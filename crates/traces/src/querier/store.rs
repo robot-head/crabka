@@ -2,8 +2,6 @@
 
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fmt,
-    str::FromStr,
     sync::Arc,
 };
 
@@ -35,11 +33,10 @@ use crabka_traceql::{
     TypedValue, span_schema,
 };
 use crabka_units::{
-    ByteSize,
-    convert::ByteSizeExt as _,
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt},
 };
 use datafusion::{catalog::MemTable, prelude::SessionContext};
-use refined_type::rule::MinMaxU64;
 
 use crate::{querier::live::LiveTier, span::batch::RESOURCE_ATTR_PREFIX};
 
@@ -78,66 +75,14 @@ const SCOPE_ORDER: &[TagScope] = &[
 pub type SharedTraceIndex = Arc<ArcSwap<TraceIndex>>;
 
 /// Default and maximum safe memory size for concatenating scan batches.
-pub const DEFAULT_SCAN_CONCAT_MAX_BYTES: u64 = 1_500_000_000;
-
-/// Configured scan-concatenation memory cap within Arrow's safe offset range.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ScanConcatMaxBytes(u64);
-
-impl ScanConcatMaxBytes {
-    /// Validate a scan-concatenation memory cap.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error unless `value` is between 1 and
-    /// [`DEFAULT_SCAN_CONCAT_MAX_BYTES`] inclusive.
-    pub fn new(value: u64) -> Result<Self, String> {
-        MinMaxU64::<1, DEFAULT_SCAN_CONCAT_MAX_BYTES>::new(value)
-            .map(|value| Self(value.into_value()))
-            .map_err(|error| error.to_string())
-    }
-
-    #[must_use]
-    pub const fn into_value(self) -> u64 {
-        self.0
-    }
-
-    #[must_use]
-    pub fn size(self) -> ByteSize {
-        ByteSize::from_bytes(self.0)
-    }
-}
-
-impl Default for ScanConcatMaxBytes {
-    fn default() -> Self {
-        Self::new(DEFAULT_SCAN_CONCAT_MAX_BYTES)
-            .expect("default scan concatenation cap is within Arrow's safe range")
-    }
-}
-
-impl fmt::Display for ScanConcatMaxBytes {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl FromStr for ScanConcatMaxBytes {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .parse()
-            .map_err(|error: std::num::ParseIntError| error.to_string())
-            .and_then(Self::new)
-    }
-}
+pub const DEFAULT_SCAN_CONCAT_MAX: ByteSize = crabka_units::bytes(1_500_000_000);
 
 /// Query-side span store that merges sealed blocks with an optional live tier.
 pub struct CrabkaSpanStore {
     blocks: Arc<BlockStore>,
     trace_index: SharedTraceIndex,
     live: Option<LiveTier>,
-    scan_concat_max_bytes: ScanConcatMaxBytes,
+    scan_concat_max: ByteSize,
 }
 
 impl CrabkaSpanStore {
@@ -147,26 +92,21 @@ impl CrabkaSpanStore {
         trace_index: SharedTraceIndex,
         live: Option<LiveTier>,
     ) -> Self {
-        Self::new_with_scan_concat_max_bytes(
-            blocks,
-            trace_index,
-            live,
-            ScanConcatMaxBytes::default(),
-        )
+        Self::new_with_scan_concat_max(blocks, trace_index, live, DEFAULT_SCAN_CONCAT_MAX)
     }
 
     #[must_use]
-    pub fn new_with_scan_concat_max_bytes(
+    pub fn new_with_scan_concat_max(
         blocks: Arc<BlockStore>,
         trace_index: SharedTraceIndex,
         live: Option<LiveTier>,
-        scan_concat_max_bytes: ScanConcatMaxBytes,
+        scan_concat_max: ByteSize,
     ) -> Self {
         Self {
             blocks,
             trace_index,
             live,
-            scan_concat_max_bytes,
+            scan_concat_max,
         }
     }
 
@@ -233,13 +173,15 @@ impl CrabkaSpanStore {
         {
             batches.extend(live.span_batches(tenant, live_start, end_ns).await?);
         }
-        // Bytes this scan inspected: the decoded size of the cold+live data read,
+        // What this scan inspected: the decoded size of the cold+live data read,
         // before filtering (surfaced as the Tempo search `metrics.inspectedBytes`).
-        let inspected_bytes = batches
+        let inspected = batches
             .iter()
-            .map(|b| u64::try_from(b.get_array_memory_size()).unwrap_or(u64::MAX))
-            .fold(0_u64, u64::saturating_add);
-        let batches = recompute_scan_nested_sets(batches, self.scan_concat_max_bytes.size())?;
+            .map(|b| {
+                ByteSize::from_bytes(u64::try_from(b.get_array_memory_size()).unwrap_or(u64::MAX))
+            })
+            .sum();
+        let batches = recompute_scan_nested_sets(batches, self.scan_concat_max)?;
         let batches = filter_batches_by_matchers(batches, matchers)?;
         let mut expansion_matchers = matchers.to_vec();
         expansion_matchers.extend(options.projection_matchers.clone());
@@ -260,7 +202,7 @@ impl CrabkaSpanStore {
         Ok(ScanResult {
             ctx,
             span_table: "spans".into(),
-            inspected_bytes,
+            inspected,
         })
     }
 
@@ -780,7 +722,7 @@ fn event_matcher_matches_event(event: &EventRef, matcher: &SpanMatcher) -> bool 
             "event:timeSinceStart" => nested_presence_matches(true, matcher.op, &matcher.value)
                 .unwrap_or_else(|| {
                     int_matches(
-                        i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                        event.time_since_start.nanos_i64(),
                         matcher.op,
                         &matcher.value,
                     )
@@ -980,7 +922,7 @@ fn intrinsic_matches(
                 || {
                     events.iter().any(|event| {
                         int_matches(
-                            i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX),
+                            event.time_since_start.nanos_i64(),
                             matcher.op,
                             &matcher.value,
                         )
@@ -1300,7 +1242,7 @@ fn trace_from_batches(
                 nested_set_parent: int32_value(&batch, COL_PARENT_ID, row)?,
                 start_time_unix_nano: u64::try_from(int64_value(&batch, COL_START, row)?)
                     .unwrap_or(0),
-                duration_nanos: u64::try_from(int64_value(&batch, COL_DURATION, row)?).unwrap_or(0),
+                duration: Time::from_nanos(int64_value(&batch, COL_DURATION, row)?),
                 status_code: int32_value(&batch, COL_STATUS_CODE, row)?,
                 status_message: string_value(&batch, COL_STATUS_MESSAGE, row)?,
                 instrumentation_name: string_value(&batch, COL_INSTRUMENTATION_NAME, row)?,
@@ -1691,8 +1633,7 @@ fn append_nested_event(
 ) {
     if let Some(event) = event {
         event_name.append_value(&event.name);
-        event_time_since_start
-            .append_value(i64::try_from(event.time_since_start_nano).unwrap_or(i64::MAX));
+        event_time_since_start.append_value(event.time_since_start.nanos_i64());
     } else {
         event_name.append_null();
         event_time_since_start.append_null();
@@ -2356,13 +2297,13 @@ fn event_values(batch: &RecordBatch, row: usize) -> Result<Vec<EventRef>, Traceq
         } else {
             string_array_value(names, idx)?
         };
-        let time_since_start_nano = if times.is_null(idx) {
-            0
+        let time_since_start = if times.is_null(idx) {
+            <Time as TimeExt>::ZERO
         } else {
-            u64::try_from(times.value(idx)).unwrap_or(0)
+            Time::from_nanos(times.value(idx))
         };
         out.push(EventRef {
-            time_since_start_nano,
+            time_since_start,
             name,
             attributes: nested_string_attrs(attr_keys, attr_values, idx)?,
         });
@@ -2841,34 +2782,19 @@ mod tests {
     }
 
     #[test]
-    fn scan_concat_max_bytes_validates_and_converts_to_uom() {
-        for value in [1, DEFAULT_SCAN_CONCAT_MAX_BYTES] {
-            let cap = value.to_string().parse::<ScanConcatMaxBytes>().unwrap();
-            assert2::assert!(cap.into_value() == value);
-            assert2::assert!(cap.size().bytes_u64() == value);
-            assert2::assert!(cap.to_string() == value.to_string());
-        }
-
-        for invalid in [
-            "0",
-            "-1",
-            "not-a-number",
-            "1500000001",
-            "18446744073709551616",
-        ] {
-            assert2::assert!(invalid.parse::<ScanConcatMaxBytes>().is_err());
-        }
+    fn scan_concat_max_is_dimensioned() {
+        assert2::assert!(DEFAULT_SCAN_CONCAT_MAX == crabka_units::bytes(1_500_000_000));
     }
 
     #[test]
     fn scan_concat_cap_accepts_exact_size_and_rejects_one_byte_less() {
         let batch = batch();
         let size = u64::try_from(batch.get_array_memory_size()).unwrap();
-        let exact = ScanConcatMaxBytes::new(size).unwrap();
-        assert2::assert!(recompute_scan_nested_sets(vec![batch.clone()], exact.size()).is_ok());
+        let exact = ByteSize::from_bytes(size);
+        assert2::assert!(recompute_scan_nested_sets(vec![batch.clone()], exact).is_ok());
 
-        let smaller = ScanConcatMaxBytes::new(size - 1).unwrap();
-        let error = recompute_scan_nested_sets(vec![batch], smaller.size()).unwrap_err();
+        let smaller = ByteSize::from_bytes(size - 1);
+        let error = recompute_scan_nested_sets(vec![batch], smaller).unwrap_err();
         assert2::assert!(error.to_string().contains("scan result too large to merge"));
     }
 
@@ -2880,7 +2806,7 @@ mod tests {
         ));
         let store = CrabkaSpanStore::new(blocks, shared(TraceIndex::new()), None);
 
-        assert2::assert!(store.scan_concat_max_bytes.into_value() == DEFAULT_SCAN_CONCAT_MAX_BYTES);
+        assert2::assert!(store.scan_concat_max == DEFAULT_SCAN_CONCAT_MAX);
     }
 
     fn dictionary_attr_batch() -> RecordBatch {
@@ -3721,10 +3647,10 @@ mod tests {
             );
             index
         };
-        let capped_blocks = Arc::new(BlockStore::new_with_block_read_max_bytes(
+        let capped_blocks = Arc::new(BlockStore::new_with_block_read_max(
             object_store,
             Url::parse("memory:///").unwrap(),
-            crabka_blockstore::BlockReadMaxBytes::new(1).unwrap(),
+            crabka_units::bytes(1),
         ));
         let capped_store = CrabkaSpanStore::new(capped_blocks, shared(index()), None);
         let store = CrabkaSpanStore::new(blocks, shared(index()), None);
@@ -3954,7 +3880,7 @@ mod tests {
             nested_set_right: 2,
             nested_set_parent: 0,
             start_time_unix_nano: u64::try_from(span.start_ns).unwrap_or_default(),
-            duration_nanos: u64::try_from(span.duration_ns).unwrap_or_default(),
+            duration: Time::from_nanos(span.duration_ns),
             status_code: span.status as i32,
             status_message: span.status_message.clone(),
             instrumentation_name: span.instrumentation_scope.clone(),
@@ -4032,7 +3958,7 @@ mod tests {
                         ("retryable".into(), AttrValue::Bool(true)),
                     ],
                     &vec![EventRef {
-                        time_since_start_nano: 50,
+                        time_since_start: nanos(50),
                         name: "exception".into(),
                         attributes: vec![(
                             "exception.type".into(),
@@ -5004,11 +4930,11 @@ mod tests {
             root_service_name: Some("api".into()),
             root_span_name: Some("root".into()),
             trace_start_unix_nano: 1_000,
-            trace_duration_nanos: 500,
+            trace_duration: nanos(500),
             name: Some(name.into()),
             kind: BlockSpanKind::Server,
             start_unix_nano: 1_000,
-            duration_nanos: 500,
+            duration: nanos(500),
             status_code: BlockStatusCode::Ok,
             status_message: None,
             instrumentation_name: Some("otel-rust".into()),

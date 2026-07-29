@@ -4,8 +4,6 @@
 
 use std::{
     collections::HashMap,
-    fmt,
-    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicI32, Ordering},
@@ -25,8 +23,9 @@ use crabka_protocol::{
     primitives::uuid::Uuid as WireUuid,
 };
 use crabka_units::{
-    ByteSize,
-    convert::ByteSizeExt as _,
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, StdDurationExt as _, TimeExt as _},
+    minutes, secs,
 };
 use refined_type::rule::{GreaterI32, MinMaxU128};
 use tokio::{sync::Mutex, task::JoinHandle};
@@ -81,16 +80,16 @@ pub struct Consumer {
     /// Topic UUIDs resolved at build time. Required by Fetch v ≥ 13
     /// (which carries `topic_id` instead of the topic name).
     pub(crate) topic_ids: Arc<Mutex<HashMap<String, WireUuid>>>,
-    pub(crate) session_timeout: Duration,
-    pub(crate) heartbeat_interval: Duration,
+    pub(crate) session_timeout: Time,
+    pub(crate) heartbeat_interval: Time,
     #[allow(dead_code)]
     pub(crate) assignor: Assignor,
     pub(crate) coordinator_shutdown: CancellationToken,
     pub(crate) coordinator_handle: Option<JoinHandle<()>>,
     /// Controls which records are returned by `poll`.
     pub(crate) isolation_level: IsolationLevel,
-    pub(crate) fetch_max_bytes: i32,
-    pub(crate) fetch_partition_max_bytes: i32,
+    pub(crate) fetch_max: ByteSize,
+    pub(crate) fetch_partition_max: ByteSize,
     /// What `poll` does on a missing offset / detected truncation. `None`
     /// surfaces `ConsumerError::LogTruncation`; otherwise the safe offset is
     /// applied (KIP-320).
@@ -102,25 +101,25 @@ struct StartConfig {
     bootstrap: String,
     client_id: String,
     group_id: String,
-    session_timeout: Duration,
-    rebalance_timeout: Duration,
-    heartbeat_interval: Duration,
-    subscription_metadata_refresh_interval: Duration,
+    session_timeout: Time,
+    rebalance_timeout: Time,
+    heartbeat_interval: Time,
+    subscription_metadata_refresh_interval: Time,
     subscribe: Vec<String>,
     group_instance_id: Option<String>,
     auto_offset_reset: AutoOffsetReset,
     isolation_level: IsolationLevel,
     assignor: Assignor,
-    fetch_max_bytes: i32,
-    fetch_partition_max_bytes: i32,
-    request_timeout: Duration,
-    leave_group_timeout: Duration,
+    fetch_max: ByteSize,
+    fetch_partition_max: ByteSize,
+    request_timeout: Time,
+    leave_group_timeout: Time,
     client_rack: Option<String>,
     security: Option<crabka_client_core::security::ClientSecurity>,
 }
 
 /// Default deadline for classic Consumer best-effort group departure.
-pub const DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT: Duration = Duration::from_secs(5);
+pub const DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT: Time = secs(5);
 
 /// Positive, whole-millisecond classic Consumer leave-group deadline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -166,14 +165,13 @@ impl ConsumerLeaveGroupTimeout {
 
 impl Default for ConsumerLeaveGroupTimeout {
     fn default() -> Self {
-        Self::new(DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT)
+        Self::new(DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT.to_std())
             .expect("default consumer leave-group timeout is valid")
     }
 }
 
 /// Default cadence for checking subscribed-topic metadata changes.
-pub const DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL: Duration =
-    Duration::from_secs(5);
+pub const DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL: Time = secs(5);
 
 /// Positive total response-byte budget for one classic consumer fetch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -204,20 +202,20 @@ impl ConsumerFetchMaxBytes {
     }
 }
 
-impl fmt::Display for ConsumerFetchMaxBytes {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
+impl TryFrom<ByteSize> for ConsumerFetchMaxBytes {
+    type Error = String;
 
-impl FromStr for ConsumerFetchMaxBytes {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .parse()
-            .map_err(|error: std::num::ParseIntError| error.to_string())
-            .and_then(Self::new)
+    fn try_from(value: ByteSize) -> Result<Self, Self::Error> {
+        let bytes = value.bytes_f64();
+        if !bytes.is_finite()
+            || bytes.fract() != 0.0
+            || !(1.0..=f64::from(i32::MAX)).contains(&bytes)
+        {
+            return Err(
+                "consumer fetch max must be a positive whole-byte value that fits i32".to_owned(),
+            );
+        }
+        Self::new(value.bytes_i32())
     }
 }
 
@@ -250,20 +248,21 @@ impl ConsumerFetchPartitionMaxBytes {
     }
 }
 
-impl fmt::Display for ConsumerFetchPartitionMaxBytes {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
+impl TryFrom<ByteSize> for ConsumerFetchPartitionMaxBytes {
+    type Error = String;
 
-impl FromStr for ConsumerFetchPartitionMaxBytes {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .parse()
-            .map_err(|error: std::num::ParseIntError| error.to_string())
-            .and_then(Self::new)
+    fn try_from(value: ByteSize) -> Result<Self, Self::Error> {
+        let bytes = value.bytes_f64();
+        if !bytes.is_finite()
+            || bytes.fract() != 0.0
+            || !(1.0..=f64::from(i32::MAX)).contains(&bytes)
+        {
+            return Err(
+                "consumer fetch partition max must be a positive whole-byte value that fits i32"
+                    .to_owned(),
+            );
+        }
+        Self::new(value.bytes_i32())
     }
 }
 
@@ -313,7 +312,7 @@ impl ConsumerSubscriptionMetadataRefreshInterval {
 
 impl Default for ConsumerSubscriptionMetadataRefreshInterval {
     fn default() -> Self {
-        Self::new(DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL)
+        Self::new(DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL.to_std())
             .expect("default consumer subscription metadata refresh interval is valid")
     }
 }
@@ -433,7 +432,7 @@ async fn leave_startup_member(
     group_id: &str,
     member_id: &str,
     group_instance_id: Option<String>,
-    leave_group_timeout: Duration,
+    leave_group_timeout: Time,
 ) {
     if member_id.is_empty() {
         return;
@@ -444,7 +443,7 @@ async fn leave_startup_member(
         member_id.to_string(),
         group_instance_id,
     ));
-    let _ = tokio::time::timeout(leave_group_timeout, send).await;
+    let _ = tokio::time::timeout(leave_group_timeout.to_std(), send).await;
 }
 
 fn has_assigned_partitions(assigned_partitions: &[(String, i32)]) -> bool {
@@ -476,13 +475,23 @@ fn primed_position(committed_epoch: i32) -> crate::position::PartitionPosition {
     }
 }
 
+/// A protocol `int32` millisecond field, truncated rather than rounded.
+///
+/// Every Kafka request field this feeds is compared by the coordinator against
+/// its own configured bounds, and the pre-quantity code reached them through
+/// `Duration::as_millis`, which truncates. Rounding to nearest would push a
+/// fractional-millisecond timeout one millisecond wider on the wire.
+pub(crate) fn protocol_millis_i32(value: Time) -> i32 {
+    i32::try_from(value.millis_i64_trunc()).unwrap_or(i32::MAX)
+}
+
 /// Per-attempt timeout for `Consumer::start`.  Must exceed the default
 /// `rebalance_timeout` (60 s) so a legitimately slow group-join isn't
 /// cut short, while still bounding a true cold-boot hang.
-const CONSUMER_START_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(90);
+const CONSUMER_START_ATTEMPT_TIMEOUT: Time = secs(90);
 
 /// Wall-clock deadline across all retry attempts in `Consumer::start`.
-const CONSUMER_START_DEADLINE: Duration = Duration::from_mins(5);
+const CONSUMER_START_DEADLINE: Time = minutes(5);
 
 #[bon::bon]
 impl Consumer {
@@ -508,26 +517,21 @@ impl Consumer {
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka-consumer".to_string())] client_id: String,
         #[builder(into)] group_id: String,
-        #[builder(default = std::time::Duration::from_secs(45))]
-        session_timeout: std::time::Duration,
-        #[builder(default = std::time::Duration::from_mins(1))]
-        rebalance_timeout: std::time::Duration,
-        #[builder(default = std::time::Duration::from_secs(3))]
-        heartbeat_interval: std::time::Duration,
+        #[builder(default = secs(45))] session_timeout: Time,
+        #[builder(default = minutes(1))] rebalance_timeout: Time,
+        #[builder(default = secs(3))] heartbeat_interval: Time,
         #[builder(default = DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL)]
-        subscription_metadata_refresh_interval: std::time::Duration,
+        subscription_metadata_refresh_interval: Time,
         #[builder(into)] subscribe: Vec<String>,
         #[builder(into)] group_instance_id: Option<String>,
         #[builder(default = AutoOffsetReset::Latest)] auto_offset_reset: AutoOffsetReset,
         #[builder(default = IsolationLevel::ReadUncommitted)] isolation_level: IsolationLevel,
         #[builder(default = Assignor::Range)] assignor: Assignor,
-        #[builder(default = crate::poll::DEFAULT_FETCH_MAX_BYTES)] fetch_max_bytes: i32,
-        #[builder(default = crate::poll::DEFAULT_FETCH_PARTITION_MAX_BYTES)]
-        fetch_partition_max_bytes: i32,
-        #[builder(default = std::time::Duration::from_secs(30))]
-        request_timeout: std::time::Duration,
-        #[builder(default = DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT)]
-        leave_group_timeout: std::time::Duration,
+        #[builder(default = crate::poll::DEFAULT_FETCH_MAX)] fetch_max: ByteSize,
+        #[builder(default = crate::poll::DEFAULT_FETCH_PARTITION_MAX)]
+        fetch_partition_max: ByteSize,
+        #[builder(default = secs(30))] request_timeout: Time,
+        #[builder(default = DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT)] leave_group_timeout: Time,
         #[builder(into)] client_rack: Option<String>,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ConsumerError> {
@@ -543,21 +547,21 @@ impl Consumer {
                 "group_instance_id must not be empty".into(),
             ));
         }
-        if fetch_max_bytes <= 0 {
-            return Err(ConsumerError::RebalanceFailed(
-                "fetch_max_bytes must be positive".into(),
-            ));
-        }
-        if fetch_partition_max_bytes <= 0 {
-            return Err(ConsumerError::RebalanceFailed(
-                "fetch_partition_max_bytes must be positive".into(),
-            ));
-        }
-        let leave_group_timeout = ConsumerLeaveGroupTimeout::new(leave_group_timeout)
+        let fetch_max = ConsumerFetchMaxBytes::try_from(fetch_max)
+            .map_err(ConsumerError::RebalanceFailed)?
+            .size();
+        let fetch_partition_max = ConsumerFetchPartitionMaxBytes::try_from(fetch_partition_max)
+            .map_err(ConsumerError::RebalanceFailed)?
+            .size();
+        // The two validated newtypes below still speak `Duration`: both derive
+        // `Eq`, which an `f64`-backed quantity cannot satisfy. Their whole job
+        // is to police the whole-millisecond invariant, so the quantity meets
+        // them at their own boundary and comes straight back.
+        let leave_group_timeout = ConsumerLeaveGroupTimeout::new(leave_group_timeout.to_std())
             .map_err(ConsumerError::RebalanceFailed)?;
         let subscription_metadata_refresh_interval =
             ConsumerSubscriptionMetadataRefreshInterval::new(
-                subscription_metadata_refresh_interval,
+                subscription_metadata_refresh_interval.to_std(),
             )
             .map_err(ConsumerError::RebalanceFailed)?;
 
@@ -568,17 +572,18 @@ impl Consumer {
             session_timeout,
             rebalance_timeout,
             heartbeat_interval,
-            subscription_metadata_refresh_interval: subscription_metadata_refresh_interval
-                .duration(),
+            subscription_metadata_refresh_interval: Time::from_std(
+                subscription_metadata_refresh_interval.duration(),
+            ),
             subscribe,
             group_instance_id,
             auto_offset_reset,
             isolation_level,
             assignor,
-            fetch_max_bytes,
-            fetch_partition_max_bytes,
+            fetch_max,
+            fetch_partition_max,
             request_timeout,
-            leave_group_timeout: leave_group_timeout.duration(),
+            leave_group_timeout: Time::from_std(leave_group_timeout.duration()),
             client_rack,
             security,
         };
@@ -587,14 +592,14 @@ impl Consumer {
         let mut backoff = Duration::from_millis(500);
         loop {
             match tokio::time::timeout(
-                CONSUMER_START_ATTEMPT_TIMEOUT,
+                CONSUMER_START_ATTEMPT_TIMEOUT.to_std(),
                 Self::start_once(config.clone()),
             )
             .await
             {
                 Ok(Ok(consumer)) => return Ok(consumer),
                 Ok(Err(error)) => {
-                    if started.elapsed() < CONSUMER_START_DEADLINE
+                    if started.elapsed().as_time() < CONSUMER_START_DEADLINE
                         && is_retriable_consumer_start_error(&error)
                     {
                         tracing::warn!(
@@ -607,7 +612,7 @@ impl Consumer {
                     }
                 }
                 Err(_elapsed) => {
-                    if started.elapsed() >= CONSUMER_START_DEADLINE {
+                    if started.elapsed().as_time() >= CONSUMER_START_DEADLINE {
                         return Err(ConsumerError::Client(
                             crabka_client_core::ClientError::Timeout(
                                 CONSUMER_START_ATTEMPT_TIMEOUT,
@@ -676,8 +681,13 @@ impl Consumer {
             .build()
             .await?;
 
-        let session_timeout_ms = i32::try_from(session_timeout.as_millis()).unwrap_or(i32::MAX);
-        let rebalance_timeout_ms = i32::try_from(rebalance_timeout.as_millis()).unwrap_or(i32::MAX);
+        // `JoinGroupRequest` carries these as `int32` milliseconds, and the
+        // JVM coordinator compares them against its own configured bounds.
+        // `Duration::as_millis` truncated here before the conversion, so keep
+        // truncating: `millis_i32`'s round-to-nearest would widen a fractional
+        // session timeout by a millisecond on the wire.
+        let session_timeout_ms = protocol_millis_i32(session_timeout);
+        let rebalance_timeout_ms = protocol_millis_i32(rebalance_timeout);
 
         // 0. Discover the group's coordinator broker. Real Kafka (Strimzi)
         //    returns NOT_COORDINATOR (16) for any group RPC that doesn't reach
@@ -1027,8 +1037,8 @@ async fn spawn_consumer(
         auto_offset_reset,
         isolation_level,
         assignor,
-        fetch_max_bytes,
-        fetch_partition_max_bytes,
+        fetch_max,
+        fetch_partition_max,
         request_timeout,
         leave_group_timeout,
         client_rack,
@@ -1127,8 +1137,8 @@ async fn spawn_consumer(
         coordinator_shutdown: shutdown,
         coordinator_handle: Some(coord_handle),
         isolation_level,
-        fetch_max_bytes,
-        fetch_partition_max_bytes,
+        fetch_max,
+        fetch_partition_max,
         auto_offset_reset,
     })
 }
@@ -1237,6 +1247,49 @@ impl Consumer {
             let _ = h.await;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod protocol_millis_tests {
+    use assert2::check;
+    use crabka_units::{Time, convert::TimeExt as _, millis, minutes, secs};
+
+    use super::protocol_millis_i32;
+
+    /// `session_timeout_ms` and `rebalance_timeout_ms` are `int32` wire fields
+    /// the group coordinator range-checks. The pre-quantity code reached them
+    /// through `Duration::as_millis`, which truncates, so a fractional
+    /// millisecond must still round *down* — `TimeExt::millis_i32` rounds to
+    /// nearest and would report one millisecond more.
+    #[test]
+    fn protocol_millis_truncates_rather_than_rounding() {
+        for (_name, value, expected) in [
+            ("whole default session timeout", secs(45), 45_000),
+            ("whole default rebalance timeout", minutes(1), 60_000),
+            ("whole millisecond", millis(37), 37),
+            (
+                "fractional millisecond truncates down",
+                Time::from_secs_f64(0.0016),
+                1,
+            ),
+            (
+                "fractional millisecond that would round up",
+                Time::from_secs_f64(1.9999),
+                1_999,
+            ),
+            ("below one millisecond", Time::from_secs_f64(0.0009), 0),
+        ] {
+            check!(protocol_millis_i32(value) == expected);
+        }
+    }
+
+    /// The saturation the `i32::try_from(...).unwrap_or(i32::MAX)` guard
+    /// provided is preserved: an absurd timeout clamps instead of wrapping
+    /// negative on the wire.
+    #[test]
+    fn protocol_millis_saturates_at_i32_max() {
+        check!(protocol_millis_i32(Time::from_secs(10_000_000_000)) == i32::MAX);
     }
 }
 
@@ -1356,7 +1409,7 @@ mod security_arg_tests {
             .bootstrap("invalid.invalid:9092")
             .group_id("metadata-refresh-validation")
             .subscribe(["topic".to_owned()])
-            .subscription_metadata_refresh_interval(Duration::ZERO)
+            .subscription_metadata_refresh_interval(crabka_units::secs(0))
             .build()
             .await
             .err()
@@ -1375,7 +1428,7 @@ mod security_arg_tests {
             .bootstrap("invalid.invalid:9092")
             .group_id("leave-validation")
             .subscribe(["topic".to_owned()])
-            .leave_group_timeout(Duration::ZERO)
+            .leave_group_timeout(crabka_units::secs(0))
             .build()
             .await
             .err()
@@ -1402,7 +1455,7 @@ mod security_arg_tests {
 
         let client = Client::builder()
             .bootstrap(mock.addr.to_string())
-            .request_timeout(Duration::from_millis(100))
+            .request_timeout(crabka_units::millis(100))
             .build()
             .await
             .unwrap();
@@ -1414,7 +1467,7 @@ mod security_arg_tests {
             "group-a",
             "member-a",
             Some("instance-a".into()),
-            Duration::from_millis(37),
+            crabka_units::millis(37),
         )
         .await;
 
@@ -1440,7 +1493,7 @@ mod security_arg_tests {
 
         let client = Client::builder()
             .bootstrap(mock.addr.to_string())
-            .request_timeout(Duration::from_secs(5))
+            .request_timeout(crabka_units::secs(5))
             .build()
             .await
             .expect("client");
@@ -1454,7 +1507,7 @@ mod security_arg_tests {
                 "group-a",
                 "member-a",
                 None,
-                Duration::from_millis(37),
+                crabka_units::millis(37),
             ),
         )
         .await
@@ -1649,7 +1702,7 @@ mod security_arg_tests {
             .client_id("timeout-consumer")
             .group_id("timeout-group")
             .subscribe(vec!["orders".to_string()])
-            .request_timeout(Duration::from_millis(100))
+            .request_timeout(crabka_units::millis(100))
             .build();
         let res = tokio::time::timeout(Duration::from_millis(500), build).await;
 
@@ -1662,30 +1715,30 @@ mod security_arg_tests {
         assert2::assert!(matches!(
             err,
             ConsumerError::Client(ClientError::Timeout(d))
-                if d == Duration::from_millis(100)
+                if d == crabka_units::millis(100)
         ));
     }
 
     #[tokio::test]
     async fn consumer_builder_rejects_non_positive_fetch_budgets_before_network_io() {
-        let max_bytes = Consumer::builder()
+        let max = Consumer::builder()
             .bootstrap("127.0.0.1:1")
             .group_id("timeout-group")
             .subscribe(vec!["orders".to_string()])
-            .fetch_max_bytes(0)
+            .fetch_max(crabka_units::bytes(0))
             .build()
             .await;
-        assert2::assert!(matches!(max_bytes, Err(ConsumerError::RebalanceFailed(_))));
+        assert2::assert!(matches!(max, Err(ConsumerError::RebalanceFailed(_))));
 
-        let partition_max_bytes = Consumer::builder()
+        let partition_max = Consumer::builder()
             .bootstrap("127.0.0.1:1")
             .group_id("timeout-group")
             .subscribe(vec!["orders".to_string()])
-            .fetch_partition_max_bytes(0)
+            .fetch_partition_max(crabka_units::bytes(0))
             .build()
             .await;
         assert2::assert!(matches!(
-            partition_max_bytes,
+            partition_max,
             Err(ConsumerError::RebalanceFailed(_))
         ));
     }
@@ -1693,26 +1746,25 @@ mod security_arg_tests {
     #[test]
     fn consumer_fetch_byte_settings_validate_and_convert_to_uom() {
         for value in [1, i32::MAX] {
-            let max = value
-                .to_string()
-                .parse::<ConsumerFetchMaxBytes>()
-                .expect("positive fetch maximum");
-            let partition_max = value
-                .to_string()
-                .parse::<ConsumerFetchPartitionMaxBytes>()
+            let size = ByteSize::from_bytes_i64(i64::from(value));
+            let max = ConsumerFetchMaxBytes::try_from(size).expect("positive fetch maximum");
+            let partition_max = ConsumerFetchPartitionMaxBytes::try_from(size)
                 .expect("positive partition fetch maximum");
 
             check!(max.bytes() == value);
             check!(partition_max.bytes() == value);
             check!(max.size().bytes_i32() == value);
             check!(partition_max.size().bytes_i32() == value);
-            check!(max.to_string() == value.to_string());
-            check!(partition_max.to_string() == value.to_string());
         }
 
-        for invalid in ["0", "-1", "not-a-number", "2147483648"] {
-            check!(invalid.parse::<ConsumerFetchMaxBytes>().is_err());
-            check!(invalid.parse::<ConsumerFetchPartitionMaxBytes>().is_err());
+        for invalid in [
+            ByteSize::ZERO,
+            ByteSize::from_bytes_f64(-1.0),
+            ByteSize::from_bytes_f64(1.5),
+            ByteSize::from_bytes_f64(f64::from(i32::MAX) + 1.0),
+        ] {
+            check!(ConsumerFetchMaxBytes::try_from(invalid).is_err());
+            check!(ConsumerFetchPartitionMaxBytes::try_from(invalid).is_err());
         }
     }
 
@@ -1736,14 +1788,14 @@ mod security_arg_tests {
             positions: Arc::new(Mutex::new(HashMap::new())),
             pending_seeks: Arc::new(Mutex::new(HashMap::new())),
             topic_ids: Arc::new(Mutex::new(HashMap::new())),
-            session_timeout: std::time::Duration::from_secs(45),
-            heartbeat_interval: std::time::Duration::from_secs(3),
+            session_timeout: secs(45),
+            heartbeat_interval: secs(3),
             assignor: Assignor::Range,
             coordinator_shutdown: CancellationToken::new(),
             coordinator_handle: None,
             isolation_level: IsolationLevel::ReadUncommitted,
-            fetch_max_bytes: crate::poll::DEFAULT_FETCH_MAX_BYTES,
-            fetch_partition_max_bytes: crate::poll::DEFAULT_FETCH_PARTITION_MAX_BYTES,
+            fetch_max: crate::poll::DEFAULT_FETCH_MAX,
+            fetch_partition_max: crate::poll::DEFAULT_FETCH_PARTITION_MAX,
             auto_offset_reset: AutoOffsetReset::Latest,
         }
     }
@@ -1851,13 +1903,13 @@ mod security_arg_tests {
             // the per-attempt timeout, not classified here).
             (
                 "timeout",
-                ConsumerError::Client(ClientError::Timeout(Duration::from_secs(1))),
+                ConsumerError::Client(ClientError::Timeout(crabka_units::secs(1))),
                 false,
             ),
             (
                 "startup after join",
                 ConsumerError::StartupAfterJoin(Box::new(ConsumerError::Client(
-                    ClientError::Timeout(Duration::from_secs(1)),
+                    ClientError::Timeout(crabka_units::secs(1)),
                 ))),
                 true,
             ),

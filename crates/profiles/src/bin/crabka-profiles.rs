@@ -6,12 +6,11 @@ use std::{
     net::SocketAddr,
     path::Path,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use clap::{Parser, ValueEnum};
-use crabka_blockstore::{IndexSnapshotMaxBytes, IndexSnapshotRetain, ProfileIndex};
-use crabka_client_consumer::{ConsumerFetchMaxBytes, ConsumerFetchPartitionMaxBytes};
+use crabka_blockstore::{IndexSnapshotRetain, ProfileIndex};
+use crabka_client_consumer::ConsumerFetchMaxBytes;
 use crabka_client_producer::Producer;
 use crabka_pprof::UnionProfileStore;
 use crabka_profiles::{
@@ -27,6 +26,11 @@ use crabka_profiles::{
     query_frontend::FrontendConfig,
 };
 use crabka_telemetry::OtlpConfig;
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes, parse, secs,
+};
 use object_store::{ObjectStore, path::Path as ObjectPath};
 
 #[derive(Debug, Parser)]
@@ -41,31 +45,44 @@ struct Cli {
     bootstrap: String,
     #[arg(
         long,
-        env = "CRABKA_PROFILES_WAL_FETCH_MAX_BYTES",
-        default_value_t = crabka_profiles::blockbuilder::default_wal_fetch_max_bytes()
+        env = "CRABKA_PROFILES_WAL_FETCH_MAX",
+        default_value = "2MiB",
+        value_parser = parse_consumer_fetch_size
     )]
-    wal_fetch_max_bytes: ConsumerFetchMaxBytes,
+    wal_fetch_max: ByteSize,
     #[arg(
         long,
-        env = "CRABKA_PROFILES_WAL_FETCH_PARTITION_MAX_BYTES",
-        default_value_t = crabka_profiles::blockbuilder::default_wal_fetch_partition_max_bytes()
+        env = "CRABKA_PROFILES_WAL_FETCH_PARTITION_MAX",
+        default_value = "256KiB",
+        value_parser = parse_consumer_fetch_size
     )]
-    wal_fetch_partition_max_bytes: ConsumerFetchPartitionMaxBytes,
+    wal_fetch_partition_max: ByteSize,
     #[arg(long, default_value = "file://./.crabka-profiles-blocks")]
     object_store_url: String,
     #[arg(
         long,
-        env = "CRABKA_PROFILES_INDEX_SNAPSHOT_MAX_BYTES",
-        default_value_t = IndexSnapshotMaxBytes::default()
+        env = "CRABKA_PROFILES_INDEX_SNAPSHOT_MAX",
+        default_value = "256MiB",
+        value_parser = parse_positive_whole_byte_size
     )]
-    index_snapshot_max_bytes: IndexSnapshotMaxBytes,
+    index_snapshot_max: ByteSize,
     #[arg(
         long,
         env = "CRABKA_PROFILES_INDEX_SNAPSHOT_RETAIN",
         default_value_t = IndexSnapshotRetain::default()
     )]
     index_snapshot_retain: IndexSnapshotRetain,
-    #[arg(long, default_value_t = 15 * 60 * 1000)]
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_WAL_POLL_TIMEOUT",
+        default_value = "500ms",
+        value_parser = parse::positive_time
+    )]
+    wal_poll_timeout: Time,
+    // Same deployment contract as the flush-max-age flag: the name and the
+    // millisecond integer stay, and the value is lifted into a `Time` where it
+    // enters the frontend config.
+    #[arg(long, default_value_t = FrontendConfig::default().shard_width.millis_i64())]
     query_frontend_shard_ms: i64,
     #[arg(long)]
     tenant_limits_config: Option<std::path::PathBuf>,
@@ -79,8 +96,11 @@ struct Cli {
     compactor_downsample_resolution_ns: Option<i64>,
     #[arg(long, default_value_t = crabka_profiles::blockbuilder::DEFAULT_FLUSH_RECORDS)]
     block_builder_flush_records: usize,
-    #[arg(long, default_value_t = crabka_profiles::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis() as u64)]
-    block_builder_flush_max_age_ms: u64,
+    // The flag name and its millisecond integer encoding are the deployment
+    // contract (`demo/observability/docker-compose.yml` passes it), so the raw
+    // value is held here and lifted into a `Time` where it enters the config.
+    #[arg(long, default_value_t = crabka_profiles::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64())]
+    block_builder_flush_max_age_ms: i64,
     /// debuginfod base URLs (comma-separated) to fetch DWARF for unsymbolized
     /// native frames. Empty by default: the symbolizer makes NO outbound
     /// requests unless an operator explicitly opts in by supplying URLs.
@@ -102,6 +122,23 @@ enum Target {
 struct ConfiguredObjectStore {
     store: std::sync::Arc<dyn ObjectStore>,
     prefix: ObjectPath,
+}
+
+fn parse_consumer_fetch_size(value: &str) -> Result<ByteSize, String> {
+    let size = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ConsumerFetchMaxBytes::try_from(size)?;
+    Ok(size)
+}
+
+fn parse_positive_whole_byte_size(value: &str) -> Result<ByteSize, String> {
+    let size = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    let bytes = size.bytes_f64();
+    if bytes.fract() != 0.0 || bytes > 9_007_199_254_740_992.0 {
+        return Err(
+            "size must be a positive whole-byte value exactly representable by UOM".to_owned(),
+        );
+    }
+    Ok(size)
 }
 
 impl ConfiguredObjectStore {
@@ -127,6 +164,10 @@ fn build_object_store(
     })
 }
 
+/// How often the querier reloads the profile block index from object storage.
+const INDEX_REFRESH_INTERVAL: Time = secs(15);
+
+/// How long each hot WAL-tail poll waits for records.
 /// Periodically reload the profile block index from object storage and swap it
 /// into the cold store. The block-builder writes new blocks continuously; without
 /// this the querier only ever sees the index snapshot it loaded at boot, so blocks
@@ -137,10 +178,10 @@ fn spawn_profile_index_refresh(
     cold: Arc<ColdProfileStore>,
     store: Arc<dyn ObjectStore>,
     index_key: String,
-    max_bytes: IndexSnapshotMaxBytes,
+    max_bytes: ByteSize,
 ) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(15));
+        let mut tick = tokio::time::interval(INDEX_REFRESH_INTERVAL.to_std());
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
@@ -192,7 +233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 active_series: Mutex::default(),
                 ingestion_buckets: Mutex::default(),
                 relabel: Vec::<RelabelConfig>::new(),
-                max_decompressed: 1 << 24,
+                max_decompressed: mebibytes(16),
                 metrics: metrics.clone(),
             });
             let shutdown = async {
@@ -207,11 +248,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("object store: {e}"))?;
             let mut config =
                 BlockBuilderConfig::new(cli.bootstrap, configured.store).with_metrics(metrics);
-            config.wal_fetch_max_bytes = cli.wal_fetch_max_bytes;
-            config.wal_fetch_partition_max_bytes = cli.wal_fetch_partition_max_bytes;
+            config.wal_fetch_max = cli.wal_fetch_max;
+            config.wal_fetch_partition_max = cli.wal_fetch_partition_max;
             config.flush_records = cli.block_builder_flush_records;
-            config.flush_max_age = Duration::from_millis(cli.block_builder_flush_max_age_ms);
-            config.index_snapshot_max_bytes = cli.index_snapshot_max_bytes;
+            config.flush_max_age = Time::from_millis(cli.block_builder_flush_max_age_ms);
+            config.poll_timeout = cli.wal_poll_timeout;
+            config.index_snapshot_max = cli.index_snapshot_max;
             config.index_snapshot_retain = cli.index_snapshot_retain;
             crabka_profiles::blockbuilder::run_with_config(config).await?;
         }
@@ -225,7 +267,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let index = ProfileIndex::load_latest_snapshot_with_max_bytes(
                 &configured.store,
                 &index_key,
-                cli.index_snapshot_max_bytes,
+                cli.index_snapshot_max,
             )
             .await
             .unwrap_or_else(|_| ProfileIndex::new());
@@ -239,7 +281,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::clone(&cold),
                 refresh_store,
                 index_key.clone(),
-                cli.index_snapshot_max_bytes,
+                cli.index_snapshot_max,
             );
             let hot = WalTailProfileStore::new();
             spawn_wal_tail(&cli, hot.clone());
@@ -264,7 +306,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let index = ProfileIndex::load_latest_snapshot_with_max_bytes(
                 &configured.store,
                 &index_key,
-                cli.index_snapshot_max_bytes,
+                cli.index_snapshot_max,
             )
             .await
             .unwrap_or_else(|_| ProfileIndex::new());
@@ -278,7 +320,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Arc::clone(&cold),
                 refresh_store,
                 index_key.clone(),
-                cli.index_snapshot_max_bytes,
+                cli.index_snapshot_max,
             );
             let hot = WalTailProfileStore::new();
             spawn_wal_tail(&cli, hot.clone());
@@ -287,7 +329,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 QuerierState::new_frontend_with_overrides(
                     union,
                     FrontendConfig {
-                        shard_width_ms: cli.query_frontend_shard_ms,
+                        shard_width: Time::from_millis(cli.query_frontend_shard_ms),
                     },
                     overrides,
                 )
@@ -314,7 +356,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut index = ProfileIndex::load_latest_snapshot_with_max_bytes(
                 &configured.store,
                 &index_key,
-                cli.index_snapshot_max_bytes,
+                cli.index_snapshot_max,
             )
             .await
             .unwrap_or_else(|_| ProfileIndex::new());
@@ -369,8 +411,9 @@ fn load_profiles_limits_overrides_config(
 fn spawn_wal_tail(cli: &Cli, hot: WalTailProfileStore) {
     let bootstrap = cli.bootstrap.clone();
     let group_id = cli.query_wal_tail_group_id.clone();
+    let poll_timeout = cli.wal_poll_timeout;
     tokio::spawn(async move {
-        if let Err(err) = run_wal_tail(hot, bootstrap, group_id, Duration::from_millis(500)).await {
+        if let Err(err) = run_wal_tail(hot, bootstrap, group_id, poll_timeout).await {
             tracing::warn!(%err, "profiles hot WAL-tail stopped");
         }
     });
@@ -380,6 +423,7 @@ fn spawn_wal_tail(cli: &Cli, hot: WalTailProfileStore) {
 mod tests {
     use assert2::{assert, check};
     use clap::Parser;
+    use crabka_units::{bytes, per_sec};
 
     use super::*;
 
@@ -418,15 +462,15 @@ mod tests {
     fn index_snapshot_policy_defaults_and_rejects_invalid_values() {
         let cli = Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
         assert_eq!(
-            cli.index_snapshot_max_bytes.into_value(),
-            crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_MAX_BYTES
+            cli.index_snapshot_max,
+            crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_MAX
         );
         assert_eq!(
             cli.index_snapshot_retain.into_value(),
             crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_RETAIN
         );
 
-        for flag in ["--index-snapshot-max-bytes", "--index-snapshot-retain"] {
+        for flag in ["--index-snapshot-max", "--index-snapshot-retain"] {
             for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
                 assert!(
                     Cli::try_parse_from([
@@ -440,6 +484,18 @@ mod tests {
                     "{flag} should reject {invalid:?}"
                 );
             }
+        }
+        for invalid in ["1.5B", "18446744073709551616B"] {
+            assert!(
+                Cli::try_parse_from([
+                    "crabka-profiles",
+                    "--target",
+                    "block-builder",
+                    "--index-snapshot-max",
+                    invalid,
+                ])
+                .is_err()
+            );
         }
     }
 
@@ -455,7 +511,7 @@ mod tests {
                         "tests::index_snapshot_policy_reads_environment_and_prefers_cli",
                     ])
                     .env(CHILD, "1")
-                    .env("CRABKA_PROFILES_INDEX_SNAPSHOT_MAX_BYTES", "1024")
+                    .env("CRABKA_PROFILES_INDEX_SNAPSHOT_MAX", "1KiB")
                     .env("CRABKA_PROFILES_INDEX_SNAPSHOT_RETAIN", "3")
                     .status()
                     .expect("child test");
@@ -465,38 +521,40 @@ mod tests {
 
         let from_env =
             Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
-        assert_eq!(from_env.index_snapshot_max_bytes.into_value(), 1024);
+        assert_eq!(from_env.index_snapshot_max.bytes_u64(), 1024);
         assert_eq!(from_env.index_snapshot_retain.into_value(), 3);
 
         let from_cli = Cli::try_parse_from([
             "crabka-profiles",
             "--target",
             "block-builder",
-            "--index-snapshot-max-bytes",
-            "2048",
+            "--index-snapshot-max",
+            "2KiB",
             "--index-snapshot-retain",
             "4",
         ])
         .unwrap();
-        assert_eq!(from_cli.index_snapshot_max_bytes.into_value(), 2048);
+        assert_eq!(from_cli.index_snapshot_max.bytes_u64(), 2048);
         assert_eq!(from_cli.index_snapshot_retain.into_value(), 4);
     }
 
     #[test]
     fn wal_fetch_limits_preserve_defaults_and_reject_invalid_values() {
         let cli = Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
-        assert_eq!(cli.wal_fetch_max_bytes.bytes(), 2_097_152);
-        assert_eq!(cli.wal_fetch_partition_max_bytes.bytes(), 262_144);
+        assert_eq!(cli.wal_fetch_max.bytes_i32(), 2_097_152);
+        assert_eq!(cli.wal_fetch_partition_max.bytes_i32(), 262_144);
 
         for (flag, invalid) in [
-            ("--wal-fetch-max-bytes", "0"),
-            ("--wal-fetch-max-bytes", "not-a-number"),
-            ("--wal-fetch-max-bytes", "-1"),
-            ("--wal-fetch-max-bytes", "2147483648"),
-            ("--wal-fetch-partition-max-bytes", "0"),
-            ("--wal-fetch-partition-max-bytes", "not-a-number"),
-            ("--wal-fetch-partition-max-bytes", "-1"),
-            ("--wal-fetch-partition-max-bytes", "2147483648"),
+            ("--wal-fetch-max", "0"),
+            ("--wal-fetch-max", "not-a-number"),
+            ("--wal-fetch-max", "-1B"),
+            ("--wal-fetch-max", "1.5B"),
+            ("--wal-fetch-max", "2147483648B"),
+            ("--wal-fetch-partition-max", "0"),
+            ("--wal-fetch-partition-max", "not-a-number"),
+            ("--wal-fetch-partition-max", "-1B"),
+            ("--wal-fetch-partition-max", "1.5B"),
+            ("--wal-fetch-partition-max", "2147483648B"),
         ] {
             assert!(
                 Cli::try_parse_from([
@@ -524,8 +582,8 @@ mod tests {
                         "tests::wal_fetch_limits_read_environment_and_prefer_cli",
                     ])
                     .env(CHILD, "1")
-                    .env("CRABKA_PROFILES_WAL_FETCH_MAX_BYTES", "1024")
-                    .env("CRABKA_PROFILES_WAL_FETCH_PARTITION_MAX_BYTES", "256")
+                    .env("CRABKA_PROFILES_WAL_FETCH_MAX", "1KiB")
+                    .env("CRABKA_PROFILES_WAL_FETCH_PARTITION_MAX", "256B")
                     .status()
                     .expect("child test");
             assert!(status.success());
@@ -534,21 +592,85 @@ mod tests {
 
         let from_env =
             Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
-        assert_eq!(from_env.wal_fetch_max_bytes.bytes(), 1024);
-        assert_eq!(from_env.wal_fetch_partition_max_bytes.bytes(), 256);
+        assert_eq!(from_env.wal_fetch_max.bytes_i32(), 1024);
+        assert_eq!(from_env.wal_fetch_partition_max.bytes_i32(), 256);
 
         let from_cli = Cli::try_parse_from([
             "crabka-profiles",
             "--target",
             "block-builder",
-            "--wal-fetch-max-bytes",
-            "2048",
-            "--wal-fetch-partition-max-bytes",
-            "512",
+            "--wal-fetch-max",
+            "2KiB",
+            "--wal-fetch-partition-max",
+            "512B",
         ])
         .unwrap();
-        assert_eq!(from_cli.wal_fetch_max_bytes.bytes(), 2048);
-        assert_eq!(from_cli.wal_fetch_partition_max_bytes.bytes(), 512);
+        assert_eq!(from_cli.wal_fetch_max.bytes_i32(), 2048);
+        assert_eq!(from_cli.wal_fetch_partition_max.bytes_i32(), 512);
+    }
+
+    #[test]
+    fn wal_poll_timeout_preserves_default_and_accepts_units() {
+        let defaults =
+            Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
+        assert_eq!(defaults.wal_poll_timeout, crabka_units::millis(500));
+
+        let overridden = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "querier",
+            "--wal-poll-timeout",
+            "2s",
+        ])
+        .unwrap();
+        assert_eq!(overridden.wal_poll_timeout, crabka_units::secs(2));
+
+        for invalid in ["0", "1", "1KiB"] {
+            assert!(
+                Cli::try_parse_from([
+                    "crabka-profiles",
+                    "--target",
+                    "query-frontend",
+                    "--wal-poll-timeout",
+                    invalid,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn wal_poll_timeout_reads_environment_and_cli_wins() {
+        const CHILD: &str = "CRABKA_PROFILES_WAL_POLL_TIMEOUT_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::wal_poll_timeout_reads_environment_and_cli_wins",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_PROFILES_WAL_POLL_TIMEOUT", "750ms")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env =
+            Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
+        assert_eq!(from_env.wal_poll_timeout, crabka_units::millis(750));
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "query-frontend",
+            "--wal-poll-timeout",
+            "1s",
+        ])
+        .unwrap();
+        assert_eq!(from_cli.wal_poll_timeout, crabka_units::secs(1));
     }
 
     #[test]
@@ -686,13 +808,13 @@ mod tests {
             r#"{
               "default": {
                 "max_label_names_per_series": 10,
-                "max_label_value_len": 100,
+                "max_label_value": "100B",
                 "session_id_buckets": 32
               },
               "tenants": {
                 "tenant-a": {
                   "max_label_names_per_series": 2,
-                  "max_label_value_len": 3,
+                  "max_label_value": "3B",
                   "session_id_buckets": 4
                 }
               }
@@ -703,7 +825,7 @@ mod tests {
         let config = load_tenant_limits_config(Some(&path)).unwrap();
 
         assert!(config.default.max_label_names_per_series == 10);
-        assert!(config.for_tenant("tenant-a").max_label_value_len == 3);
+        assert!(config.for_tenant("tenant-a").max_label_value == bytes(3));
     }
 
     #[test]
@@ -726,22 +848,22 @@ overrides:
         assert!(
             *overrides.for_tenant("tenant-a")
                 == crabka_profiles::limits::Limits {
-                    ingestion_rate_profiles_per_sec: 10_000.0,
+                    ingestion_rate: per_sec(10_000),
                     ingestion_burst_profiles: 10_000,
                     max_series: 0,
-                    max_label_name_length: 1024,
-                    max_label_value_length: 2048,
+                    max_label_name: bytes(1024),
+                    max_label_value: bytes(2048),
                     max_label_names_per_series: 40,
                     max_flamegraph_nodes_default: 2048,
                     max_flamegraph_nodes_max: 512,
-                    max_query_length_secs: 30,
+                    max_query_length: secs(30),
                     max_session_id_cardinality: 0,
                 }
         );
         // An unlisted tenant inherits the process default query-length cap.
         check!(
-            overrides.for_tenant("tenant-b").max_query_length_secs
-                == crabka_profiles::limits::DEFAULT_MAX_QUERY_LENGTH_SECS
+            overrides.for_tenant("tenant-b").max_query_length
+                == crabka_profiles::limits::DEFAULT_MAX_QUERY_LENGTH
         );
     }
 

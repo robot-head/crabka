@@ -216,7 +216,7 @@ fn trace_and_profile_snapshot_policy_is_overrideable_per_signal() {
     ] {
         let block = compose_service_block(&compose, service);
         assert2::assert!(block.contains(&format!(
-            "CRABKA_{signal}_INDEX_SNAPSHOT_MAX_BYTES: \"${{CRABKA_{signal}_INDEX_SNAPSHOT_MAX_BYTES:-268435456}}\""
+            "CRABKA_{signal}_INDEX_SNAPSHOT_MAX: \"${{CRABKA_{signal}_INDEX_SNAPSHOT_MAX:-256MiB}}\""
         )));
         assert2::assert!(block.contains(&format!(
             "CRABKA_{signal}_INDEX_SNAPSHOT_RETAIN: \"${{CRABKA_{signal}_INDEX_SNAPSHOT_RETAIN:-8}}\""
@@ -229,7 +229,7 @@ fn trace_and_profile_snapshot_policy_is_overrideable_per_signal() {
     ] {
         let block = compose_service_block(&compose, service);
         assert2::assert!(block.contains(&format!(
-            "CRABKA_{signal}_INDEX_SNAPSHOT_MAX_BYTES: \"${{CRABKA_{signal}_INDEX_SNAPSHOT_MAX_BYTES:-268435456}}\""
+            "CRABKA_{signal}_INDEX_SNAPSHOT_MAX: \"${{CRABKA_{signal}_INDEX_SNAPSHOT_MAX:-256MiB}}\""
         )));
         assert2::assert!(!block.contains(&format!("CRABKA_{signal}_INDEX_SNAPSHOT_RETAIN:")));
     }
@@ -244,10 +244,10 @@ fn trace_and_profile_wal_fetch_limits_are_overrideable_per_signal() {
     ] {
         let block = compose_service_block(&compose, service);
         assert2::assert!(block.contains(&format!(
-            "CRABKA_{signal}_WAL_FETCH_MAX_BYTES: \"${{CRABKA_{signal}_WAL_FETCH_MAX_BYTES:-2097152}}\""
+            "CRABKA_{signal}_WAL_FETCH_MAX: \"${{CRABKA_{signal}_WAL_FETCH_MAX:-2MiB}}\""
         )));
         assert2::assert!(block.contains(&format!(
-            "CRABKA_{signal}_WAL_FETCH_PARTITION_MAX_BYTES: \"${{CRABKA_{signal}_WAL_FETCH_PARTITION_MAX_BYTES:-262144}}\""
+            "CRABKA_{signal}_WAL_FETCH_PARTITION_MAX: \"${{CRABKA_{signal}_WAL_FETCH_PARTITION_MAX:-256KiB}}\""
         )));
     }
 }
@@ -256,18 +256,34 @@ fn trace_and_profile_wal_fetch_limits_are_overrideable_per_signal() {
 fn traces_querier_parquet_read_cap_is_overrideable() {
     let compose = docker_compose();
     let block = compose_service_block(&compose, "traces-querier");
-    assert2::assert!(block.contains(
-        "CRABKA_TRACES_BLOCK_READ_MAX_BYTES: \"${CRABKA_TRACES_BLOCK_READ_MAX_BYTES:-1073741824}\""
-    ));
+    assert2::assert!(
+        block.contains("CRABKA_TRACES_BLOCK_READ_MAX: \"${CRABKA_TRACES_BLOCK_READ_MAX:-1GiB}\"")
+    );
 }
 
 #[test]
 fn traces_querier_scan_concat_cap_is_overrideable() {
     let compose = docker_compose();
     let block = compose_service_block(&compose, "traces-querier");
-    assert2::assert!(block.contains(
-        "CRABKA_TRACES_SCAN_CONCAT_MAX_BYTES: \"${CRABKA_TRACES_SCAN_CONCAT_MAX_BYTES:-1500000000}\""
-    ));
+    assert2::assert!(
+        block
+            .contains("CRABKA_TRACES_SCAN_CONCAT_MAX: \"${CRABKA_TRACES_SCAN_CONCAT_MAX:-1.5GB}\"")
+    );
+}
+
+#[test]
+fn profiles_wal_poll_timeout_is_owned_by_wal_consumers() {
+    let compose = docker_compose();
+    for service in ["profiles-block-builder", "profiles-querier"] {
+        let block = compose_service_block(&compose, service);
+        assert2::assert!(block.contains(
+            "CRABKA_PROFILES_WAL_POLL_TIMEOUT: \"${CRABKA_PROFILES_WAL_POLL_TIMEOUT:-500ms}\""
+        ));
+    }
+    assert2::assert!(
+        !compose_service_block(&compose, "profiles-distributor")
+            .contains("CRABKA_PROFILES_WAL_POLL_TIMEOUT")
+    );
 }
 
 #[test]

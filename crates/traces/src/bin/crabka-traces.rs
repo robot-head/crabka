@@ -2,17 +2,14 @@
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
+use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 
 use arc_swap::ArcSwap;
 use clap::{ArgAction, Args, Parser, ValueEnum};
 use crabka_blockstore::{
-    BlockReadMaxBytes, BlockStore, BlockWriter, IndexSnapshotMaxBytes, IndexSnapshotRetain,
-    PromotedSpanAttr, TraceIndex,
+    BlockStore, BlockWriter, IndexSnapshotRetain, PromotedSpanAttr, TraceIndex,
 };
-use crabka_client_consumer::{
-    AutoOffsetReset, Consumer, ConsumerFetchMaxBytes, ConsumerFetchPartitionMaxBytes,
-};
+use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerFetchMaxBytes};
 use crabka_client_producer::Producer;
 use crabka_telemetry::OtlpConfig;
 use crabka_traceql::{EngineOpts, TraceqlEngine};
@@ -31,14 +28,14 @@ use crabka_traces::{
         self as trace_querier,
         http::HttpConfig,
         live::{LiveSource, LiveTier, RemoteLiveSource},
-        store::{CrabkaSpanStore, ScanConcatMaxBytes, SharedTraceIndex},
+        store::{CrabkaSpanStore, DEFAULT_SCAN_CONCAT_MAX, SharedTraceIndex},
     },
     span::batch::RESOURCE_ATTR_PREFIX,
 };
 use crabka_units::{
     ByteSize, Frequency, Time,
     convert::{ByteSizeExt as _, FrequencyExt, TimeExt as _},
-    kibibytes, secs,
+    kibibytes, parse, secs,
 };
 use num_traits::ToPrimitive as _;
 use object_store::{ObjectStore, path::Path};
@@ -46,17 +43,29 @@ use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-const DEFAULT_WAL_FETCH_MAX_BYTES: i32 = 2 * 1024 * 1024;
-const DEFAULT_WAL_FETCH_PARTITION_MAX_BYTES: i32 = 256 * 1024;
-
-fn default_wal_fetch_max_bytes() -> ConsumerFetchMaxBytes {
-    ConsumerFetchMaxBytes::new(DEFAULT_WAL_FETCH_MAX_BYTES)
-        .expect("default WAL fetch maximum is positive")
+fn parse_consumer_fetch_size(value: &str) -> Result<ByteSize, String> {
+    let size = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ConsumerFetchMaxBytes::try_from(size)?;
+    Ok(size)
 }
 
-fn default_wal_fetch_partition_max_bytes() -> ConsumerFetchPartitionMaxBytes {
-    ConsumerFetchPartitionMaxBytes::new(DEFAULT_WAL_FETCH_PARTITION_MAX_BYTES)
-        .expect("default WAL partition fetch maximum is positive")
+fn parse_positive_whole_byte_size(value: &str) -> Result<ByteSize, String> {
+    let size = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    let bytes = size.bytes_f64();
+    if bytes.fract() != 0.0 || bytes > 9_007_199_254_740_992.0 {
+        return Err(
+            "size must be a positive whole-byte value exactly representable by UOM".to_owned(),
+        );
+    }
+    Ok(size)
+}
+
+fn parse_scan_concat_max(value: &str) -> Result<ByteSize, String> {
+    let size = parse_positive_whole_byte_size(value)?;
+    if size > DEFAULT_SCAN_CONCAT_MAX {
+        return Err("scan concatenation maximum must not exceed 1.5GB".to_owned());
+    }
+    Ok(size)
 }
 
 #[derive(Debug, Parser)]
@@ -85,24 +94,26 @@ struct Cli {
     bootstrap: String,
     #[arg(
         long,
-        env = "CRABKA_TRACES_WAL_FETCH_MAX_BYTES",
-        default_value_t = default_wal_fetch_max_bytes()
+        env = "CRABKA_TRACES_WAL_FETCH_MAX",
+        default_value = "2MiB",
+        value_parser = parse_consumer_fetch_size
     )]
-    wal_fetch_max_bytes: ConsumerFetchMaxBytes,
+    wal_fetch_max: ByteSize,
     #[arg(
         long,
-        env = "CRABKA_TRACES_WAL_FETCH_PARTITION_MAX_BYTES",
-        default_value_t = default_wal_fetch_partition_max_bytes()
+        env = "CRABKA_TRACES_WAL_FETCH_PARTITION_MAX",
+        default_value = "256KiB",
+        value_parser = parse_consumer_fetch_size
     )]
-    wal_fetch_partition_max_bytes: ConsumerFetchPartitionMaxBytes,
+    wal_fetch_partition_max: ByteSize,
     #[arg(long, default_value_t = 30 * 60 * 1_000_000_000_i64)]
     retention_ns: i64,
     #[arg(long, default_value_t = 5)]
-    block_builder_window_secs: u64,
+    block_builder_window_secs: i64,
     #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS)]
     block_builder_flush_max_records: usize,
-    #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis() as u64)]
-    block_builder_flush_max_age_ms: u64,
+    #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64())]
+    block_builder_flush_max_age_ms: i64,
     #[arg(long, action = ArgAction::SetTrue)]
     querier_live_store: bool,
     #[arg(long)]
@@ -111,10 +122,11 @@ struct Cli {
     trace_index_key: String,
     #[arg(
         long,
-        env = "CRABKA_TRACES_INDEX_SNAPSHOT_MAX_BYTES",
-        default_value_t = IndexSnapshotMaxBytes::default()
+        env = "CRABKA_TRACES_INDEX_SNAPSHOT_MAX",
+        default_value = "256MiB",
+        value_parser = parse_positive_whole_byte_size
     )]
-    index_snapshot_max_bytes: IndexSnapshotMaxBytes,
+    index_snapshot_max: ByteSize,
     #[arg(
         long,
         env = "CRABKA_TRACES_INDEX_SNAPSHOT_RETAIN",
@@ -123,16 +135,18 @@ struct Cli {
     index_snapshot_retain: IndexSnapshotRetain,
     #[arg(
         long,
-        env = "CRABKA_TRACES_BLOCK_READ_MAX_BYTES",
-        default_value_t = BlockReadMaxBytes::default()
+        env = "CRABKA_TRACES_BLOCK_READ_MAX",
+        default_value = "1GiB",
+        value_parser = parse_positive_whole_byte_size
     )]
-    block_read_max_bytes: BlockReadMaxBytes,
+    block_read_max: ByteSize,
     #[arg(
         long,
-        env = "CRABKA_TRACES_SCAN_CONCAT_MAX_BYTES",
-        default_value_t = ScanConcatMaxBytes::default()
+        env = "CRABKA_TRACES_SCAN_CONCAT_MAX",
+        default_value = "1.5GB",
+        value_parser = parse_scan_concat_max
     )]
-    scan_concat_max_bytes: ScanConcatMaxBytes,
+    scan_concat_max: ByteSize,
     #[arg(long, default_value = "memory:///")]
     object_store_url: String,
     #[arg(long)]
@@ -224,7 +238,9 @@ impl ConfiguredObjectStore {
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    match run(cli).await {
+    // `run` fans out over every role, so its state machine is large; boxing keeps
+    // it off the startup task's stack.
+    match Box::pin(run(cli)).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("{err}");
@@ -285,11 +301,11 @@ async fn run_distributor(
         DistributorState::with_metrics(Arc::new(KafkaSink::new(Arc::new(producer))), metrics);
     state.limits.max_spans_per_request = cli.max_spans_per_request;
     state.limits.max_spans_per_trace = cli.max_spans_per_trace;
-    state.limits.max_ingest_spans_per_second = cli.max_ingest_spans_per_second;
+    state.limits.max_ingest_rate = ingest_rate_from_cli(cli.max_ingest_spans_per_second);
     state.limits.ingest_rate_burst = cli.ingest_rate_burst;
-    state.limits.max_attr_value_len = cli.max_attr_value_len;
+    state.limits.max_attr_value = size_from_usize(cli.max_attr_value_len);
     state.shared_limits = state.limits.to_shared_limits();
-    state.max_decompressed = cli.max_decompressed_bytes;
+    state.max_decompressed = size_from_usize(cli.max_decompressed_bytes);
     let state = Arc::new(state);
     let addr: SocketAddr = cli.listen.parse()?;
     let grpc_addr: SocketAddr = cli.grpc_listen.parse()?;
@@ -350,8 +366,8 @@ async fn run_block_builder(
         cli.bootstrap.clone(),
         "crabka-traces-block-builder",
         Some("crabka-traces-block-builder"),
-        cli.wal_fetch_max_bytes,
-        cli.wal_fetch_partition_max_bytes,
+        cli.wal_fetch_max,
+        cli.wal_fetch_partition_max,
     )
     .await?;
     let configured = build_object_store(&cli)?;
@@ -361,7 +377,7 @@ async fn run_block_builder(
     let initial_index = TraceIndex::load_latest_snapshot_with_max_bytes(
         &configured.store,
         &trace_index_key,
-        cli.index_snapshot_max_bytes,
+        cli.index_snapshot_max,
     )
     .await
     .unwrap_or_else(|_| TraceIndex::new());
@@ -374,10 +390,10 @@ async fn run_block_builder(
         blockbuilder::BlockBuilderConfig {
             object_key_prefix,
             index_key: trace_index_key,
-            window: Duration::from_secs(cli.block_builder_window_secs),
+            window: Time::from_secs(cli.block_builder_window_secs),
             promoted_attrs,
             flush_max_records: cli.block_builder_flush_max_records,
-            flush_max_age: Duration::from_millis(cli.block_builder_flush_max_age_ms),
+            flush_max_age: Time::from_millis(cli.block_builder_flush_max_age_ms),
             index_snapshot_retain: cli.index_snapshot_retain,
         },
         metrics,
@@ -396,8 +412,8 @@ async fn run_live_store(
         cli.bootstrap.clone(),
         "crabka-traces-live-store",
         None,
-        cli.wal_fetch_max_bytes,
-        cli.wal_fetch_partition_max_bytes,
+        cli.wal_fetch_max,
+        cli.wal_fetch_partition_max,
     )
     .await?;
     let store = Arc::new(RwLock::new(LiveStore::new(cli.retention_ns)));
@@ -436,8 +452,8 @@ async fn run_querier(
             cli.bootstrap.clone(),
             "crabka-traces-querier-live-store",
             None,
-            cli.wal_fetch_max_bytes,
-            cli.wal_fetch_partition_max_bytes,
+            cli.wal_fetch_max,
+            cli.wal_fetch_partition_max,
         )
         .await?;
         let live_shutdown = shutdown.clone();
@@ -452,10 +468,10 @@ async fn run_querier(
     let refresh_shutdown = shutdown.clone();
     let refresh_store = Arc::clone(&store);
     let refresh_index = Arc::clone(&trace_index);
-    let refresh_interval = cli.block_builder_window_secs.max(1);
-    let index_snapshot_max_bytes = cli.index_snapshot_max_bytes;
+    let refresh_interval = Time::from_secs(cli.block_builder_window_secs).max(secs(1));
+    let index_snapshot_max = cli.index_snapshot_max;
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(refresh_interval));
+        let mut tick = tokio::time::interval(refresh_interval.to_std());
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -464,7 +480,7 @@ async fn run_querier(
                     if let Ok(idx) = TraceIndex::load_latest_snapshot_with_max_bytes(
                         &refresh_store,
                         &trace_index_key,
-                        index_snapshot_max_bytes,
+                        index_snapshot_max,
                     ).await {
                         refresh_index.store(Arc::new(idx));
                     }
@@ -504,15 +520,15 @@ async fn build_querier_router_with_live(
     let initial = TraceIndex::load_latest_snapshot_with_max_bytes(
         &configured.store,
         &trace_index_key,
-        cli.index_snapshot_max_bytes,
+        cli.index_snapshot_max,
     )
     .await
     .unwrap_or_else(|_| TraceIndex::new());
     let trace_index: SharedTraceIndex = Arc::new(ArcSwap::from_pointee(initial));
-    let blocks = Arc::new(BlockStore::new_with_block_read_max_bytes(
+    let blocks = Arc::new(BlockStore::new_with_block_read_max(
         Arc::clone(&configured.store),
         configured.root,
-        cli.block_read_max_bytes,
+        cli.block_read_max,
     ));
     let live = if let Some(store) = live_store {
         Some(LiveTier::new(Arc::new(IndexedLiveSource::new(
@@ -527,11 +543,11 @@ async fn build_querier_router_with_live(
     } else {
         None
     };
-    let store = Arc::new(CrabkaSpanStore::new_with_scan_concat_max_bytes(
+    let store = Arc::new(CrabkaSpanStore::new_with_scan_concat_max(
         blocks,
         Arc::clone(&trace_index),
         live,
-        cli.scan_concat_max_bytes,
+        cli.scan_concat_max,
     ));
     let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
     let router = trace_querier::http::router_with_config_and_metrics(
@@ -558,11 +574,11 @@ fn build_live_store_router(
         Arc::clone(&live_store),
         Arc::clone(&trace_index),
     )));
-    let store = Arc::new(CrabkaSpanStore::new_with_scan_concat_max_bytes(
+    let store = Arc::new(CrabkaSpanStore::new_with_scan_concat_max(
         blocks,
         trace_index,
         Some(live),
-        cli.scan_concat_max_bytes,
+        cli.scan_concat_max,
     ));
     let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
     let tempo_router = trace_querier::http::router_with_config(
@@ -742,12 +758,10 @@ fn frontend_config_from_cli(
     let querier_addrs = parse_querier_addrs(&cli.querier_url)?;
     Ok(FrontendConfig {
         querier_addrs,
-        target_bytes_per_job: cli.target_bytes_per_job,
+        target_per_job: ByteSize::from_bytes(cli.target_bytes_per_job),
         max_concurrency: cli.query_queue_depth.max(1),
         hot_frontier_ns: cli.live_frontier_ns.unwrap_or(0),
-        max_trace_bytes: u64::try_from(cli.max_trace_spans)
-            .unwrap_or(u64::MAX)
-            .saturating_mul(64 * 1024),
+        max_trace: max_trace_size(cli.max_trace_spans),
         listen_addr,
         ..FrontendConfig::default()
     })
@@ -767,15 +781,12 @@ async fn build_trace_index_catalog(
     let trace_index = TraceIndex::load_latest_snapshot_with_max_bytes(
         &configured.store,
         &trace_index_key,
-        cli.index_snapshot_max_bytes,
+        cli.index_snapshot_max,
     )
     .await
     .unwrap_or_else(|_| TraceIndex::new());
-    let blocks = BlockStore::new_with_block_read_max_bytes(
-        configured.store,
-        configured.root,
-        cli.block_read_max_bytes,
-    );
+    let blocks =
+        BlockStore::new_with_block_read_max(configured.store, configured.root, cli.block_read_max);
     Ok(TraceIndexCatalog::from_trace_index(&blocks, &trace_index)
         .await
         .unwrap_or_else(|_| TraceIndexCatalog::new(std::collections::BTreeMap::new())))
@@ -813,7 +824,7 @@ async fn build_query_frontend_router(
     let addr: SocketAddr = cli.listen.parse()?;
     let cfg = frontend_config_from_cli(cli, addr)?;
     let catalog = build_trace_index_catalog(cli).await?;
-    let backend = HttpQuerier::new(cfg.querier_addrs.clone(), cfg.request_timeout)?;
+    let backend = HttpQuerier::new(cfg.querier_addrs.clone(), cfg.request_timeout.to_std())?;
     let qf = Arc::new(QueryFrontend::new(
         Arc::new(backend),
         Arc::new(catalog),
@@ -829,7 +840,7 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
     let mut index = TraceIndex::load_latest_snapshot_with_max_bytes(
         &configured.store,
         &trace_index_key,
-        cli.index_snapshot_max_bytes,
+        cli.index_snapshot_max,
     )
     .await
     .unwrap_or_else(|_| TraceIndex::new());
@@ -840,7 +851,7 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
         configured.prefix.as_ref(),
         cli.compaction_start_ns,
         cli.compaction_end_ns,
-        cli.block_read_max_bytes,
+        cli.block_read_max,
     )
     .await?;
     index
@@ -916,8 +927,8 @@ async fn run_metrics_generator(
         cli.bootstrap,
         "crabka-traces-metrics-generator",
         None,
-        cli.wal_fetch_max_bytes,
-        cli.wal_fetch_partition_max_bytes,
+        cli.wal_fetch_max,
+        cli.wal_fetch_partition_max,
     )
     .await?;
     let source = Arc::new(KafkaSpanSource::new(consumer));
@@ -927,9 +938,32 @@ async fn run_metrics_generator(
     Ok(())
 }
 
+/// `usize::MAX` is the CLI's "no limit" spelling; a zero rate is how the shared
+/// limits express unlimited.
+fn ingest_rate_from_cli(spans_per_sec: usize) -> Frequency {
+    if spans_per_sec == usize::MAX {
+        <Frequency as FrequencyExt>::ZERO
+    } else {
+        Frequency::from_per_sec(f64_from_usize(spans_per_sec))
+    }
+}
+
+fn size_from_usize(value: usize) -> ByteSize {
+    ByteSize::from_bytes(u64::try_from(value).unwrap_or(u64::MAX))
+}
+
+fn f64_from_usize(value: usize) -> f64 {
+    value.to_f64().unwrap_or(f64::MAX)
+}
+
+/// The assembled-trace ceiling, budgeting ~64KiB of OTLP JSON per span.
+fn max_trace_size(spans: usize) -> ByteSize {
+    kibibytes(64) * f64_from_usize(spans)
+}
+
 fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) {
     if let Some(secs) = cli.collection_interval_secs {
-        cfg.collection_interval = Duration::from_secs(secs);
+        cfg.collection_interval = Time::from_secs(i64::try_from(secs).unwrap_or(i64::MAX));
     }
     if let Some(url) = &cli.remote_write_url {
         cfg.remote_write_url.clone_from(url);
@@ -938,7 +972,7 @@ fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) 
         cfg.max_exemplars_per_series = max;
     }
     if let Some(secs) = cli.edge_ttl_secs {
-        cfg.edge_ttl = Duration::from_secs(secs);
+        cfg.edge_ttl = Time::from_secs(i64::try_from(secs).unwrap_or(i64::MAX));
     }
     if let Some(max) = cli.edge_store_max_items {
         cfg.edge_store_max_items = max;
@@ -955,8 +989,8 @@ async fn wal_consumer(
     bootstrap: String,
     group_id: &str,
     group_instance_id: Option<&str>,
-    fetch_max_bytes: ConsumerFetchMaxBytes,
-    fetch_partition_max_bytes: ConsumerFetchPartitionMaxBytes,
+    fetch_max: ByteSize,
+    fetch_partition_max: ByteSize,
 ) -> Result<Consumer, crabka_client_consumer::ConsumerError> {
     // Boxed: consumer startup (bootstrap resolve, double `JoinGroup`,
     // `SyncGroup`, offset priming) builds a ~13 KB future. Every role that
@@ -968,8 +1002,8 @@ async fn wal_consumer(
             .bootstrap(bootstrap)
             .group_id(group_id.to_string())
             .maybe_group_instance_id(group_instance_id)
-            .fetch_max(fetch_max_bytes.size())
-            .fetch_partition_max(fetch_partition_max_bytes.size())
+            .fetch_max(fetch_max)
+            .fetch_partition_max(fetch_partition_max)
             .subscribe(vec![TRACES_WAL_TOPIC.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .build(),
@@ -985,6 +1019,7 @@ mod tests {
         http::{Request, StatusCode as HttpStatusCode},
     };
     use clap::Parser;
+    use crabka_units::minutes;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -1102,8 +1137,7 @@ mod tests {
         );
         assert2::assert!(
             cli.block_builder_flush_max_age_ms
-                == u64::try_from(crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.as_millis())
-                    .unwrap()
+                == crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64()
         );
     }
 
@@ -1111,15 +1145,15 @@ mod tests {
     fn index_snapshot_policy_defaults_and_rejects_invalid_values() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
         assert_eq!(
-            cli.index_snapshot_max_bytes.into_value(),
-            crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_MAX_BYTES
+            cli.index_snapshot_max,
+            crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_MAX
         );
         assert_eq!(
             cli.index_snapshot_retain.into_value(),
             crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_RETAIN
         );
 
-        for flag in ["--index-snapshot-max-bytes", "--index-snapshot-retain"] {
+        for flag in ["--index-snapshot-max", "--index-snapshot-retain"] {
             for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
                 assert!(
                     Cli::try_parse_from([
@@ -1133,6 +1167,18 @@ mod tests {
                     "{flag} should reject {invalid:?}"
                 );
             }
+        }
+        for invalid in ["1.5B", "18446744073709551616B"] {
+            assert!(
+                Cli::try_parse_from([
+                    "crabka-traces",
+                    "--target",
+                    "block-builder",
+                    "--index-snapshot-max",
+                    invalid,
+                ])
+                .is_err()
+            );
         }
     }
 
@@ -1148,7 +1194,7 @@ mod tests {
                         "tests::index_snapshot_policy_reads_environment_and_prefers_cli",
                     ])
                     .env(CHILD, "1")
-                    .env("CRABKA_TRACES_INDEX_SNAPSHOT_MAX_BYTES", "1024")
+                    .env("CRABKA_TRACES_INDEX_SNAPSHOT_MAX", "1KiB")
                     .env("CRABKA_TRACES_INDEX_SNAPSHOT_RETAIN", "3")
                     .status()
                     .expect("child test");
@@ -1157,29 +1203,29 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
-        assert_eq!(from_env.index_snapshot_max_bytes.into_value(), 1024);
+        assert_eq!(from_env.index_snapshot_max.bytes_u64(), 1024);
         assert_eq!(from_env.index_snapshot_retain.into_value(), 3);
 
         let from_cli = Cli::try_parse_from([
             "crabka-traces",
             "--target",
             "block-builder",
-            "--index-snapshot-max-bytes",
-            "2048",
+            "--index-snapshot-max",
+            "2KiB",
             "--index-snapshot-retain",
             "4",
         ])
         .unwrap();
-        assert_eq!(from_cli.index_snapshot_max_bytes.into_value(), 2048);
+        assert_eq!(from_cli.index_snapshot_max.bytes_u64(), 2048);
         assert_eq!(from_cli.index_snapshot_retain.into_value(), 4);
     }
 
     #[test]
-    fn block_read_max_bytes_defaults_and_rejects_invalid_values() {
+    fn block_read_max_defaults_and_rejects_invalid_values() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "querier"]).unwrap();
         assert_eq!(
-            cli.block_read_max_bytes.into_value(),
-            crabka_blockstore::DEFAULT_BLOCK_READ_MAX_BYTES
+            cli.block_read_max,
+            crabka_blockstore::DEFAULT_BLOCK_READ_MAX
         );
 
         for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
@@ -1188,28 +1234,40 @@ mod tests {
                     "crabka-traces",
                     "--target",
                     "querier",
-                    "--block-read-max-bytes",
+                    "--block-read-max",
                     invalid,
                 ])
                 .is_err(),
-                "--block-read-max-bytes should reject {invalid:?}"
+                "--block-read-max should reject {invalid:?}"
+            );
+        }
+        for invalid in ["1.5B", "18446744073709551616B"] {
+            assert!(
+                Cli::try_parse_from([
+                    "crabka-traces",
+                    "--target",
+                    "querier",
+                    "--block-read-max",
+                    invalid,
+                ])
+                .is_err()
             );
         }
     }
 
     #[test]
-    fn block_read_max_bytes_reads_environment_and_prefers_cli() {
-        const CHILD: &str = "CRABKA_TRACES_BLOCK_READ_MAX_BYTES_CHILD";
+    fn block_read_max_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_BLOCK_READ_MAX_CHILD";
 
         if std::env::var_os(CHILD).is_none() {
             let status =
                 std::process::Command::new(std::env::current_exe().expect("test executable"))
                     .args([
                         "--exact",
-                        "tests::block_read_max_bytes_reads_environment_and_prefers_cli",
+                        "tests::block_read_max_reads_environment_and_prefers_cli",
                     ])
                     .env(CHILD, "1")
-                    .env("CRABKA_TRACES_BLOCK_READ_MAX_BYTES", "1024")
+                    .env("CRABKA_TRACES_BLOCK_READ_MAX", "1KiB")
                     .status()
                     .expect("child test");
             assert!(status.success());
@@ -1217,58 +1275,58 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(["crabka-traces", "--target", "querier"]).unwrap();
-        assert_eq!(from_env.block_read_max_bytes.into_value(), 1024);
+        assert_eq!(from_env.block_read_max.bytes_u64(), 1024);
 
         let from_cli = Cli::try_parse_from([
             "crabka-traces",
             "--target",
             "querier",
-            "--block-read-max-bytes",
-            "2048",
+            "--block-read-max",
+            "2KiB",
         ])
         .unwrap();
-        assert_eq!(from_cli.block_read_max_bytes.into_value(), 2048);
+        assert_eq!(from_cli.block_read_max.bytes_u64(), 2048);
     }
 
     #[test]
-    fn scan_concat_max_bytes_preserves_default_and_rejects_invalid_values() {
+    fn scan_concat_max_preserves_default_and_rejects_invalid_values() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "querier"]).unwrap();
-        assert_eq!(cli.scan_concat_max_bytes.into_value(), 1_500_000_000);
+        assert_eq!(cli.scan_concat_max.bytes_u64(), 1_500_000_000);
 
         for invalid in [
             "0",
             "not-a-number",
-            "-1",
-            "1500000001",
-            "18446744073709551616",
+            "-1B",
+            "1500000001B",
+            "18446744073709551616B",
         ] {
             assert!(
                 Cli::try_parse_from([
                     "crabka-traces",
                     "--target",
                     "querier",
-                    "--scan-concat-max-bytes",
+                    "--scan-concat-max",
                     invalid,
                 ])
                 .is_err(),
-                "--scan-concat-max-bytes should reject {invalid:?}"
+                "--scan-concat-max should reject {invalid:?}"
             );
         }
     }
 
     #[test]
-    fn scan_concat_max_bytes_reads_environment_and_prefers_cli() {
-        const CHILD: &str = "CRABKA_TRACES_SCAN_CONCAT_MAX_BYTES_CHILD";
+    fn scan_concat_max_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_SCAN_CONCAT_MAX_CHILD";
 
         if std::env::var_os(CHILD).is_none() {
             let status =
                 std::process::Command::new(std::env::current_exe().expect("test executable"))
                     .args([
                         "--exact",
-                        "tests::scan_concat_max_bytes_reads_environment_and_prefers_cli",
+                        "tests::scan_concat_max_reads_environment_and_prefers_cli",
                     ])
                     .env(CHILD, "1")
-                    .env("CRABKA_TRACES_SCAN_CONCAT_MAX_BYTES", "1024")
+                    .env("CRABKA_TRACES_SCAN_CONCAT_MAX", "1KiB")
                     .status()
                     .expect("child test");
             assert!(status.success());
@@ -1276,34 +1334,36 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(["crabka-traces", "--target", "querier"]).unwrap();
-        assert_eq!(from_env.scan_concat_max_bytes.into_value(), 1024);
+        assert_eq!(from_env.scan_concat_max.bytes_u64(), 1024);
 
         let from_cli = Cli::try_parse_from([
             "crabka-traces",
             "--target",
             "querier",
-            "--scan-concat-max-bytes",
-            "2048",
+            "--scan-concat-max",
+            "2KiB",
         ])
         .unwrap();
-        assert_eq!(from_cli.scan_concat_max_bytes.into_value(), 2048);
+        assert_eq!(from_cli.scan_concat_max.bytes_u64(), 2048);
     }
 
     #[test]
     fn wal_fetch_limits_preserve_defaults_and_reject_invalid_values() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
-        assert_eq!(cli.wal_fetch_max_bytes.bytes(), 2_097_152);
-        assert_eq!(cli.wal_fetch_partition_max_bytes.bytes(), 262_144);
+        assert_eq!(cli.wal_fetch_max.bytes_i32(), 2_097_152);
+        assert_eq!(cli.wal_fetch_partition_max.bytes_i32(), 262_144);
 
         for (flag, invalid) in [
-            ("--wal-fetch-max-bytes", "0"),
-            ("--wal-fetch-max-bytes", "not-a-number"),
-            ("--wal-fetch-max-bytes", "-1"),
-            ("--wal-fetch-max-bytes", "2147483648"),
-            ("--wal-fetch-partition-max-bytes", "0"),
-            ("--wal-fetch-partition-max-bytes", "not-a-number"),
-            ("--wal-fetch-partition-max-bytes", "-1"),
-            ("--wal-fetch-partition-max-bytes", "2147483648"),
+            ("--wal-fetch-max", "0"),
+            ("--wal-fetch-max", "not-a-number"),
+            ("--wal-fetch-max", "-1B"),
+            ("--wal-fetch-max", "1.5B"),
+            ("--wal-fetch-max", "2147483648B"),
+            ("--wal-fetch-partition-max", "0"),
+            ("--wal-fetch-partition-max", "not-a-number"),
+            ("--wal-fetch-partition-max", "-1B"),
+            ("--wal-fetch-partition-max", "1.5B"),
+            ("--wal-fetch-partition-max", "2147483648B"),
         ] {
             assert!(
                 Cli::try_parse_from(["crabka-traces", "--target", "block-builder", flag, invalid,])
@@ -1325,8 +1385,8 @@ mod tests {
                         "tests::wal_fetch_limits_read_environment_and_prefer_cli",
                     ])
                     .env(CHILD, "1")
-                    .env("CRABKA_TRACES_WAL_FETCH_MAX_BYTES", "1024")
-                    .env("CRABKA_TRACES_WAL_FETCH_PARTITION_MAX_BYTES", "256")
+                    .env("CRABKA_TRACES_WAL_FETCH_MAX", "1KiB")
+                    .env("CRABKA_TRACES_WAL_FETCH_PARTITION_MAX", "256B")
                     .status()
                     .expect("child test");
             assert!(status.success());
@@ -1334,21 +1394,21 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
-        assert_eq!(from_env.wal_fetch_max_bytes.bytes(), 1024);
-        assert_eq!(from_env.wal_fetch_partition_max_bytes.bytes(), 256);
+        assert_eq!(from_env.wal_fetch_max.bytes_i32(), 1024);
+        assert_eq!(from_env.wal_fetch_partition_max.bytes_i32(), 256);
 
         let from_cli = Cli::try_parse_from([
             "crabka-traces",
             "--target",
             "block-builder",
-            "--wal-fetch-max-bytes",
-            "2048",
-            "--wal-fetch-partition-max-bytes",
-            "512",
+            "--wal-fetch-max",
+            "2KiB",
+            "--wal-fetch-partition-max",
+            "512B",
         ])
         .unwrap();
-        assert_eq!(from_cli.wal_fetch_max_bytes.bytes(), 2048);
-        assert_eq!(from_cli.wal_fetch_partition_max_bytes.bytes(), 512);
+        assert_eq!(from_cli.wal_fetch_max.bytes_i32(), 2048);
+        assert_eq!(from_cli.wal_fetch_partition_max.bytes_i32(), 512);
     }
 
     #[test]
@@ -1787,9 +1847,9 @@ mod tests {
     fn metrics_generator_config_preserves_file_values_without_cli_overrides() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "metrics-generator"]).unwrap();
         let mut cfg = MetricsGenConfig {
-            collection_interval: Duration::from_secs(30),
+            collection_interval: secs(30),
             max_exemplars_per_series: 5,
-            edge_ttl: Duration::from_mins(1),
+            edge_ttl: minutes(1),
             edge_store_max_items: 2_000,
             histogram_buckets_ns: vec![1_000.0, 2_000.0],
             remote_write_url: "http://metrics.example/api/v1/push".into(),
@@ -1807,9 +1867,9 @@ mod tests {
                 cfg.histogram_buckets_ns.as_slice(),
                 cfg.remote_write_url.as_str(),
             ) == (
-                Duration::from_secs(30),
+                secs(30),
                 5,
-                Duration::from_mins(1),
+                minutes(1),
                 2_000,
                 &[1_000.0, 2_000.0][..],
                 "http://metrics.example/api/v1/push",
@@ -1846,9 +1906,9 @@ mod tests {
                 cfg.histogram_buckets_ns.as_slice(),
                 cfg.remote_write_url.as_str(),
             ) == (
-                Duration::from_secs(45),
+                secs(45),
                 2,
-                Duration::from_secs(9),
+                secs(9),
                 77,
                 &[500.0, 1_000.0, 2_500.0][..],
                 "http://override.example/api/v1/push",

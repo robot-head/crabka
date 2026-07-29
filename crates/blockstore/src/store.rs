@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
+use crabka_units::ByteSize;
 use datafusion::{
     catalog::MemTable,
     prelude::{ParquetReadOptions, SessionContext},
@@ -16,7 +17,7 @@ use crate::{
     index::Index,
     matcher::LabelMatcher,
     reader::{
-        BlockReadMaxBytes, RowGroupMeta, read_block_row_groups_with_max_bytes,
+        DEFAULT_BLOCK_READ_MAX, RowGroupMeta, read_block_row_groups_with_max_bytes,
         read_row_group_metadata_with_max_bytes,
     },
     writer::BlockWriter,
@@ -40,26 +41,26 @@ pub struct BlockStore {
     store: Arc<dyn ObjectStore>,
     base: Url,
     index: Arc<Index>,
-    block_read_max_bytes: BlockReadMaxBytes,
+    block_read_max: ByteSize,
 }
 
 impl BlockStore {
     #[must_use]
     pub fn new(store: Arc<dyn ObjectStore>, base: Url) -> Self {
-        Self::new_with_block_read_max_bytes(store, base, BlockReadMaxBytes::default())
+        Self::new_with_block_read_max(store, base, DEFAULT_BLOCK_READ_MAX)
     }
 
     #[must_use]
-    pub fn new_with_block_read_max_bytes(
+    pub fn new_with_block_read_max(
         store: Arc<dyn ObjectStore>,
         base: Url,
-        block_read_max_bytes: BlockReadMaxBytes,
+        block_read_max: ByteSize,
     ) -> Self {
         Self {
             store,
             base,
             index: Arc::new(Index::new()),
-            block_read_max_bytes,
+            block_read_max,
         }
     }
 
@@ -97,11 +98,7 @@ impl BlockStore {
 
     #[must_use]
     pub fn empty_like(&self) -> Self {
-        Self::new_with_block_read_max_bytes(
-            self.store.clone(),
-            self.base.clone(),
-            self.block_read_max_bytes,
-        )
+        Self::new_with_block_read_max(self.store.clone(), self.base.clone(), self.block_read_max)
     }
 
     /// Read Parquet row-group metadata with this store's configured cap.
@@ -110,12 +107,8 @@ impl BlockStore {
     /// Returns an error when object-store I/O fails, the block exceeds the
     /// configured cap, or persisted metadata is malformed.
     pub async fn read_row_group_metadata(&self, object_key: &str) -> Result<Vec<RowGroupMeta>> {
-        read_row_group_metadata_with_max_bytes(
-            self.store.clone(),
-            object_key,
-            self.block_read_max_bytes,
-        )
-        .await
+        read_row_group_metadata_with_max_bytes(self.store.clone(), object_key, self.block_read_max)
+            .await
     }
 
     /// # Errors
@@ -268,7 +261,7 @@ impl BlockStore {
             self.store.clone(),
             object_key,
             row_groups,
-            self.block_read_max_bytes,
+            self.block_read_max,
         )
         .await?;
         let partitions = if batches.is_empty() {
@@ -464,12 +457,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn block_read_max_bytes_reaches_metadata_row_groups_and_empty_like() {
+    async fn block_read_max_reaches_metadata_row_groups_and_empty_like() {
         let (bs, schema) = seeded_store().await;
-        let capped = BlockStore::new_with_block_read_max_bytes(
+        let capped = BlockStore::new_with_block_read_max(
             bs.object_store(),
             url::Url::parse("memory:///").unwrap(),
-            crate::BlockReadMaxBytes::new(1).unwrap(),
+            crabka_units::bytes(1),
         );
 
         assert2::assert!(

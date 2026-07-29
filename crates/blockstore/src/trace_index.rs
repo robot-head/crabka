@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use crabka_units::prelude::*;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -15,7 +16,8 @@ use crate::{
     bloom::ShardedTraceBloom,
     error::{BlockStoreError, Result},
     index_snapshot::{
-        IndexSnapshotMaxBytes, IndexSnapshotRetain, latest_index_snapshot_path, put_index_snapshot,
+        DEFAULT_INDEX_SNAPSHOT_MAX, IndexSnapshotRetain, latest_index_snapshot_path,
+        put_index_snapshot,
     },
 };
 
@@ -224,7 +226,7 @@ impl TraceIndex {
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
-        Self::load_with_max_bytes(store, key, IndexSnapshotMaxBytes::default()).await
+        Self::load_with_max_bytes(store, key, DEFAULT_INDEX_SNAPSHOT_MAX).await
     }
 
     /// # Errors
@@ -232,7 +234,7 @@ impl TraceIndex {
     pub async fn load_with_max_bytes(
         store: &Arc<dyn ObjectStore>,
         key: &str,
-        max_bytes: IndexSnapshotMaxBytes,
+        max_bytes: ByteSize,
     ) -> Result<Self> {
         Self::load_path_with_max_bytes(store, &Path::from(key), max_bytes).await
     }
@@ -240,8 +242,7 @@ impl TraceIndex {
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load_latest_snapshot(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
-        Self::load_latest_snapshot_with_max_bytes(store, key, IndexSnapshotMaxBytes::default())
-            .await
+        Self::load_latest_snapshot_with_max_bytes(store, key, DEFAULT_INDEX_SNAPSHOT_MAX).await
     }
 
     /// # Errors
@@ -249,7 +250,7 @@ impl TraceIndex {
     pub async fn load_latest_snapshot_with_max_bytes(
         store: &Arc<dyn ObjectStore>,
         key: &str,
-        max_bytes: IndexSnapshotMaxBytes,
+        max_bytes: ByteSize,
     ) -> Result<Self> {
         if let Some(path) = latest_index_snapshot_path(store, key).await? {
             return Self::load_path_with_max_bytes(store, &path, max_bytes).await;
@@ -261,10 +262,9 @@ impl TraceIndex {
     async fn load_path_with_max_bytes(
         store: &Arc<dyn ObjectStore>,
         path: &Path,
-        max_bytes: IndexSnapshotMaxBytes,
+        max_bytes: ByteSize,
     ) -> Result<Self> {
-        let bytes = match crabka_object_store::read_capped(store, path, max_bytes.into_value())
-            .await
+        let bytes = match crabka_object_store::read_capped(store, path, max_bytes.bytes_u64()).await
         {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -658,7 +658,7 @@ mod tests {
         }
         assert_eq!(count, 2);
 
-        let cap = crate::IndexSnapshotMaxBytes::new(1).unwrap();
+        let cap = crabka_units::bytes(1);
         let got =
             TraceIndex::load_latest_snapshot_with_max_bytes(&store, "index/traces.json", cap).await;
         assert2::assert!(matches!(got, Err(BlockStoreError::InvalidBlock(_))));

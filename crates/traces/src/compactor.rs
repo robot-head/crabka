@@ -16,7 +16,7 @@ use arrow::{
 #[cfg(test)]
 use crabka_blockstore::read_block;
 use crabka_blockstore::{
-    BlockIndex, BlockMeta, BlockReadMaxBytes, BlockWriter, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE,
+    BlockIndex, BlockMeta, BlockWriter, DEFAULT_BLOCK_READ_MAX, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE,
     SCOL_ATTR_VALUE_BOOL, SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_CHILD_COUNT,
     SCOL_DURATION_NANOS, SCOL_EVENTS, SCOL_INSTRUMENTATION_NAME, SCOL_INSTRUMENTATION_VERSION,
     SCOL_LINKS, SCOL_NAME, SCOL_NESTED_SET_LEFT, SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID,
@@ -25,6 +25,7 @@ use crabka_blockstore::{
     ShardedTraceBloom, SummaryColumns, TraceBlockStats, TraceIndex, read_block_with_max_bytes,
     span_block_decl, span_block_schema,
 };
+use crabka_units::ByteSize;
 use object_store::ObjectStore;
 
 use crate::{
@@ -70,7 +71,7 @@ pub async fn compact_block_keys(
         tenant,
         input_keys,
         output_key,
-        BlockReadMaxBytes::default(),
+        DEFAULT_BLOCK_READ_MAX,
     )
     .await
 }
@@ -88,12 +89,12 @@ pub async fn compact_block_keys_with_max_bytes(
     tenant: &str,
     input_keys: &[String],
     output_key: &str,
-    block_read_max_bytes: BlockReadMaxBytes,
+    block_read_max: ByteSize,
 ) -> Result<BlockMeta, TracesError> {
     let mut batches = Vec::new();
     for key in input_keys {
         batches.extend(
-            read_block_with_max_bytes(store.clone(), key, block_read_max_bytes)
+            read_block_with_max_bytes(store.clone(), key, block_read_max)
                 .await
                 .map_err(|err| TracesError::Block(err.to_string()))?,
         );
@@ -157,7 +158,7 @@ pub async fn compact_index_window(
         object_key_prefix,
         start_ns,
         end_ns,
-        BlockReadMaxBytes::default(),
+        DEFAULT_BLOCK_READ_MAX,
     )
     .await
 }
@@ -175,7 +176,7 @@ pub async fn compact_index_window_with_max_bytes(
     object_key_prefix: &str,
     start_ns: i64,
     end_ns: i64,
-    block_read_max_bytes: BlockReadMaxBytes,
+    block_read_max: ByteSize,
 ) -> Result<Vec<BlockMeta>, TracesError> {
     let mut metas = Vec::new();
     for tenant in index.tenants() {
@@ -200,7 +201,7 @@ pub async fn compact_index_window_with_max_bytes(
             &tenant,
             &candidate_keys,
             &output_key,
-            block_read_max_bytes,
+            block_read_max,
         )
         .await?;
         metas.push(meta);
@@ -1006,7 +1007,7 @@ mod tests {
             "tenant",
             &["a.parquet".to_string(), "b.parquet".to_string()],
             "rejected.parquet",
-            crabka_blockstore::BlockReadMaxBytes::new(1).unwrap(),
+            crabka_units::bytes(1),
         )
         .await;
         assert2::assert!(rejected.is_err());

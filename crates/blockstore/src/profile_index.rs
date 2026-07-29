@@ -19,7 +19,8 @@ use crate::{
     error::{BlockStoreError, Result},
     index::Index,
     index_snapshot::{
-        IndexSnapshotMaxBytes, IndexSnapshotRetain, latest_index_snapshot_path, put_index_snapshot,
+        DEFAULT_INDEX_SNAPSHOT_MAX, IndexSnapshotRetain, latest_index_snapshot_path,
+        put_index_snapshot,
     },
     labels::{Labels, SeriesFingerprint},
     matcher::LabelMatcher,
@@ -384,7 +385,7 @@ impl ProfileIndex {
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
-        Self::load_with_max_bytes(store, key, IndexSnapshotMaxBytes::default()).await
+        Self::load_with_max_bytes(store, key, DEFAULT_INDEX_SNAPSHOT_MAX).await
     }
 
     /// # Errors
@@ -392,7 +393,7 @@ impl ProfileIndex {
     pub async fn load_with_max_bytes(
         store: &Arc<dyn ObjectStore>,
         key: &str,
-        max_bytes: IndexSnapshotMaxBytes,
+        max_bytes: ByteSize,
     ) -> Result<Self> {
         Self::load_path_with_max_bytes(store, &Path::from(key), max_bytes).await
     }
@@ -400,8 +401,7 @@ impl ProfileIndex {
     /// # Errors
     /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load_latest_snapshot(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
-        Self::load_latest_snapshot_with_max_bytes(store, key, IndexSnapshotMaxBytes::default())
-            .await
+        Self::load_latest_snapshot_with_max_bytes(store, key, DEFAULT_INDEX_SNAPSHOT_MAX).await
     }
 
     /// # Errors
@@ -409,7 +409,7 @@ impl ProfileIndex {
     pub async fn load_latest_snapshot_with_max_bytes(
         store: &Arc<dyn ObjectStore>,
         key: &str,
-        max_bytes: IndexSnapshotMaxBytes,
+        max_bytes: ByteSize,
     ) -> Result<Self> {
         if let Some(path) = latest_index_snapshot_path(store, key).await? {
             return Self::load_path_with_max_bytes(store, &path, max_bytes).await;
@@ -426,10 +426,9 @@ impl ProfileIndex {
     async fn load_path_with_max_bytes(
         store: &Arc<dyn ObjectStore>,
         path: &Path,
-        max_bytes: IndexSnapshotMaxBytes,
+        max_bytes: ByteSize,
     ) -> Result<Self> {
-        let bytes = match crabka_object_store::read_capped(store, path, max_bytes.into_value())
-            .await
+        let bytes = match crabka_object_store::read_capped(store, path, max_bytes.bytes_u64()).await
         {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -946,7 +945,7 @@ mod tests {
         }
         assert_eq!(count, 2);
 
-        let cap = crate::IndexSnapshotMaxBytes::new(1).unwrap();
+        let cap = crabka_units::bytes(1);
         let got =
             ProfileIndex::load_latest_snapshot_with_max_bytes(&store, "index/profiles.json", cap)
                 .await;
@@ -973,7 +972,7 @@ mod tests {
         let got = ProfileIndex::load_with_max_bytes(
             &store,
             "index/profiles.json",
-            crate::IndexSnapshotMaxBytes::new(1).unwrap(),
+            crabka_units::bytes(1),
         )
         .await;
         let Err(BlockStoreError::InvalidBlock(msg)) = got else {
@@ -989,7 +988,7 @@ mod tests {
         let loaded = ProfileIndex::load_with_max_bytes(
             &store,
             "index/profiles.json",
-            crate::IndexSnapshotMaxBytes::new(size).unwrap(),
+            ByteSize::from_bytes(size),
         )
         .await
         .unwrap();
@@ -1009,7 +1008,7 @@ mod tests {
         let got = ProfileIndex::load_with_max_bytes(
             &store,
             "index/missing-profiles.json",
-            crate::IndexSnapshotMaxBytes::default(),
+            crate::DEFAULT_INDEX_SNAPSHOT_MAX,
         )
         .await;
 
