@@ -27,7 +27,7 @@ applicable rule below:
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
   `docgen`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`, `logfmt`,
   `logql`, `object-store`, `operator`, `protocol-codegen`, `remote-storage`,
-  `schema-registry`.
+  `pgparser`, `schema-registry`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `connect`, `connect-postgres`, `gres`, `gres-activator`,
   `gres-balancer`,
@@ -35,7 +35,7 @@ applicable rule below:
   `gres-ranges`, `gres-substrate`,
   `kraft-core`, `log`, `log-iobench`, `metadata`, `metrics`,
   `metrics-service`, `observability`, `observability-demo-app`,
-  `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgparser`, `pgtypes`, `pgwire`,
+  `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgtypes`, `pgwire`,
   `playground`, `pprof`, `profiles`, `promql`, `protocol`, `raft`,
   `rebalancer`, `records-legacy`, `remote-storage-topic`, `replicator`,
   `schema-serde`, `security`, `telemetry`, `throttle`,
@@ -4413,3 +4413,23 @@ additional setting is warranted.
 
 The current object-store all-target gate passed 29 tests, including configured
 multipart boundaries and capped reads, and strict all-target Clippy passed.
+
+## Pgparser
+
+The `pgparser` owner has six scanner rows. Five are parser contracts:
+the typed non-goal refusal registry, the `COPY FROM STDIN` sentinel, the
+generated command-identity catalog, the identifier-slot grammar table, and a
+test-only placeholder table.
+
+The remaining row is `MAX_DEPTH = 50`, the parser's denial-of-service safety
+boundary. It caps recursive parsing and the depth of iteratively built ASTs
+before either can overflow the server worker stack during parse, evaluation,
+or recursive drop. The value is deliberately derived from the smallest
+deployed stack and has tests immediately below and above the boundary.
+Allowing operators to raise it would make a crash-safety invariant tunable, so
+it remains fixed.
+
+The crate owns no deployment timing, capacity, retry, or resource policy, so
+no CLI, environment variable, or CRD field is warranted. The current
+`pgparser` all-target gate passed 214 tests; its feature-gated oracle target
+compiled with zero active tests, and strict all-target Clippy passed.
