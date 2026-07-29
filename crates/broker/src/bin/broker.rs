@@ -23,7 +23,7 @@ use crabka_broker::{
     },
 };
 use crabka_log::LogConfig;
-use crabka_units::{ByteSize, Ratio, Time, convert::TimeExt as _};
+use crabka_units::{ByteSize, Ratio, Time, convert::TimeExt as _, fmt::Human as _};
 
 /// Parse `--process-roles` string values into `NodeRole`s.
 fn parse_roles_arg(roles: &[String]) -> Result<Vec<crabka_broker::config::NodeRole>, String> {
@@ -770,17 +770,17 @@ struct Args {
     #[arg(long, env = "OTEL_SERVICE_NAME")]
     otel_service_name: Option<String>,
 
-    /// CRABKA-specific OTLP timeout in seconds.
-    #[arg(long, env = "CRABKA_OTLP_TIMEOUT_SECS")]
-    crabka_otlp_timeout_secs: Option<String>,
+    /// CRABKA-specific OTLP timeout.
+    #[arg(long, env = "CRABKA_OTLP_TIMEOUT", value_parser = crabka_units::parse::non_negative_time)]
+    crabka_otlp_timeout: Option<Time>,
 
     /// OpenTelemetry exporter timeout in seconds.
     #[arg(long, env = "OTEL_EXPORTER_OTLP_TIMEOUT_SECS")]
     otel_exporter_otlp_timeout_secs: Option<String>,
 
-    /// OTLP heartbeat interval in seconds; `0` disables heartbeats.
-    #[arg(long, env = "CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS")]
-    crabka_otlp_heartbeat_interval_secs: Option<String>,
+    /// OTLP heartbeat interval; `0s` disables heartbeats.
+    #[arg(long, env = "CRABKA_OTLP_HEARTBEAT_INTERVAL", value_parser = crabka_units::parse::non_negative_time)]
+    crabka_otlp_heartbeat_interval: Option<Time>,
 }
 
 impl Args {
@@ -877,11 +877,13 @@ impl Args {
             "CRABKA_OTLP_SAMPLE_RATIO" => self.crabka_otlp_sample_ratio.clone(),
             "OTEL_TRACES_SAMPLER_ARG" => self.otel_traces_sampler_arg.clone(),
             "OTEL_SERVICE_NAME" => self.otel_service_name.clone(),
-            "CRABKA_OTLP_TIMEOUT_SECS" => self.crabka_otlp_timeout_secs.clone(),
+            "CRABKA_OTLP_TIMEOUT" => self
+                .crabka_otlp_timeout
+                .map(|value| value.human().to_string()),
             "OTEL_EXPORTER_OTLP_TIMEOUT_SECS" => self.otel_exporter_otlp_timeout_secs.clone(),
-            "CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS" => {
-                self.crabka_otlp_heartbeat_interval_secs.clone()
-            }
+            "CRABKA_OTLP_HEARTBEAT_INTERVAL" => self
+                .crabka_otlp_heartbeat_interval
+                .map(|value| value.human().to_string()),
             _ => None,
         }
     }

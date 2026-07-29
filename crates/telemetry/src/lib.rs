@@ -41,6 +41,7 @@ pub mod propagation;
 
 use std::time::Duration;
 
+use crabka_units::prelude::TimeExt as _;
 use opentelemetry::{
     Context, KeyValue,
     trace::{
@@ -173,14 +174,20 @@ impl OtlpConfig {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| default_service_name.to_owned());
 
-        let timeout = get("CRABKA_OTLP_TIMEOUT_SECS")
-            .or_else(|| get("OTEL_EXPORTER_OTLP_TIMEOUT_SECS"))
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .map_or(Duration::from_secs(10), Duration::from_secs);
+        let timeout = get("CRABKA_OTLP_TIMEOUT")
+            .and_then(|s| crabka_units::parse::non_negative_time(&s).ok())
+            .map(crabka_units::Time::to_std)
+            .or_else(|| {
+                get("OTEL_EXPORTER_OTLP_TIMEOUT_SECS")
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .map(Duration::from_secs)
+            })
+            .unwrap_or(Duration::from_secs(10));
 
-        let heartbeat_interval = get("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS")
-            .and_then(|s| s.trim().parse::<u64>().ok())
-            .and_then(|secs| (secs > 0).then(|| Duration::from_secs(secs)));
+        let heartbeat_interval = get("CRABKA_OTLP_HEARTBEAT_INTERVAL")
+            .and_then(|s| crabka_units::parse::non_negative_time(&s).ok())
+            .map(crabka_units::Time::to_std)
+            .filter(|interval| !interval.is_zero());
 
         Some(Self {
             endpoint,
@@ -674,7 +681,7 @@ mod tests {
         let cfg = OtlpConfig::from_env(
             env_from(&[
                 ("CRABKA_OTLP_ENDPOINT", "http://c:4317"),
-                ("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS", "0"),
+                ("CRABKA_OTLP_HEARTBEAT_INTERVAL", "0s"),
             ]),
             "1",
             "0.1.1",
@@ -689,7 +696,7 @@ mod tests {
         let cfg = OtlpConfig::from_env(
             env_from(&[
                 ("CRABKA_OTLP_ENDPOINT", "http://c:4317"),
-                ("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS", "15"),
+                ("CRABKA_OTLP_HEARTBEAT_INTERVAL", "15s"),
             ]),
             "1",
             "0.1.1",
@@ -736,7 +743,7 @@ mod tests {
             env_from(&[
                 ("CRABKA_OTLP_ENDPOINT", "http://c:4317"),
                 ("OTEL_SERVICE_NAME", "my-kafka"),
-                ("CRABKA_OTLP_TIMEOUT_SECS", "3"),
+                ("CRABKA_OTLP_TIMEOUT", "3s"),
             ]),
             "9",
             "0.1.1",
@@ -745,6 +752,23 @@ mod tests {
         .expect("enabled");
         assert2::assert!(cfg.service_name.as_str() == "my-kafka");
         assert2::assert!(cfg.timeout == Duration::from_secs(3));
+    }
+
+    #[test]
+    fn unit_suffixed_crabka_otlp_time_names_are_not_aliases() {
+        let cfg = OtlpConfig::from_env(
+            env_from(&[
+                ("CRABKA_OTLP_ENDPOINT", "http://c:4317"),
+                ("CRABKA_OTLP_TIMEOUT_SECS", "3"),
+                ("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS", "15"),
+            ]),
+            "9",
+            "0.1.1",
+            "crabka-broker",
+        )
+        .expect("enabled");
+        assert2::assert!(cfg.timeout == Duration::from_secs(10));
+        assert2::assert!(cfg.heartbeat_interval.is_none());
     }
 
     #[test]

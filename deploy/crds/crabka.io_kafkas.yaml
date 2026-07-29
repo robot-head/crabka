@@ -1446,14 +1446,12 @@ spec:
                           `"crabka-broker"`.
                         nullable: true
                         type: string
-                      timeoutSecs:
+                      timeout:
                         description: |-
-                          Optional export timeout in seconds. Rendered as
-                          `CRABKA_OTLP_TIMEOUT_SECS`. Defaults to the broker's `10`.
-                        format: uint64
-                        minimum: 0.0
+                          Optional export timeout. Rendered as `CRABKA_OTLP_TIMEOUT`.
+                          Defaults to the broker's `10s`.
                         nullable: true
-                        type: integer
+                        type: string
                     required:
                     - endpoint
                     type: object

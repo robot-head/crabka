@@ -1288,10 +1288,15 @@ pub struct OtlpTracing {
     /// `"crabka-broker"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_name: Option<String>,
-    /// Optional export timeout in seconds. Rendered as
-    /// `CRABKA_OTLP_TIMEOUT_SECS`. Defaults to the broker's `10`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_secs: Option<u64>,
+    /// Optional export timeout. Rendered as `CRABKA_OTLP_TIMEOUT`.
+    /// Defaults to the broker's `10s`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub timeout: Option<Time>,
 }
 
 /// OTLP wire protocol selector. Mirrors the broker's
@@ -1325,7 +1330,7 @@ impl Tracing {
     ///
     /// Fails when `type=Otlp` is missing the `otlp` block, when
     /// `otlp.endpoint` is empty, when `sampleRatio` is outside
-    /// `[0.0, 1.0]`, or when `timeoutSecs == 0`.
+    /// `[0.0, 1.0]`, or when `timeout` is not positive.
     pub fn validate(&self) -> Result<(), String> {
         match (self.kind, &self.otlp) {
             (TracingType::Otlp, None) => {
@@ -1345,8 +1350,11 @@ impl Tracing {
                 {
                     return Err("otlp.serviceName, when set, must be non-empty".into());
                 }
-                if otlp.timeout_secs == Some(0) {
-                    return Err("otlp.timeoutSecs, when set, must be > 0".into());
+                if otlp
+                    .timeout
+                    .is_some_and(|timeout| timeout.secs_f64() <= 0.0)
+                {
+                    return Err("otlp.timeout, when set, must be > 0".into());
                 }
                 Ok(())
             }
@@ -2646,7 +2654,7 @@ authorization:
                 protocol: None,
                 sample_ratio: None,
                 service_name: None,
-                timeout_secs: None,
+                timeout: None,
             }),
         };
         let err = t.validate().unwrap_err();
@@ -2662,7 +2670,7 @@ authorization:
                 protocol: None,
                 sample_ratio: Some(1.5),
                 service_name: None,
-                timeout_secs: None,
+                timeout: None,
             }),
         };
         let err = t.validate().unwrap_err();
@@ -2678,11 +2686,11 @@ authorization:
                 protocol: None,
                 sample_ratio: None,
                 service_name: None,
-                timeout_secs: Some(0),
+                timeout: Some(Time::ZERO),
             }),
         };
         let err = t.validate().unwrap_err();
-        assert!(err.contains("otlp.timeoutSecs"), "got: {err}");
+        assert!(err.contains("otlp.timeout"), "got: {err}");
     }
 
     #[test]
@@ -2694,7 +2702,7 @@ authorization:
                 protocol: Some(OtlpProtocol::Grpc),
                 sample_ratio: Some(0.1),
                 service_name: Some("prod-cluster".into()),
-                timeout_secs: Some(5),
+                timeout: Some(Time::from_secs(5)),
             }),
         };
         assert!(t.validate().is_ok());

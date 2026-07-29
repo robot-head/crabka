@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+use crabka_units::fmt::Human as _;
 use futures::StreamExt as _;
 use k8s_openapi::{
     api::{
@@ -409,10 +410,10 @@ fn render_broker_container(spec: BrokerContainerSpec<'_>) -> serde_json::Value {
         if let Some(name) = otlp.service_name.as_deref() {
             env.push(json!({ "name": "OTEL_SERVICE_NAME", "value": name }));
         }
-        if let Some(t) = otlp.timeout_secs {
+        if let Some(t) = otlp.timeout {
             env.push(json!({
-                "name": "CRABKA_OTLP_TIMEOUT_SECS",
-                "value": t.to_string(),
+                "name": "CRABKA_OTLP_TIMEOUT",
+                "value": t.human().to_string(),
             }));
         }
     }
@@ -3853,7 +3854,7 @@ mod tests {
                 protocol: Some(crate::crd::kafka::OtlpProtocol::HttpProtobuf),
                 sample_ratio: Some(0.25),
                 service_name: Some("svc".into()),
-                timeout_secs: Some(7),
+                timeout: Some(crabka_units::prelude::secs(7)),
             },
         );
         let pool = pool_fixture("brokers", "demo", 1);
@@ -3889,7 +3890,7 @@ mod tests {
             ("CRABKA_OTLP_PROTOCOL", "http/protobuf"),
             ("CRABKA_OTLP_SAMPLE_RATIO", "0.25"),
             ("OTEL_SERVICE_NAME", "svc"),
-            ("CRABKA_OTLP_TIMEOUT_SECS", "7"),
+            ("CRABKA_OTLP_TIMEOUT", "7s"),
         ] {
             assert!(by_name(name) == want, "case {name}");
         }
@@ -3904,7 +3905,7 @@ mod tests {
                 protocol: None,
                 sample_ratio: None,
                 service_name: None,
-                timeout_secs: None,
+                timeout: None,
             },
         );
         let pool = pool_fixture("brokers", "demo", 1);
@@ -3933,7 +3934,7 @@ mod tests {
             "CRABKA_OTLP_PROTOCOL",
             "CRABKA_OTLP_SAMPLE_RATIO",
             "OTEL_SERVICE_NAME",
-            "CRABKA_OTLP_TIMEOUT_SECS",
+            "CRABKA_OTLP_TIMEOUT",
         ] {
             assert!(
                 env.iter().all(|e| e.name != unset),
@@ -3969,7 +3970,7 @@ mod tests {
             "CRABKA_OTLP_PROTOCOL",
             "CRABKA_OTLP_SAMPLE_RATIO",
             "OTEL_SERVICE_NAME",
-            "CRABKA_OTLP_TIMEOUT_SECS",
+            "CRABKA_OTLP_TIMEOUT",
         ] {
             assert!(
                 env.iter().all(|e| e.name != never),

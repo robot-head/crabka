@@ -3942,6 +3942,7 @@ dependencies = [
  "assert2",
  "axum",
  "crabka-logfmt",
+ "crabka-units",
  "flate2",
  "jemalloc_pprof",
  "mutants",
