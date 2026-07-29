@@ -897,8 +897,13 @@ fn activation_crash_config(
             object_store: crabka_gres::CheckpointObjectStoreConfig::Local {
                 root: checkpoint_root,
             },
-            frames_threshold: 1,
-            bytes_threshold: 1,
+            // These tests force every checkpoint they need through the control
+            // protocol. Leave the periodic thresholds at the runtime defaults:
+            // a per-frame threshold makes the background poll trim the WAL in
+            // the window between a forced checkpoint and the transfer pause,
+            // which then fails the successor's bounded tail read.
+            frames_threshold: 10_000,
+            bytes_threshold: 64 * 1024 * 1024,
             part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
             retain_newest: 16,
         }),
@@ -3101,4 +3106,242 @@ async fn hosted_range_compute_forwards_dml_and_grants_timestamps_over_real_tcp()
         rows.as_slice(),
         [crabka_pgwire::engine::QueryResult::Rows { .. }]
     ));
+}
+
+/// A `tokio_postgres` connection whose asynchronous messages are observable:
+/// notifications arrive on the *connection*, not the client, so the connection
+/// is driven with `poll_message` instead of being spawned as a bare future.
+async fn connect_with_notifications(
+    port: u16,
+) -> (
+    tokio_postgres::Client,
+    tokio::sync::mpsc::UnboundedReceiver<tokio_postgres::Notification>,
+) {
+    use assert2::assert;
+
+    let config = format!("host=127.0.0.1 port={port} user=postgres");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        if let Ok((client, mut connection)) =
+            tokio_postgres::connect(&config, tokio_postgres::NoTls).await
+        {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(async move {
+                while let Some(message) =
+                    std::future::poll_fn(|cx| connection.poll_message(cx)).await
+                {
+                    match message {
+                        Ok(tokio_postgres::AsyncMessage::Notification(notification)) => {
+                            if tx.send(notification).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(_) => break,
+                    }
+                }
+            });
+            return (client, rx);
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "connect to crabka-gres did not succeed within 5s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// The next notification, or a failure if none arrives promptly.
+async fn next_notification(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<tokio_postgres::Notification>,
+) -> tokio_postgres::Notification {
+    tokio::time::timeout(std::time::Duration::from_secs(10), rx.recv())
+        .await
+        .expect("a notification within 10s")
+        .expect("the connection task is still running")
+}
+
+/// Assert that nothing is delivered in the next `millis` — used only for the
+/// "not yet" half of a case whose positive half is asserted right afterwards.
+async fn no_notification_within(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<tokio_postgres::Notification>,
+    millis: u64,
+) {
+    use assert2::assert;
+
+    let idle = tokio::time::timeout(std::time::Duration::from_millis(millis), rx.recv()).await;
+    assert!(idle.is_err(), "unexpected notification: {idle:?}");
+}
+
+/// A hand-rolled pgwire connection. tokio-postgres keeps the pid the server
+/// announced in `BackendKeyData` private, so the test that pins
+/// `NotificationResponse.process_id == BackendKeyData.pid` needs its own client.
+struct RawPgConnection {
+    stream: tokio::net::TcpStream,
+    /// The pid the server announced in `BackendKeyData`.
+    pid: i32,
+}
+
+impl RawPgConnection {
+    async fn connect(port: u16) -> Self {
+        use tokio::io::AsyncWriteExt as _;
+
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .expect("raw pgwire connection");
+        let mut body = Vec::new();
+        body.extend_from_slice(&196_608i32.to_be_bytes());
+        body.extend_from_slice(b"user\0postgres\0\0");
+        let mut startup = Vec::new();
+        startup.extend_from_slice(
+            &i32::try_from(body.len() + 4)
+                .expect("startup message length")
+                .to_be_bytes(),
+        );
+        startup.extend_from_slice(&body);
+        stream.write_all(&startup).await.expect("send startup");
+
+        let startup_burst = read_until_ready(&mut stream).await.expect("startup burst");
+        let pid = startup_burst
+            .iter()
+            .find_map(|(kind, body)| {
+                (*kind == b'K').then(|| i32::from_be_bytes([body[0], body[1], body[2], body[3]]))
+            })
+            .expect("BackendKeyData");
+        RawPgConnection { stream, pid }
+    }
+
+    /// Run one simple-protocol Query, panicking on an `ErrorResponse`.
+    async fn simple_query(&mut self, sql: &str) {
+        use tokio::io::AsyncWriteExt as _;
+
+        let mut body = sql.as_bytes().to_vec();
+        body.push(0);
+        let mut message = vec![b'Q'];
+        message.extend_from_slice(
+            &i32::try_from(body.len() + 4)
+                .expect("query length")
+                .to_be_bytes(),
+        );
+        message.extend_from_slice(&body);
+        self.stream.write_all(&message).await.expect("send query");
+
+        let messages = read_until_ready(&mut self.stream)
+            .await
+            .expect("query burst");
+        if let Some((_, body)) = messages.iter().find(|(kind, _)| *kind == b'E') {
+            panic!("{sql} failed: {}", String::from_utf8_lossy(body));
+        }
+    }
+}
+
+/// The end-to-end proof: a real driver's `LISTEN` receives a
+/// `NotificationResponse` raised by another connection, stamped with that
+/// connection's `BackendKeyData` pid, and only once the notifier commits.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_delivers_notifications_between_pgwire_connections() {
+    use assert2::assert;
+
+    let _permit = broker_test_permit().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let server = tokio::spawn(crabka_gres::serve_listener(
+        listener,
+        test_args(format!("127.0.0.1:{port}"), None),
+    ));
+
+    let (listening_client, mut notifications) = connect_with_notifications(port).await;
+    listening_client
+        .simple_query("LISTEN news")
+        .await
+        .expect("listen");
+    let mut notifier = RawPgConnection::connect(port).await;
+    assert!(notifier.pid != 0, "the server must announce a real pid");
+
+    notifier.simple_query("NOTIFY news, 'hello'").await;
+    let delivered = next_notification(&mut notifications).await;
+    assert!(delivered.channel() == "news");
+    assert!(delivered.payload() == "hello");
+    assert!(delivered.process_id() == notifier.pid);
+
+    // Queued in a transaction: nothing until COMMIT, then both in order.
+    notifier.simple_query("BEGIN").await;
+    notifier.simple_query("NOTIFY news, 'first'").await;
+    notifier.simple_query("NOTIFY news, 'second'").await;
+    no_notification_within(&mut notifications, 250).await;
+    notifier.simple_query("COMMIT").await;
+    let first = next_notification(&mut notifications).await;
+    let second = next_notification(&mut notifications).await;
+    assert!((first.payload(), second.payload()) == ("first", "second"));
+
+    // A rolled-back NOTIFY is never delivered; the following one still is.
+    notifier.simple_query("BEGIN").await;
+    notifier.simple_query("NOTIFY news, 'dropped'").await;
+    notifier.simple_query("ROLLBACK").await;
+    notifier.simple_query("NOTIFY news, 'kept'").await;
+    assert!(next_notification(&mut notifications).await.payload() == "kept");
+
+    // UNLISTEN really unsubscribes: pg_notify from the other connection is
+    // accepted but delivered nowhere.
+    listening_client
+        .simple_query("UNLISTEN news")
+        .await
+        .expect("unlisten");
+    notifier
+        .simple_query("SELECT pg_notify('news', 'after unlisten')")
+        .await;
+    no_notification_within(&mut notifications, 250).await;
+
+    server.abort();
+    let _ = server.await;
+}
+
+/// A connection that listens on a channel it notifies hears itself, and the pid
+/// on the message identifies the notifying connection (a second connection's
+/// notification carries a different one).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn runtime_delivers_a_self_notification_to_the_notifying_connection() {
+    use assert2::assert;
+
+    let _permit = broker_test_permit().await;
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("local addr").port();
+    let server = tokio::spawn(crabka_gres::serve_listener(
+        listener,
+        test_args(format!("127.0.0.1:{port}"), None),
+    ));
+
+    let (client, mut notifications) = connect_with_notifications(port).await;
+    client.simple_query("LISTEN news").await.expect("listen");
+    client
+        .simple_query("NOTIFY news, 'to myself'")
+        .await
+        .expect("notify");
+
+    let own = next_notification(&mut notifications).await;
+    assert!(own.channel() == "news");
+    assert!(own.payload() == "to myself");
+    assert!(own.process_id() != 0);
+
+    // pg_notify takes the same route on the same connection.
+    client
+        .simple_query("SELECT pg_notify('news', 'from the function')")
+        .await
+        .expect("pg_notify");
+    let from_function = next_notification(&mut notifications).await;
+    assert!(from_function.payload() == "from the function");
+    assert!(from_function.process_id() == own.process_id());
+
+    // A different connection stamps a different pid on the same channel.
+    let other = connect(port).await;
+    other
+        .simple_query("NOTIFY news, 'from elsewhere'")
+        .await
+        .expect("notify from the second connection");
+    let foreign = next_notification(&mut notifications).await;
+    assert!(foreign.payload() == "from elsewhere");
+    assert!(foreign.process_id() != own.process_id());
+
+    server.abort();
+    let _ = server.await;
 }

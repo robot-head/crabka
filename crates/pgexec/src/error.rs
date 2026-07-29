@@ -41,8 +41,24 @@ pub enum ExecError {
     /// The table definition itself is invalid (42P16) — e.g. adding a second
     /// primary key.
     InvalidTableDefinition(String),
+    /// An expression's type cannot be determined (42P18) — e.g. `ARRAY[]` with
+    /// no cast to supply the element type.
+    IndeterminateType(String),
     /// A row would duplicate a visible row in a unique index (23505).
     UniqueViolation(String),
+    /// No unique index arbitrates the `ON CONFLICT` specification (42P10) — the
+    /// inference column set matches no unique index on the target table.
+    OnConflictNoArbiter,
+    /// One `INSERT … ON CONFLICT DO UPDATE` statement tried to update the same
+    /// row twice (21000) — either two conflicting rows in the same statement or
+    /// a row already updated by this statement.
+    OnConflictAffectsRowTwice,
+    /// `ON CONFLICT ON CONSTRAINT <name>` named a constraint the target table
+    /// does not have (42704).
+    UndefinedConstraint {
+        name: String,
+        table: String,
+    },
     /// A grouping/aggregation rule was violated (42803) — e.g. a column that is
     /// neither grouped nor inside an aggregate, or a nested aggregate.
     Grouping(String),
@@ -205,9 +221,22 @@ impl ExecError {
                 format!("column \"{column}\" of relation \"{table}\" contains null values"),
             ),
             ExecError::InvalidTableDefinition(m) => PgError::error("42P16", m),
+            ExecError::IndeterminateType(m) => PgError::error("42P18", m),
             ExecError::UniqueViolation(index) => PgError::error(
                 "23505",
                 format!("duplicate key value violates unique constraint \"{index}\""),
+            ),
+            ExecError::OnConflictNoArbiter => PgError::error(
+                "42P10",
+                "there is no unique or exclusion constraint matching the ON CONFLICT specification",
+            ),
+            ExecError::OnConflictAffectsRowTwice => PgError::error(
+                "21000",
+                "ON CONFLICT DO UPDATE command cannot affect row a second time",
+            ),
+            ExecError::UndefinedConstraint { name, table } => PgError::error(
+                "42704",
+                format!("constraint \"{name}\" for table \"{table}\" does not exist"),
             ),
             ExecError::Grouping(m) => PgError::error("42803", m),
             ExecError::UndefinedFunction(m) => PgError::error("42883", m),
@@ -268,19 +297,57 @@ impl From<KvError> for ExecError {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
 
+    /// Each row is (error, expected SQLSTATE, expected PG-exact message). The
+    /// ON CONFLICT rows are diffed against a real PostgreSQL oracle by the
+    /// conformance harness, so their texts are byte-for-byte PG's.
     #[test]
-    fn syntax_maps_to_42601() {
-        let pg = ExecError::Syntax("non-integer constant in ORDER BY".into()).into_pg();
-        assert_eq!(pg.code, "42601");
-        assert_eq!(pg.message, "non-integer constant in ORDER BY");
-    }
+    fn errors_map_to_sqlstate_and_pg_message() {
+        let cases: Vec<(ExecError, &str, &str)> = vec![
+            (
+                ExecError::Syntax("non-integer constant in ORDER BY".into()),
+                "42601",
+                "non-integer constant in ORDER BY",
+            ),
+            (
+                ExecError::AmbiguousOrderBy("x".into()),
+                "42702",
+                "ORDER BY \"x\" is ambiguous",
+            ),
+            (
+                ExecError::IndeterminateType("cannot determine type of empty array".into()),
+                "42P18",
+                "cannot determine type of empty array",
+            ),
+            (
+                ExecError::OnConflictNoArbiter,
+                "42P10",
+                "there is no unique or exclusion constraint matching the ON CONFLICT specification",
+            ),
+            (
+                ExecError::OnConflictAffectsRowTwice,
+                "21000",
+                "ON CONFLICT DO UPDATE command cannot affect row a second time",
+            ),
+            (
+                ExecError::UndefinedConstraint {
+                    name: "t_k_key".into(),
+                    table: "t".into(),
+                },
+                "42704",
+                "constraint \"t_k_key\" for table \"t\" does not exist",
+            ),
+        ];
 
-    #[test]
-    fn ambiguous_order_by_maps_to_pg_message() {
-        let pg = ExecError::AmbiguousOrderBy("x".into()).into_pg();
-        assert_eq!(pg.code, "42702");
-        assert_eq!(pg.message, "ORDER BY \"x\" is ambiguous");
+        for (error, code, message) in cases {
+            let pg = error.clone().into_pg();
+            assert!(
+                (pg.code.as_str(), pg.message.as_str()) == (code, message),
+                "unexpected wire error for {error:?}"
+            );
+        }
     }
 }

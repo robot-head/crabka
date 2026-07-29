@@ -48,6 +48,11 @@ pub enum TypeError {
     /// SP37: a date/time field out of range (e.g. month 13) (22008).
     #[error("date/time field value out of range: \"{value}\"")]
     DatetimeFieldOverflow { value: String },
+    /// A type-layer feature crabka deliberately does not implement (0A000) —
+    /// e.g. an array of an unsupported element type, or a multidimensional
+    /// array literal.
+    #[error("{message}")]
+    FeatureNotSupported { message: String },
 }
 
 impl TypeError {
@@ -64,6 +69,7 @@ impl TypeError {
             TypeError::Domain { sqlstate, .. } => sqlstate,
             TypeError::InvalidDatetimeFormat { .. } => "22007",
             TypeError::DatetimeFieldOverflow { .. } => "22008",
+            TypeError::FeatureNotSupported { .. } => "0A000",
         }
     }
 }
@@ -123,6 +129,13 @@ mod tests {
             }
             .sqlstate(),
             "22008"
+        );
+        assert_eq!(
+            TypeError::FeatureNotSupported {
+                message: "multidimensional arrays are not supported".into(),
+            }
+            .sqlstate(),
+            "0A000"
         );
     }
 }

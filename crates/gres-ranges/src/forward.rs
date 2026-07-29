@@ -367,7 +367,10 @@ impl HostedRangeService {
 
     async fn handle_session_request(&self, request: RangeRequest) -> RangeResponse {
         match request {
-            RangeRequest::SessionOpen { range_id } => {
+            RangeRequest::SessionOpen {
+                range_id,
+                notify_pid,
+            } => {
                 let engine = match self.hosted_engine(range_id) {
                     Ok(engine) => engine,
                     Err(response) => return response,
@@ -387,7 +390,10 @@ impl HostedRangeService {
                     session_id,
                     HostedSession {
                         range_id,
-                        session: engine.connect(),
+                        session: match notify_pid {
+                            Some(pid) => engine.connect_with_pid(pid),
+                            None => engine.connect(),
+                        },
                         last_used: now,
                     },
                 );
@@ -1517,7 +1523,11 @@ pub trait RemoteForward: Send + Sync {
     ) -> Result<(), ForwardError>;
 
     /// Open a stateful owner-side session for extended protocol and transactions.
-    async fn open_session(&self, range_id: RangeId) -> Result<RemoteRangeSession, ForwardError>;
+    async fn open_session(
+        &self,
+        range_id: RangeId,
+        notify_pid: Option<i32>,
+    ) -> Result<RemoteRangeSession, ForwardError>;
 
     async fn recover_global(
         &self,
@@ -1842,11 +1852,21 @@ impl RemoteForward for RegistryRemoteForward {
             })
     }
 
-    async fn open_session(&self, range_id: RangeId) -> Result<RemoteRangeSession, ForwardError> {
+    async fn open_session(
+        &self,
+        range_id: RangeId,
+        notify_pid: Option<i32>,
+    ) -> Result<RemoteRangeSession, ForwardError> {
         let endpoint = self.registry.resolve(range_id).await?;
         match self
             .client
-            .call(&endpoint.endpoint, &RangeRequest::SessionOpen { range_id })
+            .call(
+                &endpoint.endpoint,
+                &RangeRequest::SessionOpen {
+                    range_id,
+                    notify_pid,
+                },
+            )
             .await?
         {
             RangeResponse::SessionOpened { session_id } => Ok(RemoteRangeSession {
@@ -4512,7 +4532,7 @@ mod tests {
             RangeRegistry::from_tenant_record(&record(address.to_string())).expect("registry");
         let forward = RegistryRemoteForward::new(registry, FramedTcpClient::default());
         let mut session = forward
-            .open_session(RangeId::new(1))
+            .open_session(RangeId::new(1), None)
             .await
             .expect("open hosted session");
         session
@@ -4607,7 +4627,7 @@ mod tests {
             .expect("registry");
         let forward = RegistryRemoteForward::new(registry, FramedTcpClient::default());
         let mut session = forward
-            .open_session(RangeId::COORDINATOR)
+            .open_session(RangeId::COORDINATOR, None)
             .await
             .expect("open remote range zero session");
 

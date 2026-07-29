@@ -42,6 +42,21 @@ pub fn cast_allowed(from: ColumnType, to: ColumnType) -> bool {
     match (from, to) {
         // Identity (e.g. numeric → numeric, even across differing typmods).
         (a, b) if a == b => true,
+        // Array → array whenever the element cast is defined (PostgreSQL builds
+        // an array coercion from the element coercion). Must precede the string
+        // rules so `text[] → int4[]` is judged element-wise, not as a string cast.
+        (ColumnType::Array(a), ColumnType::Array(b)) => {
+            cast_allowed(a.column_type(), b.column_type())
+        }
+        // `jsonb` and arrays otherwise interconvert ONLY with the string family
+        // (the rule below): PostgreSQL has no jsonb/array ↔ number/bool/temporal
+        // cast, and this arm keeps the permissive numeric rules from claiming one.
+        (ColumnType::Jsonb | ColumnType::Array(_), _)
+        | (_, ColumnType::Jsonb | ColumnType::Array(_))
+            if !from.is_string() && !to.is_string() =>
+        {
+            false
+        }
         _ if from.is_numeric() && to.is_numeric() => true,
         // Numeric family ↔ numeric family, any direction.
         _ if num_family(from) && num_family(to) => true,
@@ -145,6 +160,38 @@ pub fn cast(value: &Datum, to: ColumnType, tz: &jiff::tz::TimeZone) -> Result<Da
         (Datum::Timestamp(dt), ColumnType::Timestamp) => Ok(Datum::Timestamp(*dt)),
         (Datum::Timestamptz(ts), ColumnType::Timestamptz) => Ok(Datum::Timestamptz(*ts)),
         (Datum::Interval(i), ColumnType::Interval) => Ok(Datum::Interval(*i)),
+        // jsonb / array identity and text conversions. These must be explicit:
+        // `cast_allowed` says yes for `T → T` and for anything ↔ the string
+        // family, so without them a runtime cast would wrongly report 42846.
+        (Datum::Jsonb(j), ColumnType::Jsonb) => Ok(Datum::Jsonb(j.clone())),
+        // text → jsonb is `jsonb_in` (22P02 on bad JSON).
+        (Datum::Text(s), ColumnType::Jsonb) => crate::jsonb::parse(s).map(Datum::Jsonb),
+        // text → array is `array_in`: split the literal, then run the element
+        // type's input function over each element.
+        (Datum::Text(s), ColumnType::Array(elem)) => {
+            let raw = crate::array::parse_literal(s)?;
+            let elems = raw
+                .into_iter()
+                .map(|e| match e {
+                    None => Ok(Datum::Null),
+                    Some(text) => cast(&Datum::Text(text), elem.column_type(), tz),
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Datum::Array(crate::datum::ArrayValue::new(elem, elems)))
+        }
+        // array → array: identity when the element types match, element-wise
+        // conversion otherwise (PostgreSQL's array coercion).
+        (Datum::Array(a), ColumnType::Array(elem)) => {
+            if a.elem == elem {
+                return Ok(Datum::Array(a.clone()));
+            }
+            let elems = a
+                .elems
+                .iter()
+                .map(|e| cast(e, elem.column_type(), tz))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Datum::Array(crate::datum::ArrayValue::new(elem, elems)))
+        }
         // Numeric (int/float) ↔ numeric (int/float).
         (Datum::Int4(n), Int8) => Ok(Datum::Int8(i64::from(*n))),
         (Datum::Int4(n), Float8) => Ok(Datum::Float8(f64::from(*n))),
@@ -420,11 +467,16 @@ mod tests {
     #[test]
     fn assignment_cast_matrix_is_a_strict_subset_of_the_explicit_matrix() {
         use ColumnType::{
-            Bool, Bytea, Date, Float8, Int4, Int8, Interval, Regclass, Text, Time, Timestamp,
-            Timestamptz, Uuid,
+            Bool, Bytea, Date, Float8, Int4, Int8, Interval, Jsonb, Regclass, Text, Time,
+            Timestamp, Timestamptz, Uuid,
         };
         use assert2::assert;
+
+        use crate::ElemType;
         let types = [
+            Jsonb,
+            ColumnType::Array(ElemType::Int4),
+            ColumnType::Array(ElemType::Text),
             Bool,
             Int4,
             Int8,
@@ -714,6 +766,130 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    // ---- jsonb / arrays ----
+
+    #[test]
+    fn jsonb_casts_parse_and_render_canonically() {
+        use assert2::assert;
+
+        use crate::JsonbValue;
+        let tz = utc();
+        let jsonb = ColumnType::Jsonb;
+        // text → jsonb decomposes (key order + duplicate keys normalized).
+        let value =
+            cast(&Datum::Text(r#"{"b":1,"a":2,"a":3}"#.into()), jsonb, &tz).expect("text -> jsonb");
+        assert!(value == cast(&Datum::Text(r#"{"a":3,"b":1}"#.into()), jsonb, &tz).expect("same"));
+        // jsonb → text is the canonical rendering, and identity round-trips.
+        assert!(
+            cast(&value, ColumnType::Text, &tz).expect("jsonb -> text")
+                == Datum::Text(r#"{"a": 3, "b": 1}"#.into())
+        );
+        assert!(cast(&value, jsonb, &tz).expect("identity") == value);
+        // Bad JSON is 22P02, not a panic.
+        let err = cast(&Datum::Text("{oops".into()), jsonb, &tz).expect_err("bad json");
+        assert!(err.sqlstate() == "22P02");
+        // NULL casts to NULL like every other target.
+        assert!(cast(&Datum::Null, jsonb, &tz).expect("null") == Datum::Null);
+        // `json` is an input alias for the same type.
+        assert!(ColumnType::from_sql_name("json") == Some(ColumnType::Jsonb));
+        assert!(
+            cast(&Datum::Text("[]".into()), jsonb, &tz).expect("empty")
+                == Datum::Jsonb(JsonbValue::Array(vec![]))
+        );
+    }
+
+    #[test]
+    fn array_casts_parse_render_and_convert_element_wise() {
+        use assert2::assert;
+
+        use crate::{ArrayValue, ElemType};
+        let tz = utc();
+        let int_array = ColumnType::Array(ElemType::Int4);
+        let text_array = ColumnType::Array(ElemType::Text);
+        let parsed =
+            cast(&Datum::Text("{1,NULL,3}".into()), int_array, &tz).expect("text -> int[]");
+        assert!(
+            parsed
+                == Datum::Array(ArrayValue::new(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Null, Datum::Int4(3)],
+                ))
+        );
+        // → text renders the literal back.
+        assert!(
+            cast(&parsed, ColumnType::Text, &tz).expect("int[] -> text")
+                == Datum::Text("{1,NULL,3}".into())
+        );
+        // Identity keeps the element type; a differing element type converts.
+        assert!(cast(&parsed, int_array, &tz).expect("identity") == parsed);
+        assert!(
+            cast(&parsed, text_array, &tz).expect("int[] -> text[]")
+                == Datum::Array(ArrayValue::new(
+                    ElemType::Text,
+                    vec![
+                        Datum::Text("1".into()),
+                        Datum::Null,
+                        Datum::Text("3".into())
+                    ],
+                ))
+        );
+        // An empty array is typed by its target.
+        assert!(
+            cast(&Datum::Text("{}".into()), text_array, &tz).expect("empty")
+                == Datum::Array(ArrayValue::new(ElemType::Text, vec![]))
+        );
+        // A bad element is the element type's own error (22P02 here).
+        let err = cast(&Datum::Text("{x}".into()), int_array, &tz).expect_err("bad element");
+        assert!(err.sqlstate() == "22P02");
+        // A multidimensional literal is 0A000.
+        let err = cast(&Datum::Text("{{1}}".into()), int_array, &tz).expect_err("multidim");
+        assert!(err.sqlstate() == "0A000");
+    }
+
+    #[test]
+    fn jsonb_and_array_cast_matrix_allows_only_string_conversions() {
+        use assert2::assert;
+
+        use crate::ElemType;
+        let jsonb = ColumnType::Jsonb;
+        let int_array = ColumnType::Array(ElemType::Int4);
+        let text_array = ColumnType::Array(ElemType::Text);
+        // Allowed: identity, ↔ the string family, and array ↔ array when the
+        // element cast is defined.
+        for (from, to) in [
+            (jsonb, jsonb),
+            (jsonb, ColumnType::Text),
+            (ColumnType::Text, jsonb),
+            (ColumnType::Varchar(None), jsonb),
+            (int_array, int_array),
+            (int_array, text_array),
+            (text_array, int_array),
+            (int_array, ColumnType::Text),
+            (ColumnType::Text, int_array),
+        ] {
+            assert!(cast_allowed(from, to), "{from:?} -> {to:?}");
+        }
+        // Not allowed: jsonb/array ↔ anything outside the string family.
+        for (from, to) in [
+            (jsonb, ColumnType::Int4),
+            (ColumnType::Int4, jsonb),
+            (jsonb, ColumnType::Bool),
+            (jsonb, int_array),
+            (int_array, jsonb),
+            (int_array, ColumnType::Int4),
+            (ColumnType::Int4, int_array),
+            (int_array, ColumnType::Array(ElemType::Date)),
+            (ColumnType::Timestamp, jsonb),
+        ] {
+            assert!(!cast_allowed(from, to), "{from:?} -> {to:?}");
+        }
+        // Assignment context stays identity-only for these types.
+        assert!(assignment_cast_allowed(jsonb, jsonb));
+        assert!(assignment_cast_allowed(int_array, int_array));
+        assert!(!assignment_cast_allowed(ColumnType::Text, jsonb));
+        assert!(!assignment_cast_allowed(int_array, text_array));
     }
 
     // ---- NULL ----

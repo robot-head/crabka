@@ -42,7 +42,7 @@ pub use self::{
     error::SubstrateError,
     follower::{
         BrokerRange0EndSampler, CommittedEndSampler, LiveCommittedEndSampler,
-        ReadOnlyRange0Follower,
+        ReadOnlyRange0Follower, rebuild_range0_tail_from_checkpoint, wal_trimmed_past_applied,
     },
     frame::WalFrame,
     readonly_fold::{
@@ -53,9 +53,10 @@ pub use self::{
     recovery::{
         CommittedWalReader, InMemoryWalLog, LiveRecovered, LiveRecoveryConfig, RecoveryBarrier,
         RecoveryFencer, bootstrap_live_range0_follower, bounded_committed_tail,
-        ensure_live_wal_topic, live_committed_end, read_live_committed_tail,
-        read_live_retained_committed, recover_after_barrier, recover_live, recover_live_for_range,
-        recover_live_for_range_with_restore,
+        ensure_live_wal_topic, live_committed_end, live_wal_trimmed_past_applied,
+        read_live_committed_tail, read_live_retained_committed,
+        rebuild_live_range0_tail_from_checkpoint, recover_after_barrier, recover_live,
+        recover_live_for_range, recover_live_for_range_with_restore,
     },
     replay::{
         ReplayItem, ReplayOutcome, replay_committed_frames, replay_committed_frames_from_filtered,

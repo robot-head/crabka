@@ -406,6 +406,57 @@ pub async fn bootstrap_live_range0_follower(
     crate::follower::ReadOnlyRange0Follower::bootstrap(config, store, &reader, checkpoints).await
 }
 
+/// Report whether the live WAL has been trimmed past the frames a follower at
+/// `applied_offset` still needs.
+///
+/// This is the discriminator between the one failure a follower cannot retry
+/// its way out of and every transient fetch failure. It asks the broker for
+/// the retained log start rather than inspecting a failed fetch's error text;
+/// an error here means the broker could not be asked, which is itself
+/// transient and leaves the caller retrying.
+///
+/// # Errors
+///
+/// Returns an error when the retained log start cannot be read.
+pub async fn live_wal_trimmed_past_applied(
+    config: &LiveRecoveryConfig,
+    applied_offset: i64,
+) -> Result<bool, SubstrateError> {
+    let reader = live_committed_reader(config, applied_offset).await?;
+    let log_start = reader.log_start_offset().await?;
+    Ok(crate::follower::wal_trimmed_past_applied(
+        applied_offset,
+        log_start,
+    ))
+}
+
+/// Rebuild a live range-0 follower tail from the newest checkpoint.
+///
+/// See [`crate::follower::rebuild_range0_tail_from_checkpoint`]: `fresh_store`
+/// must be an empty store distinct from the one `tail` is serving.
+///
+/// # Errors
+///
+/// Returns an error when the WAL topic cannot be resolved, when no checkpoint
+/// covers the retained WAL, or when the rebuild does not advance the tail.
+pub async fn rebuild_live_range0_tail_from_checkpoint(
+    config: &LiveRecoveryConfig,
+    tail: &crabka_gres_ranges::Range0Tail,
+    fresh_store: Arc<dyn RestoreKv>,
+    checkpoints: Option<&dyn CheckpointStore>,
+) -> Result<i64, SubstrateError> {
+    let end = live_committed_end(config).await?;
+    let reader = live_committed_reader(config, end).await?;
+    crate::follower::rebuild_range0_tail_from_checkpoint(
+        config,
+        tail,
+        fresh_store,
+        &reader,
+        checkpoints,
+    )
+    .await
+}
+
 async fn recover_live_for_range_inner(
     config: LiveRecoveryConfig,
     store: &dyn Kv,

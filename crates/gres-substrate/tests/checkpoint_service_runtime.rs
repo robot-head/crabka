@@ -77,16 +77,18 @@ async fn spawned_checkpoint_service_prunes_wal_and_recovery_replays_retained_tai
 
     let checkpoint_offset = checkpoint_ack.frames.last().expect("last ack").offset;
     let run = handle
-        .checkpoint_if_threshold_crossed(CheckpointSnapshot {
-            covered_offset: checkpoint_offset,
-            journal_seq: 2,
-            producer_epoch: 0,
-            wal_generation: 0,
-            garbage_horizon_xid: 0,
-        })
+        .checkpoint(
+            CheckpointSnapshot {
+                covered_offset: checkpoint_offset,
+                journal_seq: 2,
+                producer_epoch: 0,
+                wal_generation: 0,
+                garbage_horizon_xid: 0,
+            },
+            CheckpointTrigger::Frames,
+        )
         .await
-        .expect("checkpoint command")
-        .expect("threshold checkpoint");
+        .expect("checkpoint command");
 
     assert!(run.trigger == CheckpointTrigger::Frames);
     assert!(run.manifest.covered_offset == checkpoint_offset);
@@ -205,16 +207,18 @@ async fn live_broker_checkpoint_delete_records_and_recovery_replays_retained_tai
         .expect("last checkpoint ack")
         .offset;
     let run = service
-        .checkpoint_if_threshold_crossed(CheckpointSnapshot {
-            covered_offset: checkpoint_offset,
-            journal_seq: 2,
-            producer_epoch: 0,
-            wal_generation: 0,
-            garbage_horizon_xid: 0,
-        })
+        .checkpoint(
+            CheckpointSnapshot {
+                covered_offset: checkpoint_offset,
+                journal_seq: 2,
+                producer_epoch: 0,
+                wal_generation: 0,
+                garbage_horizon_xid: 0,
+            },
+            CheckpointTrigger::Frames,
+        )
         .await
-        .expect("checkpoint command")
-        .expect("threshold checkpoint");
+        .expect("checkpoint command");
 
     let retained_start = checkpoint_offset + 1;
     assert!(run.manifest.covered_offset == checkpoint_offset);

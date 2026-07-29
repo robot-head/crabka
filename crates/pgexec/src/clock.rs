@@ -17,8 +17,13 @@ pub trait Clock: Send + Sync {
 #[derive(Debug, Default)]
 pub struct SystemClock;
 impl Clock for SystemClock {
+    /// Quantized to microseconds, the resolution every `timestamp` encoding
+    /// stores. A sub-microsecond value would compare unequal to its own stored
+    /// form while encoding to identical bytes, which a unique index reads as a
+    /// duplicate — the same hazard the text parsers guard against.
     fn now(&self) -> Timestamp {
-        Timestamp::now()
+        Timestamp::from_microsecond(Timestamp::now().as_microsecond())
+            .unwrap_or_else(|_| Timestamp::now())
     }
 }
 
@@ -43,6 +48,12 @@ pub struct EvalCtx {
     pub session_user: String,
     pub clock: Arc<dyn Clock>,
     pub(crate) sequence: Option<Arc<SequenceRuntime>>,
+    /// The session's queued `LISTEN`/`NOTIFY` work, so the side-effecting
+    /// `pg_notify(channel, payload)` can enqueue from inside expression
+    /// evaluation — the same seam `sequence` gives `nextval`. `None` outside a
+    /// SQL session (planning contexts, unit tests), where `pg_notify` is an
+    /// error rather than a silent no-op.
+    pub(crate) notify: Option<Arc<Mutex<crate::session::NotifyPending>>>,
 }
 
 pub(crate) struct SequenceRuntime {
@@ -63,6 +74,25 @@ impl EvalCtx {
             session_user: "public".into(),
             clock: Arc::new(SystemClock),
             sequence: None,
+            notify: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+
+    use super::{Clock, SystemClock};
+
+    /// Every `timestamp` encoding stores microseconds. A clock reading with a
+    /// finer tail would compare unequal to its own stored form while encoding to
+    /// identical bytes — a unique index would read that as a duplicate.
+    #[test]
+    fn the_system_clock_reads_whole_microseconds() {
+        for _ in 0..64 {
+            let now = SystemClock.now();
+            assert!(now.subsec_nanosecond() % 1_000 == 0);
         }
     }
 }

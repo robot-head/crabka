@@ -11,10 +11,13 @@
 //! `DISTINCT` forms, multi-key `GROUP BY`, and `HAVING`. `AVG` is deferred until
 //! a `numeric`/float type exists.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+};
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall, SelectItem, SelectStmt};
-use crabka_pgtypes::{ColumnType, Datum, TypeError, ops};
+use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, TypeError, ops};
 use crabka_pgwire::engine::QueryResult;
 
 use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
@@ -35,6 +38,24 @@ enum AggFunc {
     Avg,
     Min,
     Max,
+    /// `array_agg(x)` — the inputs as a one-dimensional array, in input order.
+    ArrayAgg,
+    /// `jsonb_agg(x)` — the inputs as a JSON array, in input order.
+    JsonbAgg,
+    /// `jsonb_object_agg(key, value)` — the inputs as a JSON object.
+    JsonbObjectAgg,
+}
+
+impl AggFunc {
+    /// Do NULL inputs contribute a row? `count`/`sum`/`avg`/`min`/`max` skip
+    /// them; the collecting aggregates keep them (a NULL becomes a NULL array
+    /// element or a JSON `null` value).
+    fn keeps_nulls(self) -> bool {
+        matches!(
+            self,
+            AggFunc::ArrayAgg | AggFunc::JsonbAgg | AggFunc::JsonbObjectAgg
+        )
+    }
 }
 
 /// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
@@ -47,6 +68,9 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
         "avg" => Some(AggFunc::Avg),
         "min" => Some(AggFunc::Min),
         "max" => Some(AggFunc::Max),
+        "array_agg" => Some(AggFunc::ArrayAgg),
+        "jsonb_agg" => Some(AggFunc::JsonbAgg),
+        "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
         _ => None,
     }
 }
@@ -85,6 +109,13 @@ pub(crate) fn contains_aggregate(e: &Expr) -> bool {
         }
         // SP31: a cast over an aggregate is an aggregate (`sum(x)::int8`).
         Expr::Cast { expr, .. } => contains_aggregate(expr),
+        // The array expression forms are aggregates iff a child is
+        // (`ARRAY[count(*)]`, `arr[max(i)]`, `x = ANY(array_agg(y))`).
+        Expr::ArrayLiteral(items) => items.iter().any(contains_aggregate),
+        Expr::Subscript { base, index } => contains_aggregate(base) || contains_aggregate(index),
+        Expr::QuantifiedArray { expr, array, .. } => {
+            contains_aggregate(expr) || contains_aggregate(array)
+        }
         _ => false,
     }
 }
@@ -157,7 +188,29 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
             let arg = single_value_arg(fc)?;
             crate::eval::infer_type(arg, scope)
         }
+        // array_agg(x) -> x[]; an element type crabka has no array type for is 0A000.
+        AggFunc::ArrayAgg => {
+            let arg = single_value_arg(fc)?;
+            let t = crate::eval::infer_type(arg, scope)?;
+            array_of(t)
+        }
+        AggFunc::JsonbAgg => {
+            single_value_arg(fc)?;
+            Ok(ColumnType::Jsonb)
+        }
+        AggFunc::JsonbObjectAgg => {
+            let (key, _) = two_value_args(fc)?;
+            crate::eval::infer_type(key, scope)?;
+            Ok(ColumnType::Jsonb)
+        }
     }
+}
+
+/// The array type over `elem`, or 0A000 when crabka has no array type for it.
+fn array_of(elem: ColumnType) -> Result<ColumnType, ExecError> {
+    ColumnType::array_of(elem).ok_or_else(|| {
+        ExecError::Unsupported(format!("arrays of {} are not supported", elem.name()))
+    })
 }
 
 fn undefined_function(name: &str) -> ExecError {
@@ -186,6 +239,14 @@ fn single_value_arg(fc: &FuncCall) -> Result<&Expr, ExecError> {
     }
 }
 
+/// The `(key, value)` arguments of `jsonb_object_agg`; 42883 for any other arity.
+fn two_value_args(fc: &FuncCall) -> Result<(&Expr, &Expr), ExecError> {
+    match &fc.args {
+        FuncArgs::Exprs(args) if args.len() == 2 => Ok((&args[0], &args[1])),
+        _ => Err(undefined_function(&fc.name)),
+    }
+}
+
 /// A resolved aggregate to compute: the function, its argument (`None` only for
 /// `count(*)`), the argument's static type (SP30 — picks the int vs float
 /// accumulator for `sum`/`avg`; `None` for `count(*)`), and whether `DISTINCT`.
@@ -195,6 +256,9 @@ fn single_value_arg(fc: &FuncCall) -> Result<&Expr, ExecError> {
 struct AggSpec {
     func: AggFunc,
     arg: Option<Expr>,
+    /// `jsonb_object_agg`'s VALUE argument (`arg` is then its key). `None` for
+    /// every other aggregate, all of which take at most one argument.
+    value_arg: Option<Expr>,
     arg_type: Option<ColumnType>,
     distinct: bool,
 }
@@ -208,6 +272,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
             FuncArgs::Star => Ok(AggSpec {
                 func,
                 arg: None,
+                value_arg: None,
                 arg_type: None,
                 distinct: fc.distinct,
             }),
@@ -217,12 +282,50 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 Ok(AggSpec {
                     func,
                     arg: Some(args[0].clone()),
+                    value_arg: None,
                     arg_type: Some(arg_type),
                     distinct: fc.distinct,
                 })
             }
             _ => Err(undefined_function("count")),
         },
+        // The collecting aggregates: one value argument, any type array_agg has
+        // an array type for (jsonb_agg accepts every type).
+        AggFunc::ArrayAgg | AggFunc::JsonbAgg => {
+            let arg = single_value_arg(fc)?;
+            reject_nested_aggregate(arg)?;
+            let arg_type = crate::eval::infer_type(arg, scope)?;
+            if func == AggFunc::ArrayAgg {
+                array_of(arg_type)?;
+            }
+            Ok(AggSpec {
+                func,
+                arg: Some(arg.clone()),
+                value_arg: None,
+                arg_type: Some(arg_type),
+                distinct: fc.distinct,
+            })
+        }
+        AggFunc::JsonbObjectAgg => {
+            let (key, value) = two_value_args(fc)?;
+            reject_nested_aggregate(key)?;
+            reject_nested_aggregate(value)?;
+            // Both arguments sit on PostgreSQL's `"any"` parameter: every scalar
+            // key is accepted and rendered through its output function, and only
+            // a container key (`jsonb`, an array) is refused — at RUN time, as
+            // 22023, which is why a zero-row `jsonb_object_agg(jsonb_col, v)` is
+            // NULL rather than an error. Type-check both expressions now so a bad
+            // one still fails at plan time.
+            let key_type = crate::eval::infer_type(key, scope)?;
+            crate::eval::infer_type(value, scope)?;
+            Ok(AggSpec {
+                func,
+                arg: Some(key.clone()),
+                value_arg: Some(value.clone()),
+                arg_type: Some(key_type),
+                distinct: fc.distinct,
+            })
+        }
         AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max => {
             let arg = single_value_arg(fc)?;
             reject_nested_aggregate(arg)?;
@@ -241,10 +344,34 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
             Ok(AggSpec {
                 func,
                 arg: Some(arg.clone()),
+                value_arg: None,
                 arg_type: Some(arg_type),
                 distinct: fc.distinct,
             })
         }
+    }
+}
+
+impl AggSpec {
+    /// Evaluate this aggregate's argument expressions for one row: `[value]`, or
+    /// `[key, value]` for `jsonb_object_agg`. `DISTINCT` compares and
+    /// deduplicates the whole tuple, exactly as PostgreSQL does, so the value
+    /// argument is evaluated before that decision rather than after it.
+    fn eval_args(
+        &self,
+        scope: &Scope,
+        row: &[Datum],
+        ctx: &EvalCtx,
+    ) -> Result<Vec<Datum>, ExecError> {
+        let arg = self
+            .arg
+            .as_ref()
+            .expect("non-star aggregate has an argument");
+        let mut args = vec![crate::eval::eval(arg, scope, row, ctx)?];
+        if let Some(value) = &self.value_arg {
+            args.push(crate::eval::eval(value, scope, row, ctx)?);
+        }
+        Ok(args)
     }
 }
 
@@ -273,11 +400,7 @@ fn collect_specs(e: &Expr, scope: &Scope, specs: &mut Vec<AggSpec>) -> Result<()
         // aggregate via the outer scalar/agg traversal; this arm handles such a
         // function wrapping an aggregate (`date_trunc('day', max(ts))`,
         // `to_char(max(ts), 'YYYY')`).
-        Expr::Func(fc)
-            if crate::func::is_scalar(&fc.name)
-                || crate::datetime_fn::is_datetime_func(&fc.name)
-                || crate::format_fn::is_format_func(&fc.name) =>
-        {
+        Expr::Func(fc) if is_wrapping_scalar_func(&fc.name) => {
             if let FuncArgs::Exprs(args) = &fc.args {
                 for a in args {
                     collect_specs(a, scope, specs)?;
@@ -327,9 +450,33 @@ fn collect_specs(e: &Expr, scope: &Scope, specs: &mut Vec<AggSpec>) -> Result<()
         }
         // SP31: gather aggregates from a cast's operand (`avg(x)::int8`).
         Expr::Cast { expr, .. } => collect_specs(expr, scope, specs)?,
+        // The array expression forms: gather from every child.
+        Expr::ArrayLiteral(items) => {
+            for item in items {
+                collect_specs(item, scope, specs)?;
+            }
+        }
+        Expr::Subscript { base, index } => {
+            collect_specs(base, scope, specs)?;
+            collect_specs(index, scope, specs)?;
+        }
+        Expr::QuantifiedArray { expr, array, .. } => {
+            collect_specs(expr, scope, specs)?;
+            collect_specs(array, scope, specs)?;
+        }
         _ => {}
     }
     Ok(())
+}
+
+/// The scalar function families that may WRAP an aggregate or a grouped column:
+/// the call itself is not an aggregate, but its arguments must be traversed.
+fn is_wrapping_scalar_func(name: &str) -> bool {
+    crate::func::is_scalar(name)
+        || crate::datetime_fn::is_datetime_func(name)
+        || crate::format_fn::is_format_func(name)
+        || crate::json_fn::is_json_func(name)
+        || crate::array_fn::is_array_func(name)
 }
 
 /// Collect (deduped, in first-appearance order) the aggregate calls of one
@@ -353,18 +500,12 @@ pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncC
             }
             true
         }
-        Expr::Func(fc)
-            if crate::func::is_scalar(&fc.name)
-                || crate::datetime_fn::is_datetime_func(&fc.name)
-                || crate::format_fn::is_format_func(&fc.name) =>
-        {
-            match &fc.args {
-                FuncArgs::Star => false,
-                FuncArgs::Exprs(args) => args
-                    .iter()
-                    .all(|arg| collect_streamable_aggregate_calls(arg, calls)),
-            }
-        }
+        Expr::Func(fc) if is_wrapping_scalar_func(&fc.name) => match &fc.args {
+            FuncArgs::Star => false,
+            FuncArgs::Exprs(args) => args
+                .iter()
+                .all(|arg| collect_streamable_aggregate_calls(arg, calls)),
+        },
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
@@ -411,6 +552,10 @@ pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncC
                     .as_deref()
                     .is_none_or(|e| collect_streamable_aggregate_calls(e, calls))
         }
+        // The array expression forms are deliberately NOT streamable: they need
+        // the scope-aware evaluator (element-type unification, subscripting),
+        // which the streamed fold does not have. The materializing scan handles
+        // them — and its errors — unchanged.
         Expr::Column { .. }
         | Expr::Param(_)
         | Expr::Default
@@ -418,7 +563,10 @@ pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncC
         | Expr::ScalarSubquery(_)
         | Expr::Exists(_)
         | Expr::InSubquery { .. }
-        | Expr::Quantified { .. } => false,
+        | Expr::Quantified { .. }
+        | Expr::QuantifiedArray { .. }
+        | Expr::ArrayLiteral(_)
+        | Expr::Subscript { .. } => false,
     }
 }
 
@@ -462,14 +610,10 @@ fn validate_grouped(e: &Expr, group_by: &[Expr]) -> Result<(), ExecError> {
             validate_grouped(left, group_by)?;
             validate_grouped(right, group_by)
         }
-        // SP29/SP37/SP38: every argument of a scalar, date/time, or formatting
-        // function must itself be grouped-valid (the call as a whole, if it matches a
-        // GROUP BY key, was already accepted above).
-        Expr::Func(fc)
-            if crate::func::is_scalar(&fc.name)
-                || crate::datetime_fn::is_datetime_func(&fc.name)
-                || crate::format_fn::is_format_func(&fc.name) =>
-        {
+        // SP29/SP37/SP38: every argument of a scalar, date/time, formatting, jsonb,
+        // or array function must itself be grouped-valid (the call as a whole, if it
+        // matches a GROUP BY key, was already accepted above).
+        Expr::Func(fc) if is_wrapping_scalar_func(&fc.name) => {
             if let FuncArgs::Exprs(args) = &fc.args {
                 for a in args {
                     validate_grouped(a, group_by)?;
@@ -518,6 +662,21 @@ fn validate_grouped(e: &Expr, group_by: &[Expr]) -> Result<(), ExecError> {
         // SP31: a cast is grouped-valid iff its operand is (and an entire cast
         // expression matching a GROUP BY key was already accepted above).
         Expr::Cast { expr, .. } => validate_grouped(expr, group_by),
+        // The array expression forms are grouped-valid iff every child is.
+        Expr::ArrayLiteral(items) => {
+            for item in items {
+                validate_grouped(item, group_by)?;
+            }
+            Ok(())
+        }
+        Expr::Subscript { base, index } => {
+            validate_grouped(base, group_by)?;
+            validate_grouped(index, group_by)
+        }
+        Expr::QuantifiedArray { expr, array, .. } => {
+            validate_grouped(expr, group_by)?;
+            validate_grouped(array, group_by)
+        }
         _ => Ok(()), // literals / params are constants
     }
 }
@@ -625,7 +784,7 @@ fn eval_grouped_depth(
         Expr::Binary { op, left, right } => {
             let l = eval_grouped_depth(left, grouped, d)?;
             let r = eval_grouped_depth(right, grouped, d)?;
-            crate::eval::apply_binary(*op, &l, &r, ctx)
+            crate::eval::apply_binary_of(*op, left, right, &l, &r, scope, ctx)
         }
         // SP28: predicate + conditional expressions in a grouped context — same
         // combinators as scalar `eval`, recursing through `eval_grouped_depth`.
@@ -684,12 +843,52 @@ fn eval_grouped_depth(
         Expr::Func(fc) if crate::format_fn::is_format_func(&fc.name) => {
             crate::format_fn::eval_format(fc, ctx, |e| eval_grouped_depth(e, grouped, d))
         }
+        // A jsonb or array function over grouped/aggregate arguments (e.g.
+        // `jsonb_build_object('n', count(*))`, `array_length(array_agg(x), 1)`).
+        Expr::Func(fc) if crate::json_fn::is_json_func(&fc.name) => {
+            crate::json_fn::eval_json(fc, ctx, |e| eval_grouped_depth(e, grouped, d))
+        }
+        Expr::Func(fc) if crate::array_fn::is_array_func(&fc.name) => {
+            crate::array_fn::eval_array(fc, ctx, |e| eval_grouped_depth(e, grouped, d))
+        }
         Expr::Func(fc) => Err(undefined_function(&fc.name)),
         // SP31: cast in a grouped context — convert the grouped-evaluated operand
         // using the session zone from `ctx`.
         Expr::Cast { expr, ty } => {
+            if let Some(empty) = crate::eval::empty_array_cast(expr, *ty) {
+                return Ok(empty);
+            }
             let v = eval_grouped_depth(expr, grouped, d)?;
             Ok(crabka_pgtypes::cast::cast(&v, *ty, &ctx.time_zone)?)
+        }
+        // The array expression forms in a grouped context — same semantics as
+        // scalar `eval`, recursing through the grouped evaluator.
+        Expr::ArrayLiteral(items) => {
+            let elem = crate::eval::array_literal_elem_type(items, scope)?;
+            let target = elem.column_type();
+            let mut elems = Vec::with_capacity(items.len());
+            for item in items {
+                let v = eval_grouped_depth(item, grouped, d)?;
+                elems.push(crabka_pgtypes::cast::cast(&v, target, &ctx.time_zone)?);
+            }
+            Ok(Datum::Array(ArrayValue::new(elem, elems)))
+        }
+        Expr::Subscript { base, index } => {
+            let b = eval_grouped_depth(base, grouped, d)?;
+            let i = eval_grouped_depth(index, grouped, d)?;
+            crate::array_fn::array_subscript(&b, &i)
+        }
+        Expr::QuantifiedArray {
+            expr,
+            op,
+            all,
+            array,
+        } => {
+            let x = eval_grouped_depth(expr, grouped, d)?;
+            let a = eval_grouped_depth(array, grouped, d)?;
+            crate::array_fn::eval_quantified(&a, crate::eval::quantifier_of(*all), |elem| {
+                crate::eval::apply_binary(*op, &x, elem, ctx)
+            })
         }
         // SP34: a resolved subquery constant in a grouped context.
         Expr::Const { value, .. } => Ok(value.clone()),
@@ -702,94 +901,80 @@ fn eval_grouped_depth(
     }
 }
 
-/// One group's running accumulator for one aggregate. The optional `seen` set is
-/// present iff the spec is `DISTINCT`. SP30 splits `Sum` into an integer (`SumI`,
+/// One group's running accumulator for one aggregate: the running [`AccState`]
+/// plus, for a `DISTINCT` aggregate, the argument tuples it has yet to fold.
+///
+/// PostgreSQL implements `DISTINCT` by sorting the WHOLE argument tuple and
+/// dropping adjacent duplicates, so a `DISTINCT` aggregate buffers its rows and
+/// folds them at [`Acc::finish`] instead of on arrival. Two things follow that a
+/// fold-on-arrival "first value seen" set gets wrong:
+/// `jsonb_object_agg(DISTINCT k, v)` over `('k',1),('k',2)` keeps BOTH pairs (so
+/// the object's last value is `2`, not `1`), and `array_agg(DISTINCT x)` /
+/// `jsonb_agg(DISTINCT x)` emit sorted — not first-appearance — order.
+struct Acc {
+    state: AccState,
+    /// `Some` iff the spec is `DISTINCT`: each row's evaluated argument tuple.
+    distinct: Option<Vec<Vec<Datum>>>,
+}
+
+/// The running value of one aggregate. SP30 splits `Sum` into an integer (`SumI`,
 /// accumulated in a checked i64 so `sum(int4)` never overflows prematurely) and a
 /// float (`SumF`, accumulated in f64) variant, and adds `Avg` (float8 result).
-enum Acc {
+enum AccState {
     Count {
         n: i64,
-        seen: Option<HashSet<Datum>>,
     },
     SumI {
         acc: Option<i64>,
-        seen: Option<HashSet<Datum>>,
     },
     SumF {
         acc: f64,
         any: bool,
-        seen: Option<HashSet<Datum>>,
     },
     /// SP32: numeric sum (exact, no overflow) — accumulated as a numeric `Datum`.
     SumN {
         acc: Option<Datum>,
-        seen: Option<HashSet<Datum>>,
     },
     MinMax {
         best: Option<Datum>,
-        seen: Option<HashSet<Datum>>,
     },
     Avg {
         sum: f64,
         n: i64,
-        seen: Option<HashSet<Datum>>,
     },
     /// SP32: numeric mean — a numeric running sum and a count, divided at finish
     /// with PostgreSQL's `select_div_scale` (so `avg(int)`/`avg(numeric)` are exact).
     AvgN {
         sum: Option<Datum>,
         n: i64,
-        seen: Option<HashSet<Datum>>,
+    },
+    /// `array_agg` — the values in fold order, NULLs included. Empty means zero
+    /// rows were folded, which is SQL NULL (not an empty array).
+    ArrayAgg {
+        elem: ElemType,
+        elems: Vec<Datum>,
+    },
+    /// `jsonb_agg` — the values in fold order, converted to JSON at `finish`.
+    JsonbAgg {
+        items: Vec<Datum>,
+    },
+    /// `jsonb_object_agg` — the (key, value) pairs in fold order, built into one
+    /// object at `finish` (duplicate keys last-wins, a NULL key is 22023).
+    JsonbObjectAgg {
+        pairs: Vec<(Datum, Datum)>,
     },
 }
 
 impl Acc {
     fn new(spec: &AggSpec) -> Acc {
-        let seen = spec.distinct.then(HashSet::new);
-        match spec.func {
-            AggFunc::Count => Acc::Count { n: 0, seen },
-            AggFunc::Sum => match spec.arg_type {
-                Some(ColumnType::Float8) => Acc::SumF {
-                    acc: 0.0,
-                    any: false,
-                    seen,
-                },
-                Some(t) if t.is_numeric() => Acc::SumN { acc: None, seen },
-                _ => Acc::SumI { acc: None, seen },
-            },
-            // float8 avg stays in f64; int/numeric avg accumulates exactly.
-            AggFunc::Avg => {
-                if spec.arg_type == Some(ColumnType::Float8) {
-                    Acc::Avg {
-                        sum: 0.0,
-                        n: 0,
-                        seen,
-                    }
-                } else {
-                    Acc::AvgN {
-                        sum: None,
-                        n: 0,
-                        seen,
-                    }
-                }
-            }
-            AggFunc::Min | AggFunc::Max => Acc::MinMax { best: None, seen },
+        Acc {
+            state: AccState::new(spec),
+            distinct: spec.distinct.then(Vec::new),
         }
     }
 
-    fn seen_mut(&mut self) -> Option<&mut HashSet<Datum>> {
-        match self {
-            Acc::Count { seen, .. }
-            | Acc::SumI { seen, .. }
-            | Acc::SumF { seen, .. }
-            | Acc::SumN { seen, .. }
-            | Acc::MinMax { seen, .. }
-            | Acc::Avg { seen, .. }
-            | Acc::AvgN { seen, .. } => seen.as_mut(),
-        }
-    }
-
-    /// Fold one source row into this accumulator.
+    /// Fold one source row into this accumulator — or, under `DISTINCT`, buffer
+    /// its argument tuple for the sorted fold [`Acc::finish`] performs.
     fn fold_row(
         &mut self,
         spec: &AggSpec,
@@ -799,30 +984,136 @@ impl Acc {
     ) -> Result<(), ExecError> {
         // count(*) counts every row, ignoring NULL/DISTINCT.
         if let (AggFunc::Count, None) = (spec.func, &spec.arg) {
-            if let Acc::Count { n, .. } = self {
+            if let AccState::Count { n } = &mut self.state {
                 *n += 1;
             }
             return Ok(());
         }
-        let arg = spec
-            .arg
-            .as_ref()
-            .expect("non-star aggregate has an argument");
-        let v = crate::eval::eval(arg, scope, row, ctx)?;
-        // count(x)/sum/min/max ignore NULL arguments.
-        if v.is_null() {
+        let args = spec.eval_args(scope, row, ctx)?;
+        // count(x)/sum/avg/min/max ignore NULL arguments; the collecting
+        // aggregates keep them (NULL array element / JSON `null` value).
+        if args[0].is_null() && !spec.func.keeps_nulls() {
             return Ok(());
         }
-        // DISTINCT: fold only the first occurrence of each value.
-        if spec.distinct
-            && let Some(seen) = self.seen_mut()
-            && !seen.insert(v.clone())
+        match &mut self.distinct {
+            Some(tuples) => {
+                tuples.push(args);
+                Ok(())
+            }
+            None => self.state.fold_args(spec, &args, ctx),
+        }
+    }
+
+    /// This aggregate's value for the group: any buffered `DISTINCT` tuples are
+    /// sorted, deduplicated, and folded first.
+    fn finish(&mut self, spec: &AggSpec, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+        if let Some(tuples) = self.distinct.take() {
+            for args in sorted_distinct(tuples)? {
+                self.state.fold_args(spec, &args, ctx)?;
+            }
+        }
+        self.state.finish(ctx)
+    }
+}
+
+/// PostgreSQL's `DISTINCT` input for an aggregate: the argument tuples sorted
+/// ascending with adjacent duplicates dropped. Sorting is what makes
+/// `array_agg(DISTINCT x)` emit ascending order, and comparing (rather than
+/// hashing) is what makes `1.0` and `1.00` one `numeric` value.
+fn sorted_distinct(mut tuples: Vec<Vec<Datum>>) -> Result<Vec<Vec<Datum>>, ExecError> {
+    // `sort_by` needs a total order, so an incomparable pair is recorded and
+    // reported once the sort is over rather than panicking inside it.
+    let mut failure: Option<ExecError> = None;
+    tuples.sort_by(|a, b| match compare_tuples(a, b) {
+        Ok(ord) => ord,
+        Err(e) => {
+            failure.get_or_insert(e);
+            Ordering::Equal
+        }
+    });
+    if let Some(e) = failure {
+        return Err(e);
+    }
+    let mut out: Vec<Vec<Datum>> = Vec::with_capacity(tuples.len());
+    for tuple in tuples {
+        if let Some(prev) = out.last()
+            && compare_tuples(prev, &tuple)? == Ordering::Equal
         {
-            return Ok(());
+            continue;
         }
+        out.push(tuple);
+    }
+    Ok(out)
+}
+
+/// The order `DISTINCT` sorts and deduplicates in: argument by argument,
+/// ascending, NULLs last. Two NULLs are EQUAL here — SQL `DISTINCT` folds NULLs
+/// together even though `NULL = NULL` is unknown.
+fn compare_tuples(a: &[Datum], b: &[Datum]) -> Result<Ordering, ExecError> {
+    for (x, y) in a.iter().zip(b) {
+        let ord = match (x.is_null(), y.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => ops::compare(x, y)?.expect("non-NULL operands compare"),
+        };
+        if ord != Ordering::Equal {
+            return Ok(ord);
+        }
+    }
+    Ok(Ordering::Equal)
+}
+
+impl AccState {
+    fn new(spec: &AggSpec) -> AccState {
+        match spec.func {
+            AggFunc::Count => AccState::Count { n: 0 },
+            AggFunc::Sum => match spec.arg_type {
+                Some(ColumnType::Float8) => AccState::SumF {
+                    acc: 0.0,
+                    any: false,
+                },
+                Some(t) if t.is_numeric() => AccState::SumN { acc: None },
+                _ => AccState::SumI { acc: None },
+            },
+            // float8 avg stays in f64; int/numeric avg accumulates exactly.
+            AggFunc::Avg => {
+                if spec.arg_type == Some(ColumnType::Float8) {
+                    AccState::Avg { sum: 0.0, n: 0 }
+                } else {
+                    AccState::AvgN { sum: None, n: 0 }
+                }
+            }
+            AggFunc::Min | AggFunc::Max => AccState::MinMax { best: None },
+            // The argument type was validated by `spec_of`, so it has an array
+            // element type; `text` is a harmless stand-in for the impossible case.
+            AggFunc::ArrayAgg => AccState::ArrayAgg {
+                elem: spec
+                    .arg_type
+                    .and_then(ElemType::from_column_type)
+                    .unwrap_or(ElemType::Text),
+                elems: Vec::new(),
+            },
+            AggFunc::JsonbAgg => AccState::JsonbAgg { items: Vec::new() },
+            AggFunc::JsonbObjectAgg => AccState::JsonbObjectAgg { pairs: Vec::new() },
+        }
+    }
+
+    /// Fold one already-evaluated argument tuple (`[value]`, or `[key, value]`
+    /// for `jsonb_object_agg`) into the running value.
+    fn fold_args(
+        &mut self,
+        spec: &AggSpec,
+        args: &[Datum],
+        ctx: &EvalCtx,
+    ) -> Result<(), ExecError> {
+        let v = args
+            .first()
+            .cloned()
+            .expect("an aggregate argument tuple is never empty");
         match self {
-            Acc::Count { n, .. } => *n += 1,
-            Acc::SumI { acc, .. } => {
+            AccState::Count { n } => *n += 1,
+            AccState::SumI { acc } => {
                 let add = as_i64(&v).ok_or_else(|| {
                     undefined_for_arg("sum", v.column_type().unwrap_or(ColumnType::Text))
                 })?;
@@ -834,7 +1125,7 @@ impl Acc {
                 };
                 *acc = Some(next);
             }
-            Acc::SumF { acc, any, .. } => {
+            AccState::SumF { acc, any } => {
                 *acc += as_f64(&v).ok_or_else(|| {
                     undefined_for_arg("sum", v.column_type().unwrap_or(ColumnType::Text))
                 })?;
@@ -842,13 +1133,13 @@ impl Acc {
             }
             // SP32: numeric sum/avg accumulate exactly via the numeric ops (sum's
             // scale is the max input scale; avg defers the division to `finish`).
-            Acc::SumN { acc, .. } => {
+            AccState::SumN { acc } => {
                 *acc = Some(match acc.take() {
                     None => v,
                     Some(cur) => ops::add(&cur, &v)?,
                 });
             }
-            Acc::AvgN { sum, n, .. } => {
+            AccState::AvgN { sum, n } => {
                 let vn = crabka_pgtypes::cast::cast(&v, ColumnType::Numeric(None), &ctx.time_zone)?;
                 *sum = Some(match sum.take() {
                     None => vn,
@@ -856,21 +1147,21 @@ impl Acc {
                 });
                 *n += 1;
             }
-            Acc::Avg { sum, n, .. } => {
+            AccState::Avg { sum, n } => {
                 *sum += as_f64(&v).ok_or_else(|| {
                     undefined_for_arg("avg", v.column_type().unwrap_or(ColumnType::Text))
                 })?;
                 *n += 1;
             }
-            Acc::MinMax { best, .. } => {
+            AccState::MinMax { best } => {
                 let take = match best {
                     None => true,
                     Some(cur) => {
                         let ord = ops::compare(&v, cur)?; // both non-null
                         matches!(
                             (spec.func, ord),
-                            (AggFunc::Min, Some(std::cmp::Ordering::Less))
-                                | (AggFunc::Max, Some(std::cmp::Ordering::Greater))
+                            (AggFunc::Min, Some(Ordering::Less))
+                                | (AggFunc::Max, Some(Ordering::Greater))
                         )
                     }
                 };
@@ -878,16 +1169,34 @@ impl Acc {
                     *best = Some(v);
                 }
             }
+            // The elements are coerced to the accumulator's element type so the
+            // array stays homogeneous (`array_agg(int4_col)` over an int8-typed
+            // expression cannot arise, but a `numeric` scale can vary).
+            AccState::ArrayAgg { elem, elems } => {
+                elems.push(crabka_pgtypes::cast::cast(
+                    &v,
+                    elem.column_type(),
+                    &ctx.time_zone,
+                )?);
+            }
+            AccState::JsonbAgg { items } => items.push(v),
+            AccState::JsonbObjectAgg { pairs } => {
+                let value = args
+                    .get(1)
+                    .cloned()
+                    .expect("jsonb_object_agg has a value argument");
+                pairs.push((v, value));
+            }
         }
         Ok(())
     }
 
-    fn finish(&self) -> Result<Datum, ExecError> {
+    fn finish(&self, ctx: &EvalCtx) -> Result<Datum, ExecError> {
         Ok(match self {
-            Acc::Count { n, .. } => Datum::Int8(*n),
-            Acc::SumI { acc, .. } => acc.map(Datum::Int8).unwrap_or(Datum::Null),
+            AccState::Count { n } => Datum::Int8(*n),
+            AccState::SumI { acc } => acc.map(Datum::Int8).unwrap_or(Datum::Null),
             // An empty / all-null float sum is NULL (matches the integer sum).
-            Acc::SumF { acc, any, .. } => {
+            AccState::SumF { acc, any } => {
                 if *any {
                     Datum::Float8(*acc)
                 } else {
@@ -895,10 +1204,10 @@ impl Acc {
                 }
             }
             // SP32: an empty/all-null numeric sum is NULL; else the exact numeric.
-            Acc::SumN { acc, .. } => acc.clone().unwrap_or(Datum::Null),
-            Acc::MinMax { best, .. } => best.clone().unwrap_or(Datum::Null),
+            AccState::SumN { acc } => acc.clone().unwrap_or(Datum::Null),
+            AccState::MinMax { best } => best.clone().unwrap_or(Datum::Null),
             // avg over zero non-null rows is NULL; otherwise the float8 mean.
-            Acc::Avg { sum, n, .. } => {
+            AccState::Avg { sum, n } => {
                 if *n == 0 {
                     Datum::Null
                 } else {
@@ -906,12 +1215,66 @@ impl Acc {
                 }
             }
             // SP32: numeric mean = sum / count, with PostgreSQL's division scale.
-            Acc::AvgN { sum, n, .. } => match sum {
+            AccState::AvgN { sum, n } => match sum {
                 Some(s) if *n > 0 => ops::div(s, &Datum::Int8(*n))?,
                 _ => Datum::Null,
             },
+            // PostgreSQL's array_agg over zero rows is NULL, NOT an empty array.
+            AccState::ArrayAgg { elem, elems } => {
+                if elems.is_empty() {
+                    Datum::Null
+                } else {
+                    Datum::Array(ArrayValue::new(*elem, elems.clone()))
+                }
+            }
+            AccState::JsonbAgg { items } => {
+                if items.is_empty() {
+                    Datum::Null
+                } else {
+                    build_jsonb("jsonb_build_array", items.clone(), ctx)?
+                }
+            }
+            AccState::JsonbObjectAgg { pairs } => {
+                if pairs.is_empty() {
+                    Datum::Null
+                } else {
+                    let mut flat = Vec::with_capacity(pairs.len() * 2);
+                    for (key, value) in pairs {
+                        flat.push(key.clone());
+                        flat.push(value.clone());
+                    }
+                    build_jsonb("jsonb_build_object", flat, ctx)?
+                }
+            }
         })
     }
+}
+
+/// Build a `jsonb` aggregate's result through the corresponding `json_fn`
+/// builder: `jsonb_agg` is exactly the row-wise fold of `jsonb_build_array`, and
+/// `jsonb_object_agg` of `jsonb_build_object`. Routing through the builders keeps
+/// ONE set of SQL-value → JSON rules (numeric scale, ISO date spelling, JSON
+/// `null` for a SQL NULL value, 22023 for a NULL key, last-wins duplicate keys)
+/// instead of a second copy that could drift.
+fn build_jsonb(builder: &str, args: Vec<Datum>, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    let call = FuncCall {
+        name: builder.to_string(),
+        distinct: false,
+        args: FuncArgs::Exprs(
+            args.into_iter()
+                .map(|value| {
+                    let ty = value.column_type().unwrap_or(ColumnType::Text);
+                    Expr::Const { value, ty }
+                })
+                .collect(),
+        ),
+    };
+    crate::json_fn::eval_json(&call, ctx, |e| match e {
+        Expr::Const { value, .. } => Ok(value.clone()),
+        _ => Err(ExecError::Unsupported(
+            "internal: a jsonb aggregate builds only from constants".into(),
+        )),
+    })
 }
 
 fn as_i64(d: &Datum) -> Option<i64> {
@@ -1034,10 +1397,11 @@ pub(crate) fn aggregate_rows(
 
     // Finalize each group: HAVING filter, ORDER BY keys, projected output Datums.
     let mut out: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::with_capacity(keys.len());
-    for (key, group_accs) in keys.iter().zip(accs.iter()) {
+    for (key, group_accs) in keys.iter().zip(accs.iter_mut()) {
         let results: Vec<Datum> = group_accs
-            .iter()
-            .map(Acc::finish)
+            .iter_mut()
+            .zip(&specs)
+            .map(|(acc, spec)| acc.finish(spec, ctx))
             .collect::<Result<_, ExecError>>()?;
         if let Some(h) = &s.having {
             match eval_grouped(h, scope, &s.group_by, key, &specs, &results, ctx)? {
@@ -1810,5 +2174,276 @@ mod tests {
                 .expect("aggregate over format func"),
             vec![vec![Some("2025".into())]]
         );
+    }
+
+    // ---- the collecting aggregates: array_agg / jsonb_agg / jsonb_object_agg ----
+
+    /// A relation whose rows feed the collecting aggregates.
+    fn collect_table() -> Table {
+        Table {
+            id: 3,
+            name: "t".into(),
+            columns: vec![
+                Column::new("k", ColumnType::Int4),
+                Column::new("v", ColumnType::Int4),
+                Column::new("s", ColumnType::Text),
+            ],
+            sharded: false,
+            sharding: None,
+            foreign: None,
+        }
+    }
+
+    fn collect_rows() -> Vec<Vec<Datum>> {
+        vec![
+            r(&[Datum::Int4(1), Datum::Int4(30), Datum::Text("c".into())]),
+            r(&[Datum::Int4(1), Datum::Int4(10), Datum::Text("a".into())]),
+            r(&[Datum::Int4(2), Datum::Null, Datum::Text("b".into())]),
+        ]
+    }
+
+    /// The result types are what RowDescription reports, and follow the argument.
+    #[test]
+    fn collecting_aggregates_infer_their_result_types() {
+        let t = collect_table();
+        let scope = scope_of(Some(&t));
+        let infer = |sql: &str| {
+            let s = parsed_select(sql);
+            let SelectItem::Expr { expr, .. } = &s.projection[0] else {
+                panic!("expected an expression projection")
+            };
+            crate::eval::infer_type(expr, &scope)
+        };
+        assert2::assert!(
+            infer("SELECT array_agg(v) FROM t").expect("infer")
+                == ColumnType::Array(ElemType::Int4)
+        );
+        assert2::assert!(
+            infer("SELECT array_agg(s) FROM t").expect("infer")
+                == ColumnType::Array(ElemType::Text)
+        );
+        assert2::assert!(infer("SELECT jsonb_agg(v) FROM t").expect("infer") == ColumnType::Jsonb);
+        assert2::assert!(
+            infer("SELECT jsonb_object_agg(s, v) FROM t").expect("infer") == ColumnType::Jsonb
+        );
+        // A scalar key of any type is accepted (PostgreSQL's `"any"` parameter),
+        // so an integer key plans exactly as a text one does.
+        assert2::assert!(
+            infer("SELECT jsonb_object_agg(v, s) FROM t").expect("infer") == ColumnType::Jsonb
+        );
+        // The wrong arity is still 42883 at plan time.
+        assert2::assert!(
+            infer("SELECT jsonb_object_agg(s) FROM t")
+                .expect_err("wrong arity")
+                .into_pg()
+                .code
+                == "42883"
+        );
+        assert2::assert!(
+            infer("SELECT array_agg(v, s) FROM t")
+                .expect_err("wrong arity")
+                .into_pg()
+                .code
+                == "42883"
+        );
+    }
+
+    /// The three aggregates accumulate in INPUT order and keep NULL inputs (a
+    /// NULL array element, and the JSON `null` literal) — unlike sum/min/max.
+    #[test]
+    fn collecting_aggregates_accumulate_in_input_order_keeping_nulls() {
+        let t = collect_table();
+        let cases: &[(&str, &str)] = &[
+            ("SELECT array_agg(v) FROM t", "{30,10,NULL}"),
+            ("SELECT array_agg(s) FROM t", "{c,a,b}"),
+            ("SELECT jsonb_agg(v) FROM t", "[30, 10, null]"),
+            (
+                "SELECT jsonb_object_agg(s, v) FROM t",
+                r#"{"a": 10, "b": null, "c": 30}"#,
+            ),
+        ];
+        for (sql, want) in cases {
+            assert2::assert!(
+                agg_text(sql, Some(&t), collect_rows()).expect("aggregate")
+                    == vec![vec![Some((*want).to_string())]],
+                "for {sql}"
+            );
+        }
+    }
+
+    /// Over ZERO rows every collecting aggregate is SQL NULL — `array_agg` in
+    /// particular is NULL, not an empty array (PostgreSQL's behavior).
+    #[test]
+    fn collecting_aggregates_over_zero_rows_are_null() {
+        let t = collect_table();
+        for sql in [
+            "SELECT array_agg(v) FROM t",
+            "SELECT jsonb_agg(v) FROM t",
+            "SELECT jsonb_object_agg(s, v) FROM t",
+        ] {
+            assert2::assert!(
+                agg_text(sql, Some(&t), Vec::new()).expect("aggregate") == vec![vec![None]],
+                "for {sql}"
+            );
+        }
+        // count(*) still reports 0 for the same zero-row group, so the NULL is
+        // the aggregate's own empty value, not a missing group.
+        assert2::assert!(
+            agg_text("SELECT count(*), array_agg(v) FROM t", Some(&t), Vec::new())
+                .expect("aggregate")
+                == vec![vec![Some("0".into()), None]]
+        );
+    }
+
+    /// The collecting aggregates group like every other aggregate, and compose
+    /// with the array/jsonb function families around them.
+    #[test]
+    fn collecting_aggregates_group_and_compose() {
+        let t = collect_table();
+        assert2::assert!(
+            agg_text(
+                "SELECT k, array_agg(s) FROM t GROUP BY k ORDER BY k",
+                Some(&t),
+                collect_rows()
+            )
+            .expect("grouped")
+                == vec![
+                    vec![Some("1".into()), Some("{c,a}".into())],
+                    vec![Some("2".into()), Some("{b}".into())],
+                ]
+        );
+        // An array function OVER the aggregate, and a subscript of it.
+        assert2::assert!(
+            agg_text(
+                "SELECT cardinality(array_agg(s)) FROM t",
+                Some(&t),
+                collect_rows()
+            )
+            .expect("wrapped")
+                == vec![vec![Some("3".into())]]
+        );
+        assert2::assert!(
+            agg_text("SELECT array_agg(s)[2] FROM t", Some(&t), collect_rows())
+                .expect("subscripted")
+                == vec![vec![Some("a".into())]]
+        );
+        // A jsonb function over an aggregate value.
+        assert2::assert!(
+            agg_text(
+                "SELECT jsonb_build_object('n', count(*)) FROM t",
+                Some(&t),
+                collect_rows()
+            )
+            .expect("jsonb over aggregate")
+                == vec![vec![Some(r#"{"n": 3}"#.to_string())]]
+        );
+    }
+
+    /// A NULL `jsonb_object_agg` KEY is an error (22023), not a dropped pair.
+    #[test]
+    fn jsonb_object_agg_rejects_a_null_key() {
+        let t = collect_table();
+        let rows = vec![r(&[Datum::Int4(1), Datum::Int4(10), Datum::Null])];
+        let err =
+            agg_text("SELECT jsonb_object_agg(s, v) FROM t", Some(&t), rows).expect_err("null key");
+        assert2::assert!(err.into_pg().code == "22023");
+    }
+
+    /// `DISTINCT` sorts the WHOLE argument tuple and drops adjacent duplicates,
+    /// as PostgreSQL does: the collecting aggregates emit ascending — not
+    /// first-appearance — order, and `jsonb_object_agg(DISTINCT k, v)` keeps
+    /// every distinct PAIR, so a repeated key still takes its last value. Each
+    /// expected row is PostgreSQL 18.4's output over the same rows.
+    #[test]
+    fn distinct_sorts_and_dedups_the_whole_argument_tuple() {
+        let t = collect_table();
+        // Ascending in neither aggregated column, with `a` carrying two values
+        // and one row duplicated outright.
+        let rows = || {
+            vec![
+                r(&[Datum::Int4(1), Datum::Int4(30), Datum::Text("c".into())]),
+                r(&[Datum::Int4(1), Datum::Int4(10), Datum::Text("a".into())]),
+                r(&[Datum::Int4(1), Datum::Int4(20), Datum::Text("a".into())]),
+                r(&[Datum::Int4(1), Datum::Int4(30), Datum::Text("c".into())]),
+            ]
+        };
+        for (sql, expected) in [
+            ("SELECT array_agg(DISTINCT v) FROM t", "{10,20,30}"),
+            ("SELECT array_agg(DISTINCT s) FROM t", "{a,c}"),
+            ("SELECT jsonb_agg(DISTINCT s) FROM t", r#"["a", "c"]"#),
+            (
+                "SELECT jsonb_object_agg(DISTINCT s, v) FROM t",
+                r#"{"a": 20, "c": 30}"#,
+            ),
+            (
+                "SELECT jsonb_object_agg(s, v) FROM t",
+                r#"{"a": 20, "c": 30}"#,
+            ),
+        ] {
+            assert2::assert!(
+                agg_text(sql, Some(&t), rows()).expect(sql)
+                    == vec![vec![Some(expected.to_string())]],
+                "{sql}"
+            );
+        }
+        // The order-insensitive aggregates still see each distinct value once.
+        assert2::assert!(
+            agg_text(
+                "SELECT count(DISTINCT v), sum(DISTINCT v) FROM t",
+                Some(&t),
+                rows()
+            )
+            .expect("count/sum")
+                == vec![vec![Some("3".to_string()), Some("60".to_string())]]
+        );
+    }
+
+    /// `jsonb_object_agg`'s key is PostgreSQL's `"any"` parameter: every scalar
+    /// type is accepted and rendered through its output function. Only a
+    /// container key is refused, and — like a NULL key — it is refused at RUN
+    /// time as 22023, so a zero-row aggregate over one is NULL, not an error.
+    /// Each expected object is PostgreSQL 18.4's output over the same rows.
+    #[test]
+    fn jsonb_object_agg_accepts_any_scalar_key() {
+        let t = collect_table();
+        let rows = || {
+            vec![
+                r(&[Datum::Int4(1), Datum::Int4(30), Datum::Text("c".into())]),
+                r(&[Datum::Int4(1), Datum::Int4(10), Datum::Text("a".into())]),
+                r(&[Datum::Int4(1), Datum::Int4(20), Datum::Text("a".into())]),
+                r(&[Datum::Int4(1), Datum::Int4(30), Datum::Text("c".into())]),
+            ]
+        };
+        let ints = r#"{"10": "a", "20": "a", "30": "c"}"#;
+        for (sql, expected) in [
+            ("SELECT jsonb_object_agg(v, s) FROM t", ints),
+            ("SELECT jsonb_object_agg(v::int8, s) FROM t", ints),
+            ("SELECT jsonb_object_agg(v::float8, s) FROM t", ints),
+            ("SELECT jsonb_object_agg(v::text, s) FROM t", ints),
+        ] {
+            assert2::assert!(
+                agg_text(sql, Some(&t), rows()).expect(sql)
+                    == vec![vec![Some(expected.to_string())]],
+                "{sql}"
+            );
+        }
+        // A container key is 22023 — and only once a row reaches it.
+        for sql in [
+            "SELECT jsonb_object_agg(to_jsonb(v), s) FROM t",
+            "SELECT jsonb_object_agg(ARRAY[v], s) FROM t",
+        ] {
+            assert2::assert!(
+                agg_text(sql, Some(&t), rows())
+                    .expect_err(sql)
+                    .into_pg()
+                    .code
+                    == "22023",
+                "{sql}"
+            );
+            assert2::assert!(
+                agg_text(sql, Some(&t), Vec::new()).expect(sql) == vec![vec![None]],
+                "{sql}"
+            );
+        }
     }
 }

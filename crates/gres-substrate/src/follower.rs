@@ -271,6 +271,58 @@ impl ReadOnlyRange0Follower {
     }
 }
 
+/// Has the retained WAL start passed the frames a follower still needs?
+///
+/// A follower that has applied through `applied_offset` fetches from
+/// `applied_offset + 1`. Checkpoint-driven `DeleteRecords` moves the log start
+/// forward; once it passes that offset the frame is gone for good and every
+/// later fetch fails with `OFFSET_OUT_OF_RANGE`, so retrying the same fetch
+/// can never make progress. A log start at or below it means the fetch is
+/// still servable and the failure was transient — a broker blip, a timeout —
+/// which must keep retrying rather than trigger a rebuild.
+///
+/// `log_start` is `None` when the broker did not report one; that is not
+/// evidence of a trim, so it reads as retryable.
+#[must_use]
+pub fn wal_trimmed_past_applied(applied_offset: i64, log_start: Option<i64>) -> bool {
+    log_start.is_some_and(|start| start > applied_offset.saturating_add(1))
+}
+
+/// Rebuild `tail` from the newest checkpoint after its WAL tail was trimmed.
+///
+/// `fresh_store` must be empty and must not be the store `tail` is currently
+/// serving: [`crabka_pgkv::RestoreKv::restore_sorted`] refuses a non-empty
+/// target, and restoring into the live store would expose half-rebuilt state
+/// to readers the barrier has already released. The restore happens entirely
+/// in `fresh_store`, and only a complete, caught-up store is handed to
+/// [`Range0Tail::reset_to_checkpoint`].
+///
+/// Returns the offset the rebuilt tail has applied through.
+///
+/// # Errors
+///
+/// Returns an error when no checkpoint covers the retained WAL, when the
+/// restore or the post-checkpoint replay fails, or when the rebuilt offset
+/// does not advance the tail.
+pub async fn rebuild_range0_tail_from_checkpoint(
+    config: &LiveRecoveryConfig,
+    tail: &Range0Tail,
+    fresh_store: Arc<dyn RestoreKv>,
+    reader: &dyn CommittedWalReader,
+    checkpoints: Option<&dyn CheckpointStore>,
+) -> Result<i64, SubstrateError> {
+    let rebuilt =
+        ReadOnlyRange0Follower::bootstrap(config, Arc::clone(&fresh_store), reader, checkpoints)
+            .await?;
+    let covered_offset = rebuilt.tail().applied_offset();
+    let store: Arc<dyn Kv> = fresh_store;
+    tail.reset_to_checkpoint(store, covered_offset)
+        .map_err(|error| {
+            SubstrateError::Unavailable(format!("range-0 follower checkpoint reset: {error}"))
+        })?;
+    Ok(covered_offset)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -379,6 +431,220 @@ mod tests {
         assert!(kv.get(b"catalog/aborted").expect("aborted").is_none());
         assert!(follower.tail().applied_offset() == 1);
         assert!(log.current_generation().await == WriterGeneration(0));
+    }
+
+    // ── surviving a WAL trim ─────────────────────────────────────────────────
+
+    #[test]
+    fn only_a_log_start_past_the_next_needed_frame_counts_as_a_trim() {
+        // (applied offset, retained log start, is the follower wedged?)
+        let cases = [
+            // The frame the follower needs next is still retained.
+            (5_i64, Some(0_i64), false),
+            (5, Some(5), false),
+            (5, Some(6), false),
+            // It has been trimmed away: no fetch can ever return it.
+            (5, Some(7), true),
+            (5, Some(4_000), true),
+            // A fresh follower that has applied nothing.
+            (-1, Some(0), false),
+            (-1, Some(1), true),
+            // A broker that reported no log start is not evidence of a trim.
+            (5, None, false),
+        ];
+
+        for (applied, log_start, expected) in cases {
+            assert!(
+                wal_trimmed_past_applied(applied, log_start) == expected,
+                "applied {applied}, log start {log_start:?}"
+            );
+        }
+    }
+
+    /// The wedge this guards against: checkpoint-driven `DeleteRecords` moves
+    /// the log start past the offset a live follower still needs, so every
+    /// later fetch from that offset fails forever. The follower must rebuild
+    /// from the newest checkpoint and resume, not stall.
+    #[tokio::test]
+    async fn a_follower_trimmed_past_its_applied_offset_rebuilds_and_resumes() {
+        let log = InMemoryWalLog::shared();
+        let config = LiveRecoveryConfig::new(
+            "unused",
+            TenantName::parse("replica").expect("tenant"),
+            RangeId::COORDINATOR,
+            None,
+        );
+        for (index, key) in ["catalog/a", "catalog/b"].into_iter().enumerate() {
+            log.commit_group(crate::GroupCommitRequest {
+                generation: WriterGeneration(0),
+                frames: vec![WalFrame {
+                    journal_seq: index as u64,
+                    ops: vec![WriteOp::Put {
+                        key: key.as_bytes().to_vec(),
+                        value: b"early".to_vec(),
+                    }],
+                }],
+            })
+            .await
+            .expect("commit early frame");
+        }
+
+        let live_store: Arc<dyn RestoreKv> = Arc::new(MemKv::default());
+        let follower =
+            ReadOnlyRange0Follower::bootstrap(&config, Arc::clone(&live_store), log.as_ref(), None)
+                .await
+                .expect("bootstrap follower");
+        let tail = follower.tail();
+        // The read-only replica captures this handle once, at construction,
+        // and never asks for it again.
+        let catalog_kv = tail.store_handle();
+        assert!(tail.applied_offset() == 1);
+
+        // A frame commits, then a checkpoint covering it prunes the WAL behind
+        // itself while the follower is still one poll behind.
+        log.commit_group(crate::GroupCommitRequest {
+            generation: WriterGeneration(0),
+            frames: vec![WalFrame {
+                journal_seq: 2,
+                ops: vec![WriteOp::Put {
+                    key: b"catalog/c".to_vec(),
+                    value: b"checkpointed".to_vec(),
+                }],
+            }],
+        })
+        .await
+        .expect("commit checkpointed frame");
+        let checkpoints = InMemoryCheckpointStore::shared();
+        let checkpoint_state = MemKv::default();
+        for key in ["catalog/a", "catalog/b"] {
+            checkpoint_state
+                .put(key.as_bytes().to_vec(), b"early".to_vec())
+                .expect("seed checkpoint state");
+        }
+        checkpoint_state
+            .put(b"catalog/c".to_vec(), b"checkpointed".to_vec())
+            .expect("seed checkpoint state");
+        write_checkpoint(
+            checkpoints.as_ref(),
+            &config.checkpoint_namespace(),
+            &checkpoint_state,
+            CheckpointSnapshot {
+                covered_offset: 2,
+                journal_seq: 3,
+                producer_epoch: 0,
+                wal_generation: 0,
+                garbage_horizon_xid: 0,
+            },
+            DEFAULT_PART_MAX_BYTES,
+        )
+        .await
+        .expect("write checkpoint");
+        crate::checkpoint::CheckpointWalPruner::delete_records(
+            log.as_ref(),
+            &[crabka_client_admin::DeleteRecordsOp {
+                topic: config.wal_topic(),
+                partition: 0,
+                offset: 3,
+            }],
+        )
+        .await
+        .expect("prune the WAL");
+
+        // The follower is now wedged: the frame at offset 2 is gone.
+        let log_start = log.log_start_offset().await.expect("log start");
+        assert!(wal_trimmed_past_applied(tail.applied_offset(), log_start));
+
+        let fresh_store: Arc<dyn RestoreKv> = Arc::new(MemKv::default());
+        let covered_offset = rebuild_range0_tail_from_checkpoint(
+            &config,
+            &tail,
+            Arc::clone(&fresh_store),
+            log.as_ref(),
+            Some(checkpoints.as_ref()),
+        )
+        .await
+        .expect("rebuild from checkpoint");
+
+        assert!(covered_offset == 2);
+        assert!(tail.applied_offset() == 2);
+        // The once-captured handle now reads the rebuilt store, including the
+        // frame that was trimmed away before this node could apply it.
+        assert!(catalog_kv.get(b"catalog/c").expect("get") == Some(b"checkpointed".to_vec()));
+        assert!(catalog_kv.get(b"catalog/a").expect("get") == Some(b"early".to_vec()));
+
+        // And the follower tails on from there rather than stalling.
+        let acks = log
+            .commit_group(crate::GroupCommitRequest {
+                generation: WriterGeneration(0),
+                frames: vec![WalFrame {
+                    journal_seq: 3,
+                    ops: vec![WriteOp::Put {
+                        key: b"catalog/d".to_vec(),
+                        value: b"after rebuild".to_vec(),
+                    }],
+                }],
+            })
+            .await
+            .expect("commit post-rebuild frame");
+        let resumed = log
+            .committed_from(covered_offset + 1)
+            .await
+            .expect("read resumed tail");
+        for item in &resumed {
+            follower.apply_committed(item).expect("apply after rebuild");
+        }
+
+        assert!(tail.applied_offset() == acks.frames[0].offset);
+        assert!(catalog_kv.get(b"catalog/d").expect("get") == Some(b"after rebuild".to_vec()));
+        // The abandoned store is untouched by the rebuild and by later frames.
+        let abandoned: Arc<dyn Kv> = live_store;
+        assert!(abandoned.get(b"catalog/c").expect("get") == None);
+        assert!(abandoned.get(b"catalog/d").expect("get") == None);
+    }
+
+    #[tokio::test]
+    async fn a_rebuild_that_would_not_advance_the_tail_is_refused() {
+        let log = InMemoryWalLog::shared();
+        let config = LiveRecoveryConfig::new(
+            "unused",
+            TenantName::parse("replica").expect("tenant"),
+            RangeId::COORDINATOR,
+            None,
+        );
+        log.commit_group(crate::GroupCommitRequest {
+            generation: WriterGeneration(0),
+            frames: vec![WalFrame {
+                journal_seq: 0,
+                ops: vec![WriteOp::Put {
+                    key: b"catalog/a".to_vec(),
+                    value: b"live".to_vec(),
+                }],
+            }],
+        })
+        .await
+        .expect("commit frame");
+        let live_store: Arc<dyn RestoreKv> = Arc::new(MemKv::default());
+        let follower =
+            ReadOnlyRange0Follower::bootstrap(&config, Arc::clone(&live_store), log.as_ref(), None)
+                .await
+                .expect("bootstrap follower");
+        let tail = follower.tail();
+        let catalog_kv = tail.store_handle();
+
+        // No checkpoint at all: the rebuild restores nothing, so adopting it
+        // would move the applied offset backwards.
+        let rejected = rebuild_range0_tail_from_checkpoint(
+            &config,
+            &tail,
+            Arc::new(MemKv::default()),
+            log.as_ref(),
+            None,
+        )
+        .await;
+
+        assert!(rejected.is_err());
+        assert!(tail.applied_offset() == 0);
+        assert!(catalog_kv.get(b"catalog/a").expect("get") == Some(b"live".to_vec()));
     }
 
     // ── persistent committed-end sampler ─────────────────────────────────────

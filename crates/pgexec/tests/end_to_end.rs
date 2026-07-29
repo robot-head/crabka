@@ -1554,8 +1554,10 @@ async fn parameter_edge_cases_report_expected_sqlstates() {
         .expect_err("simple protocol parameters are rejected");
     assert_eq!(sqlstate(&err), "0A000");
 
+    // `regconfig` (OID 3734) stands in for "an OID the engine does not support"
+    // — `json`/`jsonb` used to play that role and are now supported.
     let err = client
-        .prepare_typed("SELECT $1", &[Type::JSON])
+        .prepare_typed("SELECT $1", &[Type::REGCONFIG])
         .await
         .expect_err("unsupported parameter OID is rejected");
     assert_eq!(sqlstate(&err), "42P18");
@@ -1567,7 +1569,7 @@ async fn extended_prepare_type_error_aborts_explicit_transaction() {
 
     client.batch_execute("BEGIN").await.expect("begin");
     let err = client
-        .prepare_typed("SELECT $1", &[Type::JSON])
+        .prepare_typed("SELECT $1", &[Type::REGCONFIG])
         .await
         .expect_err("unsupported prepare parameter OID must fail");
     assert_eq!(sqlstate(&err), "42P18");

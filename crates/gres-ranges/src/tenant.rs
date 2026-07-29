@@ -18,8 +18,8 @@ use crabka_pgexec::{
 use crabka_pgtypes::Datum;
 use crabka_pgwire::{
     engine::{
-        BoundParam, CloseTarget, Engine, ExecuteOutcome, PortalDescription, PreparedDescription,
-        QueryResult, Session, TxStatus,
+        BoundParam, CloseTarget, Engine, ExecuteOutcome, Notification, PortalDescription,
+        PreparedDescription, QueryResult, Session, TxStatus,
     },
     error::{PgError, sqlstate},
 };
@@ -69,6 +69,22 @@ pub struct MultiRangeTenantConfig {
     pub recover_timestamps_on_start: bool,
     /// Which timestamp-ordering source this tenant installs on its engines.
     pub timestamp_source_mode: TimestampSourceMode,
+    /// This node's identity for cross-gateway `NOTIFY`, and the switch that
+    /// turns it on.
+    ///
+    /// `Some` opts the node in: the coordinator engine stamps every committed
+    /// notification with this string and appends it to the range-0 log, and a
+    /// node without range 0 re-injects the records its follower tail reads,
+    /// skipping the ones carrying its own identity. It must therefore differ
+    /// between the nodes of one tenant — the live runtime passes its
+    /// authenticated range-listen endpoint.
+    ///
+    /// `None` keeps notifications in-process. That is the required setting for
+    /// a tenant whose engines commit straight to their KV rather than through
+    /// the substrate WAL: only the WAL apply paths drop notify records, so
+    /// replicating without one would write a notification into the catalog
+    /// store, where checkpoints would keep it forever.
+    pub node_identity: Option<String>,
     /// Signed wall-clock skew in milliseconds applied to this node's HLC reads.
     ///
     /// Fault-injection knob for load and chaos testing, not a production
@@ -177,6 +193,7 @@ impl MultiRangeTenantConfig {
             range_registry: None,
             range_client: None,
             recover_timestamps_on_start: true,
+            node_identity: None,
             timestamp_source_mode: TimestampSourceMode::default(),
             hlc_wall_offset_ms: 0,
             commit_fault_for_testing: None,
@@ -238,6 +255,18 @@ impl MultiRangeTenantConfig {
     #[must_use]
     pub fn defer_timestamp_recovery(mut self) -> Self {
         self.recover_timestamps_on_start = false;
+        self
+    }
+
+    /// Replicate this node's notifications through the range-0 log, stamped
+    /// with `identity`.
+    ///
+    /// Must differ between the nodes of one tenant: it is how a node recognises
+    /// the records it published itself. Only for a tenant whose ranges commit
+    /// through the substrate WAL — see [`Self::node_identity`].
+    #[must_use]
+    pub fn with_node_identity(mut self, identity: impl Into<String>) -> Self {
+        self.node_identity = Some(identity.into());
         self
     }
 
@@ -316,6 +345,8 @@ pub enum TenantError {
 pub struct ReadOnlyRange0Replica {
     catalog_kv: Arc<dyn crabka_pgkv::Kv>,
     barrier: Arc<Range0Barrier>,
+    tail: crate::Range0Tail,
+    refresh_poke: Option<Arc<tokio::sync::Notify>>,
 }
 
 impl std::fmt::Debug for ReadOnlyRange0Replica {
@@ -333,7 +364,9 @@ impl ReadOnlyRange0Replica {
     pub fn new(tail: crate::Range0Tail, sampler: Arc<dyn Range0EndSampler>) -> Self {
         Self {
             catalog_kv: tail.store_handle(),
-            barrier: Arc::new(Range0Barrier::new(tail, sampler)),
+            barrier: Arc::new(Range0Barrier::new(tail.clone(), sampler)),
+            tail,
+            refresh_poke: None,
         }
     }
 
@@ -343,12 +376,42 @@ impl ReadOnlyRange0Replica {
         Arc::clone(&self.barrier)
     }
 
+    /// The follower tail this replica reads, for consumers of records the merge
+    /// rules deliberately never store — cross-gateway `NOTIFY` being the one.
+    #[must_use]
+    pub fn tail(&self) -> &crate::Range0Tail {
+        &self.tail
+    }
+
     /// Rebuild with a poke that wakes the follower poll loop before sampling.
     #[must_use]
     pub fn with_catalog_refresh_poke(self, poke: Arc<tokio::sync::Notify>) -> Self {
         Self {
             catalog_kv: self.catalog_kv,
-            barrier: Arc::new(self.barrier.as_ref().clone().with_refresh_poke(poke)),
+            barrier: Arc::new(
+                self.barrier
+                    .as_ref()
+                    .clone()
+                    .with_refresh_poke(Arc::clone(&poke)),
+            ),
+            tail: self.tail,
+            refresh_poke: Some(poke),
+        }
+    }
+
+    /// Wake the follower's poll loop without waiting for it.
+    ///
+    /// A `NOTIFY` this node forwarded to the coordinator is already durable in
+    /// the range-0 log by the time the forwarded statement returns, but this
+    /// node only sees it on the follower's next poll — up to its full poll
+    /// period away. Poking costs nothing, never blocks the notifying client,
+    /// and turns that wait into one broker round trip for the listeners on
+    /// *this* node. Listeners elsewhere still learn on their own node's poll.
+    fn poke_catalog_refresh(&self) {
+        if let Some(poke) = &self.refresh_poke {
+            // `notify_one` leaves a permit when the loop is mid-iteration, so
+            // the wake cannot be lost between two polls.
+            poke.notify_one();
         }
     }
 
@@ -361,6 +424,63 @@ impl ReadOnlyRange0Replica {
     pub async fn wait_for_latest_catalog(&self) -> Result<(), BarrierError> {
         self.barrier.wait_for_fresh_end().await
     }
+}
+
+/// Re-injects the notifications carried by the range-0 log into this node's bus.
+///
+/// Installed on the follower tail of a node that does not host range 0. Notify
+/// records never reach a KV — every apply site drops them — so this hook is the
+/// only place they are visible, and it runs inline on the apply path: it does
+/// exactly one non-blocking best-effort fan-out and returns.
+struct NotifyTailObserver {
+    bus: Arc<crabka_pgexec::notify::NotifyBus>,
+    origin: String,
+}
+
+impl crate::range0_tail::Range0FrameObserver for NotifyTailObserver {
+    fn observe(&self, ops: &[crabka_pgkv::WriteOp]) {
+        let notifications = remote_notifications(ops, &self.origin);
+        if notifications.is_empty() {
+            return;
+        }
+        self.bus.deliver_remote(&notifications);
+    }
+}
+
+/// The notifications a frame carries for delivery on a node identified by
+/// `origin`.
+///
+/// Non-notify ops and this node's own records are skipped, and so is any record
+/// that fails to decode: these bytes came off a log another node wrote, so a
+/// corrupt or future-versioned record must cost one warning, not the catalog
+/// apply path it runs on.
+fn remote_notifications(ops: &[crabka_pgkv::WriteOp], origin: &str) -> Vec<Notification> {
+    let mut notifications = Vec::new();
+    for op in ops {
+        if !crabka_pgkv::is_notify_op(op) {
+            continue;
+        }
+        let (crabka_pgkv::WriteOp::Put { value, .. }
+        | crabka_pgkv::WriteOp::ConditionalPut { value, .. }) = op
+        else {
+            continue;
+        };
+        match crabka_pgkv::NotifyRecord::decode(value) {
+            // A node that observes its own record has already delivered it
+            // locally; the leader applies its own frames without this tail, so
+            // this is a safety net rather than the load-bearing check.
+            Ok(record) if record.origin == origin => {}
+            Ok(record) => notifications.push(Notification {
+                process_id: record.process_id,
+                channel: record.channel,
+                payload: record.payload,
+            }),
+            Err(error) => {
+                tracing::warn!(%error, "skipping undecodable range-0 notify record");
+            }
+        }
+    }
+    notifications
 }
 
 /// Fail-clear rejection for the deliberately narrow local SQL split bridge.
@@ -723,8 +843,16 @@ impl MultiRangeTenant {
             (None, None | Some(_)) => None,
             (Some(_), None) => return Err(TenantError::MissingRangeTls),
         };
+        let notify_origin = config.node_identity.clone();
+        let notify_bus = install_node_notify_bus(
+            &engines,
+            config.range0_replica.as_ref(),
+            notify_origin.clone(),
+        );
         let inner = Arc::new(TenantInner {
             tenant: config.tenant,
+            notify_bus,
+            notify_origin,
             serving: ArcSwap::from_pointee(ServingSnapshot::ready(config.range_map, engines)),
             remote_forward,
             range0_replica: config.range0_replica,
@@ -764,6 +892,15 @@ impl MultiRangeTenant {
             return Err(TenantError::MissingRangeZeroReplica);
         }
         Ok(hosts_range0)
+    }
+
+    /// This node's identity on the cross-gateway notification log: the origin
+    /// stamped on every record it publishes, and the one it ignores when
+    /// reading records back off the log. `None` when its notifications stay
+    /// in-process.
+    #[must_use]
+    pub fn node_notify_origin(&self) -> Option<&str> {
+        self.inner.notify_origin.as_deref()
     }
 
     /// Snapshot handles for the ranges hosted by this compute process.
@@ -2015,6 +2152,46 @@ fn install_replica_catalog(
     }
 }
 
+/// Give this node the one `LISTEN`/`NOTIFY` bus every connection to it shares,
+/// and — when the node has an identity to publish under — connect that bus to
+/// the range-0 log in whichever direction this node can reach it.
+///
+/// A node hosting range 0 must use that engine's own bus, not a bus beside it:
+/// the coordinator engine publishes there, so a second bus would leave every
+/// statement executed on this node invisible to its own listeners. It is also
+/// the node that owns the notification log, so it is the one that stamps and
+/// appends records — hence [`SqlEngine::set_notify_origin`] on that engine and
+/// no observer, since the leader applies its own frames without the tail.
+///
+/// A node without range 0 is fed from the other direction: its follower tail
+/// observes the records the coordinator appended and re-injects them.
+///
+/// Without an identity the bus stays in-process, which is what a tenant whose
+/// engines commit straight to their KV needs: nothing stamps, nothing appends,
+/// and no notification can reach a store.
+fn install_node_notify_bus(
+    engines: &BTreeMap<RangeId, SqlEngine>,
+    replica: Option<&ReadOnlyRange0Replica>,
+    identity: Option<String>,
+) -> Arc<crabka_pgexec::notify::NotifyBus> {
+    if let Some(coordinator) = engines.get(&RangeId::COORDINATOR) {
+        if let Some(identity) = identity {
+            coordinator.set_notify_origin(identity);
+        }
+        return Arc::clone(coordinator.notify_bus());
+    }
+    let bus = Arc::new(crabka_pgexec::notify::NotifyBus::new());
+    if let (Some(replica), Some(identity)) = (replica, identity) {
+        replica
+            .tail()
+            .set_frame_observer(Arc::new(NotifyTailObserver {
+                bus: Arc::clone(&bus),
+                origin: identity,
+            }));
+    }
+    bus
+}
+
 /// Build a pgexec timestamp oracle from a recovered range-0 TSO horizon.
 /// # Panics
 ///
@@ -2447,16 +2624,45 @@ fn range_client_for_registry(
         .transpose()
 }
 
-impl Engine for MultiRangeTenant {
-    type Session = GatewaySession;
-
-    fn connect(&self) -> Self::Session {
+impl MultiRangeTenant {
+    /// Build a gateway session over the engines this node currently serves.
+    ///
+    /// When `notify_pid` is set the session also joins **this node's**
+    /// notification bus under that backend pid — the coordinator engine's own
+    /// bus where range 0 is hosted, a standalone bus fed by the range-0 tail
+    /// where it is not. The gateway keeps the receiver — the wire loop takes it
+    /// through [`Session::take_notifications`] and pushes `NotificationResponse`
+    /// from there — and hands the registration handle to one hosted range's
+    /// [`crabka_pgexec::SqlSession`], the seat this connection's `LISTEN` and
+    /// `UNLISTEN` run on.
+    ///
+    /// A session that cannot register — no backend pid, or no hosted engine to
+    /// seat the registration on — records why in [`GatewayNotify`] and refuses
+    /// the statements rather than accepting them into a queue nothing on this
+    /// connection drains.
+    fn open_session(&self, notify_pid: Option<i32>) -> GatewaySession {
         let serving = self.inner.serving.load_full();
-        let sessions = serving
+        let mut sessions: BTreeMap<RangeId, crabka_pgexec::SqlSession> = serving
             .engines
             .iter()
             .map(|(range_id, engine)| (*range_id, engine.connect()))
             .collect();
+        let (notify, notifications) = match (notify_pid, notify_seat(&sessions)) {
+            (None, _) => (GatewayNotify::NoBackendPid, None),
+            (Some(_), None) => (GatewayNotify::NoLocalSeat, None),
+            (Some(pid), Some(seat)) => {
+                let (handle, receiver) =
+                    crabka_pgexec::notify::NotifyBus::register(&self.inner.notify_bus, pid);
+                // Replaces (and unregisters) the registration the seat engine
+                // made for its own session, so this connection has exactly one
+                // seat on the bus and the gateway holds its queue.
+                sessions
+                    .get_mut(&seat)
+                    .expect("notify seat names a hosted session")
+                    .adopt_notify(handle);
+                (GatewayNotify::Registered { seat }, Some(receiver))
+            }
+        };
         GatewaySession {
             inner: Arc::clone(&self.inner),
             sessions,
@@ -2469,12 +2675,90 @@ impl Engine for MultiRangeTenant {
             prepared: BTreeMap::new(),
             portals: BTreeMap::new(),
             next_internal_statement: 0,
+            notify,
+            notify_pid,
+            notifications,
         }
+    }
+}
+
+/// The hosted range whose session carries a connection's bus registration.
+///
+/// Range 0 when this node hosts it — the seat every notification statement
+/// already ran on — and otherwise the lowest hosted range, because `LISTEN` and
+/// `UNLISTEN` only ever touch the registration handle the seat holds, never the
+/// seat's own data. A node hosting nothing has no seat, and no statement at all
+/// (its router has no catalog engine either).
+fn notify_seat(sessions: &BTreeMap<RangeId, crabka_pgexec::SqlSession>) -> Option<RangeId> {
+    sessions
+        .contains_key(&RangeId::COORDINATOR)
+        .then_some(RangeId::COORDINATOR)
+        .or_else(|| sessions.keys().next().copied())
+}
+
+/// Whether this gateway session holds a seat on this node's notification bus,
+/// and if not, why — the two shapes carry different refusals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GatewayNotify {
+    /// Registered on the node-local bus, with the hosted range whose session
+    /// holds the registration: `LISTEN` and `UNLISTEN` run there rather than
+    /// routing to range 0, since a subscription is only meaningful to the wire
+    /// loop attached to this connection.
+    Registered { seat: RangeId },
+    /// Opened through [`Engine::connect`] without a backend pid, so there is no
+    /// wire loop to hand a notification queue to. Only in-process callers reach
+    /// this: the wire layer always opens sessions with a pid.
+    NoBackendPid,
+    /// This node hosts no range engine, so there is no session to seat the
+    /// registration on.
+    NoLocalSeat,
+}
+
+impl GatewayNotify {
+    /// The hosted range this connection's subscriptions live on.
+    fn seat(self) -> Option<RangeId> {
+        match self {
+            Self::Registered { seat } => Some(seat),
+            Self::NoBackendPid | Self::NoLocalSeat => None,
+        }
+    }
+
+    /// The gateway's verdict on a `LISTEN`/`NOTIFY`/`UNLISTEN` statement.
+    fn ensure_supported(self, tenant: &str) -> Result<(), PgError> {
+        let reason = match self {
+            Self::Registered { .. } => return Ok(()),
+            Self::NoBackendPid => "this session was opened without a backend process id".to_owned(),
+            Self::NoLocalSeat => {
+                format!("tenant {tenant} hosts no range engine on this gateway")
+            }
+        };
+        Err(PgError::error(
+            sqlstate::FEATURE_NOT_SUPPORTED,
+            format!("LISTEN/NOTIFY is unavailable on this connection: {reason}"),
+        ))
+    }
+}
+
+impl Engine for MultiRangeTenant {
+    type Session = GatewaySession;
+
+    fn connect(&self) -> Self::Session {
+        self.open_session(None)
+    }
+
+    fn connect_with_pid(&self, pid: i32) -> Self::Session {
+        self.open_session(Some(pid))
     }
 }
 
 struct TenantInner {
     tenant: TenantName,
+    /// The one notification bus of this node: shared with the coordinator
+    /// engine where range 0 is hosted, fed by the range-0 tail where it is not.
+    notify_bus: Arc<crabka_pgexec::notify::NotifyBus>,
+    /// This node's identity on the notification log, or `None` when its
+    /// notifications stay in-process.
+    notify_origin: Option<String>,
     serving: ArcSwap<ServingSnapshot>,
     remote_forward: Option<Arc<dyn RemoteForward>>,
     range0_replica: Option<ReadOnlyRange0Replica>,
@@ -2824,6 +3108,15 @@ pub struct GatewaySession {
     prepared: BTreeMap<String, GatewayPrepared>,
     portals: BTreeMap<String, GatewayPortal>,
     next_internal_statement: u64,
+    /// This session's standing on this node's notification bus.
+    notify: GatewayNotify,
+    /// This connection's backend pid, forwarded on `SessionOpen` so a `NOTIFY`
+    /// executed on the range owner is stamped with the originating pid.
+    notify_pid: Option<i32>,
+    /// The receiving end of this connection's registration on that bus, handed to
+    /// the wire loop once by [`Session::take_notifications`]. `None` unless
+    /// [`GatewayNotify::Registered`], and `None` again once taken.
+    notifications: Option<tokio::sync::mpsc::Receiver<Notification>>,
 }
 
 #[derive(Debug, Clone)]
@@ -2901,6 +3194,10 @@ impl From<PgError> for GlobalCommitError {
 }
 
 impl Session for GatewaySession {
+    fn take_notifications(&mut self) -> Option<tokio::sync::mpsc::Receiver<Notification>> {
+        self.notifications.take()
+    }
+
     async fn simple_query(&mut self, sql: &str) -> Result<Vec<QueryResult>, PgError> {
         let mut all_results = Vec::new();
         for statement in split_statements(sql) {
@@ -3179,7 +3476,7 @@ impl GatewaySession {
             )
         })?;
         let session = forward
-            .open_session(range_id)
+            .open_session(range_id, self.notify_pid)
             .await
             .map_err(ForwardError::into_pg)?;
         self.remote_sessions.insert(range_id, session);
@@ -4389,7 +4686,11 @@ impl GatewaySession {
         kind: StatementKind,
         range_id: RangeId,
     ) -> Result<Vec<QueryResult>, PgError> {
-        if kind != StatementKind::Dml && kind != StatementKind::Query {
+        // `NOTIFY` is forwarded even though it is neither DML nor a query: the
+        // coordinator owns the notification log, so running it there is exactly
+        // what carries the notification to every node, this one included.
+        let publishes_notification = statement_is_notify_family(statement);
+        if kind != StatementKind::Dml && kind != StatementKind::Query && !publishes_notification {
             return Err(PgError::error(
                 sqlstate::FEATURE_NOT_SUPPORTED,
                 format!(
@@ -4414,7 +4715,15 @@ impl GatewaySession {
             .get_mut(&range_id)
             .expect("remote session inserted");
         remote.set_timestamp_own_start_ts(own_start_ts).await?;
-        remote.simple_query(statement.to_owned(), cap).await
+        let result = remote.simple_query(statement.to_owned(), cap).await;
+        if result.is_ok() && publishes_notification {
+            // The record is durable in the range-0 log by now; wake this node's
+            // follower so its own listeners do not wait out a poll period.
+            if let Some(replica) = &self.inner.range0_replica {
+                replica.poke_catalog_refresh();
+            }
+        }
+        result
     }
 
     #[allow(
@@ -5137,7 +5446,26 @@ impl GatewaySession {
     fn route_statement(&self, sql: &str) -> Result<StatementRoute, PgError> {
         let serving = self.current_serving()?;
         let catalog = planner_engine(&serving)?;
-        route_statement(&serving.range_map, catalog, sql)
+        let mut route = route_statement(&serving.range_map, catalog, sql)?;
+        // Every notification statement acts on the registration this session
+        // adopted onto its seat. Without that registration the statement would
+        // appear to succeed while nothing on this connection could ever be
+        // delivered, so refuse it instead.
+        if statement_is_notify_family(sql) {
+            self.notify.ensure_supported(self.inner.tenant.as_str())?;
+        }
+        // `NOTIFY` keeps routing to the coordinator, which owns the log every
+        // node reads: publishing there is what makes it cross-gateway. A
+        // subscription is the opposite — only this node's wire loop can deliver
+        // to it — so `LISTEN`/`UNLISTEN` run on the local seat instead of being
+        // forwarded to a bus on another node that could never reach back.
+        if route.kind == StatementKind::Local
+            && statement_is_subscription_change(sql)
+            && let Some(seat) = self.notify.seat()
+        {
+            route.range_id = seat;
+        }
+        Ok(route)
     }
 
     /// The lock-wait cap this session's next remote statement should carry:
@@ -5385,16 +5713,74 @@ fn ensure_timestamp_scatter_is_supported(statement: &str) -> Result<(), PgError>
             format!("cannot parse timestamp scatter statement: {error}"),
         )
     })?;
+    // `ON CONFLICT` needs the arbiter's unique-key probe, which is engine-local:
+    // scattering the statement would let each range decide independently. The
+    // primary refusal lives in the executor's timestamp write path; this keeps an
+    // upsert from reaching the scatter protocol as if it were a plain insert.
     if matches!(
         statements.as_slice(),
-        [crabka_pgparser::ast::Statement::Insert { .. }]
+        [crabka_pgparser::ast::Statement::Insert {
+            on_conflict: None,
+            ..
+        }]
     ) {
         return Ok(());
     }
     Err(PgError::error(
         sqlstate::FEATURE_NOT_SUPPORTED,
-        "multi-range timestamp scatter currently supports INSERT only; UPDATE and DELETE remain unsupported",
+        "multi-range timestamp scatter currently supports plain INSERT only; INSERT ... ON CONFLICT, UPDATE, and DELETE remain unsupported",
     ))
+}
+
+/// Whether `sql` acts on this connection's notification registration:
+/// `LISTEN`, `NOTIFY`, `UNLISTEN`, or a `pg_notify()` call anywhere in a query.
+///
+/// `pg_notify` publishes exactly as `NOTIFY` does, so a statement calling it is
+/// as much a notification statement as one that leads with the keyword —
+/// matching only the leading word would let `SELECT pg_notify('c', 'p')` slip
+/// past the registration check and be accepted by a connection that can never
+/// be delivered to.
+fn statement_is_notify_family(sql: &str) -> bool {
+    leading_keyword_is(sql, &["listen", "notify", "unlisten"]) || calls_pg_notify(sql)
+}
+
+/// Whether `sql` changes this connection's subscriptions, as opposed to
+/// publishing. There is no function form of either, so the leading keyword
+/// decides.
+fn statement_is_subscription_change(sql: &str) -> bool {
+    leading_keyword_is(sql, &["listen", "unlisten"])
+}
+
+fn leading_keyword_is(sql: &str, keywords: &[&str]) -> bool {
+    let command = sql
+        .trim_start()
+        .split(|character: char| character.is_ascii_whitespace() || character == ';')
+        .next()
+        .unwrap_or_default();
+    keywords
+        .iter()
+        .any(|keyword| command.eq_ignore_ascii_case(keyword))
+}
+
+/// Whether `sql` contains a call to `pg_notify`: the identifier on a token
+/// boundary, followed by its argument list.
+///
+/// Deliberately lexical rather than parsed, and allocation-free — every
+/// forwarded statement passes through here ahead of planning, and the cost of a
+/// false positive is a refusal on a connection that could not have been
+/// delivered to anyway.
+fn calls_pg_notify(sql: &str) -> bool {
+    const NAME: &[u8] = b"pg_notify";
+    let bytes = sql.as_bytes();
+    bytes.windows(NAME.len()).enumerate().any(|(at, window)| {
+        window.eq_ignore_ascii_case(NAME)
+                // At index 0 the wrapping subtraction indexes past the end, so
+                // `get` reports what is true there: nothing precedes the name.
+                && !bytes
+                    .get(at.wrapping_sub(1))
+                    .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+                && sql[at + NAME.len()..].trim_start().starts_with('(')
+    })
 }
 
 fn failed_transaction_error() -> PgError {
@@ -6305,7 +6691,9 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         | Datum::Time(_)
         | Datum::Timestamp(_)
         | Datum::Timestamptz(_)
-        | Datum::Interval(_) => None,
+        | Datum::Interval(_)
+        | Datum::Jsonb(_)
+        | Datum::Array(_) => None,
     }
 }
 
@@ -8273,6 +8661,85 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn notify_on_an_rn_only_gateway_publishes_on_the_range0_owner() {
+        let catalog_kv: Arc<dyn Kv> = Arc::new(MemKv::default());
+        let range0_engine = SqlEngine::with_kv(Arc::clone(&catalog_kv)).expect("range-0 engine");
+        let service = Arc::new(crate::forward::HostedRangeService::new(BTreeMap::from([(
+            RangeId::COORDINATOR,
+            range0_engine.clone_handle(),
+        )])));
+        let address = crate::transport::spawn_loopback(service)
+            .await
+            .expect("spawn range-0 service");
+        let registry = ddl_registry(
+            "notify-rn-only-forward",
+            vec![
+                ddl_layout_entry(
+                    0,
+                    Some(crabka_gres_control::RangeBoundary::table_start(60)),
+                    address.to_string(),
+                ),
+                ddl_layout_entry(1, None, address.to_string()),
+            ],
+        );
+        let replica = ReadOnlyRange0Replica::new(
+            crate::range0_tail::Range0Tail::new(Arc::clone(&catalog_kv)),
+            Arc::new(EmptyRange0End),
+        );
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("notify_rn_only_forward").expect("tenant"),
+            "0,60",
+        )
+        .expect("config")
+        .with_hosted_ranges(vec![RangeId::new(1)])
+        .expect("r1 host")
+        .with_node_identity("rn-node")
+        .with_read_only_range0_replica(replica)
+        .with_range_registry(registry)
+        .with_range_client(FramedTcpClient::default());
+        let (gateway, _handles) =
+            MultiRangeTenant::start_with_engine_factory(config, |_dir, _id| Ok(SqlEngine::new()))
+                .expect("rN-only gateway");
+
+        // A listener on the range-0 owner itself: reaching its bus is what puts
+        // the notification on the log every other node reads.
+        let mut owner_listener = range0_engine.connect_with_pid(4242);
+        let mut owner_queue = owner_listener.take_notifications().expect("owner queue");
+        owner_listener
+            .simple_query("LISTEN forwarded_chan")
+            .await
+            .expect("listen on the owner");
+
+        let results = gateway
+            .connect_with_pid(909)
+            .simple_query("NOTIFY forwarded_chan, 'from the rN gateway'")
+            .await
+            .expect("NOTIFY forwarded to the range-0 owner");
+        assert!(
+            results
+                == vec![QueryResult::Command {
+                    tag: "NOTIFY".to_string()
+                }]
+        );
+
+        let delivered = owner_queue
+            .try_recv()
+            .expect("published on the owner's bus");
+        assert!(
+            delivered
+                == Notification {
+                    // The originating pid survives the hop: `SessionOpen`
+                    // carries it, and the owner-side session adopts it, so a
+                    // forwarded NOTIFY is stamped with the pid PostgreSQL
+                    // would report rather than the owner session's own.
+                    process_id: 909,
+                    channel: "forwarded_chan".to_owned(),
+                    payload: "from the rN gateway".to_owned(),
+                }
+        );
+    }
+
+    #[tokio::test]
     async fn ddl_from_range0_host_blocks_until_followers_apply() {
         let follower_tail = crate::range0_tail::Range0Tail::new(Arc::new(MemKv::default()));
         let follower_barrier = Arc::new(Range0Barrier::new(
@@ -8971,6 +9438,317 @@ mod tests {
 
         assert_eq!(error.code, sqlstate::FEATURE_NOT_SUPPORTED);
         assert!(error.message.contains("range r1 is not hosted"));
+    }
+
+    #[tokio::test]
+    async fn notify_family_statements_route_local_to_the_coordinator() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("notify-routing").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, _handles) = MultiRangeTenant::start(config).expect("start");
+        let session = gateway.connect_with_pid(77);
+
+        for statement in [
+            "LISTEN gateway_chan",
+            "NOTIFY gateway_chan, 'payload'",
+            "UNLISTEN gateway_chan",
+            "UNLISTEN *",
+        ] {
+            let route = session.route_statement(statement).expect("route");
+            assert!(
+                route
+                    == StatementRoute {
+                        kind: StatementKind::Local,
+                        range_id: RangeId::COORDINATOR,
+                        table_id: None,
+                        scatter_ranges: None,
+                    },
+                "unexpected route for {statement}: {route:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gateway_sessions_exchange_notifications_through_the_coordinator_bus() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("gateway-listen-notify").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, _handles) = MultiRangeTenant::start(config).expect("start");
+
+        let mut listener = gateway.connect_with_pid(4242);
+        let mut notifier = gateway.connect_with_pid(4343);
+        let mut notifications = listener
+            .take_notifications()
+            .expect("a pid-bearing gateway session joins the coordinator bus");
+        assert!(listener.take_notifications().is_none());
+
+        listener
+            .simple_query("LISTEN gateway_chan")
+            .await
+            .expect("listen");
+        notifier
+            .simple_query("NOTIFY gateway_chan, 'from the other session'")
+            .await
+            .expect("notify");
+
+        let delivered = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            std::pin::pin!(notifications.recv()),
+        )
+        .await
+        .expect("notification delivered before the deadline")
+        .expect("notification queue stays open");
+        assert!(
+            delivered
+                == Notification {
+                    process_id: 4343,
+                    channel: "gateway_chan".to_owned(),
+                    payload: "from the other session".to_owned(),
+                }
+        );
+    }
+
+    #[tokio::test]
+    async fn gateway_session_without_a_backend_pid_has_no_notification_queue() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("gateway-listen-no-pid").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, _handles) = MultiRangeTenant::start(config).expect("start");
+        let mut session = gateway.connect();
+
+        assert!(session.take_notifications().is_none());
+        let error = session
+            .simple_query("LISTEN gateway_chan")
+            .await
+            .expect_err("an unregistered session cannot listen");
+        assert!(error.code == sqlstate::FEATURE_NOT_SUPPORTED);
+        assert!(
+            error.message.contains("without a backend process id"),
+            "unexpected refusal: {error:?}"
+        );
+    }
+
+    /// An rN-only gateway plus the follower tail its node reads, so a test can
+    /// push committed range-0 frames past the installed observer exactly as the
+    /// live follower poll loop does.
+    fn rn_only_notify_gateway(tenant_name: &str) -> (MultiRangeTenant, crate::Range0Tail) {
+        let follower_kv: Arc<dyn Kv> = Arc::new(MemKv::default());
+        let tail = crate::range0_tail::Range0Tail::new(follower_kv);
+        let replica = ReadOnlyRange0Replica::new(tail.clone(), Arc::new(EmptyRange0End));
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse(tenant_name).expect("tenant"),
+            "0,7",
+        )
+        .expect("config")
+        .with_hosted_ranges(vec![RangeId::new(1)])
+        .expect("r1 host")
+        .with_node_identity(format!("{tenant_name}-node"))
+        .with_read_only_range0_replica(replica);
+        let (gateway, _) = MultiRangeTenant::start_with_engine_factory_and_timestamp_oracle(
+            config,
+            |_dir, _range_id| Ok(SqlEngine::new()),
+            None,
+        )
+        .expect("rN-only assembly");
+        (gateway, tail)
+    }
+
+    /// One committed frame carrying `records` as notify-keyed puts.
+    fn notify_frame(offset: i64, records: &[(&str, i32, &str, &str)]) -> crate::Range0Frame {
+        let ops = records
+            .iter()
+            .enumerate()
+            .map(
+                |(index, (origin, process_id, channel, payload))| crabka_pgkv::WriteOp::Put {
+                    key: crabka_pgkv::key::notify_key(
+                        u64::try_from(index).expect("index fits u64"),
+                    ),
+                    value: crabka_pgkv::NotifyRecord {
+                        origin: (*origin).to_owned(),
+                        process_id: *process_id,
+                        channel: (*channel).to_owned(),
+                        payload: (*payload).to_owned(),
+                    }
+                    .encode(),
+                },
+            )
+            .collect();
+        crate::Range0Frame::new(offset, ops)
+    }
+
+    #[tokio::test]
+    async fn rn_only_gateway_session_subscribes_on_its_own_node() {
+        let (gateway, _tail) = rn_only_notify_gateway("rn_only_listen_notify");
+        let mut session = gateway.connect_with_pid(909);
+
+        assert!(
+            session.take_notifications().is_some(),
+            "a pid-bearing session joins the node-local bus even without range 0"
+        );
+        for statement in ["LISTEN chan", "UNLISTEN chan", "UNLISTEN *"] {
+            session
+                .simple_query(statement)
+                .await
+                .unwrap_or_else(|error| panic!("{statement} on an rN gateway: {error:?}"));
+        }
+
+        // The subscription is registered on this node's bus, not forwarded to
+        // range 0's: the seat is the hosted data range.
+        session.simple_query("LISTEN chan").await.expect("listen");
+        let route = session.route_statement("LISTEN chan").expect("route");
+        assert!(route.range_id == RangeId::new(1));
+        assert!(
+            session
+                .route_statement("NOTIFY chan, 'x'")
+                .expect("route")
+                .range_id
+                == RangeId::COORDINATOR
+        );
+    }
+
+    #[tokio::test]
+    async fn range0_frames_deliver_remote_notifications_to_a_local_listener() {
+        let (gateway, tail) = rn_only_notify_gateway("rn_only_remote_notify");
+        let mut listener = gateway.connect_with_pid(11);
+        let mut notifications = listener.take_notifications().expect("queue");
+        listener
+            .simple_query("LISTEN remote_chan")
+            .await
+            .expect("listen");
+
+        tail.apply_committed(&notify_frame(
+            0,
+            &[
+                ("other-node", 4343, "remote_chan", "from another gateway"),
+                ("other-node", 4343, "unheard_chan", "nobody listens here"),
+            ],
+        ))
+        .expect("frame applies");
+
+        let delivered = notifications.try_recv().expect("notification delivered");
+        assert!(
+            delivered
+                == Notification {
+                    // The ORIGINATING backend pid, as PostgreSQL reports it.
+                    process_id: 4343,
+                    channel: "remote_chan".to_owned(),
+                    payload: "from another gateway".to_owned(),
+                }
+        );
+        assert!(notifications.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn range0_frames_skip_this_nodes_own_records_and_undecodable_ones() {
+        let (gateway, tail) = rn_only_notify_gateway("rn_only_notify_skips");
+        let mut listener = gateway.connect_with_pid(12);
+        let mut notifications = listener.take_notifications().expect("queue");
+        listener
+            .simple_query("LISTEN remote_chan")
+            .await
+            .expect("listen");
+
+        let own_origin = gateway
+            .node_notify_origin()
+            .expect("a replicating node has an identity")
+            .to_owned();
+        tail.apply_committed(&notify_frame(
+            0,
+            &[(own_origin.as_str(), 7, "remote_chan", "published here")],
+        ))
+        .expect("frame applies");
+        assert!(
+            notifications.try_recv().is_err(),
+            "a node must not re-deliver its own notification"
+        );
+
+        // A corrupt record costs one warning, not the frame around it: the
+        // well-formed record that follows still arrives.
+        tail.apply_committed(&crate::Range0Frame::new(
+            1,
+            vec![
+                crabka_pgkv::WriteOp::Put {
+                    key: crabka_pgkv::key::notify_key(9),
+                    value: vec![0xff, 0x00, 0x01],
+                },
+                crabka_pgkv::WriteOp::Put {
+                    key: crabka_pgkv::key::notify_key(10),
+                    value: crabka_pgkv::NotifyRecord {
+                        origin: "other-node".to_owned(),
+                        process_id: 99,
+                        channel: "remote_chan".to_owned(),
+                        payload: "after the corrupt one".to_owned(),
+                    }
+                    .encode(),
+                },
+            ],
+        ))
+        .expect("frame with a corrupt record still applies");
+
+        assert!(
+            notifications.try_recv().expect("notification delivered")
+                == Notification {
+                    process_id: 99,
+                    channel: "remote_chan".to_owned(),
+                    payload: "after the corrupt one".to_owned(),
+                }
+        );
+    }
+
+    #[tokio::test]
+    async fn pg_notify_calls_are_recognised_as_notification_statements() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("gateway-pg-notify").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, _handles) = MultiRangeTenant::start(config).expect("start");
+        let mut session = gateway.connect();
+
+        // A session with no wire loop cannot be delivered to, so the function
+        // form must be refused exactly as the statement form is.
+        let error = session
+            .simple_query("SELECT pg_notify('chan', 'payload')")
+            .await
+            .expect_err("an unregistered session cannot publish");
+        assert!(error.code == sqlstate::FEATURE_NOT_SUPPORTED);
+        assert!(
+            error.message.contains("without a backend process id"),
+            "unexpected refusal: {error:?}"
+        );
+
+        // An identifier that merely ends in the function's name is not a call.
+        session
+            .simple_query("SELECT 1 AS my_pg_notify_count")
+            .await
+            .expect("an unrelated statement stays unaffected");
+    }
+
+    #[test]
+    fn timestamp_scatter_admits_plain_inserts_and_refuses_upserts() {
+        ensure_timestamp_scatter_is_supported("INSERT INTO t7 VALUES (1, 10)")
+            .expect("a plain insert scatters");
+
+        for statement in [
+            "INSERT INTO t7 VALUES (1, 10) ON CONFLICT DO NOTHING",
+            "INSERT INTO t7 VALUES (1, 10) ON CONFLICT (id) DO UPDATE SET note = 11",
+            "UPDATE t7 SET note = 11 WHERE id = 1",
+            "DELETE FROM t7 WHERE id = 1",
+        ] {
+            let error = ensure_timestamp_scatter_is_supported(statement)
+                .expect_err("only plain inserts scatter");
+            assert!(error.code == sqlstate::FEATURE_NOT_SUPPORTED);
+            assert!(
+                error.message.contains("plain INSERT only"),
+                "unexpected scatter refusal for {statement}: {error:?}"
+            );
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

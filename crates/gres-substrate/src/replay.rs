@@ -1,6 +1,8 @@
 //! Pure recovery replay over committed `GRW1` frame bytes.
 
-use crabka_pgkv::{Kv, WriteOp};
+use std::borrow::Cow;
+
+use crabka_pgkv::{Kv, WriteOp, is_notify_op};
 
 use crate::{
     apply::apply_frame,
@@ -122,8 +124,8 @@ pub fn replay_committed_frames_from_table_transfer(
                 offset: item.offset,
             });
         }
-        let selected = frame
-            .ops
+        let replayable = without_notify_ops(&frame.ops);
+        let selected = replayable
             .iter()
             .try_fold(Vec::new(), |mut ops, operation| {
                 if let Some(operation) = selector.select_tail_op(operation)? {
@@ -173,13 +175,14 @@ fn replay_committed_frames_from_with_filter(
             });
         }
 
+        let replayable = without_notify_ops(&frame.ops);
         let filtered_ops;
         let ops = match filter {
             Some(filter) => {
-                filtered_ops = filter_write_ops(&frame.ops, filter)?;
+                filtered_ops = filter_write_ops(&replayable, filter)?;
                 filtered_ops.as_slice()
             }
-            None => frame.ops.as_slice(),
+            None => replayable.as_ref(),
         };
         apply_frame(kv, ops)?;
         expected = expected.checked_add(1).ok_or_else(|| {
@@ -190,6 +193,27 @@ fn replay_committed_frames_from_with_filter(
     Err(SubstrateError::Unavailable(
         "replay reached end before recovery barrier".into(),
     ))
+}
+
+/// Drop the WAL-only cross-node `NOTIFY` records from one frame.
+///
+/// Recovery rebuilds durable state, and notify records are not durable state:
+/// they are in-flight fan-out that must never reach the KV (a checkpoint would
+/// make them permanent) and that no listener exists to receive during recovery.
+/// Dropping them here also keeps them away from the range and table-transfer
+/// selectors, which have no notion of the namespace. Frames without notify
+/// records — every frame outside a `NOTIFY` — are borrowed, not copied.
+fn without_notify_ops(ops: &[WriteOp]) -> Cow<'_, [WriteOp]> {
+    if ops.iter().any(is_notify_op) {
+        Cow::Owned(
+            ops.iter()
+                .filter(|op| !is_notify_op(op))
+                .cloned()
+                .collect::<Vec<_>>(),
+        )
+    } else {
+        Cow::Borrowed(ops)
+    }
 }
 
 fn filter_write_ops(
@@ -490,6 +514,184 @@ mod tests {
         assert!(outcome.next_journal_seq == 1);
         assert!(kv.get(&predecessor_key).expect("get predecessor").is_none());
         assert!(kv.get(&successor_key).expect("get successor") == Some(b"successor".to_vec()));
+    }
+
+    fn notify_record() -> Vec<u8> {
+        crabka_pgkv::NotifyRecord {
+            origin: "node-a".into(),
+            process_id: 7,
+            channel: "c".into(),
+            payload: "p".into(),
+        }
+        .encode()
+    }
+
+    /// A mixed frame replayed during recovery must rebuild everything except
+    /// the notify records, which are in-flight fan-out rather than state.
+    #[test]
+    fn replay_never_persists_notify_records() {
+        let kv = MemKv::default();
+        let row = crabka_pgkv::key::row_key(7, 1);
+        let frames = vec![
+            item(
+                0,
+                &WalFrame {
+                    journal_seq: 0,
+                    ops: vec![
+                        WriteOp::Put {
+                            key: row.clone(),
+                            value: b"row".to_vec(),
+                        },
+                        WriteOp::Put {
+                            key: crabka_pgkv::key::notify_key(1),
+                            value: notify_record(),
+                        },
+                        WriteOp::Put {
+                            key: crabka_pgkv::key::next_xid_key(),
+                            value: 9_u64.to_be_bytes().to_vec(),
+                        },
+                        WriteOp::Put {
+                            key: crabka_pgkv::key::notify_key(2),
+                            value: notify_record(),
+                        },
+                        crabka_pgmvcc::clog::put_op(11, crabka_pgmvcc::clog::XidStatus::Committed),
+                    ],
+                },
+            ),
+            item(
+                1,
+                &WalFrame {
+                    journal_seq: BARRIER_SEQ,
+                    ops: Vec::new(),
+                },
+            ),
+        ];
+
+        let outcome = replay_committed_frames(&kv, frames, 1).expect("replay");
+
+        assert!(outcome.next_journal_seq == 1);
+        assert!(kv.get(&row).expect("get") == Some(b"row".to_vec()));
+        assert!(
+            kv.get(&crabka_pgkv::key::next_xid_key()).expect("get")
+                == Some(9_u64.to_be_bytes().to_vec())
+        );
+        assert!(
+            kv.get(&crabka_pgkv::key::clog_key(11))
+                .expect("get")
+                .is_some()
+        );
+        assert!(
+            kv.scan_prefix(&crabka_pgkv::key::notify_prefix())
+                .expect("scan")
+                .is_empty()
+        );
+    }
+
+    /// The range-filtered and table-transfer recovery paths drop notify records
+    /// before their selectors ever see a key from a namespace they do not know.
+    #[test]
+    fn filtered_and_table_transfer_replay_never_persist_notify_records() {
+        let successor_key = crabka_pgkv::key::row_key(7, 20);
+        let frames = || {
+            vec![
+                item(
+                    0,
+                    &WalFrame {
+                        journal_seq: 0,
+                        ops: vec![
+                            WriteOp::Put {
+                                key: crabka_pgkv::key::notify_key(1),
+                                value: notify_record(),
+                            },
+                            WriteOp::Put {
+                                key: successor_key.clone(),
+                                value: b"successor".to_vec(),
+                            },
+                            WriteOp::Delete {
+                                key: crabka_pgkv::key::notify_key(2),
+                            },
+                        ],
+                    },
+                ),
+                item(
+                    1,
+                    &WalFrame {
+                        journal_seq: BARRIER_SEQ,
+                        ops: Vec::new(),
+                    },
+                ),
+            ]
+        };
+        let filter = CheckpointFilter::new(
+            RangeKey::new(TableId::new(7), 20),
+            Some(RangeKey::new(TableId::new(7), 30)),
+        )
+        .expect("filter")
+        .with_physical_to_logical(BTreeMap::from([(TableId::new(7), TableId::new(7))]));
+
+        let filtered_kv = MemKv::default();
+        let outcome =
+            replay_committed_frames_from_filtered(&filtered_kv, frames(), 1, 0, 0, &filter)
+                .expect("filtered replay");
+        assert!(outcome.next_journal_seq == 1);
+        assert!(filtered_kv.get(&successor_key).expect("get") == Some(b"successor".to_vec()));
+        assert!(
+            filtered_kv
+                .scan_prefix(&crabka_pgkv::key::notify_prefix())
+                .expect("scan")
+                .is_empty()
+        );
+
+        let transfer_kv = MemKv::default();
+        let mut selector = TableTransferSelector::new(7).expect("selector");
+        let transfer_frames = vec![
+            item(
+                0,
+                &WalFrame {
+                    journal_seq: 0,
+                    ops: vec![
+                        WriteOp::Put {
+                            key: crabka_pgkv::key::notify_key(1),
+                            value: notify_record(),
+                        },
+                        WriteOp::Put {
+                            key: crabka_pgkv::key::seq_key(7),
+                            value: 5_u64.to_be_bytes().to_vec(),
+                        },
+                        WriteOp::Delete {
+                            key: crabka_pgkv::key::notify_key(2),
+                        },
+                    ],
+                },
+            ),
+            item(
+                1,
+                &WalFrame {
+                    journal_seq: BARRIER_SEQ,
+                    ops: Vec::new(),
+                },
+            ),
+        ];
+        let outcome = replay_committed_frames_from_table_transfer(
+            &transfer_kv,
+            transfer_frames,
+            1,
+            0,
+            0,
+            &mut selector,
+        )
+        .expect("table transfer replay");
+        assert!(outcome.next_journal_seq == 1);
+        assert!(
+            transfer_kv.get(&crabka_pgkv::key::seq_key(7)).expect("get")
+                == Some(5_u64.to_be_bytes().to_vec())
+        );
+        assert!(
+            transfer_kv
+                .scan_prefix(&crabka_pgkv::key::notify_prefix())
+                .expect("scan")
+                .is_empty()
+        );
     }
 
     fn item(offset: i64, frame: &WalFrame) -> ReplayItem {

@@ -192,6 +192,10 @@ impl CheckpointFilter {
             key::KeyClass::Sequence { table_id } => {
                 RangeKey::table_start(self.logical_table(table_id)?)
             }
+            // WAL-only cross-node NOTIFY records belong to no range and are
+            // never checkpointed or restored: no apply site writes them, and if
+            // one ever appeared it must not be carried into a successor.
+            key::KeyClass::Notify => return Ok(false),
             key::KeyClass::Clog { .. }
             | key::KeyClass::SecondaryIndex { .. }
             | key::KeyClass::System

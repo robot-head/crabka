@@ -9,11 +9,16 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crabka_pgkv::{Kv, KvError, WriteOp, key};
+use crabka_pgkv::{Kv, KvError, WriteOp, is_notify_op, key};
 use crabka_pgmvcc::clog;
 
 /// Apply one journaled batch to `kv` with max-merge counters and write-once
 /// clog, folding duplicates within the batch.
+///
+/// Cross-node `NOTIFY` records are dropped: they ride the WAL so followers can
+/// observe them in flight, but a record that reached the KV would be baked into
+/// every later checkpoint. Skipping them is invisible to everything else —
+/// offsets and journal sequences are accounted for by the caller, per frame.
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
@@ -23,6 +28,9 @@ pub fn apply_frame(kv: &dyn Kv, ops: &[WriteOp]) -> Result<(), KvError> {
     let mut adjusted = Vec::with_capacity(ops.len());
 
     for op in ops {
+        if is_notify_op(op) {
+            continue;
+        }
         match op {
             WriteOp::Put { key, value } if is_counter_key(key) => {
                 push_counter_op(kv, &mut counters, &mut adjusted, key, value)?;
@@ -284,6 +292,94 @@ mod tests {
         apply_frame(&kv, &[WriteOp::Delete { key: b"a".to_vec() }]).expect("apply");
 
         assert!(kv.get(b"a").expect("get").is_none());
+    }
+
+    /// Notify records must never reach the store — a checkpoint would make them
+    /// permanent — while every other op in the same batch applies as usual.
+    #[test]
+    fn notify_ops_are_dropped_without_disturbing_the_rest_of_the_batch() {
+        let kv = MemKv::default();
+        let row = key::row_key(7, 1);
+        let record = crabka_pgkv::NotifyRecord {
+            origin: "node-a".into(),
+            process_id: 99,
+            channel: "c".into(),
+            payload: "p".into(),
+        };
+
+        apply_frame(
+            &kv,
+            &[
+                WriteOp::Put {
+                    key: row.clone(),
+                    value: b"row".to_vec(),
+                },
+                WriteOp::Put {
+                    key: key::next_xid_key(),
+                    value: u64_be_vec(4),
+                },
+                WriteOp::Put {
+                    key: key::notify_key(1),
+                    value: record.encode(),
+                },
+                clog::put_op(11, clog::XidStatus::Committed),
+                WriteOp::Put {
+                    key: key::notify_key(2),
+                    value: record.encode(),
+                },
+                WriteOp::Put {
+                    key: key::next_xid_key(),
+                    value: u64_be_vec(3),
+                },
+            ],
+        )
+        .expect("apply");
+
+        assert!(kv.get(&row).expect("get") == Some(b"row".to_vec()));
+        assert!(kv.get(&key::next_xid_key()).expect("get") == Some(u64_be_vec(4)));
+        assert!(
+            kv.get(&key::clog_key(11)).expect("get")
+                == Some(terminal_bytes(clog::XidStatus::Committed))
+        );
+        assert!(kv.get(&key::notify_key(1)).expect("get").is_none());
+        assert!(kv.get(&key::notify_key(2)).expect("get").is_none());
+        assert!(
+            kv.scan_prefix(&key::notify_prefix())
+                .expect("scan")
+                .is_empty()
+        );
+    }
+
+    /// Every write shape is filtered, so a stray delete or conditional put in
+    /// the notify namespace cannot resurrect it either.
+    #[test]
+    fn notify_ops_are_dropped_in_every_write_shape() {
+        let kv = MemKv::default();
+
+        apply_frame(
+            &kv,
+            &[
+                WriteOp::Delete {
+                    key: key::notify_key(1),
+                },
+                WriteOp::ConditionalPut {
+                    key: key::notify_key(2),
+                    expected: None,
+                    value: b"x".to_vec(),
+                },
+                WriteOp::Put {
+                    key: key::notify_prefix(),
+                    value: b"x".to_vec(),
+                },
+            ],
+        )
+        .expect("apply");
+
+        assert!(
+            kv.scan_prefix(&key::notify_prefix())
+                .expect("scan")
+                .is_empty()
+        );
     }
 
     fn terminal_bytes(status: clog::XidStatus) -> Vec<u8> {

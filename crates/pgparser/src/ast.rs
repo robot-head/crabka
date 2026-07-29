@@ -64,6 +64,8 @@ pub enum Statement {
         table: String,
         columns: Option<Vec<String>>,
         rows: Vec<Vec<Expr>>,
+        /// `ON CONFLICT …` (absent for a plain INSERT).
+        on_conflict: Option<OnConflict>,
         returning: Option<Vec<SelectItem>>,
     },
     Query(QueryExpr),
@@ -191,6 +193,70 @@ pub enum Statement {
         selector: ImportSelector,
         server: String,
         into_schema: String,
+    },
+    /// `LISTEN <channel>` — subscribe the session to an asynchronous notification
+    /// channel. The channel is an identifier (unquoted spellings fold to
+    /// lowercase; quoted spellings keep their case).
+    Listen {
+        channel: String,
+    },
+    /// `NOTIFY <channel> [, '<payload>']` — queue a notification for delivery at
+    /// commit. `payload` is `None` for the bare form (`PostgreSQL` delivers an
+    /// empty payload).
+    Notify {
+        channel: String,
+        payload: Option<String>,
+    },
+    /// `UNLISTEN { <channel> | * }`.
+    Unlisten {
+        target: UnlistenTarget,
+    },
+}
+
+/// The target of an `UNLISTEN` statement.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnlistenTarget {
+    /// `UNLISTEN <channel>` — drop one subscription.
+    Channel(String),
+    /// `UNLISTEN *` — drop every subscription held by the session.
+    All,
+}
+
+/// The parsed `ON CONFLICT` clause of an `INSERT`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OnConflict {
+    pub target: OnConflictTarget,
+    pub action: OnConflictAction,
+}
+
+/// How the conflicting unique index is chosen ("arbiter inference").
+#[derive(Debug, Clone, PartialEq)]
+pub enum OnConflictTarget {
+    /// No inference specification — legal only with `DO NOTHING`, where every
+    /// unique index arbitrates.
+    None,
+    /// `( col, … ) [WHERE <index_predicate>]`. Entries are plain column names;
+    /// expression/collation/opclass inference is not accepted.
+    Columns {
+        columns: Vec<String>,
+        /// The `WHERE` inside the inference specification (partial-index
+        /// predicate). Retained for parse fidelity; the executor refuses it.
+        index_predicate: Option<Expr>,
+    },
+    /// `ON CONSTRAINT <name>` — arbitrate by constraint name.
+    OnConstraint(String),
+}
+
+/// What to do with a row that conflicts.
+#[derive(Debug, Clone, PartialEq)]
+pub enum OnConflictAction {
+    /// `DO NOTHING` — skip the row.
+    DoNothing,
+    /// `DO UPDATE SET a = e, … [WHERE <filter>]`. Assignment right-hand sides and
+    /// the filter may reference the target table and the pseudo-table `excluded`.
+    DoUpdate {
+        assignments: Vec<(String, Expr)>,
+        filter: Option<Expr>,
     },
 }
 
@@ -754,6 +820,16 @@ pub enum TableExpr {
         kind: JoinKind,
         constraint: JoinConstraint,
     },
+    /// A set-returning function in FROM position (`unnest(a) AS u(x)`). The
+    /// parser accepts any function name and argument list; which functions are
+    /// actually table-producing is decided by the executor. `LATERAL` is not
+    /// accepted, so the arguments never reference other FROM items.
+    Function {
+        name: String,
+        args: Vec<Expr>,
+        alias: Option<String>,
+        column_aliases: Option<Vec<String>>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -873,6 +949,25 @@ pub enum Expr {
         all: bool,
         subquery: Box<QueryExpr>,
     },
+    /// `expr op ANY|SOME|ALL (<array expression>)` — the array form of a
+    /// quantified comparison, as emitted by every driver that binds an IN-list as
+    /// one parameter (`= ANY($1)`). The subquery form is [`Expr::Quantified`];
+    /// the two are disambiguated by lookahead after the quantifier's `(`.
+    QuantifiedArray {
+        expr: Box<Expr>,
+        op: BinaryOp,
+        all: bool,
+        array: Box<Expr>,
+    },
+    /// `ARRAY[e1, e2, …]` — an array constructor. The element list may be empty
+    /// (`ARRAY[]`), in which case the executor needs a cast to type it.
+    ArrayLiteral(Vec<Expr>),
+    /// `base[index]` — one-dimensional array subscripting (1-based, like
+    /// `PostgreSQL`). Slices (`base[lo:hi]`) are refused by the parser.
+    Subscript {
+        base: Box<Expr>,
+        index: Box<Expr>,
+    },
     /// SP34: an executor-produced literal — a resolved subquery folded to a value
     /// carrying its static type. The parser NEVER emits this; `ty` matters because a
     /// zero-row scalar subquery is a typed NULL.
@@ -908,11 +1003,33 @@ pub enum UnaryOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
     Add,
+    /// `-`. Also the jsonb/array "delete key/element" operator — the operand
+    /// types disambiguate at evaluation time, not at parse time.
     Sub,
     Mul,
     Div,
-    /// SP29: `||` string concatenation.
+    /// SP29: `||` string concatenation. Also jsonb and array concatenation.
     Concat,
+    /// jsonb `->` — object field / array element, as jsonb.
+    JsonGet,
+    /// jsonb `->>` — object field / array element, as text.
+    JsonGetText,
+    /// jsonb `#>` — value at a text path, as jsonb.
+    JsonGetPath,
+    /// jsonb `#>>` — value at a text path, as text.
+    JsonGetPathText,
+    /// jsonb/array `@>` — left contains right.
+    Contains,
+    /// jsonb/array `<@` — left is contained by right.
+    ContainedBy,
+    /// jsonb `?` — the string exists as a top-level key (or array element).
+    KeyExists,
+    /// jsonb `?|` — any of the given strings exist as top-level keys.
+    KeyExistsAny,
+    /// jsonb `?&` — all of the given strings exist as top-level keys.
+    KeyExistsAll,
+    /// array `&&` — the two arrays have at least one element in common.
+    Overlaps,
     Eq,
     Ne,
     Lt,

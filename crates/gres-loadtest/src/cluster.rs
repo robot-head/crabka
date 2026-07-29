@@ -839,8 +839,6 @@ fn build_spec(
             "local".to_owned(),
             "--checkpoint-local-root".to_owned(),
             context.work_dir.join("checkpoints").display().to_string(),
-            "--checkpoint-frames".to_owned(),
-            "1".to_owned(),
         ]);
     }
     args.extend(timestamp_args(context.mode, skew_ms));
@@ -1549,7 +1547,9 @@ mod tests {
         };
         let node0 = node_spec(0, &context);
         assert!(arg_value(&node0.args, "--checkpoint-store") == Some("local"));
-        assert!(arg_value(&node0.args, "--checkpoint-frames") == Some("1"));
+        // Thresholds stay at the runtime defaults: a per-frame threshold would
+        // make the measured workload checkpoint-bound.
+        assert!(arg_value(&node0.args, "--checkpoint-frames") == None);
         assert!(arg_value(&node0.args, "--hlc-max-offset-ms") == Some("300"));
         assert!(arg_value(&node0.args, "--hlc-wall-offset-ms") == None);
 

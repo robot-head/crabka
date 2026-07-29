@@ -59,7 +59,8 @@ pub struct CheckpointConfig {
     pub part_max_bytes: usize,
     /// Number of newest checkpoint directories to retain.
     pub retain_checkpoints: usize,
-    /// Background wake-up interval used by [`CheckpointService::spawn`].
+    /// Background wake-up interval used by [`CheckpointService::spawn_with_source`]
+    /// to re-evaluate [`CheckpointService::threshold_trigger`].
     pub poll_interval: Duration,
 }
 
@@ -339,22 +340,12 @@ where
         None
     }
 
-    /// Checkpoint if a threshold has crossed.
+    /// Force one checkpoint attempt against a caller-supplied snapshot.
     ///
-    /// # Errors
-    ///
-    /// Returns [`SubstrateError`] if snapshotting, manifest writing, truncating, or pruning fails.
-    pub async fn checkpoint_if_threshold_crossed(
-        &self,
-        snapshot: CheckpointSnapshot,
-    ) -> Result<Option<CheckpointRun>, SubstrateError> {
-        let Some(trigger) = self.threshold_trigger() else {
-            return Ok(None);
-        };
-        self.checkpoint(snapshot, trigger).await.map(Some)
-    }
-
-    /// Force one checkpoint attempt.
+    /// This is the ungated variant: the caller is responsible for `snapshot`
+    /// matching the KV state this service will read. Prefer
+    /// [`Self::checkpoint_from_source`], which holds the writer's group gate
+    /// while it captures both, whenever a live committer can be running.
     ///
     /// # Errors
     ///
@@ -543,34 +534,86 @@ where
         Ok(())
     }
 
-    /// Spawn a narrow background control loop.
+    /// Spawn a command-only background control loop.
+    ///
+    /// Nothing evaluates [`Self::threshold_trigger`] on this loop; use
+    /// [`Self::spawn_with_source`] for any runtime whose WAL must be trimmed
+    /// without an external request.
     #[must_use]
     pub fn spawn(self: Arc<Self>) -> CheckpointHandle {
+        self.spawn_loop(None)
+    }
+
+    /// Spawn the background control loop and poll the configured thresholds.
+    ///
+    /// Every [`CheckpointConfig::poll_interval`] the loop re-reads
+    /// [`Self::threshold_trigger`] and, when a threshold has crossed, runs a
+    /// gated checkpoint against `source`.
+    ///
+    /// The poll deliberately lives on this task and nowhere near a commit. A
+    /// [`SubstrateCommitter`](crate::SubstrateCommitter) configured with
+    /// `source` borrows `source`'s group gate as its own commit gate and holds
+    /// that single permit for the whole of `commit`, while
+    /// [`CheckpointSnapshotSource::capture`] must acquire the same permit to
+    /// pair the WAL metadata with the KV snapshot. Checking the threshold
+    /// synchronously from `commit` would therefore self-deadlock; checking it
+    /// from this independent task cannot, because the task holds no lock a
+    /// committer waits on and every commit releases the permit when it returns.
+    #[must_use]
+    pub fn spawn_with_source(
+        self: Arc<Self>,
+        source: Arc<CheckpointSnapshotSource>,
+    ) -> CheckpointHandle {
+        self.spawn_loop(Some(source))
+    }
+
+    fn spawn_loop(
+        self: Arc<Self>,
+        threshold_source: Option<Arc<CheckpointSnapshotSource>>,
+    ) -> CheckpointHandle {
         let (commands, mut receiver) = mpsc::channel(8);
         let task = tokio::spawn(async move {
-            while let Some(command) = receiver.recv().await {
-                match command {
-                    CheckpointCommand::Run {
-                        snapshot,
-                        trigger,
-                        reply,
-                    } => {
-                        let result = self.checkpoint(snapshot, trigger).await;
-                        let _ignored = reply.send(result);
+            let mut poll = tokio::time::interval(self.config.poll_interval);
+            poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tokio::select! {
+                    command = receiver.recv() => {
+                        let Some(command) = command else { break };
+                        match command {
+                            CheckpointCommand::Run {
+                                snapshot,
+                                trigger,
+                                reply,
+                            } => {
+                                let result = self.checkpoint(snapshot, trigger).await;
+                                let _ignored = reply.send(result);
+                            }
+                            CheckpointCommand::RunFromSource {
+                                source,
+                                trigger,
+                                reply,
+                            } => {
+                                let result = self.checkpoint_from_source(&source, trigger).await;
+                                let _ignored = reply.send(result);
+                            }
+                            CheckpointCommand::Shutdown => break,
+                        }
                     }
-                    CheckpointCommand::RunIfThreshold { snapshot, reply } => {
-                        let result = self.checkpoint_if_threshold_crossed(snapshot).await;
-                        let _ignored = reply.send(result);
+                    _instant = poll.tick(), if threshold_source.is_some() => {
+                        let Some(source) = threshold_source.as_ref() else {
+                            continue;
+                        };
+                        let Some(trigger) = self.threshold_trigger() else {
+                            continue;
+                        };
+                        if let Err(error) = self.checkpoint_from_source(source, trigger).await {
+                            tracing::warn!(
+                                %error,
+                                ?trigger,
+                                "threshold checkpoint failed; retrying at the next poll",
+                            );
+                        }
                     }
-                    CheckpointCommand::RunFromSource {
-                        source,
-                        trigger,
-                        reply,
-                    } => {
-                        let result = self.checkpoint_from_source(&source, trigger).await;
-                        let _ignored = reply.send(result);
-                    }
-                    CheckpointCommand::Shutdown => break,
                 }
             }
         });
@@ -599,10 +642,6 @@ enum CheckpointCommand {
         snapshot: CheckpointSnapshot,
         trigger: CheckpointTrigger,
         reply: oneshot::Sender<Result<CheckpointRun, SubstrateError>>,
-    },
-    RunIfThreshold {
-        snapshot: CheckpointSnapshot,
-        reply: oneshot::Sender<Result<Option<CheckpointRun>, SubstrateError>>,
     },
     RunFromSource {
         source: Arc<CheckpointSnapshotSource>,
@@ -668,24 +707,6 @@ impl CheckpointHandle {
             .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?
     }
 
-    /// Request a checkpoint only if the spawned service's thresholds have crossed.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SubstrateError`] if the service has stopped or the checkpoint attempt fails.
-    pub async fn checkpoint_if_threshold_crossed(
-        &self,
-        snapshot: CheckpointSnapshot,
-    ) -> Result<Option<CheckpointRun>, SubstrateError> {
-        let (reply, wait) = oneshot::channel();
-        self.commands
-            .send(CheckpointCommand::RunIfThreshold { snapshot, reply })
-            .await
-            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?;
-        wait.await
-            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?
-    }
-
     /// Stop the background task.
     ///
     /// # Errors
@@ -708,12 +729,28 @@ mod tests {
     use tokio::sync::Notify;
 
     use super::*;
-    use crate::checkpoint::{DEFAULT_PART_MAX_BYTES, InMemoryCheckpointStore};
+    use crate::{
+        checkpoint::{DEFAULT_PART_MAX_BYTES, InMemoryCheckpointStore},
+        writer::WriterGeneration,
+    };
 
     #[derive(Default)]
     struct FakePruner {
         fail: AtomicBool,
         calls: std::sync::Mutex<Vec<Vec<DeleteRecordsOp>>>,
+        pruned: Notify,
+    }
+
+    impl FakePruner {
+        fn call_count(&self) -> usize {
+            self.calls.lock().expect("lock").len()
+        }
+
+        async fn wait_for_prune(&self) {
+            tokio::time::timeout(Duration::from_secs(10), self.pruned.notified())
+                .await
+                .expect("checkpoint must prune the WAL without an external command");
+        }
     }
 
     #[async_trait::async_trait]
@@ -723,6 +760,22 @@ mod tests {
                 return Err(SubstrateError::Unavailable("delete records failed".into()));
             }
             self.calls.lock().expect("lock").push(ops.to_vec());
+            self.pruned.notify_one();
+            Ok(())
+        }
+    }
+
+    /// Pruner that yields inside the checkpoint body so two concurrent attempts
+    /// genuinely interleave unless `attempt_lock` serializes them.
+    #[derive(Default)]
+    struct YieldingPruner;
+
+    #[async_trait::async_trait]
+    impl CheckpointWalPruner for YieldingPruner {
+        async fn delete_records(&self, _ops: &[DeleteRecordsOp]) -> Result<(), SubstrateError> {
+            for _ in 0..8 {
+                tokio::task::yield_now().await;
+            }
             Ok(())
         }
     }
@@ -743,34 +796,106 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thresholds_trigger_checkpoint_and_reset_after_truncate() {
+    async fn committed_frames_past_the_frame_threshold_checkpoint_without_any_command() {
         let kv: Arc<dyn SnapshotKv> = Arc::new(MemKv::default());
         kv.put(b"k".to_vec(), b"v".to_vec()).expect("put");
         let store: Arc<dyn CheckpointStore> = InMemoryCheckpointStore::shared();
         let pruner = Arc::new(FakePruner::default());
         let stats = Arc::new(CheckpointStats::default());
-        let service =
-            CheckpointService::new(config(2, 0), kv, store, pruner.clone(), stats.clone())
-                .expect("service");
-
-        stats.record_committed(1, 10);
-        assert!(
-            service
-                .checkpoint_if_threshold_crossed(snapshot(3))
-                .await
-                .expect("check")
-                .is_none()
+        let service = Arc::new(
+            CheckpointService::new(
+                polling(config(2, 0)),
+                kv,
+                store,
+                pruner.clone(),
+                stats.clone(),
+            )
+            .expect("service"),
         );
-        stats.record_committed(1, 10);
-        let run = service
-            .checkpoint_if_threshold_crossed(snapshot(3))
-            .await
-            .expect("checkpoint")
-            .expect("run");
+        let handle = Arc::clone(&service).spawn_with_source(source(3));
 
-        assert!(run.trigger == CheckpointTrigger::Frames);
+        stats.record_committed(1, 10);
+        assert!(service.threshold_trigger().is_none());
+        stats.record_committed(1, 10);
+        pruner.wait_for_prune().await;
+
         assert!(stats.snapshot() == (0, 0));
-        assert!(pruner.calls.lock().expect("lock").len() == 1);
+        assert!(pruner.call_count() == 1);
+        assert!(service.threshold_trigger().is_none());
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn committed_bytes_past_the_byte_threshold_checkpoint_without_any_command() {
+        let kv: Arc<dyn SnapshotKv> = Arc::new(MemKv::default());
+        kv.put(b"k".to_vec(), b"v".to_vec()).expect("put");
+        let store: Arc<dyn CheckpointStore> = InMemoryCheckpointStore::shared();
+        let pruner = Arc::new(FakePruner::default());
+        let stats = Arc::new(CheckpointStats::default());
+        let service = Arc::new(
+            CheckpointService::new(
+                polling(config(0, 64)),
+                kv,
+                store,
+                pruner.clone(),
+                stats.clone(),
+            )
+            .expect("service"),
+        );
+        let handle = Arc::clone(&service).spawn_with_source(source(3));
+
+        stats.record_committed(1, 63);
+        assert!(service.threshold_trigger().is_none());
+        stats.record_committed(1, 1);
+        pruner.wait_for_prune().await;
+
+        assert!(stats.snapshot() == (0, 0));
+        assert!(pruner.call_count() == 1);
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
+    async fn a_service_without_a_snapshot_source_never_checkpoints_on_its_own() {
+        let kv: Arc<dyn SnapshotKv> = Arc::new(MemKv::default());
+        let store: Arc<dyn CheckpointStore> = InMemoryCheckpointStore::shared();
+        let pruner = Arc::new(FakePruner::default());
+        let stats = Arc::new(CheckpointStats::default());
+        let service = Arc::new(
+            CheckpointService::new(
+                polling(config(1, 0)),
+                kv,
+                store,
+                pruner.clone(),
+                stats.clone(),
+            )
+            .expect("service"),
+        );
+        let handle = Arc::clone(&service).spawn();
+
+        stats.record_committed(4, 40);
+        let run = handle
+            .checkpoint_from_source(source(3), CheckpointTrigger::Manual)
+            .await
+            .expect("commanded checkpoint");
+
+        assert!(run.trigger == CheckpointTrigger::Manual);
+        assert!(pruner.call_count() == 1);
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    #[test]
+    fn a_configuration_with_both_thresholds_zero_is_rejected() {
+        let error = CheckpointConfig::new(
+            "tenant".into(),
+            "topic".into(),
+            0,
+            0,
+            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_CHECKPOINT_RETAIN,
+        )
+        .expect_err("both thresholds zero must be rejected");
+
+        assert!(matches!(error, SubstrateError::Checkpoint(_)));
     }
 
     #[tokio::test]
@@ -784,10 +909,13 @@ mod tests {
             .expect("service");
         stats.record_committed(1, 7);
 
-        let result = service.checkpoint_if_threshold_crossed(snapshot(3)).await;
+        let result = service
+            .checkpoint_from_source(&source(3), CheckpointTrigger::Frames)
+            .await;
 
         assert!(result.is_err());
         assert!(stats.snapshot() == (1, 7));
+        assert!(service.threshold_trigger() == Some(CheckpointTrigger::Frames));
     }
 
     #[tokio::test]
@@ -805,7 +933,7 @@ mod tests {
         let checkpoint_service = service.clone();
         let checkpoint = tokio::spawn(async move {
             checkpoint_service
-                .checkpoint_if_threshold_crossed(snapshot(3))
+                .checkpoint_from_source(&source(3), CheckpointTrigger::Bytes)
                 .await
         });
         pruner.started.notified().await;
@@ -814,11 +942,53 @@ mod tests {
         checkpoint
             .await
             .expect("checkpoint task")
-            .expect("checkpoint")
             .expect("checkpoint run");
 
         assert!(stats.snapshot() == (1, 10));
         assert!(service.threshold_trigger() == Some(CheckpointTrigger::Bytes));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_threshold_checkpoint_and_a_concurrent_manual_one_do_not_corrupt_the_counters() {
+        let kv: Arc<dyn SnapshotKv> = Arc::new(MemKv::default());
+        kv.put(b"k".to_vec(), b"v".to_vec()).expect("put");
+        let store = InMemoryCheckpointStore::shared();
+        let stats = Arc::new(CheckpointStats::default());
+        let service = Arc::new(
+            CheckpointService::new(
+                config(2, 0),
+                kv,
+                store,
+                Arc::new(YieldingPruner),
+                stats.clone(),
+            )
+            .expect("service"),
+        );
+        stats.record_committed(2, 20);
+
+        let threshold_service = Arc::clone(&service);
+        let manual_service = Arc::clone(&service);
+        let (threshold, manual) = tokio::join!(
+            tokio::spawn(async move {
+                threshold_service
+                    .checkpoint_from_source(&source(3), CheckpointTrigger::Frames)
+                    .await
+            }),
+            tokio::spawn(async move {
+                manual_service
+                    .checkpoint_from_source(&source(3), CheckpointTrigger::Manual)
+                    .await
+            }),
+        );
+
+        let threshold = threshold.expect("threshold task").expect("threshold run");
+        let manual = manual.expect("manual task").expect("manual run");
+        assert!(threshold.trigger == CheckpointTrigger::Frames);
+        assert!(manual.trigger == CheckpointTrigger::Manual);
+        // Serialized attempts each discard only what they themselves snapshotted;
+        // overlapping ones would double-subtract and wrap the unsigned counters.
+        assert!(stats.snapshot() == (0, 0));
+        assert!(service.threshold_trigger().is_none());
     }
 
     #[tokio::test]
@@ -957,6 +1127,20 @@ mod tests {
             ),
             JoinStrategy::Gather,
         );
+    }
+
+    /// Shorten the background wake-up so threshold tests finish promptly.
+    fn polling(mut config: CheckpointConfig) -> CheckpointConfig {
+        config.poll_interval = Duration::from_millis(5);
+        config
+    }
+
+    fn source(covered_offset: i64) -> Arc<CheckpointSnapshotSource> {
+        Arc::new(CheckpointSnapshotSource::new(
+            covered_offset,
+            1,
+            WriterGeneration(0),
+        ))
     }
 
     fn config(frames_threshold: u64, bytes_threshold: u64) -> CheckpointConfig {

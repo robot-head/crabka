@@ -82,10 +82,12 @@ pub(crate) struct WriteContext<'a> {
     pub eval_ctx: &'a crate::clock::EvalCtx,
     /// `Some(garbage horizon)` iff this statement may opportunistically prune
     /// dead versions of the rows it writes (the session computes it once per
-    /// statement). Insert-only statements pass `None`: they re-read no
-    /// chains, so there is nothing to prune. The prune deletes ride this
-    /// statement's own commit batch, so they replicate and replay like any
-    /// other write.
+    /// statement). Pruning happens only where a row's chain was re-read under
+    /// its exclusive lock — UPDATE, DELETE, and `INSERT … ON CONFLICT DO
+    /// UPDATE` — so a plain INSERT never prunes whatever this carries. `None`
+    /// disables pruning entirely, for callers with no horizon to offer. The
+    /// prune deletes ride this statement's own commit batch, so they replicate
+    /// and replay like any other write.
     pub prune_horizon: Option<u64>,
     /// Bound on every lock wait this statement performs (`None` waits
     /// indefinitely under the engine-local deadlock detector). Set for
@@ -190,6 +192,7 @@ pub(crate) fn execute_ddl(
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let sharding = sharding.as_ref().map(hash_sharding_from_ast).transpose()?;
+            ensure_hash_shard_key_types_are_supported(&cols, sharding.as_ref())?;
             let (id, mut ops) = crabka_pgcatalog::create_table_with_sharding_ops(
                 kv,
                 name,
@@ -604,6 +607,23 @@ fn validate_view_expr(expr: &Expr) -> Result<(), ExecError> {
             }
             Ok(())
         }
+        // Array constructor / subscript / `= ANY(<array>)`: ordinary expression
+        // nodes (no subquery, no parameter of their own), so the walk simply
+        // recurses into their children.
+        Expr::ArrayLiteral(elements) => {
+            for element in elements {
+                validate_view_expr(element)?;
+            }
+            Ok(())
+        }
+        Expr::Subscript { base, index } => {
+            validate_view_expr(base)?;
+            validate_view_expr(index)
+        }
+        Expr::QuantifiedArray { expr, array, .. } => {
+            validate_view_expr(expr)?;
+            validate_view_expr(array)
+        }
         Expr::Between {
             expr, low, high, ..
         } => {
@@ -902,9 +922,17 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
             | Datum::Text(_)
             | Datum::Float8(_)
             | Datum::Numeric(_)
+            | Datum::Jsonb(_)
+            // An array carries its elements in the row encoding, so an element
+            // of a type that cannot be a *column* default (a date, say) still
+            // persists inside one.
+            | Datum::Array(_)
     ) {
         return Ok(());
     }
+    // The catalog's schema serializer has no encoding for these default values
+    // (`crabka_pgcatalog::serde::write_default`), so they are refused at DDL
+    // time rather than written and lost.
     Err(ExecError::Unsupported(
         "defaults for date/time, interval, and bytea columns are not persisted yet".into(),
     ))
@@ -1169,6 +1197,7 @@ pub(crate) async fn execute_write(
             table,
             columns,
             rows,
+            on_conflict,
             returning,
         } => {
             if rows.is_empty() {
@@ -1181,12 +1210,29 @@ pub(crate) async fn execute_write(
             }
             let t = crabka_pgcatalog::get_table(catalog_kv, table)?;
             let local_indexes = writable_local_indexes(catalog_kv, &t)?;
+            // Arbiter resolution is statement-level: a bad conflict target is an
+            // error even when no row would have conflicted.
+            let arbiters = match on_conflict {
+                Some(on_conflict) => {
+                    resolve_arbiter_indexes(&t, &local_indexes, &on_conflict.target)?
+                }
+                None => Vec::new(),
+            };
             let mut pending_unique_keys = HashSet::new();
+            // Rows already updated by this statement; a second conflict onto one
+            // of them is 21000 (PostgreSQL's "cannot affect row a second time").
+            let mut updated_rowids: HashSet<u64> = HashSet::new();
+            // The command tag's N: inserted rows plus rows updated by DO UPDATE.
+            // Rows skipped by DO NOTHING or by a false DO UPDATE … WHERE do not
+            // count. Without an ON CONFLICT clause this always ends at rows.len().
+            let mut inserted_or_updated: u64 = 0;
             let target_idx = resolve_targets(&t, columns)?;
             // Reserve a contiguous block of rowids atomically. In Durable mode the
             // SequenceManager persists the new next-rowid itself (seq_op is None).
             // In Replicated mode it returns the seq Put for us to fold into this
             // same commit batch (max-merged by the replicated state machine).
+            // Rows that end up skipped or updated leave their reserved rowid
+            // unused, exactly as PostgreSQL burns a sequence value per proposed row.
             let n_rows = rows.len() as u64;
             let (start, seq_op) = seq.alloc(kv, t.id, n_rows)?;
             if let Some(op) = seq_op {
@@ -1202,7 +1248,76 @@ pub(crate) async fn execute_write(
                         "INSERT has the wrong number of expressions for the target columns".into(),
                     ));
                 }
+                // Defaults, coercion and NOT NULL apply to the proposed row even
+                // when ON CONFLICT would go on to skip it — PostgreSQL raises
+                // 23502 on a DO NOTHING row too.
                 let full = build_insert_row(&t, &target_idx, row_exprs, ctx)?;
+                if let Some(on_conflict) = on_conflict {
+                    let plan = arbitrate_insert_row(
+                        write_ctx,
+                        &t,
+                        &arbiters,
+                        on_conflict,
+                        &full,
+                        &InsertConflictState {
+                            pending_unique_keys: &pending_unique_keys,
+                            updated_rowids: &updated_rowids,
+                        },
+                    )
+                    .await?;
+                    match plan {
+                        InsertRowPlan::Insert => {}
+                        // The arbiter key lock stays held to COMMIT/ROLLBACK, as
+                        // it does for every other unique-key decision.
+                        InsertRowPlan::Skip => continue,
+                        // NB: the conflicting row's rowid, not this VALUES row's
+                        // reserved one — that reservation goes unused.
+                        InsertRowPlan::Update {
+                            rowid: holder_rowid,
+                            cur_key_xid,
+                            cur_xmin,
+                            cur_row,
+                        } => {
+                            let crabka_pgparser::ast::OnConflictAction::DoUpdate {
+                                assignments,
+                                filter,
+                            } = &on_conflict.action
+                            else {
+                                unreachable!("only DO UPDATE plans a row update")
+                            };
+                            let updated = apply_insert_conflict_update(
+                                write_ctx,
+                                &t,
+                                &local_indexes,
+                                &ConflictUpdate {
+                                    assignments,
+                                    filter: filter.as_ref(),
+                                    rowid: holder_rowid,
+                                    cur_key_xid,
+                                    cur_xmin,
+                                    cur_row: &cur_row,
+                                    proposed: &full,
+                                },
+                                &mut pending_unique_keys,
+                                &mut ops,
+                            )
+                            .await?;
+                            // A DO UPDATE … WHERE that is not true leaves the row
+                            // neither inserted nor updated, with no RETURNING row.
+                            let Some(next) = updated else { continue };
+                            updated_rowids.insert(holder_rowid);
+                            if returning.is_some() {
+                                returned_rows.push(next);
+                            }
+                            inserted_or_updated += 1;
+                            continue;
+                        }
+                    }
+                }
+                // No conflict (or no ON CONFLICT clause): the plain insert path.
+                // Re-locking the arbiter keys here is idempotent, and this also
+                // enforces 23505 on the unique indexes that do NOT arbitrate —
+                // PostgreSQL's ordering.
                 enforce_unique_local_indexes(
                     write_ctx,
                     &t,
@@ -1224,8 +1339,9 @@ pub(crate) async fn execute_write(
                     ),
                 });
                 ops.extend(local_index_entry_ops(&t, &local_indexes, rowid, &full)?);
+                inserted_or_updated += 1;
             }
-            let tag = format!("INSERT 0 {n_rows}");
+            let tag = format!("INSERT 0 {inserted_or_updated}");
             let result = returning_result(&t, returning.as_deref(), returned_rows, tag, ctx)?;
             Ok((result, ops))
         }
@@ -1286,73 +1402,23 @@ pub(crate) async fn execute_write(
                     let v = crate::eval::eval(expr, &scope, &cur_row, ctx)?;
                     next[*idx] = coerce(v, t.columns[*idx].ty, ctx)?;
                 }
-                enforce_not_null(&t, &next)?;
-                enforce_unique_local_index_updates(
+                apply_locked_row_update(
                     write_ctx,
                     &t,
                     &local_indexes,
-                    rowid,
-                    &cur_row,
-                    &next,
+                    &LockedRowUpdate {
+                        rowid,
+                        cur_key_xid,
+                        cur_xmin,
+                        cur_row: &cur_row,
+                        next: &next,
+                    },
                     &mut pending_unique_keys,
+                    &mut ops,
                 )
                 .await?;
                 if returning.is_some() {
-                    returned_rows.push(next.clone());
-                }
-                if cur_xmin == xid {
-                    // Updating my own uncommitted version: overwrite in place
-                    // (last-write-wins within the txn; no new tuple, xmax stays
-                    // invalid). PostgreSQL uses cmin/cmax here; we have no command
-                    // ids, so in-place replacement is the faithful observable result.
-                    ops.push(crabka_pgkv::WriteOp::Put {
-                        key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, xid),
-                        value: crabka_pgmvcc::version::encode_tuple(
-                            xid,
-                            crabka_pgmvcc::xid::INVALID_XID,
-                            &next,
-                        ),
-                    });
-                } else {
-                    // Supersede a committed version: stamp its xmax, write a new
-                    // tuple. The stamp targets the version's PHYSICAL key
-                    // (`cur_key_xid`) — for a frozen tuple the header xmin
-                    // (`FROZEN_XID`) no longer names its key.
-                    ops.push(crabka_pgkv::WriteOp::Put {
-                        key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, cur_key_xid),
-                        value: crabka_pgmvcc::version::encode_tuple(cur_xmin, xid, &cur_row),
-                    });
-                    ops.push(crabka_pgkv::WriteOp::Put {
-                        key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, xid),
-                        value: crabka_pgmvcc::version::encode_tuple(
-                            xid,
-                            crabka_pgmvcc::xid::INVALID_XID,
-                            &next,
-                        ),
-                    });
-                }
-                ops.extend(local_index_entry_ops(&t, &local_indexes, rowid, &next)?);
-                // Opportunistic per-rowid chain pruning (local engines only):
-                // we hold this row's exclusive lock and just re-read its chain,
-                // so reclaim its dead versions in the same commit batch. The
-                // versions this statement writes (`cur_xmin`, `xid`) are never
-                // pruned, and `next`'s indexed values count as survivors.
-                if let Some(horizon) = write_ctx.prune_horizon {
-                    ops.extend(
-                        prune_rowid_chain_ops(
-                            kv,
-                            &t,
-                            &local_indexes,
-                            &ChainPruneRequest {
-                                rowid,
-                                horizon,
-                                keep_xids: &[cur_key_xid, xid],
-                                new_row: Some(&next),
-                                freeze_below: None,
-                            },
-                        )?
-                        .ops,
-                    );
+                    returned_rows.push(next);
                 }
                 n += 1;
             }
@@ -1850,19 +1916,45 @@ async fn enforce_unique_local_index(
     if !pending_unique_keys.insert(pending_key) {
         return Err(ExecError::UniqueViolation(index.name.clone()));
     }
-    // Serialize check-then-write PER KEY: take this key's exclusive lock (in
-    // the row-lock manager, so it shares the deadlock wait-for graph and is
-    // released with the row locks at COMMIT/ROLLBACK) before probing. Without
-    // it, two concurrent writers of the same key would both pass the probe —
-    // neither sees the other's uncommitted version — and both commit. A waiter
-    // that wakes here after the holder's terminal outcome re-probes against
-    // the then-current committed state: a violation if the holder committed,
-    // success if it rolled back.
+    let holders = lock_and_probe_unique_key(write_ctx, table, index, &values).await?;
+    if holders.iter().any(|holder| holder.rowid != rowid) {
+        return Err(ExecError::UniqueViolation(index.name.clone()));
+    }
+    Ok(())
+}
+
+/// Take `values`' unique-key lock and return the rows that currently hold that
+/// key. The lock-and-probe half of unique enforcement, shared with `ON CONFLICT`
+/// arbitration.
+///
+/// Serializes check-then-write PER KEY: takes this key's exclusive lock (in the
+/// row-lock manager, so it shares the deadlock wait-for graph and is released
+/// with the row locks at COMMIT/ROLLBACK) before probing. Without it, two
+/// concurrent writers of the same key would both pass the probe — neither sees
+/// the other's uncommitted version — and both commit. A waiter that wakes here
+/// after the holder's terminal outcome probes the then-current committed state:
+/// a holder if it committed, none if it rolled back.
+///
+/// The probe reads exactly this key instead of scanning the whole table, under
+/// the scan path's visibility (all-committed local + global snapshots plus our
+/// own xid), and `lookup_local_index_equal` resolves each candidate rowid
+/// through MVCC and re-checks its visible row's values — so dead entries left by
+/// old versions or aborted writers never count.
+///
+/// `acquire_key` is idempotent for a holder xid, so a caller that already locked
+/// this key (arbitration, before the insert path re-enforces uniqueness) can
+/// call again without self-deadlocking.
+async fn lock_and_probe_unique_key(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    values: &[Datum],
+) -> Result<Vec<ScannedRow>, ExecError> {
     write_ctx
         .lockmgr
         .acquire_key(
             crate::lockmgr::LockKey::UniqueKey(crabka_pgkv::key::secondary_index_entry_prefix(
-                table.id, index.id, &values,
+                table.id, index.id, values,
             )),
             crate::lockmgr::LockMode::Exclusive,
             write_ctx.xid,
@@ -1870,12 +1962,6 @@ async fn enforce_unique_local_index(
         )
         .await
         .map_err(lock_acquire_error)?;
-    // Probe the index for exactly this key instead of scanning the whole table.
-    // The probe keeps the scan path's visibility (all-committed local + global
-    // snapshots plus our own xid), and `lookup_local_index_equal` resolves each
-    // candidate rowid through MVCC and re-checks its visible row's values, so
-    // dead entries left by old versions or aborted writers never count. A
-    // visible holder other than the row being written is a violation.
     let mvcc = write_ctx.mvcc_read();
     let current_visibility = all_committed_snapshot();
     let probe = MvccReadContext {
@@ -1885,11 +1971,395 @@ async fn enforce_unique_local_index(
         snapshot: &current_visibility,
         own: mvcc.own,
     };
-    let holders = lookup_local_index_equal(&probe, table, index, &values)?;
-    if holders.iter().any(|holder| holder.rowid != rowid) {
-        return Err(ExecError::UniqueViolation(index.name.clone()));
+    lookup_local_index_equal(&probe, table, index, values)
+}
+
+/// The unique local indexes that arbitrate an `ON CONFLICT` clause, resolved
+/// once per statement (before the row loop) from the clause's conflict target.
+///
+/// - `Columns` matches every unique local index whose column SET equals the
+///   inference set. PostgreSQL's inference is order-insensitive even though an
+///   index's columns are ordered, so `ON CONFLICT (b, a)` arbitrates a
+///   `UNIQUE (a, b)` index. No match is 42P10.
+/// - `Columns` with an index predicate (`ON CONFLICT (c) WHERE …`) is refused
+///   (0A000): partial indexes do not exist here, so nothing could ever match it.
+/// - `OnConstraint` matches by index name, restricted to indexes that back a
+///   constraint — PostgreSQL rejects `ON CONSTRAINT` naming a plain index.
+///   No match is 42704.
+/// - `None` (reachable only with `DO NOTHING`; the parser rejects a bare
+///   `DO UPDATE`) arbitrates every unique local index. An empty result is legal:
+///   a table with no unique index simply never conflicts.
+///
+/// Global unique indexes never reach here — `writable_local_indexes` refuses
+/// them for every write on the table.
+fn resolve_arbiter_indexes(
+    table: &Table,
+    local_indexes: &[crabka_pgcatalog::Index],
+    target: &crabka_pgparser::ast::OnConflictTarget,
+) -> Result<Vec<crabka_pgcatalog::Index>, ExecError> {
+    use crabka_pgparser::ast::OnConflictTarget;
+
+    let unique = || local_indexes.iter().filter(|index| index.unique);
+    match target {
+        OnConflictTarget::None => Ok(unique().cloned().collect()),
+        OnConflictTarget::Columns {
+            index_predicate: Some(_),
+            ..
+        } => Err(ExecError::Unsupported(
+            "ON CONFLICT inference predicates are not supported".into(),
+        )),
+        OnConflictTarget::Columns {
+            columns,
+            index_predicate: None,
+        } => {
+            for column in columns {
+                if table.column_index(column).is_none() {
+                    return Err(ExecError::UndefinedColumn(column.clone()));
+                }
+            }
+            let wanted: BTreeSet<&str> = columns.iter().map(String::as_str).collect();
+            let arbiters: Vec<_> = unique()
+                .filter(|index| {
+                    index
+                        .columns
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<BTreeSet<_>>()
+                        == wanted
+                })
+                .cloned()
+                .collect();
+            if arbiters.is_empty() {
+                return Err(ExecError::OnConflictNoArbiter);
+            }
+            Ok(arbiters)
+        }
+        OnConflictTarget::OnConstraint(name) => local_indexes
+            .iter()
+            .find(|index| index.constraint.is_some() && index.name == *name)
+            .map(|index| vec![index.clone()])
+            .ok_or_else(|| ExecError::UndefinedConstraint {
+                name: name.clone(),
+                table: table.name.clone(),
+            }),
+    }
+}
+
+/// What one `VALUES` row of an `INSERT … ON CONFLICT` should do, decided by
+/// [`arbitrate_insert_row`].
+enum InsertRowPlan {
+    /// No arbiter conflicts: insert the proposed row through the normal path.
+    Insert,
+    /// `DO NOTHING` on a conflict: the row is skipped entirely — no ops, no
+    /// RETURNING row, and it does not count towards the command tag.
+    Skip,
+    /// `DO UPDATE` on a conflict: the stored row to update, already locked and
+    /// re-read under [`eval_plan_qual`].
+    Update {
+        rowid: u64,
+        cur_key_xid: u64,
+        cur_xmin: u64,
+        cur_row: Vec<Datum>,
+    },
+}
+
+/// Statement-level state the `ON CONFLICT` per-row flow reads: keys claimed by
+/// earlier `VALUES` rows of this statement, and rows this statement has already
+/// updated.
+struct InsertConflictState<'a> {
+    pending_unique_keys: &'a HashSet<PendingUniqueKey>,
+    updated_rowids: &'a HashSet<u64>,
+}
+
+/// Decide what an `INSERT … ON CONFLICT` does with one proposed row.
+///
+/// Probes the arbiter indexes in catalog order (`list_table_indexes` sorts by
+/// name, so the choice of conflicting index is deterministic) and stops at the
+/// first conflict. An arbiter whose key holds a NULL cannot conflict — SQL
+/// unique treats NULLs as distinct, matching the enforcement path's own
+/// short-circuit.
+///
+/// A key already claimed by an earlier row of THIS statement lives only in the
+/// pending op batch, invisible to a KV probe, so it is checked separately:
+/// `DO NOTHING` skips the row and `DO UPDATE` raises 21000. That reproduces
+/// PostgreSQL's `INSERT … VALUES (1), (1)` semantics exactly.
+///
+/// Termination: the outer loop restarts only after adding a holder rowid to
+/// `discarded` (its row vanished under the lock, or no longer carries the
+/// arbiter key). Every probed key is held under an exclusive key lock for the
+/// rest of the transaction, so the holder sets can only shrink — no new holder
+/// can appear — and `discarded` grows strictly on each restart, bounded by the
+/// rows already in the table.
+async fn arbitrate_insert_row(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    arbiters: &[crabka_pgcatalog::Index],
+    on_conflict: &crabka_pgparser::ast::OnConflict,
+    proposed: &[Datum],
+    state: &InsertConflictState<'_>,
+) -> Result<InsertRowPlan, ExecError> {
+    use crabka_pgparser::ast::OnConflictAction;
+
+    let do_update = matches!(on_conflict.action, OnConflictAction::DoUpdate { .. });
+    let mut discarded: HashSet<u64> = HashSet::new();
+    'arbitration: loop {
+        for index in arbiters {
+            let values = indexed_values(table, index, proposed)?;
+            if values.iter().any(Datum::is_null) {
+                continue;
+            }
+            if state
+                .pending_unique_keys
+                .contains(&(index.id, values.clone()))
+            {
+                if do_update {
+                    return Err(ExecError::OnConflictAffectsRowTwice);
+                }
+                return Ok(InsertRowPlan::Skip);
+            }
+            let holders = lock_and_probe_unique_key(write_ctx, table, index, &values).await?;
+            // The proposed row has no version of its own yet, so every visible
+            // holder is a genuine conflict.
+            let Some(holder) = holders
+                .into_iter()
+                .find(|holder| !discarded.contains(&holder.rowid))
+            else {
+                continue;
+            };
+            if !do_update {
+                return Ok(InsertRowPlan::Skip);
+            }
+            if state.updated_rowids.contains(&holder.rowid) {
+                return Err(ExecError::OnConflictAffectsRowTwice);
+            }
+            // The probe deliberately reads all-committed visibility, so it finds
+            // rows committed after our snapshot. `eval_plan_qual`'s own 40001
+            // check keys off xmax stamps and would not catch a freshly inserted
+            // row that our snapshot cannot see, so REPEATABLE READ needs this
+            // explicit guard — without it the upsert would silently update a row
+            // it cannot read.
+            if write_ctx.repeatable_read
+                && holder.xmin != write_ctx.xid
+                && !snapshot_can_see(write_ctx.snapshot, holder.xmin)
+            {
+                return Err(ExecError::SerializationFailure);
+            }
+            // Key lock first, then row lock — the established order everywhere
+            // on the write path, so upserts add no new deadlock shapes.
+            write_ctx
+                .lockmgr
+                .acquire(
+                    table.id,
+                    holder.rowid,
+                    crate::lockmgr::LockMode::Exclusive,
+                    write_ctx.xid,
+                    write_ctx.lock_wait_cap,
+                )
+                .await
+                .map_err(lock_acquire_error)?;
+            // READ COMMITTED: the probe reads all-committed visibility, so a
+            // holder committed while we waited on the key lock is real but
+            // invisible to our statement snapshot. `eval_plan_qual`'s own
+            // read-committed refresh only fires on an `xmax` stamp, and a
+            // concurrent INSERT leaves none — so re-read such a holder under a
+            // fresh snapshot. Discarding it instead would fall through to the
+            // insert path and raise 23505, breaking PostgreSQL's guarantee that
+            // ON CONFLICT DO UPDATE yields an atomic insert-or-update outcome
+            // even under high concurrency.
+            let refreshed;
+            let mutation = if !write_ctx.repeatable_read
+                && holder.xmin != write_ctx.xid
+                && !snapshot_can_see(write_ctx.snapshot, holder.xmin)
+            {
+                refreshed = write_ctx.procarray.snapshot();
+                MutationContext {
+                    snapshot: &refreshed,
+                    ..write_ctx.mutation()
+                }
+            } else {
+                write_ctx.mutation()
+            };
+            let Some((cur_key_xid, cur_xmin, cur_row)) =
+                eval_plan_qual(&mutation, table, holder.rowid)?
+            else {
+                // Concurrently deleted: re-arbitrate without it.
+                discarded.insert(holder.rowid);
+                continue 'arbitration;
+            };
+            if indexed_values(table, index, &cur_row)? != values {
+                // The row under the lock no longer carries the arbiter key.
+                discarded.insert(holder.rowid);
+                continue 'arbitration;
+            }
+            return Ok(InsertRowPlan::Update {
+                rowid: holder.rowid,
+                cur_key_xid,
+                cur_xmin,
+                cur_row,
+            });
+        }
+        return Ok(InsertRowPlan::Insert);
+    }
+}
+
+/// One locked row's in-place replacement: the version this write operates on
+/// (`cur_key_xid`/`cur_xmin`/`cur_row`, as returned by [`eval_plan_qual`]) and
+/// the post-image to store.
+struct LockedRowUpdate<'a> {
+    rowid: u64,
+    cur_key_xid: u64,
+    cur_xmin: u64,
+    cur_row: &'a [Datum],
+    next: &'a [Datum],
+}
+
+/// Stage the writes replacing a locked row with `next`: NOT NULL and unique
+/// enforcement, the MVCC version ops, index entries, and opportunistic chain
+/// pruning. Shared by `UPDATE` and `INSERT … ON CONFLICT DO UPDATE`, whose
+/// stored-row mutation is identical once the row is locked and the post-image
+/// computed.
+async fn apply_locked_row_update(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    local_indexes: &[crabka_pgcatalog::Index],
+    update: &LockedRowUpdate<'_>,
+    pending_unique_keys: &mut HashSet<PendingUniqueKey>,
+    ops: &mut Vec<crabka_pgkv::WriteOp>,
+) -> Result<(), ExecError> {
+    let LockedRowUpdate {
+        rowid,
+        cur_key_xid,
+        cur_xmin,
+        cur_row,
+        next,
+    } = *update;
+    enforce_not_null(table, next)?;
+    enforce_unique_local_index_updates(
+        write_ctx,
+        table,
+        local_indexes,
+        rowid,
+        cur_row,
+        next,
+        pending_unique_keys,
+    )
+    .await?;
+    let xid = write_ctx.xid;
+    if cur_xmin == xid {
+        // Updating my own uncommitted version: overwrite in place
+        // (last-write-wins within the txn; no new tuple, xmax stays
+        // invalid). PostgreSQL uses cmin/cmax here; we have no command
+        // ids, so in-place replacement is the faithful observable result.
+        ops.push(crabka_pgkv::WriteOp::Put {
+            key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, xid),
+            value: crabka_pgmvcc::version::encode_tuple(xid, crabka_pgmvcc::xid::INVALID_XID, next),
+        });
+    } else {
+        // Supersede a committed version: stamp its xmax, write a new
+        // tuple. The stamp targets the version's PHYSICAL key
+        // (`cur_key_xid`) — for a frozen tuple the header xmin
+        // (`FROZEN_XID`) no longer names its key.
+        ops.push(crabka_pgkv::WriteOp::Put {
+            key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, cur_key_xid),
+            value: crabka_pgmvcc::version::encode_tuple(cur_xmin, xid, cur_row),
+        });
+        ops.push(crabka_pgkv::WriteOp::Put {
+            key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, xid),
+            value: crabka_pgmvcc::version::encode_tuple(xid, crabka_pgmvcc::xid::INVALID_XID, next),
+        });
+    }
+    ops.extend(local_index_entry_ops(table, local_indexes, rowid, next)?);
+    // Opportunistic per-rowid chain pruning (local engines only):
+    // we hold this row's exclusive lock and just re-read its chain,
+    // so reclaim its dead versions in the same commit batch. The
+    // versions this statement writes (`cur_xmin`, `xid`) are never
+    // pruned, and `next`'s indexed values count as survivors.
+    if let Some(horizon) = write_ctx.prune_horizon {
+        ops.extend(
+            prune_rowid_chain_ops(
+                write_ctx.kv,
+                table,
+                local_indexes,
+                &ChainPruneRequest {
+                    rowid,
+                    horizon,
+                    keep_xids: &[cur_key_xid, xid],
+                    new_row: Some(next),
+                    freeze_below: None,
+                },
+            )?
+            .ops,
+        );
     }
     Ok(())
+}
+
+/// One `ON CONFLICT DO UPDATE` application: the clause's assignments and filter,
+/// the locked stored row they run against, and the proposed row bound as
+/// `excluded`.
+struct ConflictUpdate<'a> {
+    assignments: &'a [(String, Expr)],
+    filter: Option<&'a Expr>,
+    rowid: u64,
+    cur_key_xid: u64,
+    cur_xmin: u64,
+    cur_row: &'a [Datum],
+    proposed: &'a [Datum],
+}
+
+/// Run `DO UPDATE`'s filter and assignments against a locked conflicting row and
+/// stage the resulting update. Returns the post-image (for RETURNING), or `None`
+/// when the `WHERE` is not true — that row is then neither inserted nor updated
+/// and produces no RETURNING row, though its row and key locks stay held, as
+/// PostgreSQL's do.
+///
+/// Both the filter and the assignment right-hand sides evaluate against
+/// [`Scope::insert_conflict`] over the stored row concatenated with the proposed
+/// row, so `excluded.c` reads the proposed value and `t.c` the stored one. Every
+/// column name appears under both qualifiers, which makes a bare reference
+/// ambiguous (42702) — that is PostgreSQL's behavior, where `DO UPDATE SET
+/// v = v + 1` is an error and must be written `t.v` or `excluded.v`.
+async fn apply_insert_conflict_update(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    local_indexes: &[crabka_pgcatalog::Index],
+    update: &ConflictUpdate<'_>,
+    pending_unique_keys: &mut HashSet<PendingUniqueKey>,
+    ops: &mut Vec<crabka_pgkv::WriteOp>,
+) -> Result<Option<Vec<Datum>>, ExecError> {
+    let ctx = write_ctx.eval_ctx;
+    let scope = Scope::insert_conflict(table);
+    let mut bindings = update.cur_row.to_vec();
+    bindings.extend_from_slice(update.proposed);
+    if !row_matches(update.filter, &scope, &bindings, ctx)? {
+        return Ok(None);
+    }
+    let mut next = update.cur_row.to_vec();
+    for (column, expr) in update.assignments {
+        // Assignment targets are unqualified column names of the target table,
+        // resolved exactly as the UPDATE arm resolves its own (42703 on miss).
+        let idx = table
+            .column_index(column)
+            .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
+        let value = crate::eval::eval(expr, &scope, &bindings, ctx)?;
+        next[idx] = coerce(value, table.columns[idx].ty, ctx)?;
+    }
+    apply_locked_row_update(
+        write_ctx,
+        table,
+        local_indexes,
+        &LockedRowUpdate {
+            rowid: update.rowid,
+            cur_key_xid: update.cur_key_xid,
+            cur_xmin: update.cur_xmin,
+            cur_row: update.cur_row,
+            next: &next,
+        },
+        pending_unique_keys,
+        ops,
+    )
+    .await?;
+    Ok(Some(next))
 }
 
 fn all_committed_snapshot() -> crabka_pgmvcc::visibility::Snapshot {
@@ -2265,6 +2735,18 @@ pub(crate) fn execute_timestamp_write(
             ));
         }
         _ => {}
+    }
+    // ON CONFLICT arbitration probes and locks a unique key on the local range;
+    // a sharded table's unique keys live on other ranges, so the conflict can
+    // neither be seen nor locked here. Refused permanently, like RETURNING.
+    if let Statement::Insert {
+        on_conflict: Some(_),
+        ..
+    } = stmt
+    {
+        return Err(ExecError::Unsupported(
+            "ON CONFLICT on sharded timestamp writes is not supported".into(),
+        ));
     }
 
     let table_name = match stmt {
@@ -2884,6 +3366,15 @@ fn coerce(
         (Datum::Timestamp(ts), ColumnType::Timestamp) => Datum::Timestamp(ts),
         (Datum::Timestamptz(ts), ColumnType::Timestamptz) => Datum::Timestamptz(ts),
         (Datum::Interval(iv), ColumnType::Interval) => Datum::Interval(iv),
+        // jsonb / array assignment. A string value runs the target type's input
+        // function (`jsonb_in` / `array_in` — 22P02 on malformed input), the same
+        // literal-assignment shape the `uuid` and `bytea` arms above use; an
+        // array value converts element-wise so `ARRAY[1,2]` (int4[]) stores into
+        // a `bigint[]` column. `cast` implements all four conversions.
+        (value @ (Datum::Text(_) | Datum::Jsonb(_)), ty @ ColumnType::Jsonb)
+        | (value @ (Datum::Text(_) | Datum::Array(_)), ty @ ColumnType::Array(_)) => {
+            crabka_pgtypes::cast::cast(&value, ty, &ctx.time_zone)?
+        }
         (v, target) => {
             // Assignment-context implicit casts — PostgreSQL's pg_cast
             // castcontext 'i'/'a' pairs (crabka subset): notably
@@ -3583,7 +4074,99 @@ fn build_table_expr(
             let inner = crate::query::query_to_relation_with_ctes(read_ctx, subquery)?;
             crate::values::requalify_derived(inner, alias, columns)
         }
+        TableExpr::Function {
+            name,
+            args,
+            alias,
+            column_aliases,
+        } => {
+            let arg = unnest_argument(name, args)?;
+            let column = unnest_column(arg)?;
+            // Not LATERAL: the argument resolves and evaluates in the empty
+            // scope, the same restriction the non-lateral derived-table arm has.
+            let rows = match crate::eval::eval(arg, &Scope::empty(), &[], ctx)? {
+                // A NULL array expands to no rows, as an empty one does.
+                Datum::Null => Vec::new(),
+                Datum::Array(array) => array.elems.into_iter().map(|elem| vec![elem]).collect(),
+                other => return Err(not_an_unnest_array(&other)),
+            };
+            unnest_relation(column, rows, alias.as_deref(), column_aliases)
+        }
     }
+}
+
+/// The single argument of an `unnest(<array>)` FROM item.
+///
+/// `unnest` is the only set-returning function crabka accepts in FROM position:
+/// any other name is 42883, PostgreSQL's failed function lookup. The
+/// multi-argument form (`unnest(a, b)`, which PostgreSQL expands as `ROWS FROM`)
+/// is accepted by the parser and refused here.
+fn unnest_argument<'a>(name: &str, args: &'a [Expr]) -> Result<&'a Expr, ExecError> {
+    if !name.eq_ignore_ascii_case("unnest") {
+        return Err(ExecError::UndefinedFunction(format!(
+            "function {name}(...) does not exist"
+        )));
+    }
+    let [arg] = args else {
+        return Err(ExecError::Unsupported(
+            "unnest in FROM takes exactly one array argument".into(),
+        ));
+    };
+    Ok(arg)
+}
+
+/// The lone column an `unnest(<array>)` FROM item produces, named `unnest` like
+/// PostgreSQL's default. The argument's static type decides the column type; a
+/// non-array argument resolves to no `unnest` function (42883).
+fn unnest_column(arg: &Expr) -> Result<ColumnBinding, ExecError> {
+    let ty = crate::eval::infer_type(arg, &Scope::empty())?;
+    let elem = ty.array_element().ok_or_else(|| {
+        ExecError::UndefinedFunction(format!("function unnest({}) does not exist", ty.name()))
+    })?;
+    Ok(ColumnBinding {
+        qualifier: None,
+        name: "unnest".to_string(),
+        ty: elem.column_type(),
+    })
+}
+
+/// Wrap an `unnest` expansion as a relation. Absent an explicit alias the item
+/// is qualified by the function name (`unnest.unnest`), and `AS u(x)` renames
+/// the column exactly as it does for a derived table.
+///
+/// A bare `AS u` renames the column to `u` as well, not just the qualifier: a
+/// function in FROM returning a single scalar takes its column name from the
+/// table alias in PostgreSQL, so `SELECT u FROM unnest(...) AS u` resolves.
+fn unnest_relation(
+    column: ColumnBinding,
+    rows: Vec<Vec<Datum>>,
+    alias: Option<&str>,
+    column_aliases: &Option<Vec<String>>,
+) -> Result<Relation, ExecError> {
+    let relation = Relation {
+        scope: Scope {
+            columns: vec![column],
+        },
+        rows,
+    };
+    let inferred = match (alias, column_aliases) {
+        (Some(alias), None) => Some(vec![alias.to_string()]),
+        _ => None,
+    };
+    crate::values::requalify_derived(
+        relation,
+        alias.unwrap_or("unnest"),
+        column_aliases
+            .as_ref()
+            .map_or(&inferred, |_| column_aliases),
+    )
+}
+
+fn not_an_unnest_array(value: &Datum) -> ExecError {
+    ExecError::TypeMismatch(format!(
+        "unnest argument is of type {} but must be an array",
+        value.column_type().map_or("unknown", ColumnType::name)
+    ))
 }
 
 fn try_distributed_inner_equi_join(
@@ -4285,6 +4868,52 @@ pub(crate) fn table_uses_global_visibility(table: &Table) -> bool {
     table.sharded
 }
 
+/// Refuse `SHARDED BY HASH (col)` on a column whose values the shard-key hasher
+/// cannot turn into bytes, at CREATE TABLE rather than at every INSERT.
+///
+/// A missing hash column is *not* reported here — the catalog's own validation
+/// raises the undefined-column error for that.
+fn ensure_hash_shard_key_types_are_supported(
+    columns: &[Column],
+    sharding: Option<&crabka_pgcatalog::ShardingStrategy>,
+) -> Result<(), ExecError> {
+    let Some(crabka_pgcatalog::ShardingStrategy::Hash(hash)) = sharding else {
+        return Ok(());
+    };
+    for column in hash
+        .columns
+        .iter()
+        .filter_map(|name| columns.iter().find(|column| column.name == *name))
+    {
+        if !hash_shard_key_type_is_supported(column.ty) {
+            return Err(ExecError::Unsupported(format!(
+                "hash shard key column \"{}\" of type {} is not supported",
+                column.name,
+                column.ty.name()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// The column types [`hash_bucket_for_row`] can hash: those stored as an
+/// `Int4`, `Int8`, `Text`, or `Bytea` datum. Everything else — `boolean`,
+/// `double precision`, `numeric`, the date/time types, `jsonb`, and arrays —
+/// would fail on the write path, so a table is never created with such a key.
+fn hash_shard_key_type_is_supported(ty: ColumnType) -> bool {
+    matches!(
+        ty,
+        ColumnType::Int4
+            | ColumnType::Int8
+            | ColumnType::Text
+            | ColumnType::Varchar(_)
+            | ColumnType::Char(_)
+            | ColumnType::Bytea
+            | ColumnType::Uuid
+            | ColumnType::Regclass
+    )
+}
+
 fn hash_sharding_from_ast(
     sharding: &crabka_pgparser::ast::ShardingSpec,
 ) -> Result<crabka_pgcatalog::ShardingStrategy, ExecError> {
@@ -4505,6 +5134,15 @@ fn build_table_expr_schema_with_ctes(
             };
             crate::values::requalify_derived(inner, alias, columns)
         }
+        TableExpr::Function {
+            name,
+            args,
+            alias,
+            column_aliases,
+        } => {
+            let column = unnest_column(unnest_argument(name, args)?)?;
+            unnest_relation(column, Vec::new(), alias.as_deref(), column_aliases)
+        }
     }
 }
 
@@ -4531,12 +5169,19 @@ const INFORMATION_SCHEMA_NAMESPACE_OID: i32 = 13_370;
 const PUBLIC_NAMESPACE_OID: i32 = 2200;
 const CURRENT_DATABASE: &str = "postgres";
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BuiltinTypeRow {
     oid: i32,
     name: &'static str,
     len: i16,
     category: &'static str,
+    /// `pg_type.typelem`: the element type of an array type, 0 for a scalar.
+    elem: i32,
+    /// `pg_type.typarray`: the array type over a scalar, 0 for an array type
+    /// and for the scalars crabka has no array type for (`varchar`, `char(n)`,
+    /// `regclass` — [`crabka_pgtypes::ElemType::from_column_type`] refuses
+    /// those, so pointing at an absent row would be worse than reporting none).
+    array: i32,
 }
 
 fn virtual_catalog_relation(
@@ -4626,7 +5271,15 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             // `typtype` is `"char"` (OID 18) in PostgreSQL; Text is the
             // closest synthesized type, same trade-off as `typcategory`.
             ("typtype", Text),
+            // `typdelim` is `"char"` in PostgreSQL too. It is the element
+            // separator of the array text literal — ',' for every type crabka
+            // exposes — and drivers read it when parsing array output.
+            ("typdelim", Text),
+            // `typelem`/`typarray` are the two halves of the scalar ↔ array
+            // link a driver walks to recognize an array OID and to find the
+            // array type of a scalar.
             ("typelem", Int4),
+            ("typarray", Int4),
             ("typbasetype", Int4),
         ]),
         // PostgreSQL 18 column set, in catalog order. The oid-valued columns
@@ -4840,7 +5493,13 @@ fn information_schema_columns_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>
                 text(&table.name),
                 text(&column.name),
                 int(usize_i32(idx + 1)?),
-                text(column.ty.name()),
+                // PostgreSQL reports the literal string `ARRAY` here for every
+                // array column (the element type lives in `udt_name`, which
+                // this synthesized view does not expose).
+                text(match column.ty {
+                    ColumnType::Array(_) => "ARRAY",
+                    ty => ty.name(),
+                }),
                 text(if column.not_null { "NO" } else { "YES" }),
                 column_default_datum(column),
             ]);
@@ -4879,6 +5538,16 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
             let _ = write!(out, "'{}'::{}", escape_sql_string(value), ty.name());
             out
         }
+        // A jsonb/array default renders like PostgreSQL's `pg_get_expr` output:
+        // the value's own text, quoted and cast to the column type.
+        Datum::Jsonb(_) | Datum::Array(_) => match zone_independent_text(value) {
+            Some(literal) => {
+                let mut out = String::new();
+                let _ = write!(out, "'{}'::{}", escape_sql_string(&literal), ty.name());
+                out
+            }
+            None => "<unsupported>".to_string(),
+        },
         Datum::Date(_)
         | Datum::Time(_)
         | Datum::Timestamp(_)
@@ -4886,6 +5555,28 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         | Datum::Interval(_)
         | Datum::Bytea(_) => "<unsupported>".to_string(),
     }
+}
+
+/// The output text of a value whose rendering does not depend on the session
+/// time zone, for the catalog's default-expression rendering (which has no
+/// session context). `None` for a `timestamptz` array element — the one case a
+/// jsonb/array value can be zone-dependent.
+fn zone_independent_text(value: &Datum) -> Option<String> {
+    fn zone_dependent(value: &Datum) -> bool {
+        match value {
+            Datum::Timestamptz(_) => true,
+            Datum::Array(array) => array.elems.iter().any(zone_dependent),
+            _ => false,
+        }
+    }
+    if zone_dependent(value) {
+        return None;
+    }
+    String::from_utf8(crabka_pgtypes::encoding::encode_text(
+        value,
+        &jiff::tz::TimeZone::UTC,
+    ))
+    .ok()
 }
 
 fn escape_sql_string(value: &str) -> String {
@@ -4922,11 +5613,14 @@ fn pg_type_rows() -> Vec<Vec<Datum>> {
                 text(ty.category),
                 int(PG_CATALOG_NAMESPACE_OID),
                 int(0),
-                // Every exposed built-in is a base scalar: typtype 'b', no
-                // array element type, and no domain base type — matching
-                // PostgreSQL 18's pg_type for these OIDs.
+                // Every exposed built-in — scalar or array — is a base type
+                // ('b') with no domain base type, matching PostgreSQL 18's
+                // pg_type for these OIDs. Only `box` uses a typdelim other
+                // than ',', and crabka has no geometric types.
                 text("b"),
-                int(0),
+                text(","),
+                int(ty.elem),
+                int(ty.array),
                 int(0),
             ]
         })
@@ -4953,7 +5647,11 @@ fn pg_index_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 int(catalog_index_oid(index.id)?),
                 int(oid_i32(index.table_id)?),
                 Datum::Bool(index.unique),
-                Datum::Bool(false),
+                // The catalog knows which index backs the primary key; ORMs
+                // introspecting for upserts key off exactly this column.
+                Datum::Bool(
+                    index.constraint == Some(crabka_pgcatalog::IndexConstraint::PrimaryKey),
+                ),
                 text(&indkey),
             ])
         })
@@ -5078,105 +5776,209 @@ fn virtual_relation_oid(name: &str) -> i32 {
     }
 }
 
-fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
+/// The scalar built-in types crabka exposes. `array` is 0 for the three whose
+/// array type crabka does not implement; every other one gets a generated
+/// array row from [`builtin_type_rows`].
+fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
     &[
         BuiltinTypeRow {
             oid: 2205,
             name: "regclass",
             len: 4,
             category: "N",
+            elem: 0,
+            array: 0,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::BOOL as i32,
             name: "bool",
             len: 1,
             category: "B",
+            elem: 0,
+            array: crabka_pgtypes::oids::BOOLARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::BYTEA as i32,
             name: "bytea",
             len: -1,
             category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::BYTEAARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::INT8 as i32,
             name: "int8",
             len: 8,
             category: "N",
+            elem: 0,
+            array: crabka_pgtypes::oids::INT8ARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::INT4 as i32,
             name: "int4",
             len: 4,
             category: "N",
+            elem: 0,
+            array: crabka_pgtypes::oids::INT4ARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::TEXT as i32,
             name: "text",
             len: -1,
             category: "S",
+            elem: 0,
+            array: crabka_pgtypes::oids::TEXTARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::BPCHAR as i32,
             name: "bpchar",
             len: -1,
             category: "S",
+            elem: 0,
+            array: 0,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::VARCHAR as i32,
             name: "varchar",
             len: -1,
             category: "S",
+            elem: 0,
+            array: 0,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::FLOAT8 as i32,
             name: "float8",
             len: 8,
             category: "N",
+            elem: 0,
+            array: crabka_pgtypes::oids::FLOAT8ARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::NUMERIC as i32,
             name: "numeric",
             len: -1,
             category: "N",
+            elem: 0,
+            array: crabka_pgtypes::oids::NUMERICARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::DATE as i32,
             name: "date",
             len: 4,
             category: "D",
+            elem: 0,
+            array: crabka_pgtypes::oids::DATEARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::TIME as i32,
             name: "time",
             len: 8,
             category: "D",
+            elem: 0,
+            array: crabka_pgtypes::oids::TIMEARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::TIMESTAMP as i32,
             name: "timestamp",
             len: 8,
             category: "D",
+            elem: 0,
+            array: crabka_pgtypes::oids::TIMESTAMPARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::TIMESTAMPTZ as i32,
             name: "timestamptz",
             len: 8,
             category: "D",
+            elem: 0,
+            array: crabka_pgtypes::oids::TIMESTAMPTZARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::INTERVAL as i32,
             name: "interval",
             len: 16,
             category: "T",
+            elem: 0,
+            array: crabka_pgtypes::oids::INTERVALARRAY as i32,
         },
         BuiltinTypeRow {
             oid: crabka_pgtypes::oids::UUID as i32,
             name: "uuid",
             len: 16,
             category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::UUIDARRAY as i32,
+        },
+        // `json` is an input alias for `jsonb` (crabka never reports OID 114),
+        // but PostgreSQL's own row is what a driver's typeinfo query finds when
+        // an application asks about the `json` type by name or oid.
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::JSON as i32,
+            name: "json",
+            len: -1,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::JSONARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::JSONB as i32,
+            name: "jsonb",
+            len: -1,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::JSONBARRAY as i32,
         },
     ]
+}
+
+/// The `pg_type.typname` of an element type's array type — PostgreSQL's leading
+/// underscore over the element's own `typname`.
+fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
+    use crabka_pgtypes::ElemType;
+    match elem {
+        ElemType::Bool => "_bool",
+        ElemType::Int4 => "_int4",
+        ElemType::Int8 => "_int8",
+        ElemType::Text => "_text",
+        ElemType::Float8 => "_float8",
+        ElemType::Numeric => "_numeric",
+        ElemType::Date => "_date",
+        ElemType::Time => "_time",
+        ElemType::Timestamp => "_timestamp",
+        ElemType::Timestamptz => "_timestamptz",
+        ElemType::Interval => "_interval",
+        ElemType::Bytea => "_bytea",
+        ElemType::Uuid => "_uuid",
+        ElemType::Jsonb => "_jsonb",
+    }
+}
+
+/// The scalar rows plus one array row per supported element type (and `_json`,
+/// the array of the `json` input alias). Array types are base types like their
+/// elements — `typtype` 'b' — in category 'A', variable length, and carry the
+/// element's oid in `typelem`.
+fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
+    static ROWS: std::sync::LazyLock<Vec<BuiltinTypeRow>> = std::sync::LazyLock::new(|| {
+        let mut rows = scalar_type_rows().to_vec();
+        rows.push(BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::JSONARRAY as i32,
+            name: "_json",
+            len: -1,
+            category: "A",
+            elem: crabka_pgtypes::oids::JSON as i32,
+            array: 0,
+        });
+        rows.extend(crabka_pgtypes::ElemType::ALL.map(|elem| BuiltinTypeRow {
+            oid: i32::try_from(elem.array_oid()).expect("array oid fits in int4"),
+            name: array_typname(elem),
+            len: -1,
+            category: "A",
+            elem: i32::try_from(elem.oid()).expect("element oid fits in int4"),
+            array: 0,
+        }));
+        rows
+    });
+    &ROWS
 }
 
 pub(crate) fn format_type_name(oid: i32) -> Option<&'static str> {
@@ -5730,11 +6532,17 @@ pub(crate) fn column_type_from_oid(oid: u32) -> Result<ColumnType, ExecError> {
         crabka_pgtypes::oids::TIMESTAMPTZ => ColumnType::Timestamptz,
         crabka_pgtypes::oids::INTERVAL => ColumnType::Interval,
         crabka_pgtypes::oids::UUID => ColumnType::Uuid,
-        _ => {
-            return Err(ExecError::Unsupported(format!(
-                "unknown query field type oid {oid}"
-            )));
-        }
+        // `json` is an input alias for `jsonb`; both name the same column type.
+        crabka_pgtypes::oids::JSON | crabka_pgtypes::oids::JSONB => ColumnType::Jsonb,
+        // Every array oid crabka has an element type for, `_json` included.
+        _ => match crabka_pgtypes::ElemType::from_array_oid(oid) {
+            Some(elem) => ColumnType::Array(elem),
+            None => {
+                return Err(ExecError::Unsupported(format!(
+                    "unknown query field type oid {oid}"
+                )));
+            }
+        },
     })
 }
 
@@ -8315,5 +9123,585 @@ mod tests {
         let r = &run_s(&mut s, "SELECT id FROM t").await[0];
         assert!(rows_of(r).len() == 1);
         assert!(text(&rows_of(r)[0][0]) == Some("1".into()));
+    }
+
+    #[test]
+    fn column_type_from_oid_maps_json_jsonb_and_every_array_oid() {
+        use assert2::assert;
+        use crabka_pgtypes::{ColumnType, ElemType, oids};
+
+        for (oid, expected) in [
+            // `json` is an input alias for `jsonb`.
+            (oids::JSON, ColumnType::Jsonb),
+            (oids::JSONB, ColumnType::Jsonb),
+            (oids::JSONARRAY, ColumnType::Array(ElemType::Jsonb)),
+        ] {
+            assert!(super::column_type_from_oid(oid).expect("known oid") == expected);
+        }
+        for elem in ElemType::ALL {
+            assert!(
+                super::column_type_from_oid(elem.array_oid()).expect("array oid")
+                    == ColumnType::Array(elem)
+            );
+        }
+        assert!(super::column_type_from_oid(999_999).is_err());
+    }
+
+    #[test]
+    fn pg_type_exposes_the_scalar_array_link_for_every_row() {
+        use assert2::assert;
+        use crabka_pgtypes::ElemType;
+
+        let rows = super::builtin_type_rows();
+        for scalar in rows.iter().filter(|row| row.array != 0) {
+            let array = rows
+                .iter()
+                .find(|row| row.oid == scalar.array)
+                .unwrap_or_else(|| panic!("{} has no array row", scalar.name));
+            assert!(
+                (array.elem, array.category, array.len, array.array) == (scalar.oid, "A", -1, 0)
+            );
+        }
+        for array in rows.iter().filter(|row| row.category == "A") {
+            assert!(
+                rows.iter().any(|row| row.oid == array.elem),
+                "{} has a dangling typelem",
+                array.name
+            );
+        }
+        // Every element type crabka can build an array of has a pg_type row.
+        for elem in ElemType::ALL {
+            let oid = i32::try_from(elem.array_oid()).expect("array oid fits in int4");
+            assert!(rows.iter().any(|row| row.oid == oid), "{elem:?}");
+        }
+    }
+
+    #[test]
+    fn pg_type_rows_match_the_declared_column_list() {
+        use assert2::assert;
+
+        let columns = super::virtual_catalog_columns("pg_type");
+        let names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
+        assert!(
+            names
+                == [
+                    "oid",
+                    "typname",
+                    "typlen",
+                    "typcategory",
+                    "typnamespace",
+                    "typrelid",
+                    "typtype",
+                    "typdelim",
+                    "typelem",
+                    "typarray",
+                    "typbasetype",
+                ]
+        );
+        let rows = super::pg_type_rows();
+        for row in &rows {
+            assert!(row.len() == columns.len());
+        }
+        // The `_int4` row, in full: PostgreSQL's own values for OID 1007.
+        let int4_array = rows
+            .iter()
+            .find(|row| row[0] == super::int(1007))
+            .expect("_int4 row");
+        assert!(
+            *int4_array
+                == vec![
+                    super::int(1007),
+                    super::text("_int4"),
+                    super::int(-1),
+                    super::text("A"),
+                    super::int(super::PG_CATALOG_NAMESPACE_OID),
+                    super::int(0),
+                    super::text("b"),
+                    super::text(","),
+                    super::int(23),
+                    super::int(0),
+                    super::int(0),
+                ]
+        );
+    }
+
+    #[test]
+    fn coerce_assigns_literals_and_arrays_to_jsonb_and_array_columns() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType};
+
+        let ctx = crate::clock::EvalCtx::test_default();
+        let jsonb = super::coerce(
+            Datum::Text("{\"b\":2,\"a\":1}".into()),
+            ColumnType::Jsonb,
+            &ctx,
+        )
+        .expect("jsonb literal");
+        assert!(
+            jsonb
+                == Datum::Jsonb(
+                    crabka_pgtypes::jsonb::parse("{\"a\":1,\"b\":2}").expect("canonical parse")
+                )
+        );
+        let array = super::coerce(
+            Datum::Text("{1,2}".into()),
+            ColumnType::Array(ElemType::Int4),
+            &ctx,
+        )
+        .expect("array literal");
+        assert!(
+            array
+                == Datum::Array(ArrayValue::new(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Int4(2)]
+                ))
+        );
+        // An int4[] value widens element-wise into a bigint[] column.
+        let widened = super::coerce(
+            Datum::Array(ArrayValue::new(ElemType::Int4, vec![Datum::Int4(7)])),
+            ColumnType::Array(ElemType::Int8),
+            &ctx,
+        )
+        .expect("element-wise widening");
+        assert!(widened == Datum::Array(ArrayValue::new(ElemType::Int8, vec![Datum::Int8(7)])));
+        // Malformed input is the type's input-function error, not 42804.
+        assert!(super::coerce(Datum::Text("{".into()), ColumnType::Jsonb, &ctx).is_err());
+    }
+
+    /// The DDL gate covers every column type: exactly the types whose datums
+    /// [`super::hash_bucket_for_row`] can hash are accepted as a hash shard key.
+    #[test]
+    fn only_hashable_column_types_are_accepted_as_a_hash_shard_key() {
+        use assert2::assert;
+        use crabka_pgcatalog::Column;
+        use crabka_pgtypes::{ColumnType, ElemType};
+
+        let sharding = |column: &str| {
+            crabka_pgcatalog::ShardingStrategy::Hash(crabka_pgcatalog::HashSharding {
+                columns: vec![column.to_string()],
+                buckets: 4,
+                co_location_group: None,
+            })
+        };
+        for (ty, supported) in [
+            (ColumnType::Int4, true),
+            (ColumnType::Int8, true),
+            (ColumnType::Text, true),
+            (ColumnType::Varchar(Some(8)), true),
+            (ColumnType::Char(Some(8)), true),
+            (ColumnType::Bytea, true),
+            (ColumnType::Uuid, true),
+            (ColumnType::Regclass, true),
+            (ColumnType::Bool, false),
+            (ColumnType::Float8, false),
+            (ColumnType::Numeric(None), false),
+            (ColumnType::Date, false),
+            (ColumnType::Time, false),
+            (ColumnType::Timestamp, false),
+            (ColumnType::Timestamptz, false),
+            (ColumnType::Interval, false),
+            (ColumnType::Jsonb, false),
+            (ColumnType::Array(ElemType::Int4), false),
+        ] {
+            let columns = vec![Column::new("k", ty)];
+            let result =
+                super::ensure_hash_shard_key_types_are_supported(&columns, Some(&sharding("k")));
+            assert!(result.is_ok() == supported, "{ty:?}");
+            if !supported {
+                let error = result.expect_err("unhashable key").into_pg();
+                assert!(error.code == "0A000");
+                assert!(error.message.contains("\"k\""), "{}", error.message);
+                assert!(error.message.contains(ty.name()), "{}", error.message);
+            }
+        }
+        // A hash column that does not exist is left to the catalog's own
+        // undefined-column error, and an unsharded table has nothing to check.
+        let columns = vec![Column::new("k", ColumnType::Jsonb)];
+        assert!(
+            super::ensure_hash_shard_key_types_are_supported(&columns, Some(&sharding("missing")))
+                .is_ok()
+        );
+        assert!(super::ensure_hash_shard_key_types_are_supported(&columns, None).is_ok());
+    }
+
+    /// The write-path backstop still refuses an unhashable shard key — reachable
+    /// for a table whose sharding was attached outside CREATE TABLE.
+    #[test]
+    fn hashing_a_row_refuses_an_unhashable_shard_key() {
+        use assert2::assert;
+        use crabka_pgcatalog::Column;
+        use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType};
+
+        let table = crabka_pgcatalog::Table {
+            id: 1,
+            name: "t".into(),
+            columns: vec![Column::new("k", ColumnType::Jsonb)],
+            sharded: true,
+            sharding: Some(crabka_pgcatalog::ShardingStrategy::Hash(
+                crabka_pgcatalog::HashSharding {
+                    columns: vec!["k".into()],
+                    buckets: 4,
+                    co_location_group: None,
+                },
+            )),
+            foreign: None,
+        };
+        for value in [
+            Datum::Jsonb(crabka_pgtypes::jsonb::parse("{\"a\":1}").expect("jsonb")),
+            Datum::Array(ArrayValue::new(ElemType::Int4, vec![Datum::Int4(1)])),
+        ] {
+            let error = super::hash_bucket_for_row(&table, &[value])
+                .expect_err("unhashable")
+                .into_pg();
+            assert!(error.code == "0A000");
+            assert!(error.message == "hash shard key type is not supported");
+        }
+        // A hashable value in the same slot still routes.
+        assert!(
+            super::hash_bucket_for_row(&table, &[Datum::Int4(1)])
+                .expect("hashable")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn jsonb_and_array_defaults_render_as_quoted_literals() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType};
+
+        let doc = Datum::Jsonb(crabka_pgtypes::jsonb::parse("{\"a\":1}").expect("parse"));
+        assert!(super::format_default_value(&doc, ColumnType::Jsonb) == "'{\"a\": 1}'::jsonb");
+        let array = Datum::Array(ArrayValue::new(
+            ElemType::Int4,
+            vec![Datum::Int4(1), Datum::Int4(2)],
+        ));
+        assert!(
+            super::format_default_value(&array, ColumnType::Array(ElemType::Int4))
+                == "'{1,2}'::integer[]"
+        );
+    }
+
+    #[test]
+    fn unnest_is_the_only_from_function_and_takes_one_array() {
+        use assert2::assert;
+        use crabka_pgparser::ast::Expr;
+        use crabka_pgtypes::{ColumnType, Datum, ElemType};
+
+        let array_arg = Expr::Const {
+            value: Datum::Null,
+            ty: ColumnType::Array(ElemType::Text),
+        };
+        assert!(matches!(
+            super::unnest_argument("generate_series", std::slice::from_ref(&array_arg)),
+            Err(ExecError::UndefinedFunction(_))
+        ));
+        assert!(matches!(
+            super::unnest_argument("unnest", &[array_arg.clone(), array_arg.clone()]),
+            Err(ExecError::Unsupported(_))
+        ));
+        // The lexer lowercases function names; accept either spelling anyway.
+        let arg = super::unnest_argument("UNNEST", std::slice::from_ref(&array_arg))
+            .expect("one array argument");
+        assert!(
+            super::unnest_column(arg).expect("element column")
+                == ColumnBinding {
+                    qualifier: None,
+                    name: "unnest".to_string(),
+                    ty: ColumnType::Text,
+                }
+        );
+        // A non-array argument resolves to no `unnest` function at all.
+        let scalar = Expr::Const {
+            value: Datum::Int4(1),
+            ty: ColumnType::Int4,
+        };
+        assert!(matches!(
+            super::unnest_column(&scalar),
+            Err(ExecError::UndefinedFunction(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn unnest_in_from_expands_an_array_argument() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        let r = &run_s(&mut s, "SELECT * FROM unnest('{3,1,2}'::int[])").await[0];
+        assert!(fields_of(r)[0].name == "unnest");
+        assert!(fields_of(r)[0].type_oid == crabka_pgtypes::oids::INT4);
+        let values: Vec<Option<String>> = rows_of(r).iter().map(|row| text(&row[0])).collect();
+        assert!(values == vec![Some("3".into()), Some("1".into()), Some("2".into())]);
+
+        // Alias and column alias behave as they do for a derived table.
+        let r = &run_s(
+            &mut s,
+            "SELECT u.x FROM unnest('{a,b}'::text[]) AS u(x) ORDER BY u.x",
+        )
+        .await[0];
+        assert!(fields_of(r)[0].name == "x");
+        let values: Vec<Option<String>> = rows_of(r).iter().map(|row| text(&row[0])).collect();
+        assert!(values == vec![Some("a".into()), Some("b".into())]);
+
+        // A NULL array and an empty array both expand to zero rows.
+        for sql in [
+            "SELECT * FROM unnest(NULL::int[])",
+            "SELECT * FROM unnest('{}'::int[])",
+        ] {
+            assert!(rows_of(&run_s(&mut s, sql).await[0]).is_empty(), "{sql}");
+        }
+
+        // Any other function in FROM position is 42883.
+        let error = s
+            .simple_query("SELECT * FROM generate_series(1, 3)")
+            .await
+            .expect_err("no such table function");
+        assert!(error.code == "42883", "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn jsonb_and_array_columns_round_trip_through_ddl() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(
+            &mut s,
+            "CREATE TABLE t (id int4 PRIMARY KEY, j jsonb, a int[])",
+        )
+        .await;
+        run_s(
+            &mut s,
+            "INSERT INTO t (id, j, a) VALUES (1, '{\"b\":2,\"a\":1}', '{3,4}'), (2, NULL, '{}')",
+        )
+        .await;
+        let r = &run_s(&mut s, "SELECT j, a FROM t ORDER BY id").await[0];
+        assert!(fields_of(r)[0].type_oid == crabka_pgtypes::oids::JSONB);
+        assert!(fields_of(r)[1].type_oid == crabka_pgtypes::oids::INT4ARRAY);
+        let values: Vec<Vec<Option<String>>> = rows_of(r)
+            .iter()
+            .map(|row| row.iter().map(text).collect())
+            .collect();
+        assert!(
+            values
+                == vec![
+                    vec![Some("{\"a\": 1, \"b\": 2}".into()), Some("{3,4}".into())],
+                    vec![None, Some("{}".into())],
+                ]
+        );
+
+        // jsonb/array defaults persist and apply; a default of a type the
+        // catalog still cannot encode is refused at DDL time instead.
+        run_s(
+            &mut s,
+            "CREATE TABLE d (id int4, j jsonb DEFAULT '{}', a int[] DEFAULT '{1}')",
+        )
+        .await;
+        run_s(&mut s, "INSERT INTO d (id) VALUES (1)").await;
+        let r = &run_s(&mut s, "SELECT j, a FROM d").await[0];
+        assert!(
+            rows_of(r)[0].iter().map(text).collect::<Vec<_>>()
+                == vec![Some("{}".into()), Some("{1}".into())]
+        );
+        let error = s
+            .simple_query("CREATE TABLE e (d date DEFAULT '2020-01-01'::date)")
+            .await
+            .expect_err("an unencodable default is refused");
+        assert!(error.code == "0A000", "{error:?}");
+    }
+
+    #[tokio::test]
+    async fn pg_index_marks_the_primary_key_index() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE t (id int4 PRIMARY KEY, v text)").await;
+        run_s(&mut s, "CREATE UNIQUE INDEX t_v_key ON t (v)").await;
+        let r = &run_s(
+            &mut s,
+            "SELECT indisunique, indisprimary FROM pg_index ORDER BY indexrelid",
+        )
+        .await[0];
+        let values: Vec<Vec<Option<String>>> = rows_of(r)
+            .iter()
+            .map(|row| row.iter().map(text).collect())
+            .collect();
+        assert!(
+            values
+                == vec![
+                    vec![Some("t".into()), Some("t".into())],
+                    vec![Some("t".into()), Some("f".into())],
+                ]
+        );
+    }
+
+    /// Build a table and its indexes for the arbiter-resolution tests.
+    /// `indexes` entries are `(name, columns, unique, is_constraint)`.
+    fn arbiter_fixture(
+        columns: &[&str],
+        indexes: &[(&str, &[&str], bool, bool)],
+    ) -> (crabka_pgcatalog::Table, Vec<crabka_pgcatalog::Index>) {
+        let table = crabka_pgcatalog::Table {
+            id: 1,
+            name: "t".into(),
+            columns: columns
+                .iter()
+                .map(|name| crabka_pgcatalog::Column::new(*name, crabka_pgtypes::ColumnType::Int4))
+                .collect(),
+            sharded: false,
+            sharding: None,
+            foreign: None,
+        };
+        let indexes = indexes
+            .iter()
+            .enumerate()
+            .map(
+                |(i, (name, cols, unique, constraint))| crabka_pgcatalog::Index {
+                    id: i as u32 + 1,
+                    name: (*name).to_string(),
+                    table: "t".into(),
+                    table_id: 1,
+                    columns: cols.iter().map(|c| (*c).to_string()).collect(),
+                    unique: *unique,
+                    placement: crabka_pgcatalog::IndexPlacement::Local,
+                    constraint: constraint.then_some(crabka_pgcatalog::IndexConstraint::Unique),
+                },
+            )
+            .collect();
+        (table, indexes)
+    }
+
+    #[test]
+    fn arbiter_resolution_matches_column_sets_and_constraint_names() {
+        use assert2::assert;
+        use crabka_pgparser::ast::OnConflictTarget;
+
+        let (table, indexes) = arbiter_fixture(
+            &["a", "b", "c"],
+            &[
+                ("t_pkey", &["a"], true, true),
+                ("t_ab_key", &["a", "b"], true, true),
+                ("t_c_idx", &["c"], false, false),
+                ("t_c_uniq", &["c"], true, false),
+            ],
+        );
+        let names = |target: &OnConflictTarget| {
+            super::resolve_arbiter_indexes(&table, &indexes, target)
+                .map(|found| found.iter().map(|i| i.name.clone()).collect::<Vec<_>>())
+        };
+        let columns = |cols: &[&str]| OnConflictTarget::Columns {
+            columns: cols.iter().map(|c| (*c).to_string()).collect(),
+            index_predicate: None,
+        };
+
+        // No target: every unique local index arbitrates (the non-unique one
+        // never does).
+        assert!(
+            names(&OnConflictTarget::None)
+                == Ok(vec!["t_pkey".into(), "t_ab_key".into(), "t_c_uniq".into()])
+        );
+        // Column-set inference, order-insensitive: `(b, a)` finds `UNIQUE (a, b)`.
+        assert!(names(&columns(&["a"])) == Ok(vec!["t_pkey".into()]));
+        assert!(names(&columns(&["b", "a"])) == Ok(vec!["t_ab_key".into()]));
+        // A unique index needs no constraint to be inferred by columns.
+        assert!(names(&columns(&["c"])) == Ok(vec!["t_c_uniq".into()]));
+        // A subset/superset of an index's columns is not a match: 42P10.
+        assert!(names(&columns(&["b"])) == Err(ExecError::OnConflictNoArbiter));
+        assert!(
+            names(&columns(&["a", "b", "c"])) == Err(ExecError::OnConflictNoArbiter),
+            "no index covers all three columns"
+        );
+        // An unknown inference column is 42703, checked before arbitration.
+        assert!(names(&columns(&["nope"])) == Err(ExecError::UndefinedColumn("nope".into())));
+        // ON CONSTRAINT resolves by name, but only for constraint-backed indexes.
+        assert!(
+            names(&OnConflictTarget::OnConstraint("t_ab_key".into()))
+                == Ok(vec!["t_ab_key".into()])
+        );
+        for name in ["t_c_uniq", "t_c_idx", "nosuch"] {
+            assert!(
+                names(&OnConflictTarget::OnConstraint(name.into()))
+                    == Err(ExecError::UndefinedConstraint {
+                        name: name.into(),
+                        table: "t".into(),
+                    }),
+                "ON CONSTRAINT {name}"
+            );
+        }
+        // An inference predicate is refused: there are no partial indexes to match.
+        let predicated = OnConflictTarget::Columns {
+            columns: vec!["a".into()],
+            index_predicate: Some(crabka_pgparser::ast::Expr::BoolLiteral(true)),
+        };
+        assert!(matches!(
+            super::resolve_arbiter_indexes(&table, &indexes, &predicated),
+            Err(ExecError::Unsupported(_))
+        ));
+    }
+
+    #[test]
+    fn arbiter_resolution_without_unique_indexes_is_empty_not_an_error() {
+        use assert2::assert;
+        use crabka_pgparser::ast::OnConflictTarget;
+
+        // `DO NOTHING` with no target on a table with no unique index: legal,
+        // and every row simply inserts.
+        let (table, indexes) = arbiter_fixture(&["a"], &[("t_a_idx", &["a"], false, false)]);
+        let found = super::resolve_arbiter_indexes(&table, &indexes, &OnConflictTarget::None);
+        assert!(found == Ok(Vec::new()));
+    }
+
+    #[tokio::test]
+    async fn on_conflict_do_nothing_and_do_update_upsert() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE t (id int4 PRIMARY KEY, v text)").await;
+        run_s(&mut s, "INSERT INTO t VALUES (1, 'a'), (2, 'b')").await;
+
+        // DO NOTHING skips the conflicting row and does not count it.
+        let r = &run_s(
+            &mut s,
+            "INSERT INTO t VALUES (1, 'x'), (3, 'c') ON CONFLICT (id) DO NOTHING",
+        )
+        .await[0];
+        assert!(matches!(r, QueryResult::Command { tag } if tag == "INSERT 0 1"));
+
+        // DO UPDATE upserts: the conflicting row is updated (and counted), the
+        // new one inserted. RETURNING reports the post-image.
+        let r = &run_s(
+            &mut s,
+            "INSERT INTO t VALUES (1, 'x'), (4, 'd') \
+             ON CONFLICT (id) DO UPDATE SET v = excluded.v || t.v RETURNING id, v",
+        )
+        .await[0];
+        let values: Vec<Vec<Option<String>>> = rows_of(r)
+            .iter()
+            .map(|row| row.iter().map(text).collect())
+            .collect();
+        assert!(
+            values
+                == vec![
+                    vec![Some("1".into()), Some("xa".into())],
+                    vec![Some("4".into()), Some("d".into())]
+                ]
+        );
+
+        let r = &run_s(&mut s, "SELECT id, v FROM t ORDER BY id").await[0];
+        let values: Vec<Vec<Option<String>>> = rows_of(r)
+            .iter()
+            .map(|row| row.iter().map(text).collect())
+            .collect();
+        assert!(
+            values
+                == vec![
+                    vec![Some("1".into()), Some("xa".into())],
+                    vec![Some("2".into()), Some("b".into())],
+                    vec![Some("3".into()), Some("c".into())],
+                    vec![Some("4".into()), Some("d".into())],
+                ]
+        );
     }
 }

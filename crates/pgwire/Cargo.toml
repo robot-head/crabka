@@ -33,6 +33,7 @@ rand = { workspace = true }
 subtle = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 tokio-postgres = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["full"] }

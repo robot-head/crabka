@@ -79,6 +79,7 @@ enum ScalarFunc {
     NextVal,
     CurrVal,
     SetVal,
+    PgNotify,
 }
 
 /// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
@@ -134,6 +135,7 @@ fn scalar_func(name: &str) -> Option<ScalarFunc> {
         "nextval" => ScalarFunc::NextVal,
         "currval" => ScalarFunc::CurrVal,
         "setval" => ScalarFunc::SetVal,
+        "pg_notify" => ScalarFunc::PgNotify,
         _ => return None,
     })
 }
@@ -374,6 +376,16 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
             }
             Ok(ColumnType::Int8)
         }
+        // PostgreSQL's `pg_notify` returns `void`, which crabka has no column
+        // type for; it reports `text` and evaluates to the empty string, which
+        // renders identically to `void` on the wire. Documented divergence: the
+        // RowDescription type OID is 25, not 2278.
+        ScalarFunc::PgNotify => {
+            require_arity(fc, n == 2)?;
+            require_text(&args[0], scope)?;
+            require_text(&args[1], scope)?;
+            Ok(ColumnType::Text)
+        }
     }
 }
 
@@ -435,6 +447,15 @@ pub(crate) fn eval_scalar(
                 Some(Ordering::Equal) => Ok(Datum::Null),
                 _ => Ok(a),
             }
+        }
+        // `pg_notify` is NOT strict: PostgreSQL substitutes the empty string for
+        // a NULL channel or payload, so `pg_notify(NULL, 'x')` raises the same
+        // empty-channel error as `pg_notify('', 'x')` rather than returning NULL.
+        ScalarFunc::PgNotify => {
+            require_arity(fc, args.len() == 2)?;
+            let channel = eval_child(&args[0])?;
+            let payload = eval_child(&args[1])?;
+            eval_pg_notify(&channel, &payload, ctx)
         }
         // Eager, strict-or-concat functions: evaluate every argument first.
         _ => {
@@ -872,6 +893,34 @@ fn require_arity(fc: &FuncCall, ok: bool) -> Result<(), ExecError> {
 /// A text argument at runtime. A non-text Datum here means the function was used
 /// in a non-projected position (so `scalar_result_type` never type-checked it);
 /// PostgreSQL rejects it at plan time (42883), we surface it at runtime (42804).
+/// Queue one `pg_notify(channel, payload)` on the session's pending
+/// notification list — the same list a `NOTIFY` statement writes to, so both
+/// deliver at the same point (commit, or the end of an autocommit statement)
+/// and dedup against each other.
+fn eval_pg_notify(channel: &Datum, payload: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    let channel = nullable_text_arg(channel)?;
+    let payload = nullable_text_arg(payload)?;
+    let pending = ctx
+        .notify
+        .as_ref()
+        .ok_or_else(|| ExecError::Unsupported("pg_notify requires a SQL session".into()))?;
+    pending
+        .lock()
+        .expect("notify pending mutex")
+        .queue_notify(channel, payload)
+        .map_err(crate::session::notify_queue_error)?;
+    Ok(Datum::Text(String::new()))
+}
+
+/// A text argument of a non-strict function, with PostgreSQL's NULL-as-empty
+/// -string conversion.
+fn nullable_text_arg(d: &Datum) -> Result<&str, ExecError> {
+    match d {
+        Datum::Null => Ok(""),
+        other => text_arg(other),
+    }
+}
+
 fn text_arg(d: &Datum) -> Result<&str, ExecError> {
     match d {
         Datum::Text(s) => Ok(s),

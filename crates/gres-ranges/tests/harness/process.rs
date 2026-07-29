@@ -16,7 +16,9 @@ use crabka_gres_control::{
     TenantRecord, TenantState,
 };
 use tokio::{
-    io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, copy_bidirectional},
+    io::{
+        AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader, copy_bidirectional,
+    },
     net::{TcpListener, TcpStream},
     process::{Child, Command},
     sync::{mpsc, oneshot, watch},
@@ -34,6 +36,7 @@ pub struct ProcessHarness {
     tenant: String,
     tls: TlsPaths,
     commit_fault: Option<String>,
+    checkpoint_frames: Option<u64>,
     sql_proxy: RangeProxy,
     r0_proxy: RangeProxy,
     r1_proxy: RangeProxy,
@@ -62,14 +65,27 @@ struct ProcessReady {
 #[allow(dead_code)]
 impl ProcessHarness {
     pub async fn start(name: &str) -> Self {
-        Self::start_inner(name, None).await
+        Self::start_inner(name, None, None).await
     }
 
     pub async fn start_with_commit_fault(name: &str, fault: &str) -> Self {
-        Self::start_inner(name, Some(fault.to_owned())).await
+        Self::start_inner(name, Some(fault.to_owned()), None).await
     }
 
-    async fn start_inner(name: &str, commit_fault: Option<String>) -> Self {
+    /// Start with an explicit `--checkpoint-frames` threshold on range 0.
+    ///
+    /// The default is deliberately the runtime's own threshold, matching what
+    /// the operator gives a managed pod. Only a test that needs range 0 to
+    /// checkpoint within its own lifetime should lower it.
+    pub async fn start_with_checkpoint_frames(name: &str, frames: u64) -> Self {
+        Self::start_inner(name, None, Some(frames)).await
+    }
+
+    async fn start_inner(
+        name: &str,
+        commit_fault: Option<String>,
+        checkpoint_frames: Option<u64>,
+    ) -> Self {
         let root = tempfile::tempdir().expect("process harness root");
         let broker_dir = root.path().join("broker");
         let broker = Broker::start(BrokerConfig::for_tests(broker_dir))
@@ -85,16 +101,26 @@ impl ProcessHarness {
         let tls = write_tls_fixture(root.path());
         provision_control(&bootstrap, &tenant, r0_proxy.port, r1_proxy.port).await;
 
-        let r0 = spawn_node(
-            root.path(),
-            &bootstrap,
-            &tenant,
-            0,
-            "r0",
-            &tls,
-            commit_fault.as_deref(),
-        );
-        let r1 = spawn_node(root.path(), &bootstrap, &tenant, 1, "r1", &tls, None);
+        let r0 = spawn_node(NodeSpawn {
+            root: root.path(),
+            bootstrap: &bootstrap,
+            tenant: &tenant,
+            range: 0,
+            hosted_ranges: "r0",
+            tls: &tls,
+            commit_fault: commit_fault.as_deref(),
+            checkpoint_frames,
+        });
+        let r1 = spawn_node(NodeSpawn {
+            root: root.path(),
+            bootstrap: &bootstrap,
+            tenant: &tenant,
+            range: 1,
+            hosted_ranges: "r1",
+            tls: &tls,
+            commit_fault: None,
+            checkpoint_frames: None,
+        });
         let mut harness = Self {
             root,
             _broker: broker,
@@ -102,6 +128,7 @@ impl ProcessHarness {
             tenant,
             tls,
             commit_fault,
+            checkpoint_frames,
             sql_proxy,
             r0_proxy,
             r1_proxy,
@@ -137,15 +164,16 @@ impl ProcessHarness {
         let r3_proxy = RangeProxy::start().await;
         let tls = write_tls_fixture(root.path());
         provision_control(&bootstrap, &tenant, r0_proxy.port, r1_proxy.port).await;
-        let r0 = spawn_node(
-            root.path(),
-            &bootstrap,
-            &tenant,
-            0,
-            "r0,r1",
-            &tls,
-            commit_fault.as_deref(),
-        );
+        let r0 = spawn_node(NodeSpawn {
+            root: root.path(),
+            bootstrap: &bootstrap,
+            tenant: &tenant,
+            range: 0,
+            hosted_ranges: "r0,r1",
+            tls: &tls,
+            commit_fault: commit_fault.as_deref(),
+            checkpoint_frames: None,
+        });
         let mut harness = Self {
             root,
             _broker: broker,
@@ -153,6 +181,7 @@ impl ProcessHarness {
             tenant,
             tls,
             commit_fault,
+            checkpoint_frames: None,
             sql_proxy,
             r0_proxy,
             r1_proxy,
@@ -182,6 +211,62 @@ impl ProcessHarness {
         connect_with_driver(self.node(range).sql_port, &self.tenant)
             .await
             .expect("connect compute with driver")
+    }
+
+    /// A connection whose asynchronous messages are observable.
+    ///
+    /// A `NotificationResponse` arrives on the *connection*, not the client, so
+    /// the connection is driven with `poll_message` — [`Self::sql`] spawns it as
+    /// a bare future and every notification is swallowed.
+    pub async fn sql_with_notifications(
+        &self,
+        range: u32,
+    ) -> (
+        tokio_postgres::Client,
+        mpsc::UnboundedReceiver<tokio_postgres::Notification>,
+    ) {
+        let (client, mut connection) = tokio_postgres::Config::new()
+            .host("127.0.0.1")
+            .port(self.node(range).sql_port)
+            .user("alice")
+            .password(fixture_password())
+            .dbname(&self.tenant)
+            .connect(tokio_postgres::NoTls)
+            .await
+            .expect("connect compute for notifications");
+        let (notifications, receiver) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            while let Some(message) = std::future::poll_fn(|cx| connection.poll_message(cx)).await {
+                match message {
+                    Ok(tokio_postgres::AsyncMessage::Notification(notification)) => {
+                        if notifications.send(notification).is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        });
+        (client, receiver)
+    }
+
+    /// A hand-rolled pgwire connection to one node, whose backend pid is
+    /// readable. See [`RawPgConnection`].
+    pub async fn raw_sql(&self, range: u32) -> RawPgConnection {
+        RawPgConnection::connect(self.node(range).sql_port, &self.tenant).await
+    }
+
+    /// The `--cache-dir` a node was started with: its range stores live under
+    /// `r<range>/`, and a node that does not host range 0 keeps its follower
+    /// replica of the range-0 catalog under `r0-follower-<generation>/`.
+    pub fn cache_dir(&self, range: u32) -> PathBuf {
+        self.root.path().join(format!("r{range}-cache"))
+    }
+
+    /// Local object-store root shared by every checkpointing node in this harness.
+    pub fn checkpoint_root(&self) -> PathBuf {
+        self.root.path().join("checkpoints")
     }
 
     pub async fn try_sql(&self, range: u32) -> Option<tokio_postgres::Client> {
@@ -380,19 +465,24 @@ impl ProcessHarness {
             let node = self.node(range);
             node.range
         };
-        let replacement = spawn_node(
-            self.root.path(),
-            &self.bootstrap,
-            &self.tenant,
-            node_range,
+        let replacement = spawn_node(NodeSpawn {
+            root: self.root.path(),
+            bootstrap: &self.bootstrap,
+            tenant: &self.tenant,
+            range: node_range,
             hosted_ranges,
-            &self.tls,
-            if range == 0 {
+            tls: &self.tls,
+            commit_fault: if range == 0 {
                 self.commit_fault.as_deref()
             } else {
                 None
             },
-        );
+            checkpoint_frames: if node_range == 0 {
+                self.checkpoint_frames
+            } else {
+                None
+            },
+        });
         *self.node_mut(range) = replacement;
         if range == 0 && self.r1.is_none() {
             let replacement_port = self.r0.range_port;
@@ -625,15 +715,30 @@ fn write_tls_fixture(root: &Path) -> TlsPaths {
     }
 }
 
-fn spawn_node(
-    root: &Path,
-    bootstrap: &str,
-    tenant: &str,
+/// Everything one `crabka-gres` child needs to be spawned or respawned.
+#[derive(Clone, Copy)]
+struct NodeSpawn<'a> {
+    root: &'a Path,
+    bootstrap: &'a str,
+    tenant: &'a str,
     range: u32,
-    hosted_ranges: &str,
-    tls: &TlsPaths,
-    commit_fault: Option<&str>,
-) -> ProcessNode {
+    hosted_ranges: &'a str,
+    tls: &'a TlsPaths,
+    commit_fault: Option<&'a str>,
+    checkpoint_frames: Option<u64>,
+}
+
+fn spawn_node(spawn: NodeSpawn<'_>) -> ProcessNode {
+    let NodeSpawn {
+        root,
+        bootstrap,
+        tenant,
+        range,
+        hosted_ranges,
+        tls,
+        commit_fault,
+        checkpoint_frames,
+    } = spawn;
     let cache_dir = root.join(format!("r{range}-cache"));
     let checkpoint_dir = root.join("checkpoints");
     std::fs::create_dir_all(&cache_dir).expect("cache dir");
@@ -677,15 +782,17 @@ fn spawn_node(
         "--operator-control-principal",
         "CN=process-range",
     ]);
-    if range == 0 {
-        command.args([
-            "--checkpoint-store",
-            "local",
-            "--checkpoint-local-root",
-            checkpoint_dir.to_str().expect("checkpoint path"),
-            "--checkpoint-frames",
-            "1",
-        ]);
+    // Every node needs the checkpoint store, exactly as the operator gives it to
+    // every managed pod: once range 0 trims its WAL, a range-0 follower on any
+    // other node can only bootstrap by restoring the covering checkpoint first.
+    command.args([
+        "--checkpoint-store",
+        "local",
+        "--checkpoint-local-root",
+        checkpoint_dir.to_str().expect("checkpoint path"),
+    ]);
+    if let Some(frames) = checkpoint_frames {
+        command.args(["--checkpoint-frames", &frames.to_string()]);
     }
     if let Some(fault) = commit_fault {
         command.env("CRABKA_GRES_TEST_COMMIT_FAULT", fault);
@@ -838,6 +945,161 @@ async fn connect_with_driver(
 }
 async fn connect(port: u16, database: &str) -> tokio_postgres::Client {
     try_connect(port, database).await.expect("connect compute")
+}
+
+/// A hand-rolled pgwire connection that authenticates with SCRAM-SHA-256 and
+/// keeps the pid the server announced in `BackendKeyData`.
+///
+/// `tokio_postgres` hides that pid, so a test pinning a
+/// `NotificationResponse.process_id` to the *originating* backend has to take
+/// the expected pid off the wire itself rather than recompute it from the same
+/// place the assertion reads.
+// Only the multiprocess notify tests use this; the harness is also included by
+// `crates/gres`, where it is dead — the same reason the other helpers here carry
+// this attribute.
+#[allow(dead_code)]
+pub struct RawPgConnection {
+    stream: TcpStream,
+    pid: i32,
+}
+
+#[allow(dead_code)]
+impl RawPgConnection {
+    async fn connect(port: u16, database: &str) -> Self {
+        let mut stream = TcpStream::connect((IpAddr::V4(Ipv4Addr::LOCALHOST), port))
+            .await
+            .expect("raw pgwire connection");
+        let mut body = Vec::new();
+        body.extend_from_slice(&196_608i32.to_be_bytes());
+        for (name, value) in [("user", "alice"), ("database", database)] {
+            body.extend_from_slice(name.as_bytes());
+            body.push(0);
+            body.extend_from_slice(value.as_bytes());
+            body.push(0);
+        }
+        body.push(0);
+        write_message(&mut stream, None, &body).await;
+        authenticate_scram(&mut stream).await;
+
+        let startup_burst = read_until_ready(&mut stream).await;
+        let pid = startup_burst
+            .iter()
+            .find_map(|(kind, body)| {
+                (*kind == b'K').then(|| i32::from_be_bytes([body[0], body[1], body[2], body[3]]))
+            })
+            .expect("BackendKeyData");
+        Self { stream, pid }
+    }
+
+    /// The pid this connection's backend announced in `BackendKeyData`.
+    pub fn pid(&self) -> i32 {
+        self.pid
+    }
+
+    /// Run one simple-protocol Query, panicking on an `ErrorResponse`.
+    pub async fn simple_query(&mut self, sql: &str) {
+        let mut body = sql.as_bytes().to_vec();
+        body.push(0);
+        write_message(&mut self.stream, Some(b'Q'), &body).await;
+        let messages = read_until_ready(&mut self.stream).await;
+        if let Some((_, body)) = messages.iter().find(|(kind, _)| *kind == b'E') {
+            panic!("{sql} failed: {}", String::from_utf8_lossy(body));
+        }
+    }
+}
+
+/// Drive the SASL exchange the tenant's SCRAM verifier demands, leaving the
+/// stream positioned on the post-authentication startup burst.
+async fn authenticate_scram(stream: &mut TcpStream) {
+    use assert2::assert;
+    use crabka_security::{SaslMechanism, scram::ScramClientExchange};
+
+    let (code, _) = read_authentication(stream).await;
+    assert!(code == 10, "expected an AuthenticationSASL request: {code}");
+
+    let (client_first, exchange) = ScramClientExchange::new(
+        "alice".to_owned(),
+        fixture_password().into_bytes(),
+        SaslMechanism::ScramSha256,
+    )
+    .client_first()
+    .expect("SCRAM client-first");
+    let mut initial = b"SCRAM-SHA-256\0".to_vec();
+    initial.extend_from_slice(
+        &i32::try_from(client_first.len())
+            .expect("SCRAM client-first length")
+            .to_be_bytes(),
+    );
+    initial.extend_from_slice(&client_first);
+    write_message(stream, Some(b'p'), &initial).await;
+
+    let (code, server_first) = read_authentication(stream).await;
+    assert!(code == 11, "expected an AuthenticationSASLContinue: {code}");
+    let (client_final, exchange) = exchange.step(&server_first).expect("SCRAM client-final");
+    write_message(stream, Some(b'p'), &client_final).await;
+
+    let (code, server_final) = read_authentication(stream).await;
+    assert!(code == 12, "expected an AuthenticationSASLFinal: {code}");
+    exchange
+        .verify_server_final(&server_final)
+        .expect("SCRAM server signature");
+}
+
+/// The next `Authentication*` message as `(code, remaining body)`.
+async fn read_authentication(stream: &mut TcpStream) -> (i32, Vec<u8>) {
+    use assert2::assert;
+
+    loop {
+        let (kind, body) = read_backend_message(stream).await;
+        assert!(
+            kind != b'E',
+            "authentication failed: {}",
+            String::from_utf8_lossy(&body)
+        );
+        if kind == b'R' {
+            let code = i32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+            return (code, body[4..].to_vec());
+        }
+    }
+}
+
+async fn read_until_ready(stream: &mut TcpStream) -> Vec<(u8, Vec<u8>)> {
+    let mut seen = Vec::new();
+    loop {
+        let (kind, body) = read_backend_message(stream).await;
+        let done = kind == b'Z';
+        seen.push((kind, body));
+        if done {
+            return seen;
+        }
+    }
+}
+
+async fn read_backend_message(stream: &mut TcpStream) -> (u8, Vec<u8>) {
+    let mut kind = [0_u8; 1];
+    stream.read_exact(&mut kind).await.expect("message tag");
+    let mut length = [0_u8; 4];
+    stream
+        .read_exact(&mut length)
+        .await
+        .expect("message length");
+    let length = usize::try_from(i32::from_be_bytes(length) - 4).expect("message body length");
+    let mut body = vec![0_u8; length];
+    stream.read_exact(&mut body).await.expect("message body");
+    (kind[0], body)
+}
+
+/// Write one frontend message; `kind` is absent only for the startup packet.
+async fn write_message(stream: &mut TcpStream, kind: Option<u8>, body: &[u8]) {
+    let mut message = Vec::with_capacity(body.len() + 5);
+    message.extend(kind);
+    message.extend_from_slice(
+        &i32::try_from(body.len() + 4)
+            .expect("message length")
+            .to_be_bytes(),
+    );
+    message.extend_from_slice(body);
+    stream.write_all(&message).await.expect("write message");
 }
 
 fn gres_binary() -> PathBuf {

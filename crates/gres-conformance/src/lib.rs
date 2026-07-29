@@ -15,9 +15,10 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use bytes::BytesMut;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio_postgres::types::{ToSql, Type};
+use tokio_postgres::types::{IsNull, ToSql, Type, to_sql_checked};
 
 const CASE_ID_TOKEN: &str = "__case_id__";
 static NEXT_CASE_ID: AtomicU64 = AtomicU64::new(0);
@@ -58,7 +59,7 @@ pub struct ExtendedCase {
     pub teardown: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ExtendedParam {
     #[serde(rename = "type")]
     pub ty: ExtendedParamType,
@@ -71,14 +72,27 @@ pub enum ExtendedParamType {
     Bool,
     Int4,
     Text,
+    /// `jsonb` (OID 3802), sent in the binary `[0x01][canonical text]` format.
+    Jsonb,
+    #[serde(rename = "int4[]")]
+    Int4Array,
+    #[serde(rename = "text[]")]
+    TextArray,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+/// A case's parameter value.
+///
+/// The variants are untagged, so the JSON shape picks the variant: a `jsonb`
+/// parameter carries its text in [`ExtendedParamValue::Text`], and both array
+/// types carry a JSON array whose elements are checked against the declared
+/// [`ExtendedParamType`] in [`owned_param`].
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(untagged)]
 pub enum ExtendedParamValue {
     Bool(bool),
     Int4(i32),
     Text(String),
+    Array(Vec<serde_json::Value>),
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +227,36 @@ enum OwnedParam {
     Bool(Option<bool>),
     Int4(Option<i32>),
     Text(Option<String>),
+    Jsonb(Option<JsonbParam>),
+    Int4Array(Option<Vec<Option<i32>>>),
+    TextArray(Option<Vec<Option<String>>>),
+}
+
+/// A `jsonb` bind parameter in `PostgreSQL`'s binary format.
+///
+/// `tokio-postgres` only encodes `jsonb` through its optional `serde_json`
+/// integration, so the harness carries the document as text and writes the
+/// jsonb version byte itself. That keeps the bind on the binary path that real
+/// drivers use (`[0x01][json text]`) rather than falling back to a text cast.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct JsonbParam(String);
+
+impl ToSql for JsonbParam {
+    fn to_sql(
+        &self,
+        _ty: &Type,
+        out: &mut BytesMut,
+    ) -> Result<IsNull, Box<dyn std::error::Error + Sync + Send>> {
+        out.extend_from_slice(&[1]);
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::JSONB
+    }
+
+    to_sql_checked!();
 }
 
 #[derive(Debug, Serialize)]
@@ -723,10 +767,48 @@ fn owned_param(param: &ExtendedParam) -> Result<OwnedParam, String> {
         (ExtendedParamType::Text, Some(ExtendedParamValue::Text(value))) => {
             Ok(OwnedParam::Text(Some(value.clone())))
         }
+        (ExtendedParamType::Jsonb, None) => Ok(OwnedParam::Jsonb(None)),
+        (ExtendedParamType::Jsonb, Some(ExtendedParamValue::Text(value))) => {
+            Ok(OwnedParam::Jsonb(Some(JsonbParam(value.clone()))))
+        }
+        (ExtendedParamType::Int4Array, None) => Ok(OwnedParam::Int4Array(None)),
+        (ExtendedParamType::Int4Array, Some(ExtendedParamValue::Array(elements))) => {
+            Ok(OwnedParam::Int4Array(Some(int4_elements(elements)?)))
+        }
+        (ExtendedParamType::TextArray, None) => Ok(OwnedParam::TextArray(None)),
+        (ExtendedParamType::TextArray, Some(ExtendedParamValue::Array(elements))) => {
+            Ok(OwnedParam::TextArray(Some(text_elements(elements)?)))
+        }
         (ty, value) => Err(format!(
             "XXPARAM: {ty:?} parameter has incompatible value {value:?}"
         )),
     }
+}
+
+fn int4_elements(elements: &[serde_json::Value]) -> Result<Vec<Option<i32>>, String> {
+    elements
+        .iter()
+        .map(|element| match element {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::Number(number) => number
+                .as_i64()
+                .and_then(|value| i32::try_from(value).ok())
+                .map(Some)
+                .ok_or_else(|| format!("XXPARAM: int4[] element {number} is not an int4")),
+            other => Err(format!("XXPARAM: int4[] element {other} is not a number")),
+        })
+        .collect()
+}
+
+fn text_elements(elements: &[serde_json::Value]) -> Result<Vec<Option<String>>, String> {
+    elements
+        .iter()
+        .map(|element| match element {
+            serde_json::Value::Null => Ok(None),
+            serde_json::Value::String(value) => Ok(Some(value.clone())),
+            other => Err(format!("XXPARAM: text[] element {other} is not a string")),
+        })
+        .collect()
 }
 
 fn param_refs(params: &[OwnedParam]) -> Vec<&(dyn ToSql + Sync)> {
@@ -736,6 +818,9 @@ fn param_refs(params: &[OwnedParam]) -> Vec<&(dyn ToSql + Sync)> {
             OwnedParam::Bool(value) => value as &(dyn ToSql + Sync),
             OwnedParam::Int4(value) => value as &(dyn ToSql + Sync),
             OwnedParam::Text(value) => value as &(dyn ToSql + Sync),
+            OwnedParam::Jsonb(value) => value as &(dyn ToSql + Sync),
+            OwnedParam::Int4Array(value) => value as &(dyn ToSql + Sync),
+            OwnedParam::TextArray(value) => value as &(dyn ToSql + Sync),
         })
         .collect()
 }
@@ -745,6 +830,9 @@ fn postgres_type(ty: ExtendedParamType) -> Type {
         ExtendedParamType::Bool => Type::BOOL,
         ExtendedParamType::Int4 => Type::INT4,
         ExtendedParamType::Text => Type::TEXT,
+        ExtendedParamType::Jsonb => Type::JSONB,
+        ExtendedParamType::Int4Array => Type::INT4_ARRAY,
+        ExtendedParamType::TextArray => Type::TEXT_ARRAY,
     }
 }
 
@@ -1340,6 +1428,64 @@ mod tests {
             ]
         );
         assert_eq!(transformed.teardown, case.teardown);
+    }
+
+    #[test]
+    fn typed_parameters_bind_jsonb_and_array_values() {
+        let params: Vec<ExtendedParam> = serde_json::from_str(
+            r#"[
+              { "type": "jsonb", "value": "{\"a\": 1}" },
+              { "type": "int4[]", "value": [1, null] },
+              { "type": "text[]", "value": ["a", null] },
+              { "type": "text[]", "value": [] },
+              { "type": "int4[]", "value": null }
+            ]"#,
+        )
+        .expect("typed parameters must deserialize");
+
+        let owned = owned_params(&params).expect("typed parameters must bind");
+
+        assert!(matches!(
+            owned.as_slice(),
+            [
+                OwnedParam::Jsonb(Some(JsonbParam(document))),
+                OwnedParam::Int4Array(Some(numbers)),
+                OwnedParam::TextArray(Some(labels)),
+                OwnedParam::TextArray(Some(empty)),
+                OwnedParam::Int4Array(None),
+            ] if document == "{\"a\": 1}"
+                && numbers.as_slice() == [Some(1), None]
+                && labels.as_slice() == [Some("a".to_string()), None]
+                && empty.is_empty()
+        ));
+        assert!(param_refs(&owned).len() == 5);
+        assert!(postgres_type(ExtendedParamType::Jsonb) == Type::JSONB);
+        assert!(postgres_type(ExtendedParamType::Int4Array) == Type::INT4_ARRAY);
+        assert!(postgres_type(ExtendedParamType::TextArray) == Type::TEXT_ARRAY);
+    }
+
+    #[test]
+    fn mistyped_array_elements_fail_the_case_instead_of_binding() {
+        let params: Vec<ExtendedParam> =
+            serde_json::from_str(r#"[{ "type": "int4[]", "value": ["not a number"] }]"#)
+                .expect("parameters must deserialize");
+
+        let error = owned_params(&params).expect_err("mistyped element must not bind");
+
+        assert!(error.contains("XXPARAM"));
+    }
+
+    #[test]
+    fn jsonb_parameters_use_the_binary_version_byte() {
+        let mut encoded = BytesMut::new();
+        let null = JsonbParam("{\"a\": 1}".into())
+            .to_sql(&Type::JSONB, &mut encoded)
+            .expect("jsonb parameter must encode");
+
+        assert!(matches!(null, IsNull::No));
+        assert!(encoded.as_ref() == b"\x01{\"a\": 1}");
+        assert!(<JsonbParam as ToSql>::accepts(&Type::JSONB));
+        assert!(!<JsonbParam as ToSql>::accepts(&Type::TEXT));
     }
 
     /// Report with the given counts and no per-case detail.

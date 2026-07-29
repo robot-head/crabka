@@ -1,0 +1,93 @@
+-- T3 core: the `jsonb` type, diffed against PostgreSQL 18.
+-- Canonical text output (sorted keys, `", "` / `": "` separators, preserved
+-- numeric scale), the operator set (`-> ->> #> #>> @> <@ ? ?| ?& || -`), the
+-- `jsonb_*` functions, `jsonb_agg`/`jsonb_object_agg`, text casts, storage, and
+-- unique-index canonicalization. Aggregates run before the UPDATE below so the
+-- unordered aggregate input is the same physical order on both sides.
+-- jsonpath, `JSON_TABLE`, SQL/JSON constructor syntax, and `jsonb_each` are
+-- deferred and deliberately absent.
+SELECT '{"b": 1, "a": 2}'::jsonb;
+SELECT '{"a": 1, "a": 2}'::jsonb;
+SELECT '1.00'::jsonb;
+SELECT '   [1, "two", null, true]   '::jsonb;
+SELECT '{"outer": {"inner": [1, {"k": "v"}]}}'::jsonb;
+SELECT '{"a": 1}'::json;
+SELECT 'not json'::jsonb;
+SELECT ''::jsonb;
+SELECT '{"a": 1,}'::jsonb;
+SELECT jsonb_typeof('{"a": 1}'::jsonb), jsonb_typeof('[1]'::jsonb), jsonb_typeof('1'::jsonb);
+SELECT jsonb_typeof('"s"'::jsonb), jsonb_typeof('true'::jsonb), jsonb_typeof('null'::jsonb);
+SELECT jsonb_typeof(NULL::jsonb);
+SELECT '{"a": 1}'::jsonb = '{"a": 1}'::jsonb;
+SELECT '{"a": {"b": 3}}'::jsonb -> 'a';
+SELECT '{"a": {"b": 3}}'::jsonb ->> 'a';
+SELECT '{"a": 1}'::jsonb -> 'missing';
+SELECT '{"a": null}'::jsonb -> 'a';
+SELECT '{"a": null}'::jsonb ->> 'a';
+SELECT '[10, 20, 30]'::jsonb -> 1;
+SELECT '[10, 20, 30]'::jsonb -> -1;
+SELECT '[10, 20, 30]'::jsonb ->> 9;
+SELECT '{"a": {"b": {"c": 7}}}'::jsonb #> ARRAY['a', 'b', 'c'];
+SELECT '{"a": {"b": {"c": 7}}}'::jsonb #>> ARRAY['a', 'b', 'c'];
+SELECT '{"a": {"b": 1}}'::jsonb #> ARRAY['a', 'zz'];
+SELECT '{"a": 1, "b": 2}'::jsonb @> '{"a": 1}'::jsonb;
+SELECT '{"a": 1}'::jsonb @> '{"a": 1, "b": 2}'::jsonb;
+SELECT '{"a": 1}'::jsonb <@ '{"a": 1, "b": 2}'::jsonb;
+SELECT '[1, 2, 3]'::jsonb @> '[1, 3]'::jsonb;
+SELECT '[10, 20]'::jsonb @> '20'::jsonb;
+SELECT '{"a": 1}'::jsonb ? 'a', '{"a": 1}'::jsonb ? 'b';
+SELECT '{"a": 1, "b": 2}'::jsonb ?| ARRAY['x', 'b'];
+SELECT '{"a": 1, "b": 2}'::jsonb ?& ARRAY['a', 'b'];
+SELECT '{"a": 1, "b": 2}'::jsonb ?& ARRAY['a', 'z'];
+SELECT '{"a": 1}'::jsonb || '{"b": 2}'::jsonb;
+SELECT '{"a": 1}'::jsonb || '{"a": 9}'::jsonb;
+SELECT '[1, 2]'::jsonb || '[3]'::jsonb;
+SELECT '{"a": 1, "b": 2}'::jsonb - 'a';
+SELECT '{"a": 1}'::jsonb - 'zz';
+SELECT '[1, 2, 3]'::jsonb - 1;
+SELECT jsonb_build_object('a', 1, 'b', 'two');
+SELECT jsonb_build_object('b', 1, 'a', 2);
+SELECT jsonb_build_object('a', ARRAY[1, 2]);
+SELECT jsonb_build_object('a');
+SELECT jsonb_build_array(1, 'a', true, NULL);
+SELECT jsonb_build_array();
+SELECT jsonb_array_length('[1, 2, 3]'::jsonb), jsonb_array_length('[]'::jsonb);
+SELECT jsonb_array_length('{"a": 1}'::jsonb);
+SELECT jsonb_extract_path('{"a": {"b": 5}}'::jsonb, 'a', 'b');
+SELECT jsonb_extract_path_text('{"a": {"b": 5}}'::jsonb, 'a', 'b');
+SELECT jsonb_extract_path('{"a": {"b": 5}}'::jsonb, 'a', 'zz');
+SELECT jsonb_set('{"a": {"b": 1}}'::jsonb, ARRAY['a', 'b'], '9'::jsonb);
+SELECT jsonb_set('{"a": 1}'::jsonb, ARRAY['b'], '2'::jsonb);
+SELECT jsonb_set('{"a": 1}'::jsonb, ARRAY['b'], '2'::jsonb, false);
+SELECT to_jsonb(1), to_jsonb('x'::text), to_jsonb(true);
+SELECT to_jsonb(ARRAY[1, 2]);
+SELECT to_jsonb(NULL::int4);
+SELECT '{"a": 1}'::jsonb::text;
+SELECT '{"b": 1, "a": 2}'::text::jsonb;
+CREATE TABLE jsonb_doc (id int4, body jsonb);
+INSERT INTO jsonb_doc VALUES (1, '{"name": "ada", "tags": ["x", "y"], "n": 1}');
+INSERT INTO jsonb_doc VALUES (2, '{"name": "bob", "tags": [], "n": 2}');
+INSERT INTO jsonb_doc VALUES (3, NULL);
+SELECT id, body ->> 'name' FROM jsonb_doc ORDER BY id;
+SELECT body FROM jsonb_doc WHERE id = 1;
+SELECT id FROM jsonb_doc WHERE body @> '{"name": "ada"}'::jsonb ORDER BY id;
+SELECT id FROM jsonb_doc WHERE body ? 'tags' ORDER BY id;
+SELECT id FROM jsonb_doc WHERE body IS NULL;
+SELECT jsonb_array_length(body -> 'tags') FROM jsonb_doc WHERE id = 1;
+SELECT count(*) FROM jsonb_doc WHERE body ->> 'n' = '1';
+SELECT body ->> 'name', count(*) FROM jsonb_doc GROUP BY body ->> 'name' ORDER BY 1;
+SELECT body FROM jsonb_doc WHERE body IS NOT NULL ORDER BY body;
+SELECT jsonb_agg(body -> 'name') FROM jsonb_doc;
+SELECT jsonb_object_agg(id::text, body -> 'name') FROM jsonb_doc WHERE body IS NOT NULL;
+UPDATE jsonb_doc SET body = jsonb_set(body, ARRAY['n'], '7'::jsonb) WHERE id = 1;
+SELECT body ->> 'n' FROM jsonb_doc WHERE id = 1;
+DELETE FROM jsonb_doc WHERE body @> '{"name": "bob"}'::jsonb;
+SELECT id FROM jsonb_doc ORDER BY id;
+CREATE TABLE jsonb_uniq (body jsonb UNIQUE);
+INSERT INTO jsonb_uniq VALUES ('{"a": 1, "b": 2}');
+INSERT INTO jsonb_uniq VALUES ('{"b": 2, "a": 1}');
+INSERT INTO jsonb_uniq VALUES ('{"a": 1.0}');
+INSERT INTO jsonb_uniq VALUES ('{"a": 1.00}');
+SELECT count(*) FROM jsonb_uniq;
+DROP TABLE jsonb_uniq;
+DROP TABLE jsonb_doc;

@@ -450,6 +450,10 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
     let ord = match (a, b) {
         (Datum::Text(x), Datum::Text(y)) => x.cmp(y),
         (Datum::Bool(x), Datum::Bool(y)) => x.cmp(y),
+        // PostgreSQL's `byteacmp`: memcmp over the common prefix, then length.
+        // That is exactly `Ord` for a byte slice. Without this arm `ORDER BY`,
+        // `min`/`max` and `DISTINCT` over a bytea column all raise 42804.
+        (Datum::Bytea(x), Datum::Bytea(y)) => x.cmp(y),
         // Temporal comparisons (same-type + date↔timestamp promotion).
         (Datum::Date(x), Datum::Date(y)) => x.cmp(y),
         (Datum::Time(x), Datum::Time(y)) => x.cmp(y),
@@ -460,6 +464,12 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         // date ↔ timestamp: promote the date to midnight and compare.
         (Datum::Date(d), Datum::Timestamp(ts)) => crate::datetime::date_to_midnight(*d).cmp(ts),
         (Datum::Timestamp(ts), Datum::Date(d)) => ts.cmp(&crate::datetime::date_to_midnight(*d)),
+        // jsonb btree order (Object > Array > Bool > Number > String > Null).
+        // Placed before the numeric fall-throughs, which would otherwise try to
+        // promote these to f64 and fail.
+        (Datum::Jsonb(x), Datum::Jsonb(y)) => x.cmp(y),
+        // SQL arrays compare element-wise, shorter first on a common prefix.
+        (Datum::Array(x), Datum::Array(y)) => compare_arrays(x, y)?,
         // SP30: any numeric pair with a float promotes to float comparison (NaN is
         // the largest value and equals itself; `-0.0 == +0.0` — PG's float ordering).
         _ if is_float(a) || is_float(b) => match (as_f64(a), as_f64(b)) {
@@ -477,6 +487,28 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         },
     };
     Ok(Some(ord))
+}
+
+/// PostgreSQL's array btree order (`array_cmp`): element-wise over the common
+/// prefix, then the shorter array first. A NULL element sorts greater than any
+/// non-NULL one (PostgreSQL's `btarraycmp` treats NULLs as largest), and two
+/// NULLs are equal — the *comparison* is never NULL, unlike a scalar `=`.
+fn compare_arrays(
+    a: &crate::datum::ArrayValue,
+    b: &crate::datum::ArrayValue,
+) -> Result<Ordering, TypeError> {
+    for (x, y) in a.elems.iter().zip(b.elems.iter()) {
+        let ord = match (x.is_null(), y.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => compare(x, y)?.expect("non-NULL operands compare"),
+        };
+        if ord != Ordering::Equal {
+            return Ok(ord);
+        }
+    }
+    Ok(a.elems.len().cmp(&b.elems.len()))
 }
 
 /// PostgreSQL's `float8` total order: NaN sorts greater than every non-NaN and is
@@ -549,6 +581,28 @@ pub fn cmp_to_bool(op_holds: bool, ord: Option<Ordering>) -> Datum {
 
 #[cfg(test)]
 mod tests {
+    /// `ORDER BY`, `min`/`max` and `DISTINCT` over a bytea column all route
+    /// through `compare`; without a bytea arm they raise 42804. PostgreSQL's
+    /// `byteacmp` is bytewise over the common prefix, then length.
+    #[test]
+    fn bytea_compares_bytewise_then_by_length() {
+        let b = |bytes: &[u8]| Datum::Bytea(bytes.to_vec());
+        for (left, right, want) in [
+            (b(&[1, 2]), b(&[1, 2]), Some(Ordering::Equal)),
+            (b(&[1, 2]), b(&[1, 3]), Some(Ordering::Less)),
+            (b(&[1, 3]), b(&[1, 2]), Some(Ordering::Greater)),
+            // A prefix sorts before the longer value.
+            (b(&[1, 2]), b(&[1, 2, 0]), Some(Ordering::Less)),
+            (b(&[]), b(&[0]), Some(Ordering::Less)),
+            // High bytes are unsigned, so 0x80 sorts above 0x7f.
+            (b(&[0x7f]), b(&[0x80]), Some(Ordering::Less)),
+            (Datum::Null, b(&[1]), None),
+        ] {
+            let got = compare(&left, &right).expect("bytea comparison is defined");
+            assert!(got == want, "{left:?} vs {right:?}");
+        }
+    }
+
     use std::cmp::Ordering;
 
     use super::*;
@@ -1216,5 +1270,75 @@ mod tests {
             compare(&num("3"), &Datum::Int4(2)).expect("cmp"),
             Some(Ordering::Greater)
         );
+    }
+
+    #[test]
+    fn jsonb_compare_uses_the_jsonb_btree_order() {
+        use assert2::assert;
+        let j = |text: &str| Datum::Jsonb(crate::jsonb::parse(text).expect("jsonb"));
+        // Object > Array > Bool > Number > String > Null, then within-type order.
+        let cases: &[(&str, &str, Ordering)] = &[
+            ("null", r#""s""#, Ordering::Less),
+            (r#""s""#, "1", Ordering::Less),
+            ("1", "true", Ordering::Less),
+            ("true", "[]", Ordering::Less),
+            ("[]", "{}", Ordering::Less),
+            ("1", "2", Ordering::Less),
+            ("1.0", "1.00", Ordering::Equal),
+            (r#"{"a":1,"b":2}"#, r#"{"b":2,"a":1}"#, Ordering::Equal),
+            (r#"[1]"#, r#"[0,0]"#, Ordering::Less),
+        ];
+        for (left, right, expected) in cases {
+            assert!(
+                compare(&j(left), &j(right)).expect("jsonb cmp") == Some(*expected),
+                "{left} vs {right}"
+            );
+        }
+        // NULL still short-circuits before the jsonb arm.
+        assert!(compare(&j("1"), &Datum::Null).expect("null") == None);
+    }
+
+    #[test]
+    fn array_compare_is_element_wise_with_nulls_greater() {
+        use assert2::assert;
+
+        use crate::{ArrayValue, ElemType};
+        let a = |values: &[Option<i32>]| {
+            Datum::Array(ArrayValue::new(
+                ElemType::Int4,
+                values
+                    .iter()
+                    .map(|v| v.map_or(Datum::Null, Datum::Int4))
+                    .collect(),
+            ))
+        };
+        type Case = (Vec<Option<i32>>, Vec<Option<i32>>, Ordering);
+        let cases: &[Case] = &[
+            (vec![], vec![], Ordering::Equal),
+            (vec![], vec![Some(1)], Ordering::Less),
+            (vec![Some(1)], vec![Some(2)], Ordering::Less),
+            // Element-wise wins over length: {2} > {1,9}.
+            (vec![Some(2)], vec![Some(1), Some(9)], Ordering::Greater),
+            // Equal prefix: shorter first.
+            (vec![Some(1)], vec![Some(1), Some(0)], Ordering::Less),
+            // A NULL element sorts greater than any value, and two NULLs are equal.
+            (vec![None], vec![Some(i32::MAX)], Ordering::Greater),
+            (vec![None], vec![None], Ordering::Equal),
+            (
+                vec![Some(1), None],
+                vec![Some(1), Some(2)],
+                Ordering::Greater,
+            ),
+        ];
+        for (left, right, expected) in cases {
+            assert!(
+                compare(&a(left), &a(right)).expect("array cmp") == Some(*expected),
+                "{left:?} vs {right:?}"
+            );
+            assert!(
+                compare(&a(right), &a(left)).expect("array cmp") == Some(expected.reverse()),
+                "{right:?} vs {left:?}"
+            );
+        }
     }
 }

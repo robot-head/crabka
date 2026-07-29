@@ -4,9 +4,15 @@
 use std::cmp::Ordering;
 
 use crabka_pgparser::ast::{BinaryOp, Expr, UnaryOp};
-use crabka_pgtypes::{ColumnType, Datum, TypeError, ops};
+use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, TypeError, ops};
 
-use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
+use crate::{
+    array_fn::{self, ConcatForm, Quantifier},
+    clock::EvalCtx,
+    error::ExecError,
+    json_fn::{self, JsonOp},
+    scope::Scope,
+};
 
 /// The maximum expression-tree depth `eval` will recurse before returning
 /// `54001` (statement_too_complex). This is DEFENSE-IN-DEPTH: the parser already
@@ -81,7 +87,7 @@ fn eval_depth(
         Expr::Binary { op, left, right } => {
             let l = eval_depth(left, scope, values, ctx, d)?;
             let r = eval_depth(right, scope, values, ctx, d)?;
-            apply_binary(*op, &l, &r, ctx)
+            apply_binary_of(*op, left, right, &l, &r, scope, ctx)
         }
         // A function call reached scalar `eval`: a SP29 scalar function evaluates
         // here (its arguments recurse through this same `eval`). Otherwise it is
@@ -101,6 +107,14 @@ fn eval_depth(
         // datetime, before the aggregate-context error.
         Expr::Func(fc) if crate::format_fn::is_format_func(&fc.name) => {
             crate::format_fn::eval_format(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
+        }
+        // The jsonb + array function families, tried after the older families and
+        // before the aggregate-context error, exactly like the arms above.
+        Expr::Func(fc) if json_fn::is_json_func(&fc.name) => {
+            json_fn::eval_json(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
+        }
+        Expr::Func(fc) if array_fn::is_array_func(&fc.name) => {
+            array_fn::eval_array(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
         }
         Expr::Func(fc) => Err(crate::agg::func_in_scalar_context_error(fc)),
         // SP28: predicate + conditional expressions. The pure-Datum combinators
@@ -151,6 +165,11 @@ fn eval_depth(
         // failure (22P02), numeric overflow (22003), or undefined cast (42846)
         // surfaces here; NULL casts to NULL. The session zone comes from `ctx`.
         Expr::Cast { expr, ty } => {
+            // `ARRAY[]::int[]`: the cast supplies the element type the empty
+            // constructor cannot infer, so it never reaches the operand eval.
+            if let Some(empty) = empty_array_cast(expr, *ty) {
+                return Ok(empty);
+            }
             let v = eval_depth(expr, scope, values, ctx, d)?;
             // `'name'::regclass`: a non-numeric string is a relation name only
             // the catalog can resolve (PostgreSQL's regclassin); numeric and
@@ -163,6 +182,38 @@ fn eval_depth(
                 return crate::exec::resolve_regclass(sequence.kv.as_ref(), name).map(Datum::Int4);
             }
             Ok(crabka_pgtypes::cast::cast(&v, *ty, &ctx.time_zone)?)
+        }
+        // `ARRAY[e1, e2, …]`: every element is coerced to the constructor's
+        // unified element type, so the built array is homogeneous.
+        Expr::ArrayLiteral(items) => {
+            let elem = array_literal_elem_type(items, scope)?;
+            let target = elem.column_type();
+            let mut elems = Vec::with_capacity(items.len());
+            for item in items {
+                let v = eval_depth(item, scope, values, ctx, d)?;
+                elems.push(crabka_pgtypes::cast::cast(&v, target, &ctx.time_zone)?);
+            }
+            Ok(Datum::Array(ArrayValue::new(elem, elems)))
+        }
+        // `base[index]`: 1-based, and out-of-range / NULL is SQL NULL (not an error).
+        Expr::Subscript { base, index } => {
+            let b = eval_depth(base, scope, values, ctx, d)?;
+            let i = eval_depth(index, scope, values, ctx, d)?;
+            array_fn::array_subscript(&b, &i)
+        }
+        // `x <op> ANY|ALL (array)` — the array form of a quantified comparison,
+        // with three-valued logic supplied by `array_fn::eval_quantified`.
+        Expr::QuantifiedArray {
+            expr,
+            op,
+            all,
+            array,
+        } => {
+            let x = eval_depth(expr, scope, values, ctx, d)?;
+            let a = eval_depth(array, scope, values, ctx, d)?;
+            array_fn::eval_quantified(&a, quantifier_of(*all), |elem| {
+                apply_binary(*op, &x, elem, ctx)
+            })
         }
         // SP34: a resolved subquery folded to a constant.
         Expr::Const { value, .. } => Ok(value.clone()),
@@ -375,6 +426,81 @@ pub(crate) fn apply_unary(op: UnaryOp, v: &Datum, _ctx: &EvalCtx) -> Result<Datu
     }
 }
 
+/// Apply a binary operator when the operand *expressions* and the scope are also
+/// in hand — the front door both evaluators use.
+///
+/// Only `||` needs more than the values: PostgreSQL resolves which concatenation
+/// operator applies (text, jsonb, or one of the three array forms) from the
+/// operands' STATIC types, and those are indistinguishable once an operand has
+/// evaluated to SQL NULL. Every other operator resolves from the values alone and
+/// goes straight to [`apply_binary`].
+pub(crate) fn apply_binary_of(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    l: &Datum,
+    r: &Datum,
+    scope: &Scope,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    let (lc, rc) = coerce_untyped_literal_operands(op, left, right, l, r, ctx)?;
+    let (l, r) = (lc.as_ref().unwrap_or(l), rc.as_ref().unwrap_or(r));
+    if op == BinaryOp::Concat {
+        let (kind, _) = resolve_concat(left, right, scope)?;
+        return apply_concat(kind, l, r, ctx);
+    }
+    apply_binary(op, l, r, ctx)
+}
+
+/// Convert an `unknown` string-literal operand's *value* to the type the
+/// operator resolved it to. Typing it is not enough on its own: the literal
+/// still evaluates to a `Datum::Text`, while the jsonb operators need a
+/// `Datum::Jsonb` (or a `text[]` path). Returns `None` per side when nothing
+/// needs converting, so the common case copies nothing.
+fn coerce_untyped_literal_operands(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    l: &Datum,
+    r: &Datum,
+    ctx: &EvalCtx,
+) -> Result<(Option<Datum>, Option<Datum>), ExecError> {
+    // Only a jsonb counterpart resolves a bare literal; an array must not, so
+    // that `ARRAY['a'] || 'b'` still appends an element (PostgreSQL's
+    // `anyarray || anyelement`).
+    let target = |other: &Datum| -> Option<ColumnType> {
+        if !matches!(other, Datum::Jsonb(_)) {
+            return None;
+        }
+        match op {
+            BinaryOp::JsonGetPath
+            | BinaryOp::JsonGetPathText
+            | BinaryOp::KeyExistsAny
+            | BinaryOp::KeyExistsAll => ColumnType::array_of(ColumnType::Text),
+            BinaryOp::Contains
+            | BinaryOp::ContainedBy
+            | BinaryOp::Concat
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge => Some(ColumnType::Jsonb),
+            _ => None,
+        }
+    };
+    let convert = |e: &Expr, v: &Datum, other: &Datum| -> Result<Option<Datum>, ExecError> {
+        if !matches!(e, Expr::StringLiteral(_)) || !matches!(v, Datum::Text(_)) {
+            return Ok(None);
+        }
+        match target(other) {
+            Some(ty) => Ok(Some(crabka_pgtypes::cast::cast(v, ty, &ctx.time_zone)?)),
+            None => Ok(None),
+        }
+    };
+    Ok((convert(left, l, r)?, convert(right, r, l)?))
+}
+
 /// Apply a binary operator to two already-evaluated operands. Shared by scalar
 /// `eval` and the SP27 grouped evaluator (`agg::eval_grouped`). `ctx` supplies the
 /// session zone used by `||`'s text rendering.
@@ -395,16 +521,399 @@ pub(crate) fn apply_binary(
     }
     match op {
         BinaryOp::Add => Ok(ops::add(l, r)?),
+        // jsonb `-` (delete a key, an index, or a set of keys) overloads the
+        // arithmetic `-`; a jsonb LEFT operand is what selects it, so every
+        // numeric/date pair keeps its existing behavior.
+        BinaryOp::Sub if matches!(l, Datum::Jsonb(_)) => {
+            json_fn::eval_json_operator(JsonOp::Delete, l, r)
+        }
         BinaryOp::Sub => Ok(ops::sub(l, r)?),
         BinaryOp::Mul => Ok(ops::mul(l, r)?),
         BinaryOp::Div => Ok(ops::div(l, r)?),
         BinaryOp::And => Ok(ops::and(l, r)?),
         BinaryOp::Or => Ok(ops::or(l, r)?),
-        BinaryOp::Concat => Ok(ops::concat(l, r, &ctx.time_zone)?),
+        // Resolved from the runtime values' types, which agrees with the static
+        // resolution for every non-NULL pair. A NULL operand carries no type, so
+        // this falls back to text concatenation — and `||` propagates NULL for
+        // every family, so only the reported *type* could differ. Callers with
+        // the operand expressions use [`apply_binary_of`], which is exact.
+        BinaryOp::Concat => {
+            let kind = l
+                .column_type()
+                .zip(r.column_type())
+                .and_then(|(lt, rt)| concat_kind(lt, rt))
+                .map_or(ConcatKind::Text, |(kind, _)| kind);
+            apply_concat(kind, l, r, ctx)
+        }
+        BinaryOp::JsonGet => json_fn::eval_json_operator(JsonOp::Get, l, r),
+        BinaryOp::JsonGetText => json_fn::eval_json_operator(JsonOp::GetText, l, r),
+        BinaryOp::JsonGetPath => json_fn::eval_json_operator(JsonOp::GetPath, l, r),
+        BinaryOp::JsonGetPathText => json_fn::eval_json_operator(JsonOp::GetPathText, l, r),
+        BinaryOp::KeyExists => json_fn::eval_json_operator(JsonOp::KeyExists, l, r),
+        BinaryOp::KeyExistsAny => json_fn::eval_json_operator(JsonOp::KeyExistsAny, l, r),
+        BinaryOp::KeyExistsAll => json_fn::eval_json_operator(JsonOp::KeyExistsAll, l, r),
+        // `@>` / `<@` are defined for BOTH jsonb and arrays.
+        BinaryOp::Contains | BinaryOp::ContainedBy => apply_containment(op, l, r),
+        // `&&` is array-only; `array_overlap` already yields NULL for a NULL side.
+        BinaryOp::Overlaps => array_fn::array_overlap(l, r),
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
             let ord = ops::compare(l, r)?;
             Ok(cmp_result(op, ord))
         }
+    }
+}
+
+/// `@>` / `<@`: the operand values pick the jsonb or the array family (the
+/// static types already agreed at plan time). Both families are strict, so two
+/// SQL NULLs need no family at all.
+fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
+    let contains = op == BinaryOp::Contains;
+    if matches!(l, Datum::Jsonb(_)) || matches!(r, Datum::Jsonb(_)) {
+        let json_op = if contains {
+            JsonOp::Contains
+        } else {
+            JsonOp::ContainedBy
+        };
+        return json_fn::eval_json_operator(json_op, l, r);
+    }
+    if matches!(l, Datum::Array(_)) || matches!(r, Datum::Array(_)) {
+        return if contains {
+            array_fn::array_contains(l, r)
+        } else {
+            array_fn::array_contained_by(l, r)
+        };
+    }
+    if l.is_null() && r.is_null() {
+        return Ok(Datum::Null);
+    }
+    Err(undefined_operator_for(op, l, r))
+}
+
+/// Which of PostgreSQL's concatenation operators a `||` resolves to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConcatKind {
+    /// `text || anynonarray` / `anynonarray || text`.
+    Text,
+    /// `jsonb || jsonb`.
+    Jsonb,
+    /// One of the three array forms (`anyarray || anyarray`, `anyarray ||
+    /// anyelement`, `anyelement || anyarray`).
+    Array(ConcatForm),
+}
+
+/// Resolve `left || right` from the operands' STATIC types: the operator that
+/// applies plus its result type. 42883 when no `||` is defined for the pair.
+fn resolve_concat(
+    left: &Expr,
+    right: &Expr,
+    scope: &Scope,
+) -> Result<(ConcatKind, ColumnType), ExecError> {
+    let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+    let (lt, rt) = adopt_null_literal_type(left, right, lt, rt);
+    concat_kind(lt, rt).ok_or_else(|| undefined_operator("||", lt, rt))
+}
+
+/// This codebase types a bare `NULL` literal as `text`, but PostgreSQL resolves
+/// the literal's `unknown` type against the other operand. That matters for `||`:
+/// `ARRAY[1,2] || NULL` must pick `array_cat` (yielding `{1,2}`), not
+/// `array_append` (which would yield `{1,2,NULL}`). Only the two families whose
+/// `||` a text fallback would silently steal — jsonb and arrays — are adopted.
+fn adopt_null_literal_type(
+    left: &Expr,
+    right: &Expr,
+    lt: ColumnType,
+    rt: ColumnType,
+) -> (ColumnType, ColumnType) {
+    let adopts = |t: ColumnType| t == ColumnType::Jsonb || t.array_element().is_some();
+    if matches!(left, Expr::NullLiteral) && adopts(rt) {
+        (rt, rt)
+    } else if matches!(right, Expr::NullLiteral) && adopts(lt) {
+        (lt, lt)
+    } else {
+        adopt_string_literal_type(left, right, lt, rt)
+    }
+}
+
+/// PostgreSQL leaves a bare string literal `unknown` and resolves it against the
+/// other operand; this codebase types it `text` at once. Adopt it into `jsonb`
+/// when the other side is jsonb, so `j @> '{"a":1}'` and `j || '{"b":2}'` mean
+/// what they do in PostgreSQL. Without this, `||` is the dangerous one: a
+/// jsonb/text pair falls through to *string* concatenation and returns a
+/// plausible-looking wrong answer instead of merging.
+///
+/// Deliberately jsonb-only. An array must NOT adopt, because PostgreSQL's
+/// `anyarray || anyelement` is what makes `ARRAY['a'] || 'b'` append `'b'` as an
+/// element rather than concatenating two arrays.
+fn adopt_string_literal_type(
+    left: &Expr,
+    right: &Expr,
+    lt: ColumnType,
+    rt: ColumnType,
+) -> (ColumnType, ColumnType) {
+    let untyped = |e: &Expr| matches!(e, Expr::StringLiteral(_));
+    if untyped(left) && rt == ColumnType::Jsonb {
+        (ColumnType::Jsonb, rt)
+    } else if untyped(right) && lt == ColumnType::Jsonb {
+        (lt, ColumnType::Jsonb)
+    } else {
+        (lt, rt)
+    }
+}
+
+/// Resolve an `unknown` string-literal operand of a jsonb operator to the type
+/// that operator expects on that side: `text[]` for the path and multi-key
+/// operators, `jsonb` for containment.
+fn adopt_json_operand_types(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    lt: ColumnType,
+    rt: ColumnType,
+) -> (ColumnType, ColumnType) {
+    if !matches!(right, Expr::StringLiteral(_)) || lt != ColumnType::Jsonb {
+        return adopt_string_literal_type(left, right, lt, rt);
+    }
+    let expected = match op {
+        BinaryOp::JsonGetPath
+        | BinaryOp::JsonGetPathText
+        | BinaryOp::KeyExistsAny
+        | BinaryOp::KeyExistsAll => ColumnType::array_of(ColumnType::Text),
+        BinaryOp::Contains | BinaryOp::ContainedBy => Some(ColumnType::Jsonb),
+        _ => None,
+    };
+    (lt, expected.unwrap_or(rt))
+}
+
+// ---- `unknown` literals as FUNCTION ARGUMENTS ----
+//
+// The operator side of PostgreSQL's `unknown` resolution is above
+// (`adopt_string_literal_type` / `adopt_json_operand_types`). The three items
+// below are its function-argument counterpart, shared by the families that need
+// it (`json_fn`, `array_fn`): each family writes its parameter types down once,
+// as a `param_types` rule over [`ArgType`]s, and both the plan-time result-type
+// resolver and the run-time evaluator drive that one rule.
+
+/// What one argument contributes to PostgreSQL's function-argument type
+/// resolution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArgType {
+    /// A bare literal PostgreSQL leaves `unknown`, so it adopts the type of the
+    /// parameter it is passed to. This codebase types both a string literal and
+    /// a bare `NULL` as `text` immediately, so the question has to be asked
+    /// syntactically.
+    Unknown,
+    /// An argument carrying a type of its own.
+    Known(ColumnType),
+    /// An argument that carries a type, but not one visible here — a run-time
+    /// SQL NULL. Like [`ArgType::Unknown`] it resolves no polymorphic
+    /// parameter, but unlike it, it is never the *reason* one is unresolvable
+    /// (`to_jsonb(j)` on a NULL row value is not `to_jsonb('a')`).
+    Opaque,
+}
+
+impl ArgType {
+    /// The type this argument contributes, if any.
+    pub(crate) fn known(self) -> Option<ColumnType> {
+        match self {
+            ArgType::Known(t) => Some(t),
+            ArgType::Unknown | ArgType::Opaque => None,
+        }
+    }
+
+    /// Is this an `unknown` literal awaiting its parameter's type?
+    pub(crate) fn is_unknown(self) -> bool {
+        self == ArgType::Unknown
+    }
+}
+
+/// The argument types a family resolves its parameters from at PLAN time.
+pub(crate) fn static_arg_types(args: &[Expr], scope: &Scope) -> Result<Vec<ArgType>, ExecError> {
+    args.iter()
+        .map(|e| {
+            if is_unknown_literal(e) {
+                Ok(ArgType::Unknown)
+            } else {
+                infer_type(e, scope).map(ArgType::Known)
+            }
+        })
+        .collect()
+}
+
+/// The same, at RUN time: an argument's type comes from its value, and a SQL
+/// NULL carries none.
+pub(crate) fn value_arg_types(args: &[Expr], vals: &[Datum]) -> Vec<ArgType> {
+    args.iter()
+        .zip(vals)
+        .map(|(e, v)| {
+            if is_unknown_literal(e) {
+                ArgType::Unknown
+            } else {
+                v.column_type().map_or(ArgType::Opaque, ArgType::Known)
+            }
+        })
+        .collect()
+}
+
+/// Each argument's type once the `unknown` literals have adopted their
+/// parameter's type — what a family's plan-time checks and result type are
+/// computed from. A parameter a literal cannot adopt (a `"any"` parameter, where
+/// PostgreSQL resolves `unknown` to `text`) leaves it `text`.
+pub(crate) fn effective_arg_types(
+    given: &[ArgType],
+    params: &[Option<ColumnType>],
+) -> Vec<ColumnType> {
+    given
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            if g.is_unknown() {
+                params.get(i).copied().flatten().unwrap_or(ColumnType::Text)
+            } else {
+                g.known().unwrap_or(ColumnType::Text)
+            }
+        })
+        .collect()
+}
+
+/// Convert each `unknown` literal argument's `text` value to the type its
+/// parameter resolved to. Typing the literal is not enough on its own: it still
+/// evaluates to a `Datum::Text`, while `jsonb_set`'s path parameter needs a
+/// `Datum::Array` and its value parameter a `Datum::Jsonb`. A NULL value has
+/// nothing to convert.
+pub(crate) fn coerce_unknown_args(
+    args: &[Expr],
+    vals: &mut [Datum],
+    params: &[Option<ColumnType>],
+    ctx: &EvalCtx,
+) -> Result<(), ExecError> {
+    for (i, v) in vals.iter_mut().enumerate() {
+        let Some(Some(ty)) = args.get(i).map(|e| {
+            is_unknown_literal(e)
+                .then(|| params.get(i).copied().flatten())
+                .flatten()
+        }) else {
+            continue;
+        };
+        if v.is_null() || v.column_type() == Some(ty) {
+            continue;
+        }
+        *v = crabka_pgtypes::cast::cast(v, ty, &ctx.time_zone)?;
+    }
+    Ok(())
+}
+
+/// Is `e` a literal PostgreSQL would still call `unknown`?
+fn is_unknown_literal(e: &Expr) -> bool {
+    matches!(e, Expr::StringLiteral(_) | Expr::NullLiteral)
+}
+
+/// PostgreSQL's 42804 for a polymorphic parameter (`anyarray`, `anyelement`)
+/// that nothing in the call resolves, because every argument that could have is
+/// an `unknown` literal — `cardinality('{1,2}')`, `to_jsonb('a')`.
+pub(crate) fn undetermined_polymorphic_type() -> ExecError {
+    ExecError::TypeMismatch(
+        "could not determine polymorphic type because input has type unknown".into(),
+    )
+}
+
+/// The `||` operator for a type pair, and its result type. Arrays are resolved
+/// before the text fallback so `text[] || text` appends rather than stringifies —
+/// PostgreSQL's `anyarray || anyelement` outranks `anynonarray || text` there.
+fn concat_kind(lt: ColumnType, rt: ColumnType) -> Option<(ConcatKind, ColumnType)> {
+    if lt == ColumnType::Jsonb && rt == ColumnType::Jsonb {
+        return Some((ConcatKind::Jsonb, ColumnType::Jsonb));
+    }
+    if let (Some(form), Some(ty)) = (
+        array_fn::concat_form(lt, rt),
+        array_fn::concat_result_type(lt, rt),
+    ) {
+        return Some((ConcatKind::Array(form), ty));
+    }
+    // SP29: `||` yields text, and PostgreSQL requires at least one operand to be
+    // text (`text || anynonarray` / `anynonarray || text`); neither-text (e.g.
+    // `int || int`) is 42883.
+    (lt == ColumnType::Text || rt == ColumnType::Text)
+        .then_some((ConcatKind::Text, ColumnType::Text))
+}
+
+fn apply_concat(kind: ConcatKind, l: &Datum, r: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    match kind {
+        ConcatKind::Text => Ok(ops::concat(l, r, &ctx.time_zone)?),
+        ConcatKind::Jsonb => json_fn::eval_json_operator(JsonOp::Concat, l, r),
+        ConcatKind::Array(form) => array_fn::array_concat(form, l, r, ctx),
+    }
+}
+
+/// The `JsonOp` a `BinaryOp` spells, for the operators jsonb defines.
+fn json_op_of(op: BinaryOp) -> Option<JsonOp> {
+    Some(match op {
+        BinaryOp::JsonGet => JsonOp::Get,
+        BinaryOp::JsonGetText => JsonOp::GetText,
+        BinaryOp::JsonGetPath => JsonOp::GetPath,
+        BinaryOp::JsonGetPathText => JsonOp::GetPathText,
+        BinaryOp::Contains => JsonOp::Contains,
+        BinaryOp::ContainedBy => JsonOp::ContainedBy,
+        BinaryOp::KeyExists => JsonOp::KeyExists,
+        BinaryOp::KeyExistsAny => JsonOp::KeyExistsAny,
+        BinaryOp::KeyExistsAll => JsonOp::KeyExistsAll,
+        _ => return None,
+    })
+}
+
+/// A binary operator's SQL spelling, for error messages.
+fn op_spelling(op: BinaryOp) -> &'static str {
+    match op {
+        BinaryOp::Add => "+",
+        BinaryOp::Sub => "-",
+        BinaryOp::Mul => "*",
+        BinaryOp::Div => "/",
+        BinaryOp::Concat => "||",
+        BinaryOp::JsonGet => "->",
+        BinaryOp::JsonGetText => "->>",
+        BinaryOp::JsonGetPath => "#>",
+        BinaryOp::JsonGetPathText => "#>>",
+        BinaryOp::Contains => "@>",
+        BinaryOp::ContainedBy => "<@",
+        BinaryOp::KeyExists => "?",
+        BinaryOp::KeyExistsAny => "?|",
+        BinaryOp::KeyExistsAll => "?&",
+        BinaryOp::Overlaps => "&&",
+        BinaryOp::Eq => "=",
+        BinaryOp::Ne => "<>",
+        BinaryOp::Lt => "<",
+        BinaryOp::Le => "<=",
+        BinaryOp::Gt => ">",
+        BinaryOp::Ge => ">=",
+        BinaryOp::And => "AND",
+        BinaryOp::Or => "OR",
+    }
+}
+
+fn undefined_operator(op: &str, lt: ColumnType, rt: ColumnType) -> ExecError {
+    ExecError::UndefinedFunction(format!(
+        "operator does not exist: {} {op} {}",
+        lt.name(),
+        rt.name()
+    ))
+}
+
+/// The same 42883, reported from the runtime values (an untyped SQL NULL has no
+/// type to name).
+fn undefined_operator_for(op: BinaryOp, l: &Datum, r: &Datum) -> ExecError {
+    let name = |d: &Datum| d.column_type().map_or("unknown", ColumnType::name);
+    ExecError::UndefinedFunction(format!(
+        "operator does not exist: {} {} {}",
+        name(l),
+        op_spelling(op),
+        name(r)
+    ))
+}
+
+pub(crate) fn quantifier_of(all: bool) -> Quantifier {
+    if all {
+        Quantifier::All
+    } else {
+        Quantifier::Any
     }
 }
 
@@ -501,32 +1010,7 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             UnaryOp::Not => Ok(ColumnType::Bool),
             UnaryOp::Neg => infer_type(expr, scope),
         },
-        Expr::Binary { op, left, right } => {
-            match op {
-                BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
-                    let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
-                    // SP37: a temporal operand resolves via PG's date/time arithmetic
-                    // matrix first; a non-temporal pair falls through to the numeric tower.
-                    Ok(datetime_result_type(*op, lt, rt)
-                        .unwrap_or_else(|| numeric_result_type(lt, rt)))
-                }
-                // SP29: `||` yields text. PostgreSQL resolves the operator at plan
-                // time and requires at least one operand to be text (`text || anynonarray`
-                // / `anynonarray || text`); neither-text (e.g. `int || int`) is 42883.
-                BinaryOp::Concat => {
-                    let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
-                    if lt != ColumnType::Text && rt != ColumnType::Text {
-                        return Err(ExecError::UndefinedFunction(format!(
-                            "operator does not exist: {} || {}",
-                            lt.name(),
-                            rt.name()
-                        )));
-                    }
-                    Ok(ColumnType::Text)
-                }
-                _ => Ok(ColumnType::Bool),
-            }
-        }
+        Expr::Binary { op, left, right } => infer_binary_type(*op, left, right, scope),
         // SP29: a scalar function's result type; otherwise an aggregate result
         // type for RowDescription (count/sum -> int8, min/max -> the argument's
         // type); unknown names / bad arity / bad argument type -> 42883.
@@ -541,6 +1025,13 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         Expr::Func(fc) if crate::format_fn::is_format_func(&fc.name) => {
             crate::format_fn::format_func_result_type(fc, scope)
         }
+        // The jsonb + array function families' static result types.
+        Expr::Func(fc) if json_fn::is_json_func(&fc.name) => {
+            json_fn::json_func_result_type(fc, scope)
+        }
+        Expr::Func(fc) if array_fn::is_array_func(&fc.name) => {
+            array_fn::array_func_result_type(fc, scope)
+        }
         Expr::Func(fc) => crate::agg::func_result_type(fc, scope),
         // SP28: predicates are boolean; CASE unifies its branch result types.
         Expr::IsNull { .. } | Expr::InList { .. } | Expr::Between { .. } | Expr::Like { .. } => {
@@ -554,6 +1045,12 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // (so it is rejected before any row is produced). A bare `NULL` infers as
         // text, and text → anything is defined, so `NULL::<any>` is accepted.
         Expr::Cast { expr, ty } => {
+            // `ARRAY[]::int[]`: the empty constructor has no element type of its
+            // own — the cast supplies it (PostgreSQL pushes the type context down
+            // into the constructor), so the operand is not inferred at all.
+            if empty_array_cast(expr, *ty).is_some() {
+                return Ok(*ty);
+            }
             let from = infer_type(expr, scope)?;
             if crabka_pgtypes::cast::cast_allowed(from, *ty) {
                 Ok(*ty)
@@ -567,8 +1064,27 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // SP34: a resolved subquery's static type is recorded on the node.
         Expr::Const { ty, .. } => Ok(*ty),
         // SP34: EXISTS / IN-subquery / quantified comparison are always boolean
-        // (typeable without executing — used by `describe`).
-        Expr::Exists(_) | Expr::InSubquery { .. } | Expr::Quantified { .. } => Ok(ColumnType::Bool),
+        // (typeable without executing — used by `describe`). The array form of a
+        // quantified comparison (`= ANY(arr)`) is boolean for the same reason.
+        Expr::Exists(_)
+        | Expr::InSubquery { .. }
+        | Expr::Quantified { .. }
+        | Expr::QuantifiedArray { .. } => Ok(ColumnType::Bool),
+        // `ARRAY[…]` types as an array of its unified element type.
+        Expr::ArrayLiteral(items) => Ok(ColumnType::Array(array_literal_elem_type(items, scope)?)),
+        // `base[index]` yields the base array's element type; anything else has no
+        // subscripting operator.
+        Expr::Subscript { base, .. } => {
+            let bt = infer_type(base, scope)?;
+            bt.array_element()
+                .map(ElemType::column_type)
+                .ok_or_else(|| {
+                    ExecError::TypeMismatch(format!(
+                        "cannot subscript type {} because it does not support subscripting",
+                        bt.name()
+                    ))
+                })
+        }
         // A scalar subquery's type needs the catalog; both the exec and describe
         // paths substitute it to `Const` before `infer_type` runs, so this is
         // unreachable in practice (defensive).
@@ -576,6 +1092,116 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             "internal: scalar subquery must be resolved before type inference".into(),
         )),
     }
+}
+
+/// Statically infer a binary expression's result type.
+fn infer_binary_type(
+    op: BinaryOp,
+    left: &Expr,
+    right: &Expr,
+    scope: &Scope,
+) -> Result<ColumnType, ExecError> {
+    match op {
+        BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            // jsonb `-` (delete) overloads the arithmetic `-`. Only a jsonb LEFT
+            // operand selects it, so every numeric/date pair below is unchanged;
+            // a jsonb left operand with an unsupported right operand is 42883
+            // rather than falling through to the numeric tower.
+            if op == BinaryOp::Sub && lt == ColumnType::Jsonb {
+                return json_fn::json_operator_result_type(JsonOp::Delete, lt, rt)
+                    .ok_or_else(|| undefined_operator("-", lt, rt));
+            }
+            // SP37: a temporal operand resolves via PG's date/time arithmetic
+            // matrix first; a non-temporal pair falls through to the numeric tower.
+            Ok(datetime_result_type(op, lt, rt).unwrap_or_else(|| numeric_result_type(lt, rt)))
+        }
+        // `||` is text, jsonb, or one of the three array concatenations, resolved
+        // from the operand types (42883 when no `||` applies).
+        BinaryOp::Concat => Ok(resolve_concat(left, right, scope)?.1),
+        // The jsonb/array operators: `->` and `#>` yield jsonb, `->>` and `#>>`
+        // yield text, and the containment/existence/overlap tests yield boolean.
+        BinaryOp::JsonGet
+        | BinaryOp::JsonGetText
+        | BinaryOp::JsonGetPath
+        | BinaryOp::JsonGetPathText
+        | BinaryOp::Contains
+        | BinaryOp::ContainedBy
+        | BinaryOp::KeyExists
+        | BinaryOp::KeyExistsAny
+        | BinaryOp::KeyExistsAll
+        | BinaryOp::Overlaps => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            let (alt, art) = adopt_json_operand_types(op, left, right, lt, rt);
+            json_or_array_operator_result_type(op, alt, art)
+                .ok_or_else(|| undefined_operator(op_spelling(op), lt, rt))
+        }
+        _ => Ok(ColumnType::Bool),
+    }
+}
+
+/// The static result type of a jsonb or array operator, or `None` when the
+/// operand types resolve neither (the caller reports 42883 at plan time). The
+/// jsonb rules live in `json_fn`; the array rules are `@>` / `<@` / `&&` over two
+/// arrays sharing one element type.
+fn json_or_array_operator_result_type(
+    op: BinaryOp,
+    lt: ColumnType,
+    rt: ColumnType,
+) -> Option<ColumnType> {
+    if let Some(json_op) = json_op_of(op)
+        && let Some(t) = json_fn::json_operator_result_type(json_op, lt, rt)
+    {
+        return Some(t);
+    }
+    if matches!(
+        op,
+        BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps
+    ) && let (Some(le), Some(re)) = (lt.array_element(), rt.array_element())
+        && le == re
+    {
+        return Some(ColumnType::Bool);
+    }
+    None
+}
+
+/// The element type of an `ARRAY[…]` constructor: its elements unified exactly as
+/// `CASE`/`COALESCE` unify their branches, so a bare `NULL` element imposes no
+/// constraint and an all-NULL list falls back to `text` (PostgreSQL's `unknown` →
+/// `text`). `ARRAY[]` has nothing to unify — 42P18, and a cast supplies the type.
+/// An element type crabka has no array type for is 0A000.
+pub(crate) fn array_literal_elem_type(
+    items: &[Expr],
+    scope: &Scope,
+) -> Result<ElemType, ExecError> {
+    if items.is_empty() {
+        return Err(indeterminate_type("cannot determine type of empty array"));
+    }
+    let mut acc: Option<ColumnType> = None;
+    for item in items {
+        acc = unify_branch(acc, item, scope)?;
+    }
+    let elem = acc.unwrap_or(ColumnType::Text);
+    ElemType::from_column_type(elem).ok_or_else(|| {
+        ExecError::Unsupported(format!("arrays of {} are not supported", elem.name()))
+    })
+}
+
+/// `ARRAY[]::int[]`: an empty array constructor has no element type of its own,
+/// so PostgreSQL pushes the cast's type context down into it. Returns the typed
+/// empty array when `expr`/`ty` are exactly that shape.
+pub(crate) fn empty_array_cast(expr: &Expr, ty: ColumnType) -> Option<Datum> {
+    match (expr, ty.array_element()) {
+        (Expr::ArrayLiteral(items), Some(elem)) if items.is_empty() => {
+            Some(Datum::Array(ArrayValue::new(elem, Vec::new())))
+        }
+        _ => None,
+    }
+}
+
+/// 42P18 (`indeterminate_datatype`).
+fn indeterminate_type(message: &str) -> ExecError {
+    ExecError::IndeterminateType(message.to_string())
 }
 
 /// Infer a `CASE`'s result type by unifying every THEN result and the ELSE. A
@@ -1206,6 +1832,349 @@ mod tests {
         assert_eq!(
             infer_type(&p("DATE '2024-01-01' + INTERVAL '1 day'"), &scope).expect("inf"),
             ColumnType::Timestamp
+        );
+    }
+
+    // ---- jsonb + array operators, constructors, and quantified comparisons ----
+
+    /// A relation covering every operand family the new operators resolve over.
+    fn jt() -> Table {
+        Table {
+            id: 2,
+            name: "jt".into(),
+            columns: vec![
+                Column::new("j", ColumnType::Jsonb),
+                Column::new("ia", ColumnType::Array(ElemType::Int4)),
+                Column::new("ta", ColumnType::Array(ElemType::Text)),
+                Column::new("i", ColumnType::Int4),
+                Column::new("s", ColumnType::Text),
+            ],
+            sharded: false,
+            sharding: None,
+            foreign: None,
+        }
+    }
+
+    fn jb(text: &str) -> Datum {
+        Datum::Jsonb(crabka_pgtypes::jsonb::parse(text).expect("jsonb literal"))
+    }
+
+    fn int_array(elems: &[i32]) -> Datum {
+        Datum::Array(ArrayValue::new(
+            ElemType::Int4,
+            elems.iter().copied().map(Datum::Int4).collect(),
+        ))
+    }
+
+    /// The row bound to [`jt`] for the evaluation tables below.
+    fn jt_row() -> Vec<Datum> {
+        vec![
+            jb(r#"{"a": 1, "b": [10, 20]}"#),
+            int_array(&[1, 2, 3]),
+            Datum::Array(ArrayValue::new(
+                ElemType::Text,
+                vec![Datum::Text("a".into()), Datum::Text("x".into())],
+            )),
+            Datum::Int4(2),
+            Datum::Text("a".into()),
+        ]
+    }
+
+    fn infer_jt(sql: &str) -> Result<ColumnType, ExecError> {
+        infer_type(&pexpr(sql).expect("parse"), &scope_of(Some(&jt())))
+    }
+
+    fn eval_jt(sql: &str) -> Result<Datum, ExecError> {
+        let ctx = crate::clock::EvalCtx::test_default();
+        eval(
+            &pexpr(sql).expect("parse"),
+            &scope_of(Some(&jt())),
+            &jt_row(),
+            &ctx,
+        )
+    }
+
+    /// Every new operator's STATIC result type, routed through the `json_fn` /
+    /// `array_fn` rules so plan-time typing and evaluation never disagree.
+    #[test]
+    fn new_operators_infer_their_result_types() {
+        let text_array = ColumnType::Array(ElemType::Text);
+        let int_array_ty = ColumnType::Array(ElemType::Int4);
+        let cases: &[(&str, ColumnType)] = &[
+            ("j -> 'a'", ColumnType::Jsonb),
+            ("j -> 1", ColumnType::Jsonb),
+            ("j ->> 'a'", ColumnType::Text),
+            ("j #> ARRAY['b', '0']", ColumnType::Jsonb),
+            ("j #>> ARRAY['b', '0']", ColumnType::Text),
+            ("j @> j", ColumnType::Bool),
+            ("j <@ j", ColumnType::Bool),
+            ("j ? 'a'", ColumnType::Bool),
+            ("j ?| ARRAY['a']", ColumnType::Bool),
+            ("j ?& ARRAY['a']", ColumnType::Bool),
+            ("ia @> ia", ColumnType::Bool),
+            ("ia <@ ia", ColumnType::Bool),
+            ("ia && ia", ColumnType::Bool),
+            ("ta && ta", ColumnType::Bool),
+            // `||` and `-` are overloads of the existing operators.
+            ("j || j", ColumnType::Jsonb),
+            ("j - 'a'", ColumnType::Jsonb),
+            ("j - 1", ColumnType::Jsonb),
+            ("j - ARRAY['a']", ColumnType::Jsonb),
+            ("ia || ia", int_array_ty),
+            ("ia || i", int_array_ty),
+            ("i || ia", int_array_ty),
+            ("ta || s", text_array),
+            ("s || ta", text_array),
+            // The existing text/numeric behavior is untouched.
+            ("s || i", ColumnType::Text),
+            ("i - i", ColumnType::Int4),
+            // The array expression forms.
+            ("ARRAY[1, 2]", int_array_ty),
+            ("ia[1]", ColumnType::Int4),
+            ("ta[1]", ColumnType::Text),
+            ("i = ANY(ia)", ColumnType::Bool),
+            ("i > ALL(ia)", ColumnType::Bool),
+        ];
+        for (sql, want) in cases {
+            assert2::assert!(infer_jt(sql).expect("infer") == *want, "for {sql}");
+        }
+    }
+
+    /// Operand combinations no operator resolves are 42883 at PLAN time.
+    #[test]
+    fn unresolvable_operator_operands_are_42883() {
+        for sql in [
+            "i -> 'a'",      // `->` needs a jsonb left operand
+            "j -> true",     // no jsonb subscript for boolean
+            "j @> ia",       // jsonb against an array
+            "ia && ta",      // mismatched element types
+            "j && j",        // `&&` is array-only
+            "i && i",        // neither side is an array
+            "j || i",        // jsonb concatenates only with jsonb (or text)
+            "i || i",        // the pre-existing neither-text rule still holds
+            "j - true",      // no jsonb delete for boolean
+            "ia || ta",      // mismatched element types
+            "j ?| ARRAY[1]", // `?|` needs text[]
+        ] {
+            let err = infer_jt(sql).expect_err("must not resolve");
+            assert2::assert!(err.into_pg().code == "42883", "for {sql}");
+        }
+    }
+
+    /// Every new operator's VALUE, including the jsonb-null / SQL-NULL and
+    /// three-valued cells that distinguish them.
+    #[test]
+    fn new_operators_evaluate() {
+        let cases: &[(&str, Datum)] = &[
+            ("j -> 'a'", jb("1")),
+            ("j -> 'zz'", Datum::Null),
+            ("j ->> 'a'", Datum::Text("1".into())),
+            ("j -> 'b' -> 0", jb("10")),
+            ("j #> ARRAY['b', '1']", jb("20")),
+            ("j #>> ARRAY['b', '1']", Datum::Text("20".into())),
+            (r#"j @> '{"a": 1}'::jsonb"#, Datum::Bool(true)),
+            (r#"j @> '{"a": 2}'::jsonb"#, Datum::Bool(false)),
+            (r#"'{"a": 1}'::jsonb <@ j"#, Datum::Bool(true)),
+            ("j ? 'a'", Datum::Bool(true)),
+            ("j ? 'zz'", Datum::Bool(false)),
+            ("j ?| ARRAY['zz', 'a']", Datum::Bool(true)),
+            ("j ?& ARRAY['a', 'zz']", Datum::Bool(false)),
+            ("ia @> ARRAY[1, 2]", Datum::Bool(true)),
+            ("ia @> ARRAY[9]", Datum::Bool(false)),
+            ("ARRAY[1] <@ ia", Datum::Bool(true)),
+            ("ia && ARRAY[9, 3]", Datum::Bool(true)),
+            ("ia && ARRAY[9]", Datum::Bool(false)),
+            // Every jsonb operator is strict.
+            ("null::jsonb -> 'a'", Datum::Null),
+            ("j -> null", Datum::Null),
+            ("null::jsonb @> j", Datum::Null),
+            ("null::int[] && ia", Datum::Null),
+            ("null::int[] && null::int[]", Datum::Null),
+        ];
+        for (sql, want) in cases {
+            assert2::assert!(eval_jt(sql).expect("eval") == *want, "for {sql}");
+        }
+    }
+
+    /// `||` resolves to five different operators; the choice is made from the
+    /// operands' STATIC types, which is the only way `ARRAY[1,2] || NULL` (a
+    /// concatenation, `{1,2}`) can differ from `ARRAY[1,2] || NULL::int` (an
+    /// append, `{1,2,NULL}`) once both right sides have evaluated to SQL NULL.
+    #[test]
+    fn concat_resolves_text_jsonb_and_the_three_array_forms() {
+        let with_null = Datum::Array(ArrayValue::new(
+            ElemType::Int4,
+            vec![Datum::Int4(1), Datum::Int4(2), Datum::Null],
+        ));
+        let cases: &[(&str, Datum)] = &[
+            ("s || i", Datum::Text("a2".into())),
+            (
+                r#"j || '{"c": 3}'::jsonb"#,
+                jb(r#"{"a": 1, "b": [10, 20], "c": 3}"#),
+            ),
+            ("ARRAY[1, 2] || ARRAY[3]", int_array(&[1, 2, 3])),
+            ("ARRAY[1, 2] || 3", int_array(&[1, 2, 3])),
+            ("1 || ARRAY[2, 3]", int_array(&[1, 2, 3])),
+            // A bare NULL literal resolves to `array_cat`, as PostgreSQL's
+            // `unknown` resolution does — NOT to `array_append`.
+            ("ARRAY[1, 2] || null", int_array(&[1, 2])),
+            ("null || ARRAY[1, 2]", int_array(&[1, 2])),
+            // A NULL typed as the ELEMENT still appends.
+            ("ARRAY[1, 2] || null::int4", with_null),
+            // A typed NULL array is still a concatenation of an unknown array.
+            ("ARRAY[1, 2] || null::int[]", int_array(&[1, 2])),
+            // jsonb `||` is strict.
+            ("j || null::jsonb", Datum::Null),
+        ];
+        for (sql, want) in cases {
+            assert2::assert!(eval_jt(sql).expect("eval") == *want, "for {sql}");
+        }
+        // The NULL-literal adoption also shows up in the static type.
+        assert2::assert!(
+            infer_jt("ARRAY[1, 2] || null").expect("infer") == ColumnType::Array(ElemType::Int4)
+        );
+        assert2::assert!(infer_jt("j || null").expect("infer") == ColumnType::Jsonb);
+    }
+
+    /// jsonb `-` shares the `Sub` operator with arithmetic; the LEFT operand's
+    /// type disambiguates, and every numeric/temporal pair is untouched.
+    #[test]
+    fn jsonb_delete_overloads_subtraction() {
+        let cases: &[(&str, Datum)] = &[
+            ("j - 'a'", jb(r#"{"b": [10, 20]}"#)),
+            ("j - 'zz'", jb(r#"{"a": 1, "b": [10, 20]}"#)),
+            ("j - ARRAY['a', 'b']", jb("{}")),
+            (r"'[1, 2, 3]'::jsonb - 1", jb("[1, 3]")),
+            ("null::jsonb - 'a'", Datum::Null),
+            // Arithmetic subtraction is unchanged.
+            ("i - 1", Datum::Int4(1)),
+        ];
+        for (sql, want) in cases {
+            assert2::assert!(eval_jt(sql).expect("eval") == *want, "for {sql}");
+        }
+    }
+
+    /// `ARRAY[…]` unifies its elements exactly as `CASE` does; `ARRAY[]` has
+    /// nothing to unify and needs a cast (42P18); an all-NULL list falls back to
+    /// `text`, matching PostgreSQL's `unknown` → `text`.
+    #[test]
+    fn array_literal_typing_and_construction() {
+        let text_array = ColumnType::Array(ElemType::Text);
+        assert2::assert!(eval_jt("ARRAY[1, 2, 3]").expect("eval") == int_array(&[1, 2, 3]));
+        // int4 + int8 unify to int8, and the int4 element is coerced.
+        assert2::assert!(
+            infer_jt("ARRAY[1, 2147483648]").expect("infer") == ColumnType::Array(ElemType::Int8)
+        );
+        assert2::assert!(
+            eval_jt("ARRAY[1, 2147483648]").expect("eval")
+                == Datum::Array(ArrayValue::new(
+                    ElemType::Int8,
+                    vec![Datum::Int8(1), Datum::Int8(2_147_483_648)]
+                ))
+        );
+        // A NULL element is type-neutral but is kept as an array element.
+        assert2::assert!(
+            eval_jt("ARRAY[1, null]").expect("eval")
+                == Datum::Array(ArrayValue::new(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Null]
+                ))
+        );
+        // An all-NULL list is text[].
+        assert2::assert!(infer_jt("ARRAY[null]").expect("infer") == text_array);
+        assert2::assert!(
+            eval_jt("ARRAY[null]").expect("eval")
+                == Datum::Array(ArrayValue::new(ElemType::Text, vec![Datum::Null]))
+        );
+        // `ARRAY[]` alone cannot be typed; the cast supplies the element type.
+        assert2::assert!(infer_jt("ARRAY[]").expect_err("empty array").into_pg().code == "42P18");
+        assert2::assert!(eval_jt("ARRAY[]").expect_err("empty array").into_pg().code == "42P18");
+        assert2::assert!(
+            infer_jt("ARRAY[]::int[]").expect("infer") == ColumnType::Array(ElemType::Int4)
+        );
+        assert2::assert!(
+            eval_jt("ARRAY[]::int[]").expect("eval")
+                == Datum::Array(ArrayValue::new(ElemType::Int4, Vec::new()))
+        );
+        // Incompatible elements are the same 42804 `CASE` reports.
+        assert2::assert!(
+            infer_jt("ARRAY[1, 'x']")
+                .expect_err("incompatible")
+                .into_pg()
+                .code
+                == "42804"
+        );
+    }
+
+    /// Subscripting is 1-based, and out-of-range / NULL is SQL NULL rather than
+    /// an error. A non-array base has no subscripting operator at all.
+    #[test]
+    fn array_subscripting() {
+        let cases: &[(&str, Datum)] = &[
+            ("ia[1]", Datum::Int4(1)),
+            ("ia[3]", Datum::Int4(3)),
+            ("ia[0]", Datum::Null),
+            ("ia[4]", Datum::Null),
+            ("ia[null]", Datum::Null),
+            ("ta[2]", Datum::Text("x".into())),
+            ("(null::int[])[1]", Datum::Null),
+            ("ia[i]", Datum::Int4(2)),
+        ];
+        for (sql, want) in cases {
+            assert2::assert!(eval_jt(sql).expect("eval") == *want, "for {sql}");
+        }
+        let err = infer_jt("i[1]").expect_err("int is not subscriptable");
+        assert2::assert!(err.into_pg().code == "42804");
+    }
+
+    /// `ANY`/`ALL` over an array, including the three-valued cells: an unmatched
+    /// `ANY` over an array containing NULL is UNKNOWN, not false; an empty array
+    /// is false for `ANY` and true for `ALL`; a NULL array is NULL for both.
+    #[test]
+    fn quantified_array_three_valued_logic() {
+        let cases: &[(&str, Datum)] = &[
+            ("2 = ANY(ARRAY[1, 2, 3])", Datum::Bool(true)),
+            ("9 = ANY(ARRAY[1, 2, 3])", Datum::Bool(false)),
+            ("2 = SOME(ARRAY[1, 2, 3])", Datum::Bool(true)),
+            // A match short-circuits past the NULL element.
+            ("2 = ANY(ARRAY[2, null])", Datum::Bool(true)),
+            // No match with a NULL element present is UNKNOWN.
+            ("9 = ANY(ARRAY[1, null])", Datum::Null),
+            ("null = ANY(ARRAY[1, 2])", Datum::Null),
+            ("1 = ANY(null::int[])", Datum::Null),
+            ("1 = ANY(ARRAY[]::int[])", Datum::Bool(false)),
+            ("9 > ALL(ARRAY[1, 2, 3])", Datum::Bool(true)),
+            ("2 > ALL(ARRAY[1, 2, 3])", Datum::Bool(false)),
+            // A mismatch short-circuits past the NULL element.
+            ("1 > ALL(ARRAY[2, null])", Datum::Bool(false)),
+            ("9 > ALL(ARRAY[1, null])", Datum::Null),
+            ("1 > ALL(null::int[])", Datum::Null),
+            ("1 > ALL(ARRAY[]::int[])", Datum::Bool(true)),
+            // The array may be a column, and the operator any comparison.
+            ("i = ANY(ia)", Datum::Bool(true)),
+            ("s = ANY(ta)", Datum::Bool(true)),
+        ];
+        for (sql, want) in cases {
+            assert2::assert!(eval_jt(sql).expect("eval") == *want, "for {sql}");
+        }
+    }
+
+    /// The jsonb + array FUNCTION families are reachable from scalar `eval` and
+    /// from static inference (the guard chains wire them in beside the older
+    /// scalar/datetime/format families).
+    #[test]
+    fn json_and_array_function_families_are_wired_into_eval() {
+        assert2::assert!(eval_jt("jsonb_typeof(j)").expect("eval") == Datum::Text("object".into()));
+        assert2::assert!(infer_jt("jsonb_typeof(j)").expect("infer") == ColumnType::Text);
+        assert2::assert!(eval_jt("jsonb_build_object('k', i)").expect("eval") == jb(r#"{"k": 2}"#));
+        assert2::assert!(
+            infer_jt("jsonb_build_object('k', i)").expect("infer") == ColumnType::Jsonb
+        );
+        assert2::assert!(eval_jt("cardinality(ia)").expect("eval") == Datum::Int4(3));
+        assert2::assert!(infer_jt("cardinality(ia)").expect("infer") == ColumnType::Int4);
+        assert2::assert!(eval_jt("array_append(ia, 4)").expect("eval") == int_array(&[1, 2, 3, 4]));
+        assert2::assert!(
+            infer_jt("array_append(ia, 4)").expect("infer") == ColumnType::Array(ElemType::Int4)
         );
     }
 

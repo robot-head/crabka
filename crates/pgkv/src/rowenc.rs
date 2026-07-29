@@ -22,6 +22,12 @@ mod tag {
     pub const TIMESTAMPTZ: u8 = 10;
     pub const INTERVAL: u8 = 11;
     pub const BYTEA: u8 = 12;
+    /// `jsonb`, stored as its canonical text (`[13][u32 len][text]`); decoding
+    /// re-parses. Append-only — no version bump.
+    pub const JSONB: u8 = 13;
+    /// A one-dimensional array (`[14][elem code][u32 count][elements...]`), each
+    /// element encoded by the same tagged-field format. Append-only.
+    pub const ARRAY: u8 = 14;
 }
 
 /// Encode one row using the current storage format.
@@ -32,6 +38,13 @@ mod tag {
 #[must_use]
 pub fn encode_row(cols: &[Datum]) -> Vec<u8> {
     let mut out = vec![ROW_VERSION];
+    encode_fields(cols, &mut out);
+    out
+}
+
+/// Append `cols` as tagged fields (the row body, without the version byte —
+/// also the payload format for array elements).
+fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
     for d in cols {
         match d {
             Datum::Null => out.push(tag::NULL),
@@ -90,9 +103,24 @@ pub fn encode_row(cols: &[Datum]) -> Vec<u8> {
                 out.extend_from_slice(&len.to_be_bytes());
                 out.extend_from_slice(b);
             }
+            Datum::Jsonb(j) => {
+                out.push(tag::JSONB);
+                let text = j.to_text();
+                let len = u32::try_from(text.len()).expect("jsonb column exceeds 4 GiB");
+                out.extend_from_slice(&len.to_be_bytes());
+                out.extend_from_slice(text.as_bytes());
+            }
+            Datum::Array(a) => {
+                out.push(tag::ARRAY);
+                out.push(a.elem.code());
+                let count = u32::try_from(a.elems.len()).expect("array exceeds 4G elements");
+                out.extend_from_slice(&count.to_be_bytes());
+                // Elements reuse the same tagged-field encoding, so a `jsonb`
+                // inside an array (or a NULL element) needs no special case.
+                encode_fields(&a.elems, out);
+            }
         }
     }
-    out
 }
 
 /// Decode row bytes into datum values.
@@ -116,85 +144,110 @@ pub fn decode_row(bytes: &[u8]) -> Result<Vec<Datum>, KvError> {
     }
     let mut cols = Vec::new();
     while !cur.is_empty() {
-        let t = take_u8(&mut cur)?;
-        let d = match t {
-            tag::NULL => Datum::Null,
-            tag::BOOL => Datum::Bool(take_bool(&mut cur)?),
-            tag::INT4 => {
-                let raw = take_n(&mut cur, 4)?;
-                Datum::Int4(i32::from_be_bytes(raw.try_into().expect("4 bytes fit i32")))
-            }
-            tag::INT8 => {
-                let raw = take_n(&mut cur, 8)?;
-                Datum::Int8(i64::from_be_bytes(raw.try_into().expect("8 bytes fit i64")))
-            }
-            tag::TEXT => {
-                let len = take_u32_len(&mut cur)?;
-                let raw = take_n(&mut cur, len)?;
-                Datum::Text(
-                    String::from_utf8(raw.to_vec())
-                        .map_err(|_| KvError::CorruptRow("text is not valid UTF-8".into()))?,
-                )
-            }
-            tag::FLOAT8 => {
-                let raw = take_n(&mut cur, 8)?;
-                Datum::Float8(f64::from_be_bytes(raw.try_into().expect("8 bytes fit f64")))
-            }
-            tag::NUMERIC => {
-                let len = take_u32_len(&mut cur)?;
-                let raw = take_n(&mut cur, len)?;
-                let s = std::str::from_utf8(raw)
-                    .map_err(|_| KvError::CorruptRow("numeric text is not valid UTF-8".into()))?;
-                Datum::Numeric(
-                    crabka_pgtypes::numeric::parse(s)
-                        .ok_or_else(|| KvError::CorruptRow(format!("invalid numeric {s:?}")))?,
-                )
-            }
-            tag::DATE => {
-                let raw = take_n(&mut cur, 4)?;
-                Datum::Date(
-                    crabka_pgtypes::datetime::date_from_binary(raw)
-                        .map_err(|e| KvError::CorruptRow(format!("corrupt date: {e}")))?,
-                )
-            }
-            tag::TIME => {
-                let raw = take_n(&mut cur, 8)?;
-                Datum::Time(
-                    crabka_pgtypes::datetime::time_from_binary(raw)
-                        .map_err(|e| KvError::CorruptRow(format!("corrupt time: {e}")))?,
-                )
-            }
-            tag::TIMESTAMP => {
-                let raw = take_n(&mut cur, 8)?;
-                Datum::Timestamp(
-                    crabka_pgtypes::datetime::timestamp_from_binary(raw)
-                        .map_err(|e| KvError::CorruptRow(format!("corrupt timestamp: {e}")))?,
-                )
-            }
-            tag::TIMESTAMPTZ => {
-                let raw = take_n(&mut cur, 8)?;
-                Datum::Timestamptz(
-                    crabka_pgtypes::datetime::timestamptz_from_binary(raw)
-                        .map_err(|e| KvError::CorruptRow(format!("corrupt timestamptz: {e}")))?,
-                )
-            }
-            tag::INTERVAL => {
-                let raw = take_n(&mut cur, 16)?;
-                Datum::Interval(
-                    crabka_pgtypes::datetime::interval_from_binary(raw)
-                        .map_err(|e| KvError::CorruptRow(format!("corrupt interval: {e}")))?,
-                )
-            }
-            tag::BYTEA => {
-                let len = take_u32_len(&mut cur)?;
-                let raw = take_n(&mut cur, len)?;
-                Datum::Bytea(raw.to_vec())
-            }
-            other => return Err(KvError::CorruptRow(format!("unknown field tag {other}"))),
-        };
-        cols.push(d);
+        cols.push(decode_field(&mut cur)?);
     }
     Ok(cols)
+}
+
+/// Decode one tagged field, advancing `cur` past it.
+fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
+    let t = take_u8(cur)?;
+    Ok(match t {
+        tag::NULL => Datum::Null,
+        tag::BOOL => Datum::Bool(take_bool(cur)?),
+        tag::INT4 => {
+            let raw = take_n(cur, 4)?;
+            Datum::Int4(i32::from_be_bytes(raw.try_into().expect("4 bytes fit i32")))
+        }
+        tag::INT8 => {
+            let raw = take_n(cur, 8)?;
+            Datum::Int8(i64::from_be_bytes(raw.try_into().expect("8 bytes fit i64")))
+        }
+        tag::TEXT => {
+            let len = take_u32_len(cur)?;
+            let raw = take_n(cur, len)?;
+            Datum::Text(
+                String::from_utf8(raw.to_vec())
+                    .map_err(|_| KvError::CorruptRow("text is not valid UTF-8".into()))?,
+            )
+        }
+        tag::FLOAT8 => {
+            let raw = take_n(cur, 8)?;
+            Datum::Float8(f64::from_be_bytes(raw.try_into().expect("8 bytes fit f64")))
+        }
+        tag::NUMERIC => {
+            let len = take_u32_len(cur)?;
+            let raw = take_n(cur, len)?;
+            let s = std::str::from_utf8(raw)
+                .map_err(|_| KvError::CorruptRow("numeric text is not valid UTF-8".into()))?;
+            Datum::Numeric(
+                crabka_pgtypes::numeric::parse(s)
+                    .ok_or_else(|| KvError::CorruptRow(format!("invalid numeric {s:?}")))?,
+            )
+        }
+        tag::DATE => {
+            let raw = take_n(cur, 4)?;
+            Datum::Date(
+                crabka_pgtypes::datetime::date_from_binary(raw)
+                    .map_err(|e| KvError::CorruptRow(format!("corrupt date: {e}")))?,
+            )
+        }
+        tag::TIME => {
+            let raw = take_n(cur, 8)?;
+            Datum::Time(
+                crabka_pgtypes::datetime::time_from_binary(raw)
+                    .map_err(|e| KvError::CorruptRow(format!("corrupt time: {e}")))?,
+            )
+        }
+        tag::TIMESTAMP => {
+            let raw = take_n(cur, 8)?;
+            Datum::Timestamp(
+                crabka_pgtypes::datetime::timestamp_from_binary(raw)
+                    .map_err(|e| KvError::CorruptRow(format!("corrupt timestamp: {e}")))?,
+            )
+        }
+        tag::TIMESTAMPTZ => {
+            let raw = take_n(cur, 8)?;
+            Datum::Timestamptz(
+                crabka_pgtypes::datetime::timestamptz_from_binary(raw)
+                    .map_err(|e| KvError::CorruptRow(format!("corrupt timestamptz: {e}")))?,
+            )
+        }
+        tag::INTERVAL => {
+            let raw = take_n(cur, 16)?;
+            Datum::Interval(
+                crabka_pgtypes::datetime::interval_from_binary(raw)
+                    .map_err(|e| KvError::CorruptRow(format!("corrupt interval: {e}")))?,
+            )
+        }
+        tag::BYTEA => {
+            let len = take_u32_len(cur)?;
+            let raw = take_n(cur, len)?;
+            Datum::Bytea(raw.to_vec())
+        }
+        tag::JSONB => {
+            let len = take_u32_len(cur)?;
+            let raw = take_n(cur, len)?;
+            let text = std::str::from_utf8(raw)
+                .map_err(|_| KvError::CorruptRow("jsonb text is not valid UTF-8".into()))?;
+            Datum::Jsonb(
+                crabka_pgtypes::jsonb::parse(text)
+                    .map_err(|e| KvError::CorruptRow(format!("corrupt jsonb: {e}")))?,
+            )
+        }
+        tag::ARRAY => {
+            let code = take_u8(cur)?;
+            let elem = crabka_pgtypes::ElemType::from_code(code)
+                .ok_or_else(|| KvError::CorruptRow(format!("unknown array element code {code}")))?;
+            let count = take_u32_len(cur)?;
+            let mut elems = Vec::new();
+            for _ in 0..count {
+                elems.push(decode_field(cur)?);
+            }
+            Datum::Array(crabka_pgtypes::ArrayValue::new(elem, elems))
+        }
+        other => return Err(KvError::CorruptRow(format!("unknown field tag {other}"))),
+    })
 }
 
 fn take_u8(cur: &mut &[u8]) -> Result<u8, KvError> {
@@ -251,6 +304,72 @@ mod tests {
         ];
         let bytes = encode_row(&row);
         assert_eq!(decode_row(&bytes).expect("decode"), row);
+    }
+
+    #[test]
+    fn jsonb_and_array_tags_round_trip() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayValue, ElemType};
+
+        let json = |s: &str| Datum::Jsonb(crabka_pgtypes::jsonb::parse(s).expect("jsonb"));
+        let row = vec![
+            json(r#"{"b":1,"a":[1,2],"c":"x"}"#),
+            json("null"),
+            // Empty, NULL elements, and a jsonb inside an array.
+            Datum::Array(ArrayValue::new(ElemType::Int4, vec![])),
+            Datum::Array(ArrayValue::new(
+                ElemType::Int4,
+                vec![Datum::Int4(1), Datum::Null, Datum::Int4(3)],
+            )),
+            Datum::Array(ArrayValue::new(
+                ElemType::Text,
+                vec![Datum::Text("a,b".into()), Datum::Text(String::new())],
+            )),
+            Datum::Array(ArrayValue::new(
+                ElemType::Jsonb,
+                vec![json(r#"{"z":1}"#), Datum::Null],
+            )),
+            Datum::Array(ArrayValue::new(
+                ElemType::Numeric,
+                vec![Datum::Numeric(
+                    crabka_pgtypes::numeric::parse("1.50").expect("n"),
+                )],
+            )),
+            // A scalar after the arrays pins that element counts are honoured.
+            Datum::Int4(9),
+        ];
+        assert!(decode_row(&encode_row(&row)).expect("decode") == row);
+    }
+
+    #[test]
+    fn jsonb_tag_layout_is_a_length_prefixed_canonical_text() {
+        use assert2::assert;
+
+        let value = Datum::Jsonb(crabka_pgtypes::jsonb::parse(r#"{"b":1,"a":2}"#).expect("jsonb"));
+        let text = br#"{"a": 2, "b": 1}"#;
+        let mut expected = vec![ROW_VERSION, tag::JSONB];
+        expected.extend_from_slice(&u32::try_from(text.len()).expect("small").to_be_bytes());
+        expected.extend_from_slice(text);
+        assert!(encode_row(&[value]) == expected);
+    }
+
+    #[test]
+    fn corrupt_jsonb_and_array_payloads_error_not_panic() {
+        use assert2::assert;
+
+        // An unknown element type code.
+        let mut bytes = vec![ROW_VERSION, tag::ARRAY, 200];
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        assert!(decode_row(&bytes).is_err());
+        // Fewer elements than the declared count.
+        let mut bytes = vec![ROW_VERSION, tag::ARRAY, 1];
+        bytes.extend_from_slice(&3u32.to_be_bytes());
+        assert!(decode_row(&bytes).is_err());
+        // Text that is not valid JSON.
+        let mut bytes = vec![ROW_VERSION, tag::JSONB];
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(b"{{");
+        assert!(decode_row(&bytes).is_err());
     }
 
     #[test]

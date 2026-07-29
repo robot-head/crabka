@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use assert2::assert;
 use bytes::Bytes;
 use crabka_gres_conformance::{
     feature_manifest::{FEATURE_PROBES, FeatureBehavior},
@@ -101,7 +102,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert_eq!(report.probes.len(), 94);
+    assert!(report.probes.len() == 97);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -117,9 +118,8 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
             .simple_query(&probe.sql)
             .await
             .expect_err(&probe.sql);
-        assert_eq!(
-            Some(error.code.as_str()),
-            probe.sqlstate,
+        assert!(
+            Some(error.code.as_str()) == probe.sqlstate,
             "{}",
             probe.command
         );
@@ -132,13 +132,13 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert_eq!(executed, 44);
-    assert_eq!(refused, 50);
+    assert!(executed == 47);
+    assert!(refused == 50);
 }
 
 #[tokio::test]
 async fn every_major_feature_probe_matches_its_typed_behavior() {
-    assert_eq!(FEATURE_PROBES.len(), 23);
+    assert!(FEATURE_PROBES.len() == 27);
     for probe in FEATURE_PROBES {
         if probe.behavior == FeatureBehavior::ParserRejectPending {
             assert!(
@@ -183,7 +183,11 @@ async fn every_major_feature_probe_matches_its_typed_behavior() {
             }
             FeatureBehavior::SessionRefuse => {
                 let error = session.simple_query(probe.sql).await.expect_err(probe.item);
-                assert_eq!(Some(error.code.as_str()), probe.sqlstate, "{}", probe.item);
+                assert!(
+                    Some(error.code.as_str()) == probe.sqlstate,
+                    "{}",
+                    probe.item
+                );
                 assert!(
                     error
                         .message

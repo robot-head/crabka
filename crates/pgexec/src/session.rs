@@ -8,29 +8,34 @@
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{Arc, Mutex},
 };
 
-use crabka_pgkv::Kv;
+use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgmvcc::{clog::XidStatus, visibility::Snapshot};
 use crabka_pgparser::ast::{
-    BinaryOp, CopyFormat, CopyStmt, Expr, FuncArgs, IsolationLevel, JoinConstraint, QueryBody,
-    QueryExpr, ResetTarget, RowLockStrength, SelectItem, SetExpr, Statement, TableExpr, UnaryOp,
+    BinaryOp, CopyFormat, CopyStmt, Expr, FuncArgs, IsolationLevel, JoinConstraint, OnConflict,
+    OnConflictAction, OnConflictTarget, QueryBody, QueryExpr, ResetTarget, RowLockStrength,
+    SelectItem, SetExpr, Statement, TableExpr, UnaryOp, UnlistenTarget,
 };
-use crabka_pgtypes::{ColumnType, Datum};
+use crabka_pgtypes::{ColumnType, Datum, ElemType};
 use crabka_pgwire::{
     engine::{
-        BoundParam, CloseTarget, CopyInResponse, ExecuteOutcome, FieldDescription,
+        BoundParam, CloseTarget, CopyInResponse, ExecuteOutcome, FieldDescription, Notification,
         PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
     },
     error::{PgError, sqlstate},
 };
-use tokio::sync::OwnedRwLockReadGuard;
+use tokio::sync::{OwnedRwLockReadGuard, mpsc};
 
 use crate::{
-    error::ExecError, exec::UniqueLocalSerialization, lockmgr::RowLockManager,
-    procarray::ProcArray, seq::SequenceManager,
+    error::ExecError,
+    exec::UniqueLocalSerialization,
+    lockmgr::RowLockManager,
+    notify::{self, NotifyBus, NotifySessionHandle, PreparedPublish},
+    procarray::ProcArray,
+    seq::SequenceManager,
 };
 
 /// In-flight transaction context.
@@ -793,6 +798,12 @@ fn establishes_transaction_activity(stmt: &Statement) -> bool {
         // VACUUM is refused inside a transaction block, so it never marks one
         // active.
         | Statement::Vacuum
+        // PostgreSQL deliberately skips the snapshot push for LISTEN/NOTIFY/
+        // UNLISTEN (PortalRunUtility's exclusion list), so they never set
+        // FirstSnapshotSet and never block a later SET TRANSACTION.
+        | Statement::Listen { .. }
+        | Statement::Notify { .. }
+        | Statement::Unlisten { .. }
         | Statement::CompatibilityRefusal(_) => false,
     }
 }
@@ -808,6 +819,119 @@ pub(crate) fn durable_global_snapshot(range0: &dyn Kv) -> Result<Snapshot, ExecE
         xmax: crate::gtm::read_next_global(range0)?,
         xip: vec![],
     })
+}
+
+/// One subscription change staged by the current transaction.
+///
+/// `LISTEN`/`UNLISTEN` are transactional in PostgreSQL — they take effect at
+/// COMMIT and vanish at ROLLBACK — so they are queued here rather than applied
+/// to the bus as the statement runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ListenAction {
+    Listen(String),
+    Unlisten(String),
+    UnlistenAll,
+}
+
+/// The current transaction's queued `LISTEN`/`NOTIFY` work.
+///
+/// `NOTIFY` statements and `pg_notify()` calls both append here; the session
+/// flushes the queue at COMMIT (or, for an autocommit statement, in `run_one`'s
+/// epilogue) and drops it on any abort. PostgreSQL collapses duplicate
+/// `(channel, payload)` pairs within one transaction, which `dedup` enforces
+/// while `notifies` preserves the first occurrence's order.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct NotifyPending {
+    actions: Vec<ListenAction>,
+    notifies: Vec<(String, String)>,
+    dedup: HashSet<(String, String)>,
+}
+
+/// A committing transaction's notification work, held between the point where
+/// its permits are reserved and the point where the commit becomes durable.
+///
+/// Reserving is deliberately free of side effects the rest of the engine can
+/// see: it holds queue permits and nothing else, so dropping it is a complete
+/// undo.
+#[derive(Default)]
+pub(crate) struct ReservedNotifications {
+    /// Reserved queue permits, or `None` when the transaction queued no
+    /// notification.
+    publish: Option<PreparedPublish>,
+    /// The WAL records that replicate these notifications to the other nodes:
+    /// one [`WriteOp::Put`] per notification. Always empty unless an owner opted
+    /// this engine into replication with `SqlEngine::set_notify_origin`. The
+    /// commit path folds them into the batch it was already committing, so they
+    /// are durable exactly when the transaction is.
+    wal_ops: Vec<WriteOp>,
+}
+
+impl NotifyPending {
+    /// Stage a subscription change. `UNLISTEN *` supersedes every earlier
+    /// channel action of this transaction, so the queue never re-adds a
+    /// subscription the same transaction already dropped wholesale.
+    fn queue_action(&mut self, action: ListenAction) {
+        if matches!(action, ListenAction::UnlistenAll) {
+            self.actions.clear();
+        }
+        self.actions.push(action);
+    }
+
+    /// Stage one notification.
+    ///
+    /// Validation happens here — at the statement that wrote the notification,
+    /// not at commit — because that is where PostgreSQL reports an empty channel
+    /// or an oversized payload.
+    ///
+    /// # Errors
+    ///
+    /// The validation errors of [`notify::validate`].
+    pub(crate) fn queue_notify(
+        &mut self,
+        channel: &str,
+        payload: &str,
+    ) -> Result<(), notify::NotifyError> {
+        notify::validate(channel, payload)?;
+        let entry = (channel.to_string(), payload.to_string());
+        if self.dedup.insert(entry.clone()) {
+            self.notifies.push(entry);
+        }
+        Ok(())
+    }
+
+    fn is_empty(&self) -> bool {
+        self.actions.is_empty() && self.notifies.is_empty()
+    }
+}
+
+/// The channels a session will listen on once `actions` commit: its live
+/// subscriptions with the transaction's queued `LISTEN`/`UNLISTEN` folded in.
+///
+/// This is what the committing transaction's own notifications are addressed
+/// by, so its pending `LISTEN` is honoured for itself without being staged on
+/// the bus where another publisher could reach it.
+fn effective_subscriptions(
+    handle: &NotifySessionHandle,
+    actions: &[ListenAction],
+) -> HashSet<String> {
+    let mut channels = handle.subscriptions();
+    for action in actions {
+        match action {
+            ListenAction::Listen(channel) => {
+                channels.insert(channel.clone());
+            }
+            ListenAction::Unlisten(channel) => {
+                channels.remove(channel);
+            }
+            ListenAction::UnlistenAll => channels.clear(),
+        }
+    }
+    channels
+}
+
+/// Map a `NOTIFY` queue error onto the wire error PostgreSQL reports for it.
+pub(crate) fn notify_queue_error(error: notify::NotifyError) -> ExecError {
+    ExecError::Remote(PgError::error(error.sqlstate(), error.to_string()))
 }
 
 /// One connection's view of the engine. Holds shared handles to the KV store,
@@ -895,6 +1019,27 @@ pub struct SqlSession {
     ts_gc: Arc<crate::ts_gc::TsVersionGc>,
     timestamp_own_start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
     sequence_currvals: Arc<Mutex<HashMap<String, i64>>>,
+    /// This connection's registration on the engine's `LISTEN`/`NOTIFY` bus.
+    /// `None` until an owner calls [`SqlSession::register_notify`] or
+    /// [`SqlSession::adopt_notify`]; `LISTEN`/`NOTIFY`/`pg_notify` then report a
+    /// clear error rather than silently doing nothing. Dropping the handle (with
+    /// the session) unregisters it from every channel.
+    notify: Option<NotifySessionHandle>,
+    /// The receiving end of this session's notification queue, taken once by the
+    /// wire loop through [`Session::take_notifications`].
+    notify_rx: Option<mpsc::Receiver<Notification>>,
+    /// The open transaction's queued notification work. Shared (not owned)
+    /// because the per-statement `EvalCtx` hands it to `pg_notify()`.
+    notify_pending: Arc<Mutex<NotifyPending>>,
+    /// Queue permits an autocommit statement reserved before making its write
+    /// durable, waiting for the statement epilogue to send them. See
+    /// [`SqlSession::reserve_autocommit_notifications`].
+    notify_reserved: Mutex<Option<ReservedNotifications>>,
+    /// Cross-node notification replication (shared from the engine): the origin
+    /// stamp and record sequence of the WAL records a committing transaction
+    /// appends for its notifications. Inert — and the commit batch unchanged —
+    /// until an owner calls `SqlEngine::set_notify_origin`.
+    notify_replication: Arc<crate::NotifyReplication>,
     session_user: String,
     current_role: String,
     state: TxnState,
@@ -928,6 +1073,7 @@ pub(crate) struct SqlSessionConfig {
     pub local_sequence: Arc<crate::local_sequence::LocalSequence>,
     pub gc_horizon: Arc<crabka_pgmvcc::gc::GcHorizon>,
     pub ts_gc: Arc<crate::ts_gc::TsVersionGc>,
+    pub notify_replication: Arc<crate::NotifyReplication>,
 }
 
 #[derive(Clone)]
@@ -984,6 +1130,7 @@ impl SqlSession {
             local_sequence,
             gc_horizon,
             ts_gc,
+            notify_replication,
         } = config;
         Self {
             kv,
@@ -1016,6 +1163,11 @@ impl SqlSession {
             ts_gc,
             timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
+            notify: None,
+            notify_rx: None,
+            notify_pending: Arc::new(Mutex::new(NotifyPending::default())),
+            notify_reserved: Mutex::new(None),
+            notify_replication,
             session_user: "public".into(),
             current_role: "public".into(),
             state: TxnState::Idle,
@@ -1056,6 +1208,7 @@ impl SqlSession {
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::clone(&self.sequence_currvals),
             })),
+            notify: Some(Arc::clone(&self.notify_pending)),
         }
     }
 
@@ -1133,6 +1286,269 @@ impl SqlSession {
     /// engine-local cycle check.
     pub fn set_lock_wait_cap(&mut self, cap: Option<std::time::Duration>) {
         self.lock_wait_cap = cap;
+    }
+
+    /// Register this connection on `bus` under backend pid `pid`.
+    ///
+    /// `pid` is the pid the wire layer reports in `BackendKeyData`, so a
+    /// notification this session sends to itself carries the `process_id` the
+    /// client expects. The registration lives until the session is dropped.
+    pub fn register_notify(&mut self, bus: &Arc<NotifyBus>, pid: i32) {
+        let (handle, rx) = NotifyBus::register(bus, pid);
+        self.notify = Some(handle);
+        self.notify_rx = Some(rx);
+    }
+
+    /// Adopt a registration made by an owner that keeps the receiver itself.
+    ///
+    /// The multi-range gateway registers on the coordinator range's bus and
+    /// drains the queue at its own session boundary, then hands the handle to
+    /// the coordinator [`SqlSession`] that actually runs the statements.
+    pub fn adopt_notify(&mut self, handle: NotifySessionHandle) {
+        self.notify = Some(handle);
+        self.notify_rx = None;
+    }
+
+    /// The receiving end of this session's notification queue, taken once.
+    ///
+    /// The wire loop owns the receiver for the connection's lifetime (it selects
+    /// on it while idle), so a second call yields `None`.
+    pub fn take_notifications(&mut self) -> Option<mpsc::Receiver<Notification>> {
+        self.notify_rx.take()
+    }
+
+    fn pending_notify(&self) -> std::sync::MutexGuard<'_, NotifyPending> {
+        self.notify_pending.lock().expect("notify pending mutex")
+    }
+
+    /// This session's bus registration, or the error `LISTEN`/`NOTIFY` reports
+    /// when the owner never registered one.
+    fn notify_handle(&self) -> Result<&NotifySessionHandle, ExecError> {
+        self.notify.as_ref().ok_or_else(|| {
+            ExecError::Unsupported(
+                "LISTEN/NOTIFY requires a connection registered on the notification bus".into(),
+            )
+        })
+    }
+
+    /// Stage a `LISTEN`/`UNLISTEN`, to be applied to the bus at commit.
+    fn queue_listen_action(
+        &self,
+        action: ListenAction,
+        tag: &str,
+    ) -> Result<QueryResult, ExecError> {
+        self.notify_handle()?;
+        self.pending_notify().queue_action(action);
+        Ok(QueryResult::Command { tag: tag.into() })
+    }
+
+    /// Stage a `NOTIFY channel [, payload]`, validated here rather than at
+    /// commit so the error names the statement that wrote it.
+    fn queue_notify(&self, channel: &str, payload: &str) -> Result<QueryResult, ExecError> {
+        self.notify_handle()?;
+        self.pending_notify()
+            .queue_notify(channel, payload)
+            .map_err(notify_queue_error)?;
+        Ok(QueryResult::Command {
+            tag: "NOTIFY".into(),
+        })
+    }
+
+    /// Reserve one queue permit per (queued notification, listener) pair.
+    ///
+    /// Called strictly BEFORE the transaction's durable commit: a listener whose
+    /// queue is full has to fail the *notifying* transaction (54000) before
+    /// anything is committed, never lose a notification and never disconnect the
+    /// listener.
+    ///
+    /// The transaction's queued `LISTEN`/`UNLISTEN` are *not* applied here —
+    /// they reach the bus only once the commit is durable
+    /// ([`Self::commit_pending_notifications`]). They are instead folded into
+    /// the subscription set this session is addressed by, so `LISTEN a; NOTIFY
+    /// a;` in one transaction still delivers to itself (PostgreSQL applies
+    /// pending listens before queueing the transaction's notifications) while a
+    /// concurrent publisher keeps seeing only committed subscriptions — a
+    /// `LISTEN` that rolls back can then never have been delivered to.
+    fn reserve_pending_notifications(&self) -> Result<ReservedNotifications, ExecError> {
+        let pending = self.pending_notify().clone();
+        if pending.notifies.is_empty() {
+            // A subscription-only transaction reserves nothing; its actions are
+            // applied by the commit.
+            return Ok(ReservedNotifications::default());
+        }
+        let handle = match self.notify_handle() {
+            Ok(handle) => handle,
+            Err(e) => {
+                self.discard_pending_notifications();
+                return Err(e);
+            }
+        };
+        let effective = effective_subscriptions(handle, &pending.actions);
+        match handle.prepare_publish_with_pending(&pending.notifies, &effective) {
+            Ok(publish) => Ok(ReservedNotifications {
+                publish: Some(publish),
+                // Built here, from the same deduped list the permits were
+                // reserved from, so a record exists for exactly the
+                // notifications this transaction will deliver locally.
+                wal_ops: self.notify_wal_ops(&pending.notifies, handle.pid()),
+            }),
+            Err(e) => {
+                self.discard_pending_notifications();
+                Err(notify_queue_error(e))
+            }
+        }
+    }
+
+    /// Reserve an autocommit statement's permits before its write becomes
+    /// durable.
+    ///
+    /// A statement whose expressions called `pg_notify()` has already queued
+    /// everything it will queue by the time its write batch is built, so the
+    /// reservation can be taken here — while the statement can still be
+    /// aborted. Without it a full listener queue would report 54000 for a row
+    /// that is already committed, and a client retrying the "failed" statement
+    /// would duplicate its own write.
+    ///
+    /// The reservation is parked on the session and consumed by
+    /// [`Self::flush_autocommit_notifications`] in the statement epilogue; any
+    /// path that discards the queue drops it, releasing the permits.
+    fn reserve_autocommit_notifications(&self) -> Result<(), ExecError> {
+        if !matches!(self.state, TxnState::Idle) || self.pending_notify().is_empty() {
+            return Ok(());
+        }
+        let reserved = self.reserve_pending_notifications()?;
+        *self.reserved_notify() = Some(reserved);
+        Ok(())
+    }
+
+    fn reserved_notify(&self) -> std::sync::MutexGuard<'_, Option<ReservedNotifications>> {
+        self.notify_reserved.lock().expect("notify reserved mutex")
+    }
+
+    /// The WAL records replicating `notifies` to the other nodes: one
+    /// [`WriteOp::Put`] per notification, keyed by an engine-monotonic sequence
+    /// so records sort by arrival within the log, and stamped with the
+    /// *originating* backend pid so a remote listener sees the pid PostgreSQL
+    /// would report.
+    ///
+    /// Empty — and every commit batch byte-for-byte what it was — unless an
+    /// owner opted this engine into replication with
+    /// `SqlEngine::set_notify_origin`. The records never reach a KV: every apply
+    /// site drops them (`crabka_pgkv::is_notify_op`), so they are WAL bytes a
+    /// tailing node re-injects into its own bus and nothing more.
+    fn notify_wal_ops(&self, notifies: &[(String, String)], pid: i32) -> Vec<WriteOp> {
+        let Some(origin) = self.notify_replication.origin() else {
+            return Vec::new();
+        };
+        notifies
+            .iter()
+            .map(|(channel, payload)| WriteOp::Put {
+                key: crabka_pgkv::key::notify_key(self.notify_replication.next_seq()),
+                value: crabka_pgkv::NotifyRecord {
+                    origin: origin.to_string(),
+                    process_id: pid,
+                    channel: channel.clone(),
+                    payload: payload.clone(),
+                }
+                .encode(),
+            })
+            .collect()
+    }
+
+    /// Append notify records that could not ride a batch the transaction was
+    /// already committing — an autocommit statement (whose writes committed
+    /// inside the statement), a block that wrote no data, or a cross-range
+    /// transaction whose decision is already durable.
+    ///
+    /// Called only once the transaction's outcome is settled as committed, so
+    /// no record can describe a transaction that did not happen. The append
+    /// cannot change that outcome, so a failure here is logged and dropped:
+    /// remote delivery is best-effort by design, and local listeners still get
+    /// their notification.
+    async fn append_notify_records(&self, ops: Vec<WriteOp>) {
+        if ops.is_empty() {
+            return;
+        }
+        let records = ops.len();
+        if let Err(e) = self.committer.commit(ops).await {
+            tracing::warn!(
+                error = ?e,
+                records,
+                "failed to append notify records; local delivery is unaffected"
+            );
+        }
+    }
+
+    /// Publish the transaction's `LISTEN`/`UNLISTEN` and deliver its
+    /// already-reserved notifications. Called only once the commit is durable:
+    /// the subscription changes become visible to other publishers exactly when
+    /// the transaction does, and sending through held permits cannot fail, so no
+    /// notification can escape a transaction that did not commit.
+    fn commit_pending_notifications(&self, reserved: ReservedNotifications) {
+        self.apply_pending_subscriptions();
+        self.discard_pending_notifications();
+        if let Some(publish) = reserved.publish {
+            publish.send();
+        }
+    }
+
+    /// Apply the queued `LISTEN`/`UNLISTEN` to the bus, making this session's
+    /// new subscription set visible to every other publisher.
+    fn apply_pending_subscriptions(&self) {
+        let Some(handle) = &self.notify else {
+            return;
+        };
+        let actions = std::mem::take(&mut self.pending_notify().actions);
+        for action in actions {
+            match action {
+                ListenAction::Listen(channel) => handle.listen(&channel),
+                ListenAction::Unlisten(channel) => handle.unlisten(&channel),
+                ListenAction::UnlistenAll => handle.unlisten_all(),
+            }
+        }
+    }
+
+    /// Undo a reservation whose transaction did not commit. Reserving touches
+    /// nothing outside the session, so this only drops the queue; the unsent
+    /// [`PreparedPublish`] releases its permits as it falls.
+    fn undo_reserved_notifications(&self, reserved: ReservedNotifications) {
+        drop(reserved);
+        self.discard_pending_notifications();
+    }
+
+    /// Drop everything queued — the staged `LISTEN`/`UNLISTEN`, the queued
+    /// notifications, and any permits an autocommit write reserved ahead of its
+    /// commit. Live subscriptions are untouched, because nothing queued has
+    /// reached the bus.
+    fn discard_pending_notifications(&self) {
+        *self.pending_notify() = NotifyPending::default();
+        drop(self.reserved_notify().take());
+    }
+
+    /// Flush the queue of an autocommit statement, which is its own transaction.
+    ///
+    /// A statement that wrote data reserved its permits before that write became
+    /// durable (see [`Self::reserve_autocommit_notifications`]) and parked them
+    /// on the session; this consumes them. A statement that wrote nothing —
+    /// standalone `LISTEN`/`NOTIFY`/`UNLISTEN`, or a `SELECT pg_notify(…)` —
+    /// reserves here, which is still before anything of its own is durable.
+    ///
+    /// The notify records cannot ride the statement's own batch (it is already
+    /// durable by now), so they are appended here, between the reservation and
+    /// the send, and are the whole batch when the statement wrote nothing else.
+    async fn flush_autocommit_notifications(&self) -> Result<(), ExecError> {
+        let parked = self.reserved_notify().take();
+        if parked.is_none() && self.pending_notify().is_empty() {
+            return Ok(());
+        }
+        let mut reserved = match parked {
+            Some(reserved) => reserved,
+            None => self.reserve_pending_notifications()?,
+        };
+        self.append_notify_records(std::mem::take(&mut reserved.wal_ops))
+            .await;
+        self.commit_pending_notifications(reserved);
+        Ok(())
     }
 
     /// Apply a typed practical-subset GUC mutation and return the `SET` command
@@ -1495,7 +1911,33 @@ impl SqlSession {
             Statement::Reset { target } => self.reset_guc(target),
             Statement::SetRole { role } => self.set_role(role.as_deref()),
             Statement::Show { name } => self.show_guc(name),
+            // LISTEN/NOTIFY/UNLISTEN only stage work here. Both the subscription
+            // changes and the notifications are transactional, so they reach the
+            // bus at COMMIT — or, in autocommit, in the epilogue below.
+            Statement::Listen { channel } => {
+                self.queue_listen_action(ListenAction::Listen(channel.clone()), "LISTEN")
+            }
+            Statement::Unlisten { target } => {
+                let action = match target {
+                    UnlistenTarget::Channel(channel) => ListenAction::Unlisten(channel.clone()),
+                    UnlistenTarget::All => ListenAction::UnlistenAll,
+                };
+                self.queue_listen_action(action, "UNLISTEN")
+            }
+            Statement::Notify { channel, payload } => {
+                self.queue_notify(channel, payload.as_deref().unwrap_or_default())
+            }
         };
+        self.finish_statement(stmt, result).await
+    }
+
+    /// The bookkeeping every statement shares: abort-on-error, the
+    /// transaction-activity mark, and the autocommit notification flush.
+    async fn finish_statement(
+        &mut self,
+        stmt: &Statement,
+        result: Result<QueryResult, ExecError>,
+    ) -> Result<QueryResult, ExecError> {
         // Any error inside a transaction block aborts it (PostgreSQL 25P02): the
         // block stays Failed (carrying its ctx, so the xid and any row locks it
         // holds stay held) until COMMIT/ROLLBACK releases them. Autocommit errors
@@ -1507,12 +1949,26 @@ impl SqlSession {
         {
             ctx.activity_started = true;
         }
-        result
+        if !matches!(self.state, TxnState::Idle) {
+            // Inside a block the queue lives until COMMIT (which flushes it) or
+            // ROLLBACK/abort (which drops it).
+            return result;
+        }
+        match result {
+            Ok(result) => self.flush_autocommit_notifications().await.map(|()| result),
+            Err(e) => {
+                self.discard_pending_notifications();
+                Err(e)
+            }
+        }
     }
 
     /// Record an aborted transaction's outcome (clog Aborted + deregister) and
     /// release its row locks. Shared by ROLLBACK and COMMIT-of-failed.
     async fn abort_ctx(&self, ctx: TxnCtx) -> Result<(), ExecError> {
+        // Queued notifications and queued LISTEN/UNLISTEN die with the
+        // transaction that wrote them.
+        self.discard_pending_notifications();
         if let Some(xid) = ctx.xid {
             // Best-effort abort record; the versions are already invisible
             // (in-progress in no future snapshot once deregistered), so even if
@@ -1607,52 +2063,7 @@ impl SqlSession {
 
     async fn commit_cmd(&mut self) -> Result<QueryResult, ExecError> {
         match std::mem::replace(&mut self.state, TxnState::Idle) {
-            TxnState::InTransaction(ctx) => {
-                if let Some(xid) = ctx.xid {
-                    if let Some(g) = self.global_xid.take() {
-                        let status = self.commit_global_decision(g, XidStatus::Committed).await?;
-                        self.procarray.finish(xid);
-                        self.lockmgr.release_all(xid);
-                        if let Some(gtm) = &self.gtm {
-                            gtm.finish_global(g);
-                        }
-                        if !matches!(status, XidStatus::Committed) {
-                            return Err(ExecError::SerializationFailure);
-                        }
-                        self.guc.commit();
-                        return Ok(QueryResult::Command {
-                            tag: "COMMIT".into(),
-                        });
-                    }
-                    // Record the commit. Deregister xid BEFORE propagating any
-                    // write error so the xid never stays stuck in the running set.
-                    let mut ops = vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Committed)];
-                    // In Replicated mode, fold the next_xid advance into the
-                    // committed batch (the state machine max-merges it). A txn
-                    // that allocated its xid only via a locking SELECT (FOR
-                    // UPDATE / FOR SHARE) wrote no rows, so without this its
-                    // next_xid bump would never reach the replicated state
-                    // machine — after failover the new leader would reseed from a
-                    // stale next_xid and re-hand-out this xid, whose clog entry is
-                    // durably Committed (dirty reads). Redundant-but-harmless for
-                    // data-writing txns: their write entry already folded
-                    // next_xid and this COMMIT entry is ordered after it.
-                    if self.persist_mode == crate::PersistMode::Replicated {
-                        ops.push(self.procarray.next_xid_op());
-                    }
-                    let r = self.committer.commit(ops).await;
-                    self.procarray.finish(xid);
-                    // Free every row this transaction locked, waking waiters.
-                    self.lockmgr.release_all(xid);
-                    r?;
-                }
-                // SP37: a real COMMIT of an open block promotes any staged session
-                // GUC override and drops any LOCAL override.
-                self.guc.commit();
-                Ok(QueryResult::Command {
-                    tag: "COMMIT".into(),
-                })
-            }
+            TxnState::InTransaction(ctx) => self.commit_open_block(ctx).await,
             // COMMIT of a failed transaction behaves as a ROLLBACK.
             TxnState::Failed(ctx) => {
                 self.abort_current_global().await?;
@@ -1674,6 +2085,103 @@ impl SqlSession {
         }
     }
 
+    /// COMMIT of an open block.
+    ///
+    /// The notification queue brackets the durable commit: permits are reserved
+    /// *before* it (a full listener queue must fail the transaction while
+    /// nothing is durable yet) and the delivery plus the queued
+    /// LISTEN/UNLISTEN are applied *after* it. Any error on the way out drops
+    /// the queue, and the unsent [`PreparedPublish`] releases its reservations
+    /// as it falls.
+    async fn commit_open_block(&mut self, ctx: TxnCtx) -> Result<QueryResult, ExecError> {
+        let mut reserved = match self.reserve_pending_notifications() {
+            Ok(reserved) => reserved,
+            Err(e) => {
+                // Nothing is durable yet, so this is an ordinary failed COMMIT:
+                // abort the block and leave no trace of it.
+                let _ = self.abort_current_global().await;
+                let _ = self.abort_ctx(ctx).await;
+                self.guc.rollback();
+                return Err(e);
+            }
+        };
+        let outcome = self.commit_reserved_block(ctx, &mut reserved).await;
+        if outcome.is_err() {
+            self.undo_reserved_notifications(std::mem::take(&mut reserved));
+        }
+        outcome
+    }
+
+    async fn commit_reserved_block(
+        &mut self,
+        ctx: TxnCtx,
+        reserved: &mut ReservedNotifications,
+    ) -> Result<QueryResult, ExecError> {
+        // Empty unless this engine replicates notifications; folded into the
+        // batch this commit was already sending wherever there is one.
+        let notify_ops = std::mem::take(&mut reserved.wal_ops);
+        if let Some(xid) = ctx.xid {
+            if let Some(g) = self.global_xid.take() {
+                let status = self.commit_global_decision(g, XidStatus::Committed).await?;
+                self.procarray.finish(xid);
+                self.lockmgr.release_all(xid);
+                if let Some(gtm) = &self.gtm {
+                    gtm.finish_global(g);
+                }
+                if !matches!(status, XidStatus::Committed) {
+                    // Another node decided this global transaction Aborted, so
+                    // it did not happen and `notify_ops` is dropped unwritten.
+                    return Err(ExecError::SerializationFailure);
+                }
+                self.guc.commit();
+                // The decision batch cannot carry these: it is written before
+                // the decision is read back, and a decision that loses must
+                // append nothing.
+                self.append_notify_records(notify_ops).await;
+                self.commit_pending_notifications(std::mem::take(reserved));
+                return Ok(QueryResult::Command {
+                    tag: "COMMIT".into(),
+                });
+            }
+            // Record the commit. Deregister xid BEFORE propagating any
+            // write error so the xid never stays stuck in the running set.
+            let mut ops = vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Committed)];
+            // In Replicated mode, fold the next_xid advance into the
+            // committed batch (the state machine max-merges it). A txn
+            // that allocated its xid only via a locking SELECT (FOR
+            // UPDATE / FOR SHARE) wrote no rows, so without this its
+            // next_xid bump would never reach the replicated state
+            // machine — after failover the new leader would reseed from a
+            // stale next_xid and re-hand-out this xid, whose clog entry is
+            // durably Committed (dirty reads). Redundant-but-harmless for
+            // data-writing txns: their write entry already folded
+            // next_xid and this COMMIT entry is ordered after it.
+            if self.persist_mode == crate::PersistMode::Replicated {
+                ops.push(self.procarray.next_xid_op());
+            }
+            // The notify records ride the commit record itself: durable iff the
+            // transaction committed, in the transaction's own WAL entry.
+            ops.extend(notify_ops);
+            let r = self.committer.commit(ops).await;
+            self.procarray.finish(xid);
+            // Free every row this transaction locked, waking waiters.
+            self.lockmgr.release_all(xid);
+            r?;
+        } else {
+            // A block that wrote nothing (`BEGIN; NOTIFY a; COMMIT;`) never
+            // allocated an xid and so commits no batch today. The records are
+            // then the whole batch — the transaction's only durable act.
+            self.append_notify_records(notify_ops).await;
+        }
+        // SP37: a real COMMIT of an open block promotes any staged session
+        // GUC override and drops any LOCAL override.
+        self.guc.commit();
+        self.commit_pending_notifications(std::mem::take(reserved));
+        Ok(QueryResult::Command {
+            tag: "COMMIT".into(),
+        })
+    }
+
     async fn rollback_cmd(&mut self) -> Result<QueryResult, ExecError> {
         match std::mem::replace(&mut self.state, TxnState::Idle) {
             TxnState::InTransaction(ctx) | TxnState::Failed(ctx) => {
@@ -1688,6 +2196,9 @@ impl SqlSession {
         }
         // SP37: ROLLBACK discards every staged GUC override (session and LOCAL).
         self.guc.rollback();
+        // Every abort path drops the notification queue; a ROLLBACK with no open
+        // block has nothing staged, so this is a no-op there.
+        self.discard_pending_notifications();
         Ok(QueryResult::Command {
             tag: "ROLLBACK".into(),
         })
@@ -2323,7 +2834,15 @@ impl SqlSession {
                 let prune_horizon = Some(self.local_prune_horizon()?);
                 let write_ctx =
                     self.write_context(&gsnap, &snapshot, xid, false, &ctx, prune_horizon);
-                let outcome = crate::exec::execute_write(&write_ctx, stmt).await;
+                // Reserving the notification permits is part of executing the
+                // statement, not of its epilogue: `execute_write` has evaluated
+                // every `pg_notify()` by now, and a full listener queue has to
+                // fail this statement while it can still be aborted — never
+                // after its row is durable.
+                let outcome = match crate::exec::execute_write(&write_ctx, stmt).await {
+                    Ok(written) => self.reserve_autocommit_notifications().map(|()| written),
+                    Err(e) => Err(e),
+                };
                 let (result, mut ops) = match outcome {
                     Ok(v) => v,
                     Err(e) => {
@@ -2442,7 +2961,19 @@ impl SqlSession {
                         &rows,
                         &ctx,
                     )?;
-                    return self.commit_timestamp_write_plan(plan).await;
+                    // COPY bypasses `run_one`, so it runs that epilogue itself:
+                    // deliver on success, drop the queue (and the permits
+                    // reserved ahead of the commit) on failure.
+                    return match self.commit_timestamp_write_plan(plan).await {
+                        Ok(result) => {
+                            self.flush_autocommit_notifications().await?;
+                            Ok(result)
+                        }
+                        Err(error) => {
+                            self.discard_pending_notifications();
+                            Err(error)
+                        }
+                    };
                 }
                 let _unique_guard = match crate::exec::copy_requires_unique_local_serialization(
                     self.catalog_kv.as_ref(),
@@ -2459,7 +2990,13 @@ impl SqlSession {
                 let snapshot = self.procarray.snapshot();
                 // COPY is insert-only: no chains are re-read, nothing to prune.
                 let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx, None);
-                let outcome = crate::exec::execute_copy_write(&write_ctx, copy, &rows).await;
+                // Reserved before the batch is durable, as in `run_write`: a
+                // column default that calls `pg_notify()` must not be able to
+                // fail a COPY whose rows are already committed.
+                let outcome = match crate::exec::execute_copy_write(&write_ctx, copy, &rows).await {
+                    Ok(written) => self.reserve_autocommit_notifications().map(|()| written),
+                    Err(error) => Err(error),
+                };
                 let (result, mut ops) = match outcome {
                     Ok(value) => value,
                     Err(error) => {
@@ -2481,7 +3018,13 @@ impl SqlSession {
                 self.procarray.finish(xid);
                 // Free the unique-key locks this COPY acquired, waking waiters.
                 self.lockmgr.release_all(xid);
-                commit?;
+                if let Err(error) = commit {
+                    // Nothing became durable, so the reservation this COPY took
+                    // ahead of the batch is released with the queue.
+                    self.discard_pending_notifications();
+                    return Err(error);
+                }
+                self.flush_autocommit_notifications().await?;
                 Ok(result)
             }
             TxnState::Prepared(_) => Err(ExecError::ObjectNotInPrerequisiteState(
@@ -2523,6 +3066,13 @@ impl SqlSession {
         .with_ts_gc(Arc::clone(&self.ts_gc));
         let commit_ts = self.allocate_commit_timestamp_after(start_ts).await?;
         participant.prewrite(start_ts, &plan.writes).await?;
+        // Same rule as the non-sharded autocommit path: reserve before the
+        // commit record, so a full listener queue aborts the intents instead of
+        // failing a statement whose rows are already visible.
+        if let Err(error) = self.reserve_autocommit_notifications() {
+            let _ = participant.abort(start_ts, &plan.writes).await;
+            return Err(error);
+        }
         match participant
             .commit_with_ops(start_ts, commit_ts, &plan.writes, plan.commit_ops)
             .await
@@ -3003,6 +3553,7 @@ impl ParamBinder<'_> {
                 table,
                 columns,
                 rows,
+                on_conflict,
                 returning,
             } => {
                 let target_types = self.insert_target_types(table, columns.as_ref())?;
@@ -3011,12 +3562,17 @@ impl ParamBinder<'_> {
                         self.bind_expr(expr, target_types.get(idx).copied())?;
                     }
                 }
-                if let Some(returning) = returning {
+                if on_conflict.is_some() || returning.is_some() {
                     let table = crabka_pgcatalog::get_table(self.catalog_kv, table)
                         .map_err(ExecError::from)
                         .map_err(ExecError::into_pg)?;
-                    let scope = crate::scope::Scope::single(&table, &table.name);
-                    self.bind_returning(returning, &scope)?;
+                    if let Some(on_conflict) = on_conflict {
+                        self.bind_on_conflict(on_conflict, &table)?;
+                    }
+                    if let Some(returning) = returning {
+                        let scope = crate::scope::Scope::single(&table, &table.name);
+                        self.bind_returning(returning, &scope)?;
+                    }
                 }
             }
             Statement::Query(q) => self.bind_query_expr(q)?,
@@ -3094,6 +3650,47 @@ impl ParamBinder<'_> {
             if let SelectItem::Expr { expr, .. } = item {
                 self.bind_expr_with_scope(expr, None, scope)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Bind the parameters inside an `ON CONFLICT` clause.
+    ///
+    /// A `DO UPDATE` assignment is typed by its target column exactly as an
+    /// ordinary `UPDATE` assignment is, and is resolved against the
+    /// target-table-plus-`excluded` scope so `$n` beside either side of
+    /// `SET v = excluded.v + $1` infers that column's type. The action filter
+    /// and the arbiter's index predicate are boolean.
+    fn bind_on_conflict(
+        &self,
+        on_conflict: &mut OnConflict,
+        table: &crabka_pgcatalog::Table,
+    ) -> Result<(), PgError> {
+        if let OnConflictTarget::Columns {
+            index_predicate: Some(predicate),
+            ..
+        } = &mut on_conflict.target
+        {
+            // An inference predicate names only the target relation's columns.
+            let scope = crate::scope::Scope::single(table, &table.name);
+            self.bind_expr_with_scope(predicate, Some(ColumnType::Bool), &scope)?;
+        }
+        let OnConflictAction::DoUpdate {
+            assignments,
+            filter,
+        } = &mut on_conflict.action
+        else {
+            return Ok(());
+        };
+        let scope = crate::scope::Scope::insert_conflict(table);
+        for (column, expr) in assignments {
+            let Some(idx) = table.column_index(column) else {
+                return Err(ExecError::UndefinedColumn(column.clone()).into_pg());
+            };
+            self.bind_expr_with_scope(expr, Some(table.columns[idx].ty), &scope)?;
+        }
+        if let Some(filter) = filter {
+            self.bind_expr_with_scope(filter, Some(ColumnType::Bool), &scope)?;
         }
         Ok(())
     }
@@ -3232,6 +3829,19 @@ impl ParamBinder<'_> {
         match table {
             TableExpr::Table { .. } => Ok(()),
             TableExpr::Derived { subquery, .. } => self.bind_query_expr_with_ctes(subquery, ctes),
+            TableExpr::Function { args, .. } => {
+                // Not LATERAL: the arguments resolve against no FROM item, so an
+                // empty scope is the whole story.
+                for arg in args {
+                    self.bind_expr_with_scope_and_ctes(
+                        arg,
+                        None,
+                        &crate::scope::Scope::empty(),
+                        ctes,
+                    )?;
+                }
+                Ok(())
+            }
             TableExpr::Join {
                 left,
                 right,
@@ -3393,6 +4003,28 @@ impl ParamBinder<'_> {
                 self.bind_expr_with_scope_and_ctes(expr, None, scope, ctes)?;
                 self.bind_query_expr_with_ctes(subquery, ctes)?;
             }
+            // `x = ANY($1)` is how every driver binds an IN-list as a single
+            // parameter, so the array side adopts the array type over the left
+            // operand's type — and vice versa for `$1 = ANY(tags)`.
+            Expr::QuantifiedArray { expr, array, .. } => {
+                let left_expected = array_element_context_type(array, scope);
+                let array_expected = array_of_context_type(expr, scope);
+                self.bind_expr_with_scope_and_ctes(expr, left_expected, scope, ctes)?;
+                self.bind_expr_with_scope_and_ctes(array, array_expected, scope, ctes)?;
+            }
+            Expr::ArrayLiteral(elements) => {
+                let element_expected = match expected {
+                    Some(ColumnType::Array(elem)) => Some(elem.column_type()),
+                    _ => None,
+                };
+                for element in elements {
+                    self.bind_expr_with_scope_and_ctes(element, element_expected, scope, ctes)?;
+                }
+            }
+            Expr::Subscript { base, index } => {
+                self.bind_expr_with_scope_and_ctes(base, None, scope, ctes)?;
+                self.bind_expr_with_scope_and_ctes(index, Some(ColumnType::Int4), scope, ctes)?;
+            }
             Expr::IntLiteral(_)
             | Expr::NumericLiteral(_)
             | Expr::StringLiteral(_)
@@ -3444,12 +4076,57 @@ fn binary_param_type(
         | BinaryOp::Gt
         | BinaryOp::Ge
         | BinaryOp::Add
-        | BinaryOp::Sub
         | BinaryOp::Mul
         | BinaryOp::Div => infer_param_context_type(other, scope),
-        BinaryOp::Concat => Some(ColumnType::Text),
+        // `-` is also jsonb's "delete key/element", whose right operand is a
+        // text key or an integer index — never jsonb — so a parameter beside a
+        // jsonb operand keeps the default text resolution.
+        BinaryOp::Sub => match infer_param_context_type(other, scope) {
+            Some(ColumnType::Jsonb) => None,
+            inferred => inferred,
+        },
+        // `||` concatenates text, jsonb and arrays; only the text case has a
+        // fixed operand type.
+        BinaryOp::Concat => match infer_param_context_type(other, scope) {
+            Some(ty @ (ColumnType::Jsonb | ColumnType::Array(_))) => Some(ty),
+            _ => Some(ColumnType::Text),
+        },
+        // Containment and overlap are same-type operators (jsonb @> jsonb,
+        // int[] && int[]), so a parameter adopts its sibling's type.
+        BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps => {
+            infer_param_context_type(other, scope)
+        }
+        // `?` tests one key; `?|`/`?&` and the `#>`/`#>>` path operators take a
+        // text[] on the right. A parameter on the LEFT of one of these is
+        // meaningless (the left operand is always jsonb), so the asymmetry the
+        // caller's symmetric use introduces is harmless.
+        BinaryOp::KeyExists => Some(ColumnType::Text),
+        BinaryOp::KeyExistsAny
+        | BinaryOp::KeyExistsAll
+        | BinaryOp::JsonGetPath
+        | BinaryOp::JsonGetPathText => Some(ColumnType::Array(ElemType::Text)),
+        // `->`/`->>` take either a text key or an integer index; the operand
+        // alone cannot say which, so leave the parameter at its default.
+        BinaryOp::JsonGet | BinaryOp::JsonGetText => None,
         BinaryOp::And | BinaryOp::Or => None,
     }
+}
+
+/// The element type of an array-typed expression — how `$1 = ANY(tags)` types
+/// its left operand.
+fn array_element_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<ColumnType> {
+    match infer_param_context_type(expr, scope) {
+        Some(ColumnType::Array(elem)) => Some(elem.column_type()),
+        _ => None,
+    }
+}
+
+/// The array type over an expression's type — how `id = ANY($1)` types its
+/// array operand. `None` for element types crabka has no array type for.
+fn array_of_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<ColumnType> {
+    infer_param_context_type(expr, scope)
+        .and_then(ElemType::from_column_type)
+        .map(ColumnType::Array)
 }
 
 fn infer_param_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<ColumnType> {
@@ -3475,12 +4152,18 @@ fn max_statement_param(stmt: &Statement) -> usize {
     let mut max = 0;
     match stmt {
         Statement::Insert {
-            rows, returning, ..
+            rows,
+            on_conflict,
+            returning,
+            ..
         } => {
             for row in rows {
                 for expr in row {
                     collect_expr_param(expr, &mut max);
                 }
+            }
+            if let Some(on_conflict) = on_conflict {
+                collect_on_conflict_param(on_conflict, &mut max);
             }
             collect_returning_param(returning.as_deref(), &mut max);
         }
@@ -3510,6 +4193,30 @@ fn max_statement_param(stmt: &Statement) -> usize {
         _ => {}
     }
     max
+}
+
+/// Count the `$n` placeholders an `ON CONFLICT` clause contributes. Missing this
+/// would under-count an `INSERT`'s parameters and make Bind reject the message.
+fn collect_on_conflict_param(on_conflict: &OnConflict, max: &mut usize) {
+    if let OnConflictTarget::Columns {
+        index_predicate: Some(predicate),
+        ..
+    } = &on_conflict.target
+    {
+        collect_expr_param(predicate, max);
+    }
+    if let OnConflictAction::DoUpdate {
+        assignments,
+        filter,
+    } = &on_conflict.action
+    {
+        for (_, expr) in assignments {
+            collect_expr_param(expr, max);
+        }
+        if let Some(filter) = filter {
+            collect_expr_param(filter, max);
+        }
+    }
 }
 
 fn collect_returning_param(returning: Option<&[SelectItem]>, max: &mut usize) {
@@ -3579,6 +4286,13 @@ fn collect_table_param(table: &TableExpr, max: &mut usize) {
     match table {
         TableExpr::Table { .. } => {}
         TableExpr::Derived { subquery, .. } => collect_query_param(subquery, max),
+        // A set-returning function in FROM (`unnest($1)`) is not LATERAL, so its
+        // arguments see no other FROM item — but they can still be parameters.
+        TableExpr::Function { args, .. } => {
+            for arg in args {
+                collect_expr_param(arg, max);
+            }
+        }
         TableExpr::Join {
             left,
             right,
@@ -3653,6 +4367,19 @@ fn collect_expr_param(expr: &Expr, max: &mut usize) {
             collect_expr_param(expr, max);
             collect_query_param(subquery, max);
         }
+        Expr::QuantifiedArray { expr, array, .. } => {
+            collect_expr_param(expr, max);
+            collect_expr_param(array, max);
+        }
+        Expr::ArrayLiteral(elements) => {
+            for element in elements {
+                collect_expr_param(element, max);
+            }
+        }
+        Expr::Subscript { base, index } => {
+            collect_expr_param(base, max);
+            collect_expr_param(index, max);
+        }
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
         | Expr::StringLiteral(_)
@@ -3707,11 +4434,21 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::TIMESTAMP) => Ok(Some(ColumnType::Timestamp)),
         Some(crabka_pgtypes::oids::TIMESTAMPTZ) => Ok(Some(ColumnType::Timestamptz)),
         Some(crabka_pgtypes::oids::INTERVAL) => Ok(Some(ColumnType::Interval)),
+        // `json` (114) is an input alias for `jsonb`: a value bound as either is
+        // decomposed on input, and the type is always reported back as 3802.
+        Some(crabka_pgtypes::oids::JSON | crabka_pgtypes::oids::JSONB) => {
+            Ok(Some(ColumnType::Jsonb))
+        }
         Some(0) | None => Ok(None),
-        Some(oid) => Err(PgError::error(
-            "42P18",
-            format!("could not determine data type of parameter with oid {oid}"),
-        )),
+        // Every array OID crabka has an element type for (`_int4`, `_text`, …);
+        // `_json` folds onto `jsonb[]` the same way `json` folds onto `jsonb`.
+        Some(oid) => match ElemType::from_array_oid(oid) {
+            Some(elem) => Ok(Some(ColumnType::Array(elem))),
+            None => Err(PgError::error(
+                "42P18",
+                format!("could not determine data type of parameter with oid {oid}"),
+            )),
+        },
     }
 }
 
@@ -3729,85 +4466,228 @@ fn decode_bound_param(
         _ => {}
     }
 
-    match (param.format, ty) {
-        (0, ty) => {
+    match param.format {
+        0 => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
             decode_text_bound_param(text, ty, time_zone)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        (1, ColumnType::Int4 | ColumnType::Regclass) => {
+        1 => decode_binary_value(value, ty, time_zone),
+        format => Err(PgError::protocol(format!(
+            "invalid parameter format code {format}"
+        ))),
+    }
+}
+
+/// Decode one binary-format value of type `ty`: a bind parameter's body, or one
+/// element inside a binary array parameter (the two share PostgreSQL's `*_recv`
+/// representations exactly, which is why array decoding recurses through here).
+fn decode_binary_value(
+    value: &[u8],
+    ty: ColumnType,
+    time_zone: &jiff::tz::TimeZone,
+) -> Result<Datum, PgError> {
+    match ty {
+        ColumnType::Int4 | ColumnType::Regclass => {
             let bytes = binary_array(value)?;
             Ok(Datum::Int4(i32::from_be_bytes(bytes)))
         }
-        (1, ColumnType::Int8) => Ok(Datum::Int8(i64::from_be_bytes(binary_array(value)?))),
-        (1, ColumnType::Bool) => match value {
+        ColumnType::Int8 => Ok(Datum::Int8(i64::from_be_bytes(binary_array(value)?))),
+        ColumnType::Bool => match value {
             [0] => Ok(Datum::Bool(false)),
             [1] => Ok(Datum::Bool(true)),
-            _ => Err(PgError::error(
-                "22P03",
-                "incorrect binary data format in bind parameter",
-            )),
+            _ => Err(malformed_binary_parameter()),
         },
-        (1, ColumnType::Text) => {
+        ColumnType::Text => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
             Ok(Datum::Text(text.to_string()))
         }
-        (1, ColumnType::Varchar(_) | ColumnType::Char(_)) => {
+        ColumnType::Varchar(_) | ColumnType::Char(_) => {
             let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
             decode_text_bound_param(text, ty, time_zone)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        (1, ColumnType::Float8) => Ok(Datum::Float8(f64::from_be_bytes(binary_array(value)?))),
-        (1, ColumnType::Numeric(_)) => crabka_pgtypes::numeric::from_binary(value)
+        ColumnType::Float8 => Ok(Datum::Float8(f64::from_be_bytes(binary_array(value)?))),
+        ColumnType::Numeric(_) => crabka_pgtypes::numeric::from_binary(value)
             .map(Datum::Numeric)
             .ok_or_else(malformed_binary_parameter),
-        (1, ColumnType::Bytea) => Ok(Datum::Bytea(value.to_vec())),
-        (1, ColumnType::Uuid) => {
+        ColumnType::Bytea => Ok(Datum::Bytea(value.to_vec())),
+        ColumnType::Uuid => {
             let bytes: [u8; 16] = binary_array(value)?;
             Ok(Datum::Text(
                 crabka_pgtypes::uuid::UuidBytes(bytes).to_canonical_text(),
             ))
         }
-        (1, ColumnType::Date) => {
+        ColumnType::Date => {
             let _: [u8; 4] = binary_array(value)?;
             crabka_pgtypes::datetime::date_from_binary(value)
                 .map(Datum::Date)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        (1, ColumnType::Time) => {
+        ColumnType::Time => {
             let _: [u8; 8] = binary_array(value)?;
             crabka_pgtypes::datetime::time_from_binary(value)
                 .map(Datum::Time)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        (1, ColumnType::Timestamp) => {
+        ColumnType::Timestamp => {
             let _: [u8; 8] = binary_array(value)?;
             crabka_pgtypes::datetime::timestamp_from_binary(value)
                 .map(Datum::Timestamp)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        (1, ColumnType::Timestamptz) => {
+        ColumnType::Timestamptz => {
             let _: [u8; 8] = binary_array(value)?;
             crabka_pgtypes::datetime::timestamptz_from_binary(value)
                 .map(Datum::Timestamptz)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        (1, ColumnType::Interval) => {
+        ColumnType::Interval => {
             let _: [u8; 16] = binary_array(value)?;
             crabka_pgtypes::datetime::interval_from_binary(value)
                 .map(Datum::Interval)
                 .map_err(ExecError::from)
                 .map_err(ExecError::into_pg)
         }
-        (format, _) => Err(PgError::protocol(format!(
-            "invalid parameter format code {format}"
-        ))),
+        ColumnType::Jsonb => decode_jsonb_binary(value),
+        ColumnType::Array(elem) => decode_array_binary(value, elem, time_zone),
+    }
+}
+
+/// The lowest byte a JSON document can start with (`\t`). Every smaller byte is
+/// a control character no JSON text may begin with, so a leading one can only be
+/// a `jsonb` version byte.
+const JSON_TEXT_MIN_FIRST_BYTE: u8 = b'\t';
+
+/// `jsonb_recv`: a version byte followed by the JSON text.
+///
+/// A `json` (OID 114) parameter is the same document with no version byte, and
+/// the two forms are unambiguous — no JSON document can begin with byte 0x01.
+fn decode_jsonb_binary(value: &[u8]) -> Result<Datum, PgError> {
+    let json = match value.first() {
+        Some(&crabka_pgtypes::encoding::JSONB_BINARY_VERSION) => &value[1..],
+        Some(&version) if version < JSON_TEXT_MIN_FIRST_BYTE => {
+            return Err(PgError::protocol(format!(
+                "unsupported jsonb version number {version}"
+            )));
+        }
+        // `json_recv` (OID 114) — the bare document.
+        _ => value,
+    };
+    let text = std::str::from_utf8(json).map_err(invalid_parameter_encoding)?;
+    crabka_pgtypes::jsonb::parse(text)
+        .map(Datum::Jsonb)
+        .map_err(ExecError::from)
+        .map_err(ExecError::into_pg)
+}
+
+/// `array_recv` for a one-dimensional array — the layout
+/// `crabka_pgtypes::encoding` writes, read back exactly.
+///
+/// The 12-byte `ndim = 0` header (no dimension block, no elements) is the empty
+/// array libpq and `tokio-postgres` emit, so it must round-trip. Higher
+/// dimensions and lower bounds other than 1 are crabka's documented deferrals
+/// rather than malformed input, so they report 0A000.
+fn decode_array_binary(
+    value: &[u8],
+    elem: ElemType,
+    time_zone: &jiff::tz::TimeZone,
+) -> Result<Datum, PgError> {
+    let mut reader = BinaryReader::new(value);
+    let ndim = reader.read_i32()?;
+    // `hasnull` is advisory: the per-element -1 lengths are authoritative, and
+    // PostgreSQL's own receiver likewise does not trust the flag.
+    let _has_null = reader.read_i32()?;
+    let elem_oid = reader.read_u32()?;
+    if !array_element_oid_matches(elem, elem_oid) {
+        return Err(PgError::error(
+            "42804",
+            format!(
+                "binary array parameter has element type {elem_oid}, but {} was expected",
+                elem.oid()
+            ),
+        ));
+    }
+    let count = match ndim {
+        0 => 0,
+        1 => {
+            let len = reader.read_i32()?;
+            let lower_bound = reader.read_i32()?;
+            if lower_bound != 1 {
+                return Err(PgError::error(
+                    "0A000",
+                    "array lower bounds other than 1 are not supported",
+                ));
+            }
+            usize::try_from(len).map_err(|_| malformed_binary_parameter())?
+        }
+        n if n > 1 => {
+            return Err(PgError::error(
+                "0A000",
+                "multidimensional arrays are not supported",
+            ));
+        }
+        _ => return Err(malformed_binary_parameter()),
+    };
+    let mut elems = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = reader.read_i32()?;
+        if len < 0 {
+            elems.push(Datum::Null);
+            continue;
+        }
+        let bytes = reader.take(usize::try_from(len).map_err(|_| malformed_binary_parameter())?)?;
+        elems.push(decode_binary_value(bytes, elem.column_type(), time_zone)?);
+    }
+    if !reader.is_empty() {
+        return Err(malformed_binary_parameter());
+    }
+    Ok(Datum::Array(crabka_pgtypes::ArrayValue::new(elem, elems)))
+}
+
+/// Whether a binary array's declared element OID matches the expected element
+/// type. `json` and `jsonb` elements are interchangeable on input for the same
+/// reason the scalar types are.
+fn array_element_oid_matches(elem: ElemType, elem_oid: u32) -> bool {
+    elem_oid == elem.oid() || (elem == ElemType::Jsonb && elem_oid == crabka_pgtypes::oids::JSON)
+}
+
+/// A cursor over a variable-length binary parameter. Every read is
+/// bounds-checked and reports the same 22P03 a short fixed-width parameter does.
+struct BinaryReader<'a> {
+    rest: &'a [u8],
+}
+
+impl<'a> BinaryReader<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        BinaryReader { rest: bytes }
+    }
+
+    fn take(&mut self, len: usize) -> Result<&'a [u8], PgError> {
+        if self.rest.len() < len {
+            return Err(malformed_binary_parameter());
+        }
+        let (head, tail) = self.rest.split_at(len);
+        self.rest = tail;
+        Ok(head)
+    }
+
+    fn read_i32(&mut self) -> Result<i32, PgError> {
+        Ok(i32::from_be_bytes(binary_array(self.take(4)?)?))
+    }
+
+    fn read_u32(&mut self) -> Result<u32, PgError> {
+        Ok(u32::from_be_bytes(binary_array(self.take(4)?)?))
+    }
+
+    fn is_empty(&self) -> bool {
+        self.rest.is_empty()
     }
 }
 
@@ -4285,18 +5165,13 @@ impl Session for SqlSession {
                 .stream_eligible_select(stmt, result_index, page_rows, sink)
                 .await
             {
-                match result {
-                    Ok(()) => {
-                        if let TxnState::InTransaction(ctx) = &mut self.state {
-                            ctx.activity_started = true;
-                        }
-                        continue;
-                    }
-                    Err(error) => {
-                        self.mark_transaction_failed();
-                        return Err(error.into_pg());
-                    }
-                }
+                // The streaming fast path bypasses `run_one`, so run its
+                // epilogue here — a projected `pg_notify()` must still deliver
+                // at the end of an autocommit statement.
+                self.finish_statement(stmt, result.map(|()| QueryResult::Empty))
+                    .await
+                    .map_err(ExecError::into_pg)?;
+                continue;
             }
             match self.run_one(stmt).await.map_err(ExecError::into_pg)? {
                 QueryResult::Rows { fields, rows, tag } => {
@@ -4625,6 +5500,10 @@ impl Session for SqlSession {
     async fn sync(&mut self) -> Result<(), PgError> {
         self.portals.clear();
         Ok(())
+    }
+
+    fn take_notifications(&mut self) -> Option<mpsc::Receiver<Notification>> {
+        self.notify_rx.take()
     }
 
     async fn begin_copy_in(&mut self, sql: &str) -> Result<Option<CopyInResponse>, PgError> {
@@ -7052,5 +7931,1054 @@ mod compatibility_refusal_tests {
             assert_eq!(error.code, "0A000", "{}", spec.command.command_name());
             assert_eq!(error.message, spec.command.message());
         }
+    }
+}
+
+#[cfg(test)]
+mod notify_and_binary_parameter_tests {
+    use assert2::assert;
+    use crabka_pgparser::ast::Statement;
+    use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, encoding, oids};
+    use crabka_pgwire::{engine::BoundParam, error::PgError};
+
+    use super::{
+        ListenAction, NotifyPending, decode_bound_param, max_statement_param, param_column_type,
+    };
+    use crate::notify::{MAX_PAYLOAD_BYTES, NotifyError};
+
+    fn param(type_oid: u32, format: i16, value: &[u8]) -> BoundParam {
+        BoundParam {
+            type_oid: Some(type_oid),
+            format,
+            value: Some(bytes::Bytes::copy_from_slice(value)),
+        }
+    }
+
+    fn decode(param: &BoundParam, ty: ColumnType) -> Result<Datum, PgError> {
+        let value = param.value.clone().expect("a bound value");
+        decode_bound_param(&value, param, ty, &jiff::tz::TimeZone::UTC)
+    }
+
+    fn jsonb(text: &str) -> Datum {
+        Datum::Jsonb(crabka_pgtypes::jsonb::parse(text).expect("valid jsonb"))
+    }
+
+    fn parse_one(sql: &str) -> Statement {
+        let mut statements = crabka_pgparser::parse(sql).expect("parse");
+        assert!(statements.len() == 1);
+        statements.remove(0)
+    }
+
+    #[test]
+    fn jsonb_and_array_parameter_oids_resolve_to_their_column_types() {
+        let cases = [
+            (oids::JSONB, ColumnType::Jsonb),
+            // `json` is an input alias for `jsonb`, scalar and array alike.
+            (oids::JSON, ColumnType::Jsonb),
+            (oids::INT4ARRAY, ColumnType::Array(ElemType::Int4)),
+            (oids::INT8ARRAY, ColumnType::Array(ElemType::Int8)),
+            (oids::TEXTARRAY, ColumnType::Array(ElemType::Text)),
+            (oids::BOOLARRAY, ColumnType::Array(ElemType::Bool)),
+            (
+                oids::TIMESTAMPTZARRAY,
+                ColumnType::Array(ElemType::Timestamptz),
+            ),
+            (oids::JSONBARRAY, ColumnType::Array(ElemType::Jsonb)),
+            (oids::JSONARRAY, ColumnType::Array(ElemType::Jsonb)),
+        ];
+        for (oid, expected) in cases {
+            let param = BoundParam {
+                type_oid: Some(oid),
+                format: 0,
+                value: None,
+            };
+            assert!(
+                param_column_type(&param).expect("a known oid") == Some(expected),
+                "oid {oid}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unsupported_parameter_oid_is_still_rejected() {
+        // `regconfig` (3734) has no crabka type and is not an array type.
+        let param = BoundParam {
+            type_oid: Some(3734),
+            format: 0,
+            value: None,
+        };
+        assert!(param_column_type(&param).expect_err("unknown oid").code == "42P18");
+    }
+
+    #[test]
+    fn jsonb_binary_parameters_round_trip_the_encoder() {
+        for text in [
+            r#"{"a": 1, "b": [1, 2, null]}"#,
+            "null",
+            "[]",
+            r#""a string""#,
+            "1.50",
+            "true",
+        ] {
+            let value = jsonb(text);
+            let encoded = encoding::encode_binary(&value);
+            assert!(encoded[0] == encoding::JSONB_BINARY_VERSION, "{text}");
+            let decoded = decode(&param(oids::JSONB, 1, &encoded), ColumnType::Jsonb);
+            assert!(decoded.expect("decode") == value, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_binary_json_parameter_carries_no_version_byte() {
+        let decoded = decode(
+            &param(oids::JSON, 1, br#"{"b": 2, "a": 1}"#),
+            ColumnType::Jsonb,
+        );
+        assert!(decoded.expect("decode") == jsonb(r#"{"a": 1, "b": 2}"#));
+    }
+
+    #[test]
+    fn an_unsupported_jsonb_version_byte_is_a_protocol_error() {
+        let error = decode(&param(oids::JSONB, 1, b"\x02{}"), ColumnType::Jsonb)
+            .expect_err("version 2 is not supported");
+        assert!(error.message.contains("unsupported jsonb version number 2"));
+    }
+
+    #[test]
+    fn text_format_jsonb_and_array_parameters_go_through_the_input_functions() {
+        let decoded = decode(
+            &param(oids::JSONB, 0, br#"{"b": 2, "a": 1}"#),
+            ColumnType::Jsonb,
+        );
+        assert!(decoded.expect("jsonb text") == jsonb(r#"{"a": 1, "b": 2}"#));
+
+        let decoded = decode(
+            &param(oids::INT4ARRAY, 0, b"{1,-2,NULL}"),
+            ColumnType::Array(ElemType::Int4),
+        );
+        assert!(
+            decoded.expect("array text")
+                == Datum::Array(ArrayValue::new(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Int4(-2), Datum::Null],
+                ))
+        );
+    }
+
+    #[test]
+    fn array_binary_parameters_round_trip_the_encoder() {
+        let cases = [
+            ArrayValue::new(ElemType::Int4, vec![Datum::Int4(1), Datum::Int4(-2)]),
+            // The empty array is the 12-byte `ndim = 0` form tokio-postgres emits.
+            ArrayValue::new(ElemType::Int4, vec![]),
+            ArrayValue::new(
+                ElemType::Text,
+                vec![
+                    Datum::Text("a".into()),
+                    Datum::Null,
+                    Datum::Text(String::new()),
+                ],
+            ),
+            ArrayValue::new(ElemType::Bool, vec![Datum::Bool(true), Datum::Bool(false)]),
+            ArrayValue::new(
+                ElemType::Jsonb,
+                vec![jsonb(r#"{"a": 1}"#), Datum::Null, jsonb("[1, 2]")],
+            ),
+            ArrayValue::new(
+                ElemType::Timestamptz,
+                vec![Datum::Timestamptz(
+                    "2024-01-15T12:00:00Z".parse().expect("timestamp"),
+                )],
+            ),
+        ];
+        for value in cases {
+            let elem = value.elem;
+            let expected = Datum::Array(value);
+            let encoded = encoding::encode_binary(&expected);
+            let decoded = decode(
+                &param(elem.array_oid(), 1, &encoded),
+                ColumnType::Array(elem),
+            );
+            assert!(
+                decoded.expect("decode") == expected,
+                "{}",
+                elem.array_name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_empty_array_is_the_twelve_byte_header_with_no_dimension_block() {
+        let empty = Datum::Array(ArrayValue::new(ElemType::Text, vec![]));
+        let encoded = encoding::encode_binary(&empty);
+        assert!(encoded.len() == 12);
+        let decoded = decode(
+            &param(oids::TEXTARRAY, 1, &encoded),
+            ColumnType::Array(ElemType::Text),
+        );
+        assert!(decoded.expect("decode") == empty);
+    }
+
+    #[test]
+    fn a_binary_jsonb_array_accepts_json_typed_elements() {
+        let mut bytes = array_header(1, 0, oids::JSON, Some((1, 1)));
+        let element = br#"{"a": 1}"#;
+        push_element(&mut bytes, Some(element));
+        let decoded = decode(
+            &param(oids::JSONARRAY, 1, &bytes),
+            ColumnType::Array(ElemType::Jsonb),
+        );
+        assert!(
+            decoded.expect("decode")
+                == Datum::Array(ArrayValue::new(ElemType::Jsonb, vec![jsonb(r#"{"a": 1}"#)]))
+        );
+    }
+
+    /// The fixed part of a binary array: `ndim`, `hasnull`, the element OID and
+    /// (for `ndim == 1`) the single dimension's length and lower bound.
+    fn array_header(ndim: i32, has_null: i32, elem_oid: u32, dim: Option<(i32, i32)>) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&ndim.to_be_bytes());
+        bytes.extend_from_slice(&has_null.to_be_bytes());
+        bytes.extend_from_slice(&elem_oid.to_be_bytes());
+        if let Some((len, lower_bound)) = dim {
+            bytes.extend_from_slice(&len.to_be_bytes());
+            bytes.extend_from_slice(&lower_bound.to_be_bytes());
+        }
+        bytes
+    }
+
+    fn push_element(bytes: &mut Vec<u8>, element: Option<&[u8]>) {
+        match element {
+            None => bytes.extend_from_slice(&(-1i32).to_be_bytes()),
+            Some(element) => {
+                let len = i32::try_from(element.len()).expect("element length");
+                bytes.extend_from_slice(&len.to_be_bytes());
+                bytes.extend_from_slice(element);
+            }
+        }
+    }
+
+    fn int4_element(value: i32) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        push_element(&mut bytes, Some(&value.to_be_bytes()));
+        bytes
+    }
+
+    #[test]
+    fn malformed_and_unsupported_binary_arrays_are_rejected() {
+        let one_int4 = |ndim, has_null, elem_oid, dim| {
+            let mut bytes = array_header(ndim, has_null, elem_oid, dim);
+            bytes.extend_from_slice(&int4_element(7));
+            bytes
+        };
+        let truncated_header = array_header(1, 0, oids::INT4, Some((1, 1)));
+        let mut short_element = array_header(1, 0, oids::INT4, Some((1, 1)));
+        short_element.extend_from_slice(&4i32.to_be_bytes());
+        short_element.extend_from_slice(&[0, 0]);
+        let mut trailing = one_int4(1, 0, oids::INT4, Some((1, 1)));
+        trailing.push(0);
+
+        let cases = [
+            // Multidimensional arrays and non-1 lower bounds are deferrals, not
+            // malformed input, so they report 0A000.
+            (
+                "two dimensions",
+                one_int4(2, 0, oids::INT4, Some((1, 1))),
+                "0A000",
+            ),
+            (
+                "lower bound 0",
+                one_int4(1, 0, oids::INT4, Some((1, 0))),
+                "0A000",
+            ),
+            // A mismatched element type is a type error, as in PostgreSQL.
+            (
+                "wrong element type",
+                one_int4(1, 0, oids::TEXT, Some((1, 1))),
+                "42804",
+            ),
+            (
+                "negative ndim",
+                one_int4(-1, 0, oids::INT4, Some((1, 1))),
+                "22P03",
+            ),
+            ("missing dimension block", truncated_header, "22P03"),
+            ("element shorter than its length", short_element, "22P03"),
+            ("trailing bytes", trailing, "22P03"),
+            ("empty body", Vec::new(), "22P03"),
+        ];
+        for (name, bytes, expected) in cases {
+            let error = decode(
+                &param(oids::INT4ARRAY, 1, &bytes),
+                ColumnType::Array(ElemType::Int4),
+            )
+            .expect_err(name);
+            assert!(error.code == expected, "{name}: {}", error.message);
+        }
+    }
+
+    #[test]
+    fn a_declared_length_longer_than_the_element_block_is_rejected() {
+        let mut bytes = array_header(1, 0, oids::INT4, Some((2, 1)));
+        bytes.extend_from_slice(&int4_element(1));
+        let error = decode(
+            &param(oids::INT4ARRAY, 1, &bytes),
+            ColumnType::Array(ElemType::Int4),
+        )
+        .expect_err("two elements were promised");
+        assert!(error.code == "22P03");
+    }
+
+    #[test]
+    fn queued_notifications_dedup_by_channel_and_payload_keeping_order() {
+        let mut pending = NotifyPending::default();
+        assert!(pending.is_empty());
+        for (channel, payload) in [("b", "1"), ("a", "1"), ("b", "1"), ("b", "2")] {
+            pending.queue_notify(channel, payload).expect("queue");
+        }
+        assert!(
+            pending.notifies
+                == vec![
+                    ("b".to_string(), "1".to_string()),
+                    ("a".to_string(), "1".to_string()),
+                    ("b".to_string(), "2".to_string()),
+                ]
+        );
+        assert!(!pending.is_empty());
+    }
+
+    #[test]
+    fn an_invalid_notification_is_rejected_at_queue_time_and_stages_nothing() {
+        let mut pending = NotifyPending::default();
+        let error = pending.queue_notify("", "x").expect_err("an empty channel");
+        assert!(error == NotifyError::EmptyChannel);
+        assert!(error.sqlstate() == "22023");
+        assert!(pending.is_empty());
+
+        let oversized = "x".repeat(MAX_PAYLOAD_BYTES + 1);
+        let error = pending
+            .queue_notify("c", &oversized)
+            .expect_err("an oversized payload");
+        assert!(error == NotifyError::PayloadTooLong);
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn unlisten_all_supersedes_the_transactions_earlier_subscription_actions() {
+        let mut pending = NotifyPending::default();
+        pending.queue_action(ListenAction::Listen("a".into()));
+        pending.queue_action(ListenAction::Unlisten("b".into()));
+        pending.queue_action(ListenAction::UnlistenAll);
+        pending.queue_action(ListenAction::Listen("c".into()));
+        assert!(
+            pending.actions
+                == vec![
+                    ListenAction::UnlistenAll,
+                    ListenAction::Listen("c".to_string()),
+                ]
+        );
+        assert!(!pending.is_empty());
+    }
+
+    #[test]
+    fn on_conflict_and_array_placeholders_are_counted_for_bind() {
+        let cases = [
+            ("INSERT INTO t (k, v) VALUES ($1, $2)", 2),
+            (
+                "INSERT INTO t (k, v) VALUES ($1, $2) ON CONFLICT (k) DO NOTHING",
+                2,
+            ),
+            (
+                "INSERT INTO t (k, v) VALUES ($1, $2) ON CONFLICT (k) DO UPDATE SET v = $3",
+                3,
+            ),
+            (
+                "INSERT INTO t (k, v) VALUES ($1, $2) ON CONFLICT (k) DO UPDATE SET v = excluded.v WHERE t.v <> $3",
+                3,
+            ),
+            (
+                "INSERT INTO t (k, v) VALUES ($1, $2) ON CONFLICT (k) WHERE k > $4 DO UPDATE SET v = $3",
+                4,
+            ),
+            (
+                "INSERT INTO t (k, v) VALUES ($1, $2) ON CONFLICT ON CONSTRAINT t_pkey DO UPDATE SET v = $3 RETURNING $4",
+                4,
+            ),
+            ("SELECT * FROM t WHERE k = ANY($1)", 1),
+            ("SELECT ARRAY[$1, $2]", 2),
+            ("SELECT (ARRAY[1, 2])[$1]", 1),
+            ("SELECT * FROM unnest($1) AS u(x)", 1),
+        ];
+        for (sql, expected) in cases {
+            assert!(max_statement_param(&parse_one(sql)) == expected, "{sql}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod listen_notify_session_tests {
+    use std::sync::{Arc, Mutex};
+
+    use assert2::assert;
+    use crabka_pgkv::{Kv, MemKv, NotifyRecord, WriteOp, is_notify_op};
+    use crabka_pgwire::engine::{Engine, Notification, QueryResult, Session};
+    use tokio::sync::{mpsc::error::TryRecvError, oneshot};
+
+    use super::SqlSession;
+    use crate::{ExecError, SqlEngine, notify::NotifyBus};
+
+    /// A session registered on the engine's bus under `pid` — the wiring
+    /// `Engine::connect_with_pid` performs for a real connection.
+    fn session(engine: &SqlEngine, pid: i32) -> SqlSession {
+        let mut session = engine.connect();
+        session.register_notify(engine.notify_bus(), pid);
+        session
+    }
+
+    /// A session on a bus of the caller's choosing, so a test can drive the
+    /// queue-full path with a tiny capacity.
+    fn session_on(engine: &SqlEngine, bus: &Arc<NotifyBus>, pid: i32) -> SqlSession {
+        let mut session = engine.connect();
+        session.register_notify(bus, pid);
+        session
+    }
+
+    /// A committer that keeps every batch it is handed, so a test can see what
+    /// a transaction actually appended.
+    struct RecordingCommitter {
+        kv: Arc<dyn Kv>,
+        batches: Mutex<Vec<Vec<WriteOp>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::commit::Committer for RecordingCommitter {
+        async fn commit(&self, ops: Vec<WriteOp>) -> Result<(), ExecError> {
+            // Mirror every real apply site: notify records are WAL-only and
+            // never reach a KV.
+            let persisted: Vec<WriteOp> =
+                ops.iter().filter(|op| !is_notify_op(op)).cloned().collect();
+            self.kv.write_batch(&persisted)?;
+            self.batches.lock().expect("batches").push(ops);
+            Ok(())
+        }
+    }
+
+    impl RecordingCommitter {
+        fn batches(&self) -> Vec<Vec<WriteOp>> {
+            self.batches.lock().expect("batches").clone()
+        }
+
+        /// Every notify record appended so far, in commit order.
+        fn records(&self) -> Vec<NotifyRecord> {
+            self.batches()
+                .iter()
+                .flatten()
+                .filter(|op| is_notify_op(op))
+                .map(|op| match op {
+                    WriteOp::Put { value, .. } => NotifyRecord::decode(value).expect("a record"),
+                    other => panic!("a notify op is always a Put, got {other:?}"),
+                })
+                .collect()
+        }
+
+        /// The keys of the appended records, in commit order.
+        fn record_keys(&self) -> Vec<Vec<u8>> {
+            self.batches()
+                .iter()
+                .flatten()
+                .filter(|op| is_notify_op(op))
+                .map(|op| match op {
+                    WriteOp::Put { key, .. } => key.clone(),
+                    other => panic!("a notify op is always a Put, got {other:?}"),
+                })
+                .collect()
+        }
+
+        /// The batches that carry at least one notify record.
+        fn notifying_batches(&self) -> Vec<Vec<WriteOp>> {
+            self.batches()
+                .into_iter()
+                .filter(|batch| batch.iter().any(is_notify_op))
+                .collect()
+        }
+    }
+
+    /// A committer that can be armed to park inside one `commit`, so a test can
+    /// act while a transaction is mid-commit: after its notification work is
+    /// reserved and before its batch is durable.
+    struct GatedCommitter {
+        kv: Arc<dyn Kv>,
+        gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::commit::Committer for GatedCommitter {
+        async fn commit(&self, ops: Vec<WriteOp>) -> Result<(), ExecError> {
+            let gate = self.gate.lock().expect("gate").take();
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+            let persisted: Vec<WriteOp> =
+                ops.iter().filter(|op| !is_notify_op(op)).cloned().collect();
+            self.kv.write_batch(&persisted)?;
+            Ok(())
+        }
+    }
+
+    impl GatedCommitter {
+        /// Park the next commit. The returned receiver fires once it is parked;
+        /// sending on the returned sender lets it through.
+        fn arm(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered_tx, entered_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            *self.gate.lock().expect("gate") = Some((entered_tx, release_rx));
+            (entered_rx, release_tx)
+        }
+    }
+
+    /// An engine whose commits a test can park mid-flight.
+    fn gated_engine() -> (SqlEngine, Arc<GatedCommitter>) {
+        let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+        let committer = Arc::new(GatedCommitter {
+            kv: Arc::clone(&kv),
+            gate: Mutex::new(None),
+        });
+        let engine = SqlEngine::replicated(
+            Arc::clone(&kv),
+            kv,
+            Arc::clone(&committer) as Arc<dyn crate::commit::Committer>,
+            Arc::new(crate::read_gate::LocalLinearizer),
+        )
+        .expect("replicated engine");
+        (engine, committer)
+    }
+
+    /// An engine whose commit batches a test can inspect.
+    fn recording_engine() -> (SqlEngine, Arc<RecordingCommitter>) {
+        let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+        let committer = Arc::new(RecordingCommitter {
+            kv: Arc::clone(&kv),
+            batches: Mutex::new(Vec::new()),
+        });
+        let engine = SqlEngine::replicated(
+            Arc::clone(&kv),
+            kv,
+            Arc::clone(&committer) as Arc<dyn crate::commit::Committer>,
+            Arc::new(crate::read_gate::LocalLinearizer),
+        )
+        .expect("replicated engine");
+        (engine, committer)
+    }
+
+    fn record(process_id: i32, channel: &str, payload: &str) -> NotifyRecord {
+        NotifyRecord {
+            origin: "node-a".to_string(),
+            process_id,
+            channel: channel.to_string(),
+            payload: payload.to_string(),
+        }
+    }
+
+    /// Run one statement and return its command tag.
+    async fn tag(session: &mut SqlSession, sql: &str) -> String {
+        let results = session.simple_query(sql).await.expect(sql);
+        let [QueryResult::Command { tag }] = results.as_slice() else {
+            panic!("expected one command tag from {sql}");
+        };
+        tag.clone()
+    }
+
+    /// Number of rows one query returns — how a test checks whether a failed
+    /// statement's write is there.
+    async fn row_count(session: &mut SqlSession, sql: &str) -> usize {
+        let results = session.simple_query(sql).await.expect(sql);
+        let [QueryResult::Rows { rows, .. }] = results.as_slice() else {
+            panic!("expected one row set from {sql}");
+        };
+        rows.len()
+    }
+
+    fn notification(process_id: i32, channel: &str, payload: &str) -> Notification {
+        Notification {
+            process_id,
+            channel: channel.to_string(),
+            payload: payload.to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn an_autocommit_notify_is_delivered_when_the_statement_finishes() {
+        let engine = SqlEngine::new();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        assert!(tag(&mut listener, "LISTEN news").await == "LISTEN");
+        let mut rx = listener.take_notifications().expect("a receiver");
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+
+        assert!(tag(&mut notifier, "NOTIFY news, 'hello'").await == "NOTIFY");
+        assert!(rx.try_recv() == Ok(notification(22, "news", "hello")));
+        // The bare form delivers an empty payload.
+        assert!(tag(&mut notifier, "NOTIFY news").await == "NOTIFY");
+        assert!(rx.try_recv() == Ok(notification(22, "news", "")));
+        // A second take yields nothing: the wire loop owns the receiver.
+        assert!(listener.take_notifications().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_session_notifying_itself_sees_its_own_pid() {
+        let engine = SqlEngine::new();
+        let mut session = session(&engine, 77);
+        tag(&mut session, "LISTEN self").await;
+        let mut rx = session.take_notifications().expect("a receiver");
+        tag(&mut session, "NOTIFY self, 'mine'").await;
+        assert!(rx.try_recv() == Ok(notification(77, "self", "mine")));
+    }
+
+    #[tokio::test]
+    async fn listen_is_transactional_and_only_takes_effect_at_commit() {
+        let engine = SqlEngine::new();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        let mut rx = listener.take_notifications().expect("a receiver");
+
+        tag(&mut listener, "BEGIN").await;
+        tag(&mut listener, "LISTEN news").await;
+        tag(&mut notifier, "NOTIFY news, 'early'").await;
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+
+        tag(&mut listener, "COMMIT").await;
+        tag(&mut notifier, "NOTIFY news, 'late'").await;
+        assert!(rx.try_recv() == Ok(notification(22, "news", "late")));
+    }
+
+    /// PostgreSQL applies a transaction's pending `LISTEN` before queueing its
+    /// notifications, so a transaction that does both delivers to itself.
+    #[tokio::test]
+    async fn listening_and_notifying_in_one_transaction_delivers_to_itself() {
+        let engine = SqlEngine::new();
+        let mut session = session(&engine, 33);
+        let mut rx = session.take_notifications().expect("a receiver");
+
+        tag(&mut session, "BEGIN").await;
+        tag(&mut session, "LISTEN news").await;
+        tag(&mut session, "NOTIFY news, 'self'").await;
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+
+        tag(&mut session, "COMMIT").await;
+        assert!(rx.try_recv() == Ok(notification(33, "news", "self")));
+    }
+
+    /// The pending `LISTEN` is honoured for the block's own `NOTIFY` (which the
+    /// rollback then discards) but never reaches the bus, so a block that does
+    /// not commit leaves nothing behind for a later publisher to find.
+    #[tokio::test]
+    async fn a_rolled_back_block_leaves_no_trace_of_its_pending_subscription() {
+        let engine = SqlEngine::new();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        let mut rx = listener.take_notifications().expect("a receiver");
+
+        tag(&mut listener, "BEGIN").await;
+        tag(&mut listener, "LISTEN news").await;
+        tag(&mut listener, "NOTIFY news, 'dropped'").await;
+        tag(&mut listener, "ROLLBACK").await;
+
+        tag(&mut notifier, "NOTIFY news, 'nobody home'").await;
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+    }
+
+    /// A pending `LISTEN` stays private to its own transaction until the commit
+    /// is durable. A publisher racing that commit addresses only committed
+    /// subscriptions — otherwise a commit that failed afterwards could not
+    /// un-deliver what the racing publisher had already queued.
+    #[tokio::test]
+    async fn a_concurrent_publisher_cannot_reach_a_listen_that_is_still_committing() {
+        let (engine, committer) = gated_engine();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        let mut rx = listener.take_notifications().expect("a receiver");
+        tag(&mut notifier, "CREATE TABLE t (v int)").await;
+
+        // The block writes as well as subscribing, so its COMMIT has a durable
+        // batch for the committer to park in.
+        tag(&mut listener, "BEGIN").await;
+        tag(&mut listener, "LISTEN news").await;
+        listener
+            .simple_query("INSERT INTO t VALUES (1)")
+            .await
+            .expect("insert");
+
+        let (parked, release) = committer.arm();
+        let committing = tag(&mut listener, "COMMIT");
+        let racing = async {
+            parked.await.expect("the commit parks in the committer");
+            tag(&mut notifier, "NOTIFY news, 'racing'").await;
+            // The subscription has not committed, so this publisher must not
+            // have been able to address it.
+            assert!(rx.try_recv() == Err(TryRecvError::Empty));
+            release.send(()).expect("release the parked commit");
+        };
+        let raced = Box::pin(async { tokio::join!(committing, racing) });
+        let (commit_tag, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), raced)
+            .await
+            .expect("the commit and the racing publisher both finish");
+        assert!(commit_tag == "COMMIT");
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+
+        // Once the block is committed the subscription is public, as usual.
+        tag(&mut notifier, "NOTIFY news, 'after'").await;
+        assert!(rx.try_recv() == Ok(notification(22, "news", "after")));
+    }
+
+    /// A full listener queue has to fail an autocommit write BEFORE its row is
+    /// durable. Reporting 54000 for a write that already committed would tell
+    /// the client to retry a statement whose effect it cannot see, duplicating
+    /// the write.
+    #[tokio::test]
+    async fn a_full_queue_fails_an_autocommit_write_without_committing_it() {
+        let engine = SqlEngine::new();
+        let bus = Arc::new(NotifyBus::with_capacity(1));
+        let mut listener = session_on(&engine, &bus, 11);
+        let mut writer = session_on(&engine, &bus, 22);
+        tag(&mut listener, "LISTEN news").await;
+        // The receiver is never drained, so the single slot stays taken.
+        let _rx = listener.take_notifications().expect("a receiver");
+        tag(&mut writer, "CREATE TABLE t (v text)").await;
+
+        writer
+            .simple_query("INSERT INTO t VALUES (pg_notify('news', 'first'))")
+            .await
+            .expect("the first insert fills the queue");
+        assert!(row_count(&mut writer, "SELECT v FROM t").await == 1);
+
+        let error = writer
+            .simple_query("INSERT INTO t VALUES (pg_notify('news', 'second'))")
+            .await
+            .expect_err("the listener's queue is full");
+        assert!(error.code == "54000");
+        // The statement that reported failure wrote nothing.
+        assert!(row_count(&mut writer, "SELECT v FROM t").await == 1);
+    }
+
+    #[tokio::test]
+    async fn a_rolled_back_block_drops_both_its_subscription_and_its_notification() {
+        let engine = SqlEngine::new();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        let mut rx = listener.take_notifications().expect("a receiver");
+        tag(&mut listener, "LISTEN news").await;
+
+        tag(&mut notifier, "BEGIN").await;
+        tag(&mut notifier, "NOTIFY news, 'discarded'").await;
+        tag(&mut notifier, "ROLLBACK").await;
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+
+        // The rolled-back UNLISTEN never reaches the bus either.
+        tag(&mut listener, "BEGIN").await;
+        tag(&mut listener, "UNLISTEN news").await;
+        tag(&mut listener, "ROLLBACK").await;
+        tag(&mut notifier, "NOTIFY news, 'still listening'").await;
+        assert!(rx.try_recv() == Ok(notification(22, "news", "still listening")));
+    }
+
+    #[tokio::test]
+    async fn a_failed_statement_aborts_the_block_and_discards_its_notifications() {
+        let engine = SqlEngine::new();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        let mut rx = listener.take_notifications().expect("a receiver");
+        tag(&mut listener, "LISTEN news").await;
+
+        tag(&mut notifier, "BEGIN").await;
+        tag(&mut notifier, "NOTIFY news, 'doomed'").await;
+        assert!(notifier.simple_query("SELECT 1 / 0").await.is_err());
+        // COMMIT of a failed block is a ROLLBACK, and delivers nothing.
+        assert!(tag(&mut notifier, "COMMIT").await == "ROLLBACK");
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn duplicate_notifications_collapse_within_a_transaction_but_not_across_them() {
+        let engine = SqlEngine::new();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        let mut rx = listener.take_notifications().expect("a receiver");
+        tag(&mut listener, "LISTEN news").await;
+
+        tag(&mut notifier, "BEGIN").await;
+        tag(&mut notifier, "NOTIFY news, 'p'").await;
+        tag(&mut notifier, "NOTIFY news, 'p'").await;
+        tag(&mut notifier, "NOTIFY news, 'q'").await;
+        tag(&mut notifier, "COMMIT").await;
+        assert!(rx.try_recv() == Ok(notification(22, "news", "p")));
+        assert!(rx.try_recv() == Ok(notification(22, "news", "q")));
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+
+        // A later transaction sends the same pair again.
+        tag(&mut notifier, "NOTIFY news, 'p'").await;
+        assert!(rx.try_recv() == Ok(notification(22, "news", "p")));
+    }
+
+    #[tokio::test]
+    async fn unlisten_and_unlisten_all_stop_delivery_at_commit() {
+        let engine = SqlEngine::new();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        let mut rx = listener.take_notifications().expect("a receiver");
+        tag(&mut listener, "LISTEN a").await;
+        tag(&mut listener, "LISTEN b").await;
+
+        assert!(tag(&mut listener, "UNLISTEN a").await == "UNLISTEN");
+        tag(&mut notifier, "NOTIFY a, '1'").await;
+        tag(&mut notifier, "NOTIFY b, '2'").await;
+        assert!(rx.try_recv() == Ok(notification(22, "b", "2")));
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+
+        tag(&mut listener, "UNLISTEN *").await;
+        tag(&mut notifier, "NOTIFY b, '3'").await;
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn an_oversized_payload_is_rejected_by_the_notifying_statement() {
+        let engine = SqlEngine::new();
+        let mut notifier = session(&engine, 22);
+        let payload = "x".repeat(crate::notify::MAX_PAYLOAD_BYTES + 1);
+        let error = notifier
+            .simple_query(&format!("NOTIFY news, '{payload}'"))
+            .await
+            .expect_err("the payload is over the limit");
+        assert!(error.code == "22023");
+    }
+
+    #[tokio::test]
+    async fn pg_notify_queues_through_the_same_transactional_machinery() {
+        let engine = SqlEngine::new();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        let mut rx = listener.take_notifications().expect("a receiver");
+        tag(&mut listener, "LISTEN news").await;
+
+        // Autocommit: delivered once the statement finishes.
+        notifier
+            .simple_query("SELECT pg_notify('news', 'from-function')")
+            .await
+            .expect("pg_notify");
+        assert!(rx.try_recv() == Ok(notification(22, "news", "from-function")));
+
+        // In a block: deferred to COMMIT, and deduped against a NOTIFY statement.
+        tag(&mut notifier, "BEGIN").await;
+        notifier
+            .simple_query("SELECT pg_notify('news', 'same')")
+            .await
+            .expect("pg_notify");
+        tag(&mut notifier, "NOTIFY news, 'same'").await;
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+        tag(&mut notifier, "COMMIT").await;
+        assert!(rx.try_recv() == Ok(notification(22, "news", "same")));
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
+    async fn the_streaming_select_fast_path_still_flushes_pg_notify() {
+        use crabka_pgwire::engine::CollectingResultSink;
+
+        let engine = SqlEngine::new();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        let mut rx = listener.take_notifications().expect("a receiver");
+        tag(&mut listener, "LISTEN news").await;
+        tag(&mut notifier, "CREATE TABLE t (v text)").await;
+        notifier
+            .simple_query("INSERT INTO t VALUES ('a')")
+            .await
+            .expect("insert");
+
+        // `SELECT <expr> FROM <one table>` takes the streaming fast path, which
+        // bypasses `run_one` and so needs its own epilogue.
+        let mut sink = CollectingResultSink::default();
+        notifier
+            .simple_query_into("SELECT pg_notify('news', v) FROM t", 16, &mut sink)
+            .await
+            .expect("streamed select");
+        assert!(rx.try_recv() == Ok(notification(22, "news", "a")));
+    }
+
+    #[tokio::test]
+    async fn pg_notify_rejects_an_empty_channel_including_the_null_spelling() {
+        let engine = SqlEngine::new();
+        let mut notifier = session(&engine, 22);
+        for sql in [
+            "SELECT pg_notify('', 'x')",
+            // pg_notify is not strict: NULL becomes the empty string.
+            "SELECT pg_notify(NULL, 'x')",
+        ] {
+            let error = notifier.simple_query(sql).await.expect_err(sql);
+            assert!(error.code == "22023", "{sql}");
+        }
+    }
+
+    /// An engine nobody opted into replication appends nothing anywhere — and a
+    /// transaction that only notified still commits no batch at all.
+    #[tokio::test]
+    async fn without_an_origin_a_committed_notify_appends_nothing() {
+        let (engine, committer) = recording_engine();
+        let mut notifier = session(&engine, 22);
+
+        tag(&mut notifier, "NOTIFY news, 'hello'").await;
+        tag(&mut notifier, "BEGIN").await;
+        tag(&mut notifier, "NOTIFY news, 'in a block'").await;
+        tag(&mut notifier, "COMMIT").await;
+
+        assert!(committer.batches().is_empty());
+    }
+
+    /// One record per notification the transaction actually delivers: deduped
+    /// within the transaction, and nothing at all when it does not commit.
+    #[tokio::test]
+    async fn a_committed_notify_appends_one_record_per_notification() {
+        for (name, script, expected) in [
+            (
+                "autocommit",
+                vec!["NOTIFY news, 'hello'"],
+                vec![record(22, "news", "hello")],
+            ),
+            (
+                "the bare form carries an empty payload",
+                vec!["NOTIFY news"],
+                vec![record(22, "news", "")],
+            ),
+            (
+                "a block, in queue order",
+                vec!["BEGIN", "NOTIFY a, '1'", "NOTIFY b, '2'", "COMMIT"],
+                vec![record(22, "a", "1"), record(22, "b", "2")],
+            ),
+            (
+                "duplicates collapse to one record",
+                vec![
+                    "BEGIN",
+                    "NOTIFY news, 'p'",
+                    "NOTIFY news, 'p'",
+                    "NOTIFY news, 'q'",
+                    "COMMIT",
+                ],
+                vec![record(22, "news", "p"), record(22, "news", "q")],
+            ),
+            (
+                "a rollback appends nothing",
+                vec!["BEGIN", "NOTIFY news, 'gone'", "ROLLBACK"],
+                vec![],
+            ),
+            (
+                // The failed statement aborts the block, so its COMMIT rolls back.
+                "a failed block appends nothing",
+                vec!["BEGIN", "NOTIFY news, 'doomed'", "SELECT 1 / 0", "COMMIT"],
+                vec![],
+            ),
+        ] {
+            let (engine, committer) = recording_engine();
+            engine.set_notify_origin("node-a".to_string());
+            let mut notifier = session(&engine, 22);
+            for sql in script {
+                // Some scripts fail on purpose; what matters is what reached
+                // the WAL, which the assertion below is the only judge of.
+                let _ = notifier.simple_query(sql).await;
+            }
+            assert!(committer.records() == expected, "{name}");
+        }
+    }
+
+    /// The records ride the batch the commit was already sending, so they are
+    /// durable exactly when the transaction is.
+    #[tokio::test]
+    async fn notify_records_ride_the_transactions_own_commit_batch() {
+        let (engine, committer) = recording_engine();
+        engine.set_notify_origin("node-a".to_string());
+        let mut notifier = session(&engine, 22);
+        tag(&mut notifier, "CREATE TABLE t (v int)").await;
+
+        tag(&mut notifier, "BEGIN").await;
+        notifier
+            .simple_query("INSERT INTO t VALUES (1)")
+            .await
+            .expect("insert");
+        tag(&mut notifier, "NOTIFY news, 'with data'").await;
+        tag(&mut notifier, "COMMIT").await;
+
+        let batches = committer.notifying_batches();
+        let [batch] = batches.as_slice() else {
+            panic!("exactly one batch carries the record, got {batches:?}");
+        };
+        assert!(batch.iter().filter(|op| is_notify_op(op)).count() == 1);
+        // Not a batch of its own: it also carries the transaction's commit record.
+        assert!(batch.iter().any(|op| !is_notify_op(op)));
+        assert!(committer.records() == vec![record(22, "news", "with data")]);
+    }
+
+    /// A standalone `NOTIFY` commits nothing today, so with replication on its
+    /// records are the whole batch — without one, no other node could see it.
+    #[tokio::test]
+    async fn a_standalone_notify_appends_a_batch_of_its_own() {
+        let (engine, committer) = recording_engine();
+        engine.set_notify_origin("node-a".to_string());
+        let mut notifier = session(&engine, 22);
+        tag(&mut notifier, "NOTIFY news, 'alone'").await;
+
+        let batches = committer.batches();
+        let [batch] = batches.as_slice() else {
+            panic!("exactly one batch, got {batches:?}");
+        };
+        assert!(batch.iter().all(is_notify_op));
+        assert!(committer.records() == vec![record(22, "news", "alone")]);
+    }
+
+    /// Keys are unique and ordered by arrival, so the same `(channel, payload)`
+    /// recurring in a later transaction is a second record, not an overwrite.
+    #[tokio::test]
+    async fn record_keys_are_unique_and_ordered_by_arrival() {
+        let (engine, committer) = recording_engine();
+        engine.set_notify_origin("node-a".to_string());
+        let mut notifier = session(&engine, 22);
+        tag(&mut notifier, "NOTIFY news, 'p'").await;
+        tag(&mut notifier, "BEGIN").await;
+        tag(&mut notifier, "NOTIFY news, 'p'").await;
+        tag(&mut notifier, "NOTIFY news, 'q'").await;
+        tag(&mut notifier, "COMMIT").await;
+
+        let keys = committer.record_keys();
+        assert!(keys.len() == 3);
+        assert!(keys.iter().all(|key| crabka_pgkv::key::is_notify_key(key)));
+        assert!(keys[0] < keys[1] && keys[1] < keys[2]);
+    }
+
+    /// Replication is additive: local delivery keeps its own discipline, and a
+    /// full listener queue still fails the notifier before anything is durable.
+    #[tokio::test]
+    async fn local_delivery_and_the_full_queue_failure_survive_replication() {
+        let (engine, committer) = recording_engine();
+        engine.set_notify_origin("node-a".to_string());
+        let bus = Arc::new(NotifyBus::with_capacity(1));
+        let mut listener = session_on(&engine, &bus, 11);
+        let mut notifier = session_on(&engine, &bus, 22);
+        tag(&mut listener, "LISTEN news").await;
+        let mut rx = listener.take_notifications().expect("a receiver");
+
+        // Fills the listener's single queue slot, and is replicated.
+        tag(&mut notifier, "NOTIFY news, 'first'").await;
+        assert!(committer.records() == vec![record(22, "news", "first")]);
+
+        // The next one cannot reserve a slot: 54000, and nothing appended.
+        let error = notifier
+            .simple_query("NOTIFY news, 'second'")
+            .await
+            .expect_err("the listener's queue is full");
+        assert!(error.code == "54000");
+        assert!(committer.records() == vec![record(22, "news", "first")]);
+
+        // The delivered one is untouched by any of it.
+        assert!(rx.try_recv() == Ok(notification(22, "news", "first")));
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
     }
 }

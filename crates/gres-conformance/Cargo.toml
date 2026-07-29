@@ -41,6 +41,7 @@ postgres-native-tls = { workspace = true }
 sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+bytes = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
 crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
@@ -48,7 +49,6 @@ crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
 [dev-dependencies]
 assert2 = { workspace = true }
 tempfile = { workspace = true }
-bytes = { workspace = true }
 crabka-pgexec = { version = "0.3.9", path = "../pgexec" }
 crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
 crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }

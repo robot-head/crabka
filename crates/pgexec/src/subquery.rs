@@ -205,6 +205,31 @@ fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             expr: Box::new(resolve_expr(ctx, expr)?),
             ty: *ty,
         },
+        // The array expression forms carry ordinary child expressions, any of
+        // which may contain a subquery (`ARRAY[(SELECT …)]`, `arr[(SELECT …)]`,
+        // `x = ANY((SELECT …))`), so they recurse like every other node — the
+        // node itself is not a subquery and is rebuilt unchanged.
+        Expr::ArrayLiteral(items) => Expr::ArrayLiteral(
+            items
+                .iter()
+                .map(|item| resolve_expr(ctx, item))
+                .collect::<Result<_, _>>()?,
+        ),
+        Expr::Subscript { base, index } => Expr::Subscript {
+            base: Box::new(resolve_expr(ctx, base)?),
+            index: Box::new(resolve_expr(ctx, index)?),
+        },
+        Expr::QuantifiedArray {
+            expr,
+            op,
+            all,
+            array,
+        } => Expr::QuantifiedArray {
+            expr: Box::new(resolve_expr(ctx, expr)?),
+            op: *op,
+            all: *all,
+            array: Box::new(resolve_expr(ctx, array)?),
+        },
         // ---- the subquery nodes: run once, fold to constants ----
         Expr::ScalarSubquery(s) => {
             let (value, ty) = run_scalar(ctx, s)?;

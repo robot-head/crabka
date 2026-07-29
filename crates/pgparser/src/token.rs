@@ -21,6 +21,34 @@ pub enum Token {
     Concat,
     /// SP31: the `::` cast operator (`expr::type`).
     TypeCast,
+    /// A lone `:`. Only ever appears inside an array slice (`a[1:2]`), which the
+    /// parser refuses with a clear "array slices are not supported" error; the
+    /// two-byte `::` is claimed first by maximal munch.
+    Colon,
+    /// `[` — array literal / subscript opener, and the `int[]` type suffix.
+    LBracket,
+    /// `]`
+    RBracket,
+    /// The jsonb/array `->` operator (element by key or index).
+    JsonGet,
+    /// The jsonb `->>` operator (element as text).
+    JsonGetText,
+    /// The jsonb `#>` operator (element at a text path).
+    JsonGetPath,
+    /// The jsonb `#>>` operator (element at a text path, as text).
+    JsonGetPathText,
+    /// The jsonb/array `@>` containment operator.
+    Contains,
+    /// The jsonb/array `<@` "contained by" operator.
+    ContainedBy,
+    /// The jsonb `?` key-existence operator.
+    KeyExists,
+    /// The jsonb `?|` "any key exists" operator.
+    KeyExistsAny,
+    /// The jsonb `?&` "all keys exist" operator.
+    KeyExistsAll,
+    /// The array `&&` overlap operator.
+    Overlaps,
     /// SP33: the `.` qualified-name separator (`a.col`). Only lexed when it does
     /// NOT begin a number lexeme — `.5` / `2.` stay a single `FloatLit`.
     Dot,
@@ -136,6 +164,9 @@ pub enum Keyword {
     CurrentUser,
     Public,
     Returning,
+    /// The `ARRAY[...]` constructor. Reserved in `PostgreSQL`, so it is a keyword
+    /// rather than a soft identifier.
+    Array,
 }
 
 impl Keyword {
@@ -242,6 +273,7 @@ impl Keyword {
             "current_user" => Keyword::CurrentUser,
             "public" => Keyword::Public,
             "returning" => Keyword::Returning,
+            "array" => Keyword::Array,
             _ => return None,
         })
     }
@@ -339,6 +371,7 @@ mod tests {
             ("current_user", Keyword::CurrentUser),
             ("public", Keyword::Public),
             ("returning", Keyword::Returning),
+            ("array", Keyword::Array),
         ];
         for (word, kw) in pairs {
             assert_eq!(Keyword::from_word(word), Some(*kw), "from_word({word:?})");
