@@ -4,6 +4,14 @@
 //! terminal outcome), writers of different keys run concurrently, and unique
 //! CREATE INDEX backfill still excludes in-flight DML via the shared/exclusive
 //! `unique_index_lock` gate.
+//!
+//! `INSERT … ON CONFLICT` rides the same key lock: arbitration takes the
+//! exclusive UNIQUE-KEY lock BEFORE probing, so a concurrent inserter of the
+//! same key serializes with it and the loser re-probes only once the winner's
+//! outcome is durable. The upsert tests below cover both terminal outcomes of
+//! the winner, the row-lock/`eval_plan_qual` re-arbitration when the
+//! conflicting row is concurrently deleted, and the REPEATABLE READ guard that
+//! turns an otherwise-invisible conflict into 40001.
 
 use std::{sync::Arc, time::Duration};
 
@@ -343,4 +351,310 @@ async fn key_changing_update_blocks_concurrent_insert_of_new_key() {
         .expect("t2 did not hang")
         .expect("t2 join");
     assert!(code == "23505");
+}
+
+/// Seed an engine with the shared upsert fixture table.
+async fn upsert_engine() -> Arc<SqlEngine> {
+    let engine = Arc::new(SqlEngine::new());
+    let mut s = engine.connect();
+    run(&mut s, "CREATE TABLE t (id bigint PRIMARY KEY, v text)").await;
+    engine
+}
+
+async fn rows_of(engine: &SqlEngine, sql: &str) -> Vec<Vec<Option<String>>> {
+    let mut s = engine.connect();
+    match &run(&mut s, sql).await[0] {
+        QueryResult::Rows { rows, .. } => rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .map(|cell| {
+                        cell.as_ref()
+                            .map(|c: &Cell| String::from_utf8(c.text.to_vec()).expect("utf8"))
+                    })
+                    .collect()
+            })
+            .collect(),
+        o => panic!("{o:?}"),
+    }
+}
+
+/// (g) `ON CONFLICT DO NOTHING` takes the SAME exclusive key lock before it
+/// probes, so it cannot race an uncommitted inserter of that key: it blocks,
+/// and the outcome it reports depends on whether the holder committed. When
+/// the holder COMMITs the key is taken and the row is skipped (`INSERT 0 0`);
+/// when the holder ROLLBACKs there is nothing to conflict with and the row is
+/// inserted (`INSERT 0 1`).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn do_nothing_blocks_on_the_key_then_follows_the_holders_outcome() {
+    for (holder_outcome, expected_tag, expected_v) in [
+        ("COMMIT", "INSERT 0 0", "first"),
+        ("ROLLBACK", "INSERT 0 1", "second"),
+    ] {
+        let engine = upsert_engine().await;
+
+        let mut t1 = engine.connect();
+        run(&mut t1, "BEGIN").await;
+        run(&mut t1, "INSERT INTO t VALUES (1, 'first')").await; // holds key lock on id=1
+
+        let e2 = Arc::clone(&engine);
+        let t2 = tokio::spawn(async move {
+            let mut s = e2.connect();
+            let r = run(
+                &mut s,
+                "INSERT INTO t VALUES (1, 'second') ON CONFLICT (id) DO NOTHING",
+            )
+            .await;
+            tag_of(&r[0]).to_string()
+        });
+
+        // The probe is BEHIND the key lock: no early skip, no early insert.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!t2.is_finished(), "{holder_outcome}");
+
+        run(&mut t1, holder_outcome).await;
+        let tag = tokio::time::timeout(Duration::from_secs(10), t2)
+            .await
+            .expect("t2 did not hang")
+            .expect("t2 join");
+        assert!(tag == expected_tag, "{holder_outcome}");
+        assert!(
+            rows_of(&engine, "SELECT id, v FROM t ORDER BY id").await
+                == vec![vec![Some("1".into()), Some(expected_v.into())]],
+            "{holder_outcome}"
+        );
+    }
+}
+
+/// (h) The same race with `DO UPDATE` where the holder ROLLS BACK: the blocked
+/// upsert wakes, re-probes, finds no conflict and inserts its own row.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn do_update_blocks_then_inserts_after_the_holder_rolls_back() {
+    let engine = upsert_engine().await;
+
+    let mut t1 = engine.connect();
+    run(&mut t1, "BEGIN").await;
+    run(&mut t1, "INSERT INTO t VALUES (1, 'first')").await; // holds key lock on id=1
+
+    let e2 = Arc::clone(&engine);
+    let t2 = tokio::spawn(async move {
+        let mut s = e2.connect();
+        let r = run(
+            &mut s,
+            "INSERT INTO t VALUES (1, 'second') \
+             ON CONFLICT (id) DO UPDATE SET v = excluded.v || '/' || t.v",
+        )
+        .await;
+        tag_of(&r[0]).to_string()
+    });
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!t2.is_finished());
+
+    run(&mut t1, "ROLLBACK").await;
+    let tag = tokio::time::timeout(Duration::from_secs(10), t2)
+        .await
+        .expect("t2 did not hang")
+        .expect("t2 join");
+    assert!(tag == "INSERT 0 1");
+    assert!(
+        rows_of(&engine, "SELECT id, v FROM t ORDER BY id").await
+            == vec![vec![Some("1".into()), Some("second".into())]]
+    );
+}
+
+/// (h′) The blocked `DO UPDATE` must UPDATE the row the winner inserted, not
+/// raise a unique violation.
+///
+/// When the key holder COMMITs, the blocked upsert wakes and re-probes. The
+/// probe reads all-committed visibility and finds the freshly committed row,
+/// but that row is invisible to the statement's own snapshot (taken before the
+/// holder committed), and `eval_plan_qual`'s read-committed refresh only fires
+/// on an `xmax` stamp — which a concurrent INSERT never leaves. Arbitration
+/// therefore re-reads such a holder under a fresh snapshot; without that it
+/// would treat the row as vanished, fall through to a plain INSERT, and raise
+/// 23505. `PostgreSQL` guarantees the opposite: "ON CONFLICT DO UPDATE guarantees
+/// an atomic INSERT or UPDATE outcome … even under high concurrency".
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn do_update_after_a_concurrently_committed_insert_updates_that_row() {
+    let engine = upsert_engine().await;
+
+    let mut t1 = engine.connect();
+    run(&mut t1, "BEGIN").await;
+    run(&mut t1, "INSERT INTO t VALUES (1, 'first')").await; // holds key lock on id=1
+
+    let e2 = Arc::clone(&engine);
+    let t2 = tokio::spawn(async move {
+        let mut s = e2.connect();
+        s.simple_query(
+            "INSERT INTO t VALUES (1, 'second') \
+             ON CONFLICT (id) DO UPDATE SET v = excluded.v || '/' || t.v",
+        )
+        .await
+        .map(|r| tag_of(&r[0]).to_string())
+        .map_err(|e| e.code)
+    });
+
+    // The probe is behind the key lock, so nothing is decided early.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!t2.is_finished());
+
+    run(&mut t1, "COMMIT").await;
+    let outcome = tokio::time::timeout(Duration::from_secs(10), t2)
+        .await
+        .expect("t2 did not hang")
+        .expect("t2 join");
+    assert!(outcome == Ok("INSERT 0 1".to_string()));
+    assert!(
+        rows_of(&engine, "SELECT id, v FROM t ORDER BY id").await
+            == vec![vec![Some("1".into()), Some("second/first".into())]]
+    );
+}
+
+/// (h″) The contrast that isolates (h′)'s cause. Here the key holder is a
+/// key-CHANGING `UPDATE` rather than an `INSERT`, so the row it moves onto the
+/// key leaves an `xmax` stamp on its previous version. That stamp is what
+/// `eval_plan_qual`'s read-committed refresh keys off, so the blocked upsert
+/// does re-read under a fresh snapshot and correctly UPDATEs the row it found —
+/// the outcome (h′) should have produced.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn do_update_racing_a_key_changing_update_upserts_correctly() {
+    let engine = upsert_engine().await;
+    {
+        let mut s = engine.connect();
+        run(&mut s, "INSERT INTO t VALUES (1, 'orig')").await;
+    }
+
+    let mut t1 = engine.connect();
+    run(&mut t1, "BEGIN").await;
+    run(&mut t1, "UPDATE t SET id = 7 WHERE id = 1").await; // key lock on id=7
+
+    let e2 = Arc::clone(&engine);
+    let t2 = tokio::spawn(async move {
+        let mut s = e2.connect();
+        let r = run(
+            &mut s,
+            "INSERT INTO t VALUES (7, 'up') \
+             ON CONFLICT (id) DO UPDATE SET v = excluded.v || '/' || t.v",
+        )
+        .await;
+        tag_of(&r[0]).to_string()
+    });
+
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!t2.is_finished());
+
+    run(&mut t1, "COMMIT").await;
+    let tag = tokio::time::timeout(Duration::from_secs(10), t2)
+        .await
+        .expect("t2 did not hang")
+        .expect("t2 join");
+    assert!(tag == "INSERT 0 1");
+    // The post-image proves the upsert read T1's committed post-image.
+    assert!(
+        rows_of(&engine, "SELECT id, v FROM t ORDER BY id").await
+            == vec![vec![Some("7".into()), Some("up/orig".into())]]
+    );
+}
+
+/// (i) `DO UPDATE` versus a concurrent DELETE of the conflicting row: the
+/// arbiter's probe (all-committed visibility) still finds the row, so the
+/// upsert takes its ROW lock and blocks on the deleter. When the DELETE
+/// commits, `eval_plan_qual` finds the row gone, arbitration restarts without
+/// it, and the statement falls through to a plain INSERT — leaving exactly one
+/// row carrying the upsert's proposed values.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn do_update_re_arbitrates_into_an_insert_when_the_row_is_deleted() {
+    let engine = upsert_engine().await;
+    {
+        let mut s = engine.connect();
+        run(&mut s, "INSERT INTO t VALUES (1, 'seed')").await;
+    }
+
+    let mut t1 = engine.connect();
+    run(&mut t1, "BEGIN").await;
+    // A PK-preserving DELETE takes the ROW lock only, leaving key id=1 free.
+    run(&mut t1, "DELETE FROM t WHERE id = 1").await;
+
+    let e2 = Arc::clone(&engine);
+    let t2 = tokio::spawn(async move {
+        let mut s = e2.connect();
+        let r = run(
+            &mut s,
+            "INSERT INTO t VALUES (1, 'upserted') \
+             ON CONFLICT (id) DO UPDATE SET v = excluded.v",
+        )
+        .await;
+        tag_of(&r[0]).to_string()
+    });
+
+    // T2 got the key lock and found the (still committed) row, then queued on
+    // T1's row lock.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!t2.is_finished());
+
+    run(&mut t1, "COMMIT").await;
+    let tag = tokio::time::timeout(Duration::from_secs(10), t2)
+        .await
+        .expect("t2 did not hang")
+        .expect("t2 join");
+    assert!(tag == "INSERT 0 1");
+
+    assert!(
+        rows_of(&engine, "SELECT id, v FROM t ORDER BY id").await
+            == vec![vec![Some("1".into()), Some("upserted".into())]]
+    );
+}
+
+/// (j) The REPEATABLE READ guard. The arbiter probes with all-committed
+/// visibility, so it finds a row committed AFTER the RR snapshot was taken —
+/// a row the transaction cannot read. `DO UPDATE` must refuse that with 40001
+/// rather than silently updating an invisible row (or reporting a bogus
+/// 23505); `DO NOTHING` has nothing to read and simply skips the row, which is
+/// what Postgres does too.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn repeatable_read_upsert_onto_an_invisible_row_is_40001() {
+    for (action, expectation) in [
+        ("DO UPDATE SET v = excluded.v", Err("40001".to_string())),
+        ("DO NOTHING", Ok("INSERT 0 0".to_string())),
+    ] {
+        let engine = upsert_engine().await;
+
+        let mut rr = engine.connect();
+        run(&mut rr, "BEGIN ISOLATION LEVEL REPEATABLE READ").await;
+        // Take the snapshot before the conflicting row exists.
+        assert!(col0(&run(&mut rr, "SELECT id FROM t").await[0]).is_empty());
+
+        {
+            let mut other = engine.connect();
+            run(&mut other, "INSERT INTO t VALUES (1, 'invisible')").await;
+        }
+        // The RR transaction genuinely cannot see the committed row — that
+        // invisibility is the whole point of the guard — while a fresh reader
+        // does.
+        assert!(
+            col0(&run(&mut rr, "SELECT id FROM t").await[0]).is_empty(),
+            "{action}"
+        );
+        assert!(
+            rows_of(&engine, "SELECT id FROM t").await == vec![vec![Some("1".into())]],
+            "{action}"
+        );
+
+        let sql = format!("INSERT INTO t VALUES (1, 'rr') ON CONFLICT (id) {action}");
+        let actual = rr
+            .simple_query(&sql)
+            .await
+            .map(|r| tag_of(&r[0]).to_string())
+            .map_err(|e| e.code);
+        assert!(actual == expectation, "{action}");
+
+        let _ = rr.simple_query("ROLLBACK").await;
+        // The concurrent row is untouched either way.
+        assert!(
+            rows_of(&engine, "SELECT id, v FROM t ORDER BY id").await
+                == vec![vec![Some("1".into()), Some("invisible".into())]],
+            "{action}"
+        );
+    }
 }

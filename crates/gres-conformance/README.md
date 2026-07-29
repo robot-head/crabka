@@ -76,13 +76,17 @@ cargo run -p crabka-gres-conformance -- \
 Each `.json` file is discovered recursively and contains cases with `name`,
 `sql`, typed `params`, `setup`, and `teardown`; `baseline.json` is the reserved
 parity-metadata filename and is not a case file. Supported parameter types are
-`int4`, `text`, and `bool`; `"value": null` sends a typed SQL NULL. The F-0 gate
-covers parameterized `SELECT`, `WHERE`, and `INSERT ... RETURNING` cases against
-both oracle and subject. It writes `extended-parity.json` and
+`int4`, `text`, `bool`, `jsonb`, `int4[]`, and `text[]`; `"value": null` sends a
+typed SQL NULL. A `jsonb` value is written as the JSON document's text and bound
+in PostgreSQL's binary `jsonb` format; `int4[]`/`text[]` values are JSON arrays
+whose elements may be `null`, and `[]` exercises the empty-array binary form.
+The F-0 gate covers parameterized `SELECT`, `WHERE`, `INSERT ... RETURNING`,
+`= ANY($1)`, and `ON CONFLICT ... DO UPDATE SET col = $n` cases against both
+oracle and subject. It writes `extended-parity.json` and
 `extended-parity.md`; `--extended-baseline` pins the extended statement total
 and ratchets the matched count exactly like the simple corpus baseline.
 
-CI runs this six-case baseline twice: against the standalone subject, producing
+CI runs this fourteen-case baseline twice: against the standalone subject, producing
 `extended-parity-standalone.{json,md}`, and against the substrate-backed subject,
 producing `extended-parity-substrate.{json,md}`. Both Markdown summaries are
 added to the job summary and all four reports are included in the

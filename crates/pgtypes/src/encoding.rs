@@ -40,8 +40,29 @@ pub fn encode_text(d: &Datum, tz: &jiff::tz::TimeZone) -> Vec<u8> {
             }
             out
         }
+        // `jsonb_out`: the canonical re-rendering of the decomposed value.
+        Datum::Jsonb(j) => j.to_text().into_bytes(),
+        // `array_out`: `{...}` with each element rendered by its own output
+        // function and quoted when PostgreSQL would quote it.
+        Datum::Array(a) => {
+            let elements: Vec<Option<String>> = a
+                .elems
+                .iter()
+                .map(|e| {
+                    (!e.is_null()).then(|| {
+                        String::from_utf8(encode_text(e, tz))
+                            .expect("a Datum's text encoding is always valid UTF-8")
+                    })
+                })
+                .collect();
+            crate::array::literal_text(&elements).into_bytes()
+        }
     }
 }
+
+/// The `jsonb` binary-format version byte. PostgreSQL prefixes `jsonb_send`
+/// output with it; only version 1 is defined.
+pub const JSONB_BINARY_VERSION: u8 = 1;
 
 /// PostgreSQL `float8out` text rendering. The IEEE specials are spelled exactly as
 /// PostgreSQL does (`Infinity`/`-Infinity`/`NaN`); finite values use Rust's `f64`
@@ -79,7 +100,46 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         Datum::Interval(i) => crate::datetime::interval_to_binary(*i).to_vec(),
         // SP40: `byteasend` — raw bytes (no transformation).
         Datum::Bytea(b) => b.clone(),
+        // `jsonb_send`: a version byte then the canonical JSON text.
+        Datum::Jsonb(j) => {
+            let text = j.to_text();
+            let mut out = Vec::with_capacity(1 + text.len());
+            out.push(JSONB_BINARY_VERSION);
+            out.extend_from_slice(text.as_bytes());
+            out
+        }
+        // `array_send`: the standard big-endian array header then each element
+        // as `i32 length` (-1 for NULL) plus its own binary encoding.
+        Datum::Array(a) => encode_array_binary(a),
     }
+}
+
+/// PostgreSQL `array_send` for a one-dimensional array. An empty array is the
+/// 12-byte `ndim = 0` header with no dimension block — the form libpq and
+/// `tokio-postgres` emit, which must round-trip.
+fn encode_array_binary(a: &crate::datum::ArrayValue) -> Vec<u8> {
+    let has_null = a.elems.iter().any(Datum::is_null);
+    let ndim: i32 = if a.elems.is_empty() { 0 } else { 1 };
+    let mut out = Vec::with_capacity(20 + a.elems.len() * 8);
+    out.extend_from_slice(&ndim.to_be_bytes());
+    out.extend_from_slice(&i32::from(has_null).to_be_bytes());
+    out.extend_from_slice(&a.elem.oid().to_be_bytes());
+    if ndim == 1 {
+        let len = i32::try_from(a.elems.len()).expect("array length exceeds i32");
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&1i32.to_be_bytes()); // lower bound
+    }
+    for elem in &a.elems {
+        if elem.is_null() {
+            out.extend_from_slice(&(-1i32).to_be_bytes());
+        } else {
+            let bytes = encode_binary(elem);
+            let len = i32::try_from(bytes.len()).expect("array element exceeds i32 bytes");
+            out.extend_from_slice(&len.to_be_bytes());
+            out.extend_from_slice(&bytes);
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -140,6 +200,123 @@ mod tests {
     #[should_panic]
     fn encoding_null_is_a_caller_error() {
         let _ = encode_text(&Datum::Null, &utc());
+    }
+
+    // ---- jsonb / array wire formats ----
+
+    fn jsonb(text: &str) -> Datum {
+        Datum::Jsonb(crate::jsonb::parse(text).expect("valid jsonb"))
+    }
+
+    fn int_array(values: &[Option<i32>]) -> Datum {
+        Datum::Array(crate::datum::ArrayValue::new(
+            crate::ElemType::Int4,
+            values
+                .iter()
+                .map(|v| v.map_or(Datum::Null, Datum::Int4))
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn jsonb_text_is_the_canonical_rendering() {
+        use assert2::assert;
+        let tz = utc();
+        assert!(encode_text(&jsonb(r#"{"b":1,"a":[1,2]}"#), &tz) == br#"{"a": [1, 2], "b": 1}"#);
+    }
+
+    #[test]
+    fn jsonb_binary_is_a_version_byte_then_canonical_text() {
+        use assert2::assert;
+        let encoded = encode_binary(&jsonb(r#"{"b":1,"a":2}"#));
+        let mut expected = vec![1u8];
+        expected.extend_from_slice(br#"{"a": 2, "b": 1}"#);
+        assert!(encoded == expected);
+        assert!(encoded[0] == JSONB_BINARY_VERSION);
+    }
+
+    #[test]
+    fn array_text_quotes_like_array_out() {
+        use assert2::assert;
+        let tz = utc();
+        assert!(encode_text(&int_array(&[Some(1), None, Some(3)]), &tz) == b"{1,NULL,3}");
+        assert!(encode_text(&int_array(&[]), &tz) == b"{}");
+        let texts = Datum::Array(crate::datum::ArrayValue::new(
+            crate::ElemType::Text,
+            vec![
+                Datum::Text("plain".into()),
+                Datum::Text("a,b".into()),
+                Datum::Text("NULL".into()),
+                Datum::Null,
+            ],
+        ));
+        assert!(encode_text(&texts, &tz) == br#"{plain,"a,b","NULL",NULL}"#);
+    }
+
+    #[test]
+    fn array_binary_matches_the_postgres_layout() {
+        use assert2::assert;
+        // ndim=1, hasnull=0, elemoid=23 (int4), dim len=2, lbound=1, then
+        // {len=4, 1}, {len=4, 2}.
+        let expected: Vec<u8> = [
+            &1i32.to_be_bytes()[..],
+            &0i32.to_be_bytes()[..],
+            &23u32.to_be_bytes()[..],
+            &2i32.to_be_bytes()[..],
+            &1i32.to_be_bytes()[..],
+            &4i32.to_be_bytes()[..],
+            &1i32.to_be_bytes()[..],
+            &4i32.to_be_bytes()[..],
+            &2i32.to_be_bytes()[..],
+        ]
+        .concat();
+        assert!(encode_binary(&int_array(&[Some(1), Some(2)])) == expected);
+    }
+
+    #[test]
+    fn array_binary_flags_nulls_and_uses_minus_one_lengths() {
+        use assert2::assert;
+        let encoded = encode_binary(&int_array(&[None, Some(7)]));
+        // hasnull is the second i32.
+        assert!(encoded[4..8] == 1i32.to_be_bytes());
+        // The NULL element is a bare -1 length with no payload.
+        let tail: Vec<u8> = [
+            &(-1i32).to_be_bytes()[..],
+            &4i32.to_be_bytes()[..],
+            &7i32.to_be_bytes()[..],
+        ]
+        .concat();
+        assert!(encoded[20..] == tail[..]);
+    }
+
+    #[test]
+    fn empty_array_binary_is_the_twelve_byte_ndim_zero_form() {
+        use assert2::assert;
+        // What tokio-postgres emits for an empty array: no dimension block.
+        let encoded = encode_binary(&int_array(&[]));
+        let expected: Vec<u8> = [
+            &0i32.to_be_bytes()[..],
+            &0i32.to_be_bytes()[..],
+            &23u32.to_be_bytes()[..],
+        ]
+        .concat();
+        assert!(encoded == expected);
+        assert!(encoded.len() == 12);
+    }
+
+    #[test]
+    fn jsonb_inside_an_array_is_quoted_and_length_prefixed() {
+        use assert2::assert;
+        let tz = utc();
+        let value = Datum::Array(crate::datum::ArrayValue::new(
+            crate::ElemType::Jsonb,
+            vec![jsonb(r#"{"a":1}"#)],
+        ));
+        assert!(encode_text(&value, &tz) == br#"{"{\"a\": 1}"}"#);
+        let encoded = encode_binary(&value);
+        // elem oid is jsonb (3802) and the element carries its version byte.
+        assert!(encoded[8..12] == 3802u32.to_be_bytes());
+        assert!(encoded[24] == JSONB_BINARY_VERSION);
     }
 
     #[test]

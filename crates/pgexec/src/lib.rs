@@ -38,6 +38,7 @@
 #![doc(html_root_url = "https://docs.rs/crabka-pgexec/0.3.9")]
 
 mod agg;
+mod array_fn;
 pub mod clock;
 mod commit;
 mod cte;
@@ -52,8 +53,10 @@ mod gtm;
 pub mod hlc;
 pub mod hlc_source;
 mod join;
+mod json_fn;
 mod local_sequence;
 mod lockmgr;
+pub mod notify;
 pub mod plan_dist;
 mod procarray;
 mod query;
@@ -242,6 +245,43 @@ fn coordination_for(kv: &Arc<dyn Kv>) -> Arc<EngineCoordination> {
     coordinator
 }
 
+/// Cross-node `NOTIFY` replication state, shared by every handle of one engine
+/// (and so by every session it creates).
+///
+/// `origin` is `None` until an owner calls [`SqlEngine::set_notify_origin`], and
+/// then nothing is appended anywhere: a single-node engine's commit batches are
+/// exactly what they were before this existed.
+#[derive(Default)]
+pub(crate) struct NotifyReplication {
+    origin: Mutex<Option<Arc<str>>>,
+    seq: std::sync::atomic::AtomicU64,
+}
+
+impl NotifyReplication {
+    /// Start stamping this engine's notify records with `origin`.
+    fn set_origin(&self, origin: String) {
+        *self.lock() = Some(origin.into());
+    }
+
+    /// This engine's origin stamp, or `None` when it does not replicate
+    /// notifications.
+    pub(crate) fn origin(&self) -> Option<Arc<str>> {
+        self.lock().clone()
+    }
+
+    /// The next record sequence number. Keys are ordered by it, so records sort
+    /// by arrival within the log. Process-lifetime only, and deliberately so: a
+    /// notify record is never written to any KV, so a counter that restarts at
+    /// zero cannot collide with anything that outlived the process.
+    pub(crate) fn next_seq(&self) -> u64 {
+        self.seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<str>>> {
+        self.origin.lock().expect("notify origin lock")
+    }
+}
+
 /// Whether the counter managers (`ProcArray`, `SequenceManager`) persist their
 /// counters themselves (`Durable` — the local/single-node path) or fold the
 /// counter advance into the commit batch for the replicated state machine to
@@ -270,6 +310,14 @@ pub struct SqlEngine {
     pub(crate) procarray: Arc<ProcArray>,
     pub(crate) seq: Arc<SequenceManager>,
     pub(crate) lockmgr: Arc<RowLockManager>,
+    /// The engine-wide `LISTEN`/`NOTIFY` bus. Every session registers on it and
+    /// receives its own bounded notification queue; every `clone_handle` shares
+    /// the same bus, so all of a node's connections publish into one place.
+    pub(crate) notify: Arc<notify::NotifyBus>,
+    /// Cross-node notification replication, shared by every `clone_handle` so an
+    /// origin set once covers every connection of the node. Inert until
+    /// [`SqlEngine::set_notify_origin`] is called.
+    pub(crate) notify_replication: Arc<NotifyReplication>,
     pub(crate) catalog_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serializes physical rewrites with ordinary writes. Explicit xid writers
     /// additionally retain `writer_fence` through their terminal outcome.
@@ -656,6 +704,8 @@ impl SqlEngine {
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Durable)),
             lockmgr: Arc::new(RowLockManager::new()),
+            notify: Arc::new(notify::NotifyBus::new()),
+            notify_replication: Arc::new(NotifyReplication::default()),
             catalog_lock: Arc::clone(&coordination.catalog_lock),
             table_write_gate: Arc::clone(&coordination.table_write_gate),
             writer_fence: Arc::clone(&coordination.writer_fence),
@@ -1238,6 +1288,8 @@ impl SqlEngine {
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Replicated)),
             lockmgr: Arc::new(RowLockManager::new()),
+            notify: Arc::new(notify::NotifyBus::new()),
+            notify_replication: Arc::new(NotifyReplication::default()),
             catalog_lock: Arc::clone(&coordination.catalog_lock),
             table_write_gate: Arc::clone(&coordination.table_write_gate),
             writer_fence: Arc::clone(&coordination.writer_fence),
@@ -1301,6 +1353,8 @@ impl SqlEngine {
             procarray: Arc::clone(&self.procarray),
             seq: Arc::clone(&self.seq),
             lockmgr: Arc::clone(&self.lockmgr),
+            notify: Arc::clone(&self.notify),
+            notify_replication: Arc::clone(&self.notify_replication),
             catalog_lock: Arc::clone(&self.catalog_lock),
             table_write_gate: Arc::clone(&self.table_write_gate),
             writer_fence: Arc::clone(&self.writer_fence),
@@ -1324,6 +1378,39 @@ impl SqlEngine {
             vacuum_demand: Arc::clone(&self.vacuum_demand),
             vacuum_progress: Arc::clone(&self.vacuum_progress),
         }
+    }
+
+    /// This engine's `LISTEN`/`NOTIFY` bus. Sessions register on it to receive
+    /// notifications, and a gateway threads its coordinator range's bus into the
+    /// sessions it creates.
+    #[must_use]
+    pub fn notify_bus(&self) -> &Arc<notify::NotifyBus> {
+        &self.notify
+    }
+
+    /// Replicate this engine's notifications to other nodes: every committed
+    /// `NOTIFY` also appends a record to this engine's WAL, stamped with
+    /// `origin`.
+    ///
+    /// Opt-in, and shared by every handle of this engine (`clone_handle` carries
+    /// it), so a node sets it once at startup. Until it is set — a single-node
+    /// engine, or a range that does not host the notification log — a committing
+    /// transaction appends nothing and the notify path is exactly the in-process
+    /// one. The records are WAL-only: every apply site drops them
+    /// (`crabka_pgkv::is_notify_op`) rather than writing them to a KV, so this
+    /// belongs on a replicated engine — a local committer writes its batches
+    /// straight to the store and has no such filter.
+    pub fn set_notify_origin(&self, origin: String) {
+        self.notify_replication.set_origin(origin);
+    }
+
+    /// This engine's notify origin stamp, or `None` when it does not replicate.
+    /// A consumer reading records off the log uses it to recognise its own.
+    #[must_use]
+    pub fn notify_origin(&self) -> Option<String> {
+        self.notify_replication
+            .origin()
+            .map(|origin| origin.to_string())
     }
 
     /// Return a new handle that uses `timestamp_oracle` for sharded timestamp DML.
@@ -1638,6 +1725,10 @@ impl SqlEngine {
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             })),
+            // Planning a sharded write has no session behind it, so `pg_notify`
+            // in one reports "requires a SQL session" rather than silently
+            // dropping the notification.
+            notify: None,
         };
         crate::exec::execute_timestamp_write(
             self.catalog_kv.as_ref(),
@@ -2906,7 +2997,11 @@ impl Engine for SqlEngine {
     type Session = SqlSession;
 
     fn connect(&self) -> SqlSession {
-        SqlSession::new(session::SqlSessionConfig {
+        self.connect_with_pid(0)
+    }
+
+    fn connect_with_pid(&self, pid: i32) -> SqlSession {
+        let mut session = SqlSession::new(session::SqlSessionConfig {
             kv: Arc::clone(&self.kv),
             catalog_kv: Arc::clone(&self.catalog_kv),
             procarray: Arc::clone(&self.procarray),
@@ -2932,7 +3027,10 @@ impl Engine for SqlEngine {
             local_sequence: Arc::clone(&self.local_sequence),
             gc_horizon: Arc::clone(&self.gc_horizon),
             ts_gc: Arc::clone(&self.ts_gc),
-        })
+            notify_replication: Arc::clone(&self.notify_replication),
+        });
+        session.register_notify(&self.notify, pid);
+        session
     }
 }
 

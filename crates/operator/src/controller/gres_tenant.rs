@@ -2006,9 +2006,10 @@ fn checkpoint_runtime_args(
     if config.gres_checkpoint_allow_http {
         args.push("--checkpoint-allow-http".to_owned());
     }
-    // A final checkpoint must be possible even when no periodic threshold was
-    // selected; this threshold also keeps the live lifecycle gate compact.
-    args.extend(["--checkpoint-frames".to_owned(), "1".to_owned()]);
+    // `--checkpoint-store` alone enables checkpointing, so no threshold flag is
+    // needed here for the final/idle-suspend checkpoint to be possible. Leave the
+    // periodic thresholds at the runtime defaults: pinning frames to 1 would make
+    // every pod checkpoint on every poll that saw a single committed WAL frame.
     Ok(args)
 }
 
@@ -2686,5 +2687,9 @@ mod tests {
         );
         assert!(args.contains(&"--checkpoint-allow-http".to_string()));
         assert!(!args.iter().any(|arg| arg == "secret"));
+        // Checkpointing is enabled by `--checkpoint-store`; the periodic
+        // thresholds stay at the runtime defaults.
+        assert!(!args.iter().any(|arg| arg == "--checkpoint-frames"));
+        assert!(!args.iter().any(|arg| arg == "--checkpoint-bytes"));
     }
 }

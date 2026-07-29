@@ -252,17 +252,54 @@ impl Parser {
         let ty = crabka_pgtypes::ColumnType::from_sql_name(&type_word)
             .ok_or_else(|| ParseError::new(format!("unknown type \"{type_word}\""), type_pos))?;
         // SP32: `numeric`/`decimal` may carry a `(precision[, scale])` modifier.
-        if ty.is_numeric() && *self.peek() == Token::LParen {
-            return self.parse_numeric_typmod();
-        }
-        if matches!(
+        let base = if ty.is_numeric() && *self.peek() == Token::LParen {
+            self.parse_numeric_typmod()?
+        } else if matches!(
             ty,
             crabka_pgtypes::ColumnType::Varchar(_) | crabka_pgtypes::ColumnType::Char(_)
         ) && *self.peek() == Token::LParen
         {
-            return self.parse_string_typmod(ty);
+            self.parse_string_typmod(ty)?
+        } else {
+            ty
+        };
+        self.parse_array_type_suffix(base, &type_word, type_pos)
+    }
+
+    /// Consume an optional `[]` / `[N]` array suffix after a base type name.
+    /// `PostgreSQL` ignores the declared size, so `int[4]` is `int[]`. A second
+    /// `[]` (a multidimensional array) and element types with no array type are
+    /// both refused with 0A000 — the same class the executor uses for
+    /// deliberately unimplemented type constructs.
+    fn parse_array_type_suffix(
+        &mut self,
+        base: crabka_pgtypes::ColumnType,
+        type_word: &str,
+        type_pos: usize,
+    ) -> Result<crabka_pgtypes::ColumnType, ParseError> {
+        if *self.peek() != Token::LBracket {
+            return Ok(base);
         }
-        Ok(ty)
+        self.bump();
+        // The declared dimension size is parsed and discarded, like PostgreSQL.
+        if matches!(self.peek(), Token::IntLit(_)) {
+            self.bump();
+        }
+        self.expect(&Token::RBracket)?;
+        if *self.peek() == Token::LBracket {
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                "multidimensional arrays are not supported",
+                self.peek_pos(),
+            ));
+        }
+        crabka_pgtypes::ColumnType::array_of(base).ok_or_else(|| {
+            ParseError::new_sqlstate(
+                "0A000",
+                format!("arrays of type \"{type_word}\" are not supported"),
+                type_pos,
+            )
+        })
     }
 
     fn parse_string_typmod(
@@ -343,6 +380,26 @@ impl Parser {
                 lhs = Expr::Cast {
                     expr: Box::new(lhs),
                     ty,
+                };
+                continue;
+            }
+            // Array subscripting binds as tightly as `::` and is likewise
+            // consumed with no `min_bp` gate, so `a[1] + b` is `(a[1]) + b` and
+            // `a[1][2]` chains left-associatively.
+            if *self.peek() == Token::LBracket {
+                self.bump();
+                // `a[:2]` — an omitted lower bound is still a slice.
+                if *self.peek() == Token::Colon {
+                    return Err(Self::array_slices_unsupported(self.peek_pos()));
+                }
+                let index = self.expr(0)?;
+                if *self.peek() == Token::Colon {
+                    return Err(Self::array_slices_unsupported(self.peek_pos()));
+                }
+                self.expect(&Token::RBracket)?;
+                lhs = Expr::Subscript {
+                    base: Box::new(lhs),
+                    index: Box::new(index),
                 };
                 continue;
             }
@@ -436,6 +493,21 @@ impl Parser {
                 Token::Gt => (BinaryOp::Gt, 5, 6),
                 Token::Ge => (BinaryOp::Ge, 5, 6),
                 Token::Concat => (BinaryOp::Concat, 7, 8),
+                // The jsonb/array operators share the `||` slot (7, 8),
+                // left-associative: tighter than the comparisons (so
+                // `a->>'k' = 'v'` groups as `(a->>'k') = 'v'`) and looser than
+                // `+ - * /`, which is PostgreSQL's relative ordering for this
+                // whole family.
+                Token::JsonGet => (BinaryOp::JsonGet, 7, 8),
+                Token::JsonGetText => (BinaryOp::JsonGetText, 7, 8),
+                Token::JsonGetPath => (BinaryOp::JsonGetPath, 7, 8),
+                Token::JsonGetPathText => (BinaryOp::JsonGetPathText, 7, 8),
+                Token::Contains => (BinaryOp::Contains, 7, 8),
+                Token::ContainedBy => (BinaryOp::ContainedBy, 7, 8),
+                Token::KeyExists => (BinaryOp::KeyExists, 7, 8),
+                Token::KeyExistsAny => (BinaryOp::KeyExistsAny, 7, 8),
+                Token::KeyExistsAll => (BinaryOp::KeyExistsAll, 7, 8),
+                Token::Overlaps => (BinaryOp::Overlaps, 7, 8),
                 Token::Plus => (BinaryOp::Add, 9, 10),
                 Token::Minus => (BinaryOp::Sub, 9, 10),
                 Token::Star => (BinaryOp::Mul, 11, 12),
@@ -463,12 +535,31 @@ impl Parser {
                 let all = matches!(self.peek(), Token::Keyword(Keyword::All));
                 self.bump(); // ANY / SOME / ALL
                 self.expect(&Token::LParen)?;
-                let subquery = Box::new(self.query_expr_after_open_paren()?);
-                lhs = Expr::Quantified {
-                    expr: Box::new(lhs),
-                    op,
-                    all,
-                    subquery,
+                // Two shapes share this syntax. `SELECT`/`VALUES`/`WITH`/`(`
+                // after the paren is the subquery form; anything else is the
+                // ARRAY form (`= ANY($1)`, `= ANY(ARRAY[…])`, `= ANY(tags)`),
+                // which every driver emits when it binds an IN-list as one
+                // parameter.
+                lhs = if matches!(
+                    self.peek(),
+                    Token::Keyword(Keyword::Select | Keyword::Values | Keyword::With)
+                        | Token::LParen
+                ) {
+                    Expr::Quantified {
+                        expr: Box::new(lhs),
+                        op,
+                        all,
+                        subquery: Box::new(self.query_expr_after_open_paren()?),
+                    }
+                } else {
+                    let array = Box::new(self.expr(0)?);
+                    self.expect(&Token::RParen)?;
+                    Expr::QuantifiedArray {
+                        expr: Box::new(lhs),
+                        op,
+                        all,
+                        array,
+                    }
                 };
                 continue;
             }
@@ -523,6 +614,7 @@ impl Parser {
                 let sub = self.query_expr_after_open_paren()?;
                 Ok(Expr::Exists(Box::new(sub)))
             }
+            Token::Keyword(Keyword::Array) => self.array_literal(),
             Token::IntLit(s) => {
                 self.bump();
                 Ok(Expr::IntLiteral(s))
@@ -651,6 +743,39 @@ impl Parser {
                 self.peek_pos(),
             )),
         }
+    }
+
+    /// The 0A000 refusal shared by every array-slice spelling (`a[1:2]`,
+    /// `a[:2]`, `a[1:]`), named so the message never degrades into a generic
+    /// "unexpected token" for what is a deliberately unimplemented construct.
+    fn array_slices_unsupported(position: usize) -> ParseError {
+        ParseError::new_sqlstate("0A000", "array slices are not supported", position)
+    }
+
+    /// `ARRAY[e1, e2, …]` — positioned at the `ARRAY` keyword. The element list
+    /// may be empty. `ARRAY(subquery)` is a deliberate 0A000 refusal.
+    fn array_literal(&mut self) -> Result<Expr, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Array))?;
+        if *self.peek() == Token::LParen {
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                "ARRAY(subquery) is not supported; use ARRAY[...]",
+                self.peek_pos(),
+            ));
+        }
+        self.expect(&Token::LBracket)?;
+        let mut elements = Vec::new();
+        if *self.peek() != Token::RBracket {
+            loop {
+                elements.push(self.expr(0)?);
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+        }
+        self.expect(&Token::RBracket)?;
+        Ok(Expr::ArrayLiteral(elements))
     }
 
     /// Parse a function call after its name `ident`, positioned at `(`.
@@ -993,6 +1118,9 @@ impl Parser {
                     _ => emitted(I::DropTable, self.drop_table()),
                 }
             }
+            Token::Ident(s) if s == "listen" => emitted(I::Listen, self.listen_stmt()),
+            Token::Ident(s) if s == "notify" => emitted(I::Notify, self.notify_stmt()),
+            Token::Ident(s) if s == "unlisten" => emitted(I::Unlisten, self.unlisten_stmt()),
             Token::Ident(s) if s == "truncate" => emitted(I::Truncate, self.truncate()),
             Token::Ident(s) if s == "vacuum" => emitted(I::Vacuum, self.vacuum()),
             Token::Ident(s) if s == "grant" => emitted(I::Grant, self.grant_table_privileges()),
@@ -2094,6 +2222,44 @@ impl Parser {
         Ok(crate::ast::Statement::Vacuum)
     }
 
+    /// `LISTEN <channel>`. `listen` and the channel are plain identifiers, so
+    /// the word stays usable as a column/table name; an unquoted channel folds
+    /// to lowercase and a quoted one keeps its case, exactly like any other
+    /// identifier.
+    fn listen_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("listen")?;
+        Ok(crate::ast::Statement::Listen {
+            channel: self.expect_ident()?,
+        })
+    }
+
+    /// `NOTIFY <channel> [, '<payload>']`. The payload is a string literal;
+    /// `PostgreSQL` treats an omitted payload as the empty string, which the AST
+    /// records as `None` so the executor can tell the two spellings apart.
+    fn notify_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("notify")?;
+        let channel = self.expect_ident()?;
+        let payload = if self.eat_comma() {
+            Some(self.expect_string_lit()?)
+        } else {
+            None
+        };
+        Ok(crate::ast::Statement::Notify { channel, payload })
+    }
+
+    /// `UNLISTEN { <channel> | * }`.
+    fn unlisten_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::UnlistenTarget;
+        self.expect_ident_eq("unlisten")?;
+        let target = if *self.peek() == Token::Star {
+            self.bump();
+            UnlistenTarget::All
+        } else {
+            UnlistenTarget::Channel(self.expect_ident()?)
+        };
+        Ok(crate::ast::Statement::Unlisten { target })
+    }
+
     /// `TRUNCATE [TABLE] name [, ...] [RESTART IDENTITY | CONTINUE IDENTITY]
     /// [CASCADE | RESTRICT]`. `CONTINUE IDENTITY` is the `PostgreSQL` default;
     /// `CASCADE`/`RESTRICT` are accepted and equivalent because no foreign-key
@@ -2229,12 +2395,91 @@ impl Parser {
             }
             break;
         }
+        let on_conflict = self.on_conflict_clause()?;
         Ok(Statement::Insert {
             table,
             columns,
             rows,
+            on_conflict,
             returning: self.returning_clause()?,
         })
+    }
+
+    /// `ON CONFLICT [ ( col, … ) [WHERE pred] | ON CONSTRAINT name ]
+    /// DO { NOTHING | UPDATE SET a = e, … [WHERE pred] }`, positioned where the
+    /// clause would start (immediately after the VALUES list).
+    ///
+    /// `conflict`, `do`, `nothing` and `constraint` are matched as soft
+    /// identifiers, so all four remain usable as column and table names — they
+    /// are unreserved in `PostgreSQL` too.
+    fn on_conflict_clause(&mut self) -> Result<Option<crate::ast::OnConflict>, ParseError> {
+        use crate::ast::{OnConflict, OnConflictAction, OnConflictTarget};
+
+        let clause_pos = self.peek_pos();
+        if !self.eat_keyword(Keyword::On) {
+            return Ok(None);
+        }
+        self.expect_ident_eq("conflict")?;
+        let target = if *self.peek() == Token::LParen {
+            self.bump();
+            let mut columns = vec![self.expect_ident()?];
+            while self.eat_comma() {
+                columns.push(self.expect_ident()?);
+            }
+            self.expect(&Token::RParen)?;
+            let index_predicate = if self.eat_keyword(Keyword::Where) {
+                Some(self.expr(0)?)
+            } else {
+                None
+            };
+            OnConflictTarget::Columns {
+                columns,
+                index_predicate,
+            }
+        } else if self.eat_keyword(Keyword::On) {
+            self.expect_ident_eq("constraint")?;
+            OnConflictTarget::OnConstraint(self.expect_ident()?)
+        } else {
+            OnConflictTarget::None
+        };
+        self.expect_ident_eq("do")?;
+        let action = if self.eat_ident_eq("nothing") {
+            OnConflictAction::DoNothing
+        } else {
+            self.expect(&Token::Keyword(Keyword::Update))?;
+            // PostgreSQL raises this during parse analysis, not in the grammar,
+            // but the rule is purely syntactic: DO UPDATE has no way to pick an
+            // arbiter index without an inference specification.
+            if matches!(target, OnConflictTarget::None) {
+                return Err(ParseError::new_sqlstate(
+                    "42601",
+                    "ON CONFLICT DO UPDATE requires inference specification or constraint name",
+                    clause_pos,
+                ));
+            }
+            self.expect(&Token::Keyword(Keyword::Set))?;
+            let mut assignments = Vec::new();
+            loop {
+                let column = self.expect_ident()?;
+                self.expect(&Token::Eq)?;
+                let value = self.expr(0)?;
+                assignments.push((column, value));
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+            let filter = if self.eat_keyword(Keyword::Where) {
+                Some(self.expr(0)?)
+            } else {
+                None
+            };
+            OnConflictAction::DoUpdate {
+                assignments,
+                filter,
+            }
+        };
+        Ok(Some(OnConflict { target, action }))
     }
 
     fn returning_clause(&mut self) -> Result<Option<Vec<crate::ast::SelectItem>>, ParseError> {
@@ -3041,8 +3286,46 @@ impl Parser {
             let object = self.expect_ident()?;
             name = format!("{name}.{object}");
         }
+        // `ident (` in FROM position is a set-returning function call
+        // (`unnest(tags) AS u(tag)`), never a table.
+        if *self.peek() == Token::LParen {
+            return self.table_function(name);
+        }
         let alias = self.opt_alias()?;
         Ok(TableExpr::Table { name, alias })
+    }
+
+    /// A function in FROM position, positioned at `(` after its name. Which
+    /// function names are actually table-producing is the executor's decision;
+    /// `LATERAL` is not part of the accepted grammar.
+    fn table_function(&mut self, name: String) -> Result<crate::ast::TableExpr, ParseError> {
+        use crate::ast::TableExpr;
+        self.expect(&Token::LParen)?;
+        let mut args = Vec::new();
+        if *self.peek() != Token::RParen {
+            loop {
+                args.push(self.expr(0)?);
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        let alias = self.opt_alias()?;
+        // Column aliases only follow a table alias (`f(x) AS t(c)`), matching
+        // PostgreSQL — without one, a following `(` starts something else.
+        let column_aliases = if alias.is_some() {
+            self.opt_column_aliases()?
+        } else {
+            None
+        };
+        Ok(TableExpr::Function {
+            name,
+            args,
+            alias,
+            column_aliases,
+        })
     }
 
     /// An optional table alias: `AS ident`, or a bare `ident` that is not a
@@ -4421,12 +4704,14 @@ mod tests {
                 table,
                 columns,
                 rows,
+                on_conflict,
                 returning,
             } => {
                 assert_eq!(table, "t");
                 assert_eq!(columns, Some(vec!["a".into(), "b".into()]));
                 assert_eq!(rows.len(), 2);
                 assert_eq!(rows[0].len(), 2);
+                assert_eq!(on_conflict, None);
                 assert_eq!(returning, None);
             }
             other => panic!("expected Insert, got {other:?}"),
@@ -6821,5 +7106,647 @@ fn token_sql(token: &Token) -> String {
         Token::Lt => "<".into(),
         Token::Plus => "+".into(),
         other => panic!("unhandled representative token {other:?}"),
+    }
+}
+
+/// Parse-shape tests for the jsonb/array expression grammar, `ON CONFLICT`, and
+/// `LISTEN`/`NOTIFY`/`UNLISTEN`.
+#[cfg(test)]
+mod json_array_conflict_notify_tests {
+    use assert2::assert;
+
+    use crate::{
+        ast::{
+            BinaryOp, ColumnDef, Expr, OnConflict, OnConflictAction, OnConflictTarget, SelectItem,
+            SelectStmt, Statement, TableExpr, UnlistenTarget,
+        },
+        command::CommandIdentity,
+        parse, parse_with_command_identities,
+    };
+
+    fn one(sql: &str) -> Statement {
+        let mut parsed = parse(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        assert!(parsed.len() == 1, "{sql}");
+        parsed.pop().expect("one statement")
+    }
+
+    fn select(sql: &str) -> SelectStmt {
+        use crate::ast::{QueryBody, SetExpr};
+        let Statement::Query(query) = one(sql) else {
+            panic!("expected a query: {sql}");
+        };
+        let SetExpr::Query(QueryBody::Select(select)) = query.body else {
+            panic!("expected a SELECT body: {sql}");
+        };
+        *select
+    }
+
+    /// The single projected expression of `SELECT <expr> …`.
+    fn projected(sql: &str) -> Expr {
+        let mut select = select(sql);
+        assert!(select.projection.len() == 1, "{sql}");
+        match select.projection.pop().expect("one projection") {
+            SelectItem::Expr { expr, .. } => expr,
+            other => panic!("expected an expression projection, got {other:?}"),
+        }
+    }
+
+    fn column(name: &str) -> Expr {
+        Expr::Column {
+            table: None,
+            name: name.into(),
+        }
+    }
+
+    fn binary(op: BinaryOp, left: Expr, right: Expr) -> Expr {
+        Expr::Binary {
+            op,
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    }
+
+    fn error(sql: &str) -> crate::ParseError {
+        parse(sql).expect_err(sql)
+    }
+
+    #[test]
+    fn every_jsonb_and_array_operator_parses_to_its_binary_op() {
+        let cases: &[(&str, BinaryOp)] = &[
+            ("a -> b", BinaryOp::JsonGet),
+            ("a ->> b", BinaryOp::JsonGetText),
+            ("a #> b", BinaryOp::JsonGetPath),
+            ("a #>> b", BinaryOp::JsonGetPathText),
+            ("a @> b", BinaryOp::Contains),
+            ("a <@ b", BinaryOp::ContainedBy),
+            ("a ? b", BinaryOp::KeyExists),
+            ("a ?| b", BinaryOp::KeyExistsAny),
+            ("a ?& b", BinaryOp::KeyExistsAll),
+            ("a && b", BinaryOp::Overlaps),
+            // `||` and `-` are shared with text concatenation and subtraction:
+            // the operand types, not the parse, pick the jsonb/array meaning.
+            ("a || b", BinaryOp::Concat),
+            ("a - b", BinaryOp::Sub),
+        ];
+        for (expression, op) in cases {
+            assert!(
+                projected(&format!("SELECT {expression}")) == binary(*op, column("a"), column("b")),
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn jsonb_operators_bind_tighter_than_comparison_and_looser_than_arithmetic() {
+        // `(a->>'k') = 'v'` — the whole point of the (7, 8) slot: a driver's
+        // `WHERE doc->>'id' = $1` must not parse as `doc ->> ('id' = $1)`.
+        assert!(
+            projected("SELECT a ->> 'k' = 'v'")
+                == binary(
+                    BinaryOp::Eq,
+                    binary(
+                        BinaryOp::JsonGetText,
+                        column("a"),
+                        Expr::StringLiteral("k".into())
+                    ),
+                    Expr::StringLiteral("v".into()),
+                )
+        );
+        // Looser than `+`: `a -> (b + c)`.
+        assert!(
+            projected("SELECT a -> b + c")
+                == binary(
+                    BinaryOp::JsonGet,
+                    column("a"),
+                    binary(BinaryOp::Add, column("b"), column("c")),
+                )
+        );
+        // Looser than the boolean operators too, in the other direction.
+        assert!(
+            projected("SELECT a @> b AND c")
+                == binary(
+                    BinaryOp::And,
+                    binary(BinaryOp::Contains, column("a"), column("b")),
+                    column("c"),
+                )
+        );
+    }
+
+    #[test]
+    fn operators_at_the_concat_level_are_left_associative() {
+        assert!(
+            projected("SELECT x || y || z")
+                == binary(
+                    BinaryOp::Concat,
+                    binary(BinaryOp::Concat, column("x"), column("y")),
+                    column("z"),
+                )
+        );
+        // A mixed chain at the same level also folds left, so `a->'x'->'y'`
+        // walks two levels down rather than nesting to the right.
+        assert!(
+            projected("SELECT a -> 'x' ->> 'y'")
+                == binary(
+                    BinaryOp::JsonGetText,
+                    binary(
+                        BinaryOp::JsonGet,
+                        column("a"),
+                        Expr::StringLiteral("x".into())
+                    ),
+                    Expr::StringLiteral("y".into()),
+                )
+        );
+    }
+
+    #[test]
+    fn array_literals_parse_including_the_empty_and_nested_forms() {
+        assert!(
+            projected("SELECT ARRAY[1, 2]")
+                == Expr::ArrayLiteral(vec![
+                    Expr::IntLiteral("1".into()),
+                    Expr::IntLiteral("2".into())
+                ])
+        );
+        assert!(projected("SELECT ARRAY[]") == Expr::ArrayLiteral(vec![]));
+        assert!(
+            projected("SELECT ARRAY[a || b]")
+                == Expr::ArrayLiteral(vec![binary(BinaryOp::Concat, column("a"), column("b"))])
+        );
+    }
+
+    #[test]
+    fn array_subquery_constructor_is_refused_by_name() {
+        let error = error("SELECT ARRAY(SELECT 1)");
+        assert!(error.sqlstate() == "0A000");
+        assert!(error.message.contains("ARRAY(subquery) is not supported"));
+    }
+
+    #[test]
+    fn subscripts_bind_tightest_and_chain() {
+        assert!(
+            projected("SELECT a[1]")
+                == Expr::Subscript {
+                    base: Box::new(column("a")),
+                    index: Box::new(Expr::IntLiteral("1".into())),
+                }
+        );
+        // Tighter than `+`: `(a[1]) + 2`, never `a[1 + 2]`.
+        assert!(
+            projected("SELECT a[1] + 2")
+                == binary(
+                    BinaryOp::Add,
+                    Expr::Subscript {
+                        base: Box::new(column("a")),
+                        index: Box::new(Expr::IntLiteral("1".into())),
+                    },
+                    Expr::IntLiteral("2".into()),
+                )
+        );
+        // A chain nests left, and the index is a full expression.
+        assert!(
+            projected("SELECT a[i + 1][2]")
+                == Expr::Subscript {
+                    base: Box::new(Expr::Subscript {
+                        base: Box::new(column("a")),
+                        index: Box::new(binary(
+                            BinaryOp::Add,
+                            column("i"),
+                            Expr::IntLiteral("1".into())
+                        )),
+                    }),
+                    index: Box::new(Expr::IntLiteral("2".into())),
+                }
+        );
+    }
+
+    #[test]
+    fn every_array_slice_spelling_is_refused_by_name() {
+        for sql in [
+            "SELECT a[1:2]",
+            "SELECT a[:2]",
+            "SELECT a[1:]",
+            "SELECT a[1:2] FROM t",
+        ] {
+            let error = error(sql);
+            assert!(error.sqlstate() == "0A000", "{sql}");
+            assert!(
+                error.message.contains("array slices are not supported"),
+                "{sql}: {}",
+                error.message
+            );
+        }
+    }
+
+    #[test]
+    fn quantified_comparisons_split_between_the_array_and_subquery_forms() {
+        // The array form — what sqlx/Diesel/asyncpg emit for every IN-list bind.
+        let cases: &[(&str, BinaryOp, bool, Expr)] = &[
+            ("a = ANY($1)", BinaryOp::Eq, false, Expr::Param(1)),
+            (
+                "a = ANY(ARRAY[1, 2])",
+                BinaryOp::Eq,
+                false,
+                Expr::ArrayLiteral(vec![
+                    Expr::IntLiteral("1".into()),
+                    Expr::IntLiteral("2".into()),
+                ]),
+            ),
+            ("a <> ALL(tags)", BinaryOp::Ne, true, column("tags")),
+            ("a = SOME(tags)", BinaryOp::Eq, false, column("tags")),
+            (
+                "a > ANY($1::int8[])",
+                BinaryOp::Gt,
+                false,
+                Expr::Cast {
+                    expr: Box::new(Expr::Param(1)),
+                    ty: crabka_pgtypes::ColumnType::array_of(crabka_pgtypes::ColumnType::Int8)
+                        .expect("int8[] is supported"),
+                },
+            ),
+        ];
+        for (expression, op, all, array) in cases {
+            assert!(
+                projected(&format!("SELECT {expression}"))
+                    == Expr::QuantifiedArray {
+                        expr: Box::new(column("a")),
+                        op: *op,
+                        all: *all,
+                        array: Box::new(array.clone()),
+                    },
+                "{expression}"
+            );
+        }
+        // The subquery form is untouched.
+        for sql in [
+            "SELECT a = ANY(SELECT id FROM t)",
+            "SELECT a = ANY(VALUES (1))",
+            "SELECT a = ALL(WITH c AS (SELECT 1) SELECT * FROM c)",
+        ] {
+            assert!(matches!(projected(sql), Expr::Quantified { .. }), "{sql}");
+        }
+    }
+
+    #[test]
+    fn array_type_suffix_parses_in_ddl_and_casts() {
+        use crabka_pgtypes::ColumnType;
+
+        let array_of = |elem| ColumnType::array_of(elem).expect("array type exists");
+        let Statement::CreateTable { columns, .. } =
+            one("CREATE TABLE t (a int4[], b text[5], c jsonb, d numeric(10, 2)[])")
+        else {
+            panic!("expected CREATE TABLE");
+        };
+        assert!(
+            columns
+                .iter()
+                .map(|ColumnDef { name, ty, .. }| (name.as_str(), *ty))
+                .collect::<Vec<_>>()
+                == vec![
+                    ("a", array_of(ColumnType::Int4)),
+                    ("b", array_of(ColumnType::Text)),
+                    ("c", ColumnType::Jsonb),
+                    (
+                        "d",
+                        array_of(ColumnType::Numeric(Some(crabka_pgtypes::numeric::Typmod {
+                            precision: 10,
+                            scale: 2,
+                        })))
+                    ),
+                ]
+        );
+        assert!(
+            projected("SELECT $1::text[]")
+                == Expr::Cast {
+                    expr: Box::new(Expr::Param(1)),
+                    ty: array_of(ColumnType::Text),
+                }
+        );
+    }
+
+    #[test]
+    fn unsupported_array_type_suffixes_are_refused_by_name() {
+        let cases: &[(&str, &str)] = &[
+            (
+                "CREATE TABLE t (a int4[][])",
+                "multidimensional arrays are not supported",
+            ),
+            (
+                "CREATE TABLE t (a varchar(10)[])",
+                "arrays of type \"varchar\" are not supported",
+            ),
+            (
+                "SELECT $1::regclass[]",
+                "arrays of type \"regclass\" are not supported",
+            ),
+        ];
+        for (sql, message) in cases {
+            let error = error(sql);
+            assert!(error.sqlstate() == "0A000", "{sql}");
+            assert!(error.message.contains(message), "{sql}: {}", error.message);
+        }
+    }
+
+    #[test]
+    fn functions_in_from_position_parse_with_and_without_aliases() {
+        assert!(
+            select("SELECT tag FROM unnest(tags) AS u(tag)").from
+                == vec![TableExpr::Function {
+                    name: "unnest".into(),
+                    args: vec![column("tags")],
+                    alias: Some("u".into()),
+                    column_aliases: Some(vec!["tag".into()]),
+                }]
+        );
+        assert!(
+            select("SELECT * FROM unnest(ARRAY[1, 2])").from
+                == vec![TableExpr::Function {
+                    name: "unnest".into(),
+                    args: vec![Expr::ArrayLiteral(vec![
+                        Expr::IntLiteral("1".into()),
+                        Expr::IntLiteral("2".into()),
+                    ])],
+                    alias: None,
+                    column_aliases: None,
+                }]
+        );
+        // Joining a table against a function keeps both FROM item shapes.
+        let from = select("SELECT * FROM t JOIN unnest(t.tags) u ON true").from;
+        assert!(matches!(from.as_slice(), [TableExpr::Join { .. }]));
+    }
+
+    #[test]
+    fn on_conflict_clauses_parse_into_whole_target_and_action_structs() {
+        fn on_conflict(sql: &str) -> Option<OnConflict> {
+            let Statement::Insert { on_conflict, .. } = one(sql) else {
+                panic!("expected INSERT: {sql}");
+            };
+            on_conflict
+        }
+
+        assert!(on_conflict("INSERT INTO t VALUES (1)") == None);
+        assert!(
+            on_conflict("INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING")
+                == Some(OnConflict {
+                    target: OnConflictTarget::None,
+                    action: OnConflictAction::DoNothing,
+                })
+        );
+        assert!(
+            on_conflict("INSERT INTO t VALUES (1) ON CONFLICT (a, b) DO NOTHING")
+                == Some(OnConflict {
+                    target: OnConflictTarget::Columns {
+                        columns: vec!["a".into(), "b".into()],
+                        index_predicate: None,
+                    },
+                    action: OnConflictAction::DoNothing,
+                })
+        );
+        assert!(
+            on_conflict("INSERT INTO t VALUES (1) ON CONFLICT (a) WHERE a > 0 DO NOTHING")
+                == Some(OnConflict {
+                    target: OnConflictTarget::Columns {
+                        columns: vec!["a".into()],
+                        index_predicate: Some(binary(
+                            BinaryOp::Gt,
+                            column("a"),
+                            Expr::IntLiteral("0".into())
+                        )),
+                    },
+                    action: OnConflictAction::DoNothing,
+                })
+        );
+        assert!(
+            on_conflict("INSERT INTO t VALUES (1) ON CONFLICT ON CONSTRAINT t_pkey DO NOTHING")
+                == Some(OnConflict {
+                    target: OnConflictTarget::OnConstraint("t_pkey".into()),
+                    action: OnConflictAction::DoNothing,
+                })
+        );
+        assert!(
+            on_conflict(
+                "INSERT INTO t VALUES (1) ON CONFLICT (id) DO UPDATE SET v = excluded.v, n = t.n + 1 WHERE t.n < 10"
+            ) == Some(OnConflict {
+                target: OnConflictTarget::Columns {
+                    columns: vec!["id".into()],
+                    index_predicate: None,
+                },
+                action: OnConflictAction::DoUpdate {
+                    assignments: vec![
+                        (
+                            "v".into(),
+                            Expr::Column {
+                                table: Some("excluded".into()),
+                                name: "v".into(),
+                            }
+                        ),
+                        (
+                            "n".into(),
+                            binary(
+                                BinaryOp::Add,
+                                Expr::Column {
+                                    table: Some("t".into()),
+                                    name: "n".into(),
+                                },
+                                Expr::IntLiteral("1".into()),
+                            )
+                        ),
+                    ],
+                    filter: Some(binary(
+                        BinaryOp::Lt,
+                        Expr::Column {
+                            table: Some("t".into()),
+                            name: "n".into(),
+                        },
+                        Expr::IntLiteral("10".into()),
+                    )),
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn on_conflict_composes_with_returning_and_multi_row_values() {
+        let Statement::Insert {
+            rows,
+            on_conflict,
+            returning,
+            ..
+        } = one(
+            "INSERT INTO t (id, v) VALUES (1, 'a'), (2, 'b') ON CONFLICT (id) DO UPDATE SET v = excluded.v RETURNING id",
+        )
+        else {
+            panic!("expected INSERT");
+        };
+        assert!(rows.len() == 2);
+        assert!(on_conflict.is_some());
+        assert!(
+            returning
+                == Some(vec![SelectItem::Expr {
+                    expr: column("id"),
+                    alias: None,
+                }])
+        );
+    }
+
+    #[test]
+    fn do_update_without_an_inference_specification_is_a_syntax_error() {
+        // PostgreSQL raises exactly this during parse analysis (42601).
+        let error = error("INSERT INTO t VALUES (1) ON CONFLICT DO UPDATE SET v = 1");
+        assert!(error.sqlstate() == "42601");
+        assert!(
+            error.message
+                == "ON CONFLICT DO UPDATE requires inference specification or constraint name"
+        );
+    }
+
+    #[test]
+    fn malformed_on_conflict_tails_are_rejected() {
+        for sql in [
+            "INSERT INTO t VALUES (1) ON DO NOTHING",
+            "INSERT INTO t VALUES (1) ON CONFLICT",
+            "INSERT INTO t VALUES (1) ON CONFLICT DO",
+            "INSERT INTO t VALUES (1) ON CONFLICT (id) DO SOMETHING",
+            "INSERT INTO t VALUES (1) ON CONFLICT () DO NOTHING",
+            "INSERT INTO t VALUES (1) ON CONFLICT (a + 1) DO NOTHING",
+            "INSERT INTO t VALUES (1) ON CONFLICT ON CONSTRAINT DO NOTHING",
+            "INSERT INTO t VALUES (1) ON CONFLICT (id) DO UPDATE",
+            "INSERT INTO t VALUES (1) ON CONFLICT (id) DO UPDATE SET",
+        ] {
+            assert!(parse(sql).is_err(), "must reject: {sql}");
+        }
+    }
+
+    #[test]
+    fn on_conflict_words_remain_usable_as_identifiers() {
+        // `conflict`, `do`, `nothing` and `constraint` are unreserved in
+        // PostgreSQL and matched as soft idents here, so they stay legal names.
+        let Statement::CreateTable { name, columns, .. } =
+            one("CREATE TABLE conflict (do int4, nothing int4, constraint int4)")
+        else {
+            panic!("expected CREATE TABLE");
+        };
+        assert!(name == "conflict");
+        assert!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>()
+                == vec!["do", "nothing", "constraint"]
+        );
+        assert!(matches!(
+            one("SELECT do FROM conflict"),
+            Statement::Query(_)
+        ));
+    }
+
+    #[test]
+    fn excluded_qualified_columns_need_no_dedicated_parser_support() {
+        // `excluded.v` is an ordinary qualified column reference; the lexer's
+        // ident lowercasing means the executor can match on `"excluded"`.
+        assert!(
+            projected("SELECT EXCLUDED.v")
+                == Expr::Column {
+                    table: Some("excluded".into()),
+                    name: "v".into(),
+                }
+        );
+    }
+
+    #[test]
+    fn listen_notify_and_unlisten_parse_with_their_command_identities() {
+        let cases: &[(&str, Statement, CommandIdentity)] = &[
+            (
+                "LISTEN chan",
+                Statement::Listen {
+                    channel: "chan".into(),
+                },
+                CommandIdentity::Listen,
+            ),
+            (
+                // Unquoted channel names fold to lowercase, quoted ones do not.
+                "LISTEN Chan",
+                Statement::Listen {
+                    channel: "chan".into(),
+                },
+                CommandIdentity::Listen,
+            ),
+            (
+                "LISTEN \"MixedCase\"",
+                Statement::Listen {
+                    channel: "MixedCase".into(),
+                },
+                CommandIdentity::Listen,
+            ),
+            (
+                "NOTIFY chan",
+                Statement::Notify {
+                    channel: "chan".into(),
+                    payload: None,
+                },
+                CommandIdentity::Notify,
+            ),
+            (
+                "NOTIFY chan, 'hello'",
+                Statement::Notify {
+                    channel: "chan".into(),
+                    payload: Some("hello".into()),
+                },
+                CommandIdentity::Notify,
+            ),
+            (
+                "UNLISTEN chan",
+                Statement::Unlisten {
+                    target: UnlistenTarget::Channel("chan".into()),
+                },
+                CommandIdentity::Unlisten,
+            ),
+            (
+                "UNLISTEN *",
+                Statement::Unlisten {
+                    target: UnlistenTarget::All,
+                },
+                CommandIdentity::Unlisten,
+            ),
+        ];
+        for (sql, statement, identity) in cases {
+            let parsed =
+                parse_with_command_identities(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+            assert!(parsed.len() == 1, "{sql}");
+            assert!(parsed[0].0 == *statement, "{sql}");
+            assert!(parsed[0].1 == *identity, "{sql}");
+        }
+    }
+
+    #[test]
+    fn malformed_listen_family_statements_are_rejected() {
+        for sql in [
+            "LISTEN",
+            "LISTEN a b",
+            "LISTEN *",
+            "NOTIFY",
+            "NOTIFY chan, payload",
+            "NOTIFY chan 'hello'",
+            "UNLISTEN",
+            "UNLISTEN a, b",
+        ] {
+            assert!(parse(sql).is_err(), "must reject: {sql}");
+        }
+    }
+
+    #[test]
+    fn listen_family_words_remain_usable_as_identifiers() {
+        let Statement::CreateTable { name, columns, .. } =
+            one("CREATE TABLE listen (notify int4, unlisten int4)")
+        else {
+            panic!("expected CREATE TABLE");
+        };
+        assert!(name == "listen");
+        assert!(
+            columns
+                .iter()
+                .map(|column| column.name.as_str())
+                .collect::<Vec<_>>()
+                == vec!["notify", "unlisten"]
+        );
     }
 }

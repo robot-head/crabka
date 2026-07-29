@@ -14,6 +14,7 @@ pub mod range0_tail;
 pub mod registry;
 pub mod split;
 pub mod split_hooks;
+pub mod swappable_kv;
 pub mod tenant;
 pub mod transfer;
 pub mod transport;
@@ -61,6 +62,7 @@ pub use self::{
         SplitHookAdapterBuilder, SplitHookOperation, SuccessorPrologueOperation,
         WriteGateOperation,
     },
+    swappable_kv::SwappableKv,
     tenant::{
         GatewayCommitFault, LocalSqlSplitError, MultiRangeTenant, MultiRangeTenantConfig,
         MultiRangeTenantHandles, ReadOnlyRange0Replica, RouteRecord, StatementKind, TenantError,

@@ -2,8 +2,8 @@
 
 Pinned front-door pooler: PgDog 0.1.47 (`f6eea5e7c7c06f62a72e669c3f3f607f4945658b`).
 
-The front-door corpus uses `pooler-baseline.json` (665/688), one match below
-the direct-compute baseline (666/688). PgDog accepts the deliberately invalid
+The front-door corpus uses `pooler-baseline.json` (859/877), one match below
+the direct-compute baseline (860/877). PgDog accepts the deliberately invalid
 `SET TIME ZONE 'Mars/Phobos'` as logical session state without forwarding the
 compute's `22023`; the harness reconnects between SQL files so this deliberate
 pooler deviation cannot contaminate unrelated cases. The statement is still

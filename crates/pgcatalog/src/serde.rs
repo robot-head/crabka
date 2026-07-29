@@ -35,6 +35,9 @@ const INDEX_CONSTRAINT_NONE: u8 = 0;
 const INDEX_CONSTRAINT_PRIMARY_KEY: u8 = 1;
 const INDEX_CONSTRAINT_UNIQUE: u8 = 2;
 
+/// Tags for a persisted column DEFAULT value. Like [`type_tag`], this space is
+/// **append-only**: a new value type takes the next free code and an existing
+/// code never changes meaning, so adding one needs no [`SCHEMA_VERSION`] bump.
 mod datum_tag {
     pub const NULL: u8 = 0;
     pub const BOOL: u8 = 1;
@@ -43,6 +46,16 @@ mod datum_tag {
     pub const TEXT: u8 = 4;
     pub const FLOAT8: u8 = 5;
     pub const NUMERIC: u8 = 6;
+    /// `jsonb` — followed by the value's canonical text (u32 length + bytes),
+    /// which is reparsed on read. Append-only — no version bump.
+    pub const JSONB: u8 = 7;
+    /// A one-dimensional array — followed by the element type's
+    /// `ElemType::code()` byte, then the elements as a `crabka_pgkv::rowenc`
+    /// row (u32 length + bytes). Reusing the row encoder keeps a second full
+    /// datum encoder out of the catalog and covers every element type,
+    /// including NULL and nested `jsonb`, for free. Append-only — no version
+    /// bump.
+    pub const ARRAY: u8 = 8;
 }
 
 mod type_tag {
@@ -76,6 +89,11 @@ mod type_tag {
     pub const UUID: u8 = 14;
     /// `regclass` — a relation oid stored as `Int4`. Append-only — no version bump.
     pub const REGCLASS: u8 = 15;
+    /// `jsonb`. Append-only — no version bump.
+    pub const JSONB: u8 = 16;
+    /// A one-dimensional array — followed by the element type's
+    /// `ElemType::code()` byte. Append-only — no version bump.
+    pub const ARRAY: u8 = 17;
 }
 
 /// Append a column's type (tag byte, plus the numeric typmod payload).
@@ -119,6 +137,11 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Bytea => out.push(type_tag::BYTEA),
         ColumnType::Uuid => out.push(type_tag::UUID),
         ColumnType::Regclass => out.push(type_tag::REGCLASS),
+        ColumnType::Jsonb => out.push(type_tag::JSONB),
+        ColumnType::Array(elem) => {
+            out.push(type_tag::ARRAY);
+            out.push(elem.code());
+        }
     }
 }
 
@@ -173,6 +196,14 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::BYTEA => ColumnType::Bytea,
         type_tag::UUID => ColumnType::Uuid,
         type_tag::REGCLASS => ColumnType::Regclass,
+        type_tag::JSONB => ColumnType::Jsonb,
+        type_tag::ARRAY => {
+            let code = take_u8(cur)?;
+            let elem = crabka_pgtypes::ElemType::from_code(code).ok_or_else(|| {
+                KvError::CorruptRow(format!("unknown array element type code {code}"))
+            })?;
+            ColumnType::Array(elem)
+        }
         other => {
             return Err(KvError::CorruptRow(format!(
                 "unknown column type tag {other}"
@@ -248,12 +279,23 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(datum_tag::NUMERIC);
             write_str(out, &value.to_string());
         }
+        Datum::Jsonb(value) => {
+            out.push(datum_tag::JSONB);
+            write_str(out, &value.to_text());
+        }
+        Datum::Array(array) => {
+            out.push(datum_tag::ARRAY);
+            out.push(array.elem.code());
+            write_bytes(out, &crabka_pgkv::rowenc::encode_row(&array.elems));
+        }
         Datum::Date(_)
         | Datum::Time(_)
         | Datum::Timestamp(_)
         | Datum::Timestamptz(_)
         | Datum::Interval(_)
-        | Datum::Bytea(_) => unreachable!("unsupported defaults are rejected before catalog write"),
+        | Datum::Bytea(_) => {
+            unreachable!("unsupported defaults are rejected before catalog write")
+        }
     }
 }
 
@@ -297,6 +339,21 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 })?,
             )
         }
+        datum_tag::JSONB => {
+            let raw = read_string(cur)?;
+            Datum::Jsonb(
+                crabka_pgtypes::jsonb::parse(&raw)
+                    .map_err(|_| KvError::CorruptRow(format!("invalid jsonb default {raw:?}")))?,
+            )
+        }
+        datum_tag::ARRAY => {
+            let code = take_u8(cur)?;
+            let elem = crabka_pgtypes::ElemType::from_code(code).ok_or_else(|| {
+                KvError::CorruptRow(format!("unknown array element type code {code}"))
+            })?;
+            let elems = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
+            Datum::Array(crabka_pgtypes::ArrayValue::new(elem, elems))
+        }
         tag => {
             return Err(KvError::CorruptRow(format!(
                 "unknown default datum tag {tag}"
@@ -309,12 +366,17 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
 // ── Options helpers ───────────────────────────────────────────────────────────
 
 fn write_str(out: &mut Vec<u8>, s: &str) {
+    write_bytes(out, s.as_bytes());
+}
+
+/// Append a length-prefixed byte string (the framing `read_str` expects).
+fn write_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(
-        &u32::try_from(s.len())
+        &u32::try_from(bytes.len())
             .expect("catalog string length must fit in u32")
             .to_be_bytes(),
     );
-    out.extend_from_slice(s.as_bytes());
+    out.extend_from_slice(bytes);
 }
 
 fn write_options(out: &mut Vec<u8>, opts: &[(String, String)]) {
@@ -1009,6 +1071,58 @@ mod tests {
         assert_eq!(decoded, columns);
     }
 
+    /// `jsonb` and array DEFAULT values survive the catalog round trip, including
+    /// the awkward shapes: a nested object/array document, an array holding NULL
+    /// elements, an empty array (whose element type lives only in the tag), and
+    /// an array of `jsonb`.
+    #[test]
+    fn roundtrip_jsonb_and_array_column_defaults() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayValue, ElemType};
+
+        let doc = crabka_pgtypes::jsonb::parse(r#"{"b":[1,{"c":null}],"a":"x"}"#).expect("jsonb");
+        let columns = vec![
+            Column {
+                name: "doc".into(),
+                ty: ColumnType::Jsonb,
+                not_null: false,
+                default: Some(ColumnDefault::Value(Datum::Jsonb(doc.clone()))),
+            },
+            Column {
+                name: "holes".into(),
+                ty: ColumnType::Array(ElemType::Int4),
+                not_null: false,
+                default: Some(ColumnDefault::Value(Datum::Array(ArrayValue::new(
+                    ElemType::Int4,
+                    vec![Datum::Int4(1), Datum::Null, Datum::Int4(3)],
+                )))),
+            },
+            Column {
+                name: "empty".into(),
+                ty: ColumnType::Array(ElemType::Text),
+                not_null: false,
+                default: Some(ColumnDefault::Value(Datum::Array(ArrayValue::new(
+                    ElemType::Text,
+                    Vec::new(),
+                )))),
+            },
+            Column {
+                name: "docs".into(),
+                ty: ColumnType::Array(ElemType::Jsonb),
+                not_null: false,
+                default: Some(ColumnDefault::Value(Datum::Array(ArrayValue::new(
+                    ElemType::Jsonb,
+                    vec![Datum::Jsonb(doc), Datum::Null],
+                )))),
+            },
+        ];
+
+        let bytes = serialize_schema(31, &columns, TableOptions::default(), None);
+        let (_id, decoded, _options, _foreign) = deserialize_schema(&bytes).expect("decode");
+
+        assert!(decoded == columns);
+    }
+
     #[test]
     fn roundtrip_schema_datetime_types() {
         let table_id = 99u32;
@@ -1025,6 +1139,46 @@ mod tests {
         assert_eq!(cols, columns);
         assert!(!options.sharded);
         assert!(foreign.is_none());
+    }
+
+    /// Every `jsonb`/array column type survives a catalog round trip — the
+    /// element code is what distinguishes one array column from another, so all
+    /// of them are exercised, not just one.
+    #[test]
+    fn roundtrip_schema_jsonb_and_array_types() {
+        use assert2::assert;
+        use crabka_pgtypes::ElemType;
+
+        let table_id = 21u32;
+        let mut columns = vec![Column::new("doc", ColumnType::Jsonb)];
+        for elem in ElemType::ALL {
+            columns.push(Column::new(
+                format!("arr_{}", elem.code()),
+                ColumnType::Array(elem),
+            ));
+        }
+        let bytes = serialize_schema(table_id, &columns, TableOptions::default(), None);
+        let (id, cols, _options, _foreign) = deserialize_schema(&bytes).expect("decode");
+        assert!(id == table_id);
+        assert!(cols == columns);
+    }
+
+    #[test]
+    fn unknown_array_element_code_is_a_corrupt_row() {
+        use assert2::assert;
+
+        let columns = vec![Column::new(
+            "arr",
+            ColumnType::Array(crabka_pgtypes::ElemType::Int4),
+        )];
+        let mut bytes = serialize_schema(3, &columns, TableOptions::default(), None);
+        // The element code is the byte after the ARRAY tag; corrupt it.
+        let tag_at = bytes
+            .iter()
+            .position(|b| *b == type_tag::ARRAY)
+            .expect("array tag");
+        bytes[tag_at + 1] = 200;
+        assert!(deserialize_schema(&bytes).is_err());
     }
 
     #[test]

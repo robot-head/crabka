@@ -97,40 +97,6 @@ pub fn lex(sql: &str) -> Result<Vec<(Token, usize)>, ParseError> {
                 }
                 out.push((Token::Ident(s), start));
             }
-            b'<' if bytes.get(i + 1) == Some(&b'=') => {
-                out.push((Token::Le, i));
-                i += 2;
-            }
-            b'>' if bytes.get(i + 1) == Some(&b'=') => {
-                out.push((Token::Ge, i));
-                i += 2;
-            }
-            b'<' if bytes.get(i + 1) == Some(&b'>') => {
-                out.push((Token::Ne, i));
-                i += 2;
-            }
-            b'|' if bytes.get(i + 1) == Some(&b'|') => {
-                out.push((Token::Concat, i));
-                i += 2;
-            }
-            // SP31: `::` is the cast operator. A lone `:` is not a token in this
-            // slice (no array slices / named-parameter `:=`), so it falls through
-            // to the "unexpected character" arm.
-            b':' if bytes.get(i + 1) == Some(&b':') => {
-                out.push((Token::TypeCast, i));
-                i += 2;
-            }
-            b'(' => push1(&mut out, Token::LParen, &mut i),
-            b')' => push1(&mut out, Token::RParen, &mut i),
-            b',' => push1(&mut out, Token::Comma, &mut i),
-            b';' => push1(&mut out, Token::Semicolon, &mut i),
-            b'*' => push1(&mut out, Token::Star, &mut i),
-            b'+' => push1(&mut out, Token::Plus, &mut i),
-            b'-' => push1(&mut out, Token::Minus, &mut i),
-            b'/' => push1(&mut out, Token::Slash, &mut i),
-            b'=' => push1(&mut out, Token::Eq, &mut i),
-            b'<' => push1(&mut out, Token::Lt, &mut i),
-            b'>' => push1(&mut out, Token::Gt, &mut i),
             b'$' if bytes.get(i + 1).is_some_and(u8::is_ascii_digit) => {
                 let start = i;
                 i += 1;
@@ -186,7 +152,10 @@ pub fn lex(sql: &str) -> Result<Vec<(Token, usize)>, ParseError> {
             // SP33: a `.` that does not begin a number lexeme is the qualified-name
             // separator. The numeric arm above already claimed `.5`/`2.`, so any `.`
             // reaching here is a separator (`a.col`).
-            b'.' => push1(&mut out, Token::Dot, &mut i),
+            b'.' => {
+                out.push((Token::Dot, i));
+                i += 1;
+            }
             c if c == b'_' || c.is_ascii_alphabetic() => {
                 let start = i;
                 while i < bytes.len() && (bytes[i] == b'_' || bytes[i].is_ascii_alphanumeric()) {
@@ -199,11 +168,18 @@ pub fn lex(sql: &str) -> Result<Vec<(Token, usize)>, ParseError> {
                 };
                 out.push((tok, start));
             }
+            // Every operator/punctuation lexeme. Reached last so the arms
+            // above keep their claim on `--`, `/*`, quotes, `$1`, numbers and
+            // words; within it, maximal munch is `punctuation`'s job.
             _ => {
-                return Err(ParseError::new(
-                    format!("unexpected character {:?}", c as char),
-                    i,
-                ));
+                let Some((token, len)) = punctuation(bytes, i) else {
+                    return Err(ParseError::new(
+                        format!("unexpected character {:?}", c as char),
+                        i,
+                    ));
+                };
+                out.push((token, i));
+                i += len;
             }
         }
     }
@@ -211,9 +187,56 @@ pub fn lex(sql: &str) -> Result<Vec<(Token, usize)>, ParseError> {
     Ok(out)
 }
 
-fn push1(out: &mut Vec<(Token, usize)>, tok: Token, i: &mut usize) {
-    out.push((tok, *i));
-    *i += 1;
+/// Match the longest operator/punctuation lexeme starting at `bytes[i]`,
+/// returning it with its byte length.
+///
+/// MAXIMAL MUNCH is the whole contract of this function: every spelling whose
+/// first byte also begins a shorter spelling is listed longest-first — `->>`
+/// before `->` before `-`, `#>>` before `#>`, `?|`/`?&` before `?`, `<@` before
+/// `<=`/`<>`/`<`, `::` before `:`, `||` before a bare `|` (which is not a
+/// lexeme). A slip re-reads `a->>'k'` as `a -> >'k'`, whose tail still lexes, so
+/// the lexer tests pin each neighbouring shorter spelling explicitly.
+///
+/// `--` and `/*` are claimed by the comment arms in [`lex`] before this runs, so
+/// a `-` or `/` reaching here is always the operator.
+fn punctuation(bytes: &[u8], i: usize) -> Option<(Token, usize)> {
+    let next_is = |byte: u8| bytes.get(i + 1) == Some(&byte);
+    let next_two_are = |first: u8, second: u8| next_is(first) && bytes.get(i + 2) == Some(&second);
+    Some(match bytes[i] {
+        b'-' if next_two_are(b'>', b'>') => (Token::JsonGetText, 3),
+        b'-' if next_is(b'>') => (Token::JsonGet, 2),
+        b'#' if next_two_are(b'>', b'>') => (Token::JsonGetPathText, 3),
+        b'#' if next_is(b'>') => (Token::JsonGetPath, 2),
+        b'@' if next_is(b'>') => (Token::Contains, 2),
+        b'<' if next_is(b'@') => (Token::ContainedBy, 2),
+        b'?' if next_is(b'|') => (Token::KeyExistsAny, 2),
+        b'?' if next_is(b'&') => (Token::KeyExistsAll, 2),
+        b'?' => (Token::KeyExists, 1),
+        b'&' if next_is(b'&') => (Token::Overlaps, 2),
+        b'<' if next_is(b'=') => (Token::Le, 2),
+        b'>' if next_is(b'=') => (Token::Ge, 2),
+        b'<' if next_is(b'>') => (Token::Ne, 2),
+        b'|' if next_is(b'|') => (Token::Concat, 2),
+        b':' if next_is(b':') => (Token::TypeCast, 2),
+        // A lone `:` is only grammatical inside an array slice (`a[1:2]`); it is
+        // lexed so the parser can refuse slices by name rather than failing with
+        // a character-level lexer error.
+        b':' => (Token::Colon, 1),
+        b'[' => (Token::LBracket, 1),
+        b']' => (Token::RBracket, 1),
+        b'(' => (Token::LParen, 1),
+        b')' => (Token::RParen, 1),
+        b',' => (Token::Comma, 1),
+        b';' => (Token::Semicolon, 1),
+        b'*' => (Token::Star, 1),
+        b'+' => (Token::Plus, 1),
+        b'-' => (Token::Minus, 1),
+        b'/' => (Token::Slash, 1),
+        b'=' => (Token::Eq, 1),
+        b'<' => (Token::Lt, 1),
+        b'>' => (Token::Gt, 1),
+        _ => return None,
+    })
 }
 
 #[cfg(test)]
@@ -322,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn cast_operator_lexes_and_a_lone_colon_is_rejected() {
+    fn cast_operator_wins_maximal_munch_over_the_lone_colon() {
         // `::` is one token; with no surrounding spaces a slip in the two-byte
         // advance would mis-read the next byte.
         assert_eq!(
@@ -334,9 +357,17 @@ mod tests {
                 Token::Eof,
             ]
         );
-        // A single `:` is not a token in this slice.
-        let e = lex("a : b").expect_err("lone colon");
-        assert!(e.message.contains("unexpected character"));
+        // A single `:` is its own token (array-slice syntax, which the parser
+        // refuses by name); it must never be mis-lexed as a cast.
+        assert_eq!(
+            toks("a : b"),
+            vec![
+                Token::Ident("a".into()),
+                Token::Colon,
+                Token::Ident("b".into()),
+                Token::Eof,
+            ]
+        );
     }
 
     #[test]
@@ -540,6 +571,98 @@ mod tests {
                 Token::Keyword(Keyword::Cross),
                 Token::Eof,
             ]
+        );
+    }
+
+    #[test]
+    fn jsonb_and_array_operators_lex_with_maximal_munch() {
+        use assert2::assert;
+
+        // Every new operator, written WITHOUT surrounding spaces: a munch-order
+        // slip would split `->>` into `->` `>` (etc.) and the trailing operand
+        // would still lex, so only the exact token vector catches it.
+        let cases: &[(&str, &[Token])] = &[
+            ("a->'k'", &[Token::JsonGet, Token::StringLit("k".into())]),
+            (
+                "a->>'k'",
+                &[Token::JsonGetText, Token::StringLit("k".into())],
+            ),
+            (
+                "a#>'{k}'",
+                &[Token::JsonGetPath, Token::StringLit("{k}".into())],
+            ),
+            (
+                "a#>>'{k}'",
+                &[Token::JsonGetPathText, Token::StringLit("{k}".into())],
+            ),
+            ("a@>b", &[Token::Contains, Token::Ident("b".into())]),
+            ("a<@b", &[Token::ContainedBy, Token::Ident("b".into())]),
+            ("a?'k'", &[Token::KeyExists, Token::StringLit("k".into())]),
+            ("a?|b", &[Token::KeyExistsAny, Token::Ident("b".into())]),
+            ("a?&b", &[Token::KeyExistsAll, Token::Ident("b".into())]),
+            ("a&&b", &[Token::Overlaps, Token::Ident("b".into())]),
+            (
+                "a[1]",
+                &[Token::LBracket, Token::IntLit("1".into()), Token::RBracket],
+            ),
+        ];
+        for (sql, tail) in cases {
+            let mut expected = vec![Token::Ident("a".into())];
+            expected.extend_from_slice(tail);
+            expected.push(Token::Eof);
+            assert!(toks(sql) == expected, "lexing {sql:?}");
+        }
+    }
+
+    #[test]
+    fn new_operators_do_not_steal_the_shorter_spellings_they_share_a_prefix_with() {
+        use assert2::assert;
+
+        // `->` must not swallow the subtraction in `a-1`, `<@` must not shadow
+        // `<=`/`<>`/`<`, and `||` must still be Concat now that `?|` exists.
+        let cases: &[(&str, &[Token])] = &[
+            ("a-1", &[Token::Minus, Token::IntLit("1".into())]),
+            ("a<=b", &[Token::Le, Token::Ident("b".into())]),
+            ("a<b", &[Token::Lt, Token::Ident("b".into())]),
+            ("a<>b", &[Token::Ne, Token::Ident("b".into())]),
+            ("a>=b", &[Token::Ge, Token::Ident("b".into())]),
+            ("a>b", &[Token::Gt, Token::Ident("b".into())]),
+            ("a||b", &[Token::Concat, Token::Ident("b".into())]),
+            ("a::b", &[Token::TypeCast, Token::Ident("b".into())]),
+        ];
+        for (sql, tail) in cases {
+            let mut expected = vec![Token::Ident("a".into())];
+            expected.extend_from_slice(tail);
+            expected.push(Token::Eof);
+            assert!(toks(sql) == expected, "lexing {sql:?}");
+        }
+        // A `--` line comment still wins over `->`-style munching.
+        assert!(toks("a --x") == vec![Token::Ident("a".into()), Token::Eof]);
+    }
+
+    #[test]
+    fn lone_hash_and_ampersand_remain_unexpected_characters() {
+        use assert2::assert;
+
+        for sql in ["a # b", "a & b", "a | b", "a @ b"] {
+            let e = lex(sql).expect_err("lone operator byte");
+            assert!(e.message.contains("unexpected character"), "{sql}");
+        }
+    }
+
+    #[test]
+    fn array_keyword_lexes_as_a_keyword() {
+        use assert2::assert;
+
+        assert!(
+            toks("ARRAY[1]")
+                == vec![
+                    Token::Keyword(Keyword::Array),
+                    Token::LBracket,
+                    Token::IntLit("1".into()),
+                    Token::RBracket,
+                    Token::Eof,
+                ]
         );
     }
 

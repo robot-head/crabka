@@ -30,12 +30,16 @@ const TABLE_ID_ROW: &[&str] = &[
     "INSERT INTO feature_t VALUES (1)",
 ];
 const SEQUENCE: &[&str] = &["CREATE SEQUENCE feature_seq"];
+const UPSERT_TARGET: &[&str] = &[
+    "CREATE TABLE feature_upsert (id int4 PRIMARY KEY, n int4)",
+    "INSERT INTO feature_upsert VALUES (1, 1)",
+];
 
 pub const FEATURE_PROBES: &[FeatureProbe] = &[
     FeatureProbe {
         item: "ARRAY expressions and operators",
         sql: "SELECT ARRAY[1, 2]",
-        behavior: FeatureBehavior::ParserRejectPending,
+        behavior: FeatureBehavior::SessionExecute,
         setup: NONE,
         sqlstate: None,
         message_fragment: None,
@@ -59,6 +63,38 @@ pub const FEATURE_PROBES: &[FeatureProbe] = &[
     FeatureProbe {
         item: "Column NOT NULL constraints",
         sql: "CREATE TABLE feature_not_null (id int4 NOT NULL)",
+        behavior: FeatureBehavior::SessionExecute,
+        setup: NONE,
+        sqlstate: None,
+        message_fragment: None,
+    },
+    FeatureProbe {
+        item: "Scalar type `jsonb`",
+        sql: "SELECT '{\"b\": 1, \"a\": 2}'::jsonb -> 'a'",
+        behavior: FeatureBehavior::SessionExecute,
+        setup: NONE,
+        sqlstate: None,
+        message_fragment: None,
+    },
+    FeatureProbe {
+        item: "`json` type as a `jsonb` input alias",
+        sql: "SELECT '{\"a\": 1}'::json",
+        behavior: FeatureBehavior::SessionExecute,
+        setup: NONE,
+        sqlstate: None,
+        message_fragment: None,
+    },
+    FeatureProbe {
+        item: "INSERT ... ON CONFLICT",
+        sql: "INSERT INTO feature_upsert VALUES (1, 2) ON CONFLICT (id) DO UPDATE SET n = excluded.n",
+        behavior: FeatureBehavior::SessionExecute,
+        setup: UPSERT_TARGET,
+        sqlstate: None,
+        message_fragment: None,
+    },
+    FeatureProbe {
+        item: "`pg_notify` notification function",
+        sql: "SELECT pg_notify('feature_channel', 'payload')",
         behavior: FeatureBehavior::SessionExecute,
         setup: NONE,
         sqlstate: None,

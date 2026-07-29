@@ -56,7 +56,15 @@ pub enum RangeRequest {
     /// committed before this request was sent.
     Range0Barrier,
     /// Open one owner-side connection session.
-    SessionOpen { range_id: RangeId },
+    SessionOpen {
+        range_id: RangeId,
+        /// The originating connection's backend pid, when it holds a seat on
+        /// its gateway's notification bus. The owner-side session adopts it so
+        /// a forwarded `NOTIFY` is stamped with the pid `PostgreSQL` would
+        /// report, not the owner session's own.
+        #[serde(default)]
+        notify_pid: Option<i32>,
+    },
     /// Execute one stateful protocol operation in an owner session.
     Session {
         range_id: RangeId,

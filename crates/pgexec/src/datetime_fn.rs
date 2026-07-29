@@ -811,6 +811,7 @@ mod tests {
             session_user: "public".into(),
             clock: Arc::new(FixedClock(now)),
             sequence: None,
+            notify: None,
         }
     }
     fn ev(sql: &str, ctx: &EvalCtx) -> Datum {
@@ -919,6 +920,7 @@ mod tests {
             session_user: "public".into(),
             clock: Arc::new(FixedClock(ny)),
             sequence: None,
+            notify: None,
         };
         assert_eq!(
             ev("current_date", &ctx),
@@ -995,6 +997,7 @@ mod tests {
             session_user: "public".into(),
             clock: Arc::new(FixedClock(ts)),
             sequence: None,
+            notify: None,
         };
         assert_eq!(
             ev(

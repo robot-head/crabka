@@ -95,6 +95,21 @@ pub fn command_complete(out: &mut BytesMut, tag: &str) {
     msg(out, b'C', |b| put_cstr(b, tag));
 }
 
+/// Encode an asynchronous `NotificationResponse` for a `NOTIFY`.
+///
+/// `process_id` is the notifying backend's process id — for a self-notify this
+/// is the receiving connection's own `BackendKeyData` pid. The message is
+/// delivered outside the request/response cycle, so it is only ever written
+/// between transactions (immediately before `ReadyForQuery` or while the
+/// connection is idle).
+pub fn notification_response(out: &mut BytesMut, process_id: i32, channel: &str, payload: &str) {
+    msg(out, b'A', |b| {
+        b.put_i32(process_id);
+        put_cstr(b, channel);
+        put_cstr(b, payload);
+    });
+}
+
 /// Encode a COPY-in response.
 ///
 /// # Panics
@@ -262,6 +277,21 @@ mod tests {
             &out[..],
             b"D\x00\x00\x00\x0f\x00\x02\x00\x00\x00\x011\xff\xff\xff\xff"
         );
+    }
+
+    #[test]
+    fn encodes_notification_response() {
+        let mut out = BytesMut::new();
+        notification_response(&mut out, 4242, "chan", "hi");
+        // tag A, len 16 = 4(len) + 4(pid) + 5("chan\0") + 3("hi\0")
+        assert2::assert!(&out[..] == b"A\x00\x00\x00\x10\x00\x00\x10\x92chan\0hi\0");
+    }
+
+    #[test]
+    fn encodes_notification_response_with_empty_payload() {
+        let mut out = BytesMut::new();
+        notification_response(&mut out, 1, "c", "");
+        assert2::assert!(&out[..] == b"A\x00\x00\x00\x0b\x00\x00\x00\x01c\0\0");
     }
 
     #[test]

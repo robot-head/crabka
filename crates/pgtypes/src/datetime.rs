@@ -421,6 +421,10 @@ pub fn parse_time(s: &str) -> Result<Time, TypeError> {
 
 /// Best-effort `HH:MM[:SS[.ffffff]]` parse (returns `None` on any malformation).
 /// jiff's `Time` FromStr requires `HH:MM:SS`, so we normalize `HH:MM` ourselves.
+///
+/// This is the single ingestion point for `time`, `timestamp` and `timestamptz`
+/// text, so it is also where sub-microsecond precision is dropped (see
+/// [`truncate_to_micros`]).
 fn parse_time_inner(t: &str) -> Option<Time> {
     // jiff parses `HH:MM:SS[.fff]`; supply `:00` seconds when omitted.
     let normalized = match t.split(':').count() {
@@ -428,7 +432,30 @@ fn parse_time_inner(t: &str) -> Option<Time> {
         3 => t.to_string(),
         _ => return None,
     };
-    normalized.parse::<Time>().ok()
+    normalized.parse::<Time>().map(truncate_to_micros).ok()
+}
+
+/// Drop the sub-microsecond tail of a parsed clock time.
+///
+/// PostgreSQL's resolution is one microsecond, and so is every crabka encoding
+/// (`time_send`, `timestamp_send`, the row encoder, index keys). jiff parses
+/// nanoseconds, so without this a literal like `00:00:00.0000001` would produce
+/// a value that (a) does not survive a storage round trip and (b) compares
+/// UNEQUAL to `00:00:00` while encoding to byte-identical storage — which an
+/// index, being equality-by-bytes, would silently conflate.
+///
+/// PostgreSQL *rounds* the seventh digit; truncating keeps this total (no
+/// wrap past `23:59:59.999999`) and exactly matches what the encoders do.
+fn truncate_to_micros(t: Time) -> Time {
+    let nanos = t.subsec_nanosecond();
+    let whole_micros = nanos - nanos % 1_000;
+    if whole_micros == nanos {
+        return t;
+    }
+    t.with()
+        .subsec_nanosecond(whole_micros)
+        .build()
+        .expect("a truncated sub-second is still a valid nanosecond-of-second")
 }
 
 /// Render a `time` as `HH:MM:SS[.ffffff]` (PostgreSQL `time_out`).
@@ -2816,6 +2843,46 @@ mod io_tests {
         assert_eq!(
             time_to_text(parse_time("01:02:03.450000").expect("valid time")),
             "01:02:03.45"
+        );
+    }
+
+    /// Parsed date/time values must land on a microsecond, because that is all
+    /// the wire and storage encodings carry: a sub-microsecond value would
+    /// otherwise compare UNEQUAL to its stored form while encoding to identical
+    /// bytes, which an equality-by-bytes index would conflate.
+    #[test]
+    fn parsed_clock_values_are_quantized_to_microseconds() {
+        use assert2::assert;
+
+        let tz = jiff::tz::TimeZone::UTC;
+        let time = parse_time("00:00:00.0000001").expect("valid time");
+        assert!(time == parse_time("00:00:00").expect("valid time"));
+        assert!(time_to_binary(time) == time_to_binary(parse_time("00:00:00").expect("time")));
+        assert!(
+            time_from_binary(&time_to_binary(time)).expect("round trip") == time,
+            "storage round trip is lossless"
+        );
+        // The last microsecond digit still survives.
+        assert!(time_to_text(parse_time("00:00:00.999999").expect("time")) == "00:00:00.999999");
+        assert!(
+            time_to_text(parse_time("00:00:00.9999999").expect("time")) == "00:00:00.999999",
+            "the seventh digit is dropped, not rounded up"
+        );
+
+        let ts = parse_timestamp("2024-01-15 13:45:00.1234567").expect("valid timestamp");
+        assert!(ts == parse_timestamp("2024-01-15 13:45:00.123456").expect("valid timestamp"));
+        assert!(
+            timestamp_from_binary(&timestamp_to_binary(ts)).expect("round trip") == ts,
+            "storage round trip is lossless"
+        );
+
+        let tstz = parse_timestamptz("2024-01-15 13:45:00.1234567+00", &tz).expect("valid tstz");
+        assert!(
+            tstz == parse_timestamptz("2024-01-15 13:45:00.123456+00", &tz).expect("valid tstz")
+        );
+        assert!(
+            timestamptz_from_binary(&timestamptz_to_binary(tstz)).expect("round trip") == tstz,
+            "storage round trip is lossless"
         );
     }
 

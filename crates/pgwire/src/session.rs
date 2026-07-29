@@ -4,12 +4,16 @@
 use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    sync::mpsc,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     engine::{
-        BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, QueryResult, Session,
+        BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, Notification, QueryResult,
+        Session, TxStatus,
     },
     error::{PgError, Severity, sqlstate},
     messages::{
@@ -478,6 +482,79 @@ where
     }
 }
 
+// ── Asynchronous notifications ──────────────────────────────────────────────
+
+/// Write the `ReadyForQuery` that closes an exchange, preceded by any pending
+/// `NotificationResponse` messages.
+///
+/// Postgres delivers notifications only between transactions: a session that
+/// is idle *in* a transaction block accumulates them until the block ends, so
+/// the queue is drained only when the reported status is `Idle`.
+fn write_ready<Sess: Session>(
+    out: &mut BytesMut,
+    session: &Sess,
+    notifications: Option<&mut mpsc::Receiver<Notification>>,
+) {
+    let status = session.tx_status();
+    if status == TxStatus::Idle
+        && let Some(rx) = notifications
+    {
+        while let Ok(notification) = rx.try_recv() {
+            backend::notification_response(
+                out,
+                notification.process_id,
+                &notification.channel,
+                &notification.payload,
+            );
+        }
+    }
+    backend::ready_for_query(out, status);
+}
+
+/// Wait for more frontend bytes, pushing notifications that arrive meanwhile.
+///
+/// Returns `false` when the client went away. Notifications are only awaited
+/// between transactions (see [`write_ready`]); inside a transaction block this
+/// is a plain read and the queue drains at the next `ReadyForQuery`. `status`
+/// is passed by value rather than read from the session so the returned future
+/// borrows nothing shared and stays `Send` for a non-`Sync` session.
+async fn read_or_notify<S>(
+    stream: &mut S,
+    inbuf: &mut BytesMut,
+    out: &mut BytesMut,
+    status: TxStatus,
+    notifications: Option<&mut mpsc::Receiver<Notification>>,
+) -> std::io::Result<bool>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    let Some(rx) = notifications.filter(|_| status == TxStatus::Idle) else {
+        return Ok(stream.read_buf(inbuf).await? > 0);
+    };
+    loop {
+        // Both branches are cancellation-safe: `read_buf` keeps whatever it
+        // already appended to `inbuf`, and `recv` loses no queued notification.
+        let notification = tokio::select! {
+            read = stream.read_buf(inbuf) => return Ok(read? > 0),
+            notification = rx.recv() => notification,
+        };
+        // The engine dropped the sender (no more notifications will ever
+        // arrive): fall back to a plain read instead of spinning on `None`.
+        let Some(notification) = notification else {
+            return Ok(stream.read_buf(inbuf).await? > 0);
+        };
+        backend::notification_response(
+            out,
+            notification.process_id,
+            &notification.channel,
+            &notification.payload,
+        );
+        stream.write_all(out).await?;
+        out.clear();
+        stream.flush().await?;
+    }
+}
+
 // ── Main session loop ───────────────────────────────────────────────────────
 
 /// Drive a single connection from the point immediately after the `StartupMessage`
@@ -525,10 +602,15 @@ where
     backend::backend_key_data(&mut out, cancel.pid, cancel.secret);
 
     // One session per connection; it owns the (currently trivial) transaction
-    // state and is threaded by `&mut` through the message loop.
-    let mut session = engine.connect();
+    // state and is threaded by `&mut` through the message loop. The pid it is
+    // built with is the one just announced in `BackendKeyData`, so a
+    // self-notify reaches the client stamped with its own pid.
+    let mut session = engine.connect_with_pid(cancel.pid);
+    // The loop, not the session, owns the notification stream: taking it once
+    // here keeps the idle `select!` free of a second borrow of `session`.
+    let mut notifications = session.take_notifications();
 
-    backend::ready_for_query(&mut out, session.tx_status());
+    write_ready(&mut out, &session, notifications.as_mut());
     stream.write_all(&out).await?;
     out.clear();
 
@@ -539,7 +621,15 @@ where
         let msg = match frontend::decode_message(&mut inbuf) {
             Ok(Some(msg)) => msg,
             Ok(None) => {
-                if stream.read_buf(&mut inbuf).await? == 0 {
+                if !read_or_notify(
+                    &mut stream,
+                    &mut inbuf,
+                    &mut out,
+                    session.tx_status(),
+                    notifications.as_mut(),
+                )
+                .await?
+                {
                     return Ok(()); // client went away
                 }
                 continue;
@@ -605,7 +695,7 @@ where
                     // CopyDone) produces ReadyForQuery; simple protocol owes
                     // it now.
                     if !extended {
-                        backend::ready_for_query(&mut out, session.tx_status());
+                        write_ready(&mut out, &session, notifications.as_mut());
                     }
                     stream.write_all(&out).await?;
                     out.clear();
@@ -621,7 +711,7 @@ where
                         fail_extended(&mut ext, &mut out, &e);
                     } else {
                         backend::error_response(&mut out, &e);
-                        backend::ready_for_query(&mut out, session.tx_status());
+                        write_ready(&mut out, &session, notifications.as_mut());
                     }
                     stream.write_all(&out).await?;
                     out.clear();
@@ -668,7 +758,7 @@ where
                     Ok(None) => {}
                     Err(e) => {
                         backend::error_response(&mut out, &e);
-                        backend::ready_for_query(&mut out, session.tx_status());
+                        write_ready(&mut out, &session, notifications.as_mut());
                         stream.write_all(&out).await?;
                         out.clear();
                         continue;
@@ -694,7 +784,7 @@ where
                         }
                     }
                 }
-                backend::ready_for_query(&mut out, session.tx_status());
+                write_ready(&mut out, &session, notifications.as_mut());
                 stream.write_all(&out).await?;
                 out.clear();
             }
@@ -703,7 +793,7 @@ where
                     backend::error_response(&mut out, &e);
                 }
                 ext.failed = false;
-                backend::ready_for_query(&mut out, session.tx_status());
+                write_ready(&mut out, &session, notifications.as_mut());
                 stream.write_all(&out).await?;
                 out.clear();
             }

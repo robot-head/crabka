@@ -131,6 +131,46 @@ const ACCEPTED: &[&str] = &[
     "IMPORT FOREIGN SCHEMA kafka FROM SERVER s INTO public",
     "CREATE USER MAPPING FOR PUBLIC SERVER s OPTIONS (u 'x')",
     "DROP FOREIGN TABLE IF EXISTS t",
+    // jsonb + array types and operators
+    "CREATE TABLE t (a jsonb, b int4[], c text[], d numeric(10, 2)[])",
+    "CREATE TABLE t (a int4[4])",
+    "SELECT a -> 'k' FROM t",
+    "SELECT a ->> 'k' FROM t",
+    "SELECT a #> '{k,0}' FROM t",
+    "SELECT a #>> '{k,0}' FROM t",
+    "SELECT a @> b FROM t",
+    "SELECT a <@ b FROM t",
+    "SELECT a ? 'k' FROM t",
+    "SELECT a ?| b FROM t",
+    "SELECT a ?& b FROM t",
+    "SELECT a && b FROM t",
+    "SELECT a - 'k' FROM t",
+    "SELECT a ->> 'k' = 'v' FROM t",
+    "SELECT ARRAY[1, 2, 3]",
+    "SELECT a[1] FROM t",
+    "SELECT a[1][2] FROM t",
+    "SELECT $1::int4[]",
+    "SELECT a = ANY($1) FROM t",
+    "SELECT a = ANY(ARRAY[1, 2]) FROM t",
+    "SELECT a <> ALL(tags) FROM t",
+    "SELECT x FROM unnest(ARRAY[1, 2]) AS u(x)",
+    "SELECT * FROM unnest(tags)",
+    "SELECT tag FROM t JOIN unnest(t.tags) AS u(tag) ON true",
+    // ON CONFLICT
+    "INSERT INTO t VALUES (1) ON CONFLICT DO NOTHING",
+    "INSERT INTO t VALUES (1) ON CONFLICT (id) DO NOTHING",
+    "INSERT INTO t VALUES (1) ON CONFLICT (id, name) DO NOTHING",
+    "INSERT INTO t VALUES (1) ON CONFLICT (id) WHERE id > 0 DO NOTHING",
+    "INSERT INTO t VALUES (1) ON CONFLICT ON CONSTRAINT t_pkey DO NOTHING",
+    "INSERT INTO t (id, v) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET v = excluded.v",
+    "INSERT INTO t (id, v) VALUES (1, 'a') ON CONFLICT (id) DO UPDATE SET v = excluded.v WHERE t.v <> excluded.v",
+    "INSERT INTO t VALUES (1) ON CONFLICT (id) DO UPDATE SET v = 1 RETURNING id",
+    // LISTEN / NOTIFY / UNLISTEN
+    "LISTEN chan",
+    "NOTIFY chan",
+    "NOTIFY chan, 'payload'",
+    "UNLISTEN chan",
+    "UNLISTEN *",
 ];
 
 /// Clear syntax errors — BOTH parsers must reject.
@@ -154,6 +194,22 @@ const REJECTED: &[&str] = &[
     // SP40: FDW DDL malformed
     "CREATE FOREIGN TABLE t SERVER",
     "IMPORT FOREIGN SCHEMA FROM SERVER s",
+    // jsonb/array operator and constructor grammar
+    "SELECT a ->",
+    "SELECT a[",
+    "SELECT ARRAY[1,",
+    "SELECT a = ANY()",
+    // ON CONFLICT grammar
+    "INSERT INTO t VALUES (1) ON CONFLICT DO",
+    "INSERT INTO t VALUES (1) ON CONFLICT () DO NOTHING",
+    "INSERT INTO t VALUES (1) ON CONFLICT (id) DO UPDATE",
+    "INSERT INTO t VALUES (1) ON CONFLICT ON CONSTRAINT DO NOTHING",
+    // LISTEN / NOTIFY / UNLISTEN grammar
+    "LISTEN",
+    "LISTEN a b",
+    "NOTIFY",
+    "NOTIFY chan, payload",
+    "UNLISTEN",
 ];
 
 fn pg_accepts(sql: &str) -> bool {
@@ -277,6 +333,34 @@ fn agreement_on_rejected() {
     for &sql in REJECTED {
         assert!(!pg_accepts(sql), "libpg_query should reject: {sql}");
         assert!(!we_accept(sql), "pgparser should reject (PG does): {sql}");
+    }
+}
+
+/// Constructs `PostgreSQL`'s grammar accepts but this parser deliberately
+/// refuses (0A000 / 42601), so the divergence stays an explicit, listed set
+/// rather than drifting into an accidental acceptance.
+#[test]
+fn deliberately_unsupported_array_and_conflict_constructs_are_explicitly_bounded() {
+    for sql in [
+        // Array slices, multidimensional arrays and ARRAY(subquery) are
+        // out of scope for the one-dimensional array slice implemented here.
+        "SELECT a[1:2] FROM t",
+        "SELECT a[:2] FROM t",
+        "SELECT a[1:] FROM t",
+        "SELECT ARRAY(SELECT 1)",
+        "CREATE TABLE t (a int4[][])",
+        // Element types with no supported array type.
+        "CREATE TABLE t (a varchar(10)[])",
+        "SELECT $1::regclass[]",
+        // PostgreSQL's raw grammar accepts a target-less DO UPDATE and rejects
+        // it in parse analysis; this parser rejects it in the grammar instead.
+        "INSERT INTO t VALUES (1) ON CONFLICT DO UPDATE SET v = 1",
+    ] {
+        assert!(pg_accepts(sql), "PostgreSQL grammar should accept: {sql}");
+        assert!(
+            !we_accept(sql),
+            "pgparser must reject the deliberately unsupported construct: {sql}"
+        );
     }
 }
 

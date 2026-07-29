@@ -3,6 +3,7 @@
 use std::future::Future;
 
 use bytes::Bytes;
+use tokio::sync::mpsc;
 
 use crate::error::PgError;
 
@@ -203,8 +204,10 @@ pub struct CopyOutResponse {
     pub column_formats: Vec<i16>,
 }
 
+/// One `NOTIFY` delivered asynchronously to a listening connection.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Notification {
+    /// Process id of the notifying backend, as announced in `BackendKeyData`.
     pub process_id: i32,
     pub channel: String,
     pub payload: String,
@@ -244,6 +247,17 @@ pub trait Engine: Send + Sync + 'static {
 
     /// Create a fresh per-connection session. Called once per connection.
     fn connect(&self) -> Self::Session;
+
+    /// Create a fresh per-connection session that knows its backend process id.
+    ///
+    /// `pid` is the same value the wire layer announces in `BackendKeyData`, so
+    /// an engine with LISTEN/NOTIFY can stamp it on the notifications it
+    /// publishes and self-notifications arrive with the listener's own pid, as
+    /// in Postgres. The default ignores the pid and delegates to
+    /// [`Engine::connect`].
+    fn connect_with_pid(&self, _pid: i32) -> Self::Session {
+        self.connect()
+    }
 }
 
 /// A per-connection session. Owns transaction state; not shared between
@@ -383,6 +397,17 @@ pub trait Session: Send {
                 "COPY FROM STDIN is not supported by this engine",
             ))
         }
+    }
+
+    /// Hand the wire layer this session's asynchronous notification stream.
+    ///
+    /// Called exactly once, immediately after the session is created: the wire
+    /// loop — not the session — owns the receiver, so a notification can be
+    /// pushed to the client while the connection is parked waiting for the next
+    /// frontend message. Engines without LISTEN/NOTIFY keep the default `None`
+    /// and never see an asynchronous message on the wire.
+    fn take_notifications(&mut self) -> Option<mpsc::Receiver<Notification>> {
+        None
     }
 
     /// Mark the current statement as failed after a protocol-side error.

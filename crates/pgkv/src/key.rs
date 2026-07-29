@@ -47,6 +47,9 @@ pub enum KeyClass {
     Sequence { table_id: u32 },
     /// A transaction commit-status-log key.
     Clog { xid: u64 },
+    /// A cross-node `NOTIFY` record key. WAL-only: it is dropped by every apply
+    /// site and must never reach the store.
+    Notify,
     /// A known system key that is not transferable table state.
     System,
     /// A malformed or currently unrecognised key.
@@ -65,6 +68,11 @@ pub fn classify_key(bytes: &[u8]) -> KeyClass {
     }
     if let Some(table_id) = sequence_table_id_of(bytes) {
         return KeyClass::Sequence { table_id };
+    }
+    // Must precede the `table_id == 0` catch-all below, which would otherwise
+    // report notify keys as ordinary (persistable) system state.
+    if is_notify_key(bytes) {
+        return KeyClass::Notify;
     }
 
     let Some((table_id, index_id)) = key_header(bytes) else {
@@ -195,6 +203,14 @@ pub fn secondary_index_prefix(table_id: u32, index_id: u32) -> Vec<u8> {
 
 /// Prefix for a local secondary-index equality probe over an encoded key tuple.
 ///
+/// Index lookups (and unique-constraint enforcement) are equality **by these
+/// bytes**, so the values are first put through
+/// [`crabka_pgtypes::canonicalize_row_for_key`]: two values that compare equal
+/// — `numeric` `1.0` and `1.00`, `-0.0` and `0.0`, `interval` `1 mon` and
+/// `30 days`, the same inside `jsonb` or an array — must produce the same key.
+/// Canonicalization is confined to this key path; `encode_row` on a stored row
+/// keeps whatever the value was written as.
+///
 /// # Panics
 ///
 /// Panics when the encoded tuple exceeds 4 GiB or `index_id` overflows the
@@ -205,7 +221,8 @@ pub fn secondary_index_entry_prefix(
     index_id: u32,
     indexed_values: &[crabka_pgtypes::Datum],
 ) -> Vec<u8> {
-    let encoded_values = crate::rowenc::encode_row(indexed_values);
+    let canonical = crabka_pgtypes::canonicalize_row_for_key(indexed_values);
+    let encoded_values = crate::rowenc::encode_row(&canonical);
     let mut k = secondary_index_prefix(table_id, index_id);
     let encoded_len = u32::try_from(encoded_values.len()).expect("index key exceeds 4 GiB");
     k.extend_from_slice(&encoded_len.to_be_bytes());
@@ -461,6 +478,39 @@ pub fn clog_xid_of(key: &[u8]) -> Option<u64> {
     crate::keyenc::take_u64(&mut rest).ok()
 }
 
+/// The shared prefix of every cross-node `NOTIFY` record: `/0/notify/`.
+///
+/// Records under this prefix live in the WAL only. Range-0 checkpoints snapshot
+/// the entire KV and the WAL topic never expires by time, so a notify record
+/// that reached the store would become permanent catalog state; every apply
+/// site drops them instead (see [`crate::is_notify_op`]).
+#[must_use]
+pub fn notify_prefix() -> Vec<u8> {
+    system_prefix("notify")
+}
+
+/// Key for one cross-node `NOTIFY` record: `/0/notify/<seq>`.
+///
+/// `seq` is written big-endian so records sort — and are therefore observed —
+/// in arrival order. One WAL frame may carry several records, each with its own
+/// `seq`.
+#[must_use]
+pub fn notify_key(seq: u64) -> Vec<u8> {
+    let mut k = notify_prefix();
+    put_u64(&mut k, seq);
+    k
+}
+
+/// True for any key in the `/0/notify/` namespace.
+///
+/// Deliberately a prefix test rather than an exact-shape test: this predicate
+/// guards the store, so even a malformed key under the notify namespace must be
+/// rejected.
+#[must_use]
+pub fn is_notify_key(key: &[u8]) -> bool {
+    key.starts_with(&notify_prefix())
+}
+
 /// Recover `(table_id, rowid)` from a primary-index row/version key.
 #[must_use]
 pub fn table_rowid_of(key: &[u8]) -> Option<(u32, u64)> {
@@ -543,6 +593,115 @@ mod tests {
         let mut k = Vec::new();
         crate::keyenc::put_u32(&mut k, 0);
         k
+    }
+
+    /// Index probes are equality by raw key bytes, so values that compare equal
+    /// MUST build the same key — otherwise a unique index would admit two rows
+    /// `PostgreSQL` considers duplicates.
+    #[test]
+    fn equal_index_values_build_identical_keys() {
+        use assert2::assert;
+        use crabka_pgtypes::{ArrayValue, Datum, ElemType};
+
+        let num = |s: &str| Datum::Numeric(crabka_pgtypes::numeric::parse(s).expect("numeric"));
+        let json = |s: &str| Datum::Jsonb(crabka_pgtypes::jsonb::parse(s).expect("jsonb"));
+        let iv = |s: &str| {
+            Datum::Interval(crabka_pgtypes::datetime::parse_interval(s).expect("interval"))
+        };
+        let pairs: &[(Datum, Datum)] = &[
+            // Plain numeric scale.
+            (num("1.0"), num("1.00")),
+            (num("-0.0"), num("0")),
+            // float negative zero.
+            (Datum::Float8(-0.0), Datum::Float8(0.0)),
+            // interval field spelling: equality is the 30-day-month / 24-hour-day
+            // estimate, so these are one value stored three ways.
+            (iv("1 mon"), iv("30 days")),
+            (iv("1 day"), iv("24 hours")),
+            (iv("1 year 1 day"), iv("12 mons 24 hours")),
+            (iv("1 mon -1 hour"), iv("29 days 23:00:00")),
+            (iv("-1 mon"), iv("-30 days")),
+            // jsonb key order and number scale.
+            (json(r#"{"b":2,"a":1}"#), json(r#"{"a":1,"b":2}"#)),
+            (json(r#"{"a":1.0}"#), json(r#"{"a":1.00}"#)),
+            // Array elements, recursively.
+            (
+                Datum::Array(ArrayValue::new(ElemType::Numeric, vec![num("2.50")])),
+                Datum::Array(ArrayValue::new(ElemType::Numeric, vec![num("2.5")])),
+            ),
+            (
+                Datum::Array(ArrayValue::new(ElemType::Interval, vec![iv("1 mon")])),
+                Datum::Array(ArrayValue::new(ElemType::Interval, vec![iv("30 days")])),
+            ),
+        ];
+        for (left, right) in pairs {
+            assert!(left == right, "{left:?} and {right:?} are equal values");
+            assert!(
+                secondary_index_entry_prefix(7, 1, std::slice::from_ref(left))
+                    == secondary_index_entry_prefix(7, 1, std::slice::from_ref(right)),
+                "index key for {left:?}"
+            );
+        }
+        // Values that differ still build different keys.
+        assert!(
+            secondary_index_entry_prefix(7, 1, &[num("1.0")])
+                != secondary_index_entry_prefix(7, 1, &[num("1.1")])
+        );
+        assert!(
+            secondary_index_entry_prefix(7, 1, &[json(r#"{"a":1}"#)])
+                != secondary_index_entry_prefix(7, 1, &[json(r#"{"a":2}"#)])
+        );
+        assert!(
+            secondary_index_entry_prefix(7, 1, &[iv("1 mon")])
+                != secondary_index_entry_prefix(7, 1, &[iv("31 days")])
+        );
+    }
+
+    /// Key canonicalization must not leak into row storage: a stored `interval`
+    /// keeps the months/days/micros it was given, so `1 mon` renders `1 mon`
+    /// (not the `30 days` its index key folds to).
+    #[test]
+    fn canonicalization_is_key_only_and_never_rewrites_stored_rows() {
+        use assert2::assert;
+        use crabka_pgtypes::Datum;
+
+        let parse = |s: &str| crabka_pgtypes::datetime::parse_interval(s).expect("interval");
+        // Fields + rendering of a decoded interval, or `None` for any other datum.
+        let stored = |d: &Datum| match d {
+            Datum::Interval(i) => Some((
+                i.months,
+                i.days,
+                i.micros,
+                crabka_pgtypes::datetime::interval_to_text(*i),
+            )),
+            _ => None,
+        };
+        for (spelling, rendered) in [
+            ("1 mon", "1 mon"),
+            ("30 days", "30 days"),
+            ("720 hours", "720:00:00"),
+            ("1 mon -1 hour", "1 mon -01:00:00"),
+            ("-1 mon", "-1 mons"),
+        ] {
+            let original = parse(spelling);
+            let row = crate::rowenc::encode_row(&[Datum::Interval(original)]);
+            let decoded = crate::rowenc::decode_row(&row).expect("row decodes");
+            assert!(
+                stored(&decoded[0])
+                    == Some((
+                        original.months,
+                        original.days,
+                        original.micros,
+                        rendered.to_string(),
+                    )),
+                "stored form of {spelling}"
+            );
+        }
+        // `1 mon` and `30 days` share an index key but NOT a stored row.
+        assert!(
+            crate::rowenc::encode_row(&[Datum::Interval(parse("1 mon"))])
+                != crate::rowenc::encode_row(&[Datum::Interval(parse("30 days"))])
+        );
     }
 
     #[test]
@@ -792,6 +951,112 @@ mod tests {
         assert!(server_key("pg").starts_with(&prefix));
         assert!(!fdw_key("x").starts_with(&prefix));
         assert!(!catalog_key("t").starts_with(&prefix));
+    }
+
+    #[test]
+    fn notify_keys_are_an_isolated_ordered_namespace() {
+        use assert2::assert;
+
+        let prefix = notify_prefix();
+
+        assert!(notify_key(0).starts_with(&prefix));
+        assert!(notify_key(u64::MAX).starts_with(&prefix));
+        assert!(notify_key(1) < notify_key(2) && notify_key(2) < notify_key(10));
+        assert!(notify_key(3).starts_with(&table_zero_prefix()));
+        // No other namespace overlaps the notify prefix in either direction.
+        for other in [
+            clog_key(3),
+            seq_key(3),
+            catalog_key("notify"),
+            next_xid_key(),
+            meta_range_map_key(),
+            row_key(7, 3),
+            secondary_index_prefix(7, 1),
+        ] {
+            assert!(!is_notify_key(&other), "{other:?}");
+            assert!(!other.starts_with(&prefix), "{other:?}");
+            assert!(!notify_key(3).starts_with(&other), "{other:?}");
+        }
+    }
+
+    #[test]
+    fn is_notify_key_covers_the_whole_namespace() {
+        use assert2::assert;
+
+        let mut malformed = notify_prefix();
+        malformed.extend_from_slice(b"garbage");
+
+        assert!(is_notify_key(&notify_key(7)));
+        assert!(is_notify_key(&notify_prefix()));
+        // A truncated or over-long key under the prefix is still a notify key:
+        // the predicate guards the store, so it must not admit junk.
+        assert!(is_notify_key(&malformed));
+        let mut long = notify_key(7);
+        long.push(0);
+        assert!(is_notify_key(&long));
+        assert!(!is_notify_key(&notify_prefix()[..4]));
+        assert!(!is_notify_key(b""));
+    }
+
+    #[test]
+    fn classification_reports_notify_keys_and_leaves_other_shapes_alone() {
+        use assert2::assert;
+
+        let mut version = row_key(7, 42);
+        put_u64(&mut version, 9);
+        let mut malformed_notify = notify_prefix();
+        malformed_notify.extend_from_slice(b"garbage");
+
+        let cases: &[(&str, Vec<u8>, KeyClass)] = &[
+            ("notify record", notify_key(7), KeyClass::Notify),
+            ("notify prefix", notify_prefix(), KeyClass::Notify),
+            ("malformed notify", malformed_notify, KeyClass::Notify),
+            (
+                "primary row",
+                row_key(7, 42),
+                KeyClass::PrimaryRow {
+                    table_id: 7,
+                    rowid: 42,
+                },
+            ),
+            (
+                "primary version",
+                version,
+                KeyClass::PrimaryVersion {
+                    table_id: 7,
+                    rowid: 42,
+                    version: 9,
+                },
+            ),
+            (
+                "hash primary row",
+                hash_row_key(7, 1, 42),
+                KeyClass::HashPrimaryRow {
+                    table_id: 7,
+                    bucket: 1,
+                    rowid: 42,
+                },
+            ),
+            (
+                "secondary index",
+                secondary_index_prefix(7, 1),
+                KeyClass::SecondaryIndex {
+                    table_id: 7,
+                    storage_index_id: 2,
+                },
+            ),
+            ("sequence", seq_key(7), KeyClass::Sequence { table_id: 7 }),
+            ("clog", clog_key(7), KeyClass::Clog { xid: 7 }),
+            ("catalog", catalog_key("users"), KeyClass::System),
+            ("meta range map", meta_range_map_key(), KeyClass::System),
+            ("next xid", next_xid_key(), KeyClass::System),
+            ("server", server_key("kafka"), KeyClass::System),
+            ("short", b"abc".to_vec(), KeyClass::Unknown),
+        ];
+
+        for (name, key, class) in cases {
+            assert!(classify_key(key) == *class, "{name}");
+        }
     }
 
     #[test]

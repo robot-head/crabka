@@ -48,6 +48,217 @@ pub mod oids {
     pub const INTERVAL: u32 = 1186;
     /// PostgreSQL `uuid` — 128-bit universally unique identifier.
     pub const UUID: u32 = 2950;
+    /// PostgreSQL `json` — accepted on input (parameters, casts) as an alias for
+    /// `jsonb`; crabka never *reports* this OID.
+    pub const JSON: u32 = 114;
+    /// PostgreSQL `jsonb` — the decomposed binary JSON type.
+    pub const JSONB: u32 = 3802;
+    /// `json[]`.
+    pub const JSONARRAY: u32 = 199;
+    /// `jsonb[]`.
+    pub const JSONBARRAY: u32 = 3807;
+    /// `boolean[]`.
+    pub const BOOLARRAY: u32 = 1000;
+    /// `bytea[]`.
+    pub const BYTEAARRAY: u32 = 1001;
+    /// `bigint[]`.
+    pub const INT8ARRAY: u32 = 1016;
+    /// `integer[]`.
+    pub const INT4ARRAY: u32 = 1007;
+    /// `text[]`.
+    pub const TEXTARRAY: u32 = 1009;
+    /// `double precision[]`.
+    pub const FLOAT8ARRAY: u32 = 1022;
+    /// `numeric[]`.
+    pub const NUMERICARRAY: u32 = 1231;
+    /// `date[]`.
+    pub const DATEARRAY: u32 = 1182;
+    /// `time without time zone[]`.
+    pub const TIMEARRAY: u32 = 1183;
+    /// `timestamp without time zone[]`.
+    pub const TIMESTAMPARRAY: u32 = 1115;
+    /// `timestamp with time zone[]`.
+    pub const TIMESTAMPTZARRAY: u32 = 1185;
+    /// `interval[]`.
+    pub const INTERVALARRAY: u32 = 1187;
+    /// `uuid[]`.
+    pub const UUIDARRAY: u32 = 2951;
+}
+
+/// The element type of a one-dimensional SQL array.
+///
+/// A separate `Copy` enum rather than a boxed [`ColumnType`] because
+/// `ColumnType` is passed by value throughout the executor; it is deliberately
+/// smaller than `ColumnType` — the types with a modifier (`varchar(n)`,
+/// `char(n)`), `regclass`, and arrays themselves have no array form here and are
+/// refused with 0A000 by [`ElemType::from_column_type`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ElemType {
+    Bool,
+    Int4,
+    Int8,
+    Text,
+    Float8,
+    Numeric,
+    Date,
+    Time,
+    Timestamp,
+    Timestamptz,
+    Interval,
+    Bytea,
+    Uuid,
+    Jsonb,
+}
+
+impl ElemType {
+    /// Every supported array element type, in `code()` order.
+    pub const ALL: [ElemType; 14] = [
+        ElemType::Bool,
+        ElemType::Int4,
+        ElemType::Int8,
+        ElemType::Text,
+        ElemType::Float8,
+        ElemType::Numeric,
+        ElemType::Date,
+        ElemType::Time,
+        ElemType::Timestamp,
+        ElemType::Timestamptz,
+        ElemType::Interval,
+        ElemType::Bytea,
+        ElemType::Uuid,
+        ElemType::Jsonb,
+    ];
+
+    /// The element type as a column type (`numeric` is unconstrained — an array
+    /// carries no element typmod).
+    pub fn column_type(self) -> ColumnType {
+        match self {
+            ElemType::Bool => ColumnType::Bool,
+            ElemType::Int4 => ColumnType::Int4,
+            ElemType::Int8 => ColumnType::Int8,
+            ElemType::Text => ColumnType::Text,
+            ElemType::Float8 => ColumnType::Float8,
+            ElemType::Numeric => ColumnType::Numeric(None),
+            ElemType::Date => ColumnType::Date,
+            ElemType::Time => ColumnType::Time,
+            ElemType::Timestamp => ColumnType::Timestamp,
+            ElemType::Timestamptz => ColumnType::Timestamptz,
+            ElemType::Interval => ColumnType::Interval,
+            ElemType::Bytea => ColumnType::Bytea,
+            ElemType::Uuid => ColumnType::Uuid,
+            ElemType::Jsonb => ColumnType::Jsonb,
+        }
+    }
+
+    /// The element type for `elem`, or `None` when crabka has no array type for
+    /// it (`varchar(n)`, `char(n)`, `regclass`, and nested arrays).
+    pub fn from_column_type(elem: ColumnType) -> Option<Self> {
+        Some(match elem {
+            ColumnType::Bool => ElemType::Bool,
+            ColumnType::Int4 => ElemType::Int4,
+            ColumnType::Int8 => ElemType::Int8,
+            ColumnType::Text => ElemType::Text,
+            ColumnType::Float8 => ElemType::Float8,
+            ColumnType::Numeric(_) => ElemType::Numeric,
+            ColumnType::Date => ElemType::Date,
+            ColumnType::Time => ElemType::Time,
+            ColumnType::Timestamp => ElemType::Timestamp,
+            ColumnType::Timestamptz => ElemType::Timestamptz,
+            ColumnType::Interval => ElemType::Interval,
+            ColumnType::Bytea => ElemType::Bytea,
+            ColumnType::Uuid => ElemType::Uuid,
+            ColumnType::Jsonb => ElemType::Jsonb,
+            ColumnType::Varchar(_)
+            | ColumnType::Char(_)
+            | ColumnType::Regclass
+            | ColumnType::Array(_) => return None,
+        })
+    }
+
+    /// The element type's own OID (`pg_type.typelem` of the array type).
+    pub fn oid(self) -> u32 {
+        self.column_type().oid()
+    }
+
+    /// The OID of the array type over this element type (`pg_type.typarray`).
+    pub fn array_oid(self) -> u32 {
+        match self {
+            ElemType::Bool => oids::BOOLARRAY,
+            ElemType::Int4 => oids::INT4ARRAY,
+            ElemType::Int8 => oids::INT8ARRAY,
+            ElemType::Text => oids::TEXTARRAY,
+            ElemType::Float8 => oids::FLOAT8ARRAY,
+            ElemType::Numeric => oids::NUMERICARRAY,
+            ElemType::Date => oids::DATEARRAY,
+            ElemType::Time => oids::TIMEARRAY,
+            ElemType::Timestamp => oids::TIMESTAMPARRAY,
+            ElemType::Timestamptz => oids::TIMESTAMPTZARRAY,
+            ElemType::Interval => oids::INTERVALARRAY,
+            ElemType::Bytea => oids::BYTEAARRAY,
+            ElemType::Uuid => oids::UUIDARRAY,
+            ElemType::Jsonb => oids::JSONBARRAY,
+        }
+    }
+
+    /// The element type's PostgreSQL name (`integer`, `text`, …).
+    pub fn name(self) -> &'static str {
+        self.column_type().name()
+    }
+
+    /// The array type's PostgreSQL name (`integer[]`, `text[]`, …).
+    pub fn array_name(self) -> &'static str {
+        match self {
+            ElemType::Bool => "boolean[]",
+            ElemType::Int4 => "integer[]",
+            ElemType::Int8 => "bigint[]",
+            ElemType::Text => "text[]",
+            ElemType::Float8 => "double precision[]",
+            ElemType::Numeric => "numeric[]",
+            ElemType::Date => "date[]",
+            ElemType::Time => "time without time zone[]",
+            ElemType::Timestamp => "timestamp without time zone[]",
+            ElemType::Timestamptz => "timestamp with time zone[]",
+            ElemType::Interval => "interval[]",
+            ElemType::Bytea => "bytea[]",
+            ElemType::Uuid => "uuid[]",
+            ElemType::Jsonb => "jsonb[]",
+        }
+    }
+
+    /// A stable, **append-only** wire/storage code. Persisted by the row encoder
+    /// and the catalog's schema serializer, so existing values must never change.
+    pub fn code(self) -> u8 {
+        match self {
+            ElemType::Bool => 0,
+            ElemType::Int4 => 1,
+            ElemType::Int8 => 2,
+            ElemType::Text => 3,
+            ElemType::Float8 => 4,
+            ElemType::Numeric => 5,
+            ElemType::Date => 6,
+            ElemType::Time => 7,
+            ElemType::Timestamp => 8,
+            ElemType::Timestamptz => 9,
+            ElemType::Interval => 10,
+            ElemType::Bytea => 11,
+            ElemType::Uuid => 12,
+            ElemType::Jsonb => 13,
+        }
+    }
+
+    /// The inverse of [`ElemType::code`] (`None` for an unknown code).
+    pub fn from_code(code: u8) -> Option<Self> {
+        ElemType::ALL.into_iter().find(|e| e.code() == code)
+    }
+
+    /// The element type of an array OID (`pg_type.typelem`), for parameter
+    /// binding. `json[]` maps onto `jsonb[]` like `json` maps onto `jsonb`.
+    pub fn from_array_oid(oid: u32) -> Option<Self> {
+        if oid == oids::JSONARRAY {
+            return Some(ElemType::Jsonb);
+        }
+        ElemType::ALL.into_iter().find(|e| e.array_oid() == oid)
+    }
 }
 
 /// A SQL column type. SP30 added `Float8`; SP32 added `Numeric` (which carries an
@@ -86,6 +297,11 @@ pub enum ColumnType {
     /// resolution, which the session/executor layers perform — the pure
     /// datum-parse path only accepts numeric strings).
     Regclass,
+    /// PostgreSQL `jsonb` (OID 3802) — decomposed JSON. `json` (114) is accepted
+    /// on input as an alias but never reported.
+    Jsonb,
+    /// A one-dimensional PostgreSQL array (OID = the element type's `typarray`).
+    Array(ElemType),
 }
 
 impl ColumnType {
@@ -121,6 +337,24 @@ impl ColumnType {
             "bytea" => Some(ColumnType::Bytea),
             "uuid" => Some(ColumnType::Uuid),
             "regclass" => Some(ColumnType::Regclass),
+            // `json` is an input alias for `jsonb`: values are stored decomposed
+            // and always report OID 3802 (a documented divergence).
+            "jsonb" | "json" => Some(ColumnType::Jsonb),
+            _ => None,
+        }
+    }
+
+    /// The one-dimensional array type over `elem`, or `None` when crabka has no
+    /// array type for it (`varchar(n)`, `char(n)`, `regclass`, nested arrays) —
+    /// callers report that as 0A000.
+    pub fn array_of(elem: ColumnType) -> Option<Self> {
+        ElemType::from_column_type(elem).map(ColumnType::Array)
+    }
+
+    /// The element type when this is an array type.
+    pub fn array_element(self) -> Option<ElemType> {
+        match self {
+            ColumnType::Array(elem) => Some(elem),
             _ => None,
         }
     }
@@ -143,6 +377,8 @@ impl ColumnType {
             ColumnType::Bytea => oids::BYTEA,
             ColumnType::Uuid => oids::UUID,
             ColumnType::Regclass => oids::REGCLASS,
+            ColumnType::Jsonb => oids::JSONB,
+            ColumnType::Array(elem) => elem.array_oid(),
         }
     }
 
@@ -165,6 +401,8 @@ impl ColumnType {
             ColumnType::Bytea => "bytea",
             ColumnType::Uuid => "uuid",
             ColumnType::Regclass => "regclass",
+            ColumnType::Jsonb => "jsonb",
+            ColumnType::Array(elem) => elem.array_name(),
         }
     }
 
@@ -185,6 +423,8 @@ impl ColumnType {
             ColumnType::Bytea => -1,
             ColumnType::Uuid => 16,
             ColumnType::Regclass => 4,
+            // jsonb and arrays are variable-length.
+            ColumnType::Jsonb | ColumnType::Array(_) => -1,
         }
     }
 
@@ -244,6 +484,50 @@ pub enum Datum {
     Interval(crate::datetime::Interval),
     /// SP40: PostgreSQL `bytea` — variable-length binary string (raw bytes).
     Bytea(Vec<u8>),
+    /// PostgreSQL `jsonb` — a decomposed JSON value in canonical form.
+    Jsonb(crate::jsonb::JsonbValue),
+    /// A one-dimensional PostgreSQL array.
+    Array(ArrayValue),
+}
+
+/// A one-dimensional array value.
+///
+/// The element type is carried alongside the elements so an empty array is still
+/// typed (`'{}'::int[]` knows it is `integer[]`) and so the binary wire encoding,
+/// which must emit the element OID, is context-free.
+#[derive(Debug, Clone)]
+pub struct ArrayValue {
+    /// The array's element type.
+    pub elem: ElemType,
+    /// The elements, in order; `Datum::Null` is a NULL element.
+    pub elems: Vec<Datum>,
+}
+
+impl ArrayValue {
+    /// An array of `elems` with element type `elem`.
+    pub fn new(elem: ElemType, elems: Vec<Datum>) -> Self {
+        ArrayValue { elem, elems }
+    }
+
+    /// The array's column type.
+    pub fn column_type(&self) -> ColumnType {
+        ColumnType::Array(self.elem)
+    }
+}
+
+impl PartialEq for ArrayValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.elem == other.elem && self.elems == other.elems
+    }
+}
+
+impl Eq for ArrayValue {}
+
+impl std::hash::Hash for ArrayValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.elem.hash(state);
+        self.elems.hash(state);
+    }
 }
 
 impl PartialEq for Datum {
@@ -270,6 +554,11 @@ impl PartialEq for Datum {
             (Datum::Interval(a), Datum::Interval(b)) => a == b,
             // SP40: bytea equality is byte-for-byte (matches PostgreSQL's `byteaeq`).
             (Datum::Bytea(a), Datum::Bytea(b)) => a == b,
+            // jsonb equality is structural over the canonical form (key order is
+            // already normalized; number scale is ignored, as in `numeric`).
+            (Datum::Jsonb(a), Datum::Jsonb(b)) => a == b,
+            // Arrays are equal when their element type and every element are.
+            (Datum::Array(a), Datum::Array(b)) => a == b,
             _ => false,
         }
     }
@@ -304,9 +593,9 @@ impl std::hash::Hash for Datum {
             // SP32: hash the scale-normalized form so values that compare equal
             // (`1.0` and `1.00`) hash equally (the Hash/Eq contract).
             Datum::Numeric(d) => d.normalized().to_string().hash(state),
-            // SP37: jiff types all implement Hash; Interval derives Hash.
-            // (Grouping equality arms come in Task 3; Hash arms are required now
-            // because the `impl Hash` is exhaustive — no catch-all.)
+            // SP37: jiff types all implement Hash by value. `Interval` hashes its
+            // `canonical_micros` — the same quantity its `PartialEq` compares — so
+            // `1 mon` and `30 days` hash alike (the Hash/Eq contract).
             Datum::Date(d) => d.hash(state),
             Datum::Time(t) => t.hash(state),
             Datum::Timestamp(dt) => dt.hash(state),
@@ -314,6 +603,9 @@ impl std::hash::Hash for Datum {
             Datum::Interval(i) => i.hash(state),
             // SP40: bytea hashes its bytes.
             Datum::Bytea(b) => b.hash(state),
+            // Both hash scale-normalized numbers internally, matching `Eq`.
+            Datum::Jsonb(j) => j.hash(state),
+            Datum::Array(a) => a.hash(state),
         }
     }
 }
@@ -336,12 +628,106 @@ impl Datum {
             Datum::Timestamptz(_) => Some(ColumnType::Timestamptz),
             Datum::Interval(_) => Some(ColumnType::Interval),
             Datum::Bytea(_) => Some(ColumnType::Bytea),
+            Datum::Jsonb(_) => Some(ColumnType::Jsonb),
+            Datum::Array(a) => Some(a.column_type()),
         }
     }
 
     pub fn is_null(&self) -> bool {
         matches!(self, Datum::Null)
     }
+}
+
+/// Normalize a value into the form used for **index key bytes**.
+///
+/// Index lookups are equality-by-bytes over `encode_row`, so two values that
+/// compare equal must encode identically. Four representations break that on
+/// their own: `numeric` scale (`1.0` vs `1.00`), float negative zero, `interval`
+/// field spelling (`1 mon` vs `30 days`), and the same inside `jsonb` and array
+/// elements. (Object key order is not a concern — `jsonb` is stored canonically
+/// ordered.)
+///
+/// This is the **key** form only. Row storage keeps every value exactly as
+/// given, so a stored `interval '1 mon'` still renders `1 mon`, not `30 days`.
+///
+/// Returns `Cow::Borrowed` when the value is already canonical, which is the
+/// common case.
+#[must_use]
+pub fn canonicalize_for_key(value: &Datum) -> std::borrow::Cow<'_, Datum> {
+    use std::borrow::Cow;
+    match value {
+        Datum::Numeric(d) => {
+            let normalized = crate::numeric::canonical(d.normalized());
+            if normalized.fractional_digit_count() == d.fractional_digit_count() {
+                Cow::Borrowed(value)
+            } else {
+                Cow::Owned(Datum::Numeric(normalized))
+            }
+        }
+        // `-0.0 == 0.0` and every NaN is one value under `Datum`'s grouping
+        // equality, but their bit patterns differ.
+        Datum::Float8(f) if f.is_nan() => Cow::Owned(Datum::Float8(f64::NAN)),
+        Datum::Float8(f) if *f == 0.0 && f.is_sign_negative() => Cow::Owned(Datum::Float8(0.0)),
+        // `interval` equality (and `Hash`, and `Ord`) is PostgreSQL's canonical
+        // estimate — a 30-day month and a 24-hour day — so `1 mon`, `30 days`
+        // and `720 hours` are ONE value with three field spellings, while the
+        // encoding stores months/days/micros separately. `justify_interval` is
+        // PostgreSQL's canonical spelling of that estimate: it preserves
+        // `Interval::canonical_micros` and depends on nothing else, so equal
+        // intervals justify to identical fields.
+        Datum::Interval(iv) => match crate::datetime::justify_interval(*iv) {
+            // An interval whose justified form overflows `i32` months has no
+            // in-range canonical spelling (only reachable from raw binary
+            // input, since every parse path range-checks); leave it as-is
+            // rather than picking a lossy stand-in.
+            Err(_) => Cow::Borrowed(value),
+            Ok(justified) => {
+                if (justified.months, justified.days, justified.micros)
+                    == (iv.months, iv.days, iv.micros)
+                {
+                    Cow::Borrowed(value)
+                } else {
+                    Cow::Owned(Datum::Interval(justified))
+                }
+            }
+        },
+        Datum::Jsonb(j) => match j.normalized_numbers() {
+            Some(normalized) => Cow::Owned(Datum::Jsonb(normalized)),
+            None => Cow::Borrowed(value),
+        },
+        Datum::Array(a) => {
+            let mut changed = false;
+            let elems = a
+                .elems
+                .iter()
+                .map(|e| match canonicalize_for_key(e) {
+                    Cow::Owned(v) => {
+                        changed = true;
+                        v
+                    }
+                    Cow::Borrowed(v) => v.clone(),
+                })
+                .collect();
+            if changed {
+                Cow::Owned(Datum::Array(ArrayValue::new(a.elem, elems)))
+            } else {
+                Cow::Borrowed(value)
+            }
+        }
+        _ => Cow::Borrowed(value),
+    }
+}
+
+/// [`canonicalize_for_key`] over a whole index key tuple, borrowing when every
+/// value is already canonical.
+#[must_use]
+pub fn canonicalize_row_for_key(values: &[Datum]) -> std::borrow::Cow<'_, [Datum]> {
+    use std::borrow::Cow;
+    let canonical: Vec<Cow<'_, Datum>> = values.iter().map(canonicalize_for_key).collect();
+    if canonical.iter().all(|v| matches!(v, Cow::Borrowed(_))) {
+        return Cow::Borrowed(values);
+    }
+    Cow::Owned(canonical.into_iter().map(Cow::into_owned).collect())
 }
 
 #[cfg(test)]
@@ -650,6 +1036,275 @@ mod tests {
         let diff = Datum::Bytea(vec![0x00]);
         assert_eq!(d, same, "identical byte sequences are equal");
         assert_ne!(d, diff, "different byte sequences are not equal");
+    }
+
+    // ---- jsonb + arrays ----
+
+    fn jsonb(text: &str) -> Datum {
+        Datum::Jsonb(crate::jsonb::parse(text).expect("valid jsonb"))
+    }
+
+    fn array(elem: ElemType, elems: Vec<Datum>) -> Datum {
+        Datum::Array(ArrayValue::new(elem, elems))
+    }
+
+    fn hash_of(d: &Datum) -> u64 {
+        use std::{
+            collections::hash_map::DefaultHasher,
+            hash::{Hash, Hasher},
+        };
+        let mut hasher = DefaultHasher::new();
+        d.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    #[test]
+    fn jsonb_column_type_reports_postgres_oid_name_and_size() {
+        use assert2::assert;
+        assert!(ColumnType::Jsonb.oid() == 3802);
+        assert!(ColumnType::Jsonb.name() == "jsonb");
+        assert!(ColumnType::Jsonb.type_size() == -1);
+        assert!(ColumnType::Jsonb.typmod() == -1);
+        assert!(ColumnType::from_sql_name("jsonb") == Some(ColumnType::Jsonb));
+        // `json` is an input alias that reports as jsonb.
+        assert!(ColumnType::from_sql_name("JSON") == Some(ColumnType::Jsonb));
+        assert!(jsonb("1").column_type() == Some(ColumnType::Jsonb));
+    }
+
+    #[test]
+    fn array_types_report_the_postgres_typarray_oids() {
+        use assert2::assert;
+        let expected: &[(ElemType, u32, u32, &str)] = &[
+            (ElemType::Bool, 16, 1000, "boolean[]"),
+            (ElemType::Bytea, 17, 1001, "bytea[]"),
+            (ElemType::Int8, 20, 1016, "bigint[]"),
+            (ElemType::Int4, 23, 1007, "integer[]"),
+            (ElemType::Text, 25, 1009, "text[]"),
+            (ElemType::Float8, 701, 1022, "double precision[]"),
+            (ElemType::Numeric, 1700, 1231, "numeric[]"),
+            (ElemType::Date, 1082, 1182, "date[]"),
+            (ElemType::Time, 1083, 1183, "time without time zone[]"),
+            (
+                ElemType::Timestamp,
+                1114,
+                1115,
+                "timestamp without time zone[]",
+            ),
+            (
+                ElemType::Timestamptz,
+                1184,
+                1185,
+                "timestamp with time zone[]",
+            ),
+            (ElemType::Interval, 1186, 1187, "interval[]"),
+            (ElemType::Uuid, 2950, 2951, "uuid[]"),
+            (ElemType::Jsonb, 3802, 3807, "jsonb[]"),
+        ];
+        assert!(expected.len() == ElemType::ALL.len());
+        for (elem, elem_oid, array_oid, name) in expected {
+            assert!(elem.oid() == *elem_oid, "{elem:?} element oid");
+            assert!(elem.array_oid() == *array_oid, "{elem:?} array oid");
+            assert!(elem.array_name() == *name, "{elem:?} array name");
+            let ty = ColumnType::Array(*elem);
+            assert!(ty.oid() == *array_oid);
+            assert!(ty.name() == *name);
+            assert!(ty.type_size() == -1);
+            assert!(ty.array_element() == Some(*elem));
+            assert!(ElemType::from_array_oid(*array_oid) == Some(*elem));
+        }
+        // `json[]` binds onto `jsonb[]`, like `json` onto `jsonb`.
+        assert!(ElemType::from_array_oid(oids::JSONARRAY) == Some(ElemType::Jsonb));
+        assert!(ElemType::from_array_oid(9999) == None);
+    }
+
+    /// The element codes are persisted (row encoding, catalog schema), so they
+    /// are append-only: this pins every existing value.
+    #[test]
+    fn element_type_codes_are_stable_and_round_trip() {
+        use assert2::assert;
+        for (code, elem) in ElemType::ALL.iter().enumerate() {
+            let code = u8::try_from(code).expect("small");
+            assert!(elem.code() == code, "{elem:?}");
+            assert!(ElemType::from_code(code) == Some(*elem));
+        }
+        assert!(ElemType::from_code(200) == None);
+    }
+
+    #[test]
+    fn array_of_refuses_element_types_without_an_array_type() {
+        use assert2::assert;
+        assert!(ColumnType::array_of(ColumnType::Int4) == Some(ColumnType::Array(ElemType::Int4)));
+        assert!(
+            ColumnType::array_of(ColumnType::Numeric(Some(Typmod {
+                precision: 5,
+                scale: 2,
+            }))) == Some(ColumnType::Array(ElemType::Numeric)),
+            "an array element carries no typmod"
+        );
+        for unsupported in [
+            ColumnType::Varchar(Some(8)),
+            ColumnType::Varchar(None),
+            ColumnType::Char(Some(2)),
+            ColumnType::Regclass,
+            ColumnType::Array(ElemType::Int4),
+        ] {
+            assert!(
+                ColumnType::array_of(unsupported) == None,
+                "{unsupported:?} has no array type"
+            );
+        }
+        assert!(ColumnType::Int4.array_element() == None);
+    }
+
+    #[test]
+    fn jsonb_and_array_datums_use_structural_equality() {
+        use assert2::assert;
+        // jsonb: key order and number scale do not distinguish values.
+        assert!(jsonb(r#"{"b":2,"a":1}"#) == jsonb(r#"{"a":1,"b":2}"#));
+        assert!(jsonb(r#"{"a":1.0}"#) == jsonb(r#"{"a":1.00}"#));
+        assert!(jsonb("1") != jsonb("2"));
+        // A jsonb null is not a SQL NULL, and never equals another type.
+        assert!(jsonb("null") != Datum::Null);
+        assert!(jsonb("1") != Datum::Int4(1));
+        // Arrays: element type and elements both matter.
+        let ints = array(ElemType::Int4, vec![Datum::Int4(1)]);
+        assert!(ints == array(ElemType::Int4, vec![Datum::Int4(1)]));
+        assert!(ints != array(ElemType::Int4, vec![Datum::Int4(2)]));
+        assert!(ints != array(ElemType::Int4, vec![Datum::Int4(1), Datum::Null]));
+        assert!(
+            array(ElemType::Int4, vec![]) != array(ElemType::Text, vec![]),
+            "an empty array is still typed"
+        );
+        assert!(ints.column_type() == Some(ColumnType::Array(ElemType::Int4)));
+    }
+
+    /// The index-key contract: equal Datums must hash equally AND canonicalize
+    /// to identical `encode_row` input, because index lookups are equality by
+    /// raw key bytes.
+    #[test]
+    fn equal_datums_hash_equally_and_canonicalize_identically() {
+        use assert2::assert;
+        let num = |s: &str| Datum::Numeric(crate::numeric::parse(s).expect("numeric"));
+        let iv = |s: &str| Datum::Interval(crate::datetime::parse_interval(s).expect("interval"));
+        let pairs: &[(Datum, Datum)] = &[
+            // Plain numeric scale — the latent case this fixes.
+            (num("1.0"), num("1.00")),
+            (num("100"), num("1e2")),
+            (num("-0.0"), num("0")),
+            // Float negative zero and NaN bit patterns.
+            (Datum::Float8(-0.0), Datum::Float8(0.0)),
+            (
+                Datum::Float8(f64::NAN),
+                Datum::Float8(f64::from_bits(0x7ff8_0000_0000_0001)),
+            ),
+            // interval: equality is the 30-day-month / 24-hour-day estimate, so
+            // the same value has many field spellings.
+            (iv("1 mon"), iv("30 days")),
+            (iv("1 day"), iv("24 hours")),
+            (iv("1 year"), iv("12 mons")),
+            (iv("1 mon"), iv("720 hours")),
+            (iv("1 mon -1 hour"), iv("29 days 23:00:00")),
+            (iv("-1 mon"), iv("-30 days")),
+            (iv("-1 day 1 hour"), iv("-23 hours")),
+            (iv("0 days"), iv("00:00:00")),
+            // jsonb: key order (storage invariant) and number scale.
+            (jsonb(r#"{"b":2,"a":1}"#), jsonb(r#"{"a":1,"b":2}"#)),
+            (jsonb(r#"{"a":1.0}"#), jsonb(r#"{"a":1.00}"#)),
+            (jsonb(r#"[1.0, {"k": 2.00}]"#), jsonb(r#"[1, {"k": 2}]"#)),
+            // Array elements canonicalize recursively.
+            (
+                array(ElemType::Numeric, vec![num("1.0"), Datum::Null]),
+                array(ElemType::Numeric, vec![num("1.000"), Datum::Null]),
+            ),
+            (
+                array(ElemType::Jsonb, vec![jsonb(r#"{"b":1,"a":2}"#)]),
+                array(ElemType::Jsonb, vec![jsonb(r#"{"a":2,"b":1}"#)]),
+            ),
+            (
+                array(ElemType::Interval, vec![iv("1 mon"), Datum::Null]),
+                array(ElemType::Interval, vec![iv("30 days"), Datum::Null]),
+            ),
+            // Already-canonical values are unchanged (and still agree).
+            (Datum::Text("x".into()), Datum::Text("x".into())),
+            (array(ElemType::Int4, vec![]), array(ElemType::Int4, vec![])),
+        ];
+        for (left, right) in pairs {
+            assert!(left == right, "{left:?} == {right:?}");
+            assert!(hash_of(left) == hash_of(right), "hash of {left:?}");
+            let (a, b) = (canonicalize_for_key(left), canonicalize_for_key(right));
+            assert!(*a == *b, "canonical form of {left:?}");
+            assert!(
+                crate::encoding::encode_text(&a, &jiff::tz::TimeZone::UTC)
+                    == crate::encoding::encode_text(&b, &jiff::tz::TimeZone::UTC),
+                "canonical text of {left:?}"
+            );
+        }
+    }
+
+    /// The converse of the key contract for `interval`: values that are NOT
+    /// equal keep distinct canonical spellings, and a value with no in-range
+    /// canonical spelling is left alone rather than overflowing.
+    #[test]
+    fn interval_canonicalization_keeps_unequal_values_apart() {
+        use std::borrow::Cow;
+
+        use assert2::assert;
+        let iv = |s: &str| Datum::Interval(crate::datetime::parse_interval(s).expect("interval"));
+        let canonical_text = |d: &Datum| {
+            crate::encoding::encode_text(&canonicalize_for_key(d), &jiff::tz::TimeZone::UTC)
+        };
+        for (left, right) in [
+            (iv("1 mon"), iv("31 days")),
+            (iv("1 day"), iv("25 hours")),
+            (iv("1 mon"), iv("-1 mon")),
+        ] {
+            assert!(left != right, "{left:?} != {right:?}");
+            assert!(
+                canonical_text(&left) != canonical_text(&right),
+                "canonical form of {left:?} vs {right:?}"
+            );
+        }
+        // No in-range justified spelling exists for this one (its canonical
+        // month count overflows i32), so it is left exactly as given.
+        let unjustifiable = Datum::Interval(crate::datetime::Interval {
+            months: i32::MAX,
+            days: i32::MAX,
+            micros: i64::MAX,
+        });
+        assert!(matches!(
+            canonicalize_for_key(&unjustifiable),
+            Cow::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn canonicalize_borrows_canonical_values_and_owns_normalized_ones() {
+        use std::borrow::Cow;
+
+        use assert2::assert;
+        for already_canonical in [
+            Datum::Null,
+            Datum::Int4(1),
+            Datum::Text("x".into()),
+            Datum::Float8(1.5),
+            Datum::Numeric(crate::numeric::parse("1.5").expect("n")),
+            Datum::Interval(crate::datetime::parse_interval("1 mon").expect("interval")),
+            jsonb(r#"{"a": 1}"#),
+            array(ElemType::Int4, vec![Datum::Int4(1), Datum::Null]),
+        ] {
+            assert!(
+                matches!(canonicalize_for_key(&already_canonical), Cow::Borrowed(_)),
+                "{already_canonical:?} is already canonical"
+            );
+        }
+        let row = [Datum::Int4(1), Datum::Text("x".into())];
+        assert!(matches!(canonicalize_row_for_key(&row), Cow::Borrowed(_)));
+        let scaled = [Datum::Numeric(crate::numeric::parse("1.50").expect("n"))];
+        assert!(matches!(canonicalize_row_for_key(&scaled), Cow::Owned(_)));
+        assert!(
+            canonicalize_row_for_key(&scaled)[0]
+                == Datum::Numeric(crate::numeric::parse("1.5").expect("n"))
+        );
     }
 
     #[test]

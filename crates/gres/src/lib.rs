@@ -15,8 +15,8 @@ use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{FjallKv, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
 use crabka_pgwire::{
     engine::{
-        BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, PortalDescription,
-        PreparedDescription, QueryResult, Session, TxStatus,
+        BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, Notification,
+        PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
     },
     session::{AuthMode, SessionConfig},
 };
@@ -28,6 +28,7 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 mod live_range_control;
+mod range0_follower;
 mod split_activation;
 use split_activation::{PendingLiveTopology, PreparedLiveTopology, StagedLiveRangeSuccessor};
 
@@ -1058,6 +1059,13 @@ impl Engine for RuntimeEngine {
             Self::Multi(engine) => RuntimeSession::Multi(Box::new(engine.connect())),
         }
     }
+
+    fn connect_with_pid(&self, pid: i32) -> Self::Session {
+        match self {
+            Self::Single(engine) => RuntimeSession::Single(Box::new(engine.connect_with_pid(pid))),
+            Self::Multi(engine) => RuntimeSession::Multi(Box::new(engine.connect_with_pid(pid))),
+        }
+    }
 }
 
 impl Session for RuntimeSession {
@@ -1181,6 +1189,13 @@ impl Session for RuntimeSession {
         match self {
             Self::Single(session) => session.copy_in_portal(portal, data).await,
             Self::Multi(session) => session.copy_in_portal(portal, data).await,
+        }
+    }
+
+    fn take_notifications(&mut self) -> Option<tokio::sync::mpsc::Receiver<Notification>> {
+        match self {
+            Self::Single(session) => session.take_notifications(),
+            Self::Multi(session) => session.take_notifications(),
         }
     }
 
@@ -3106,6 +3121,27 @@ where
     }
 }
 
+/// This node's identity among the nodes of one tenant.
+///
+/// A name no other live process shares, used for exactly one thing: recognising
+/// the notification records this node published itself.
+///
+/// It is always suffixed with a per-process random component, because
+/// `--range-listen` is a *bind specification*, not a resolved address — every
+/// pod of a tenant is given the same `0.0.0.0:7432` by the operator, and the
+/// test harnesses pass the same `127.0.0.1:0` to every node. Deriving the
+/// identity from that string alone made every node of a cluster share one
+/// origin, so each discarded its peers' notifications as its own and
+/// cross-gateway delivery was a silent no-op. The endpoint is kept as a prefix
+/// only because it makes a record's origin readable in a log.
+fn node_identity(config: &SubstrateRuntimeConfig) -> String {
+    let unique: u64 = rand::rng().random();
+    match &config.advertised_endpoint {
+        Some(endpoint) => format!("{endpoint}#{unique:016x}"),
+        None => format!("node-{unique:016x}"),
+    }
+}
+
 fn multirange_tenant_config(
     config: &SubstrateRuntimeConfig,
     boundaries: &str,
@@ -3175,28 +3211,24 @@ fn multirange_tenant_config(
 async fn attach_range0_read_barrier(
     config: &SubstrateRuntimeConfig,
     tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
-    checkpoint_store: Option<&dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
+    checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
 ) -> std::io::Result<crabka_gres_ranges::MultiRangeTenantConfig> {
     let follower_config = crabka_gres_substrate::LiveRecoveryConfig::new(
         config.bootstrap.clone(),
         tenant_config.tenant.clone(),
         crabka_gres_ranges::RangeId::COORDINATOR,
         config.kafka_security.clone(),
-    );
-    let follower_store: Arc<dyn RestoreKv> = match config.cache_dir.as_deref() {
-        Some(parent) => {
-            let dir = parent.join("r0-follower");
-            std::fs::create_dir_all(&dir)?;
-            Arc::new(FjallKv::open_cache(&dir).map_err(|error| {
-                std::io::Error::other(format!("range-0 follower cache: {error:?}"))
-            })?)
-        }
-        None => Arc::new(MemKv::default()),
-    };
+    )
+    .with_optional_advertised_endpoint(config.advertised_endpoint.clone());
+    // Generation 0 of the follower cache; a rebuild after a WAL trim opens the
+    // next generation beside it. Anything left over from a previous process is
+    // stale by construction and is swept away first.
+    range0_follower::remove_other_follower_stores(config.cache_dir.as_deref(), 0);
+    let follower_store = range0_follower::open_follower_store(config.cache_dir.as_deref(), 0)?;
     let follower = crabka_gres_substrate::bootstrap_live_range0_follower(
         &follower_config,
         follower_store,
-        checkpoint_store,
+        checkpoint_store.as_deref(),
     )
     .await
     .map_err(|error| std::io::Error::other(format!("range-0 follower bootstrap: {error}")))?;
@@ -3215,41 +3247,17 @@ async fn attach_range0_read_barrier(
         crabka_gres_ranges::ReadOnlyRange0Replica::new(tail, sampler)
             .with_catalog_refresh_poke(Arc::clone(&catalog_refresh_poke)),
     );
-    tokio::spawn(async move {
-        loop {
-            let applied = follower.tail().applied_offset();
-            match end_sampler.committed_end().await {
-                Ok(end) if end > applied => {
-                    match crabka_gres_substrate::read_live_committed_tail(
-                        &follower_config,
-                        applied,
-                        end,
-                    )
-                    .await
-                    {
-                        Ok(items) => {
-                            for item in &items {
-                                if follower.apply_committed(item).is_err() {
-                                    break;
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            tracing::warn!(%error, "range-0 follower tail read failed");
-                        }
-                    }
-                }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, "range-0 follower end sample failed"),
-            }
-            // A catalog barrier pokes the refresh so waiters catch up
-            // immediately instead of on the next periodic tick.
-            tokio::select! {
-                () = catalog_refresh_poke.notified() => {}
-                () = tokio::time::sleep(Duration::from_millis(100)) => {}
-            }
-        }
-    });
+    tokio::spawn(
+        range0_follower::Range0FollowerTail::new(
+            follower,
+            follower_config,
+            end_sampler,
+            checkpoint_store,
+            config.cache_dir.clone(),
+            catalog_refresh_poke,
+        )
+        .run(),
+    );
     Ok(tenant_config)
 }
 
@@ -3271,6 +3279,11 @@ async fn open_multirange_runtime(
         return Ok(GresRuntime::multi(gateway));
     }
 
+    // Past this point every range commits through the substrate WAL, whose
+    // apply paths drop notify records before they can reach a store — the
+    // precondition for replicating notifications at all.
+    tenant_config = tenant_config.with_node_identity(node_identity(config));
+
     let checkpoint_store = config
         .checkpoints
         .as_ref()
@@ -3282,7 +3295,7 @@ async fn open_multirange_runtime(
         .is_some_and(|ranges| !ranges.contains(&crabka_gres_ranges::RangeId::COORDINATOR))
     {
         tenant_config =
-            attach_range0_read_barrier(config, tenant_config, checkpoint_store.as_deref()).await?;
+            attach_range0_read_barrier(config, tenant_config, checkpoint_store.clone()).await?;
     }
     let mut activation_receipt =
         split_activation::discover_activation_receipt(config, checkpoint_store.as_deref())
@@ -6033,8 +6046,11 @@ fn build_checkpoint_runtime(
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint service: {error}")))?;
     let planner_stats = service.planner_stats();
+    // Poll the configured thresholds off the commit path so a node that never
+    // splits still trims its `retention.ms=-1` WAL topic.
+    let handle = Arc::new(service).spawn_with_source(Arc::clone(&snapshot_source));
     Ok(Some(StartedCheckpointRuntime {
-        handle: Arc::new(service).spawn(),
+        handle,
         stats,
         planner_stats,
         snapshot_source,
@@ -6084,8 +6100,11 @@ fn build_range_checkpoint_runtime(
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint service: {error}")))?;
     let planner_stats = service.planner_stats();
+    // Poll the configured thresholds off the commit path so a node that never
+    // splits still trims its `retention.ms=-1` WAL topic.
+    let handle = Arc::new(service).spawn_with_source(Arc::clone(&snapshot_source));
     Ok(Some(StartedCheckpointRuntime {
-        handle: Arc::new(service).spawn(),
+        handle,
         stats,
         planner_stats,
         snapshot_source,
@@ -8274,6 +8293,33 @@ mod tests {
         .expect("config");
         let (multi, _handles) = crabka_gres_ranges::MultiRangeTenant::start(config).expect("multi");
         assert_runtime_session_v2(RuntimeEngine::Multi(Box::new(multi)).connect()).await;
+    }
+
+    #[tokio::test]
+    async fn runtime_session_forwards_the_notification_stream_with_its_pid() {
+        use assert2::assert;
+
+        let mut session = RuntimeEngine::Single(Box::new(SqlEngine::new())).connect_with_pid(4242);
+        let mut notifications = session
+            .take_notifications()
+            .expect("the single-engine session hands over its notification stream");
+
+        session.simple_query("LISTEN news").await.expect("listen");
+        session
+            .simple_query("NOTIFY news, 'hello'")
+            .await
+            .expect("notify");
+
+        assert!(
+            notifications.try_recv()
+                == Ok(Notification {
+                    process_id: 4242,
+                    channel: "news".to_string(),
+                    payload: "hello".to_string(),
+                })
+        );
+        // The receiver is handed over once: the wire loop owns it from then on.
+        assert!(session.take_notifications().is_none());
     }
 
     #[tokio::test]

@@ -164,6 +164,21 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         expected_statement: "Truncate",
     },
     CommandProbe {
+        command: "LISTEN",
+        sql: "LISTEN parser_commands_channel",
+        expected_statement: "Listen",
+    },
+    CommandProbe {
+        command: "NOTIFY",
+        sql: "NOTIFY parser_commands_channel, 'parser commands payload'",
+        expected_statement: "Notify",
+    },
+    CommandProbe {
+        command: "UNLISTEN",
+        sql: "UNLISTEN parser_commands_channel",
+        expected_statement: "Unlisten",
+    },
+    CommandProbe {
         command: "VACUUM",
         sql: "VACUUM ANALYZE parser_commands_probe",
         expected_statement: "Vacuum",
@@ -464,6 +479,9 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::Insert { .. } => "Insert",
         Statement::Truncate { .. } => "Truncate",
         Statement::Vacuum => "Vacuum",
+        Statement::Listen { .. } => "Listen",
+        Statement::Notify { .. } => "Notify",
+        Statement::Unlisten { .. } => "Unlisten",
         Statement::Query(_) => "Query",
         Statement::Begin { .. } => "Begin",
         Statement::Commit => "Commit",
@@ -503,16 +521,17 @@ fn statement_shape(statement: &Statement) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
 
     #[test]
     fn report_contains_each_matrix_command_and_uses_the_stable_format() {
         let report = parser_command_report().expect("all parser command probes must parse");
 
-        assert_eq!(report.format_version, PARSER_COMMAND_REPORT_FORMAT_VERSION);
-        assert_eq!(
-            report.commands.len(),
-            94,
+        assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
+        assert!(
+            report.commands.len() == 97,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -539,7 +558,7 @@ mod tests {
             ("CREATE USER u", CommandIdentity::CreateUser),
         ] {
             let parsed = parse_with_command_identities(sql).expect(sql);
-            assert_eq!(parsed[0].1, identity);
+            assert!(parsed[0].1 == identity);
         }
     }
 
@@ -548,16 +567,16 @@ mod tests {
         let report = parser_command_report().expect("all parser command probes must parse");
         let json = serde_json::to_value(report).expect("report must serialize");
 
-        assert_eq!(json["format_version"], PARSER_COMMAND_REPORT_FORMAT_VERSION);
-        assert_eq!(json["commands"][0], "ABORT");
-        assert_eq!(json["probes"].as_array().map(Vec::len), Some(94));
+        assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
+        assert!(json["commands"][0] == "ABORT");
+        assert!(json["probes"].as_array().map(Vec::len) == Some(97));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")
             .iter()
             .find(|probe| probe["command"] == "CREATE DATABASE")
             .expect("CREATE DATABASE probe");
-        assert_eq!(refusal["behavior"], "refuse");
-        assert_eq!(refusal["sqlstate"], "0A000");
+        assert!(refusal["behavior"] == "refuse");
+        assert!(refusal["sqlstate"] == "0A000");
     }
 }
