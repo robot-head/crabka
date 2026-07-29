@@ -3900,3 +3900,62 @@ The combined all-target test gate passed for `crabka-blockstore`,
 warnings denied, nightly formatting, one help entry, default and overridden
 Compose rendering, Compose validation, diff hygiene, scanner stability, and
 lockfile-diff inspection also passed. `Cargo.lock` is unchanged.
+
+## Observability WAL Fetch Limits
+
+The traces and profiles WAL consumers now preserve their existing total and
+per-partition fetch defaults of 2,097,152 and 262,144 bytes while accepting:
+
+```text
+--wal-fetch-max-bytes
+--wal-fetch-partition-max-bytes
+CRABKA_TRACES_WAL_FETCH_MAX_BYTES
+CRABKA_TRACES_WAL_FETCH_PARTITION_MAX_BYTES
+CRABKA_PROFILES_WAL_FETCH_MAX_BYTES
+CRABKA_PROFILES_WAL_FETCH_PARTITION_MAX_BYTES
+```
+
+Command-line values win over environment values. Shared
+`ConsumerFetchMaxBytes` and `ConsumerFetchPartitionMaxBytes` newtypes use
+`refined_type::rule::GreaterI32<0>`, rejecting zero, malformed, negative, and
+primitive-overflow values before network I/O. They convert the validated
+protocol integer to `ByteSize` only at the consumer-builder boundary.
+
+The traces binary routes both settings through its common WAL-consumer helper,
+covering block builder, live store, embedded-querier live store, and metrics
+generator consumers. The profiles binary routes them through
+`BlockBuilderConfig`. The consumer library's independent 50-MiB total and
+1-MiB per-partition defaults remain unchanged.
+
+The checked-in deployment owners are `traces-block-builder` and
+`profiles-block-builder` in `demo/observability/docker-compose.yml`. No other
+demo service receives unused entries. No CRD or operator field was added
+because these services are not managed by an existing repository CRD.
+
+After implementation and before this section was appended,
+`tools/audit-runtime-values.sh` reported 5,533 lines across 1,038 files. Its
+affected-package subsets contained 92 client-consumer lines, 114 traces lines,
+63 profiles lines, and 10 observability-demo-app lines.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  'WAL_FETCH_(MAX|PARTITION_MAX)|ConsumerFetch(Max|PartitionMax)Bytes|wal_fetch_(max|partition_max)_bytes|wal-fetch-(max|partition-max)-bytes' \
+  crates \
+  demo \
+  docs/configuration-audit.md
+```
+
+reported 115 lines. The mutually exclusive classification is 56 production
+configuration-flow references, four deployment-flow references, 44 test
+references, 11 adjacent existing share-consumer or audit references matched by
+the broad expression, and zero unresolved references:
+`56 + 4 + 44 + 11 + 0 = 115`.
+
+The combined all-target test gate passed for `crabka-client-consumer`,
+`crabka-traces`, `crabka-profiles`, and `observability-demo-app`. Strict
+combined Clippy with warnings denied, nightly formatting, one help entry per
+setting in each service binary, default and overridden Compose rendering,
+Compose validation, diff hygiene, scanner stability, and lockfile-diff
+inspection also passed. `Cargo.lock` is unchanged.
