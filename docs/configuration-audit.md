@@ -26,7 +26,8 @@ applicable rule below:
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
   `docgen`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`, `logfmt`,
-  `logql`, `operator`, `protocol-codegen`, `schema-registry`.
+  `logql`, `operator`, `protocol-codegen`, `remote-storage`,
+  `schema-registry`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `connect`, `connect-postgres`, `gres`, `gres-activator`,
   `gres-balancer`,
@@ -37,8 +38,7 @@ applicable rule below:
   `object-store`, `observability`, `observability-demo-app`,
   `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgparser`, `pgtypes`, `pgwire`,
   `playground`, `pprof`, `profiles`, `promql`, `protocol`, `raft`,
-  `rebalancer`, `records-legacy`,
-  `remote-storage`, `remote-storage-topic`, `replicator`,
+  `rebalancer`, `records-legacy`, `remote-storage-topic`, `replicator`,
   `schema-serde`, `security`, `telemetry`, `throttle`,
   `traceql`, `traces`, `verified`, and `voters`.
 
@@ -4384,3 +4384,18 @@ values owns production configuration.
 No CLI, environment variable, or CRD field is warranted. The package library
 target compiled and ran successfully, and strict all-target Clippy compiled
 the complete test and example surface.
+
+## Remote Storage
+
+The `remote-storage` owner has one scanner row, an expected byte cap in an
+error-format test. Production multipart thresholds and chunk sizes already
+come from the shared S3/GCS object-store configuration, flow through broker
+file configuration and Kafka CRD fields, and become dimensioned `ByteSize`
+values at the upload boundary.
+
+Object-key names, index suffixes, KIP-405 state transitions, and wire
+sentinels are compatibility contracts. No unresolved deployment policy remains
+in this crate.
+
+The current remote-storage all-target gate passed 60 tests, including
+configured multipart paths for S3 and GCS, and strict all-target Clippy passed.
