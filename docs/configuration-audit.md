@@ -25,10 +25,10 @@ applicable rule below:
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
-  `grpc-gateway`, `ids`, `logfmt`, `operator`, `schema-registry`.
+  `docgen`, `grpc-gateway`, `ids`, `logfmt`, `operator`, `schema-registry`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
-  `client-streams`, `connect`, `connect-postgres`, `docgen`, `gres`,
-  `gres-activator`, `gres-balancer`,
+  `client-streams`, `connect`, `connect-postgres`, `gres`, `gres-activator`,
+  `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
   `integration-tests`, `kafka-tap`, `kraft-core`, `log`, `log-iobench`,
@@ -4322,3 +4322,19 @@ configuration surface is warranted.
 
 The current IDs all-target gate passed eight tests, including wire-boundary
 round trips, and strict all-target Clippy passed.
+
+## Docgen
+
+The `docgen` owner has 14 scanner rows. Eleven are canonical Kafka protocol or
+KIP documentation identities, two are static explanatory text blocks, and one
+is the recursion safety bound used while rendering cyclic JSON Schema
+references. The recursion bound controls generated-document traversal rather
+than deployed runtime behavior.
+
+The command already exposes its input directories as CLI arguments with
+documented defaults. Page weights, table columns, and scenario node labels are
+website structure and generated content. No environment variable or CRD field
+is warranted for this build-time tool.
+
+The current docgen all-target gate passed 20 tests, including cyclic-schema
+termination and generated-tree output, and strict all-target Clippy passed.
