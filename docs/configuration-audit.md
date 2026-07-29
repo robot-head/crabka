@@ -26,13 +26,14 @@ applicable rule below:
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
   `connect-postgres`,
-  `docgen`, `gres-activator`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`,
+  `docgen`, `gres-activator`, `gres-control`, `grpc-gateway`, `ids`,
+  `integration-tests`, `kafka-tap`,
   `log-iobench`, `logfmt`, `logql`, `object-store`, `operator`,
   `protocol-codegen`, `remote-storage`, `pgparser`, `playground`,
   `schema-registry`, `throttle`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `connect`, `gres`, `gres-balancer`,
-  `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
+  `gres-conformance`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
   `kraft-core`, `log`, `metadata`, `metrics`,
   `metrics-service`, `observability`, `observability-demo-app`,
@@ -4522,3 +4523,22 @@ environment variable, or CRD field is warranted.
 
 The current all-target gate passed 13 unit and lifecycle tests, and strict
 all-target Clippy passed.
+
+## Gres Control Completion
+
+The `gres-control` owner has 30 scanner rows. Its production defaults for
+checkpoint triggers, checkpoint maintenance, idle-suspend polling, range-zero
+follower polling and rebuild backoff, registry operations, and PgDog behavior
+already feed exposed Gres CLI/environment or CRD policy. Their dimensioned
+values use `Time` and `ByteSize`; validated counts and integral boundaries use
+`refined_type`.
+
+The remaining constants are stable wire, storage, topology, or compatibility
+contracts: Kafka protocol codes and transactional identities, registry envelope
+versions and typed keys, PgDog's minimum accepted timeout, and its documented
+healthcheck-disable sentinel required by scale-to-zero. Test deadlines, test
+polls, golden fixtures, and exact collection preallocation are not deployment
+policy.
+
+No additional CLI, environment variable, or CRD field is warranted. The
+current all-target gate passed 84 tests, and strict all-target Clippy passed.
