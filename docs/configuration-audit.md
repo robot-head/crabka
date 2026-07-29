@@ -29,8 +29,8 @@ applicable rule below:
   `docgen`, `gres`, `gres-activator`, `gres-control`, `grpc-gateway`, `ids`,
   `integration-tests`, `kafka-tap`,
   `log-iobench`, `logfmt`, `logql`, `metadata`, `object-store`, `operator`,
-  `pgcatalog`, `pgmvcc`, `protocol-codegen`, `remote-storage`, `pgparser`,
-  `playground`,
+  `pgcatalog`, `pgmvcc`, `pgtypes`, `protocol-codegen`, `remote-storage`,
+  `pgparser`, `playground`,
   `schema-registry`, `throttle`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-streams`,
   `gres-balancer`,
@@ -38,7 +38,7 @@ applicable rule below:
   `gres-ranges`, `gres-substrate`,
   `kraft-core`, `log`, `metrics`,
   `metrics-service`, `observability`, `observability-demo-app`,
-  `pgexec`, `pgkv`, `pgtypes`, `pgwire`,
+  `pgexec`, `pgkv`, `pgwire`,
   `pprof`, `profiles`, `promql`, `protocol`, `raft`,
   `rebalancer`, `records-legacy`, `remote-storage-topic`, `replicator`,
   `schema-serde`, `security`, `telemetry`,
@@ -4650,3 +4650,18 @@ collection accepts its work cap from the caller and owns no hidden timing,
 queue, retry, or resource policy. No CLI, environment variable, or CRD field
 is warranted. The current all-target gate passed 54 visibility, serialization,
 and reclamation tests, and strict all-target Clippy passed.
+
+## PostgreSQL Types
+
+The `pgtypes` owner has 50 scanner rows. Its production constants are
+PostgreSQL compatibility and arithmetic contracts: type and array OIDs,
+calendar and epoch conversions, numeric storage/display bounds, JSONB's binary
+version, and fixed formatting vocabularies.
+
+The JSONB recursion limit is a process-safety boundary tested against deeply
+nested input; allowing operators to raise it would make stack safety tunable.
+Reported capacities are exact or input-sized preallocation. The crate owns no
+runtime timing, queue, retry, or resource policy, so no CLI, environment
+variable, or CRD field is warranted. The current all-target gate passed 218
+tests; two external-PostgreSQL oracle tests were explicitly ignored. Strict
+all-target Clippy passed.
