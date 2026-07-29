@@ -25,15 +25,15 @@ applicable rule below:
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
-  `docgen`, `grpc-gateway`, `ids`, `logfmt`, `operator`, `protocol-codegen`,
-  `schema-registry`.
+  `docgen`, `grpc-gateway`, `ids`, `kafka-tap`, `logfmt`, `logql`, `operator`,
+  `protocol-codegen`, `schema-registry`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `connect`, `connect-postgres`, `gres`, `gres-activator`,
   `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
-  `integration-tests`, `kafka-tap`, `kraft-core`, `log`, `log-iobench`,
-  `logfmt`, `logql`, `metadata`, `metrics`, `metrics-service`,
+  `integration-tests`, `kraft-core`, `log`, `log-iobench`, `metadata`,
+  `metrics`, `metrics-service`,
   `object-store`, `observability`, `observability-demo-app`,
   `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgparser`, `pgtypes`, `pgwire`,
   `playground`, `pprof`, `profiles`, `promql`, `protocol`, `raft`,
@@ -4356,3 +4356,19 @@ non-deterministic, so no setting is warranted.
 The current protocol-codegen all-target gate passed 35 tests, including every
 vendored schema parse, validation, parity, snapshot, and compile check. Strict
 all-target Clippy passed.
+
+## Kafka Tap and LogQL
+
+The `kafka-tap` owner had one scanner row: an arbitrary one-hour sleep repeated
+forever solely to keep its main thread alive. It now parks the thread instead,
+removing a fake timing policy without adding a useless setting.
+
+The `logql` owner has one scanner row, the reserved internal label used to
+carry unwrapped sample values between parsing and evaluation. Its other
+numeric literals implement grammar, decimal arithmetic, unit conversion, and
+template formatting contracts or are test inputs. The crate owns no runtime
+timing, capacity, retry, or resource policy.
+
+The current combined all-target gate passed three Kafka Tap tests and 258
+LogQL tests. Strict all-target Clippy, nightly formatting, a zero-row Kafka Tap
+scanner check, and diff hygiene passed.
