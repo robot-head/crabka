@@ -593,6 +593,57 @@ mod tests {
         hasher.finish()
     }
 
+    /// The equal-values-hash-equally test cannot distinguish a correct `Hash`
+    /// from a constant one, so pin that the hash actually discriminates.
+    /// Collisions are permitted by the `Hash` contract, but a handful of
+    /// clearly-different values colliding would mean the impl stopped reading
+    /// its input — the same check the `Datum` instant test already makes.
+    #[test]
+    fn hashing_discriminates_between_distinct_values() {
+        let distinct = [
+            JsonbValue::Null,
+            JsonbValue::Bool(true),
+            JsonbValue::Bool(false),
+            num("1"),
+            num("2"),
+            JsonbValue::String("a".to_owned()),
+            JsonbValue::String("b".to_owned()),
+            JsonbValue::Array(vec![num("1")]),
+            JsonbValue::Object(vec![("a".to_owned(), num("1"))]),
+        ];
+        for (i, left) in distinct.iter().enumerate() {
+            for right in &distinct[i + 1..] {
+                assert!(hash_of(left) != hash_of(right), "{left:?} vs {right:?}");
+            }
+        }
+        // …while equal values still agree, including across numeric scale.
+        assert!(hash_of(&num("1.0")) == hash_of(&num("1.00")));
+    }
+
+    /// `PartialOrd` delegates to `Ord`, but every caller in the crate reaches
+    /// for `cmp` directly, so nothing else exercises the delegation or the
+    /// comparison operators it powers.
+    #[test]
+    fn partial_ord_agrees_with_ord() {
+        let cases = [
+            (JsonbValue::Null, JsonbValue::Null),
+            (JsonbValue::Null, JsonbValue::String("a".to_owned())),
+            (num("1"), num("2")),
+            (JsonbValue::Bool(false), JsonbValue::Bool(true)),
+            (JsonbValue::Array(vec![]), JsonbValue::Object(vec![])),
+        ];
+        for (left, right) in cases {
+            assert!(
+                left.partial_cmp(&right) == Some(left.cmp(&right)),
+                "{left:?} vs {right:?}"
+            );
+        }
+        // The operators PartialOrd powers, which a `None` would silently break.
+        assert!(JsonbValue::Null < JsonbValue::String(String::new()));
+        assert!(num("2") > num("1"));
+        assert!(JsonbValue::Null <= JsonbValue::Null);
+    }
+
     #[test]
     fn parses_the_json_value_grammar() {
         let cases: &[(&str, JsonbValue)] = &[
@@ -658,6 +709,179 @@ mod tests {
         ] {
             assert!(parse(input).is_err(), "expected {input:?} to be rejected");
         }
+    }
+
+    /// Every two-character escape RFC 8259 defines, decoded and re-rendered.
+    #[test]
+    fn two_character_escapes_decode_and_round_trip() {
+        // (input, decoded scalar, canonical rendering)
+        let cases: &[(&str, &str, &str)] = &[
+            (r#""\"""#, "\"", r#""\"""#),
+            (r#""\\""#, "\\", r#""\\""#),
+            // `/` may be escaped on input but is never escaped on output.
+            (r#""\/""#, "/", r#""/""#),
+            (r#""\b""#, "\u{8}", r#""\b""#),
+            (r#""\f""#, "\u{c}", r#""\f""#),
+            (r#""\n""#, "\n", r#""\n""#),
+            (r#""\r""#, "\r", r#""\r""#),
+            (r#""\t""#, "\t", r#""\t""#),
+        ];
+        for (input, decoded, rendered) in cases {
+            let value = parse(input).expect("parse");
+            assert!(
+                value == JsonbValue::String((*decoded).to_owned()),
+                "decoding {input}"
+            );
+            assert!(value.to_text() == *rendered, "rendering {input}");
+        }
+        // All of them together, inside one string, in one order-sensitive pass.
+        assert!(
+            parse(r#""a\bb\fc\rd""#).expect("parse")
+                == JsonbValue::String("a\u{8}b\u{c}c\rd".to_owned())
+        );
+    }
+
+    /// Each of `units` written as a `\uXXXX` escape, in the requested
+    /// hex-digit case. Built rather than spelled out so the tests below can
+    /// name code units directly and cover both spellings.
+    fn escapes(units: &[u16], upper: bool) -> String {
+        units
+            .iter()
+            .map(|unit| {
+                if upper {
+                    format!("\\u{unit:04X}")
+                } else {
+                    format!("\\u{unit:04x}")
+                }
+            })
+            .collect()
+    }
+
+    /// Wrap `body` in JSON string quotes verbatim, escaping nothing.
+    fn quoted(body: &str) -> String {
+        format!("\"{body}\"")
+    }
+
+    /// `\uXXXX`, including the surrogate-pair arithmetic. A pair decodes to
+    /// `0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00)`; each case below picks
+    /// code units where every operand of that expression changes the result.
+    #[test]
+    fn unicode_escapes_decode_including_surrogate_pairs() {
+        // (UTF-16 code units of the escape sequence, decoded content)
+        let cases: &[(&[u16], &str)] = &[
+            (&[0x0041], "A"),
+            (&[0x0020], " "),
+            (&[0x00e9], "\u{e9}"),
+            (&[0xfffd], "\u{fffd}"),
+            (&[0xffff], "\u{ffff}"),
+            // Surrogate pairs: the lowest astral scalar, U+1F600, and the
+            // highest scalar there is.
+            (&[0xd800, 0xdc00], "\u{10000}"),
+            (&[0xd83d, 0xde00], "\u{1f600}"),
+            (&[0xdbff, 0xdfff], "\u{10ffff}"),
+            // Two pairs back to back, so no half leaks into the next escape.
+            (&[0xd83d, 0xde00, 0xd83d, 0xde00], "\u{1f600}\u{1f600}"),
+        ];
+        for (units, expected) in cases {
+            for upper in [false, true] {
+                let input = quoted(&escapes(units, upper));
+                let value = parse(&input).expect("parse");
+                assert!(
+                    value == JsonbValue::String((*expected).to_owned()),
+                    "decoding {input}"
+                );
+            }
+        }
+        // An escape sits between the raw characters around it, and non-ASCII is
+        // re-rendered raw rather than re-escaped.
+        let mixed = quoted(&format!("x{}y", escapes(&[0xd83d, 0xde00], false)));
+        let value = parse(&mixed).expect("parse");
+        assert!(value == JsonbValue::String("x\u{1f600}y".to_owned()));
+        assert!(value.to_text() == "\"x\u{1f600}y\"");
+    }
+
+    #[test]
+    fn rejects_malformed_unicode_escapes() {
+        let high = escapes(&[0xd83d], false);
+        let inputs = [
+            // Truncated, and non-hex digits.
+            quoted("\\u12"),
+            quoted("\\u00g0"),
+            quoted("\\u 041"),
+            // A lone high surrogate: at the end of the string, before raw text,
+            // and before an escape that is not `\u`.
+            quoted(&high),
+            quoted(&format!("{high}A")),
+            quoted(&format!("{high}\\n")),
+            // A high surrogate followed by a non-surrogate `\u` escape, and by
+            // a second high surrogate.
+            quoted(&format!("{high}{}", escapes(&[0x0041], false))),
+            quoted(&format!("{high}{high}")),
+            // Lone low surrogates.
+            quoted(&escapes(&[0xdc00], false)),
+            quoted(&escapes(&[0xde00], false)),
+            // NUL cannot be stored in `text`.
+            quoted(&escapes(&[0x0000], false)),
+        ];
+        for input in &inputs {
+            assert!(parse(input).is_err(), "expected {input:?} to be rejected");
+        }
+    }
+
+    /// The string scanner walks raw UTF-8 by hand (one lead byte plus its
+    /// continuation bytes), so multi-byte scalars must survive intact.
+    #[test]
+    fn raw_multi_byte_utf8_in_strings_is_preserved() {
+        let cases: &[(&str, &str)] = &[
+            ("\"\u{e9}\"", "\u{e9}"),
+            ("\"na\u{ef}ve caf\u{e9}\"", "na\u{ef}ve caf\u{e9}"),
+            ("\"\u{65e5}\u{672c}\u{8a9e}\"", "\u{65e5}\u{672c}\u{8a9e}"),
+            ("\"\u{1f600} emoji\"", "\u{1f600} emoji"),
+            ("\"a\u{e9}\u{1f600}b\"", "a\u{e9}\u{1f600}b"),
+        ];
+        for (input, expected) in cases {
+            let value = parse(input).expect("parse");
+            assert!(
+                value == JsonbValue::String((*expected).to_owned()),
+                "decoding {input}"
+            );
+            assert!(value.to_text() == *input, "non-ASCII is emitted raw");
+        }
+        // Object keys go through the same scanner.
+        let obj = parse("{\"\u{e9}\u{1f600}\": 1}").expect("parse");
+        assert!(obj.object_get("\u{e9}\u{1f600}") == Some(&num("1")));
+    }
+
+    /// C0 controls without a shorthand escape are written `\u00XX`; U+0020 and
+    /// everything above it is emitted raw.
+    #[test]
+    fn control_character_escaping_stops_at_u0020() {
+        for unit in [0x0000_u16, 0x0001, 0x001e, 0x001f] {
+            let ch = char::from_u32(u32::from(unit)).expect("scalar value");
+            let text = JsonbValue::String(ch.to_string()).to_text();
+            assert!(
+                text == quoted(&escapes(&[unit], false)),
+                "U+{unit:04X} rendered as {text:?}"
+            );
+        }
+        for ch in [' ', '!', '~'] {
+            let text = JsonbValue::String(ch.to_string()).to_text();
+            assert!(text == format!("\"{ch}\""), "{ch:?} rendered as {text:?}");
+        }
+        // Controls that do have a shorthand escape keep it.
+        assert!(JsonbValue::String("\u{8}".to_owned()).to_text() == r#""\b""#);
+        // Escaped controls survive a round trip through the parser.
+        let text = JsonbValue::String("\u{1f}".to_owned()).to_text();
+        assert!(parse(&text).expect("reparse") == JsonbValue::String("\u{1f}".to_owned()));
+    }
+
+    #[test]
+    fn display_renders_the_canonical_text() {
+        let value = parse(r#"{"b": 1, "a": [null, "x"]}"#).expect("parse");
+        assert!(value.to_string() == r#"{"a": [null, "x"], "b": 1}"#);
+        assert!(format!("{value}") == value.to_text());
+        assert!(JsonbValue::Null.to_string() == "null");
+        assert!(format!("{}", JsonbValue::String("\t".to_owned())) == r#""\t""#);
     }
 
     #[test]
@@ -825,6 +1049,25 @@ mod tests {
         // Just inside the limit still parses.
         let ok = format!("{}{}", "[".repeat(100), "]".repeat(100));
         assert!(parse(&ok).is_ok());
+    }
+
+    /// The depth guard is exact: the deepest accepted value nests to
+    /// [`MAX_DEPTH`], one more is 54001. Objects count towards it like arrays.
+    #[test]
+    fn nesting_is_accepted_up_to_max_depth_and_rejected_one_past_it() {
+        // `n` nested arrays put the innermost value at depth `n - 1`; `n`
+        // nested objects put their innermost member value at depth `n`.
+        let arrays = |n: usize| format!("{}{}", "[".repeat(n), "]".repeat(n));
+        let objects = |n: usize| format!("{}1{}", r#"{"a":"#.repeat(n), "}".repeat(n));
+        let limit = MAX_DEPTH as usize;
+
+        assert!(parse(&arrays(limit + 1)).is_ok(), "arrays at the limit");
+        assert!(parse(&objects(limit)).is_ok(), "objects at the limit");
+
+        let array_err = parse(&arrays(limit + 2)).expect_err("arrays one too deep");
+        assert!(array_err.sqlstate() == "54001");
+        let object_err = parse(&objects(limit + 1)).expect_err("objects one too deep");
+        assert!(object_err.sqlstate() == "54001");
     }
 
     #[test]
