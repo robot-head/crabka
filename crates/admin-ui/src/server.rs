@@ -10,6 +10,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, post},
 };
+use crabka_units::prelude::*;
 use serde::de::DeserializeOwned;
 
 use crate::{
@@ -40,7 +41,7 @@ pub struct AdminRouterState<F, B = AdminClientLoginBroker> {
 impl AppState {
     #[must_use]
     pub fn new(cfg: AdminUiConfig) -> Self {
-        let session_ttl = cfg.session_ttl.duration();
+        let session_ttl = cfg.session_ttl.to_std();
 
         Self {
             cfg: Arc::new(cfg),
@@ -504,7 +505,7 @@ where
 
     let body = to_bytes(
         request.into_body(),
-        state.app.cfg.mutation_json_body_limit_bytes.into_value(),
+        state.app.cfg.mutation_json_body_limit.bytes_usize(),
     )
     .await
     .map_err(|_| {

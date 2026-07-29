@@ -14,7 +14,7 @@ use axum::{
 };
 use crabka_admin_ui::{
     auth::LoginBroker,
-    config::{AdminUiConfig, MutationJsonBodyLimitBytes},
+    config::AdminUiConfig,
     dto::{
         AclRequestDto, AlterConfigRequestDto, CreatePartitionsRequestDto, CreateTopicRequestDto,
         DeleteTopicRequestDto, GroupRow, LogDirMoveRequestDto, LogDirRow, QuotaDeleteDto,
@@ -26,6 +26,7 @@ use crabka_admin_ui::{
     session::{SessionRecord, SessionStore},
     views::{ReadRouteState, Route, RoutePage, render_page, render_route_html},
 };
+use crabka_units::bytes;
 use tower::ServiceExt as _;
 
 fn smoke_app() -> axum::Router {
@@ -370,8 +371,7 @@ async fn authenticated_mutation_routes_share_the_configured_body_limit() {
     let session_id = sessions.create_user("alice", "User:alice");
     let state = AppState::from_parts(
         Arc::new(AdminUiConfig {
-            mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes::new(16)
-                .expect("test limit is valid"),
+            mutation_json_body_limit: bytes(16),
             ..AdminUiConfig::default()
         }),
         sessions,

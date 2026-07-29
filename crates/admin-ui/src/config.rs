@@ -1,176 +1,53 @@
 //! Runtime configuration for one admin UI instance.
 
 use std::{
-    fmt,
     net::SocketAddr,
     path::PathBuf,
-    str::FromStr,
     time::{Duration, Instant},
 };
 
 use clap::Parser;
 use crabka_client_core::security::TlsConnectorConfig;
 use crabka_security::ListenerProtocol;
-use refined_type::rule::{GreaterI32, GreaterU64, GreaterUsize};
+use crabka_units::{parse, prelude::*};
 use thiserror::Error;
 
 /// Default maximum size of an authenticated mutation JSON body.
-pub const DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES: usize = 1_048_576;
-
-/// A positive maximum size for an authenticated mutation JSON body.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MutationJsonBodyLimitBytes(usize);
-
-impl MutationJsonBodyLimitBytes {
-    /// Validate a mutation JSON body limit.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `value` is zero.
-    pub fn new(value: usize) -> Result<Self, String> {
-        GreaterUsize::<0>::new(value)
-            .map(|value| Self(value.into_value()))
-            .map_err(|error| error.to_string())
-    }
-
-    /// Return the validated byte limit.
-    #[must_use]
-    pub const fn into_value(self) -> usize {
-        self.0
-    }
-}
-
-impl Default for MutationJsonBodyLimitBytes {
-    fn default() -> Self {
-        Self::new(DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES)
-            .expect("default mutation JSON body limit is positive")
-    }
-}
-
-impl fmt::Display for MutationJsonBodyLimitBytes {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl FromStr for MutationJsonBodyLimitBytes {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .parse()
-            .map_err(|error: std::num::ParseIntError| error.to_string())
-            .and_then(Self::new)
-    }
-}
+pub const DEFAULT_MUTATION_JSON_BODY_LIMIT: ByteSize = mebibytes(1);
 
 /// Default server-side lifetime for an authenticated admin UI session.
-pub const DEFAULT_SESSION_TTL_SECONDS: u64 = 28_800;
-
-/// A positive session lifetime representable by the platform monotonic clock.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SessionTtlSeconds(u64);
-
-impl SessionTtlSeconds {
-    /// Validate an admin UI session lifetime.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `value` is zero or cannot be added to the
-    /// platform monotonic clock.
-    pub fn new(value: u64) -> Result<Self, String> {
-        let value = GreaterU64::<0>::new(value)
-            .map(refined_type::Refined::into_value)
-            .map_err(|error| error.to_string())?;
-
-        if Instant::now()
-            .checked_add(Duration::from_secs(value))
-            .is_none()
-        {
-            return Err("session TTL exceeds the platform monotonic clock".to_string());
-        }
-
-        Ok(Self(value))
-    }
-
-    /// Return the validated session lifetime.
-    #[must_use]
-    pub const fn duration(self) -> Duration {
-        Duration::from_secs(self.0)
-    }
-}
-
-impl Default for SessionTtlSeconds {
-    fn default() -> Self {
-        Self::new(DEFAULT_SESSION_TTL_SECONDS)
-            .expect("default session TTL is positive and representable")
-    }
-}
-
-impl fmt::Display for SessionTtlSeconds {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl FromStr for SessionTtlSeconds {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .parse()
-            .map_err(|error: std::num::ParseIntError| error.to_string())
-            .and_then(Self::new)
-    }
-}
+pub const DEFAULT_SESSION_TTL: Time = hours(8);
 
 /// Default Kafka request timeout for admin UI topic mutations.
-pub const DEFAULT_TOPIC_MUTATION_TIMEOUT_MS: i32 = 30_000;
+pub const DEFAULT_TOPIC_MUTATION_TIMEOUT: Time = secs(30);
 
-/// A positive Kafka request timeout for admin UI topic mutations.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TopicMutationTimeoutMs(i32);
-
-impl TopicMutationTimeoutMs {
-    /// Validate a topic-mutation request timeout.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `value` is not positive.
-    pub fn new(value: i32) -> Result<Self, String> {
-        GreaterI32::<0>::new(value)
-            .map(|value| Self(value.into_value()))
-            .map_err(|error| error.to_string())
-    }
-
-    /// Return the validated timeout in milliseconds.
-    #[must_use]
-    pub const fn into_value(self) -> i32 {
-        self.0
+fn parse_body_limit(input: &str) -> Result<ByteSize, String> {
+    let value = parse::positive_byte_size(input).map_err(|error| error.to_string())?;
+    let lowered = value.bytes_usize();
+    if u64::try_from(lowered).is_ok_and(|bytes| ByteSize::from_bytes(bytes) == value) {
+        Ok(value)
+    } else {
+        Err("body limit must be a whole byte count representable by usize".to_string())
     }
 }
 
-impl Default for TopicMutationTimeoutMs {
-    fn default() -> Self {
-        Self::new(DEFAULT_TOPIC_MUTATION_TIMEOUT_MS)
-            .expect("default topic-mutation timeout is positive")
-    }
+fn parse_session_ttl(input: &str) -> Result<Time, String> {
+    let value = parse::positive_time(input).map_err(|error| error.to_string())?;
+    let duration =
+        Duration::try_from_secs_f64(value.secs_f64()).map_err(|error| error.to_string())?;
+    Instant::now()
+        .checked_add(duration)
+        .map(|_| value)
+        .ok_or_else(|| "session TTL exceeds the platform monotonic clock".to_string())
 }
 
-impl fmt::Display for TopicMutationTimeoutMs {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(formatter)
-    }
-}
-
-impl FromStr for TopicMutationTimeoutMs {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .parse()
-            .map_err(|error: std::num::ParseIntError| error.to_string())
-            .and_then(Self::new)
+fn parse_topic_mutation_timeout(input: &str) -> Result<Time, String> {
+    let value = parse::positive_time(input).map_err(|error| error.to_string())?;
+    let millis = value.secs_f64() * 1_000.0;
+    if millis.fract() == 0.0 && millis <= f64::from(i32::MAX) {
+        Ok(value)
+    } else {
+        Err("topic mutation timeout must be a whole i32 millisecond count".to_string())
     }
 }
 
@@ -178,29 +55,32 @@ impl FromStr for TopicMutationTimeoutMs {
 #[derive(Debug, Clone, Parser)]
 #[command(name = "crabka-admin-ui")]
 pub struct AdminUiRuntimeArgs {
-    /// Maximum authenticated mutation JSON body size in bytes.
+    /// Maximum authenticated mutation JSON body size.
     #[arg(
         long,
-        env = "CRABKA_ADMIN_UI_MUTATION_JSON_BODY_LIMIT_BYTES",
-        default_value_t = MutationJsonBodyLimitBytes::default()
+        env = "CRABKA_ADMIN_UI_MUTATION_JSON_BODY_LIMIT",
+        default_value = "1MiB",
+        value_parser = parse_body_limit
     )]
-    pub mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes,
+    pub mutation_json_body_limit: ByteSize,
 
-    /// Server-side lifetime for an authenticated session, in seconds.
+    /// Server-side lifetime for an authenticated session.
     #[arg(
-        long = "session-ttl-seconds",
-        env = "CRABKA_ADMIN_UI_SESSION_TTL_SECONDS",
-        default_value_t = SessionTtlSeconds::default()
+        long,
+        env = "CRABKA_ADMIN_UI_SESSION_TTL",
+        default_value = "8h",
+        value_parser = parse_session_ttl
     )]
-    pub session_ttl: SessionTtlSeconds,
+    pub session_ttl: Time,
 
-    /// Kafka request timeout for topic mutations, in milliseconds.
+    /// Kafka request timeout for topic mutations.
     #[arg(
-        long = "topic-mutation-timeout-ms",
-        env = "CRABKA_ADMIN_UI_TOPIC_MUTATION_TIMEOUT_MS",
-        default_value_t = TopicMutationTimeoutMs::default()
+        long,
+        env = "CRABKA_ADMIN_UI_TOPIC_MUTATION_TIMEOUT",
+        default_value = "30s",
+        value_parser = parse_topic_mutation_timeout
     )]
-    pub topic_mutation_timeout_ms: TopicMutationTimeoutMs,
+    pub topic_mutation_timeout: Time,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,15 +93,15 @@ pub enum BrokerSecurityConfig {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AdminUiConfig {
     pub listen_addr: SocketAddr,
     pub cluster_name: String,
     pub bootstrap_addrs: Vec<String>,
     pub security: BrokerSecurityConfig,
-    pub session_ttl: SessionTtlSeconds,
-    pub mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes,
-    pub topic_mutation_timeout_ms: TopicMutationTimeoutMs,
+    pub session_ttl: Time,
+    pub mutation_json_body_limit: ByteSize,
+    pub topic_mutation_timeout: Time,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -249,9 +129,9 @@ impl Default for AdminUiConfig {
             cluster_name: "local".to_string(),
             bootstrap_addrs: Vec::new(),
             security: BrokerSecurityConfig::SaslPlaintext,
-            session_ttl: SessionTtlSeconds::default(),
-            mutation_json_body_limit_bytes: MutationJsonBodyLimitBytes::default(),
-            topic_mutation_timeout_ms: TopicMutationTimeoutMs::default(),
+            session_ttl: DEFAULT_SESSION_TTL,
+            mutation_json_body_limit: DEFAULT_MUTATION_JSON_BODY_LIMIT,
+            topic_mutation_timeout: DEFAULT_TOPIC_MUTATION_TIMEOUT,
         }
     }
 }

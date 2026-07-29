@@ -46,9 +46,21 @@ pub(crate) const DEFAULT_BROKER_IMAGE: &str = concat!(
 );
 
 pub(super) fn error_requeue(ctx: Arc<Context>) -> Action {
-    let delay = ctx.config.controller_error_requeue_ms.duration();
+    let delay = ctx.config.controller_error_requeue;
     drop(ctx);
-    Action::requeue(delay)
+    Action::requeue(delay.to_std())
+}
+
+pub(crate) fn time_from_millis_u64(millis: u64) -> Time {
+    Time::from_millis(i64::try_from(millis).unwrap_or(i64::MAX))
+}
+
+pub(crate) fn millis_u64(extent: Time) -> u64 {
+    u64::try_from(extent.millis_i64()).unwrap_or_default()
+}
+
+pub(crate) fn secs_u64(extent: Time) -> u64 {
+    u64::try_from(extent.secs_i64()).unwrap_or_default()
 }
 
 /// Reconcile-error surface shared by both reconcilers.

@@ -1,10 +1,14 @@
-use std::{net::SocketAddr, str::FromStr, time::Duration};
+use std::{net::SocketAddr, str::FromStr};
 
 use clap::{Args, ValueEnum};
+use crabka_units::{Time, parse};
 use refined_type::rule::GreaterU64;
 use serde::{Deserialize, Serialize};
 
 /// A validated positive operator configuration value.
+///
+/// The `refined_type` rule rejects zero, making an instance proof of a usable
+/// dimensionless count.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "u64", into = "u64")]
 pub struct PositiveU64(u64);
@@ -14,12 +18,6 @@ impl PositiveU64 {
     #[must_use]
     pub const fn into_value(self) -> u64 {
         self.0
-    }
-
-    /// Return the value as a duration in milliseconds.
-    #[must_use]
-    pub const fn duration(self) -> Duration {
-        Duration::from_millis(self.0)
     }
 }
 
@@ -111,20 +109,45 @@ pub struct OperatorConfig {
     #[arg(long, env = "PGDOG_RELOAD_ATTEMPTS", default_value = "3")]
     pub pgdog_reload_attempts: PositiveU64,
     /// Delay between `PgDog` reload verification attempts.
-    #[arg(long, env = "PGDOG_RELOAD_BACKOFF_MS", default_value = "100")]
-    pub pgdog_reload_backoff_ms: PositiveU64,
+    #[arg(
+        long,
+        env = "PGDOG_RELOAD_BACKOFF",
+        default_value = "100ms",
+        value_parser = parse::positive_time
+    )]
+    pub pgdog_reload_backoff: Time,
     /// Requeue delay after `PgDog` remains stale.
-    #[arg(long, env = "PGDOG_RELOAD_REQUEUE_MS", default_value = "15000")]
-    pub pgdog_reload_requeue_ms: PositiveU64,
+    #[arg(
+        long,
+        env = "PGDOG_RELOAD_REQUEUE",
+        default_value = "15s",
+        value_parser = parse::positive_time
+    )]
+    pub pgdog_reload_requeue: Time,
     /// Timeout for one `PgDog` admin reload operation.
-    #[arg(long, env = "PGDOG_ADMIN_TIMEOUT_MS", default_value = "20000")]
-    pub pgdog_admin_timeout_ms: PositiveU64,
+    #[arg(
+        long,
+        env = "PGDOG_ADMIN_TIMEOUT",
+        default_value = "20s",
+        value_parser = parse::positive_time
+    )]
+    pub pgdog_admin_timeout: Time,
     /// Fallback poll interval when no earlier `PgDog` transition is pending.
-    #[arg(long, env = "PGDOG_TRANSITION_POLL_MS", default_value = "60000")]
-    pub pgdog_transition_poll_ms: PositiveU64,
+    #[arg(
+        long,
+        env = "PGDOG_TRANSITION_POLL",
+        default_value = "1m",
+        value_parser = parse::positive_time
+    )]
+    pub pgdog_transition_poll: Time,
     /// Requeue delay after a controller reconcile error.
-    #[arg(long, env = "CONTROLLER_ERROR_REQUEUE_MS", default_value = "15000")]
-    pub controller_error_requeue_ms: PositiveU64,
+    #[arg(
+        long,
+        env = "CONTROLLER_ERROR_REQUEUE",
+        default_value = "15s",
+        value_parser = parse::positive_time
+    )]
+    pub controller_error_requeue: Time,
 
     /// Durable checkpoint object store used to verify a suspended tenant before
     /// its WAL topics are deleted. Parking is disabled when this is unset.
@@ -199,11 +222,11 @@ mod tests {
         assert!(parsed.cfg.watched().is_none());
         assert!(parsed.cfg.operator_namespace == "crabka-operator");
         assert!(parsed.cfg.pgdog_reload_attempts.into_value() == 3);
-        assert!(parsed.cfg.pgdog_reload_backoff_ms.into_value() == 100);
-        assert!(parsed.cfg.pgdog_reload_requeue_ms.into_value() == 15_000);
-        assert!(parsed.cfg.pgdog_admin_timeout_ms.into_value() == 20_000);
-        assert!(parsed.cfg.pgdog_transition_poll_ms.into_value() == 60_000);
-        assert!(parsed.cfg.controller_error_requeue_ms.into_value() == 15_000);
+        assert!(parsed.cfg.pgdog_reload_backoff == millis(100));
+        assert!(parsed.cfg.pgdog_reload_requeue == secs(15));
+        assert!(parsed.cfg.pgdog_admin_timeout == secs(20));
+        assert!(parsed.cfg.pgdog_transition_poll == secs(60));
+        assert!(parsed.cfg.controller_error_requeue == secs(15));
     }
 
     #[test]
@@ -224,11 +247,11 @@ mod tests {
                 ])
                 .env(CHILD, "1")
                 .env("PGDOG_RELOAD_ATTEMPTS", "4")
-                .env("PGDOG_RELOAD_BACKOFF_MS", "5")
-                .env("PGDOG_RELOAD_REQUEUE_MS", "6")
-                .env("PGDOG_ADMIN_TIMEOUT_MS", "7")
-                .env("PGDOG_TRANSITION_POLL_MS", "8")
-                .env("CONTROLLER_ERROR_REQUEUE_MS", "9")
+                .env("PGDOG_RELOAD_BACKOFF", "5ms")
+                .env("PGDOG_RELOAD_REQUEUE", "6ms")
+                .env("PGDOG_ADMIN_TIMEOUT", "7ms")
+                .env("PGDOG_TRANSITION_POLL", "8ms")
+                .env("CONTROLLER_ERROR_REQUEUE", "9ms")
                 .output()
                 .expect("spawn isolated environment test");
             assert!(
@@ -241,47 +264,51 @@ mod tests {
 
         let environment = Wrap::parse_from(["bin"]);
         assert!(environment.cfg.pgdog_reload_attempts.into_value() == 4);
-        assert!(environment.cfg.pgdog_reload_backoff_ms.into_value() == 5);
-        assert!(environment.cfg.pgdog_reload_requeue_ms.into_value() == 6);
-        assert!(environment.cfg.pgdog_admin_timeout_ms.into_value() == 7);
-        assert!(environment.cfg.pgdog_transition_poll_ms.into_value() == 8);
-        assert!(environment.cfg.controller_error_requeue_ms.into_value() == 9);
+        assert!(environment.cfg.pgdog_reload_backoff == millis(5));
+        assert!(environment.cfg.pgdog_reload_requeue == millis(6));
+        assert!(environment.cfg.pgdog_admin_timeout == millis(7));
+        assert!(environment.cfg.pgdog_transition_poll == millis(8));
+        assert!(environment.cfg.controller_error_requeue == millis(9));
 
         let parsed = Wrap::parse_from([
             "bin",
             "--pgdog-reload-attempts",
             "10",
-            "--pgdog-reload-backoff-ms",
-            "11",
-            "--pgdog-reload-requeue-ms",
-            "12",
-            "--pgdog-admin-timeout-ms",
-            "13",
-            "--pgdog-transition-poll-ms",
-            "14",
-            "--controller-error-requeue-ms",
-            "15",
+            "--pgdog-reload-backoff",
+            "11ms",
+            "--pgdog-reload-requeue",
+            "12ms",
+            "--pgdog-admin-timeout",
+            "13ms",
+            "--pgdog-transition-poll",
+            "14ms",
+            "--controller-error-requeue",
+            "15ms",
         ]);
         assert!(parsed.cfg.pgdog_reload_attempts.into_value() == 10);
-        assert!(parsed.cfg.pgdog_reload_backoff_ms.into_value() == 11);
-        assert!(parsed.cfg.pgdog_reload_requeue_ms.into_value() == 12);
-        assert!(parsed.cfg.pgdog_admin_timeout_ms.into_value() == 13);
-        assert!(parsed.cfg.pgdog_transition_poll_ms.into_value() == 14);
-        assert!(parsed.cfg.controller_error_requeue_ms.into_value() == 15);
+        assert!(parsed.cfg.pgdog_reload_backoff == millis(11));
+        assert!(parsed.cfg.pgdog_reload_requeue == millis(12));
+        assert!(parsed.cfg.pgdog_admin_timeout == millis(13));
+        assert!(parsed.cfg.pgdog_transition_poll == millis(14));
+        assert!(parsed.cfg.controller_error_requeue == millis(15));
     }
 
     #[test]
     fn controller_timing_values_reject_zero_and_overflow() {
+        assert!(Wrap::try_parse_from(["bin", "--pgdog-reload-attempts", "0"]).is_err());
+        assert!(
+            Wrap::try_parse_from(["bin", "--pgdog-reload-attempts", "18446744073709551616",])
+                .is_err()
+        );
         for option in [
-            "--pgdog-reload-attempts",
-            "--pgdog-reload-backoff-ms",
-            "--pgdog-reload-requeue-ms",
-            "--pgdog-admin-timeout-ms",
-            "--pgdog-transition-poll-ms",
-            "--controller-error-requeue-ms",
+            "--pgdog-reload-backoff",
+            "--pgdog-reload-requeue",
+            "--pgdog-admin-timeout",
+            "--pgdog-transition-poll",
+            "--controller-error-requeue",
         ] {
-            assert!(Wrap::try_parse_from(["bin", option, "0"]).is_err());
-            assert!(Wrap::try_parse_from(["bin", option, "18446744073709551616"]).is_err());
+            assert!(Wrap::try_parse_from(["bin", option, "0ms"]).is_err());
+            assert!(Wrap::try_parse_from(["bin", option, "1"]).is_err());
         }
     }
 

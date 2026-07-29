@@ -237,7 +237,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         .and_then(|status| status.confirmed_pgdog_config_hash.as_deref())
         != Some(hash.as_str())
     {
-        let admin_timeout = ctx.config.pgdog_admin_timeout_ms.duration();
+        let admin_timeout = ctx.config.pgdog_admin_timeout.to_std();
         let verified = tokio::time::timeout(
             admin_timeout,
             verify_pgdog_reload(&obj, &ctx, &endpoints, &rollout_hash),
@@ -250,9 +250,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         })??;
         if !verified {
             tracing::warn!(gres = %name, config_hash = %hash, "pgdog admin view is stale after reload attempts");
-            return Ok(Action::requeue(
-                ctx.config.pgdog_reload_requeue_ms.duration(),
-            ));
+            return Ok(Action::requeue(ctx.config.pgdog_reload_requeue.to_std()));
         }
     }
 
@@ -263,8 +261,8 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         &tenants.items,
         &name,
         now,
-        pgdog_policy.direct_bootstrap_grace.into_value(),
-        ctx.config.pgdog_transition_poll_ms.into_value(),
+        time_from_millis_u64(pgdog_policy.direct_bootstrap_grace.into_value()),
+        ctx.config.pgdog_transition_poll,
     );
     Ok(Action::requeue(requeue))
 }
@@ -553,7 +551,7 @@ async fn verify_pgdog_reload(
             return Ok(true);
         }
         if attempt < reload_attempts {
-            tokio::time::sleep(ctx.config.pgdog_reload_backoff_ms.duration()).await;
+            tokio::time::sleep(ctx.config.pgdog_reload_backoff.to_std()).await;
         }
     }
     Ok(false)

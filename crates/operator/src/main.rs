@@ -95,11 +95,11 @@ mod tests {
         let help = error.to_string();
         for option in [
             "--pgdog-reload-attempts",
-            "--pgdog-reload-backoff-ms",
-            "--pgdog-reload-requeue-ms",
-            "--pgdog-admin-timeout-ms",
-            "--pgdog-transition-poll-ms",
-            "--controller-error-requeue-ms",
+            "--pgdog-reload-backoff",
+            "--pgdog-reload-requeue",
+            "--pgdog-admin-timeout",
+            "--pgdog-transition-poll",
+            "--controller-error-requeue",
         ] {
             assert!(help.contains(option), "missing {option} in:\n{help}");
         }

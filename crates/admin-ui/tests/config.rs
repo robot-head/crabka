@@ -1,11 +1,10 @@
-use std::{net::SocketAddr, path::PathBuf, process::Command, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, process::Command};
 
 use clap::Parser;
 use crabka_admin_ui::config::{
     AdminUiConfig, AdminUiRuntimeArgs, BrokerSecurityConfig, ConfigError,
-    DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES, MutationJsonBodyLimitBytes, SessionTtlSeconds,
-    TopicMutationTimeoutMs,
 };
+use crabka_units::prelude::*;
 
 #[test]
 fn default_config_targets_local_server_and_requires_bootstrap() {
@@ -23,27 +22,15 @@ fn default_config_targets_local_server_and_requires_bootstrap() {
 }
 
 #[test]
-fn mutation_json_body_limit_default_and_boundaries_are_typed() {
+fn mutation_json_body_limit_default_and_boundaries_are_dimensioned() {
     let cfg = AdminUiConfig::default();
 
-    assert_eq!(
-        cfg.mutation_json_body_limit_bytes.into_value(),
-        DEFAULT_MUTATION_JSON_BODY_LIMIT_BYTES
-    );
-    assert_eq!(
-        MutationJsonBodyLimitBytes::new(1)
-            .expect("one byte is valid")
-            .into_value(),
-        1
-    );
-    assert!(MutationJsonBodyLimitBytes::new(0).is_err());
-
-    let overflowing = format!("{}0", usize::MAX);
-    for invalid in ["0", "not-a-number", "-1", overflowing.as_str()] {
+    assert_eq!(cfg.mutation_json_body_limit, mebibytes(1));
+    for invalid in ["0B", "not-a-number", "-1B", "1.5B", "1"] {
         assert!(
             AdminUiRuntimeArgs::try_parse_from([
                 "crabka-admin-ui",
-                "--mutation-json-body-limit-bytes",
+                "--mutation-json-body-limit",
                 invalid,
             ])
             .is_err(),
@@ -59,7 +46,7 @@ fn mutation_json_body_limit_environment_and_cli_precedence() {
         .arg("mutation_json_body_limit_precedence_child")
         .arg("--nocapture")
         .env("CRABKA_ADMIN_UI_BODY_LIMIT_CHILD", "1")
-        .env("CRABKA_ADMIN_UI_MUTATION_JSON_BODY_LIMIT_BYTES", "32")
+        .env("CRABKA_ADMIN_UI_MUTATION_JSON_BODY_LIMIT", "32B")
         .output()
         .expect("child test process runs");
 
@@ -79,48 +66,30 @@ fn mutation_json_body_limit_precedence_child() {
 
     let from_env = AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui"])
         .expect("environment value is valid");
-    assert_eq!(from_env.mutation_json_body_limit_bytes.into_value(), 32);
+    assert_eq!(from_env.mutation_json_body_limit, bytes(32));
 
     let from_cli = AdminUiRuntimeArgs::try_parse_from([
         "crabka-admin-ui",
-        "--mutation-json-body-limit-bytes",
-        "64",
+        "--mutation-json-body-limit",
+        "64B",
     ])
     .expect("CLI value is valid");
-    assert_eq!(from_cli.mutation_json_body_limit_bytes.into_value(), 64);
+    assert_eq!(from_cli.mutation_json_body_limit, bytes(64));
 }
 
 #[test]
 fn session_ttl_default_remains_eight_hours() {
     let cfg = AdminUiConfig::default();
 
-    assert_eq!(cfg.session_ttl.duration(), Duration::from_hours(8));
-}
-
-#[test]
-fn session_ttl_accepts_one_second() {
-    assert_eq!(
-        SessionTtlSeconds::new(1)
-            .expect("one second is valid")
-            .duration(),
-        Duration::from_secs(1)
-    );
+    assert_eq!(cfg.session_ttl, hours(8));
 }
 
 #[test]
 fn session_ttl_rejects_invalid_values() {
-    assert!(SessionTtlSeconds::new(0).is_err());
-    assert!(SessionTtlSeconds::new(u64::MAX).is_err());
-
-    let unrepresentable = u64::MAX.to_string();
-    for invalid in ["0", "not-a-number", "-1", unrepresentable.as_str()] {
+    for invalid in ["0s", "not-a-number", "-1s", "1"] {
         assert!(
-            AdminUiRuntimeArgs::try_parse_from([
-                "crabka-admin-ui",
-                "--session-ttl-seconds",
-                invalid,
-            ])
-            .is_err(),
+            AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui", "--session-ttl", invalid])
+                .is_err(),
             "{invalid:?} must be rejected"
         );
     }
@@ -133,7 +102,7 @@ fn session_ttl_environment_and_cli_precedence() {
         .arg("session_ttl_precedence_child")
         .arg("--nocapture")
         .env("CRABKA_ADMIN_UI_SESSION_TTL_CHILD", "1")
-        .env("CRABKA_ADMIN_UI_SESSION_TTL_SECONDS", "32")
+        .env("CRABKA_ADMIN_UI_SESSION_TTL", "32s")
         .output()
         .expect("child test process runs");
 
@@ -153,41 +122,27 @@ fn session_ttl_precedence_child() {
 
     let from_env = AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui"])
         .expect("environment value is valid");
-    assert_eq!(from_env.session_ttl.duration(), Duration::from_secs(32));
+    assert_eq!(from_env.session_ttl, secs(32));
 
-    let from_cli =
-        AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui", "--session-ttl-seconds", "64"])
-            .expect("CLI value is valid");
-    assert_eq!(from_cli.session_ttl.duration(), Duration::from_secs(64));
+    let from_cli = AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui", "--session-ttl", "64s"])
+        .expect("CLI value is valid");
+    assert_eq!(from_cli.session_ttl, secs(64));
 }
 
 #[test]
 fn topic_mutation_timeout_default_remains_thirty_seconds() {
     let cfg = AdminUiConfig::default();
 
-    assert_eq!(cfg.topic_mutation_timeout_ms.into_value(), 30_000);
-}
-
-#[test]
-fn topic_mutation_timeout_accepts_one_millisecond() {
-    assert_eq!(
-        TopicMutationTimeoutMs::new(1)
-            .expect("one millisecond is valid")
-            .into_value(),
-        1
-    );
+    assert_eq!(cfg.topic_mutation_timeout, secs(30));
 }
 
 #[test]
 fn topic_mutation_timeout_rejects_invalid_values() {
-    assert!(TopicMutationTimeoutMs::new(0).is_err());
-
-    let overflowing = format!("{}0", i32::MAX);
-    for invalid in ["0", "not-a-number", "-1", overflowing.as_str()] {
+    for invalid in ["0ms", "not-a-number", "-1ms", "1.5ms", "1"] {
         assert!(
             AdminUiRuntimeArgs::try_parse_from([
                 "crabka-admin-ui",
-                "--topic-mutation-timeout-ms",
+                "--topic-mutation-timeout",
                 invalid,
             ])
             .is_err(),
@@ -203,7 +158,7 @@ fn topic_mutation_timeout_environment_and_cli_precedence() {
         .arg("topic_mutation_timeout_precedence_child")
         .arg("--nocapture")
         .env("CRABKA_ADMIN_UI_TOPIC_TIMEOUT_CHILD", "1")
-        .env("CRABKA_ADMIN_UI_TOPIC_MUTATION_TIMEOUT_MS", "32")
+        .env("CRABKA_ADMIN_UI_TOPIC_MUTATION_TIMEOUT", "32ms")
         .output()
         .expect("child test process runs");
 
@@ -223,15 +178,12 @@ fn topic_mutation_timeout_precedence_child() {
 
     let from_env = AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui"])
         .expect("environment value is valid");
-    assert_eq!(from_env.topic_mutation_timeout_ms.into_value(), 32);
+    assert_eq!(from_env.topic_mutation_timeout, millis(32));
 
-    let from_cli = AdminUiRuntimeArgs::try_parse_from([
-        "crabka-admin-ui",
-        "--topic-mutation-timeout-ms",
-        "64",
-    ])
-    .expect("CLI value is valid");
-    assert_eq!(from_cli.topic_mutation_timeout_ms.into_value(), 64);
+    let from_cli =
+        AdminUiRuntimeArgs::try_parse_from(["crabka-admin-ui", "--topic-mutation-timeout", "64ms"])
+            .expect("CLI value is valid");
+    assert_eq!(from_cli.topic_mutation_timeout, millis(64));
 }
 
 #[test]

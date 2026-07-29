@@ -7,6 +7,7 @@ use crabka_client_admin::{
     IncrementalAlterOp, PatternType, PermissionType, QuotaOp, ResourceType, ScramDeletion,
     ScramUpsertion,
 };
+use crabka_units::Time;
 use serde::{Deserialize, Serialize};
 
 pub use crate::dto::{AclRow, QuotaRow, UserRow};
@@ -23,6 +24,14 @@ use crate::{
     server::AppState,
     session::{SessionId, SessionRecord, SessionStore},
 };
+
+/// How long the broker may take to finish a UI-issued topic mutation before it
+/// answers with a timeout error, carried on `CreateTopics`/`DeleteTopics`/
+/// `CreatePartitions` as Kafka's `timeout_ms` field.
+/// The configured topic-mutation timeout, as the quantity `AdminClient` takes.
+fn mutation_timeout(cfg: &AdminUiConfig) -> Time {
+    cfg.topic_mutation_timeout
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CurrentSession {

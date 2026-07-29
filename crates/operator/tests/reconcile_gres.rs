@@ -1200,8 +1200,8 @@ async fn stale_pgdog_admin_view_requeues_without_confirming_hash() {
         fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin.clone());
     let config = Arc::get_mut(&mut context.config).expect("unique config");
     config.pgdog_reload_attempts = "2".parse().expect("positive attempts");
-    config.pgdog_reload_backoff_ms = "150".parse().expect("positive backoff");
-    config.pgdog_reload_requeue_ms = "1234".parse().expect("positive requeue");
+    config.pgdog_reload_backoff = crabka_units::millis(150);
+    config.pgdog_reload_requeue = crabka_units::millis(1234);
     let ctx = Arc::new(context);
 
     let action = reconcile(Arc::new(gres()), ctx).await.unwrap();
@@ -1229,7 +1229,7 @@ async fn gres_error_policy_uses_configured_requeue() {
     let mut context = fixture_ctx(mock_client(&state, "ns"), "ns");
     Arc::get_mut(&mut context.config)
         .expect("unique config")
-        .controller_error_requeue_ms = "4321".parse().expect("positive error requeue");
+        .controller_error_requeue = crabka_units::millis(4321);
 
     let action = error_policy(
         Arc::new(gres()),
@@ -1250,7 +1250,7 @@ async fn pgdog_admin_reload_uses_configured_timeout() {
     let mut context = fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin);
     Arc::get_mut(&mut context.config)
         .expect("unique config")
-        .pgdog_admin_timeout_ms = "1".parse().expect("positive timeout");
+        .pgdog_admin_timeout = crabka_units::millis(1);
 
     let error = reconcile(Arc::new(gres()), Arc::new(context))
         .await
