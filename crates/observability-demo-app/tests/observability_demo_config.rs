@@ -289,7 +289,10 @@ fn profiles_wal_poll_timeout_is_owned_by_wal_consumers() {
 #[test]
 fn otlp_heartbeat_traces_use_per_component_service_names() {
     let compose = docker_compose();
-    assert2::assert!(compose.contains("CRABKA_OTLP_HEARTBEAT_INTERVAL: \"15s\""));
+    assert2::assert!(
+        compose
+            .contains("CRABKA_OTLP_HEARTBEAT_INTERVAL: \"${CRABKA_OTLP_HEARTBEAT_INTERVAL:-15s}\"")
+    );
     for service in [
         "broker",
         "schema-registry",

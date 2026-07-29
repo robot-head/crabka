@@ -291,7 +291,7 @@ async fn main() -> anyhow::Result<()> {
             "crabka-schema-registry",
             env!("CARGO_PKG_VERSION"),
             "crabka-schema-registry",
-        ),
+        )?,
         "crabka_schema_registry=info,info",
         "info",
         "crabka-schema-registry",

@@ -256,7 +256,7 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "crabka-traces",
             env!("CARGO_PKG_VERSION"),
             "crabka-traces",
-        ),
+        )?,
         "crabka_traces=info,info",
         "info",
         "crabka-traces",

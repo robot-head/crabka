@@ -388,7 +388,7 @@ async fn main() -> Result<(), BoxError> {
             "demo-app",
             env!("CARGO_PKG_VERSION"),
             "observability-demo-app",
-        ),
+        )?,
         "observability_demo_app=info,info",
         "info",
         "observability-demo-app",

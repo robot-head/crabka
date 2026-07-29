@@ -19,7 +19,7 @@ x-otlp-env: &otlp-env
   # serve). 0.05 keeps the per-generation amplification < 1 so the feedback
   # converges while still leaving plenty of demo traces to view.
   CRABKA_OTLP_SAMPLE_RATIO: "0.05"
-  CRABKA_OTLP_HEARTBEAT_INTERVAL: "15s"
+  CRABKA_OTLP_HEARTBEAT_INTERVAL: "${CRABKA_OTLP_HEARTBEAT_INTERVAL:-15s}"
   CRABKA_ADMIN_LISTEN_ADDR: 0.0.0.0:9404
   # Enable jemalloc heap profiling support continuously so heap profiles include
   # long-lived allocations, but sample coarsely (~every 1 MiB) so small demo

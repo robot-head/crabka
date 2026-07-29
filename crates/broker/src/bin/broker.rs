@@ -903,7 +903,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &args.broker_id.to_string(),
         env!("CARGO_PKG_VERSION"),
         "crabka-broker",
-    );
+    )?;
     let client_metrics_otlp_endpoint = otlp.as_ref().map(|cfg| cfg.endpoint.clone());
     let telemetry = crabka_broker::telemetry::init(
         otlp,
@@ -1283,6 +1283,33 @@ mod tests {
                 assert!(args.runtime.cleaner_interval == Some(Time::from_millis(17)));
                 assert!(args.runtime.socket_request_max == Some(crabka_units::mebibytes(100)));
                 assert!(args.leader_imbalance_per_broker == Some(crabka_units::fraction(0.1)));
+            },
+        );
+    }
+
+    #[test]
+    fn otlp_time_cli_values_override_environment() {
+        let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().expect("environment lock");
+
+        temp_env::with_vars(
+            [
+                ("CRABKA_OTLP_TIMEOUT", Some("17s")),
+                ("CRABKA_OTLP_HEARTBEAT_INTERVAL", Some("19s")),
+            ],
+            || {
+                let args = Args::try_parse_from([
+                    "crabka-broker",
+                    "--crabka-otlp-timeout=23s",
+                    "--crabka-otlp-heartbeat-interval=29s",
+                ])
+                .expect("parse CLI OTLP overrides");
+                assert!(
+                    (
+                        args.telemetry_value("CRABKA_OTLP_TIMEOUT"),
+                        args.telemetry_value("CRABKA_OTLP_HEARTBEAT_INTERVAL"),
+                    ) == (Some("23s".to_owned()), Some("29s".to_owned()))
+                );
             },
         );
     }

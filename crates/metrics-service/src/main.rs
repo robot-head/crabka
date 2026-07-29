@@ -95,7 +95,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "metrics-service",
             env!("CARGO_PKG_VERSION"),
             "crabka-metrics-service",
-        ),
+        )?,
         "crabka_metrics_service=info,info",
         "info",
         "crabka-metrics-service",

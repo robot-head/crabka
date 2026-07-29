@@ -28,7 +28,8 @@
 //!     "0.1.0",
 //!     "crabka-broker",
 //! )
-//! .unwrap();
+//! .expect("valid OTLP configuration")
+//! .expect("OTLP enabled");
 //!
 //! assert_eq!(cfg.protocol, OtlpProtocol::Grpc);
 //! assert_eq!(cfg.endpoint, "http://localhost:4317");
@@ -66,6 +67,8 @@ use tracing_subscriber::{
 /// rather than a silent no-export.
 #[derive(Debug, thiserror::Error)]
 pub enum TelemetryError {
+    #[error("invalid {name}: {message}")]
+    InvalidConfig { name: &'static str, message: String },
     #[error("failed to build OTLP span exporter: {0}")]
     Exporter(#[from] opentelemetry_otlp::ExporterBuildError),
 }
@@ -99,7 +102,7 @@ impl OtlpProtocol {
     }
 }
 
-/// Resolved OTLP configuration. Built by [`OtlpConfig::from_env`]; `None`
+/// Resolved OTLP configuration. Built by [`OtlpConfig::from_env`]; `Ok(None)`
 /// from that constructor means OTLP is disabled and no exporter is built.
 #[derive(Debug, Clone)]
 pub struct OtlpConfig {
@@ -123,6 +126,19 @@ fn env_truthy(v: &str) -> bool {
     )
 }
 
+fn parse_duration(name: &'static str, value: &str) -> Result<Duration, TelemetryError> {
+    let time = crabka_units::parse::non_negative_time(value).map_err(|error| {
+        TelemetryError::InvalidConfig {
+            name,
+            message: error.to_string(),
+        }
+    })?;
+    Duration::try_from_secs_f64(time.secs_f64()).map_err(|error| TelemetryError::InvalidConfig {
+        name,
+        message: error.to_string(),
+    })
+}
+
 impl OtlpConfig {
     /// Resolve OTLP config from the environment. `get` is the env lookup
     /// (injected so this is a pure, testable function);
@@ -130,17 +146,20 @@ impl OtlpConfig {
     /// `service_version` the crate version, and `default_service_name` is the
     /// fallback used when `OTEL_SERVICE_NAME` is not set.
     ///
-    /// Returns `None` when OTLP is disabled — either nothing turned it on
+    /// Returns `Ok(None)` when OTLP is disabled — either nothing turned it on
     /// or `OTEL_SDK_DISABLED` turned it off.
-    #[must_use]
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a custom Crabka duration is malformed.
     pub fn from_env(
         get: impl Fn(&str) -> Option<String>,
         service_instance_id: &str,
         service_version: &str,
         default_service_name: &str,
-    ) -> Option<Self> {
+    ) -> Result<Option<Self>, TelemetryError> {
         if get("OTEL_SDK_DISABLED").as_deref().is_some_and(env_truthy) {
-            return None;
+            return Ok(None);
         }
 
         let endpoint_override = get("CRABKA_OTLP_ENDPOINT")
@@ -155,7 +174,7 @@ impl OtlpConfig {
 
         // Off unless something opts in.
         if endpoint_override.is_none() && !explicitly_enabled {
-            return None;
+            return Ok(None);
         }
 
         let protocol = get("CRABKA_OTLP_PROTOCOL")
@@ -174,22 +193,20 @@ impl OtlpConfig {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| default_service_name.to_owned());
 
-        let timeout = get("CRABKA_OTLP_TIMEOUT")
-            .and_then(|s| crabka_units::parse::non_negative_time(&s).ok())
-            .map(crabka_units::Time::to_std)
-            .or_else(|| {
-                get("OTEL_EXPORTER_OTLP_TIMEOUT_SECS")
-                    .and_then(|s| s.trim().parse::<u64>().ok())
-                    .map(Duration::from_secs)
-            })
-            .unwrap_or(Duration::from_secs(10));
+        let timeout = match get("CRABKA_OTLP_TIMEOUT") {
+            Some(value) => parse_duration("CRABKA_OTLP_TIMEOUT", &value)?,
+            None => get("OTEL_EXPORTER_OTLP_TIMEOUT_SECS")
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_secs(10)),
+        };
 
         let heartbeat_interval = get("CRABKA_OTLP_HEARTBEAT_INTERVAL")
-            .and_then(|s| crabka_units::parse::non_negative_time(&s).ok())
-            .map(crabka_units::Time::to_std)
+            .map(|value| parse_duration("CRABKA_OTLP_HEARTBEAT_INTERVAL", &value))
+            .transpose()?
             .filter(|interval| !interval.is_zero());
 
-        Some(Self {
+        Ok(Some(Self {
             endpoint,
             protocol,
             sample_ratio,
@@ -198,7 +215,7 @@ impl OtlpConfig {
             service_instance_id: service_instance_id.to_owned(),
             timeout,
             heartbeat_interval,
-        })
+        }))
     }
 
     fn build_exporter(&self) -> Result<SpanExporter, TelemetryError> {
@@ -507,7 +524,8 @@ mod tests {
 
     #[test]
     fn disabled_when_no_env() {
-        let cfg = OtlpConfig::from_env(env_from(&[]), "1", "0.1.1", "crabka-broker");
+        let cfg = OtlpConfig::from_env(env_from(&[]), "1", "0.1.1", "crabka-broker")
+            .expect("valid config");
         assert2::assert!(cfg.is_none());
     }
 
@@ -525,7 +543,8 @@ mod tests {
             "1",
             "0.1.1",
             "crabka-broker",
-        );
+        )
+        .expect("valid config");
         assert2::assert!(cfg.is_none());
 
         let cfg = OtlpConfig::from_env(
@@ -536,7 +555,8 @@ mod tests {
             "1",
             "0.1.1",
             "crabka-broker",
-        );
+        )
+        .expect("valid config");
         assert2::assert!(cfg.is_some());
     }
 
@@ -548,6 +568,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.endpoint.as_str() == "http://collector:4317");
         assert2::assert!(cfg.protocol == OtlpProtocol::Grpc);
@@ -568,6 +589,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.protocol == OtlpProtocol::HttpProtobuf);
         assert2::assert!(cfg.endpoint.as_str() == "http://localhost:4318");
@@ -581,6 +603,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.protocol == OtlpProtocol::Grpc);
         assert2::assert!(cfg.endpoint.as_str() == "http://localhost:4317");
@@ -596,7 +619,8 @@ mod tests {
             "1",
             "0.1.1",
             "crabka-broker",
-        );
+        )
+        .expect("valid config");
         assert2::assert!(cfg.is_none());
     }
 
@@ -609,6 +633,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.endpoint == "http://otel:4317");
 
@@ -622,6 +647,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.endpoint == "http://traces:4317");
 
@@ -635,6 +661,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.endpoint == "http://crabka:4317");
     }
@@ -650,6 +677,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!((cfg.sample_ratio - 0.25).abs() < f64::EPSILON);
 
@@ -663,6 +691,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!((cfg.sample_ratio - 1.0).abs() < f64::EPSILON);
     }
@@ -675,6 +704,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.heartbeat_interval.is_none());
 
@@ -687,6 +717,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.heartbeat_interval.is_none());
     }
@@ -702,8 +733,40 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.heartbeat_interval == Some(Duration::from_secs(15)));
+    }
+
+    #[test]
+    fn custom_otlp_times_reject_malformed_values() {
+        for name in ["CRABKA_OTLP_TIMEOUT", "CRABKA_OTLP_HEARTBEAT_INTERVAL"] {
+            for value in [
+                "5",
+                "1MiB",
+                "NaNs",
+                "-1s",
+                "999999999999999999999999999999999999999999999999999999999999s",
+            ] {
+                let error = OtlpConfig::from_env(
+                    env_from(&[("CRABKA_OTLP_ENDPOINT", "http://c:4317"), (name, value)]),
+                    "1",
+                    "0.1.1",
+                    "crabka-broker",
+                )
+                .expect_err("invalid custom OTLP time must fail startup");
+                assert2::assert!(
+                    matches!(
+                        error,
+                        TelemetryError::InvalidConfig {
+                            name: actual_name,
+                            ..
+                        } if actual_name == name
+                    ),
+                    "{name}={value}: {error}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -749,9 +812,28 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.service_name.as_str() == "my-kafka");
         assert2::assert!(cfg.timeout == Duration::from_secs(3));
+    }
+
+    #[test]
+    fn standard_otlp_timeout_secs_remains_compatible() {
+        for (value, expected) in [("7", 7), ("7s", 10)] {
+            let cfg = OtlpConfig::from_env(
+                env_from(&[
+                    ("CRABKA_OTLP_ENDPOINT", "http://c:4317"),
+                    ("OTEL_EXPORTER_OTLP_TIMEOUT_SECS", value),
+                ]),
+                "9",
+                "0.1.1",
+                "crabka-broker",
+            )
+            .expect("standard OTLP timeout remains non-failing")
+            .expect("enabled");
+            assert2::assert!(cfg.timeout == Duration::from_secs(expected));
+        }
     }
 
     #[test]
@@ -766,6 +848,7 @@ mod tests {
             "0.1.1",
             "crabka-broker",
         )
+        .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.timeout == Duration::from_secs(10));
         assert2::assert!(cfg.heartbeat_interval.is_none());

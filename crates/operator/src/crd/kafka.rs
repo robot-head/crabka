@@ -1350,11 +1350,11 @@ impl Tracing {
                 {
                     return Err("otlp.serviceName, when set, must be non-empty".into());
                 }
-                if otlp
-                    .timeout
-                    .is_some_and(|timeout| timeout.secs_f64() <= 0.0)
+                if let Some(timeout) = otlp.timeout
+                    && (timeout.secs_f64() <= 0.0
+                        || std::time::Duration::try_from_secs_f64(timeout.secs_f64()).is_err())
                 {
-                    return Err("otlp.timeout, when set, must be > 0".into());
+                    return Err("otlp.timeout, when set, must be positive and representable".into());
                 }
                 Ok(())
             }
@@ -2691,6 +2691,39 @@ authorization:
         };
         let err = t.validate().unwrap_err();
         assert!(err.contains("otlp.timeout"), "got: {err}");
+    }
+
+    #[test]
+    fn tracing_otlp_timeout_rejects_invalid_dimensioned_values() {
+        for value in ["5", "1MiB", "NaNs"] {
+            let json = serde_json::json!({
+                "endpoint": "http://otel:4317",
+                "timeout": value,
+            });
+            assert!(
+                serde_json::from_value::<OtlpTracing>(json).is_err(),
+                "accepted timeout {value}"
+            );
+        }
+
+        for value in [
+            "-1s",
+            "999999999999999999999999999999999999999999999999999999999999s",
+        ] {
+            let otlp: OtlpTracing = serde_json::from_value(serde_json::json!({
+                "endpoint": "http://otel:4317",
+                "timeout": value,
+            }))
+            .expect("dimensioned timeout deserializes before semantic validation");
+            let tracing = Tracing {
+                kind: TracingType::Otlp,
+                otlp: Some(otlp),
+            };
+            assert!(
+                tracing.validate().is_err(),
+                "accepted invalid timeout {value}"
+            );
+        }
     }
 
     #[test]

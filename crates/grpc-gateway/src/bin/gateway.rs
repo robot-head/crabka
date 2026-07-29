@@ -277,7 +277,7 @@ async fn main() -> anyhow::Result<()> {
         &args.client_id,
         env!("CARGO_PKG_VERSION"),
         "crabka-grpc-gateway",
-    );
+    )?;
     let telemetry = crabka_telemetry::init(
         otlp,
         "crabka_grpc_gateway=info,info",
