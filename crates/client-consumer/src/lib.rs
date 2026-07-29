@@ -93,9 +93,10 @@ mod validate;
 pub use assignor::Assignor;
 pub use builder::{AutoOffsetReset, IsolationLevel};
 pub use consumer::{
-    Consumer, ConsumerLeaveGroupTimeout, ConsumerRecord,
-    ConsumerSubscriptionMetadataRefreshInterval, DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT,
-    DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL, Header,
+    Consumer, ConsumerFetchMaxBytes, ConsumerFetchPartitionMaxBytes, ConsumerLeaveGroupTimeout,
+    ConsumerRecord, ConsumerSubscriptionMetadataRefreshInterval,
+    DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT, DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL,
+    Header,
 };
 pub use error::ConsumerError;
 pub use group_metadata::ConsumerGroupMetadata;

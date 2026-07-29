@@ -4,6 +4,8 @@
 
 use std::{
     collections::HashMap,
+    fmt,
+    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicI32, Ordering},
@@ -22,7 +24,11 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
-use refined_type::rule::MinMaxU128;
+use crabka_units::{
+    ByteSize,
+    convert::ByteSizeExt as _,
+};
+use refined_type::rule::{GreaterI32, MinMaxU128};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -168,6 +174,98 @@ impl Default for ConsumerLeaveGroupTimeout {
 /// Default cadence for checking subscribed-topic metadata changes.
 pub const DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL: Duration =
     Duration::from_secs(5);
+
+/// Positive total response-byte budget for one classic consumer fetch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConsumerFetchMaxBytes(i32);
+
+impl ConsumerFetchMaxBytes {
+    /// Validate a total fetch byte budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero or negative.
+    pub fn new(value: i32) -> Result<Self, String> {
+        GreaterI32::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("consumer fetch max bytes: {error}"))
+    }
+
+    /// Return the validated protocol byte count.
+    #[must_use]
+    pub const fn bytes(self) -> i32 {
+        self.0
+    }
+
+    /// Return the validated byte count as a dimensioned quantity.
+    #[must_use]
+    pub fn size(self) -> ByteSize {
+        ByteSize::from_bytes_i64(i64::from(self.0))
+    }
+}
+
+impl fmt::Display for ConsumerFetchMaxBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for ConsumerFetchMaxBytes {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+/// Positive per-partition response-byte budget for one classic consumer fetch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConsumerFetchPartitionMaxBytes(i32);
+
+impl ConsumerFetchPartitionMaxBytes {
+    /// Validate a per-partition fetch byte budget.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero or negative.
+    pub fn new(value: i32) -> Result<Self, String> {
+        GreaterI32::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("consumer fetch partition max bytes: {error}"))
+    }
+
+    /// Return the validated protocol byte count.
+    #[must_use]
+    pub const fn bytes(self) -> i32 {
+        self.0
+    }
+
+    /// Return the validated byte count as a dimensioned quantity.
+    #[must_use]
+    pub fn size(self) -> ByteSize {
+        ByteSize::from_bytes_i64(i64::from(self.0))
+    }
+}
+
+impl fmt::Display for ConsumerFetchPartitionMaxBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for ConsumerFetchPartitionMaxBytes {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
 
 /// Positive, whole-millisecond subscribed-topic metadata refresh cadence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1590,6 +1688,32 @@ mod security_arg_tests {
             partition_max_bytes,
             Err(ConsumerError::RebalanceFailed(_))
         ));
+    }
+
+    #[test]
+    fn consumer_fetch_byte_settings_validate_and_convert_to_uom() {
+        for value in [1, i32::MAX] {
+            let max = value
+                .to_string()
+                .parse::<ConsumerFetchMaxBytes>()
+                .expect("positive fetch maximum");
+            let partition_max = value
+                .to_string()
+                .parse::<ConsumerFetchPartitionMaxBytes>()
+                .expect("positive partition fetch maximum");
+
+            check!(max.bytes() == value);
+            check!(partition_max.bytes() == value);
+            check!(max.size().bytes_i32() == value);
+            check!(partition_max.size().bytes_i32() == value);
+            check!(max.to_string() == value.to_string());
+            check!(partition_max.to_string() == value.to_string());
+        }
+
+        for invalid in ["0", "-1", "not-a-number", "2147483648"] {
+            check!(invalid.parse::<ConsumerFetchMaxBytes>().is_err());
+            check!(invalid.parse::<ConsumerFetchPartitionMaxBytes>().is_err());
+        }
     }
 
     async fn test_consumer() -> Consumer {
