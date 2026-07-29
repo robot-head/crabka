@@ -1,5 +1,5 @@
 //! Broker-side heartbeat client. Sends `BrokerHeartbeat` to the
-//! controller leader every `heartbeat_interval_ms`. Discovers the
+//! controller leader every configured `heartbeat_interval`. Discovers the
 //! current controller via the metadata image; retries on transient
 //! errors.
 

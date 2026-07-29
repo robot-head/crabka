@@ -1,5 +1,5 @@
 //! Per-leader-partition ISR maintenance. Compares each follower's
-//! last-fetch time vs `replica_lag_time_max_ms` and proposes
+//! last-fetch time vs `replica_lag_time_max` and proposes
 //! `AlterPartition` shrink/expand to the controller leader.
 
 #![allow(dead_code)]

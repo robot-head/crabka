@@ -1,3 +1,4 @@
+use crabka_units::{Time, convert::TimeExt as _, fmt::Human as _};
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -202,6 +203,51 @@ impl GresRegistrySpec {
     }
 }
 
+fn validate_nonnegative_tuning_time(field: &str, value: Time) -> Result<(), String> {
+    if value.secs_f64().is_finite() && value >= Time::from_secs(0) {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(
+            field,
+            "must be finite and nonnegative",
+        ))
+    }
+}
+
+fn validate_positive_tuning_time(field: &str, value: Time) -> Result<(), String> {
+    validate_nonnegative_tuning_time(field, value)?;
+    if value > Time::from_secs(0) {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(field, "must be positive"))
+    }
+}
+
+fn validate_bounded_tuning_time(field: &str, value: Time, max_ms: i32) -> Result<(), String> {
+    validate_whole_millis_tuning_time(field, value)?;
+    let millis = value.millis_i64();
+    if millis <= i64::from(max_ms) {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(
+            field,
+            format!("must be at most {max_ms}ms"),
+        ))
+    }
+}
+
+fn validate_whole_millis_tuning_time(field: &str, value: Time) -> Result<(), String> {
+    validate_positive_tuning_time(field, value)?;
+    if Time::from_millis(value.millis_i64()) == value {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(
+            field,
+            "must be a whole number of milliseconds",
+        ))
+    }
+}
+
 macro_rules! validate_tuning_field {
     (refined, $owner:ident, $field:ident, $rule:ty) => {
         if let Some(value) = $owner.$field {
@@ -211,6 +257,36 @@ macro_rules! validate_tuning_field {
     };
     (plain, $owner:ident, $field:ident, $rule:ty) => {};
     (string, $owner:ident, $field:ident, $rule:ty) => {};
+    (time, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_positive_tuning_time(stringify!($field), value)?;
+        }
+    };
+    (time_nonnegative, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_nonnegative_tuning_time(stringify!($field), value)?;
+        }
+    };
+    (time_voter, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_bounded_tuning_time(stringify!($field), value, i32::MAX)?;
+        }
+    };
+    (time_transaction_max, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_bounded_tuning_time(stringify!($field), value, i32::MAX - 1)?;
+        }
+    };
+    (time_i32, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_bounded_tuning_time(stringify!($field), value, i32::MAX)?;
+        }
+    };
+    (time_i64, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_whole_millis_tuning_time(stringify!($field), value)?;
+        }
+    };
 }
 
 macro_rules! render_tuning_field {
@@ -237,6 +313,17 @@ macro_rules! render_tuning_field {
             );
         }
     };
+    ($kind:ident, $owner:ident, $out:ident, $field:ident) => {
+        if let Some(value) = $owner.$field {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                $out,
+                "{} = {}",
+                stringify!($field),
+                toml::Value::String(value.human().to_string())
+            );
+        }
+    };
 }
 
 macro_rules! define_broker_tuning {
@@ -246,7 +333,7 @@ macro_rules! define_broker_tuning {
         $field:ident: $ty:ty => $rule:ty;
     )*) => {
         /// Typed Kafka CRD surface for broker `[runtime]` policy.
-        #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+        #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
         #[serde(rename_all = "camelCase", deny_unknown_fields)]
         pub struct BrokerTuning {
             $(
@@ -282,62 +369,62 @@ macro_rules! define_broker_tuning {
 }
 
 define_broker_tuning! {
-    refined #[schemars(range(min = 1))] startup_leader_wait_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] self_registration_backoff_min_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] self_registration_backoff_max_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] observer_poll_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] audit_spool_replay_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] audit_stats_poll_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] audit_partition_wait_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] liveness_tick_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] gauge_poll_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] cleaner_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] isr_scan_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] future_log_move_retry_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] client_metrics_eviction_tick_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] client_metrics_stale_floor_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] client_metrics_default_interval_ms: i32 => refined_type::rule::GreaterI32<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] startup_leader_wait_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] self_registration_backoff_min: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] self_registration_backoff_max: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] observer_poll_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] audit_spool_replay_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] audit_stats_poll_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] audit_partition_wait_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] liveness_tick_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] gauge_poll_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] cleaner_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] isr_scan_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] future_log_move_retry_backoff: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_eviction_tick: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_stale_floor: Time => ();
+    time_i32 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_default_interval: Time => ();
     refined #[schemars(range(min = 1))] client_metrics_telemetry_max_bytes: i32 => refined_type::rule::GreaterI32<0>;
-    refined #[schemars(range(min = 1))] client_metrics_prom_snapshot_ttl_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] rlmm_reconcile_tick_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] rlmm_bootstrap_backoff_initial_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] rlmm_bootstrap_backoff_max_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] connection_creation_throttle_max_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] opa_http_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] oauth_jwks_http_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] auto_join_retry_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1, max = 2_147_483_647))] auto_join_voter_request_timeout_ms: u64 => refined_type::rule::MinMaxU64<1, 2_147_483_647>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_prom_snapshot_ttl: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] rlmm_reconcile_tick: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] rlmm_bootstrap_backoff_initial: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] rlmm_bootstrap_backoff_max: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] connection_creation_throttle_max: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] opa_http_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] oauth_jwks_http_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] auto_join_retry_backoff: Time => ();
+    time_voter #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] auto_join_voter_request_timeout: Time => ();
     refined #[schemars(range(min = 1))] replication_fetch_max_bytes: i32 => refined_type::rule::GreaterI32<0>;
-    refined #[schemars(range(min = 1))] replication_fetch_max_wait_ms: i32 => refined_type::rule::GreaterI32<0>;
+    time_i32 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_fetch_max_wait: Time => ();
     refined #[schemars(range(min = 1))] replication_fetch_min_bytes: i32 => refined_type::rule::GreaterI32<0>;
-    refined #[schemars(range(min = 1))] replication_throttle_exhausted_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] replication_send_error_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] replication_unknown_topic_retry_delay_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] replication_epoch_fence_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] replication_unexpected_error_backoff_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] replication_reconnect_initial_delay_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] replication_reconnect_delay_cap_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] coordinator_session_expiry_tick_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] coordinator_shutdown_ack_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] consumer_group_session_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] consumer_group_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] consumer_group_min_session_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] consumer_group_max_session_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] consumer_group_min_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] consumer_group_max_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_throttle_exhausted_backoff: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_send_error_backoff: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_unknown_topic_retry_delay: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_epoch_fence_backoff: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_unexpected_error_backoff: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_reconnect_initial_delay: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_reconnect_delay_cap: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] coordinator_session_expiry_tick: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] coordinator_shutdown_ack_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_session_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_heartbeat_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_min_session_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_max_session_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_min_heartbeat_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_max_heartbeat_interval: Time => ();
     refined #[schemars(range(min = 1))] consumer_group_max_size: usize => refined_type::rule::GreaterUsize<0>;
-    refined #[schemars(range(min = 1))] classic_group_initial_rebalance_delay_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] sync_group_follower_wait_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] unclean_recovery_aggressive_deadline_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] unclean_recovery_balanced_deadline_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] operator_recovery_deadline_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] quota_throttle_max_ms: u64 => refined_type::rule::GreaterU64<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] classic_group_initial_rebalance_delay: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] sync_group_follower_wait: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] unclean_recovery_aggressive_deadline: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] unclean_recovery_balanced_deadline: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] operator_recovery_deadline: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] quota_throttle_max: Time => ();
     refined #[schemars(range(min = 1))] self_registration_max_attempts: u32 => refined_type::rule::GreaterU32<0>;
     refined #[schemars(range(min = 1))] observer_fetch_max_bytes: u32 => refined_type::rule::GreaterU32<0>;
     refined #[schemars(range(min = 1))] audit_event_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] audit_tail_window_offsets: i64 => refined_type::rule::GreaterI64<0>;
     refined #[schemars(range(min = 1))] audit_tail_read_max_bytes: usize => refined_type::rule::GreaterUsize<0>;
-    refined #[schemars(range(min = 1))] offsets_topic_metadata_wait_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] offsets_topic_metadata_wait_timeout: Time => ();
     refined #[schemars(range(min = 1))] client_metrics_stale_push_intervals: u32 => refined_type::rule::GreaterU32<0>;
     refined #[schemars(range(min = 1))] client_metrics_otlp_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] coordinator_actor_mailbox_capacity: usize => refined_type::rule::GreaterUsize<0>;
@@ -354,8 +441,8 @@ define_broker_tuning! {
     refined #[schemars(range(min = 1))] telemetry_decompressed_output_floor_bytes: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] telemetry_decompressed_output_ceiling_bytes: usize => refined_type::rule::GreaterUsize<0>;
     string #[schemars(length(min = 1))] inter_broker_server_name: String => ();
-    refined #[schemars(range(min = 1))] producer_id_expiration_ms: i64 => refined_type::rule::GreaterI64<0>;
-    refined #[schemars(range(min = 1))] producer_id_expiration_scan_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    time_i64 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] producer_id_expiration: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] producer_id_expiration_scan_interval: Time => ();
     refined #[schemars(range(min = 1))] max_produce_group: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] partition_writer_queue_depth: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] default_min_insync_replicas: i32 => refined_type::rule::GreaterI32<0>;
@@ -364,44 +451,44 @@ define_broker_tuning! {
     refined #[schemars(range(min = 1))] share_state_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 1))] transaction_state_num_partitions: i32 => refined_type::rule::GreaterI32<0>;
     refined #[schemars(range(min = 1))] transaction_state_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
-    refined #[schemars(range(min = 1))] transaction_min_timeout_ms: i32 => refined_type::rule::GreaterI32<0>;
-    refined #[schemars(range(min = 1, max = 2_147_483_646))] transaction_max_timeout_ms: i32 => refined_type::rule::MinMaxI32<1, 2_147_483_646>;
-    plain partition_disk_scan_interval_secs: u64 => ();
+    time_i32 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] transaction_min_timeout: Time => ();
+    time_transaction_max #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] transaction_max_timeout: Time => ();
+    time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] partition_disk_scan_interval: Time => ();
     plain observer_lag_bound: u64 => ();
-    refined #[schemars(range(min = 1))] heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] heartbeat_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] replica_lag_time_max_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] controller_election_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] controller_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] controlled_shutdown_drain_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] heartbeat_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] heartbeat_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replica_lag_time_max: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controller_election_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controller_heartbeat_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controlled_shutdown_drain_timeout: Time => ();
     refined #[schemars(range(min = 1))] metadata_max_bytes_between_snapshots: u64 => refined_type::rule::GreaterU64<0>;
-    plain metadata_max_snapshot_interval_ms: u64 => ();
+    time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] metadata_max_snapshot_interval: Time => ();
     refined #[schemars(range(min = 1))] metadata_snapshot_interval_records: u64 => refined_type::rule::GreaterU64<0>;
-    plain txn_abort_cleanup_interval_ms: u64 => ();
-    refined #[schemars(range(min = 1))] leader_imbalance_check_interval_secs: u64 => refined_type::rule::GreaterU64<0>;
+    time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] txn_abort_cleanup_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] leader_imbalance_check_interval: Time => ();
     refined #[schemars(range(min = 0, max = 100))] leader_imbalance_per_broker_percentage: u32 => refined_type::rule::MinMaxU32<0, 100>;
-    plain tls_reload_interval_ms: u64 => ();
+    time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] tls_reload_interval: Time => ();
     plain max_incremental_fetch_session_cache_slots: usize => ();
     plain max_connections: usize => ();
     plain max_connections_per_ip: usize => ();
-    refined #[schemars(range(min = 1))] delegation_token_max_lifetime_ms: i64 => refined_type::rule::GreaterI64<0>;
-    refined #[schemars(range(min = 1))] delegation_token_expiry_check_interval_ms: i64 => refined_type::rule::GreaterI64<0>;
-    refined #[schemars(range(min = 1))] delegation_token_default_renew_period_ms: i64 => refined_type::rule::GreaterI64<0>;
-    refined #[schemars(range(min = 1))] remote_log_manager_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    time_i64 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] delegation_token_max_lifetime: Time => ();
+    time_i64 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] delegation_token_expiry_check_interval: Time => ();
+    time_i64 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] delegation_token_default_renew_period: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] remote_log_manager_interval: Time => ();
     plain share_group_enable: bool => ();
-    refined #[schemars(range(min = 1))] share_group_session_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] share_group_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] share_group_record_lock_duration_ms: u64 => refined_type::rule::GreaterU64<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_session_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_heartbeat_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_record_lock_duration: Time => ();
     refined #[schemars(range(min = 1))] share_group_max_delivery_attempts: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 1))] share_group_max_inflight_records: i32 => refined_type::rule::GreaterI32<0>;
     string share_group_isolation_level: String => ();
-    refined #[schemars(range(min = 1))] streams_group_session_timeout_ms: u64 => refined_type::rule::GreaterU64<0>;
-    refined #[schemars(range(min = 1))] streams_group_heartbeat_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] streams_group_session_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] streams_group_heartbeat_interval: Time => ();
     refined #[schemars(range(min = 1))] streams_internal_topic_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 0))] streams_group_num_standby_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
     refined #[schemars(range(min = 0))] streams_group_num_warmup_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
     refined #[schemars(range(min = 0))] streams_group_acceptable_recovery_lag: i64 => refined_type::rule::GreaterEqualI64<0>;
-    refined #[schemars(range(min = 1))] streams_group_task_offset_interval_ms: u64 => refined_type::rule::GreaterU64<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] streams_group_task_offset_interval: Time => ();
     string streams_group_assignor: String => ();
 }
 
@@ -497,18 +584,18 @@ impl BrokerTuning {
         }
 
         ordered!(
-            self_registration_backoff_min_ms,
-            100,
+            self_registration_backoff_min,
+            Time::from_millis(100),
             <=,
-            self_registration_backoff_max_ms,
-            5_000
+            self_registration_backoff_max,
+            Time::from_millis(5_000)
         );
         ordered!(
-            rlmm_bootstrap_backoff_initial_ms,
-            250,
+            rlmm_bootstrap_backoff_initial,
+            Time::from_millis(250),
             <=,
-            rlmm_bootstrap_backoff_max_ms,
-            10_000
+            rlmm_bootstrap_backoff_max,
+            Time::from_millis(10_000)
         );
         ordered!(
             replication_fetch_min_bytes,
@@ -518,46 +605,46 @@ impl BrokerTuning {
             1_048_576
         );
         ordered!(
-            replication_reconnect_initial_delay_ms,
-            100,
+            replication_reconnect_initial_delay,
+            Time::from_millis(100),
             <=,
-            replication_reconnect_delay_cap_ms,
-            5_000
+            replication_reconnect_delay_cap,
+            Time::from_millis(5_000)
         );
         ordered!(
-            heartbeat_interval_ms,
-            3_000,
+            heartbeat_interval,
+            Time::from_millis(3_000),
             <,
-            heartbeat_timeout_ms,
-            9_000
+            heartbeat_timeout,
+            Time::from_millis(9_000)
         );
         ordered!(
-            controller_heartbeat_interval_ms,
-            500,
+            controller_heartbeat_interval,
+            Time::from_millis(500),
             <,
-            controller_election_timeout_ms,
-            5_000
+            controller_election_timeout,
+            Time::from_millis(5_000)
         );
         ordered!(
-            delegation_token_default_renew_period_ms,
-            86_400_000,
+            delegation_token_default_renew_period,
+            Time::from_millis(86_400_000),
             <=,
-            delegation_token_max_lifetime_ms,
-            604_800_000
+            delegation_token_max_lifetime,
+            Time::from_millis(604_800_000)
         );
         ordered!(
-            client_metrics_eviction_tick_ms,
-            60_000,
+            client_metrics_eviction_tick,
+            Time::from_millis(60_000),
             <=,
-            client_metrics_stale_floor_ms,
-            600_000
+            client_metrics_stale_floor,
+            Time::from_millis(600_000)
         );
         ordered!(
-            unclean_recovery_aggressive_deadline_ms,
-            2_000,
+            unclean_recovery_aggressive_deadline,
+            Time::from_millis(2_000),
             <=,
-            unclean_recovery_balanced_deadline_ms,
-            30_000
+            unclean_recovery_balanced_deadline,
+            Time::from_millis(30_000)
         );
         ordered!(
             telemetry_decompressed_output_floor_bytes,
@@ -567,65 +654,81 @@ impl BrokerTuning {
             1_073_741_824
         );
         ordered!(
-            transaction_min_timeout_ms,
-            1_000,
+            transaction_min_timeout,
+            Time::from_millis(1_000),
             <,
-            transaction_max_timeout_ms,
-            900_000
+            transaction_max_timeout,
+            Time::from_millis(900_000)
         );
 
         ordered!(
-            consumer_group_min_session_timeout_ms,
-            45_000,
+            consumer_group_min_session_timeout,
+            Time::from_millis(45_000),
             <=,
-            consumer_group_max_session_timeout_ms,
-            60_000
+            consumer_group_max_session_timeout,
+            Time::from_millis(60_000)
         );
         bounded!(
-            consumer_group_session_timeout_ms,
-            45_000,
-            consumer_group_min_session_timeout_ms,
-            45_000,
-            consumer_group_max_session_timeout_ms,
-            60_000
+            consumer_group_session_timeout,
+            Time::from_millis(45_000),
+            consumer_group_min_session_timeout,
+            Time::from_millis(45_000),
+            consumer_group_max_session_timeout,
+            Time::from_millis(60_000)
         );
         ordered!(
-            consumer_group_min_heartbeat_interval_ms,
-            5_000,
+            consumer_group_min_heartbeat_interval,
+            Time::from_millis(5_000),
             <=,
-            consumer_group_max_heartbeat_interval_ms,
-            15_000
+            consumer_group_max_heartbeat_interval,
+            Time::from_millis(15_000)
         );
         bounded!(
-            consumer_group_heartbeat_interval_ms,
-            5_000,
-            consumer_group_min_heartbeat_interval_ms,
-            5_000,
-            consumer_group_max_heartbeat_interval_ms,
-            15_000
+            consumer_group_heartbeat_interval,
+            Time::from_millis(5_000),
+            consumer_group_min_heartbeat_interval,
+            Time::from_millis(5_000),
+            consumer_group_max_heartbeat_interval,
+            Time::from_millis(15_000)
         );
 
-        if !(45_000..=60_000).contains(&self.share_group_session_timeout_ms.unwrap_or(45_000)) {
+        if !(Time::from_millis(45_000)..=Time::from_millis(60_000)).contains(
+            &self
+                .share_group_session_timeout
+                .unwrap_or_else(|| Time::from_millis(45_000)),
+        ) {
             return Err(Self::invalid(
-                "share_group_session_timeout_ms",
+                "share_group_session_timeout",
                 "must be within 45000..=60000",
             ));
         }
-        if !(5_000..=15_000).contains(&self.share_group_heartbeat_interval_ms.unwrap_or(5_000)) {
+        if !(Time::from_millis(5_000)..=Time::from_millis(15_000)).contains(
+            &self
+                .share_group_heartbeat_interval
+                .unwrap_or_else(|| Time::from_millis(5_000)),
+        ) {
             return Err(Self::invalid(
-                "share_group_heartbeat_interval_ms",
+                "share_group_heartbeat_interval",
                 "must be within 5000..=15000",
             ));
         }
-        if !(45_000..=60_000).contains(&self.streams_group_session_timeout_ms.unwrap_or(45_000)) {
+        if !(Time::from_millis(45_000)..=Time::from_millis(60_000)).contains(
+            &self
+                .streams_group_session_timeout
+                .unwrap_or_else(|| Time::from_millis(45_000)),
+        ) {
             return Err(Self::invalid(
-                "streams_group_session_timeout_ms",
+                "streams_group_session_timeout",
                 "must be within 45000..=60000",
             ));
         }
-        if !(5_000..=15_000).contains(&self.streams_group_heartbeat_interval_ms.unwrap_or(5_000)) {
+        if !(Time::from_millis(5_000)..=Time::from_millis(15_000)).contains(
+            &self
+                .streams_group_heartbeat_interval
+                .unwrap_or_else(|| Time::from_millis(5_000)),
+        ) {
             return Err(Self::invalid(
-                "streams_group_heartbeat_interval_ms",
+                "streams_group_heartbeat_interval",
                 "must be within 5000..=15000",
             ));
         }

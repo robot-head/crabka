@@ -395,7 +395,7 @@ async fn acks_all_completes_via_isr_shrink_when_follower_dead() {
     cluster[0].0.wait_until_isr_len("shrink", 0, 3).await;
 
     // Kill broker 3 — its absence forces ISR to shrink within
-    // replica_lag_time_max_ms (2s on CI), unblocking the acks=-1 produce.
+    // replica_lag_time_max (2s on CI), unblocking the acks=-1 produce.
     let dead = cluster.pop().expect("3rd broker");
     dead.0.shutdown().await;
 

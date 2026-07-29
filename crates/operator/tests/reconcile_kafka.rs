@@ -852,17 +852,17 @@ fn configmap_data<B: AsRef<[u8]>>(observed: &[http::Request<B>]) -> serde_json::
 }
 
 #[tokio::test]
-async fn broker_tuning_renders_numeric_runtime_toml_in_declaration_order() {
+async fn broker_tuning_renders_runtime_toml_in_declaration_order() {
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
     let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
     let mut kafka = kafka_cr("demo", "y");
     kafka.spec.broker_tuning = Some(BrokerTuning {
-        cleaner_interval_ms: Some(7_000),
-        isr_scan_interval_ms: Some(800),
-        opa_http_timeout_ms: Some(2_500),
-        auto_join_voter_request_timeout_ms: Some(4_000),
+        cleaner_interval: Some(crabka_units::secs(7)),
+        isr_scan_interval: Some(crabka_units::millis(800)),
+        opa_http_timeout: Some(crabka_units::millis(2_500)),
+        auto_join_voter_request_timeout: Some(crabka_units::secs(4)),
         replication_fetch_max_bytes: Some(2_097_152),
-        replication_fetch_max_wait_ms: Some(750),
+        replication_fetch_max_wait: Some(crabka_units::millis(750)),
         replication_fetch_min_bytes: Some(2),
         share_state_replication_factor: Some(2),
         transaction_state_replication_factor: Some(3),
@@ -876,12 +876,12 @@ async fn broker_tuning_renders_numeric_runtime_toml_in_declaration_order() {
     let data = configmap_data(&observed);
     let toml = data["broker-0.toml"].as_str().expect("broker TOML");
     let expected = "[runtime]\n\
-cleaner_interval_ms = 7000\n\
-isr_scan_interval_ms = 800\n\
-opa_http_timeout_ms = 2500\n\
-auto_join_voter_request_timeout_ms = 4000\n\
+cleaner_interval = \"7s\"\n\
+isr_scan_interval = \"800ms\"\n\
+opa_http_timeout = \"2.5s\"\n\
+auto_join_voter_request_timeout = \"4s\"\n\
 replication_fetch_max_bytes = 2097152\n\
-replication_fetch_max_wait_ms = 750\n\
+replication_fetch_max_wait = \"750ms\"\n\
 replication_fetch_min_bytes = 2\n\
 share_state_replication_factor = 2\n\
 transaction_state_replication_factor = 3\n\
@@ -909,25 +909,38 @@ async fn empty_broker_tuning_omits_runtime_section() {
 #[test]
 fn broker_tuning_rejects_zero_with_camel_case_path() {
     let tuning = BrokerTuning {
-        cleaner_interval_ms: Some(0),
+        cleaner_interval: Some(crabka_units::millis(0)),
         ..BrokerTuning::default()
     };
 
     let error = tuning.validate().expect_err("zero interval must fail");
-    assert!(error.contains("spec.brokerTuning.cleanerIntervalMs"));
+    assert!(error.contains("spec.brokerTuning.cleanerInterval"));
 }
 
 #[test]
 fn broker_tuning_rejects_voter_timeout_above_wire_limit() {
     let tuning = BrokerTuning {
-        auto_join_voter_request_timeout_ms: Some(2_147_483_648),
+        auto_join_voter_request_timeout: Some(crabka_units::millis(2_147_483_648)),
         ..BrokerTuning::default()
     };
 
     let error = tuning
         .validate()
         .expect_err("timeout above i32 wire limit must fail");
-    assert!(error.contains("spec.brokerTuning.autoJoinVoterRequestTimeoutMs"));
+    assert!(error.contains("spec.brokerTuning.autoJoinVoterRequestTimeout"));
+}
+
+#[test]
+fn broker_tuning_rejects_fractional_protocol_milliseconds() {
+    let tuning = BrokerTuning {
+        replication_fetch_max_wait: Some(crabka_units::micros(1_500)),
+        ..BrokerTuning::default()
+    };
+
+    let error = tuning
+        .validate()
+        .expect_err("fractional protocol milliseconds must fail");
+    assert!(error.contains("spec.brokerTuning.replicationFetchMaxWait"));
 }
 
 #[test]
@@ -946,16 +959,16 @@ fn broker_tuning_rejects_zero_streams_internal_topic_replication_factor() {
 #[test]
 fn broker_tuning_rejects_initial_backoff_above_cap() {
     let tuning = BrokerTuning {
-        replication_reconnect_initial_delay_ms: Some(500),
-        replication_reconnect_delay_cap_ms: Some(100),
+        replication_reconnect_initial_delay: Some(crabka_units::millis(500)),
+        replication_reconnect_delay_cap: Some(crabka_units::millis(100)),
         ..BrokerTuning::default()
     };
 
     let error = tuning
         .validate()
         .expect_err("initial reconnect delay above cap must fail");
-    assert!(error.contains("spec.brokerTuning.replicationReconnectInitialDelayMs"));
-    assert!(error.contains("spec.brokerTuning.replicationReconnectDelayCapMs"));
+    assert!(error.contains("spec.brokerTuning.replicationReconnectInitialDelay"));
+    assert!(error.contains("spec.brokerTuning.replicationReconnectDelayCap"));
 }
 
 #[tokio::test]
@@ -980,7 +993,7 @@ async fn invalid_broker_tuning_sets_condition_and_skips_configmap() {
     let (ctx, state) = build_ctx("y", rules);
     let mut kafka = kafka_cr("demo", "y");
     kafka.spec.broker_tuning = Some(BrokerTuning {
-        cleaner_interval_ms: Some(0),
+        cleaner_interval: Some(crabka_units::millis(0)),
         ..BrokerTuning::default()
     });
 
@@ -1018,7 +1031,7 @@ async fn invalid_broker_tuning_sets_condition_and_skips_configmap() {
         condition["message"]
             .as_str()
             .expect("message")
-            .contains("spec.brokerTuning.cleanerIntervalMs")
+            .contains("spec.brokerTuning.cleanerInterval")
     );
     assert!(state.remaining_rules() == 0);
 }

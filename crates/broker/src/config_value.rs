@@ -1,59 +1,12 @@
 //! Validated scalar values accepted at broker configuration boundaries.
 
-use refined_type::rule::{
-    GreaterI16, GreaterI32, GreaterI64, GreaterU64, GreaterUsize, MinMaxU32, MinMaxU64,
-};
+use refined_type::rule::{GreaterI16, GreaterI32, GreaterI64, GreaterUsize, MinMaxU32};
 
-type RefinedPositiveMillis = GreaterU64<0>;
 type RefinedPositiveI32 = GreaterI32<0>;
 type RefinedPositiveI16 = GreaterI16<0>;
 type RefinedPositiveI64 = GreaterI64<0>;
 type RefinedPositiveCount = GreaterUsize<0>;
 type RefinedPercentage = MinMaxU32<0, 100>;
-type RefinedVoterRequestTimeoutMillis = MinMaxU64<1, 2_147_483_647>;
-
-/// A millisecond count greater than zero.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PositiveMillis(u64);
-
-impl PositiveMillis {
-    /// Validate and construct a positive millisecond count.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `value` is zero.
-    pub fn new(value: u64) -> Result<Self, refined_type::result::Error<u64>> {
-        RefinedPositiveMillis::new(value).map(|value| Self(value.into_value()))
-    }
-
-    /// Consume the validated value.
-    #[must_use]
-    pub const fn into_value(self) -> u64 {
-        self.0
-    }
-}
-
-/// A positive millisecond count representable by the Kafka `i32` wire field.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct VoterRequestTimeoutMillis(u64);
-
-impl VoterRequestTimeoutMillis {
-    /// Validate and construct an auto-join voter request timeout.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error outside `1..=i32::MAX`.
-    pub fn new(value: u64) -> Result<Self, refined_type::result::Error<u64>> {
-        RefinedVoterRequestTimeoutMillis::new(value).map(|value| Self(value.into_value()))
-    }
-
-    /// Consume the validated value.
-    #[must_use]
-    pub const fn into_value(self) -> u64 {
-        self.0
-    }
-}
-
 /// A 32-bit signed integer greater than zero.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PositiveI32(i32);
@@ -159,32 +112,6 @@ impl Percentage {
     }
 }
 
-/// Parse a positive millisecond count.
-///
-/// # Errors
-///
-/// Returns an error when `value` is not an integer greater than zero.
-pub fn parse_positive_millis(value: &str) -> Result<PositiveMillis, String> {
-    value
-        .parse::<u64>()
-        .map_err(|error| error.to_string())
-        .and_then(|value| PositiveMillis::new(value).map_err(|error| error.to_string()))
-}
-
-/// Parse an auto-join voter request timeout representable on the wire.
-///
-/// # Errors
-///
-/// Returns an error outside `1..=i32::MAX`.
-pub fn parse_voter_request_timeout_millis(
-    value: &str,
-) -> Result<VoterRequestTimeoutMillis, String> {
-    value
-        .parse::<u64>()
-        .map_err(|error| error.to_string())
-        .and_then(|value| VoterRequestTimeoutMillis::new(value).map_err(|error| error.to_string()))
-}
-
 /// Parse a positive 32-bit signed integer.
 ///
 /// # Errors
@@ -248,22 +175,11 @@ pub fn parse_percentage(value: &str) -> Result<Percentage, String> {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use clap::Parser;
 
     use super::*;
 
-    #[derive(Debug, Parser)]
-    struct TestArgs {
-        #[arg(long, value_parser = parse_positive_millis)]
-        delay_ms: PositiveMillis,
-    }
-
     #[test]
     fn refined_scalar_boundaries() {
-        assert!(parse_positive_millis("1").is_ok());
-        assert!(parse_positive_millis("0").is_err());
-        assert!(parse_voter_request_timeout_millis("2147483647").is_ok());
-        assert!(parse_voter_request_timeout_millis("2147483648").is_err());
         assert!(parse_positive_i32("1").is_ok());
         assert!(parse_positive_i32("0").is_err());
         assert!(parse_positive_i16("1").is_ok());
@@ -275,14 +191,5 @@ mod tests {
         assert!(parse_percentage("0").is_ok());
         assert!(parse_percentage("100").is_ok());
         assert!(parse_percentage("101").is_err());
-    }
-
-    #[test]
-    fn clap_value_parser_uses_refined_validation() {
-        let args = TestArgs::try_parse_from(["test", "--delay-ms", "1"])
-            .expect("positive milliseconds should parse");
-        assert!(args.delay_ms.into_value() == 1);
-
-        assert!(TestArgs::try_parse_from(["test", "--delay-ms", "0"]).is_err());
     }
 }

@@ -205,7 +205,7 @@ async fn acks_all_completes_after_isr_shrink() {
     dead.0.shutdown().await;
 
     // Produce acks=-1. ISR should shrink to {1,2} within
-    // replica_lag_time_max_ms (2s on CI) + heartbeat_timeout (2s); produce
+    // replica_lag_time_max (2s on CI) + heartbeat_timeout (2s); produce
     // completes after.
     let start = Instant::now();
     let offset = produce_acks(&bootstrap_1, "shrink2", &["a", "b", "c"], -1, 15_000)

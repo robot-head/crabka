@@ -3220,11 +3220,11 @@ fn render_broker_header(
     let (controller_quorum_voters, controller_server_name) = controller;
     let _ = writeln!(out, "broker_id = {broker_id}");
     let _ = writeln!(out, "log_dir = \"/var/lib/crabka/data\"");
-    let _ = writeln!(out, "heartbeat_interval_ms = 500");
-    let _ = writeln!(out, "heartbeat_timeout_ms = 3000");
-    let _ = writeln!(out, "replica_lag_time_max_ms = 2000");
-    let _ = writeln!(out, "controller_election_timeout_ms = 500");
-    let _ = writeln!(out, "controller_heartbeat_interval_ms = 100");
+    let _ = writeln!(out, "heartbeat_interval = \"500ms\"");
+    let _ = writeln!(out, "heartbeat_timeout = \"3s\"");
+    let _ = writeln!(out, "replica_lag_time_max = \"2s\"");
+    let _ = writeln!(out, "controller_election_timeout = \"500ms\"");
+    let _ = writeln!(out, "controller_heartbeat_interval = \"100ms\"");
     let _ = writeln!(
         out,
         "inter_broker_listener_name = \"{inter_broker_listener_name}\""
@@ -3583,11 +3583,11 @@ mod toml_rendering_tests {
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
         check!(parsed.broker_id == Some(0));
         check!(parsed.inter_broker_listener_name.as_deref() == Some("PLAIN"));
-        check!(parsed.heartbeat_interval_ms == Some(500));
-        check!(parsed.heartbeat_timeout_ms == Some(3000));
-        check!(parsed.replica_lag_time_max_ms == Some(2000));
-        check!(parsed.controller_election_timeout_ms == Some(500));
-        check!(parsed.controller_heartbeat_interval_ms == Some(100));
+        check!(parsed.heartbeat_interval == Some(crabka_units::millis(500)));
+        check!(parsed.heartbeat_timeout == Some(crabka_units::secs(3)));
+        check!(parsed.replica_lag_time_max == Some(crabka_units::secs(2)));
+        check!(parsed.controller_election_timeout == Some(crabka_units::millis(500)));
+        check!(parsed.controller_heartbeat_interval == Some(crabka_units::millis(100)));
         check!(parsed.listeners.len() == 1);
         check!(parsed.listeners[0].advertised == "demo-0.svc.local:9092");
     }

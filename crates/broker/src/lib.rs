@@ -106,12 +106,12 @@
 //! change. Leader election runs on the controller:
 //! `heartbeat::controller_state::ControllerLivenessState` tracks
 //! per-broker `last_heartbeat`; a 1s ticker times out brokers at
-//! `heartbeat_timeout_ms` and calls `leader_election::on_broker_dead`
+//! `heartbeat_timeout` and calls `leader_election::on_broker_dead`
 //! which scans partitions of the dead broker, picks the first alive
 //! ISR replica, and bumps `leader_epoch`. ISR shrink/expand is
 //! leader-driven by `isr_maintenance` — proposes `AlterPartition`
 //! whenever a follower's last-fetch time exceeds
-//! `replica_lag_time_max_ms`.
+//! `replica_lag_time_max`.
 //!
 //! Together with the HW + acks=all work above, the bulletproof-EOS promise is complete:
 //! `acks=all` produces survive arbitrary single-broker failures with

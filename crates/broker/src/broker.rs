@@ -94,7 +94,7 @@ pub struct Broker {
     pub(crate) supervisor_shutdown: tokio_util::sync::CancellationToken,
     pub(crate) supervisor_handle: tokio::sync::Mutex<Option<JoinHandle<()>>>,
     /// Handle for the periodic disk-usage scanner spawned when
-    /// `BrokerConfig::partition_disk_scan_interval_secs > 0`. Retained on
+    /// `BrokerConfig::partition_disk_scan_interval > 0`. Retained on
     /// the struct so [`BrokerHandle::shutdown`] can await it after
     /// cancelling `supervisor_shutdown`. `None` when the scanner is
     /// disabled (interval = 0, typical in tests).

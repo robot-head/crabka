@@ -120,7 +120,7 @@ pub struct DelegationTokenAuth {
     pub renewers: Vec<String>,
 
     /// Hard upper bound on token lifetime in milliseconds. `None` →
-    /// broker's `delegation_token_max_lifetime_ms` (7d default). Capped
+    /// broker's `delegation_token_max_lifetime` (7d default). Capped
     /// by the broker even when explicitly set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]

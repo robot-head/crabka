@@ -79,21 +79,15 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  auditPartitionWaitTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                  auditPartitionWaitTimeout:
                     nullable: true
-                    type: integer
-                  auditSpoolReplayIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  auditSpoolReplayInterval:
                     nullable: true
-                    type: integer
-                  auditStatsPollIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  auditStatsPollInterval:
                     nullable: true
-                    type: integer
+                    type: string
                   auditTailReadMaxBytes:
                     format: uint
                     minimum: 1.0
@@ -104,52 +98,35 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  autoJoinRetryBackoffMs:
-                    format: uint64
-                    minimum: 1.0
+                  autoJoinRetryBackoff:
                     nullable: true
-                    type: integer
-                  autoJoinVoterRequestTimeoutMs:
-                    format: uint64
-                    maximum: 2147483647.0
-                    minimum: 1.0
+                    type: string
+                  autoJoinVoterRequestTimeout:
                     nullable: true
-                    type: integer
-                  classicGroupInitialRebalanceDelayMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  classicGroupInitialRebalanceDelay:
                     nullable: true
-                    type: integer
-                  cleanerIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  cleanerInterval:
                     nullable: true
-                    type: integer
-                  clientMetricsDefaultIntervalMs:
-                    format: int32
-                    minimum: 1.0
+                    type: string
+                  clientMetricsDefaultInterval:
                     nullable: true
-                    type: integer
-                  clientMetricsEvictionTickMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  clientMetricsEvictionTick:
                     nullable: true
-                    type: integer
+                    type: string
                   clientMetricsOtlpQueueCapacity:
                     format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  clientMetricsPromSnapshotTtlMs:
-                    format: uint64
-                    minimum: 1.0
+                  clientMetricsPromSnapshotTtl:
                     nullable: true
-                    type: integer
-                  clientMetricsStaleFloorMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  clientMetricsStaleFloor:
                     nullable: true
-                    type: integer
+                    type: string
                   clientMetricsStalePushIntervals:
                     format: uint32
                     minimum: 1.0
@@ -160,146 +137,102 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  connectionCreationThrottleMaxMs:
-                    format: uint64
-                    minimum: 1.0
+                  connectionCreationThrottleMax:
                     nullable: true
-                    type: integer
-                  consumerGroupHeartbeatIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  consumerGroupHeartbeatInterval:
                     nullable: true
-                    type: integer
-                  consumerGroupMaxHeartbeatIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  consumerGroupMaxHeartbeatInterval:
                     nullable: true
-                    type: integer
-                  consumerGroupMaxSessionTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  consumerGroupMaxSessionTimeout:
                     nullable: true
-                    type: integer
+                    type: string
                   consumerGroupMaxSize:
                     format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  consumerGroupMinHeartbeatIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                  consumerGroupMinHeartbeatInterval:
                     nullable: true
-                    type: integer
-                  consumerGroupMinSessionTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  consumerGroupMinSessionTimeout:
                     nullable: true
-                    type: integer
-                  consumerGroupSessionTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  consumerGroupSessionTimeout:
                     nullable: true
-                    type: integer
-                  controlledShutdownDrainTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  controlledShutdownDrainTimeout:
                     nullable: true
-                    type: integer
-                  controllerElectionTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  controllerElectionTimeout:
                     nullable: true
-                    type: integer
-                  controllerHeartbeatIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  controllerHeartbeatInterval:
                     nullable: true
-                    type: integer
+                    type: string
                   coordinatorActorMailboxCapacity:
                     format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  coordinatorSessionExpiryTickMs:
-                    format: uint64
-                    minimum: 1.0
+                  coordinatorSessionExpiryTick:
                     nullable: true
-                    type: integer
-                  coordinatorShutdownAckTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  coordinatorShutdownAckTimeout:
                     nullable: true
-                    type: integer
+                    type: string
                   defaultMinInsyncReplicas:
                     format: int32
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  delegationTokenDefaultRenewPeriodMs:
-                    format: int64
-                    minimum: 1.0
+                  delegationTokenDefaultRenewPeriod:
                     nullable: true
-                    type: integer
-                  delegationTokenExpiryCheckIntervalMs:
-                    format: int64
-                    minimum: 1.0
+                    type: string
+                  delegationTokenExpiryCheckInterval:
                     nullable: true
-                    type: integer
-                  delegationTokenMaxLifetimeMs:
-                    format: int64
-                    minimum: 1.0
+                    type: string
+                  delegationTokenMaxLifetime:
                     nullable: true
-                    type: integer
+                    type: string
                   futureLogMoveReadChunkBytes:
                     format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  futureLogMoveRetryBackoffMs:
-                    format: uint64
-                    minimum: 1.0
+                  futureLogMoveRetryBackoff:
                     nullable: true
-                    type: integer
-                  gaugePollIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  gaugePollInterval:
                     nullable: true
-                    type: integer
-                  heartbeatIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  heartbeatInterval:
                     nullable: true
-                    type: integer
-                  heartbeatTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  heartbeatTimeout:
                     nullable: true
-                    type: integer
+                    type: string
                   interBrokerServerName:
                     minLength: 1
                     nullable: true
                     type: string
-                  isrScanIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                  isrScanInterval:
                     nullable: true
-                    type: integer
-                  leaderImbalanceCheckIntervalSecs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  leaderImbalanceCheckInterval:
                     nullable: true
-                    type: integer
+                    type: string
                   leaderImbalancePerBrokerPercentage:
                     format: uint32
                     maximum: 100.0
                     minimum: 0.0
                     nullable: true
                     type: integer
-                  livenessTickIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                  livenessTickInterval:
                     nullable: true
-                    type: integer
+                    type: string
                   maxConnections:
                     format: uint
                     minimum: 0.0
@@ -325,21 +258,17 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  metadataMaxSnapshotIntervalMs:
-                    format: uint64
-                    minimum: 0.0
+                  metadataMaxSnapshotInterval:
                     nullable: true
-                    type: integer
+                    type: string
                   metadataSnapshotIntervalRecords:
                     format: uint64
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  oauthJwksHttpTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                  oauthJwksHttpTimeout:
                     nullable: true
-                    type: integer
+                    type: string
                   observerFetchMaxBytes:
                     format: uint32
                     minimum: 1.0
@@ -350,136 +279,90 @@ spec:
                     minimum: 0.0
                     nullable: true
                     type: integer
-                  observerPollIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                  observerPollInterval:
                     nullable: true
-                    type: integer
-                  offsetsTopicMetadataWaitTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  offsetsTopicMetadataWaitTimeout:
                     nullable: true
-                    type: integer
-                  opaHttpTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  opaHttpTimeout:
                     nullable: true
-                    type: integer
-                  operatorRecoveryDeadlineMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  operatorRecoveryDeadline:
                     nullable: true
-                    type: integer
-                  partitionDiskScanIntervalSecs:
-                    format: uint64
-                    minimum: 0.0
+                    type: string
+                  partitionDiskScanInterval:
                     nullable: true
-                    type: integer
+                    type: string
                   partitionWriterQueueDepth:
                     format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  producerIdExpirationMs:
-                    format: int64
-                    minimum: 1.0
+                  producerIdExpiration:
                     nullable: true
-                    type: integer
-                  producerIdExpirationScanIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  producerIdExpirationScanInterval:
                     nullable: true
-                    type: integer
-                  quotaThrottleMaxMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  quotaThrottleMax:
                     nullable: true
-                    type: integer
-                  remoteLogManagerIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  remoteLogManagerInterval:
                     nullable: true
-                    type: integer
-                  replicaLagTimeMaxMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  replicaLagTimeMax:
                     nullable: true
-                    type: integer
-                  replicationEpochFenceBackoffMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  replicationEpochFenceBackoff:
                     nullable: true
-                    type: integer
+                    type: string
                   replicationFetchMaxBytes:
                     format: int32
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  replicationFetchMaxWaitMs:
-                    format: int32
-                    minimum: 1.0
+                  replicationFetchMaxWait:
                     nullable: true
-                    type: integer
+                    type: string
                   replicationFetchMinBytes:
                     format: int32
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  replicationReconnectDelayCapMs:
-                    format: uint64
-                    minimum: 1.0
+                  replicationReconnectDelayCap:
                     nullable: true
-                    type: integer
-                  replicationReconnectInitialDelayMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  replicationReconnectInitialDelay:
                     nullable: true
-                    type: integer
-                  replicationSendErrorBackoffMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  replicationSendErrorBackoff:
                     nullable: true
-                    type: integer
-                  replicationThrottleExhaustedBackoffMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  replicationThrottleExhaustedBackoff:
                     nullable: true
-                    type: integer
-                  replicationUnexpectedErrorBackoffMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  replicationUnexpectedErrorBackoff:
                     nullable: true
-                    type: integer
-                  replicationUnknownTopicRetryDelayMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  replicationUnknownTopicRetryDelay:
                     nullable: true
-                    type: integer
-                  rlmmBootstrapBackoffInitialMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  rlmmBootstrapBackoffInitial:
                     nullable: true
-                    type: integer
-                  rlmmBootstrapBackoffMaxMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  rlmmBootstrapBackoffMax:
                     nullable: true
-                    type: integer
-                  rlmmReconcileTickMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  rlmmReconcileTick:
                     nullable: true
-                    type: integer
-                  selfRegistrationBackoffMaxMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  selfRegistrationBackoffMax:
                     nullable: true
-                    type: integer
-                  selfRegistrationBackoffMinMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  selfRegistrationBackoffMin:
                     nullable: true
-                    type: integer
+                    type: string
                   selfRegistrationMaxAttempts:
                     format: uint32
                     minimum: 1.0
@@ -493,11 +376,9 @@ spec:
                   shareGroupEnable:
                     nullable: true
                     type: boolean
-                  shareGroupHeartbeatIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                  shareGroupHeartbeatInterval:
                     nullable: true
-                    type: integer
+                    type: string
                   shareGroupIsolationLevel:
                     nullable: true
                     type: string
@@ -512,16 +393,12 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  shareGroupRecordLockDurationMs:
-                    format: uint64
-                    minimum: 1.0
+                  shareGroupRecordLockDuration:
                     nullable: true
-                    type: integer
-                  shareGroupSessionTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  shareGroupSessionTimeout:
                     nullable: true
-                    type: integer
+                    type: string
                   shareRecoveryReadMaxBytes:
                     format: uint
                     minimum: 1.0
@@ -559,11 +436,9 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  startupLeaderWaitTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                  startupLeaderWaitTimeout:
                     nullable: true
-                    type: integer
+                    type: string
                   streamsGroupAcceptableRecoveryLag:
                     format: int64
                     minimum: 0.0
@@ -572,11 +447,9 @@ spec:
                   streamsGroupAssignor:
                     nullable: true
                     type: string
-                  streamsGroupHeartbeatIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                  streamsGroupHeartbeatInterval:
                     nullable: true
-                    type: integer
+                    type: string
                   streamsGroupNumStandbyReplicas:
                     format: int32
                     minimum: 0.0
@@ -587,27 +460,21 @@ spec:
                     minimum: 0.0
                     nullable: true
                     type: integer
-                  streamsGroupSessionTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                  streamsGroupSessionTimeout:
                     nullable: true
-                    type: integer
-                  streamsGroupTaskOffsetIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  streamsGroupTaskOffsetInterval:
                     nullable: true
-                    type: integer
+                    type: string
                   streamsInternalTopicReplicationFactor:
                     format: int16
                     maximum: 32767.0
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  syncGroupFollowerWaitMs:
-                    format: uint64
-                    minimum: 1.0
+                  syncGroupFollowerWait:
                     nullable: true
-                    type: integer
+                    type: string
                   telemetryDecompressedOutputCeilingBytes:
                     format: uint
                     minimum: 1.0
@@ -623,22 +490,15 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  tlsReloadIntervalMs:
-                    format: uint64
-                    minimum: 0.0
+                  tlsReloadInterval:
                     nullable: true
-                    type: integer
-                  transactionMaxTimeoutMs:
-                    format: int32
-                    maximum: 2147483646.0
-                    minimum: 1.0
+                    type: string
+                  transactionMaxTimeout:
                     nullable: true
-                    type: integer
-                  transactionMinTimeoutMs:
-                    format: int32
-                    minimum: 1.0
+                    type: string
+                  transactionMinTimeout:
                     nullable: true
-                    type: integer
+                    type: string
                   transactionStateNumPartitions:
                     format: int32
                     minimum: 1.0
@@ -650,21 +510,15 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  txnAbortCleanupIntervalMs:
-                    format: uint64
-                    minimum: 0.0
+                  txnAbortCleanupInterval:
                     nullable: true
-                    type: integer
-                  uncleanRecoveryAggressiveDeadlineMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  uncleanRecoveryAggressiveDeadline:
                     nullable: true
-                    type: integer
-                  uncleanRecoveryBalancedDeadlineMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  uncleanRecoveryBalancedDeadline:
                     nullable: true
-                    type: integer
+                    type: string
                   uncleanRecoveryQueueCapacity:
                     format: uint
                     minimum: 1.0
