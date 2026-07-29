@@ -32,10 +32,9 @@ const SCRAM_SHA_512_WIRE: i8 = 2;
 /// Paired with the `*_sha256` builders/helpers below.
 const SCRAM_SHA_256_WIRE: i8 = 1;
 
-/// Default PBKDF2 iteration count for new SCRAM credentials. Matches
-/// Kafka's `org.apache.kafka.common.security.scram.internals.ScramFormatter`
-/// default and exceeds the broker's `MIN_ITERATIONS = 4096`.
-pub const DEFAULT_SCRAM_ITERATIONS: i32 = 8192;
+pub use crabka_security::scram::{
+    DEFAULT_SCRAM_ITERATIONS, MAX_SCRAM_ITERATIONS, MIN_SCRAM_ITERATIONS, ScramIterations,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ResourceType {
@@ -633,6 +632,18 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn scram_iterations_match_broker_bounds() {
+        assert2::assert!(ScramIterations::default().into_value() == DEFAULT_SCRAM_ITERATIONS);
+        assert2::assert!(ScramIterations::new(4_096).is_ok());
+        assert2::assert!(ScramIterations::new(16_384).is_ok());
+        for invalid in [0, 4_095, 16_385, i32::MAX] {
+            assert2::assert!(ScramIterations::new(invalid).is_err());
+        }
+        assert2::assert!("8192".parse::<ScramIterations>().is_ok());
+        assert2::assert!("not-a-number".parse::<ScramIterations>().is_err());
+    }
 
     fn encode_v0(resp: &impl Encode) -> Vec<u8> {
         encode_at(resp, 0)

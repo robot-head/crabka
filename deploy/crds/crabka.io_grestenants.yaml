@@ -50,6 +50,13 @@ spec:
                     minimum: 0.0
                     nullable: true
                     type: integer
+                  scramIterations:
+                    description: PBKDF2 iteration count for tenant Kafka and `PostgreSQL` SCRAM credentials.
+                    format: int32
+                    maximum: 16384.0
+                    minimum: 4096.0
+                    nullable: true
+                    type: integer
                   suspendMaxCheckpointSize:
                     description: Keep the tenant warm when its latest checkpoint exceeds this size.
                     nullable: true

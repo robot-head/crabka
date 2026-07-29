@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use crabka_client_admin::{
-    AclEntry, AclEntryFilter, AclOperation, CreateTopicSpec, DEFAULT_SCRAM_ITERATIONS, PatternType,
-    PermissionType, ResourceType, ScramDeletion, ScramUpsertion,
+    AclEntry, AclEntryFilter, AclOperation, CreateTopicSpec, PatternType, PermissionType,
+    ResourceType, ScramDeletion, ScramIterations, ScramUpsertion,
 };
 use crabka_gres_control::{
     DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_FRAMES, RangeBoundary, RangeLayoutEntry, SqlUser,
@@ -269,7 +269,7 @@ async fn prepare_tenant(
         cluster,
         bootstrap,
         policy,
-        defaults: effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref()),
+        defaults: effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref())?,
         compute_image,
         compute_policy,
         direct_bootstrap_grace: Time::from_millis(
@@ -610,7 +610,7 @@ async fn provision_tenant_resources(
             &[ScramUpsertion {
                 username: kafka_username.clone(),
                 password: password.clone(),
-                iterations: DEFAULT_SCRAM_ITERATIONS,
+                iterations: config.defaults.scram_iterations.into_value(),
             }],
             &[],
         )
@@ -1274,6 +1274,7 @@ async fn cleanup_tenant(
 #[derive(Debug, Clone, Copy)]
 struct EffectiveDefaults {
     wal_replication: i32,
+    scram_iterations: ScramIterations,
     checkpoint_frames: Option<u64>,
     checkpoint_size: Option<ByteSize>,
     suspend_max_checkpoint_size: Option<ByteSize>,
@@ -1283,12 +1284,18 @@ struct EffectiveDefaults {
 fn effective_defaults(
     base: Option<&TenantDefaults>,
     override_: Option<&TenantDefaults>,
-) -> EffectiveDefaults {
-    EffectiveDefaults {
+) -> Result<EffectiveDefaults, ReconcileError> {
+    let scram_iterations = override_
+        .and_then(|defaults| defaults.scram_iterations)
+        .or_else(|| base.and_then(|defaults| defaults.scram_iterations))
+        .map_or_else(|| Ok(ScramIterations::default()), ScramIterations::new)
+        .map_err(|error| ReconcileError::Malformed(format!("defaults.scramIterations: {error}")))?;
+    Ok(EffectiveDefaults {
         wal_replication: override_
             .and_then(|d| d.wal_replication)
             .or_else(|| base.and_then(|d| d.wal_replication))
             .unwrap_or(1),
+        scram_iterations,
         checkpoint_frames: override_
             .and_then(|d| d.checkpoint_frames)
             .or_else(|| base.and_then(|d| d.checkpoint_frames))
@@ -1303,7 +1310,7 @@ fn effective_defaults(
         idle_seconds: override_
             .and_then(|d| d.idle_seconds)
             .or_else(|| base.and_then(|d| d.idle_seconds)),
-    }
+    })
 }
 
 async fn missing_topics(
@@ -1369,12 +1376,18 @@ fn build_tenant_record(
     desired_ranges: &[GresTenantRangeSpec],
 ) -> Result<TenantRecord, ReconcileError> {
     let verifier = current
-        .filter(|record| verifier_matches_password(&record.scram_verifier, password))
+        .filter(|record| {
+            verifier_matches_password(&record.scram_verifier, password, defaults.scram_iterations)
+        })
         .map(|record| record.scram_verifier.clone())
         .unwrap_or(
-            PgScramVerifier::generate(password, DEFAULT_SCRAM_ITERATIONS as u32)
-                .map_err(|err| ReconcileError::Malformed(err.to_string()))?
-                .to_string(),
+            PgScramVerifier::generate(
+                password,
+                u32::try_from(defaults.scram_iterations.into_value())
+                    .expect("validated SCRAM iterations are positive"),
+            )
+            .map_err(|err| ReconcileError::Malformed(err.to_string()))?
+            .to_string(),
         );
     let state = current.map_or_else(|| requested_state(obj), |record| record.state);
     let mut record = TenantRecord::new(
@@ -1465,10 +1478,20 @@ fn requested_state(obj: &GresTenant) -> TenantState {
     TenantState::Active
 }
 
-fn verifier_matches_password(verifier: &str, password: &str) -> bool {
+fn verifier_matches_password(
+    verifier: &str,
+    password: &str,
+    scram_iterations: ScramIterations,
+) -> bool {
     let Ok(parsed) = PgScramVerifier::parse(verifier) else {
         return false;
     };
+    if parsed.iterations
+        != u32::try_from(scram_iterations.into_value())
+            .expect("validated SCRAM iterations are positive")
+    {
+        return false;
+    }
     let Ok(candidate) =
         PgScramVerifier::generate_with_salt(password, parsed.iterations, parsed.salt)
     else {
@@ -2740,6 +2763,7 @@ mod tests {
     fn checkpoint_thresholds_use_override_then_fleet_then_compiled_fallback() {
         let defaults = |frames, bytes| TenantDefaults {
             wal_replication: None,
+            scram_iterations: None,
             checkpoint_frames: frames,
             checkpoint_size: bytes,
             suspend_max_checkpoint_size: None,
@@ -2777,9 +2801,44 @@ mod tests {
                 crabka_units::bytes(22),
             ),
         ] {
-            let effective = effective_defaults(base.as_ref(), override_.as_ref());
+            let effective = effective_defaults(base.as_ref(), override_.as_ref()).unwrap();
             assert!(effective.checkpoint_frames == Some(expected_frames));
             assert!(effective.checkpoint_size == Some(expected_bytes));
+        }
+    }
+
+    #[test]
+    fn scram_iterations_use_override_then_fleet_then_default_and_validate() {
+        let defaults = |scram_iterations| TenantDefaults {
+            wal_replication: None,
+            scram_iterations,
+            checkpoint_frames: None,
+            checkpoint_size: None,
+            suspend_max_checkpoint_size: None,
+            idle_seconds: None,
+        };
+        let fallback = effective_defaults(None, None).unwrap();
+        assert!(
+            fallback.scram_iterations.into_value() == crabka_client_admin::DEFAULT_SCRAM_ITERATIONS
+        );
+        let fleet = defaults(Some(8_192));
+        assert!(
+            effective_defaults(Some(&fleet), None)
+                .unwrap()
+                .scram_iterations
+                .into_value()
+                == 8_192
+        );
+        let override_ = defaults(Some(12_288));
+        assert!(
+            effective_defaults(Some(&fleet), Some(&override_))
+                .unwrap()
+                .scram_iterations
+                .into_value()
+                == 12_288
+        );
+        for invalid in [4_095, 16_385] {
+            assert!(effective_defaults(Some(&defaults(Some(invalid))), None).is_err());
         }
     }
 
@@ -2833,6 +2892,7 @@ mod tests {
         let password = fixture_password();
         let defaults = EffectiveDefaults {
             wal_replication: 1,
+            scram_iterations: crabka_client_admin::ScramIterations::new(12_288).unwrap(),
             checkpoint_frames: Some(37),
             checkpoint_size: None,
             suspend_max_checkpoint_size: None,
@@ -2852,8 +2912,34 @@ mod tests {
         )
         .unwrap();
         assert!(record.scram_verifier.starts_with("SCRAM-SHA-256$"));
+        assert!(
+            PgScramVerifier::parse(&record.scram_verifier)
+                .is_ok_and(|verifier| verifier.iterations == 12_288)
+        );
         assert!(!record.scram_verifier.contains(&password));
         assert!(record.checkpoint_frames == Some(37));
+
+        let mut changed_defaults = defaults;
+        changed_defaults.scram_iterations =
+            crabka_client_admin::ScramIterations::new(8_192).unwrap();
+        let changed = build_tenant_record(
+            &obj,
+            &TenantName::try_from("tenant-a").unwrap(),
+            &password,
+            2,
+            &changed_defaults,
+            Some(&record),
+            &[GresTenantRangeSpec {
+                range_id: 0,
+                end_key: None,
+            }],
+        )
+        .unwrap();
+        assert!(
+            PgScramVerifier::parse(&changed.scram_verifier)
+                .is_ok_and(|verifier| verifier.iterations == 8_192)
+        );
+        assert!(changed.scram_verifier != record.scram_verifier);
     }
 
     #[test]

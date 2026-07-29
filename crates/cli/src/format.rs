@@ -24,7 +24,10 @@ use crabka_metadata::{
     AclEntry, KRaftVersionRange, KRaftVersionRecord, MetadataRecord, ScramCredentialRecord, Voter,
     VoterEndpoint, VoterSet, VotersRecord,
 };
-use crabka_security::{SaslMechanism, scram::hash_scram_password_with_salt};
+use crabka_security::{
+    SaslMechanism,
+    scram::{MIN_SCRAM_ITERATIONS, hash_scram_password_with_salt},
+};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::Serialize;
 use serde_wincode::SerdeCompat;
@@ -43,10 +46,6 @@ const EXIT_LOW_ITERATIONS: i32 = 2;
 const EXIT_DIRTY_LOG_DIR: i32 = 3;
 const EXIT_BOOTSTRAP_FAIL: i32 = 4;
 const EXIT_INVALID_FEATURE: i32 = 5;
-
-/// SCRAM iteration floor — matches Kafka's recommended minimum and the
-/// `AlterUserScramCredentials` handler's pre-check.
-const MIN_SCRAM_ITERATIONS: u32 = 4096;
 
 #[derive(Args, Debug)]
 pub struct FormatArgs {
@@ -224,7 +223,7 @@ fn parse_scram_spec(s: &str) -> Result<ScramSpec, String> {
     let body = body.strip_suffix(']').ok_or("must end with ]")?;
     let mut name = None;
     let mut password = None;
-    let mut iterations: u32 = 4096;
+    let mut iterations = u32::try_from(MIN_SCRAM_ITERATIONS).expect("SCRAM minimum is positive");
     for attr in body.split(',') {
         let (k, v) = attr
             .split_once('=')
@@ -527,7 +526,8 @@ pub async fn run(args: FormatArgs) -> i32 {
     // so the on-disk record carries the stretched keys, never the plain
     // password.
     for spec in &args.add_scram {
-        if spec.iterations < MIN_SCRAM_ITERATIONS {
+        if spec.iterations < u32::try_from(MIN_SCRAM_ITERATIONS).expect("SCRAM minimum is positive")
+        {
             eprintln!(
                 "crabka format: iterations must be >= {MIN_SCRAM_ITERATIONS}, got {} for user {}",
                 spec.iterations, spec.name,

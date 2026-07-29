@@ -150,6 +150,15 @@ mod tests {
     }
 
     #[test]
+    fn tenant_scram_iterations_schema_matches_broker_bounds() {
+        let crd = serde_json::to_value(GresTenant::crd()).unwrap();
+        let iterations = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["overrides"]["properties"]["scramIterations"];
+        assert!(iterations["minimum"].as_f64() == Some(4_096.0));
+        assert!(iterations["maximum"].as_f64() == Some(16_384.0));
+    }
+
+    #[test]
     fn spec_round_trips_through_json() {
         let spec = GresTenantSpec {
             gres: "analytics".into(),
@@ -167,6 +176,7 @@ mod tests {
             }],
             overrides: Some(TenantDefaults {
                 wal_replication: Some(3),
+                scram_iterations: Some(12_288),
                 checkpoint_frames: None,
                 checkpoint_size: Some(crabka_units::bytes(134_217_728)),
                 suspend_max_checkpoint_size: None,
@@ -183,6 +193,7 @@ mod tests {
             json.contains("\"checkpointSize\":\"128MiB\""),
             "got: {json}"
         );
+        assert!(json.contains("\"scramIterations\":12288"), "got: {json}");
         let back: GresTenantSpec = serde_json::from_str(&json).unwrap();
         assert!(back == spec);
     }

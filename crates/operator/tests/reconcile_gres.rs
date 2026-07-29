@@ -731,6 +731,7 @@ async fn zero_override_and_unrelated_fleet_do_not_select_suspension_timeout() {
     obj.spec.defaults = Some(TenantDefaults {
         idle_seconds: Some(8),
         wal_replication: None,
+        scram_iterations: None,
         checkpoint_frames: None,
         checkpoint_size: None,
         suspend_max_checkpoint_size: None,

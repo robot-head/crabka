@@ -23,16 +23,16 @@ applicable rule below:
 
 ## Coverage Status
 
-- Complete: `bench-driver`, `broker`, `schema-registry`, `grpc-gateway`.
-- Pending: `admin-ui`, `audit`, `authz`, `blockstore`, `cli`,
-  `client-admin`, `client-consumer`, `client-core`, `client-producer`,
+- Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
+  `broker`, `cli`, `grpc-gateway`, `operator`, `schema-registry`.
+- Pending: `client-admin`, `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `compression`, `connect`, `connect-derive`,
   `connect-postgres`, `docgen`, `gres`, `gres-activator`, `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`, `ids`,
   `integration-tests`, `kafka-tap`, `kraft-core`, `log`, `log-iobench`,
   `logfmt`, `logql`, `metadata`, `metrics`, `metrics-service`,
-  `object-store`, `observability`, `observability-demo-app`, `operator`,
+  `object-store`, `observability`, `observability-demo-app`,
   `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgparser`, `pgtypes`, `pgwire`,
   `playground`, `pprof`, `profiles`, `promql`, `protocol`,
   `protocol-codegen`, `raft`, `rebalancer`, `records-legacy`,
@@ -4158,3 +4158,96 @@ crate, path, line, source text, and the reason
 rows requires owner-by-owner production/test/contract/invariant review and any
 resulting configuration changes. Treating the branch-only zero as
 whole-repository completion would be incorrect.
+
+## Coverage Reconciliation: Admin UI, Audit, and Operator
+
+The current owner ledger now closes three previously stale entries:
+
+- `admin-ui` has 16 scanner rows. Its three runtime-policy defaults are
+  positive UOM values exposed through CLI-over-environment inputs. The
+  remaining rows are permission-bit assignments, the session-cookie identity,
+  and the static sidebar table.
+- `audit` has 11 scanner rows. The genesis hash, checkpoint and schema
+  identities, signing domain, record header names, and spool filename are
+  persisted-format or security-domain invariants. The remaining four UOM
+  timing/capacity constants are inside test modules.
+- `operator` has 138 scanner rows. Runtime reconciliation, leader-election,
+  topic-mutation, rebalancer, and delegation-token timing policy flows through
+  `OperatorConfig` as positive UOM CLI/environment values. Resource-owned
+  defaults flow through their CRDs. The residual rows are test inputs,
+  Kubernetes or Kafka external contracts, resource names and paths, generated
+  protocol bounds, allocation hints, ports, image defaults, or other fixed
+  identities.
+
+The operator package's all-target tests and strict Clippy passed, its generated
+CRDs reproduced exactly, every operator timing flag appeared exactly once in
+`run --help`, nightly formatting and diff hygiene passed, and the affected Gres
+process tests compiled. No new audit-crate setting is warranted: none of its
+production scanner rows expresses deployment policy.
+
+## Authz
+
+The `authz` owner has two scanner rows, both in the `#[cfg(test)]`
+`precedence` module: the independent Kafka ACL implication table and the
+fixture principal name. Production authorization is a pure decision function
+with no timing, capacity, or deployment-policy literal. Both rows are
+verification inputs, so no runtime setting is warranted.
+
+## Blockstore
+
+The `blockstore` owner has 64 scanner rows. Snapshot read caps, snapshot
+retention, and persisted Parquet read caps have positive UOM/configured APIs;
+the traces and profiles process owners pass their CLI-over-environment values
+into those seams. Default-preserving public wrappers retain the prior 256 MiB,
+eight-snapshot, and 1 GiB behavior.
+
+The remaining rows are Arrow/Parquet schema identities, object-format names
+and versions, FNV and Bloom-filter mathematics, minimum-safe nonzero
+invariants, allocation hints, compatibility defaults, or test inputs. In
+particular, the 250 ms receive timeout is a test-only hang guard and the Tempo
+Bloom defaults are an interoperability algorithm with an already-parameterized
+lower-level constructor. No unresolved blockstore deployment policy remains.
+
+The current `crabka-blockstore` all-target gate passed 180 tests across its
+library and integration targets.
+
+## CLI
+
+The CLI owner had one unresolved runtime policy: Gres tenant SCRAM credentials
+were generated with a fixed PBKDF2 iteration count. The shared security crate
+now owns a `refined_type`-validated `ScramIterations` in the exact broker range
+4096 through 16384. Existing defaults remain unchanged: `crabka gres
+create-tenant` defaults to 4096, while operator-managed tenants default to the
+existing 8192 client value.
+
+The direct CLI boundary is:
+
+```text
+--scram-iterations
+CRABKA_GRES_SCRAM_ITERATIONS
+```
+
+The existing `--wal-replication` input now also reads
+`CRABKA_GRES_WAL_REPLICATION` and validates through the existing replication
+factor type. Command-line values win over environment values.
+
+Operator-managed Gres tenants resolve the same validated SCRAM count from:
+
+```text
+Gres.spec.defaults.scramIterations
+GresTenant.spec.overrides.scramIterations
+```
+
+The tenant override wins over the fleet default. Both generated CRDs carry
+minimum 4096 and maximum 16384. A changed iteration count regenerates the
+stored PostgreSQL verifier even when the password is unchanged, and the same
+value reaches the Kafka SCRAM upsertion.
+
+The current CLI scanner subset has 43 rows. The remaining production rows are
+stable exit codes, the Base64 alphabet, and the fixed in-cluster PostgreSQL
+service port; all other rows are test inputs. The CLI's 62 all-target tests,
+the operator's 743 library tests and all integration targets, the security
+crate's 208 tests, client-admin's 78 library/integration tests, the broker's 26
+focused SCRAM-handler tests, strict affected-package Clippy, nightly
+formatting, exact help-entry checks, generated-CRD reproduction, lockfile
+scope, and diff hygiene passed.

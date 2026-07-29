@@ -8,7 +8,8 @@ use std::{
 
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use crabka_client_admin::{
-    AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType, ScramUpsertion,
+    AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType,
+    ScramIterations, ScramUpsertion,
 };
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_gres_balancer::{
@@ -28,8 +29,6 @@ use serde::Serialize;
 
 const EXIT_OK: i32 = 0;
 const EXIT_ERROR: i32 = 1;
-const DEFAULT_WAL_REPLICATION: i32 = 1;
-const DEFAULT_SCRAM_ITERATIONS: u32 = 4096;
 const DEFAULT_BACKEND_PORT: u16 = 5432;
 
 #[derive(Args, Debug)]
@@ -179,8 +178,11 @@ struct CreateTenantArgs {
     #[arg(long)]
     password_stdin: bool,
     /// WAL topic replication factor for this tenant.
-    #[arg(long, default_value_t = DEFAULT_WAL_REPLICATION)]
-    wal_replication: i32,
+    #[arg(long, env = "CRABKA_GRES_WAL_REPLICATION", default_value = "1")]
+    wal_replication: RegistryReplicationFactor,
+    /// PBKDF2 iteration count for the tenant's Kafka and `PostgreSQL` SCRAM credentials.
+    #[arg(long, env = "CRABKA_GRES_SCRAM_ITERATIONS", default_value = "4096")]
+    scram_iterations: ScramIterations,
     /// Optional object-store prefix for tenant checkpoints.
     #[arg(long)]
     bucket_prefix: Option<String>,
@@ -812,10 +814,16 @@ async fn create_tenant(args: CreateTenantArgs, policy: &RegistryPolicy) -> Resul
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("tenant {} disappeared after replacement", args.name))?;
     registry
-        .upsert_tenant_config(&record, args.wal_replication)
+        .upsert_tenant_config(&record, args.wal_replication.into_value())
         .await
         .map_err(|e| e.to_string())?;
-    provision_tenant_kafka_access(&args.bootstrap, &record.name, &password).await?;
+    provision_tenant_kafka_access(
+        &args.bootstrap,
+        &record.name,
+        &password,
+        args.scram_iterations,
+    )
+    .await?;
     println!("created tenant {}", record.name);
     Ok(())
 }
@@ -824,6 +832,7 @@ async fn provision_tenant_kafka_access(
     bootstrap: &str,
     tenant: &TenantName,
     password: &str,
+    scram_iterations: ScramIterations,
 ) -> Result<(), String> {
     let bootstrap_addrs = bootstrap
         .split(',')
@@ -843,8 +852,7 @@ async fn provision_tenant_kafka_access(
             &[ScramUpsertion {
                 username: username.clone(),
                 password: password.to_string(),
-                iterations: i32::try_from(DEFAULT_SCRAM_ITERATIONS)
-                    .map_err(|_| "default SCRAM iterations exceed i32".to_string())?,
+                iterations: scram_iterations.into_value(),
             }],
             &[],
         )
@@ -993,9 +1001,13 @@ fn build_create_tenant_record(
     let name = TenantName::try_from(args.name.as_str()).map_err(|e| e.to_string())?;
     let id = TenantId::try_from(args.name.as_str()).map_err(|e| e.to_string())?;
     let sql_user = SqlUser::try_from(args.sql_user.as_str()).map_err(|e| e.to_string())?;
-    let verifier = PgScramVerifier::generate(password, DEFAULT_SCRAM_ITERATIONS)
-        .map_err(|e| e.to_string())?
-        .to_string();
+    let verifier = PgScramVerifier::generate(
+        password,
+        u32::try_from(args.scram_iterations.into_value())
+            .expect("validated SCRAM iterations are positive"),
+    )
+    .map_err(|e| e.to_string())?
+    .to_string();
     let ranges = parse_range_layout(&name, args.ranges.as_deref())?;
     let mut record = TenantRecord::new(
         record_version,
@@ -1004,7 +1016,7 @@ fn build_create_tenant_record(
         TenantState::Active,
         sql_user,
         verifier,
-        args.wal_replication,
+        args.wal_replication.into_value(),
     )
     .map_err(|e| e.to_string())?;
     record.bucket_prefix.clone_from(&args.bucket_prefix);
@@ -1313,6 +1325,78 @@ mod tests {
     struct TestCli {
         #[command(flatten)]
         gres: GresArgs,
+    }
+
+    fn create_tenant_test_args(extra: impl IntoIterator<Item = &'static str>) -> CreateTenantArgs {
+        let args = [
+            "test",
+            "create-tenant",
+            "--bootstrap=broker:9092",
+            "--name=tenant-a",
+            "--user=alice",
+            "--password-stdin",
+        ]
+        .into_iter()
+        .chain(extra)
+        .collect::<Vec<_>>();
+        let parsed = TestCli::try_parse_from(args).expect("create-tenant arguments");
+        let GresCommand::CreateTenant(args) = parsed.gres.command else {
+            panic!("expected create-tenant command");
+        };
+        args
+    }
+
+    #[test]
+    fn create_tenant_policy_defaults_and_validation() {
+        let defaults = create_tenant_test_args([]);
+        assert!(defaults.wal_replication.into_value() == 1);
+        assert!(defaults.scram_iterations.into_value() == 4_096);
+
+        for option in [
+            "--wal-replication=0",
+            "--wal-replication=32768",
+            "--scram-iterations=4095",
+            "--scram-iterations=16385",
+            "--scram-iterations=not-a-number",
+        ] {
+            let args = [
+                "test",
+                "create-tenant",
+                "--bootstrap=broker:9092",
+                "--name=tenant-a",
+                "--user=alice",
+                "--password-stdin",
+                option,
+            ];
+            assert!(TestCli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn create_tenant_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TEST_CLI_CREATE_TENANT_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "gres::tests::create_tenant_policy_reads_environment_and_prefers_cli",
+                ])
+                .env(CHILD, "1")
+                .env("CRABKA_GRES_WAL_REPLICATION", "2")
+                .env("CRABKA_GRES_SCRAM_ITERATIONS", "8192")
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let environment = create_tenant_test_args([]);
+        assert!(environment.wal_replication.into_value() == 2);
+        assert!(environment.scram_iterations.into_value() == 8_192);
+
+        let cli = create_tenant_test_args(["--wal-replication=3", "--scram-iterations=12288"]);
+        assert!(cli.wal_replication.into_value() == 3);
+        assert!(cli.scram_iterations.into_value() == 12_288);
     }
 
     #[test]
@@ -1667,7 +1751,8 @@ mod tests {
             sql_user: "alice".to_string(),
             password_file: None,
             password_stdin: true,
-            wal_replication: 3,
+            wal_replication: RegistryReplicationFactor::new(3).unwrap(),
+            scram_iterations: crabka_client_admin::ScramIterations::new(12_288).unwrap(),
             bucket_prefix: Some("prefix".to_string()),
             checkpoint_frames: Some(10),
             checkpoint_size: Some(crabka_units::bytes(20)),
@@ -1683,6 +1768,10 @@ mod tests {
         check!(record.name.as_str() == "tenant-a");
         check!(record.sql_user.as_str() == "alice");
         check!(record.wal_replication == 3);
+        check!(
+            PgScramVerifier::parse(&record.scram_verifier)
+                .is_ok_and(|verifier| verifier.iterations == 12_288)
+        );
         check!(record.bucket_prefix.as_deref() == Some("prefix"));
         check!(record.ranges.len() == 3);
         check!(record.ranges[0].end_key == Some(RangeBoundary::table_start(100)));

@@ -1031,6 +1031,11 @@ pub struct TenantDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_replication: Option<i32>,
 
+    /// PBKDF2 iteration count for tenant Kafka and `PostgreSQL` SCRAM credentials.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 4096, max = 16384))]
+    pub scram_iterations: Option<i32>,
+
     /// Checkpoint after this many frames when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_frames: Option<u64>,
@@ -1144,6 +1149,15 @@ mod tests {
     }
 
     #[test]
+    fn tenant_scram_iterations_schema_matches_broker_bounds() {
+        let crd = serde_json::to_value(Gres::crd()).unwrap();
+        let iterations = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["defaults"]["properties"]["scramIterations"];
+        assert!(iterations["minimum"].as_f64() == Some(4_096.0));
+        assert!(iterations["maximum"].as_f64() == Some(16_384.0));
+    }
+
+    #[test]
     fn spec_round_trips_through_json() {
         let spec = GresSpec {
             kafka_cluster: "demo".into(),
@@ -1179,6 +1193,7 @@ mod tests {
             }),
             defaults: Some(TenantDefaults {
                 wal_replication: Some(3),
+                scram_iterations: Some(12_288),
                 checkpoint_frames: Some(10_000),
                 checkpoint_size: None,
                 suspend_max_checkpoint_size: None,
@@ -1199,6 +1214,7 @@ mod tests {
         let json = serde_json::to_string(&spec).unwrap();
         assert!(json.contains("\"kafkaCluster\":\"demo\""), "got: {json}");
         assert!(json.contains("\"listenPort\":6432"), "got: {json}");
+        assert!(json.contains("\"scramIterations\":12288"), "got: {json}");
         assert!(
             json.contains(
                 "\"activator\":{\"image\":\"example.test/activator:v2\",\"replicas\":3,\"registryPoll\":\"500ms\",\"coldStartTimeout\":\"45s\",\"readinessProbePeriodSeconds\":7}"
