@@ -12,7 +12,10 @@ use crabka_blockstore::{
     BlockIndex, BlockMeta, IndexSnapshotMaxBytes, IndexSnapshotRetain, Labels, ProfileIndex,
     ProfileSampleRow, encode_profile_samples,
 };
-use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord};
+use crabka_client_consumer::{
+    AutoOffsetReset, Consumer, ConsumerFetchMaxBytes, ConsumerFetchPartitionMaxBytes,
+    ConsumerRecord,
+};
 use crabka_pprof::{FunctionRec, LineRec, LocationRec, MappingRec, MappingSymbolization, SymbolDb};
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use parquet::arrow::ArrowWriter;
@@ -26,10 +29,32 @@ use crate::{
 
 pub const STACKTRACE_PARTITION: u64 = 0;
 const NANOS_PER_MILLI: i64 = 1_000_000;
-const WAL_FETCH_MAX_BYTES: i32 = 2 * 1024 * 1024;
-const WAL_FETCH_PARTITION_MAX_BYTES: i32 = 256 * 1024;
+pub const DEFAULT_WAL_FETCH_MAX_BYTES: i32 = 2 * 1024 * 1024;
+pub const DEFAULT_WAL_FETCH_PARTITION_MAX_BYTES: i32 = 256 * 1024;
 pub const DEFAULT_FLUSH_RECORDS: usize = 1024;
 pub const DEFAULT_FLUSH_MAX_AGE: Duration = Duration::from_secs(10);
+
+#[must_use]
+/// Returns the validated default total WAL fetch limit.
+///
+/// # Panics
+///
+/// Panics if [`DEFAULT_WAL_FETCH_MAX_BYTES`] is changed to a non-positive value.
+pub fn default_wal_fetch_max_bytes() -> ConsumerFetchMaxBytes {
+    ConsumerFetchMaxBytes::new(DEFAULT_WAL_FETCH_MAX_BYTES)
+        .expect("default profiles WAL fetch maximum is positive")
+}
+
+#[must_use]
+/// Returns the validated default per-partition WAL fetch limit.
+///
+/// # Panics
+///
+/// Panics if [`DEFAULT_WAL_FETCH_PARTITION_MAX_BYTES`] is changed to a non-positive value.
+pub fn default_wal_fetch_partition_max_bytes() -> ConsumerFetchPartitionMaxBytes {
+    ConsumerFetchPartitionMaxBytes::new(DEFAULT_WAL_FETCH_PARTITION_MAX_BYTES)
+        .expect("default profiles WAL partition fetch maximum is positive")
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BuiltSample {
@@ -50,6 +75,8 @@ pub struct BlockBuilderConfig {
     pub group_id: String,
     pub store: Arc<dyn ObjectStore>,
     pub index_key: String,
+    pub wal_fetch_max_bytes: ConsumerFetchMaxBytes,
+    pub wal_fetch_partition_max_bytes: ConsumerFetchPartitionMaxBytes,
     pub flush_records: usize,
     pub flush_max_age: Duration,
     pub poll_timeout: Duration,
@@ -70,6 +97,8 @@ impl BlockBuilderConfig {
             group_id: "crabka-profiles-block-builder".to_string(),
             store,
             index_key: "index/profiles.json".to_string(),
+            wal_fetch_max_bytes: default_wal_fetch_max_bytes(),
+            wal_fetch_partition_max_bytes: default_wal_fetch_partition_max_bytes(),
             flush_records: DEFAULT_FLUSH_RECORDS,
             flush_max_age: DEFAULT_FLUSH_MAX_AGE,
             poll_timeout: Duration::from_millis(500),
@@ -296,8 +325,8 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
         .bootstrap(config.bootstrap)
         .group_id(config.group_id.clone())
         .group_instance_id(config.group_id)
-        .fetch_max_bytes(WAL_FETCH_MAX_BYTES)
-        .fetch_partition_max_bytes(WAL_FETCH_PARTITION_MAX_BYTES)
+        .fetch_max(config.wal_fetch_max_bytes.size())
+        .fetch_partition_max(config.wal_fetch_partition_max_bytes.size())
         .subscribe(vec![PROFILES_WAL_TOPIC.to_string()])
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .build()
@@ -644,6 +673,15 @@ mod tests {
             config.index_snapshot_retain.into_value(),
             crabka_blockstore::DEFAULT_INDEX_SNAPSHOT_RETAIN
         );
+    }
+
+    #[test]
+    fn block_builder_wal_fetch_limits_preserve_defaults() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let config = BlockBuilderConfig::new("broker:9092".into(), store);
+
+        assert_eq!(config.wal_fetch_max_bytes.bytes(), 2_097_152);
+        assert_eq!(config.wal_fetch_partition_max_bytes.bytes(), 262_144);
     }
 
     #[test]

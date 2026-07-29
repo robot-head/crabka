@@ -11,6 +11,7 @@ use std::{
 
 use clap::{Parser, ValueEnum};
 use crabka_blockstore::{IndexSnapshotMaxBytes, IndexSnapshotRetain, ProfileIndex};
+use crabka_client_consumer::{ConsumerFetchMaxBytes, ConsumerFetchPartitionMaxBytes};
 use crabka_client_producer::Producer;
 use crabka_pprof::UnionProfileStore;
 use crabka_profiles::{
@@ -38,6 +39,18 @@ struct Cli {
     admin_listen_addr: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:9092")]
     bootstrap: String,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_WAL_FETCH_MAX_BYTES",
+        default_value_t = crabka_profiles::blockbuilder::default_wal_fetch_max_bytes()
+    )]
+    wal_fetch_max_bytes: ConsumerFetchMaxBytes,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_WAL_FETCH_PARTITION_MAX_BYTES",
+        default_value_t = crabka_profiles::blockbuilder::default_wal_fetch_partition_max_bytes()
+    )]
+    wal_fetch_partition_max_bytes: ConsumerFetchPartitionMaxBytes,
     #[arg(long, default_value = "file://./.crabka-profiles-blocks")]
     object_store_url: String,
     #[arg(
@@ -194,6 +207,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("object store: {e}"))?;
             let mut config =
                 BlockBuilderConfig::new(cli.bootstrap, configured.store).with_metrics(metrics);
+            config.wal_fetch_max_bytes = cli.wal_fetch_max_bytes;
+            config.wal_fetch_partition_max_bytes = cli.wal_fetch_partition_max_bytes;
             config.flush_records = cli.block_builder_flush_records;
             config.flush_max_age = Duration::from_millis(cli.block_builder_flush_max_age_ms);
             config.index_snapshot_max_bytes = cli.index_snapshot_max_bytes;
@@ -465,6 +480,75 @@ mod tests {
         .unwrap();
         assert_eq!(from_cli.index_snapshot_max_bytes.into_value(), 2048);
         assert_eq!(from_cli.index_snapshot_retain.into_value(), 4);
+    }
+
+    #[test]
+    fn wal_fetch_limits_preserve_defaults_and_reject_invalid_values() {
+        let cli = Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
+        assert_eq!(cli.wal_fetch_max_bytes.bytes(), 2_097_152);
+        assert_eq!(cli.wal_fetch_partition_max_bytes.bytes(), 262_144);
+
+        for (flag, invalid) in [
+            ("--wal-fetch-max-bytes", "0"),
+            ("--wal-fetch-max-bytes", "not-a-number"),
+            ("--wal-fetch-max-bytes", "-1"),
+            ("--wal-fetch-max-bytes", "2147483648"),
+            ("--wal-fetch-partition-max-bytes", "0"),
+            ("--wal-fetch-partition-max-bytes", "not-a-number"),
+            ("--wal-fetch-partition-max-bytes", "-1"),
+            ("--wal-fetch-partition-max-bytes", "2147483648"),
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "crabka-profiles",
+                    "--target",
+                    "block-builder",
+                    flag,
+                    invalid,
+                ])
+                .is_err(),
+                "{flag} should reject {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wal_fetch_limits_read_environment_and_prefer_cli() {
+        const CHILD: &str = "CRABKA_PROFILES_WAL_FETCH_LIMITS_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::wal_fetch_limits_read_environment_and_prefer_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_PROFILES_WAL_FETCH_MAX_BYTES", "1024")
+                    .env("CRABKA_PROFILES_WAL_FETCH_PARTITION_MAX_BYTES", "256")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env =
+            Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
+        assert_eq!(from_env.wal_fetch_max_bytes.bytes(), 1024);
+        assert_eq!(from_env.wal_fetch_partition_max_bytes.bytes(), 256);
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "block-builder",
+            "--wal-fetch-max-bytes",
+            "2048",
+            "--wal-fetch-partition-max-bytes",
+            "512",
+        ])
+        .unwrap();
+        assert_eq!(from_cli.wal_fetch_max_bytes.bytes(), 2048);
+        assert_eq!(from_cli.wal_fetch_partition_max_bytes.bytes(), 512);
     }
 
     #[test]
