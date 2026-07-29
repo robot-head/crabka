@@ -10,7 +10,9 @@ use crabka_blockstore::{
     BlockReadMaxBytes, BlockStore, BlockWriter, IndexSnapshotMaxBytes, IndexSnapshotRetain,
     PromotedSpanAttr, TraceIndex,
 };
-use crabka_client_consumer::{AutoOffsetReset, Consumer};
+use crabka_client_consumer::{
+    AutoOffsetReset, Consumer, ConsumerFetchMaxBytes, ConsumerFetchPartitionMaxBytes,
+};
 use crabka_client_producer::Producer;
 use crabka_telemetry::OtlpConfig;
 use crabka_traceql::{EngineOpts, TraceqlEngine};
@@ -33,13 +35,29 @@ use crabka_traces::{
     },
     span::batch::RESOURCE_ATTR_PREFIX,
 };
+use crabka_units::{
+    ByteSize, Frequency, Time,
+    convert::{ByteSizeExt as _, FrequencyExt, TimeExt as _},
+    kibibytes, secs,
+};
+use num_traits::ToPrimitive as _;
 use object_store::{ObjectStore, path::Path};
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 
-const WAL_FETCH_MAX_BYTES: i32 = 2 * 1024 * 1024;
-const WAL_FETCH_PARTITION_MAX_BYTES: i32 = 256 * 1024;
+const DEFAULT_WAL_FETCH_MAX_BYTES: i32 = 2 * 1024 * 1024;
+const DEFAULT_WAL_FETCH_PARTITION_MAX_BYTES: i32 = 256 * 1024;
+
+fn default_wal_fetch_max_bytes() -> ConsumerFetchMaxBytes {
+    ConsumerFetchMaxBytes::new(DEFAULT_WAL_FETCH_MAX_BYTES)
+        .expect("default WAL fetch maximum is positive")
+}
+
+fn default_wal_fetch_partition_max_bytes() -> ConsumerFetchPartitionMaxBytes {
+    ConsumerFetchPartitionMaxBytes::new(DEFAULT_WAL_FETCH_PARTITION_MAX_BYTES)
+        .expect("default WAL partition fetch maximum is positive")
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "crabka-traces")]
@@ -65,6 +83,18 @@ struct Cli {
     zipkin_listen: String,
     #[arg(long, default_value = "127.0.0.1:9092")]
     bootstrap: String,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_WAL_FETCH_MAX_BYTES",
+        default_value_t = default_wal_fetch_max_bytes()
+    )]
+    wal_fetch_max_bytes: ConsumerFetchMaxBytes,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_WAL_FETCH_PARTITION_MAX_BYTES",
+        default_value_t = default_wal_fetch_partition_max_bytes()
+    )]
+    wal_fetch_partition_max_bytes: ConsumerFetchPartitionMaxBytes,
     #[arg(long, default_value_t = 30 * 60 * 1_000_000_000_i64)]
     retention_ns: i64,
     #[arg(long, default_value_t = 5)]
@@ -314,6 +344,8 @@ async fn run_block_builder(
         cli.bootstrap.clone(),
         "crabka-traces-block-builder",
         Some("crabka-traces-block-builder"),
+        cli.wal_fetch_max_bytes,
+        cli.wal_fetch_partition_max_bytes,
     )
     .await?;
     let configured = build_object_store(&cli)?;
@@ -354,7 +386,14 @@ async fn run_live_store(
     shutdown: CancellationToken,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr: SocketAddr = cli.listen.parse()?;
-    let consumer = wal_consumer(cli.bootstrap.clone(), "crabka-traces-live-store", None).await?;
+    let consumer = wal_consumer(
+        cli.bootstrap.clone(),
+        "crabka-traces-live-store",
+        None,
+        cli.wal_fetch_max_bytes,
+        cli.wal_fetch_partition_max_bytes,
+    )
+    .await?;
     let store = Arc::new(RwLock::new(LiveStore::new(cli.retention_ns)));
     let router = build_live_store_router(&cli, Arc::clone(&store))?;
     let live_shutdown = shutdown.clone();
@@ -391,6 +430,8 @@ async fn run_querier(
             cli.bootstrap.clone(),
             "crabka-traces-querier-live-store",
             None,
+            cli.wal_fetch_max_bytes,
+            cli.wal_fetch_partition_max_bytes,
         )
         .await?;
         let live_shutdown = shutdown.clone();
@@ -855,7 +896,14 @@ async fn run_metrics_generator(
     };
     apply_metrics_generator_cli_overrides(&mut cfg, &cli);
 
-    let consumer = wal_consumer(cli.bootstrap, "crabka-traces-metrics-generator", None).await?;
+    let consumer = wal_consumer(
+        cli.bootstrap,
+        "crabka-traces-metrics-generator",
+        None,
+        cli.wal_fetch_max_bytes,
+        cli.wal_fetch_partition_max_bytes,
+    )
+    .await?;
     let source = Arc::new(KafkaSpanSource::new(consumer));
     let sink = Arc::new(PrometheusRemoteWriteSink::new(cfg.remote_write_url.clone()));
     let service = MetricsGenService::new(cfg, Arc::new(SystemClock), source, sink);
@@ -891,6 +939,8 @@ async fn wal_consumer(
     bootstrap: String,
     group_id: &str,
     group_instance_id: Option<&str>,
+    fetch_max_bytes: ConsumerFetchMaxBytes,
+    fetch_partition_max_bytes: ConsumerFetchPartitionMaxBytes,
 ) -> Result<Consumer, crabka_client_consumer::ConsumerError> {
     // Boxed: consumer startup (bootstrap resolve, double `JoinGroup`,
     // `SyncGroup`, offset priming) builds a ~13 KB future. Every role that
@@ -902,8 +952,8 @@ async fn wal_consumer(
             .bootstrap(bootstrap)
             .group_id(group_id.to_string())
             .maybe_group_instance_id(group_instance_id)
-            .fetch_max_bytes(WAL_FETCH_MAX_BYTES)
-            .fetch_partition_max_bytes(WAL_FETCH_PARTITION_MAX_BYTES)
+            .fetch_max(fetch_max_bytes.size())
+            .fetch_partition_max(fetch_partition_max_bytes.size())
             .subscribe(vec![TRACES_WAL_TOPIC.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .build(),
@@ -1162,6 +1212,68 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(from_cli.block_read_max_bytes.into_value(), 2048);
+    }
+
+    #[test]
+    fn wal_fetch_limits_preserve_defaults_and_reject_invalid_values() {
+        let cli = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
+        assert_eq!(cli.wal_fetch_max_bytes.bytes(), 2_097_152);
+        assert_eq!(cli.wal_fetch_partition_max_bytes.bytes(), 262_144);
+
+        for (flag, invalid) in [
+            ("--wal-fetch-max-bytes", "0"),
+            ("--wal-fetch-max-bytes", "not-a-number"),
+            ("--wal-fetch-max-bytes", "-1"),
+            ("--wal-fetch-max-bytes", "2147483648"),
+            ("--wal-fetch-partition-max-bytes", "0"),
+            ("--wal-fetch-partition-max-bytes", "not-a-number"),
+            ("--wal-fetch-partition-max-bytes", "-1"),
+            ("--wal-fetch-partition-max-bytes", "2147483648"),
+        ] {
+            assert!(
+                Cli::try_parse_from(["crabka-traces", "--target", "block-builder", flag, invalid,])
+                    .is_err(),
+                "{flag} should reject {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wal_fetch_limits_read_environment_and_prefer_cli() {
+        const CHILD: &str = "CRABKA_TRACES_WAL_FETCH_LIMITS_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::wal_fetch_limits_read_environment_and_prefer_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_TRACES_WAL_FETCH_MAX_BYTES", "1024")
+                    .env("CRABKA_TRACES_WAL_FETCH_PARTITION_MAX_BYTES", "256")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
+        assert_eq!(from_env.wal_fetch_max_bytes.bytes(), 1024);
+        assert_eq!(from_env.wal_fetch_partition_max_bytes.bytes(), 256);
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target",
+            "block-builder",
+            "--wal-fetch-max-bytes",
+            "2048",
+            "--wal-fetch-partition-max-bytes",
+            "512",
+        ])
+        .unwrap();
+        assert_eq!(from_cli.wal_fetch_max_bytes.bytes(), 2048);
+        assert_eq!(from_cli.wal_fetch_partition_max_bytes.bytes(), 512);
     }
 
     #[test]
