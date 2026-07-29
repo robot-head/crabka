@@ -29,7 +29,8 @@ applicable rule below:
   `docgen`, `gres`, `gres-activator`, `gres-control`, `grpc-gateway`, `ids`,
   `integration-tests`, `kafka-tap`,
   `log-iobench`, `logfmt`, `logql`, `metadata`, `object-store`, `operator`,
-  `pgcatalog`, `protocol-codegen`, `remote-storage`, `pgparser`, `playground`,
+  `pgcatalog`, `pgmvcc`, `protocol-codegen`, `remote-storage`, `pgparser`,
+  `playground`,
   `schema-registry`, `throttle`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-streams`,
   `gres-balancer`,
@@ -37,7 +38,7 @@ applicable rule below:
   `gres-ranges`, `gres-substrate`,
   `kraft-core`, `log`, `metrics`,
   `metrics-service`, `observability`, `observability-demo-app`,
-  `pgexec`, `pgkv`, `pgmvcc`, `pgtypes`, `pgwire`,
+  `pgexec`, `pgkv`, `pgtypes`, `pgwire`,
   `pprof`, `profiles`, `promql`, `protocol`, `raft`,
   `rebalancer`, `records-legacy`, `remote-storage-topic`, `replicator`,
   `schema-serde`, `security`, `telemetry`,
@@ -4635,3 +4636,17 @@ limit accepted catalog data. No runtime timing, queue, retry, or resource policy
 exists in this crate, so no CLI, environment variable, or CRD field is
 warranted. The current all-target gate passed 36 serialization and catalog
 behavior tests, and strict all-target Clippy passed.
+
+## PostgreSQL MVCC
+
+The `pgmvcc` owner has 16 scanner rows. Every production value is an MVCC or
+persisted-format invariant: reserved transaction identifiers, the local/global
+transaction-id partition, CLOG state tags, tuple record tags, and timestamp
+version state tags. Changing any of them through deployment configuration
+would change transaction visibility or the meaning of stored rows.
+
+The reported capacities exactly preallocate known serialized headers. Garbage
+collection accepts its work cap from the caller and owns no hidden timing,
+queue, retry, or resource policy. No CLI, environment variable, or CRD field
+is warranted. The current all-target gate passed 54 visibility, serialization,
+and reclamation tests, and strict all-target Clippy passed.
