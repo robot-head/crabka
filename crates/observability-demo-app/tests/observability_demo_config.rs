@@ -236,6 +236,23 @@ fn trace_and_profile_snapshot_policy_is_overrideable_per_signal() {
 }
 
 #[test]
+fn trace_and_profile_wal_fetch_limits_are_overrideable_per_signal() {
+    let compose = docker_compose();
+    for (service, signal) in [
+        ("traces-block-builder", "TRACES"),
+        ("profiles-block-builder", "PROFILES"),
+    ] {
+        let block = compose_service_block(&compose, service);
+        assert2::assert!(block.contains(&format!(
+            "CRABKA_{signal}_WAL_FETCH_MAX_BYTES: \"${{CRABKA_{signal}_WAL_FETCH_MAX_BYTES:-2097152}}\""
+        )));
+        assert2::assert!(block.contains(&format!(
+            "CRABKA_{signal}_WAL_FETCH_PARTITION_MAX_BYTES: \"${{CRABKA_{signal}_WAL_FETCH_PARTITION_MAX_BYTES:-262144}}\""
+        )));
+    }
+}
+
+#[test]
 fn traces_querier_parquet_read_cap_is_overrideable() {
     let compose = docker_compose();
     let block = compose_service_block(&compose, "traces-querier");
