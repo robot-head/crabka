@@ -25,12 +25,12 @@ applicable rule below:
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
-  `grpc-gateway`, `logfmt`, `operator`, `schema-registry`.
+  `grpc-gateway`, `ids`, `logfmt`, `operator`, `schema-registry`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `connect`, `connect-postgres`, `docgen`, `gres`,
   `gres-activator`, `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
-  `gres-ranges`, `gres-substrate`, `ids`,
+  `gres-ranges`, `gres-substrate`,
   `integration-tests`, `kafka-tap`, `kraft-core`, `log`, `log-iobench`,
   `logfmt`, `logql`, `metadata`, `metrics`, `metrics-service`,
   `object-store`, `observability`, `observability-demo-app`,
@@ -4311,3 +4311,14 @@ Neither crate owns a process or deployment boundary, so CLI, environment, and
 CRD settings would be unused. The current combined gate passed 17 tests across
 both crates, including compile-pass and compile-fail cases, and strict
 all-target Clippy passed.
+
+## IDs
+
+The `ids` owner has four scanner rows, all fixed domain sentinels: zero offset,
+Kafka's no-producer ID, unknown leader epoch, and initial leader epoch. They
+encode Kafka wire and state-machine meaning and cannot be deployment policy.
+The crate has no timing, capacity, resource, or retry behavior, so no
+configuration surface is warranted.
+
+The current IDs all-target gate passed eight tests, including wire-boundary
+round trips, and strict all-target Clippy passed.
