@@ -4023,9 +4023,9 @@ dependency on `crabka-traces`.
 
 ## Branch-Wide UOM Boundary Audit
 
-This checkpoint audits the branch from the recorded merge-base
-`1d171e99ac73cebdb944479d0d249b816e55a454` through
-`0ed4258a68cb5d25c83a87fb83206589b5313f21`. It does not close the separate
+This checkpoint audits the branch code and configuration at `HEAD`, relative
+to the recorded merge-base
+`1d171e99ac73cebdb944479d0d249b816e55a454`. It does not close the separate
 whole-repository runtime-value audit.
 
 ### Counts
