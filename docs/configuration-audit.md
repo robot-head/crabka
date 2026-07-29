@@ -3959,3 +3959,58 @@ combined Clippy with warnings denied, nightly formatting, one help entry per
 setting in each service binary, default and overridden Compose rendering,
 Compose validation, diff hygiene, scanner stability, and lockfile-diff
 inspection also passed. `Cargo.lock` is unchanged.
+
+## Traces Scan Concatenation Cap
+
+The traces querier and live-store span stores now preserve the existing
+1,500,000,000-byte scan-concatenation cap while accepting:
+
+```text
+--scan-concat-max-bytes
+CRABKA_TRACES_SCAN_CONCAT_MAX_BYTES
+```
+
+Command-line values win over environment values. `ScanConcatMaxBytes` uses
+`refined_type::rule::MinMaxU64<1, 1_500_000_000>`, rejecting zero, malformed,
+negative, primitive-overflow, and above-ceiling values before external I/O.
+It converts to `ByteSize` at the existing batch-memory comparison.
+
+The upper bound remains a fixed invariant because Arrow variable-length
+columns use signed 32-bit offsets. Operators can lower the cap to constrain
+memory, but cannot configure a value beyond the established safe headroom. An
+exact-cap scan remains accepted; a larger scan returns the existing actionable
+error before `concat_batches`.
+
+`CrabkaSpanStore::new` remains a default-preserving compatibility constructor.
+The traces querier and live-store production paths use the configurable
+constructor. The checked-in deployment exposes the setting only on
+`traces-querier`; the demo does not run the separate live-store role. No CRD or
+operator field was added because traces is not managed by an existing
+repository CRD.
+
+After implementation and before this section was appended,
+`tools/audit-runtime-values.sh` reported 5,534 lines across 1,038 files. Its
+affected-package subsets contained 115 traces lines and 10
+observability-demo-app lines.
+
+Before this section was appended, the exact focused search
+
+```text
+rg -n \
+  'MAX_SCAN_CONCAT|DEFAULT_SCAN_CONCAT_MAX_BYTES|ScanConcatMaxBytes|scan_concat_max_bytes|scan-concat-max-bytes|SCAN_CONCAT_MAX_BYTES' \
+  crates \
+  demo \
+  docs/configuration-audit.md
+```
+
+reported 44 lines. The mutually exclusive classification is 24 production
+configuration-flow or compatibility-API references, one deployment-flow
+reference, 19 test references, and zero unresolved references:
+`24 + 1 + 19 + 0 = 44`.
+
+The combined all-target test gate passed for `crabka-traces` and
+`observability-demo-app`. Strict combined Clippy with warnings denied, nightly
+formatting, one help entry, default and overridden Compose rendering, Compose
+validation, diff hygiene, scanner stability, and lockfile inspection also
+passed. The only lockfile change is the direct workspace-pinned `refined_type`
+dependency on `crabka-traces`.
