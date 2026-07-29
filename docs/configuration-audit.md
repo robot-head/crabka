@@ -25,15 +25,16 @@ applicable rule below:
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
-  `docgen`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`, `logfmt`,
-  `logql`, `object-store`, `operator`, `protocol-codegen`, `remote-storage`,
-  `pgparser`, `playground`, `schema-registry`, `throttle`, `verified`, `voters`.
+  `docgen`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`,
+  `log-iobench`, `logfmt`, `logql`, `object-store`, `operator`,
+  `protocol-codegen`, `remote-storage`, `pgparser`, `playground`,
+  `schema-registry`, `throttle`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `connect`, `connect-postgres`, `gres`, `gres-activator`,
   `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
-  `kraft-core`, `log`, `log-iobench`, `metadata`, `metrics`,
+  `kraft-core`, `log`, `metadata`, `metrics`,
   `metrics-service`, `observability`, `observability-demo-app`,
   `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgtypes`, `pgwire`,
   `pprof`, `profiles`, `promql`, `protocol`, `raft`,
@@ -4474,3 +4475,18 @@ operator-selected tuning policy.
 No CLI, environment variable, or CRD field is warranted. The combined
 all-target gate passed 10 Playground tests, 15 Verified tests, and three Voters
 tests, and strict all-target Clippy passed.
+
+## Log I/O Benchmark
+
+`log-iobench` is a non-published benchmark-only package. Its production library
+is a seven-line marker target, and the scanner reports zero rows.
+
+Every numeric value lives in the single Criterion benchmark and defines its
+fixed comparison fixture: segment and read sizes, batch shape and count, byte
+payload, and midpoint selection. Making those values deployment configuration
+would not change any shipped runtime behavior and would make benchmark results
+less comparable.
+
+No CLI, environment variable, or CRD field is warranted. The library test
+target passed, the complete benchmark target compiled, and strict all-target
+Clippy passed.
