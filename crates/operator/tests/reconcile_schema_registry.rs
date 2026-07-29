@@ -14,6 +14,7 @@ use crabka_operator::{
         SchemaRegistryHealthChecks, SchemaRegistryRuntime, SchemaRegistrySpec,
     },
 };
+use crabka_units::{bytes, millis, secs};
 use http::Method;
 
 #[path = "shared/mod.rs"]
@@ -101,15 +102,15 @@ fn schema_registry_apply_rules() -> Vec<MockRule> {
 
 fn valid_runtime() -> SchemaRegistryRuntime {
     SchemaRegistryRuntime {
-        election_session_timeout_ms: Some(12_000),
-        election_rebalance_timeout_ms: Some(40_000),
-        election_heartbeat_interval_ms: Some(2_000),
-        election_reconnect_backoff_ms: Some(750),
-        store_reader_retry_backoff_ms: Some(333),
-        store_reader_fetch_max_wait_ms: Some(777),
-        store_reader_fetch_max_bytes: Some(2_097_152),
-        schemas_topic_create_timeout_ms: Some(22_000),
-        forward_max_body_bytes: Some(3_145_728),
+        election_session_timeout: Some(secs(12)),
+        election_rebalance_timeout: Some(secs(40)),
+        election_heartbeat_interval: Some(secs(2)),
+        election_reconnect_backoff: Some(millis(750)),
+        store_reader_retry_backoff: Some(millis(333)),
+        store_reader_fetch_max_wait: Some(millis(777)),
+        store_reader_fetch_max: Some(bytes(2_097_152)),
+        schemas_topic_create_timeout: Some(secs(22)),
+        forward_max_body: Some(bytes(3_145_728)),
         default_compatibility_level: Some("FULL".into()),
         default_mode: Some("IMPORT".into()),
     }
@@ -146,15 +147,15 @@ async fn runtime_policy_renders_exact_flags_and_probe_timings() {
                 "--bootstrap-servers=ext:9092",
                 "--listen-addr=0.0.0.0:8081",
                 "--schemas-topic-rf=1",
-                "--election-session-timeout-ms=12000",
-                "--election-rebalance-timeout-ms=40000",
-                "--election-heartbeat-interval-ms=2000",
-                "--election-reconnect-backoff-ms=750",
-                "--store-reader-retry-backoff-ms=333",
-                "--store-reader-fetch-max-wait-ms=777",
-                "--store-reader-fetch-max-bytes=2097152",
-                "--schemas-topic-create-timeout-ms=22000",
-                "--forward-max-body-bytes=3145728",
+                "--election-session-timeout=12s",
+                "--election-rebalance-timeout=40s",
+                "--election-heartbeat-interval=2s",
+                "--election-reconnect-backoff=750ms",
+                "--store-reader-retry-backoff=333ms",
+                "--store-reader-fetch-max-wait=777ms",
+                "--store-reader-fetch-max=2MiB",
+                "--schemas-topic-create-timeout=22s",
+                "--forward-max-body=3MiB",
                 "--default-compatibility-level=FULL",
                 "--default-mode=IMPORT",
                 "--client-id=registry-production",
@@ -230,25 +231,29 @@ async fn assert_schema_registry_config_invalid(cr: SchemaRegistry) {
 #[tokio::test]
 async fn runtime_invalid_policy_is_rejected_before_deployment() {
     for field in [
-        "electionSessionTimeoutMs",
-        "electionRebalanceTimeoutMs",
-        "electionHeartbeatIntervalMs",
-        "electionReconnectBackoffMs",
-        "storeReaderRetryBackoffMs",
-        "storeReaderFetchMaxWaitMs",
-        "storeReaderFetchMaxBytes",
-        "schemasTopicCreateTimeoutMs",
-        "forwardMaxBodyBytes",
+        "electionSessionTimeout",
+        "electionRebalanceTimeout",
+        "electionHeartbeatInterval",
+        "electionReconnectBackoff",
+        "storeReaderRetryBackoff",
+        "storeReaderFetchMaxWait",
+        "schemasTopicCreateTimeout",
     ] {
         let mut cr = sr("sr1", Some(CLUSTER));
         cr.spec.bootstrap_servers = Some("ext:9092".into());
-        cr.spec.runtime = Some(runtime_with(field, serde_json::json!(0)));
+        cr.spec.runtime = Some(runtime_with(field, serde_json::json!("0s")));
+        assert_schema_registry_config_invalid(cr).await;
+    }
+    for field in ["storeReaderFetchMax", "forwardMaxBody"] {
+        let mut cr = sr("sr1", Some(CLUSTER));
+        cr.spec.bootstrap_servers = Some("ext:9092".into());
+        cr.spec.runtime = Some(runtime_with(field, serde_json::json!("0B")));
         assert_schema_registry_config_invalid(cr).await;
     }
 
     for runtime in [
-        runtime_with("electionHeartbeatIntervalMs", serde_json::json!(12_000)),
-        runtime_with("electionSessionTimeoutMs", serde_json::json!(40_001)),
+        runtime_with("electionHeartbeatInterval", serde_json::json!("12s")),
+        runtime_with("electionSessionTimeout", serde_json::json!("40.001s")),
         runtime_with("defaultCompatibilityLevel", serde_json::json!("INVALID")),
         runtime_with("defaultMode", serde_json::json!("INVALID")),
     ] {
@@ -314,7 +319,7 @@ async fn runtime_invalid_policy_is_rejected_before_deployment() {
             jwks_expected_audience: None,
             jwks_tls_secret_name: None,
             jwks_principal_claim: None,
-            jwks_refresh_ms: Some(0),
+            jwks_refresh: Some(millis(0)),
         }),
     });
     assert_schema_registry_config_invalid(invalid_jwks).await;
@@ -324,7 +329,7 @@ async fn runtime_invalid_policy_is_rejected_before_deployment() {
     invalid_acl.spec.authorization = Some(SchemaRegistryAuthz {
         enabled: true,
         super_users: Vec::new(),
-        acl_refresh_seconds: Some(0),
+        acl_refresh: Some(secs(0)),
     });
     assert_schema_registry_config_invalid(invalid_acl).await;
 }
@@ -428,7 +433,7 @@ async fn optional_topic_group_and_bearer_render_to_args() {
             jwks_expected_audience: None,
             jwks_tls_secret_name: None,
             jwks_principal_claim: None,
-            jwks_refresh_ms: None,
+            jwks_refresh: None,
         }),
     });
     // kube-rs deserializes each SSA response into its typed object, which
@@ -679,7 +684,7 @@ async fn full_security_fields_render_to_args_and_mounts() {
     cr.spec.authorization = Some(crabka_operator::crd::SchemaRegistryAuthz {
         enabled: true,
         super_users: vec!["User:admin".into()],
-        acl_refresh_seconds: Some(15),
+        acl_refresh: Some(secs(15)),
     });
     // No Kafka GET rule needed (bootstrap override). Provide the apply/status rules.
     let rules = vec![
@@ -755,7 +760,7 @@ async fn full_security_fields_render_to_args_and_mounts() {
         "--basic-auth-file=/etc/sr/basic/users",
         "--authz",
         "--super-user=User:admin",
-        "--acl-refresh-secs=15",
+        "--acl-refresh=15s",
     ] {
         assert!(
             joined.contains(needle),
@@ -1211,7 +1216,7 @@ async fn bearer_jwks_renders_to_args() {
             jwks_expected_audience: Some("kafka-sr".into()),
             jwks_tls_secret_name: None,
             jwks_principal_claim: Some("email".into()),
-            jwks_refresh_ms: Some(30_000),
+            jwks_refresh: Some(secs(30)),
         }),
     });
     let rules = vec![
@@ -1282,7 +1287,7 @@ async fn bearer_jwks_renders_to_args() {
         "--bearer-jwks-valid-issuer=https://idp.example.com",
         "--bearer-jwks-expected-audience=kafka-sr",
         "--bearer-jwks-principal-claim=email",
-        "--bearer-jwks-refresh-ms=30000",
+        "--bearer-jwks-refresh=30s",
     ] {
         assert!(
             joined.contains(needle),

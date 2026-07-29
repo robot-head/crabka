@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use crabka_units::{ByteSize, Ratio, Time};
 use k8s_openapi::api::core::v1::ResourceRequirements;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -110,11 +111,15 @@ pub struct DedupSpec {
     #[schemars(range(min = 1, max = 2_147_483_647))]
     pub partitions: Option<u32>,
 
-    /// Dedup window in milliseconds. Records with the same idempotency
-    /// key within this window are dropped. Default `86_400_000` (24 h).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub window_ms: Option<i64>,
+    /// Dedup window, as a unit-carrying duration (`24h`, `30m`). Records with
+    /// the same idempotency key within this window are dropped. Default `24h`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub window: Option<Time>,
 
     /// Prefix for transactional producer IDs. Defaults to the gateway
     /// name. The full `transactional.id` is `<prefix>-<partition>`.
@@ -136,30 +141,58 @@ pub struct GatewayTuning {
     pub internal_topic_replication_factor: Option<i16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub internal_topic_allow_replication_fallback: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub internal_topic_create_timeout_ms: Option<i32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub internal_topic_segment_ms: Option<i64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 0, max = 10_000))]
-    pub internal_topic_min_cleanable_dirty_ratio_basis_points: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub consumer_poll_timeout_ms: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub internal_topic_create_timeout: Option<Time>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub internal_topic_segment: Option<Time>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_ratio"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub internal_topic_min_cleanable_dirty_ratio: Option<Ratio>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub consumer_poll_timeout: Option<Time>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub ownership_warmup_empty_polls: Option<u32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub readiness_poll_interval_ms: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub produce_max_body_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub forward_max_body_bytes: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub readiness_poll_interval: Option<Time>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub produce_max_body: Option<ByteSize>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub forward_max_body: Option<ByteSize>,
 }
 
 /// Schema Registry settings for structured records.
@@ -168,9 +201,13 @@ pub struct GatewayTuning {
 pub struct GatewaySchemaRegistrySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub latest_cache_ttl_ms: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub latest_cache_ttl: Option<Time>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frame_raw: Option<bool>,
 }
@@ -209,10 +246,14 @@ pub struct GatewayTlsSpec {
     #[schemars(range(min = 1))]
     pub validity_days: Option<u32>,
 
-    /// Cert hot-reload poll interval in seconds. Default 30.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub reload_interval_secs: Option<u64>,
+    /// Cert hot-reload poll interval, as a unit-carrying duration. Default `30s`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub reload_interval: Option<Time>,
 }
 
 /// Authorization configuration for the gateway.
@@ -229,10 +270,14 @@ pub struct GatewayAuthzSpec {
     pub super_users: Vec<String>,
 
     /// How often the gateway refreshes its ACL cache from the broker,
-    /// in seconds. Default 60.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub acl_refresh_secs: Option<u64>,
+    /// as a unit-carrying duration. Default `60s`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub acl_refresh: Option<Time>,
 
     /// Bearer-token authentication configuration. When absent,
     /// bearer auth is disabled.
@@ -252,10 +297,15 @@ pub struct GatewayBearerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub principal_claim: Option<String>,
 
-    /// Allowable clock skew for bearer-token timestamps in milliseconds.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 0))]
-    pub allowable_clock_skew_ms: Option<i64>,
+    /// Allowable clock skew for bearer-token timestamps, as a unit-carrying
+    /// duration (`30s`, `500ms`).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub allowable_clock_skew: Option<Time>,
 }
 
 /// One inbound HTTP-webhook endpoint. Records a produce call against
@@ -289,15 +339,19 @@ pub struct InboundWebhookSpec {
     pub signature_prefix: Option<String>,
 
     /// HTTP header carrying the request timestamp. Used with
-    /// `timestampToleranceSecs` to reject replayed requests.
+    /// `timestampTolerance` to reject replayed requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timestamp_header: Option<String>,
 
-    /// Maximum age of a request timestamp in seconds before it is
-    /// rejected as a replay. Default 300 (5 minutes).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 0))]
-    pub timestamp_tolerance_secs: Option<i64>,
+    /// Maximum age of a request timestamp before it is rejected as a replay,
+    /// as a unit-carrying duration. Default `300s`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub timestamp_tolerance: Option<Time>,
 
     /// How to derive the idempotency key for deduplication. E.g.
     /// `header:X-Idempotency-Key` or `body_hash`.
@@ -310,9 +364,13 @@ pub struct InboundWebhookSpec {
     pub key_source: Option<String>,
 
     /// Maximum accepted request body size in bytes. Default 1 MiB.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub max_body_bytes: Option<u64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub max_body: Option<ByteSize>,
 
     /// Optional Schema Registry subject for structured request bodies.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -357,20 +415,33 @@ pub struct OutboundSubscriptionSpec {
     #[schemars(range(min = 1))]
     pub max_attempts: Option<u32>,
 
-    /// Initial backoff in milliseconds for exponential retry. Default 500.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub base_backoff_ms: Option<u64>,
+    /// Initial backoff for exponential retry, as a unit-carrying duration.
+    /// Default `500ms`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub base_backoff: Option<Time>,
 
-    /// Maximum backoff cap in milliseconds. Default 30000.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub max_backoff_ms: Option<u64>,
+    /// Maximum backoff cap, as a unit-carrying duration. Default `30s`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub max_backoff: Option<Time>,
 
-    /// HTTP request timeout in milliseconds. Default 10000.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub request_timeout_ms: Option<u64>,
+    /// HTTP request timeout, as a unit-carrying duration. Default `10s`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub request_timeout: Option<Time>,
 
     /// Consumer group override for this subscription.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -459,9 +530,70 @@ pub struct KafkaGrpcGatewayStatus {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::{mebibytes, millis, minutes, secs};
     use kube::CustomResourceExt as _;
 
     use super::*;
+
+    /// The dimensioned CRD fields are an external, operator-facing surface: they
+    /// take and emit the same unit-carrying strings the gateway's own config
+    /// does, so a bare number is a schema error rather than a guess.
+    #[test]
+    fn dimensioned_tuning_fields_serialize_as_unit_carrying_strings() {
+        let tuning = GatewayTuning {
+            internal_topic_create_timeout: Some(secs(10)),
+            internal_topic_segment: Some(minutes(1)),
+            consumer_poll_timeout: Some(millis(500)),
+            readiness_poll_interval: Some(millis(250)),
+            produce_max_body: Some(mebibytes(2)),
+            forward_max_body: Some(mebibytes(3)),
+            ..GatewayTuning::default()
+        };
+        let json = serde_json::to_value(&tuning).unwrap();
+        check!(json["internalTopicCreateTimeout"] == serde_json::json!("10s"));
+        check!(json["internalTopicSegment"] == serde_json::json!("1m"));
+        check!(json["consumerPollTimeout"] == serde_json::json!("500ms"));
+        check!(json["readinessPollInterval"] == serde_json::json!("250ms"));
+        check!(json["produceMaxBody"] == serde_json::json!("2MiB"));
+        check!(json["forwardMaxBody"] == serde_json::json!("3MiB"));
+        let back: GatewayTuning = serde_json::from_value(json).unwrap();
+        assert!(back == tuning);
+    }
+
+    /// A bare number carries no unit, so it must be rejected rather than assumed
+    /// to be milliseconds or bytes.
+    #[test]
+    fn dimensioned_fields_reject_bare_numbers() {
+        for raw in [
+            r#"{"internalTopicCreateTimeout":10}"#,
+            r#"{"produceMaxBody":2097152}"#,
+        ] {
+            check!(
+                serde_json::from_str::<GatewayTuning>(raw).is_err(),
+                "case {raw}"
+            );
+        }
+    }
+
+    /// The generated schema is a string for every dimensioned field — an integer
+    /// `minimum` on a string would be an invalid CRD schema.
+    #[test]
+    fn dimensioned_fields_have_a_string_schema() {
+        let crd = serde_json::to_value(KafkaGrpcGateway::crd()).unwrap();
+        let props = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["tuning"]["properties"];
+        for field in [
+            "internalTopicCreateTimeout",
+            "internalTopicSegment",
+            "consumerPollTimeout",
+            "readinessPollInterval",
+            "produceMaxBody",
+            "forwardMaxBody",
+        ] {
+            check!(props[field]["type"] == "string", "case {field}");
+            check!(props[field]["minimum"].is_null(), "case {field}");
+        }
+    }
 
     #[test]
     fn crd_metadata_is_correct() {
@@ -516,7 +648,7 @@ mod tests {
                 dedup: Some(DedupSpec {
                     topic: Some("my-gateway-dedup".into()),
                     partitions: Some(16),
-                    window_ms: Some(86_400_000),
+                    window: Some(millis(86_400_000)),
                     txn_id_prefix: Some("gw".into()),
                     ownership_group: None,
                 }),
@@ -532,16 +664,16 @@ mod tests {
                 tls: Some(GatewayTlsSpec {
                     client_auth: Some("required".into()),
                     validity_days: Some(365),
-                    reload_interval_secs: None,
+                    reload_interval: None,
                 }),
                 authz: Some(GatewayAuthzSpec {
                     mode: Some("simple".into()),
                     super_users: vec!["User:admin".into()],
-                    acl_refresh_secs: Some(60),
+                    acl_refresh: Some(secs(60)),
                     bearer: Some(GatewayBearerSpec {
                         mode: Some("off".into()),
                         principal_claim: None,
-                        allowable_clock_skew_ms: None,
+                        allowable_clock_skew: None,
                     }),
                 }),
                 webhooks: vec![InboundWebhookSpec {
@@ -552,10 +684,10 @@ mod tests {
                     signature_encoding: Some("hex".into()),
                     signature_prefix: Some("sha256=".into()),
                     timestamp_header: None,
-                    timestamp_tolerance_secs: Some(300),
+                    timestamp_tolerance: Some(secs(300)),
                     idempotency_source: Some("header:X-Idempotency-Key".into()),
                     key_source: None,
-                    max_body_bytes: Some(1_048_576),
+                    max_body: Some(crabka_units::bytes(1_048_576)),
                     schema_subject: None,
                     schema_format: None,
                     secret_ref: Some(SecretKeyRef {
@@ -569,9 +701,9 @@ mod tests {
                     target_url: "https://example.com/hook".into(),
                     dead_letter_topic: Some("failed-deliveries".into()),
                     max_attempts: Some(5),
-                    base_backoff_ms: Some(1000),
-                    max_backoff_ms: Some(30_000),
-                    request_timeout_ms: Some(10_000),
+                    base_backoff: Some(millis(1000)),
+                    max_backoff: Some(millis(30_000)),
+                    request_timeout: Some(millis(10_000)),
                     group_id: None,
                     decode_to_json: None,
                     filter: None,
@@ -651,9 +783,9 @@ mod tests {
             target_url: "https://example.com/hook".into(),
             dead_letter_topic: None,
             max_attempts: None,
-            base_backoff_ms: None,
-            max_backoff_ms: None,
-            request_timeout_ms: None,
+            base_backoff: None,
+            max_backoff: None,
+            request_timeout: None,
             group_id: None,
             decode_to_json: None,
             filter: None,

@@ -46,26 +46,24 @@ spec:
                   is used (mode = `simple`).
                 nullable: true
                 properties:
-                  aclRefreshSecs:
+                  aclRefresh:
                     description: |-
                       How often the gateway refreshes its ACL cache from the broker,
-                      in seconds. Default 60.
-                    format: uint64
-                    minimum: 1.0
+                      as a unit-carrying duration. Default `60s`.
                     nullable: true
-                    type: integer
+                    type: string
                   bearer:
                     description: |-
                       Bearer-token authentication configuration. When absent,
                       bearer auth is disabled.
                     nullable: true
                     properties:
-                      allowableClockSkewMs:
-                        description: Allowable clock skew for bearer-token timestamps in milliseconds.
-                        format: int64
-                        minimum: 0.0
+                      allowableClockSkew:
+                        description: |-
+                          Allowable clock skew for bearer-token timestamps, as a unit-carrying
+                          duration (`30s`, `500ms`).
                         nullable: true
-                        type: integer
+                        type: string
                       mode:
                         description: Bearer auth mode. One of `off` or `unsecured`. Default `off`.
                         nullable: true
@@ -118,14 +116,12 @@ spec:
                       name. The full `transactional.id` is `<prefix>-<partition>`.
                     nullable: true
                     type: string
-                  windowMs:
+                  window:
                     description: |-
-                      Dedup window in milliseconds. Records with the same idempotency
-                      key within this window are dropped. Default `86_400_000` (24 h).
-                    format: int64
-                    minimum: 1.0
+                      Dedup window, as a unit-carrying duration (`24h`, `30m`). Records with
+                      the same idempotency key within this window are dropped. Default `24h`.
                     nullable: true
-                    type: integer
+                    type: string
                 type: object
               healthChecks:
                 description: Kubernetes readiness and liveness probe timing.
@@ -171,12 +167,12 @@ spec:
                     One outbound webhook subscription. Reads from `sourceTopics` and
                     HTTP-POSTs each record to `targetUrl`.
                   properties:
-                    baseBackoffMs:
-                      description: Initial backoff in milliseconds for exponential retry. Default 500.
-                      format: uint64
-                      minimum: 1.0
+                    baseBackoff:
+                      description: |-
+                        Initial backoff for exponential retry, as a unit-carrying duration.
+                        Default `500ms`.
                       nullable: true
-                      type: integer
+                      type: string
                     deadLetterTopic:
                       description: |-
                         Kafka topic for records that exhausted all delivery attempts.
@@ -210,23 +206,19 @@ spec:
                       minimum: 1.0
                       nullable: true
                       type: integer
-                    maxBackoffMs:
-                      description: Maximum backoff cap in milliseconds. Default 30000.
-                      format: uint64
-                      minimum: 1.0
+                    maxBackoff:
+                      description: Maximum backoff cap, as a unit-carrying duration. Default `30s`.
                       nullable: true
-                      type: integer
+                      type: string
                     name:
                       description: |-
                         Unique name for this subscription. Used as the consumer group id
                         suffix.
                       type: string
-                    requestTimeoutMs:
-                      description: HTTP request timeout in milliseconds. Default 10000.
-                      format: uint64
-                      minimum: 1.0
+                    requestTimeout:
+                      description: HTTP request timeout, as a unit-carrying duration. Default `10s`.
                       nullable: true
-                      type: integer
+                      type: string
                     signingSecretRef:
                       description: |-
                         Secret key reference for the outbound request HMAC signing secret.
@@ -306,11 +298,9 @@ spec:
                   frameRaw:
                     nullable: true
                     type: boolean
-                  latestCacheTtlMs:
-                    format: uint64
-                    minimum: 1.0
+                  latestCacheTtl:
                     nullable: true
-                    type: integer
+                    type: string
                   url:
                     nullable: true
                     type: string
@@ -353,12 +343,10 @@ spec:
                       One of `disabled`, `optional`, `required`. Default `required`.
                     nullable: true
                     type: string
-                  reloadIntervalSecs:
-                    description: Cert hot-reload poll interval in seconds. Default 30.
-                    format: uint64
-                    minimum: 1.0
+                  reloadInterval:
+                    description: Cert hot-reload poll interval, as a unit-carrying duration. Default `30s`.
                     nullable: true
-                    type: integer
+                    type: string
                   validityDays:
                     description: Serving-cert lifetime in days. Default 365.
                     format: uint32
@@ -370,56 +358,41 @@ spec:
                 description: Gateway runtime policy overrides.
                 nullable: true
                 properties:
-                  consumerPollTimeoutMs:
-                    format: uint64
-                    minimum: 1.0
+                  consumerPollTimeout:
                     nullable: true
-                    type: integer
-                  forwardMaxBodyBytes:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  forwardMaxBody:
                     nullable: true
-                    type: integer
+                    type: string
                   internalTopicAllowReplicationFallback:
                     nullable: true
                     type: boolean
-                  internalTopicCreateTimeoutMs:
-                    format: int32
-                    minimum: 1.0
+                  internalTopicCreateTimeout:
                     nullable: true
-                    type: integer
-                  internalTopicMinCleanableDirtyRatioBasisPoints:
-                    format: uint32
-                    maximum: 10000.0
-                    minimum: 0.0
+                    type: string
+                  internalTopicMinCleanableDirtyRatio:
                     nullable: true
-                    type: integer
+                    type: string
                   internalTopicReplicationFactor:
                     format: int16
                     maximum: 32767.0
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  internalTopicSegmentMs:
-                    format: int64
-                    minimum: 1.0
+                  internalTopicSegment:
                     nullable: true
-                    type: integer
+                    type: string
                   ownershipWarmupEmptyPolls:
                     format: uint32
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  produceMaxBodyBytes:
-                    format: uint64
-                    minimum: 1.0
+                  produceMaxBody:
                     nullable: true
-                    type: integer
-                  readinessPollIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  readinessPollInterval:
                     nullable: true
-                    type: integer
+                    type: string
                 type: object
               webhooks:
                 description: |-
@@ -443,12 +416,10 @@ spec:
                         `header:X-Record-Key` or `body_path:.id`.
                       nullable: true
                       type: string
-                    maxBodyBytes:
+                    maxBody:
                       description: Maximum accepted request body size in bytes. Default 1 MiB.
-                      format: uint64
-                      minimum: 1.0
                       nullable: true
-                      type: integer
+                      type: string
                     name:
                       description: Unique name for this webhook route. Used as the URL path segment.
                       type: string
@@ -506,17 +477,15 @@ spec:
                     timestampHeader:
                       description: |-
                         HTTP header carrying the request timestamp. Used with
-                        `timestampToleranceSecs` to reject replayed requests.
+                        `timestampTolerance` to reject replayed requests.
                       nullable: true
                       type: string
-                    timestampToleranceSecs:
+                    timestampTolerance:
                       description: |-
-                        Maximum age of a request timestamp in seconds before it is
-                        rejected as a replay. Default 300 (5 minutes).
-                      format: int64
-                      minimum: 0.0
+                        Maximum age of a request timestamp before it is rejected as a replay,
+                        as a unit-carrying duration. Default `300s`.
                       nullable: true
-                      type: integer
+                      type: string
                   required:
                   - name
                   - targetTopic

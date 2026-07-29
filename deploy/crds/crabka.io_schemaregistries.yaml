@@ -56,11 +56,10 @@ spec:
                           `principalClaim` for JWKS paths.
                         nullable: true
                         type: string
-                      jwksRefreshMs:
-                        description: JWKS key-set refresh interval in milliseconds. Default 60 000.
-                        format: int64
+                      jwksRefresh:
+                        description: JWKS key-set refresh interval. Default `1m`.
                         nullable: true
-                        type: integer
+                        type: string
                       jwksTlsSecretName:
                         description: |-
                           Secret name whose `ca.crt` key is mounted and passed as
@@ -96,11 +95,10 @@ spec:
                 description: REST authorization (Kafka-ACL based).
                 nullable: true
                 properties:
-                  aclRefreshSeconds:
-                    description: ACL-cache refresh interval (seconds). Default 30.
-                    format: int64
+                  aclRefresh:
+                    description: ACL-cache refresh interval. Default `30s`.
                     nullable: true
-                    type: integer
+                    type: string
                   enabled:
                     default: false
                     type: boolean
@@ -246,51 +244,33 @@ spec:
                   defaultMode:
                     nullable: true
                     type: string
-                  electionHeartbeatIntervalMs:
-                    format: uint64
-                    minimum: 1.0
+                  electionHeartbeatInterval:
                     nullable: true
-                    type: integer
-                  electionRebalanceTimeoutMs:
-                    format: int32
-                    minimum: 1.0
+                    type: string
+                  electionRebalanceTimeout:
                     nullable: true
-                    type: integer
-                  electionReconnectBackoffMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  electionReconnectBackoff:
                     nullable: true
-                    type: integer
-                  electionSessionTimeoutMs:
-                    format: int32
-                    minimum: 1.0
+                    type: string
+                  electionSessionTimeout:
                     nullable: true
-                    type: integer
-                  forwardMaxBodyBytes:
-                    format: int32
-                    minimum: 1.0
+                    type: string
+                  forwardMaxBody:
                     nullable: true
-                    type: integer
-                  schemasTopicCreateTimeoutMs:
-                    format: int32
-                    minimum: 1.0
+                    type: string
+                  schemasTopicCreateTimeout:
                     nullable: true
-                    type: integer
-                  storeReaderFetchMaxBytes:
-                    format: int32
-                    minimum: 1.0
+                    type: string
+                  storeReaderFetchMax:
                     nullable: true
-                    type: integer
-                  storeReaderFetchMaxWaitMs:
-                    format: int32
-                    minimum: 1.0
+                    type: string
+                  storeReaderFetchMaxWait:
                     nullable: true
-                    type: integer
-                  storeReaderRetryBackoffMs:
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  storeReaderRetryBackoff:
                     nullable: true
-                    type: integer
+                    type: string
                 type: object
               schemasTopic:
                 description: Backing compacted topic. Default `_schemas`.

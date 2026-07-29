@@ -4,6 +4,12 @@
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    fmt::Human as _,
+    secs,
+};
 use futures::StreamExt as _;
 use k8s_openapi::api::{
     apps::v1::Deployment,
@@ -37,9 +43,9 @@ use crate::{
 
 const APP_NAME: &str = "crabka-schema-registry";
 const SR_PORT: i32 = 8081;
-const DEFAULT_ELECTION_SESSION_TIMEOUT_MS: i32 = 10_000;
-const DEFAULT_ELECTION_REBALANCE_TIMEOUT_MS: i32 = 30_000;
-const DEFAULT_ELECTION_HEARTBEAT_INTERVAL_MS: u64 = 3_000;
+const DEFAULT_ELECTION_SESSION_TIMEOUT: Time = secs(10);
+const DEFAULT_ELECTION_REBALANCE_TIMEOUT: Time = secs(30);
+const DEFAULT_ELECTION_HEARTBEAT_INTERVAL: Time = secs(3);
 const DEFAULT_IMAGE: &str = concat!(
     "ghcr.io/robot-head/crabka-schema-registry:",
     env!("CARGO_PKG_VERSION")
@@ -305,70 +311,76 @@ fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
             .map_err(|error| format!("spec.clientId: {error}"))?;
     }
     if let Some(runtime) = &spec.runtime {
-        validate!(
-            runtime.election_session_timeout_ms,
-            refined_type::rule::GreaterI32<0>,
-            "spec.runtime.electionSessionTimeoutMs"
-        );
-        validate!(
-            runtime.election_rebalance_timeout_ms,
-            refined_type::rule::GreaterI32<0>,
-            "spec.runtime.electionRebalanceTimeoutMs"
-        );
-        validate!(
-            runtime.election_heartbeat_interval_ms,
-            refined_type::rule::GreaterU64<0>,
-            "spec.runtime.electionHeartbeatIntervalMs"
-        );
-        validate!(
-            runtime.election_reconnect_backoff_ms,
-            refined_type::rule::GreaterU64<0>,
-            "spec.runtime.electionReconnectBackoffMs"
-        );
-        validate!(
-            runtime.store_reader_retry_backoff_ms,
-            refined_type::rule::GreaterU64<0>,
-            "spec.runtime.storeReaderRetryBackoffMs"
-        );
-        validate!(
-            runtime.store_reader_fetch_max_wait_ms,
-            refined_type::rule::GreaterI32<0>,
-            "spec.runtime.storeReaderFetchMaxWaitMs"
-        );
-        validate!(
-            runtime.store_reader_fetch_max_bytes,
-            refined_type::rule::GreaterI32<0>,
-            "spec.runtime.storeReaderFetchMaxBytes"
-        );
-        validate!(
-            runtime.schemas_topic_create_timeout_ms,
-            refined_type::rule::GreaterI32<0>,
-            "spec.runtime.schemasTopicCreateTimeoutMs"
-        );
-        validate!(
-            runtime.forward_max_body_bytes,
-            refined_type::rule::GreaterI32<0>,
-            "spec.runtime.forwardMaxBodyBytes"
-        );
+        for (value, path) in [
+            (
+                runtime.election_session_timeout,
+                "spec.runtime.electionSessionTimeout",
+            ),
+            (
+                runtime.election_rebalance_timeout,
+                "spec.runtime.electionRebalanceTimeout",
+            ),
+            (
+                runtime.election_heartbeat_interval,
+                "spec.runtime.electionHeartbeatInterval",
+            ),
+            (
+                runtime.election_reconnect_backoff,
+                "spec.runtime.electionReconnectBackoff",
+            ),
+            (
+                runtime.store_reader_retry_backoff,
+                "spec.runtime.storeReaderRetryBackoff",
+            ),
+            (
+                runtime.store_reader_fetch_max_wait,
+                "spec.runtime.storeReaderFetchMaxWait",
+            ),
+            (
+                runtime.schemas_topic_create_timeout,
+                "spec.runtime.schemasTopicCreateTimeout",
+            ),
+        ] {
+            if value.is_some_and(|value| {
+                !value.secs_f64().is_finite()
+                    || value <= <Time as crabka_units::convert::TimeExt>::ZERO
+            }) {
+                return Err(format!("{path}: must be positive"));
+            }
+        }
+        for (value, path) in [
+            (
+                runtime.store_reader_fetch_max,
+                "spec.runtime.storeReaderFetchMax",
+            ),
+            (runtime.forward_max_body, "spec.runtime.forwardMaxBody"),
+        ] {
+            if value.is_some_and(|value| {
+                !value.bytes_f64().is_finite()
+                    || value <= <ByteSize as crabka_units::convert::ByteSizeExt>::ZERO
+            }) {
+                return Err(format!("{path}: must be positive"));
+            }
+        }
 
         let session = runtime
-            .election_session_timeout_ms
-            .unwrap_or(DEFAULT_ELECTION_SESSION_TIMEOUT_MS);
+            .election_session_timeout
+            .unwrap_or(DEFAULT_ELECTION_SESSION_TIMEOUT);
         let rebalance = runtime
-            .election_rebalance_timeout_ms
-            .unwrap_or(DEFAULT_ELECTION_REBALANCE_TIMEOUT_MS);
+            .election_rebalance_timeout
+            .unwrap_or(DEFAULT_ELECTION_REBALANCE_TIMEOUT);
         let heartbeat = runtime
-            .election_heartbeat_interval_ms
-            .unwrap_or(DEFAULT_ELECTION_HEARTBEAT_INTERVAL_MS);
-        if heartbeat >= u64::try_from(session).unwrap_or(0) {
+            .election_heartbeat_interval
+            .unwrap_or(DEFAULT_ELECTION_HEARTBEAT_INTERVAL);
+        if heartbeat >= session {
             return Err(
-                "spec.runtime.electionHeartbeatIntervalMs must be below electionSessionTimeoutMs"
+                "spec.runtime.electionHeartbeatInterval must be below electionSessionTimeout"
                     .into(),
             );
         }
         if session > rebalance {
             return Err(
-                "spec.runtime.electionSessionTimeoutMs must not exceed electionRebalanceTimeoutMs"
+                "spec.runtime.electionSessionTimeout must not exceed electionRebalanceTimeout"
                     .into(),
             );
         }
@@ -414,22 +426,24 @@ fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
             "spec.healthChecks.livenessPeriodSeconds"
         );
     }
-    if let Some(refresh_ms) = spec
+    if let Some(refresh) = spec
         .authentication
         .as_ref()
         .and_then(|authn| authn.bearer.as_ref())
-        .and_then(|bearer| bearer.jwks_refresh_ms)
+        .and_then(|bearer| bearer.jwks_refresh)
+        && (!refresh.secs_f64().is_finite()
+            || refresh <= <Time as crabka_units::convert::TimeExt>::ZERO)
     {
-        refined_type::rule::GreaterI64::<0>::new(refresh_ms)
-            .map_err(|error| format!("spec.authentication.bearer.jwksRefreshMs: {error}"))?;
+        return Err("spec.authentication.bearer.jwksRefresh: must be positive".into());
     }
-    if let Some(refresh_seconds) = spec
+    if let Some(refresh) = spec
         .authorization
         .as_ref()
-        .and_then(|authz| authz.acl_refresh_seconds)
+        .and_then(|authz| authz.acl_refresh)
+        && (!refresh.secs_f64().is_finite()
+            || refresh <= <Time as crabka_units::convert::TimeExt>::ZERO)
     {
-        refined_type::rule::GreaterI64::<0>::new(refresh_seconds)
-            .map_err(|error| format!("spec.authorization.aclRefreshSeconds: {error}"))?;
+        return Err("spec.authorization.aclRefresh: must be positive".into());
     }
     Ok(())
 }
@@ -622,16 +636,25 @@ fn build_args_and_mounts(
                     ));
                 }
             };
+            (quantity $field:ident) => {
+                if let Some(value) = runtime.$field {
+                    a.push(format!(
+                        "--{}={}",
+                        stringify!($field).replace('_', "-"),
+                        value.human()
+                    ));
+                }
+            };
         }
-        push_runtime!(election_session_timeout_ms);
-        push_runtime!(election_rebalance_timeout_ms);
-        push_runtime!(election_heartbeat_interval_ms);
-        push_runtime!(election_reconnect_backoff_ms);
-        push_runtime!(store_reader_retry_backoff_ms);
-        push_runtime!(store_reader_fetch_max_wait_ms);
-        push_runtime!(store_reader_fetch_max_bytes);
-        push_runtime!(schemas_topic_create_timeout_ms);
-        push_runtime!(forward_max_body_bytes);
+        push_runtime!(quantity election_session_timeout);
+        push_runtime!(quantity election_rebalance_timeout);
+        push_runtime!(quantity election_heartbeat_interval);
+        push_runtime!(quantity election_reconnect_backoff);
+        push_runtime!(quantity store_reader_retry_backoff);
+        push_runtime!(quantity store_reader_fetch_max_wait);
+        push_runtime!(quantity store_reader_fetch_max);
+        push_runtime!(quantity schemas_topic_create_timeout);
+        push_runtime!(quantity forward_max_body);
         push_runtime!(default_compatibility_level);
         push_runtime!(default_mode);
     }
@@ -710,8 +733,8 @@ fn build_args_and_mounts(
                     {
                         a.push(format!("--bearer-jwks-principal-claim={pc}"));
                     }
-                    if let Some(ms) = bearer.jwks_refresh_ms {
-                        a.push(format!("--bearer-jwks-refresh-ms={ms}"));
+                    if let Some(refresh) = bearer.jwks_refresh {
+                        a.push(format!("--bearer-jwks-refresh={}", refresh.human()));
                     }
                     if let Some(ca_sn) = &bearer.jwks_tls_secret_name {
                         a.push("--bearer-jwks-ca=/etc/sr/jwks-ca/ca.crt".into());
@@ -734,8 +757,8 @@ fn build_args_and_mounts(
         for u in &az.super_users {
             a.push(format!("--super-user={u}"));
         }
-        if let Some(r) = az.acl_refresh_seconds {
-            a.push(format!("--acl-refresh-secs={r}"));
+        if let Some(refresh) = az.acl_refresh {
+            a.push(format!("--acl-refresh={}", refresh.human()));
         }
     }
 
