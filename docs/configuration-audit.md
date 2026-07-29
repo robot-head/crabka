@@ -29,7 +29,7 @@ applicable rule below:
   `docgen`, `gres`, `gres-activator`, `gres-control`, `grpc-gateway`, `ids`,
   `integration-tests`, `kafka-tap`,
   `log-iobench`, `logfmt`, `logql`, `metadata`, `object-store`, `operator`,
-  `protocol-codegen`, `remote-storage`, `pgparser`, `playground`,
+  `pgcatalog`, `protocol-codegen`, `remote-storage`, `pgparser`, `playground`,
   `schema-registry`, `throttle`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-streams`,
   `gres-balancer`,
@@ -37,7 +37,7 @@ applicable rule below:
   `gres-ranges`, `gres-substrate`,
   `kraft-core`, `log`, `metrics`,
   `metrics-service`, `observability`, `observability-demo-app`,
-  `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgtypes`, `pgwire`,
+  `pgexec`, `pgkv`, `pgmvcc`, `pgtypes`, `pgwire`,
   `pprof`, `profiles`, `promql`, `protocol`, `raft`,
   `rebalancer`, `records-legacy`, `remote-storage-topic`, `replicator`,
   `schema-serde`, `security`, `telemetry`,
@@ -4621,3 +4621,17 @@ This crate owns no runtime timing, queue, retry, or resource policy, so no CLI,
 environment variable, or CRD field is warranted. The current all-target gate
 passed 180 unit and evolution tests plus the complete benchmark target, and
 strict all-target Clippy passed.
+
+## PostgreSQL Catalog
+
+The `pgcatalog` owner has 47 scanner rows. Every production constant belongs
+to its persisted catalog format: key prefixes, schema and record versions,
+table/index/sharding flags, index constraints and placements, and scalar/array
+type discriminants. These values must remain stable so existing catalog rows
+retain their meaning.
+
+The reported collection capacities are bounded preallocation hints and do not
+limit accepted catalog data. No runtime timing, queue, retry, or resource policy
+exists in this crate, so no CLI, environment variable, or CRD field is
+warranted. The current all-target gate passed 36 serialization and catalog
+behavior tests, and strict all-target Clippy passed.
