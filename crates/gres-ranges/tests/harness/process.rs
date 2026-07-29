@@ -49,7 +49,6 @@ async fn acquire_slot(slots: &Arc<Semaphore>) -> OwnedSemaphorePermit {
 }
 
 pub struct ProcessHarness {
-    _slot: OwnedSemaphorePermit,
     root: tempfile::TempDir,
     _broker: BrokerHandle,
     bootstrap: String,
@@ -65,6 +64,7 @@ pub struct ProcessHarness {
     r0: ProcessNode,
     r1: Option<ProcessNode>,
     catalog_ids: std::sync::Mutex<BTreeMap<String, u64>>,
+    _slot: OwnedSemaphorePermit,
 }
 
 struct ProcessNode {
@@ -144,7 +144,6 @@ impl ProcessHarness {
             checkpoint_frames: None,
         });
         let mut harness = Self {
-            _slot: slot,
             root,
             _broker: broker,
             bootstrap,
@@ -160,6 +159,7 @@ impl ProcessHarness {
             r0,
             r1: Some(r1),
             catalog_ids: std::sync::Mutex::default(),
+            _slot: slot,
         };
         harness.wait_ready(0).await;
         harness.wait_ready(1).await;
@@ -200,7 +200,6 @@ impl ProcessHarness {
             checkpoint_frames: None,
         });
         let mut harness = Self {
-            _slot: slot,
             root,
             _broker: broker,
             bootstrap,
@@ -216,6 +215,7 @@ impl ProcessHarness {
             r0,
             r1: None,
             catalog_ids: std::sync::Mutex::default(),
+            _slot: slot,
         };
         harness.wait_ready(0).await;
         harness.r1_proxy.set_backend(harness.r0.range_port);
