@@ -6,6 +6,7 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 
@@ -21,7 +22,7 @@ use tokio::{
     },
     net::{TcpListener, TcpStream},
     process::{Child, Command},
-    sync::{mpsc, oneshot, watch},
+    sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot, watch},
     task::{JoinHandle, JoinSet},
 };
 
@@ -29,7 +30,26 @@ pub(super) fn fixture_password() -> String {
     std::process::id().to_string()
 }
 
+const PROCESS_HARNESS_CONCURRENCY: usize = 2;
+
+fn process_harness_slots() -> &'static Arc<Semaphore> {
+    static SLOTS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    SLOTS.get_or_init(|| Arc::new(Semaphore::new(PROCESS_HARNESS_CONCURRENCY)))
+}
+
+async fn acquire_process_harness_slot() -> OwnedSemaphorePermit {
+    acquire_slot(process_harness_slots()).await
+}
+
+async fn acquire_slot(slots: &Arc<Semaphore>) -> OwnedSemaphorePermit {
+    Arc::clone(slots)
+        .acquire_owned()
+        .await
+        .expect("process harness semaphore remains open")
+}
+
 pub struct ProcessHarness {
+    _slot: OwnedSemaphorePermit,
     root: tempfile::TempDir,
     _broker: BrokerHandle,
     bootstrap: String,
@@ -87,6 +107,7 @@ impl ProcessHarness {
         commit_fault: Option<String>,
         checkpoint_frames: Option<u64>,
     ) -> Self {
+        let slot = acquire_process_harness_slot().await;
         let root = tempfile::tempdir().expect("process harness root");
         let broker_dir = root.path().join("broker");
         let broker = Broker::start(BrokerConfig::for_tests(broker_dir))
@@ -123,6 +144,7 @@ impl ProcessHarness {
             checkpoint_frames: None,
         });
         let mut harness = Self {
+            _slot: slot,
             root,
             _broker: broker,
             bootstrap,
@@ -153,6 +175,7 @@ impl ProcessHarness {
     }
 
     async fn start_all_on_zero_inner(name: &str, commit_fault: Option<String>) -> Self {
+        let slot = acquire_process_harness_slot().await;
         let root = tempfile::tempdir().expect("process harness root");
         let broker = Broker::start(BrokerConfig::for_tests(root.path().join("broker")))
             .await
@@ -177,6 +200,7 @@ impl ProcessHarness {
             checkpoint_frames: None,
         });
         let mut harness = Self {
+            _slot: slot,
             root,
             _broker: broker,
             bootstrap,
@@ -1174,6 +1198,24 @@ fn gres_binary() -> PathBuf {
 #[cfg(test)]
 mod process_group_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn process_harness_slots_bound_parallel_test_resources() {
+        let slots = Arc::new(Semaphore::new(PROCESS_HARNESS_CONCURRENCY));
+        let first = acquire_slot(&slots).await;
+        let second = acquire_slot(&slots).await;
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), acquire_slot(&slots))
+                .await
+                .is_err()
+        );
+        drop(first);
+        let third = tokio::time::timeout(Duration::from_secs(1), acquire_slot(&slots))
+            .await
+            .expect("released harness slot becomes available");
+        drop(third);
+        drop(second);
+    }
 
     #[tokio::test]
     async fn kill_process_group_reaps_child_and_descendant() {
