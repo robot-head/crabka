@@ -26,13 +26,12 @@ applicable rule below:
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
   `connect-postgres`,
-  `docgen`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`,
+  `docgen`, `gres-activator`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`,
   `log-iobench`, `logfmt`, `logql`, `object-store`, `operator`,
   `protocol-codegen`, `remote-storage`, `pgparser`, `playground`,
   `schema-registry`, `throttle`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
-  `client-streams`, `connect`, `gres`, `gres-activator`,
-  `gres-balancer`,
+  `client-streams`, `connect`, `gres`, `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
   `kraft-core`, `log`, `metadata`, `metrics`,
@@ -4505,3 +4504,21 @@ the connector's stable wire schema. None is deployment policy.
 
 No additional CLI, environment variable, or CRD field is warranted. The
 current all-target gate passed 69 tests, and strict all-target Clippy passed.
+
+## Gres Activator Completion
+
+The current full-crate review closes the activator sub-slice recorded above.
+All production deployment policy is already exposed as typed CLI options with
+environment-variable backing: connection addresses, readiness timing, shared
+registry timing and fetch limits, replication, and the backend endpoint
+template. Dimensioned settings use `Time` or `ByteSize`; validated scalar and
+string boundaries use `refined_type`.
+
+The current scanner rows are test timing fixtures, invalid-zero parser cases,
+and environment/CLI precedence values. Startup packet framing and its imported
+maximum length are PostgreSQL protocol safety invariants, while vector
+capacities exactly preallocate already-known frame lengths. No additional CLI,
+environment variable, or CRD field is warranted.
+
+The current all-target gate passed 13 unit and lifecycle tests, and strict
+all-target Clippy passed.
