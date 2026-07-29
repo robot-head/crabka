@@ -4080,19 +4080,18 @@ dependencies = [
 
 [[package]]
 name = "creusot-std"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a77f30cd8e0bba94af3627c0652816b8541a03f79e08fec08a10994f460c778"
+checksum = "68cc8f3ec44f553652fecb0b534726b2ca5d4684a54a593f0aedfe766b3e76fd"
 dependencies = [
  "creusot-std-proc",
- "num-rational",
 ]
 
 [[package]]
 name = "creusot-std-proc"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97c5a41f2030d728a025673cbf19e43fb5ff9c2856fadcb9de69d786cb231528"
+checksum = "c9530985d4aff8273851f018c36422944f70717d7aa9e0c724c3deab004bd6db"
 dependencies = [
  "pearlite-syn",
  "proc-macro2",
@@ -6613,7 +6612,7 @@ dependencies = [
  "libc",
  "log",
  "rustversion",
- "windows-link 0.1.3",
+ "windows-link 0.2.1",
  "windows-result 0.4.1",
 ]
 
@@ -9461,9 +9460,9 @@ dependencies = [
 
 [[package]]
 name = "pearlite-syn"
-version = "0.12.0"
+version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b14a6d97c13d0fc76502a3c380ad776324ab61a2966c1baac07c2510c2b5100e"
+checksum = "0d109ea947aee5910cb3a17ec83e0f026e05934b12335b97d05d825320b4cb15"
 dependencies = [
  "proc-macro2",
  "quote",
