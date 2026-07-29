@@ -46,15 +46,18 @@ values are rejected by Clap before network I/O.
 Add `ConsumerFetchMaxBytes(i32)` and
 `ConsumerFetchPartitionMaxBytes(i32)` to `crabka-client-consumer`. Both use
 `refined_type::rule::GreaterI32<0>` and implement the parsing and display traits
-needed by Clap.
+needed by Clap. Each exposes its value as a `crabka_units::ByteSize` for the
+runtime boundary while retaining the exact positive-`i32` Kafka protocol
+domain.
 
-The classic consumer builder keeps its primitive public arguments for
-compatibility and uses the shared types for its existing validation. Traces and
-profiles retain their current application-specific defaults rather than
-changing the client library's independent default fetch policy.
+The UOM-integrated classic consumer builder keeps its existing `ByteSize`
+arguments and validation. Traces and profiles pass the validated settings as
+`ByteSize` values and retain their current application-specific defaults rather
+than changing the client library's independent default fetch policy.
 
 No dependency is added: `crabka-client-consumer` already depends on
-`refined_type`, and both services already depend on the consumer crate.
+`refined_type` and `crabka-units`, and both services already depend on the
+consumer and units crates.
 
 ## Runtime Flow
 
