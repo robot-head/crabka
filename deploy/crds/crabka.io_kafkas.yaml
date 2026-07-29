@@ -597,12 +597,10 @@ spec:
                     description: Maximum time a registry fetch waits for data.
                     nullable: true
                     type: string
-                  fetchPartitionMaxBytes:
+                  fetchPartitionMax:
                     description: Maximum bytes fetched from the registry partition.
-                    format: int32
-                    minimum: 1.0
                     nullable: true
-                    type: integer
+                    type: string
                   producerDnsTimeout:
                     description: DNS lookup deadline for the registry producer.
                     nullable: true

@@ -6,11 +6,7 @@ use crabka_gres_control::{
     PgdogGeneral, PgdogRenderInput, PgdogTimeouts, PgdogUser, TenantEndpoint, TenantName,
     TenantState, render_pgdog_toml, render_users_toml,
 };
-use crabka_units::{
-    Time,
-    convert::{ByteSizeExt as _, TimeExt as _},
-    fmt::Human as _,
-};
+use crabka_units::{Time, convert::TimeExt as _, fmt::Human as _};
 use futures::StreamExt as _;
 use k8s_openapi::{
     ByteString,
@@ -928,7 +924,7 @@ fn render_activator_deployment(
                             "--registry-topic-create-timeout", registry_policy.topic_create_timeout().human().to_string(),
                             "--registry-reader-retry-backoff", registry_policy.reader_retry_backoff().human().to_string(),
                             "--registry-fetch-max-wait", registry_policy.fetch_max_wait().human().to_string(),
-                            "--registry-fetch-partition-max-bytes", registry_policy.fetch_partition_max().bytes_i32().to_string(),
+                            "--registry-fetch-partition-max", registry_policy.fetch_partition_max().human().to_string(),
                             "--registry-producer-dns-timeout", Time::from_std(registry_policy.producer_dns_timeout().duration()).human().to_string(),
                             "--registry-reader-admin-dns-timeout", Time::from_std(registry_policy.reader_admin_dns_timeout().duration()).human().to_string(),
                             "--backend-endpoint-template", format!("{{tenant}}-gres.{namespace}.svc:{COMPUTE_PORT}", namespace = obj.namespace().unwrap_or_else(|| "default".into()))
@@ -1356,8 +1352,8 @@ mod tests {
                 "250ms",
                 "--registry-fetch-max-wait",
                 "500ms",
-                "--registry-fetch-partition-max-bytes",
-                "1048576",
+                "--registry-fetch-partition-max",
+                "1MiB",
                 "--registry-producer-dns-timeout",
                 "10s",
                 "--registry-reader-admin-dns-timeout",
@@ -1384,7 +1380,7 @@ mod tests {
             crabka_units::millis(15_001),
             crabka_units::millis(251),
             crabka_units::millis(501),
-            1_048_577,
+            crabka_units::bytes(1_048_577),
         )
         .expect("policy")
         .with_producer_dns_timeout(crabka_units::millis(37))
@@ -1417,8 +1413,8 @@ mod tests {
                     "251ms",
                     "--registry-fetch-max-wait",
                     "501ms",
-                    "--registry-fetch-partition-max-bytes",
-                    "1048577",
+                    "--registry-fetch-partition-max",
+                    "1048577B",
                     "--registry-producer-dns-timeout",
                     "37ms",
                     "--registry-reader-admin-dns-timeout",

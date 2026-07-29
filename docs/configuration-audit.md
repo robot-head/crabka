@@ -529,10 +529,10 @@ Standalone activator, compute, `crabka gres`, and loadtest `run`/`compare`
 surfaces expose the exact common variables:
 
 - `CRABKA_GRES_REGISTRY_REPLICATION_FACTOR`;
-- `CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS`;
-- `CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS`;
-- `CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS`; and
-- `CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES`.
+- `CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT`;
+- `CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF`;
+- `CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT`; and
+- `CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX`.
 
 CLI values take precedence over environment values. Loadtest carries one
 policy through provisioning and every spawned compute. No production caller
@@ -1333,15 +1333,15 @@ three CLI/environment pairs:
 
 - `--wal-producer-compression` /
   `CRABKA_GRES_WAL_PRODUCER_COMPRESSION`;
-- `--wal-producer-linger-ms` /
-  `CRABKA_GRES_WAL_PRODUCER_LINGER_MS`;
-- `--wal-producer-batch-bytes` /
-  `CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES`.
+- `--wal-producer-linger` /
+  `CRABKA_GRES_WAL_PRODUCER_LINGER`;
+- `--wal-producer-batch` /
+  `CRABKA_GRES_WAL_PRODUCER_BATCH`.
 
 The fleet CRD adds the matching optional
-`spec.compute.walProducerCompression`, `walProducerLingerMs`, and
-`walProducerBatchBytes` fields. Compression has the exact
-`none`/`gzip`/`snappy`/`lz4`/`zstd` enum; linger and batch bytes carry the same
+`spec.compute.walProducerCompression`, `walProducerLinger`, and
+`walProducerBatch` fields. Compression has the exact
+`none`/`gzip`/`snappy`/`lz4`/`zstd` enum; linger and batch size carry the same
 protocol bounds as the shared policy. The effective compute policy validates
 the three values and the central Deployment renderer emits each effective
 argument exactly once in both single- and multi-range modes.

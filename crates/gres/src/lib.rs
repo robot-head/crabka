@@ -66,8 +66,8 @@ impl Cli {
         let mut command = <Self as clap::CommandFactory>::command();
         for argument in [
             "wal_recovery_fetch_max_wait",
-            "wal_recovery_fetch_partition_max_bytes",
-            "wal_recovery_fetch_response_max_bytes",
+            "wal_recovery_fetch_partition_max",
+            "wal_recovery_fetch_response_max",
             "wal_recovery_empty_fetch_retries",
             "wal_recovery_dns_timeout",
             "wal_recovery_connect_timeout",
@@ -88,7 +88,7 @@ impl Cli {
             "wal_producer_transaction_timeout",
             "wal_producer_compression",
             "wal_producer_linger",
-            "wal_producer_batch_bytes",
+            "wal_producer_batch",
         ] {
             command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
         }
@@ -168,19 +168,21 @@ pub struct ServeArgs {
 
     /// Per-partition byte limit for committed-WAL recovery fetches.
     #[arg(
-        long = "wal-recovery-fetch-partition-max-bytes",
-        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
+        long = "wal-recovery-fetch-partition-max",
+        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
+        value_parser = crabka_units::parse::positive_byte_size,
         requires = "substrate_bootstrap"
     )]
-    pub wal_recovery_fetch_partition_max_bytes: Option<PositiveI32>,
+    pub wal_recovery_fetch_partition_max: Option<ByteSize>,
 
     /// Whole-response byte limit for committed-WAL recovery fetches.
     #[arg(
-        long = "wal-recovery-fetch-response-max-bytes",
-        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
+        long = "wal-recovery-fetch-response-max",
+        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
+        value_parser = crabka_units::parse::positive_byte_size,
         requires = "substrate_bootstrap"
     )]
-    pub wal_recovery_fetch_response_max_bytes: Option<PositiveI32>,
+    pub wal_recovery_fetch_response_max: Option<ByteSize>,
 
     /// Consecutive empty-fetch retries after the initial recovery fetch.
     #[arg(
@@ -357,13 +359,14 @@ pub struct ServeArgs {
     )]
     pub wal_producer_linger: Option<Time>,
 
-    /// Maximum uncompressed WAL producer batch size in bytes.
+    /// Maximum uncompressed WAL producer batch size.
     #[arg(
-        long = "wal-producer-batch-bytes",
-        env = "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
+        long = "wal-producer-batch",
+        env = "CRABKA_GRES_WAL_PRODUCER_BATCH",
+        value_parser = crabka_units::parse::positive_byte_size,
         requires = "substrate_bootstrap"
     )]
-    pub wal_producer_batch_bytes: Option<usize>,
+    pub wal_producer_batch: Option<ByteSize>,
 
     /// Substrate mode: comma-separated hosted range ids, for example r0,r2.
     #[arg(long = "host-ranges", requires = "ranges")]
@@ -470,16 +473,21 @@ pub struct ServeArgs {
     #[arg(long = "checkpoint-frames", env = "CRABKA_GRES_CHECKPOINT_FRAMES")]
     pub checkpoint_frames: Option<NonZeroU64>,
 
-    /// Checkpoint after at least this many WAL bytes since the previous manifest.
-    #[arg(long = "checkpoint-bytes", env = "CRABKA_GRES_CHECKPOINT_BYTES")]
-    pub checkpoint_bytes: Option<NonZeroU64>,
-
-    /// Target maximum bytes per checkpoint part object.
+    /// Checkpoint after at least this much WAL since the previous manifest.
     #[arg(
-        long = "checkpoint-part-bytes",
-        env = "CRABKA_GRES_CHECKPOINT_PART_BYTES"
+        long = "checkpoint-size",
+        env = "CRABKA_GRES_CHECKPOINT_SIZE",
+        value_parser = crabka_units::parse::positive_byte_size
     )]
-    pub checkpoint_part_bytes: Option<CheckpointPartBytes>,
+    pub checkpoint_size: Option<ByteSize>,
+
+    /// Target maximum size per checkpoint part object.
+    #[arg(
+        long = "checkpoint-part-size",
+        env = "CRABKA_GRES_CHECKPOINT_PART_SIZE",
+        value_parser = crabka_units::parse::positive_byte_size
+    )]
+    pub checkpoint_part_size: Option<ByteSize>,
 
     /// Number of newest checkpoint directories to retain after pruning.
     #[arg(long = "checkpoint-retain", env = "CRABKA_GRES_CHECKPOINT_RETAIN")]
@@ -656,8 +664,8 @@ fn validate_range0_follower_poll_interval(args: &ServeArgs) -> std::io::Result<(
 
 fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
     if (args.wal_recovery_fetch_max_wait.is_some()
-        || args.wal_recovery_fetch_partition_max_bytes.is_some()
-        || args.wal_recovery_fetch_response_max_bytes.is_some()
+        || args.wal_recovery_fetch_partition_max.is_some()
+        || args.wal_recovery_fetch_response_max.is_some()
         || args.wal_recovery_empty_fetch_retries.is_some()
         || args.wal_recovery_dns_timeout.is_some()
         || args.wal_recovery_connect_timeout.is_some()
@@ -677,7 +685,7 @@ fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
         || args.wal_producer_transaction_timeout.is_some()
         || args.wal_producer_compression.is_some()
         || args.wal_producer_linger.is_some()
-        || args.wal_producer_batch_bytes.is_some())
+        || args.wal_producer_batch.is_some())
         && args.substrate_bootstrap.is_none()
     {
         return invalid_input("WAL recovery options require --substrate-bootstrap");
@@ -794,8 +802,14 @@ fn effective_wal_producer_throughput_policy(
         args.wal_producer_linger
             .unwrap_or_else(|| Time::from_std(defaults.linger()))
             .to_std(),
-        args.wal_producer_batch_bytes
-            .unwrap_or(defaults.batch_bytes()),
+        whole_bytes_usize(
+            "WAL producer batch",
+            args.wal_producer_batch.unwrap_or_else(|| {
+                ByteSize::from_bytes(
+                    u64::try_from(defaults.batch_bytes()).expect("producer batch fits u64"),
+                )
+            }),
+        )?,
         defaults.max_in_flight(),
     )
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
@@ -822,6 +836,35 @@ fn whole_millis_u64(name: &str, value: Time) -> std::io::Result<u64> {
             "{name} must be finite, positive, and a whole number of milliseconds"
         ))
     }
+}
+
+fn whole_bytes_u64(name: &str, value: ByteSize) -> std::io::Result<u64> {
+    let bytes = value.bytes_u64();
+    if bytes > 0 && ByteSize::from_bytes(bytes) == value {
+        Ok(bytes)
+    } else {
+        invalid_input(format!(
+            "{name} must be a finite, positive whole number of bytes"
+        ))
+    }
+}
+
+fn whole_bytes_i32(name: &str, value: ByteSize) -> std::io::Result<i32> {
+    i32::try_from(whole_bytes_u64(name, value)?).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{name} exceeds i32::MAX bytes"),
+        )
+    })
+}
+
+fn whole_bytes_usize(name: &str, value: ByteSize) -> std::io::Result<usize> {
+    usize::try_from(whole_bytes_u64(name, value)?).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{name} exceeds usize::MAX bytes"),
+        )
+    })
 }
 
 fn whole_millis_i32(name: &str, value: Time) -> std::io::Result<i32> {
@@ -903,11 +946,12 @@ pub struct RegistryOptions {
     )]
     fetch_max_wait: Time,
     #[arg(
-        long = "registry-fetch-partition-max-bytes",
-        env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES",
-        default_value = "1048576"
+        long = "registry-fetch-partition-max",
+        env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX",
+        default_value = "1MiB",
+        value_parser = crabka_units::parse::positive_byte_size
     )]
-    fetch_partition_max_bytes: PositiveI32,
+    fetch_partition_max: ByteSize,
     #[arg(
         long = "registry-producer-dns-timeout",
         env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT",
@@ -931,7 +975,7 @@ impl RegistryOptions {
             self.topic_create_timeout,
             self.reader_retry_backoff,
             self.fetch_max_wait,
-            self.fetch_partition_max_bytes.into_value(),
+            self.fetch_partition_max,
         )
         .expect("validated registry options")
         .with_producer_dns_timeout(
@@ -1167,14 +1211,16 @@ impl SubstrateRuntimeConfig {
                     args.wal_recovery_fetch_max_wait
                         .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT),
                 )?,
-                args.wal_recovery_fetch_partition_max_bytes.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32(),
-                    PositiveI32::into_value,
-                ),
-                args.wal_recovery_fetch_response_max_bytes.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32(),
-                    PositiveI32::into_value,
-                ),
+                whole_bytes_i32(
+                    "WAL recovery fetch partition maximum",
+                    args.wal_recovery_fetch_partition_max
+                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX),
+                )?,
+                whole_bytes_i32(
+                    "WAL recovery fetch response maximum",
+                    args.wal_recovery_fetch_response_max
+                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX),
+                )?,
                 args.wal_recovery_empty_fetch_retries.map_or(
                     crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
                     PositiveUsize::into_value,
@@ -1344,21 +1390,19 @@ impl CheckpointRuntimeConfig {
         }
 
         let object_store = CheckpointObjectStoreConfig::from_args(args)?;
-        let part_max_size = args
-            .checkpoint_part_bytes
-            .map_or(crabka_gres_substrate::DEFAULT_PART_MAX_SIZE, |value| {
-                value.into_value()
-            });
+        let part_max_size = CheckpointPartBytes::new(whole_bytes_usize(
+            "checkpoint part size",
+            args.checkpoint_part_size
+                .unwrap_or(crabka_gres_substrate::DEFAULT_PART_MAX_SIZE),
+        )?)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+        .into_value();
         Ok(Some(Self {
             object_store,
             frames_threshold: args
                 .checkpoint_frames
                 .map_or(DEFAULT_CHECKPOINT_FRAMES, NonZeroU64::get),
-            bytes_threshold: args
-                .checkpoint_bytes
-                .map_or(DEFAULT_CHECKPOINT_BYTES, |bytes| {
-                    ByteSize::from_bytes(bytes.get())
-                }),
+            bytes_threshold: args.checkpoint_size.unwrap_or(DEFAULT_CHECKPOINT_BYTES),
             part_max_size,
             retain_newest: args.checkpoint_retain.map_or(
                 crabka_gres_substrate::DEFAULT_CHECKPOINT_RETAIN,
@@ -2113,13 +2157,8 @@ impl SuspendPolicy {
 
         Some(Self {
             tenant: record.name.as_str().to_string(),
-            // The registry record carries the raw registry JSON encoding
-            // (`crabka-gres-control` leaves it alone by design); this is the
-            // seam where it becomes a quantity.
             idle_window: Time::from_secs(i64::try_from(idle_seconds).unwrap_or(i64::MAX)),
-            suspend_max_checkpoint: record
-                .suspend_max_checkpoint_bytes
-                .map(ByteSize::from_bytes),
+            suspend_max_checkpoint: record.suspend_max_checkpoint_size,
         })
     }
 }
@@ -2300,8 +2339,8 @@ fn checkpointing_was_requested(args: &ServeArgs) -> bool {
         || args.checkpoint_gcs_service_account_key.is_some()
         || args.checkpoint_gcs_application_credentials_path.is_some()
         || args.checkpoint_frames.is_some()
-        || args.checkpoint_bytes.is_some()
-        || args.checkpoint_part_bytes.is_some()
+        || args.checkpoint_size.is_some()
+        || args.checkpoint_part_size.is_some()
         || args.checkpoint_retain.is_some()
         || args.checkpoint_delete_records_timeout.is_some()
         || args.checkpoint_poll_interval.is_some()
@@ -3799,8 +3838,8 @@ fn apply_tenant_runtime_defaults(
     if args.checkpoint_frames.is_none() {
         args.checkpoint_frames = nonzero_u64(record.checkpoint_frames, "checkpoint_frames")?;
     }
-    if args.checkpoint_bytes.is_none() {
-        args.checkpoint_bytes = nonzero_u64(record.checkpoint_bytes, "checkpoint_bytes")?;
+    if args.checkpoint_size.is_none() {
+        args.checkpoint_size = record.checkpoint_size;
     }
     Ok(args)
 }
@@ -7752,7 +7791,7 @@ mod tests {
             "--registry-topic-create-timeout=0ms",
             "--registry-reader-retry-backoff=0ms",
             "--registry-fetch-max-wait=0ms",
-            "--registry-fetch-partition-max-bytes=0",
+            "--registry-fetch-partition-max=0B",
             "--registry-producer-dns-timeout=0ms",
             "--registry-reader-admin-dns-timeout=0ms",
         ] {
@@ -7768,7 +7807,7 @@ mod tests {
             ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", "15001ms"),
             ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF", "251ms"),
             ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT", "501ms"),
-            ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES", "1048577"),
+            ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX", "1048577B"),
             ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
             ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
         ];
@@ -7791,7 +7830,7 @@ mod tests {
             crabka_units::millis(15_001),
             crabka_units::millis(251),
             crabka_units::millis(501),
-            1_048_577,
+            crabka_units::bytes(1_048_577),
         )
         .expect("policy")
         .with_producer_dns_timeout(crabka_units::millis(37))
@@ -7805,7 +7844,7 @@ mod tests {
             "--registry-topic-create-timeout=15002ms",
             "--registry-reader-retry-backoff=252ms",
             "--registry-fetch-max-wait=502ms",
-            "--registry-fetch-partition-max-bytes=1048578",
+            "--registry-fetch-partition-max=1048578B",
             "--registry-producer-dns-timeout=47ms",
             "--registry-reader-admin-dns-timeout=47ms",
         ])
@@ -7815,7 +7854,7 @@ mod tests {
             crabka_units::millis(15_002),
             crabka_units::millis(252),
             crabka_units::millis(502),
-            1_048_578,
+            crabka_units::bytes(1_048_578),
         )
         .expect("policy")
         .with_producer_dns_timeout(crabka_units::millis(47))
@@ -8099,8 +8138,8 @@ mod tests {
             .serve;
 
         assert!(args.checkpoint_frames.is_none());
-        assert!(args.checkpoint_bytes.is_none());
-        assert!(args.checkpoint_part_bytes.is_none());
+        assert!(args.checkpoint_size.is_none());
+        assert!(args.checkpoint_part_size.is_none());
         assert!(args.checkpoint_retain.is_none());
         assert!(args.checkpoint_delete_records_timeout.is_none());
         assert!(args.checkpoint_poll_interval.is_none());
@@ -8112,7 +8151,7 @@ mod tests {
         );
 
         for option in [
-            "--checkpoint-part-bytes=7",
+            "--checkpoint-part-size=0B",
             "--checkpoint-retain=0",
             "--checkpoint-delete-records-timeout=0ms",
             "--checkpoint-poll-interval=0ms",
@@ -8137,8 +8176,8 @@ mod tests {
         const CHILD: &str = "CRABKA_TEST_GRES_CHECKPOINT_ENV_CHILD";
         let vars = [
             ("CRABKA_GRES_CHECKPOINT_FRAMES", "11"),
-            ("CRABKA_GRES_CHECKPOINT_BYTES", "12"),
-            ("CRABKA_GRES_CHECKPOINT_PART_BYTES", "13"),
+            ("CRABKA_GRES_CHECKPOINT_SIZE", "12B"),
+            ("CRABKA_GRES_CHECKPOINT_PART_SIZE", "13B"),
             ("CRABKA_GRES_CHECKPOINT_RETAIN", "14"),
             ("CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT", "15ms"),
             ("CRABKA_GRES_CHECKPOINT_POLL_INTERVAL", "16ms"),
@@ -8162,11 +8201,11 @@ mod tests {
             .expect("environment checkpoint policy")
             .serve;
         assert!(environment.checkpoint_frames.map(NonZeroU64::get) == Some(11));
-        assert!(environment.checkpoint_bytes.map(NonZeroU64::get) == Some(12));
+        assert!(environment.checkpoint_size == Some(crabka_units::bytes(12)));
         assert!(
             environment
-                .checkpoint_part_bytes
-                .map(|value| value.into_value().bytes_usize())
+                .checkpoint_part_size
+                .map(crabka_units::convert::ByteSizeExt::bytes_usize)
                 == Some(13)
         );
         assert!(environment.checkpoint_retain.map(PositiveUsize::into_value) == Some(14));
@@ -8192,8 +8231,8 @@ mod tests {
         let cli = Cli::try_parse_from([
             "crabka-gres",
             "--checkpoint-frames=21",
-            "--checkpoint-bytes=22",
-            "--checkpoint-part-bytes=23",
+            "--checkpoint-size=22B",
+            "--checkpoint-part-size=23B",
             "--checkpoint-retain=24",
             "--checkpoint-delete-records-timeout=25ms",
             "--checkpoint-poll-interval=26ms",
@@ -8202,10 +8241,10 @@ mod tests {
         .expect("CLI checkpoint policy")
         .serve;
         assert!(cli.checkpoint_frames.map(NonZeroU64::get) == Some(21));
-        assert!(cli.checkpoint_bytes.map(NonZeroU64::get) == Some(22));
+        assert!(cli.checkpoint_size == Some(crabka_units::bytes(22)));
         assert!(
-            cli.checkpoint_part_bytes
-                .map(|value| value.into_value().bytes_usize())
+            cli.checkpoint_part_size
+                .map(crabka_units::convert::ByteSizeExt::bytes_usize)
                 == Some(23)
         );
         assert!(cli.checkpoint_retain.map(PositiveUsize::into_value) == Some(24));
@@ -8689,7 +8728,7 @@ mod tests {
                 topic_create_timeout: crabka_units::millis(15_000),
                 reader_retry_backoff: crabka_units::millis(250),
                 fetch_max_wait: crabka_units::millis(500),
-                fetch_partition_max_bytes: PositiveI32::new(1_048_576).expect("default"),
+                fetch_partition_max: crabka_units::mebibytes(1),
                 producer_dns_timeout: None,
                 reader_admin_dns_timeout: None,
             },
@@ -8706,8 +8745,8 @@ mod tests {
             ranges: None,
             range0_follower_poll_interval: None,
             wal_recovery_fetch_max_wait: None,
-            wal_recovery_fetch_partition_max_bytes: None,
-            wal_recovery_fetch_response_max_bytes: None,
+            wal_recovery_fetch_partition_max: None,
+            wal_recovery_fetch_response_max: None,
             wal_recovery_empty_fetch_retries: None,
             wal_recovery_dns_timeout: None,
             wal_recovery_connect_timeout: None,
@@ -8728,7 +8767,7 @@ mod tests {
             wal_producer_transaction_timeout: None,
             wal_producer_compression: None,
             wal_producer_linger: None,
-            wal_producer_batch_bytes: None,
+            wal_producer_batch: None,
             host_ranges: None,
             timestamp_source: TimestampSourceKind::LogicalTso,
             hlc_max_offset: crabka_units::millis(250),
@@ -8753,8 +8792,8 @@ mod tests {
             checkpoint_gcs_service_account_key: None,
             checkpoint_gcs_application_credentials_path: None,
             checkpoint_frames: None,
-            checkpoint_bytes: None,
-            checkpoint_part_bytes: None,
+            checkpoint_size: None,
+            checkpoint_part_size: None,
             checkpoint_retain: None,
             checkpoint_delete_records_timeout: None,
             checkpoint_poll_interval: None,
@@ -9059,7 +9098,7 @@ mod tests {
             topic_create_timeout: crabka_units::millis(15_001),
             reader_retry_backoff: crabka_units::millis(251),
             fetch_max_wait: crabka_units::millis(777),
-            fetch_partition_max_bytes: PositiveI32::new(2_000_000).expect("fetch bytes"),
+            fetch_partition_max: crabka_units::bytes(2_000_000),
             producer_dns_timeout: None,
             reader_admin_dns_timeout: None,
         };
@@ -9085,7 +9124,7 @@ mod tests {
             crabka_units::millis(15_001),
             crabka_units::millis(251),
             crabka_units::millis(777),
-            2_000_000,
+            crabka_units::bytes(2_000_000),
         )
         .expect("registry policy");
         let fetch = live_split_operation_fetch(
@@ -9121,22 +9160,22 @@ mod tests {
         let mut record = tenant_record();
         record.bucket_prefix = Some("from-record".to_string());
         record.checkpoint_frames = Some(77);
-        record.checkpoint_bytes = Some(88);
+        record.checkpoint_size = Some(crabka_units::bytes(88));
         let mut args = substrate_args();
         args.checkpoint_store = Some(CheckpointStoreKind::InMemory);
 
         let applied = apply_tenant_runtime_defaults(args.clone(), Some(&record)).expect("defaults");
         assert_eq!(applied.checkpoint_prefix.as_deref(), Some("from-record"));
         assert_eq!(applied.checkpoint_frames.map(NonZeroU64::get), Some(77));
-        assert_eq!(applied.checkpoint_bytes.map(NonZeroU64::get), Some(88));
+        assert_eq!(applied.checkpoint_size, Some(crabka_units::bytes(88)));
 
         args.checkpoint_prefix = Some("cli".to_string());
         args.checkpoint_frames = Some(NonZeroU64::new(7).expect("nonzero"));
-        args.checkpoint_bytes = Some(NonZeroU64::new(8).expect("nonzero"));
+        args.checkpoint_size = Some(crabka_units::bytes(8));
         let applied = apply_tenant_runtime_defaults(args, Some(&record)).expect("overrides");
         assert_eq!(applied.checkpoint_prefix.as_deref(), Some("cli"));
         assert_eq!(applied.checkpoint_frames.map(NonZeroU64::get), Some(7));
-        assert_eq!(applied.checkpoint_bytes.map(NonZeroU64::get), Some(8));
+        assert_eq!(applied.checkpoint_size, Some(crabka_units::bytes(8)));
     }
 
     #[test]
@@ -9144,13 +9183,13 @@ mod tests {
         let mut record = tenant_record();
         record.bucket_prefix = Some("from-record".to_string());
         record.checkpoint_frames = Some(77);
-        record.checkpoint_bytes = Some(88);
+        record.checkpoint_size = Some(crabka_units::bytes(88));
         let applied =
             apply_tenant_runtime_defaults(substrate_args(), Some(&record)).expect("defaults");
 
         assert!(applied.checkpoint_prefix.is_none());
         assert!(applied.checkpoint_frames.is_none());
-        assert!(applied.checkpoint_bytes.is_none());
+        assert!(applied.checkpoint_size.is_none());
         assert!(
             SubstrateRuntimeConfig::from_args(&applied)
                 .expect("substrate config")
@@ -9174,7 +9213,7 @@ mod tests {
 
         let mut record = tenant_record();
         record.checkpoint_frames = Some(77);
-        record.checkpoint_bytes = Some(88);
+        record.checkpoint_size = Some(crabka_units::bytes(88));
         let hydrated = apply_tenant_runtime_defaults(args.clone(), Some(&record))
             .expect("tenant checkpoint policy");
         let from_record = CheckpointRuntimeConfig::from_args(&hydrated)
@@ -9184,7 +9223,7 @@ mod tests {
         assert!(from_record.bytes_threshold == crabka_units::bytes(88));
 
         args.checkpoint_frames = Some(NonZeroU64::new(7).expect("nonzero"));
-        args.checkpoint_bytes = Some(NonZeroU64::new(8).expect("nonzero"));
+        args.checkpoint_size = Some(crabka_units::bytes(8));
         let explicit =
             apply_tenant_runtime_defaults(args, Some(&record)).expect("explicit checkpoint policy");
         let from_explicit = CheckpointRuntimeConfig::from_args(&explicit)
@@ -9245,7 +9284,7 @@ mod tests {
         assert!(help.contains("--checkpoint-bucket"));
         assert!(help.contains("--checkpoint-store"));
         assert!(help.contains("--checkpoint-frames"));
-        assert!(help.contains("--checkpoint-bytes"));
+        assert!(help.contains("--checkpoint-size"));
         assert!(help.contains("--checkpoint-retain"));
         assert!(help.contains("--auth"));
         assert!(help.contains("--tls-cert"));
@@ -9499,8 +9538,8 @@ mod tests {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_READ_POLICY_CHILD";
         const VARS: [&str; 23] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
             "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
             "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
@@ -9520,7 +9559,7 @@ mod tests {
             "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
             "CRABKA_GRES_WAL_PRODUCER_LINGER",
-            "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH",
         ];
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
@@ -9537,9 +9576,9 @@ mod tests {
                 }
                 if mode == "environment" {
                     for (variable, value) in VARS.into_iter().zip([
-                        "17ms", "18", "19", "20", "21ms", "22ms", "23ms", "24", "25ms", "26ms",
+                        "17ms", "18B", "19B", "20", "21ms", "22ms", "23ms", "24", "25ms", "26ms",
                         "27ms", "28ms", "29ms", "30ms", "31", "32ms", "33ms", "34ms", "35ms",
-                        "36ms", "none", "37ms", "38",
+                        "36ms", "none", "37ms", "38B",
                     ]) {
                         child.env(variable, value);
                     }
@@ -9594,8 +9633,8 @@ mod tests {
 
         let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
             "--wal-recovery-fetch-max-wait=27ms",
-            "--wal-recovery-fetch-partition-max-bytes=28",
-            "--wal-recovery-fetch-response-max-bytes=29",
+            "--wal-recovery-fetch-partition-max=28B",
+            "--wal-recovery-fetch-response-max=29B",
             "--wal-recovery-empty-fetch-retries=30",
             "--wal-recovery-dns-timeout=30ms",
             "--wal-recovery-connect-timeout=31ms",
@@ -9632,8 +9671,8 @@ mod tests {
                 "tests::registry_policy_options_use_validated_defaults",
             ])
             .env("CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT", "17ms")
-            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES", "18")
-            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES", "19")
+            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX", "18B")
+            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX", "19B")
             .env("CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES", "20")
             .env("CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT", "21ms")
             .env("CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT", "21ms")
@@ -9653,7 +9692,7 @@ mod tests {
             .env("CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT", "33ms")
             .env("CRABKA_GRES_WAL_PRODUCER_COMPRESSION", "gzip")
             .env("CRABKA_GRES_WAL_PRODUCER_LINGER", "34ms")
-            .env("CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES", "35")
+            .env("CRABKA_GRES_WAL_PRODUCER_BATCH", "35B")
             .status()
             .expect("child test");
 
@@ -9664,8 +9703,8 @@ mod tests {
     fn wal_recovery_read_policy_rejects_zero_and_inert_use() {
         for option in [
             "--wal-recovery-fetch-max-wait=0ms",
-            "--wal-recovery-fetch-partition-max-bytes=0",
-            "--wal-recovery-fetch-response-max-bytes=0",
+            "--wal-recovery-fetch-partition-max=0B",
+            "--wal-recovery-fetch-response-max=0B",
             "--wal-recovery-empty-fetch-retries=0",
             "--wal-recovery-dns-timeout=0ms",
             "--wal-recovery-connect-timeout=0ms",
@@ -9712,7 +9751,7 @@ mod tests {
             "--wal-producer-transaction-timeout=1ms",
             "--wal-producer-compression=gzip",
             "--wal-producer-linger=0ms",
-            "--wal-producer-batch-bytes=1",
+            "--wal-producer-batch=1B",
         ] {
             assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
         }
@@ -9785,10 +9824,18 @@ mod tests {
                 .to_string()
                 .contains("backoff")
         );
+        assert!(
+            Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--wal-producer-batch=0B",
+            ])
+            .is_err()
+        );
         for (option, field) in [
             ("--wal-producer-linger=2147483648ms", "linger"),
-            ("--wal-producer-batch-bytes=0", "batch bytes"),
-            ("--wal-producer-batch-bytes=2147483648", "batch bytes"),
+            ("--wal-producer-batch=2147483648B", "batch"),
         ] {
             let args = Cli::try_parse_from([
                 "crabka-gres",
@@ -9852,8 +9899,8 @@ mod tests {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_BIND_CHILD";
         const VARS: [&str; 23] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
             "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
             "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
@@ -9873,7 +9920,7 @@ mod tests {
             "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
             "CRABKA_GRES_WAL_PRODUCER_LINGER",
-            "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH",
         ];
         if std::env::var_os(CHILD).is_none() {
             let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
@@ -9910,7 +9957,7 @@ mod tests {
 
         let mut args = substrate_args();
         args.listen = occupied.local_addr().expect("address").to_string();
-        args.wal_producer_batch_bytes = Some(0);
+        args.wal_producer_batch = Some(crabka_units::bytes(0));
         let error = run_serve(args)
             .await
             .expect_err("invalid producer throughput before bind");
@@ -9920,8 +9967,8 @@ mod tests {
     fn set_wal_policy_option(args: &mut ServeArgs, option: usize) {
         match option {
             0 => args.wal_recovery_fetch_max_wait = Some(crabka_units::millis(1)),
-            1 => args.wal_recovery_fetch_partition_max_bytes = PositiveI32::new(1).ok(),
-            2 => args.wal_recovery_fetch_response_max_bytes = PositiveI32::new(1).ok(),
+            1 => args.wal_recovery_fetch_partition_max = Some(crabka_units::bytes(1)),
+            2 => args.wal_recovery_fetch_response_max = Some(crabka_units::bytes(1)),
             3 => args.wal_recovery_empty_fetch_retries = PositiveUsize::new(1).ok(),
             4 => args.wal_recovery_dns_timeout = Some(crabka_units::millis(1)),
             5 => args.wal_recovery_connect_timeout = Some(crabka_units::millis(1)),
@@ -9941,7 +9988,7 @@ mod tests {
             19 => args.wal_producer_transaction_timeout = Some(crabka_units::millis(1)),
             20 => args.wal_producer_compression = Some(crabka_client_producer::Compression::Gzip),
             21 => args.wal_producer_linger = Some(Time::ZERO),
-            22 => args.wal_producer_batch_bytes = Some(1),
+            22 => args.wal_producer_batch = Some(crabka_units::bytes(1)),
             _ => unreachable!("test policy option"),
         }
     }
@@ -10310,7 +10357,7 @@ mod tests {
             "--tenant=tenant-a",
             "--wal-producer-compression=zstd",
             "--wal-producer-linger=38ms",
-            "--wal-producer-batch-bytes=39",
+            "--wal-producer-batch=39B",
         ])
         .expect("WAL producer throughput policy");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -10343,8 +10390,8 @@ mod tests {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_THROUGHPUT_POLICY_CHILD";
         const VARS: [&str; 23] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
             "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
             "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
@@ -10364,7 +10411,7 @@ mod tests {
             "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
             "CRABKA_GRES_WAL_PRODUCER_LINGER",
-            "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH",
         ];
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
@@ -10380,7 +10427,7 @@ mod tests {
                     child.env_remove(variable);
                 }
                 if mode == "environment" {
-                    for (variable, value) in VARS[20..].iter().copied().zip(["gzip", "41ms", "42"])
+                    for (variable, value) in VARS[20..].iter().copied().zip(["gzip", "41ms", "42B"])
                     {
                         child.env(variable, value);
                     }
@@ -10418,7 +10465,7 @@ mod tests {
         let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
             "--wal-producer-compression=lz4",
             "--wal-producer-linger=51ms",
-            "--wal-producer-batch-bytes=52",
+            "--wal-producer-batch=52B",
         ]))
         .expect("CLI policy");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -10439,8 +10486,8 @@ mod tests {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_POLICY_CHILD";
         const VARS: [&str; 23] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
             "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
             "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
@@ -10460,7 +10507,7 @@ mod tests {
             "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
             "CRABKA_GRES_WAL_PRODUCER_LINGER",
-            "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH",
         ];
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
@@ -10582,8 +10629,8 @@ mod tests {
             "dev/gres",
             "--checkpoint-frames",
             "100",
-            "--checkpoint-bytes",
-            "1048576",
+            "--checkpoint-size",
+            "1MiB",
             "--checkpoint-retain",
             "3",
         ])

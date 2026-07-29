@@ -17,12 +17,12 @@ use crabka_client_core::{
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, Transaction};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
-#[cfg(test)]
-use crabka_units::millis;
 use crabka_units::{
     ByteSize, Time,
     convert::{ByteSizeExt as _, TimeExt as _},
 };
+#[cfg(test)]
+use crabka_units::{bytes, millis};
 use refined_type::rule::{GreaterU64, MinMaxI32};
 use tokio::sync::{Mutex, watch};
 
@@ -167,16 +167,14 @@ impl RegistryPolicy {
         topic_create_timeout: Time,
         reader_retry_backoff: Time,
         fetch_max_wait: Time,
-        fetch_partition_max_bytes: i32,
+        fetch_partition_max: ByteSize,
     ) -> Result<Self, String> {
         Ok(Self {
             replication_factor: RegistryReplicationFactor::new(replication_factor)?.into_value(),
             topic_create_timeout: whole_millis_i32("topic_create_timeout", topic_create_timeout)?,
             reader_retry_backoff: whole_millis_i64("reader_retry_backoff", reader_retry_backoff)?,
             fetch_max_wait: whole_millis_i32("fetch_max_wait", fetch_max_wait)?,
-            fetch_partition_max: ByteSize::from_bytes_i64(i64::from(
-                PositiveI32::new(fetch_partition_max_bytes)?.into_value(),
-            )),
+            fetch_partition_max: whole_bytes_i32("fetch_partition_max", fetch_partition_max)?,
             producer_dns_timeout: ClientDnsTimeout::default(),
             reader_admin_dns_timeout: ClientDnsTimeout::default(),
         })
@@ -256,7 +254,7 @@ impl Default for RegistryPolicy {
             crabka_units::secs(15),
             crabka_units::millis(250),
             crabka_units::millis(500),
-            1_048_576,
+            crabka_units::mebibytes(1),
         )
         .expect("default registry policy is valid")
     }
@@ -269,6 +267,17 @@ fn whole_millis_i64(name: &str, value: Time) -> Result<Time, String> {
     } else {
         Err(format!(
             "{name} must be a positive whole number of milliseconds"
+        ))
+    }
+}
+
+fn whole_bytes_i32(name: &str, value: ByteSize) -> Result<ByteSize, String> {
+    let bytes = value.bytes_f64();
+    if bytes.is_finite() && bytes > 0.0 && bytes.fract() == 0.0 && bytes <= f64::from(i32::MAX) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "{name} must be a positive whole number of bytes within the i32 range"
         ))
     }
 }
@@ -1909,16 +1918,78 @@ mod tests {
         assert!("2147483648".parse::<PositiveI32>().is_err());
         assert!("0".parse::<PositiveMillis>().is_err());
         assert!(
-            RegistryPolicy::new(0, millis(15_000), millis(250), millis(500), 1_048_576).is_err()
+            RegistryPolicy::new(
+                0,
+                millis(15_000),
+                millis(250),
+                millis(500),
+                crabka_units::mebibytes(1),
+            )
+            .is_err()
         );
         assert!(
-            RegistryPolicy::new(32_768, millis(15_000), millis(250), millis(500), 1_048_576)
-                .is_err()
+            RegistryPolicy::new(
+                32_768,
+                millis(15_000),
+                millis(250),
+                millis(500),
+                crabka_units::mebibytes(1),
+            )
+            .is_err()
         );
-        assert!(RegistryPolicy::new(1, millis(0), millis(250), millis(500), 1_048_576).is_err());
-        assert!(RegistryPolicy::new(1, millis(15_000), millis(0), millis(500), 1_048_576).is_err());
-        assert!(RegistryPolicy::new(1, millis(15_000), millis(250), millis(0), 1_048_576).is_err());
-        assert!(RegistryPolicy::new(1, millis(15_000), millis(250), millis(500), 0).is_err());
+        assert!(
+            RegistryPolicy::new(
+                1,
+                millis(0),
+                millis(250),
+                millis(500),
+                crabka_units::mebibytes(1),
+            )
+            .is_err()
+        );
+        assert!(
+            RegistryPolicy::new(
+                1,
+                millis(15_000),
+                millis(0),
+                millis(500),
+                crabka_units::mebibytes(1),
+            )
+            .is_err()
+        );
+        assert!(
+            RegistryPolicy::new(
+                1,
+                millis(15_000),
+                millis(250),
+                millis(0),
+                crabka_units::mebibytes(1),
+            )
+            .is_err()
+        );
+        assert!(
+            RegistryPolicy::new(1, millis(15_000), millis(250), millis(500), bytes(0)).is_err()
+        );
+        assert!(
+            RegistryPolicy::new(
+                1,
+                millis(15_000),
+                millis(250),
+                millis(500),
+                ByteSize::from_bytes_f64(1.5),
+            )
+            .is_err()
+        );
+        assert!(
+            RegistryPolicy::new(
+                1,
+                millis(15_000),
+                millis(250),
+                millis(500),
+                ByteSize::from_bytes_f64(f64::from(i32::MAX) + 1.0),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1977,7 +2048,8 @@ mod tests {
     #[test]
     fn registry_policy_reaches_topic_and_fetch_requests() {
         let policy =
-            RegistryPolicy::new(7, millis(12_345), millis(678), millis(901), 234_567).unwrap();
+            RegistryPolicy::new(7, millis(12_345), millis(678), millis(901), bytes(234_567))
+                .unwrap();
 
         let (registry_spec, timeout) =
             compacted_topic_request(TENANT_REGISTRY_TOPIC, policy.replication_factor(), &policy);
@@ -1994,8 +2066,14 @@ mod tests {
 
     #[test]
     fn registry_policy_reaches_every_reader_failure_backoff() {
-        let policy =
-            RegistryPolicy::new(1, millis(15_000), millis(678), millis(500), 1_048_576).unwrap();
+        let policy = RegistryPolicy::new(
+            1,
+            millis(15_000),
+            millis(678),
+            millis(500),
+            crabka_units::mebibytes(1),
+        )
+        .unwrap();
 
         for failure in [
             ReaderFailure::ResolveBootstrap,
@@ -2287,7 +2365,8 @@ mod tests {
             .expect("broker start");
         let bootstrap = broker.listen_addr().to_string();
         let policy =
-            RegistryPolicy::new(1, millis(12_345), millis(678), millis(901), 234_567).unwrap();
+            RegistryPolicy::new(1, millis(12_345), millis(678), millis(901), bytes(234_567))
+                .unwrap();
         let mut registry = Registry::connect_with_policy(&bootstrap, policy.clone())
             .await
             .expect("registry connect");

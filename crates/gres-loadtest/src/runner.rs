@@ -572,7 +572,7 @@ mod tests {
             crabka_units::millis(15_002),
             crabka_units::millis(252),
             crabka_units::millis(502),
-            1_048_578,
+            crabka_units::bytes(1_048_578),
         )
         .expect("policy");
         let config = RunConfig {

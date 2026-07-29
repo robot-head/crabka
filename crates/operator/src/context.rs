@@ -1219,7 +1219,7 @@ mod tests {
             crabka_units::millis(15_001),
             crabka_units::millis(251),
             crabka_units::millis(501),
-            1_048_577,
+            crabka_units::bytes(1_048_577),
         )
         .expect("policy");
         let changed_policy: GresControlHandle = Arc::new(TestGresControl);

@@ -20,8 +20,9 @@ use crabka_gres_substrate::{
     DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
 };
 use crabka_units::{
-    Time,
+    ByteSize, Ratio, Time,
     convert::{ByteSizeExt as _, TimeExt as _},
+    gibibytes, mebibytes, percent,
 };
 use kube::CustomResource;
 use refined_type::rule::GreaterI32;
@@ -66,6 +67,27 @@ fn nonnegative_whole_millis_i32(name: &str, value: Time) -> Result<i32, String> 
             "{name}: must be a whole number of milliseconds within 0ms..=2147483647ms"
         ))
     }
+}
+
+fn whole_bytes_u64(name: &str, value: ByteSize) -> Result<u64, String> {
+    let bytes = value.bytes_u64();
+    if bytes > 0 && ByteSize::from_bytes(bytes) == value {
+        Ok(bytes)
+    } else {
+        Err(format!(
+            "{name}: must be a finite, positive whole number of bytes"
+        ))
+    }
+}
+
+fn whole_bytes_i32(name: &str, value: ByteSize) -> Result<i32, String> {
+    i32::try_from(whole_bytes_u64(name, value)?)
+        .map_err(|_| format!("{name}: must not exceed i32::MAX bytes"))
+}
+
+fn whole_bytes_usize(name: &str, value: ByteSize) -> Result<usize, String> {
+    usize::try_from(whole_bytes_u64(name, value)?)
+        .map_err(|_| format!("{name}: must not exceed usize::MAX bytes"))
 }
 
 /// Gres fleet specification.
@@ -173,10 +195,11 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1))]
     pub readiness_probe_period_seconds: Option<i32>,
 
-    /// Maximum checkpoint object part size in bytes.
+    /// Maximum checkpoint object part size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 8))]
-    pub checkpoint_part_bytes: Option<usize>,
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub checkpoint_part_size: Option<ByteSize>,
 
     /// Number of checkpoint manifests to retain.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -219,15 +242,17 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub wal_recovery_fetch_max_wait: Option<Time>,
 
-    /// Per-partition byte limit for committed-WAL recovery fetches.
+    /// Per-partition size limit for committed-WAL recovery fetches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub wal_recovery_fetch_partition_max_bytes: Option<i32>,
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub wal_recovery_fetch_partition_max: Option<ByteSize>,
 
-    /// Whole-response byte limit for committed-WAL recovery fetches.
+    /// Whole-response size limit for committed-WAL recovery fetches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub wal_recovery_fetch_response_max_bytes: Option<i32>,
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub wal_recovery_fetch_response_max: Option<ByteSize>,
 
     /// Consecutive empty-fetch retries after the first empty recovery fetch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -315,10 +340,11 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub wal_producer_linger: Option<Time>,
 
-    /// Maximum WAL producer batch size in bytes.
+    /// Maximum WAL producer batch size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 2_147_483_647))]
-    pub wal_producer_batch_bytes: Option<usize>,
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub wal_producer_batch: Option<ByteSize>,
 
     /// Replication factor requested when creating a range WAL topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -353,7 +379,7 @@ pub struct GresComputeSpec {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) readiness_probe_period_seconds: i32,
-    pub(crate) checkpoint_part_bytes: CheckpointPartBytes,
+    pub(crate) checkpoint_part_size: CheckpointPartBytes,
     pub(crate) checkpoint_retain: PositiveUsize,
     pub(crate) checkpoint_delete_records_timeout_ms: PositiveI32,
     pub(crate) checkpoint_poll_interval_ms: PositiveMillis,
@@ -361,8 +387,8 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) range0_follower_poll_interval_ms: PositiveMillis,
     pub(crate) fdw_broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
     pub(crate) wal_recovery_fetch_max_wait_ms: PositiveI32,
-    pub(crate) wal_recovery_fetch_partition_max_bytes: PositiveI32,
-    pub(crate) wal_recovery_fetch_response_max_bytes: PositiveI32,
+    pub(crate) wal_recovery_fetch_partition_max: PositiveI32,
+    pub(crate) wal_recovery_fetch_response_max: PositiveI32,
     pub(crate) wal_recovery_empty_fetch_retries: PositiveUsize,
     pub(crate) wal_recovery_dns_timeout_ms: PositiveMillis,
     pub(crate) wal_recovery_connect_timeout_ms: PositiveMillis,
@@ -388,11 +414,11 @@ impl GresComputeSpec {
     pub(crate) fn effective_policy(&self) -> Result<EffectiveGresComputePolicy, String> {
         Ok(EffectiveGresComputePolicy {
             readiness_probe_period_seconds: self.effective_readiness_probe_period_seconds()?,
-            checkpoint_part_bytes: CheckpointPartBytes::new(
-                self.checkpoint_part_bytes
-                    .unwrap_or_else(|| DEFAULT_PART_MAX_SIZE.bytes_usize()),
-            )
-            .map_err(|error| format!("spec.compute.checkpointPartBytes: {error}"))?,
+            checkpoint_part_size: CheckpointPartBytes::new(whole_bytes_usize(
+                "spec.compute.checkpointPartSize",
+                self.checkpoint_part_size.unwrap_or(DEFAULT_PART_MAX_SIZE),
+            )?)
+            .map_err(|error| format!("spec.compute.checkpointPartSize: {error}"))?,
             checkpoint_retain: PositiveUsize::new(
                 self.checkpoint_retain.unwrap_or(DEFAULT_CHECKPOINT_RETAIN),
             )
@@ -435,16 +461,18 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT),
             )?)
             .map_err(|error| format!("spec.compute.walRecoveryFetchMaxWait: {error}"))?,
-            wal_recovery_fetch_partition_max_bytes: PositiveI32::new(
-                self.wal_recovery_fetch_partition_max_bytes
-                    .unwrap_or_else(|| DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32()),
-            )
-            .map_err(|error| format!("spec.compute.walRecoveryFetchPartitionMaxBytes: {error}"))?,
-            wal_recovery_fetch_response_max_bytes: PositiveI32::new(
-                self.wal_recovery_fetch_response_max_bytes
-                    .unwrap_or_else(|| DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32()),
-            )
-            .map_err(|error| format!("spec.compute.walRecoveryFetchResponseMaxBytes: {error}"))?,
+            wal_recovery_fetch_partition_max: PositiveI32::new(whole_bytes_i32(
+                "spec.compute.walRecoveryFetchPartitionMax",
+                self.wal_recovery_fetch_partition_max
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX),
+            )?)
+            .map_err(|error| format!("spec.compute.walRecoveryFetchPartitionMax: {error}"))?,
+            wal_recovery_fetch_response_max: PositiveI32::new(whole_bytes_i32(
+                "spec.compute.walRecoveryFetchResponseMax",
+                self.wal_recovery_fetch_response_max
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX),
+            )?)
+            .map_err(|error| format!("spec.compute.walRecoveryFetchResponseMax: {error}"))?,
             wal_recovery_empty_fetch_retries: PositiveUsize::new(
                 self.wal_recovery_empty_fetch_retries
                     .unwrap_or(DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES),
@@ -597,15 +625,21 @@ impl GresComputeSpec {
                 )?)
                 .expect("nonnegative"),
             ),
-            self.wal_producer_batch_bytes
-                .unwrap_or_else(|| defaults.batch_bytes()),
+            whole_bytes_usize(
+                "spec.compute.walProducerBatch",
+                self.wal_producer_batch.unwrap_or_else(|| {
+                    ByteSize::from_bytes(
+                        u64::try_from(defaults.batch_bytes()).expect("producer batch fits u64"),
+                    )
+                }),
+            )?,
             defaults.max_in_flight(),
         )
         .map_err(|error| {
             let field = if error.starts_with("producer linger:") {
                 "walProducerLinger"
             } else {
-                "walProducerBatchBytes"
+                "walProducerBatch"
             };
             format!("spec.compute.{field}: {error}")
         })
@@ -711,17 +745,23 @@ pub enum GresBalancerGoal {
 }
 
 /// Planner threshold and no-flapping knobs.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GresBalancerThresholds {
-    /// Split ranges larger than this many bytes.
-    pub size_ceiling_bytes: u64,
-    /// Merge adjacent ranges below this combined byte size.
-    pub merge_floor_bytes: u64,
+    /// Split ranges larger than this size.
+    #[serde(with = "crabka_units::serde_units::human::byte_size")]
+    #[schemars(with = "String")]
+    pub size_ceiling: ByteSize,
+    /// Merge adjacent ranges below this combined size.
+    #[serde(with = "crabka_units::serde_units::human::byte_size")]
+    #[schemars(with = "String")]
+    pub merge_floor: ByteSize,
     /// Row stride used when a range has no upper bound.
     pub split_stride_rows: u64,
-    /// Load skew percentage tolerated before move planning.
-    pub load_skew_hysteresis_pct: u32,
+    /// Load skew tolerated before move planning.
+    #[serde(with = "crabka_units::serde_units::human::ratio")]
+    #[schemars(with = "String")]
+    pub load_skew_hysteresis: Ratio,
     /// Optional maximum ranges per compute.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_ranges_per_compute: Option<usize>,
@@ -734,10 +774,10 @@ pub struct GresBalancerThresholds {
 impl Default for GresBalancerThresholds {
     fn default() -> Self {
         Self {
-            size_ceiling_bytes: 1_073_741_824,
-            merge_floor_bytes: 67_108_864,
+            size_ceiling: gibibytes(1),
+            merge_floor: mebibytes(64),
             split_stride_rows: 1_000_000,
-            load_skew_hysteresis_pct: 25,
+            load_skew_hysteresis: percent(25),
             max_ranges_per_compute: None,
             max_operations: 32,
             cooldown_epochs: 2,
@@ -886,7 +926,7 @@ impl PgdogSpec {
 }
 
 /// Reference to a Kubernetes Secret in the same namespace.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SecretRef {
     /// Secret name.
@@ -905,7 +945,7 @@ pub struct SecretKeyRef {
 }
 
 /// Defaults shared by a Gres fleet's tenants.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TenantDefaults {
     /// Replication factor for tenant WAL topics.
@@ -916,13 +956,17 @@ pub struct TenantDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_frames: Option<u64>,
 
-    /// Checkpoint after this many bytes when set.
+    /// Checkpoint after this much WAL when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub checkpoint_bytes: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub checkpoint_size: Option<ByteSize>,
 
     /// Keep the tenant warm when its latest checkpoint exceeds this size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub suspend_max_checkpoint_bytes: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub suspend_max_checkpoint_size: Option<ByteSize>,
 
     /// Idle timeout in seconds; unset means never suspend by idleness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1057,8 +1101,8 @@ mod tests {
             defaults: Some(TenantDefaults {
                 wal_replication: Some(3),
                 checkpoint_frames: Some(10_000),
-                checkpoint_bytes: None,
-                suspend_max_checkpoint_bytes: None,
+                checkpoint_size: None,
+                suspend_max_checkpoint_size: None,
                 idle_seconds: Some(3_600),
             }),
             balancer: Some(GresBalancerSpec {
@@ -1154,7 +1198,7 @@ mod tests {
     #[test]
     fn compute_checkpoint_lifecycle_policy_round_trips_and_has_exact_schema_bounds() {
         let policy = GresComputeSpec {
-            checkpoint_part_bytes: Some(8),
+            checkpoint_part_size: Some(crabka_units::bytes(8)),
             checkpoint_retain: Some(1),
             checkpoint_delete_records_timeout: Some(Time::from_millis(i64::from(i32::MAX))),
             checkpoint_poll_interval: Some(crabka_units::millis(1)),
@@ -1169,10 +1213,7 @@ mod tests {
         let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
         let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
             ["properties"]["compute"]["properties"];
-        assert!(
-            properties["checkpointPartBytes"]["minimum"].as_f64() == Some(8.0),
-            "got: {properties}"
-        );
+        assert!(properties["checkpointPartSize"]["type"] == "string");
         assert!(properties["checkpointRetain"]["minimum"].as_f64() == Some(1.0));
         for field in [
             "checkpointDeleteRecordsTimeout",
@@ -1196,7 +1237,7 @@ mod tests {
         // The CRD field stays a raw usize (the spec derives Eq); the policy
         // hands out a ByteSize, so compare at the seam.
         assert!(
-            defaults.checkpoint_part_bytes.into_value().bytes_usize()
+            defaults.checkpoint_part_size.into_value().bytes_usize()
                 == DEFAULT_PART_MAX_SIZE.bytes_usize()
         );
         assert!(defaults.checkpoint_retain.into_value() == DEFAULT_CHECKPOINT_RETAIN);
@@ -1224,10 +1265,10 @@ mod tests {
         for (policy, path) in [
             (
                 GresComputeSpec {
-                    checkpoint_part_bytes: Some(7),
+                    checkpoint_part_size: Some(crabka_units::bytes(7)),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.checkpointPartBytes",
+                "spec.compute.checkpointPartSize",
             ),
             (
                 GresComputeSpec {
@@ -1281,8 +1322,8 @@ mod tests {
     fn compute_wal_recovery_policy_round_trips_validates_and_uses_substrate_defaults() {
         let policy = GresComputeSpec {
             wal_recovery_fetch_max_wait: Some(crabka_units::millis(11)),
-            wal_recovery_fetch_partition_max_bytes: Some(22),
-            wal_recovery_fetch_response_max_bytes: Some(33),
+            wal_recovery_fetch_partition_max: Some(crabka_units::bytes(22)),
+            wal_recovery_fetch_response_max: Some(crabka_units::bytes(33)),
             wal_recovery_empty_fetch_retries: Some(44),
             wal_recovery_dns_timeout: Some(crabka_units::millis(77)),
             wal_recovery_connect_timeout: Some(crabka_units::millis(55)),
@@ -1298,15 +1339,15 @@ mod tests {
         let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
             ["properties"]["compute"]["properties"];
         for field in [
-            "walRecoveryFetchPartitionMaxBytes",
-            "walRecoveryFetchResponseMaxBytes",
-            "walRecoveryEmptyFetchRetries",
+            "walRecoveryFetchPartitionMax",
+            "walRecoveryFetchResponseMax",
         ] {
             assert!(
-                properties[field]["minimum"].as_f64() == Some(1.0),
-                "missing minimum for {field}: {properties}"
+                properties[field]["type"] == "string",
+                "wrong schema for {field}: {properties}"
             );
         }
+        assert!(properties["walRecoveryEmptyFetchRetries"]["minimum"].as_f64() == Some(1.0));
         for field in [
             "walRecoveryFetchMaxWait",
             "walRecoveryDnsTimeout",
@@ -1327,11 +1368,11 @@ mod tests {
                 == DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT.millis_i32()
         );
         assert!(
-            defaults.wal_recovery_fetch_partition_max_bytes.into_value()
+            defaults.wal_recovery_fetch_partition_max.into_value()
                 == DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32()
         );
         assert!(
-            defaults.wal_recovery_fetch_response_max_bytes.into_value()
+            defaults.wal_recovery_fetch_response_max.into_value()
                 == DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32()
         );
         assert!(
@@ -1361,17 +1402,17 @@ mod tests {
             ),
             (
                 GresComputeSpec {
-                    wal_recovery_fetch_partition_max_bytes: Some(0),
+                    wal_recovery_fetch_partition_max: Some(crabka_units::bytes(0)),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walRecoveryFetchPartitionMaxBytes",
+                "spec.compute.walRecoveryFetchPartitionMax",
             ),
             (
                 GresComputeSpec {
-                    wal_recovery_fetch_response_max_bytes: Some(0),
+                    wal_recovery_fetch_response_max: Some(crabka_units::bytes(0)),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walRecoveryFetchResponseMaxBytes",
+                "spec.compute.walRecoveryFetchResponseMax",
             ),
             (
                 GresComputeSpec {
@@ -1755,7 +1796,7 @@ mod tests {
         let policy = GresComputeSpec {
             wal_producer_compression: Some(WalProducerCompression::Zstd),
             wal_producer_linger: Some(Time::from_millis(i64::from(i32::MAX))),
-            wal_producer_batch_bytes: Some(i32::MAX as usize),
+            wal_producer_batch: Some(ByteSize::from_bytes(i32::MAX as u64)),
             ..GresComputeSpec::default()
         };
         let json = serde_json::to_string(&policy).expect("serialize compute policy");
@@ -1779,10 +1820,7 @@ mod tests {
         );
         assert!(properties["walProducerCompression"]["nullable"] == true);
         assert!(properties["walProducerLinger"]["type"] == "string");
-        assert!(properties["walProducerBatchBytes"]["minimum"].as_f64() == Some(1.0));
-        assert!(
-            properties["walProducerBatchBytes"]["maximum"].as_f64() == Some(f64::from(i32::MAX))
-        );
+        assert!(properties["walProducerBatch"]["type"] == "string");
     }
 
     #[test]
@@ -1796,7 +1834,7 @@ mod tests {
         let configured = GresComputeSpec {
             wal_producer_compression: Some(WalProducerCompression::Lz4),
             wal_producer_linger: Some(crabka_units::millis(11)),
-            wal_producer_batch_bytes: Some(12),
+            wal_producer_batch: Some(crabka_units::bytes(12)),
             ..GresComputeSpec::default()
         }
         .effective_policy()
@@ -1823,17 +1861,17 @@ mod tests {
             ),
             (
                 GresComputeSpec {
-                    wal_producer_batch_bytes: Some(0),
+                    wal_producer_batch: Some(crabka_units::bytes(0)),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerBatchBytes: producer batch bytes: [the value must be equal to 1, but received 0 || the value must be greater than 1, but received 0]",
+                "spec.compute.walProducerBatch: must be a finite, positive whole number of bytes",
             ),
             (
                 GresComputeSpec {
-                    wal_producer_batch_bytes: Some(i32::MAX as usize + 1),
+                    wal_producer_batch: Some(ByteSize::from_bytes(i32::MAX as u64 + 1)),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerBatchBytes: producer batch bytes: [the value must be equal to 2147483647, but received 2147483648 || the value must be less than 2147483647, but received 2147483648]",
+                "spec.compute.walProducerBatch: producer batch bytes: [the value must be equal to 2147483647, but received 2147483648 || the value must be less than 2147483647, but received 2147483648]",
             ),
         ] {
             let error = policy.effective_policy().expect_err("invalid boundary");

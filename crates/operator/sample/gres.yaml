@@ -29,7 +29,7 @@ spec:
   defaults:
     walReplication: 3
     checkpointFrames: 10000
-    checkpointBytes: 134217728
+    checkpointSize: 128MiB
 ---
 apiVersion: crabka.io/v1alpha1
 kind: GresTenant

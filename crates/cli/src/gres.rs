@@ -17,13 +17,13 @@ use crabka_gres_balancer::{
 };
 use crabka_gres_control::{
     HashPlacement, PgdogConnectAttempts, PgdogGeneral, PgdogPoolerMode, PgdogRenderInput,
-    PgdogUser, PositiveI32, RangeBoundary, RangeLayoutEntry, RangeLayoutSplit, RangeLifecycle,
-    Registry, RegistryPolicy, RegistryReplicationFactor, SplitOperationPlan, SplitOperationRecord,
-    SqlUser, TenantEndpoint, TenantId, TenantName, TenantRecord, TenantState, render_pgdog_toml,
+    PgdogUser, RangeBoundary, RangeLayoutEntry, RangeLayoutSplit, RangeLifecycle, Registry,
+    RegistryPolicy, RegistryReplicationFactor, SplitOperationPlan, SplitOperationRecord, SqlUser,
+    TenantEndpoint, TenantId, TenantName, TenantRecord, TenantState, render_pgdog_toml,
     render_users_toml, tenant_config_topic,
 };
 use crabka_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
-use crabka_units::{Time, convert::TimeExt as _};
+use crabka_units::{ByteSize, Time, convert::TimeExt as _};
 use serde::Serialize;
 
 const EXIT_OK: i32 = 0;
@@ -70,11 +70,12 @@ struct RegistryOptions {
     )]
     fetch_max_wait: Time,
     #[arg(
-        long = "registry-fetch-partition-max-bytes",
-        env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES",
-        default_value = "1048576"
+        long = "registry-fetch-partition-max",
+        env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX",
+        default_value = "1MiB",
+        value_parser = crabka_units::parse::positive_byte_size
     )]
-    fetch_partition_max_bytes: PositiveI32,
+    fetch_partition_max: ByteSize,
     #[arg(
         long = "registry-producer-dns-timeout",
         env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT",
@@ -98,7 +99,7 @@ impl RegistryOptions {
             self.topic_create_timeout,
             self.reader_retry_backoff,
             self.fetch_max_wait,
-            self.fetch_partition_max_bytes.into_value(),
+            self.fetch_partition_max,
         )
         .expect("validated registry options")
         .with_producer_dns_timeout(
@@ -186,9 +187,9 @@ struct CreateTenantArgs {
     /// Optional frame threshold for checkpointing.
     #[arg(long)]
     checkpoint_frames: Option<u64>,
-    /// Optional byte threshold for checkpointing.
-    #[arg(long)]
-    checkpoint_bytes: Option<u64>,
+    /// Optional size threshold for checkpointing.
+    #[arg(long, value_parser = crabka_units::parse::positive_byte_size)]
+    checkpoint_size: Option<ByteSize>,
     /// Idle seconds before automatic suspension. Zero means never.
     #[arg(long)]
     idle_seconds: Option<u64>,
@@ -418,7 +419,7 @@ struct BalanceApplyOutput {
     report: ExecutionReport,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq)]
 struct RedactedTenantRecord {
     record_version: u64,
     id: String,
@@ -429,7 +430,8 @@ struct RedactedTenantRecord {
     wal_replication: i32,
     bucket_prefix: Option<String>,
     checkpoint_frames: Option<u64>,
-    checkpoint_bytes: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    checkpoint_size: Option<ByteSize>,
     idle_seconds: Option<u64>,
     ranges: Vec<RangeLayoutEntry>,
 }
@@ -1007,7 +1009,7 @@ fn build_create_tenant_record(
     .map_err(|e| e.to_string())?;
     record.bucket_prefix.clone_from(&args.bucket_prefix);
     record.checkpoint_frames = args.checkpoint_frames;
-    record.checkpoint_bytes = args.checkpoint_bytes;
+    record.checkpoint_size = args.checkpoint_size;
     record.idle_seconds = args.idle_seconds;
     record.ranges = ranges;
     record.hash_placements.clone_from(&args.hash_placements);
@@ -1254,7 +1256,7 @@ fn redact_tenant(record: &TenantRecord) -> RedactedTenantRecord {
         wal_replication: record.wal_replication,
         bucket_prefix: record.bucket_prefix.clone(),
         checkpoint_frames: record.checkpoint_frames,
-        checkpoint_bytes: record.checkpoint_bytes,
+        checkpoint_size: record.checkpoint_size,
         idle_seconds: record.idle_seconds,
         ranges: record.ranges.clone(),
     }
@@ -1324,7 +1326,7 @@ mod tests {
             "--registry-topic-create-timeout=0ms",
             "--registry-reader-retry-backoff=0ms",
             "--registry-fetch-max-wait=0ms",
-            "--registry-fetch-partition-max-bytes=0",
+            "--registry-fetch-partition-max=0B",
             "--registry-producer-dns-timeout=0ms",
             "--registry-reader-admin-dns-timeout=0ms",
         ] {
@@ -1343,7 +1345,7 @@ mod tests {
             ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", "15001ms"),
             ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF", "251ms"),
             ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT", "501ms"),
-            ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES", "1048577"),
+            ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX", "1048577B"),
             ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
             ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
         ];
@@ -1367,7 +1369,7 @@ mod tests {
             crabka_units::millis(15_001),
             crabka_units::millis(251),
             crabka_units::millis(501),
-            1_048_577,
+            crabka_units::bytes(1_048_577),
         )
         .expect("policy")
         .with_producer_dns_timeout(crabka_units::millis(37))
@@ -1381,7 +1383,7 @@ mod tests {
             "--registry-topic-create-timeout=15002ms",
             "--registry-reader-retry-backoff=252ms",
             "--registry-fetch-max-wait=502ms",
-            "--registry-fetch-partition-max-bytes=1048578",
+            "--registry-fetch-partition-max=1048578B",
             "--registry-producer-dns-timeout=47ms",
             "--registry-reader-admin-dns-timeout=47ms",
             "list",
@@ -1393,7 +1395,7 @@ mod tests {
             crabka_units::millis(15_002),
             crabka_units::millis(252),
             crabka_units::millis(502),
-            1_048_578,
+            crabka_units::bytes(1_048_578),
         )
         .expect("policy")
         .with_producer_dns_timeout(crabka_units::millis(47))
@@ -1573,10 +1575,10 @@ mod tests {
         "config": {
             "goals": { "disabledGoals": [] },
             "context": {
-                "sizeCeilingBytes": 1000,
-                "mergeFloorBytes": 100,
+                "sizeCeiling": "1000B",
+                "mergeFloor": "100B",
                 "splitStrideRows": 100,
-                "loadSkewHysteresisPct": 25,
+                "loadSkewHysteresis": "25%",
                 "maxRangesPerCompute": null,
                 "maxOperations": 32,
                 "cooldownEpochs": 2,
@@ -1592,8 +1594,8 @@ mod tests {
                 "tableName": "orders",
                 "isSharded": true,
                 "autoShardDisabled": false,
-                "convertStoreBytesThreshold": 10000,
-                "convertCommitRateThreshold": 10000
+                "convertStoreThreshold": "10000B",
+                "convertCommitRateThreshold": "10000/s"
             }],
             "ranges": [{
                 "rangeId": 1,
@@ -1617,10 +1619,10 @@ mod tests {
         "config": {
             "goals": { "disabledGoals": ["range_size"] },
             "context": {
-                "sizeCeilingBytes": 1000,
-                "mergeFloorBytes": 100,
+                "sizeCeiling": "1000B",
+                "mergeFloor": "100B",
                 "splitStrideRows": 100,
-                "loadSkewHysteresisPct": 25,
+                "loadSkewHysteresis": "25%",
                 "maxRangesPerCompute": null,
                 "maxOperations": 32,
                 "cooldownEpochs": 2,
@@ -1636,8 +1638,8 @@ mod tests {
                 "tableName": "orders",
                 "isSharded": true,
                 "autoShardDisabled": false,
-                "convertStoreBytesThreshold": 10000,
-                "convertCommitRateThreshold": 10000
+                "convertStoreThreshold": "10000B",
+                "convertCommitRateThreshold": "10000/s"
             }],
             "ranges": [{
                 "rangeId": 1,
@@ -1668,7 +1670,7 @@ mod tests {
             wal_replication: 3,
             bucket_prefix: Some("prefix".to_string()),
             checkpoint_frames: Some(10),
-            checkpoint_bytes: Some(20),
+            checkpoint_size: Some(crabka_units::bytes(20)),
             idle_seconds: Some(30),
             ranges: Some("0,100,200".to_string()),
             hash_placements: Vec::new(),

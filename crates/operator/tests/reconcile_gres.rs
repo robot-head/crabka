@@ -420,8 +420,8 @@ async fn renders_pgdog_config_secret_and_status_hash() {
                 "250ms",
                 "--registry-fetch-max-wait",
                 "500ms",
-                "--registry-fetch-partition-max-bytes",
-                "1048576",
+                "--registry-fetch-partition-max",
+                "1MiB",
                 "--registry-producer-dns-timeout",
                 "10s",
                 "--registry-reader-admin-dns-timeout",
@@ -491,7 +491,7 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
             "topicCreateTimeout": "15001ms",
             "readerRetryBackoff": "251ms",
             "fetchMaxWait": "501ms",
-            "fetchPartitionMaxBytes": 1_048_577
+            "fetchPartitionMax": "1048577B"
         })),
     ));
     let mut context = fixture_ctx(mock_client(&state, "ns"), "ns");
@@ -552,8 +552,8 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
                 "251ms",
                 "--registry-fetch-max-wait",
                 "501ms",
-                "--registry-fetch-partition-max-bytes",
-                "1048577",
+                "--registry-fetch-partition-max",
+                "1048577B",
                 "--registry-producer-dns-timeout",
                 "10s",
                 "--registry-reader-admin-dns-timeout",
@@ -732,8 +732,8 @@ async fn zero_override_and_unrelated_fleet_do_not_select_suspension_timeout() {
         idle_seconds: Some(8),
         wal_replication: None,
         checkpoint_frames: None,
-        checkpoint_bytes: None,
-        suspend_max_checkpoint_bytes: None,
+        checkpoint_size: None,
+        suspend_max_checkpoint_size: None,
     });
     obj.spec.pgdog.idle_timeout = Some(crabka_units::secs(61));
     obj.spec.pgdog.suspension_idle_timeout = Some(crabka_units::millis(1_500));

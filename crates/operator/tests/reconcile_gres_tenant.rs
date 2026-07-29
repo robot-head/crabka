@@ -290,7 +290,7 @@ fn tenant_record(state: TenantState, generation: u64) -> TenantRecord {
     )
     .unwrap();
     record.checkpoint_frames = Some(10_000);
-    record.checkpoint_bytes = Some(67_108_864);
+    record.checkpoint_size = Some(crabka_units::bytes(67_108_864));
     record.wal_generation = generation;
     record.ranges = vec![RangeLayoutEntry {
         range_id: 0,
@@ -557,7 +557,7 @@ async fn deleting_multi_range_tenant_cleans_up_and_removes_its_finalizer() {
         crabka_units::millis(15_001),
         crabka_units::millis(251),
         crabka_units::millis(501),
-        1_048_577,
+        crabka_units::bytes(1_048_577),
     )
     .expect("registry policy");
     let mut kafka = ready_kafka_body("demo", "ns");
@@ -566,7 +566,7 @@ async fn deleting_multi_range_tenant_cleans_up_and_removes_its_finalizer() {
         "topicCreateTimeout": "15.001s",
         "readerRetryBackoff": "251ms",
         "fetchMaxWait": "501ms",
-        "fetchPartitionMaxBytes": 1_048_577
+        "fetchPartitionMax": "1048577B"
     });
     let rules = vec![
         MockRule {
@@ -798,7 +798,7 @@ async fn reconciles_topics_scram_acls_records_workload_and_status() {
     assert!(!upserts[0].scram_verifier.contains("hunter2"));
     assert!(upserts[0].record_version == 1);
     assert!(upserts[0].checkpoint_frames == Some(10_000));
-    assert!(upserts[0].checkpoint_bytes == Some(67_108_864));
+    assert!(upserts[0].checkpoint_size == Some(crabka_units::bytes(67_108_864)));
     drop(upserts);
     let observed = state.take_observed();
     let deployment = observed
@@ -818,7 +818,7 @@ async fn reconciles_topics_scram_acls_records_workload_and_status() {
         ["--registry-topic-create-timeout", "15s"],
         ["--registry-reader-retry-backoff", "250ms"],
         ["--registry-fetch-max-wait", "500ms"],
-        ["--registry-fetch-partition-max-bytes", "1048576"],
+        ["--registry-fetch-partition-max", "1MiB"],
     ] {
         assert!(
             args.windows(2).any(|window| {

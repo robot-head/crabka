@@ -1,11 +1,12 @@
 //! Goal implementations for the dry-run balancer.
 
-use std::{
-    cmp::Ordering,
-    collections::{BTreeMap, HashMap},
-};
+use std::collections::{BTreeMap, HashMap};
 
-use crabka_gres_control::RangeBoundary;
+use crabka_units::{
+    ByteSize, Frequency, Ratio,
+    convert::{ByteSizeExt as _, FrequencyExt as _},
+    gibibytes, mebibytes, percent,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{BalanceOperation, OperationKind, RangeMetrics, TenantMetrics};
@@ -19,13 +20,23 @@ pub enum GoalPriority {
 }
 
 /// Configuration and recent-operation memory used by goals.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq` but not `Eq`: the two size thresholds and the skew hysteresis are
+/// `f64`-backed quantities, so equality is not reflexive across the whole
+/// domain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalContext {
-    pub size_ceiling_bytes: u64,
-    pub merge_floor_bytes: u64,
+    /// Split any range stored above this size.
+    #[serde(with = "crabka_units::serde_units::human::byte_size")]
+    pub size_ceiling: ByteSize,
+    /// Merge adjacent ranges whose combined size stays below this floor.
+    #[serde(with = "crabka_units::serde_units::human::byte_size")]
+    pub merge_floor: ByteSize,
     pub split_stride_rows: u64,
-    pub load_skew_hysteresis_pct: u32,
+    /// Leave load skew alone while it stays within this margin.
+    #[serde(with = "crabka_units::serde_units::human::ratio")]
+    pub load_skew_hysteresis: Ratio,
     pub max_ranges_per_compute: Option<usize>,
     pub max_operations: usize,
     pub cooldown_epochs: u64,
@@ -48,10 +59,10 @@ impl GoalContext {
 impl Default for GoalContext {
     fn default() -> Self {
         Self {
-            size_ceiling_bytes: 1_073_741_824,
-            merge_floor_bytes: 67_108_864,
+            size_ceiling: gibibytes(1),
+            merge_floor: mebibytes(64),
             split_stride_rows: 1_000_000,
-            load_skew_hysteresis_pct: 25,
+            load_skew_hysteresis: percent(25),
             max_ranges_per_compute: None,
             max_operations: 32,
             cooldown_epochs: 2,
@@ -89,7 +100,9 @@ impl GoalToggles {
 }
 
 /// Complete dry-run balancer configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// `PartialEq` but not `Eq`, following [`GoalContext`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BalancerConfig {
     #[serde(default)]
@@ -242,7 +255,7 @@ impl Goal for LoadSkewGoal {
         let mut operations = Vec::new();
         for tenant in tenants {
             let totals = load_by_compute(tenant);
-            if skew_pct(&totals) <= ctx.load_skew_hysteresis_pct {
+            if percent(skew_pct(&totals)) <= ctx.load_skew_hysteresis {
                 continue;
             }
             let Some((hot_compute, _)) = totals.iter().max_by_key(|(_, total)| *total) else {
@@ -306,8 +319,8 @@ impl Goal for ConversionGoal {
                 let Some(totals) = totals else {
                     continue;
                 };
-                if totals.0 < table.convert_store_bytes_threshold
-                    && totals.1 < table.convert_commit_rate_threshold
+                if ByteSize::from_bytes(totals.0) < table.convert_store_threshold
+                    && Frequency::from_per_sec_u64(totals.1) < table.convert_commit_rate_threshold
                 {
                     continue;
                 }
@@ -329,30 +342,16 @@ fn split_oversized_ranges(tenant: &TenantMetrics, ctx: &GoalContext) -> Vec<Bala
         .filter(|range| {
             range
                 .store_bytes
-                .is_some_and(|bytes| bytes > ctx.size_ceiling_bytes)
+                .is_some_and(|bytes| ByteSize::from_bytes(bytes) > ctx.size_ceiling)
         })
         .filter(|range| !ctx.is_in_cooldown(range.range_id, OperationKind::Split))
-        .filter_map(|range| {
-            let split_at = split_boundary(
-                range,
-                hash_bucket_count(tenant, range.table_id),
-                ctx.split_stride_rows,
-            )?;
-            Some(BalanceOperation::Split {
-                tenant_name: tenant.tenant_name.clone(),
-                source_range_id: range.range_id,
-                split_at,
-            })
+        .map(|range| BalanceOperation::Split {
+            tenant_name: tenant.tenant_name.clone(),
+            table_id: range.table_id,
+            source_range_id: range.range_id,
+            split_at_rowid: split_at_rowid(range, ctx.split_stride_rows),
         })
         .collect()
-}
-
-fn hash_bucket_count(tenant: &TenantMetrics, table_id: u64) -> Option<u32> {
-    tenant
-        .tables
-        .iter()
-        .find(|table| table.table_id == table_id)
-        .and_then(|table| table.hash_bucket_count)
 }
 
 fn merge_tiny_adjacent_ranges(tenant: &TenantMetrics, ctx: &GoalContext) -> Vec<BalanceOperation> {
@@ -370,7 +369,7 @@ fn merge_tiny_adjacent_ranges(tenant: &TenantMetrics, ctx: &GoalContext) -> Vec<
             else {
                 return None;
             };
-            if left_bytes.saturating_add(right_bytes) >= ctx.merge_floor_bytes {
+            if ByteSize::from_bytes(left_bytes.saturating_add(right_bytes)) >= ctx.merge_floor {
                 return None;
             }
             if ctx.is_in_cooldown(left.range_id, OperationKind::Merge)
@@ -387,102 +386,13 @@ fn merge_tiny_adjacent_ranges(tenant: &TenantMetrics, ctx: &GoalContext) -> Vec<
         .collect()
 }
 
-/// Propose the boundary a range is cut at, or `None` when the range has no legal
-/// split point.
-///
-/// A hash-sharded table is cut on the first row of a bucket it has, and nowhere
-/// else. Hash equality routing probes a bucket at rowid 0 and answers for every
-/// row of that bucket, so a boundary inside a bucket would leave the rest of its
-/// rows on a range the router never consults. The same rule is enforced by
-/// `RangeMap::plan_hash_split_at_key`, by the registry
-/// (`ensure_boundaries_match_hash_placements`), and by `gres split`; planning a
-/// mid-bucket point here would only ever produce an operation rejected at
-/// execution.
-fn split_boundary(
-    range: &RangeMetrics,
-    hash_bucket_count: Option<u32>,
-    stride: u64,
-) -> Option<RangeBoundary> {
-    let candidate = match hash_bucket_count {
-        Some(bucket_count) => bucket_start_boundary(range, bucket_count)?,
-        None => rowid_boundary(range, stride),
-    };
-
-    // `RangeMap::plan_split_at_key`: a split point lies strictly inside the
-    // source range, so both successors keep at least one key.
-    (contains(range, candidate) && candidate != range.start_key).then_some(candidate)
-}
-
-/// Halve the buckets the range owns of `range.table_id`.
-///
-/// A range holding less than two whole buckets has no bucket start strictly
-/// inside it — a legal cut would have to fall inside a bucket — so it declines.
-fn bucket_start_boundary(range: &RangeMetrics, bucket_count: u32) -> Option<RangeBoundary> {
-    let table_id = range.table_id;
-    let first = first_splittable_bucket(range, table_id)?;
-    let limit = bucket_limit(range, table_id, bucket_count)?;
-
-    (limit > first)
-        .then(|| RangeBoundary::hash(table_id, first.saturating_add((limit - first) / 2), 0))
-}
-
-/// Lowest bucket of `table_id` whose start is above the range start.
-fn first_splittable_bucket(range: &RangeMetrics, table_id: u64) -> Option<u32> {
-    match range.start_key.table_id.cmp(&table_id) {
-        // The range opens before the table, so it owns the table's first bucket.
-        Ordering::Less => Some(0),
-        // Cutting at the start bucket would leave an empty left successor, so
-        // the first candidate is the bucket after it. A start that carries no
-        // bucket contradicts the table's hash placement, and the registry
-        // rejects that boundary, so there is nothing to plan from it.
-        Ordering::Equal => Some(range.start_key.bucket?.saturating_add(1)),
-        Ordering::Greater => None,
+fn split_at_rowid(range: &RangeMetrics, stride: u64) -> u64 {
+    if let Some(end) = range.end_rowid {
+        return range
+            .start_rowid
+            .saturating_add(end.saturating_sub(range.start_rowid) / 2);
     }
-}
-
-/// Exclusive upper bucket bound of the range within `table_id`.
-fn bucket_limit(range: &RangeMetrics, table_id: u64, bucket_count: u32) -> Option<u32> {
-    let Some(end) = range.end_key else {
-        return Some(bucket_count);
-    };
-
-    match end.table_id.cmp(&table_id) {
-        // The range runs past the table, so it owns every remaining bucket.
-        Ordering::Greater => Some(bucket_count),
-        // A legal boundary names a bucket the table has, so an end past the last
-        // one bounds nothing extra and the split point stays inside the table.
-        Ordering::Equal => Some(end.bucket?.min(bucket_count)),
-        Ordering::Less => None,
-    }
-}
-
-/// Halve the rowids the range owns of `range.table_id`, or step one stride when
-/// the range is unbounded within that table.
-fn rowid_boundary(range: &RangeMetrics, stride: u64) -> RangeBoundary {
-    let table_id = range.table_id;
-    let start_rowid = if range.start_key.table_id == table_id {
-        range.start_key.rowid
-    } else {
-        0
-    };
-    let bounded = range
-        .end_key
-        .filter(|end| end.table_id == table_id)
-        .map(|end| end.rowid);
-
-    let Some(end_rowid) = bounded else {
-        return RangeBoundary::new(table_id, start_rowid.saturating_add(stride.max(1)));
-    };
-
-    RangeBoundary::new(
-        table_id,
-        start_rowid.saturating_add(end_rowid.saturating_sub(start_rowid) / 2),
-    )
-}
-
-/// `RangeSpec::contains_key` over the registry's boundary type.
-fn contains(range: &RangeMetrics, key: RangeBoundary) -> bool {
-    range.start_key <= key && range.end_key.is_none_or(|end| key < end)
+    range.start_rowid.saturating_add(stride.max(1))
 }
 
 fn range_counts_by_compute(tenant: &TenantMetrics) -> HashMap<String, usize> {

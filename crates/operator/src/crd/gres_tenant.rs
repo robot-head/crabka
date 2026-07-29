@@ -168,8 +168,8 @@ mod tests {
             overrides: Some(TenantDefaults {
                 wal_replication: Some(3),
                 checkpoint_frames: None,
-                checkpoint_bytes: Some(134_217_728),
-                suspend_max_checkpoint_bytes: None,
+                checkpoint_size: Some(crabka_units::bytes(134_217_728)),
+                suspend_max_checkpoint_size: None,
                 idle_seconds: None,
             }),
         };
@@ -180,7 +180,7 @@ mod tests {
         );
         assert!(json.contains("\"passwordSecretRef\""), "got: {json}");
         assert!(
-            json.contains("\"checkpointBytes\":134217728"),
+            json.contains("\"checkpointSize\":\"128MiB\""),
             "got: {json}"
         );
         let back: GresTenantSpec = serde_json::from_str(&json).unwrap();

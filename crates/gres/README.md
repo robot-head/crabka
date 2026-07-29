@@ -82,7 +82,7 @@ crabka-gres --substrate-bootstrap 127.0.0.1:9092 \
   --checkpoint-region us-east-1 \
   --checkpoint-prefix dev/smoke \
   --checkpoint-frames 10000 \
-  --checkpoint-bytes 67108864 \
+  --checkpoint-size 64MiB \
   --checkpoint-retain 2
 ```
 

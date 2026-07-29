@@ -164,8 +164,9 @@ pub struct GresRegistrySpec {
     pub fetch_max_wait: Option<Time>,
     /// Maximum bytes fetched from the registry partition.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub fetch_partition_max_bytes: Option<i32>,
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_partition_max: Option<ByteSize>,
     /// DNS lookup deadline for the registry producer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(with = "crabka_units::serde_units::human::option_time")]
@@ -192,7 +193,8 @@ impl GresRegistrySpec {
             self.reader_retry_backoff
                 .unwrap_or(crabka_units::millis(250)),
             self.fetch_max_wait.unwrap_or(crabka_units::millis(500)),
-            self.fetch_partition_max_bytes.unwrap_or(1_048_576),
+            self.fetch_partition_max
+                .unwrap_or(crabka_units::mebibytes(1)),
         )
         .map_err(|error| format!("spec.gresRegistry: {error}"))?;
         let policy = policy
@@ -1604,7 +1606,7 @@ mod tests {
                     "topicCreateTimeout":"15001ms",
                     "readerRetryBackoff":"251ms",
                     "fetchMaxWait":"501ms",
-                    "fetchPartitionMaxBytes":1048577,
+                    "fetchPartitionMax":"1048577B",
                     "producerDnsTimeout":"37ms",
                     "readerAdminDnsTimeout":"37ms"
                 }
@@ -1616,7 +1618,7 @@ mod tests {
             crabka_units::millis(15_001),
             crabka_units::millis(251),
             crabka_units::millis(501),
-            1_048_577,
+            crabka_units::bytes(1_048_577),
         )
         .expect("expected policy")
         .with_producer_dns_timeout(crabka_units::millis(37))
@@ -1656,12 +1658,8 @@ mod tests {
         let crd = serde_json::to_value(Kafka::crd()).expect("serialize Kafka CRD");
         let registry = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
             ["properties"]["gresRegistry"];
-        for field in ["replicationFactor", "fetchPartitionMaxBytes"] {
-            assert!(
-                registry["properties"][field]["minimum"].as_f64() == Some(1.0),
-                "missing minimum for {field}: {registry}"
-            );
-        }
+        assert!(registry["properties"]["replicationFactor"]["minimum"].as_f64() == Some(1.0));
+        assert!(registry["properties"]["fetchPartitionMax"]["type"] == "string");
         for field in [
             "topicCreateTimeout",
             "readerRetryBackoff",
@@ -1698,7 +1696,7 @@ mod tests {
                 ..Default::default()
             },
             GresRegistrySpec {
-                fetch_partition_max_bytes: Some(0),
+                fetch_partition_max: Some(ByteSize::ZERO),
                 ..Default::default()
             },
             GresRegistrySpec {

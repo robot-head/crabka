@@ -119,10 +119,10 @@ spec:
                   thresholds:
                     default:
                       cooldownEpochs: 2
-                      loadSkewHysteresisPct: 25
+                      loadSkewHysteresis: 25%
                       maxOperations: 32
-                      mergeFloorBytes: 67108864
-                      sizeCeilingBytes: 1073741824
+                      mergeFloor: 64MiB
+                      sizeCeiling: 1GiB
                       splitStrideRows: 1000000
                     description: Threshold and cooldown knobs used by future live planner input.
                     properties:
@@ -131,11 +131,9 @@ spec:
                         format: uint64
                         minimum: 0.0
                         type: integer
-                      loadSkewHysteresisPct:
-                        description: Load skew percentage tolerated before move planning.
-                        format: uint32
-                        minimum: 0.0
-                        type: integer
+                      loadSkewHysteresis:
+                        description: Load skew tolerated before move planning.
+                        type: string
                       maxOperations:
                         description: Maximum operations in one dry-run plan.
                         format: uint
@@ -147,16 +145,12 @@ spec:
                         minimum: 0.0
                         nullable: true
                         type: integer
-                      mergeFloorBytes:
-                        description: Merge adjacent ranges below this combined byte size.
-                        format: uint64
-                        minimum: 0.0
-                        type: integer
-                      sizeCeilingBytes:
-                        description: Split ranges larger than this many bytes.
-                        format: uint64
-                        minimum: 0.0
-                        type: integer
+                      mergeFloor:
+                        description: Merge adjacent ranges below this combined size.
+                        type: string
+                      sizeCeiling:
+                        description: Split ranges larger than this size.
+                        type: string
                       splitStrideRows:
                         description: Row stride used when a range has no upper bound.
                         format: uint64
@@ -164,10 +158,10 @@ spec:
                         type: integer
                     required:
                     - cooldownEpochs
-                    - loadSkewHysteresisPct
+                    - loadSkewHysteresis
                     - maxOperations
-                    - mergeFloorBytes
-                    - sizeCeilingBytes
+                    - mergeFloor
+                    - sizeCeiling
                     - splitStrideRows
                     type: object
                 type: object
@@ -179,12 +173,10 @@ spec:
                     description: Kafka `DeleteRecords` timeout.
                     nullable: true
                     type: string
-                  checkpointPartBytes:
-                    description: Maximum checkpoint object part size in bytes.
-                    format: uint
-                    minimum: 8.0
+                  checkpointPartSize:
+                    description: Maximum checkpoint object part size.
                     nullable: true
-                    type: integer
+                    type: string
                   checkpointPollInterval:
                     description: Checkpoint threshold polling interval.
                     nullable: true
@@ -225,13 +217,10 @@ spec:
                     description: Timeout for WAL admin requests.
                     nullable: true
                     type: string
-                  walProducerBatchBytes:
-                    description: Maximum WAL producer batch size in bytes.
-                    format: uint
-                    maximum: 2147483647.0
-                    minimum: 1.0
+                  walProducerBatch:
+                    description: Maximum WAL producer batch size.
                     nullable: true
-                    type: integer
+                    type: string
                   walProducerCompression:
                     description: WAL producer compression codec.
                     enum:
@@ -303,18 +292,14 @@ spec:
                     description: Kafka broker long-poll wait for committed-WAL recovery fetches.
                     nullable: true
                     type: string
-                  walRecoveryFetchPartitionMaxBytes:
-                    description: Per-partition byte limit for committed-WAL recovery fetches.
-                    format: int32
-                    minimum: 1.0
+                  walRecoveryFetchPartitionMax:
+                    description: Per-partition size limit for committed-WAL recovery fetches.
                     nullable: true
-                    type: integer
-                  walRecoveryFetchResponseMaxBytes:
-                    description: Whole-response byte limit for committed-WAL recovery fetches.
-                    format: int32
-                    minimum: 1.0
+                    type: string
+                  walRecoveryFetchResponseMax:
+                    description: Whole-response size limit for committed-WAL recovery fetches.
                     nullable: true
-                    type: integer
+                    type: string
                   walRecoveryRequestTimeout:
                     description: Timeout for committed-WAL recovery broker requests.
                     nullable: true
@@ -337,30 +322,26 @@ spec:
                   they set `spec.overrides`.
                 nullable: true
                 properties:
-                  checkpointBytes:
-                    description: Checkpoint after this many bytes when set.
-                    format: uint64
-                    minimum: 0.0
-                    nullable: true
-                    type: integer
                   checkpointFrames:
                     description: Checkpoint after this many frames when set.
                     format: uint64
                     minimum: 0.0
                     nullable: true
                     type: integer
+                  checkpointSize:
+                    description: Checkpoint after this much WAL when set.
+                    nullable: true
+                    type: string
                   idleSeconds:
                     description: Idle timeout in seconds; unset means never suspend by idleness.
                     format: uint64
                     minimum: 0.0
                     nullable: true
                     type: integer
-                  suspendMaxCheckpointBytes:
+                  suspendMaxCheckpointSize:
                     description: Keep the tenant warm when its latest checkpoint exceeds this size.
-                    format: uint64
-                    minimum: 0.0
                     nullable: true
-                    type: integer
+                    type: string
                   walReplication:
                     description: Replication factor for tenant WAL topics.
                     format: int32

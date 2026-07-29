@@ -177,7 +177,7 @@ fn binary_help_exposes_only_single_node_serve_surface() {
     );
     assert!(help.contains("--wal-producer-compression"));
     assert!(help.contains("--wal-producer-linger"));
-    assert!(help.contains("--wal-producer-batch-bytes"));
+    assert!(help.contains("--wal-producer-batch"));
     assert!(help.contains("--host-ranges"));
     assert!(help.contains("--timestamp-source"));
     assert!(help.contains("--hlc-max-offset"));
@@ -186,7 +186,7 @@ fn binary_help_exposes_only_single_node_serve_surface() {
     assert!(help.contains("--checkpoint-bucket"));
     assert!(help.contains("--checkpoint-store"));
     assert!(help.contains("--checkpoint-frames"));
-    assert!(help.contains("--checkpoint-bytes"));
+    assert!(help.contains("--checkpoint-size"));
     assert!(help.contains("--auth"));
     assert!(help.contains("--tls-cert"));
     assert!(!help.contains("node"));
@@ -199,8 +199,8 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
     let mut command = crabka_gres::Cli::command();
     for argument in [
         "wal_recovery_fetch_max_wait",
-        "wal_recovery_fetch_partition_max_bytes",
-        "wal_recovery_fetch_response_max_bytes",
+        "wal_recovery_fetch_partition_max",
+        "wal_recovery_fetch_response_max",
         "wal_recovery_empty_fetch_retries",
         "wal_recovery_dns_timeout",
         "wal_recovery_connect_timeout",
@@ -235,8 +235,8 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         ranges: None,
         range0_follower_poll_interval: None,
         wal_recovery_fetch_max_wait: None,
-        wal_recovery_fetch_partition_max_bytes: None,
-        wal_recovery_fetch_response_max_bytes: None,
+        wal_recovery_fetch_partition_max: None,
+        wal_recovery_fetch_response_max: None,
         wal_recovery_empty_fetch_retries: None,
         wal_recovery_dns_timeout: None,
         wal_recovery_connect_timeout: None,
@@ -257,7 +257,7 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         wal_producer_transaction_timeout: None,
         wal_producer_compression: None,
         wal_producer_linger: None,
-        wal_producer_batch_bytes: None,
+        wal_producer_batch: None,
         host_ranges: None,
         timestamp_source: crabka_gres::TimestampSourceKind::LogicalTso,
         hlc_max_offset: crabka_units::millis(250),
@@ -282,8 +282,8 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         checkpoint_gcs_service_account_key: None,
         checkpoint_gcs_application_credentials_path: None,
         checkpoint_frames: None,
-        checkpoint_bytes: None,
-        checkpoint_part_bytes: None,
+        checkpoint_size: None,
+        checkpoint_part_size: None,
         checkpoint_retain: None,
         checkpoint_delete_records_timeout: None,
         checkpoint_poll_interval: None,
@@ -1314,7 +1314,7 @@ async fn live_authority_allows_exact_target_status_at_activated_before_layout_cu
         crabka_units::millis(15_001),
         crabka_units::millis(251),
         crabka_units::millis(1),
-        2_000_000,
+        crabka_units::bytes(2_000_000),
     )
     .unwrap();
     let authority = crabka_gres::live_split_intent_authority(

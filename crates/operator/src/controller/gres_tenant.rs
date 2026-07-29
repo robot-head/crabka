@@ -15,7 +15,7 @@ use crabka_security::{
     scram::PgScramVerifier,
 };
 use crabka_units::{
-    Time,
+    ByteSize, Time,
     convert::{ByteSizeExt as _, TimeExt as _},
     fmt::Human as _,
     secs,
@@ -1245,8 +1245,8 @@ async fn cleanup_tenant(
 struct EffectiveDefaults {
     wal_replication: i32,
     checkpoint_frames: Option<u64>,
-    checkpoint_bytes: Option<u64>,
-    suspend_max_checkpoint_bytes: Option<u64>,
+    checkpoint_size: Option<ByteSize>,
+    suspend_max_checkpoint_size: Option<ByteSize>,
     idle_seconds: Option<u64>,
 }
 
@@ -1263,13 +1263,13 @@ fn effective_defaults(
             .and_then(|d| d.checkpoint_frames)
             .or_else(|| base.and_then(|d| d.checkpoint_frames))
             .or(Some(DEFAULT_CHECKPOINT_FRAMES)),
-        checkpoint_bytes: override_
-            .and_then(|d| d.checkpoint_bytes)
-            .or_else(|| base.and_then(|d| d.checkpoint_bytes))
-            .or_else(|| Some(DEFAULT_CHECKPOINT_BYTES.bytes_u64())),
-        suspend_max_checkpoint_bytes: override_
-            .and_then(|d| d.suspend_max_checkpoint_bytes)
-            .or_else(|| base.and_then(|d| d.suspend_max_checkpoint_bytes)),
+        checkpoint_size: override_
+            .and_then(|d| d.checkpoint_size)
+            .or_else(|| base.and_then(|d| d.checkpoint_size))
+            .or(Some(DEFAULT_CHECKPOINT_BYTES)),
+        suspend_max_checkpoint_size: override_
+            .and_then(|d| d.suspend_max_checkpoint_size)
+            .or_else(|| base.and_then(|d| d.suspend_max_checkpoint_size)),
         idle_seconds: override_
             .and_then(|d| d.idle_seconds)
             .or_else(|| base.and_then(|d| d.idle_seconds)),
@@ -1357,8 +1357,8 @@ fn build_tenant_record(
         defaults.wal_replication,
     )?;
     record.checkpoint_frames = defaults.checkpoint_frames;
-    record.checkpoint_bytes = defaults.checkpoint_bytes;
-    record.suspend_max_checkpoint_bytes = defaults.suspend_max_checkpoint_bytes;
+    record.checkpoint_size = defaults.checkpoint_size;
+    record.suspend_max_checkpoint_size = defaults.suspend_max_checkpoint_size;
     record.idle_seconds = defaults.idle_seconds;
     if let Some(current) = current {
         record.wal_generation = current.wal_generation;
@@ -2008,8 +2008,8 @@ fn registry_policy_args(policy: &crabka_gres_control::RegistryPolicy) -> [String
         policy.reader_retry_backoff().human().to_string(),
         "--registry-fetch-max-wait".to_owned(),
         policy.fetch_max_wait().human().to_string(),
-        "--registry-fetch-partition-max-bytes".to_owned(),
-        policy.fetch_partition_max().bytes_i32().to_string(),
+        "--registry-fetch-partition-max".to_owned(),
+        policy.fetch_partition_max().human().to_string(),
         "--registry-producer-dns-timeout".to_owned(),
         Time::from_std(policy.producer_dns_timeout().duration())
             .human()
@@ -2035,16 +2035,20 @@ fn wal_consumer_admin_args(policy: &EffectiveGresComputePolicy) -> [String; 24] 
         human_millis(i64::from(
             policy.wal_recovery_fetch_max_wait_ms.into_value(),
         )),
-        "--wal-recovery-fetch-partition-max-bytes".to_owned(),
-        policy
-            .wal_recovery_fetch_partition_max_bytes
-            .into_value()
-            .to_string(),
-        "--wal-recovery-fetch-response-max-bytes".to_owned(),
-        policy
-            .wal_recovery_fetch_response_max_bytes
-            .into_value()
-            .to_string(),
+        "--wal-recovery-fetch-partition-max".to_owned(),
+        ByteSize::from_bytes(
+            u64::try_from(policy.wal_recovery_fetch_partition_max.into_value())
+                .expect("validated positive i32"),
+        )
+        .human()
+        .to_string(),
+        "--wal-recovery-fetch-response-max".to_owned(),
+        ByteSize::from_bytes(
+            u64::try_from(policy.wal_recovery_fetch_response_max.into_value())
+                .expect("validated positive i32"),
+        )
+        .human()
+        .to_string(),
         "--wal-recovery-empty-fetch-retries".to_owned(),
         policy
             .wal_recovery_empty_fetch_retries
@@ -2135,11 +2139,11 @@ fn render_deployment(
     let checkpoint_runtime_args = checkpoint_runtime_args(config.operator_config)?;
     if !checkpoint_runtime_args.is_empty() {
         args.extend([
-            "--checkpoint-part-bytes".to_owned(),
+            "--checkpoint-part-size".to_owned(),
             compute_policy
-                .checkpoint_part_bytes
+                .checkpoint_part_size
                 .into_value()
-                .bytes_usize()
+                .human()
                 .to_string(),
             "--checkpoint-retain".to_owned(),
             compute_policy.checkpoint_retain.into_value().to_string(),
@@ -2288,8 +2292,10 @@ fn wal_producer_throughput_args(
         policy.compression().to_string(),
         "--wal-producer-linger".to_owned(),
         Time::from_std(policy.linger()).human().to_string(),
-        "--wal-producer-batch-bytes".to_owned(),
-        policy.batch_bytes().to_string(),
+        "--wal-producer-batch".to_owned(),
+        ByteSize::from_bytes(u64::try_from(policy.batch_bytes()).expect("producer batch fits u64"))
+            .human()
+            .to_string(),
     ]
 }
 
@@ -2672,8 +2678,8 @@ mod tests {
         let defaults = |frames, bytes| TenantDefaults {
             wal_replication: None,
             checkpoint_frames: frames,
-            checkpoint_bytes: bytes,
-            suspend_max_checkpoint_bytes: None,
+            checkpoint_size: bytes,
+            suspend_max_checkpoint_size: None,
             idle_seconds: None,
         };
         for (base, override_, expected_frames, expected_bytes) in [
@@ -2681,36 +2687,36 @@ mod tests {
                 None,
                 None,
                 DEFAULT_CHECKPOINT_FRAMES,
-                DEFAULT_CHECKPOINT_BYTES.bytes_u64(),
+                DEFAULT_CHECKPOINT_BYTES,
             ),
             (
                 Some(defaults(Some(11), None)),
                 None,
                 11,
-                DEFAULT_CHECKPOINT_BYTES.bytes_u64(),
+                DEFAULT_CHECKPOINT_BYTES,
             ),
             (
-                Some(defaults(None, Some(12))),
+                Some(defaults(None, Some(crabka_units::bytes(12)))),
                 None,
                 DEFAULT_CHECKPOINT_FRAMES,
-                12,
+                crabka_units::bytes(12),
             ),
             (
-                Some(defaults(Some(11), Some(12))),
+                Some(defaults(Some(11), Some(crabka_units::bytes(12)))),
                 Some(defaults(Some(21), None)),
                 21,
-                12,
+                crabka_units::bytes(12),
             ),
             (
-                Some(defaults(Some(11), Some(12))),
-                Some(defaults(None, Some(22))),
+                Some(defaults(Some(11), Some(crabka_units::bytes(12)))),
+                Some(defaults(None, Some(crabka_units::bytes(22)))),
                 11,
-                22,
+                crabka_units::bytes(22),
             ),
         ] {
             let effective = effective_defaults(base.as_ref(), override_.as_ref());
             assert!(effective.checkpoint_frames == Some(expected_frames));
-            assert!(effective.checkpoint_bytes == Some(expected_bytes));
+            assert!(effective.checkpoint_size == Some(expected_bytes));
         }
     }
 
@@ -2765,8 +2771,8 @@ mod tests {
         let defaults = EffectiveDefaults {
             wal_replication: 1,
             checkpoint_frames: Some(37),
-            checkpoint_bytes: None,
-            suspend_max_checkpoint_bytes: None,
+            checkpoint_size: None,
+            suspend_max_checkpoint_size: None,
             idle_seconds: None,
         };
         let record = build_tenant_record(
@@ -2836,7 +2842,7 @@ mod tests {
             .expect("args");
 
         for absent in [
-            "--checkpoint-part-bytes",
+            "--checkpoint-part-size",
             "--checkpoint-retain",
             "--checkpoint-delete-records-timeout",
             "--checkpoint-poll-interval",
@@ -2855,10 +2861,10 @@ mod tests {
                     == [
                         "--wal-recovery-fetch-max-wait",
                         "100ms",
-                        "--wal-recovery-fetch-partition-max-bytes",
-                        "1048576",
-                        "--wal-recovery-fetch-response-max-bytes",
-                        "52428800",
+                        "--wal-recovery-fetch-partition-max",
+                        "1MiB",
+                        "--wal-recovery-fetch-response-max",
+                        "50MiB",
                         "--wal-recovery-empty-fetch-retries",
                         "100",
                         "--wal-recovery-dns-timeout",
@@ -2886,20 +2892,20 @@ mod tests {
         for (spec, expected) in [
             (
                 crate::crd::gres::GresComputeSpec::default(),
-                ["100ms", "1048576", "52428800", "100", "10s", "10s", "30s"],
+                ["100ms", "1MiB", "50MiB", "100", "10s", "10s", "30s"],
             ),
             (
                 crate::crd::gres::GresComputeSpec {
                     wal_recovery_fetch_max_wait: Some(crabka_units::millis(11)),
-                    wal_recovery_fetch_partition_max_bytes: Some(22),
-                    wal_recovery_fetch_response_max_bytes: Some(33),
+                    wal_recovery_fetch_partition_max: Some(crabka_units::bytes(22)),
+                    wal_recovery_fetch_response_max: Some(crabka_units::bytes(33)),
                     wal_recovery_empty_fetch_retries: Some(44),
                     wal_recovery_dns_timeout: Some(crabka_units::millis(77)),
                     wal_recovery_connect_timeout: Some(crabka_units::millis(55)),
                     wal_recovery_request_timeout: Some(crabka_units::millis(66)),
                     ..crate::crd::gres::GresComputeSpec::default()
                 },
-                ["11ms", "22", "33", "44", "77ms", "55ms", "66ms"],
+                ["11ms", "22B", "33B", "44", "77ms", "55ms", "66ms"],
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
@@ -2931,9 +2937,9 @@ mod tests {
                 let expected = [
                     "--wal-recovery-fetch-max-wait",
                     expected[0],
-                    "--wal-recovery-fetch-partition-max-bytes",
+                    "--wal-recovery-fetch-partition-max",
                     expected[1],
-                    "--wal-recovery-fetch-response-max-bytes",
+                    "--wal-recovery-fetch-response-max",
                     expected[2],
                     "--wal-recovery-empty-fetch-retries",
                     expected[3],
@@ -3265,16 +3271,16 @@ mod tests {
         for (spec, expected) in [
             (
                 crate::crd::gres::GresComputeSpec::default(),
-                ["none", "0s", "16384"],
+                ["none", "0s", "16KiB"],
             ),
             (
                 crate::crd::gres::GresComputeSpec {
                     wal_producer_compression: Some(crate::crd::gres::WalProducerCompression::Zstd),
                     wal_producer_linger: Some(crabka_units::millis(18)),
-                    wal_producer_batch_bytes: Some(19),
+                    wal_producer_batch: Some(crabka_units::bytes(19)),
                     ..crate::crd::gres::GresComputeSpec::default()
                 },
-                ["zstd", "18ms", "19"],
+                ["zstd", "18ms", "19B"],
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
@@ -3310,7 +3316,7 @@ mod tests {
                     for pair in [
                         ["--wal-producer-compression", expected[0]],
                         ["--wal-producer-linger", expected[1]],
-                        ["--wal-producer-batch-bytes", expected[2]],
+                        ["--wal-producer-batch", expected[2]],
                     ] {
                         assert!(
                             args.windows(2).filter(|window| *window == pair).count() == 1,
@@ -3416,7 +3422,7 @@ mod tests {
         operator_config.gres_checkpoint_store = Some(crate::config::GresCheckpointStoreKind::S3);
         operator_config.gres_checkpoint_bucket = Some("checkpoints".to_owned());
         let compute_policy = crate::crd::gres::GresComputeSpec {
-            checkpoint_part_bytes: Some(8_388_608),
+            checkpoint_part_size: Some(crabka_units::bytes(8_388_608)),
             checkpoint_retain: Some(4),
             checkpoint_delete_records_timeout: Some(crabka_units::millis(12_345)),
             checkpoint_poll_interval: Some(crabka_units::millis(2_345)),
@@ -3432,7 +3438,7 @@ mod tests {
             crabka_units::millis(15_001),
             crabka_units::millis(251),
             crabka_units::millis(501),
-            1_048_577,
+            crabka_units::bytes(1_048_577),
         )
         .expect("policy")
         .with_producer_dns_timeout(crabka_units::millis(37))
@@ -3477,10 +3483,10 @@ mod tests {
             ["--registry-topic-create-timeout", "15.001s"],
             ["--registry-reader-retry-backoff", "251ms"],
             ["--registry-fetch-max-wait", "501ms"],
-            ["--registry-fetch-partition-max-bytes", "1048577"],
+            ["--registry-fetch-partition-max", "1048577B"],
             ["--registry-producer-dns-timeout", "37ms"],
             ["--registry-reader-admin-dns-timeout", "37ms"],
-            ["--checkpoint-part-bytes", "8388608"],
+            ["--checkpoint-part-size", "8MiB"],
             ["--checkpoint-retain", "4"],
             ["--checkpoint-delete-records-timeout", "12.345s"],
             ["--checkpoint-poll-interval", "2.345s"],
@@ -3494,7 +3500,7 @@ mod tests {
         }
         for absent in [
             "--checkpoint-frames",
-            "--checkpoint-bytes",
+            "--checkpoint-size",
             "--lifecycle-requeue",
         ] {
             assert!(!args.iter().any(|arg| arg == absent), "got: {args:?}");
@@ -3503,7 +3509,7 @@ mod tests {
             args.iter()
                 .filter(|arg| {
                     [
-                        "--checkpoint-part-bytes",
+                        "--checkpoint-part-size",
                         "--checkpoint-retain",
                         "--checkpoint-delete-records-timeout",
                         "--checkpoint-poll-interval",
@@ -3567,8 +3573,8 @@ mod tests {
 
         for (compute, expected_path) in [
             (
-                json!({"checkpointPartBytes": 7}),
-                "spec.compute.checkpointPartBytes",
+                json!({"checkpointPartSize": "7B"}),
+                "spec.compute.checkpointPartSize",
             ),
             (
                 json!({"fdwBrokerDnsTimeout": "0ms"}),

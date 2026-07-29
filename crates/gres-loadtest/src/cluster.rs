@@ -874,8 +874,8 @@ fn registry_policy_args(policy: &RegistryPolicy) -> [String; 14] {
         policy.reader_retry_backoff().human().to_string(),
         "--registry-fetch-max-wait".to_owned(),
         policy.fetch_max_wait().human().to_string(),
-        "--registry-fetch-partition-max-bytes".to_owned(),
-        policy.fetch_partition_max().bytes_i32().to_string(),
+        "--registry-fetch-partition-max".to_owned(),
+        policy.fetch_partition_max().human().to_string(),
         "--registry-producer-dns-timeout".to_owned(),
         Time::from_std(policy.producer_dns_timeout().duration())
             .human()
@@ -1560,7 +1560,7 @@ mod tests {
             crabka_units::millis(15_002),
             crabka_units::millis(252),
             crabka_units::millis(502),
-            1_048_578,
+            crabka_units::bytes(1_048_578),
         )
         .expect("policy")
         .with_producer_dns_timeout(crabka_units::millis(37))
@@ -1590,9 +1590,7 @@ mod tests {
         assert!(arg_value(&spawned_args, "--registry-topic-create-timeout") == Some("15.002s"));
         assert!(arg_value(&spawned_args, "--registry-reader-retry-backoff") == Some("252ms"));
         assert!(arg_value(&spawned_args, "--registry-fetch-max-wait") == Some("502ms"));
-        assert!(
-            arg_value(&spawned_args, "--registry-fetch-partition-max-bytes") == Some("1048578")
-        );
+        assert!(arg_value(&spawned_args, "--registry-fetch-partition-max") == Some("1048578B"));
         assert!(arg_value(&spawned_args, "--registry-producer-dns-timeout") == Some("37ms"));
         assert!(arg_value(&spawned_args, "--registry-reader-admin-dns-timeout",) == Some("37ms"));
     }

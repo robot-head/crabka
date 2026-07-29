@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand};
-use crabka_gres_control::{PositiveI32, RegistryPolicy, RegistryReplicationFactor};
+use crabka_gres_control::{RegistryPolicy, RegistryReplicationFactor};
 use crabka_gres_loadtest::{
     cluster::Binaries,
     external::{self, ExternalTarget},
@@ -110,11 +110,12 @@ struct RegistryOptions {
     )]
     fetch_max_wait: Time,
     #[arg(
-        long = "registry-fetch-partition-max-bytes",
-        env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES",
-        default_value = "1048576"
+        long = "registry-fetch-partition-max",
+        env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX",
+        default_value = "1MiB",
+        value_parser = crabka_units::parse::positive_byte_size
     )]
-    fetch_partition_max_bytes: PositiveI32,
+    fetch_partition_max: ByteSize,
     #[arg(
         long = "registry-producer-dns-timeout",
         env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT",
@@ -138,7 +139,7 @@ impl RegistryOptions {
             self.topic_create_timeout,
             self.reader_retry_backoff,
             self.fetch_max_wait,
-            self.fetch_partition_max_bytes.into_value(),
+            self.fetch_partition_max,
         )
         .expect("validated registry options")
         .with_producer_dns_timeout(
@@ -441,7 +442,7 @@ mod tests {
             "--registry-topic-create-timeout=0ms",
             "--registry-reader-retry-backoff=0ms",
             "--registry-fetch-max-wait=0ms",
-            "--registry-fetch-partition-max-bytes=0",
+            "--registry-fetch-partition-max=0B",
             "--registry-producer-dns-timeout=0ms",
             "--registry-reader-admin-dns-timeout=0ms",
         ] {
@@ -459,7 +460,7 @@ mod tests {
             ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", "15001ms"),
             ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF", "251ms"),
             ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT", "501ms"),
-            ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES", "1048577"),
+            ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX", "1048577B"),
             ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
             ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
         ];
@@ -486,7 +487,7 @@ mod tests {
             crabka_units::millis(15_001),
             crabka_units::millis(251),
             crabka_units::millis(501),
-            1_048_577,
+            bytes(1_048_577),
         )
         .expect("policy")
         .with_producer_dns_timeout(crabka_units::millis(37))
@@ -502,7 +503,7 @@ mod tests {
             "--registry-topic-create-timeout=15002ms",
             "--registry-reader-retry-backoff=252ms",
             "--registry-fetch-max-wait=502ms",
-            "--registry-fetch-partition-max-bytes=1048578",
+            "--registry-fetch-partition-max=1048578B",
             "--registry-producer-dns-timeout=47ms",
             "--registry-reader-admin-dns-timeout=47ms",
         ])
@@ -515,7 +516,7 @@ mod tests {
             crabka_units::millis(15_002),
             crabka_units::millis(252),
             crabka_units::millis(502),
-            1_048_578,
+            bytes(1_048_578),
         )
         .expect("policy")
         .with_producer_dns_timeout(crabka_units::millis(47))
