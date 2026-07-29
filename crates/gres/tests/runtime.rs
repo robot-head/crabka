@@ -165,23 +165,23 @@ fn binary_help_exposes_only_single_node_serve_surface() {
     assert!(help.contains("--cache-dir"));
     assert!(help.contains("--ranges"));
     assert!(help.contains("--wal-topic-replication-factor"));
-    assert!(help.contains("--wal-topic-ensure-timeout-ms"));
-    assert!(help.contains("--wal-admin-connect-timeout-ms"));
-    assert!(help.contains("--wal-admin-request-timeout-ms"));
-    assert!(help.contains("--wal-producer-flush-timeout-ms"));
+    assert!(help.contains("--wal-topic-ensure-timeout"));
+    assert!(help.contains("--wal-admin-connect-timeout"));
+    assert!(help.contains("--wal-admin-request-timeout"));
+    assert!(help.contains("--wal-producer-flush-timeout"));
     assert_eq!(
         help.split_whitespace()
-            .filter(|word| *word == "--fdw-broker-dns-timeout-ms")
+            .filter(|word| *word == "--fdw-broker-dns-timeout")
             .count(),
         1
     );
     assert!(help.contains("--wal-producer-compression"));
-    assert!(help.contains("--wal-producer-linger-ms"));
+    assert!(help.contains("--wal-producer-linger"));
     assert!(help.contains("--wal-producer-batch-bytes"));
     assert!(help.contains("--host-ranges"));
     assert!(help.contains("--timestamp-source"));
-    assert!(help.contains("--hlc-max-offset-ms"));
-    assert!(help.contains("--hlc-wall-offset-ms"));
+    assert!(help.contains("--hlc-max-offset"));
+    assert!(help.contains("--hlc-wall-offset"));
     assert!(help.contains("--range-listen"));
     assert!(help.contains("--checkpoint-bucket"));
     assert!(help.contains("--checkpoint-store"));
@@ -198,17 +198,17 @@ fn binary_help_exposes_only_single_node_serve_surface() {
 fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gres::ServeArgs {
     let mut command = crabka_gres::Cli::command();
     for argument in [
-        "wal_recovery_fetch_max_wait_ms",
+        "wal_recovery_fetch_max_wait",
         "wal_recovery_fetch_partition_max_bytes",
         "wal_recovery_fetch_response_max_bytes",
         "wal_recovery_empty_fetch_retries",
-        "wal_recovery_dns_timeout_ms",
-        "wal_recovery_connect_timeout_ms",
-        "wal_recovery_request_timeout_ms",
+        "wal_recovery_dns_timeout",
+        "wal_recovery_connect_timeout",
+        "wal_recovery_request_timeout",
         "wal_topic_replication_factor",
-        "wal_topic_ensure_timeout_ms",
-        "wal_admin_connect_timeout_ms",
-        "wal_admin_request_timeout_ms",
+        "wal_topic_ensure_timeout",
+        "wal_admin_connect_timeout",
+        "wal_admin_request_timeout",
     ] {
         command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
     }
@@ -233,35 +233,35 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         tenant: None,
         cache_dir: None,
         ranges: None,
-        range0_follower_poll_interval_ms: None,
-        wal_recovery_fetch_max_wait_ms: None,
+        range0_follower_poll_interval: None,
+        wal_recovery_fetch_max_wait: None,
         wal_recovery_fetch_partition_max_bytes: None,
         wal_recovery_fetch_response_max_bytes: None,
         wal_recovery_empty_fetch_retries: None,
-        wal_recovery_dns_timeout_ms: None,
-        wal_recovery_connect_timeout_ms: None,
-        wal_recovery_request_timeout_ms: None,
+        wal_recovery_dns_timeout: None,
+        wal_recovery_connect_timeout: None,
+        wal_recovery_request_timeout: None,
         wal_topic_replication_factor: None,
-        wal_topic_ensure_timeout_ms: None,
-        wal_admin_connect_timeout_ms: None,
-        wal_admin_request_timeout_ms: None,
-        wal_producer_flush_timeout_ms: None,
-        wal_producer_dns_timeout_ms: None,
-        fdw_broker_dns_timeout_ms: None,
-        wal_producer_request_timeout_ms: None,
+        wal_topic_ensure_timeout: None,
+        wal_admin_connect_timeout: None,
+        wal_admin_request_timeout: None,
+        wal_producer_flush_timeout: None,
+        wal_producer_dns_timeout: None,
+        fdw_broker_dns_timeout: None,
+        wal_producer_request_timeout: None,
         wal_producer_retries: None,
-        wal_producer_retry_backoff_ms: None,
-        wal_producer_routing_retry_budget_ms: None,
-        wal_producer_init_retry_timeout_ms: None,
-        wal_producer_init_max_backoff_ms: None,
-        wal_producer_transaction_timeout_ms: None,
+        wal_producer_retry_backoff: None,
+        wal_producer_routing_retry_budget: None,
+        wal_producer_init_retry_timeout: None,
+        wal_producer_init_max_backoff: None,
+        wal_producer_transaction_timeout: None,
         wal_producer_compression: None,
-        wal_producer_linger_ms: None,
+        wal_producer_linger: None,
         wal_producer_batch_bytes: None,
         host_ranges: None,
         timestamp_source: crabka_gres::TimestampSourceKind::LogicalTso,
-        hlc_max_offset_ms: 250,
-        hlc_wall_offset_ms: 0,
+        hlc_max_offset: crabka_units::millis(250),
+        hlc_wall_offset: crabka_units::millis(0),
         range_listen: None,
         range_tls_cert: None,
         range_tls_key: None,
@@ -285,9 +285,9 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         checkpoint_bytes: None,
         checkpoint_part_bytes: None,
         checkpoint_retain: None,
-        checkpoint_delete_records_timeout_ms: None,
-        checkpoint_poll_interval_ms: None,
-        idle_suspend_poll_interval_ms: None,
+        checkpoint_delete_records_timeout: None,
+        checkpoint_poll_interval: None,
+        idle_suspend_poll_interval: None,
     }
 }
 
@@ -1309,8 +1309,14 @@ async fn live_authority_allows_exact_target_status_at_activated_before_layout_cu
         )
         .await;
     }
-    let registry_policy =
-        crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 1, 2_000_000).unwrap();
+    let registry_policy = crabka_gres_control::RegistryPolicy::new(
+        2,
+        crabka_units::millis(15_001),
+        crabka_units::millis(251),
+        crabka_units::millis(1),
+        2_000_000,
+    )
+    .unwrap();
     let authority = crabka_gres::live_split_intent_authority(
         bootstrap,
         crabka_gres_control::TenantName::try_from(tenant).unwrap(),

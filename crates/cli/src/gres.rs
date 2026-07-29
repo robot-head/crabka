@@ -4,7 +4,6 @@ use std::{
     io::Read as _,
     num::NonZeroU16,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
@@ -18,12 +17,13 @@ use crabka_gres_balancer::{
 };
 use crabka_gres_control::{
     HashPlacement, PgdogConnectAttempts, PgdogGeneral, PgdogPoolerMode, PgdogRenderInput,
-    PgdogUser, PositiveI32, PositiveMillis, RangeBoundary, RangeLayoutEntry, RangeLayoutSplit,
-    RangeLifecycle, Registry, RegistryPolicy, RegistryReplicationFactor, SplitOperationPlan,
-    SplitOperationRecord, SqlUser, TenantEndpoint, TenantId, TenantName, TenantRecord, TenantState,
-    render_pgdog_toml, render_users_toml, tenant_config_topic,
+    PgdogUser, PositiveI32, RangeBoundary, RangeLayoutEntry, RangeLayoutSplit, RangeLifecycle,
+    Registry, RegistryPolicy, RegistryReplicationFactor, SplitOperationPlan, SplitOperationRecord,
+    SqlUser, TenantEndpoint, TenantId, TenantName, TenantRecord, TenantState, render_pgdog_toml,
+    render_users_toml, tenant_config_topic,
 };
 use crabka_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
+use crabka_units::{Time, convert::TimeExt as _};
 use serde::Serialize;
 
 const EXIT_OK: i32 = 0;
@@ -31,12 +31,6 @@ const EXIT_ERROR: i32 = 1;
 const DEFAULT_WAL_REPLICATION: i32 = 1;
 const DEFAULT_SCRAM_ITERATIONS: u32 = 4096;
 const DEFAULT_BACKEND_PORT: u16 = 5432;
-// Equality routing looks a hash bucket up at rowid 0 and answers for the whole
-// bucket, so cutting a range inside a bucket would leave half its rows on a
-// range the router never consults.
-const HASH_SPLIT_ROWID_ERROR: &str = "ROWID must be 0 for a hash-sharded table split; \
-     a split inside a hash bucket would leave that bucket owned by two ranges and hide half \
-     its rows from equality routing";
 
 #[derive(Args, Debug)]
 pub struct GresArgs {
@@ -55,23 +49,26 @@ struct RegistryOptions {
     )]
     replication_factor: RegistryReplicationFactor,
     #[arg(
-        long = "registry-topic-create-timeout-ms",
-        env = "CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS",
-        default_value = "15000"
+        long = "registry-topic-create-timeout",
+        env = "CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT",
+        default_value = "15s",
+        value_parser = crabka_units::parse::positive_time
     )]
-    topic_create_timeout_ms: PositiveI32,
+    topic_create_timeout: Time,
     #[arg(
-        long = "registry-reader-retry-backoff-ms",
-        env = "CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS",
-        default_value = "250"
+        long = "registry-reader-retry-backoff",
+        env = "CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF",
+        default_value = "250ms",
+        value_parser = crabka_units::parse::positive_time
     )]
-    reader_retry_backoff_ms: PositiveMillis,
+    reader_retry_backoff: Time,
     #[arg(
-        long = "registry-fetch-max-wait-ms",
-        env = "CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS",
-        default_value = "500"
+        long = "registry-fetch-max-wait",
+        env = "CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT",
+        default_value = "500ms",
+        value_parser = crabka_units::parse::positive_time
     )]
-    fetch_max_wait_ms: PositiveI32,
+    fetch_max_wait: Time,
     #[arg(
         long = "registry-fetch-partition-max-bytes",
         env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES",
@@ -79,47 +76,40 @@ struct RegistryOptions {
     )]
     fetch_partition_max_bytes: PositiveI32,
     #[arg(
-        long = "registry-producer-dns-timeout-ms",
-        env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS"
+        long = "registry-producer-dns-timeout",
+        env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
     )]
-    producer_dns_timeout_ms: Option<PositiveMillis>,
+    producer_dns_timeout: Option<Time>,
     #[arg(
-        long = "registry-reader-admin-dns-timeout-ms",
-        env = "CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT_MS"
+        long = "registry-reader-admin-dns-timeout",
+        env = "CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
     )]
-    reader_admin_dns_timeout_ms: Option<PositiveMillis>,
+    reader_admin_dns_timeout: Option<Time>,
 }
 
 impl RegistryOptions {
     fn policy(&self) -> RegistryPolicy {
-        let producer_dns_timeout_ms = self.producer_dns_timeout_ms.map_or_else(
-            || {
-                RegistryPolicy::default()
-                    .producer_dns_timeout()
-                    .milliseconds()
-            },
-            PositiveMillis::into_value,
-        );
-        let reader_admin_dns_timeout_ms = self.reader_admin_dns_timeout_ms.map_or_else(
-            || {
-                RegistryPolicy::default()
-                    .reader_admin_dns_timeout()
-                    .milliseconds()
-            },
-            PositiveMillis::into_value,
-        );
+        let defaults = RegistryPolicy::default();
 
         RegistryPolicy::new(
             self.replication_factor.into_value(),
-            self.topic_create_timeout_ms.into_value(),
-            self.reader_retry_backoff_ms.into_value(),
-            self.fetch_max_wait_ms.into_value(),
+            self.topic_create_timeout,
+            self.reader_retry_backoff,
+            self.fetch_max_wait,
             self.fetch_partition_max_bytes.into_value(),
         )
         .expect("validated registry options")
-        .with_producer_dns_timeout_ms(producer_dns_timeout_ms)
+        .with_producer_dns_timeout(
+            self.producer_dns_timeout
+                .unwrap_or_else(|| Time::from_std(defaults.producer_dns_timeout().duration())),
+        )
         .expect("validated registry producer DNS timeout")
-        .with_reader_admin_dns_timeout_ms(reader_admin_dns_timeout_ms)
+        .with_reader_admin_dns_timeout(
+            self.reader_admin_dns_timeout
+                .unwrap_or_else(|| Time::from_std(defaults.reader_admin_dns_timeout().duration())),
+        )
         .expect("validated registry reader/admin DNS timeout")
     }
 }
@@ -277,34 +267,38 @@ struct RenderPgdogArgs {
     /// Number of backend connection attempts.
     #[arg(long, env = "CRABKA_GRES_PGDOG_CONNECT_ATTEMPTS", default_value = "3")]
     connect_attempts: PgdogConnectAttempts,
-    /// Maximum acceptable tenant wake latency in milliseconds.
+    /// Maximum acceptable tenant wake latency.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_COLD_START_CEILING_MS",
-        default_value = "30000"
+        env = "CRABKA_GRES_PGDOG_COLD_START_CEILING",
+        default_value = "30s",
+        value_parser = crabka_units::parse::positive_time
     )]
-    cold_start_ceiling_ms: PositiveMillis,
-    /// Normal pooled-server idle timeout in milliseconds.
+    cold_start_ceiling: Time,
+    /// Normal pooled-server idle timeout.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_IDLE_TIMEOUT_MS",
-        default_value = "60000"
+        env = "CRABKA_GRES_PGDOG_IDLE_TIMEOUT",
+        default_value = "60s",
+        value_parser = crabka_units::parse::positive_time
     )]
-    idle_timeout_ms: PositiveMillis,
+    idle_timeout: Time,
     /// Pooled-server idle timeout when at least one tenant may suspend.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT_MS",
-        default_value = "1000"
+        env = "CRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT",
+        default_value = "1s",
+        value_parser = crabka_units::parse::positive_time
     )]
-    suspension_idle_timeout_ms: PositiveMillis,
-    /// Maximum pooled backend connection lifetime in milliseconds.
+    suspension_idle_timeout: Time,
+    /// Maximum pooled backend connection lifetime.
     #[arg(
         long,
-        env = "CRABKA_GRES_PGDOG_SERVER_LIFETIME_MS",
-        default_value = "300000"
+        env = "CRABKA_GRES_PGDOG_SERVER_LIFETIME",
+        default_value = "5m",
+        value_parser = crabka_units::parse::positive_time
     )]
-    server_lifetime_ms: PositiveMillis,
+    server_lifetime: Time,
 }
 
 #[derive(Args, Debug)]
@@ -316,8 +310,7 @@ struct SplitRangeArgs {
     tenant: String,
     /// Table identifier that starts the successor range.
     table: u64,
-    /// Row identifier at the split point. Must be 0 for a hash-sharded table,
-    /// whose ranges may only be cut on a bucket start.
+    /// Row identifier at the split point.
     rowid: u64,
     /// Hash bucket at the split point; required exactly for hash-sharded tables.
     #[arg(long)]
@@ -397,7 +390,9 @@ enum BalanceExecuteMode {
     Validate,
 }
 
-#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+/// `Eq` is deliberately absent: the balancer's byte thresholds are quantities,
+/// whose `f64` storage is only `PartialEq`.
+#[derive(Debug, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct BalanceDryRunInput {
     #[serde(default)]
@@ -707,9 +702,6 @@ fn split_boundary(
         .find(|placement| placement.table_id == table_id);
     match (placement, bucket) {
         (Some(placement), Some(bucket)) if bucket < placement.bucket_count => {
-            if rowid != 0 {
-                return Err(HASH_SPLIT_ROWID_ERROR.to_string());
-            }
             Ok(RangeBoundary::hash(table_id, bucket, rowid))
         }
         (Some(_), Some(_)) => Err("--bucket must be less than the table hash bucket count".into()),
@@ -1197,13 +1189,13 @@ fn render_pgdog_files(records: &[TenantRecord], args: &RenderPgdogArgs) -> Resul
             password: None,
         })
         .collect();
-    let idle_timeout_ms = if records.iter().any(|record| {
+    let idle_timeout = if records.iter().any(|record| {
         record.idle_seconds.is_some_and(|seconds| seconds > 0)
             && (record.state == TenantState::Active || args.activator.is_some())
     }) {
-        args.suspension_idle_timeout_ms
+        args.suspension_idle_timeout
     } else {
-        args.idle_timeout_ms
+        args.idle_timeout
     };
     let input = PgdogRenderInput {
         tenants: &endpoints,
@@ -1224,11 +1216,11 @@ fn render_pgdog_files(records: &[TenantRecord], args: &RenderPgdogArgs) -> Resul
                 .map(|path| path.to_string_lossy().into_owned()),
             passthrough_auth: true,
             pooler_mode: args.pooler_mode,
-            cold_start_ceiling: Duration::from_millis(args.cold_start_ceiling_ms.into_value()),
+            cold_start_ceiling: args.cold_start_ceiling,
             connect_attempts: args.connect_attempts,
             timeouts: None,
-            idle_timeout: Duration::from_millis(idle_timeout_ms.into_value()),
-            server_lifetime: Duration::from_millis(args.server_lifetime_ms.into_value()),
+            idle_timeout,
+            server_lifetime: args.server_lifetime,
             users,
         },
     };
@@ -1329,12 +1321,12 @@ mod tests {
         for option in [
             "--registry-replication-factor=0",
             "--registry-replication-factor=32768",
-            "--registry-topic-create-timeout-ms=0",
-            "--registry-reader-retry-backoff-ms=0",
-            "--registry-fetch-max-wait-ms=0",
+            "--registry-topic-create-timeout=0ms",
+            "--registry-reader-retry-backoff=0ms",
+            "--registry-fetch-max-wait=0ms",
             "--registry-fetch-partition-max-bytes=0",
-            "--registry-producer-dns-timeout-ms=0",
-            "--registry-reader-admin-dns-timeout-ms=0",
+            "--registry-producer-dns-timeout=0ms",
+            "--registry-reader-admin-dns-timeout=0ms",
         ] {
             assert!(
                 TestCli::try_parse_from(["test", option, "list", "--bootstrap=broker:9092",])
@@ -1348,12 +1340,12 @@ mod tests {
         const CHILD: &str = "CRABKA_TEST_CLI_REGISTRY_ENV_CHILD";
         let vars = [
             ("CRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
-            ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS", "15001"),
-            ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS", "251"),
-            ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS", "501"),
+            ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", "15001ms"),
+            ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF", "251ms"),
+            ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT", "501ms"),
             ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES", "1048577"),
-            ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS", "37"),
-            ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT_MS", "37"),
+            ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
+            ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
         ];
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
@@ -1370,32 +1362,44 @@ mod tests {
         }
         let environment =
             TestCli::try_parse_from(["test", "list", "--bootstrap=broker:9092"]).expect("env");
-        let environment_policy = RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
-            .expect("policy")
-            .with_producer_dns_timeout_ms(37)
-            .expect("environment DNS timeout")
-            .with_reader_admin_dns_timeout_ms(37)
-            .expect("environment reader/admin DNS timeout");
+        let environment_policy = RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(501),
+            1_048_577,
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(37))
+        .expect("environment DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(37))
+        .expect("environment reader/admin DNS timeout");
         assert!(environment.gres.registry.policy() == environment_policy);
         let cli = TestCli::try_parse_from([
             "test",
             "--registry-replication-factor=3",
-            "--registry-topic-create-timeout-ms=15002",
-            "--registry-reader-retry-backoff-ms=252",
-            "--registry-fetch-max-wait-ms=502",
+            "--registry-topic-create-timeout=15002ms",
+            "--registry-reader-retry-backoff=252ms",
+            "--registry-fetch-max-wait=502ms",
             "--registry-fetch-partition-max-bytes=1048578",
-            "--registry-producer-dns-timeout-ms=47",
-            "--registry-reader-admin-dns-timeout-ms=47",
+            "--registry-producer-dns-timeout=47ms",
+            "--registry-reader-admin-dns-timeout=47ms",
             "list",
             "--bootstrap=broker:9092",
         ])
         .expect("CLI over environment");
-        let cli_policy = RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
-            .expect("policy")
-            .with_producer_dns_timeout_ms(47)
-            .expect("CLI DNS timeout")
-            .with_reader_admin_dns_timeout_ms(47)
-            .expect("CLI reader/admin DNS timeout");
+        let cli_policy = RegistryPolicy::new(
+            3,
+            crabka_units::millis(15_002),
+            crabka_units::millis(252),
+            crabka_units::millis(502),
+            1_048_578,
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(47))
+        .expect("CLI DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(47))
+        .expect("CLI reader/admin DNS timeout");
         assert!(cli.gres.registry.policy() == cli_policy);
     }
 
@@ -1417,10 +1421,10 @@ mod tests {
         assert!(args.tls_client_ca_certificate.is_none());
         assert!(args.pooler_mode == PgdogPoolerMode::Transaction);
         assert!(args.connect_attempts.into_value() == 3);
-        assert!(args.cold_start_ceiling_ms.into_value() == 30_000);
-        assert!(args.idle_timeout_ms.into_value() == 60_000);
-        assert!(args.suspension_idle_timeout_ms.into_value() == 1_000);
-        assert!(args.server_lifetime_ms.into_value() == 300_000);
+        assert!(args.cold_start_ceiling.millis_i64() == 30_000);
+        assert!(args.idle_timeout.millis_i64() == 60_000);
+        assert!(args.suspension_idle_timeout.millis_i64() == 1_000);
+        assert!(args.server_lifetime.millis_i64() == 300_000);
     }
 
     #[test]
@@ -1437,10 +1441,10 @@ mod tests {
             "--tls-client-ca-certificate=/tls/ca.pem",
             "--pooler-mode=session",
             "--connect-attempts=4",
-            "--cold-start-ceiling-ms=10001",
-            "--idle-timeout-ms=60001",
-            "--suspension-idle-timeout-ms=1001",
-            "--server-lifetime-ms=300001",
+            "--cold-start-ceiling=10001ms",
+            "--idle-timeout=60001ms",
+            "--suspension-idle-timeout=1001ms",
+            "--server-lifetime=300001ms",
         ])
         .expect("custom render-pgdog options");
 
@@ -1456,10 +1460,10 @@ mod tests {
         assert!(args.tls_client_ca_certificate == Some(PathBuf::from("/tls/ca.pem")));
         assert!(args.pooler_mode == PgdogPoolerMode::Session);
         assert!(args.connect_attempts.into_value() == 4);
-        assert!(args.cold_start_ceiling_ms.into_value() == 10_001);
-        assert!(args.idle_timeout_ms.into_value() == 60_001);
-        assert!(args.suspension_idle_timeout_ms.into_value() == 1_001);
-        assert!(args.server_lifetime_ms.into_value() == 300_001);
+        assert!(args.cold_start_ceiling.millis_i64() == 10_001);
+        assert!(args.idle_timeout.millis_i64() == 60_001);
+        assert!(args.suspension_idle_timeout.millis_i64() == 1_001);
+        assert!(args.server_lifetime.millis_i64() == 300_001);
     }
 
     #[test]
@@ -1469,11 +1473,11 @@ mod tests {
             &["--listen-port=65536"],
             &["--connect-attempts=0"],
             &["--connect-attempts=65536"],
-            &["--cold-start-ceiling-ms=0"],
-            &["--idle-timeout-ms=0"],
-            &["--suspension-idle-timeout-ms=0"],
-            &["--server-lifetime-ms=0"],
-            &["--cold-start-ceiling-ms=18446744073709551616"],
+            &["--cold-start-ceiling=0ms"],
+            &["--idle-timeout=0ms"],
+            &["--suspension-idle-timeout=0ms"],
+            &["--server-lifetime=0ms"],
+            &["--cold-start-ceiling=inf"],
             &["--pooler-mode=statement"],
             &["--tls-certificate=/tls/cert.pem"],
             &["--tls-private-key=/tls/key.pem"],
@@ -1506,10 +1510,10 @@ mod tests {
             ("CRABKA_GRES_PGDOG_TLS_CLIENT_CA_CERTIFICATE", "/env/ca.pem"),
             ("CRABKA_GRES_PGDOG_POOLER_MODE", "session"),
             ("CRABKA_GRES_PGDOG_CONNECT_ATTEMPTS", "5"),
-            ("CRABKA_GRES_PGDOG_COLD_START_CEILING_MS", "30005"),
-            ("CRABKA_GRES_PGDOG_IDLE_TIMEOUT_MS", "60005"),
-            ("CRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT_MS", "1005"),
-            ("CRABKA_GRES_PGDOG_SERVER_LIFETIME_MS", "300005"),
+            ("CRABKA_GRES_PGDOG_COLD_START_CEILING", "30005ms"),
+            ("CRABKA_GRES_PGDOG_IDLE_TIMEOUT", "60005ms"),
+            ("CRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT", "1005ms"),
+            ("CRABKA_GRES_PGDOG_SERVER_LIFETIME", "300005ms"),
         ];
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
@@ -1538,10 +1542,10 @@ mod tests {
         assert!(environment.tls_client_ca_certificate == Some(PathBuf::from("/env/ca.pem")));
         assert!(environment.pooler_mode == PgdogPoolerMode::Session);
         assert!(environment.connect_attempts.into_value() == 5);
-        assert!(environment.cold_start_ceiling_ms.into_value() == 30_005);
-        assert!(environment.idle_timeout_ms.into_value() == 60_005);
-        assert!(environment.suspension_idle_timeout_ms.into_value() == 1_005);
-        assert!(environment.server_lifetime_ms.into_value() == 300_005);
+        assert!(environment.cold_start_ceiling.millis_i64() == 30_005);
+        assert!(environment.idle_timeout.millis_i64() == 60_005);
+        assert!(environment.suspension_idle_timeout.millis_i64() == 1_005);
+        assert!(environment.server_lifetime.millis_i64() == 300_005);
 
         let cli = TestCli::try_parse_from([
             "test",
@@ -1589,14 +1593,13 @@ mod tests {
                 "isSharded": true,
                 "autoShardDisabled": false,
                 "convertStoreBytesThreshold": 10000,
-                "convertCommitRateThreshold": 10000,
-                "hashBucketCount": null
+                "convertCommitRateThreshold": 10000
             }],
             "ranges": [{
                 "rangeId": 1,
                 "tableId": 10,
-                "startKey": { "table_id": 10, "rowid": 0 },
-                "endKey": { "table_id": 10, "rowid": 1000 },
+                "startRowid": 0,
+                "endRowid": 1000,
                 "computeId": "c1",
                 "storeBytes": 2500,
                 "checkpointBytes": 0,
@@ -1634,59 +1637,13 @@ mod tests {
                 "isSharded": true,
                 "autoShardDisabled": false,
                 "convertStoreBytesThreshold": 10000,
-                "convertCommitRateThreshold": 10000,
-                "hashBucketCount": null
+                "convertCommitRateThreshold": 10000
             }],
             "ranges": [{
                 "rangeId": 1,
                 "tableId": 10,
-                "startKey": { "table_id": 10, "rowid": 0 },
-                "endKey": { "table_id": 10, "rowid": 1000 },
-                "computeId": "c1",
-                "storeBytes": 2500,
-                "checkpointBytes": 0,
-                "commitRate": 0,
-                "scanBytes": 0,
-                "isSharded": true,
-                "coLocationGroup": null,
-                "coLocationBucket": null,
-                "isIndexRange": false
-            }]
-        }]
-    }"#;
-
-    const BALANCE_SNAPSHOT_HASH_SHARDED: &str = r#"{
-        "config": {
-            "goals": { "disabledGoals": [] },
-            "context": {
-                "sizeCeilingBytes": 1000,
-                "mergeFloorBytes": 100,
-                "splitStrideRows": 100,
-                "loadSkewHysteresisPct": 25,
-                "maxRangesPerCompute": null,
-                "maxOperations": 32,
-                "cooldownEpochs": 2,
-                "currentEpoch": 10,
-                "cooldowns": []
-            }
-        },
-        "tenants": [{
-            "tenantName": "tenant-a",
-            "computes": [{ "computeId": "c1" }],
-            "tables": [{
-                "tableId": 10,
-                "tableName": "orders",
-                "isSharded": true,
-                "autoShardDisabled": false,
-                "convertStoreBytesThreshold": 10000,
-                "convertCommitRateThreshold": 10000,
-                "hashBucketCount": 16
-            }],
-            "ranges": [{
-                "rangeId": 1,
-                "tableId": 10,
-                "startKey": { "table_id": 10, "bucket": 0, "rowid": 0 },
-                "endKey": { "table_id": 10, "bucket": 8, "rowid": 0 },
+                "startRowid": 0,
+                "endRowid": 1000,
                 "computeId": "c1",
                 "storeBytes": 2500,
                 "checkpointBytes": 0,
@@ -1833,7 +1790,7 @@ mod tests {
     }
 
     #[test]
-    fn split_boundary_requires_a_bucket_aligned_hash_split_point() {
+    fn split_boundary_requires_exact_hash_bucket_contract() {
         let mut record = test_record("tenant-a", TenantState::Active);
         record.hash_placements = vec![crabka_gres_control::HashPlacement {
             table_id: 7,
@@ -1842,15 +1799,10 @@ mod tests {
             co_location_group: None,
         }];
 
-        // A hash-sharded table may only be cut on a bucket start: equality
-        // routing probes a bucket at rowid 0, so a cut inside a bucket would
-        // put the rest of its rows on a range the router never consults.
-        assert!(split_boundary(&record, 7, Some(3), 0) == Ok(RangeBoundary::hash(7, 3, 0)));
-        assert!(split_boundary(&record, 7, Some(3), 9) == Err(HASH_SPLIT_ROWID_ERROR.to_string()));
-        assert!(split_boundary(&record, 7, None, 0).is_err());
-        assert!(split_boundary(&record, 7, Some(8), 0).is_err());
-        assert!(split_boundary(&record, 9, Some(0), 0).is_err());
-        // A row-sharded table stays free to split at any rowid.
+        assert!(split_boundary(&record, 7, Some(3), 9) == Ok(RangeBoundary::hash(7, 3, 9)));
+        assert!(split_boundary(&record, 7, None, 9).is_err());
+        assert!(split_boundary(&record, 7, Some(8), 9).is_err());
+        assert!(split_boundary(&record, 9, Some(0), 9).is_err());
         assert!(split_boundary(&record, 9, None, 9) == Ok(RangeBoundary::new(9, 9)));
     }
 
@@ -1949,10 +1901,10 @@ mod tests {
             "--tls-client-ca-certificate=/tls/ca.pem",
             "--pooler-mode=session",
             "--connect-attempts=4",
-            "--cold-start-ceiling-ms=10001",
-            "--idle-timeout-ms=60001",
-            "--suspension-idle-timeout-ms=1001",
-            "--server-lifetime-ms=300001",
+            "--cold-start-ceiling=10001ms",
+            "--idle-timeout=60001ms",
+            "--suspension-idle-timeout=1001ms",
+            "--server-lifetime=300001ms",
         ]);
 
         render_pgdog_files(&[record], &args).expect("render succeeds");
@@ -1997,8 +1949,8 @@ mod tests {
             "render-pgdog",
             "--bootstrap=broker:9092",
             &out_dir,
-            "--idle-timeout-ms=60001",
-            "--suspension-idle-timeout-ms=1001",
+            "--idle-timeout=60001ms",
+            "--suspension-idle-timeout=1001ms",
         ]);
 
         render_pgdog_files(&[record], &args).expect("render succeeds");
@@ -2019,8 +1971,8 @@ mod tests {
             "render-pgdog",
             "--bootstrap=broker:9092",
             &out_dir,
-            "--idle-timeout-ms=60001",
-            "--suspension-idle-timeout-ms=1001",
+            "--idle-timeout=60001ms",
+            "--suspension-idle-timeout=1001ms",
         ]);
 
         render_pgdog_files(std::slice::from_ref(&record), &args).expect("normal render succeeds");
@@ -2064,27 +2016,9 @@ mod tests {
             output.operations
                 == vec![BalanceOperation::Split {
                     tenant_name: "tenant-a".to_string(),
+                    table_id: 10,
                     source_range_id: 1,
-                    split_at: RangeBoundary::new(10, 500),
-                }]
-        );
-    }
-
-    #[test]
-    fn gres_balance_dry_run_cuts_a_hash_sharded_range_on_a_bucket_start() {
-        let input: BalanceDryRunInput =
-            serde_json::from_str(BALANCE_SNAPSHOT_HASH_SHARDED).unwrap();
-
-        let output = plan_balance_dry_run(&input);
-
-        // Buckets 0..8 halve at bucket 4, and never inside a bucket: equality
-        // routing probes a bucket at rowid 0 and answers for all of its rows.
-        assert!(
-            output.operations
-                == vec![BalanceOperation::Split {
-                    tenant_name: "tenant-a".to_string(),
-                    source_range_id: 1,
-                    split_at: RangeBoundary::hash(10, 4, 0),
+                    split_at_rowid: 500,
                 }]
         );
     }

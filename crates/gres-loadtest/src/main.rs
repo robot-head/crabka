@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand};
-use crabka_gres_control::{PositiveI32, PositiveMillis, RegistryPolicy, RegistryReplicationFactor};
+use crabka_gres_control::{PositiveI32, RegistryPolicy, RegistryReplicationFactor};
 use crabka_gres_loadtest::{
     cluster::Binaries,
     external::{self, ExternalTarget},
@@ -89,23 +89,26 @@ struct RegistryOptions {
     )]
     replication_factor: RegistryReplicationFactor,
     #[arg(
-        long = "registry-topic-create-timeout-ms",
-        env = "CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS",
-        default_value = "15000"
+        long = "registry-topic-create-timeout",
+        env = "CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT",
+        default_value = "15s",
+        value_parser = crabka_units::parse::positive_time
     )]
-    topic_create_timeout_ms: PositiveI32,
+    topic_create_timeout: Time,
     #[arg(
-        long = "registry-reader-retry-backoff-ms",
-        env = "CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS",
-        default_value = "250"
+        long = "registry-reader-retry-backoff",
+        env = "CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF",
+        default_value = "250ms",
+        value_parser = crabka_units::parse::positive_time
     )]
-    reader_retry_backoff_ms: PositiveMillis,
+    reader_retry_backoff: Time,
     #[arg(
-        long = "registry-fetch-max-wait-ms",
-        env = "CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS",
-        default_value = "500"
+        long = "registry-fetch-max-wait",
+        env = "CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT",
+        default_value = "500ms",
+        value_parser = crabka_units::parse::positive_time
     )]
-    fetch_max_wait_ms: PositiveI32,
+    fetch_max_wait: Time,
     #[arg(
         long = "registry-fetch-partition-max-bytes",
         env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES",
@@ -113,47 +116,40 @@ struct RegistryOptions {
     )]
     fetch_partition_max_bytes: PositiveI32,
     #[arg(
-        long = "registry-producer-dns-timeout-ms",
-        env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS"
+        long = "registry-producer-dns-timeout",
+        env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
     )]
-    producer_dns_timeout_ms: Option<PositiveMillis>,
+    producer_dns_timeout: Option<Time>,
     #[arg(
-        long = "registry-reader-admin-dns-timeout-ms",
-        env = "CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT_MS"
+        long = "registry-reader-admin-dns-timeout",
+        env = "CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
     )]
-    reader_admin_dns_timeout_ms: Option<PositiveMillis>,
+    reader_admin_dns_timeout: Option<Time>,
 }
 
 impl RegistryOptions {
     fn policy(&self) -> RegistryPolicy {
-        let producer_dns_timeout_ms = self.producer_dns_timeout_ms.map_or_else(
-            || {
-                RegistryPolicy::default()
-                    .producer_dns_timeout()
-                    .milliseconds()
-            },
-            PositiveMillis::into_value,
-        );
-        let reader_admin_dns_timeout_ms = self.reader_admin_dns_timeout_ms.map_or_else(
-            || {
-                RegistryPolicy::default()
-                    .reader_admin_dns_timeout()
-                    .milliseconds()
-            },
-            PositiveMillis::into_value,
-        );
+        let defaults = RegistryPolicy::default();
 
         RegistryPolicy::new(
             self.replication_factor.into_value(),
-            self.topic_create_timeout_ms.into_value(),
-            self.reader_retry_backoff_ms.into_value(),
-            self.fetch_max_wait_ms.into_value(),
+            self.topic_create_timeout,
+            self.reader_retry_backoff,
+            self.fetch_max_wait,
             self.fetch_partition_max_bytes.into_value(),
         )
         .expect("validated registry options")
-        .with_producer_dns_timeout_ms(producer_dns_timeout_ms)
+        .with_producer_dns_timeout(
+            self.producer_dns_timeout
+                .unwrap_or_else(|| Time::from_std(defaults.producer_dns_timeout().duration())),
+        )
         .expect("validated registry producer DNS timeout")
-        .with_reader_admin_dns_timeout_ms(reader_admin_dns_timeout_ms)
+        .with_reader_admin_dns_timeout(
+            self.reader_admin_dns_timeout
+                .unwrap_or_else(|| Time::from_std(defaults.reader_admin_dns_timeout().duration())),
+        )
         .expect("validated registry reader/admin DNS timeout")
     }
 }
@@ -442,12 +438,12 @@ mod tests {
         for option in [
             "--registry-replication-factor=0",
             "--registry-replication-factor=32768",
-            "--registry-topic-create-timeout-ms=0",
-            "--registry-reader-retry-backoff-ms=0",
-            "--registry-fetch-max-wait-ms=0",
+            "--registry-topic-create-timeout=0ms",
+            "--registry-reader-retry-backoff=0ms",
+            "--registry-fetch-max-wait=0ms",
             "--registry-fetch-partition-max-bytes=0",
-            "--registry-producer-dns-timeout-ms=0",
-            "--registry-reader-admin-dns-timeout-ms=0",
+            "--registry-producer-dns-timeout=0ms",
+            "--registry-reader-admin-dns-timeout=0ms",
         ] {
             assert!(
                 Cli::try_parse_from(["loadtest", "run", "--scenario=test.yaml", option]).is_err()
@@ -460,12 +456,12 @@ mod tests {
         const CHILD: &str = "CRABKA_TEST_LOADTEST_REGISTRY_ENV_CHILD";
         let vars = [
             ("CRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
-            ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS", "15001"),
-            ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS", "251"),
-            ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS", "501"),
+            ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", "15001ms"),
+            ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF", "251ms"),
+            ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT", "501ms"),
             ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES", "1048577"),
-            ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS", "37"),
-            ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT_MS", "37"),
+            ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
+            ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
         ];
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
@@ -485,35 +481,47 @@ mod tests {
         let CliCommand::Run { registry, .. } = environment.command else {
             panic!("run");
         };
-        let environment_policy = RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
-            .expect("policy")
-            .with_producer_dns_timeout_ms(37)
-            .expect("environment DNS timeout")
-            .with_reader_admin_dns_timeout_ms(37)
-            .expect("environment reader/admin DNS timeout");
+        let environment_policy = RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(501),
+            1_048_577,
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(37))
+        .expect("environment DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(37))
+        .expect("environment reader/admin DNS timeout");
         assert!(registry.policy() == environment_policy);
         let cli = Cli::try_parse_from([
             "loadtest",
             "run",
             "--scenario=test.yaml",
             "--registry-replication-factor=3",
-            "--registry-topic-create-timeout-ms=15002",
-            "--registry-reader-retry-backoff-ms=252",
-            "--registry-fetch-max-wait-ms=502",
+            "--registry-topic-create-timeout=15002ms",
+            "--registry-reader-retry-backoff=252ms",
+            "--registry-fetch-max-wait=502ms",
             "--registry-fetch-partition-max-bytes=1048578",
-            "--registry-producer-dns-timeout-ms=47",
-            "--registry-reader-admin-dns-timeout-ms=47",
+            "--registry-producer-dns-timeout=47ms",
+            "--registry-reader-admin-dns-timeout=47ms",
         ])
         .expect("CLI over environment");
         let CliCommand::Run { registry, .. } = cli.command else {
             panic!("run");
         };
-        let cli_policy = RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
-            .expect("policy")
-            .with_producer_dns_timeout_ms(47)
-            .expect("CLI DNS timeout")
-            .with_reader_admin_dns_timeout_ms(47)
-            .expect("CLI reader/admin DNS timeout");
+        let cli_policy = RegistryPolicy::new(
+            3,
+            crabka_units::millis(15_002),
+            crabka_units::millis(252),
+            crabka_units::millis(502),
+            1_048_578,
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(47))
+        .expect("CLI DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(47))
+        .expect("CLI reader/admin DNS timeout");
         assert!(registry.policy() == cli_policy);
     }
 

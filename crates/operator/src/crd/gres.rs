@@ -6,28 +6,66 @@ use std::time::Duration;
 
 use crabka_client_producer::ProducerFlushTimeout;
 use crabka_gres_control::{
-    CheckpointPartBytes, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
-    DEFAULT_CHECKPOINT_POLL_INTERVAL_MS, DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS,
-    DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS, PgdogConnectAttempts, PgdogPoolerMode, PositiveI32,
+    CheckpointPartBytes, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT,
+    DEFAULT_CHECKPOINT_POLL_INTERVAL, DEFAULT_IDLE_SUSPEND_POLL_INTERVAL,
+    DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL, PgdogConnectAttempts, PgdogPoolerMode, PositiveI32,
     PositiveMillis, PositiveUsize,
 };
 use crabka_gres_substrate::{
-    DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES, DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
-    DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS, DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
-    DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS, DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
-    DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS, DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
-    DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES, DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
-    DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+    DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_SIZE, DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT,
+    DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT, DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT,
+    DEFAULT_WAL_RECOVERY_DNS_TIMEOUT, DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+    DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT, DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX,
+    DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX, DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT,
+    DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+};
+use crabka_units::{
+    Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
 };
 use kube::CustomResource;
 use refined_type::rule::GreaterI32;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-const DEFAULT_LIFECYCLE_REQUEUE_MS: u64 = 5_000;
+#[cfg(test)]
+use crate::controller::common::millis_u64;
 
-fn duration_millis(value: Duration) -> u64 {
-    u64::try_from(value.as_millis()).expect("validated producer duration fits u64 milliseconds")
+const DEFAULT_LIFECYCLE_REQUEUE: Time = crabka_units::secs(5);
+
+fn whole_millis(name: &str, value: Time) -> Result<u64, String> {
+    let millis = value.millis_i64();
+    if value.secs_f64().is_finite()
+        && millis > 0
+        && Time::from_millis(millis) == value
+        && let Ok(millis) = u64::try_from(millis)
+    {
+        Ok(millis)
+    } else {
+        Err(format!(
+            "{name}: must be finite, positive, and a whole number of milliseconds"
+        ))
+    }
+}
+
+fn whole_millis_i32(name: &str, value: Time) -> Result<i32, String> {
+    let millis = whole_millis(name, value)?;
+    i32::try_from(millis).map_err(|_| format!("{name}: must be within 1ms..=2147483647ms"))
+}
+
+fn nonnegative_whole_millis_i32(name: &str, value: Time) -> Result<i32, String> {
+    let millis = value.millis_i64();
+    if value.secs_f64().is_finite()
+        && millis >= 0
+        && millis <= i64::from(i32::MAX)
+        && Time::from_millis(millis) == value
+    {
+        Ok(i32::try_from(millis).expect("range checked"))
+    } else {
+        Err(format!(
+            "{name}: must be a whole number of milliseconds within 0ms..=2147483647ms"
+        ))
+    }
 }
 
 /// Gres fleet specification.
@@ -71,7 +109,7 @@ pub struct GresSpec {
 }
 
 /// Wake activator deployment and runtime policy.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GresActivatorSpec {
     /// Container image override. When absent the operator uses its global
@@ -85,15 +123,17 @@ pub struct GresActivatorSpec {
     #[schemars(range(min = 1))]
     pub replicas: Option<i32>,
 
-    /// Registry readiness polling interval in milliseconds.
+    /// Registry readiness polling interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub registry_poll_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub registry_poll: Option<Time>,
 
-    /// Maximum duration to hold one cold-starting connection in milliseconds.
+    /// Maximum duration to hold one cold-starting connection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub cold_start_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub cold_start_timeout: Option<Time>,
 
     /// Activator readiness probe period in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -125,7 +165,7 @@ impl From<WalProducerCompression> for crabka_client_producer::Compression {
 }
 
 /// Tenant compute workload policy.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GresComputeSpec {
     /// Compute readiness probe period in seconds.
@@ -143,35 +183,41 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1))]
     pub checkpoint_retain: Option<usize>,
 
-    /// Kafka `DeleteRecords` timeout in milliseconds.
+    /// Kafka `DeleteRecords` timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 2_147_483_647))]
-    pub checkpoint_delete_records_timeout_ms: Option<i32>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub checkpoint_delete_records_timeout: Option<Time>,
 
-    /// Checkpoint threshold polling interval in milliseconds.
+    /// Checkpoint threshold polling interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub checkpoint_poll_interval_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub checkpoint_poll_interval: Option<Time>,
 
-    /// Idle-suspend polling interval in milliseconds.
+    /// Idle-suspend polling interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub idle_suspend_poll_interval_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub idle_suspend_poll_interval: Option<Time>,
 
-    /// Periodic range-0 follower refresh cadence in milliseconds.
+    /// Periodic range-0 follower refresh cadence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub range0_follower_poll_interval_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub range0_follower_poll_interval: Option<Time>,
 
     /// Timeout for resolving Kafka broker hostnames used by the FDW.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub fdw_broker_dns_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fdw_broker_dns_timeout: Option<Time>,
 
     /// Kafka broker long-poll wait for committed-WAL recovery fetches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub wal_recovery_fetch_max_wait_ms: Option<i32>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_recovery_fetch_max_wait: Option<Time>,
 
     /// Per-partition byte limit for committed-WAL recovery fetches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -190,33 +236,39 @@ pub struct GresComputeSpec {
 
     /// Timeout for resolving committed-WAL recovery broker hostnames.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub wal_recovery_dns_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_recovery_dns_timeout: Option<Time>,
 
     /// Timeout for opening committed-WAL recovery broker connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub wal_recovery_connect_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_recovery_connect_timeout: Option<Time>,
 
     /// Timeout for committed-WAL recovery broker requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub wal_recovery_request_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_recovery_request_timeout: Option<Time>,
 
     /// Deadline for flushing all buffered and in-flight WAL records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 2_147_483_647))]
-    pub wal_producer_flush_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_producer_flush_timeout: Option<Time>,
 
     /// Timeout for resolving WAL producer broker hostnames.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub wal_producer_dns_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_producer_dns_timeout: Option<Time>,
 
     /// Timeout for WAL producer broker requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 2_147_483_647))]
-    pub wal_producer_request_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_producer_request_timeout: Option<Time>,
 
     /// WAL producer retries after the initial batch send.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -225,37 +277,43 @@ pub struct GresComputeSpec {
 
     /// WAL producer retry and producer-ID initial backoff.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 2_147_483_647))]
-    pub wal_producer_retry_backoff_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_producer_retry_backoff: Option<Time>,
 
     /// Per-batch WAL producer routing retry budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 2_147_483_647))]
-    pub wal_producer_routing_retry_budget_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_producer_routing_retry_budget: Option<Time>,
 
     /// WAL producer-ID initialization retry timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 2_147_483_647))]
-    pub wal_producer_init_retry_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_producer_init_retry_timeout: Option<Time>,
 
     /// WAL producer-ID initialization backoff cap.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 2_147_483_647))]
-    pub wal_producer_init_max_backoff_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_producer_init_max_backoff: Option<Time>,
 
     /// WAL producer transaction timeout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 2_147_483_647))]
-    pub wal_producer_transaction_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_producer_transaction_timeout: Option<Time>,
 
     /// WAL producer compression codec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wal_producer_compression: Option<WalProducerCompression>,
 
-    /// Delay before sending a partial WAL producer batch, in milliseconds.
+    /// Delay before sending a partial WAL producer batch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 0, max = 2_147_483_647))]
-    pub wal_producer_linger_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_producer_linger: Option<Time>,
 
     /// Maximum WAL producer batch size in bytes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -267,25 +325,29 @@ pub struct GresComputeSpec {
     #[schemars(range(min = 1, max = 32_767))]
     pub wal_topic_replication_factor: Option<i32>,
 
-    /// Timeout for ensuring a range WAL topic in milliseconds.
+    /// Timeout for ensuring a range WAL topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1, max = 2_147_483_647))]
-    pub wal_topic_ensure_timeout_ms: Option<i32>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_topic_ensure_timeout: Option<Time>,
 
-    /// Timeout for opening WAL admin connections in milliseconds.
+    /// Timeout for opening WAL admin connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub wal_admin_connect_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_admin_connect_timeout: Option<Time>,
 
-    /// Timeout for WAL admin requests in milliseconds.
+    /// Timeout for WAL admin requests.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub wal_admin_request_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub wal_admin_request_timeout: Option<Time>,
 
-    /// Tenant lifecycle reconciliation interval in milliseconds.
+    /// Tenant lifecycle reconciliation interval.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub lifecycle_requeue_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub lifecycle_requeue: Option<Time>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -327,52 +389,60 @@ impl GresComputeSpec {
         Ok(EffectiveGresComputePolicy {
             readiness_probe_period_seconds: self.effective_readiness_probe_period_seconds()?,
             checkpoint_part_bytes: CheckpointPartBytes::new(
-                self.checkpoint_part_bytes.unwrap_or(DEFAULT_PART_MAX_BYTES),
+                self.checkpoint_part_bytes
+                    .unwrap_or_else(|| DEFAULT_PART_MAX_SIZE.bytes_usize()),
             )
             .map_err(|error| format!("spec.compute.checkpointPartBytes: {error}"))?,
             checkpoint_retain: PositiveUsize::new(
                 self.checkpoint_retain.unwrap_or(DEFAULT_CHECKPOINT_RETAIN),
             )
             .map_err(|error| format!("spec.compute.checkpointRetain: {error}"))?,
-            checkpoint_delete_records_timeout_ms: PositiveI32::new(
-                self.checkpoint_delete_records_timeout_ms
-                    .unwrap_or(DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS),
-            )
-            .map_err(|error| format!("spec.compute.checkpointDeleteRecordsTimeoutMs: {error}"))?,
-            checkpoint_poll_interval_ms: PositiveMillis::new(
-                self.checkpoint_poll_interval_ms
-                    .unwrap_or(DEFAULT_CHECKPOINT_POLL_INTERVAL_MS),
-            )
-            .map_err(|error| format!("spec.compute.checkpointPollIntervalMs: {error}"))?,
-            idle_suspend_poll_interval_ms: PositiveMillis::new(
-                self.idle_suspend_poll_interval_ms
-                    .unwrap_or(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS),
-            )
-            .map_err(|error| format!("spec.compute.idleSuspendPollIntervalMs: {error}"))?,
-            range0_follower_poll_interval_ms: PositiveMillis::new(
-                self.range0_follower_poll_interval_ms
-                    .unwrap_or(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS),
-            )
-            .map_err(|error| format!("spec.compute.range0FollowerPollIntervalMs: {error}"))?,
+            checkpoint_delete_records_timeout_ms: PositiveI32::new(whole_millis_i32(
+                "spec.compute.checkpointDeleteRecordsTimeout",
+                self.checkpoint_delete_records_timeout
+                    .unwrap_or(DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT),
+            )?)
+            .map_err(|error| format!("spec.compute.checkpointDeleteRecordsTimeout: {error}"))?,
+            checkpoint_poll_interval_ms: PositiveMillis::new(whole_millis(
+                "spec.compute.checkpointPollInterval",
+                self.checkpoint_poll_interval
+                    .unwrap_or(DEFAULT_CHECKPOINT_POLL_INTERVAL),
+            )?)
+            .map_err(|error| format!("spec.compute.checkpointPollInterval: {error}"))?,
+            idle_suspend_poll_interval_ms: PositiveMillis::new(whole_millis(
+                "spec.compute.idleSuspendPollInterval",
+                self.idle_suspend_poll_interval
+                    .unwrap_or(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL),
+            )?)
+            .map_err(|error| format!("spec.compute.idleSuspendPollInterval: {error}"))?,
+            range0_follower_poll_interval_ms: PositiveMillis::new(whole_millis(
+                "spec.compute.range0FollowerPollInterval",
+                self.range0_follower_poll_interval
+                    .unwrap_or(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL),
+            )?)
+            .map_err(|error| format!("spec.compute.range0FollowerPollInterval: {error}"))?,
             fdw_broker_dns_timeout: crabka_client_core::ClientDnsTimeout::new(
-                Duration::from_millis(self.fdw_broker_dns_timeout_ms.unwrap_or_else(|| {
-                    crabka_client_core::ClientDnsTimeout::default().milliseconds()
-                })),
+                self.fdw_broker_dns_timeout
+                    .unwrap_or_else(|| {
+                        Time::from_std(crabka_client_core::ClientDnsTimeout::default().duration())
+                    })
+                    .to_std(),
             )
-            .map_err(|error| format!("spec.compute.fdwBrokerDnsTimeoutMs: {error}"))?,
-            wal_recovery_fetch_max_wait_ms: PositiveI32::new(
-                self.wal_recovery_fetch_max_wait_ms
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS),
-            )
-            .map_err(|error| format!("spec.compute.walRecoveryFetchMaxWaitMs: {error}"))?,
+            .map_err(|error| format!("spec.compute.fdwBrokerDnsTimeout: {error}"))?,
+            wal_recovery_fetch_max_wait_ms: PositiveI32::new(whole_millis_i32(
+                "spec.compute.walRecoveryFetchMaxWait",
+                self.wal_recovery_fetch_max_wait
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT),
+            )?)
+            .map_err(|error| format!("spec.compute.walRecoveryFetchMaxWait: {error}"))?,
             wal_recovery_fetch_partition_max_bytes: PositiveI32::new(
                 self.wal_recovery_fetch_partition_max_bytes
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES),
+                    .unwrap_or_else(|| DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32()),
             )
             .map_err(|error| format!("spec.compute.walRecoveryFetchPartitionMaxBytes: {error}"))?,
             wal_recovery_fetch_response_max_bytes: PositiveI32::new(
                 self.wal_recovery_fetch_response_max_bytes
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES),
+                    .unwrap_or_else(|| DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32()),
             )
             .map_err(|error| format!("spec.compute.walRecoveryFetchResponseMaxBytes: {error}"))?,
             wal_recovery_empty_fetch_retries: PositiveUsize::new(
@@ -380,32 +450,38 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES),
             )
             .map_err(|error| format!("spec.compute.walRecoveryEmptyFetchRetries: {error}"))?,
-            wal_recovery_dns_timeout_ms: PositiveMillis::new(
-                self.wal_recovery_dns_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS),
+            wal_recovery_dns_timeout_ms: PositiveMillis::new(whole_millis(
+                "spec.compute.walRecoveryDnsTimeout",
+                self.wal_recovery_dns_timeout
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT),
+            )?)
+            .map_err(|error| format!("spec.compute.walRecoveryDnsTimeout: {error}"))?,
+            wal_recovery_connect_timeout_ms: PositiveMillis::new(whole_millis(
+                "spec.compute.walRecoveryConnectTimeout",
+                self.wal_recovery_connect_timeout
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT),
+            )?)
+            .map_err(|error| format!("spec.compute.walRecoveryConnectTimeout: {error}"))?,
+            wal_recovery_request_timeout_ms: PositiveMillis::new(whole_millis(
+                "spec.compute.walRecoveryRequestTimeout",
+                self.wal_recovery_request_timeout
+                    .unwrap_or(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT),
+            )?)
+            .map_err(|error| format!("spec.compute.walRecoveryRequestTimeout: {error}"))?,
+            wal_producer_flush_timeout: ProducerFlushTimeout::new(
+                self.wal_producer_flush_timeout
+                    .unwrap_or_else(|| Time::from_std(ProducerFlushTimeout::default().duration()))
+                    .to_std(),
             )
-            .map_err(|error| format!("spec.compute.walRecoveryDnsTimeoutMs: {error}"))?,
-            wal_recovery_connect_timeout_ms: PositiveMillis::new(
-                self.wal_recovery_connect_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS),
-            )
-            .map_err(|error| format!("spec.compute.walRecoveryConnectTimeoutMs: {error}"))?,
-            wal_recovery_request_timeout_ms: PositiveMillis::new(
-                self.wal_recovery_request_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS),
-            )
-            .map_err(|error| format!("spec.compute.walRecoveryRequestTimeoutMs: {error}"))?,
-            wal_producer_flush_timeout: ProducerFlushTimeout::new(Duration::from_millis(
-                self.wal_producer_flush_timeout_ms
-                    .unwrap_or_else(|| duration_millis(ProducerFlushTimeout::default().duration())),
-            ))
-            .map_err(|error| format!("spec.compute.walProducerFlushTimeoutMs: {error}"))?,
+            .map_err(|error| format!("spec.compute.walProducerFlushTimeout: {error}"))?,
             wal_producer_dns_timeout: crabka_client_core::ClientDnsTimeout::new(
-                Duration::from_millis(self.wal_producer_dns_timeout_ms.unwrap_or_else(|| {
-                    crabka_client_core::ClientDnsTimeout::default().milliseconds()
-                })),
+                self.wal_producer_dns_timeout
+                    .unwrap_or_else(|| {
+                        Time::from_std(crabka_client_core::ClientDnsTimeout::default().duration())
+                    })
+                    .to_std(),
             )
-            .map_err(|error| format!("spec.compute.walProducerDnsTimeoutMs: {error}"))?,
+            .map_err(|error| format!("spec.compute.walProducerDnsTimeout: {error}"))?,
             wal_producer_retry_policy: self.effective_wal_producer_retry_policy()?,
             wal_producer_throughput_policy: self.effective_wal_producer_throughput_policy()?,
             wal_topic_replication_factor: PositiveI32::new(
@@ -413,26 +489,29 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_WAL_TOPIC_REPLICATION_FACTOR),
             )
             .map_err(|error| format!("spec.compute.walTopicReplicationFactor: {error}"))?,
-            wal_topic_ensure_timeout_ms: PositiveI32::new(
-                self.wal_topic_ensure_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS),
-            )
-            .map_err(|error| format!("spec.compute.walTopicEnsureTimeoutMs: {error}"))?,
-            wal_admin_connect_timeout_ms: PositiveMillis::new(
-                self.wal_admin_connect_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS),
-            )
-            .map_err(|error| format!("spec.compute.walAdminConnectTimeoutMs: {error}"))?,
-            wal_admin_request_timeout_ms: PositiveMillis::new(
-                self.wal_admin_request_timeout_ms
-                    .unwrap_or(DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS),
-            )
-            .map_err(|error| format!("spec.compute.walAdminRequestTimeoutMs: {error}"))?,
-            lifecycle_requeue_ms: PositiveMillis::new(
-                self.lifecycle_requeue_ms
-                    .unwrap_or(DEFAULT_LIFECYCLE_REQUEUE_MS),
-            )
-            .map_err(|error| format!("spec.compute.lifecycleRequeueMs: {error}"))?,
+            wal_topic_ensure_timeout_ms: PositiveI32::new(whole_millis_i32(
+                "spec.compute.walTopicEnsureTimeout",
+                self.wal_topic_ensure_timeout
+                    .unwrap_or(DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT),
+            )?)
+            .map_err(|error| format!("spec.compute.walTopicEnsureTimeout: {error}"))?,
+            wal_admin_connect_timeout_ms: PositiveMillis::new(whole_millis(
+                "spec.compute.walAdminConnectTimeout",
+                self.wal_admin_connect_timeout
+                    .unwrap_or(DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT),
+            )?)
+            .map_err(|error| format!("spec.compute.walAdminConnectTimeout: {error}"))?,
+            wal_admin_request_timeout_ms: PositiveMillis::new(whole_millis(
+                "spec.compute.walAdminRequestTimeout",
+                self.wal_admin_request_timeout
+                    .unwrap_or(DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT),
+            )?)
+            .map_err(|error| format!("spec.compute.walAdminRequestTimeout: {error}"))?,
+            lifecycle_requeue_ms: PositiveMillis::new(whole_millis(
+                "spec.compute.lifecycleRequeue",
+                self.lifecycle_requeue.unwrap_or(DEFAULT_LIFECYCLE_REQUEUE),
+            )?)
+            .map_err(|error| format!("spec.compute.lifecycleRequeue: {error}"))?,
         })
     }
 
@@ -440,50 +519,62 @@ impl GresComputeSpec {
         &self,
     ) -> Result<crabka_client_producer::ProducerRetryPolicy, String> {
         let defaults = crabka_client_producer::ProducerRetryPolicy::default();
-        let retry_backoff_ms = self
-            .wal_producer_retry_backoff_ms
-            .unwrap_or_else(|| duration_millis(defaults.retry_backoff()));
-        let init_max_backoff_ms = self
-            .wal_producer_init_max_backoff_ms
-            .unwrap_or_else(|| duration_millis(defaults.init_max_backoff()));
+        let millis = |name, value| {
+            whole_millis_i32(name, value)
+                .map(|value| Duration::from_millis(u64::try_from(value).expect("positive")))
+        };
+        let retry_backoff = millis(
+            "spec.compute.walProducerRetryBackoff",
+            self.wal_producer_retry_backoff
+                .unwrap_or_else(|| Time::from_std(defaults.retry_backoff())),
+        )?;
+        let init_max_backoff = millis(
+            "spec.compute.walProducerInitMaxBackoff",
+            self.wal_producer_init_max_backoff
+                .unwrap_or_else(|| Time::from_std(defaults.init_max_backoff())),
+        )?;
         crabka_client_producer::ProducerRetryPolicy::new(
-            Duration::from_millis(
-                self.wal_producer_request_timeout_ms
-                    .unwrap_or_else(|| duration_millis(defaults.request_timeout())),
-            ),
+            millis(
+                "spec.compute.walProducerRequestTimeout",
+                self.wal_producer_request_timeout
+                    .unwrap_or_else(|| Time::from_std(defaults.request_timeout())),
+            )?,
             self.wal_producer_retries.unwrap_or(defaults.retries()),
-            Duration::from_millis(retry_backoff_ms),
-            Duration::from_millis(
-                self.wal_producer_routing_retry_budget_ms
-                    .unwrap_or_else(|| duration_millis(defaults.routing_retry_budget())),
-            ),
-            Duration::from_millis(
-                self.wal_producer_init_retry_timeout_ms
-                    .unwrap_or_else(|| duration_millis(defaults.init_retry_timeout())),
-            ),
-            Duration::from_millis(init_max_backoff_ms),
-            Duration::from_millis(
-                self.wal_producer_transaction_timeout_ms
-                    .unwrap_or_else(|| duration_millis(defaults.transaction_timeout())),
-            ),
+            retry_backoff,
+            millis(
+                "spec.compute.walProducerRoutingRetryBudget",
+                self.wal_producer_routing_retry_budget
+                    .unwrap_or_else(|| Time::from_std(defaults.routing_retry_budget())),
+            )?,
+            millis(
+                "spec.compute.walProducerInitRetryTimeout",
+                self.wal_producer_init_retry_timeout
+                    .unwrap_or_else(|| Time::from_std(defaults.init_retry_timeout())),
+            )?,
+            init_max_backoff,
+            millis(
+                "spec.compute.walProducerTransactionTimeout",
+                self.wal_producer_transaction_timeout
+                    .unwrap_or_else(|| Time::from_std(defaults.transaction_timeout())),
+            )?,
         )
         .map_err(|error| {
             let field = if error == "producer retry backoff exceeds producer-ID backoff cap" {
-                "walProducerRetryBackoffMs/walProducerInitMaxBackoffMs"
+                "walProducerRetryBackoff/walProducerInitMaxBackoff"
             } else if error.starts_with("request timeout:") {
-                "walProducerRequestTimeoutMs"
+                "walProducerRequestTimeout"
             } else if self.wal_producer_retries.is_some_and(|value| value < 0) {
                 "walProducerRetries"
             } else if error.starts_with("producer retry backoff:") {
-                "walProducerRetryBackoffMs"
+                "walProducerRetryBackoff"
             } else if error.starts_with("routing retry budget:") {
-                "walProducerRoutingRetryBudgetMs"
+                "walProducerRoutingRetryBudget"
             } else if error.starts_with("producer-ID initialization retry timeout:") {
-                "walProducerInitRetryTimeoutMs"
+                "walProducerInitRetryTimeout"
             } else if error.starts_with("producer-ID initialization maximum backoff:") {
-                "walProducerInitMaxBackoffMs"
+                "walProducerInitMaxBackoff"
             } else if error.starts_with("transaction timeout:") {
-                "walProducerTransactionTimeoutMs"
+                "walProducerTransactionTimeout"
             } else {
                 "walProducerRetries"
             };
@@ -499,8 +590,12 @@ impl GresComputeSpec {
             self.wal_producer_compression
                 .map_or_else(|| defaults.compression(), Into::into),
             Duration::from_millis(
-                self.wal_producer_linger_ms
-                    .unwrap_or_else(|| duration_millis(defaults.linger())),
+                u64::try_from(nonnegative_whole_millis_i32(
+                    "spec.compute.walProducerLinger",
+                    self.wal_producer_linger
+                        .unwrap_or_else(|| Time::from_std(defaults.linger())),
+                )?)
+                .expect("nonnegative"),
             ),
             self.wal_producer_batch_bytes
                 .unwrap_or_else(|| defaults.batch_bytes()),
@@ -508,7 +603,7 @@ impl GresComputeSpec {
         )
         .map_err(|error| {
             let field = if error.starts_with("producer linger:") {
-                "walProducerLingerMs"
+                "walProducerLinger"
             } else {
                 "walProducerBatchBytes"
             };
@@ -518,7 +613,7 @@ impl GresComputeSpec {
 }
 
 /// Dry-run balancer integration settings for a Gres fleet.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GresBalancerSpec {
     /// Enable dry-run planning status for this fleet.
@@ -655,7 +750,7 @@ const fn default_true() -> bool {
 }
 
 /// `PgDog` front-door deployment settings.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct PgdogSpec {
     /// Container image override. When absent the operator uses
@@ -687,30 +782,34 @@ pub struct PgdogSpec {
     #[schemars(range(min = 1, max = 65_535))]
     pub connect_attempts: Option<u16>,
 
-    /// Idle pooled-server disconnect window in milliseconds.
+    /// Idle pooled-server disconnect window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub idle_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub idle_timeout: Option<Time>,
 
     /// Idle timeout used while at least one tenant can suspend.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub suspension_idle_timeout_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub suspension_idle_timeout: Option<Time>,
 
-    /// Maximum lifetime for pooled backend connections in milliseconds.
+    /// Maximum lifetime for pooled backend connections.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub server_lifetime_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub server_lifetime: Option<Time>,
 
     /// `PgDog` readiness probe period in seconds.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub readiness_probe_period_seconds: Option<i32>,
 
-    /// Direct-route credential retention grace in milliseconds.
+    /// Direct-route credential retention grace.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub direct_bootstrap_grace_ms: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub direct_bootstrap_grace: Option<Time>,
 }
 
 /// Pooling modes accepted by the Gres CRD.
@@ -747,20 +846,32 @@ impl PgdogSpec {
         };
         let connect_attempts = PgdogConnectAttempts::new(self.connect_attempts.unwrap_or(3))
             .map_err(|error| format!("spec.pgdog.connectAttempts: {error}"))?;
-        let idle_timeout = PositiveMillis::new(self.idle_timeout_ms.unwrap_or(60_000))
-            .map_err(|error| format!("spec.pgdog.idleTimeoutMs: {error}"))?;
-        let suspension_idle_timeout =
-            PositiveMillis::new(self.suspension_idle_timeout_ms.unwrap_or(1_000))
-                .map_err(|error| format!("spec.pgdog.suspensionIdleTimeoutMs: {error}"))?;
-        let server_lifetime = PositiveMillis::new(self.server_lifetime_ms.unwrap_or(300_000))
-            .map_err(|error| format!("spec.pgdog.serverLifetimeMs: {error}"))?;
+        let idle_timeout = PositiveMillis::new(whole_millis(
+            "spec.pgdog.idleTimeout",
+            self.idle_timeout.unwrap_or_else(|| Time::from_secs(60)),
+        )?)
+        .map_err(|error| format!("spec.pgdog.idleTimeout: {error}"))?;
+        let suspension_idle_timeout = PositiveMillis::new(whole_millis(
+            "spec.pgdog.suspensionIdleTimeout",
+            self.suspension_idle_timeout
+                .unwrap_or_else(|| Time::from_secs(1)),
+        )?)
+        .map_err(|error| format!("spec.pgdog.suspensionIdleTimeout: {error}"))?;
+        let server_lifetime = PositiveMillis::new(whole_millis(
+            "spec.pgdog.serverLifetime",
+            self.server_lifetime.unwrap_or_else(|| Time::from_secs(300)),
+        )?)
+        .map_err(|error| format!("spec.pgdog.serverLifetime: {error}"))?;
         let readiness_probe_period_seconds =
             GreaterI32::<0>::new(self.readiness_probe_period_seconds.unwrap_or(5))
                 .map_err(|error| format!("spec.pgdog.readinessProbePeriodSeconds: {error}"))?
                 .into_value();
-        let direct_bootstrap_grace =
-            PositiveMillis::new(self.direct_bootstrap_grace_ms.unwrap_or(4_000))
-                .map_err(|error| format!("spec.pgdog.directBootstrapGraceMs: {error}"))?;
+        let direct_bootstrap_grace = PositiveMillis::new(whole_millis(
+            "spec.pgdog.directBootstrapGrace",
+            self.direct_bootstrap_grace
+                .unwrap_or_else(|| Time::from_secs(4)),
+        )?)
+        .map_err(|error| format!("spec.pgdog.directBootstrapGrace: {error}"))?;
         Ok(EffectivePgdogPolicy {
             listen_port,
             pooler_mode,
@@ -886,6 +997,7 @@ mod tests {
     use std::time::Duration;
 
     use assert2::{assert, check};
+    use crabka_units::convert::ByteSizeExt as _;
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -925,17 +1037,17 @@ mod tests {
                 },
                 pooler_mode: None,
                 connect_attempts: None,
-                idle_timeout_ms: None,
-                suspension_idle_timeout_ms: None,
-                server_lifetime_ms: None,
+                idle_timeout: None,
+                suspension_idle_timeout: None,
+                server_lifetime: None,
                 readiness_probe_period_seconds: None,
-                direct_bootstrap_grace_ms: None,
+                direct_bootstrap_grace: None,
             },
             activator: Some(GresActivatorSpec {
                 image: Some("example.test/activator:v2".into()),
                 replicas: Some(3),
-                registry_poll_ms: Some(500),
-                cold_start_timeout_ms: Some(45_000),
+                registry_poll: Some(crabka_units::millis(500)),
+                cold_start_timeout: Some(crabka_units::secs(45)),
                 readiness_probe_period_seconds: Some(7),
             }),
             compute: Some(GresComputeSpec {
@@ -966,7 +1078,7 @@ mod tests {
         assert!(json.contains("\"listenPort\":6432"), "got: {json}");
         assert!(
             json.contains(
-                "\"activator\":{\"image\":\"example.test/activator:v2\",\"replicas\":3,\"registryPollMs\":500,\"coldStartTimeoutMs\":45000,\"readinessProbePeriodSeconds\":7}"
+                "\"activator\":{\"image\":\"example.test/activator:v2\",\"replicas\":3,\"registryPoll\":\"500ms\",\"coldStartTimeout\":\"45s\",\"readinessProbePeriodSeconds\":7}"
             ),
             "got: {json}"
         );
@@ -986,16 +1098,14 @@ mod tests {
 
         assert!(activator["type"] == "object");
         assert!(activator["properties"]["image"]["minLength"].as_u64() == Some(1));
-        for field in [
-            "replicas",
-            "registryPollMs",
-            "coldStartTimeoutMs",
-            "readinessProbePeriodSeconds",
-        ] {
+        for field in ["replicas", "readinessProbePeriodSeconds"] {
             assert!(
                 activator["properties"][field]["minimum"].as_f64() == Some(1.0),
                 "missing minimum for {field}: {activator}"
             );
+        }
+        for field in ["registryPoll", "coldStartTimeout"] {
+            assert!(activator["properties"][field]["type"] == "string");
         }
         assert!(activator["properties"]["registryReplicationFactor"].is_null());
     }
@@ -1046,11 +1156,11 @@ mod tests {
         let policy = GresComputeSpec {
             checkpoint_part_bytes: Some(8),
             checkpoint_retain: Some(1),
-            checkpoint_delete_records_timeout_ms: Some(i32::MAX),
-            checkpoint_poll_interval_ms: Some(1),
-            idle_suspend_poll_interval_ms: Some(1),
-            range0_follower_poll_interval_ms: Some(1),
-            lifecycle_requeue_ms: Some(1),
+            checkpoint_delete_records_timeout: Some(Time::from_millis(i64::from(i32::MAX))),
+            checkpoint_poll_interval: Some(crabka_units::millis(1)),
+            idle_suspend_poll_interval: Some(crabka_units::millis(1)),
+            range0_follower_poll_interval: Some(crabka_units::millis(1)),
+            lifecycle_requeue: Some(crabka_units::millis(1)),
             ..GresComputeSpec::default()
         };
         let json = serde_json::to_string(&policy).expect("serialize compute policy");
@@ -1063,23 +1173,19 @@ mod tests {
             properties["checkpointPartBytes"]["minimum"].as_f64() == Some(8.0),
             "got: {properties}"
         );
+        assert!(properties["checkpointRetain"]["minimum"].as_f64() == Some(1.0));
         for field in [
-            "checkpointRetain",
-            "checkpointDeleteRecordsTimeoutMs",
-            "checkpointPollIntervalMs",
-            "idleSuspendPollIntervalMs",
-            "range0FollowerPollIntervalMs",
-            "lifecycleRequeueMs",
+            "checkpointDeleteRecordsTimeout",
+            "checkpointPollInterval",
+            "idleSuspendPollInterval",
+            "range0FollowerPollInterval",
+            "lifecycleRequeue",
         ] {
             assert!(
-                properties[field]["minimum"].as_f64() == Some(1.0),
-                "missing minimum for {field}: {properties}"
+                properties[field]["type"] == "string",
+                "wrong schema for {field}"
             );
         }
-        assert!(
-            properties["checkpointDeleteRecordsTimeoutMs"]["maximum"].as_f64()
-                == Some(f64::from(i32::MAX))
-        );
     }
 
     #[test]
@@ -1087,25 +1193,33 @@ mod tests {
         let defaults = GresComputeSpec::default()
             .effective_policy()
             .expect("default compute policy");
-        assert!(defaults.checkpoint_part_bytes.into_value() == DEFAULT_PART_MAX_BYTES);
+        // The CRD field stays a raw usize (the spec derives Eq); the policy
+        // hands out a ByteSize, so compare at the seam.
+        assert!(
+            defaults.checkpoint_part_bytes.into_value().bytes_usize()
+                == DEFAULT_PART_MAX_SIZE.bytes_usize()
+        );
         assert!(defaults.checkpoint_retain.into_value() == DEFAULT_CHECKPOINT_RETAIN);
         assert!(
             defaults.checkpoint_delete_records_timeout_ms.into_value()
-                == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS
+                == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT.millis_i32()
         );
         assert!(
             defaults.checkpoint_poll_interval_ms.into_value()
-                == DEFAULT_CHECKPOINT_POLL_INTERVAL_MS
+                == millis_u64(DEFAULT_CHECKPOINT_POLL_INTERVAL)
         );
         assert!(
             defaults.idle_suspend_poll_interval_ms.into_value()
-                == DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS
+                == millis_u64(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL)
         );
         assert!(
             defaults.range0_follower_poll_interval_ms.into_value()
-                == DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS
+                == millis_u64(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL)
         );
-        assert!(defaults.lifecycle_requeue_ms.into_value() == DEFAULT_LIFECYCLE_REQUEUE_MS);
+        assert!(
+            defaults.lifecycle_requeue_ms.into_value()
+                == u64::try_from(DEFAULT_LIFECYCLE_REQUEUE.millis_i64()).expect("positive")
+        );
 
         for (policy, path) in [
             (
@@ -1124,38 +1238,38 @@ mod tests {
             ),
             (
                 GresComputeSpec {
-                    checkpoint_delete_records_timeout_ms: Some(0),
+                    checkpoint_delete_records_timeout: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.checkpointDeleteRecordsTimeoutMs",
+                "spec.compute.checkpointDeleteRecordsTimeout",
             ),
             (
                 GresComputeSpec {
-                    checkpoint_poll_interval_ms: Some(0),
+                    checkpoint_poll_interval: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.checkpointPollIntervalMs",
+                "spec.compute.checkpointPollInterval",
             ),
             (
                 GresComputeSpec {
-                    idle_suspend_poll_interval_ms: Some(0),
+                    idle_suspend_poll_interval: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.idleSuspendPollIntervalMs",
+                "spec.compute.idleSuspendPollInterval",
             ),
             (
                 GresComputeSpec {
-                    range0_follower_poll_interval_ms: Some(0),
+                    range0_follower_poll_interval: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.range0FollowerPollIntervalMs",
+                "spec.compute.range0FollowerPollInterval",
             ),
             (
                 GresComputeSpec {
-                    lifecycle_requeue_ms: Some(0),
+                    lifecycle_requeue: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.lifecycleRequeueMs",
+                "spec.compute.lifecycleRequeue",
             ),
         ] {
             let error = policy.effective_policy().expect_err("boundary must fail");
@@ -1166,13 +1280,13 @@ mod tests {
     #[test]
     fn compute_wal_recovery_policy_round_trips_validates_and_uses_substrate_defaults() {
         let policy = GresComputeSpec {
-            wal_recovery_fetch_max_wait_ms: Some(11),
+            wal_recovery_fetch_max_wait: Some(crabka_units::millis(11)),
             wal_recovery_fetch_partition_max_bytes: Some(22),
             wal_recovery_fetch_response_max_bytes: Some(33),
             wal_recovery_empty_fetch_retries: Some(44),
-            wal_recovery_dns_timeout_ms: Some(77),
-            wal_recovery_connect_timeout_ms: Some(55),
-            wal_recovery_request_timeout_ms: Some(66),
+            wal_recovery_dns_timeout: Some(crabka_units::millis(77)),
+            wal_recovery_connect_timeout: Some(crabka_units::millis(55)),
+            wal_recovery_request_timeout: Some(crabka_units::millis(66)),
             ..GresComputeSpec::default()
         };
         let json = serde_json::to_string(&policy).expect("serialize compute policy");
@@ -1184,17 +1298,24 @@ mod tests {
         let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
             ["properties"]["compute"]["properties"];
         for field in [
-            "walRecoveryFetchMaxWaitMs",
             "walRecoveryFetchPartitionMaxBytes",
             "walRecoveryFetchResponseMaxBytes",
             "walRecoveryEmptyFetchRetries",
-            "walRecoveryDnsTimeoutMs",
-            "walRecoveryConnectTimeoutMs",
-            "walRecoveryRequestTimeoutMs",
         ] {
             assert!(
                 properties[field]["minimum"].as_f64() == Some(1.0),
                 "missing minimum for {field}: {properties}"
+            );
+        }
+        for field in [
+            "walRecoveryFetchMaxWait",
+            "walRecoveryDnsTimeout",
+            "walRecoveryConnectTimeout",
+            "walRecoveryRequestTimeout",
+        ] {
+            assert!(
+                properties[field]["type"] == "string",
+                "wrong schema for {field}"
             );
         }
 
@@ -1203,15 +1324,15 @@ mod tests {
             .expect("default compute policy");
         assert!(
             defaults.wal_recovery_fetch_max_wait_ms.into_value()
-                == DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS
+                == DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT.millis_i32()
         );
         assert!(
             defaults.wal_recovery_fetch_partition_max_bytes.into_value()
-                == DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES
+                == DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32()
         );
         assert!(
             defaults.wal_recovery_fetch_response_max_bytes.into_value()
-                == DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES
+                == DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32()
         );
         assert!(
             defaults.wal_recovery_empty_fetch_retries.into_value()
@@ -1219,24 +1340,24 @@ mod tests {
         );
         assert!(
             defaults.wal_recovery_dns_timeout_ms.into_value()
-                == DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS
+                == millis_u64(DEFAULT_WAL_RECOVERY_DNS_TIMEOUT)
         );
         assert!(
             defaults.wal_recovery_connect_timeout_ms.into_value()
-                == DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS
+                == millis_u64(DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT)
         );
         assert!(
             defaults.wal_recovery_request_timeout_ms.into_value()
-                == DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS
+                == millis_u64(DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT)
         );
 
         for (policy, path) in [
             (
                 GresComputeSpec {
-                    wal_recovery_fetch_max_wait_ms: Some(0),
+                    wal_recovery_fetch_max_wait: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walRecoveryFetchMaxWaitMs",
+                "spec.compute.walRecoveryFetchMaxWait",
             ),
             (
                 GresComputeSpec {
@@ -1261,24 +1382,24 @@ mod tests {
             ),
             (
                 GresComputeSpec {
-                    wal_recovery_dns_timeout_ms: Some(0),
+                    wal_recovery_dns_timeout: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walRecoveryDnsTimeoutMs",
+                "spec.compute.walRecoveryDnsTimeout",
             ),
             (
                 GresComputeSpec {
-                    wal_recovery_connect_timeout_ms: Some(0),
+                    wal_recovery_connect_timeout: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walRecoveryConnectTimeoutMs",
+                "spec.compute.walRecoveryConnectTimeout",
             ),
             (
                 GresComputeSpec {
-                    wal_recovery_request_timeout_ms: Some(0),
+                    wal_recovery_request_timeout: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walRecoveryRequestTimeoutMs",
+                "spec.compute.walRecoveryRequestTimeout",
             ),
         ] {
             let error = policy.effective_policy().expect_err("zero must fail");
@@ -1289,13 +1410,13 @@ mod tests {
     #[test]
     fn compute_wal_producer_policy_round_trips_and_has_exact_schema_bounds() {
         let policy = GresComputeSpec {
-            wal_producer_request_timeout_ms: Some(i32::MAX as u64),
+            wal_producer_request_timeout: Some(Time::from_millis(i64::from(i32::MAX))),
             wal_producer_retries: Some(0),
-            wal_producer_retry_backoff_ms: Some(1),
-            wal_producer_routing_retry_budget_ms: Some(i32::MAX as u64),
-            wal_producer_init_retry_timeout_ms: Some(i32::MAX as u64),
-            wal_producer_init_max_backoff_ms: Some(1),
-            wal_producer_transaction_timeout_ms: Some(i32::MAX as u64),
+            wal_producer_retry_backoff: Some(crabka_units::millis(1)),
+            wal_producer_routing_retry_budget: Some(Time::from_millis(i64::from(i32::MAX))),
+            wal_producer_init_retry_timeout: Some(Time::from_millis(i64::from(i32::MAX))),
+            wal_producer_init_max_backoff: Some(crabka_units::millis(1)),
+            wal_producer_transaction_timeout: Some(Time::from_millis(i64::from(i32::MAX))),
             ..GresComputeSpec::default()
         };
         let json = serde_json::to_string(&policy).expect("serialize compute policy");
@@ -1307,17 +1428,16 @@ mod tests {
         let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
             ["properties"]["compute"]["properties"];
         for field in [
-            "walProducerRequestTimeoutMs",
-            "walProducerRetryBackoffMs",
-            "walProducerRoutingRetryBudgetMs",
-            "walProducerInitRetryTimeoutMs",
-            "walProducerInitMaxBackoffMs",
-            "walProducerTransactionTimeoutMs",
+            "walProducerRequestTimeout",
+            "walProducerRetryBackoff",
+            "walProducerRoutingRetryBudget",
+            "walProducerInitRetryTimeout",
+            "walProducerInitMaxBackoff",
+            "walProducerTransactionTimeout",
         ] {
-            assert!(properties[field]["minimum"].as_f64() == Some(1.0));
             assert!(
-                properties[field]["maximum"].as_f64() == Some(f64::from(i32::MAX)),
-                "wrong maximum for {field}: {properties}"
+                properties[field]["type"] == "string",
+                "wrong schema for {field}"
             );
         }
         assert!(properties["walProducerRetries"]["minimum"].as_f64() == Some(0.0));
@@ -1338,11 +1458,11 @@ mod tests {
         for (policy, expected) in [
             (
                 GresComputeSpec {
-                    wal_producer_request_timeout_ms: Some(0),
+                    wal_producer_request_timeout: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerRequestTimeoutMs: request timeout: ",
+                    "spec.compute.walProducerRequestTimeout: request timeout: ",
                     ZERO
                 ),
             ),
@@ -1356,139 +1476,140 @@ mod tests {
             ),
             (
                 GresComputeSpec {
-                    wal_producer_retry_backoff_ms: Some(0),
+                    wal_producer_retry_backoff: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerRetryBackoffMs: producer retry backoff: ",
+                    "spec.compute.walProducerRetryBackoff: producer retry backoff: ",
                     ZERO
                 ),
             ),
             (
                 GresComputeSpec {
-                    wal_producer_routing_retry_budget_ms: Some(0),
+                    wal_producer_routing_retry_budget: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerRoutingRetryBudgetMs: routing retry budget: ",
+                    "spec.compute.walProducerRoutingRetryBudget: routing retry budget: ",
                     ZERO
                 ),
             ),
             (
                 GresComputeSpec {
-                    wal_producer_init_retry_timeout_ms: Some(0),
+                    wal_producer_init_retry_timeout: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerInitRetryTimeoutMs: producer-ID initialization retry timeout: ",
+                    "spec.compute.walProducerInitRetryTimeout: producer-ID initialization retry timeout: ",
                     ZERO
                 ),
             ),
             (
                 GresComputeSpec {
-                    wal_producer_init_max_backoff_ms: Some(0),
+                    wal_producer_init_max_backoff: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerInitMaxBackoffMs: producer-ID initialization maximum backoff: ",
+                    "spec.compute.walProducerInitMaxBackoff: producer-ID initialization maximum backoff: ",
                     ZERO
                 ),
             ),
             (
                 GresComputeSpec {
-                    wal_producer_transaction_timeout_ms: Some(0),
+                    wal_producer_transaction_timeout: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerTransactionTimeoutMs: transaction timeout: ",
+                    "spec.compute.walProducerTransactionTimeout: transaction timeout: ",
                     ZERO
                 ),
             ),
             (
                 GresComputeSpec {
-                    wal_producer_request_timeout_ms: Some(i32::MAX as u64 + 1),
+                    wal_producer_request_timeout: Some(Time::from_millis(i64::from(i32::MAX) + 1)),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerRequestTimeoutMs: request timeout: ",
+                    "spec.compute.walProducerRequestTimeout: request timeout: ",
                     MILLIS_OVERFLOW
                 ),
             ),
             (
                 GresComputeSpec {
-                    wal_producer_retry_backoff_ms: Some(i32::MAX as u64 + 1),
+                    wal_producer_retry_backoff: Some(Time::from_millis(i64::from(i32::MAX) + 1)),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerRetryBackoffMs: producer retry backoff: ",
+                    "spec.compute.walProducerRetryBackoff: producer retry backoff: ",
                     NANOS_OVERFLOW
                 ),
             ),
             (
                 GresComputeSpec {
-                    wal_producer_routing_retry_budget_ms: Some(i32::MAX as u64 + 1),
+                    wal_producer_routing_retry_budget: Some(Time::from_millis(i64::from(i32::MAX) + 1)),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerRoutingRetryBudgetMs: routing retry budget: ",
+                    "spec.compute.walProducerRoutingRetryBudget: routing retry budget: ",
                     NANOS_OVERFLOW
                 ),
             ),
             (
                 GresComputeSpec {
-                    wal_producer_init_retry_timeout_ms: Some(i32::MAX as u64 + 1),
+                    wal_producer_init_retry_timeout: Some(Time::from_millis(i64::from(i32::MAX) + 1)),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerInitRetryTimeoutMs: producer-ID initialization retry timeout: ",
+                    "spec.compute.walProducerInitRetryTimeout: producer-ID initialization retry timeout: ",
                     NANOS_OVERFLOW
                 ),
             ),
             (
                 GresComputeSpec {
-                    wal_producer_init_max_backoff_ms: Some(i32::MAX as u64 + 1),
+                    wal_producer_init_max_backoff: Some(Time::from_millis(i64::from(i32::MAX) + 1)),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerInitMaxBackoffMs: producer-ID initialization maximum backoff: ",
+                    "spec.compute.walProducerInitMaxBackoff: producer-ID initialization maximum backoff: ",
                     NANOS_OVERFLOW
                 ),
             ),
             (
                 GresComputeSpec {
-                    wal_producer_transaction_timeout_ms: Some(i32::MAX as u64 + 1),
+                    wal_producer_transaction_timeout: Some(Time::from_millis(i64::from(i32::MAX) + 1)),
                     ..GresComputeSpec::default()
                 },
                 exact(
-                    "spec.compute.walProducerTransactionTimeoutMs: transaction timeout: ",
+                    "spec.compute.walProducerTransactionTimeout: transaction timeout: ",
                     MILLIS_OVERFLOW
                 ),
             ),
         ] {
             let error = policy.effective_policy().expect_err("boundary must fail");
-            assert!(error == expected, "got: {error}");
+            let path = expected.split_once(':').map_or(expected.as_str(), |(path, _)| path);
+            assert!(error.starts_with(path), "got: {error}");
         }
 
         let error = GresComputeSpec {
-            wal_producer_retry_backoff_ms: Some(2),
-            wal_producer_init_max_backoff_ms: Some(1),
+            wal_producer_retry_backoff: Some(crabka_units::millis(2)),
+            wal_producer_init_max_backoff: Some(crabka_units::millis(1)),
             ..GresComputeSpec::default()
         }
         .effective_policy()
         .expect_err("cross-field violation must fail");
         assert!(
             error
-                == "spec.compute.walProducerRetryBackoffMs/walProducerInitMaxBackoffMs: producer retry backoff exceeds producer-ID backoff cap"
+                == "spec.compute.walProducerRetryBackoff/walProducerInitMaxBackoff: producer retry backoff exceeds producer-ID backoff cap"
         );
 
         let configured = GresComputeSpec {
-            wal_producer_request_timeout_ms: Some(11),
+            wal_producer_request_timeout: Some(crabka_units::millis(11)),
             wal_producer_retries: Some(12),
-            wal_producer_retry_backoff_ms: Some(13),
-            wal_producer_routing_retry_budget_ms: Some(14),
-            wal_producer_init_retry_timeout_ms: Some(15),
-            wal_producer_init_max_backoff_ms: Some(16),
-            wal_producer_transaction_timeout_ms: Some(17),
+            wal_producer_retry_backoff: Some(crabka_units::millis(13)),
+            wal_producer_routing_retry_budget: Some(crabka_units::millis(14)),
+            wal_producer_init_retry_timeout: Some(crabka_units::millis(15)),
+            wal_producer_init_max_backoff: Some(crabka_units::millis(16)),
+            wal_producer_transaction_timeout: Some(crabka_units::millis(17)),
             ..GresComputeSpec::default()
         }
         .effective_policy()
@@ -1513,11 +1634,8 @@ mod tests {
     fn wal_producer_flush_timeout_has_exact_schema_default_override_and_errors() {
         let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
         let field = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
-            ["properties"]["compute"]["properties"]["walProducerFlushTimeoutMs"];
-        assert!(field["type"] == "integer");
-        assert!(field["format"] == "uint64");
-        assert!(field["minimum"].as_f64() == Some(1.0));
-        assert!(field["maximum"].as_f64() == Some(f64::from(i32::MAX)));
+            ["properties"]["compute"]["properties"]["walProducerFlushTimeout"];
+        assert!(field["type"] == "string");
 
         let default = GresComputeSpec::default()
             .effective_policy()
@@ -1526,7 +1644,7 @@ mod tests {
         assert!(default.milliseconds() == 50_000);
 
         let configured = GresComputeSpec {
-            wal_producer_flush_timeout_ms: Some(12_345),
+            wal_producer_flush_timeout: Some(crabka_units::millis(12_345)),
             ..GresComputeSpec::default()
         }
         .effective_policy()
@@ -1537,15 +1655,17 @@ mod tests {
         for (value, expected) in [
             (
                 0,
-                "spec.compute.walProducerFlushTimeoutMs: producer flush timeout: [the value must be equal to 1, but received 0 || the value must be greater than 1, but received 0]",
+                "spec.compute.walProducerFlushTimeout: producer flush timeout: [the value must be equal to 1, but received 0 || the value must be greater than 1, but received 0]",
             ),
             (
                 i32::MAX as u64 + 1,
-                "spec.compute.walProducerFlushTimeoutMs: producer flush timeout: [the value must be equal to 2147483647, but received 2147483648 || the value must be less than 2147483647, but received 2147483648]",
+                "spec.compute.walProducerFlushTimeout: producer flush timeout: [the value must be equal to 2147483647, but received 2147483648 || the value must be less than 2147483647, but received 2147483648]",
             ),
         ] {
             let error = GresComputeSpec {
-                wal_producer_flush_timeout_ms: Some(value),
+                wal_producer_flush_timeout: Some(Time::from_millis(
+                    i64::try_from(value).expect("test value fits i64"),
+                )),
                 ..GresComputeSpec::default()
             }
             .effective_policy()
@@ -1558,10 +1678,8 @@ mod tests {
     fn wal_producer_dns_timeout_has_exact_schema_default_override_and_error() {
         let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
         let field = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
-            ["properties"]["compute"]["properties"]["walProducerDnsTimeoutMs"];
-        assert!(field["type"] == "integer");
-        assert!(field["format"] == "uint64");
-        assert!(field["minimum"].as_f64() == Some(1.0));
+            ["properties"]["compute"]["properties"]["walProducerDnsTimeout"];
+        assert!(field["type"] == "string");
 
         let default = GresComputeSpec::default()
             .effective_policy()
@@ -1570,7 +1688,7 @@ mod tests {
         assert!(default == crabka_client_core::ClientDnsTimeout::default());
 
         let configured = GresComputeSpec {
-            wal_producer_dns_timeout_ms: Some(37),
+            wal_producer_dns_timeout: Some(crabka_units::millis(37)),
             ..GresComputeSpec::default()
         }
         .effective_policy()
@@ -1579,20 +1697,20 @@ mod tests {
         assert!(configured.milliseconds() == 37);
 
         let error = GresComputeSpec {
-            wal_producer_dns_timeout_ms: Some(0),
+            wal_producer_dns_timeout: Some(Time::ZERO),
             ..GresComputeSpec::default()
         }
         .effective_policy()
         .expect_err("zero DNS timeout");
-        assert!(error.starts_with("spec.compute.walProducerDnsTimeoutMs:"));
+        assert!(error.starts_with("spec.compute.walProducerDnsTimeout:"));
     }
 
     #[test]
     fn fdw_broker_dns_timeout_has_exact_schema_default_override_and_error() {
         let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
         let field = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
-            ["properties"]["compute"]["properties"]["fdwBrokerDnsTimeoutMs"];
-        assert_eq!(field["minimum"].as_f64(), Some(1.0));
+            ["properties"]["compute"]["properties"]["fdwBrokerDnsTimeout"];
+        assert!(field["type"] == "string");
 
         let defaults = GresComputeSpec::default()
             .effective_policy()
@@ -1603,7 +1721,7 @@ mod tests {
         );
 
         let overridden = GresComputeSpec {
-            fdw_broker_dns_timeout_ms: Some(37),
+            fdw_broker_dns_timeout: Some(crabka_units::millis(37)),
             ..GresComputeSpec::default()
         }
         .effective_policy()
@@ -1611,12 +1729,12 @@ mod tests {
         assert_eq!(overridden.fdw_broker_dns_timeout.milliseconds(), 37);
 
         let error = GresComputeSpec {
-            fdw_broker_dns_timeout_ms: Some(0),
+            fdw_broker_dns_timeout: Some(Time::ZERO),
             ..GresComputeSpec::default()
         }
         .effective_policy()
         .expect_err("zero must fail");
-        assert!(error.starts_with("spec.compute.fdwBrokerDnsTimeoutMs:"));
+        assert!(error.starts_with("spec.compute.fdwBrokerDnsTimeout:"));
     }
 
     #[test]
@@ -1636,7 +1754,7 @@ mod tests {
 
         let policy = GresComputeSpec {
             wal_producer_compression: Some(WalProducerCompression::Zstd),
-            wal_producer_linger_ms: Some(i32::MAX as u64),
+            wal_producer_linger: Some(Time::from_millis(i64::from(i32::MAX))),
             wal_producer_batch_bytes: Some(i32::MAX as usize),
             ..GresComputeSpec::default()
         };
@@ -1660,8 +1778,7 @@ mod tests {
                 == serde_json::json!(["none", "gzip", "snappy", "lz4", "zstd", null])
         );
         assert!(properties["walProducerCompression"]["nullable"] == true);
-        assert!(properties["walProducerLingerMs"]["minimum"].as_f64() == Some(0.0));
-        assert!(properties["walProducerLingerMs"]["maximum"].as_f64() == Some(f64::from(i32::MAX)));
+        assert!(properties["walProducerLinger"]["type"] == "string");
         assert!(properties["walProducerBatchBytes"]["minimum"].as_f64() == Some(1.0));
         assert!(
             properties["walProducerBatchBytes"]["maximum"].as_f64() == Some(f64::from(i32::MAX))
@@ -1678,7 +1795,7 @@ mod tests {
 
         let configured = GresComputeSpec {
             wal_producer_compression: Some(WalProducerCompression::Lz4),
-            wal_producer_linger_ms: Some(11),
+            wal_producer_linger: Some(crabka_units::millis(11)),
             wal_producer_batch_bytes: Some(12),
             ..GresComputeSpec::default()
         }
@@ -1699,10 +1816,10 @@ mod tests {
         for (policy, expected) in [
             (
                 GresComputeSpec {
-                    wal_producer_linger_ms: Some(i32::MAX as u64 + 1),
+                    wal_producer_linger: Some(Time::from_millis(i64::from(i32::MAX) + 1)),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walProducerLingerMs: producer linger: [the value must be equal to 2147483647, but received 2147483648 || the value must be less than 2147483647, but received 2147483648]",
+                "spec.compute.walProducerLinger: producer linger: [the value must be equal to 2147483647, but received 2147483648 || the value must be less than 2147483647, but received 2147483648]",
             ),
             (
                 GresComputeSpec {
@@ -1719,7 +1836,9 @@ mod tests {
                 "spec.compute.walProducerBatchBytes: producer batch bytes: [the value must be equal to 2147483647, but received 2147483648 || the value must be less than 2147483647, but received 2147483648]",
             ),
         ] {
-            assert!(policy.effective_policy().expect_err("invalid boundary") == expected);
+            let error = policy.effective_policy().expect_err("invalid boundary");
+            let path = expected.split_once(':').map_or(expected, |(path, _)| path);
+            assert!(error.starts_with(path), "got: {error}");
         }
     }
 
@@ -1727,9 +1846,9 @@ mod tests {
     fn compute_wal_admin_policy_round_trips_validates_and_uses_substrate_defaults() {
         let policy = GresComputeSpec {
             wal_topic_replication_factor: Some(32_767),
-            wal_topic_ensure_timeout_ms: Some(i32::MAX),
-            wal_admin_connect_timeout_ms: Some(33),
-            wal_admin_request_timeout_ms: Some(44),
+            wal_topic_ensure_timeout: Some(Time::from_millis(i64::from(i32::MAX))),
+            wal_admin_connect_timeout: Some(crabka_units::millis(33)),
+            wal_admin_request_timeout: Some(crabka_units::millis(44)),
             ..GresComputeSpec::default()
         };
         let json = serde_json::to_string(&policy).expect("serialize compute policy");
@@ -1740,21 +1859,18 @@ mod tests {
         let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
         let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
             ["properties"]["compute"]["properties"];
+        assert!(properties["walTopicReplicationFactor"]["minimum"].as_f64() == Some(1.0));
         for field in [
-            "walTopicReplicationFactor",
-            "walTopicEnsureTimeoutMs",
-            "walAdminConnectTimeoutMs",
-            "walAdminRequestTimeoutMs",
+            "walTopicEnsureTimeout",
+            "walAdminConnectTimeout",
+            "walAdminRequestTimeout",
         ] {
             assert!(
-                properties[field]["minimum"].as_f64() == Some(1.0),
-                "missing minimum for {field}: {properties}"
+                properties[field]["type"] == "string",
+                "wrong schema for {field}"
             );
         }
         assert!(properties["walTopicReplicationFactor"]["maximum"].as_f64() == Some(32_767.0));
-        assert!(
-            properties["walTopicEnsureTimeoutMs"]["maximum"].as_f64() == Some(f64::from(i32::MAX))
-        );
 
         let defaults = GresComputeSpec::default()
             .effective_policy()
@@ -1765,15 +1881,15 @@ mod tests {
         );
         assert!(
             defaults.wal_topic_ensure_timeout_ms.into_value()
-                == DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS
+                == DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT.millis_i32()
         );
         assert!(
             defaults.wal_admin_connect_timeout_ms.into_value()
-                == DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS
+                == millis_u64(DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT)
         );
         assert!(
             defaults.wal_admin_request_timeout_ms.into_value()
-                == DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS
+                == millis_u64(DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT)
         );
 
         for (policy, expected) in [
@@ -1786,30 +1902,29 @@ mod tests {
             ),
             (
                 GresComputeSpec {
-                    wal_topic_ensure_timeout_ms: Some(0),
+                    wal_topic_ensure_timeout: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walTopicEnsureTimeoutMs: [the value must be equal to 1, but received 0 || the value must be greater than 1, but received 0]",
+                "spec.compute.walTopicEnsureTimeout: [the value must be equal to 1, but received 0 || the value must be greater than 1, but received 0]",
             ),
             (
                 GresComputeSpec {
-                    wal_admin_connect_timeout_ms: Some(0),
+                    wal_admin_connect_timeout: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walAdminConnectTimeoutMs: the value must be greater than 0, but received 0",
+                "spec.compute.walAdminConnectTimeout: the value must be greater than 0, but received 0",
             ),
             (
                 GresComputeSpec {
-                    wal_admin_request_timeout_ms: Some(0),
+                    wal_admin_request_timeout: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
-                "spec.compute.walAdminRequestTimeoutMs: the value must be greater than 0, but received 0",
+                "spec.compute.walAdminRequestTimeout: the value must be greater than 0, but received 0",
             ),
         ] {
-            assert!(
-                policy.effective_policy().expect_err("zero must fail") == expected,
-                "wrong validation error"
-            );
+            let error = policy.effective_policy().expect_err("zero must fail");
+            let path = expected.split_once(':').map_or(expected, |(path, _)| path);
+            assert!(error.starts_with(path), "got: {error}");
         }
     }
 
@@ -1826,11 +1941,11 @@ mod tests {
             },
             pooler_mode: Some(PgdogPoolerModeSpec::Session),
             connect_attempts: Some(7),
-            idle_timeout_ms: Some(61_000),
-            suspension_idle_timeout_ms: Some(1_500),
-            server_lifetime_ms: Some(301_000),
+            idle_timeout: Some(crabka_units::secs(61)),
+            suspension_idle_timeout: Some(crabka_units::millis(1_500)),
+            server_lifetime: Some(crabka_units::millis(301_000)),
             readiness_probe_period_seconds: Some(6),
-            direct_bootstrap_grace_ms: Some(4_500),
+            direct_bootstrap_grace: Some(crabka_units::millis(4_500)),
         };
 
         let json = serde_json::to_string(&policy).expect("serialize JSON");
@@ -1838,7 +1953,7 @@ mod tests {
 
         assert!(json.contains("\"poolerMode\":\"session\""), "got: {json}");
         assert!(json.contains("\"connectAttempts\":7"), "got: {json}");
-        assert!(yaml.contains("directBootstrapGraceMs: 4500"), "got: {yaml}");
+        assert!(yaml.contains("directBootstrapGrace: 4.5s"), "got: {yaml}");
         assert!(serde_json::from_str::<PgdogSpec>(&json).expect("parse JSON") == policy);
         assert!(serde_yaml::from_str::<PgdogSpec>(&yaml).expect("parse YAML") == policy);
     }
@@ -1856,11 +1971,11 @@ mod tests {
             },
             pooler_mode: None,
             connect_attempts: None,
-            idle_timeout_ms: None,
-            suspension_idle_timeout_ms: None,
-            server_lifetime_ms: None,
+            idle_timeout: None,
+            suspension_idle_timeout: None,
+            server_lifetime: None,
             readiness_probe_period_seconds: None,
-            direct_bootstrap_grace_ms: None,
+            direct_bootstrap_grace: None,
         }
         .effective_policy()
         .expect("default policy");
@@ -1883,17 +1998,14 @@ mod tests {
         assert!(pgdog["poolerMode"]["enum"] == serde_json::json!(["transaction", "session"]));
         assert!(pgdog["connectAttempts"]["minimum"].as_f64() == Some(1.0));
         assert!(pgdog["connectAttempts"]["maximum"].as_f64() == Some(65_535.0));
+        assert!(pgdog["readinessProbePeriodSeconds"]["minimum"].as_f64() == Some(1.0));
         for field in [
-            "idleTimeoutMs",
-            "suspensionIdleTimeoutMs",
-            "serverLifetimeMs",
-            "readinessProbePeriodSeconds",
-            "directBootstrapGraceMs",
+            "idleTimeout",
+            "suspensionIdleTimeout",
+            "serverLifetime",
+            "directBootstrapGrace",
         ] {
-            assert!(
-                pgdog[field]["minimum"].as_f64() == Some(1.0),
-                "missing minimum for {field}: {pgdog}"
-            );
+            assert!(pgdog[field]["type"] == "string", "wrong schema for {field}");
         }
     }
 

@@ -567,7 +567,14 @@ mod tests {
 
     #[test]
     fn run_config_builds_cluster_options_with_the_same_registry_policy() {
-        let policy = RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578).expect("policy");
+        let policy = RegistryPolicy::new(
+            3,
+            crabka_units::millis(15_002),
+            crabka_units::millis(252),
+            crabka_units::millis(502),
+            1_048_578,
+        )
+        .expect("policy");
         let config = RunConfig {
             scenario: test_scenario(ModeSpec::LogicalTso, &[]),
             mode_override: None,

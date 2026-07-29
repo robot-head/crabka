@@ -593,36 +593,28 @@ spec:
                 description: Shared creation and reader policy for the Gres tenant registry topic.
                 nullable: true
                 properties:
-                  fetchMaxWaitMs:
+                  fetchMaxWait:
                     description: Maximum time a registry fetch waits for data.
-                    format: int32
-                    minimum: 1.0
                     nullable: true
-                    type: integer
+                    type: string
                   fetchPartitionMaxBytes:
                     description: Maximum bytes fetched from the registry partition.
                     format: int32
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  producerDnsTimeoutMs:
+                  producerDnsTimeout:
                     description: DNS lookup deadline for the registry producer.
-                    format: uint64
-                    minimum: 1.0
                     nullable: true
-                    type: integer
-                  readerAdminDnsTimeoutMs:
+                    type: string
+                  readerAdminDnsTimeout:
                     description: DNS lookup deadline for registry reader and admin paths.
-                    format: uint64
-                    minimum: 1.0
                     nullable: true
-                    type: integer
-                  readerRetryBackoffMs:
-                    description: Registry reader retry delay in milliseconds.
-                    format: uint64
-                    minimum: 1.0
+                    type: string
+                  readerRetryBackoff:
+                    description: Registry reader retry delay.
                     nullable: true
-                    type: integer
+                    type: string
                   replicationFactor:
                     description: Registry topic replication factor.
                     format: int32
@@ -630,12 +622,10 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  topicCreateTimeoutMs:
-                    description: Kafka topic creation timeout in milliseconds.
-                    format: int32
-                    minimum: 1.0
+                  topicCreateTimeout:
+                    description: Kafka topic creation timeout.
                     nullable: true
-                    type: integer
+                    type: string
                 type: object
               interBrokerKerberos:
                 description: |-

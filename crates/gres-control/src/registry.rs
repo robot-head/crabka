@@ -1,21 +1,28 @@
 //! Registry store abstractions and Kafka-backed registry client.
 
+#[cfg(test)]
+use std::time::Duration;
 use std::{
     collections::BTreeMap,
     net::SocketAddr,
     str::FromStr,
     sync::{Arc, Mutex as StdMutex, RwLock},
-    time::Duration,
 };
 
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_core::{
-    ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-    IsolatedFetch, fetch_partition_with_isolation_progress,
+    ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX, IsolatedFetch,
+    fetch_partition_with_isolation_progress,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, Transaction};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+#[cfg(test)]
+use crabka_units::millis;
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use refined_type::rule::{GreaterU64, MinMaxI32};
 use tokio::sync::{Mutex, watch};
 
@@ -136,13 +143,15 @@ impl FromStr for PositiveMillis {
 }
 
 /// Shared creation and reader policy for the Gres tenant registry topic.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Not `Eq`: the timeout and size fields are `f64`-backed quantities.
+#[derive(Clone, Debug, PartialEq)]
 pub struct RegistryPolicy {
     replication_factor: i32,
-    topic_create_timeout_ms: i32,
-    reader_retry_backoff: Duration,
-    fetch_max_wait_ms: i32,
-    fetch_partition_max_bytes: i32,
+    topic_create_timeout: Time,
+    reader_retry_backoff: Time,
+    fetch_max_wait: Time,
+    fetch_partition_max: ByteSize,
     producer_dns_timeout: ClientDnsTimeout,
     reader_admin_dns_timeout: ClientDnsTimeout,
 }
@@ -155,19 +164,19 @@ impl RegistryPolicy {
     /// Returns an error when any value is outside its supported range.
     pub fn new(
         replication_factor: i32,
-        topic_create_timeout_ms: i32,
-        reader_retry_backoff_ms: u64,
-        fetch_max_wait_ms: i32,
+        topic_create_timeout: Time,
+        reader_retry_backoff: Time,
+        fetch_max_wait: Time,
         fetch_partition_max_bytes: i32,
     ) -> Result<Self, String> {
         Ok(Self {
             replication_factor: RegistryReplicationFactor::new(replication_factor)?.into_value(),
-            topic_create_timeout_ms: PositiveI32::new(topic_create_timeout_ms)?.into_value(),
-            reader_retry_backoff: Duration::from_millis(
-                PositiveMillis::new(reader_retry_backoff_ms)?.into_value(),
-            ),
-            fetch_max_wait_ms: PositiveI32::new(fetch_max_wait_ms)?.into_value(),
-            fetch_partition_max_bytes: PositiveI32::new(fetch_partition_max_bytes)?.into_value(),
+            topic_create_timeout: whole_millis_i32("topic_create_timeout", topic_create_timeout)?,
+            reader_retry_backoff: whole_millis_i64("reader_retry_backoff", reader_retry_backoff)?,
+            fetch_max_wait: whole_millis_i32("fetch_max_wait", fetch_max_wait)?,
+            fetch_partition_max: ByteSize::from_bytes_i64(i64::from(
+                PositiveI32::new(fetch_partition_max_bytes)?.into_value(),
+            )),
             producer_dns_timeout: ClientDnsTimeout::default(),
             reader_admin_dns_timeout: ClientDnsTimeout::default(),
         })
@@ -181,26 +190,26 @@ impl RegistryPolicy {
 
     /// Kafka topic-creation timeout.
     #[must_use]
-    pub const fn topic_create_timeout_ms(&self) -> i32 {
-        self.topic_create_timeout_ms
+    pub const fn topic_create_timeout(&self) -> Time {
+        self.topic_create_timeout
     }
 
     /// Delay after a registry reader failure.
     #[must_use]
-    pub const fn reader_retry_backoff(&self) -> Duration {
+    pub const fn reader_retry_backoff(&self) -> Time {
         self.reader_retry_backoff
     }
 
     /// Maximum time a registry fetch waits for data.
     #[must_use]
-    pub const fn fetch_max_wait_ms(&self) -> i32 {
-        self.fetch_max_wait_ms
+    pub const fn fetch_max_wait(&self) -> Time {
+        self.fetch_max_wait
     }
 
     /// Maximum bytes fetched from the registry partition.
     #[must_use]
-    pub const fn fetch_partition_max_bytes(&self) -> i32 {
-        self.fetch_partition_max_bytes
+    pub const fn fetch_partition_max(&self) -> ByteSize {
+        self.fetch_partition_max
     }
 
     /// DNS lookup deadline used by the registry producer.
@@ -213,10 +222,11 @@ impl RegistryPolicy {
     ///
     /// # Errors
     ///
-    /// Returns an error when `milliseconds` is zero.
+    /// Returns an error when the timeout is not a positive whole millisecond.
     #[must_use = "the validated policy must be used"]
-    pub fn with_producer_dns_timeout_ms(mut self, milliseconds: u64) -> Result<Self, String> {
-        self.producer_dns_timeout = ClientDnsTimeout::new(Duration::from_millis(milliseconds))?;
+    pub fn with_producer_dns_timeout(mut self, timeout: Time) -> Result<Self, String> {
+        self.producer_dns_timeout =
+            ClientDnsTimeout::new(whole_millis_i64("producer_dns_timeout", timeout)?.to_std())?;
         Ok(self)
     }
 
@@ -230,18 +240,48 @@ impl RegistryPolicy {
     ///
     /// # Errors
     ///
-    /// Returns an error when `milliseconds` is zero.
+    /// Returns an error when the timeout is not a positive whole millisecond.
     #[must_use = "the validated policy must be used"]
-    pub fn with_reader_admin_dns_timeout_ms(mut self, milliseconds: u64) -> Result<Self, String> {
-        self.reader_admin_dns_timeout = ClientDnsTimeout::new(Duration::from_millis(milliseconds))?;
+    pub fn with_reader_admin_dns_timeout(mut self, timeout: Time) -> Result<Self, String> {
+        self.reader_admin_dns_timeout =
+            ClientDnsTimeout::new(whole_millis_i64("reader_admin_dns_timeout", timeout)?.to_std())?;
         Ok(self)
     }
 }
 
 impl Default for RegistryPolicy {
     fn default() -> Self {
-        Self::new(1, 15_000, 250, 500, 1_048_576).expect("default registry policy is valid")
+        Self::new(
+            1,
+            crabka_units::secs(15),
+            crabka_units::millis(250),
+            crabka_units::millis(500),
+            1_048_576,
+        )
+        .expect("default registry policy is valid")
     }
+}
+
+fn whole_millis_i64(name: &str, value: Time) -> Result<Time, String> {
+    let millis = value.millis_i64();
+    if value.secs_f64().is_finite() && millis > 0 && Time::from_millis(millis) == value {
+        Ok(value)
+    } else {
+        Err(format!(
+            "{name} must be a positive whole number of milliseconds"
+        ))
+    }
+}
+
+fn whole_millis_i32(name: &str, value: Time) -> Result<Time, String> {
+    let value = whole_millis_i64(name, value)?;
+    PositiveI32::new(
+        value
+            .millis_i64()
+            .try_into()
+            .map_err(|error: std::num::TryFromIntError| format!("{name}: {error}"))?,
+    )?;
+    Ok(value)
 }
 
 /// Pure tenant-registry store seam for operator and CLI code.
@@ -1617,8 +1657,8 @@ async fn ensure_compacted_single_partition_topic(
     let mut admin =
         AdminClient::connect_with_dns_timeout(&bootstrap_addrs, policy.reader_admin_dns_timeout())
             .await?;
-    let (spec, timeout_ms) = compacted_topic_request(topic, replicas, policy);
-    let outcomes = admin.create_topics(&[spec], timeout_ms).await?;
+    let (spec, timeout) = compacted_topic_request(topic, replicas, policy);
+    let outcomes = admin.create_topics(&[spec], timeout).await?;
     if let Some(outcome) = outcomes.into_iter().next() {
         match outcome.error {
             None => {}
@@ -1644,7 +1684,7 @@ fn compacted_topic_request(
     topic: &str,
     replicas: i32,
     policy: &RegistryPolicy,
-) -> (CreateTopicSpec, i32) {
+) -> (CreateTopicSpec, Time) {
     (
         CreateTopicSpec {
             name: topic.to_string(),
@@ -1652,7 +1692,7 @@ fn compacted_topic_request(
             replicas,
             configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
         },
-        policy.topic_create_timeout_ms,
+        policy.topic_create_timeout,
     )
 }
 
@@ -1666,9 +1706,9 @@ fn registry_fetch(
         topic_id,
         partition: 0,
         fetch_offset,
-        max_wait_ms: policy.fetch_max_wait_ms,
-        max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-        partition_max_bytes: policy.fetch_partition_max_bytes,
+        max_wait: policy.fetch_max_wait,
+        max: DEFAULT_FETCH_RESPONSE_MAX,
+        partition_max: policy.fetch_partition_max,
         isolation_level: READ_COMMITTED,
     }
 }
@@ -1680,7 +1720,7 @@ enum ReaderFailure {
     Fetch,
 }
 
-const fn reader_retry_delay(policy: &RegistryPolicy, _failure: ReaderFailure) -> Duration {
+const fn reader_retry_delay(policy: &RegistryPolicy, _failure: ReaderFailure) -> Time {
     policy.reader_retry_backoff
 }
 
@@ -1699,8 +1739,10 @@ fn spawn_reader(
                 resolve_bootstrap_addr(&bootstrap, policy.reader_admin_dns_timeout()).await
             else {
                 tracing::error!(%bootstrap, "gres control registry reader: bad bootstrap address");
-                tokio::time::sleep(reader_retry_delay(&policy, ReaderFailure::ResolveBootstrap))
-                    .await;
+                tokio::time::sleep(
+                    reader_retry_delay(&policy, ReaderFailure::ResolveBootstrap).to_std(),
+                )
+                .await;
                 continue;
             };
             let opts = ConnectionOptions {
@@ -1712,7 +1754,10 @@ fn spawn_reader(
                 Ok(conn) => conn,
                 Err(error) => {
                     tracing::warn!(%error, "gres control registry reader: connect failed");
-                    tokio::time::sleep(reader_retry_delay(&policy, ReaderFailure::Connect)).await;
+                    tokio::time::sleep(
+                        reader_retry_delay(&policy, ReaderFailure::Connect).to_std(),
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1752,7 +1797,10 @@ fn spawn_reader(
                     Err(error) => {
                         tracing::warn!(%error, "gres control registry reader: fetch failed");
                         conn.close();
-                        tokio::time::sleep(reader_retry_delay(&policy, ReaderFailure::Fetch)).await;
+                        tokio::time::sleep(
+                            reader_retry_delay(&policy, ReaderFailure::Fetch).to_std(),
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -1849,10 +1897,10 @@ mod tests {
         let policy = RegistryPolicy::default();
 
         assert!(policy.replication_factor == 1);
-        assert!(policy.topic_create_timeout_ms == 15_000);
-        assert!(policy.reader_retry_backoff == Duration::from_millis(250));
-        assert!(policy.fetch_max_wait_ms == 500);
-        assert!(policy.fetch_partition_max_bytes == 1_048_576);
+        assert!(policy.topic_create_timeout == crabka_units::secs(15));
+        assert!(policy.reader_retry_backoff == crabka_units::millis(250));
+        assert!(policy.fetch_max_wait == crabka_units::millis(500));
+        assert!(policy.fetch_partition_max == crabka_units::mebibytes(1));
         assert!("1".parse::<RegistryReplicationFactor>().is_ok());
         assert!("32767".parse::<RegistryReplicationFactor>().is_ok());
         assert!("0".parse::<RegistryReplicationFactor>().is_err());
@@ -1860,12 +1908,17 @@ mod tests {
         assert!("0".parse::<PositiveI32>().is_err());
         assert!("2147483648".parse::<PositiveI32>().is_err());
         assert!("0".parse::<PositiveMillis>().is_err());
-        assert!(RegistryPolicy::new(0, 15_000, 250, 500, 1_048_576).is_err());
-        assert!(RegistryPolicy::new(32_768, 15_000, 250, 500, 1_048_576).is_err());
-        assert!(RegistryPolicy::new(1, 0, 250, 500, 1_048_576).is_err());
-        assert!(RegistryPolicy::new(1, 15_000, 0, 500, 1_048_576).is_err());
-        assert!(RegistryPolicy::new(1, 15_000, 250, 0, 1_048_576).is_err());
-        assert!(RegistryPolicy::new(1, 15_000, 250, 500, 0).is_err());
+        assert!(
+            RegistryPolicy::new(0, millis(15_000), millis(250), millis(500), 1_048_576).is_err()
+        );
+        assert!(
+            RegistryPolicy::new(32_768, millis(15_000), millis(250), millis(500), 1_048_576)
+                .is_err()
+        );
+        assert!(RegistryPolicy::new(1, millis(0), millis(250), millis(500), 1_048_576).is_err());
+        assert!(RegistryPolicy::new(1, millis(15_000), millis(0), millis(500), 1_048_576).is_err());
+        assert!(RegistryPolicy::new(1, millis(15_000), millis(250), millis(0), 1_048_576).is_err());
+        assert!(RegistryPolicy::new(1, millis(15_000), millis(250), millis(500), 0).is_err());
     }
 
     #[test]
@@ -1874,12 +1927,12 @@ mod tests {
         assert!(defaults.producer_dns_timeout() == crabka_client_core::ClientDnsTimeout::default());
 
         let policy = defaults
-            .with_producer_dns_timeout_ms(37)
+            .with_producer_dns_timeout(millis(37))
             .expect("valid DNS timeout");
         assert!(policy.producer_dns_timeout().milliseconds() == 37);
         assert!(
             RegistryPolicy::default()
-                .with_producer_dns_timeout_ms(0)
+                .with_producer_dns_timeout(millis(0))
                 .is_err()
         );
     }
@@ -1892,12 +1945,12 @@ mod tests {
         );
 
         let policy = defaults
-            .with_reader_admin_dns_timeout_ms(37)
+            .with_reader_admin_dns_timeout(millis(37))
             .expect("valid DNS timeout");
         assert!(policy.reader_admin_dns_timeout().milliseconds() == 37);
         assert!(
             RegistryPolicy::default()
-                .with_reader_admin_dns_timeout_ms(0)
+                .with_reader_admin_dns_timeout(millis(0))
                 .is_err()
         );
     }
@@ -1923,31 +1976,33 @@ mod tests {
 
     #[test]
     fn registry_policy_reaches_topic_and_fetch_requests() {
-        let policy = RegistryPolicy::new(7, 12_345, 678, 901, 234_567).unwrap();
+        let policy =
+            RegistryPolicy::new(7, millis(12_345), millis(678), millis(901), 234_567).unwrap();
 
-        let (registry_spec, timeout_ms) =
+        let (registry_spec, timeout) =
             compacted_topic_request(TENANT_REGISTRY_TOPIC, policy.replication_factor(), &policy);
-        let (tenant_spec, tenant_timeout_ms) = compacted_topic_request("tenant-config", 3, &policy);
+        let (tenant_spec, tenant_timeout) = compacted_topic_request("tenant-config", 3, &policy);
         assert!(registry_spec.replicas == 7);
         assert!(tenant_spec.replicas == 3);
-        assert!(timeout_ms == 12_345);
-        assert!(tenant_timeout_ms == 12_345);
+        assert!(timeout == crabka_units::millis(12_345));
+        assert!(tenant_timeout == crabka_units::millis(12_345));
         let fetch = registry_fetch(42, WireUuid::ZERO, &policy);
-        assert!(fetch.max_wait_ms == 901);
-        assert!(fetch.partition_max_bytes == 234_567);
-        assert!(policy.reader_retry_backoff == Duration::from_millis(678));
+        assert!(fetch.max_wait == crabka_units::millis(901));
+        assert!(fetch.partition_max == crabka_units::bytes(234_567));
+        assert!(policy.reader_retry_backoff == crabka_units::millis(678));
     }
 
     #[test]
     fn registry_policy_reaches_every_reader_failure_backoff() {
-        let policy = RegistryPolicy::new(1, 15_000, 678, 500, 1_048_576).unwrap();
+        let policy =
+            RegistryPolicy::new(1, millis(15_000), millis(678), millis(500), 1_048_576).unwrap();
 
         for failure in [
             ReaderFailure::ResolveBootstrap,
             ReaderFailure::Connect,
             ReaderFailure::Fetch,
         ] {
-            assert!(reader_retry_delay(&policy, failure) == Duration::from_millis(678));
+            assert!(reader_retry_delay(&policy, failure) == crabka_units::millis(678));
         }
     }
 
@@ -2231,7 +2286,8 @@ mod tests {
             .await
             .expect("broker start");
         let bootstrap = broker.listen_addr().to_string();
-        let policy = RegistryPolicy::new(1, 12_345, 678, 901, 234_567).unwrap();
+        let policy =
+            RegistryPolicy::new(1, millis(12_345), millis(678), millis(901), 234_567).unwrap();
         let mut registry = Registry::connect_with_policy(&bootstrap, policy.clone())
             .await
             .expect("registry connect");

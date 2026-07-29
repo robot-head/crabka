@@ -1190,7 +1190,7 @@ mod tests {
 
         let changed_reader_admin_dns = defaults
             .clone()
-            .with_reader_admin_dns_timeout_ms(37)
+            .with_reader_admin_dns_timeout(crabka_units::millis(37))
             .expect("reader/admin DNS timeout");
         let changed_reader_admin_dns_control: GresControlHandle = Arc::new(TestGresControl);
         let replaced = ctx
@@ -1203,7 +1203,7 @@ mod tests {
 
         let changed_dns = changed_reader_admin_dns
             .clone()
-            .with_producer_dns_timeout_ms(37)
+            .with_producer_dns_timeout(crabka_units::millis(37))
             .expect("DNS timeout");
         let changed_dns_control: GresControlHandle = Arc::new(TestGresControl);
         let replaced = ctx
@@ -1214,8 +1214,14 @@ mod tests {
             .expect("DNS policy replacement");
         assert!(Arc::ptr_eq(&replaced, &changed_dns_control));
 
-        let custom = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
-            .expect("policy");
+        let custom = crabka_gres_control::RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(501),
+            1_048_577,
+        )
+        .expect("policy");
         let changed_policy: GresControlHandle = Arc::new(TestGresControl);
         let replaced = ctx
             .gres_control_for_with("ns-a", "demo", "a:9092", &custom, async {

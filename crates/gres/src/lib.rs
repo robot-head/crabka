@@ -9,12 +9,11 @@ use std::{
 
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_gres_control::{
-    CheckpointPartBytes, DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
-    DEFAULT_CHECKPOINT_FRAMES, DEFAULT_CHECKPOINT_POLL_INTERVAL_MS,
-    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS, DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-    FinalCheckpoint, PositiveI32, PositiveMillis, PositiveUsize, RegistryPolicy,
-    RegistryReplicationFactor, TenantName, TenantRecord, decode_tenant_config_record,
-    tenant_config_topic,
+    CheckpointPartBytes, DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT,
+    DEFAULT_CHECKPOINT_FRAMES, DEFAULT_CHECKPOINT_POLL_INTERVAL,
+    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL, DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL, FinalCheckpoint,
+    PositiveI32, PositiveUsize, RegistryPolicy, RegistryReplicationFactor, TenantName,
+    TenantRecord, decode_tenant_config_record, tenant_config_topic,
 };
 use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{FjallKv, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
@@ -27,6 +26,12 @@ use crabka_pgwire::{
 };
 use crabka_security::{
     ClientAuthMode, ListenerProtocol, SaslMechanism, TlsConfig, scram::PgScramVerifier,
+};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, StdDurationExt as _, TimeExt as _},
+    fmt::Human as _,
+    millis, secs,
 };
 use rand::RngExt as _;
 use refined_type::rule::GreaterI32;
@@ -60,29 +65,29 @@ impl Cli {
     {
         let mut command = <Self as clap::CommandFactory>::command();
         for argument in [
-            "wal_recovery_fetch_max_wait_ms",
+            "wal_recovery_fetch_max_wait",
             "wal_recovery_fetch_partition_max_bytes",
             "wal_recovery_fetch_response_max_bytes",
             "wal_recovery_empty_fetch_retries",
-            "wal_recovery_dns_timeout_ms",
-            "wal_recovery_connect_timeout_ms",
-            "wal_recovery_request_timeout_ms",
+            "wal_recovery_dns_timeout",
+            "wal_recovery_connect_timeout",
+            "wal_recovery_request_timeout",
             "wal_topic_replication_factor",
-            "wal_topic_ensure_timeout_ms",
-            "wal_admin_connect_timeout_ms",
-            "wal_admin_request_timeout_ms",
-            "wal_producer_flush_timeout_ms",
-            "wal_producer_dns_timeout_ms",
-            "fdw_broker_dns_timeout_ms",
-            "wal_producer_request_timeout_ms",
+            "wal_topic_ensure_timeout",
+            "wal_admin_connect_timeout",
+            "wal_admin_request_timeout",
+            "wal_producer_flush_timeout",
+            "wal_producer_dns_timeout",
+            "fdw_broker_dns_timeout",
+            "wal_producer_request_timeout",
             "wal_producer_retries",
-            "wal_producer_retry_backoff_ms",
-            "wal_producer_routing_retry_budget_ms",
-            "wal_producer_init_retry_timeout_ms",
-            "wal_producer_init_max_backoff_ms",
-            "wal_producer_transaction_timeout_ms",
+            "wal_producer_retry_backoff",
+            "wal_producer_routing_retry_budget",
+            "wal_producer_init_retry_timeout",
+            "wal_producer_init_max_backoff",
+            "wal_producer_transaction_timeout",
             "wal_producer_compression",
-            "wal_producer_linger_ms",
+            "wal_producer_linger",
             "wal_producer_batch_bytes",
         ] {
             command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
@@ -145,19 +150,21 @@ pub struct ServeArgs {
 
     /// Periodic range-0 follower refresh cadence in multi-range substrate mode.
     #[arg(
-        long = "range0-follower-poll-interval-ms",
-        env = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL_MS",
+        long = "range0-follower-poll-interval",
+        env = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL",
+        value_parser = crabka_units::parse::positive_time,
         requires = "ranges"
     )]
-    pub range0_follower_poll_interval_ms: Option<PositiveMillis>,
+    pub range0_follower_poll_interval: Option<Time>,
 
     /// Broker long-poll wait for committed-WAL recovery fetches.
     #[arg(
-        long = "wal-recovery-fetch-max-wait-ms",
-        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
+        long = "wal-recovery-fetch-max-wait",
+        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_recovery_fetch_max_wait_ms: Option<PositiveI32>,
+    pub wal_recovery_fetch_max_wait: Option<Time>,
 
     /// Per-partition byte limit for committed-WAL recovery fetches.
     #[arg(
@@ -185,27 +192,30 @@ pub struct ServeArgs {
 
     /// Timeout for resolving raw WAL recovery broker hostnames.
     #[arg(
-        long = "wal-recovery-dns-timeout-ms",
-        env = "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS",
+        long = "wal-recovery-dns-timeout",
+        env = "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_recovery_dns_timeout_ms: Option<PositiveMillis>,
+    pub wal_recovery_dns_timeout: Option<Time>,
 
     /// Timeout for establishing raw WAL recovery broker connections.
     #[arg(
-        long = "wal-recovery-connect-timeout-ms",
-        env = "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
+        long = "wal-recovery-connect-timeout",
+        env = "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_recovery_connect_timeout_ms: Option<PositiveMillis>,
+    pub wal_recovery_connect_timeout: Option<Time>,
 
     /// Timeout for raw WAL recovery broker requests.
     #[arg(
-        long = "wal-recovery-request-timeout-ms",
-        env = "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
+        long = "wal-recovery-request-timeout",
+        env = "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_recovery_request_timeout_ms: Option<PositiveMillis>,
+    pub wal_recovery_request_timeout: Option<Time>,
 
     /// Replication factor requested when creating range WAL topics.
     #[arg(
@@ -217,58 +227,65 @@ pub struct ServeArgs {
 
     /// Timeout for ensuring range WAL topics.
     #[arg(
-        long = "wal-topic-ensure-timeout-ms",
-        env = "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
+        long = "wal-topic-ensure-timeout",
+        env = "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_topic_ensure_timeout_ms: Option<PositiveI32>,
+    pub wal_topic_ensure_timeout: Option<Time>,
 
     /// Timeout for establishing WAL admin broker connections.
     #[arg(
-        long = "wal-admin-connect-timeout-ms",
-        env = "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
+        long = "wal-admin-connect-timeout",
+        env = "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_admin_connect_timeout_ms: Option<PositiveMillis>,
+    pub wal_admin_connect_timeout: Option<Time>,
 
     /// Timeout for WAL admin broker requests.
     #[arg(
-        long = "wal-admin-request-timeout-ms",
-        env = "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
+        long = "wal-admin-request-timeout",
+        env = "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_admin_request_timeout_ms: Option<PositiveMillis>,
+    pub wal_admin_request_timeout: Option<Time>,
 
     /// Deadline for flushing all buffered and in-flight WAL records.
     #[arg(
-        long = "wal-producer-flush-timeout-ms",
-        env = "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT_MS",
+        long = "wal-producer-flush-timeout",
+        env = "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_producer_flush_timeout_ms: Option<PositiveMillis>,
+    pub wal_producer_flush_timeout: Option<Time>,
 
     /// Timeout for resolving WAL producer broker hostnames.
     #[arg(
-        long = "wal-producer-dns-timeout-ms",
-        env = "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT_MS",
+        long = "wal-producer-dns-timeout",
+        env = "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_producer_dns_timeout_ms: Option<PositiveMillis>,
+    pub wal_producer_dns_timeout: Option<Time>,
 
     /// Timeout for resolving Kafka broker hostnames used by the FDW.
     #[arg(
-        long = "fdw-broker-dns-timeout-ms",
-        env = "CRABKA_GRES_FDW_BROKER_DNS_TIMEOUT_MS"
+        long = "fdw-broker-dns-timeout",
+        env = "CRABKA_GRES_FDW_BROKER_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
     )]
-    pub fdw_broker_dns_timeout_ms: Option<PositiveMillis>,
+    pub fdw_broker_dns_timeout: Option<Time>,
 
     /// Timeout for WAL producer broker requests.
     #[arg(
-        long = "wal-producer-request-timeout-ms",
-        env = "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS",
+        long = "wal-producer-request-timeout",
+        env = "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_producer_request_timeout_ms: Option<PositiveMillis>,
+    pub wal_producer_request_timeout: Option<Time>,
 
     /// WAL producer retries after a batch's initial send.
     #[arg(
@@ -280,43 +297,48 @@ pub struct ServeArgs {
 
     /// WAL producer retry and producer-ID initial backoff.
     #[arg(
-        long = "wal-producer-retry-backoff-ms",
-        env = "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS",
+        long = "wal-producer-retry-backoff",
+        env = "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_producer_retry_backoff_ms: Option<PositiveMillis>,
+    pub wal_producer_retry_backoff: Option<Time>,
 
     /// Wall-clock routing retry budget for each WAL producer batch.
     #[arg(
-        long = "wal-producer-routing-retry-budget-ms",
-        env = "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS",
+        long = "wal-producer-routing-retry-budget",
+        env = "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_producer_routing_retry_budget_ms: Option<PositiveMillis>,
+    pub wal_producer_routing_retry_budget: Option<Time>,
 
     /// Producer-ID initialization retry timeout.
     #[arg(
-        long = "wal-producer-init-retry-timeout-ms",
-        env = "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
+        long = "wal-producer-init-retry-timeout",
+        env = "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_producer_init_retry_timeout_ms: Option<PositiveMillis>,
+    pub wal_producer_init_retry_timeout: Option<Time>,
 
     /// Producer-ID initialization retry backoff cap.
     #[arg(
-        long = "wal-producer-init-max-backoff-ms",
-        env = "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
+        long = "wal-producer-init-max-backoff",
+        env = "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_producer_init_max_backoff_ms: Option<PositiveMillis>,
+    pub wal_producer_init_max_backoff: Option<Time>,
 
     /// Transaction timeout sent by the WAL producer.
     #[arg(
-        long = "wal-producer-transaction-timeout-ms",
-        env = "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
+        long = "wal-producer-transaction-timeout",
+        env = "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_producer_transaction_timeout_ms: Option<PositiveMillis>,
+    pub wal_producer_transaction_timeout: Option<Time>,
 
     /// Compression used for WAL producer record batches.
     #[arg(
@@ -326,13 +348,14 @@ pub struct ServeArgs {
     )]
     pub wal_producer_compression: Option<crabka_client_producer::Compression>,
 
-    /// WAL producer linger in whole milliseconds.
+    /// WAL producer linger.
     #[arg(
-        long = "wal-producer-linger-ms",
-        env = "CRABKA_GRES_WAL_PRODUCER_LINGER_MS",
+        long = "wal-producer-linger",
+        env = "CRABKA_GRES_WAL_PRODUCER_LINGER",
+        value_parser = crabka_units::parse::non_negative_time,
         requires = "substrate_bootstrap"
     )]
-    pub wal_producer_linger_ms: Option<u64>,
+    pub wal_producer_linger: Option<Time>,
 
     /// Maximum uncompressed WAL producer batch size in bytes.
     #[arg(
@@ -351,20 +374,25 @@ pub struct ServeArgs {
     #[arg(long = "timestamp-source", value_enum, default_value = "logical-tso")]
     pub timestamp_source: TimestampSourceKind,
 
-    /// Maximum tolerated clock offset in milliseconds for --timestamp-source
-    /// hlc; sizes the read uncertainty window.
-    #[arg(long = "hlc-max-offset-ms", default_value_t = 250)]
-    pub hlc_max_offset_ms: u64,
+    /// Maximum tolerated clock offset for --timestamp-source hlc; sizes the
+    /// read uncertainty window.
+    #[arg(
+        long = "hlc-max-offset",
+        default_value = "250ms",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    pub hlc_max_offset: Time,
 
     /// Fault-injection knob for load and chaos testing only, not for
     /// production use: skew this process's HLC wall-clock reads by a signed
-    /// millisecond offset. Only meaningful with --timestamp-source hlc.
+    /// duration. Only meaningful with --timestamp-source hlc.
     #[arg(
-        long = "hlc-wall-offset-ms",
-        default_value_t = 0,
+        long = "hlc-wall-offset",
+        default_value = "0ms",
+        value_parser = crabka_units::parse::time,
         allow_negative_numbers = true
     )]
-    pub hlc_wall_offset_ms: i64,
+    pub hlc_wall_offset: Time,
 
     /// Range-compute RPC address for hosted ranges. Required by deployments
     /// whose registry layout routes any range to this process.
@@ -459,39 +487,44 @@ pub struct ServeArgs {
 
     /// Kafka `DeleteRecords` timeout used after a durable checkpoint.
     #[arg(
-        long = "checkpoint-delete-records-timeout-ms",
-        env = "CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS"
+        long = "checkpoint-delete-records-timeout",
+        env = "CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
     )]
-    pub checkpoint_delete_records_timeout_ms: Option<PositiveI32>,
+    pub checkpoint_delete_records_timeout: Option<Time>,
 
     /// Background checkpoint threshold polling interval.
     #[arg(
-        long = "checkpoint-poll-interval-ms",
-        env = "CRABKA_GRES_CHECKPOINT_POLL_INTERVAL_MS"
+        long = "checkpoint-poll-interval",
+        env = "CRABKA_GRES_CHECKPOINT_POLL_INTERVAL",
+        value_parser = crabka_units::parse::positive_time
     )]
-    pub checkpoint_poll_interval_ms: Option<PositiveMillis>,
+    pub checkpoint_poll_interval: Option<Time>,
 
     /// Idle-tenant suspension polling interval.
     #[arg(
-        long = "idle-suspend-poll-interval-ms",
-        env = "CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL_MS"
+        long = "idle-suspend-poll-interval",
+        env = "CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL",
+        value_parser = crabka_units::parse::positive_time
     )]
-    pub idle_suspend_poll_interval_ms: Option<PositiveMillis>,
+    pub idle_suspend_poll_interval: Option<Time>,
 }
 
 /// Optional local-engine vacuum pacing overrides.
-#[derive(clap::Args, Debug, Clone, Copy, Default, Eq, PartialEq)]
+#[derive(clap::Args, Debug, Clone, Copy, Default, PartialEq)]
 pub struct LocalVacuumOptions {
     #[arg(
-        long = "local-vacuum-idle-interval-ms",
-        env = "CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL_MS"
+        long = "local-vacuum-idle-interval",
+        env = "CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL",
+        value_parser = crabka_units::parse::positive_time
     )]
-    idle_interval_ms: Option<PositiveMillis>,
+    idle_interval: Option<Time>,
     #[arg(
-        long = "local-vacuum-backoff-floor-ms",
-        env = "CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR_MS"
+        long = "local-vacuum-backoff-floor",
+        env = "CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR",
+        value_parser = crabka_units::parse::positive_time
     )]
-    backoff_floor_ms: Option<PositiveMillis>,
+    backoff_floor: Option<Time>,
     #[arg(
         long = "local-vacuum-hot-debt",
         env = "CRABKA_GRES_LOCAL_VACUUM_HOT_DEBT"
@@ -508,39 +541,46 @@ pub struct LocalVacuumOptions {
     )]
     max_key_budget: Option<PositiveUsize>,
     #[arg(
-        long = "local-vacuum-step-fast-ms",
-        env = "CRABKA_GRES_LOCAL_VACUUM_STEP_FAST_MS"
+        long = "local-vacuum-step-fast",
+        env = "CRABKA_GRES_LOCAL_VACUUM_STEP_FAST",
+        value_parser = crabka_units::parse::positive_time
     )]
-    step_fast_ms: Option<PositiveMillis>,
+    step_fast: Option<Time>,
     #[arg(
-        long = "local-vacuum-step-slow-ms",
-        env = "CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW_MS"
+        long = "local-vacuum-step-slow",
+        env = "CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW",
+        value_parser = crabka_units::parse::positive_time
     )]
-    step_slow_ms: Option<PositiveMillis>,
+    step_slow: Option<Time>,
     #[arg(
-        long = "local-vacuum-idle-after-ms",
-        env = "CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER_MS"
+        long = "local-vacuum-idle-after",
+        env = "CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER",
+        value_parser = crabka_units::parse::positive_time
     )]
-    idle_after_ms: Option<PositiveMillis>,
+    idle_after: Option<Time>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Pacing knobs for the local vacuum loop.
+///
+/// `Eq` is deliberately absent: the intervals are quantities, whose `f64`
+/// storage is only `PartialEq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct LocalVacuumPolicy {
-    idle_interval: Duration,
-    backoff_floor: Duration,
+    idle_interval: Time,
+    backoff_floor: Time,
     hot_debt: u64,
     key_budget: usize,
     max_key_budget: usize,
-    step_fast: Duration,
-    step_slow: Duration,
-    idle_after: Duration,
+    step_fast: Time,
+    step_slow: Time,
+    idle_after: Time,
 }
 
-const DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL_MS: u64 = 2_000;
-const DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR_MS: u64 = 25;
-const DEFAULT_LOCAL_VACUUM_STEP_FAST_MS: u64 = 3;
-const DEFAULT_LOCAL_VACUUM_STEP_SLOW_MS: u64 = 12;
-const DEFAULT_LOCAL_VACUUM_IDLE_AFTER_MS: u64 = 1_000;
+const DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL: Time = secs(2);
+const DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR: Time = millis(25);
+const DEFAULT_LOCAL_VACUUM_STEP_FAST: Time = millis(3);
+const DEFAULT_LOCAL_VACUUM_STEP_SLOW: Time = millis(12);
+const DEFAULT_LOCAL_VACUUM_IDLE_AFTER: Time = secs(1);
 
 fn local_vacuum_policy(args: &ServeArgs) -> std::io::Result<Option<LocalVacuumPolicy>> {
     let options = args.local_vacuum;
@@ -575,26 +615,17 @@ fn local_vacuum_policy(args: &ServeArgs) -> std::io::Result<Option<LocalVacuumPo
             )
         })?,
     };
-    let idle_interval = Duration::from_millis(options.idle_interval_ms.map_or(
-        DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL_MS,
-        PositiveMillis::into_value,
-    ));
-    let backoff_floor = Duration::from_millis(options.backoff_floor_ms.map_or(
-        DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR_MS,
-        PositiveMillis::into_value,
-    ));
-    let step_fast = Duration::from_millis(options.step_fast_ms.map_or(
-        DEFAULT_LOCAL_VACUUM_STEP_FAST_MS,
-        PositiveMillis::into_value,
-    ));
-    let step_slow = Duration::from_millis(options.step_slow_ms.map_or(
-        DEFAULT_LOCAL_VACUUM_STEP_SLOW_MS,
-        PositiveMillis::into_value,
-    ));
-    let idle_after = Duration::from_millis(options.idle_after_ms.map_or(
-        DEFAULT_LOCAL_VACUUM_IDLE_AFTER_MS,
-        PositiveMillis::into_value,
-    ));
+    let idle_interval = options
+        .idle_interval
+        .unwrap_or(DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL);
+    let backoff_floor = options
+        .backoff_floor
+        .unwrap_or(DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR);
+    let step_fast = options.step_fast.unwrap_or(DEFAULT_LOCAL_VACUUM_STEP_FAST);
+    let step_slow = options.step_slow.unwrap_or(DEFAULT_LOCAL_VACUUM_STEP_SLOW);
+    let idle_after = options
+        .idle_after
+        .unwrap_or(DEFAULT_LOCAL_VACUUM_IDLE_AFTER);
     if backoff_floor > idle_interval {
         return invalid_input("local vacuum backoff floor exceeds idle interval");
     }
@@ -617,35 +648,35 @@ fn local_vacuum_policy(args: &ServeArgs) -> std::io::Result<Option<LocalVacuumPo
 }
 
 fn validate_range0_follower_poll_interval(args: &ServeArgs) -> std::io::Result<()> {
-    if args.range0_follower_poll_interval_ms.is_some() && args.ranges.is_none() {
-        return invalid_input("--range0-follower-poll-interval-ms requires --ranges");
+    if args.range0_follower_poll_interval.is_some() && args.ranges.is_none() {
+        return invalid_input("--range0-follower-poll-interval requires --ranges");
     }
     Ok(())
 }
 
 fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
-    if (args.wal_recovery_fetch_max_wait_ms.is_some()
+    if (args.wal_recovery_fetch_max_wait.is_some()
         || args.wal_recovery_fetch_partition_max_bytes.is_some()
         || args.wal_recovery_fetch_response_max_bytes.is_some()
         || args.wal_recovery_empty_fetch_retries.is_some()
-        || args.wal_recovery_dns_timeout_ms.is_some()
-        || args.wal_recovery_connect_timeout_ms.is_some()
-        || args.wal_recovery_request_timeout_ms.is_some()
+        || args.wal_recovery_dns_timeout.is_some()
+        || args.wal_recovery_connect_timeout.is_some()
+        || args.wal_recovery_request_timeout.is_some()
         || args.wal_topic_replication_factor.is_some()
-        || args.wal_topic_ensure_timeout_ms.is_some()
-        || args.wal_admin_connect_timeout_ms.is_some()
-        || args.wal_admin_request_timeout_ms.is_some()
-        || args.wal_producer_flush_timeout_ms.is_some()
-        || args.wal_producer_dns_timeout_ms.is_some()
-        || args.wal_producer_request_timeout_ms.is_some()
+        || args.wal_topic_ensure_timeout.is_some()
+        || args.wal_admin_connect_timeout.is_some()
+        || args.wal_admin_request_timeout.is_some()
+        || args.wal_producer_flush_timeout.is_some()
+        || args.wal_producer_dns_timeout.is_some()
+        || args.wal_producer_request_timeout.is_some()
         || args.wal_producer_retries.is_some()
-        || args.wal_producer_retry_backoff_ms.is_some()
-        || args.wal_producer_routing_retry_budget_ms.is_some()
-        || args.wal_producer_init_retry_timeout_ms.is_some()
-        || args.wal_producer_init_max_backoff_ms.is_some()
-        || args.wal_producer_transaction_timeout_ms.is_some()
+        || args.wal_producer_retry_backoff.is_some()
+        || args.wal_producer_routing_retry_budget.is_some()
+        || args.wal_producer_init_retry_timeout.is_some()
+        || args.wal_producer_init_max_backoff.is_some()
+        || args.wal_producer_transaction_timeout.is_some()
         || args.wal_producer_compression.is_some()
-        || args.wal_producer_linger_ms.is_some()
+        || args.wal_producer_linger.is_some()
         || args.wal_producer_batch_bytes.is_some())
         && args.substrate_bootstrap.is_none()
     {
@@ -668,18 +699,21 @@ fn effective_wal_admin_policy(
             crabka_gres_substrate::DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
             PositiveI32::into_value,
         ),
-        args.wal_topic_ensure_timeout_ms.map_or(
-            crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS,
-            PositiveI32::into_value,
-        ),
-        args.wal_admin_connect_timeout_ms.map_or(
-            crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
-            PositiveMillis::into_value,
-        ),
-        args.wal_admin_request_timeout_ms.map_or(
-            crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS,
-            PositiveMillis::into_value,
-        ),
+        whole_millis_i32(
+            "wal topic ensure timeout",
+            args.wal_topic_ensure_timeout
+                .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT),
+        )?,
+        whole_millis_u64(
+            "WAL admin connect timeout",
+            args.wal_admin_connect_timeout
+                .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT),
+        )?,
+        whole_millis_u64(
+            "WAL admin request timeout",
+            args.wal_admin_request_timeout
+                .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT),
+        )?,
     )
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
@@ -687,26 +721,23 @@ fn effective_wal_admin_policy(
 fn effective_wal_producer_flush_timeout(
     args: &ServeArgs,
 ) -> std::io::Result<crabka_client_producer::ProducerFlushTimeout> {
-    let default_ms = u64::try_from(
-        crabka_client_producer::ProducerFlushTimeout::default()
-            .duration()
-            .as_millis(),
+    crabka_client_producer::ProducerFlushTimeout::new(
+        args.wal_producer_flush_timeout
+            .unwrap_or_else(|| {
+                Time::from_std(crabka_client_producer::ProducerFlushTimeout::default().duration())
+            })
+            .to_std(),
     )
-    .expect("default producer flush timeout fits u64 milliseconds");
-    crabka_client_producer::ProducerFlushTimeout::new(Duration::from_millis(
-        args.wal_producer_flush_timeout_ms
-            .map_or(default_ms, PositiveMillis::into_value),
-    ))
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
 
 fn effective_wal_producer_dns_timeout(
     args: &ServeArgs,
 ) -> std::io::Result<crabka_client_core::ClientDnsTimeout> {
-    args.wal_producer_dns_timeout_ms.map_or_else(
+    args.wal_producer_dns_timeout.map_or_else(
         || Ok(crabka_client_core::ClientDnsTimeout::default()),
         |timeout| {
-            crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(timeout.into_value()))
+            crabka_client_core::ClientDnsTimeout::new(timeout.to_std())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
@@ -715,10 +746,10 @@ fn effective_wal_producer_dns_timeout(
 fn effective_fdw_broker_dns_timeout(
     args: &ServeArgs,
 ) -> std::io::Result<crabka_client_core::ClientDnsTimeout> {
-    args.fdw_broker_dns_timeout_ms.map_or_else(
+    args.fdw_broker_dns_timeout.map_or_else(
         || Ok(crabka_client_core::ClientDnsTimeout::default()),
         |timeout| {
-            crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(timeout.into_value()))
+            crabka_client_core::ClientDnsTimeout::new(timeout.to_std())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
@@ -728,36 +759,27 @@ fn effective_wal_producer_retry_policy(
     args: &ServeArgs,
 ) -> std::io::Result<crabka_client_producer::ProducerRetryPolicy> {
     let defaults = crabka_client_producer::ProducerRetryPolicy::default();
-    let millis = |duration: Duration| {
-        u64::try_from(duration.as_millis()).expect("producer policy duration fits u64 milliseconds")
-    };
     crabka_client_producer::ProducerRetryPolicy::new(
-        Duration::from_millis(args.wal_producer_request_timeout_ms.map_or_else(
-            || millis(defaults.request_timeout()),
-            PositiveMillis::into_value,
-        )),
+        args.wal_producer_request_timeout
+            .unwrap_or_else(|| Time::from_std(defaults.request_timeout()))
+            .to_std(),
         args.wal_producer_retries
             .map_or(defaults.retries(), NonNegativeI32::into_value),
-        Duration::from_millis(args.wal_producer_retry_backoff_ms.map_or_else(
-            || millis(defaults.retry_backoff()),
-            PositiveMillis::into_value,
-        )),
-        Duration::from_millis(args.wal_producer_routing_retry_budget_ms.map_or_else(
-            || millis(defaults.routing_retry_budget()),
-            PositiveMillis::into_value,
-        )),
-        Duration::from_millis(args.wal_producer_init_retry_timeout_ms.map_or_else(
-            || millis(defaults.init_retry_timeout()),
-            PositiveMillis::into_value,
-        )),
-        Duration::from_millis(args.wal_producer_init_max_backoff_ms.map_or_else(
-            || millis(defaults.init_max_backoff()),
-            PositiveMillis::into_value,
-        )),
-        Duration::from_millis(args.wal_producer_transaction_timeout_ms.map_or_else(
-            || millis(defaults.transaction_timeout()),
-            PositiveMillis::into_value,
-        )),
+        args.wal_producer_retry_backoff
+            .unwrap_or_else(|| Time::from_std(defaults.retry_backoff()))
+            .to_std(),
+        args.wal_producer_routing_retry_budget
+            .unwrap_or_else(|| Time::from_std(defaults.routing_retry_budget()))
+            .to_std(),
+        args.wal_producer_init_retry_timeout
+            .unwrap_or_else(|| Time::from_std(defaults.init_retry_timeout()))
+            .to_std(),
+        args.wal_producer_init_max_backoff
+            .unwrap_or_else(|| Time::from_std(defaults.init_max_backoff()))
+            .to_std(),
+        args.wal_producer_transaction_timeout
+            .unwrap_or_else(|| Time::from_std(defaults.transaction_timeout()))
+            .to_std(),
     )
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
@@ -766,17 +788,61 @@ fn effective_wal_producer_throughput_policy(
     args: &ServeArgs,
 ) -> std::io::Result<crabka_client_producer::ProducerThroughputPolicy> {
     let defaults = crabka_client_producer::ProducerThroughputPolicy::default();
-    let default_linger_ms = u64::try_from(defaults.linger().as_millis())
-        .expect("default producer linger fits u64 milliseconds");
     crabka_client_producer::ProducerThroughputPolicy::new(
         args.wal_producer_compression
             .unwrap_or(defaults.compression()),
-        Duration::from_millis(args.wal_producer_linger_ms.unwrap_or(default_linger_ms)),
+        args.wal_producer_linger
+            .unwrap_or_else(|| Time::from_std(defaults.linger()))
+            .to_std(),
         args.wal_producer_batch_bytes
             .unwrap_or(defaults.batch_bytes()),
         defaults.max_in_flight(),
     )
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+}
+
+/// A time extent back in whole milliseconds as `u64`, for the `refined_type`
+/// validators and `Duration` constructors that still take a raw count. A
+/// negative extent clamps to zero.
+#[cfg(test)]
+fn millis_u64(extent: Time) -> u64 {
+    u64::try_from(extent.millis_i64()).unwrap_or_default()
+}
+
+fn whole_millis_u64(name: &str, value: Time) -> std::io::Result<u64> {
+    let millis = value.millis_i64();
+    if value.secs_f64().is_finite()
+        && millis > 0
+        && Time::from_millis(millis) == value
+        && let Ok(millis) = u64::try_from(millis)
+    {
+        Ok(millis)
+    } else {
+        invalid_input(format!(
+            "{name} must be finite, positive, and a whole number of milliseconds"
+        ))
+    }
+}
+
+fn whole_millis_i32(name: &str, value: Time) -> std::io::Result<i32> {
+    let millis = whole_millis_u64(name, value)?;
+    i32::try_from(millis).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{name} must be within 1ms..=2147483647ms"),
+        )
+    })
+}
+
+fn whole_millis_i64(name: &str, value: Time) -> std::io::Result<i64> {
+    let millis = value.millis_i64();
+    if value.secs_f64().is_finite() && Time::from_millis(millis) == value {
+        Ok(millis)
+    } else {
+        invalid_input(format!(
+            "{name} must be finite and a whole number of milliseconds"
+        ))
+    }
 }
 
 /// A nonnegative producer retry count representable on the protocol wire.
@@ -816,23 +882,26 @@ pub struct RegistryOptions {
     )]
     replication_factor: RegistryReplicationFactor,
     #[arg(
-        long = "registry-topic-create-timeout-ms",
-        env = "CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS",
-        default_value = "15000"
+        long = "registry-topic-create-timeout",
+        env = "CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT",
+        default_value = "15s",
+        value_parser = crabka_units::parse::positive_time
     )]
-    topic_create_timeout_ms: PositiveI32,
+    topic_create_timeout: Time,
     #[arg(
-        long = "registry-reader-retry-backoff-ms",
-        env = "CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS",
-        default_value = "250"
+        long = "registry-reader-retry-backoff",
+        env = "CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF",
+        default_value = "250ms",
+        value_parser = crabka_units::parse::positive_time
     )]
-    reader_retry_backoff_ms: PositiveMillis,
+    reader_retry_backoff: Time,
     #[arg(
-        long = "registry-fetch-max-wait-ms",
-        env = "CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS",
-        default_value = "500"
+        long = "registry-fetch-max-wait",
+        env = "CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT",
+        default_value = "500ms",
+        value_parser = crabka_units::parse::positive_time
     )]
-    fetch_max_wait_ms: PositiveI32,
+    fetch_max_wait: Time,
     #[arg(
         long = "registry-fetch-partition-max-bytes",
         env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES",
@@ -840,47 +909,40 @@ pub struct RegistryOptions {
     )]
     fetch_partition_max_bytes: PositiveI32,
     #[arg(
-        long = "registry-producer-dns-timeout-ms",
-        env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS"
+        long = "registry-producer-dns-timeout",
+        env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
     )]
-    producer_dns_timeout_ms: Option<PositiveMillis>,
+    producer_dns_timeout: Option<Time>,
     #[arg(
-        long = "registry-reader-admin-dns-timeout-ms",
-        env = "CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT_MS"
+        long = "registry-reader-admin-dns-timeout",
+        env = "CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
     )]
-    reader_admin_dns_timeout_ms: Option<PositiveMillis>,
+    reader_admin_dns_timeout: Option<Time>,
 }
 
 impl RegistryOptions {
     fn policy(&self) -> RegistryPolicy {
-        let producer_dns_timeout_ms = self.producer_dns_timeout_ms.map_or_else(
-            || {
-                RegistryPolicy::default()
-                    .producer_dns_timeout()
-                    .milliseconds()
-            },
-            PositiveMillis::into_value,
-        );
-        let reader_admin_dns_timeout_ms = self.reader_admin_dns_timeout_ms.map_or_else(
-            || {
-                RegistryPolicy::default()
-                    .reader_admin_dns_timeout()
-                    .milliseconds()
-            },
-            PositiveMillis::into_value,
-        );
+        let defaults = RegistryPolicy::default();
 
         RegistryPolicy::new(
             self.replication_factor.into_value(),
-            self.topic_create_timeout_ms.into_value(),
-            self.reader_retry_backoff_ms.into_value(),
-            self.fetch_max_wait_ms.into_value(),
+            self.topic_create_timeout,
+            self.reader_retry_backoff,
+            self.fetch_max_wait,
             self.fetch_partition_max_bytes.into_value(),
         )
         .expect("validated registry options")
-        .with_producer_dns_timeout_ms(producer_dns_timeout_ms)
+        .with_producer_dns_timeout(
+            self.producer_dns_timeout
+                .unwrap_or_else(|| Time::from_std(defaults.producer_dns_timeout().duration())),
+        )
         .expect("validated registry producer DNS timeout")
-        .with_reader_admin_dns_timeout_ms(reader_admin_dns_timeout_ms)
+        .with_reader_admin_dns_timeout(
+            self.reader_admin_dns_timeout
+                .unwrap_or_else(|| Time::from_std(defaults.reader_admin_dns_timeout().duration())),
+        )
         .expect("validated registry reader/admin DNS timeout")
     }
 }
@@ -978,20 +1040,23 @@ pub struct RangeRpcRuntimeConfig {
 }
 
 /// Validated substrate checkpointing settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is deliberately absent: the part-size target is a quantity, whose
+/// `f64` storage is only `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CheckpointRuntimeConfig {
     /// Object-store connection settings for checkpoint objects.
     pub object_store: CheckpointObjectStoreConfig,
     /// WAL frames since the last manifest that trigger a checkpoint.
     pub frames_threshold: u64,
     /// WAL bytes since the last manifest that trigger a checkpoint.
-    pub bytes_threshold: u64,
-    /// Target checkpoint part object size in bytes.
-    pub part_max_bytes: usize,
+    pub bytes_threshold: ByteSize,
+    /// Target checkpoint part object size.
+    pub part_max_size: ByteSize,
     /// Number of newest checkpoint directories retained after prune planning.
     pub retain_newest: usize,
     /// Kafka `DeleteRecords` timeout after a durable manifest.
-    pub delete_records_timeout_ms: i32,
+    pub delete_records_timeout: Time,
     /// Background checkpoint threshold polling interval.
     pub poll_interval: Duration,
 }
@@ -1092,23 +1157,22 @@ impl SubstrateRuntimeConfig {
             checkpoints: CheckpointRuntimeConfig::from_args(args)?,
             kafka_security: tenant_kafka_security_from_env(tenant),
             ranges,
-            range0_follower_poll_interval: Duration::from_millis(
-                args.range0_follower_poll_interval_ms.map_or(
-                    DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-                    PositiveMillis::into_value,
-                ),
-            ),
+            range0_follower_poll_interval: args
+                .range0_follower_poll_interval
+                .unwrap_or(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL)
+                .to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::new(
-                args.wal_recovery_fetch_max_wait_ms.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
-                    PositiveI32::into_value,
-                ),
+                whole_millis_i32(
+                    "WAL recovery fetch maximum wait",
+                    args.wal_recovery_fetch_max_wait
+                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT),
+                )?,
                 args.wal_recovery_fetch_partition_max_bytes.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
+                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32(),
                     PositiveI32::into_value,
                 ),
                 args.wal_recovery_fetch_response_max_bytes.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
+                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32(),
                     PositiveI32::into_value,
                 ),
                 args.wal_recovery_empty_fetch_retries.map_or(
@@ -1117,22 +1181,28 @@ impl SubstrateRuntimeConfig {
                 ),
             )
             .and_then(|policy| {
-                policy.with_dns_timeout(args.wal_recovery_dns_timeout_ms.map_or(
-                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS,
-                    PositiveMillis::into_value,
-                ))
+                whole_millis_u64(
+                    "WAL recovery DNS timeout",
+                    args.wal_recovery_dns_timeout
+                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT),
+                )
+                .map_err(|error| error.to_string())
+                .and_then(|timeout| policy.with_dns_timeout(timeout))
             })
             .and_then(|policy| {
-                policy.with_timeouts(
-                    args.wal_recovery_connect_timeout_ms.map_or(
-                        crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
-                        PositiveMillis::into_value,
-                    ),
-                    args.wal_recovery_request_timeout_ms.map_or(
-                        crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
-                        PositiveMillis::into_value,
-                    ),
+                let connect_timeout = whole_millis_u64(
+                    "WAL recovery connect timeout",
+                    args.wal_recovery_connect_timeout
+                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT),
                 )
+                .map_err(|error| error.to_string())?;
+                let request_timeout = whole_millis_u64(
+                    "WAL recovery request timeout",
+                    args.wal_recovery_request_timeout
+                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT),
+                )
+                .map_err(|error| error.to_string())?;
+                policy.with_timeouts(connect_timeout, request_timeout)
             })
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?,
             wal_admin_policy: effective_wal_admin_policy(args)?,
@@ -1143,8 +1213,10 @@ impl SubstrateRuntimeConfig {
             host_ranges: parse_host_ranges(args.host_ranges.as_deref())?,
             range_rpc: RangeRpcRuntimeConfig::from_args(args)?,
             advertised_endpoint: args.range_listen.clone(),
-            timestamp_source_mode: args.timestamp_source.to_mode(args.hlc_max_offset_ms),
-            hlc_wall_offset_ms: args.hlc_wall_offset_ms,
+            timestamp_source_mode: args
+                .timestamp_source
+                .to_mode(whole_millis_u64("HLC maximum offset", args.hlc_max_offset)?),
+            hlc_wall_offset_ms: whole_millis_i64("HLC wall offset", args.hlc_wall_offset)?,
             registry_policy: args.registry.policy(),
         }))
     }
@@ -1272,10 +1344,11 @@ impl CheckpointRuntimeConfig {
         }
 
         let object_store = CheckpointObjectStoreConfig::from_args(args)?;
-        let part_max_bytes = args.checkpoint_part_bytes.map_or(
-            crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
-            CheckpointPartBytes::into_value,
-        );
+        let part_max_size = args
+            .checkpoint_part_bytes
+            .map_or(crabka_gres_substrate::DEFAULT_PART_MAX_SIZE, |value| {
+                value.into_value()
+            });
         Ok(Some(Self {
             object_store,
             frames_threshold: args
@@ -1283,20 +1356,23 @@ impl CheckpointRuntimeConfig {
                 .map_or(DEFAULT_CHECKPOINT_FRAMES, NonZeroU64::get),
             bytes_threshold: args
                 .checkpoint_bytes
-                .map_or(DEFAULT_CHECKPOINT_BYTES, NonZeroU64::get),
-            part_max_bytes,
+                .map_or(DEFAULT_CHECKPOINT_BYTES, |bytes| {
+                    ByteSize::from_bytes(bytes.get())
+                }),
+            part_max_size,
             retain_newest: args.checkpoint_retain.map_or(
                 crabka_gres_substrate::DEFAULT_CHECKPOINT_RETAIN,
                 PositiveUsize::into_value,
             ),
-            delete_records_timeout_ms: args.checkpoint_delete_records_timeout_ms.map_or(
-                DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
-                PositiveI32::into_value,
-            ),
-            poll_interval: Duration::from_millis(args.checkpoint_poll_interval_ms.map_or(
-                DEFAULT_CHECKPOINT_POLL_INTERVAL_MS,
-                PositiveMillis::into_value,
-            )),
+            delete_records_timeout: Time::from_millis(i64::from(whole_millis_i32(
+                "checkpoint DeleteRecords timeout",
+                args.checkpoint_delete_records_timeout
+                    .unwrap_or(DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT),
+            )?)),
+            poll_interval: args
+                .checkpoint_poll_interval
+                .unwrap_or(DEFAULT_CHECKPOINT_POLL_INTERVAL)
+                .to_std(),
         }))
     }
 }
@@ -1953,7 +2029,10 @@ impl Session for RuntimeSession {
 }
 
 /// Result of one self-suspend monitor iteration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Eq`: the size-gate outcome carries quantities, whose `f64` storage is
+/// only `PartialEq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SuspendMonitorOutcome {
     /// The tenant is not configured for idle suspension.
     Disabled,
@@ -1966,7 +2045,7 @@ pub enum SuspendMonitorOutcome {
     /// A session raced with admission close, so this attempt was aborted.
     RacedSession { count: usize },
     /// Checkpoint size gate was exceeded, so the tenant remains warm.
-    CheckpointTooLarge { bytes: u64, max_bytes: u64 },
+    CheckpointTooLarge { size: ByteSize, max: ByteSize },
     /// A final checkpoint was durable and the registry was marked suspended.
     Suspended,
 }
@@ -1986,7 +2065,7 @@ pub trait SuspendRegistry: Send {
 #[async_trait::async_trait]
 pub trait FinalCheckpointer: Send + Sync {
     /// Return the latest checkpoint size estimate used by the suspend size gate.
-    async fn latest_checkpoint_bytes(&self) -> std::io::Result<u64>;
+    async fn latest_checkpoint_size(&self) -> std::io::Result<ByteSize>;
 
     /// Force and await a durable final checkpoint manifest.
     async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint>;
@@ -2011,14 +2090,17 @@ impl SuspendRegistry for LiveSuspendRegistry {
 }
 
 /// Configuration for substrate idle self-suspension.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is deliberately absent: the idle window and the size gate are
+/// quantities, whose `f64` storage is only `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SuspendPolicy {
     /// Tenant name written to the registry.
     pub tenant: String,
     /// Idle window before suspend. Zero disables self-suspend.
-    pub idle_window: Duration,
+    pub idle_window: Time,
     /// Optional checkpoint size gate.
-    pub suspend_max_checkpoint_bytes: Option<u64>,
+    pub suspend_max_checkpoint: Option<ByteSize>,
 }
 
 impl SuspendPolicy {
@@ -2031,8 +2113,13 @@ impl SuspendPolicy {
 
         Some(Self {
             tenant: record.name.as_str().to_string(),
-            idle_window: Duration::from_secs(idle_seconds),
-            suspend_max_checkpoint_bytes: record.suspend_max_checkpoint_bytes,
+            // The registry record carries the raw registry JSON encoding
+            // (`crabka-gres-control` leaves it alone by design); this is the
+            // seam where it becomes a quantity.
+            idle_window: Time::from_secs(i64::try_from(idle_seconds).unwrap_or(i64::MAX)),
+            suspend_max_checkpoint: record
+                .suspend_max_checkpoint_bytes
+                .map(ByteSize::from_bytes),
         })
     }
 }
@@ -2047,7 +2134,7 @@ pub async fn try_suspend_idle_tenant(
     checkpointer: &dyn FinalCheckpointer,
     registry: &mut dyn SuspendRegistry,
 ) -> std::io::Result<SuspendMonitorOutcome> {
-    if policy.idle_window.is_zero() {
+    if policy.idle_window <= Time::ZERO {
         return Ok(SuspendMonitorOutcome::Disabled);
     }
 
@@ -2074,21 +2161,18 @@ pub async fn try_suspend_idle_tenant(
         });
     }
 
-    let checkpoint_bytes = checkpointer.latest_checkpoint_bytes().await?;
-    if let Some(max_bytes) = policy.suspend_max_checkpoint_bytes
-        && checkpoint_bytes > max_bytes
+    let size = checkpointer.latest_checkpoint_size().await?;
+    if let Some(max) = policy.suspend_max_checkpoint
+        && size > max
     {
         activity.reopen_after_suspend_abort();
         tracing::info!(
             tenant = %policy.tenant,
-            checkpoint_bytes,
-            max_bytes,
+            size = %size.human(),
+            max = %max.human(),
             "skip idle suspend because checkpoint exceeds configured size gate"
         );
-        return Ok(SuspendMonitorOutcome::CheckpointTooLarge {
-            bytes: checkpoint_bytes,
-            max_bytes,
-        });
+        return Ok(SuspendMonitorOutcome::CheckpointTooLarge { size, max });
     }
 
     let checkpoint = checkpointer.force_final_checkpoint().await?;
@@ -2097,12 +2181,18 @@ pub async fn try_suspend_idle_tenant(
     Ok(SuspendMonitorOutcome::Suspended)
 }
 
-fn idle_window_elapsed(last_activity_unix_millis: u64, idle_window: Duration) -> bool {
+/// Whether `idle_window` has elapsed since the last recorded activity.
+///
+/// The window is truncated, not rounded, on the way to milliseconds: it is
+/// compared against a delta of two epoch-millisecond instants, so rounding a
+/// sub-millisecond remainder up would hold the tenant warm for a whole extra
+/// millisecond that the operator never asked for.
+fn idle_window_elapsed(last_activity_unix_millis: u64, idle_window: Time) -> bool {
     let Some(now) = current_unix_millis() else {
         return false;
     };
     let idle_millis = now.saturating_sub(last_activity_unix_millis);
-    idle_millis >= u64::try_from(idle_window.as_millis()).unwrap_or(u64::MAX)
+    idle_millis >= u64::try_from(idle_window.millis_i64_trunc()).unwrap_or(u64::MAX)
 }
 
 fn current_unix_millis() -> Option<u64> {
@@ -2116,7 +2206,7 @@ fn current_unix_millis() -> Option<u64> {
 struct GresCheckpointWalPruner {
     bootstrap: CheckpointPruneBackend,
     security: Option<ClientSecurity>,
-    delete_records_timeout_ms: i32,
+    delete_records_timeout: Time,
 }
 
 enum CheckpointPruneBackend {
@@ -2125,18 +2215,18 @@ enum CheckpointPruneBackend {
 }
 
 impl GresCheckpointWalPruner {
-    fn in_memory(delete_records_timeout_ms: i32) -> Self {
+    fn in_memory(delete_records_timeout: Time) -> Self {
         Self {
             bootstrap: CheckpointPruneBackend::InMemory,
             security: None,
-            delete_records_timeout_ms,
+            delete_records_timeout,
         }
     }
 
     fn kafka(
         bootstrap: &str,
         security: Option<ClientSecurity>,
-        delete_records_timeout_ms: i32,
+        delete_records_timeout: Time,
     ) -> std::io::Result<Self> {
         let bootstrap_addrs: Vec<_> = bootstrap
             .split(',')
@@ -2150,7 +2240,7 @@ impl GresCheckpointWalPruner {
         Ok(Self {
             bootstrap: CheckpointPruneBackend::Kafka { bootstrap_addrs },
             security,
-            delete_records_timeout_ms,
+            delete_records_timeout,
         })
     }
 }
@@ -2179,7 +2269,7 @@ impl crabka_gres_substrate::CheckpointWalPruner for GresCheckpointWalPruner {
             ))
         })?;
         let outcomes = admin
-            .delete_records(ops, self.delete_records_timeout_ms)
+            .delete_records(ops, self.delete_records_timeout)
             .await
             .map_err(|error| {
                 crabka_gres_substrate::SubstrateError::Unavailable(format!(
@@ -2213,9 +2303,9 @@ fn checkpointing_was_requested(args: &ServeArgs) -> bool {
         || args.checkpoint_bytes.is_some()
         || args.checkpoint_part_bytes.is_some()
         || args.checkpoint_retain.is_some()
-        || args.checkpoint_delete_records_timeout_ms.is_some()
-        || args.checkpoint_poll_interval_ms.is_some()
-        || args.idle_suspend_poll_interval_ms.is_some()
+        || args.checkpoint_delete_records_timeout.is_some()
+        || args.checkpoint_poll_interval.is_some()
+        || args.idle_suspend_poll_interval.is_some()
 }
 
 fn infer_checkpoint_store_kind(args: &ServeArgs) -> std::io::Result<CheckpointStoreKind> {
@@ -2558,12 +2648,10 @@ pub async fn serve_listener_with_tenant_config_loader(
                 checkpointer,
                 registry,
                 shutdown,
-                Duration::from_millis(
-                    effective_args.idle_suspend_poll_interval_ms.map_or(
-                        DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS,
-                        PositiveMillis::into_value,
-                    ),
-                ),
+                effective_args
+                    .idle_suspend_poll_interval
+                    .unwrap_or(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL)
+                    .to_std(),
             ) => result,
         }
     } else {
@@ -2585,9 +2673,9 @@ fn local_vacuum_spawn_policy(
 
 /// One pacing decision for the local vacuum loop: how long to sleep before
 /// the next bounded step and how many version keys that step may examine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct VacuumPace {
-    interval: Duration,
+    interval: Time,
     key_budget: usize,
 }
 
@@ -2620,8 +2708,8 @@ struct VacuumStepObservation {
     /// committed since the previous step and no session ran any statement
     /// within [`LocalVacuumPolicy::idle_after`].
     foreground_idle: bool,
-    /// Wall-clock duration of the step itself (excluding the sleep).
-    step_elapsed: Duration,
+    /// Wall-clock extent of the step itself (excluding the sleep).
+    step_elapsed: Time,
 }
 
 /// Adaptive pacing for the local vacuum loop.
@@ -2694,13 +2782,18 @@ impl VacuumPacer {
             self.debt > self.policy.hot_debt
         };
         let interval = if hot {
-            Duration::ZERO
+            Time::ZERO
         } else if self.store_settled {
             // Proven clean: park at the idle cadence outright instead of
             // ramping — there is nothing left the ramp could discover.
             self.policy.idle_interval
         } else {
-            (self.pace.interval * 2).clamp(self.policy.backoff_floor, self.policy.idle_interval)
+            // `Ord::clamp` is unavailable on an `f64`-backed quantity, so the
+            // clamp is spelled out; `local_vacuum_policy` has already rejected
+            // a floor above the idle interval, so the order is the same.
+            (self.pace.interval * 2.0)
+                .max(self.policy.backoff_floor)
+                .min(self.policy.idle_interval)
         };
         let key_budget = if hot {
             if observation.step_elapsed <= self.policy.step_fast {
@@ -2726,12 +2819,11 @@ impl VacuumPacer {
 
 fn local_vacuum_maintenance_due(
     swept_anything: bool,
-    next_interval: Duration,
-    elapsed_since_maintain: Duration,
+    next_interval: Time,
+    elapsed_since_maintain: Time,
     policy: LocalVacuumPolicy,
 ) -> bool {
-    swept_anything
-        && (next_interval > Duration::ZERO || elapsed_since_maintain >= policy.idle_interval)
+    swept_anything && (next_interval > Time::ZERO || elapsed_since_maintain >= policy.idle_interval)
 }
 
 /// Run bounded dead-MVCC-version sweep steps on the LOCAL serving engine
@@ -2753,13 +2845,12 @@ async fn run_local_vacuum_loop(
         let pace = pacer.pace();
         tokio::select! {
             () = shutdown.cancelled() => return,
-            () = tokio::time::sleep(pace.interval) => {}
+            () = tokio::time::sleep(pace.interval.to_std()) => {}
         }
-        let _maintenance = activity.begin_maintenance().await;
         let step_started = std::time::Instant::now();
         match engine.vacuum_step_budgeted(pace.key_budget).await {
             Ok(step) => {
-                let step_elapsed = step_started.elapsed();
+                let step_elapsed = step_started.elapsed().as_time();
                 let stats = step.stats;
                 let swept_anything = stats.versions_pruned
                     + stats.index_entries_pruned
@@ -2793,7 +2884,7 @@ async fn run_local_vacuum_loop(
                 if local_vacuum_maintenance_due(
                     swept_anything,
                     next.interval,
-                    last_maintain.elapsed(),
+                    last_maintain.elapsed().as_time(),
                     policy,
                 ) {
                     last_maintain = std::time::Instant::now();
@@ -2810,8 +2901,8 @@ async fn run_local_vacuum_loop(
                     writes_since_step,
                     debt = pacer.debt,
                     foreground_idle,
-                    step_elapsed = ?step_elapsed,
-                    next_interval = ?next.interval,
+                    step_elapsed = %step_elapsed.human(),
+                    next_interval = %next.interval.human(),
                     next_key_budget = next.key_budget,
                     "local vacuum step"
                 );
@@ -2830,14 +2921,14 @@ mod vacuum_pacing_tests {
 
     const fn default_policy() -> LocalVacuumPolicy {
         LocalVacuumPolicy {
-            idle_interval: Duration::from_secs(2),
-            backoff_floor: Duration::from_millis(25),
+            idle_interval: secs(2),
+            backoff_floor: millis(25),
             hot_debt: VACUUM_STEP_KEY_BUDGET as u64,
             key_budget: VACUUM_STEP_KEY_BUDGET,
             max_key_budget: VACUUM_STEP_KEY_BUDGET * 4,
-            step_fast: Duration::from_millis(3),
-            step_slow: Duration::from_millis(12),
-            idle_after: Duration::from_secs(1),
+            step_fast: millis(3),
+            step_slow: millis(12),
+            idle_after: secs(1),
         }
     }
 
@@ -2845,14 +2936,14 @@ mod vacuum_pacing_tests {
     fn effective_defaults_pin_local_vacuum_policy() {
         const CHILD: &str = "CRABKA_TEST_GRES_LOCAL_VACUUM_DEFAULTS_CHILD";
         const VARIABLES: [&str; 8] = [
-            "CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL_MS",
-            "CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR_MS",
+            "CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL",
+            "CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR",
             "CRABKA_GRES_LOCAL_VACUUM_HOT_DEBT",
             "CRABKA_GRES_LOCAL_VACUUM_KEY_BUDGET",
             "CRABKA_GRES_LOCAL_VACUUM_MAX_KEY_BUDGET",
-            "CRABKA_GRES_LOCAL_VACUUM_STEP_FAST_MS",
-            "CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW_MS",
-            "CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER_MS",
+            "CRABKA_GRES_LOCAL_VACUUM_STEP_FAST",
+            "CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW",
+            "CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER",
         ];
         if std::env::var_os(CHILD).is_none() {
             let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
@@ -2911,20 +3002,20 @@ mod vacuum_pacing_tests {
     #[test]
     fn custom_idle_interval_controls_maintenance_rotation() {
         let policy = LocalVacuumPolicy {
-            idle_interval: Duration::from_millis(40),
+            idle_interval: millis(40),
             ..default_policy()
         };
 
         assert!(!local_vacuum_maintenance_due(
             true,
-            Duration::ZERO,
-            Duration::from_millis(39),
+            Time::ZERO,
+            millis(39),
             policy,
         ));
         assert!(local_vacuum_maintenance_due(
             true,
-            Duration::ZERO,
-            Duration::from_millis(40),
+            Time::ZERO,
+            millis(40),
             policy,
         ));
     }
@@ -2937,21 +3028,21 @@ mod vacuum_pacing_tests {
             swept_anything: false,
             cycle_completed: false,
             foreground_idle: false,
-            step_elapsed: Duration::from_millis(1),
+            step_elapsed: millis(1),
         }
     }
 
     #[test]
     fn custom_policy_controls_every_local_vacuum_decision() {
         let policy = LocalVacuumPolicy {
-            idle_interval: Duration::from_millis(90),
-            backoff_floor: Duration::from_millis(7),
+            idle_interval: millis(90),
+            backoff_floor: millis(7),
             hot_debt: 20,
             key_budget: 10,
             max_key_budget: 40,
-            step_fast: Duration::from_millis(2),
-            step_slow: Duration::from_millis(8),
-            idle_after: Duration::from_millis(30),
+            step_fast: millis(2),
+            step_slow: millis(8),
+            idle_after: millis(30),
         };
         let mut pacer = VacuumPacer::new(policy);
         assert_eq!(
@@ -2964,30 +3055,30 @@ mod vacuum_pacing_tests {
 
         let hot_fast = VacuumStepObservation {
             writes_since_step: 21,
-            step_elapsed: Duration::from_millis(2),
+            step_elapsed: millis(2),
             ..quiet_busy_step()
         };
-        assert_eq!(pacer.observe(&hot_fast).key_budget, 20);
+        assert!(pacer.observe(&hot_fast).key_budget == 20);
         pacer.pace.key_budget = 40;
-        assert_eq!(pacer.observe(&hot_fast).key_budget, 40);
+        assert!(pacer.observe(&hot_fast).key_budget == 40);
 
         let hot_slow = VacuumStepObservation {
-            step_elapsed: Duration::from_millis(8),
+            step_elapsed: millis(8),
             ..hot_fast
         };
-        assert_eq!(pacer.observe(&hot_slow).key_budget, 20);
+        assert!(pacer.observe(&hot_slow).key_budget == 20);
 
         let caught_up = VacuumStepObservation {
             writes_since_step: 0,
             versions_settled: 100,
-            step_elapsed: Duration::from_millis(4),
+            step_elapsed: millis(4),
             ..quiet_busy_step()
         };
-        assert_eq!(pacer.observe(&caught_up).interval, policy.backoff_floor);
+        assert!(pacer.observe(&caught_up).interval == policy.backoff_floor);
         let mut previous = policy.backoff_floor;
         loop {
             let pace = pacer.observe(&quiet_busy_step());
-            assert_eq!(pace.interval, (previous * 2).min(policy.idle_interval));
+            assert!(pace.interval == (previous * 2.0).min(policy.idle_interval));
             previous = pace.interval;
             if pace.interval == policy.idle_interval {
                 break;
@@ -2996,10 +3087,7 @@ mod vacuum_pacing_tests {
 
         let now = current_unix_millis().expect("system clock");
         let last_activity = now.saturating_sub(20);
-        assert!(idle_window_elapsed(
-            last_activity,
-            Duration::from_millis(10)
-        ));
+        assert!(idle_window_elapsed(last_activity, millis(10)));
         assert!(!idle_window_elapsed(last_activity, policy.idle_after));
     }
 
@@ -3017,7 +3105,7 @@ mod vacuum_pacing_tests {
         };
         assert!(pacer.observe(&behind).interval == policy.idle_interval); // debt 3 500
         assert!(pacer.observe(&behind).interval == policy.idle_interval); // debt 7 000
-        assert!(pacer.observe(&behind).interval == Duration::ZERO); // debt 10 500
+        assert!(pacer.observe(&behind).interval == Time::ZERO); // debt 10 500
         // Sweeping catches up: the interval backs off multiplicatively toward
         // the idle cadence instead of snapping straight to it.
         let repaying = VacuumStepObservation {
@@ -3032,7 +3120,7 @@ mod vacuum_pacing_tests {
         let mut previous = caught_up.interval;
         loop {
             let pace = pacer.observe(&quiet_busy_step());
-            assert!(pace.interval == (previous * 2).min(policy.idle_interval));
+            assert!(pace.interval == (previous * 2.0).min(policy.idle_interval));
             previous = pace.interval;
             if pace.interval == policy.idle_interval {
                 break;
@@ -3052,15 +3140,11 @@ mod vacuum_pacing_tests {
                 2 * VACUUM_STEP_KEY_BUDGET,
             ),
             // …but never past the cap…
-            (
-                policy.max_key_budget,
-                Duration::from_millis(1),
-                policy.max_key_budget,
-            ),
+            (policy.max_key_budget, millis(1), policy.max_key_budget),
             // …mid-range latency keeps the budget…
             (
                 2 * VACUUM_STEP_KEY_BUDGET,
-                Duration::from_millis(5),
+                millis(5),
                 2 * VACUUM_STEP_KEY_BUDGET,
             ),
             // …slow steps halve it…
@@ -3070,11 +3154,7 @@ mod vacuum_pacing_tests {
                 VACUUM_STEP_KEY_BUDGET,
             ),
             // …but never below the pgexec default.
-            (
-                VACUUM_STEP_KEY_BUDGET,
-                Duration::from_millis(50),
-                VACUUM_STEP_KEY_BUDGET,
-            ),
+            (VACUUM_STEP_KEY_BUDGET, millis(50), VACUUM_STEP_KEY_BUDGET),
         ];
         for (previous_budget, step_elapsed, expected) in cases {
             let mut pacer = VacuumPacer::new(policy);
@@ -3084,10 +3164,11 @@ mod vacuum_pacing_tests {
                 step_elapsed,
                 ..quiet_busy_step()
             });
-            assert!(pace.interval == Duration::ZERO);
+            assert!(pace.interval == Time::ZERO);
             assert!(
                 pace.key_budget == expected,
-                "previous {previous_budget}, elapsed {step_elapsed:?}"
+                "previous {previous_budget}, elapsed {}",
+                step_elapsed.human()
             );
         }
     }
@@ -3102,17 +3183,17 @@ mod vacuum_pacing_tests {
             swept_anything: true,
             cycle_completed: false,
             foreground_idle: true,
-            step_elapsed: Duration::from_millis(1),
+            step_elapsed: millis(1),
         };
         // Zero debt, but the store is not proven clean: drain back-to-back.
-        assert!(pacer.observe(&idle_dirty).interval == Duration::ZERO);
+        assert!(pacer.observe(&idle_dirty).interval == Time::ZERO);
         // A cycle that still swept something completes: keep draining (the
         // proving lap has not happened yet).
         let dirty_lap_end = VacuumStepObservation {
             cycle_completed: true,
             ..idle_dirty
         };
-        assert!(pacer.observe(&dirty_lap_end).interval == Duration::ZERO);
+        assert!(pacer.observe(&dirty_lap_end).interval == Time::ZERO);
         // A full lap that swept nothing parks the loop at the idle cadence
         // with the default budget, where it stays while nothing happens.
         let clean_lap = VacuumStepObservation {
@@ -3135,7 +3216,7 @@ mod vacuum_pacing_tests {
             writes_since_step: 20_000,
             ..quiet_busy_step()
         };
-        assert!(pacer.observe(&phantom).interval == Duration::ZERO);
+        assert!(pacer.observe(&phantom).interval == Time::ZERO);
         // The hot lap completes without sweeping anything: the ledger resets
         // instead of pinning the loop at full speed forever.
         let clean_lap = VacuumStepObservation {
@@ -3157,7 +3238,7 @@ mod vacuum_pacing_tests {
             swept_anything: false,
             cycle_completed: true,
             foreground_idle: true,
-            step_elapsed: Duration::from_millis(1),
+            step_elapsed: millis(1),
         };
         assert!(pacer.observe(&clean_idle_lap).interval == policy.idle_interval);
         // A small write lands: the store is no longer proven clean, so the
@@ -3171,7 +3252,7 @@ mod vacuum_pacing_tests {
             cycle_completed: false,
             ..clean_idle_lap
         };
-        assert!(pacer.observe(&idle_unproven).interval == Duration::ZERO);
+        assert!(pacer.observe(&idle_unproven).interval == Time::ZERO);
     }
 }
 
@@ -3310,8 +3391,13 @@ async fn run_suspend_monitor(
                 shutdown.cancel();
                 return Ok(());
             }
-            SuspendMonitorOutcome::CheckpointTooLarge { bytes, max_bytes } => {
-                tracing::info!(tenant = %policy.tenant, bytes, max_bytes, "tenant remains warm after suspend size-gate skip");
+            SuspendMonitorOutcome::CheckpointTooLarge { size, max } => {
+                tracing::info!(
+                    tenant = %policy.tenant,
+                    size = %size.human(),
+                    max = %max.human(),
+                    "tenant remains warm after suspend size-gate skip"
+                );
             }
             SuspendMonitorOutcome::Disabled
             | SuspendMonitorOutcome::OpenSessions { .. }
@@ -3790,8 +3876,8 @@ async fn load_live_tenant_config(
             topic_id,
             0,
             next_offset,
-            policy.fetch_max_wait_ms(),
-            policy.fetch_partition_max_bytes(),
+            policy.fetch_max_wait(),
+            policy.fetch_partition_max(),
         )
         .await
         .map_err(|error| std::io::Error::other(format!("tenant config fetch: {error}")))?;
@@ -3901,9 +3987,9 @@ fn live_split_operation_fetch<'a>(
         topic_id,
         partition: 0,
         fetch_offset,
-        max_wait_ms: policy.fetch_max_wait_ms(),
-        max_bytes: crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-        partition_max_bytes: policy.fetch_partition_max_bytes(),
+        max_wait: policy.fetch_max_wait(),
+        max: crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX,
+        partition_max: policy.fetch_partition_max(),
         isolation_level: 1,
     }
 }
@@ -4058,7 +4144,7 @@ async fn open_substrate_runtime_with_tenant_record(
         crabka_gres_substrate::wal_topic(&config.tenant),
         format!("{}/r0", config.tenant),
         None,
-        |timeout_ms| Ok(GresCheckpointWalPruner::in_memory(timeout_ms)),
+        |timeout| Ok(GresCheckpointWalPruner::in_memory(timeout)),
     )?;
     if let Some(checkpoint) = &checkpoint {
         seed_checkpoint_planner_stats(checkpoint).await?;
@@ -5566,7 +5652,7 @@ impl crabka_gres_ranges::DurableRecordInspector for LiveMultiRangeTransfer {
             let projection = crabka_gres_substrate::FoldProjection::All;
             let limits = crabka_gres_substrate::FoldLimits {
                 max_records: 1_000_000,
-                max_bytes: 256 * 1024 * 1024,
+                max_size: crabka_units::mebibytes(256),
             };
             match snapshot_offset {
                 Some(sample) => {
@@ -7083,7 +7169,7 @@ fn committed_tail_sha256(tail: &[crabka_gres_ranges::CommittedTailRecord]) -> St
 
 #[async_trait::async_trait]
 impl FinalCheckpointer for StartedCheckpointRuntime {
-    async fn latest_checkpoint_bytes(&self) -> std::io::Result<u64> {
+    async fn latest_checkpoint_size(&self) -> std::io::Result<ByteSize> {
         let snapshot = self.snapshot_source.snapshot();
         let metadata = crabka_gres_substrate::latest_checkpoint_metadata(
             self.store.as_ref(),
@@ -7093,10 +7179,12 @@ impl FinalCheckpointer for StartedCheckpointRuntime {
         )
         .await
         .map_err(|error| std::io::Error::other(format!("latest checkpoint metadata: {error}")))?;
-        Ok(remember_latest_checkpoint_bytes(
+        // The cache is an `AtomicU64`, which cannot hold a quantity, so it stays
+        // raw bytes and the conversion happens here in the accessor.
+        Ok(ByteSize::from_bytes(remember_latest_checkpoint_bytes(
             &self.latest_checkpoint_bytes,
             metadata.map(|metadata| metadata.total_bytes),
-        ))
+        )))
     }
 
     async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint> {
@@ -7134,7 +7222,7 @@ fn build_checkpoint_runtime(
     wal_topic: String,
     checkpoint_namespace: String,
     checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
-    pruner: impl FnOnce(i32) -> std::io::Result<GresCheckpointWalPruner>,
+    pruner: impl FnOnce(Time) -> std::io::Result<GresCheckpointWalPruner>,
 ) -> std::io::Result<Option<StartedCheckpointRuntime>> {
     let Some(checkpoint_config) = &config.checkpoints else {
         return Ok(None);
@@ -7150,7 +7238,7 @@ fn build_checkpoint_runtime(
         service_config,
         store,
         Arc::clone(&checkpoint_store),
-        Arc::new(pruner(checkpoint_config.delete_records_timeout_ms)?),
+        Arc::new(pruner(checkpoint_config.delete_records_timeout)?),
         Arc::clone(&stats),
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint service: {error}")))?;
@@ -7197,7 +7285,7 @@ fn build_range_checkpoint_runtime(
         Arc::new(GresCheckpointWalPruner::kafka(
             &config.bootstrap,
             config.kafka_security.clone(),
-            checkpoint_config.delete_records_timeout_ms,
+            checkpoint_config.delete_records_timeout,
         )?),
         Arc::clone(&stats),
     )
@@ -7227,7 +7315,7 @@ fn checkpoint_service_config(
         wal_topic,
         config.frames_threshold,
         config.bytes_threshold,
-        config.part_max_bytes,
+        config.part_max_size,
         config.retain_newest,
         config.poll_interval,
     )
@@ -7272,11 +7360,11 @@ async fn open_live_substrate_runtime(
         wal_selection.checkpoint_topic,
         wal_selection.checkpoint_namespace,
         checkpoint_store,
-        |timeout_ms| {
+        |timeout| {
             GresCheckpointWalPruner::kafka(
                 &config.bootstrap,
                 config.kafka_security.clone(),
-                timeout_ms,
+                timeout,
             )
         },
     )?;
@@ -7661,12 +7749,12 @@ mod tests {
         for option in [
             "--registry-replication-factor=0",
             "--registry-replication-factor=32768",
-            "--registry-topic-create-timeout-ms=0",
-            "--registry-reader-retry-backoff-ms=0",
-            "--registry-fetch-max-wait-ms=0",
+            "--registry-topic-create-timeout=0ms",
+            "--registry-reader-retry-backoff=0ms",
+            "--registry-fetch-max-wait=0ms",
             "--registry-fetch-partition-max-bytes=0",
-            "--registry-producer-dns-timeout-ms=0",
-            "--registry-reader-admin-dns-timeout-ms=0",
+            "--registry-producer-dns-timeout=0ms",
+            "--registry-reader-admin-dns-timeout=0ms",
         ] {
             assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
         }
@@ -7677,12 +7765,12 @@ mod tests {
         const CHILD: &str = "CRABKA_TEST_GRES_REGISTRY_ENV_CHILD";
         let vars = [
             ("CRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
-            ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT_MS", "15001"),
-            ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF_MS", "251"),
-            ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT_MS", "501"),
+            ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", "15001ms"),
+            ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF", "251ms"),
+            ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT", "501ms"),
             ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX_BYTES", "1048577"),
-            ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT_MS", "37"),
-            ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT_MS", "37"),
+            ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
+            ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
         ];
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
@@ -7698,31 +7786,42 @@ mod tests {
             return;
         }
         let environment = Cli::try_parse_from(["crabka-gres"]).expect("environment policy");
-        let environment_policy =
-            crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
-                .expect("policy")
-                .with_producer_dns_timeout_ms(37)
-                .expect("environment DNS timeout")
-                .with_reader_admin_dns_timeout_ms(37)
-                .expect("environment reader/admin DNS timeout");
+        let environment_policy = crabka_gres_control::RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(501),
+            1_048_577,
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(37))
+        .expect("environment DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(37))
+        .expect("environment reader/admin DNS timeout");
         assert!(environment.serve.registry.policy() == environment_policy);
         let cli = Cli::try_parse_from([
             "crabka-gres",
             "--registry-replication-factor=3",
-            "--registry-topic-create-timeout-ms=15002",
-            "--registry-reader-retry-backoff-ms=252",
-            "--registry-fetch-max-wait-ms=502",
+            "--registry-topic-create-timeout=15002ms",
+            "--registry-reader-retry-backoff=252ms",
+            "--registry-fetch-max-wait=502ms",
             "--registry-fetch-partition-max-bytes=1048578",
-            "--registry-producer-dns-timeout-ms=47",
-            "--registry-reader-admin-dns-timeout-ms=47",
+            "--registry-producer-dns-timeout=47ms",
+            "--registry-reader-admin-dns-timeout=47ms",
         ])
         .expect("CLI policy");
-        let cli_policy = crabka_gres_control::RegistryPolicy::new(3, 15_002, 252, 502, 1_048_578)
-            .expect("policy")
-            .with_producer_dns_timeout_ms(47)
-            .expect("CLI DNS timeout")
-            .with_reader_admin_dns_timeout_ms(47)
-            .expect("CLI reader/admin DNS timeout");
+        let cli_policy = crabka_gres_control::RegistryPolicy::new(
+            3,
+            crabka_units::millis(15_002),
+            crabka_units::millis(252),
+            crabka_units::millis(502),
+            1_048_578,
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(47))
+        .expect("CLI DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(47))
+        .expect("CLI reader/admin DNS timeout");
         assert!(cli.serve.registry.policy() == cli_policy);
     }
 
@@ -7730,14 +7829,14 @@ mod tests {
     fn local_vacuum_options_are_absent_by_default_and_cli_overrides_environment() {
         const CHILD: &str = "CRABKA_TEST_GRES_LOCAL_VACUUM_ENV_CHILD";
         let variables = [
-            ("CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL_MS", "11"),
-            ("CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR_MS", "12"),
+            ("CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL", "11ms"),
+            ("CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR", "12ms"),
             ("CRABKA_GRES_LOCAL_VACUUM_HOT_DEBT", "13"),
             ("CRABKA_GRES_LOCAL_VACUUM_KEY_BUDGET", "14"),
             ("CRABKA_GRES_LOCAL_VACUUM_MAX_KEY_BUDGET", "15"),
-            ("CRABKA_GRES_LOCAL_VACUUM_STEP_FAST_MS", "16"),
-            ("CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW_MS", "17"),
-            ("CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER_MS", "18"),
+            ("CRABKA_GRES_LOCAL_VACUUM_STEP_FAST", "16ms"),
+            ("CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW", "17ms"),
+            ("CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER", "18ms"),
         ];
         if std::env::var_os(CHILD).is_none() {
             let mut defaults =
@@ -7779,11 +7878,15 @@ mod tests {
             .serve
             .local_vacuum;
         assert_eq!(
-            environment.idle_interval_ms.map(PositiveMillis::into_value),
+            environment
+                .idle_interval
+                .map(crabka_units::convert::TimeExt::millis_i64),
             Some(11)
         );
         assert_eq!(
-            environment.backoff_floor_ms.map(PositiveMillis::into_value),
+            environment
+                .backoff_floor
+                .map(crabka_units::convert::TimeExt::millis_i64),
             Some(12)
         );
         assert_eq!(environment.hot_debt.map(NonZeroU64::get), Some(13));
@@ -7796,77 +7899,97 @@ mod tests {
             Some(15)
         );
         assert_eq!(
-            environment.step_fast_ms.map(PositiveMillis::into_value),
+            environment
+                .step_fast
+                .map(crabka_units::convert::TimeExt::millis_i64),
             Some(16)
         );
         assert_eq!(
-            environment.step_slow_ms.map(PositiveMillis::into_value),
+            environment
+                .step_slow
+                .map(crabka_units::convert::TimeExt::millis_i64),
             Some(17)
         );
         assert_eq!(
-            environment.idle_after_ms.map(PositiveMillis::into_value),
+            environment
+                .idle_after
+                .map(crabka_units::convert::TimeExt::millis_i64),
             Some(18)
         );
 
         let cli = Cli::try_parse_from([
             "crabka-gres",
-            "--local-vacuum-idle-interval-ms",
-            "21",
-            "--local-vacuum-backoff-floor-ms",
-            "22",
+            "--local-vacuum-idle-interval",
+            "21ms",
+            "--local-vacuum-backoff-floor",
+            "22ms",
             "--local-vacuum-hot-debt",
             "23",
             "--local-vacuum-key-budget",
             "24",
             "--local-vacuum-max-key-budget",
             "25",
-            "--local-vacuum-step-fast-ms",
-            "26",
-            "--local-vacuum-step-slow-ms",
-            "27",
-            "--local-vacuum-idle-after-ms",
-            "28",
+            "--local-vacuum-step-fast",
+            "26ms",
+            "--local-vacuum-step-slow",
+            "27ms",
+            "--local-vacuum-idle-after",
+            "28ms",
         ])
         .expect("CLI policy")
         .serve
         .local_vacuum;
         assert_eq!(
-            cli.idle_interval_ms.map(PositiveMillis::into_value),
+            cli.idle_interval
+                .map(crabka_units::convert::TimeExt::millis_i64),
             Some(21)
         );
         assert_eq!(
-            cli.backoff_floor_ms.map(PositiveMillis::into_value),
+            cli.backoff_floor
+                .map(crabka_units::convert::TimeExt::millis_i64),
             Some(22)
         );
         assert_eq!(cli.hot_debt.map(NonZeroU64::get), Some(23));
         assert_eq!(cli.key_budget.map(PositiveUsize::into_value), Some(24));
         assert_eq!(cli.max_key_budget.map(PositiveUsize::into_value), Some(25));
-        assert_eq!(cli.step_fast_ms.map(PositiveMillis::into_value), Some(26));
-        assert_eq!(cli.step_slow_ms.map(PositiveMillis::into_value), Some(27));
-        assert_eq!(cli.idle_after_ms.map(PositiveMillis::into_value), Some(28));
+        assert_eq!(
+            cli.step_fast
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(26)
+        );
+        assert_eq!(
+            cli.step_slow
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(27)
+        );
+        assert_eq!(
+            cli.idle_after
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(28)
+        );
     }
 
     #[test]
     fn local_vacuum_policy_rejects_invalid_relationships_and_substrate_noops() {
         for option in [
-            "--local-vacuum-idle-interval-ms=0",
-            "--local-vacuum-backoff-floor-ms=0",
+            "--local-vacuum-idle-interval=0ms",
+            "--local-vacuum-backoff-floor=0ms",
             "--local-vacuum-hot-debt=0",
             "--local-vacuum-key-budget=0",
             "--local-vacuum-max-key-budget=0",
-            "--local-vacuum-step-fast-ms=0",
-            "--local-vacuum-step-slow-ms=0",
-            "--local-vacuum-idle-after-ms=0",
+            "--local-vacuum-step-fast=0ms",
+            "--local-vacuum-step-slow=0ms",
+            "--local-vacuum-idle-after=0ms",
         ] {
             assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
         }
 
         for arguments in [
             [
-                "--local-vacuum-idle-interval-ms",
-                "10",
-                "--local-vacuum-backoff-floor-ms",
-                "11",
+                "--local-vacuum-idle-interval",
+                "10ms",
+                "--local-vacuum-backoff-floor",
+                "11ms",
             ]
             .as_slice(),
             [
@@ -7877,10 +8000,10 @@ mod tests {
             ]
             .as_slice(),
             [
-                "--local-vacuum-step-fast-ms",
-                "10",
-                "--local-vacuum-step-slow-ms",
-                "10",
+                "--local-vacuum-step-fast",
+                "10ms",
+                "--local-vacuum-step-slow",
+                "10ms",
             ]
             .as_slice(),
         ] {
@@ -7893,14 +8016,14 @@ mod tests {
         }
 
         for option in [
-            "--local-vacuum-idle-interval-ms=1",
-            "--local-vacuum-backoff-floor-ms=1",
+            "--local-vacuum-idle-interval=1ms",
+            "--local-vacuum-backoff-floor=1ms",
             "--local-vacuum-hot-debt=1",
             "--local-vacuum-key-budget=1",
             "--local-vacuum-max-key-budget=1",
-            "--local-vacuum-step-fast-ms=1",
-            "--local-vacuum-step-slow-ms=1",
-            "--local-vacuum-idle-after-ms=1",
+            "--local-vacuum-step-fast=1ms",
+            "--local-vacuum-step-slow=1ms",
+            "--local-vacuum-idle-after=1ms",
         ] {
             let args = Cli::try_parse_from([
                 "crabka-gres",
@@ -7946,7 +8069,7 @@ mod tests {
                     "tests::range0_follower_poll_validation_precedes_listener_bind",
                 ])
                 .env(CHILD, "1")
-                .env_remove("CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL_MS")
+                .env_remove("CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL")
                 .status()
                 .expect("child test");
             assert!(status.success());
@@ -7958,14 +8081,14 @@ mod tests {
             .expect("defaults")
             .serve;
         args.listen = occupied.local_addr().expect("address").to_string();
-        args.range0_follower_poll_interval_ms = Some(PositiveMillis::new(1).expect("positive"));
+        args.range0_follower_poll_interval = Some(crabka_units::millis(1));
 
         let error = run_serve(args).await.expect_err("invalid range-0 policy");
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
         assert_eq!(
             error.to_string(),
-            "--range0-follower-poll-interval-ms requires --ranges"
+            "--range0-follower-poll-interval requires --ranges"
         );
     }
 
@@ -7979,9 +8102,9 @@ mod tests {
         assert!(args.checkpoint_bytes.is_none());
         assert!(args.checkpoint_part_bytes.is_none());
         assert!(args.checkpoint_retain.is_none());
-        assert!(args.checkpoint_delete_records_timeout_ms.is_none());
-        assert!(args.checkpoint_poll_interval_ms.is_none());
-        assert!(args.idle_suspend_poll_interval_ms.is_none());
+        assert!(args.checkpoint_delete_records_timeout.is_none());
+        assert!(args.checkpoint_poll_interval.is_none());
+        assert!(args.idle_suspend_poll_interval.is_none());
         assert!(
             SubstrateRuntimeConfig::from_args(&args)
                 .expect("standalone defaults")
@@ -7991,13 +8114,22 @@ mod tests {
         for option in [
             "--checkpoint-part-bytes=7",
             "--checkpoint-retain=0",
-            "--checkpoint-delete-records-timeout-ms=0",
-            "--checkpoint-delete-records-timeout-ms=2147483648",
-            "--checkpoint-poll-interval-ms=0",
-            "--idle-suspend-poll-interval-ms=0",
+            "--checkpoint-delete-records-timeout=0ms",
+            "--checkpoint-poll-interval=0ms",
+            "--idle-suspend-poll-interval=0ms",
         ] {
             assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
         }
+
+        let oversized = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--checkpoint-store=in-memory",
+            "--checkpoint-delete-records-timeout=2147483648ms",
+        ])
+        .expect("valid UOM value");
+        assert!(SubstrateRuntimeConfig::from_args(&oversized.serve).is_err());
     }
 
     #[test]
@@ -8008,9 +8140,9 @@ mod tests {
             ("CRABKA_GRES_CHECKPOINT_BYTES", "12"),
             ("CRABKA_GRES_CHECKPOINT_PART_BYTES", "13"),
             ("CRABKA_GRES_CHECKPOINT_RETAIN", "14"),
-            ("CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS", "15"),
-            ("CRABKA_GRES_CHECKPOINT_POLL_INTERVAL_MS", "16"),
-            ("CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL_MS", "17"),
+            ("CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT", "15ms"),
+            ("CRABKA_GRES_CHECKPOINT_POLL_INTERVAL", "16ms"),
+            ("CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL", "17ms"),
         ];
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
@@ -8034,26 +8166,26 @@ mod tests {
         assert!(
             environment
                 .checkpoint_part_bytes
-                .map(CheckpointPartBytes::into_value)
+                .map(|value| value.into_value().bytes_usize())
                 == Some(13)
         );
         assert!(environment.checkpoint_retain.map(PositiveUsize::into_value) == Some(14));
         assert!(
             environment
-                .checkpoint_delete_records_timeout_ms
-                .map(PositiveI32::into_value)
+                .checkpoint_delete_records_timeout
+                .map(crabka_units::convert::TimeExt::millis_i64)
                 == Some(15)
         );
         assert!(
             environment
-                .checkpoint_poll_interval_ms
-                .map(PositiveMillis::into_value)
+                .checkpoint_poll_interval
+                .map(crabka_units::convert::TimeExt::millis_i64)
                 == Some(16)
         );
         assert!(
             environment
-                .idle_suspend_poll_interval_ms
-                .map(PositiveMillis::into_value)
+                .idle_suspend_poll_interval
+                .map(crabka_units::convert::TimeExt::millis_i64)
                 == Some(17)
         );
 
@@ -8063,9 +8195,9 @@ mod tests {
             "--checkpoint-bytes=22",
             "--checkpoint-part-bytes=23",
             "--checkpoint-retain=24",
-            "--checkpoint-delete-records-timeout-ms=25",
-            "--checkpoint-poll-interval-ms=26",
-            "--idle-suspend-poll-interval-ms=27",
+            "--checkpoint-delete-records-timeout=25ms",
+            "--checkpoint-poll-interval=26ms",
+            "--idle-suspend-poll-interval=27ms",
         ])
         .expect("CLI checkpoint policy")
         .serve;
@@ -8073,23 +8205,23 @@ mod tests {
         assert!(cli.checkpoint_bytes.map(NonZeroU64::get) == Some(22));
         assert!(
             cli.checkpoint_part_bytes
-                .map(CheckpointPartBytes::into_value)
+                .map(|value| value.into_value().bytes_usize())
                 == Some(23)
         );
         assert!(cli.checkpoint_retain.map(PositiveUsize::into_value) == Some(24));
         assert!(
-            cli.checkpoint_delete_records_timeout_ms
-                .map(PositiveI32::into_value)
+            cli.checkpoint_delete_records_timeout
+                .map(crabka_units::convert::TimeExt::millis_i64)
                 == Some(25)
         );
         assert!(
-            cli.checkpoint_poll_interval_ms
-                .map(PositiveMillis::into_value)
+            cli.checkpoint_poll_interval
+                .map(crabka_units::convert::TimeExt::millis_i64)
                 == Some(26)
         );
         assert!(
-            cli.idle_suspend_poll_interval_ms
-                .map(PositiveMillis::into_value)
+            cli.idle_suspend_poll_interval
+                .map(crabka_units::convert::TimeExt::millis_i64)
                 == Some(27)
         );
     }
@@ -8516,8 +8648,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl FinalCheckpointer for FakeCheckpointer {
-        async fn latest_checkpoint_bytes(&self) -> std::io::Result<u64> {
-            Ok(self.bytes.load(Ordering::SeqCst))
+        async fn latest_checkpoint_size(&self) -> std::io::Result<ByteSize> {
+            Ok(ByteSize::from_bytes(self.bytes.load(Ordering::SeqCst)))
         }
 
         async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint> {
@@ -8554,12 +8686,12 @@ mod tests {
         ServeArgs {
             registry: RegistryOptions {
                 replication_factor: RegistryReplicationFactor::new(1).expect("default"),
-                topic_create_timeout_ms: PositiveI32::new(15_000).expect("default"),
-                reader_retry_backoff_ms: PositiveMillis::new(250).expect("default"),
-                fetch_max_wait_ms: PositiveI32::new(500).expect("default"),
+                topic_create_timeout: crabka_units::millis(15_000),
+                reader_retry_backoff: crabka_units::millis(250),
+                fetch_max_wait: crabka_units::millis(500),
                 fetch_partition_max_bytes: PositiveI32::new(1_048_576).expect("default"),
-                producer_dns_timeout_ms: None,
-                reader_admin_dns_timeout_ms: None,
+                producer_dns_timeout: None,
+                reader_admin_dns_timeout: None,
             },
             local_vacuum: LocalVacuumOptions::default(),
             listen: "127.0.0.1:0".to_string(),
@@ -8572,35 +8704,35 @@ mod tests {
             tenant: None,
             cache_dir: None,
             ranges: None,
-            range0_follower_poll_interval_ms: None,
-            wal_recovery_fetch_max_wait_ms: None,
+            range0_follower_poll_interval: None,
+            wal_recovery_fetch_max_wait: None,
             wal_recovery_fetch_partition_max_bytes: None,
             wal_recovery_fetch_response_max_bytes: None,
             wal_recovery_empty_fetch_retries: None,
-            wal_recovery_dns_timeout_ms: None,
-            wal_recovery_connect_timeout_ms: None,
-            wal_recovery_request_timeout_ms: None,
+            wal_recovery_dns_timeout: None,
+            wal_recovery_connect_timeout: None,
+            wal_recovery_request_timeout: None,
             wal_topic_replication_factor: None,
-            wal_topic_ensure_timeout_ms: None,
-            wal_admin_connect_timeout_ms: None,
-            wal_admin_request_timeout_ms: None,
-            wal_producer_flush_timeout_ms: None,
-            wal_producer_dns_timeout_ms: None,
-            fdw_broker_dns_timeout_ms: None,
-            wal_producer_request_timeout_ms: None,
+            wal_topic_ensure_timeout: None,
+            wal_admin_connect_timeout: None,
+            wal_admin_request_timeout: None,
+            wal_producer_flush_timeout: None,
+            wal_producer_dns_timeout: None,
+            fdw_broker_dns_timeout: None,
+            wal_producer_request_timeout: None,
             wal_producer_retries: None,
-            wal_producer_retry_backoff_ms: None,
-            wal_producer_routing_retry_budget_ms: None,
-            wal_producer_init_retry_timeout_ms: None,
-            wal_producer_init_max_backoff_ms: None,
-            wal_producer_transaction_timeout_ms: None,
+            wal_producer_retry_backoff: None,
+            wal_producer_routing_retry_budget: None,
+            wal_producer_init_retry_timeout: None,
+            wal_producer_init_max_backoff: None,
+            wal_producer_transaction_timeout: None,
             wal_producer_compression: None,
-            wal_producer_linger_ms: None,
+            wal_producer_linger: None,
             wal_producer_batch_bytes: None,
             host_ranges: None,
             timestamp_source: TimestampSourceKind::LogicalTso,
-            hlc_max_offset_ms: 250,
-            hlc_wall_offset_ms: 0,
+            hlc_max_offset: crabka_units::millis(250),
+            hlc_wall_offset: Time::ZERO,
             range_listen: None,
             range_tls_cert: None,
             range_tls_key: None,
@@ -8624,9 +8756,9 @@ mod tests {
             checkpoint_bytes: None,
             checkpoint_part_bytes: None,
             checkpoint_retain: None,
-            checkpoint_delete_records_timeout_ms: None,
-            checkpoint_poll_interval_ms: None,
-            idle_suspend_poll_interval_ms: None,
+            checkpoint_delete_records_timeout: None,
+            checkpoint_poll_interval: None,
+            idle_suspend_poll_interval: None,
         }
     }
 
@@ -8718,8 +8850,8 @@ mod tests {
     fn suspend_policy() -> SuspendPolicy {
         SuspendPolicy {
             tenant: "tenant-a".to_string(),
-            idle_window: Duration::from_millis(1),
-            suspend_max_checkpoint_bytes: Some(100),
+            idle_window: millis(1),
+            suspend_max_checkpoint: Some(crabka_units::bytes(100)),
         }
     }
 
@@ -8805,12 +8937,12 @@ mod tests {
         .await
         .expect("check");
 
-        assert_eq!(
-            outcome,
-            SuspendMonitorOutcome::CheckpointTooLarge {
-                bytes: 101,
-                max_bytes: 100,
-            }
+        assert!(
+            outcome
+                == SuspendMonitorOutcome::CheckpointTooLarge {
+                    size: crabka_units::bytes(101),
+                    max: crabka_units::bytes(100),
+                }
         );
         assert_eq!(checkpointer.checkpoints.load(Ordering::SeqCst), 0);
         assert!(!registry.marked.load(Ordering::SeqCst));
@@ -8924,12 +9056,12 @@ mod tests {
         let mut args = substrate_args();
         args.registry = RegistryOptions {
             replication_factor: RegistryReplicationFactor::new(2).expect("replication factor"),
-            topic_create_timeout_ms: PositiveI32::new(15_001).expect("create timeout"),
-            reader_retry_backoff_ms: PositiveMillis::new(251).expect("retry backoff"),
-            fetch_max_wait_ms: PositiveI32::new(777).expect("fetch wait"),
+            topic_create_timeout: crabka_units::millis(15_001),
+            reader_retry_backoff: crabka_units::millis(251),
+            fetch_max_wait: crabka_units::millis(777),
             fetch_partition_max_bytes: PositiveI32::new(2_000_000).expect("fetch bytes"),
-            producer_dns_timeout_ms: None,
-            reader_admin_dns_timeout_ms: None,
+            producer_dns_timeout: None,
+            reader_admin_dns_timeout: None,
         };
         let expected_policy = args.registry.policy();
         let loader = RecordingTenantConfigLoader::default();
@@ -8948,7 +9080,14 @@ mod tests {
 
     #[test]
     fn split_operation_fetch_uses_registry_policy_limits() {
-        let policy = RegistryPolicy::new(2, 15_001, 251, 777, 2_000_000).expect("registry policy");
+        let policy = RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(777),
+            2_000_000,
+        )
+        .expect("registry policy");
         let fetch = live_split_operation_fetch(
             &policy,
             "topic",
@@ -8956,8 +9095,8 @@ mod tests {
             42,
         );
 
-        assert!(fetch.max_wait_ms == 777);
-        assert!(fetch.partition_max_bytes == 2_000_000);
+        assert!(fetch.max_wait == millis(777));
+        assert!(fetch.partition_max == crabka_units::bytes(2_000_000));
     }
 
     #[tokio::test]
@@ -9030,10 +9169,8 @@ mod tests {
             .expect("checkpoint config");
         assert!(defaults.frames_threshold == DEFAULT_CHECKPOINT_FRAMES);
         assert!(defaults.bytes_threshold == DEFAULT_CHECKPOINT_BYTES);
-        assert!(defaults.delete_records_timeout_ms == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS);
-        assert!(
-            defaults.poll_interval == Duration::from_millis(DEFAULT_CHECKPOINT_POLL_INTERVAL_MS)
-        );
+        assert!(defaults.delete_records_timeout == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT);
+        assert!(defaults.poll_interval == DEFAULT_CHECKPOINT_POLL_INTERVAL.to_std());
 
         let mut record = tenant_record();
         record.checkpoint_frames = Some(77);
@@ -9044,7 +9181,7 @@ mod tests {
             .expect("record checkpoint policy")
             .expect("checkpoint config");
         assert!(from_record.frames_threshold == 77);
-        assert!(from_record.bytes_threshold == 88);
+        assert!(from_record.bytes_threshold == crabka_units::bytes(88));
 
         args.checkpoint_frames = Some(NonZeroU64::new(7).expect("nonzero"));
         args.checkpoint_bytes = Some(NonZeroU64::new(8).expect("nonzero"));
@@ -9054,7 +9191,7 @@ mod tests {
             .expect("explicit checkpoint policy")
             .expect("checkpoint config");
         assert!(from_explicit.frames_threshold == 7);
-        assert!(from_explicit.bytes_threshold == 8);
+        assert!(from_explicit.bytes_threshold == crabka_units::bytes(8));
     }
 
     #[test]
@@ -9064,8 +9201,8 @@ mod tests {
             "--substrate-bootstrap=memory://",
             "--tenant=tenant-a",
             "--checkpoint-store=in-memory",
-            "--checkpoint-delete-records-timeout-ms=1234",
-            "--checkpoint-poll-interval-ms=5678",
+            "--checkpoint-delete-records-timeout=1234ms",
+            "--checkpoint-poll-interval=5678ms",
         ])
         .expect("checkpoint policy")
         .serve;
@@ -9079,10 +9216,10 @@ mod tests {
             "__gres_wal.tenant-a.r0".to_owned(),
         )
         .expect("service config");
-        let pruner = GresCheckpointWalPruner::in_memory(checkpoint.delete_records_timeout_ms);
+        let pruner = GresCheckpointWalPruner::in_memory(checkpoint.delete_records_timeout);
 
         assert!(service.poll_interval == Duration::from_millis(5_678));
-        assert!(pruner.delete_records_timeout_ms == 1_234);
+        assert!(pruner.delete_records_timeout == crabka_units::millis(1_234));
     }
 
     #[test]
@@ -9103,8 +9240,8 @@ mod tests {
         assert!(help.contains("--ranges"));
         assert!(help.contains("--host-ranges"));
         assert!(help.contains("--timestamp-source"));
-        assert!(help.contains("--hlc-max-offset-ms"));
-        assert!(help.contains("--hlc-wall-offset-ms"));
+        assert!(help.contains("--hlc-max-offset"));
+        assert!(help.contains("--hlc-wall-offset"));
         assert!(help.contains("--checkpoint-bucket"));
         assert!(help.contains("--checkpoint-store"));
         assert!(help.contains("--checkpoint-frames"));
@@ -9178,10 +9315,9 @@ mod tests {
             "0,100",
             "--timestamp-source",
             "hlc",
-            "--hlc-max-offset-ms",
-            "500",
-            "--hlc-wall-offset-ms",
-            "-200",
+            "--hlc-max-offset",
+            "500ms",
+            "--hlc-wall-offset=-200ms",
         ])
         .expect("hlc timestamp-source flags parse");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -9213,8 +9349,8 @@ mod tests {
         ])
         .expect("substrate options parse");
         assert!(cli.serve.timestamp_source == TimestampSourceKind::LogicalTso);
-        assert!(cli.serve.hlc_max_offset_ms == 250);
-        assert!(cli.serve.hlc_wall_offset_ms == 0);
+        assert!(cli.serve.hlc_max_offset == crabka_units::millis(250));
+        assert!(cli.serve.hlc_wall_offset == Time::ZERO);
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
             .expect("valid config")
             .expect("substrate config");
@@ -9232,7 +9368,7 @@ mod tests {
     #[test]
     fn range0_follower_poll_interval_uses_default_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_RANGE0_FOLLOWER_POLL_CHILD";
-        const ENV: &str = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL_MS";
+        const ENV: &str = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL";
         let base = [
             "crabka-gres",
             "--substrate-bootstrap=memory://",
@@ -9240,7 +9376,7 @@ mod tests {
             "--ranges=0,10",
         ];
         if std::env::var_os(CHILD).is_none() {
-            for (mode, value) in [("default", None), ("environment", Some("17"))] {
+            for (mode, value) in [("default", None), ("environment", Some("17ms"))] {
                 let mut child =
                     std::process::Command::new(std::env::current_exe().expect("test exe"));
                 child
@@ -9265,7 +9401,7 @@ mod tests {
         let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
             17
         } else {
-            DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS
+            u64::try_from(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.millis_i64()).unwrap_or_default()
         };
         let parsed = Cli::try_parse_from(base).expect("policy").serve;
         assert_eq!(
@@ -9278,7 +9414,7 @@ mod tests {
 
         let cli = Cli::try_parse_from(
             base.into_iter()
-                .chain(["--range0-follower-poll-interval-ms=19"]),
+                .chain(["--range0-follower-poll-interval=19ms"]),
         )
         .expect("CLI policy")
         .serve;
@@ -9294,7 +9430,7 @@ mod tests {
     #[test]
     fn range0_follower_poll_interval_rejects_zero_and_non_multirange_use() {
         const CHILD: &str = "CRABKA_TEST_GRES_RANGE0_FOLLOWER_POLL_REJECTION_CHILD";
-        const ENV: &str = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL_MS";
+        const ENV: &str = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL";
         if std::env::var_os(CHILD).is_none() {
             for (mode, value) in [
                 ("scrubbed", None),
@@ -9335,7 +9471,7 @@ mod tests {
                 "--substrate-bootstrap=memory://",
                 "--tenant=tenant-a",
                 "--ranges=0,10",
-                "--range0-follower-poll-interval-ms=0",
+                "--range0-follower-poll-interval=0ms",
             ])
             .is_err()
         );
@@ -9344,7 +9480,7 @@ mod tests {
                 "crabka-gres",
                 "--substrate-bootstrap=memory://",
                 "--tenant=tenant-a",
-                "--range0-follower-poll-interval-ms=1",
+                "--range0-follower-poll-interval=1ms",
             ])
             .is_err()
         );
@@ -9352,8 +9488,7 @@ mod tests {
         let mut programmatic = Cli::try_parse_from(["crabka-gres"])
             .expect("defaults")
             .serve;
-        programmatic.range0_follower_poll_interval_ms =
-            Some(PositiveMillis::new(1).expect("positive"));
+        programmatic.range0_follower_poll_interval = Some(crabka_units::millis(1));
         let error = SubstrateRuntimeConfig::from_args(&programmatic)
             .expect_err("programmatic non-multirange configuration");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
@@ -9363,28 +9498,28 @@ mod tests {
     fn wal_recovery_read_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_READ_POLICY_CHILD";
         const VARS: [&str; 23] = [
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
-            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT",
             "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
-            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_RETRIES",
-            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS",
-            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS",
-            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
-            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
-            "CRABKA_GRES_WAL_PRODUCER_LINGER_MS",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER",
             "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
         ];
         if std::env::var_os(CHILD).is_none() {
@@ -9402,8 +9537,9 @@ mod tests {
                 }
                 if mode == "environment" {
                     for (variable, value) in VARS.into_iter().zip([
-                        "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28",
-                        "29", "30", "31", "32", "33", "34", "35", "36", "none", "37", "38",
+                        "17ms", "18", "19", "20", "21ms", "22ms", "23ms", "24", "25ms", "26ms",
+                        "27ms", "28ms", "29ms", "30ms", "31", "32ms", "33ms", "34ms", "35ms",
+                        "36ms", "none", "37ms", "38",
                     ]) {
                         child.env(variable, value);
                     }
@@ -9422,17 +9558,17 @@ mod tests {
             (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27)
         } else {
             (
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT_MS,
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES,
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES,
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT.millis_i32(),
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32(),
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32(),
                 crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT_MS,
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT_MS,
-                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT_MS,
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT),
                 crabka_gres_substrate::DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
-                crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT_MS,
-                crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT_MS,
-                crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT_MS,
+                crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT.millis_i32(),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT),
             )
         };
         let config = SubstrateRuntimeConfig::from_args(
@@ -9443,49 +9579,49 @@ mod tests {
         .expect("valid config")
         .expect("substrate config");
         let policy = config.recovery_read_policy;
-        assert_eq!(policy.fetch_max_wait_ms(), expected.0);
-        assert_eq!(policy.fetch_partition_max_bytes(), expected.1);
-        assert_eq!(policy.fetch_response_max_bytes(), expected.2);
-        assert_eq!(policy.empty_fetch_retries(), expected.3);
-        assert!(policy.dns_timeout() == Duration::from_millis(expected.4));
-        assert_eq!(policy.connect_timeout(), Duration::from_millis(expected.5));
-        assert_eq!(policy.request_timeout(), Duration::from_millis(expected.6));
+        assert!(policy.fetch_max_wait().millis_i32() == expected.0);
+        assert!(policy.fetch_partition_max().bytes_i32() == expected.1);
+        assert!(policy.fetch_response_max().bytes_i32() == expected.2);
+        assert!(policy.empty_fetch_retries() == expected.3);
+        assert!(millis_u64(policy.dns_timeout()) == expected.4);
+        assert!(millis_u64(policy.connect_timeout()) == expected.5);
+        assert!(millis_u64(policy.request_timeout()) == expected.6);
         let admin = config.wal_admin_policy;
-        assert_eq!(admin.replication_factor(), expected.7);
-        assert_eq!(admin.topic_ensure_timeout_ms(), expected.8);
-        assert_eq!(admin.connect_timeout(), Duration::from_millis(expected.9));
-        assert_eq!(admin.request_timeout(), Duration::from_millis(expected.10));
+        assert!(admin.replication_factor() == expected.7);
+        assert!(admin.topic_ensure_timeout().millis_i32() == expected.8);
+        assert!(millis_u64(admin.connect_timeout()) == expected.9);
+        assert!(millis_u64(admin.request_timeout()) == expected.10);
 
         let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
-            "--wal-recovery-fetch-max-wait-ms=27",
+            "--wal-recovery-fetch-max-wait=27ms",
             "--wal-recovery-fetch-partition-max-bytes=28",
             "--wal-recovery-fetch-response-max-bytes=29",
             "--wal-recovery-empty-fetch-retries=30",
-            "--wal-recovery-dns-timeout-ms=30",
-            "--wal-recovery-connect-timeout-ms=31",
-            "--wal-recovery-request-timeout-ms=32",
+            "--wal-recovery-dns-timeout=30ms",
+            "--wal-recovery-connect-timeout=31ms",
+            "--wal-recovery-request-timeout=32ms",
             "--wal-topic-replication-factor=33",
-            "--wal-topic-ensure-timeout-ms=34",
-            "--wal-admin-connect-timeout-ms=35",
-            "--wal-admin-request-timeout-ms=36",
+            "--wal-topic-ensure-timeout=34ms",
+            "--wal-admin-connect-timeout=35ms",
+            "--wal-admin-request-timeout=36ms",
         ]))
         .expect("CLI policy");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
             .expect("valid config")
             .expect("substrate config");
         let policy = config.recovery_read_policy;
-        assert_eq!(policy.fetch_max_wait_ms(), 27);
-        assert_eq!(policy.fetch_partition_max_bytes(), 28);
-        assert_eq!(policy.fetch_response_max_bytes(), 29);
-        assert_eq!(policy.empty_fetch_retries(), 30);
-        assert!(policy.dns_timeout() == Duration::from_millis(30));
-        assert_eq!(policy.connect_timeout(), Duration::from_millis(31));
-        assert_eq!(policy.request_timeout(), Duration::from_millis(32));
+        assert!(policy.fetch_max_wait() == millis(27));
+        assert!(policy.fetch_partition_max() == crabka_units::bytes(28));
+        assert!(policy.fetch_response_max() == crabka_units::bytes(29));
+        assert!(policy.empty_fetch_retries() == 30);
+        assert!(policy.dns_timeout() == millis(30));
+        assert!(policy.connect_timeout() == millis(31));
+        assert!(policy.request_timeout() == millis(32));
         let admin = config.wal_admin_policy;
-        assert_eq!(admin.replication_factor(), 33);
-        assert_eq!(admin.topic_ensure_timeout_ms(), 34);
-        assert_eq!(admin.connect_timeout(), Duration::from_millis(35));
-        assert_eq!(admin.request_timeout(), Duration::from_millis(36));
+        assert!(admin.replication_factor() == 33);
+        assert!(admin.topic_ensure_timeout() == millis(34));
+        assert!(admin.connect_timeout() == millis(35));
+        assert!(admin.request_timeout() == millis(36));
     }
 
     #[test]
@@ -9495,28 +9631,28 @@ mod tests {
                 "--exact",
                 "tests::registry_policy_options_use_validated_defaults",
             ])
-            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS", "17")
+            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT", "17ms")
             .env("CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES", "18")
             .env("CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES", "19")
             .env("CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES", "20")
-            .env("CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS", "21")
-            .env("CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS", "21")
-            .env("CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS", "22")
+            .env("CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT", "21ms")
+            .env("CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT", "21ms")
+            .env("CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT", "22ms")
             .env("CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR", "23")
-            .env("CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS", "24")
-            .env("CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS", "25")
-            .env("CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS", "26")
-            .env("CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT_MS", "27")
-            .env("CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT_MS", "27")
-            .env("CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS", "27")
+            .env("CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT", "24ms")
+            .env("CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT", "25ms")
+            .env("CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT", "26ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT", "27ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT", "27ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT", "27ms")
             .env("CRABKA_GRES_WAL_PRODUCER_RETRIES", "28")
-            .env("CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS", "29")
-            .env("CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS", "30")
-            .env("CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS", "31")
-            .env("CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS", "32")
-            .env("CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS", "33")
+            .env("CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF", "29ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET", "30ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT", "31ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF", "32ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT", "33ms")
             .env("CRABKA_GRES_WAL_PRODUCER_COMPRESSION", "gzip")
-            .env("CRABKA_GRES_WAL_PRODUCER_LINGER_MS", "34")
+            .env("CRABKA_GRES_WAL_PRODUCER_LINGER", "34ms")
             .env("CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES", "35")
             .status()
             .expect("child test");
@@ -9527,25 +9663,25 @@ mod tests {
     #[test]
     fn wal_recovery_read_policy_rejects_zero_and_inert_use() {
         for option in [
-            "--wal-recovery-fetch-max-wait-ms=0",
+            "--wal-recovery-fetch-max-wait=0ms",
             "--wal-recovery-fetch-partition-max-bytes=0",
             "--wal-recovery-fetch-response-max-bytes=0",
             "--wal-recovery-empty-fetch-retries=0",
-            "--wal-recovery-dns-timeout-ms=0",
-            "--wal-recovery-connect-timeout-ms=0",
-            "--wal-recovery-request-timeout-ms=0",
+            "--wal-recovery-dns-timeout=0ms",
+            "--wal-recovery-connect-timeout=0ms",
+            "--wal-recovery-request-timeout=0ms",
             "--wal-topic-replication-factor=0",
-            "--wal-topic-ensure-timeout-ms=0",
-            "--wal-admin-connect-timeout-ms=0",
-            "--wal-admin-request-timeout-ms=0",
-            "--wal-producer-flush-timeout-ms=0",
-            "--wal-producer-dns-timeout-ms=0",
-            "--wal-producer-request-timeout-ms=0",
-            "--wal-producer-retry-backoff-ms=0",
-            "--wal-producer-routing-retry-budget-ms=0",
-            "--wal-producer-init-retry-timeout-ms=0",
-            "--wal-producer-init-max-backoff-ms=0",
-            "--wal-producer-transaction-timeout-ms=0",
+            "--wal-topic-ensure-timeout=0ms",
+            "--wal-admin-connect-timeout=0ms",
+            "--wal-admin-request-timeout=0ms",
+            "--wal-producer-flush-timeout=0ms",
+            "--wal-producer-dns-timeout=0ms",
+            "--wal-producer-request-timeout=0ms",
+            "--wal-producer-retry-backoff=0ms",
+            "--wal-producer-routing-retry-budget=0ms",
+            "--wal-producer-init-retry-timeout=0ms",
+            "--wal-producer-init-max-backoff=0ms",
+            "--wal-producer-transaction-timeout=0ms",
         ] {
             assert!(
                 Cli::try_parse_from([
@@ -9558,24 +9694,24 @@ mod tests {
             );
         }
         for option in [
-            "--wal-recovery-dns-timeout-ms=1",
-            "--wal-recovery-connect-timeout-ms=1",
-            "--wal-recovery-request-timeout-ms=1",
+            "--wal-recovery-dns-timeout=1ms",
+            "--wal-recovery-connect-timeout=1ms",
+            "--wal-recovery-request-timeout=1ms",
             "--wal-topic-replication-factor=1",
-            "--wal-topic-ensure-timeout-ms=1",
-            "--wal-admin-connect-timeout-ms=1",
-            "--wal-admin-request-timeout-ms=1",
-            "--wal-producer-flush-timeout-ms=1",
-            "--wal-producer-dns-timeout-ms=1",
-            "--wal-producer-request-timeout-ms=1",
+            "--wal-topic-ensure-timeout=1ms",
+            "--wal-admin-connect-timeout=1ms",
+            "--wal-admin-request-timeout=1ms",
+            "--wal-producer-flush-timeout=1ms",
+            "--wal-producer-dns-timeout=1ms",
+            "--wal-producer-request-timeout=1ms",
             "--wal-producer-retries=0",
-            "--wal-producer-retry-backoff-ms=1",
-            "--wal-producer-routing-retry-budget-ms=1",
-            "--wal-producer-init-retry-timeout-ms=1",
-            "--wal-producer-init-max-backoff-ms=1",
-            "--wal-producer-transaction-timeout-ms=1",
+            "--wal-producer-retry-backoff=1ms",
+            "--wal-producer-routing-retry-budget=1ms",
+            "--wal-producer-init-retry-timeout=1ms",
+            "--wal-producer-init-max-backoff=1ms",
+            "--wal-producer-transaction-timeout=1ms",
             "--wal-producer-compression=gzip",
-            "--wal-producer-linger-ms=0",
+            "--wal-producer-linger=0ms",
             "--wal-producer-batch-bytes=1",
         ] {
             assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
@@ -9593,31 +9729,31 @@ mod tests {
 
         for (option, field) in [
             (
-                "--wal-producer-flush-timeout-ms=2147483648",
+                "--wal-producer-flush-timeout=2147483648ms",
                 "producer flush timeout",
             ),
             (
-                "--wal-producer-request-timeout-ms=2147483648",
+                "--wal-producer-request-timeout=2147483648ms",
                 "request timeout",
             ),
             (
-                "--wal-producer-retry-backoff-ms=2147483648",
+                "--wal-producer-retry-backoff=2147483648ms",
                 "producer retry backoff",
             ),
             (
-                "--wal-producer-routing-retry-budget-ms=2147483648",
+                "--wal-producer-routing-retry-budget=2147483648ms",
                 "routing retry budget",
             ),
             (
-                "--wal-producer-init-retry-timeout-ms=2147483648",
+                "--wal-producer-init-retry-timeout=2147483648ms",
                 "producer-ID initialization retry timeout",
             ),
             (
-                "--wal-producer-init-max-backoff-ms=2147483648",
+                "--wal-producer-init-max-backoff=2147483648ms",
                 "producer-ID initialization maximum backoff",
             ),
             (
-                "--wal-producer-transaction-timeout-ms=2147483648",
+                "--wal-producer-transaction-timeout=2147483648ms",
                 "transaction timeout",
             ),
         ] {
@@ -9638,8 +9774,8 @@ mod tests {
             "crabka-gres",
             "--substrate-bootstrap=memory://",
             "--tenant=tenant-a",
-            "--wal-producer-retry-backoff-ms=2",
-            "--wal-producer-init-max-backoff-ms=1",
+            "--wal-producer-retry-backoff=2ms",
+            "--wal-producer-init-max-backoff=1ms",
         ])
         .expect("positive parser values")
         .serve;
@@ -9650,7 +9786,7 @@ mod tests {
                 .contains("backoff")
         );
         for (option, field) in [
-            ("--wal-producer-linger-ms=2147483648", "linger"),
+            ("--wal-producer-linger=2147483648ms", "linger"),
             ("--wal-producer-batch-bytes=0", "batch bytes"),
             ("--wal-producer-batch-bytes=2147483648", "batch bytes"),
         ] {
@@ -9715,28 +9851,28 @@ mod tests {
     async fn wal_recovery_read_policy_validation_precedes_listener_bind() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_BIND_CHILD";
         const VARS: [&str; 23] = [
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
-            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT",
             "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
-            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_RETRIES",
-            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS",
-            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS",
-            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
-            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
-            "CRABKA_GRES_WAL_PRODUCER_LINGER_MS",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER",
             "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
         ];
         if std::env::var_os(CHILD).is_none() {
@@ -9783,28 +9919,28 @@ mod tests {
 
     fn set_wal_policy_option(args: &mut ServeArgs, option: usize) {
         match option {
-            0 => args.wal_recovery_fetch_max_wait_ms = PositiveI32::new(1).ok(),
+            0 => args.wal_recovery_fetch_max_wait = Some(crabka_units::millis(1)),
             1 => args.wal_recovery_fetch_partition_max_bytes = PositiveI32::new(1).ok(),
             2 => args.wal_recovery_fetch_response_max_bytes = PositiveI32::new(1).ok(),
             3 => args.wal_recovery_empty_fetch_retries = PositiveUsize::new(1).ok(),
-            4 => args.wal_recovery_dns_timeout_ms = PositiveMillis::new(1).ok(),
-            5 => args.wal_recovery_connect_timeout_ms = PositiveMillis::new(1).ok(),
-            6 => args.wal_recovery_request_timeout_ms = PositiveMillis::new(1).ok(),
+            4 => args.wal_recovery_dns_timeout = Some(crabka_units::millis(1)),
+            5 => args.wal_recovery_connect_timeout = Some(crabka_units::millis(1)),
+            6 => args.wal_recovery_request_timeout = Some(crabka_units::millis(1)),
             7 => args.wal_topic_replication_factor = PositiveI32::new(1).ok(),
-            8 => args.wal_topic_ensure_timeout_ms = PositiveI32::new(1).ok(),
-            9 => args.wal_admin_connect_timeout_ms = PositiveMillis::new(1).ok(),
-            10 => args.wal_admin_request_timeout_ms = PositiveMillis::new(1).ok(),
-            11 => args.wal_producer_flush_timeout_ms = PositiveMillis::new(1).ok(),
-            12 => args.wal_producer_dns_timeout_ms = PositiveMillis::new(1).ok(),
-            13 => args.wal_producer_request_timeout_ms = PositiveMillis::new(1).ok(),
+            8 => args.wal_topic_ensure_timeout = Some(crabka_units::millis(1)),
+            9 => args.wal_admin_connect_timeout = Some(crabka_units::millis(1)),
+            10 => args.wal_admin_request_timeout = Some(crabka_units::millis(1)),
+            11 => args.wal_producer_flush_timeout = Some(crabka_units::millis(1)),
+            12 => args.wal_producer_dns_timeout = Some(crabka_units::millis(1)),
+            13 => args.wal_producer_request_timeout = Some(crabka_units::millis(1)),
             14 => args.wal_producer_retries = NonNegativeI32::new(0).ok(),
-            15 => args.wal_producer_retry_backoff_ms = PositiveMillis::new(1).ok(),
-            16 => args.wal_producer_routing_retry_budget_ms = PositiveMillis::new(1).ok(),
-            17 => args.wal_producer_init_retry_timeout_ms = PositiveMillis::new(1).ok(),
-            18 => args.wal_producer_init_max_backoff_ms = PositiveMillis::new(1).ok(),
-            19 => args.wal_producer_transaction_timeout_ms = PositiveMillis::new(1).ok(),
+            15 => args.wal_producer_retry_backoff = Some(crabka_units::millis(1)),
+            16 => args.wal_producer_routing_retry_budget = Some(crabka_units::millis(1)),
+            17 => args.wal_producer_init_retry_timeout = Some(crabka_units::millis(1)),
+            18 => args.wal_producer_init_max_backoff = Some(crabka_units::millis(1)),
+            19 => args.wal_producer_transaction_timeout = Some(crabka_units::millis(1)),
             20 => args.wal_producer_compression = Some(crabka_client_producer::Compression::Gzip),
-            21 => args.wal_producer_linger_ms = Some(0),
+            21 => args.wal_producer_linger = Some(Time::ZERO),
             22 => args.wal_producer_batch_bytes = Some(1),
             _ => unreachable!("test policy option"),
         }
@@ -9856,13 +9992,13 @@ mod tests {
             "crabka-gres",
             "--substrate-bootstrap=memory://",
             "--tenant=tenant-a",
-            "--wal-producer-request-timeout-ms=31",
+            "--wal-producer-request-timeout=31ms",
             "--wal-producer-retries=32",
-            "--wal-producer-retry-backoff-ms=33",
-            "--wal-producer-routing-retry-budget-ms=34",
-            "--wal-producer-init-retry-timeout-ms=35",
-            "--wal-producer-init-max-backoff-ms=36",
-            "--wal-producer-transaction-timeout-ms=37",
+            "--wal-producer-retry-backoff=33ms",
+            "--wal-producer-routing-retry-budget=34ms",
+            "--wal-producer-init-retry-timeout=35ms",
+            "--wal-producer-init-max-backoff=36ms",
+            "--wal-producer-transaction-timeout=37ms",
         ])
         .expect("WAL producer policy");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -9890,7 +10026,7 @@ mod tests {
     #[test]
     fn wal_producer_flush_timeout_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_FLUSH_TIMEOUT_CHILD";
-        const ENV: &str = "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT_MS";
+        const ENV: &str = "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT";
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
                 let mut child =
@@ -9903,7 +10039,7 @@ mod tests {
                     .env(CHILD, mode)
                     .env_remove(ENV);
                 if mode == "environment" {
-                    child.env(ENV, "41");
+                    child.env(ENV, "41ms");
                 }
                 assert!(child.status().expect("child test").success());
             }
@@ -9934,7 +10070,7 @@ mod tests {
 
         let cli = <Cli as clap::Parser>::try_parse_from(
             base.into_iter()
-                .chain(["--wal-producer-flush-timeout-ms=51"]),
+                .chain(["--wal-producer-flush-timeout=51ms"]),
         )
         .expect("CLI flush timeout");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -9957,7 +10093,7 @@ mod tests {
     #[test]
     fn wal_producer_dns_timeout_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_DNS_TIMEOUT_CHILD";
-        const ENV: &str = "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT_MS";
+        const ENV: &str = "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT";
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
                 let mut child =
@@ -9970,7 +10106,7 @@ mod tests {
                     .env(CHILD, mode)
                     .env_remove(ENV);
                 if mode == "environment" {
-                    child.env(ENV, "27");
+                    child.env(ENV, "27ms");
                 }
                 assert!(child.status().expect("child test").success());
             }
@@ -9997,7 +10133,7 @@ mod tests {
         assert_eq!(config.producer_dns_timeout.milliseconds(), expected_ms);
 
         let cli = <Cli as clap::Parser>::try_parse_from(
-            base.into_iter().chain(["--wal-producer-dns-timeout-ms=37"]),
+            base.into_iter().chain(["--wal-producer-dns-timeout=37ms"]),
         )
         .expect("CLI DNS timeout");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -10020,15 +10156,15 @@ mod tests {
             "crabka-gres",
             "--substrate-bootstrap=k:9092",
             "--tenant=t",
-            "--wal-producer-dns-timeout-ms=0",
+            "--wal-producer-dns-timeout=0ms",
         ])
         .expect_err("zero DNS timeout");
 
-        Cli::try_parse_from(["crabka-gres", "--wal-producer-dns-timeout-ms=1"])
+        Cli::try_parse_from(["crabka-gres", "--wal-producer-dns-timeout=1ms"])
             .expect_err("substrate bootstrap required");
 
         let mut programmatic = serve_args(Some("trust"), Vec::new());
-        programmatic.wal_producer_dns_timeout_ms = PositiveMillis::new(1).ok();
+        programmatic.wal_producer_dns_timeout = Some(crabka_units::millis(1));
         let error = SubstrateRuntimeConfig::from_args(&programmatic)
             .expect_err("programmatic DNS timeout without substrate");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
@@ -10037,7 +10173,7 @@ mod tests {
     #[test]
     fn fdw_broker_dns_timeout_uses_default_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_FDW_BROKER_DNS_TIMEOUT_CHILD";
-        const ENV: &str = "CRABKA_GRES_FDW_BROKER_DNS_TIMEOUT_MS";
+        const ENV: &str = "CRABKA_GRES_FDW_BROKER_DNS_TIMEOUT";
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
                 let mut child =
@@ -10050,7 +10186,7 @@ mod tests {
                     .env(CHILD, mode)
                     .env_remove(ENV);
                 if mode == "environment" {
-                    child.env(ENV, "27");
+                    child.env(ENV, "27ms");
                 }
                 assert!(child.status().expect("child test").success());
             }
@@ -10072,12 +10208,10 @@ mod tests {
             expected_ms
         );
 
-        let args = <Cli as clap::Parser>::try_parse_from([
-            "crabka-gres",
-            "--fdw-broker-dns-timeout-ms=37",
-        ])
-        .expect("CLI FDW DNS timeout")
-        .serve;
+        let args =
+            <Cli as clap::Parser>::try_parse_from(["crabka-gres", "--fdw-broker-dns-timeout=37ms"])
+                .expect("CLI FDW DNS timeout")
+                .serve;
         assert_eq!(
             effective_fdw_broker_dns_timeout(&args)
                 .expect("valid FDW DNS timeout")
@@ -10088,9 +10222,9 @@ mod tests {
 
     #[test]
     fn fdw_broker_dns_timeout_rejects_zero_but_allows_local_mode() {
-        Cli::try_parse_from(["crabka-gres", "--fdw-broker-dns-timeout-ms=0"])
+        Cli::try_parse_from(["crabka-gres", "--fdw-broker-dns-timeout=0ms"])
             .expect_err("zero DNS timeout");
-        Cli::try_parse_from(["crabka-gres", "--fdw-broker-dns-timeout-ms=1"])
+        Cli::try_parse_from(["crabka-gres", "--fdw-broker-dns-timeout=1ms"])
             .expect("local FDW policy");
     }
 
@@ -10100,7 +10234,7 @@ mod tests {
             "crabka-gres",
             "--substrate-bootstrap=memory://",
             "--tenant=tenant-a",
-            "--fdw-broker-dns-timeout-ms=37",
+            "--fdw-broker-dns-timeout=37ms",
         ])
         .expect("substrate FDW DNS timeout")
         .serve;
@@ -10121,7 +10255,7 @@ mod tests {
                 "crabka-gres",
                 "--substrate-bootstrap=memory://",
                 "--tenant=tenant-a",
-                "--wal-producer-flush-timeout-ms=0",
+                "--wal-producer-flush-timeout=0ms",
             ])
             .is_err()
         );
@@ -10129,7 +10263,7 @@ mod tests {
             "crabka-gres",
             "--substrate-bootstrap=memory://",
             "--tenant=tenant-a",
-            "--wal-producer-flush-timeout-ms=2147483648",
+            "--wal-producer-flush-timeout=2147483648ms",
         ])
         .expect("positive parser value");
         assert!(SubstrateRuntimeConfig::from_args(&oversized.serve).is_err());
@@ -10138,7 +10272,7 @@ mod tests {
             "crabka-gres",
             "--substrate-bootstrap=memory://",
             "--tenant=tenant-a",
-            "--wal-producer-flush-timeout-ms=2147483647",
+            "--wal-producer-flush-timeout=2147483647ms",
         ])
         .expect("maximum protocol timeout");
         assert_eq!(
@@ -10154,15 +10288,15 @@ mod tests {
             "crabka-gres",
             "--substrate-bootstrap=memory://",
             "--tenant=tenant-a",
-            "--wal-producer-flush-timeout-ms=1.5",
+            "--wal-producer-flush-timeout=1.5ms",
         ])
-        .expect_err("fractional milliseconds");
-        assert_eq!(fractional.kind(), clap::error::ErrorKind::ValueValidation);
+        .expect("fractional UOM value");
+        assert!(SubstrateRuntimeConfig::from_args(&fractional.serve).is_err());
 
         assert!(
             <Cli as clap::Parser>::try_parse_from([
                 "crabka-gres",
-                "--wal-producer-flush-timeout-ms=1",
+                "--wal-producer-flush-timeout=1ms",
             ])
             .is_err()
         );
@@ -10175,7 +10309,7 @@ mod tests {
             "--substrate-bootstrap=memory://",
             "--tenant=tenant-a",
             "--wal-producer-compression=zstd",
-            "--wal-producer-linger-ms=38",
+            "--wal-producer-linger=38ms",
             "--wal-producer-batch-bytes=39",
         ])
         .expect("WAL producer throughput policy");
@@ -10208,28 +10342,28 @@ mod tests {
     fn wal_producer_throughput_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_THROUGHPUT_POLICY_CHILD";
         const VARS: [&str; 23] = [
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
-            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT",
             "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
-            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_RETRIES",
-            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS",
-            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS",
-            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
-            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
-            "CRABKA_GRES_WAL_PRODUCER_LINGER_MS",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER",
             "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
         ];
         if std::env::var_os(CHILD).is_none() {
@@ -10246,7 +10380,8 @@ mod tests {
                     child.env_remove(variable);
                 }
                 if mode == "environment" {
-                    for (variable, value) in VARS[20..].iter().copied().zip(["gzip", "41", "42"]) {
+                    for (variable, value) in VARS[20..].iter().copied().zip(["gzip", "41ms", "42"])
+                    {
                         child.env(variable, value);
                     }
                 }
@@ -10282,7 +10417,7 @@ mod tests {
 
         let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
             "--wal-producer-compression=lz4",
-            "--wal-producer-linger-ms=51",
+            "--wal-producer-linger=51ms",
             "--wal-producer-batch-bytes=52",
         ]))
         .expect("CLI policy");
@@ -10303,28 +10438,28 @@ mod tests {
     fn wal_producer_retry_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_POLICY_CHILD";
         const VARS: [&str; 23] = [
-            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX_BYTES",
             "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
-            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT",
             "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
-            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_RETRIES",
-            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF_MS",
-            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET_MS",
-            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT_MS",
-            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF_MS",
-            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT_MS",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
-            "CRABKA_GRES_WAL_PRODUCER_LINGER_MS",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER",
             "CRABKA_GRES_WAL_PRODUCER_BATCH_BYTES",
         ];
         if std::env::var_os(CHILD).is_none() {
@@ -10337,7 +10472,7 @@ mod tests {
                         "tests::wal_producer_retry_policy_uses_defaults_environment_and_cli_precedence",
                     ])
                     .env(CHILD, mode)
-                    .env("CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT_MS", "0");
+                    .env("CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT", "0ms");
                 for variable in VARS {
                     child.env_remove(variable);
                 }
@@ -10345,7 +10480,7 @@ mod tests {
                     for (variable, value) in VARS[13..20]
                         .iter()
                         .copied()
-                        .zip(["41", "42", "43", "44", "45", "46", "47"])
+                        .zip(["41ms", "42", "43ms", "44ms", "45ms", "46ms", "47ms"])
                     {
                         child.env(variable, value);
                     }
@@ -10384,13 +10519,13 @@ mod tests {
         assert_eq!(config.producer_retry_policy, expected);
 
         let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
-            "--wal-producer-request-timeout-ms=51",
+            "--wal-producer-request-timeout=51ms",
             "--wal-producer-retries=52",
-            "--wal-producer-retry-backoff-ms=53",
-            "--wal-producer-routing-retry-budget-ms=54",
-            "--wal-producer-init-retry-timeout-ms=55",
-            "--wal-producer-init-max-backoff-ms=56",
-            "--wal-producer-transaction-timeout-ms=57",
+            "--wal-producer-retry-backoff=53ms",
+            "--wal-producer-routing-retry-budget=54ms",
+            "--wal-producer-init-retry-timeout=55ms",
+            "--wal-producer-init-max-backoff=56ms",
+            "--wal-producer-transaction-timeout=57ms",
         ]))
         .expect("CLI policy");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -10458,18 +10593,12 @@ mod tests {
             .expect("valid config")
             .expect("substrate config");
 
-        assert_eq!(
-            config.checkpoints.as_ref().map(|cfg| cfg.frames_threshold),
-            Some(100)
+        assert!(config.checkpoints.as_ref().map(|cfg| cfg.frames_threshold) == Some(100));
+        assert!(
+            config.checkpoints.as_ref().map(|cfg| cfg.bytes_threshold)
+                == Some(crabka_units::mebibytes(1))
         );
-        assert_eq!(
-            config.checkpoints.as_ref().map(|cfg| cfg.bytes_threshold),
-            Some(1_048_576)
-        );
-        assert_eq!(
-            config.checkpoints.as_ref().map(|cfg| cfg.retain_newest),
-            Some(3)
-        );
+        assert!(config.checkpoints.as_ref().map(|cfg| cfg.retain_newest) == Some(3));
         assert!(matches!(
             config.checkpoints.expect("checkpoint config").object_store,
             CheckpointObjectStoreConfig::S3 { ref bucket, ref region, ref prefix, .. }
@@ -10481,9 +10610,9 @@ mod tests {
     fn checkpoint_options_without_object_store_are_rejected() {
         for option in [
             "--checkpoint-frames=10",
-            "--checkpoint-delete-records-timeout-ms=25",
-            "--checkpoint-poll-interval-ms=26",
-            "--idle-suspend-poll-interval-ms=27",
+            "--checkpoint-delete-records-timeout=25ms",
+            "--checkpoint-poll-interval=26ms",
+            "--idle-suspend-poll-interval=27ms",
         ] {
             let args = Cli::try_parse_from([
                 "crabka-gres",
@@ -10530,9 +10659,9 @@ mod tests {
     #[test]
     fn checkpoint_lifecycle_cli_options_require_substrate_mode() {
         for option in [
-            "--checkpoint-delete-records-timeout-ms=25",
-            "--checkpoint-poll-interval-ms=26",
-            "--idle-suspend-poll-interval-ms=27",
+            "--checkpoint-delete-records-timeout=25ms",
+            "--checkpoint-poll-interval=26ms",
+            "--idle-suspend-poll-interval=27ms",
         ] {
             let args = Cli::try_parse_from(["crabka-gres", option])
                 .expect("checkpoint lifecycle option")
@@ -10551,9 +10680,9 @@ mod tests {
     fn checkpoint_lifecycle_environment_options_require_substrate_mode() {
         const CHILD: &str = "CRABKA_TEST_GRES_CHECKPOINT_REQUIRED_ENV_CHILD";
         const VARIABLES: [&str; 3] = [
-            "CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS",
-            "CRABKA_GRES_CHECKPOINT_POLL_INTERVAL_MS",
-            "CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL_MS",
+            "CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT",
+            "CRABKA_GRES_CHECKPOINT_POLL_INTERVAL",
+            "CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL",
         ];
 
         if let Ok(variable) = std::env::var(CHILD) {
@@ -10583,7 +10712,7 @@ mod tests {
             for other in VARIABLES {
                 command.env_remove(other);
             }
-            command.env(variable, "25");
+            command.env(variable, "25ms");
             assert!(
                 command.status().expect("child test").success(),
                 "{variable}"
@@ -10722,9 +10851,7 @@ mod tests {
             checkpoints: None,
             kafka_security: None,
             ranges: Some("0,100,200".to_string()),
-            range0_follower_poll_interval: Duration::from_millis(
-                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-            ),
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -10796,17 +10923,15 @@ mod tests {
             checkpoints: Some(CheckpointRuntimeConfig {
                 object_store: CheckpointObjectStoreConfig::InMemory,
                 frames_threshold: 1,
-                bytes_threshold: 1,
-                part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
+                bytes_threshold: crabka_units::bytes(1),
+                part_max_size: crabka_gres_substrate::DEFAULT_PART_MAX_SIZE,
                 retain_newest: 2,
-                delete_records_timeout_ms: 30_000,
+                delete_records_timeout: crabka_units::secs(30),
                 poll_interval: Duration::from_secs(1),
             }),
             kafka_security: None,
             ranges: None,
-            range0_follower_poll_interval: Duration::from_millis(
-                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-            ),
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -10840,7 +10965,7 @@ mod tests {
             wal_selection.checkpoint_topic,
             wal_selection.checkpoint_namespace,
             Some(Arc::clone(&checkpoint_store)),
-            |timeout_ms| Ok(GresCheckpointWalPruner::in_memory(timeout_ms)),
+            |timeout| Ok(GresCheckpointWalPruner::in_memory(timeout)),
         )
         .expect("checkpoint runtime")
         .expect("checkpoint runtime enabled");
@@ -10862,12 +10987,12 @@ mod tests {
                 .iter()
                 .any(|object| object.key == checkpoint.manifest_key)
         );
-        assert_eq!(
+        assert!(
             checkpoint_runtime
-                .latest_checkpoint_bytes()
+                .latest_checkpoint_size()
                 .await
-                .expect("range-zero checkpoint metadata"),
-            checkpoint.total_bytes
+                .expect("range-zero checkpoint metadata")
+                == ByteSize::from_bytes(checkpoint.total_bytes)
         );
         checkpoint_runtime
             .handle
@@ -11167,9 +11292,7 @@ mod tests {
             checkpoints: None,
             kafka_security: None,
             ranges: None,
-            range0_follower_poll_interval: Duration::from_millis(
-                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-            ),
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -11258,9 +11381,7 @@ mod tests {
             checkpoints: None,
             kafka_security: None,
             ranges: None,
-            range0_follower_poll_interval: Duration::from_millis(
-                DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-            ),
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),

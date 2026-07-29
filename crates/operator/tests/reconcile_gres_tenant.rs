@@ -201,7 +201,7 @@ fn gres_body(name: &str, namespace: &str) -> serde_json::Value {
 
 fn set_lifecycle_requeue(rules: &mut [MockRule], millis: u64) {
     let mut gres = gres_body("fleet", "ns");
-    gres["spec"]["compute"] = serde_json::json!({"lifecycleRequeueMs": millis});
+    gres["spec"]["compute"] = serde_json::json!({"lifecycleRequeue": format!("{millis}ms")});
     rules
         .iter_mut()
         .find(|rule| rule.path_substr == "/greses/fleet")
@@ -498,7 +498,7 @@ async fn multi_range_tenant_publishes_range_services_and_becomes_ready_after_all
 async fn configured_pgdog_grace_reaches_active_tenant_status() {
     let mut rules = multi_range_reconcile_rules();
     let mut gres = gres_body("fleet", "ns");
-    gres["spec"]["pgdog"]["directBootstrapGraceMs"] = serde_json::json!(7_000);
+    gres["spec"]["pgdog"]["directBootstrapGrace"] = serde_json::json!("7s");
     rules
         .iter_mut()
         .find(|rule| rule.path_substr == "/greses/fleet")
@@ -552,14 +552,20 @@ async fn deleting_multi_range_tenant_cleans_up_and_removes_its_finalizer() {
             .parse()
             .expect("deletion timestamp parses"),
     ));
-    let registry_policy = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
-        .expect("registry policy");
+    let registry_policy = crabka_gres_control::RegistryPolicy::new(
+        2,
+        crabka_units::millis(15_001),
+        crabka_units::millis(251),
+        crabka_units::millis(501),
+        1_048_577,
+    )
+    .expect("registry policy");
     let mut kafka = ready_kafka_body("demo", "ns");
     kafka["spec"]["gresRegistry"] = serde_json::json!({
         "replicationFactor": 2,
-        "topicCreateTimeoutMs": 15001,
-        "readerRetryBackoffMs": 251,
-        "fetchMaxWaitMs": 501,
+        "topicCreateTimeout": "15.001s",
+        "readerRetryBackoff": "251ms",
+        "fetchMaxWait": "501ms",
         "fetchPartitionMaxBytes": 1_048_577
     });
     let rules = vec![
@@ -809,9 +815,9 @@ async fn reconciles_topics_scram_acls_records_workload_and_status() {
         .expect("compute args");
     for pair in [
         ["--registry-replication-factor", "1"],
-        ["--registry-topic-create-timeout-ms", "15000"],
-        ["--registry-reader-retry-backoff-ms", "250"],
-        ["--registry-fetch-max-wait-ms", "500"],
+        ["--registry-topic-create-timeout", "15s"],
+        ["--registry-reader-retry-backoff", "250ms"],
+        ["--registry-fetch-max-wait", "500ms"],
         ["--registry-fetch-partition-max-bytes", "1048576"],
     ] {
         assert!(

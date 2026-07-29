@@ -14,6 +14,12 @@ use crabka_security::{
     ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert},
     scram::PgScramVerifier,
 };
+use crabka_units::{
+    Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    fmt::Human as _,
+    secs,
+};
 use futures::StreamExt as _;
 use k8s_openapi::{
     ByteString,
@@ -42,7 +48,10 @@ use sha2::{Digest as _, Sha256};
 use crate::{
     context::Context,
     controller::{
-        common::{self, FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref},
+        common::{
+            self, FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref,
+            time_from_millis_u64,
+        },
         gres_split_operation::{
             MtlsRangeMutationClient, active_operations, reconcile_activated_cutover,
             reconcile_one_rpc_phase, successors_may_be_deployed, verify_target_topology_ready,
@@ -57,6 +66,10 @@ use crate::{
 };
 
 const FINALIZER: &str = "crabka.io/gres-tenant-finalizer";
+
+/// How long the broker may take to finish a tenant WAL-topic mutation before
+/// it answers with a timeout error, carried as Kafka's `timeout_ms` field.
+const TENANT_TOPIC_MUTATION_TIMEOUT: Time = secs(30);
 const APP_NAME: &str = "crabka-gres";
 const DEFAULT_IMAGE: &str = concat!("ghcr.io/robot-head/crabka-gres:", env!("CARGO_PKG_VERSION"));
 pub(super) const COMPUTE_PORT: i32 = 5432;
@@ -120,7 +133,7 @@ struct ReadyTenant {
     defaults: EffectiveDefaults,
     compute_image: String,
     compute_policy: EffectiveGresComputePolicy,
-    direct_bootstrap_grace_ms: u64,
+    direct_bootstrap_grace: Time,
     kafka_sasl: bool,
 }
 
@@ -166,7 +179,7 @@ async fn prepare_tenant(
                     registry_version: None,
                     lifecycle_phase: preserved_lifecycle_state(obj),
                     advance_generation: false,
-                    direct_bootstrap_grace_ms: None,
+                    direct_bootstrap_grace: None,
                 },
             )
             .await?;
@@ -188,7 +201,7 @@ async fn prepare_tenant(
                 registry_version: None,
                 lifecycle_phase: preserved_lifecycle_state(obj),
                 advance_generation: false,
-                direct_bootstrap_grace_ms: None,
+                direct_bootstrap_grace: None,
             },
         )
         .await?;
@@ -263,7 +276,9 @@ async fn prepare_tenant(
         defaults: effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref()),
         compute_image,
         compute_policy,
-        direct_bootstrap_grace_ms: pgdog_policy.direct_bootstrap_grace.into_value(),
+        direct_bootstrap_grace: Time::from_millis(
+            i64::try_from(pgdog_policy.direct_bootstrap_grace.into_value()).unwrap_or(i64::MAX),
+        ),
         kafka_sasl: kafka_internal_listener_requires_sasl(&kafka),
     })))
 }
@@ -284,7 +299,7 @@ async fn patch_cluster_not_ready(
             registry_version: None,
             lifecycle_phase: preserved_lifecycle_state(obj),
             advance_generation: false,
-            direct_bootstrap_grace_ms: None,
+            direct_bootstrap_grace: None,
         },
     )
     .await
@@ -309,7 +324,7 @@ async fn reconcile_inner(
         defaults,
         compute_image,
         compute_policy,
-        direct_bootstrap_grace_ms,
+        direct_bootstrap_grace,
         kafka_sasl,
     } = *ready;
     let (wal_topic, cfg_topic) = (wal_topic(&tenant_name), tenant_config_topic(&tenant_name));
@@ -460,7 +475,7 @@ async fn reconcile_inner(
             image: &compute_image,
             compute_policy,
             record: &record,
-            direct_bootstrap_grace_ms,
+            direct_bootstrap_grace,
             kafka_sasl,
             range_control_enabled,
             range_tls_hash: range_tls_hash.as_deref(),
@@ -478,7 +493,7 @@ async fn reconcile_inner(
                 &error,
                 registry_version,
                 lifecycle_state,
-                direct_bootstrap_grace_ms,
+                direct_bootstrap_grace,
             )
             .await?;
             Err(error)
@@ -515,7 +530,7 @@ async fn patch_reconcile_failed(
     error: &ReconcileError,
     registry_version: Option<u64>,
     lifecycle_phase: TenantState,
-    direct_bootstrap_grace_ms: u64,
+    direct_bootstrap_grace: Time,
 ) -> Result<(), ReconcileError> {
     patch_status(
         tenant_api,
@@ -528,7 +543,7 @@ async fn patch_reconcile_failed(
             registry_version,
             lifecycle_phase,
             advance_generation: false,
-            direct_bootstrap_grace_ms: Some(direct_bootstrap_grace_ms),
+            direct_bootstrap_grace: Some(direct_bootstrap_grace),
         },
     )
     .await
@@ -580,7 +595,9 @@ async fn provision_tenant_resources(
     }
     let missing = missing_topics(admin, &topic_specs).await?;
     if !missing.is_empty() {
-        admin.create_topics(&missing, 30_000).await?;
+        admin
+            .create_topics(&missing, TENANT_TOPIC_MUTATION_TIMEOUT)
+            .await?;
     }
 
     let password = read_password_secret(
@@ -667,7 +684,7 @@ struct ComputeStatusConfig<'a> {
     image: &'a str,
     compute_policy: EffectiveGresComputePolicy,
     record: &'a TenantRecord,
-    direct_bootstrap_grace_ms: u64,
+    direct_bootstrap_grace: Time,
     kafka_sasl: bool,
     range_control_enabled: bool,
     range_tls_hash: Option<&'a str>,
@@ -742,7 +759,7 @@ async fn reconcile_compute_and_status(
             registry_version: Some(config.record.record_version),
             lifecycle_phase: config.record.state,
             advance_generation: endpoint_ready,
-            direct_bootstrap_grace_ms: Some(config.direct_bootstrap_grace_ms),
+            direct_bootstrap_grace: Some(config.direct_bootstrap_grace),
         },
     )
     .await?;
@@ -750,9 +767,7 @@ async fn reconcile_compute_and_status(
 }
 
 fn lifecycle_requeue(policy: &EffectiveGresComputePolicy) -> Action {
-    Action::requeue(Duration::from_millis(
-        policy.lifecycle_requeue_ms.into_value(),
-    ))
+    Action::requeue(time_from_millis_u64(policy.lifecycle_requeue_ms.into_value()).to_std())
 }
 
 async fn reconcile_range_tls_secret(
@@ -1064,7 +1079,7 @@ pub trait RangeRetirementAdmin: Send {
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError>;
 }
 
@@ -1083,9 +1098,9 @@ where
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
-        crabka_client_admin::AdminClientLike::delete_topics(self, names, timeout_ms).await
+        crabka_client_admin::AdminClientLike::delete_topics(self, names, timeout).await
     }
 }
 
@@ -1157,7 +1172,9 @@ where
 {
     for range_id in ranges {
         let topic = wal_topic_for_generation(tenant, *range_id, generation);
-        let outcomes = admin.delete_topics(&[topic.as_str()], 30_000).await?;
+        let outcomes = admin
+            .delete_topics(&[topic.as_str()], TENANT_TOPIC_MUTATION_TIMEOUT)
+            .await?;
         for outcome in outcomes {
             if let Some(error) = outcome.error {
                 return Err(ReconcileError::Malformed(format!(
@@ -1249,7 +1266,7 @@ fn effective_defaults(
         checkpoint_bytes: override_
             .and_then(|d| d.checkpoint_bytes)
             .or_else(|| base.and_then(|d| d.checkpoint_bytes))
-            .or(Some(DEFAULT_CHECKPOINT_BYTES)),
+            .or_else(|| Some(DEFAULT_CHECKPOINT_BYTES.bytes_u64())),
         suspend_max_checkpoint_bytes: override_
             .and_then(|d| d.suspend_max_checkpoint_bytes)
             .or_else(|| base.and_then(|d| d.suspend_max_checkpoint_bytes)),
@@ -1977,6 +1994,94 @@ struct DeploymentRenderConfig<'a> {
     range_tls_hash: Option<&'a str>,
 }
 
+/// The `--registry-*` flags a compute pod inherits from the shared policy.
+///
+/// The policy holds quantities and the compute binary accepts human-readable
+/// quantities, so no unit information is discarded at this boundary.
+fn registry_policy_args(policy: &crabka_gres_control::RegistryPolicy) -> [String; 14] {
+    [
+        "--registry-replication-factor".to_owned(),
+        policy.replication_factor().to_string(),
+        "--registry-topic-create-timeout".to_owned(),
+        policy.topic_create_timeout().human().to_string(),
+        "--registry-reader-retry-backoff".to_owned(),
+        policy.reader_retry_backoff().human().to_string(),
+        "--registry-fetch-max-wait".to_owned(),
+        policy.fetch_max_wait().human().to_string(),
+        "--registry-fetch-partition-max-bytes".to_owned(),
+        policy.fetch_partition_max().bytes_i32().to_string(),
+        "--registry-producer-dns-timeout".to_owned(),
+        Time::from_std(policy.producer_dns_timeout().duration())
+            .human()
+            .to_string(),
+        "--registry-reader-admin-dns-timeout".to_owned(),
+        Time::from_std(policy.reader_admin_dns_timeout().duration())
+            .human()
+            .to_string(),
+    ]
+}
+
+fn human_millis(value: i64) -> String {
+    Time::from_millis(value).human().to_string()
+}
+
+fn wal_consumer_admin_args(policy: &EffectiveGresComputePolicy) -> [String; 24] {
+    [
+        "--fdw-broker-dns-timeout".to_owned(),
+        Time::from_std(policy.fdw_broker_dns_timeout.duration())
+            .human()
+            .to_string(),
+        "--wal-recovery-fetch-max-wait".to_owned(),
+        human_millis(i64::from(
+            policy.wal_recovery_fetch_max_wait_ms.into_value(),
+        )),
+        "--wal-recovery-fetch-partition-max-bytes".to_owned(),
+        policy
+            .wal_recovery_fetch_partition_max_bytes
+            .into_value()
+            .to_string(),
+        "--wal-recovery-fetch-response-max-bytes".to_owned(),
+        policy
+            .wal_recovery_fetch_response_max_bytes
+            .into_value()
+            .to_string(),
+        "--wal-recovery-empty-fetch-retries".to_owned(),
+        policy
+            .wal_recovery_empty_fetch_retries
+            .into_value()
+            .to_string(),
+        "--wal-recovery-dns-timeout".to_owned(),
+        human_millis(
+            i64::try_from(policy.wal_recovery_dns_timeout_ms.into_value())
+                .expect("validated timeout fits i64"),
+        ),
+        "--wal-recovery-connect-timeout".to_owned(),
+        human_millis(
+            i64::try_from(policy.wal_recovery_connect_timeout_ms.into_value())
+                .expect("validated timeout fits i64"),
+        ),
+        "--wal-recovery-request-timeout".to_owned(),
+        human_millis(
+            i64::try_from(policy.wal_recovery_request_timeout_ms.into_value())
+                .expect("validated timeout fits i64"),
+        ),
+        "--wal-topic-replication-factor".to_owned(),
+        policy.wal_topic_replication_factor.into_value().to_string(),
+        "--wal-topic-ensure-timeout".to_owned(),
+        human_millis(i64::from(policy.wal_topic_ensure_timeout_ms.into_value())),
+        "--wal-admin-connect-timeout".to_owned(),
+        human_millis(
+            i64::try_from(policy.wal_admin_connect_timeout_ms.into_value())
+                .expect("validated timeout fits i64"),
+        ),
+        "--wal-admin-request-timeout".to_owned(),
+        human_millis(
+            i64::try_from(policy.wal_admin_request_timeout_ms.into_value())
+                .expect("validated timeout fits i64"),
+        ),
+    ]
+}
+
 fn render_deployment(
     obj: &GresTenant,
     range: &GresTenantRangeSpec,
@@ -1994,75 +2099,9 @@ fn render_deployment(
         config.bootstrap.to_owned(),
         "--tenant".to_owned(),
         name.clone(),
-        "--registry-replication-factor".to_owned(),
-        config.policy.replication_factor().to_string(),
-        "--registry-topic-create-timeout-ms".to_owned(),
-        config.policy.topic_create_timeout_ms().to_string(),
-        "--registry-reader-retry-backoff-ms".to_owned(),
-        config.policy.reader_retry_backoff().as_millis().to_string(),
-        "--registry-fetch-max-wait-ms".to_owned(),
-        config.policy.fetch_max_wait_ms().to_string(),
-        "--registry-fetch-partition-max-bytes".to_owned(),
-        config.policy.fetch_partition_max_bytes().to_string(),
-        "--registry-producer-dns-timeout-ms".to_owned(),
-        u64::to_string(&config.policy.producer_dns_timeout().milliseconds()),
-        "--registry-reader-admin-dns-timeout-ms".to_owned(),
-        u64::to_string(&config.policy.reader_admin_dns_timeout().milliseconds()),
-        "--fdw-broker-dns-timeout-ms".to_owned(),
-        u64::to_string(&compute_policy.fdw_broker_dns_timeout.milliseconds()),
-        "--wal-recovery-fetch-max-wait-ms".to_owned(),
-        compute_policy
-            .wal_recovery_fetch_max_wait_ms
-            .into_value()
-            .to_string(),
-        "--wal-recovery-fetch-partition-max-bytes".to_owned(),
-        compute_policy
-            .wal_recovery_fetch_partition_max_bytes
-            .into_value()
-            .to_string(),
-        "--wal-recovery-fetch-response-max-bytes".to_owned(),
-        compute_policy
-            .wal_recovery_fetch_response_max_bytes
-            .into_value()
-            .to_string(),
-        "--wal-recovery-empty-fetch-retries".to_owned(),
-        compute_policy
-            .wal_recovery_empty_fetch_retries
-            .into_value()
-            .to_string(),
-        "--wal-recovery-dns-timeout-ms".to_owned(),
-        u64::to_string(&compute_policy.wal_recovery_dns_timeout_ms.into_value()),
-        "--wal-recovery-connect-timeout-ms".to_owned(),
-        compute_policy
-            .wal_recovery_connect_timeout_ms
-            .into_value()
-            .to_string(),
-        "--wal-recovery-request-timeout-ms".to_owned(),
-        compute_policy
-            .wal_recovery_request_timeout_ms
-            .into_value()
-            .to_string(),
-        "--wal-topic-replication-factor".to_owned(),
-        compute_policy
-            .wal_topic_replication_factor
-            .into_value()
-            .to_string(),
-        "--wal-topic-ensure-timeout-ms".to_owned(),
-        compute_policy
-            .wal_topic_ensure_timeout_ms
-            .into_value()
-            .to_string(),
-        "--wal-admin-connect-timeout-ms".to_owned(),
-        compute_policy
-            .wal_admin_connect_timeout_ms
-            .into_value()
-            .to_string(),
-        "--wal-admin-request-timeout-ms".to_owned(),
-        compute_policy
-            .wal_admin_request_timeout_ms
-            .into_value()
-            .to_string(),
     ];
+    args.extend(registry_policy_args(config.policy));
+    args.extend(wal_consumer_admin_args(&compute_policy));
     args.extend(wal_producer_args(&compute_policy));
     if config.range_control_enabled {
         args.extend([
@@ -2084,11 +2123,13 @@ fn render_deployment(
             format!("CN={name}-range"),
             "--operator-control-principal".to_owned(),
             format!("CN={name}-operator"),
-            "--range0-follower-poll-interval-ms".to_owned(),
-            compute_policy
-                .range0_follower_poll_interval_ms
-                .into_value()
-                .to_string(),
+            "--range0-follower-poll-interval".to_owned(),
+            Time::from_millis(
+                i64::try_from(compute_policy.range0_follower_poll_interval_ms.into_value())
+                    .expect("validated interval fits i64"),
+            )
+            .human()
+            .to_string(),
         ]);
     }
     let checkpoint_runtime_args = checkpoint_runtime_args(config.operator_config)?;
@@ -2098,24 +2139,32 @@ fn render_deployment(
             compute_policy
                 .checkpoint_part_bytes
                 .into_value()
+                .bytes_usize()
                 .to_string(),
             "--checkpoint-retain".to_owned(),
             compute_policy.checkpoint_retain.into_value().to_string(),
-            "--checkpoint-delete-records-timeout-ms".to_owned(),
-            compute_policy
-                .checkpoint_delete_records_timeout_ms
-                .into_value()
-                .to_string(),
-            "--checkpoint-poll-interval-ms".to_owned(),
-            compute_policy
-                .checkpoint_poll_interval_ms
-                .into_value()
-                .to_string(),
-            "--idle-suspend-poll-interval-ms".to_owned(),
-            compute_policy
-                .idle_suspend_poll_interval_ms
-                .into_value()
-                .to_string(),
+            "--checkpoint-delete-records-timeout".to_owned(),
+            Time::from_millis(i64::from(
+                compute_policy
+                    .checkpoint_delete_records_timeout_ms
+                    .into_value(),
+            ))
+            .human()
+            .to_string(),
+            "--checkpoint-poll-interval".to_owned(),
+            Time::from_millis(
+                i64::try_from(compute_policy.checkpoint_poll_interval_ms.into_value())
+                    .expect("validated interval fits i64"),
+            )
+            .human()
+            .to_string(),
+            "--idle-suspend-poll-interval".to_owned(),
+            Time::from_millis(
+                i64::try_from(compute_policy.idle_suspend_poll_interval_ms.into_value())
+                    .expect("validated interval fits i64"),
+            )
+            .human()
+            .to_string(),
         ]);
         args.extend(checkpoint_runtime_args);
     }
@@ -2186,15 +2235,15 @@ fn render_deployment(
 
 fn wal_producer_flush_args(policy: crabka_client_producer::ProducerFlushTimeout) -> [String; 2] {
     [
-        "--wal-producer-flush-timeout-ms".to_owned(),
-        policy.milliseconds().to_string(),
+        "--wal-producer-flush-timeout".to_owned(),
+        Time::from_std(policy.duration()).human().to_string(),
     ]
 }
 
 fn wal_producer_dns_args(timeout: crabka_client_core::ClientDnsTimeout) -> [String; 2] {
     [
-        "--wal-producer-dns-timeout-ms".to_owned(),
-        timeout.milliseconds().to_string(),
+        "--wal-producer-dns-timeout".to_owned(),
+        Time::from_std(timeout.duration()).human().to_string(),
     ]
 }
 
@@ -2204,20 +2253,26 @@ fn wal_producer_args(policy: &EffectiveGresComputePolicy) -> Vec<String> {
     args.extend(wal_producer_dns_args(policy.wal_producer_dns_timeout));
     let retry = policy.wal_producer_retry_policy;
     args.extend([
-        "--wal-producer-request-timeout-ms".to_owned(),
-        retry.request_timeout().as_millis().to_string(),
+        "--wal-producer-request-timeout".to_owned(),
+        Time::from_std(retry.request_timeout()).human().to_string(),
         "--wal-producer-retries".to_owned(),
         retry.retries().to_string(),
-        "--wal-producer-retry-backoff-ms".to_owned(),
-        retry.retry_backoff().as_millis().to_string(),
-        "--wal-producer-routing-retry-budget-ms".to_owned(),
-        retry.routing_retry_budget().as_millis().to_string(),
-        "--wal-producer-init-retry-timeout-ms".to_owned(),
-        retry.init_retry_timeout().as_millis().to_string(),
-        "--wal-producer-init-max-backoff-ms".to_owned(),
-        retry.init_max_backoff().as_millis().to_string(),
-        "--wal-producer-transaction-timeout-ms".to_owned(),
-        retry.transaction_timeout().as_millis().to_string(),
+        "--wal-producer-retry-backoff".to_owned(),
+        Time::from_std(retry.retry_backoff()).human().to_string(),
+        "--wal-producer-routing-retry-budget".to_owned(),
+        Time::from_std(retry.routing_retry_budget())
+            .human()
+            .to_string(),
+        "--wal-producer-init-retry-timeout".to_owned(),
+        Time::from_std(retry.init_retry_timeout())
+            .human()
+            .to_string(),
+        "--wal-producer-init-max-backoff".to_owned(),
+        Time::from_std(retry.init_max_backoff()).human().to_string(),
+        "--wal-producer-transaction-timeout".to_owned(),
+        Time::from_std(retry.transaction_timeout())
+            .human()
+            .to_string(),
     ]);
     args.extend(wal_producer_throughput_args(
         policy.wal_producer_throughput_policy,
@@ -2231,8 +2286,8 @@ fn wal_producer_throughput_args(
     [
         "--wal-producer-compression".to_owned(),
         policy.compression().to_string(),
-        "--wal-producer-linger-ms".to_owned(),
-        policy.linger_ms().to_string(),
+        "--wal-producer-linger".to_owned(),
+        Time::from_std(policy.linger()).human().to_string(),
         "--wal-producer-batch-bytes".to_owned(),
         policy.batch_bytes().to_string(),
     ]
@@ -2398,7 +2453,7 @@ struct TenantStatusUpdate<'a> {
     registry_version: Option<u64>,
     lifecycle_phase: TenantState,
     advance_generation: bool,
-    direct_bootstrap_grace_ms: Option<u64>,
+    direct_bootstrap_grace: Option<Time>,
 }
 
 async fn patch_status(
@@ -2430,7 +2485,7 @@ async fn patch_status(
         existing_grace,
         update.lifecycle_phase,
         u64::try_from(now).unwrap_or(u64::MAX),
-        update.direct_bootstrap_grace_ms,
+        update.direct_bootstrap_grace,
     );
     let body = json!({
         "status": {
@@ -2460,7 +2515,7 @@ fn pgdog_grace_deadline(
     existing_grace: Option<u64>,
     lifecycle_phase: TenantState,
     now: u64,
-    direct_bootstrap_grace_ms: Option<u64>,
+    direct_bootstrap_grace: Option<Time>,
 ) -> Option<u64> {
     if lifecycle_phase != TenantState::Active {
         return None;
@@ -2468,7 +2523,10 @@ fn pgdog_grace_deadline(
     if previous_phase == Some("active") && existing_grace.is_some() {
         return existing_grace;
     }
-    direct_bootstrap_grace_ms.map(|grace| now.saturating_add(grace))
+    // `now` is a unix-millisecond instant, so the grace extent crosses into
+    // millisecond form here to produce the deadline the CRD status carries.
+    direct_bootstrap_grace
+        .map(|grace| now.saturating_add(grace.millis_i64().try_into().unwrap_or(u64::MAX)))
 }
 
 fn preserved_lifecycle_state(obj: &GresTenant) -> TenantState {
@@ -2500,7 +2558,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 10_000,
-                Some(7_000)
+                Some(secs(7))
             ) == Some(17_000)
         );
         assert!(
@@ -2509,7 +2567,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 u64::MAX - 1,
-                Some(7_000)
+                Some(secs(7))
             ) == Some(u64::MAX)
         );
         assert!(
@@ -2518,7 +2576,7 @@ mod tests {
                 Some(12_000),
                 TenantState::Active,
                 20_000,
-                Some(7_000)
+                Some(secs(7))
             ) == Some(12_000)
         );
         assert!(
@@ -2527,7 +2585,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 20_000,
-                Some(7_000)
+                Some(secs(7))
             ) == Some(27_000)
         );
         assert!(
@@ -2536,7 +2594,7 @@ mod tests {
                 None,
                 TenantState::Active,
                 u64::MAX - 1,
-                Some(7_000)
+                Some(secs(7))
             ) == Some(u64::MAX)
         );
         assert!(
@@ -2623,13 +2681,13 @@ mod tests {
                 None,
                 None,
                 DEFAULT_CHECKPOINT_FRAMES,
-                DEFAULT_CHECKPOINT_BYTES,
+                DEFAULT_CHECKPOINT_BYTES.bytes_u64(),
             ),
             (
                 Some(defaults(Some(11), None)),
                 None,
                 11,
-                DEFAULT_CHECKPOINT_BYTES,
+                DEFAULT_CHECKPOINT_BYTES.bytes_u64(),
             ),
             (
                 Some(defaults(None, Some(12))),
@@ -2780,35 +2838,35 @@ mod tests {
         for absent in [
             "--checkpoint-part-bytes",
             "--checkpoint-retain",
-            "--checkpoint-delete-records-timeout-ms",
-            "--checkpoint-poll-interval-ms",
-            "--idle-suspend-poll-interval-ms",
+            "--checkpoint-delete-records-timeout",
+            "--checkpoint-poll-interval",
+            "--idle-suspend-poll-interval",
         ] {
             assert!(!args.iter().any(|arg| arg == absent), "got: {args:?}");
         }
         assert!(
             !args
                 .iter()
-                .any(|arg| arg == "--range0-follower-poll-interval-ms")
+                .any(|arg| arg == "--range0-follower-poll-interval")
         );
         assert!(
             args.windows(14).any(|window| {
                 window
                     == [
-                        "--wal-recovery-fetch-max-wait-ms",
-                        "100",
+                        "--wal-recovery-fetch-max-wait",
+                        "100ms",
                         "--wal-recovery-fetch-partition-max-bytes",
                         "1048576",
                         "--wal-recovery-fetch-response-max-bytes",
                         "52428800",
                         "--wal-recovery-empty-fetch-retries",
                         "100",
-                        "--wal-recovery-dns-timeout-ms",
-                        "10000",
-                        "--wal-recovery-connect-timeout-ms",
-                        "10000",
-                        "--wal-recovery-request-timeout-ms",
-                        "30000",
+                        "--wal-recovery-dns-timeout",
+                        "10s",
+                        "--wal-recovery-connect-timeout",
+                        "10s",
+                        "--wal-recovery-request-timeout",
+                        "30s",
                     ]
             }),
             "got: {args:?}"
@@ -2828,22 +2886,20 @@ mod tests {
         for (spec, expected) in [
             (
                 crate::crd::gres::GresComputeSpec::default(),
-                [
-                    "100", "1048576", "52428800", "100", "10000", "10000", "30000",
-                ],
+                ["100ms", "1048576", "52428800", "100", "10s", "10s", "30s"],
             ),
             (
                 crate::crd::gres::GresComputeSpec {
-                    wal_recovery_fetch_max_wait_ms: Some(11),
+                    wal_recovery_fetch_max_wait: Some(crabka_units::millis(11)),
                     wal_recovery_fetch_partition_max_bytes: Some(22),
                     wal_recovery_fetch_response_max_bytes: Some(33),
                     wal_recovery_empty_fetch_retries: Some(44),
-                    wal_recovery_dns_timeout_ms: Some(77),
-                    wal_recovery_connect_timeout_ms: Some(55),
-                    wal_recovery_request_timeout_ms: Some(66),
+                    wal_recovery_dns_timeout: Some(crabka_units::millis(77)),
+                    wal_recovery_connect_timeout: Some(crabka_units::millis(55)),
+                    wal_recovery_request_timeout: Some(crabka_units::millis(66)),
                     ..crate::crd::gres::GresComputeSpec::default()
                 },
-                ["11", "22", "33", "44", "77", "55", "66"],
+                ["11ms", "22", "33", "44", "77ms", "55ms", "66ms"],
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
@@ -2873,7 +2929,7 @@ mod tests {
                     .clone()
                     .unwrap();
                 let expected = [
-                    "--wal-recovery-fetch-max-wait-ms",
+                    "--wal-recovery-fetch-max-wait",
                     expected[0],
                     "--wal-recovery-fetch-partition-max-bytes",
                     expected[1],
@@ -2881,11 +2937,11 @@ mod tests {
                     expected[2],
                     "--wal-recovery-empty-fetch-retries",
                     expected[3],
-                    "--wal-recovery-dns-timeout-ms",
+                    "--wal-recovery-dns-timeout",
                     expected[4],
-                    "--wal-recovery-connect-timeout-ms",
+                    "--wal-recovery-connect-timeout",
                     expected[5],
-                    "--wal-recovery-request-timeout-ms",
+                    "--wal-recovery-request-timeout",
                     expected[6],
                 ];
                 assert!(
@@ -2910,28 +2966,20 @@ mod tests {
         for (spec, expected) in [
             (
                 crate::crd::gres::GresComputeSpec::default(),
-                [
-                    "30000",
-                    "2147483647",
-                    "100",
-                    "30000",
-                    "30000",
-                    "1000",
-                    "60000",
-                ],
+                ["30s", "2147483647", "100ms", "30s", "30s", "1s", "1m"],
             ),
             (
                 crate::crd::gres::GresComputeSpec {
-                    wal_producer_request_timeout_ms: Some(11),
+                    wal_producer_request_timeout: Some(crabka_units::millis(11)),
                     wal_producer_retries: Some(12),
-                    wal_producer_retry_backoff_ms: Some(13),
-                    wal_producer_routing_retry_budget_ms: Some(14),
-                    wal_producer_init_retry_timeout_ms: Some(15),
-                    wal_producer_init_max_backoff_ms: Some(16),
-                    wal_producer_transaction_timeout_ms: Some(17),
+                    wal_producer_retry_backoff: Some(crabka_units::millis(13)),
+                    wal_producer_routing_retry_budget: Some(crabka_units::millis(14)),
+                    wal_producer_init_retry_timeout: Some(crabka_units::millis(15)),
+                    wal_producer_init_max_backoff: Some(crabka_units::millis(16)),
+                    wal_producer_transaction_timeout: Some(crabka_units::millis(17)),
                     ..crate::crd::gres::GresComputeSpec::default()
                 },
-                ["11", "12", "13", "14", "15", "16", "17"],
+                ["11ms", "12", "13ms", "14ms", "15ms", "16ms", "17ms"],
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
@@ -2961,19 +3009,19 @@ mod tests {
                     .clone()
                     .unwrap();
                 let expected = [
-                    "--wal-producer-request-timeout-ms",
+                    "--wal-producer-request-timeout",
                     expected[0],
                     "--wal-producer-retries",
                     expected[1],
-                    "--wal-producer-retry-backoff-ms",
+                    "--wal-producer-retry-backoff",
                     expected[2],
-                    "--wal-producer-routing-retry-budget-ms",
+                    "--wal-producer-routing-retry-budget",
                     expected[3],
-                    "--wal-producer-init-retry-timeout-ms",
+                    "--wal-producer-init-retry-timeout",
                     expected[4],
-                    "--wal-producer-init-max-backoff-ms",
+                    "--wal-producer-init-max-backoff",
                     expected[5],
-                    "--wal-producer-transaction-timeout-ms",
+                    "--wal-producer-transaction-timeout",
                     expected[6],
                 ];
                 assert!(
@@ -3006,7 +3054,7 @@ mod tests {
         ];
         let operator_config = ConfigArgs::parse_from(["operator"]).config;
         let compute_policy = crate::crd::gres::GresComputeSpec {
-            wal_producer_flush_timeout_ms: Some(12_345),
+            wal_producer_flush_timeout: Some(crabka_units::millis(12_345)),
             ..crate::crd::gres::GresComputeSpec::default()
         }
         .effective_policy()
@@ -3039,7 +3087,7 @@ mod tests {
                     .args
                     .clone()
                     .unwrap();
-                let pair = ["--wal-producer-flush-timeout-ms", "12345"];
+                let pair = ["--wal-producer-flush-timeout", "12.345s"];
                 assert!(
                     args.windows(2).filter(|window| *window == pair).count() == 1,
                     "expected {pair:?} exactly once, got: {args:?}"
@@ -3072,14 +3120,14 @@ mod tests {
         for (spec, pair) in [
             (
                 crate::crd::gres::GresComputeSpec::default(),
-                ["--wal-producer-dns-timeout-ms", "10000"],
+                ["--wal-producer-dns-timeout", "10s"],
             ),
             (
                 crate::crd::gres::GresComputeSpec {
-                    wal_producer_dns_timeout_ms: Some(37),
+                    wal_producer_dns_timeout: Some(crabka_units::millis(37)),
                     ..crate::crd::gres::GresComputeSpec::default()
                 },
-                ["--wal-producer-dns-timeout-ms", "37"],
+                ["--wal-producer-dns-timeout", "37ms"],
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
@@ -3145,14 +3193,14 @@ mod tests {
         for (spec, pair) in [
             (
                 crate::crd::gres::GresComputeSpec::default(),
-                ["--fdw-broker-dns-timeout-ms", "10000"],
+                ["--fdw-broker-dns-timeout", "10s"],
             ),
             (
                 crate::crd::gres::GresComputeSpec {
-                    fdw_broker_dns_timeout_ms: Some(37),
+                    fdw_broker_dns_timeout: Some(crabka_units::millis(37)),
                     ..crate::crd::gres::GresComputeSpec::default()
                 },
-                ["--fdw-broker-dns-timeout-ms", "37"],
+                ["--fdw-broker-dns-timeout", "37ms"],
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
@@ -3217,16 +3265,16 @@ mod tests {
         for (spec, expected) in [
             (
                 crate::crd::gres::GresComputeSpec::default(),
-                ["none", "0", "16384"],
+                ["none", "0s", "16384"],
             ),
             (
                 crate::crd::gres::GresComputeSpec {
                     wal_producer_compression: Some(crate::crd::gres::WalProducerCompression::Zstd),
-                    wal_producer_linger_ms: Some(18),
+                    wal_producer_linger: Some(crabka_units::millis(18)),
                     wal_producer_batch_bytes: Some(19),
                     ..crate::crd::gres::GresComputeSpec::default()
                 },
-                ["zstd", "18", "19"],
+                ["zstd", "18ms", "19"],
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
@@ -3261,7 +3309,7 @@ mod tests {
                         .unwrap();
                     for pair in [
                         ["--wal-producer-compression", expected[0]],
-                        ["--wal-producer-linger-ms", expected[1]],
+                        ["--wal-producer-linger", expected[1]],
                         ["--wal-producer-batch-bytes", expected[2]],
                     ] {
                         assert!(
@@ -3287,17 +3335,17 @@ mod tests {
         for (spec, expected) in [
             (
                 crate::crd::gres::GresComputeSpec::default(),
-                ["1", "30000", "5000", "30000"],
+                ["1", "30s", "5s", "30s"],
             ),
             (
                 crate::crd::gres::GresComputeSpec {
                     wal_topic_replication_factor: Some(11),
-                    wal_topic_ensure_timeout_ms: Some(22),
-                    wal_admin_connect_timeout_ms: Some(33),
-                    wal_admin_request_timeout_ms: Some(44),
+                    wal_topic_ensure_timeout: Some(crabka_units::millis(22)),
+                    wal_admin_connect_timeout: Some(crabka_units::millis(33)),
+                    wal_admin_request_timeout: Some(crabka_units::millis(44)),
                     ..crate::crd::gres::GresComputeSpec::default()
                 },
-                ["11", "22", "33", "44"],
+                ["11", "22ms", "33ms", "44ms"],
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
@@ -3329,11 +3377,11 @@ mod tests {
                 let expected = [
                     "--wal-topic-replication-factor",
                     expected[0],
-                    "--wal-topic-ensure-timeout-ms",
+                    "--wal-topic-ensure-timeout",
                     expected[1],
-                    "--wal-admin-connect-timeout-ms",
+                    "--wal-admin-connect-timeout",
                     expected[2],
-                    "--wal-admin-request-timeout-ms",
+                    "--wal-admin-request-timeout",
                     expected[3],
                 ];
                 assert!(
@@ -3370,21 +3418,27 @@ mod tests {
         let compute_policy = crate::crd::gres::GresComputeSpec {
             checkpoint_part_bytes: Some(8_388_608),
             checkpoint_retain: Some(4),
-            checkpoint_delete_records_timeout_ms: Some(12_345),
-            checkpoint_poll_interval_ms: Some(2_345),
-            idle_suspend_poll_interval_ms: Some(3_456),
-            range0_follower_poll_interval_ms: Some(5_678),
-            lifecycle_requeue_ms: Some(4_567),
+            checkpoint_delete_records_timeout: Some(crabka_units::millis(12_345)),
+            checkpoint_poll_interval: Some(crabka_units::millis(2_345)),
+            idle_suspend_poll_interval: Some(crabka_units::millis(3_456)),
+            range0_follower_poll_interval: Some(crabka_units::millis(5_678)),
+            lifecycle_requeue: Some(crabka_units::millis(4_567)),
             ..crate::crd::gres::GresComputeSpec::default()
         }
         .effective_policy()
         .expect("compute policy");
-        let policy = crabka_gres_control::RegistryPolicy::new(2, 15_001, 251, 501, 1_048_577)
-            .expect("policy")
-            .with_producer_dns_timeout_ms(37)
-            .expect("DNS timeout")
-            .with_reader_admin_dns_timeout_ms(37)
-            .expect("reader/admin DNS timeout");
+        let policy = crabka_gres_control::RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(501),
+            1_048_577,
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(37))
+        .expect("DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(37))
+        .expect("reader/admin DNS timeout");
         let deployment = render_deployment(
             &obj,
             &ranges[0],
@@ -3420,18 +3474,18 @@ mod tests {
 
         for pair in [
             ["--registry-replication-factor", "2"],
-            ["--registry-topic-create-timeout-ms", "15001"],
-            ["--registry-reader-retry-backoff-ms", "251"],
-            ["--registry-fetch-max-wait-ms", "501"],
+            ["--registry-topic-create-timeout", "15.001s"],
+            ["--registry-reader-retry-backoff", "251ms"],
+            ["--registry-fetch-max-wait", "501ms"],
             ["--registry-fetch-partition-max-bytes", "1048577"],
-            ["--registry-producer-dns-timeout-ms", "37"],
-            ["--registry-reader-admin-dns-timeout-ms", "37"],
+            ["--registry-producer-dns-timeout", "37ms"],
+            ["--registry-reader-admin-dns-timeout", "37ms"],
             ["--checkpoint-part-bytes", "8388608"],
             ["--checkpoint-retain", "4"],
-            ["--checkpoint-delete-records-timeout-ms", "12345"],
-            ["--checkpoint-poll-interval-ms", "2345"],
-            ["--idle-suspend-poll-interval-ms", "3456"],
-            ["--range0-follower-poll-interval-ms", "5678"],
+            ["--checkpoint-delete-records-timeout", "12.345s"],
+            ["--checkpoint-poll-interval", "2.345s"],
+            ["--idle-suspend-poll-interval", "3.456s"],
+            ["--range0-follower-poll-interval", "5.678s"],
         ] {
             assert!(
                 args.windows(2).any(|window| window == pair),
@@ -3441,7 +3495,7 @@ mod tests {
         for absent in [
             "--checkpoint-frames",
             "--checkpoint-bytes",
-            "--lifecycle-requeue-ms",
+            "--lifecycle-requeue",
         ] {
             assert!(!args.iter().any(|arg| arg == absent), "got: {args:?}");
         }
@@ -3451,9 +3505,9 @@ mod tests {
                     [
                         "--checkpoint-part-bytes",
                         "--checkpoint-retain",
-                        "--checkpoint-delete-records-timeout-ms",
-                        "--checkpoint-poll-interval-ms",
-                        "--idle-suspend-poll-interval-ms",
+                        "--checkpoint-delete-records-timeout",
+                        "--checkpoint-poll-interval",
+                        "--idle-suspend-poll-interval",
                     ]
                     .contains(&arg.as_str())
                 })
@@ -3462,18 +3516,19 @@ mod tests {
         );
         assert!(
             args.iter()
-                .filter(|arg| arg.as_str() == "--registry-producer-dns-timeout-ms")
+                .filter(|arg| arg.as_str() == "--registry-producer-dns-timeout")
                 .count()
                 == 1
         );
         assert!(
             args.iter()
-                .filter(|arg| { arg.as_str() == "--registry-reader-admin-dns-timeout-ms" })
+                .filter(|arg| { arg.as_str() == "--registry-reader-admin-dns-timeout" })
                 .count()
                 == 1
         );
         assert!(
-            lifecycle_requeue(&compute_policy) == Action::requeue(Duration::from_millis(4_567))
+            lifecycle_requeue(&compute_policy)
+                == Action::requeue(crabka_units::millis(4_567).to_std())
         );
         let readiness = deployment
             .spec
@@ -3516,8 +3571,8 @@ mod tests {
                 "spec.compute.checkpointPartBytes",
             ),
             (
-                json!({"fdwBrokerDnsTimeoutMs": 0}),
-                "spec.compute.fdwBrokerDnsTimeoutMs",
+                json!({"fdwBrokerDnsTimeout": "0ms"}),
+                "spec.compute.fdwBrokerDnsTimeout",
             ),
         ] {
             let requests = Arc::new(AtomicUsize::new(0));

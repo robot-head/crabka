@@ -18,6 +18,7 @@ use crabka_operator::{
         PgdogSpec, SecretKeyRef, SecretRef, TenantDefaults,
     },
 };
+use crabka_units::{Time, convert::TimeExt as _};
 use http::Method;
 
 #[path = "shared/mod.rs"]
@@ -90,11 +91,11 @@ fn gres() -> Gres {
                 },
                 pooler_mode: None,
                 connect_attempts: None,
-                idle_timeout_ms: None,
-                suspension_idle_timeout_ms: None,
-                server_lifetime_ms: None,
+                idle_timeout: None,
+                suspension_idle_timeout: None,
+                server_lifetime: None,
                 readiness_probe_period_seconds: None,
-                direct_bootstrap_grace_ms: None,
+                direct_bootstrap_grace: None,
             },
             activator: None,
             compute: None,
@@ -407,24 +408,24 @@ async fn renders_pgdog_config_secret_and_status_hash() {
                 "0.0.0.0:6543",
                 "--bootstrap",
                 "demo-plain-bootstrap.ns.svc:9092",
-                "--registry-poll-ms",
-                "250",
-                "--cold-start-timeout-ms",
-                "30000",
+                "--registry-poll",
+                "250ms",
+                "--cold-start-timeout",
+                "30s",
                 "--registry-replication-factor",
                 "1",
-                "--registry-topic-create-timeout-ms",
-                "15000",
-                "--registry-reader-retry-backoff-ms",
-                "250",
-                "--registry-fetch-max-wait-ms",
-                "500",
+                "--registry-topic-create-timeout",
+                "15s",
+                "--registry-reader-retry-backoff",
+                "250ms",
+                "--registry-fetch-max-wait",
+                "500ms",
                 "--registry-fetch-partition-max-bytes",
                 "1048576",
-                "--registry-producer-dns-timeout-ms",
-                "10000",
-                "--registry-reader-admin-dns-timeout-ms",
-                "10000",
+                "--registry-producer-dns-timeout",
+                "10s",
+                "--registry-reader-admin-dns-timeout",
+                "10s",
                 "--backend-endpoint-template",
                 "{tenant}-gres.ns.svc:5432"
             ])
@@ -487,9 +488,9 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
         true,
         Some(serde_json::json!({
             "replicationFactor": 32767,
-            "topicCreateTimeoutMs": 15001,
-            "readerRetryBackoffMs": 251,
-            "fetchMaxWaitMs": 501,
+            "topicCreateTimeout": "15001ms",
+            "readerRetryBackoff": "251ms",
+            "fetchMaxWait": "501ms",
             "fetchPartitionMaxBytes": 1_048_577
         })),
     ));
@@ -502,15 +503,15 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
     obj.spec.activator = Some(GresActivatorSpec {
         image: Some("example.test/activator:v2".into()),
         replicas: Some(4),
-        registry_poll_ms: Some(600),
-        cold_start_timeout_ms: Some(40_000),
+        registry_poll: Some(crabka_units::millis(600)),
+        cold_start_timeout: Some(crabka_units::secs(40)),
         readiness_probe_period_seconds: Some(9),
     });
     obj.spec.pgdog.pooler_mode = Some(PgdogPoolerModeSpec::Session);
     obj.spec.pgdog.connect_attempts = Some(4);
-    obj.spec.pgdog.idle_timeout_ms = Some(61_000);
-    obj.spec.pgdog.suspension_idle_timeout_ms = Some(1_500);
-    obj.spec.pgdog.server_lifetime_ms = Some(301_000);
+    obj.spec.pgdog.idle_timeout = Some(crabka_units::secs(61));
+    obj.spec.pgdog.suspension_idle_timeout = Some(crabka_units::millis(1_500));
+    obj.spec.pgdog.server_lifetime = Some(crabka_units::millis(301_000));
     obj.spec.pgdog.readiness_probe_period_seconds = Some(6);
 
     reconcile(Arc::new(obj), ctx).await.unwrap();
@@ -539,24 +540,24 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
                 "0.0.0.0:6543",
                 "--bootstrap",
                 "demo-plain-bootstrap.ns.svc:9092",
-                "--registry-poll-ms",
-                "600",
-                "--cold-start-timeout-ms",
-                "40000",
+                "--registry-poll",
+                "600ms",
+                "--cold-start-timeout",
+                "40s",
                 "--registry-replication-factor",
                 "32767",
-                "--registry-topic-create-timeout-ms",
-                "15001",
-                "--registry-reader-retry-backoff-ms",
-                "251",
-                "--registry-fetch-max-wait-ms",
-                "501",
+                "--registry-topic-create-timeout",
+                "15.001s",
+                "--registry-reader-retry-backoff",
+                "251ms",
+                "--registry-fetch-max-wait",
+                "501ms",
                 "--registry-fetch-partition-max-bytes",
                 "1048577",
-                "--registry-producer-dns-timeout-ms",
-                "10000",
-                "--registry-reader-admin-dns-timeout-ms",
-                "10000",
+                "--registry-producer-dns-timeout",
+                "10s",
+                "--registry-reader-admin-dns-timeout",
+                "10s",
                 "--backend-endpoint-template",
                 "{tenant}-gres.ns.svc:5432"
             ])
@@ -661,8 +662,8 @@ async fn matching_effective_idle_policy_selects_suspension_timeout() {
     let ctx =
         Arc::new(fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin));
     let mut obj = gres();
-    obj.spec.pgdog.idle_timeout_ms = Some(61_000);
-    obj.spec.pgdog.suspension_idle_timeout_ms = Some(1_500);
+    obj.spec.pgdog.idle_timeout = Some(crabka_units::secs(61));
+    obj.spec.pgdog.suspension_idle_timeout = Some(crabka_units::millis(1_500));
 
     reconcile(Arc::new(obj), ctx).await.unwrap();
 
@@ -734,8 +735,8 @@ async fn zero_override_and_unrelated_fleet_do_not_select_suspension_timeout() {
         checkpoint_bytes: None,
         suspend_max_checkpoint_bytes: None,
     });
-    obj.spec.pgdog.idle_timeout_ms = Some(61_000);
-    obj.spec.pgdog.suspension_idle_timeout_ms = Some(1_500);
+    obj.spec.pgdog.idle_timeout = Some(crabka_units::secs(61));
+    obj.spec.pgdog.suspension_idle_timeout = Some(crabka_units::millis(1_500));
 
     reconcile(Arc::new(obj), ctx).await.unwrap();
 
@@ -783,7 +784,7 @@ async fn invalid_pgdog_policy_fails_before_kubernetes_io() {
             30_000,
         ),
         (
-            "spec.pgdog.idleTimeoutMs",
+            "spec.pgdog.idleTimeout",
             6_432,
             Some(3),
             Some(0),
@@ -794,7 +795,7 @@ async fn invalid_pgdog_policy_fails_before_kubernetes_io() {
             30_000,
         ),
         (
-            "spec.pgdog.suspensionIdleTimeoutMs",
+            "spec.pgdog.suspensionIdleTimeout",
             6_432,
             Some(3),
             Some(60_000),
@@ -805,7 +806,7 @@ async fn invalid_pgdog_policy_fails_before_kubernetes_io() {
             30_000,
         ),
         (
-            "spec.pgdog.serverLifetimeMs",
+            "spec.pgdog.serverLifetime",
             6_432,
             Some(3),
             Some(60_000),
@@ -827,7 +828,7 @@ async fn invalid_pgdog_policy_fails_before_kubernetes_io() {
             30_000,
         ),
         (
-            "spec.pgdog.directBootstrapGraceMs",
+            "spec.pgdog.directBootstrapGrace",
             6_432,
             Some(3),
             Some(60_000),
@@ -838,7 +839,7 @@ async fn invalid_pgdog_policy_fails_before_kubernetes_io() {
             30_000,
         ),
         (
-            "spec.activator.coldStartTimeoutMs",
+            "spec.activator.coldStartTimeout",
             6_432,
             Some(65_535),
             Some(60_000),
@@ -867,13 +868,17 @@ async fn invalid_pgdog_policy_fails_before_kubernetes_io() {
         let mut obj = gres();
         obj.spec.pgdog.listen_port = listen_port;
         obj.spec.pgdog.connect_attempts = attempts;
-        obj.spec.pgdog.idle_timeout_ms = idle;
-        obj.spec.pgdog.suspension_idle_timeout_ms = suspension_idle;
-        obj.spec.pgdog.server_lifetime_ms = lifetime;
+        obj.spec.pgdog.idle_timeout = idle.map(|value| Time::from_millis(i64::from(value)));
+        obj.spec.pgdog.suspension_idle_timeout =
+            suspension_idle.map(|value| Time::from_millis(i64::from(value)));
+        obj.spec.pgdog.server_lifetime = lifetime.map(|value| Time::from_millis(i64::from(value)));
         obj.spec.pgdog.readiness_probe_period_seconds = readiness;
-        obj.spec.pgdog.direct_bootstrap_grace_ms = grace;
+        obj.spec.pgdog.direct_bootstrap_grace =
+            grace.map(|value| Time::from_millis(i64::from(value)));
         obj.spec.activator = Some(GresActivatorSpec {
-            cold_start_timeout_ms: Some(attempt_timeout),
+            cold_start_timeout: Some(Time::from_millis(
+                i64::try_from(attempt_timeout).unwrap_or(i64::MAX),
+            )),
             ..Default::default()
         });
 
@@ -938,16 +943,16 @@ async fn invalid_activator_values_fail_before_kubernetes_io() {
             },
         ),
         (
-            "spec.activator.registryPollMs",
+            "spec.activator.registryPoll",
             GresActivatorSpec {
-                registry_poll_ms: Some(0),
+                registry_poll: Some(Time::ZERO),
                 ..Default::default()
             },
         ),
         (
-            "spec.activator.coldStartTimeoutMs",
+            "spec.activator.coldStartTimeout",
             GresActivatorSpec {
-                cold_start_timeout_ms: Some(0),
+                cold_start_timeout: Some(Time::ZERO),
                 ..Default::default()
             },
         ),
