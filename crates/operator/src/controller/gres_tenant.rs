@@ -2134,6 +2134,39 @@ fn render_deployment(
             )
             .human()
             .to_string(),
+            "--range0-follower-rebuild-backoff-floor".to_owned(),
+            human_millis(
+                i64::try_from(
+                    compute_policy
+                        .range0_follower_rebuild_backoff_floor_ms
+                        .into_value(),
+                )
+                .expect("validated interval fits i64"),
+            ),
+            "--range0-follower-rebuild-backoff-ceiling".to_owned(),
+            human_millis(
+                i64::try_from(
+                    compute_policy
+                        .range0_follower_rebuild_backoff_ceiling_ms
+                        .into_value(),
+                )
+                .expect("validated interval fits i64"),
+            ),
+            "--durable-inspection-timeout".to_owned(),
+            human_millis(
+                i64::try_from(compute_policy.durable_inspection_timeout_ms.into_value())
+                    .expect("validated timeout fits i64"),
+            ),
+            "--durable-inspection-fold-max-records".to_owned(),
+            compute_policy
+                .durable_inspection_fold_max_records
+                .into_value()
+                .to_string(),
+            "--durable-inspection-fold-max-size".to_owned(),
+            compute_policy
+                .durable_inspection_fold_max_size
+                .human()
+                .to_string(),
         ]);
     }
     let checkpoint_runtime_args = checkpoint_runtime_args(config.operator_config)?;
@@ -3428,6 +3461,11 @@ mod tests {
             checkpoint_poll_interval: Some(crabka_units::millis(2_345)),
             idle_suspend_poll_interval: Some(crabka_units::millis(3_456)),
             range0_follower_poll_interval: Some(crabka_units::millis(5_678)),
+            range0_follower_rebuild_backoff_floor: Some(crabka_units::millis(6_789)),
+            range0_follower_rebuild_backoff_ceiling: Some(crabka_units::millis(7_890)),
+            durable_inspection_timeout: Some(crabka_units::millis(8_901)),
+            durable_inspection_fold_max_records: Some(9_012),
+            durable_inspection_fold_max_size: Some(crabka_units::bytes(10_123)),
             lifecycle_requeue: Some(crabka_units::millis(4_567)),
             ..crate::crd::gres::GresComputeSpec::default()
         }
@@ -3492,6 +3530,11 @@ mod tests {
             ["--checkpoint-poll-interval", "2.345s"],
             ["--idle-suspend-poll-interval", "3.456s"],
             ["--range0-follower-poll-interval", "5.678s"],
+            ["--range0-follower-rebuild-backoff-floor", "6.789s"],
+            ["--range0-follower-rebuild-backoff-ceiling", "7.89s"],
+            ["--durable-inspection-timeout", "8.901s"],
+            ["--durable-inspection-fold-max-records", "9012"],
+            ["--durable-inspection-fold-max-size", "10123B"],
         ] {
             assert!(
                 args.windows(2).any(|window| window == pair),

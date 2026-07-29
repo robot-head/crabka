@@ -1,3 +1,8 @@
+//! Unix-only: the pin-cleanup failure path is provoked with Unix mode bits,
+//! which Windows has no equivalent for. Matches the gating its sibling
+//! `topology_process_split_crash.rs` and `topology_process_nemesis.rs` use.
+#![cfg(unix)]
+
 use std::{
     collections::{BTreeMap, BTreeSet},
     os::unix::fs::PermissionsExt as _,
@@ -15,6 +20,7 @@ use crabka_gres_ranges::{
 use crabka_pgkv::Kv as _;
 use crabka_pgwire::engine::{Engine as _, Session as _};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_units::convert::TimeExt as _;
 use tokio::net::TcpListener;
 
 async fn broker_test_permit() -> tokio::sync::OwnedSemaphorePermit {
@@ -234,6 +240,11 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         cache_dir: None,
         ranges: None,
         range0_follower_poll_interval: None,
+        range0_follower_rebuild_backoff_floor: None,
+        range0_follower_rebuild_backoff_ceiling: None,
+        durable_inspection_timeout: None,
+        durable_inspection_fold_max_records: None,
+        durable_inspection_fold_max_size: None,
         wal_recovery_fetch_max_wait: None,
         wal_recovery_fetch_partition_max: None,
         wal_recovery_fetch_response_max: None,
@@ -412,9 +423,15 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
         checkpoints: None,
         kafka_security: None,
         ranges: Some("0,5".to_string()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
+        range0_follower_rebuild_backoff_floor:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR.to_std(),
+        range0_follower_rebuild_backoff_ceiling:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+        durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+            .to_std(),
+        durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -482,9 +499,15 @@ async fn live_multirange_substrate_hlc_mode_commits_and_mints_wall_anchored_stam
         checkpoints: None,
         kafka_security: None,
         ranges: Some("0,5".to_string()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
+        range0_follower_rebuild_backoff_floor:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR.to_std(),
+        range0_follower_rebuild_backoff_ceiling:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+        durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+            .to_std(),
+        durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -641,17 +664,23 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
                 root: checkpoint_dir.path().to_path_buf(),
             },
             frames_threshold: 1,
-            bytes_threshold: 1,
-            part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
+            bytes_threshold: crabka_units::bytes(1),
+            part_max_size: crabka_gres_substrate::DEFAULT_PART_MAX_SIZE,
             retain_newest: 2,
-            delete_records_timeout_ms: 30_000,
+            delete_records_timeout: crabka_units::secs(30),
             poll_interval: std::time::Duration::from_secs(1),
         }),
         kafka_security: None,
         ranges: Some("0,5".to_string()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
+        range0_follower_rebuild_backoff_floor:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR.to_std(),
+        range0_follower_rebuild_backoff_ceiling:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+        durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+            .to_std(),
+        durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -719,18 +748,12 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
             .inspect_hosted_range_kv(range)
             .expect("inspect source catalog"),
     );
-    let table_id = crabka_pgcatalog::get_table(
-        &source_catalog,
-        &crabka_pgcatalog::RelationName::public("t1"),
-    )
-    .expect("source relation")
-    .id;
-    let unrelated_table_id = crabka_pgcatalog::get_table(
-        &source_catalog,
-        &crabka_pgcatalog::RelationName::public("transfer_unrelated"),
-    )
-    .expect("unrelated relation")
-    .id;
+    let table_id = crabka_pgcatalog::get_table(&source_catalog, "t1")
+        .expect("source relation")
+        .id;
+    let unrelated_table_id = crabka_pgcatalog::get_table(&source_catalog, "transfer_unrelated")
+        .expect("unrelated relation")
+        .id;
     assert_ne!(table_id, unrelated_table_id);
 
     for sql in [
@@ -1016,17 +1039,23 @@ fn activation_crash_config(
             // the window between a forced checkpoint and the transfer pause,
             // which then fails the successor's bounded tail read.
             frames_threshold: 10_000,
-            bytes_threshold: 64 * 1024 * 1024,
-            part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
+            bytes_threshold: crabka_units::mebibytes(64),
+            part_max_size: crabka_gres_substrate::DEFAULT_PART_MAX_SIZE,
             retain_newest: 16,
-            delete_records_timeout_ms: 30_000,
+            delete_records_timeout: crabka_units::secs(30),
             poll_interval: std::time::Duration::from_secs(1),
         }),
         kafka_security: None,
         ranges: Some("0,5".to_owned()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
+        range0_follower_rebuild_backoff_floor:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR.to_std(),
+        range0_follower_rebuild_backoff_ceiling:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+        durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+            .to_std(),
+        durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -2497,11 +2526,8 @@ fn assert_selected_table_transfer(
         "unrelated table versions are absent"
     );
     assert!(
-        !staged_pairs.contains_key(&key::catalog_key(crabka_pgcatalog::PUBLIC_SCHEMA, "t10"))
-            && !staged_pairs.contains_key(&key::catalog_key(
-                crabka_pgcatalog::PUBLIC_SCHEMA,
-                "transfer_unrelated"
-            )),
+        !staged_pairs.contains_key(&key::catalog_key("t10"))
+            && !staged_pairs.contains_key(&key::catalog_key("transfer_unrelated")),
         "catalog entries are absent"
     );
 
@@ -2569,17 +2595,23 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
                 root: checkpoint_dir.path().to_path_buf(),
             },
             frames_threshold: 1,
-            bytes_threshold: 1,
-            part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
+            bytes_threshold: crabka_units::bytes(1),
+            part_max_size: crabka_gres_substrate::DEFAULT_PART_MAX_SIZE,
             retain_newest: 2,
-            delete_records_timeout_ms: 30_000,
+            delete_records_timeout: crabka_units::secs(30),
             poll_interval: std::time::Duration::from_secs(1),
         }),
         kafka_security: None,
         ranges: Some("0,5".to_string()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
+        range0_follower_rebuild_backoff_floor:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR.to_std(),
+        range0_follower_rebuild_backoff_ceiling:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+        durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+            .to_std(),
+        durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -2612,12 +2644,9 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
             .inspect_hosted_range_kv(RangeId::COORDINATOR)
             .expect("inspect source catalog"),
     );
-    let physical_table_id = crabka_pgcatalog::get_table(
-        &source_catalog,
-        &crabka_pgcatalog::RelationName::public("t10"),
-    )
-    .expect("t10 relation")
-    .id;
+    let physical_table_id = crabka_pgcatalog::get_table(&source_catalog, "t10")
+        .expect("t10 relation")
+        .id;
     assert_ne!(u64::from(physical_table_id), 10);
     let predecessor_before = runtime
         .inspect_hosted_range_kv(RangeId::new(1))
@@ -2746,17 +2775,23 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
                 root: checkpoint_dir.path().to_path_buf(),
             },
             frames_threshold: 1,
-            bytes_threshold: 1,
-            part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
+            bytes_threshold: crabka_units::bytes(1),
+            part_max_size: crabka_gres_substrate::DEFAULT_PART_MAX_SIZE,
             retain_newest: 2,
-            delete_records_timeout_ms: 30_000,
+            delete_records_timeout: crabka_units::secs(30),
             poll_interval: std::time::Duration::from_secs(1),
         }),
         kafka_security: None,
         ranges: Some("0,200".to_string()),
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
+        range0_follower_rebuild_backoff_floor:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR.to_std(),
+        range0_follower_rebuild_backoff_ceiling:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+        durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+            .to_std(),
+        durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -2827,9 +2862,15 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
         checkpoints: None,
         kafka_security: None,
         ranges: None,
-        range0_follower_poll_interval: std::time::Duration::from_millis(
-            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-        ),
+        range0_follower_poll_interval: crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL
+            .to_std(),
+        range0_follower_rebuild_backoff_floor:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR.to_std(),
+        range0_follower_rebuild_backoff_ceiling:
+            crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+        durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+            .to_std(),
+        durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
         recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
         wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
         producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -2854,9 +2895,15 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
             checkpoints: None,
             kafka_security: None,
             ranges: None,
-            range0_follower_poll_interval: std::time::Duration::from_millis(
-                crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS,
-            ),
+            range0_follower_poll_interval:
+                crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
+            range0_follower_rebuild_backoff_floor:
+                crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR.to_std(),
+            range0_follower_rebuild_backoff_ceiling:
+                crabka_gres_control::DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+            durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+                .to_std(),
+            durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),

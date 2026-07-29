@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 
 use crabka_pgkv::{Kv, MemKv, WriteOp};
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, fmt::Human as _, mebibytes};
 
 use crate::{
     SubstrateError, WalFrame,
@@ -11,6 +12,13 @@ use crate::{
     frame::BARRIER_SEQ,
     recovery::{CommittedWalReader, LiveRecoveryConfig, live_committed_reader},
 };
+
+/// Default record ceiling for a durable inspection fold.
+pub const DEFAULT_DURABLE_INSPECTION_FOLD_MAX_RECORDS: usize = 1_000_000;
+/// Default byte ceiling for a durable inspection fold.
+pub const DEFAULT_DURABLE_INSPECTION_FOLD_MAX_SIZE: ByteSize = mebibytes(256);
+/// Default deadline for one durable inspection.
+pub const DEFAULT_DURABLE_INSPECTION_TIMEOUT: crabka_units::Time = crabka_units::secs(4);
 
 /// Read-only witness for the range WAL generation.
 #[async_trait::async_trait]
@@ -41,17 +49,19 @@ impl FoldProjection {
 }
 
 /// Hard resource limits for an isolated fold.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Eq`: [`Self::max_size`] is an `f64`-backed quantity.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FoldLimits {
     pub max_records: usize,
-    pub max_bytes: usize,
+    pub max_size: ByteSize,
 }
 
 impl Default for FoldLimits {
     fn default() -> Self {
         Self {
-            max_records: 1_000_000,
-            max_bytes: 256 * 1024 * 1024,
+            max_records: DEFAULT_DURABLE_INSPECTION_FOLD_MAX_RECORDS,
+            max_size: DEFAULT_DURABLE_INSPECTION_FOLD_MAX_SIZE,
         }
     }
 }
@@ -162,10 +172,10 @@ pub async fn committed_fold_snapshot(
             .iter()
             .try_fold(0_usize, |total, item| total.checked_add(item.bytes.len()))
             .ok_or_else(|| SubstrateError::FoldLimit("WAL byte count overflow".into()))?;
-        if wal_bytes > request.limits.max_bytes {
+        if wal_bytes > request.limits.max_size.bytes_usize() {
             return Err(SubstrateError::FoldLimit(format!(
                 "{wal_bytes} WAL bytes exceeds {}",
-                request.limits.max_bytes
+                request.limits.max_size.human()
             )));
         }
         items.sort_by_key(|item| item.offset);
@@ -348,10 +358,10 @@ async fn load_checkpoint(
     };
     let manifest_bytes = usize::try_from(manifest.total_bytes)
         .map_err(|_| SubstrateError::FoldLimit("checkpoint byte count exceeds usize".into()))?;
-    if manifest_bytes > request.limits.max_bytes {
+    if manifest_bytes > request.limits.max_size.bytes_usize() {
         return Err(SubstrateError::FoldLimit(format!(
             "{manifest_bytes} checkpoint bytes exceeds {}",
-            request.limits.max_bytes
+            request.limits.max_size.human()
         )));
     }
     let mut encoded = BTreeMap::new();
@@ -412,10 +422,10 @@ fn enforce_limits(
                 .and_then(|sum| sum.checked_add(value.len()))
         })
         .ok_or_else(|| SubstrateError::FoldLimit("record byte count overflow".into()))?;
-    if bytes > limits.max_bytes {
+    if bytes > limits.max_size.bytes_usize() {
         return Err(SubstrateError::FoldLimit(format!(
             "{bytes} bytes exceeds {}",
-            limits.max_bytes
+            limits.max_size.human()
         )));
     }
     Ok(())
@@ -477,7 +487,7 @@ mod tests {
                 wal_generation: 0,
                 garbage_horizon_xid: 0,
             },
-            1024,
+            crabka_units::kibibytes(1),
         )
         .await
         .expect("checkpoint");
@@ -601,7 +611,7 @@ mod tests {
                     wal_generation: 0,
                     garbage_horizon_xid: 0,
                 },
-                1024,
+                crabka_units::kibibytes(1),
             )
             .await
             .expect("checkpoint");
@@ -673,7 +683,7 @@ mod tests {
             projection: FoldProjection::All,
             limits: FoldLimits {
                 max_records: 1,
-                max_bytes: 100,
+                max_size: crabka_units::bytes(100),
             },
         })
         .await

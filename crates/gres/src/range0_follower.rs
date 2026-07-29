@@ -19,11 +19,6 @@ use crabka_gres_substrate::{
 };
 use crabka_pgkv::{FjallKv, MemKv, RestoreKv};
 
-/// Delay before a rebuild that immediately follows another one. A trim landing
-/// between two rebuilds is legitimate; a tight rebuild loop is not.
-const REBUILD_BACKOFF_FLOOR: Duration = Duration::from_millis(250);
-/// Ceiling for the doubling rebuild backoff.
-const REBUILD_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 /// Directory-name prefix of every follower cache generation.
 const FOLLOWER_STORE_PREFIX: &str = "r0-follower";
 
@@ -98,6 +93,8 @@ pub(crate) struct Range0FollowerTail {
     checkpoints: Option<Arc<dyn CheckpointStore>>,
     cache_dir: Option<PathBuf>,
     poll_interval: Duration,
+    rebuild_backoff_floor: Duration,
+    rebuild_backoff_ceiling: Duration,
     refresh_poke: Arc<tokio::sync::Notify>,
     store_generation: u64,
     rebuilds: u64,
@@ -105,13 +102,12 @@ pub(crate) struct Range0FollowerTail {
 }
 
 impl Range0FollowerTail {
-    pub(crate) const fn new(
+    pub(crate) fn new(
         follower: ReadOnlyRange0Follower,
         config: LiveRecoveryConfig,
         end_sampler: Arc<LiveCommittedEndSampler>,
         checkpoints: Option<Arc<dyn CheckpointStore>>,
-        cache_dir: Option<PathBuf>,
-        poll_interval: Duration,
+        runtime: &crate::SubstrateRuntimeConfig,
         refresh_poke: Arc<tokio::sync::Notify>,
     ) -> Self {
         Self {
@@ -119,8 +115,10 @@ impl Range0FollowerTail {
             config,
             end_sampler,
             checkpoints,
-            cache_dir,
-            poll_interval,
+            cache_dir: runtime.cache_dir.clone(),
+            poll_interval: runtime.range0_follower_poll_interval,
+            rebuild_backoff_floor: runtime.range0_follower_rebuild_backoff_floor,
+            rebuild_backoff_ceiling: runtime.range0_follower_rebuild_backoff_ceiling,
             refresh_poke,
             store_generation: 0,
             rebuilds: 0,
@@ -197,7 +195,11 @@ impl Range0FollowerTail {
 
     async fn rebuild_from_checkpoint(&mut self, applied: i64) {
         if self.consecutive_rebuilds > 0 {
-            let backoff = rebuild_backoff(self.consecutive_rebuilds);
+            let backoff = rebuild_backoff(
+                self.consecutive_rebuilds,
+                self.rebuild_backoff_floor,
+                self.rebuild_backoff_ceiling,
+            );
             tracing::warn!(
                 consecutive_rebuilds = self.consecutive_rebuilds,
                 backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
@@ -260,11 +262,10 @@ pub(crate) async fn wait_for_refresh(refresh_poke: &tokio::sync::Notify, poll_in
 }
 
 /// Doubling backoff for consecutive rebuilds, floored and capped.
-fn rebuild_backoff(consecutive_rebuilds: u32) -> Duration {
-    let doublings = consecutive_rebuilds.saturating_sub(1).min(16);
-    REBUILD_BACKOFF_FLOOR
-        .saturating_mul(1_u32 << doublings)
-        .min(REBUILD_BACKOFF_CEILING)
+fn rebuild_backoff(consecutive_rebuilds: u32, floor: Duration, ceiling: Duration) -> Duration {
+    floor
+        .saturating_mul(2_u32.saturating_pow(consecutive_rebuilds.saturating_sub(1)))
+        .min(ceiling)
 }
 
 #[cfg(test)]
@@ -275,10 +276,13 @@ mod tests {
 
     #[test]
     fn rebuild_backoff_starts_at_the_floor_doubles_and_caps() {
-        assert!(rebuild_backoff(1) == REBUILD_BACKOFF_FLOOR);
-        assert!(rebuild_backoff(2) == REBUILD_BACKOFF_FLOOR * 2);
-        assert!(rebuild_backoff(3) == REBUILD_BACKOFF_FLOOR * 4);
-        assert!(rebuild_backoff(u32::MAX) == REBUILD_BACKOFF_CEILING);
+        let floor = Duration::from_millis(3);
+        let ceiling = Duration::from_millis(10);
+
+        assert!(rebuild_backoff(1, floor, ceiling) == floor);
+        assert!(rebuild_backoff(2, floor, ceiling) == floor * 2);
+        assert!(rebuild_backoff(3, floor, ceiling) == ceiling);
+        assert!(rebuild_backoff(u32::MAX, floor, ceiling) == ceiling);
     }
 
     #[test]

@@ -11,9 +11,10 @@ use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_gres_control::{
     CheckpointPartBytes, DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT,
     DEFAULT_CHECKPOINT_FRAMES, DEFAULT_CHECKPOINT_POLL_INTERVAL,
-    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL, DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL, FinalCheckpoint,
-    PositiveI32, PositiveUsize, RegistryPolicy, RegistryReplicationFactor, TenantName,
-    TenantRecord, decode_tenant_config_record, tenant_config_topic,
+    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL, DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL,
+    DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING, DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR,
+    FinalCheckpoint, PositiveI32, PositiveUsize, RegistryPolicy, RegistryReplicationFactor,
+    TenantName, TenantRecord, decode_tenant_config_record, tenant_config_topic,
 };
 use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{FjallKv, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
@@ -156,6 +157,50 @@ pub struct ServeArgs {
         requires = "ranges"
     )]
     pub range0_follower_poll_interval: Option<Time>,
+
+    /// Initial delay before retrying consecutive range-0 follower rebuilds.
+    #[arg(
+        long = "range0-follower-rebuild-backoff-floor",
+        env = "CRABKA_GRES_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "ranges"
+    )]
+    pub range0_follower_rebuild_backoff_floor: Option<Time>,
+
+    /// Maximum delay between consecutive range-0 follower rebuilds.
+    #[arg(
+        long = "range0-follower-rebuild-backoff-ceiling",
+        env = "CRABKA_GRES_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "ranges"
+    )]
+    pub range0_follower_rebuild_backoff_ceiling: Option<Time>,
+
+    /// Deadline for one durable record inspection.
+    #[arg(
+        long = "durable-inspection-timeout",
+        env = "CRABKA_GRES_DURABLE_INSPECTION_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "ranges"
+    )]
+    pub durable_inspection_timeout: Option<Time>,
+
+    /// Maximum records materialized by one durable inspection.
+    #[arg(
+        long = "durable-inspection-fold-max-records",
+        env = "CRABKA_GRES_DURABLE_INSPECTION_FOLD_MAX_RECORDS",
+        requires = "ranges"
+    )]
+    pub durable_inspection_fold_max_records: Option<PositiveUsize>,
+
+    /// Maximum data materialized by one durable inspection.
+    #[arg(
+        long = "durable-inspection-fold-max-size",
+        env = "CRABKA_GRES_DURABLE_INSPECTION_FOLD_MAX_SIZE",
+        value_parser = crabka_units::parse::positive_byte_size,
+        requires = "ranges"
+    )]
+    pub durable_inspection_fold_max_size: Option<ByteSize>,
 
     /// Broker long-poll wait for committed-WAL recovery fetches.
     #[arg(
@@ -655,9 +700,27 @@ fn local_vacuum_policy(args: &ServeArgs) -> std::io::Result<Option<LocalVacuumPo
     }))
 }
 
-fn validate_range0_follower_poll_interval(args: &ServeArgs) -> std::io::Result<()> {
+fn validate_multirange_operational_policy(args: &ServeArgs) -> std::io::Result<()> {
     if args.range0_follower_poll_interval.is_some() && args.ranges.is_none() {
         return invalid_input("--range0-follower-poll-interval requires --ranges");
+    }
+    if (args.range0_follower_rebuild_backoff_floor.is_some()
+        || args.range0_follower_rebuild_backoff_ceiling.is_some()
+        || args.durable_inspection_timeout.is_some()
+        || args.durable_inspection_fold_max_records.is_some()
+        || args.durable_inspection_fold_max_size.is_some())
+        && args.ranges.is_none()
+    {
+        return invalid_input("multi-range operational options require --ranges");
+    }
+    let floor = args
+        .range0_follower_rebuild_backoff_floor
+        .unwrap_or(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR);
+    let ceiling = args
+        .range0_follower_rebuild_backoff_ceiling
+        .unwrap_or(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING);
+    if floor > ceiling {
+        return invalid_input("range-0 follower rebuild backoff floor exceeds ceiling");
     }
     Ok(())
 }
@@ -1048,6 +1111,14 @@ pub struct SubstrateRuntimeConfig {
     pub ranges: Option<String>,
     /// Periodic refresh cadence for a remote range-0 follower.
     pub range0_follower_poll_interval: Duration,
+    /// Initial delay before retrying consecutive range-0 follower rebuilds.
+    pub range0_follower_rebuild_backoff_floor: Duration,
+    /// Maximum delay between consecutive range-0 follower rebuilds.
+    pub range0_follower_rebuild_backoff_ceiling: Duration,
+    /// Deadline for one durable record inspection.
+    pub durable_inspection_timeout: Duration,
+    /// Resource ceilings for one durable record inspection.
+    pub durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits,
     /// Committed-WAL recovery read limits.
     pub recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy,
     /// WAL topic creation and admin connection settings.
@@ -1156,7 +1227,7 @@ impl SubstrateRuntimeConfig {
     pub fn from_args(args: &ServeArgs) -> std::io::Result<Option<Self>> {
         use std::io::{Error, ErrorKind};
 
-        validate_range0_follower_poll_interval(args)?;
+        validate_multirange_operational_policy(args)?;
         validate_wal_recovery_read_policy(args)?;
 
         let Some(bootstrap) = args.substrate_bootstrap.as_deref() else {
@@ -1193,6 +1264,13 @@ impl SubstrateRuntimeConfig {
             ));
         }
         let ranges = trimmed_optional(args.ranges.as_ref(), "--ranges")?;
+        let durable_inspection_fold_max_size = args
+            .durable_inspection_fold_max_size
+            .unwrap_or(crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_FOLD_MAX_SIZE);
+        whole_bytes_usize(
+            "durable inspection fold maximum size",
+            durable_inspection_fold_max_size,
+        )?;
 
         Ok(Some(Self {
             bootstrap: bootstrap.to_string(),
@@ -1205,6 +1283,25 @@ impl SubstrateRuntimeConfig {
                 .range0_follower_poll_interval
                 .unwrap_or(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL)
                 .to_std(),
+            range0_follower_rebuild_backoff_floor: args
+                .range0_follower_rebuild_backoff_floor
+                .unwrap_or(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR)
+                .to_std(),
+            range0_follower_rebuild_backoff_ceiling: args
+                .range0_follower_rebuild_backoff_ceiling
+                .unwrap_or(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING)
+                .to_std(),
+            durable_inspection_timeout: args
+                .durable_inspection_timeout
+                .unwrap_or(crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT)
+                .to_std(),
+            durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits {
+                max_records: args.durable_inspection_fold_max_records.map_or(
+                    crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_FOLD_MAX_RECORDS,
+                    PositiveUsize::into_value,
+                ),
+                max_size: durable_inspection_fold_max_size,
+            },
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::new(
                 whole_millis_i32(
                     "WAL recovery fetch maximum wait",
@@ -2517,7 +2614,7 @@ pub fn tls_acceptor(
 ///
 /// Returns an error when the requested operation cannot be completed.
 pub async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
-    validate_range0_follower_poll_interval(&args)?;
+    validate_multirange_operational_policy(&args)?;
     validate_wal_recovery_read_policy(&args)?;
     local_vacuum_policy(&args)?;
     let listener = TcpListener::bind(&args.listen).await?;
@@ -2547,7 +2644,7 @@ pub async fn serve_listener_with_tenant_config_loader(
     args: ServeArgs,
     tenant_config_loader: &impl TenantConfigLoader,
 ) -> std::io::Result<()> {
-    validate_range0_follower_poll_interval(&args)?;
+    validate_multirange_operational_policy(&args)?;
     validate_wal_recovery_read_policy(&args)?;
     let local_vacuum_policy = local_vacuum_policy(&args)?;
     let sql_addr = listener.local_addr()?;
@@ -4376,8 +4473,7 @@ async fn attach_range0_read_barrier(
             follower_config,
             end_sampler,
             checkpoint_store,
-            config.cache_dir.clone(),
-            config.range0_follower_poll_interval,
+            config,
             catalog_refresh_poke,
         )
         .run(),
@@ -5687,12 +5783,9 @@ impl crabka_gres_ranges::DurableRecordInspector for LiveMultiRangeTransfer {
             transfer: self,
             range_id: request.range_id,
         };
-        let fold = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        let fold = tokio::time::timeout(self.config.durable_inspection_timeout, async {
             let projection = crabka_gres_substrate::FoldProjection::All;
-            let limits = crabka_gres_substrate::FoldLimits {
-                max_records: 1_000_000,
-                max_size: crabka_units::mebibytes(256),
-            };
+            let limits = self.config.durable_inspection_fold_limits;
             match snapshot_offset {
                 Some(sample) => {
                     crabka_gres_substrate::committed_fold_snapshot_live_at(
@@ -8745,6 +8838,11 @@ mod tests {
             cache_dir: None,
             ranges: None,
             range0_follower_poll_interval: None,
+            range0_follower_rebuild_backoff_floor: None,
+            range0_follower_rebuild_backoff_ceiling: None,
+            durable_inspection_timeout: None,
+            durable_inspection_fold_max_records: None,
+            durable_inspection_fold_max_size: None,
             wal_recovery_fetch_max_wait: None,
             wal_recovery_fetch_partition_max: None,
             wal_recovery_fetch_response_max: None,
@@ -9532,6 +9630,113 @@ mod tests {
         let error = SubstrateRuntimeConfig::from_args(&programmatic)
             .expect_err("programmatic non-multirange configuration");
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn multirange_operational_policy_uses_defaults_overrides_and_ordering() {
+        let command = <Cli as clap::CommandFactory>::command();
+        for (id, environment) in [
+            (
+                "range0_follower_rebuild_backoff_floor",
+                "CRABKA_GRES_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR",
+            ),
+            (
+                "range0_follower_rebuild_backoff_ceiling",
+                "CRABKA_GRES_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING",
+            ),
+            (
+                "durable_inspection_timeout",
+                "CRABKA_GRES_DURABLE_INSPECTION_TIMEOUT",
+            ),
+            (
+                "durable_inspection_fold_max_records",
+                "CRABKA_GRES_DURABLE_INSPECTION_FOLD_MAX_RECORDS",
+            ),
+            (
+                "durable_inspection_fold_max_size",
+                "CRABKA_GRES_DURABLE_INSPECTION_FOLD_MAX_SIZE",
+            ),
+        ] {
+            let argument = command
+                .get_arguments()
+                .find(|argument| argument.get_id().as_str() == id)
+                .expect("policy argument");
+            assert_eq!(argument.get_env(), Some(std::ffi::OsStr::new(environment)));
+        }
+
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--ranges=0,10",
+        ];
+        let defaults =
+            SubstrateRuntimeConfig::from_args(&Cli::try_parse_from(base).expect("defaults").serve)
+                .expect("valid defaults")
+                .expect("substrate config");
+        assert_eq!(
+            defaults.range0_follower_rebuild_backoff_floor,
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            defaults.range0_follower_rebuild_backoff_ceiling,
+            Duration::from_secs(30)
+        );
+        assert_eq!(defaults.durable_inspection_timeout, Duration::from_secs(4));
+        assert_eq!(
+            defaults.durable_inspection_fold_limits.max_records,
+            1_000_000
+        );
+        assert_eq!(
+            defaults.durable_inspection_fold_limits.max_size,
+            crabka_units::mebibytes(256)
+        );
+
+        let configured = SubstrateRuntimeConfig::from_args(
+            &Cli::try_parse_from(base.into_iter().chain([
+                "--range0-follower-rebuild-backoff-floor=11ms",
+                "--range0-follower-rebuild-backoff-ceiling=13ms",
+                "--durable-inspection-timeout=17ms",
+                "--durable-inspection-fold-max-records=19",
+                "--durable-inspection-fold-max-size=23B",
+            ]))
+            .expect("configured policy")
+            .serve,
+        )
+        .expect("valid configured policy")
+        .expect("substrate config");
+        assert_eq!(
+            configured.range0_follower_rebuild_backoff_floor,
+            Duration::from_millis(11)
+        );
+        assert_eq!(
+            configured.range0_follower_rebuild_backoff_ceiling,
+            Duration::from_millis(13)
+        );
+        assert_eq!(
+            configured.durable_inspection_timeout,
+            Duration::from_millis(17)
+        );
+        assert_eq!(configured.durable_inspection_fold_limits.max_records, 19);
+        assert_eq!(
+            configured.durable_inspection_fold_limits.max_size,
+            crabka_units::bytes(23)
+        );
+
+        let inverted = Cli::try_parse_from(base.into_iter().chain([
+            "--range0-follower-rebuild-backoff-floor=2ms",
+            "--range0-follower-rebuild-backoff-ceiling=1ms",
+        ]))
+        .expect("syntactically valid policy")
+        .serve;
+        let error = SubstrateRuntimeConfig::from_args(&inverted)
+            .expect_err("inverted rebuild backoff must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("range-0 follower rebuild backoff floor exceeds ceiling"),
+            "got: {error}"
+        );
     }
 
     #[test]
@@ -10900,6 +11105,13 @@ mod tests {
             kafka_security: None,
             ranges: Some("0,100,200".to_string()),
             range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
+            range0_follower_rebuild_backoff_floor: DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR
+                .to_std(),
+            range0_follower_rebuild_backoff_ceiling:
+                DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+            durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+                .to_std(),
+            durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -10980,6 +11192,13 @@ mod tests {
             kafka_security: None,
             ranges: None,
             range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
+            range0_follower_rebuild_backoff_floor: DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR
+                .to_std(),
+            range0_follower_rebuild_backoff_ceiling:
+                DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+            durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+                .to_std(),
+            durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -11341,6 +11560,13 @@ mod tests {
             kafka_security: None,
             ranges: None,
             range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
+            range0_follower_rebuild_backoff_floor: DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR
+                .to_std(),
+            range0_follower_rebuild_backoff_ceiling:
+                DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+            durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+                .to_std(),
+            durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
@@ -11430,6 +11656,13 @@ mod tests {
             kafka_security: None,
             ranges: None,
             range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
+            range0_follower_rebuild_backoff_floor: DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR
+                .to_std(),
+            range0_follower_rebuild_backoff_ceiling:
+                DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+            durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+                .to_std(),
+            durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
             wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
             producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),

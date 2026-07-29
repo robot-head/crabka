@@ -187,6 +187,20 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  durableInspectionFoldMaxRecords:
+                    description: Maximum records materialized by one durable inspection.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  durableInspectionFoldMaxSize:
+                    description: Maximum data materialized by one durable inspection.
+                    nullable: true
+                    type: string
+                  durableInspectionTimeout:
+                    description: Deadline for one durable record inspection.
+                    nullable: true
+                    type: string
                   fdwBrokerDnsTimeout:
                     description: Timeout for resolving Kafka broker hostnames used by the FDW.
                     nullable: true
@@ -201,6 +215,14 @@ spec:
                     type: string
                   range0FollowerPollInterval:
                     description: Periodic range-0 follower refresh cadence.
+                    nullable: true
+                    type: string
+                  range0FollowerRebuildBackoffCeiling:
+                    description: Maximum delay between consecutive range-0 follower rebuilds.
+                    nullable: true
+                    type: string
+                  range0FollowerRebuildBackoffFloor:
+                    description: Initial delay before retrying consecutive range-0 follower rebuilds.
                     nullable: true
                     type: string
                   readinessProbePeriodSeconds:

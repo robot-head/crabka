@@ -6,13 +6,19 @@ pub mod pgdog;
 pub mod record;
 pub mod registry;
 
-/// Default periodic range-0 follower refresh cadence in milliseconds.
-pub const DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL_MS: u64 = 100;
+/// Default periodic range-0 follower refresh cadence.
+pub const DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL: crabka_units::Time = crabka_units::millis(100);
+/// Default delay before retrying consecutive range-0 follower rebuilds.
+pub const DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR: crabka_units::Time =
+    crabka_units::millis(250);
+/// Default ceiling for consecutive range-0 follower rebuild backoff.
+pub const DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING: crabka_units::Time =
+    crabka_units::secs(30);
 
 pub use checkpoint::{
-    CheckpointPartBytes, DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS,
-    DEFAULT_CHECKPOINT_FRAMES, DEFAULT_CHECKPOINT_POLL_INTERVAL_MS,
-    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS, PositiveUsize,
+    CheckpointPartBytes, DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT,
+    DEFAULT_CHECKPOINT_FRAMES, DEFAULT_CHECKPOINT_POLL_INTERVAL,
+    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL, PositiveUsize,
 };
 pub use error::ControlError;
 pub use pgdog::{

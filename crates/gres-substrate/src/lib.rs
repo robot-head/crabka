@@ -46,8 +46,10 @@ pub use self::{
     },
     frame::WalFrame,
     readonly_fold::{
-        CommittedFoldSnapshot, FoldCheckpointIdentity, FoldLimits, FoldProjection, FoldProvenance,
-        FoldRecordSource, FoldSnapshotRequest, GenerationWitness, committed_fold_snapshot,
+        CommittedFoldSnapshot, DEFAULT_DURABLE_INSPECTION_FOLD_MAX_RECORDS,
+        DEFAULT_DURABLE_INSPECTION_FOLD_MAX_SIZE, DEFAULT_DURABLE_INSPECTION_TIMEOUT,
+        FoldCheckpointIdentity, FoldLimits, FoldProjection, FoldProvenance, FoldRecordSource,
+        FoldSnapshotRequest, GenerationWitness, committed_fold_snapshot,
         committed_fold_snapshot_live, committed_fold_snapshot_live_at,
     },
     recovery::{

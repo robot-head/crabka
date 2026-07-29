@@ -8,16 +8,19 @@ use crabka_client_producer::ProducerFlushTimeout;
 use crabka_gres_control::{
     CheckpointPartBytes, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT,
     DEFAULT_CHECKPOINT_POLL_INTERVAL, DEFAULT_IDLE_SUSPEND_POLL_INTERVAL,
-    DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL, PgdogConnectAttempts, PgdogPoolerMode, PositiveI32,
-    PositiveMillis, PositiveUsize,
+    DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL, DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING,
+    DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR, PgdogConnectAttempts, PgdogPoolerMode,
+    PositiveI32, PositiveMillis, PositiveUsize,
 };
 use crabka_gres_substrate::{
-    DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_SIZE, DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT,
-    DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT, DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT,
-    DEFAULT_WAL_RECOVERY_DNS_TIMEOUT, DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
-    DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT, DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX,
-    DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX, DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT,
-    DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+    DEFAULT_CHECKPOINT_RETAIN, DEFAULT_DURABLE_INSPECTION_FOLD_MAX_RECORDS,
+    DEFAULT_DURABLE_INSPECTION_FOLD_MAX_SIZE, DEFAULT_DURABLE_INSPECTION_TIMEOUT,
+    DEFAULT_PART_MAX_SIZE, DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT, DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT,
+    DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT, DEFAULT_WAL_RECOVERY_DNS_TIMEOUT,
+    DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES, DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT,
+    DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX, DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX,
+    DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT, DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT,
+    DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
 };
 use crabka_units::{
     ByteSize, Ratio, Time,
@@ -230,6 +233,35 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub range0_follower_poll_interval: Option<Time>,
 
+    /// Initial delay before retrying consecutive range-0 follower rebuilds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub range0_follower_rebuild_backoff_floor: Option<Time>,
+
+    /// Maximum delay between consecutive range-0 follower rebuilds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub range0_follower_rebuild_backoff_ceiling: Option<Time>,
+
+    /// Deadline for one durable record inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub durable_inspection_timeout: Option<Time>,
+
+    /// Maximum records materialized by one durable inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub durable_inspection_fold_max_records: Option<usize>,
+
+    /// Maximum data materialized by one durable inspection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub durable_inspection_fold_max_size: Option<ByteSize>,
+
     /// Timeout for resolving Kafka broker hostnames used by the FDW.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(with = "crabka_units::serde_units::human::option_time")]
@@ -385,6 +417,11 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) checkpoint_poll_interval_ms: PositiveMillis,
     pub(crate) idle_suspend_poll_interval_ms: PositiveMillis,
     pub(crate) range0_follower_poll_interval_ms: PositiveMillis,
+    pub(crate) range0_follower_rebuild_backoff_floor_ms: PositiveMillis,
+    pub(crate) range0_follower_rebuild_backoff_ceiling_ms: PositiveMillis,
+    pub(crate) durable_inspection_timeout_ms: PositiveMillis,
+    pub(crate) durable_inspection_fold_max_records: PositiveUsize,
+    pub(crate) durable_inspection_fold_max_size: ByteSize,
     pub(crate) fdw_broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
     pub(crate) wal_recovery_fetch_max_wait_ms: PositiveI32,
     pub(crate) wal_recovery_fetch_partition_max: PositiveI32,
@@ -412,6 +449,34 @@ impl GresComputeSpec {
     }
 
     pub(crate) fn effective_policy(&self) -> Result<EffectiveGresComputePolicy, String> {
+        let range0_follower_rebuild_backoff_floor_ms = PositiveMillis::new(whole_millis(
+            "spec.compute.range0FollowerRebuildBackoffFloor",
+            self.range0_follower_rebuild_backoff_floor
+                .unwrap_or(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR),
+        )?)
+        .map_err(|error| format!("spec.compute.range0FollowerRebuildBackoffFloor: {error}"))?;
+        let range0_follower_rebuild_backoff_ceiling_ms = PositiveMillis::new(whole_millis(
+            "spec.compute.range0FollowerRebuildBackoffCeiling",
+            self.range0_follower_rebuild_backoff_ceiling
+                .unwrap_or(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING),
+        )?)
+        .map_err(|error| format!("spec.compute.range0FollowerRebuildBackoffCeiling: {error}"))?;
+        if range0_follower_rebuild_backoff_floor_ms.into_value()
+            > range0_follower_rebuild_backoff_ceiling_ms.into_value()
+        {
+            return Err(
+                "spec.compute.range0FollowerRebuildBackoffFloor: must not exceed range0FollowerRebuildBackoffCeiling"
+                    .to_owned(),
+            );
+        }
+        let durable_inspection_fold_max_size = self
+            .durable_inspection_fold_max_size
+            .unwrap_or(DEFAULT_DURABLE_INSPECTION_FOLD_MAX_SIZE);
+        whole_bytes_usize(
+            "spec.compute.durableInspectionFoldMaxSize",
+            durable_inspection_fold_max_size,
+        )?;
+
         Ok(EffectiveGresComputePolicy {
             readiness_probe_period_seconds: self.effective_readiness_probe_period_seconds()?,
             checkpoint_part_size: CheckpointPartBytes::new(whole_bytes_usize(
@@ -447,6 +512,20 @@ impl GresComputeSpec {
                     .unwrap_or(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL),
             )?)
             .map_err(|error| format!("spec.compute.range0FollowerPollInterval: {error}"))?,
+            range0_follower_rebuild_backoff_floor_ms,
+            range0_follower_rebuild_backoff_ceiling_ms,
+            durable_inspection_timeout_ms: PositiveMillis::new(whole_millis(
+                "spec.compute.durableInspectionTimeout",
+                self.durable_inspection_timeout
+                    .unwrap_or(DEFAULT_DURABLE_INSPECTION_TIMEOUT),
+            )?)
+            .map_err(|error| format!("spec.compute.durableInspectionTimeout: {error}"))?,
+            durable_inspection_fold_max_records: PositiveUsize::new(
+                self.durable_inspection_fold_max_records
+                    .unwrap_or(DEFAULT_DURABLE_INSPECTION_FOLD_MAX_RECORDS),
+            )
+            .map_err(|error| format!("spec.compute.durableInspectionFoldMaxRecords: {error}"))?,
+            durable_inspection_fold_max_size,
             fdw_broker_dns_timeout: crabka_client_core::ClientDnsTimeout::new(
                 self.fdw_broker_dns_timeout
                     .unwrap_or_else(|| {
@@ -1204,6 +1283,11 @@ mod tests {
             checkpoint_poll_interval: Some(crabka_units::millis(1)),
             idle_suspend_poll_interval: Some(crabka_units::millis(1)),
             range0_follower_poll_interval: Some(crabka_units::millis(1)),
+            range0_follower_rebuild_backoff_floor: Some(crabka_units::millis(2)),
+            range0_follower_rebuild_backoff_ceiling: Some(crabka_units::millis(3)),
+            durable_inspection_timeout: Some(crabka_units::millis(4)),
+            durable_inspection_fold_max_records: Some(5),
+            durable_inspection_fold_max_size: Some(crabka_units::bytes(6)),
             lifecycle_requeue: Some(crabka_units::millis(1)),
             ..GresComputeSpec::default()
         };
@@ -1215,11 +1299,16 @@ mod tests {
             ["properties"]["compute"]["properties"];
         assert!(properties["checkpointPartSize"]["type"] == "string");
         assert!(properties["checkpointRetain"]["minimum"].as_f64() == Some(1.0));
+        assert!(properties["durableInspectionFoldMaxRecords"]["minimum"].as_f64() == Some(1.0));
         for field in [
             "checkpointDeleteRecordsTimeout",
             "checkpointPollInterval",
             "idleSuspendPollInterval",
             "range0FollowerPollInterval",
+            "range0FollowerRebuildBackoffFloor",
+            "range0FollowerRebuildBackoffCeiling",
+            "durableInspectionTimeout",
+            "durableInspectionFoldMaxSize",
             "lifecycleRequeue",
         ] {
             assert!(
@@ -1256,6 +1345,29 @@ mod tests {
         assert!(
             defaults.range0_follower_poll_interval_ms.into_value()
                 == millis_u64(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL)
+        );
+        assert!(
+            defaults
+                .range0_follower_rebuild_backoff_floor_ms
+                .into_value()
+                == millis_u64(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR)
+        );
+        assert!(
+            defaults
+                .range0_follower_rebuild_backoff_ceiling_ms
+                .into_value()
+                == millis_u64(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING)
+        );
+        assert!(
+            defaults.durable_inspection_timeout_ms.into_value()
+                == millis_u64(DEFAULT_DURABLE_INSPECTION_TIMEOUT)
+        );
+        assert!(
+            defaults.durable_inspection_fold_max_records.into_value()
+                == DEFAULT_DURABLE_INSPECTION_FOLD_MAX_RECORDS
+        );
+        assert!(
+            defaults.durable_inspection_fold_max_size == DEFAULT_DURABLE_INSPECTION_FOLD_MAX_SIZE
         );
         assert!(
             defaults.lifecycle_requeue_ms.into_value()
@@ -1307,6 +1419,41 @@ mod tests {
             ),
             (
                 GresComputeSpec {
+                    range0_follower_rebuild_backoff_floor: Some(Time::ZERO),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.range0FollowerRebuildBackoffFloor",
+            ),
+            (
+                GresComputeSpec {
+                    range0_follower_rebuild_backoff_ceiling: Some(Time::ZERO),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.range0FollowerRebuildBackoffCeiling",
+            ),
+            (
+                GresComputeSpec {
+                    durable_inspection_timeout: Some(Time::ZERO),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.durableInspectionTimeout",
+            ),
+            (
+                GresComputeSpec {
+                    durable_inspection_fold_max_records: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.durableInspectionFoldMaxRecords",
+            ),
+            (
+                GresComputeSpec {
+                    durable_inspection_fold_max_size: Some(ByteSize::ZERO),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.durableInspectionFoldMaxSize",
+            ),
+            (
+                GresComputeSpec {
                     lifecycle_requeue: Some(Time::ZERO),
                     ..GresComputeSpec::default()
                 },
@@ -1316,6 +1463,18 @@ mod tests {
             let error = policy.effective_policy().expect_err("boundary must fail");
             assert!(error.contains(path), "got: {error}");
         }
+
+        let error = GresComputeSpec {
+            range0_follower_rebuild_backoff_floor: Some(crabka_units::millis(2)),
+            range0_follower_rebuild_backoff_ceiling: Some(crabka_units::millis(1)),
+            ..GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect_err("inverted backoff must fail");
+        assert!(
+            error.contains("spec.compute.range0FollowerRebuildBackoffFloor"),
+            "got: {error}"
+        );
     }
 
     #[test]
