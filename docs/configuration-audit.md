@@ -4020,3 +4020,141 @@ formatting, one help entry, default and overridden Compose rendering, Compose
 validation, diff hygiene, scanner stability, and lockfile inspection also
 passed. The only lockfile change is the direct workspace-pinned `refined_type`
 dependency on `crabka-traces`.
+
+## Branch-Wide UOM Boundary Audit
+
+This checkpoint audits the branch from the recorded merge-base
+`1d171e99ac73cebdb944479d0d249b816e55a454` through
+`0ed4258a68cb5d25c83a87fb83206589b5313f21`. It does not close the separate
+whole-repository runtime-value audit.
+
+### Counts
+
+The recorded branch baseline contained 192 dimensioned boundary appearances:
+20 already used UOM quantities and 172 were raw migration candidates. The
+final branch contains zero unresolved live configuration surfaces from that
+set. The exhaustive removed-name scan covers 979 changed files and 138 removed
+unit-suffixed patterns. Its 377 residual lines in 81 files are 186 historical
+documentation lines, three benchmark output-format fields, and 188 Rust
+external-contract, invariant, UOM-backed, lowering-bound, or test-only lines.
+
+The broader name-and-type search over 96,455 branch-added lines reports 18,787
+matches: 6,299 historical Markdown lines, 1,657 test/model-path lines, and
+10,831 production-path references. These are references rather than distinct
+configuration definitions; the removed-name scan above is the authoritative
+branch configuration-boundary classification.
+
+The final whole-repository scanner reports 5,661 candidates across 1,041
+files. The four owners declared complete above account for 1,023 candidates:
+30 in `bench-driver`, 919 in `broker`, 38 in `schema-registry`, and 36 in
+`grpc-gateway`.
+
+The complete per-line ledger mechanically separates all 5,661 rows into 2,259
+generated/protocol/format rows, 579 obvious invariants, 84 test/model rows, 38
+allocation-only hints, 53 existing configuration-flow declarations, 1,023
+completed-owner rows, and 1,625 rows requiring semantic owner review. The
+categories are conservative: only the last 1,625 remain unclassified, and no
+claim is made that they are all production tunables.
+
+### Owner Migration Summary
+
+- Shared units: validated parsing, formatting, serde, conversion, and explicit
+  zero handling for time, size, rate, frequency, and ratio quantities.
+- Admin UI, bench driver, and observability demo: CLI-over-environment typed
+  runtime settings with physical defaults preserved.
+- Traces and profiles: typed size, cadence, rate, and ratio boundaries plus
+  checked-in Compose routing.
+- Broker: typed time, size, rate, and ratio configuration through direct
+  CLI/file inputs and the `Kafka` CRD.
+- Gres: typed time and size settings through direct binaries, the CLI, and
+  `Gres`/`GresTenant` CRDs.
+- Schema Registry and gRPC Gateway: typed runtime fields through their CRDs.
+- Telemetry: the proven residual OTLP timeout and heartbeat owner now uses
+  `CRABKA_OTLP_TIMEOUT` and `CRABKA_OTLP_HEARTBEAT_INTERVAL`; the `Kafka` CRD
+  uses string-valued `otlp.timeout`. The standard
+  `OTEL_EXPORTER_OTLP_TIMEOUT_SECS` remains an external OpenTelemetry contract.
+
+### Renamed Public Surfaces
+
+No compatibility aliases remain for the migrated branch-added settings.
+Dimensioned CLI flags, environment variables, file fields, and CRD fields use
+quantity names without `_MS`, `_SECONDS`, `_BYTES`, or equivalent fixed-unit
+suffixes. Nonzero operator values require explicit units. The bench deployment
+family is the representative external rename:
+
+```text
+BENCH_PROMETHEUS_REQUEST_TIMEOUT
+BENCH_PRODUCER_REQUEST_TIMEOUT
+BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT
+BENCH_CONSUMER_REQUEST_TIMEOUT
+BENCH_CONSUMER_BUILD_INITIAL_BACKOFF
+BENCH_CONSUMER_BUILD_MAX_BACKOFF
+BENCH_CONSUMER_POLL_TIMEOUT
+BENCH_CONSUMER_POLL_ERROR_BACKOFF
+BENCH_SAMPLE_INTERVAL
+```
+
+The Gres lifecycle manifest uses `suspendMaxCheckpointSize: "0B"`; the prior
+byte-suffixed numeric CRD field is absent.
+
+### Branch Exceptions
+
+- Historical Superpowers plans, specifications, and earlier sections of this
+  append-only audit retain superseded names as historical evidence.
+- `STARTUP_MS` is a benchmark result field, not operator input.
+- Kubernetes-native `initialDelaySeconds`, `periodSeconds`, and
+  `leaseDurationSeconds` are external API contracts.
+- `checkpointBytes`, `durationMs`, `throttleBytesPerSec`, `timeDifferenceMs`,
+  `maxBytes`, `valueBytes`, `baseBackoffMs`, and `maxBackoffMs` are wire,
+  persisted-format, or generated external-contract fields.
+- `KEY_INTERVAL_MS`, `SESSION_TIMEOUT_MS`, `REBALANCE_TIMEOUT_MS`,
+  `NO_TIMEOUT_MS`, `PRODUCER_ID_EXPIRATION_MS`, `MAX_TXN_TIMEOUT_MS`,
+  `MIN_TXN_TIMEOUT_MS`, and exact fetch byte/wait constants are Kafka protocol
+  compatibility fields or sentinels.
+- Remaining uppercase time/byte constants are internal invariants, typed UOM
+  defaults, protocol-lowering bounds, or test inputs. They are not live CLI,
+  environment, file-config, CRD, Compose, shell, or CI surfaces.
+
+### Exact Searches
+
+```bash
+base=1d171e99ac73cebdb944479d0d249b816e55a454
+git diff --unified=0 "$base"..HEAD -- \
+  '*.rs' '*.toml' '*.yaml' '*.yml' '*.json' '*.md'
+```
+
+The added-line inventory was searched for:
+
+```text
+_MS _MILLIS _SECONDS _SECS _BYTES _BYTES_PER_SEC
+timeout interval delay deadline backoff linger window ttl rate ratio
+Time ByteSize ByteRate Frequency Ratio
+```
+
+The exhaustive stale-surface check extracts every removed unit-suffixed flag,
+environment variable, and field pattern from the same diff and fixed-string
+searches every changed file for the removed patterns. The whole-repository
+candidate inventory is reproduced with:
+
+```bash
+tools/audit-runtime-values.sh
+```
+
+### Verification Evidence
+
+Task 10 verified the only changed Compose file with default and representative
+override renders, rendered the bench Job with all nine renamed environment
+families, generated nine operator CRDs with no checked-in diff, built every
+affected binary, and checked each renamed help flag exactly once. The final
+Task 11 workspace test, strict Clippy, formatting, CRD, Compose, diff, lockfile,
+and scanner gates are recorded in the Task 11 execution report.
+
+### Unresolved Repository Coverage
+
+The pending list in **Coverage Status** is authoritative. The 1,625 exact
+remaining-review rows are preserved in the Task 11 execution report with
+crate, path, line, source text, and the reason
+`pending owner; semantic production-policy review required`. Closing those
+rows requires owner-by-owner production/test/contract/invariant review and any
+resulting configuration changes. Treating the branch-only zero as
+whole-repository completion would be incorrect.
