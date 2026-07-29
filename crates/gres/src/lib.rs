@@ -6112,7 +6112,8 @@ impl LiveMultiRangeTransfer {
             .retired
             .lock()
             .map_err(|_| range_pause_lock_error(range_id))?
-            .remove(&range_id);
+            .get(&range_id)
+            .cloned();
         let Some(resources) = resources else {
             use crabka_gres_ranges::control::{
                 RangeZeroTopologyActivationStore, TopologyActivationPhase,
