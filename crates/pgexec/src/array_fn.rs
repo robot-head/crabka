@@ -129,6 +129,49 @@ fn require_resolvable(arg: ArgType) -> Result<(), ExecError> {
     Ok(())
 }
 
+/// The argument types the RUN-time resolver drives [`param_types`] from: each
+/// value's own type, with a SQL NULL falling back to the type its expression
+/// states on its face.
+///
+/// PostgreSQL resolves `anyarray`/`anyelement` from the *static* argument types,
+/// so `array_append(NULL::int4[], NULL::int4)` is `{NULL}` typed `int4[]` even
+/// though neither operand carries a type once evaluated. [`ArgType::Opaque`] —
+/// "a run-time NULL, type unknown here" — is exactly the case where the syntax
+/// still knows, so the cast target is recovered from it.
+fn runtime_arg_types(args: &[Expr], vals: &[Datum]) -> Vec<ArgType> {
+    let mut given = crate::eval::value_arg_types(args, vals);
+    for (arg, expr) in given.iter_mut().zip(args) {
+        if *arg == ArgType::Opaque
+            && let Some(ty) = stated_type(expr)
+        {
+            *arg = ArgType::Known(ty);
+        }
+    }
+    given
+}
+
+/// The type an expression states without consulting a `Scope`: a cast's target
+/// and a resolved constant's own type. A column reference states nothing here,
+/// which is why the recovery above is best-effort rather than complete.
+fn stated_type(e: &Expr) -> Option<ColumnType> {
+    match e {
+        Expr::Cast { ty, .. } | Expr::Const { ty, .. } => Some(*ty),
+        _ => None,
+    }
+}
+
+/// The element type [`param_types`] resolved for the `anyarray` parameter at
+/// position `i` — what `array_append`/`array_prepend` build a singleton with
+/// when their array operand is a run-time NULL.
+fn resolved_element(params: &[Option<ColumnType>], i: usize) -> ElemType {
+    params
+        .get(i)
+        .copied()
+        .flatten()
+        .and_then(ColumnType::array_element)
+        .unwrap_or(ElemType::Text)
+}
+
 // ---- result-type inference ----
 
 /// Statically infer an array call's result type (for RowDescription). Arity and
@@ -207,8 +250,9 @@ pub(crate) fn eval_array(
     let mut vals: Vec<Datum> = args.iter().map(&mut eval_child).collect::<Result<_, _>>()?;
     // Give every `unknown` literal argument the value its parameter's type calls
     // for, by the same rule the plan-time resolver typed it with.
-    let given = crate::eval::value_arg_types(args, &vals);
-    crate::eval::coerce_unknown_args(args, &mut vals, &param_types(f, &given)?, ctx)?;
+    let given = runtime_arg_types(args, &vals);
+    let params = param_types(f, &given)?;
+    crate::eval::coerce_unknown_args(args, &mut vals, &params, ctx)?;
     let n = vals.len();
     match f {
         ArrayFunc::Length => {
@@ -235,11 +279,11 @@ pub(crate) fn eval_array(
         }
         ArrayFunc::Append => {
             require_arity(fc, n == 2)?;
-            array_append(&vals[0], &vals[1], ctx)
+            array_append(&vals[0], &vals[1], resolved_element(&params, 0), ctx)
         }
         ArrayFunc::Prepend => {
             require_arity(fc, n == 2)?;
-            array_prepend(&vals[0], &vals[1], ctx)
+            array_prepend(&vals[0], &vals[1], resolved_element(&params, 1), ctx)
         }
         ArrayFunc::Cat => {
             require_arity(fc, n == 2)?;
@@ -340,17 +384,24 @@ fn string_to_array(input: &str, sep: Option<&str>, null_text: Option<&str>) -> D
 
 // ---- operator semantics (wired into `apply_binary` by the eval layer) ----
 
-/// `array_append(anyarray, anyelement)`: NULL array + non-NULL element yields a
-/// one-element array of that element's type (PostgreSQL's non-strict behavior);
-/// NULL on both sides is NULL, since no element type can be derived.
-pub(crate) fn array_append(array: &Datum, elem: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+/// `array_append(anyarray, anyelement)`: a NULL array behaves like the EMPTY
+/// array of the resolved element type, so the result is always a one-element
+/// array — `array_append(NULL::int4[], NULL::int4)` is `{NULL}`, not SQL NULL.
+/// `into` is the element type the call's `anyarray`/`anyelement` pair resolved
+/// to; it is used only when neither operand carries one at run time.
+pub(crate) fn array_append(
+    array: &Datum,
+    elem: &Datum,
+    into: ElemType,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
     match array {
         Datum::Array(a) => {
             let mut elems = a.elems.clone();
             elems.push(coerce_element(elem, a.elem, ctx)?);
             Ok(Datum::Array(ArrayValue::new(a.elem, elems)))
         }
-        Datum::Null => Ok(singleton_from_element(elem)),
+        Datum::Null => Ok(singleton_from_element(elem, into)),
         other => Err(not_an_array(other)),
     }
 }
@@ -359,6 +410,7 @@ pub(crate) fn array_append(array: &Datum, elem: &Datum, ctx: &EvalCtx) -> Result
 pub(crate) fn array_prepend(
     elem: &Datum,
     array: &Datum,
+    into: ElemType,
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
     match array {
@@ -368,7 +420,7 @@ pub(crate) fn array_prepend(
             elems.extend(a.elems.iter().cloned());
             Ok(Datum::Array(ArrayValue::new(a.elem, elems)))
         }
-        Datum::Null => Ok(singleton_from_element(elem)),
+        Datum::Null => Ok(singleton_from_element(elem, into)),
         other => Err(not_an_array(other)),
     }
 }
@@ -405,10 +457,11 @@ pub(crate) fn array_cat(left: &Datum, right: &Datum) -> Result<Datum, ExecError>
 pub(crate) enum ConcatForm {
     /// `anyarray || anyarray`.
     ArrayArray,
-    /// `anyarray || anyelement`.
-    ArrayElement,
-    /// `anyelement || anyarray`.
-    ElementArray,
+    /// `anyarray || anyelement`, carrying the element type the pair resolved to
+    /// (so `NULL::int4[] || NULL::int4` still builds an `int4[]` `{NULL}`).
+    ArrayElement(ElemType),
+    /// `anyelement || anyarray` — the mirror of [`ConcatForm::ArrayElement`].
+    ElementArray(ElemType),
 }
 
 /// Resolve `left || right` from the operand types, or `None` when no array `||`
@@ -423,10 +476,10 @@ pub(crate) fn concat_form(left: ColumnType, right: ColumnType) -> Option<ConcatF
         (Some(a), Some(b)) if a == b => Some(ConcatForm::ArrayArray),
         (Some(_), Some(_)) => None,
         (Some(a), None) if ElemType::from_column_type(right) == Some(a) => {
-            Some(ConcatForm::ArrayElement)
+            Some(ConcatForm::ArrayElement(a))
         }
         (None, Some(b)) if ElemType::from_column_type(left) == Some(b) => {
-            Some(ConcatForm::ElementArray)
+            Some(ConcatForm::ElementArray(b))
         }
         _ => None,
     }
@@ -435,8 +488,8 @@ pub(crate) fn concat_form(left: ColumnType, right: ColumnType) -> Option<ConcatF
 /// The static result type of an array `||`.
 pub(crate) fn concat_result_type(left: ColumnType, right: ColumnType) -> Option<ColumnType> {
     match concat_form(left, right)? {
-        ConcatForm::ArrayArray | ConcatForm::ArrayElement => Some(left),
-        ConcatForm::ElementArray => Some(right),
+        ConcatForm::ArrayArray | ConcatForm::ArrayElement(_) => Some(left),
+        ConcatForm::ElementArray(_) => Some(right),
     }
 }
 
@@ -449,8 +502,8 @@ pub(crate) fn array_concat(
 ) -> Result<Datum, ExecError> {
     match form {
         ConcatForm::ArrayArray => array_cat(left, right),
-        ConcatForm::ArrayElement => array_append(left, right, ctx),
-        ConcatForm::ElementArray => array_prepend(left, right, ctx),
+        ConcatForm::ArrayElement(elem) => array_append(left, right, elem, ctx),
+        ConcatForm::ElementArray(elem) => array_prepend(left, right, elem, ctx),
     }
 }
 
@@ -673,14 +726,16 @@ fn int_arg(d: &Datum, name: &str) -> Result<i32, ExecError> {
     }
 }
 
-/// A single-element array typed from the element itself — the `array_append`
-/// path where the array operand is NULL. Two NULLs carry no type at all, so the
-/// result is NULL.
-fn singleton_from_element(elem: &Datum) -> Datum {
-    match elem.column_type().and_then(ElemType::from_column_type) {
-        Some(t) => Datum::Array(ArrayValue::new(t, vec![elem.clone()])),
-        None => Datum::Null,
-    }
+/// A single-element array — the `array_append`/`array_prepend` path where the
+/// array operand is NULL and so behaves like the empty array. The element's own
+/// type wins when it has one; a NULL element falls back to `into`, the type the
+/// call's polymorphic pair resolved to.
+fn singleton_from_element(elem: &Datum, into: ElemType) -> Datum {
+    let t = elem
+        .column_type()
+        .and_then(ElemType::from_column_type)
+        .unwrap_or(into);
+    Datum::Array(ArrayValue::new(t, vec![elem.clone()]))
 }
 
 /// Coerce an element into an array's element type (`array_append(bigint[], 1)`
@@ -727,6 +782,14 @@ mod tests {
         Expr::Cast {
             expr: Box::new(Expr::NullLiteral),
             ty: ColumnType::Array(elem),
+        }
+    }
+
+    /// A `NULL::T` expression — a run-time SQL NULL that still states its type.
+    fn null_expr(ty: ColumnType) -> Expr {
+        Expr::Cast {
+            expr: Box::new(Expr::NullLiteral),
+            ty,
         }
     }
 
@@ -932,23 +995,32 @@ mod tests {
     #[test]
     fn append_prepend_and_cat_treat_a_null_array_as_empty() {
         let ctx = ctx();
+        let int4 = ElemType::Int4;
         assert!(
-            array_append(&ints(&[Some(1)]), &Datum::Int4(2), &ctx).expect("append")
+            array_append(&ints(&[Some(1)]), &Datum::Int4(2), int4, &ctx).expect("append")
                 == ints(&[Some(1), Some(2)])
         );
         // A NULL element is stored as a NULL element, not dropped.
         assert!(
-            array_append(&ints(&[Some(1)]), &Datum::Null, &ctx).expect("append")
+            array_append(&ints(&[Some(1)]), &Datum::Null, int4, &ctx).expect("append")
                 == ints(&[Some(1), None])
         );
         // A NULL array behaves like an empty array of the element's type.
         assert!(
-            array_append(&Datum::Null, &Datum::Int4(7), &ctx).expect("append") == ints(&[Some(7)])
+            array_append(&Datum::Null, &Datum::Int4(7), int4, &ctx).expect("append")
+                == ints(&[Some(7)])
         );
-        // Two NULLs carry no element type, so there is no array to build.
-        assert!(array_append(&Datum::Null, &Datum::Null, &ctx).expect("append") == Datum::Null);
+        // Two NULLs still append: the resolved element type carries the result,
+        // so `array_append(NULL::int4[], NULL::int4)` is `{NULL}`, not SQL NULL.
         assert!(
-            array_prepend(&Datum::Int4(0), &ints(&[Some(1)]), &ctx).expect("prepend")
+            array_append(&Datum::Null, &Datum::Null, int4, &ctx).expect("append") == ints(&[None])
+        );
+        assert!(
+            array_prepend(&Datum::Null, &Datum::Null, int4, &ctx).expect("prepend")
+                == ints(&[None])
+        );
+        assert!(
+            array_prepend(&Datum::Int4(0), &ints(&[Some(1)]), int4, &ctx).expect("prepend")
                 == ints(&[Some(0), Some(1)])
         );
         assert!(
@@ -965,13 +1037,74 @@ mod tests {
         );
     }
 
+    /// A typed NULL array is the EMPTY array of its element type, so appending
+    /// to it always builds a one-element array — even when the element is a
+    /// typed NULL too and nothing carries a type at run time. `array_cat` is the
+    /// one that stays NULL, because two empty arrays concatenate to nothing.
+    /// Type and value on each row were taken from `PostgreSQL` 18.4.
+    #[test]
+    fn a_typed_null_array_keeps_its_element_type() {
+        let int4 = ColumnType::Int4;
+        let int_array = ColumnType::Array(ElemType::Int4);
+        let text_array = ColumnType::Array(ElemType::Text);
+        let cases: [(&str, Vec<Expr>, ColumnType, Datum); 6] = [
+            (
+                "array_append",
+                vec![null_expr(int_array), null_expr(int4)],
+                int_array,
+                ints(&[None]),
+            ),
+            (
+                "array_append",
+                vec![null_expr(int_array), int_expr(1)],
+                int_array,
+                ints(&[Some(1)]),
+            ),
+            (
+                "array_append",
+                vec![array_expr("{1}", ElemType::Int4), Expr::NullLiteral],
+                int_array,
+                ints(&[Some(1), None]),
+            ),
+            (
+                "array_prepend",
+                vec![null_expr(int4), null_expr(int_array)],
+                int_array,
+                ints(&[None]),
+            ),
+            // Neither operand states a type: PostgreSQL settles the pair on text.
+            (
+                "array_append",
+                vec![Expr::NullLiteral, Expr::NullLiteral],
+                text_array,
+                texts(&[None]),
+            ),
+            (
+                "array_cat",
+                vec![null_expr(int_array), null_expr(int_array)],
+                int_array,
+                Datum::Null,
+            ),
+        ];
+        for (name, args, ty, value) in cases {
+            assert!(result_type(name, args.clone()).expect(name) == ty, "{name}");
+            assert!(call(name, args).expect(name) == value, "{name}");
+        }
+    }
+
     #[test]
     fn concat_resolves_its_form_from_the_operand_types() {
         let int_array = ColumnType::Array(ElemType::Int4);
         let text_array = ColumnType::Array(ElemType::Text);
         assert!(concat_form(int_array, int_array) == Some(ConcatForm::ArrayArray));
-        assert!(concat_form(int_array, ColumnType::Int4) == Some(ConcatForm::ArrayElement));
-        assert!(concat_form(ColumnType::Int4, int_array) == Some(ConcatForm::ElementArray));
+        assert!(
+            concat_form(int_array, ColumnType::Int4)
+                == Some(ConcatForm::ArrayElement(ElemType::Int4))
+        );
+        assert!(
+            concat_form(ColumnType::Int4, int_array)
+                == Some(ConcatForm::ElementArray(ElemType::Int4))
+        );
         // Mismatched element types, and two non-arrays, resolve to no array `||`.
         assert!(concat_form(int_array, text_array).is_none());
         assert!(concat_form(int_array, ColumnType::Text).is_none());
@@ -996,7 +1129,7 @@ mod tests {
         );
         assert!(
             array_concat(
-                ConcatForm::ArrayElement,
+                ConcatForm::ArrayElement(ElemType::Int4),
                 &ints(&[Some(1)]),
                 &Datum::Int4(2),
                 &ctx
@@ -1006,7 +1139,7 @@ mod tests {
         );
         assert!(
             array_concat(
-                ConcatForm::ElementArray,
+                ConcatForm::ElementArray(ElemType::Int4),
                 &Datum::Int4(0),
                 &ints(&[Some(1)]),
                 &ctx
@@ -1028,7 +1161,7 @@ mod tests {
         );
         assert!(
             array_concat(
-                ConcatForm::ArrayElement,
+                ConcatForm::ArrayElement(ElemType::Int4),
                 &ints(&[Some(1)]),
                 &Datum::Null,
                 &ctx
@@ -1039,7 +1172,13 @@ mod tests {
         // An int4 element coerces into an int8 array rather than failing.
         let big = Datum::Array(ArrayValue::new(ElemType::Int8, vec![Datum::Int8(1)]));
         assert!(
-            array_concat(ConcatForm::ArrayElement, &big, &Datum::Int4(2), &ctx).expect("append")
+            array_concat(
+                ConcatForm::ArrayElement(ElemType::Int8),
+                &big,
+                &Datum::Int4(2),
+                &ctx
+            )
+            .expect("append")
                 == Datum::Array(ArrayValue::new(
                     ElemType::Int8,
                     vec![Datum::Int8(1), Datum::Int8(2)]

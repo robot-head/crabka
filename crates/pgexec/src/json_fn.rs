@@ -293,11 +293,28 @@ fn build_object(vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
                     "key value must be scalar, not array, composite, or json",
                 ));
             }
-            other => datum_text(other, ctx),
+            other => object_key_text(other, ctx)?,
         };
         pairs.push((key, to_jsonb(&pair[1], ctx)?));
     }
     Ok(Datum::Jsonb(JsonbValue::object_from_pairs(pairs)))
+}
+
+/// A scalar's spelling as a JSON object key.
+///
+/// PostgreSQL renders a key through the same conversion as a value and then
+/// takes its unquoted text, so a key follows the *JSON* spelling rather than the
+/// SQL one: `true` not `t`, and `2020-01-02T03:04:05` not the space-separated
+/// form. Container and NULL keys are rejected by the caller, so the arms below
+/// cover every key that reaches here.
+fn object_key_text(d: &Datum, ctx: &EvalCtx) -> Result<String, ExecError> {
+    Ok(match to_jsonb(d, ctx)? {
+        JsonbValue::String(s) => s,
+        JsonbValue::Bool(b) => b.to_string(),
+        JsonbValue::Number(n) => numeric::to_text(&n),
+        // `build_object` rejects null and container keys before calling this.
+        other => other.to_text(),
+    })
 }
 
 /// `to_jsonb(anyelement)`: the value's JSON rendering.
@@ -1073,6 +1090,31 @@ mod tests {
 
     fn t(s: &str) -> Datum {
         Datum::Text(s.to_string())
+    }
+
+    /// A JSON object key follows the JSON spelling, not the SQL one. Rows
+    /// measured against PostgreSQL 18.4.
+    #[test]
+    fn object_keys_use_the_json_spelling_not_the_sql_one() {
+        let stamp = crabka_pgtypes::datetime::parse_timestamp("2020-01-02 03:04:05")
+            .expect("timestamp literal");
+        for (key, want) in [
+            (Datum::Bool(true), r#"{"true": "a"}"#),
+            (Datum::Bool(false), r#"{"false": "a"}"#),
+            (Datum::Int4(2), r#"{"2": "a"}"#),
+            (
+                Datum::Numeric(numeric::parse("1.50").expect("numeric literal")),
+                r#"{"1.50": "a"}"#,
+            ),
+            (Datum::Timestamp(stamp), r#"{"2020-01-02T03:04:05": "a"}"#),
+            (t("plain"), r#"{"plain": "a"}"#),
+        ] {
+            let got = build_object(&[key.clone(), t("a")], &ctx()).expect("build_object");
+            let Datum::Jsonb(value) = got else {
+                panic!("expected jsonb for key {key:?}")
+            };
+            assert!(value.to_text() == want, "key {key:?}");
+        }
     }
 
     fn text_array(items: &[&str]) -> Datum {

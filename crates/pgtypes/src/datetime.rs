@@ -327,7 +327,8 @@ const USECS_PER_DAY_I64: i64 = 86_400_000_000;
 // ---------------------------------------------------------------------------
 
 /// Append `.ffffff` (trailing zeros trimmed) for a non-zero sub-second part.
-/// `subsec_nanos` is the time's nanosecond-of-second; PG truncates to µs.
+/// `subsec_nanos` is the time's nanosecond-of-second. Values reach here already
+/// quantized to µs, so dividing the tail away is exact rather than lossy.
 fn push_subsecond(out: &mut String, subsec_nanos: i32) {
     let micros = subsec_nanos / 1_000;
     if micros == 0 {
@@ -410,52 +411,173 @@ pub fn date_from_binary(b: &[u8]) -> Result<Date, TypeError> {
 // time without time zone
 // ---------------------------------------------------------------------------
 
+/// Why a civil date/time literal could not be turned into a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClockParseError {
+    /// The text is not a well-formed literal.
+    Syntax,
+    /// The text is well formed, but quantizing it to microseconds rounded it
+    /// past the largest value crabka can represent.
+    Overflow,
+}
+
+impl ClockParseError {
+    /// Label this failure with the SQL type and literal that produced it.
+    fn into_type_error(self, type_name: &'static str, value: &str) -> TypeError {
+        match self {
+            Self::Syntax => TypeError::InvalidDatetimeFormat {
+                type_name,
+                value: value.to_string(),
+            },
+            Self::Overflow => TypeError::DatetimeFieldOverflow {
+                value: value.to_string(),
+            },
+        }
+    }
+}
+
 /// Parse a `time` literal in `HH:MM[:SS[.ffffff]]` form.
 pub fn parse_time(s: &str) -> Result<Time, TypeError> {
     let t = s.trim();
-    parse_time_inner(t).ok_or_else(|| TypeError::InvalidDatetimeFormat {
+    let parsed = parse_time_inner(t).ok_or_else(|| TypeError::InvalidDatetimeFormat {
         type_name: "time without time zone",
         value: s.to_string(),
-    })
+    })?;
+    if parsed.day_carry {
+        // PostgreSQL's `time` domain is closed at `24:00:00`, so it renders
+        // `23:59:59.9999995` as `24:00:00`. jiff's `Time` has no such value —
+        // it rejects the literal `24:00:00` for the same reason — and midnight
+        // is a different time, not a rounding of this one, so this fails
+        // instead of wrapping.
+        return Err(TypeError::DatetimeFieldOverflow {
+            value: s.to_string(),
+        });
+    }
+    Ok(parsed.time)
+}
+
+/// A clock reading quantized to PostgreSQL's microsecond resolution, plus the
+/// day carry that rounding the sub-microsecond tail may have produced.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RoundedTime {
+    /// The quantized reading. `00:00:00` whenever `day_carry` is set.
+    time: Time,
+    /// Rounding pushed the value past `23:59:59.999999` into the next day.
+    day_carry: bool,
 }
 
 /// Best-effort `HH:MM[:SS[.ffffff]]` parse (returns `None` on any malformation).
 /// jiff's `Time` FromStr requires `HH:MM:SS`, so we normalize `HH:MM` ourselves.
 ///
 /// This is the single ingestion point for `time`, `timestamp` and `timestamptz`
-/// text, so it is also where sub-microsecond precision is dropped (see
-/// [`truncate_to_micros`]).
-fn parse_time_inner(t: &str) -> Option<Time> {
-    // jiff parses `HH:MM:SS[.fff]`; supply `:00` seconds when omitted.
-    let normalized = match t.split(':').count() {
-        2 => format!("{t}:00"),
-        3 => t.to_string(),
-        _ => return None,
+/// text, so it is also where the value is quantized to PostgreSQL's microsecond
+/// resolution (see [`round_fraction_to_micros`]). Every crabka encoding —
+/// `time_send`, `timestamp_send`, the row encoder, index keys — carries
+/// microseconds and nothing finer, so a value parsed at jiff's nanosecond
+/// resolution would (a) not survive a storage round trip and (b) compare UNEQUAL
+/// to its stored form while encoding to byte-identical storage, which an index,
+/// being equality-by-bytes, would silently conflate.
+fn parse_time_inner(t: &str) -> Option<RoundedTime> {
+    let mut fields = t.split(':');
+    let hours = fields.next()?;
+    let minutes = fields.next()?;
+    let seconds = fields.next();
+    if fields.next().is_some() {
+        return None;
+    }
+
+    // The fraction is handled here rather than by jiff: jiff stops at nine
+    // digits and would round to nanoseconds first, so rounding to microseconds
+    // afterwards would round twice. Only the seconds field may carry one —
+    // PostgreSQL reads `12:34.5` as `MM:SS.f`, a form crabka does not accept,
+    // so a fraction on any other field stays the syntax error it is today.
+    if hours.contains('.') || minutes.contains('.') {
+        return None;
+    }
+    let (seconds, fraction) = match seconds {
+        Some(seconds) => match seconds.split_once('.') {
+            Some((seconds, fraction)) => (seconds, Some(fraction)),
+            None => (seconds, None),
+        },
+        // jiff parses `HH:MM:SS`; supply `:00` seconds when omitted.
+        None => ("00", None),
     };
-    normalized.parse::<Time>().map(truncate_to_micros).ok()
+    let extra_micros = match fraction {
+        Some(fraction) => round_fraction_to_micros(fraction)?,
+        None => 0,
+    };
+
+    // jiff validates the whole-number fields. It never sees a sub-second one, so
+    // `whole` always lands exactly on a second and the only carry that can leave
+    // the day is the one `extra_micros` contributes.
+    let whole = format!("{hours}:{minutes}:{seconds}")
+        .parse::<Time>()
+        .ok()?;
+    let micros_of_day = i64::from(whole.hour()) * 3_600_000_000
+        + i64::from(whole.minute()) * 60_000_000
+        + i64::from(whole.second()) * 1_000_000
+        + i64::from(extra_micros);
+    let day_carry = micros_of_day >= MICROS_PER_DAY;
+    Some(RoundedTime {
+        time: time_from_micros_of_day(micros_of_day - i64::from(day_carry) * MICROS_PER_DAY),
+        day_carry,
+    })
 }
 
-/// Drop the sub-microsecond tail of a parsed clock time.
+/// Microseconds in one calendar day, the modulus of a clock reading.
+const MICROS_PER_DAY: i64 = 86_400_000_000;
+
+/// Rebuild a clock reading from microseconds since midnight.
 ///
-/// PostgreSQL's resolution is one microsecond, and so is every crabka encoding
-/// (`time_send`, `timestamp_send`, the row encoder, index keys). jiff parses
-/// nanoseconds, so without this a literal like `00:00:00.0000001` would produce
-/// a value that (a) does not survive a storage round trip and (b) compares
-/// UNEQUAL to `00:00:00` while encoding to byte-identical storage — which an
-/// index, being equality-by-bytes, would silently conflate.
+/// # Panics
 ///
-/// PostgreSQL *rounds* the seventh digit; truncating keeps this total (no
-/// wrap past `23:59:59.999999`) and exactly matches what the encoders do.
-fn truncate_to_micros(t: Time) -> Time {
-    let nanos = t.subsec_nanosecond();
-    let whole_micros = nanos - nanos % 1_000;
-    if whole_micros == nanos {
-        return t;
+/// Panics unless `micros` is in `0..MICROS_PER_DAY`.
+fn time_from_micros_of_day(mut micros: i64) -> Time {
+    let hour = (micros / 3_600_000_000) as i8;
+    micros %= 3_600_000_000;
+    let minute = (micros / 60_000_000) as i8;
+    micros %= 60_000_000;
+    let second = (micros / 1_000_000) as i8;
+    micros %= 1_000_000;
+    Time::new(hour, minute, second, (micros * 1_000) as i32)
+        .expect("microseconds within a day are a valid clock reading")
+}
+
+/// Round a fractional-seconds digit string to PostgreSQL's microsecond
+/// resolution.
+///
+/// PostgreSQL reads the fraction as a `double` and applies `rint`, which rounds
+/// half to even: `time '00:00:00.0000005'` is `00:00:00` while
+/// `time '00:00:00.0000015'` is `00:00:00.000002`. The same rule is applied here
+/// in decimal, so it holds for fractions of any length instead of only those a
+/// `double` happens to represent exactly.
+///
+/// Returns microseconds in `0..=1_000_000`, the top value being a carry of one
+/// whole second that the caller must apply. `None` when the text is not a
+/// non-empty run of ASCII digits.
+fn round_fraction_to_micros(digits: &str) -> Option<u32> {
+    let digits = digits.as_bytes();
+    if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
+        return None;
     }
-    t.with()
-        .subsec_nanosecond(whole_micros)
-        .build()
-        .expect("a truncated sub-second is still a valid nanosecond-of-second")
+
+    // The fraction is left-aligned, so short inputs are padded, not shifted.
+    let (kept, discarded) = digits.split_at(digits.len().min(6));
+    let mut micros: u32 = 0;
+    for digit in kept {
+        micros = micros * 10 + u32::from(digit - b'0');
+    }
+    for _ in kept.len()..6 {
+        micros *= 10;
+    }
+
+    let round_up = match discarded.split_first() {
+        None | Some((b'0'..=b'4', _)) => false,
+        // Exactly one half goes to the even neighbour; anything beyond it goes up.
+        Some((b'5', rest)) => rest.iter().any(|digit| *digit != b'0') || micros % 2 == 1,
+        Some(_) => true,
+    };
+    Some(micros + u32::from(round_up))
 }
 
 /// Render a `time` as `HH:MM:SS[.ffffff]` (PostgreSQL `time_out`).
@@ -502,23 +624,31 @@ pub fn time_from_binary(b: &[u8]) -> Result<Time, TypeError> {
 /// so we split on the separator and reuse the `time` normalization.
 pub fn parse_timestamp(s: &str) -> Result<DateTime, TypeError> {
     let t = s.trim();
-    parse_timestamp_inner(t).ok_or_else(|| TypeError::InvalidDatetimeFormat {
-        type_name: "timestamp without time zone",
-        value: s.to_string(),
-    })
+    parse_timestamp_inner(t).map_err(|err| err.into_type_error("timestamp without time zone", s))
 }
 
 /// Split a civil datetime into its date and time around a space/`T` separator,
-/// parsing each part (normalizing the time's optional seconds). Returns `None`
-/// on any malformation.
-fn parse_timestamp_inner(t: &str) -> Option<DateTime> {
+/// parsing each part (normalizing the time's optional seconds).
+fn parse_timestamp_inner(t: &str) -> Result<DateTime, ClockParseError> {
     // Find the date/time separator: the first ` `, `T`, or `t`.
-    let sep = t.find([' ', 'T', 't'])?;
+    let sep = t.find([' ', 'T', 't']).ok_or(ClockParseError::Syntax)?;
     let date_part = &t[..sep];
     let time_part = &t[sep + 1..];
-    let date = date_part.parse::<Date>().ok()?;
-    let time = parse_time_inner(time_part)?;
-    Some(date.to_datetime(time))
+    let date = date_part
+        .parse::<Date>()
+        .map_err(|_| ClockParseError::Syntax)?;
+    let RoundedTime { time, day_carry } =
+        parse_time_inner(time_part).ok_or(ClockParseError::Syntax)?;
+    let date = if day_carry {
+        // Rounding crossed midnight, so the day owes a carry. PostgreSQL's
+        // timestamp range runs to 294276 AD and simply carries; jiff's `Date`
+        // stops at 9999-12-31, where there is no next day and the value must
+        // fail rather than wrap back to the start of the one it came from.
+        date.tomorrow().map_err(|_| ClockParseError::Overflow)?
+    } else {
+        date
+    };
+    Ok(date.to_datetime(time))
 }
 
 /// Render a `timestamp` as `YYYY-MM-DD HH:MM:SS[.ffffff]` (SPACE separator —
@@ -580,12 +710,9 @@ pub fn timestamp_from_binary(b: &[u8]) -> Result<DateTime, TypeError> {
 /// otherwise the wall-clock time is interpreted as local to the session `tz`.
 pub fn parse_timestamptz(s: &str, tz: &TimeZone) -> Result<Timestamp, TypeError> {
     let t = s.trim();
-    let err = || TypeError::InvalidDatetimeFormat {
-        type_name: "timestamp with time zone",
-        value: s.to_string(),
-    };
     let (civil_str, offset) = split_offset(t);
-    let dt = parse_timestamp_inner(civil_str).ok_or_else(err)?;
+    let dt = parse_timestamp_inner(civil_str)
+        .map_err(|err| err.into_type_error("timestamp with time zone", s))?;
     match offset {
         // Explicit offset: the instant is the civil time minus the offset.
         Some(off) => off
@@ -2148,8 +2275,8 @@ fn split_seconds(sec: f64) -> Option<(i8, i32)> {
         return None;
     }
     let whole = whole as i8;
-    // Fractional part → microseconds (truncate to µs precision), then ×1000 for
-    // jiff's nanosecond field. `.round()` matches PG's `rint` on the µs value.
+    // Fractional part → microseconds, then ×1000 for jiff's nanosecond field.
+    // `.round()` stands in for PG's `rint` on the µs value.
     let micros = (sec.fract() * 1_000_000.0).round() as i32;
     let nanos = micros * 1_000;
     Some((whole, nanos))
@@ -2864,13 +2991,9 @@ mod io_tests {
         );
         // The last microsecond digit still survives.
         assert!(time_to_text(parse_time("00:00:00.999999").expect("time")) == "00:00:00.999999");
-        assert!(
-            time_to_text(parse_time("00:00:00.9999999").expect("time")) == "00:00:00.999999",
-            "the seventh digit is dropped, not rounded up"
-        );
 
         let ts = parse_timestamp("2024-01-15 13:45:00.1234567").expect("valid timestamp");
-        assert!(ts == parse_timestamp("2024-01-15 13:45:00.123456").expect("valid timestamp"));
+        assert!(ts == parse_timestamp("2024-01-15 13:45:00.123457").expect("valid timestamp"));
         assert!(
             timestamp_from_binary(&timestamp_to_binary(ts)).expect("round trip") == ts,
             "storage round trip is lossless"
@@ -2878,12 +3001,120 @@ mod io_tests {
 
         let tstz = parse_timestamptz("2024-01-15 13:45:00.1234567+00", &tz).expect("valid tstz");
         assert!(
-            tstz == parse_timestamptz("2024-01-15 13:45:00.123456+00", &tz).expect("valid tstz")
+            tstz == parse_timestamptz("2024-01-15 13:45:00.123457+00", &tz).expect("valid tstz")
         );
         assert!(
             timestamptz_from_binary(&timestamptz_to_binary(tstz)).expect("round trip") == tstz,
             "storage round trip is lossless"
         );
+    }
+
+    /// Fractional seconds beyond the sixth digit round the way PostgreSQL's
+    /// `rint` on the microsecond value does — half to even, not truncated and
+    /// not half-up. Every row was measured against PostgreSQL 18.4.
+    #[test]
+    fn fractional_seconds_round_half_to_even_like_postgres() {
+        use assert2::assert;
+
+        // (fraction digits, `time_out` of `time '00:00:00.<digits>'`)
+        let cases = [
+            ("0000001", "00:00:00"),
+            ("0000004", "00:00:00"),
+            // Exactly half: 0 is even, so it stays.
+            ("0000005", "00:00:00"),
+            ("0000006", "00:00:00.000001"),
+            ("0000014", "00:00:00.000001"),
+            // Exactly half: 1 is odd, so it climbs to 2.
+            ("0000015", "00:00:00.000002"),
+            ("0000016", "00:00:00.000002"),
+            ("0000025", "00:00:00.000002"),
+            ("0000035", "00:00:00.000004"),
+            ("0000045", "00:00:00.000004"),
+            ("0000055", "00:00:00.000006"),
+            ("1234565", "00:00:00.123456"),
+            ("1234575", "00:00:00.123458"),
+            ("5000005", "00:00:00.5"),
+            ("5000015", "00:00:00.500002"),
+            // Just short of and just past half: the tie rule does not apply.
+            ("00000049999", "00:00:00"),
+            ("00000050001", "00:00:00.000001"),
+            // Fractions longer than a double can hold digits.
+            ("12345678901234", "00:00:00.123457"),
+            ("0000000000001", "00:00:00"),
+            ("999999", "00:00:00.999999"),
+            ("9999994", "00:00:00.999999"),
+            // Rounding up carries a whole second.
+            ("9999995", "00:00:01"),
+        ];
+
+        for (digits, expected) in cases {
+            let literal = format!("00:00:00.{digits}");
+            let parsed = parse_time(&literal).expect("valid time");
+            assert!(
+                time_to_text(parsed) == expected,
+                "time '{literal}' should render as {expected}"
+            );
+        }
+    }
+
+    /// Rounding can carry past the end of the day. PostgreSQL's `time` domain is
+    /// closed at `24:00:00` and its `timestamp` range reaches 294276 AD, so it
+    /// carries in both cases; crabka's representations stop one value earlier, so
+    /// a timestamp carries the date and a `time` fails. Neither may wrap back to
+    /// midnight of the day it started in — that is a different instant.
+    #[test]
+    fn rounding_across_midnight_carries_the_date_and_never_wraps() {
+        use assert2::assert;
+
+        let tz = jiff::tz::TimeZone::UTC;
+
+        // Below the carry, the value is untouched.
+        assert!(time_to_text(parse_time("23:59:59.9999994").expect("time")) == "23:59:59.999999");
+        // PostgreSQL 18.4 answers `24:00:00` here; jiff's `Time` cannot hold it.
+        assert!(let Err(TypeError::DatetimeFieldOverflow { .. }) = parse_time("23:59:59.9999995"));
+        assert!(let Err(TypeError::DatetimeFieldOverflow { .. }) = parse_time("23:59:59.9999999"));
+
+        // A timestamp has a date to carry into, exactly as PostgreSQL does.
+        for literal in ["2024-01-01 23:59:59.9999995", "2024-01-01 23:59:59.9999999"] {
+            let ts = parse_timestamp(literal).expect("valid timestamp");
+            assert!(
+                timestamp_to_text(ts) == "2024-01-02 00:00:00",
+                "timestamp '{literal}' should carry into the next day"
+            );
+        }
+        assert!(
+            timestamp_to_text(parse_timestamp("2024-01-01 23:59:59.9999985").expect("timestamp"))
+                == "2024-01-01 23:59:59.999998",
+            "the tie below the carry still goes to the even neighbour"
+        );
+
+        // PostgreSQL 18.4 answers `10000-01-01 00:00:00`; jiff's `Date` ends at
+        // 9999-12-31, so the carry has nowhere to go and must fail.
+        assert!(
+            timestamp_to_text(parse_timestamp("9999-12-31 23:59:59.9999994").expect("timestamp"))
+                == "9999-12-31 23:59:59.999999"
+        );
+        assert!(
+            let Err(TypeError::DatetimeFieldOverflow { .. }) =
+                parse_timestamp("9999-12-31 23:59:59.9999999")
+        );
+
+        // `timestamptz` shares the parser, so it rounds identically.
+        let tstz = parse_timestamptz("2024-06-01 12:00:00.9999995+00", &tz).expect("valid tstz");
+        assert!(timestamptz_to_text(tstz, &tz) == "2024-06-01 12:00:01+00");
+    }
+
+    /// A fraction is only ever part of the seconds field. PostgreSQL reads
+    /// `12:34.5` as `MM:SS.f`, which crabka does not implement, so it stays a
+    /// rejection rather than silently becoming `12:34:00.5`.
+    #[test]
+    fn a_fraction_outside_the_seconds_field_is_rejected() {
+        use assert2::assert;
+
+        assert!(let Err(TypeError::InvalidDatetimeFormat { .. }) = parse_time("12:34.5"));
+        assert!(let Err(TypeError::InvalidDatetimeFormat { .. }) = parse_time("12.5:34:56"));
+        assert!(let Err(TypeError::InvalidDatetimeFormat { .. }) = parse_time("12:34:56."));
+        assert!(let Err(TypeError::InvalidDatetimeFormat { .. }) = parse_time("12:34:56.5x"));
     }
 
     #[test]

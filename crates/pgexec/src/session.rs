@@ -848,16 +848,16 @@ pub(crate) struct NotifyPending {
 }
 
 /// A committing transaction's notification work, held between the point where
-/// its subscriptions are applied and permits reserved, and the point where the
-/// commit becomes durable.
+/// its permits are reserved and the point where the commit becomes durable.
+///
+/// Reserving is deliberately free of side effects the rest of the engine can
+/// see: it holds queue permits and nothing else, so dropping it is a complete
+/// undo.
 #[derive(Default)]
 pub(crate) struct ReservedNotifications {
     /// Reserved queue permits, or `None` when the transaction queued no
     /// notification.
     publish: Option<PreparedPublish>,
-    /// The subscriptions to restore if the commit fails, or `None` when the
-    /// transaction queued no `LISTEN`/`UNLISTEN` and so changed nothing.
-    restore: Option<HashSet<String>>,
     /// The WAL records that replicate these notifications to the other nodes:
     /// one [`WriteOp::Put`] per notification. Always empty unless an owner opted
     /// this engine into replication with `SqlEngine::set_notify_origin`. The
@@ -902,6 +902,31 @@ impl NotifyPending {
     fn is_empty(&self) -> bool {
         self.actions.is_empty() && self.notifies.is_empty()
     }
+}
+
+/// The channels a session will listen on once `actions` commit: its live
+/// subscriptions with the transaction's queued `LISTEN`/`UNLISTEN` folded in.
+///
+/// This is what the committing transaction's own notifications are addressed
+/// by, so its pending `LISTEN` is honoured for itself without being staged on
+/// the bus where another publisher could reach it.
+fn effective_subscriptions(
+    handle: &NotifySessionHandle,
+    actions: &[ListenAction],
+) -> HashSet<String> {
+    let mut channels = handle.subscriptions();
+    for action in actions {
+        match action {
+            ListenAction::Listen(channel) => {
+                channels.insert(channel.clone());
+            }
+            ListenAction::Unlisten(channel) => {
+                channels.remove(channel);
+            }
+            ListenAction::UnlistenAll => channels.clear(),
+        }
+    }
+    channels
 }
 
 /// Map a `NOTIFY` queue error onto the wire error PostgreSQL reports for it.
@@ -1006,6 +1031,10 @@ pub struct SqlSession {
     /// The open transaction's queued notification work. Shared (not owned)
     /// because the per-statement `EvalCtx` hands it to `pg_notify()`.
     notify_pending: Arc<Mutex<NotifyPending>>,
+    /// Queue permits an autocommit statement reserved before making its write
+    /// durable, waiting for the statement epilogue to send them. See
+    /// [`SqlSession::reserve_autocommit_notifications`].
+    notify_reserved: Mutex<Option<ReservedNotifications>>,
     /// Cross-node notification replication (shared from the engine): the origin
     /// stamp and record sequence of the WAL records a committing transaction
     /// appends for its notifications. Inert — and the commit batch unchanged —
@@ -1137,6 +1166,7 @@ impl SqlSession {
             notify: None,
             notify_rx: None,
             notify_pending: Arc::new(Mutex::new(NotifyPending::default())),
+            notify_reserved: Mutex::new(None),
             notify_replication,
             session_user: "public".into(),
             current_role: "public".into(),
@@ -1329,52 +1359,70 @@ impl SqlSession {
     /// Called strictly BEFORE the transaction's durable commit: a listener whose
     /// queue is full has to fail the *notifying* transaction (54000) before
     /// anything is committed, never lose a notification and never disconnect the
-    /// listener. `None` means nothing is queued.
-    /// The transaction's queued `LISTEN`/`UNLISTEN` are applied here, *before*
-    /// the permits are reserved, because PostgreSQL applies pending listens
-    /// before queueing the transaction's notifications — so `LISTEN a; NOTIFY a;`
-    /// in one transaction delivers to itself. The pre-application snapshot rides
-    /// along so a commit that fails afterwards can put the subscriptions back.
+    /// listener.
+    ///
+    /// The transaction's queued `LISTEN`/`UNLISTEN` are *not* applied here —
+    /// they reach the bus only once the commit is durable
+    /// ([`Self::commit_pending_notifications`]). They are instead folded into
+    /// the subscription set this session is addressed by, so `LISTEN a; NOTIFY
+    /// a;` in one transaction still delivers to itself (PostgreSQL applies
+    /// pending listens before queueing the transaction's notifications) while a
+    /// concurrent publisher keeps seeing only committed subscriptions — a
+    /// `LISTEN` that rolls back can then never have been delivered to.
     fn reserve_pending_notifications(&self) -> Result<ReservedNotifications, ExecError> {
         let pending = self.pending_notify().clone();
-        if pending.is_empty() {
+        if pending.notifies.is_empty() {
+            // A subscription-only transaction reserves nothing; its actions are
+            // applied by the commit.
             return Ok(ReservedNotifications::default());
         }
-        let mut reserved = ReservedNotifications::default();
-        if !pending.actions.is_empty() {
-            let handle = self.notify_handle()?;
-            reserved.restore = Some(handle.subscriptions());
-            for action in pending.actions {
-                match action {
-                    ListenAction::Listen(channel) => handle.listen(&channel),
-                    ListenAction::Unlisten(channel) => handle.unlisten(&channel),
-                    ListenAction::UnlistenAll => handle.unlisten_all(),
-                }
-            }
-        }
-        if pending.notifies.is_empty() {
-            return Ok(reserved);
-        }
-        match self.notify_handle() {
-            Ok(handle) => match handle.prepare_publish(&pending.notifies) {
-                Ok(publish) => {
-                    // Built here, from the same deduped list the permits were
-                    // reserved from, so a record exists for exactly the
-                    // notifications this transaction will deliver locally.
-                    reserved.wal_ops = self.notify_wal_ops(&pending.notifies, handle.pid());
-                    reserved.publish = Some(publish);
-                }
-                Err(e) => {
-                    self.undo_reserved_notifications(reserved);
-                    return Err(notify_queue_error(e));
-                }
-            },
+        let handle = match self.notify_handle() {
+            Ok(handle) => handle,
             Err(e) => {
-                self.undo_reserved_notifications(reserved);
+                self.discard_pending_notifications();
                 return Err(e);
             }
+        };
+        let effective = effective_subscriptions(handle, &pending.actions);
+        match handle.prepare_publish_with_pending(&pending.notifies, &effective) {
+            Ok(publish) => Ok(ReservedNotifications {
+                publish: Some(publish),
+                // Built here, from the same deduped list the permits were
+                // reserved from, so a record exists for exactly the
+                // notifications this transaction will deliver locally.
+                wal_ops: self.notify_wal_ops(&pending.notifies, handle.pid()),
+            }),
+            Err(e) => {
+                self.discard_pending_notifications();
+                Err(notify_queue_error(e))
+            }
         }
-        Ok(reserved)
+    }
+
+    /// Reserve an autocommit statement's permits before its write becomes
+    /// durable.
+    ///
+    /// A statement whose expressions called `pg_notify()` has already queued
+    /// everything it will queue by the time its write batch is built, so the
+    /// reservation can be taken here — while the statement can still be
+    /// aborted. Without it a full listener queue would report 54000 for a row
+    /// that is already committed, and a client retrying the "failed" statement
+    /// would duplicate its own write.
+    ///
+    /// The reservation is parked on the session and consumed by
+    /// [`Self::flush_autocommit_notifications`] in the statement epilogue; any
+    /// path that discards the queue drops it, releasing the permits.
+    fn reserve_autocommit_notifications(&self) -> Result<(), ExecError> {
+        if !matches!(self.state, TxnState::Idle) || self.pending_notify().is_empty() {
+            return Ok(());
+        }
+        let reserved = self.reserve_pending_notifications()?;
+        *self.reserved_notify() = Some(reserved);
+        Ok(())
+    }
+
+    fn reserved_notify(&self) -> std::sync::MutexGuard<'_, Option<ReservedNotifications>> {
+        self.notify_reserved.lock().expect("notify reserved mutex")
     }
 
     /// The WAL records replicating `notifies` to the other nodes: one
@@ -1431,50 +1479,72 @@ impl SqlSession {
         }
     }
 
-    /// Deliver the already-reserved notifications. Called only once the commit
-    /// is durable; sending through held permits cannot fail, so no notification
-    /// can escape a transaction that did not commit.
+    /// Publish the transaction's `LISTEN`/`UNLISTEN` and deliver its
+    /// already-reserved notifications. Called only once the commit is durable:
+    /// the subscription changes become visible to other publishers exactly when
+    /// the transaction does, and sending through held permits cannot fail, so no
+    /// notification can escape a transaction that did not commit.
     fn commit_pending_notifications(&self, reserved: ReservedNotifications) {
+        self.apply_pending_subscriptions();
         self.discard_pending_notifications();
         if let Some(publish) = reserved.publish {
             publish.send();
         }
     }
 
-    /// Undo a reservation whose transaction did not commit: put the
-    /// subscriptions back as they were and drop the queue. The unsent
+    /// Apply the queued `LISTEN`/`UNLISTEN` to the bus, making this session's
+    /// new subscription set visible to every other publisher.
+    fn apply_pending_subscriptions(&self) {
+        let Some(handle) = &self.notify else {
+            return;
+        };
+        let actions = std::mem::take(&mut self.pending_notify().actions);
+        for action in actions {
+            match action {
+                ListenAction::Listen(channel) => handle.listen(&channel),
+                ListenAction::Unlisten(channel) => handle.unlisten(&channel),
+                ListenAction::UnlistenAll => handle.unlisten_all(),
+            }
+        }
+    }
+
+    /// Undo a reservation whose transaction did not commit. Reserving touches
+    /// nothing outside the session, so this only drops the queue; the unsent
     /// [`PreparedPublish`] releases its permits as it falls.
     fn undo_reserved_notifications(&self, reserved: ReservedNotifications) {
-        if let (Some(handle), Some(restore)) = (&self.notify, reserved.restore) {
-            handle.restore_subscriptions(&restore);
-        }
+        drop(reserved);
         self.discard_pending_notifications();
     }
 
-    /// Drop everything queued without touching live subscriptions. Callers that
-    /// may already have applied queued `LISTEN`/`UNLISTEN` must use
-    /// [`Self::undo_reserved_notifications`] instead.
+    /// Drop everything queued — the staged `LISTEN`/`UNLISTEN`, the queued
+    /// notifications, and any permits an autocommit write reserved ahead of its
+    /// commit. Live subscriptions are untouched, because nothing queued has
+    /// reached the bus.
     fn discard_pending_notifications(&self) {
         *self.pending_notify() = NotifyPending::default();
+        drop(self.reserved_notify().take());
     }
 
     /// Flush the queue of an autocommit statement, which is its own transaction.
     ///
-    /// Unlike the explicit-block path this runs *after* any data the statement
-    /// wrote is committed (the write path commits inside the statement), so a
-    /// full listener queue fails the statement rather than its write. Standalone
-    /// `LISTEN`/`NOTIFY`/`UNLISTEN` write nothing, so for them the two orders
-    /// coincide.
+    /// A statement that wrote data reserved its permits before that write became
+    /// durable (see [`Self::reserve_autocommit_notifications`]) and parked them
+    /// on the session; this consumes them. A statement that wrote nothing —
+    /// standalone `LISTEN`/`NOTIFY`/`UNLISTEN`, or a `SELECT pg_notify(…)` —
+    /// reserves here, which is still before anything of its own is durable.
     ///
-    /// For the same reason the notify records cannot ride the statement's own
-    /// batch — it is already durable — so they are appended here, between the
-    /// reservation and the send, and are the whole batch when the statement
-    /// wrote nothing else.
+    /// The notify records cannot ride the statement's own batch (it is already
+    /// durable by now), so they are appended here, between the reservation and
+    /// the send, and are the whole batch when the statement wrote nothing else.
     async fn flush_autocommit_notifications(&self) -> Result<(), ExecError> {
-        if self.pending_notify().is_empty() {
+        let parked = self.reserved_notify().take();
+        if parked.is_none() && self.pending_notify().is_empty() {
             return Ok(());
         }
-        let mut reserved = self.reserve_pending_notifications()?;
+        let mut reserved = match parked {
+            Some(reserved) => reserved,
+            None => self.reserve_pending_notifications()?,
+        };
         self.append_notify_records(std::mem::take(&mut reserved.wal_ops))
             .await;
         self.commit_pending_notifications(reserved);
@@ -2764,7 +2834,15 @@ impl SqlSession {
                 let prune_horizon = Some(self.local_prune_horizon()?);
                 let write_ctx =
                     self.write_context(&gsnap, &snapshot, xid, false, &ctx, prune_horizon);
-                let outcome = crate::exec::execute_write(&write_ctx, stmt).await;
+                // Reserving the notification permits is part of executing the
+                // statement, not of its epilogue: `execute_write` has evaluated
+                // every `pg_notify()` by now, and a full listener queue has to
+                // fail this statement while it can still be aborted — never
+                // after its row is durable.
+                let outcome = match crate::exec::execute_write(&write_ctx, stmt).await {
+                    Ok(written) => self.reserve_autocommit_notifications().map(|()| written),
+                    Err(e) => Err(e),
+                };
                 let (result, mut ops) = match outcome {
                     Ok(v) => v,
                     Err(e) => {
@@ -2883,7 +2961,19 @@ impl SqlSession {
                         &rows,
                         &ctx,
                     )?;
-                    return self.commit_timestamp_write_plan(plan).await;
+                    // COPY bypasses `run_one`, so it runs that epilogue itself:
+                    // deliver on success, drop the queue (and the permits
+                    // reserved ahead of the commit) on failure.
+                    return match self.commit_timestamp_write_plan(plan).await {
+                        Ok(result) => {
+                            self.flush_autocommit_notifications().await?;
+                            Ok(result)
+                        }
+                        Err(error) => {
+                            self.discard_pending_notifications();
+                            Err(error)
+                        }
+                    };
                 }
                 let _unique_guard = match crate::exec::copy_requires_unique_local_serialization(
                     self.catalog_kv.as_ref(),
@@ -2900,7 +2990,13 @@ impl SqlSession {
                 let snapshot = self.procarray.snapshot();
                 // COPY is insert-only: no chains are re-read, nothing to prune.
                 let write_ctx = self.write_context(&gsnap, &snapshot, xid, false, &ctx, None);
-                let outcome = crate::exec::execute_copy_write(&write_ctx, copy, &rows).await;
+                // Reserved before the batch is durable, as in `run_write`: a
+                // column default that calls `pg_notify()` must not be able to
+                // fail a COPY whose rows are already committed.
+                let outcome = match crate::exec::execute_copy_write(&write_ctx, copy, &rows).await {
+                    Ok(written) => self.reserve_autocommit_notifications().map(|()| written),
+                    Err(error) => Err(error),
+                };
                 let (result, mut ops) = match outcome {
                     Ok(value) => value,
                     Err(error) => {
@@ -2922,7 +3018,13 @@ impl SqlSession {
                 self.procarray.finish(xid);
                 // Free the unique-key locks this COPY acquired, waking waiters.
                 self.lockmgr.release_all(xid);
-                commit?;
+                if let Err(error) = commit {
+                    // Nothing became durable, so the reservation this COPY took
+                    // ahead of the batch is released with the queue.
+                    self.discard_pending_notifications();
+                    return Err(error);
+                }
+                self.flush_autocommit_notifications().await?;
                 Ok(result)
             }
             TxnState::Prepared(_) => Err(ExecError::ObjectNotInPrerequisiteState(
@@ -2964,6 +3066,13 @@ impl SqlSession {
         .with_ts_gc(Arc::clone(&self.ts_gc));
         let commit_ts = self.allocate_commit_timestamp_after(start_ts).await?;
         participant.prewrite(start_ts, &plan.writes).await?;
+        // Same rule as the non-sharded autocommit path: reserve before the
+        // commit record, so a full listener queue aborts the intents instead of
+        // failing a statement whose rows are already visible.
+        if let Err(error) = self.reserve_autocommit_notifications() {
+            let _ = participant.abort(start_ts, &plan.writes).await;
+            return Err(error);
+        }
         match participant
             .commit_with_ops(start_ts, commit_ts, &plan.writes, plan.commit_ops)
             .await
@@ -8214,7 +8323,7 @@ mod listen_notify_session_tests {
     use assert2::assert;
     use crabka_pgkv::{Kv, MemKv, NotifyRecord, WriteOp, is_notify_op};
     use crabka_pgwire::engine::{Engine, Notification, QueryResult, Session};
-    use tokio::sync::mpsc::error::TryRecvError;
+    use tokio::sync::{mpsc::error::TryRecvError, oneshot};
 
     use super::SqlSession;
     use crate::{ExecError, SqlEngine, notify::NotifyBus};
@@ -8295,6 +8404,57 @@ mod listen_notify_session_tests {
         }
     }
 
+    /// A committer that can be armed to park inside one `commit`, so a test can
+    /// act while a transaction is mid-commit: after its notification work is
+    /// reserved and before its batch is durable.
+    struct GatedCommitter {
+        kv: Arc<dyn Kv>,
+        gate: Mutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::commit::Committer for GatedCommitter {
+        async fn commit(&self, ops: Vec<WriteOp>) -> Result<(), ExecError> {
+            let gate = self.gate.lock().expect("gate").take();
+            if let Some((entered, release)) = gate {
+                let _ = entered.send(());
+                let _ = release.await;
+            }
+            let persisted: Vec<WriteOp> =
+                ops.iter().filter(|op| !is_notify_op(op)).cloned().collect();
+            self.kv.write_batch(&persisted)?;
+            Ok(())
+        }
+    }
+
+    impl GatedCommitter {
+        /// Park the next commit. The returned receiver fires once it is parked;
+        /// sending on the returned sender lets it through.
+        fn arm(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+            let (entered_tx, entered_rx) = oneshot::channel();
+            let (release_tx, release_rx) = oneshot::channel();
+            *self.gate.lock().expect("gate") = Some((entered_tx, release_rx));
+            (entered_rx, release_tx)
+        }
+    }
+
+    /// An engine whose commits a test can park mid-flight.
+    fn gated_engine() -> (SqlEngine, Arc<GatedCommitter>) {
+        let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+        let committer = Arc::new(GatedCommitter {
+            kv: Arc::clone(&kv),
+            gate: Mutex::new(None),
+        });
+        let engine = SqlEngine::replicated(
+            Arc::clone(&kv),
+            kv,
+            Arc::clone(&committer) as Arc<dyn crate::commit::Committer>,
+            Arc::new(crate::read_gate::LocalLinearizer),
+        )
+        .expect("replicated engine");
+        (engine, committer)
+    }
+
     /// An engine whose commit batches a test can inspect.
     fn recording_engine() -> (SqlEngine, Arc<RecordingCommitter>) {
         let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
@@ -8328,6 +8488,16 @@ mod listen_notify_session_tests {
             panic!("expected one command tag from {sql}");
         };
         tag.clone()
+    }
+
+    /// Number of rows one query returns — how a test checks whether a failed
+    /// statement's write is there.
+    async fn row_count(session: &mut SqlSession, sql: &str) -> usize {
+        let results = session.simple_query(sql).await.expect(sql);
+        let [QueryResult::Rows { rows, .. }] = results.as_slice() else {
+            panic!("expected one row set from {sql}");
+        };
+        rows.len()
     }
 
     fn notification(process_id: i32, channel: &str, payload: &str) -> Notification {
@@ -8400,8 +8570,9 @@ mod listen_notify_session_tests {
         assert!(rx.try_recv() == Ok(notification(33, "news", "self")));
     }
 
-    /// The subscription is applied before the permits are reserved, so a COMMIT
-    /// that fails afterwards has to put it back the way it was.
+    /// The pending `LISTEN` is honoured for the block's own `NOTIFY` (which the
+    /// rollback then discards) but never reaches the bus, so a block that does
+    /// not commit leaves nothing behind for a later publisher to find.
     #[tokio::test]
     async fn a_rolled_back_block_leaves_no_trace_of_its_pending_subscription() {
         let engine = SqlEngine::new();
@@ -8416,6 +8587,79 @@ mod listen_notify_session_tests {
 
         tag(&mut notifier, "NOTIFY news, 'nobody home'").await;
         assert!(rx.try_recv() == Err(TryRecvError::Empty));
+    }
+
+    /// A pending `LISTEN` stays private to its own transaction until the commit
+    /// is durable. A publisher racing that commit addresses only committed
+    /// subscriptions — otherwise a commit that failed afterwards could not
+    /// un-deliver what the racing publisher had already queued.
+    #[tokio::test]
+    async fn a_concurrent_publisher_cannot_reach_a_listen_that_is_still_committing() {
+        let (engine, committer) = gated_engine();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        let mut rx = listener.take_notifications().expect("a receiver");
+        tag(&mut notifier, "CREATE TABLE t (v int)").await;
+
+        // The block writes as well as subscribing, so its COMMIT has a durable
+        // batch for the committer to park in.
+        tag(&mut listener, "BEGIN").await;
+        tag(&mut listener, "LISTEN news").await;
+        listener
+            .simple_query("INSERT INTO t VALUES (1)")
+            .await
+            .expect("insert");
+
+        let (parked, release) = committer.arm();
+        let committing = tag(&mut listener, "COMMIT");
+        let racing = async {
+            parked.await.expect("the commit parks in the committer");
+            tag(&mut notifier, "NOTIFY news, 'racing'").await;
+            // The subscription has not committed, so this publisher must not
+            // have been able to address it.
+            assert!(rx.try_recv() == Err(TryRecvError::Empty));
+            release.send(()).expect("release the parked commit");
+        };
+        let raced = Box::pin(async { tokio::join!(committing, racing) });
+        let (commit_tag, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), raced)
+            .await
+            .expect("the commit and the racing publisher both finish");
+        assert!(commit_tag == "COMMIT");
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
+
+        // Once the block is committed the subscription is public, as usual.
+        tag(&mut notifier, "NOTIFY news, 'after'").await;
+        assert!(rx.try_recv() == Ok(notification(22, "news", "after")));
+    }
+
+    /// A full listener queue has to fail an autocommit write BEFORE its row is
+    /// durable. Reporting 54000 for a write that already committed would tell
+    /// the client to retry a statement whose effect it cannot see, duplicating
+    /// the write.
+    #[tokio::test]
+    async fn a_full_queue_fails_an_autocommit_write_without_committing_it() {
+        let engine = SqlEngine::new();
+        let bus = Arc::new(NotifyBus::with_capacity(1));
+        let mut listener = session_on(&engine, &bus, 11);
+        let mut writer = session_on(&engine, &bus, 22);
+        tag(&mut listener, "LISTEN news").await;
+        // The receiver is never drained, so the single slot stays taken.
+        let _rx = listener.take_notifications().expect("a receiver");
+        tag(&mut writer, "CREATE TABLE t (v text)").await;
+
+        writer
+            .simple_query("INSERT INTO t VALUES (pg_notify('news', 'first'))")
+            .await
+            .expect("the first insert fills the queue");
+        assert!(row_count(&mut writer, "SELECT v FROM t").await == 1);
+
+        let error = writer
+            .simple_query("INSERT INTO t VALUES (pg_notify('news', 'second'))")
+            .await
+            .expect_err("the listener's queue is full");
+        assert!(error.code == "54000");
+        // The statement that reported failure wrote nothing.
+        assert!(row_count(&mut writer, "SELECT v FROM t").await == 1);
     }
 
     #[tokio::test]

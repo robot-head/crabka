@@ -165,8 +165,9 @@ mod tests {
     /// `PostgreSQL`'s channel-name limit (`NAMEDATALEN - 1`), mirrored here so
     /// the codec is exercised at the largest value a publisher can produce.
     const MAX_CHANNEL_BYTES: usize = 63;
-    /// `PostgreSQL`'s payload limit (`NOTIFY_PAYLOAD_MAX_LENGTH - 1`).
-    const MAX_PAYLOAD_BYTES: usize = 8000;
+    /// `PostgreSQL`'s payload limit (`NOTIFY_PAYLOAD_MAX_LENGTH - 1`): 8000 is
+    /// rejected, so 7999 is the largest a publisher can produce.
+    const MAX_PAYLOAD_BYTES: usize = 7999;
 
     fn sample() -> NotifyRecord {
         NotifyRecord {

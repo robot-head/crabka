@@ -73,14 +73,30 @@ impl Range0Frame {
 /// written to the KV — cross-node `NOTIFY` being the first — are visible
 /// nowhere else, hence this seam.
 ///
-/// `observe` runs inline on the apply path, before the ops reach the store and
-/// before the applied offset advances. An implementation must therefore never
-/// block: a slow observer stalls catalog application and every read barrier
-/// waiting on it. Deciding what to do with a full downstream queue belongs to
-/// the observer, which is why this is an installed hook rather than a broadcast
-/// channel with a buffering policy of its own.
+/// `observe` runs inline on the apply path, after the frame's surviving ops have
+/// reached the store and before the applied offset advances. Both halves of that
+/// ordering are load-bearing:
+///
+/// * *After* the store write, because the write is fallible. A follower that
+///   fails to apply a frame leaves its applied offset alone, re-fetches the same
+///   frame and applies it again; an observer called first would re-deliver the
+///   frame's records on every retry, even though the WAL carries them once.
+/// * *Before* the offset is published, because a reader gated on the barrier
+///   wakes on the offset. Delivering afterwards would let such a reader observe
+///   the frame's catalog effects before the records it shipped alongside them.
+///
+/// The frame is handed over whole, as it was logged — including the records the
+/// merge rules drop instead of storing, which are visible nowhere else. Those
+/// ops are filtered out of the batch the merge builds, not out of the frame, so
+/// they are still here.
+///
+/// An implementation must never block: a slow observer stalls catalog
+/// application and every read barrier waiting on it. Deciding what to do with a
+/// full downstream queue belongs to the observer, which is why this is an
+/// installed hook rather than a broadcast channel with a buffering policy of its
+/// own.
 pub trait Range0FrameObserver: Send + Sync {
-    /// Called with every committed frame's ops before they reach the store.
+    /// Called with every successfully applied frame's ops, offset not yet published.
     fn observe(&self, ops: &[WriteOp]);
 }
 
@@ -145,8 +161,11 @@ impl Range0Tail {
 
     /// Apply a committed frame with G-2 merge rules and publish its offset.
     ///
-    /// The installed [`Range0FrameObserver`] sees the frame's ops first: it is
-    /// the only view of records the merge rules drop instead of storing.
+    /// The installed [`Range0FrameObserver`] is called between the store write
+    /// and the offset publication, and only when the write succeeded — see the
+    /// trait docs for why that window is the only correct one. The frame it sees
+    /// is the logged one, so it remains the only view of the records the merge
+    /// rules drop instead of storing.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -158,11 +177,15 @@ impl Range0Tail {
             });
         }
 
+        // The merge filters its own batch and leaves `frame.ops` intact, so the
+        // dropped records survive the apply and there is nothing to capture up
+        // front. A failed apply returns here, before the observer runs.
+        apply_merge_rules(self.store.as_ref(), &frame.ops)?;
+
         if let Some(observer) = self.frame_observer() {
             observer.observe(&frame.ops);
         }
 
-        apply_merge_rules(self.store.as_ref(), &frame.ops)?;
         self.applied_offset_tx
             .send(frame.offset)
             .map_err(|_| Range0TailError::Closed)
@@ -305,7 +328,8 @@ mod range0_tail_merge {
 
         for op in ops {
             // Notify records ride the range-0 log purely as a transport; the frame
-            // observer has already seen them. They must never reach the KV: a
+            // observer picks them off `ops`, which this loop leaves untouched, once
+            // the batch below lands. They must never reach the KV: a
             // checkpoint snapshots the whole range-0 store and the WAL topic never
             // expires by time, so one stored notify record would be baked into
             // every later checkpoint and restored by every follower that
@@ -461,6 +485,50 @@ mod tests {
         }
     }
 
+    /// A store whose batch writes fail until `heal` is called, standing in for a
+    /// backend hitting a transient I/O error.
+    #[derive(Default)]
+    struct FlakyKv {
+        inner: MemKv,
+        healthy: Mutex<bool>,
+    }
+
+    impl FlakyKv {
+        fn heal(&self) {
+            *self.healthy.lock().expect("flaky kv mutex") = true;
+        }
+    }
+
+    impl Kv for FlakyKv {
+        fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvError> {
+            self.inner.get(key)
+        }
+
+        fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), KvError> {
+            self.inner.put(key, value)
+        }
+
+        fn delete(&self, key: &[u8]) -> Result<(), KvError> {
+            self.inner.delete(key)
+        }
+
+        fn scan_prefix(&self, prefix: &[u8]) -> Result<crabka_pgkv::KvScan, KvError> {
+            self.inner.scan_prefix(prefix)
+        }
+
+        fn scan_range(&self, start: &[u8], end: &[u8]) -> Result<crabka_pgkv::KvScan, KvError> {
+            self.inner.scan_range(start, end)
+        }
+
+        fn write_batch(&self, ops: &[WriteOp]) -> Result<(), KvError> {
+            if *self.healthy.lock().expect("flaky kv mutex") {
+                self.inner.write_batch(ops)
+            } else {
+                Err(KvError::Io("transient batch failure".to_owned()))
+            }
+        }
+    }
+
     fn put(key: Vec<u8>, value: &[u8]) -> WriteOp {
         WriteOp::Put {
             key,
@@ -538,6 +606,38 @@ mod tests {
         assert!(observer.frames() == vec![first, second]);
     }
 
+    /// A failed apply leaves the offset alone, so the follower loop re-fetches
+    /// and re-applies the very same frame. Delivering to the observer before the
+    /// store write would therefore duplicate every record the frame carried, once
+    /// per retry, for a WAL that holds each record exactly once.
+    #[test]
+    fn a_frame_whose_apply_fails_delivers_nothing_until_a_retry_succeeds() {
+        let store = Arc::new(FlakyKv::default());
+        let tail = Range0Tail::new(Arc::clone(&store) as Arc<dyn Kv>);
+        let observer = Arc::new(RecordingObserver::default());
+        tail.set_frame_observer(Arc::clone(&observer) as Arc<dyn Range0FrameObserver>);
+
+        let ops = vec![
+            put(key::notify_key(11), b"record"),
+            put(b"catalog/table".to_vec(), b"created"),
+        ];
+        let frame = Range0Frame::new(5, ops.clone());
+
+        let failed = tail.apply_committed(&frame);
+        assert!(let Err(Range0TailError::Kv(_)) = failed);
+        assert!(observer.frames() == Vec::<Vec<WriteOp>>::new());
+        assert!(tail.applied_offset() == -1);
+
+        // The follower loop retries the identical frame once the store recovers.
+        store.heal();
+        tail.apply_committed(&frame).expect("retry applies");
+
+        assert!(observer.frames() == vec![ops]);
+        assert!(tail.applied_offset() == 5);
+        assert!(store.get(b"catalog/table").expect("get") == Some(b"created".to_vec()));
+        assert!(store.get(&key::notify_key(11)).expect("get") == None);
+    }
+
     #[test]
     fn an_observer_installed_on_one_handle_sees_another_handles_frames() {
         let store = Arc::new(MemKv::default());
@@ -558,21 +658,24 @@ mod tests {
     fn a_frame_of_only_notify_ops_still_advances_the_applied_offset() {
         let store = Arc::new(MemKv::default());
         let tail = Range0Tail::new(Arc::clone(&store) as Arc<dyn Kv>);
+        let observer = Arc::new(RecordingObserver::default());
+        tail.set_frame_observer(Arc::clone(&observer) as Arc<dyn Range0FrameObserver>);
         let mut applied = tail.subscribe_applied_offset();
 
-        tail.apply_committed(&Range0Frame::new(
-            9,
-            vec![
-                put(key::notify_key(1), b"first"),
-                put(key::notify_key(2), b"second"),
-            ],
-        ))
-        .expect("apply");
+        let ops = vec![
+            put(key::notify_key(1), b"first"),
+            put(key::notify_key(2), b"second"),
+        ];
+        tail.apply_committed(&Range0Frame::new(9, ops.clone()))
+            .expect("apply");
 
         assert!(*applied.borrow_and_update() == 9);
         assert!(tail.applied_offset() == 9);
         // A read barrier waiting on this offset is released.
         assert!(store.get(&key::notify_key(1)).expect("get") == None);
+        // An empty write batch still counts as a successful apply, so the
+        // observer is not starved by a frame that stores nothing.
+        assert!(observer.frames() == vec![ops]);
     }
 
     #[test]

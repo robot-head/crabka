@@ -17,8 +17,14 @@
 //!
 //! Every publication funnels through the single private `address` seam, which
 //! resolves already-built [`Notification`]s to the queues of their channel's
-//! current listeners. Local publication reserves a permit on each; the
-//! cross-node transport re-injects remote notifications through
+//! current listeners — plus, for a committing transaction, the subscriptions it
+//! has staged but not yet published
+//! ([`NotifySessionHandle::prepare_publish_with_pending`]), so its own `LISTEN`
+//! reaches its own `NOTIFY` without any other publisher being able to address a
+//! subscription that has not committed.
+//!
+//! Local publication reserves a permit on each addressed queue; the cross-node
+//! transport re-injects remote notifications through
 //! [`NotifyBus::deliver_remote`], which shares the addressing but deliberately
 //! not the reservation discipline — see its documentation.
 
@@ -35,10 +41,12 @@ use tokio::sync::mpsc;
 pub const NOTIFY_QUEUE_CAPACITY: usize = 16_384;
 
 /// Maximum `NOTIFY` payload length in bytes (PostgreSQL's
-/// `NOTIFY_PAYLOAD_MAX_LENGTH - 1`).
-pub const MAX_PAYLOAD_BYTES: usize = 8000;
+/// `NOTIFY_PAYLOAD_MAX_LENGTH - 1`). PostgreSQL 18 accepts a 7999-byte payload
+/// and rejects an 8000-byte one with 22023.
+pub const MAX_PAYLOAD_BYTES: usize = 7999;
 
 /// Maximum channel-name length in bytes (PostgreSQL's `NAMEDATALEN - 1`).
+/// PostgreSQL 18 accepts a 63-byte channel name and rejects a 64-byte one.
 pub const MAX_CHANNEL_BYTES: usize = 63;
 
 /// A `NOTIFY` that cannot be queued.
@@ -207,6 +215,24 @@ impl NotifyBus {
         pid: i32,
         batch: &[(String, String)],
     ) -> Result<PreparedPublish, NotifyError> {
+        self.prepare_publish_as(pid, batch, None)
+    }
+
+    /// [`Self::prepare_publish`], but the copies of the `session` given as
+    /// `(id, subscriptions)` are addressed by that set — the channels it *will*
+    /// listen on — instead of by the set the bus currently publishes to it.
+    ///
+    /// This is how a committing transaction's own `LISTEN` reaches its own
+    /// `NOTIFY` (PostgreSQL applies pending listens before queueing the
+    /// transaction's notifications) **without** staging that subscription on the
+    /// bus: a concurrent publisher still sees only committed subscriptions, so a
+    /// `LISTEN` that later rolls back can never have been delivered to.
+    fn prepare_publish_as(
+        &self,
+        pid: i32,
+        batch: &[(String, String)],
+        session: Option<(u64, &HashSet<String>)>,
+    ) -> Result<PreparedPublish, NotifyError> {
         for (channel, payload) in batch {
             validate(channel, payload)?;
         }
@@ -218,7 +244,7 @@ impl NotifyBus {
                 payload: payload.clone(),
             })
             .collect();
-        self.fan_out(&notifications)
+        self.fan_out(&notifications, session)
     }
 
     /// Deliver notifications that originated on another node.
@@ -251,7 +277,7 @@ impl NotifyBus {
     /// Panics if the bus mutex was poisoned by a panicking publisher.
     pub fn deliver_remote(&self, notifications: &[Notification]) -> RemoteDelivery {
         let mut delivery = RemoteDelivery::default();
-        for (tx, notification) in self.address(notifications) {
+        for (tx, notification) in self.address(notifications, None) {
             match tx.try_send(notification) {
                 Ok(()) => delivery.delivered += 1,
                 Err(mpsc::error::TrySendError::Full(_)) => delivery.dropped += 1,
@@ -275,8 +301,12 @@ impl NotifyBus {
     /// its handle has not been dropped yet) is skipped: a closed queue is not
     /// the notifier's problem. A *full* queue is, and aborts the whole batch —
     /// permits reserved so far are released when the partial vector drops.
-    fn fan_out(&self, notifications: &[Notification]) -> Result<PreparedPublish, NotifyError> {
-        let targets = self.address(notifications);
+    fn fan_out(
+        &self,
+        notifications: &[Notification],
+        session: Option<(u64, &HashSet<String>)>,
+    ) -> Result<PreparedPublish, NotifyError> {
+        let targets = self.address(notifications, session);
         let mut permits = Vec::with_capacity(targets.len());
         for (tx, notification) in targets {
             match tx.try_reserve_owned() {
@@ -292,23 +322,37 @@ impl NotifyBus {
     /// channel — the one place channel membership is resolved, shared by the
     /// local and remote paths.
     ///
+    /// `session` overrides one session's membership with the subscription set it
+    /// will have after its open transaction commits (see
+    /// [`Self::prepare_publish_as`]); that session is then addressed by the
+    /// override alone, never by what the bus currently holds for it.
+    ///
     /// Senders are collected under the lock and used outside it: `try_reserve_owned`
     /// is non-blocking but takes an owned sender, and holding the bus mutex
     /// across the fan-out would serialize every publisher against every LISTEN.
     fn address(
         &self,
         notifications: &[Notification],
+        session: Option<(u64, &HashSet<String>)>,
     ) -> Vec<(mpsc::Sender<Notification>, Notification)> {
         let inner = self.lock();
         let mut targets = Vec::new();
         for notification in notifications {
-            let Some(listeners) = inner.channels.get(&notification.channel) else {
-                continue;
-            };
-            for id in listeners {
-                if let Some(slot) = inner.sessions.get(id) {
-                    targets.push((slot.tx.clone(), notification.clone()));
+            if let Some(listeners) = inner.channels.get(&notification.channel) {
+                for id in listeners {
+                    if session.is_some_and(|(overridden, _)| overridden == *id) {
+                        continue;
+                    }
+                    if let Some(slot) = inner.sessions.get(id) {
+                        targets.push((slot.tx.clone(), notification.clone()));
+                    }
                 }
+            }
+            if let Some((id, channels)) = session
+                && channels.contains(&notification.channel)
+                && let Some(slot) = inner.sessions.get(&id)
+            {
+                targets.push((slot.tx.clone(), notification.clone()));
             }
         }
         targets
@@ -402,23 +446,6 @@ impl NotifyBus {
             .map(|(channel, _)| channel.clone())
             .collect()
     }
-
-    fn restore_subscriptions(&self, id: u64, channels: &HashSet<String>) {
-        let mut inner = self.lock();
-        inner.channels.retain(|channel, listeners| {
-            if !channels.contains(channel) {
-                listeners.remove(&id);
-            }
-            !listeners.is_empty()
-        });
-        for channel in channels {
-            inner
-                .channels
-                .entry(channel.clone())
-                .or_default()
-                .insert(id);
-        }
-    }
 }
 
 /// One connection's registration on the bus.
@@ -469,18 +496,11 @@ impl NotifySessionHandle {
 
     /// The channels this session listens on right now.
     ///
-    /// Paired with [`Self::restore_subscriptions`] so a committing transaction
-    /// can apply its queued `LISTEN`/`UNLISTEN` *before* reserving queue space —
-    /// which is what makes `LISTEN a; NOTIFY a;` in one transaction deliver to
-    /// itself, as in PostgreSQL — and still undo them if the commit fails.
+    /// A committing transaction folds its queued `LISTEN`/`UNLISTEN` into this
+    /// set and hands the result to [`Self::prepare_publish_with_pending`].
     #[must_use]
     pub fn subscriptions(&self) -> HashSet<String> {
         self.bus.subscriptions(self.id)
-    }
-
-    /// Replace this session's subscriptions with exactly `channels`.
-    pub fn restore_subscriptions(&self, channels: &HashSet<String>) {
-        self.bus.restore_subscriptions(self.id, channels);
     }
 
     /// Reserve queue space for a batch of notifications from this session.
@@ -495,6 +515,28 @@ impl NotifySessionHandle {
         batch: &[(String, String)],
     ) -> Result<PreparedPublish, NotifyError> {
         self.bus.prepare_publish(self.pid, batch)
+    }
+
+    /// [`Self::prepare_publish`] for a transaction that is committing: this
+    /// session's own copies are addressed by `subscriptions`, the set it will
+    /// listen on once its queued `LISTEN`/`UNLISTEN` are applied, while every
+    /// other session is addressed by its committed subscriptions.
+    ///
+    /// The pending subscriptions are therefore honoured for this transaction's
+    /// own notifications without being published to the bus, so a concurrent
+    /// publisher cannot address a `LISTEN` that has not committed — and a
+    /// `LISTEN` that never commits cannot have received anything.
+    ///
+    /// # Errors
+    ///
+    /// The errors of [`NotifyBus::prepare_publish`].
+    pub fn prepare_publish_with_pending(
+        &self,
+        batch: &[(String, String)],
+        subscriptions: &HashSet<String>,
+    ) -> Result<PreparedPublish, NotifyError> {
+        self.bus
+            .prepare_publish_as(self.pid, batch, Some((self.id, subscriptions)))
     }
 }
 
@@ -745,6 +787,65 @@ mod tests {
             .is_ok()
         );
         assert!(NotifyError::PayloadTooLong.sqlstate() == "22023");
+    }
+
+    /// PostgreSQL 18's boundaries in absolute terms, so a constant that drifts
+    /// off by one is caught: it accepts a 7999-byte payload and a 63-byte
+    /// channel name, and rejects 8000 and 64 with 22023.
+    #[test]
+    fn the_length_limits_are_postgresqls_to_the_byte() {
+        assert!(validate("c", &"x".repeat(7999)).is_ok());
+        assert!(validate("c", &"x".repeat(8000)) == Err(NotifyError::PayloadTooLong));
+        assert!(validate(&"c".repeat(63), "").is_ok());
+        assert!(validate(&"c".repeat(64), "") == Err(NotifyError::ChannelNameTooLong));
+    }
+
+    /// A pending subscription addresses only the session that staged it: it
+    /// receives its own notification, and the bus keeps publishing to everyone
+    /// else exactly as before.
+    #[test]
+    fn a_pending_subscription_addresses_only_its_own_session() {
+        let bus = bus();
+        let (committing, mut own_rx) = NotifyBus::register(&bus, 1);
+        let (other, mut other_rx) = NotifyBus::register(&bus, 2);
+        other.listen("c");
+        let pending: HashSet<String> = ["c".to_string()].into_iter().collect();
+
+        committing
+            .prepare_publish_with_pending(&[("c".to_string(), "p".to_string())], &pending)
+            .expect("prepare")
+            .send();
+
+        assert!(
+            own_rx.try_recv()
+                == Ok(Notification {
+                    process_id: 1,
+                    channel: "c".to_string(),
+                    payload: "p".to_string(),
+                })
+        );
+        assert!(other_rx.try_recv().expect("the committed listener").payload == "p");
+        // Nothing was published to the bus: the pending LISTEN is still invisible.
+        assert!(!committing.is_listening("c"));
+        assert!(bus.listener_count("c") == 1);
+    }
+
+    /// A pending `UNLISTEN` is honoured the same way: the staging session is
+    /// addressed by its post-commit set, not by the bus's live membership.
+    #[test]
+    fn a_pending_unlisten_suppresses_the_stagers_own_copy() {
+        let bus = bus();
+        let (committing, mut own_rx) = NotifyBus::register(&bus, 1);
+        committing.listen("c");
+
+        committing
+            .prepare_publish_with_pending(&[("c".to_string(), "p".to_string())], &HashSet::new())
+            .expect("prepare")
+            .send();
+
+        assert!(own_rx.try_recv() == Err(mpsc::error::TryRecvError::Empty));
+        // The live subscription is untouched until the transaction commits.
+        assert!(committing.is_listening("c"));
     }
 
     #[test]

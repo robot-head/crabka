@@ -291,7 +291,9 @@ async fn queueing_a_bad_channel_or_payload_fails_the_notifying_statement() {
     let (mut notifier, _notifier_rx) = connect(&engine, 22);
     tag(&mut listener, "LISTEN news").await;
 
-    let oversized_payload = "x".repeat(8001);
+    // PostgreSQL's limit is `NOTIFY_PAYLOAD_MAX_LENGTH - 1` = 7999 bytes, so
+    // 8000 is already over it.
+    let oversized_payload = "x".repeat(8000);
     let oversized_channel = "c".repeat(64);
     for sql in [
         format!("NOTIFY news, '{oversized_payload}'"),
@@ -307,7 +309,7 @@ async fn queueing_a_bad_channel_or_payload_fails_the_notifying_statement() {
     }
 
     // The rejected statements queued nothing, and the connection still works.
-    let just_under = "y".repeat(8000);
+    let just_under = "y".repeat(7999);
     tag(&mut notifier, &format!("NOTIFY news, '{just_under}'")).await;
     assert!(drain(&mut rx) == vec![notification(22, "news", &just_under)]);
 }
@@ -321,7 +323,7 @@ async fn a_bad_notify_inside_a_transaction_aborts_the_block_without_delivering()
 
     tag(&mut notifier, "BEGIN").await;
     tag(&mut notifier, "NOTIFY news, 'good'").await;
-    let oversized = "x".repeat(8001);
+    let oversized = "x".repeat(8000);
     assert!(
         error(&mut notifier, &format!("NOTIFY news, '{oversized}'"))
             .await

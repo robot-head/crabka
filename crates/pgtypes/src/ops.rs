@@ -450,6 +450,10 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
     let ord = match (a, b) {
         (Datum::Text(x), Datum::Text(y)) => x.cmp(y),
         (Datum::Bool(x), Datum::Bool(y)) => x.cmp(y),
+        // PostgreSQL's `byteacmp`: memcmp over the common prefix, then length.
+        // That is exactly `Ord` for a byte slice. Without this arm `ORDER BY`,
+        // `min`/`max` and `DISTINCT` over a bytea column all raise 42804.
+        (Datum::Bytea(x), Datum::Bytea(y)) => x.cmp(y),
         // Temporal comparisons (same-type + date↔timestamp promotion).
         (Datum::Date(x), Datum::Date(y)) => x.cmp(y),
         (Datum::Time(x), Datum::Time(y)) => x.cmp(y),
@@ -577,6 +581,28 @@ pub fn cmp_to_bool(op_holds: bool, ord: Option<Ordering>) -> Datum {
 
 #[cfg(test)]
 mod tests {
+    /// `ORDER BY`, `min`/`max` and `DISTINCT` over a bytea column all route
+    /// through `compare`; without a bytea arm they raise 42804. PostgreSQL's
+    /// `byteacmp` is bytewise over the common prefix, then length.
+    #[test]
+    fn bytea_compares_bytewise_then_by_length() {
+        let b = |bytes: &[u8]| Datum::Bytea(bytes.to_vec());
+        for (left, right, want) in [
+            (b(&[1, 2]), b(&[1, 2]), Some(Ordering::Equal)),
+            (b(&[1, 2]), b(&[1, 3]), Some(Ordering::Less)),
+            (b(&[1, 3]), b(&[1, 2]), Some(Ordering::Greater)),
+            // A prefix sorts before the longer value.
+            (b(&[1, 2]), b(&[1, 2, 0]), Some(Ordering::Less)),
+            (b(&[]), b(&[0]), Some(Ordering::Less)),
+            // High bytes are unsigned, so 0x80 sorts above 0x7f.
+            (b(&[0x7f]), b(&[0x80]), Some(Ordering::Less)),
+            (Datum::Null, b(&[1]), None),
+        ] {
+            let got = compare(&left, &right).expect("bytea comparison is defined");
+            assert!(got == want, "{left:?} vs {right:?}");
+        }
+    }
+
     use std::cmp::Ordering;
 
     use super::*;
