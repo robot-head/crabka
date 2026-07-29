@@ -25,13 +25,13 @@ applicable rule below:
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `client-producer`, `compression`,
-  `connect-derive`, `connect-postgres`,
+  `connect`, `connect-derive`, `connect-postgres`,
   `docgen`, `gres`, `gres-activator`, `gres-control`, `grpc-gateway`, `ids`,
   `integration-tests`, `kafka-tap`,
   `log-iobench`, `logfmt`, `logql`, `object-store`, `operator`,
   `protocol-codegen`, `remote-storage`, `pgparser`, `playground`,
   `schema-registry`, `throttle`, `verified`, `voters`.
-- Pending: `client-consumer`, `client-core`, `client-streams`, `connect`,
+- Pending: `client-consumer`, `client-core`, `client-streams`,
   `gres-balancer`,
   `gres-conformance`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
@@ -4587,3 +4587,22 @@ conversion bounds, and exact allocation hints. No additional CLI, environment
 variable, or CRD field is warranted. The current all-target gate passed 101
 unit, runtime, and bounded failover-model tests, and strict all-target Clippy
 passed.
+
+## Connect
+
+The `connect` owner has 16 scanner rows. Its only runtime policy is already
+exposed through `ConnectorRuntime`: commit interval, maximum batch records, and
+caught-up poll backoff each have public builder settings with behavior-preserving
+defaults. Connector-specific fields are described by the public typed
+configuration system, including duration and secret kinds.
+
+The remaining scanner rows are configuration type tags and test inputs. Watch
+channels carry current control and lifecycle state rather than queued work, and
+unbounded test channels do not affect deployed behavior. The only production
+caller currently supplying fixed runtime overrides is `replicator`; those
+values remain pending under that deployment owner instead of being duplicated
+inside this library.
+
+No additional library configuration surface is warranted. The current
+all-target gate passed 70 unit, derive-contract, and integration tests, and
+strict all-target Clippy passed.
