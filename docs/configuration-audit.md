@@ -25,15 +25,15 @@ applicable rule below:
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
-  `docgen`, `grpc-gateway`, `ids`, `kafka-tap`, `logfmt`, `logql`, `operator`,
-  `protocol-codegen`, `schema-registry`.
+  `docgen`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`, `logfmt`,
+  `logql`, `operator`, `protocol-codegen`, `schema-registry`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `connect`, `connect-postgres`, `gres`, `gres-activator`,
   `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
-  `integration-tests`, `kraft-core`, `log`, `log-iobench`, `metadata`,
-  `metrics`, `metrics-service`,
+  `kraft-core`, `log`, `log-iobench`, `metadata`, `metrics`,
+  `metrics-service`,
   `object-store`, `observability`, `observability-demo-app`,
   `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgparser`, `pgtypes`, `pgwire`,
   `playground`, `pprof`, `profiles`, `promql`, `protocol`, `raft`,
@@ -4372,3 +4372,15 @@ timing, capacity, retry, or resource policy.
 The current combined all-target gate passed three Kafka Tap tests and 258
 LogQL tests. Strict all-target Clippy, nightly formatting, a zero-row Kafka Tap
 scanner check, and diff hygiene passed.
+
+## Integration Tests
+
+The `integration-tests` owner is a non-published harness package with no
+production dependencies or deployed binary. Its two scanner rows are the
+request timeout and producer linger used by the `loadgen` example fixture.
+Every other source file is an integration test or example, so none of its
+values owns production configuration.
+
+No CLI, environment variable, or CRD field is warranted. The package library
+target compiled and ran successfully, and strict all-target Clippy compiled
+the complete test and example surface.
