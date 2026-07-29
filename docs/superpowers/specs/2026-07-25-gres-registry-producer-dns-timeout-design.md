@@ -1,5 +1,10 @@
 # Gres Registry Producer DNS Timeout Design
 
+> **Historical configuration note:** This document records the pre-UOM interface
+> at the time of implementation. Unit-suffixed names and primitive numeric
+> examples below are historical, not the live contract; use current binary
+> `--help`, generated CRDs, and unit-bearing values.
+
 Expose the existing client DNS deadline through the shared Gres registry
 policy and every process that constructs the registry producer.
 

@@ -1,5 +1,10 @@
 # Traces Scan Concatenation Cap Implementation Plan
 
+> **Historical configuration note:** This document records the pre-UOM interface
+> at the time of implementation. Unit-suffixed names and primitive numeric
+> examples below are historical, not the live contract; use current binary
+> `--help`, generated CRDs, and unit-bearing values.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use
 > superpowers:executing-plans to implement this plan task-by-task.
 

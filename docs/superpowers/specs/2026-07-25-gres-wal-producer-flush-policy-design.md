@@ -1,5 +1,10 @@
 # Gres WAL Producer Flush Policy
 
+> **Historical configuration note:** This document records the pre-UOM interface
+> at the time of implementation. Unit-suffixed names and primitive numeric
+> examples below are historical, not the live contract; use current binary
+> `--help`, generated CRDs, and unit-bearing values.
+
 ## Goal
 
 Replace the producer's fixed 50-millisecond polling loop and 1,000-attempt

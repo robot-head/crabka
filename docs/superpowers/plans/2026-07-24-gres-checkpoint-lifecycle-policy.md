@@ -1,5 +1,10 @@
 # Gres Checkpoint and Lifecycle Policy
 
+> **Historical configuration note:** This document records the pre-UOM interface
+> at the time of implementation. Unit-suffixed names and primitive numeric
+> examples below are historical, not the live contract; use current binary
+> `--help`, generated CRDs, and unit-bearing values.
+
 **Goal:** Make periodic checkpointing actually run, then expose its operational policy and Gres tenant lifecycle pacing through validated CLI/environment and fleet CRD settings without masking tenant checkpoint thresholds.
 
 **Architecture:** Threshold ownership stays unchanged: explicit compute CLI/environment values override the registry record; `Gres.defaults` then `GresTenant.overrides` produce that record; compiled defaults apply only after record hydration. Fleet/process checkpoint sizing and cadence live under `Gres.spec.compute`. The substrate service serializes periodic and manual checkpoints in one loop. Retained manifests remain replayable, and a range-control operation pins its exact forced checkpoint and WAL boundary until resume or retirement so periodic pruning cannot invalidate an in-flight transfer. Operator lifecycle cadence is fleet-owned but never rendered into the compute container.

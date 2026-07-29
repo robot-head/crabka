@@ -1,5 +1,10 @@
 # Client Streams Runtime Cadence Design
 
+> **Historical configuration note:** This document records the pre-UOM interface
+> at the time of implementation. Unit-suffixed names and primitive numeric
+> examples below are historical, not the live contract; use current binary
+> `--help`, generated CRDs, and unit-bearing values.
+
 ## Goal
 
 Expose the two Client Streams supervisor cadences that already control record

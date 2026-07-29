@@ -1,5 +1,10 @@
 # Bench Driver Consumer Build Retry Design
 
+> **Historical configuration note:** This document records the pre-UOM interface
+> at the time of implementation. Unit-suffixed names and primitive numeric
+> examples below are historical, not the live contract; use current binary
+> `--help`, generated CRDs, and unit-bearing values.
+
 ## Goal
 
 Replace the fixed consumer-build retry policy in `crabka-bench-driver` with

@@ -1,5 +1,11 @@
 # Runtime Configuration Audit
 
+> **Historical configuration note:** This audit is an append-only record of
+> configuration slices as they existed when each section was completed.
+> Unit-suffixed names and primitive numeric examples in earlier sections are
+> historical, not the live contract; use current binary `--help`, generated
+> CRDs, and unit-bearing values.
+
 The audit follows the scope in the runtime-configuration design. Paths and
 line numbers are refreshed before completion; names are stable identifiers.
 

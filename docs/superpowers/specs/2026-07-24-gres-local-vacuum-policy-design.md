@@ -1,5 +1,10 @@
 # Gres Local Vacuum Policy Design
 
+> **Historical configuration note:** This document records the pre-UOM interface
+> at the time of implementation. Unit-suffixed names and primitive numeric
+> examples below are historical, not the live contract; use current binary
+> `--help`, generated CRDs, and unit-bearing values.
+
 ## Scope
 
 Expose the operational policy for Gres's adaptive local MVCC vacuum loop.

@@ -1,5 +1,10 @@
 # Client Streams State-Store Cache Budget Design
 
+> **Historical configuration note:** This document records the pre-UOM interface
+> at the time of implementation. Unit-suffixed names and primitive numeric
+> examples below are historical, not the live contract; use current binary
+> `--help`, generated CRDs, and unit-bearing values.
+
 ## Goal
 
 Expose the existing Client Streams record-cache byte budget to standalone

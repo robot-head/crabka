@@ -1,5 +1,10 @@
 # Client Streams Leave-Heartbeat Timeout Design
 
+> **Historical configuration note:** This document records the pre-UOM interface
+> at the time of implementation. Unit-suffixed names and primitive numeric
+> examples below are historical, not the live contract; use current binary
+> `--help`, generated CRDs, and unit-bearing values.
+
 ## Goal
 
 Expose the existing five-second Client Streams shutdown deadline for its final

@@ -1,5 +1,10 @@
 # Gres Range-0 Follower Poll Policy Implementation Plan
 
+> **Historical configuration note:** This document records the pre-UOM interface
+> at the time of implementation. Unit-suffixed names and primitive numeric
+> examples below are historical, not the live contract; use current binary
+> `--help`, generated CRDs, and unit-bearing values.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace Gres's fixed 100 ms range-0 follower polling cadence with one validated CLI/environment setting and a typed fleet CRD field.

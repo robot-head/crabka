@@ -13,26 +13,26 @@
 # Env vars:
 #   BENCH_DRIVER_IMAGE   image ref for the driver Job (default crabka-bench-driver:e2e)
 #   BENCH_NAMESPACE      target namespace for the Kafka CR (default 'default')
-#   BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
-#                        Prometheus HTTP request timeout (default 15)
-#   BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS
-#                        producer request timeout (default 2)
-#   BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS
-#                        producer final-drain timeout (default 10)
-#   BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
-#                        consumer request timeout (default 5 for crabka, 30 for kafka)
+#   BENCH_PROMETHEUS_REQUEST_TIMEOUT
+#                        Prometheus HTTP request timeout (default 15s)
+#   BENCH_PRODUCER_REQUEST_TIMEOUT
+#                        producer request timeout (default 2s)
+#   BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT
+#                        producer final-drain timeout (default 10s)
+#   BENCH_CONSUMER_REQUEST_TIMEOUT
+#                        consumer request timeout (default 5s for crabka, 30s for kafka)
 #   BENCH_CONSUMER_BUILD_ATTEMPTS
 #                        consumer build attempts (default 6)
-#   BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS
-#                        initial consumer build retry backoff (default 100)
-#   BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
-#                        maximum consumer build retry backoff (default 2000)
-#   BENCH_CONSUMER_POLL_TIMEOUT_MS
-#                        consumer poll timeout (default 50)
-#   BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS
-#                        sleep after consumer poll errors (default 100)
-#   BENCH_SAMPLE_INTERVAL_MS
-#                        time-series sample interval (default 2000)
+#   BENCH_CONSUMER_BUILD_INITIAL_BACKOFF
+#                        initial consumer build retry backoff (default 100ms)
+#   BENCH_CONSUMER_BUILD_MAX_BACKOFF
+#                        maximum consumer build retry backoff (default 2s)
+#   BENCH_CONSUMER_POLL_TIMEOUT
+#                        consumer poll timeout (default 50ms)
+#   BENCH_CONSUMER_POLL_ERROR_BACKOFF
+#                        sleep after consumer poll errors (default 100ms)
+#   BENCH_SAMPLE_INTERVAL
+#                        time-series sample interval (default 2s)
 #   BENCH_RESULTS_DIR    where to write the per-run JSON (default bench/results)
 #   BENCH_RUN_TAG        optional filename suffix (e.g. "-run07") for repeated
 #                        runs; set by run-matrix.sh so a 10× pass keeps all
@@ -56,19 +56,19 @@ fi
 : "${BENCH_TLS:=}"
 
 : "${BENCH_DRIVER_IMAGE:=crabka-bench-driver:e2e}"
-: "${BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS:=15}"
-: "${BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS:=2}"
-: "${BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS:=10}"
+: "${BENCH_PROMETHEUS_REQUEST_TIMEOUT:=15s}"
+: "${BENCH_PRODUCER_REQUEST_TIMEOUT:=2s}"
+: "${BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT:=10s}"
 : "${BENCH_CONSUMER_BUILD_ATTEMPTS:=6}"
-: "${BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS:=100}"
-: "${BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS:=2000}"
-: "${BENCH_CONSUMER_POLL_TIMEOUT_MS:=50}"
-: "${BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS:=100}"
-: "${BENCH_SAMPLE_INTERVAL_MS:=2000}"
+: "${BENCH_CONSUMER_BUILD_INITIAL_BACKOFF:=100ms}"
+: "${BENCH_CONSUMER_BUILD_MAX_BACKOFF:=2s}"
+: "${BENCH_CONSUMER_POLL_TIMEOUT:=50ms}"
+: "${BENCH_CONSUMER_POLL_ERROR_BACKOFF:=100ms}"
+: "${BENCH_SAMPLE_INTERVAL:=2s}"
 if [[ "$STACK" == "crabka" ]]; then
-  : "${BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS:=5}"
+  : "${BENCH_CONSUMER_REQUEST_TIMEOUT:=5s}"
 else
-  : "${BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS:=30}"
+  : "${BENCH_CONSUMER_REQUEST_TIMEOUT:=30s}"
 fi
 : "${BENCH_RESULTS_DIR:=$REPO_ROOT/bench/results}"
 
@@ -148,16 +148,16 @@ export BENCH_SCENARIO_NAME="$SCENARIO"
 export BENCH_BOOTSTRAP
 export BENCH_BROKER_COUNT
 export BENCH_DRIVER_IMAGE
-export BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
-export BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS
-export BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS
-export BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
+export BENCH_PROMETHEUS_REQUEST_TIMEOUT
+export BENCH_PRODUCER_REQUEST_TIMEOUT
+export BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT
+export BENCH_CONSUMER_REQUEST_TIMEOUT
 export BENCH_CONSUMER_BUILD_ATTEMPTS
-export BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS
-export BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
-export BENCH_CONSUMER_POLL_TIMEOUT_MS
-export BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS
-export BENCH_SAMPLE_INTERVAL_MS
+export BENCH_CONSUMER_BUILD_INITIAL_BACKOFF
+export BENCH_CONSUMER_BUILD_MAX_BACKOFF
+export BENCH_CONSUMER_POLL_TIMEOUT
+export BENCH_CONSUMER_POLL_ERROR_BACKOFF
+export BENCH_SAMPLE_INTERVAL
 
 # TLS data-path knobs consumed by the job-template envsubst. All three are
 # always exported (with inert defaults on the plaintext path) so envsubst never

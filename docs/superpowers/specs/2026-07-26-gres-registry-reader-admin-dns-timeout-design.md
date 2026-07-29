@@ -1,5 +1,10 @@
 # Gres Registry Reader/Admin DNS Timeout Design
 
+> **Historical configuration note:** This document records the pre-UOM interface
+> at the time of implementation. Unit-suffixed names and primitive numeric
+> examples below are historical, not the live contract; use current binary
+> `--help`, generated CRDs, and unit-bearing values.
+
 Expose one validated DNS deadline for the Gres registry reader and admin
 paths. Keep the registry producer deadline separate and unchanged.
 

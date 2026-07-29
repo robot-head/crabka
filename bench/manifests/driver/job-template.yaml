@@ -7,25 +7,25 @@
 #   BENCH_BOOTSTRAP        <service-dns>:9092 (plaintext) or :9093 (TLS)
 #   BENCH_BROKER_COUNT     1 or 3
 #   BENCH_DRIVER_IMAGE     crabka-bench-driver:e2e (or :0.1.1)
-#   BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
+#   BENCH_PROMETHEUS_REQUEST_TIMEOUT
 #                           Prometheus HTTP request timeout
-#   BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS
+#   BENCH_PRODUCER_REQUEST_TIMEOUT
 #                           producer request timeout
-#   BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS
+#   BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT
 #                           producer final-drain timeout
-#   BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
+#   BENCH_CONSUMER_REQUEST_TIMEOUT
 #                           active-stack consumer request timeout
 #   BENCH_CONSUMER_BUILD_ATTEMPTS
 #                           maximum consumer build attempts
-#   BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS
+#   BENCH_CONSUMER_BUILD_INITIAL_BACKOFF
 #                           initial consumer build retry backoff
-#   BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
+#   BENCH_CONSUMER_BUILD_MAX_BACKOFF
 #                           maximum consumer build retry backoff
-#   BENCH_CONSUMER_POLL_TIMEOUT_MS
+#   BENCH_CONSUMER_POLL_TIMEOUT
 #                           consumer poll timeout
-#   BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS
+#   BENCH_CONSUMER_POLL_ERROR_BACKOFF
 #                           sleep after consumer poll errors
-#   BENCH_SAMPLE_INTERVAL_MS
+#   BENCH_SAMPLE_INTERVAL
 #                           time-series sample interval
 #
 # TLS data-path env vars (run-scenario.sh exports these; default to the
@@ -85,26 +85,26 @@ spec:
               value: default
             - name: BENCH_PROMETHEUS_URL
               value: http://prometheus.monitoring.svc.cluster.local:9090
-            - name: BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS
-              value: "${BENCH_PROMETHEUS_REQUEST_TIMEOUT_SECONDS}"
-            - name: BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS
-              value: "${BENCH_PRODUCER_REQUEST_TIMEOUT_SECONDS}"
-            - name: BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS
-              value: "${BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT_SECONDS}"
-            - name: BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS
-              value: "${BENCH_CONSUMER_REQUEST_TIMEOUT_SECONDS}"
+            - name: BENCH_PROMETHEUS_REQUEST_TIMEOUT
+              value: "${BENCH_PROMETHEUS_REQUEST_TIMEOUT}"
+            - name: BENCH_PRODUCER_REQUEST_TIMEOUT
+              value: "${BENCH_PRODUCER_REQUEST_TIMEOUT}"
+            - name: BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT
+              value: "${BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT}"
+            - name: BENCH_CONSUMER_REQUEST_TIMEOUT
+              value: "${BENCH_CONSUMER_REQUEST_TIMEOUT}"
             - name: BENCH_CONSUMER_BUILD_ATTEMPTS
               value: "${BENCH_CONSUMER_BUILD_ATTEMPTS}"
-            - name: BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS
-              value: "${BENCH_CONSUMER_BUILD_INITIAL_BACKOFF_MS}"
-            - name: BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS
-              value: "${BENCH_CONSUMER_BUILD_MAX_BACKOFF_MS}"
-            - name: BENCH_CONSUMER_POLL_TIMEOUT_MS
-              value: "${BENCH_CONSUMER_POLL_TIMEOUT_MS}"
-            - name: BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS
-              value: "${BENCH_CONSUMER_POLL_ERROR_BACKOFF_MS}"
-            - name: BENCH_SAMPLE_INTERVAL_MS
-              value: "${BENCH_SAMPLE_INTERVAL_MS}"
+            - name: BENCH_CONSUMER_BUILD_INITIAL_BACKOFF
+              value: "${BENCH_CONSUMER_BUILD_INITIAL_BACKOFF}"
+            - name: BENCH_CONSUMER_BUILD_MAX_BACKOFF
+              value: "${BENCH_CONSUMER_BUILD_MAX_BACKOFF}"
+            - name: BENCH_CONSUMER_POLL_TIMEOUT
+              value: "${BENCH_CONSUMER_POLL_TIMEOUT}"
+            - name: BENCH_CONSUMER_POLL_ERROR_BACKOFF
+              value: "${BENCH_CONSUMER_POLL_ERROR_BACKOFF}"
+            - name: BENCH_SAMPLE_INTERVAL
+              value: "${BENCH_SAMPLE_INTERVAL}"
             - name: BENCH_BROKER_COUNT
               value: "${BENCH_BROKER_COUNT}"
             - name: BENCH_OUTPUT_PATH
