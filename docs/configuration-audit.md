@@ -27,7 +27,7 @@ applicable rule below:
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
   `docgen`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`, `logfmt`,
   `logql`, `object-store`, `operator`, `protocol-codegen`, `remote-storage`,
-  `pgparser`, `schema-registry`, `throttle`.
+  `pgparser`, `playground`, `schema-registry`, `throttle`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `connect`, `connect-postgres`, `gres`, `gres-activator`,
   `gres-balancer`,
@@ -36,10 +36,10 @@ applicable rule below:
   `kraft-core`, `log`, `log-iobench`, `metadata`, `metrics`,
   `metrics-service`, `observability`, `observability-demo-app`,
   `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgtypes`, `pgwire`,
-  `playground`, `pprof`, `profiles`, `promql`, `protocol`, `raft`,
+  `pprof`, `profiles`, `promql`, `protocol`, `raft`,
   `rebalancer`, `records-legacy`, `remote-storage-topic`, `replicator`,
   `schema-serde`, `security`, `telemetry`,
-  `traceql`, `traces`, `verified`, and `voters`.
+  `traceql`, and `traces`.
 
 ## Broker
 
@@ -4450,3 +4450,27 @@ invariants, not deployment policy.
 
 The current `throttle` all-target gate passed 15 unit and property tests plus
 three bounded concurrency-model tests, and strict all-target Clippy passed.
+
+## Playground, Verified, and Voters
+
+The scanner reports zero rows for each of these crates, and their complete
+source surfaces own no deployed runtime policy.
+
+`playground` is a browser-only wrapper around the deterministic KRaft
+simulator. Its selectable voter count is clamped to the simulator's supported
+one-to-seven-node domain, and its settle step budget prevents a pathological
+simulation from hanging the browser. Those are UI safety bounds, not
+deployment settings.
+
+`verified` contains pure, formally verified kernels. Operational values such
+as delete retention, election jitter range, quorum majority, and offsets are
+explicit caller inputs. Its remaining literals are integer-domain, proof,
+deterministic-hash, algorithm, and test contracts.
+
+`voters` contains pure KIP-853 value types. Its default `kraft.version` range
+describes the implementation's supported protocol capability; it is not an
+operator-selected tuning policy.
+
+No CLI, environment variable, or CRD field is warranted. The combined
+all-target gate passed 10 Playground tests, 15 Verified tests, and three Voters
+tests, and strict all-target Clippy passed.
