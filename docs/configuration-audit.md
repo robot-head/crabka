@@ -25,12 +25,13 @@ applicable rule below:
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
+  `connect-postgres`,
   `docgen`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`,
   `log-iobench`, `logfmt`, `logql`, `object-store`, `operator`,
   `protocol-codegen`, `remote-storage`, `pgparser`, `playground`,
   `schema-registry`, `throttle`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
-  `client-streams`, `connect`, `connect-postgres`, `gres`, `gres-activator`,
+  `client-streams`, `connect`, `gres`, `gres-activator`,
   `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
@@ -4490,3 +4491,17 @@ less comparable.
 No CLI, environment variable, or CRD field is warranted. The library test
 target passed, the complete benchmark target compiled, and strict all-target
 Clippy passed.
+
+## Connect Postgres
+
+The `connect-postgres` owner has eleven scanner rows. Its one operational
+quantity, `max_messages_per_poll`, is already a typed connector configuration
+field and flows directly to PostgreSQL's logical-slot peek query. The two
+reported `1000` values are test fixtures confirming that configured default.
+
+The PostgreSQL-to-Unix epoch delta is a protocol time-domain conversion. The
+remaining schema ids, protobuf message indexes, package and message names are
+the connector's stable wire schema. None is deployment policy.
+
+No additional CLI, environment variable, or CRD field is warranted. The
+current all-target gate passed 69 tests, and strict all-target Clippy passed.
