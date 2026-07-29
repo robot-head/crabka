@@ -197,8 +197,7 @@ impl OtlpConfig {
             Some(value) => parse_duration("CRABKA_OTLP_TIMEOUT", &value)?,
             None => get("OTEL_EXPORTER_OTLP_TIMEOUT_SECS")
                 .and_then(|s| s.trim().parse::<u64>().ok())
-                .map(Duration::from_secs)
-                .unwrap_or(Duration::from_secs(10)),
+                .map_or(Duration::from_secs(10), Duration::from_secs),
         };
 
         let heartbeat_interval = get("CRABKA_OTLP_HEARTBEAT_INTERVAL")
