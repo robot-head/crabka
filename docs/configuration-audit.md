@@ -24,8 +24,9 @@ applicable rule below:
 ## Coverage Status
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
-  `broker`, `cli`, `grpc-gateway`, `operator`, `schema-registry`.
-- Pending: `client-admin`, `client-consumer`, `client-core`, `client-producer`,
+  `broker`, `cli`, `client-admin`, `grpc-gateway`, `operator`,
+  `schema-registry`.
+- Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `compression`, `connect`, `connect-derive`,
   `connect-postgres`, `docgen`, `gres`, `gres-activator`, `gres-balancer`,
   `gres-conformance`, `gres-control`, `gres-fdw`, `gres-loadtest`,
@@ -4251,3 +4252,27 @@ crate's 208 tests, client-admin's 78 library/integration tests, the broker's 26
 focused SCRAM-handler tests, strict affected-package Clippy, nightly
 formatting, exact help-entry checks, generated-CRD reproduction, lockfile
 scope, and diff hygiene passed.
+
+## Client Admin
+
+The `client-admin` owner has 21 scanner rows. Its seven production rows are Kafka
+wire contracts: the dynamic-topic config source, topic resource type,
+`NOT_CONTROLLER` error code, exact quota match type, two SCRAM mechanism IDs,
+and the ACL wildcard filter value. These values must match the Kafka protocol
+and are not deployment policy.
+
+The remaining 14 rows are request-encoding expectations and bounded test
+timings inside `#[cfg(test)]` modules. In particular, the two 5,000 ms topic
+request values assert conversion from the UOM `Time` supplied to the request
+builders; they are not defaults used by production calls.
+
+Connection policy is already an explicit library input. Callers that need
+custom DNS, TCP-connect, or request deadlines pass a complete
+`ConnectionOptions` containing validated UOM values to
+`AdminClient::connect_with_options`. The convenience constructors preserve the
+existing shared defaults. Adding crate-owned CLI flags or environment
+variables would put process configuration in a library and duplicate the
+actual process owners, so no new setting is warranted.
+
+The current client-admin all-target gate passed 78 library and integration
+tests, and strict affected-package Clippy passed.
