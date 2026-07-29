@@ -1071,6 +1071,12 @@ mod tests {
             "--internal-topic-create-timeout=2147483648ms",
             "--dedup-window=9223372036854775808ms",
             "--internal-topic-segment=9223372036854775808ms",
+            "--dedup-window=9007199254740992.5ms",
+            "--internal-topic-segment=9007199254740992.5ms",
+            "--dedup-window=9007199254740993ms",
+            "--internal-topic-segment=9007199254740993ms",
+            "--dedup-window=9007199254740992ms",
+            "--internal-topic-segment=9007199254740992ms",
         ] {
             let args = Args::try_parse_from([
                 "crabka-grpc-gateway",
@@ -1092,8 +1098,8 @@ mod tests {
                 "--internal-topic-create-timeout=2147483647ms",
             ],
             [
-                "--dedup-window=1h",
-                "--internal-topic-segment=1m",
+                "--dedup-window=9007199254740991ms",
+                "--internal-topic-segment=9007199254740991ms",
                 "--internal-topic-create-timeout=10s",
             ],
         ] {
@@ -1108,6 +1114,21 @@ mod tests {
             .expect("parse exact protocol values");
             assert!(args.validate_protocol_runtime().is_ok());
         }
+
+        let ambiguous = Args::try_parse_from([
+            "crabka-grpc-gateway",
+            "--bootstrap-servers=localhost:9092",
+            "--advertised-addr=localhost:9500",
+            "--dedup-window=9007199254740992ms",
+        ])
+        .expect("generic UOM parser accepts ambiguous quantity")
+        .validate_protocol_runtime()
+        .expect_err("ambiguous UOM quantity must be rejected");
+        assert!(
+            ambiguous
+                .to_string()
+                .contains("below 9007199254740992ms because UOM quantities use f64")
+        );
 
         let defaults = Args::try_parse_from([
             "crabka-grpc-gateway",

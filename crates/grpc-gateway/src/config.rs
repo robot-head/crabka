@@ -139,13 +139,18 @@ fn protocol_millis_i32(name: &str, value: Time) -> Result<i32, String> {
         })
 }
 
+// f64 represents every integer below 2^53; at this value adjacent inputs can
+// collapse before validation sees the UOM quantity.
+const FIRST_AMBIGUOUS_F64_MILLIS: i64 = 9_007_199_254_740_992;
+
 fn protocol_millis_i64(name: &str, value: Time) -> Result<i64, String> {
     let millis = value.millis_i64();
-    // `Time` stores an `f64`; at this magnitude `i64::MAX` rounds to 2^63,
-    // so a saturated out-of-range conversion is indistinguishable after the
-    // cast. Reject the sentinel instead of accepting a potentially clamped
-    // protocol value.
-    if !value.secs_f64().is_finite() || millis == i64::MAX || Time::from_millis(millis) != value {
+    if millis >= FIRST_AMBIGUOUS_F64_MILLIS {
+        return Err(format!(
+            "{name} must be below {FIRST_AMBIGUOUS_F64_MILLIS}ms because UOM quantities use f64"
+        ));
+    }
+    if !value.secs_f64().is_finite() || Time::from_millis(millis) != value {
         return Err(format!(
             "{name} must be a positive whole number of milliseconds within 1..=i64::MAX"
         ));
@@ -162,8 +167,8 @@ impl GatewayRuntimeConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error when a value is fractional, non-positive, or exceeds
-    /// the integer width used by the downstream client.
+    /// Returns an error when a value is fractional, non-positive, or outside
+    /// the exact UOM range used by the downstream client.
     pub fn validate_protocol_units(&self) -> Result<(), String> {
         protocol_millis_i32(
             "internal topic create timeout",
@@ -178,7 +183,8 @@ impl GatewayRuntimeConfig {
 ///
 /// # Errors
 ///
-/// Returns an error unless `value` is an exact positive `i64` millisecond value.
+/// Returns an error unless `value` is an exact positive millisecond value below
+/// the first integer boundary that an `f64` cannot distinguish safely.
 pub fn validate_dedup_window(value: Time) -> Result<(), String> {
     protocol_millis_i64("dedup window", value).map(|_| ())
 }

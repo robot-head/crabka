@@ -1050,14 +1050,21 @@ fn validate_protocol_millis_i32(value: Option<Time>, path: &str) -> Result<(), S
         })
 }
 
+// f64 represents every integer below 2^53; at this value adjacent inputs can
+// collapse before validation sees the UOM quantity.
+const FIRST_AMBIGUOUS_F64_MILLIS: i64 = 9_007_199_254_740_992;
+
 fn validate_protocol_millis_i64(value: Option<Time>, path: &str) -> Result<(), String> {
     let Some(value) = value else {
         return Ok(());
     };
     let millis = value.millis_i64();
-    // `Time` stores an `f64`; reject the saturation sentinel because values at
-    // and beyond this magnitude cannot be distinguished exactly after parsing.
-    if !value.secs_f64().is_finite() || millis == i64::MAX || Time::from_millis(millis) != value {
+    if millis >= FIRST_AMBIGUOUS_F64_MILLIS {
+        return Err(format!(
+            "{path}: must be below {FIRST_AMBIGUOUS_F64_MILLIS}ms because UOM quantities use f64"
+        ));
+    }
+    if !value.secs_f64().is_finite() || Time::from_millis(millis) != value {
         return Err(format!(
             "{path}: must be a positive whole number of milliseconds within 1..=i64::MAX"
         ));
@@ -2480,6 +2487,18 @@ mod tests {
             serde_json::json!({
                 "tuning": {"internalTopicSegment": "9223372036854775808ms"}
             }),
+            serde_json::json!({"dedup": {"window": "9007199254740992.5ms"}}),
+            serde_json::json!({
+                "tuning": {"internalTopicSegment": "9007199254740992.5ms"}
+            }),
+            serde_json::json!({"dedup": {"window": "9007199254740993ms"}}),
+            serde_json::json!({
+                "tuning": {"internalTopicSegment": "9007199254740993ms"}
+            }),
+            serde_json::json!({"dedup": {"window": "9007199254740992ms"}}),
+            serde_json::json!({
+                "tuning": {"internalTopicSegment": "9007199254740992ms"}
+            }),
         ] {
             let spec: KafkaGrpcGatewaySpec = serde_json::from_value(value.clone()).unwrap();
             assert!(validate_config(&spec).is_err(), "accepted invalid {value}");
@@ -2488,9 +2507,9 @@ mod tests {
         for value in [
             serde_json::json!({}),
             serde_json::json!({
-                "dedup": {"window": "2147483648ms"},
+                "dedup": {"window": "9007199254740991ms"},
                 "tuning": {
-                    "internalTopicSegment": "2147483648ms",
+                    "internalTopicSegment": "9007199254740991ms",
                     "internalTopicCreateTimeout": "2147483647ms"
                 }
             }),
@@ -2498,6 +2517,16 @@ mod tests {
             let spec: KafkaGrpcGatewaySpec = serde_json::from_value(value.clone()).unwrap();
             assert!(validate_config(&spec).is_ok(), "rejected valid {value}");
         }
+
+        let ambiguous: KafkaGrpcGatewaySpec = serde_json::from_value(serde_json::json!({
+            "dedup": {"window": "9007199254740992ms"}
+        }))
+        .unwrap();
+        assert!(
+            validate_config(&ambiguous)
+                .expect_err("ambiguous UOM quantity must be rejected")
+                .contains("below 9007199254740992ms because UOM quantities use f64")
+        );
     }
 
     // ── resolve_broker_endpoint ───────────────────────────────
