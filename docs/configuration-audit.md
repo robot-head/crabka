@@ -27,7 +27,7 @@ applicable rule below:
   `broker`, `cli`, `client-admin`, `compression`, `connect-derive`,
   `docgen`, `grpc-gateway`, `ids`, `integration-tests`, `kafka-tap`, `logfmt`,
   `logql`, `object-store`, `operator`, `protocol-codegen`, `remote-storage`,
-  `pgparser`, `schema-registry`.
+  `pgparser`, `schema-registry`, `throttle`.
 - Pending: `client-consumer`, `client-core`, `client-producer`,
   `client-streams`, `connect`, `connect-postgres`, `gres`, `gres-activator`,
   `gres-balancer`,
@@ -38,7 +38,7 @@ applicable rule below:
   `pgcatalog`, `pgexec`, `pgkv`, `pgmvcc`, `pgtypes`, `pgwire`,
   `playground`, `pprof`, `profiles`, `promql`, `protocol`, `raft`,
   `rebalancer`, `records-legacy`, `remote-storage-topic`, `replicator`,
-  `schema-serde`, `security`, `telemetry`, `throttle`,
+  `schema-serde`, `security`, `telemetry`,
   `traceql`, `traces`, `verified`, and `voters`.
 
 ## Broker
@@ -4433,3 +4433,20 @@ The crate owns no deployment timing, capacity, retry, or resource policy, so
 no CLI, environment variable, or CRD field is warranted. The current
 `pgparser` all-target gate passed 214 tests; its feature-gated oracle target
 compiled with zero active tests, and strict all-target Clippy passed.
+
+## Throttle
+
+The `throttle` owner has seven scanner rows. Its only production row is the
+documented one-second burst used by the rate-only convenience methods.
+Callers that own independent burst policy already use
+`set_token_rate_with_burst`, `set_byte_rate_with_burst`, or
+`set_event_rate_with_burst`; adding another configuration layer inside the
+shared library would duplicate those inputs.
+
+The remaining rows are unit and model-test deadlines, mock-clock advances, and
+test token counts. Production literals not reported by the scanner implement
+nanosecond conversion and the seqlock generation protocol. They are arithmetic
+invariants, not deployment policy.
+
+The current `throttle` all-target gate passed 15 unit and property tests plus
+three bounded concurrency-model tests, and strict all-target Clippy passed.
