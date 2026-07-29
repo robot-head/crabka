@@ -9,9 +9,9 @@ use std::{net::SocketAddr, sync::Arc};
 
 use crabka_security::ListenerProtocol;
 use crabka_units::{
-    ByteSize, Time,
-    convert::{ByteSizeExt as _, TimeExt as _},
-    percent, secs,
+    ByteSize, Ratio, Time,
+    convert::{ByteSizeExt as _, RatioExt as _, TimeExt as _},
+    secs,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -255,7 +255,9 @@ pub struct RuntimeFileConfig {
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub client_metrics_default_interval: Option<Time>,
-    pub client_metrics_telemetry_max_bytes: Option<i32>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub client_metrics_telemetry_max: Option<ByteSize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub client_metrics_prom_snapshot_ttl: Option<Time>,
@@ -283,11 +285,15 @@ pub struct RuntimeFileConfig {
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub auto_join_voter_request_timeout: Option<Time>,
-    pub replication_fetch_max_bytes: Option<i32>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub replication_fetch_max: Option<ByteSize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub replication_fetch_max_wait: Option<Time>,
-    pub replication_fetch_min_bytes: Option<i32>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub replication_fetch_min: Option<ByteSize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub replication_throttle_exhausted_backoff: Option<Time>,
@@ -353,10 +359,14 @@ pub struct RuntimeFileConfig {
     #[schemars(with = "Option<String>")]
     pub quota_throttle_max: Option<Time>,
     pub self_registration_max_attempts: Option<u32>,
-    pub observer_fetch_max_bytes: Option<u32>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub observer_fetch_max: Option<ByteSize>,
     pub audit_event_queue_capacity: Option<usize>,
     pub audit_tail_window_offsets: Option<i64>,
-    pub audit_tail_read_max_bytes: Option<usize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub audit_tail_read_max: Option<ByteSize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub offsets_topic_metadata_wait_timeout: Option<Time>,
@@ -364,17 +374,37 @@ pub struct RuntimeFileConfig {
     pub client_metrics_otlp_queue_capacity: Option<usize>,
     pub coordinator_actor_mailbox_capacity: Option<usize>,
     pub unclean_recovery_queue_capacity: Option<usize>,
-    pub share_recovery_read_max_bytes: Option<usize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub share_recovery_read_max: Option<ByteSize>,
     pub share_session_cache_max_when_unlimited: Option<usize>,
-    pub socket_request_max_bytes: Option<usize>,
-    pub sendfile_min_bytes: Option<usize>,
-    pub socket_send_buffer_bytes: Option<usize>,
-    pub socket_receive_buffer_bytes: Option<usize>,
-    pub acl_max_principal_bytes: Option<usize>,
-    pub acl_max_resource_name_bytes: Option<usize>,
-    pub telemetry_max_decompression_ratio: Option<usize>,
-    pub telemetry_decompressed_output_floor_bytes: Option<usize>,
-    pub telemetry_decompressed_output_ceiling_bytes: Option<usize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub socket_request_max: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub sendfile_min: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub socket_send_buffer: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub socket_receive_buffer: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub acl_max_principal: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub acl_max_resource_name: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_ratio")]
+    #[schemars(with = "Option<String>")]
+    pub telemetry_max_decompression_ratio: Option<crabka_units::Ratio>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub telemetry_decompressed_output_floor: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub telemetry_decompressed_output_ceiling: Option<ByteSize>,
     pub inter_broker_server_name: Option<String>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
@@ -385,7 +415,9 @@ pub struct RuntimeFileConfig {
     pub max_produce_group: Option<usize>,
     pub partition_writer_queue_depth: Option<usize>,
     pub default_min_insync_replicas: Option<i32>,
-    pub future_log_move_read_chunk_bytes: Option<usize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub future_log_move_read_chunk: Option<ByteSize>,
     pub share_state_num_partitions: Option<i32>,
     pub share_state_replication_factor: Option<i16>,
     pub transaction_state_num_partitions: Option<i32>,
@@ -418,7 +450,9 @@ pub struct RuntimeFileConfig {
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub controlled_shutdown_drain_timeout: Option<Time>,
-    pub metadata_max_bytes_between_snapshots: Option<u64>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub metadata_max_between_snapshots: Option<ByteSize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub metadata_max_snapshot_interval: Option<Time>,
@@ -429,7 +463,9 @@ pub struct RuntimeFileConfig {
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub leader_imbalance_check_interval: Option<Time>,
-    pub leader_imbalance_per_broker_percentage: Option<u32>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_ratio")]
+    #[schemars(with = "Option<String>")]
+    pub leader_imbalance_per_broker: Option<crabka_units::Ratio>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub tls_reload_interval: Option<Time>,
@@ -1655,6 +1691,72 @@ fn positive_u32(name: &str, value: u32) -> Result<u32, FileConfigError> {
     Ok(value)
 }
 
+fn whole_bytes_u64(name: &str, value: ByteSize) -> Result<ByteSize, FileConfigError> {
+    let bytes = value.bytes_u64();
+    if value.bytes_f64().is_finite()
+        && value > ByteSize::from_bytes(0)
+        && value.bytes_f64() < 18_446_744_073_709_551_616.0
+        && ByteSize::from_bytes(bytes) == value
+    {
+        Ok(value)
+    } else {
+        Err(invalid_runtime_value(
+            name,
+            "must be a positive whole number of bytes within the u64 range",
+        ))
+    }
+}
+
+fn whole_bytes_i32(name: &str, value: ByteSize) -> Result<ByteSize, FileConfigError> {
+    let value = whole_bytes_u64(name, value)?;
+    if value.bytes_u64() <= u64::try_from(i32::MAX).expect("i32::MAX fits u64") {
+        Ok(value)
+    } else {
+        Err(invalid_runtime_value(
+            name,
+            "must be at most 2147483647 bytes",
+        ))
+    }
+}
+
+fn whole_bytes_u32(name: &str, value: ByteSize) -> Result<ByteSize, FileConfigError> {
+    let value = whole_bytes_u64(name, value)?;
+    if u32::try_from(value.bytes_u64()).is_ok() {
+        Ok(value)
+    } else {
+        Err(invalid_runtime_value(
+            name,
+            "must be at most 4294967295 bytes",
+        ))
+    }
+}
+
+fn whole_bytes_usize(name: &str, value: ByteSize) -> Result<ByteSize, FileConfigError> {
+    let value = whole_bytes_u64(name, value)?;
+    usize::try_from(value.bytes_u64())
+        .map(|_| value)
+        .map_err(|error| invalid_runtime_value(name, error))
+}
+
+fn positive_ratio(name: &str, value: Ratio) -> Result<Ratio, FileConfigError> {
+    if value.as_f64().is_finite() && value > crabka_units::fraction(0.0) {
+        Ok(value)
+    } else {
+        Err(invalid_runtime_value(name, "must be finite and positive"))
+    }
+}
+
+fn unit_interval_ratio(name: &str, value: Ratio) -> Result<Ratio, FileConfigError> {
+    if value.as_f64().is_finite()
+        && value >= crabka_units::fraction(0.0)
+        && value <= crabka_units::fraction(1.0)
+    {
+        Ok(value)
+    } else {
+        Err(invalid_runtime_value(name, "must be between 0% and 100%"))
+    }
+}
+
 fn positive_time(name: &str, value: Time) -> Result<Time, FileConfigError> {
     if value.secs_f64().is_finite() && value > Time::from_secs(0) {
         Ok(value)
@@ -1709,12 +1811,6 @@ fn positive_i16(name: &str, value: i16) -> Result<i16, FileConfigError> {
     Ok(value)
 }
 
-fn percentage(name: &str, value: u32) -> Result<u32, FileConfigError> {
-    crate::config_value::Percentage::new(value)
-        .map(crate::config_value::Percentage::into_value)
-        .map_err(|error| invalid_runtime_value(name, error))
-}
-
 /// Assigns a validated dimensioned time value.
 macro_rules! set_runtime_time_millis {
     ($runtime:ident, $field:ident, $target:expr) => {
@@ -1757,12 +1853,11 @@ macro_rules! set_runtime_time_secs {
     };
 }
 
-/// Assigns a `_bytes` key from the operator's TOML into a [`ByteSize`] field.
+/// Assigns a validated dimensioned byte size.
 macro_rules! set_runtime_size_bytes {
     ($runtime:ident, $field:ident, $target:expr, $validator:ident) => {
         if let Some(value) = $runtime.$field {
-            let value = $validator(stringify!($field), value)?;
-            $target = ByteSize::from_bytes(u64::try_from(value).unwrap_or(u64::MAX));
+            $target = $validator(stringify!($field), value)?;
         }
     };
 }
@@ -1895,9 +1990,9 @@ impl RuntimeFileConfig {
         );
         set_runtime_size_bytes!(
             runtime,
-            client_metrics_telemetry_max_bytes,
+            client_metrics_telemetry_max,
             cfg.client_metrics_telemetry_max,
-            positive_i32
+            whole_bytes_i32
         );
         set_runtime_time_millis!(
             runtime,
@@ -1945,9 +2040,9 @@ impl RuntimeFileConfig {
         let runtime = self;
         set_runtime_size_bytes!(
             runtime,
-            replication_fetch_max_bytes,
+            replication_fetch_max,
             cfg.replication.fetch_max,
-            positive_i32
+            whole_bytes_i32
         );
         set_runtime_time_millis!(
             runtime,
@@ -1957,9 +2052,9 @@ impl RuntimeFileConfig {
         );
         set_runtime_size_bytes!(
             runtime,
-            replication_fetch_min_bytes,
+            replication_fetch_min,
             cfg.replication.fetch_min,
-            positive_i32
+            whole_bytes_i32
         );
         set_runtime_time_millis!(
             runtime,
@@ -2090,9 +2185,9 @@ impl RuntimeFileConfig {
         );
         set_runtime_size_bytes!(
             runtime,
-            observer_fetch_max_bytes,
+            observer_fetch_max,
             cfg.observer_fetch_max,
-            positive_u32
+            whole_bytes_u32
         );
         set_runtime_usize!(
             runtime,
@@ -2106,9 +2201,9 @@ impl RuntimeFileConfig {
         );
         set_runtime_size_bytes!(
             runtime,
-            audit_tail_read_max_bytes,
+            audit_tail_read_max,
             cfg.audit_tail_read_max,
-            positive_usize
+            whole_bytes_usize
         );
         set_runtime_time_millis!(
             runtime,
@@ -2137,9 +2232,9 @@ impl RuntimeFileConfig {
         );
         set_runtime_size_bytes!(
             runtime,
-            share_recovery_read_max_bytes,
+            share_recovery_read_max,
             cfg.share_recovery_read_max,
-            positive_usize
+            whole_bytes_usize
         );
         set_runtime_usize!(
             runtime,
@@ -2156,58 +2251,50 @@ impl RuntimeFileConfig {
         let runtime = self;
         set_runtime_size_bytes!(
             runtime,
-            socket_request_max_bytes,
+            socket_request_max,
             cfg.socket_request_max,
-            positive_usize
+            whole_bytes_u32
         );
+        set_runtime_size_bytes!(runtime, sendfile_min, cfg.sendfile_min, whole_bytes_usize);
         set_runtime_size_bytes!(
             runtime,
-            sendfile_min_bytes,
-            cfg.sendfile_min,
-            positive_usize
-        );
-        set_runtime_size_bytes!(
-            runtime,
-            socket_send_buffer_bytes,
+            socket_send_buffer,
             cfg.socket_send_buffer,
-            positive_usize
+            whole_bytes_usize
         );
         set_runtime_size_bytes!(
             runtime,
-            socket_receive_buffer_bytes,
+            socket_receive_buffer,
             cfg.socket_receive_buffer,
-            positive_usize
+            whole_bytes_usize
         );
         set_runtime_size_bytes!(
             runtime,
-            acl_max_principal_bytes,
+            acl_max_principal,
             cfg.acl_max_principal,
-            positive_usize
+            whole_bytes_usize
         );
         set_runtime_size_bytes!(
             runtime,
-            acl_max_resource_name_bytes,
+            acl_max_resource_name,
             cfg.acl_max_resource_name,
-            positive_usize
+            whole_bytes_usize
         );
         if let Some(value) = runtime.telemetry_max_decompression_ratio {
-            let value = positive_usize("telemetry_max_decompression_ratio", value)?;
-            // A multiplier, not a fraction: `100` means "100× the compressed
-            // size", so it lands as `fraction(100.0)` rather than `percent(100)`.
             cfg.telemetry_max_decompression_ratio =
-                crabka_units::fraction(f64::from(u32::try_from(value).unwrap_or(u32::MAX)));
+                positive_ratio("telemetry_max_decompression_ratio", value)?;
         }
         set_runtime_size_bytes!(
             runtime,
-            telemetry_decompressed_output_floor_bytes,
+            telemetry_decompressed_output_floor,
             cfg.telemetry_decompressed_output_floor,
-            positive_usize
+            whole_bytes_usize
         );
         set_runtime_size_bytes!(
             runtime,
-            telemetry_decompressed_output_ceiling_bytes,
+            telemetry_decompressed_output_ceiling,
             cfg.telemetry_decompressed_output_ceiling,
-            positive_usize
+            whole_bytes_usize
         );
         Ok(())
     }
@@ -2241,9 +2328,9 @@ impl RuntimeFileConfig {
         );
         set_runtime_size_bytes!(
             runtime,
-            future_log_move_read_chunk_bytes,
+            future_log_move_read_chunk,
             cfg.future_log_move_read_chunk,
-            positive_usize
+            whole_bytes_usize
         );
         set_runtime_i32!(
             runtime,
@@ -2308,9 +2395,9 @@ impl RuntimeFileConfig {
         }
         set_runtime_size_bytes!(
             runtime,
-            metadata_max_bytes_between_snapshots,
+            metadata_max_between_snapshots,
             cfg.metadata_max_bytes_between_snapshots,
-            positive_u64
+            whole_bytes_u64
         );
         // Zero disables the time-based snapshot cap, so it bypasses the
         // positive-only macro.
@@ -2332,9 +2419,9 @@ impl RuntimeFileConfig {
             leader_imbalance_check_interval,
             cfg.leader_imbalance_check_interval
         );
-        if let Some(value) = runtime.leader_imbalance_per_broker_percentage {
-            let value = percentage("leader_imbalance_per_broker_percentage", value)?;
-            cfg.leader_imbalance_per_broker = percent(value);
+        if let Some(value) = runtime.leader_imbalance_per_broker {
+            cfg.leader_imbalance_per_broker =
+                unit_interval_ratio("leader_imbalance_per_broker", value)?;
         }
         // Zero disables the periodic TLS watcher, so it bypasses the
         // positive-only macro.
@@ -4529,9 +4616,9 @@ in_memory = true
 cleaner_interval = "7s"
 isr_scan_interval = "800ms"
 opa_http_timeout = "2500ms"
-replication_fetch_max_bytes = 2097152
+replication_fetch_max = "2MiB"
 replication_fetch_max_wait = "750ms"
-replication_fetch_min_bytes = 2
+replication_fetch_min = "2B"
 "#,
         )
         .expect("parse runtime config");
@@ -4558,7 +4645,7 @@ replication_fetch_min_bytes = 2
         );
     }
 
-    /// Every time / `*_bytes` runtime key must survive the round trip
+    /// Every time and byte-size runtime key must survive the round trip
     /// TOML quantity → wire integer unchanged. This is the
     /// regression the `crabka-units` adoption exists to prevent: a mapping
     /// that reads `30000` as 30 000 *seconds*, or writes a 30 s timeout back
@@ -4576,12 +4663,12 @@ transaction_max_timeout = "15min"
 producer_id_expiration = "24h"
 client_metrics_default_interval = "5min"
 delegation_token_max_lifetime = "7d"
-socket_request_max_bytes = 104857600
-client_metrics_telemetry_max_bytes = 1048576
-observer_fetch_max_bytes = 1048576
+socket_request_max = "100MiB"
+client_metrics_telemetry_max = "1MiB"
+observer_fetch_max = "1MiB"
 replication_fetch_max_wait = "500ms"
-replication_fetch_max_bytes = 1048576
-replication_fetch_min_bytes = 1
+replication_fetch_max = "1MiB"
+replication_fetch_min = "1B"
 "#,
         )
         .expect("parse runtime config");
@@ -4655,46 +4742,39 @@ replication_fetch_min_bytes = 1
                 ]
         );
         let sizes: [(&str, i64); 5] = [
+            ("socket_request_max", cfg.socket_request_max.bytes_i64()),
             (
-                "socket_request_max_bytes",
-                cfg.socket_request_max.bytes_i64(),
-            ),
-            (
-                "client_metrics_telemetry_max_bytes",
+                "client_metrics_telemetry_max",
                 i64::from(cfg.client_metrics_telemetry_max.bytes_i32()),
             ),
+            ("observer_fetch_max", cfg.observer_fetch_max.bytes_i64()),
             (
-                "observer_fetch_max_bytes",
-                cfg.observer_fetch_max.bytes_i64(),
-            ),
-            (
-                "replication_fetch_max_bytes",
+                "replication_fetch_max",
                 i64::from(cfg.replication.fetch_max.bytes_i32()),
             ),
             (
-                "replication_fetch_min_bytes",
+                "replication_fetch_min",
                 i64::from(cfg.replication.fetch_min.bytes_i32()),
             ),
         ];
         assert!(
             sizes
                 == [
-                    ("socket_request_max_bytes", 104_857_600),
-                    ("client_metrics_telemetry_max_bytes", 1_048_576),
-                    ("observer_fetch_max_bytes", 1_048_576),
-                    ("replication_fetch_max_bytes", 1_048_576),
-                    ("replication_fetch_min_bytes", 1),
+                    ("socket_request_max", 104_857_600),
+                    ("client_metrics_telemetry_max", 1_048_576),
+                    ("observer_fetch_max", 1_048_576),
+                    ("replication_fetch_max", 1_048_576),
+                    ("replication_fetch_min", 1),
                 ]
         );
     }
 
-    /// Kafka's `leader.imbalance.per.broker.percentage` is an integer
-    /// percentage on the operator surface and a [`Ratio`] in the domain.
+    /// Kafka's `leader.imbalance.per.broker.percentage` lands as a [`Ratio`].
     #[test]
     fn leader_imbalance_percentage_lands_as_a_ratio() {
-        for (raw, want) in [(0_u32, 0.0), (10, 0.10), (55, 0.55), (100, 1.0)] {
+        for (raw, want) in [("0%", 0.0), ("10%", 0.10), ("55%", 0.55), ("100%", 1.0)] {
             let file: FileConfig = toml::from_str(&format!(
-                "[runtime]\nleader_imbalance_per_broker_percentage = {raw}\n"
+                "[runtime]\nleader_imbalance_per_broker = \"{raw}\"\n"
             ))
             .expect("parse runtime config");
             let mut cfg = crate::config::BrokerConfig::default();
@@ -4703,7 +4783,7 @@ replication_fetch_min_bytes = 1
 
             assert!(
                 (cfg.leader_imbalance_per_broker.as_f64() - want).abs() < 1e-12,
-                "{raw}% should be {want}"
+                "{raw} should be {want}"
             );
         }
     }
@@ -4761,6 +4841,69 @@ replication_fetch_min_bytes = 1
     }
 
     #[test]
+    fn runtime_file_config_rejects_invalid_dimensioned_sizes_and_ratios() {
+        for field in [
+            "client_metrics_telemetry_max",
+            "replication_fetch_max",
+            "replication_fetch_min",
+            "observer_fetch_max",
+            "audit_tail_read_max",
+            "share_recovery_read_max",
+            "socket_request_max",
+            "sendfile_min",
+            "socket_send_buffer",
+            "socket_receive_buffer",
+            "acl_max_principal",
+            "acl_max_resource_name",
+            "telemetry_decompressed_output_floor",
+            "telemetry_decompressed_output_ceiling",
+            "future_log_move_read_chunk",
+            "metadata_max_between_snapshots",
+        ] {
+            let source = format!("[runtime]\n{field} = \"0B\"\n");
+            let file: FileConfig = toml::from_str(&source).expect("parse runtime config");
+            let mut cfg = crate::config::BrokerConfig::default();
+            let error = file
+                .apply_to(&mut cfg)
+                .expect_err("zero byte size must fail");
+            assert!(error.to_string().contains(field), "{error}");
+        }
+
+        for (field, value) in [
+            ("telemetry_max_decompression_ratio", "0"),
+            ("leader_imbalance_per_broker", "101%"),
+        ] {
+            let source = format!("[runtime]\n{field} = \"{value}\"\n");
+            let file: FileConfig = toml::from_str(&source).expect("parse runtime config");
+            let mut cfg = crate::config::BrokerConfig::default();
+            let error = file
+                .apply_to(&mut cfg)
+                .expect_err("invalid ratio must fail");
+            assert!(error.to_string().contains(field), "{error}");
+        }
+    }
+
+    #[test]
+    fn runtime_file_config_rejects_fractional_and_overflowing_sizes() {
+        for (field, value) in [
+            ("client_metrics_telemetry_max", "1.5B"),
+            ("replication_fetch_max", "2147483648B"),
+            ("observer_fetch_max", "4294967296B"),
+            ("socket_request_max", "4294967296B"),
+            ("audit_tail_read_max", "1.5B"),
+            ("metadata_max_between_snapshots", "18446744073709551616B"),
+        ] {
+            let source = format!("[runtime]\n{field} = \"{value}\"\n");
+            let file: FileConfig = toml::from_str(&source).expect("parse runtime config");
+            let mut cfg = crate::config::BrokerConfig::default();
+            let error = file
+                .apply_to(&mut cfg)
+                .expect_err("fractional or overflowing byte size must fail");
+            assert!(error.to_string().contains(field), "{error}");
+        }
+    }
+
+    #[test]
     fn existing_file_inputs_reject_invalid_refined_values() {
         let cases = [
             ("heartbeat_interval = \"0ms\"\n", "heartbeat_interval"),
@@ -4786,7 +4929,7 @@ replication_fetch_min_bytes = 1
     fn runtime_file_config_rejects_relational_conflicts() {
         let cases = [
             (
-                "[runtime]\nreplication_fetch_min_bytes = 3\nreplication_fetch_max_bytes = 2\n",
+                "[runtime]\nreplication_fetch_min = \"3B\"\nreplication_fetch_max = \"2B\"\n",
                 "replication fetch minimum",
             ),
             (

@@ -64,16 +64,12 @@ spec:
                 description: Validated broker operational policy rendered into `[runtime]`.
                 nullable: true
                 properties:
-                  aclMaxPrincipalBytes:
-                    format: uint
-                    minimum: 1.0
+                  aclMaxPrincipal:
                     nullable: true
-                    type: integer
-                  aclMaxResourceNameBytes:
-                    format: uint
-                    minimum: 1.0
+                    type: string
+                  aclMaxResourceName:
                     nullable: true
-                    type: integer
+                    type: string
                   auditEventQueueCapacity:
                     format: uint
                     minimum: 1.0
@@ -88,11 +84,9 @@ spec:
                   auditStatsPollInterval:
                     nullable: true
                     type: string
-                  auditTailReadMaxBytes:
-                    format: uint
-                    minimum: 1.0
+                  auditTailReadMax:
                     nullable: true
-                    type: integer
+                    type: string
                   auditTailWindowOffsets:
                     format: int64
                     minimum: 1.0
@@ -132,11 +126,9 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  clientMetricsTelemetryMaxBytes:
-                    format: int32
-                    minimum: 1.0
+                  clientMetricsTelemetryMax:
                     nullable: true
-                    type: integer
+                    type: string
                   connectionCreationThrottleMax:
                     nullable: true
                     type: string
@@ -197,11 +189,9 @@ spec:
                   delegationTokenMaxLifetime:
                     nullable: true
                     type: string
-                  futureLogMoveReadChunkBytes:
-                    format: uint
-                    minimum: 1.0
+                  futureLogMoveReadChunk:
                     nullable: true
-                    type: integer
+                    type: string
                   futureLogMoveRetryBackoff:
                     nullable: true
                     type: string
@@ -224,12 +214,9 @@ spec:
                   leaderImbalanceCheckInterval:
                     nullable: true
                     type: string
-                  leaderImbalancePerBrokerPercentage:
-                    format: uint32
-                    maximum: 100.0
-                    minimum: 0.0
+                  leaderImbalancePerBroker:
                     nullable: true
-                    type: integer
+                    type: string
                   livenessTickInterval:
                     nullable: true
                     type: string
@@ -253,11 +240,9 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  metadataMaxBytesBetweenSnapshots:
-                    format: uint64
-                    minimum: 1.0
+                  metadataMaxBetweenSnapshots:
                     nullable: true
-                    type: integer
+                    type: string
                   metadataMaxSnapshotInterval:
                     nullable: true
                     type: string
@@ -269,11 +254,9 @@ spec:
                   oauthJwksHttpTimeout:
                     nullable: true
                     type: string
-                  observerFetchMaxBytes:
-                    format: uint32
-                    minimum: 1.0
+                  observerFetchMax:
                     nullable: true
-                    type: integer
+                    type: string
                   observerLagBound:
                     format: uint64
                     minimum: 0.0
@@ -317,19 +300,15 @@ spec:
                   replicationEpochFenceBackoff:
                     nullable: true
                     type: string
-                  replicationFetchMaxBytes:
-                    format: int32
-                    minimum: 1.0
+                  replicationFetchMax:
                     nullable: true
-                    type: integer
+                    type: string
                   replicationFetchMaxWait:
                     nullable: true
                     type: string
-                  replicationFetchMinBytes:
-                    format: int32
-                    minimum: 1.0
+                  replicationFetchMin:
                     nullable: true
-                    type: integer
+                    type: string
                   replicationReconnectDelayCap:
                     nullable: true
                     type: string
@@ -368,11 +347,9 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  sendfileMinBytes:
-                    format: uint
-                    minimum: 1.0
+                  sendfileMin:
                     nullable: true
-                    type: integer
+                    type: string
                   shareGroupEnable:
                     nullable: true
                     type: boolean
@@ -399,11 +376,9 @@ spec:
                   shareGroupSessionTimeout:
                     nullable: true
                     type: string
-                  shareRecoveryReadMaxBytes:
-                    format: uint
-                    minimum: 1.0
+                  shareRecoveryReadMax:
                     nullable: true
-                    type: integer
+                    type: string
                   shareSessionCacheMaxWhenUnlimited:
                     format: uint
                     minimum: 1.0
@@ -420,22 +395,15 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
-                  socketReceiveBufferBytes:
-                    format: uint
-                    minimum: 1.0
+                  socketReceiveBuffer:
                     nullable: true
-                    type: integer
-                  socketRequestMaxBytes:
-                    format: uint
-                    maximum: 4294967295.0
-                    minimum: 1.0
+                    type: string
+                  socketRequestMax:
                     nullable: true
-                    type: integer
-                  socketSendBufferBytes:
-                    format: uint
-                    minimum: 1.0
+                    type: string
+                  socketSendBuffer:
                     nullable: true
-                    type: integer
+                    type: string
                   startupLeaderWaitTimeout:
                     nullable: true
                     type: string
@@ -475,21 +443,15 @@ spec:
                   syncGroupFollowerWait:
                     nullable: true
                     type: string
-                  telemetryDecompressedOutputCeilingBytes:
-                    format: uint
-                    minimum: 1.0
+                  telemetryDecompressedOutputCeiling:
                     nullable: true
-                    type: integer
-                  telemetryDecompressedOutputFloorBytes:
-                    format: uint
-                    minimum: 1.0
+                    type: string
+                  telemetryDecompressedOutputFloor:
                     nullable: true
-                    type: integer
+                    type: string
                   telemetryMaxDecompressionRatio:
-                    format: uint
-                    minimum: 1.0
                     nullable: true
-                    type: integer
+                    type: string
                   tlsReloadInterval:
                     nullable: true
                     type: string

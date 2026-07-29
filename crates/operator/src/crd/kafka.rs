@@ -1,4 +1,8 @@
-use crabka_units::{Time, convert::TimeExt as _, fmt::Human as _};
+use crabka_units::{
+    ByteSize, Ratio, Time,
+    convert::{ByteSizeExt as _, RatioExt as _, TimeExt as _},
+    fmt::Human as _,
+};
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -248,6 +252,46 @@ fn validate_whole_millis_tuning_time(field: &str, value: Time) -> Result<(), Str
     }
 }
 
+fn validate_tuning_size(field: &str, value: ByteSize, max: u64) -> Result<(), String> {
+    let bytes = value.bytes_u64();
+    if !value.bytes_f64().is_finite()
+        || value <= ByteSize::from_bytes(0)
+        || ByteSize::from_bytes(bytes) != value
+    {
+        return Err(BrokerTuning::invalid(
+            field,
+            "must be a positive whole number of bytes",
+        ));
+    }
+    if bytes <= max {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(
+            field,
+            format!("must be at most {max} bytes"),
+        ))
+    }
+}
+
+fn validate_positive_tuning_ratio(field: &str, value: Ratio) -> Result<(), String> {
+    if value.as_f64().is_finite() && value > crabka_units::fraction(0.0) {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(field, "must be finite and positive"))
+    }
+}
+
+fn validate_unit_interval_tuning_ratio(field: &str, value: Ratio) -> Result<(), String> {
+    if value.as_f64().is_finite()
+        && value >= crabka_units::fraction(0.0)
+        && value <= crabka_units::fraction(1.0)
+    {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(field, "must be between 0% and 100%"))
+    }
+}
+
 macro_rules! validate_tuning_field {
     (refined, $owner:ident, $field:ident, $rule:ty) => {
         if let Some(value) = $owner.$field {
@@ -285,6 +329,44 @@ macro_rules! validate_tuning_field {
     (time_i64, $owner:ident, $field:ident, $rule:ty) => {
         if let Some(value) = $owner.$field {
             validate_whole_millis_tuning_time(stringify!($field), value)?;
+        }
+    };
+    (size_i32, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_tuning_size(
+                stringify!($field),
+                value,
+                u64::try_from(i32::MAX).expect("i32::MAX fits u64"),
+            )?;
+        }
+    };
+    (size_u32, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_tuning_size(stringify!($field), value, u64::from(u32::MAX))?;
+        }
+    };
+    (size_usize, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_tuning_size(
+                stringify!($field),
+                value,
+                u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            )?;
+        }
+    };
+    (size_u64, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_tuning_size(stringify!($field), value, u64::MAX)?;
+        }
+    };
+    (ratio_positive, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_positive_tuning_ratio(stringify!($field), value)?;
+        }
+    };
+    (ratio_unit, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_unit_interval_tuning_ratio(stringify!($field), value)?;
         }
     };
 }
@@ -384,7 +466,7 @@ define_broker_tuning! {
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_eviction_tick: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_stale_floor: Time => ();
     time_i32 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_default_interval: Time => ();
-    refined #[schemars(range(min = 1))] client_metrics_telemetry_max_bytes: i32 => refined_type::rule::GreaterI32<0>;
+    size_i32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] client_metrics_telemetry_max: ByteSize => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_prom_snapshot_ttl: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] rlmm_reconcile_tick: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] rlmm_bootstrap_backoff_initial: Time => ();
@@ -394,9 +476,9 @@ define_broker_tuning! {
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] oauth_jwks_http_timeout: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] auto_join_retry_backoff: Time => ();
     time_voter #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] auto_join_voter_request_timeout: Time => ();
-    refined #[schemars(range(min = 1))] replication_fetch_max_bytes: i32 => refined_type::rule::GreaterI32<0>;
+    size_i32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] replication_fetch_max: ByteSize => ();
     time_i32 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_fetch_max_wait: Time => ();
-    refined #[schemars(range(min = 1))] replication_fetch_min_bytes: i32 => refined_type::rule::GreaterI32<0>;
+    size_i32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] replication_fetch_min: ByteSize => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_throttle_exhausted_backoff: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_send_error_backoff: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_unknown_topic_retry_delay: Time => ();
@@ -420,33 +502,33 @@ define_broker_tuning! {
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] operator_recovery_deadline: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] quota_throttle_max: Time => ();
     refined #[schemars(range(min = 1))] self_registration_max_attempts: u32 => refined_type::rule::GreaterU32<0>;
-    refined #[schemars(range(min = 1))] observer_fetch_max_bytes: u32 => refined_type::rule::GreaterU32<0>;
+    size_u32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] observer_fetch_max: ByteSize => ();
     refined #[schemars(range(min = 1))] audit_event_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] audit_tail_window_offsets: i64 => refined_type::rule::GreaterI64<0>;
-    refined #[schemars(range(min = 1))] audit_tail_read_max_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] audit_tail_read_max: ByteSize => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] offsets_topic_metadata_wait_timeout: Time => ();
     refined #[schemars(range(min = 1))] client_metrics_stale_push_intervals: u32 => refined_type::rule::GreaterU32<0>;
     refined #[schemars(range(min = 1))] client_metrics_otlp_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] coordinator_actor_mailbox_capacity: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] unclean_recovery_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
-    refined #[schemars(range(min = 1))] share_recovery_read_max_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] share_recovery_read_max: ByteSize => ();
     refined #[schemars(range(min = 1))] share_session_cache_max_when_unlimited: usize => refined_type::rule::GreaterUsize<0>;
-    refined #[schemars(range(min = 1, max = 4_294_967_295_u64))] socket_request_max_bytes: usize => refined_type::rule::MinMaxUsize<1, 4_294_967_295>;
-    refined #[schemars(range(min = 1))] sendfile_min_bytes: usize => refined_type::rule::GreaterUsize<0>;
-    refined #[schemars(range(min = 1))] socket_send_buffer_bytes: usize => refined_type::rule::GreaterUsize<0>;
-    refined #[schemars(range(min = 1))] socket_receive_buffer_bytes: usize => refined_type::rule::GreaterUsize<0>;
-    refined #[schemars(range(min = 1))] acl_max_principal_bytes: usize => refined_type::rule::GreaterUsize<0>;
-    refined #[schemars(range(min = 1))] acl_max_resource_name_bytes: usize => refined_type::rule::GreaterUsize<0>;
-    refined #[schemars(range(min = 1))] telemetry_max_decompression_ratio: usize => refined_type::rule::GreaterUsize<0>;
-    refined #[schemars(range(min = 1))] telemetry_decompressed_output_floor_bytes: usize => refined_type::rule::GreaterUsize<0>;
-    refined #[schemars(range(min = 1))] telemetry_decompressed_output_ceiling_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    size_u32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] socket_request_max: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] sendfile_min: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] socket_send_buffer: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] socket_receive_buffer: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] acl_max_principal: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] acl_max_resource_name: ByteSize => ();
+    ratio_positive #[serde(with = "crabka_units::serde_units::human::option_ratio")] #[schemars(with = "Option<String>")] telemetry_max_decompression_ratio: Ratio => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] telemetry_decompressed_output_floor: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] telemetry_decompressed_output_ceiling: ByteSize => ();
     string #[schemars(length(min = 1))] inter_broker_server_name: String => ();
     time_i64 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] producer_id_expiration: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] producer_id_expiration_scan_interval: Time => ();
     refined #[schemars(range(min = 1))] max_produce_group: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] partition_writer_queue_depth: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] default_min_insync_replicas: i32 => refined_type::rule::GreaterI32<0>;
-    refined #[schemars(range(min = 1))] future_log_move_read_chunk_bytes: usize => refined_type::rule::GreaterUsize<0>;
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] future_log_move_read_chunk: ByteSize => ();
     refined #[schemars(range(min = 1))] share_state_num_partitions: i32 => refined_type::rule::GreaterI32<0>;
     refined #[schemars(range(min = 1))] share_state_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 1))] transaction_state_num_partitions: i32 => refined_type::rule::GreaterI32<0>;
@@ -461,12 +543,12 @@ define_broker_tuning! {
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controller_election_timeout: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controller_heartbeat_interval: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controlled_shutdown_drain_timeout: Time => ();
-    refined #[schemars(range(min = 1))] metadata_max_bytes_between_snapshots: u64 => refined_type::rule::GreaterU64<0>;
+    size_u64 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] metadata_max_between_snapshots: ByteSize => ();
     time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] metadata_max_snapshot_interval: Time => ();
     refined #[schemars(range(min = 1))] metadata_snapshot_interval_records: u64 => refined_type::rule::GreaterU64<0>;
     time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] txn_abort_cleanup_interval: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] leader_imbalance_check_interval: Time => ();
-    refined #[schemars(range(min = 0, max = 100))] leader_imbalance_per_broker_percentage: u32 => refined_type::rule::MinMaxU32<0, 100>;
+    ratio_unit #[serde(with = "crabka_units::serde_units::human::option_ratio")] #[schemars(with = "Option<String>")] leader_imbalance_per_broker: Ratio => ();
     time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] tls_reload_interval: Time => ();
     plain max_incremental_fetch_session_cache_slots: usize => ();
     plain max_connections: usize => ();
@@ -598,11 +680,11 @@ impl BrokerTuning {
             Time::from_millis(10_000)
         );
         ordered!(
-            replication_fetch_min_bytes,
-            1,
+            replication_fetch_min,
+            ByteSize::from_bytes(1),
             <=,
-            replication_fetch_max_bytes,
-            1_048_576
+            replication_fetch_max,
+            ByteSize::from_bytes(1_048_576)
         );
         ordered!(
             replication_reconnect_initial_delay,
@@ -647,11 +729,11 @@ impl BrokerTuning {
             Time::from_millis(30_000)
         );
         ordered!(
-            telemetry_decompressed_output_floor_bytes,
-            16_777_216,
+            telemetry_decompressed_output_floor,
+            ByteSize::from_bytes(16_777_216),
             <=,
-            telemetry_decompressed_output_ceiling_bytes,
-            1_073_741_824
+            telemetry_decompressed_output_ceiling,
+            ByteSize::from_bytes(1_073_741_824)
         );
         ordered!(
             transaction_min_timeout,
@@ -1469,6 +1551,43 @@ mod tests {
         check!(crd.spec.names.plural == "kafkas");
         check!(crd.spec.versions.len() == 1);
         check!(crd.spec.versions[0].name == "v1alpha1");
+    }
+
+    #[test]
+    fn broker_tuning_rejects_invalid_dimensioned_sizes_and_ratios() {
+        for field in [
+            "clientMetricsTelemetryMax",
+            "replicationFetchMax",
+            "replicationFetchMin",
+            "observerFetchMax",
+            "auditTailReadMax",
+            "shareRecoveryReadMax",
+            "socketRequestMax",
+            "sendfileMin",
+            "socketSendBuffer",
+            "socketReceiveBuffer",
+            "aclMaxPrincipal",
+            "aclMaxResourceName",
+            "telemetryDecompressedOutputFloor",
+            "telemetryDecompressedOutputCeiling",
+            "futureLogMoveReadChunk",
+            "metadataMaxBetweenSnapshots",
+        ] {
+            let tuning: BrokerTuning =
+                serde_json::from_value(serde_json::json!({field: "0B"})).expect("deserialize size");
+            let error = tuning.validate().expect_err("zero byte size must fail");
+            assert!(error.contains(field), "{error}");
+        }
+
+        for (field, value) in [
+            ("telemetryMaxDecompressionRatio", "0"),
+            ("leaderImbalancePerBroker", "101%"),
+        ] {
+            let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({field: value}))
+                .expect("deserialize ratio");
+            let error = tuning.validate().expect_err("invalid ratio must fail");
+            assert!(error.contains(field), "{error}");
+        }
     }
 
     #[test]

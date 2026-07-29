@@ -861,9 +861,9 @@ async fn broker_tuning_renders_runtime_toml_in_declaration_order() {
         isr_scan_interval: Some(crabka_units::millis(800)),
         opa_http_timeout: Some(crabka_units::millis(2_500)),
         auto_join_voter_request_timeout: Some(crabka_units::secs(4)),
-        replication_fetch_max_bytes: Some(2_097_152),
+        replication_fetch_max: Some(crabka_units::mebibytes(2)),
         replication_fetch_max_wait: Some(crabka_units::millis(750)),
-        replication_fetch_min_bytes: Some(2),
+        replication_fetch_min: Some(crabka_units::bytes(2)),
         share_state_replication_factor: Some(2),
         transaction_state_replication_factor: Some(3),
         streams_internal_topic_replication_factor: Some(2),
@@ -880,9 +880,9 @@ cleaner_interval = \"7s\"\n\
 isr_scan_interval = \"800ms\"\n\
 opa_http_timeout = \"2.5s\"\n\
 auto_join_voter_request_timeout = \"4s\"\n\
-replication_fetch_max_bytes = 2097152\n\
+replication_fetch_max = \"2MiB\"\n\
 replication_fetch_max_wait = \"750ms\"\n\
-replication_fetch_min_bytes = 2\n\
+replication_fetch_min = \"2B\"\n\
 share_state_replication_factor = 2\n\
 transaction_state_replication_factor = 3\n\
 streams_internal_topic_replication_factor = 2\n";
