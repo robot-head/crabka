@@ -262,6 +262,15 @@ fn traces_querier_parquet_read_cap_is_overrideable() {
 }
 
 #[test]
+fn traces_querier_scan_concat_cap_is_overrideable() {
+    let compose = docker_compose();
+    let block = compose_service_block(&compose, "traces-querier");
+    assert2::assert!(block.contains(
+        "CRABKA_TRACES_SCAN_CONCAT_MAX_BYTES: \"${CRABKA_TRACES_SCAN_CONCAT_MAX_BYTES:-1500000000}\""
+    ));
+}
+
+#[test]
 fn otlp_heartbeat_traces_use_per_component_service_names() {
     let compose = docker_compose();
     assert2::assert!(compose.contains("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS: \"15\""));
