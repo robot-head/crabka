@@ -292,6 +292,46 @@ fn headless_name(n: &str) -> String {
     format!("{n}-sr-headless")
 }
 
+fn validate_protocol_millis_i32(value: Option<Time>, path: &str) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let millis = value.millis_i64();
+    if !value.secs_f64().is_finite() || Time::from_millis(millis) != value {
+        return Err(format!(
+            "{path}: must be a positive whole number of milliseconds within 1..=i32::MAX"
+        ));
+    }
+    let millis = i32::try_from(millis).map_err(|_| {
+        format!("{path}: must be a positive whole number of milliseconds within 1..=i32::MAX")
+    })?;
+    refined_type::rule::GreaterI32::<0>::new(millis)
+        .map(|_| ())
+        .map_err(|_| {
+            format!("{path}: must be a positive whole number of milliseconds within 1..=i32::MAX")
+        })
+}
+
+fn validate_protocol_bytes_i32(value: Option<ByteSize>, path: &str) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let bytes = value.bytes_u64();
+    if !value.bytes_f64().is_finite() || ByteSize::from_bytes(bytes) != value {
+        return Err(format!(
+            "{path}: must be a positive whole number of bytes within 1..=i32::MAX"
+        ));
+    }
+    let bytes = i32::try_from(bytes).map_err(|_| {
+        format!("{path}: must be a positive whole number of bytes within 1..=i32::MAX")
+    })?;
+    refined_type::rule::GreaterI32::<0>::new(bytes)
+        .map(|_| ())
+        .map_err(|_| {
+            format!("{path}: must be a positive whole number of bytes within 1..=i32::MAX")
+        })
+}
+
 fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
     macro_rules! validate {
         ($value:expr, $rule:ty, $path:literal) => {
@@ -311,6 +351,18 @@ fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
             .map_err(|error| format!("spec.clientId: {error}"))?;
     }
     if let Some(runtime) = &spec.runtime {
+        validate_protocol_millis_i32(
+            runtime.store_reader_fetch_max_wait,
+            "spec.runtime.storeReaderFetchMaxWait",
+        )?;
+        validate_protocol_bytes_i32(
+            runtime.store_reader_fetch_max,
+            "spec.runtime.storeReaderFetchMax",
+        )?;
+        validate_protocol_millis_i32(
+            runtime.schemas_topic_create_timeout,
+            "spec.runtime.schemasTopicCreateTimeout",
+        )?;
         for (value, path) in [
             (
                 runtime.election_session_timeout,
@@ -332,14 +384,6 @@ fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
                 runtime.store_reader_retry_backoff,
                 "spec.runtime.storeReaderRetryBackoff",
             ),
-            (
-                runtime.store_reader_fetch_max_wait,
-                "spec.runtime.storeReaderFetchMaxWait",
-            ),
-            (
-                runtime.schemas_topic_create_timeout,
-                "spec.runtime.schemasTopicCreateTimeout",
-            ),
         ] {
             if value.is_some_and(|value| {
                 !value.secs_f64().is_finite()
@@ -348,19 +392,11 @@ fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
                 return Err(format!("{path}: must be positive"));
             }
         }
-        for (value, path) in [
-            (
-                runtime.store_reader_fetch_max,
-                "spec.runtime.storeReaderFetchMax",
-            ),
-            (runtime.forward_max_body, "spec.runtime.forwardMaxBody"),
-        ] {
-            if value.is_some_and(|value| {
-                !value.bytes_f64().is_finite()
-                    || value <= <ByteSize as crabka_units::convert::ByteSizeExt>::ZERO
-            }) {
-                return Err(format!("{path}: must be positive"));
-            }
+        if runtime.forward_max_body.is_some_and(|value| {
+            !value.bytes_f64().is_finite()
+                || value <= <ByteSize as crabka_units::convert::ByteSizeExt>::ZERO
+        }) {
+            return Err("spec.runtime.forwardMaxBody: must be positive".into());
         }
 
         let session = runtime
@@ -893,4 +929,57 @@ async fn set_status(
     };
     patch_status(api, name, status).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn protocol_runtime_validation_rejects_lossy_lowering() {
+        for value in [
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"storeReaderFetchMaxWait": "0.5ms"}
+            }),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"storeReaderFetchMax": "0.5B"}
+            }),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"schemasTopicCreateTimeout": "0.5ms"}
+            }),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"storeReaderFetchMaxWait": "2147483648ms"}
+            }),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"storeReaderFetchMax": "2147483648B"}
+            }),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"schemasTopicCreateTimeout": "2147483648ms"}
+            }),
+        ] {
+            let spec: SchemaRegistrySpec = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate_config(&spec).is_err(), "accepted invalid {value}");
+        }
+
+        for value in [
+            serde_json::json!({"replicas": 1}),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {
+                    "storeReaderFetchMaxWait": "2147483647ms",
+                    "storeReaderFetchMax": "2147483647B",
+                    "schemasTopicCreateTimeout": "2147483647ms"
+                }
+            }),
+        ] {
+            let spec: SchemaRegistrySpec = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate_config(&spec).is_ok(), "rejected valid {value}");
+        }
+    }
 }

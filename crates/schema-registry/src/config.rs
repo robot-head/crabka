@@ -6,6 +6,41 @@ use std::{
 };
 
 use crabka_units::prelude::*;
+use refined_type::{Refined, rule::GreaterI32};
+
+fn protocol_millis_i32(name: &str, value: Time) -> anyhow::Result<i32> {
+    let millis = value.millis_i64();
+    if !value.secs_f64().is_finite() || Time::from_millis(millis) != value {
+        anyhow::bail!("{name} must be a positive whole number of milliseconds within 1..=i32::MAX");
+    }
+    let millis = i32::try_from(millis).map_err(|_| {
+        anyhow::anyhow!(
+            "{name} must be a positive whole number of milliseconds within 1..=i32::MAX"
+        )
+    })?;
+    GreaterI32::<0>::new(millis)
+        .map(Refined::into_value)
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{name} must be a positive whole number of milliseconds within 1..=i32::MAX"
+            )
+        })
+}
+
+fn protocol_bytes_i32(name: &str, value: ByteSize) -> anyhow::Result<i32> {
+    let bytes = value.bytes_u64();
+    if !value.bytes_f64().is_finite() || ByteSize::from_bytes(bytes) != value {
+        anyhow::bail!("{name} must be a positive whole number of bytes within 1..=i32::MAX");
+    }
+    let bytes = i32::try_from(bytes).map_err(|_| {
+        anyhow::anyhow!("{name} must be a positive whole number of bytes within 1..=i32::MAX")
+    })?;
+    GreaterI32::<0>::new(bytes)
+        .map(Refined::into_value)
+        .map_err(|_| {
+            anyhow::anyhow!("{name} must be a positive whole number of bytes within 1..=i32::MAX")
+        })
+}
 
 /// Resolved configuration for a running registry node.
 #[derive(Debug, Clone)]
@@ -61,6 +96,15 @@ impl RegistryRuntimeConfig {
     ///
     /// Returns an error when timeouts conflict or a configured default is invalid.
     pub fn validate(&self) -> anyhow::Result<()> {
+        protocol_millis_i32(
+            "store reader fetch max wait",
+            self.store_reader_fetch_max_wait,
+        )?;
+        protocol_bytes_i32("store reader fetch max", self.store_reader_fetch_max)?;
+        protocol_millis_i32(
+            "schemas topic create timeout",
+            self.schemas_topic_create_timeout,
+        )?;
         if self.election_heartbeat_interval >= self.election_session_timeout {
             anyhow::bail!("election heartbeat interval must be below session timeout");
         }

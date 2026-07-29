@@ -3,6 +3,11 @@
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf};
 
 pub use crabka_security::ClientAuthMode;
+use crabka_units::prelude::*;
+use refined_type::{
+    Refined,
+    rule::{GreaterI32, GreaterI64},
+};
 
 use crate::webhook_config::CompiledWebhook;
 
@@ -115,6 +120,67 @@ pub struct GatewayRuntimeConfig {
     pub forward_max_body_bytes: usize,
     pub schema_registry_latest_cache_ttl_ms: u64,
     pub schema_registry_frame_raw: bool,
+}
+
+fn protocol_millis_i32(name: &str, value: Time) -> Result<i32, String> {
+    let millis = value.millis_i64();
+    if !value.secs_f64().is_finite() || Time::from_millis(millis) != value {
+        return Err(format!(
+            "{name} must be a positive whole number of milliseconds within 1..=i32::MAX"
+        ));
+    }
+    let millis = i32::try_from(millis).map_err(|_| {
+        format!("{name} must be a positive whole number of milliseconds within 1..=i32::MAX")
+    })?;
+    GreaterI32::<0>::new(millis)
+        .map(Refined::into_value)
+        .map_err(|_| {
+            format!("{name} must be a positive whole number of milliseconds within 1..=i32::MAX")
+        })
+}
+
+fn protocol_millis_i64(name: &str, value: Time) -> Result<i64, String> {
+    let millis = value.millis_i64();
+    // `Time` stores an `f64`; at this magnitude `i64::MAX` rounds to 2^63,
+    // so a saturated out-of-range conversion is indistinguishable after the
+    // cast. Reject the sentinel instead of accepting a potentially clamped
+    // protocol value.
+    if !value.secs_f64().is_finite() || millis == i64::MAX || Time::from_millis(millis) != value {
+        return Err(format!(
+            "{name} must be a positive whole number of milliseconds within 1..=i64::MAX"
+        ));
+    }
+    GreaterI64::<0>::new(millis)
+        .map(Refined::into_value)
+        .map_err(|_| {
+            format!("{name} must be a positive whole number of milliseconds within 1..=i64::MAX")
+        })
+}
+
+impl GatewayRuntimeConfig {
+    /// Validate values lowered into Kafka protocol/config integer units.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a value is fractional, non-positive, or exceeds
+    /// the integer width used by the downstream client.
+    pub fn validate_protocol_units(&self) -> Result<(), String> {
+        protocol_millis_i32(
+            "internal topic create timeout",
+            self.internal_topic_create_timeout,
+        )?;
+        protocol_millis_i64("internal topic segment", self.internal_topic_segment)?;
+        Ok(())
+    }
+}
+
+/// Validate the dedup retention duration before it is lowered to `retention.ms`.
+///
+/// # Errors
+///
+/// Returns an error unless `value` is an exact positive `i64` millisecond value.
+pub fn validate_dedup_window(value: Time) -> Result<(), String> {
+    protocol_millis_i64("dedup window", value).map(|_| ())
 }
 
 impl Default for GatewayRuntimeConfig {

@@ -1030,6 +1030,45 @@ fn validate_internal_topic_dirty_ratio(value: Option<Ratio>) -> Result<(), Strin
     Ok(())
 }
 
+fn validate_protocol_millis_i32(value: Option<Time>, path: &str) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let millis = value.millis_i64();
+    if !value.secs_f64().is_finite() || Time::from_millis(millis) != value {
+        return Err(format!(
+            "{path}: must be a positive whole number of milliseconds within 1..=i32::MAX"
+        ));
+    }
+    let millis = i32::try_from(millis).map_err(|_| {
+        format!("{path}: must be a positive whole number of milliseconds within 1..=i32::MAX")
+    })?;
+    refined_type::rule::GreaterI32::<0>::new(millis)
+        .map(|_| ())
+        .map_err(|_| {
+            format!("{path}: must be a positive whole number of milliseconds within 1..=i32::MAX")
+        })
+}
+
+fn validate_protocol_millis_i64(value: Option<Time>, path: &str) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let millis = value.millis_i64();
+    // `Time` stores an `f64`; reject the saturation sentinel because values at
+    // and beyond this magnitude cannot be distinguished exactly after parsing.
+    if !value.secs_f64().is_finite() || millis == i64::MAX || Time::from_millis(millis) != value {
+        return Err(format!(
+            "{path}: must be a positive whole number of milliseconds within 1..=i64::MAX"
+        ));
+    }
+    refined_type::rule::GreaterI64::<0>::new(millis)
+        .map(|_| ())
+        .map_err(|_| {
+            format!("{path}: must be a positive whole number of milliseconds within 1..=i64::MAX")
+        })
+}
+
 fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Result<(), String> {
     macro_rules! validate {
         ($value:expr, $rule:ty, $path:literal) => {
@@ -1061,18 +1100,14 @@ fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Res
             refined_type::rule::GreaterI16<0>,
             "spec.tuning.internalTopicReplicationFactor"
         );
-        validate!(
-            tuning
-                .internal_topic_create_timeout
-                .map(TimeExt::millis_i32),
-            refined_type::rule::GreaterI32<0>,
-            "spec.tuning.internalTopicCreateTimeout"
-        );
-        validate!(
-            tuning.internal_topic_segment.map(TimeExt::millis_i64),
-            refined_type::rule::GreaterI64<0>,
-            "spec.tuning.internalTopicSegment"
-        );
+        validate_protocol_millis_i32(
+            tuning.internal_topic_create_timeout,
+            "spec.tuning.internalTopicCreateTimeout",
+        )?;
+        validate_protocol_millis_i64(
+            tuning.internal_topic_segment,
+            "spec.tuning.internalTopicSegment",
+        )?;
         validate_internal_topic_dirty_ratio(tuning.internal_topic_min_cleanable_dirty_ratio)?;
         validate!(
             tuning.consumer_poll_timeout.map(millis_u64),
@@ -1112,11 +1147,7 @@ fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Res
             refined_type::rule::MinMaxU32<1, 2_147_483_647>,
             "spec.dedup.partitions"
         );
-        validate!(
-            dedup.window.map(TimeExt::millis_i64),
-            refined_type::rule::GreaterI64<0>,
-            "spec.dedup.window"
-        );
+        validate_protocol_millis_i64(dedup.window, "spec.dedup.window")?;
         nonempty!(dedup.txn_id_prefix.as_deref(), "spec.dedup.txnIdPrefix");
         nonempty!(
             dedup.ownership_group.as_deref(),
@@ -2434,6 +2465,39 @@ mod tests {
             ..Default::default()
         });
         assert!(validate_config(&spec).is_err());
+    }
+
+    #[test]
+    fn protocol_runtime_validation_rejects_lossy_lowering() {
+        for value in [
+            serde_json::json!({"dedup": {"window": "0.5ms"}}),
+            serde_json::json!({"tuning": {"internalTopicSegment": "0.5ms"}}),
+            serde_json::json!({"tuning": {"internalTopicCreateTimeout": "0.5ms"}}),
+            serde_json::json!({
+                "tuning": {"internalTopicCreateTimeout": "2147483648ms"}
+            }),
+            serde_json::json!({"dedup": {"window": "9223372036854775808ms"}}),
+            serde_json::json!({
+                "tuning": {"internalTopicSegment": "9223372036854775808ms"}
+            }),
+        ] {
+            let spec: KafkaGrpcGatewaySpec = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate_config(&spec).is_err(), "accepted invalid {value}");
+        }
+
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({
+                "dedup": {"window": "2147483648ms"},
+                "tuning": {
+                    "internalTopicSegment": "2147483648ms",
+                    "internalTopicCreateTimeout": "2147483647ms"
+                }
+            }),
+        ] {
+            let spec: KafkaGrpcGatewaySpec = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate_config(&spec).is_ok(), "rejected valid {value}");
+        }
     }
 
     // ── resolve_broker_endpoint ───────────────────────────────

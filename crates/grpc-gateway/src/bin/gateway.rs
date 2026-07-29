@@ -9,7 +9,10 @@ use anyhow::Context as _;
 use clap::Parser;
 use crabka_grpc_gateway::{
     codec::{RawCodec, RecordCodec},
-    config::{AuthzSettings, BearerSettings, GatewayConfig, GatewayRuntimeConfig, TlsSettings},
+    config::{
+        AuthzSettings, BearerSettings, GatewayConfig, GatewayRuntimeConfig, TlsSettings,
+        validate_dedup_window,
+    },
     config_value::{PartitionCount, PositiveI16, PositiveU32},
     dedup::{
         DedupEngine,
@@ -271,6 +274,7 @@ async fn main() -> anyhow::Result<()> {
         .ok();
 
     let args = Args::parse();
+    let runtime = args.validate_protocol_runtime()?;
 
     let otlp = crabka_telemetry::OtlpConfig::from_env(
         |k| std::env::var(k).ok(),
@@ -344,7 +348,7 @@ async fn main() -> anyhow::Result<()> {
         webhooks,
         outbound,
         schema_registry_url: args.schema_registry_url.clone(),
-        runtime: args.runtime_config(),
+        runtime,
     };
 
     let bearer = build_bearer(&args)?;
@@ -516,6 +520,15 @@ impl Args {
             runtime.schema_registry_frame_raw = value;
         }
         runtime
+    }
+
+    fn validate_protocol_runtime(&self) -> anyhow::Result<GatewayRuntimeConfig> {
+        let runtime = self.runtime_config();
+        runtime
+            .validate_protocol_units()
+            .map_err(anyhow::Error::msg)?;
+        validate_dedup_window(self.dedup_window).map_err(anyhow::Error::msg)?;
+        Ok(runtime)
     }
 }
 
@@ -969,6 +982,9 @@ mod tests {
                 ("CRABKA_GATEWAY_PRODUCE_MAX_BODY", None::<&str>),
                 ("CRABKA_GATEWAY_FORWARD_MAX_BODY", None::<&str>),
                 ("CRABKA_GATEWAY_SCHEMA_REGISTRY_FRAME_RAW", None::<&str>),
+                ("CRABKA_GATEWAY_DEDUP_WINDOW", None::<&str>),
+                ("CRABKA_GATEWAY_INTERNAL_TOPIC_SEGMENT", None::<&str>),
+                ("CRABKA_GATEWAY_INTERNAL_TOPIC_CREATE_TIMEOUT", None::<&str>),
             ],
             || {
                 let defaults = Args::try_parse_from([
@@ -988,6 +1004,12 @@ mod tests {
                         ("CRABKA_GATEWAY_CONSUMER_POLL_TIMEOUT", Some("701ms")),
                         ("CRABKA_GATEWAY_PRODUCE_MAX_BODY", Some("3145729B")),
                         ("CRABKA_GATEWAY_FORWARD_MAX_BODY", Some("3145728B")),
+                        ("CRABKA_GATEWAY_DEDUP_WINDOW", Some("3600001ms")),
+                        ("CRABKA_GATEWAY_INTERNAL_TOPIC_SEGMENT", Some("60002ms")),
+                        (
+                            "CRABKA_GATEWAY_INTERNAL_TOPIC_CREATE_TIMEOUT",
+                            Some("10002ms"),
+                        ),
                     ],
                     || {
                         let from_env = Args::try_parse_from([
@@ -996,10 +1018,16 @@ mod tests {
                             "--advertised-addr=localhost:9500",
                         ])
                         .expect("parse environment");
-                        let from_env = from_env.runtime_config();
+                        let dedup_window = from_env.dedup_window;
+                        let from_env = from_env
+                            .validate_protocol_runtime()
+                            .expect("validate protocol environment");
                         check!(from_env.consumer_poll_timeout == millis(701));
                         check!(from_env.produce_max_body == bytes(3_145_729));
                         check!(from_env.forward_max_body == bytes(3_145_728));
+                        check!(dedup_window == millis(3_600_001));
+                        check!(from_env.internal_topic_segment == millis(60_002));
+                        check!(from_env.internal_topic_create_timeout == millis(10_002));
 
                         let from_cli = Args::try_parse_from([
                             "crabka-grpc-gateway",
@@ -1008,16 +1036,86 @@ mod tests {
                             "--consumer-poll-timeout=702ms",
                             "--produce-max-body=3145730B",
                             "--forward-max-body=3145729B",
+                            "--dedup-window=3600002ms",
+                            "--internal-topic-segment=60003ms",
+                            "--internal-topic-create-timeout=10003ms",
                         ])
                         .expect("parse CLI over environment");
-                        let from_cli = from_cli.runtime_config();
+                        let dedup_window = from_cli.dedup_window;
+                        let from_cli = from_cli
+                            .validate_protocol_runtime()
+                            .expect("validate protocol CLI");
                         check!(from_cli.consumer_poll_timeout == millis(702));
                         check!(from_cli.produce_max_body == bytes(3_145_730));
                         check!(from_cli.forward_max_body == bytes(3_145_729));
+                        check!(dedup_window == millis(3_600_002));
+                        check!(from_cli.internal_topic_segment == millis(60_003));
+                        check!(from_cli.internal_topic_create_timeout == millis(10_003));
                     },
                 );
             },
         );
+    }
+
+    #[test]
+    fn protocol_runtime_values_require_exact_integer_milliseconds() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+
+        for value in [
+            "--dedup-window=0.5ms",
+            "--internal-topic-segment=0.5ms",
+            "--internal-topic-create-timeout=0.5ms",
+            "--internal-topic-create-timeout=2147483648ms",
+            "--dedup-window=9223372036854775808ms",
+            "--internal-topic-segment=9223372036854775808ms",
+        ] {
+            let args = Args::try_parse_from([
+                "crabka-grpc-gateway",
+                "--bootstrap-servers=localhost:9092",
+                "--advertised-addr=localhost:9500",
+                value,
+            ])
+            .expect("generic UOM parser accepts positive quantity");
+            assert!(
+                args.validate_protocol_runtime().is_err(),
+                "accepted protocol value {value}"
+            );
+        }
+
+        for values in [
+            [
+                "--dedup-window=2147483648ms",
+                "--internal-topic-segment=2147483648ms",
+                "--internal-topic-create-timeout=2147483647ms",
+            ],
+            [
+                "--dedup-window=1h",
+                "--internal-topic-segment=1m",
+                "--internal-topic-create-timeout=10s",
+            ],
+        ] {
+            let args = Args::try_parse_from([
+                "crabka-grpc-gateway",
+                "--bootstrap-servers=localhost:9092",
+                "--advertised-addr=localhost:9500",
+                values[0],
+                values[1],
+                values[2],
+            ])
+            .expect("parse exact protocol values");
+            assert!(args.validate_protocol_runtime().is_ok());
+        }
+
+        let defaults = Args::try_parse_from([
+            "crabka-grpc-gateway",
+            "--bootstrap-servers=localhost:9092",
+            "--advertised-addr=localhost:9500",
+        ])
+        .expect("parse defaults");
+        assert!(defaults.validate_protocol_runtime().is_ok());
     }
 
     #[test]

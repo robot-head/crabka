@@ -285,6 +285,9 @@ async fn main() -> anyhow::Result<()> {
         .install_default()
         .ok();
 
+    let args = Args::parse();
+    let runtime = args.runtime_config()?;
+
     let telemetry = crabka_telemetry::init(
         crabka_telemetry::OtlpConfig::from_env(
             |k| std::env::var(k).ok(),
@@ -297,7 +300,6 @@ async fn main() -> anyhow::Result<()> {
         "crabka-schema-registry",
     )?;
 
-    let args = Args::parse();
     crabka_telemetry::profiling::serve_admin(args.admin_listen_addr, axum::Router::new()).await?;
 
     let crabka_schema_registry::cli::SecurityOutput {
@@ -315,7 +317,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|| format!("http://{}", args.listen_addr)),
         group_id: args.group_id.clone(),
         leader_eligibility: args.leader_eligibility,
-        runtime: args.runtime_config()?,
+        runtime,
         security,
     };
     info!(
@@ -789,6 +791,76 @@ mod tests {
                     );
                 },
             );
+            temp_env::with_vars(
+                [
+                    ("SCHEMA_REGISTRY_STORE_READER_FETCH_MAX_WAIT", Some("601ms")),
+                    ("SCHEMA_REGISTRY_STORE_READER_FETCH_MAX", Some("1048578B")),
+                    (
+                        "SCHEMA_REGISTRY_SCHEMAS_TOPIC_CREATE_TIMEOUT",
+                        Some("16001ms"),
+                    ),
+                ],
+                || {
+                    let from_cli = Args::try_parse_from([
+                        "crabka-schema-registry",
+                        "--bootstrap-servers=localhost:9092",
+                        "--store-reader-fetch-max-wait=602ms",
+                        "--store-reader-fetch-max=1048579B",
+                        "--schemas-topic-create-timeout=16002ms",
+                    ])
+                    .expect("parse protocol CLI over environment")
+                    .runtime_config()
+                    .expect("validate protocol CLI");
+                    assert!(from_cli.store_reader_fetch_max_wait == millis(602));
+                    assert!(from_cli.store_reader_fetch_max == bytes(1_048_579));
+                    assert!(from_cli.schemas_topic_create_timeout == millis(16_002));
+                },
+            );
         });
+    }
+
+    #[test]
+    fn protocol_runtime_values_require_exact_i32_units() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+
+        for value in [
+            "--store-reader-fetch-max-wait=0.5ms",
+            "--store-reader-fetch-max=0.5B",
+            "--schemas-topic-create-timeout=0.5ms",
+            "--store-reader-fetch-max-wait=2147483648ms",
+            "--store-reader-fetch-max=2147483648B",
+            "--schemas-topic-create-timeout=2147483648ms",
+        ] {
+            let args = Args::try_parse_from([
+                "crabka-schema-registry",
+                "--bootstrap-servers=localhost:9092",
+                value,
+            ])
+            .expect("generic UOM parser accepts positive quantity");
+            assert!(
+                args.runtime_config().is_err(),
+                "accepted protocol value {value}"
+            );
+        }
+
+        let boundary = Args::try_parse_from([
+            "crabka-schema-registry",
+            "--bootstrap-servers=localhost:9092",
+            "--store-reader-fetch-max-wait=2147483647ms",
+            "--store-reader-fetch-max=2147483647B",
+            "--schemas-topic-create-timeout=2147483647ms",
+        ])
+        .expect("parse exact i32 boundaries");
+        assert!(boundary.runtime_config().is_ok());
+
+        let defaults = Args::try_parse_from([
+            "crabka-schema-registry",
+            "--bootstrap-servers=localhost:9092",
+        ])
+        .expect("parse defaults");
+        assert!(defaults.runtime_config().is_ok());
     }
 }
