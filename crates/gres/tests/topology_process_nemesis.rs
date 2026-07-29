@@ -1567,6 +1567,7 @@ async fn reconcile_non_special_phase(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn drive_operation(
     system: &mut ProcessHarness,
     operation_id: &str,
