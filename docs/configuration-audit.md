@@ -4764,3 +4764,69 @@ passed unchanged with a per-process limit of 8,192. The focused
 are the exposed named defaults, the already-configurable partition and
 replication defaults, or the fixed semantics and tests described above. The
 full scanner reports 5,592 rows across 1,037 files.
+
+## Schema Serde Retry Policy
+
+The schema-cache background fetch retry range is now one opaque,
+cross-field-validated `SchemaFetchRetryPolicy`. Its UOM `Time` bounds are
+`initial_backoff` and `max_backoff`; the public defaults are
+`DEFAULT_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF` (`10ms`) and
+`DEFAULT_SCHEMA_FETCH_RETRY_MAX_BACKOFF` (`1s`). `CacheConfig` owns the policy
+as `fetch_retry_policy`. Both bounds must be positive and representable as
+`std::time::Duration`, the initial bound may not exceed the maximum, and equal
+bounds remain valid.
+
+The observability demo exposes:
+
+```text
+--schema-fetch-retry-initial-backoff
+--schema-fetch-retry-max-backoff
+CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF
+CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF
+```
+
+Gres exposes the same CLI names with:
+
+```text
+CRABKA_GRES_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF
+CRABKA_GRES_SCHEMA_FETCH_RETRY_MAX_BACKOFF
+```
+
+The Gres CRD owns the fleet boundary at
+`Gres.spec.compute.schemaFetchRetryInitialBackoff` and
+`Gres.spec.compute.schemaFetchRetryMaxBackoff`. Both generated schema
+properties are optional strings. Defaults remain `10ms` and `1s` at every
+boundary.
+
+Client Streams reuses its existing `cache_config` builder input. The
+observability demo constructs one validated policy and supplies it to its
+producer, stream, and consumer schema caches. Gres validates CLI/environment
+inputs once, stores the policy on `KafkaFdw`, and applies it to every
+per-scan `SchemaCache`. The operator overlays the two optional CRD values onto
+the library defaults, calls the authoritative constructor, and renders the two
+Gres CLI arguments exactly once for every compute deployment. No library-global
+environment lookup or duplicate Client Streams retry fields were added.
+
+The Confluent media type and magic byte remain fixed wire/API compatibility.
+The 64-reference traversal ceiling remains a cycle/pathology safety bound.
+Transient/terminal error classification, exponential doubling, exponent cap
+`7`, and deterministic zero-to-25-percent per-ID jitter remain fixed algorithm
+semantics. The remaining one-second cache timeout is test-only.
+
+Post-format verification passed 2,018 affected all-target tests:
+
+```text
+crabka-schema-serde: 41
+crabka-client-streams: 618
+observability-demo-app: 71
+crabka-gres-fdw: 59
+crabka-gres: 252
+crabka-operator: 977
+```
+
+Strict workspace all-target Clippy and nightly formatting checks pass. The
+generated `crabka.io_greses.yaml` is byte-for-byte identical to fresh output.
+The full runtime-value scanner reports 5,607 rows across 1,037 files; the
+focused `schema-serde` result reports 11 rows across 3 files. Those focused
+rows are the two exposed defaults, fixed exponent/media/reference/magic
+semantics, or retry/test assertions and deadlines described above.
