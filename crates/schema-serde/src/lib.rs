@@ -13,7 +13,11 @@ pub mod wire;
 
 pub mod format;
 
-pub use cache::{CacheConfig, RegisterMode, SchemaCache, default_registry, set_default_registry};
+pub use cache::{
+    CacheConfig, DEFAULT_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF,
+    DEFAULT_SCHEMA_FETCH_RETRY_MAX_BACKOFF, RegisterMode, SchemaCache, SchemaFetchRetryPolicy,
+    default_registry, set_default_registry,
+};
 pub use error::SchemaSerdeError;
 #[cfg(feature = "avro")]
 pub use format::avro::AvroSerde;

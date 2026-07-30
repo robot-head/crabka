@@ -3890,6 +3890,7 @@ dependencies = [
  "apache-avro",
  "assert2",
  "bytes",
+ "crabka-units",
  "hex",
  "jsonschema",
  "prost 0.14.4",

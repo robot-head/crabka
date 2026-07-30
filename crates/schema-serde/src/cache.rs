@@ -7,6 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crabka_units::prelude::*;
+
 use crate::{
     error::SchemaSerdeError,
     registry::RegistryClient,
@@ -35,16 +37,84 @@ pub enum RegisterMode {
     UseLatest,
 }
 
+/// Default delay before retrying a transient schema fetch failure.
+pub const DEFAULT_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF: Time = millis(10);
+
+/// Default maximum delay between transient schema fetch retries.
+pub const DEFAULT_SCHEMA_FETCH_RETRY_MAX_BACKOFF: Time = secs(1);
+
+/// Validated retry range for transient schema fetch failures.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SchemaFetchRetryPolicy {
+    initial_backoff: Time,
+    max_backoff: Time,
+}
+
+impl SchemaFetchRetryPolicy {
+    /// Build a positive, representable retry range.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when either bound cannot be represented as a
+    /// [`Duration`], either bound is zero, or the initial bound exceeds the
+    /// maximum.
+    pub fn new(initial_backoff: Time, max_backoff: Time) -> Result<Self, String> {
+        let initial = validated_duration("initial schema fetch retry backoff", initial_backoff)?;
+        let max = validated_duration("maximum schema fetch retry backoff", max_backoff)?;
+        if initial > max {
+            return Err(
+                "initial schema fetch retry backoff must not exceed the maximum".to_string(),
+            );
+        }
+        Ok(Self {
+            initial_backoff,
+            max_backoff,
+        })
+    }
+
+    /// Initial delay before retrying a transient failure.
+    #[must_use]
+    pub const fn initial_backoff(self) -> Time {
+        self.initial_backoff
+    }
+
+    /// Maximum delay between retries.
+    #[must_use]
+    pub const fn max_backoff(self) -> Time {
+        self.max_backoff
+    }
+}
+
+impl Default for SchemaFetchRetryPolicy {
+    fn default() -> Self {
+        Self {
+            initial_backoff: DEFAULT_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF,
+            max_backoff: DEFAULT_SCHEMA_FETCH_RETRY_MAX_BACKOFF,
+        }
+    }
+}
+
+fn validated_duration(label: &str, value: Time) -> Result<Duration, String> {
+    let duration =
+        Duration::try_from_secs_f64(value.secs_f64()).map_err(|error| format!("{label}: {error}"))?;
+    if duration.is_zero() {
+        return Err(format!("{label} must be greater than zero"));
+    }
+    Ok(duration)
+}
+
 /// Cache configuration.
 #[derive(Debug, Clone)]
 pub struct CacheConfig {
     pub mode: RegisterMode,
+    pub fetch_retry_policy: SchemaFetchRetryPolicy,
 }
 
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
             mode: RegisterMode::AutoRegister,
+            fetch_retry_policy: SchemaFetchRetryPolicy::default(),
         }
     }
 }
@@ -78,29 +148,29 @@ struct Inner {
     retry_attempts: HashMap<u32, u32>,
 }
 
-const INITIAL_RETRY_DELAY: Duration = Duration::from_millis(10);
-const MAX_RETRY_DELAY: Duration = Duration::from_secs(1);
-
 /// Return a capped exponential retry delay with deterministic per-id jitter.
 ///
 /// The deterministic jitter avoids synchronized retries without making tests
 /// depend on random timing. The jitter is stable for an id: it is added to the
-/// exponential delay while headroom remains, then the delay stays at
-/// [`MAX_RETRY_DELAY`]. Each later attempt is at least as long as its
-/// predecessor and never exceeds [`MAX_RETRY_DELAY`].
-fn retry_delay(id: u32, attempt: u32) -> Duration {
+/// exponential delay while headroom remains, then the delay stays at the
+/// policy maximum. Each later attempt is at least as long as its predecessor.
+fn retry_delay(policy: SchemaFetchRetryPolicy, id: u32, attempt: u32) -> Duration {
+    let initial_backoff = Duration::try_from_secs_f64(policy.initial_backoff().secs_f64())
+        .expect("schema fetch retry policy was validated");
+    let max_backoff = Duration::try_from_secs_f64(policy.max_backoff().secs_f64())
+        .expect("schema fetch retry policy was validated");
     let exponent = attempt.saturating_sub(1).min(7);
     let multiplier = 1_u32 << exponent;
-    let exponential_delay = INITIAL_RETRY_DELAY
+    let exponential_delay = initial_backoff
         .checked_mul(multiplier)
-        .unwrap_or(MAX_RETRY_DELAY)
-        .min(MAX_RETRY_DELAY);
+        .unwrap_or(max_backoff)
+        .min(max_backoff);
     let jitter_percent = id.wrapping_mul(1_103_515_245) % 26;
     let jitter = exponential_delay.mul_f64(f64::from(jitter_percent) / 100.0);
     exponential_delay
         .checked_add(jitter)
-        .unwrap_or(MAX_RETRY_DELAY)
-        .min(MAX_RETRY_DELAY)
+        .unwrap_or(max_backoff)
+        .min(max_backoff)
 }
 
 /// `Arc`-shared cache wiring serdes to a registry.
@@ -153,6 +223,12 @@ impl SchemaCache {
     #[must_use]
     pub fn subject(&self, topic: &str, role: Role) -> String {
         self.strategy.subject(topic, role)
+    }
+
+    /// Return the retry policy used for transient schema fetch failures.
+    #[must_use]
+    pub fn fetch_retry_policy(&self) -> SchemaFetchRetryPolicy {
+        self.config.fetch_retry_policy
     }
 
     /// Register a local `(subject, kind, schema)` for pre-warm. Idempotent.
@@ -315,8 +391,11 @@ impl SchemaCache {
                                     .entry(id)
                                     .and_modify(|attempt| *attempt = attempt.saturating_add(1))
                                     .or_insert(1);
-                                g.retry_after
-                                    .insert(id, Instant::now() + retry_delay(id, attempt));
+                                g.retry_after.insert(
+                                    id,
+                                    Instant::now()
+                                        + retry_delay(this.config.fetch_retry_policy, id, attempt),
+                                );
                             } else {
                                 g.unavailable_schemas.insert(id, error.to_string());
                                 g.retry_after.remove(&id);
@@ -408,6 +487,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use assert2::check;
+    use crabka_units::prelude::*;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_json, method, path},
@@ -449,22 +529,63 @@ mod tests {
     }
 
     #[test]
-    fn retry_delay_is_stable_per_id_monotonic_and_capped() {
+    fn default_fetch_retry_delay_is_stable_per_id_monotonic_and_capped() {
+        let policy = SchemaFetchRetryPolicy::default();
         let id = 91;
-        let first = retry_delay(id, 1);
-        let second = retry_delay(id, 2);
-        let third = retry_delay(id, 3);
-        let before_cap = retry_delay(id, 7);
-        let capped = retry_delay(id, 8);
-        let far_beyond_cap = retry_delay(id, u32::MAX);
+        let first = retry_delay(policy, id, 1);
+        let second = retry_delay(policy, id, 2);
+        let third = retry_delay(policy, id, 3);
+        let before_cap = retry_delay(policy, id, 7);
+        let capped = retry_delay(policy, id, 8);
+        let far_beyond_cap = retry_delay(policy, id, u32::MAX);
 
         check!(first <= second);
         check!(second <= third);
-        check!(retry_delay(id, 3) == third);
+        check!(retry_delay(policy, id, 3) == third);
         check!(third <= before_cap);
         check!(before_cap <= capped);
-        check!(capped == MAX_RETRY_DELAY);
+        check!(capped == Duration::from_secs(1));
         check!(far_beyond_cap == capped);
+    }
+
+    #[test]
+    fn custom_fetch_retry_policy_controls_delay_range() {
+        let policy = SchemaFetchRetryPolicy::new(millis(25), millis(50)).unwrap();
+
+        check!(retry_delay(policy, 0, 1) == Duration::from_millis(25));
+        check!(retry_delay(policy, 0, 2) == Duration::from_millis(50));
+        check!(retry_delay(policy, 0, u32::MAX) == Duration::from_millis(50));
+    }
+
+    #[test]
+    fn fetch_retry_policy_accepts_equal_bounds() {
+        check!(SchemaFetchRetryPolicy::new(millis(25), millis(25)).is_ok());
+    }
+
+    #[test]
+    fn fetch_retry_policy_rejects_invalid_bounds() {
+        for (initial, max) in [
+            (Time::ZERO, millis(1)),
+            (millis(1), Time::ZERO),
+            (Time::from_secs_f64(f64::INFINITY), secs(1)),
+            (millis(2), millis(1)),
+        ] {
+            check!(SchemaFetchRetryPolicy::new(initial, max).is_err());
+        }
+    }
+
+    #[test]
+    fn cache_retains_fetch_retry_policy() {
+        let policy = SchemaFetchRetryPolicy::new(millis(25), millis(50)).unwrap();
+        let cache = SchemaCache::new(
+            RegistryClient::new("http://unused"),
+            CacheConfig {
+                fetch_retry_policy: policy,
+                ..CacheConfig::default()
+            },
+        );
+
+        check!(cache.fetch_retry_policy() == policy);
     }
 
     #[test]
@@ -498,6 +619,7 @@ mod tests {
             RegistryClient::new(server.uri()),
             CacheConfig {
                 mode: RegisterMode::AutoRegister,
+                ..CacheConfig::default()
             },
         );
         c.intern(
@@ -545,6 +667,7 @@ mod tests {
             RegistryClient::new(server.uri()),
             CacheConfig {
                 mode: RegisterMode::LookupOnly,
+                ..CacheConfig::default()
             },
         );
         c.intern(
@@ -596,6 +719,7 @@ mod tests {
             RegistryClient::new(server.uri()),
             CacheConfig {
                 mode: RegisterMode::UseLatest,
+                ..CacheConfig::default()
             },
         );
         c.intern(
