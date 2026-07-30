@@ -3351,6 +3351,7 @@ dependencies = [
  "crabka-metadata",
  "crabka-object-store",
  "crabka-rebalancer",
+ "crabka-schema-serde",
  "crabka-security",
  "derive_more",
  "futures",

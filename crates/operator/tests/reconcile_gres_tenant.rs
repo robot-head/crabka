@@ -826,6 +826,8 @@ async fn reconciles_topics_scram_acls_records_workload_and_status() {
         ["--registry-reader-retry-backoff", "250ms"],
         ["--registry-fetch-max-wait", "500ms"],
         ["--registry-fetch-partition-max", "1MiB"],
+        ["--schema-fetch-retry-initial-backoff", "10ms"],
+        ["--schema-fetch-retry-max-backoff", "1s"],
     ] {
         assert!(
             args.windows(2).any(|window| {

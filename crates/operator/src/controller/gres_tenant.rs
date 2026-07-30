@@ -2078,10 +2078,22 @@ fn human_millis(value: i64) -> String {
     Time::from_millis(value).human().to_string()
 }
 
-fn wal_consumer_admin_args(policy: &EffectiveGresComputePolicy) -> [String; 24] {
+fn wal_consumer_admin_args(policy: &EffectiveGresComputePolicy) -> [String; 28] {
     [
         "--fdw-broker-dns-timeout".to_owned(),
         Time::from_std(policy.fdw_broker_dns_timeout.duration())
+            .human()
+            .to_string(),
+        "--schema-fetch-retry-initial-backoff".to_owned(),
+        policy
+            .schema_fetch_retry_policy
+            .initial_backoff()
+            .human()
+            .to_string(),
+        "--schema-fetch-retry-max-backoff".to_owned(),
+        policy
+            .schema_fetch_retry_policy
+            .max_backoff()
             .human()
             .to_string(),
         "--wal-recovery-fetch-max-wait".to_owned(),
@@ -3390,6 +3402,77 @@ mod tests {
                         .expect("compute args");
                     assert!(
                         args.windows(2).filter(|window| *window == pair).count() == 1,
+                        "expected {pair:?} exactly once, got: {args:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn schema_fetch_retry_is_exact_once_in_single_and_two_range_deployments() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    bucket: None,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let compute_policy = crate::crd::gres::GresComputeSpec {
+            schema_fetch_retry_initial_backoff: Some(crabka_units::millis(37)),
+            schema_fetch_retry_max_backoff: Some(crabka_units::millis(91)),
+            ..crate::crd::gres::GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("compute policy");
+
+        for (range_control_enabled, active_ranges) in
+            [(false, &ranges[..1]), (true, &ranges[..])]
+        {
+            for range in active_ranges {
+                let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
+                let deployment = render_deployment(
+                    &obj,
+                    range,
+                    &DeploymentRenderConfig {
+                        all_ranges: active_ranges,
+                        image: "image",
+                        readiness_probe_period_seconds: 5,
+                        bootstrap: "k:9092",
+                        wal_topic: &wal_topic,
+                        config_topic: "__gres_cfg.tenant-a",
+                        policy: &crabka_gres_control::RegistryPolicy::default(),
+                        compute_policy,
+                        replicas: 1,
+                        operator_config: &operator_config,
+                        kafka_sasl: false,
+                        range_control_enabled,
+                        range_tls_hash: None,
+                    },
+                )
+                .expect("render deployment");
+                let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                    .args
+                    .clone()
+                    .expect("compute args");
+                for pair in [
+                    ["--schema-fetch-retry-initial-backoff", "37ms"],
+                    ["--schema-fetch-retry-max-backoff", "91ms"],
+                ] {
+                    assert_eq!(
+                        args.windows(2).filter(|window| *window == pair).count(),
+                        1,
                         "expected {pair:?} exactly once, got: {args:?}"
                     );
                 }

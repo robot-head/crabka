@@ -268,6 +268,18 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub fdw_broker_dns_timeout: Option<Time>,
 
+    /// Initial delay before retrying a transient Schema Registry fetch failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub schema_fetch_retry_initial_backoff: Option<Time>,
+
+    /// Maximum delay between transient Schema Registry fetch retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub schema_fetch_retry_max_backoff: Option<Time>,
+
     /// Kafka broker long-poll wait for committed-WAL recovery fetches.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(with = "crabka_units::serde_units::human::option_time")]
@@ -423,6 +435,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) durable_inspection_fold_max_records: PositiveUsize,
     pub(crate) durable_inspection_fold_max_size: ByteSize,
     pub(crate) fdw_broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
+    pub(crate) schema_fetch_retry_policy: crabka_schema_serde::SchemaFetchRetryPolicy,
     pub(crate) wal_recovery_fetch_max_wait_ms: PositiveI32,
     pub(crate) wal_recovery_fetch_partition_max: PositiveI32,
     pub(crate) wal_recovery_fetch_response_max: PositiveI32,
@@ -476,6 +489,22 @@ impl GresComputeSpec {
             "spec.compute.durableInspectionFoldMaxSize",
             durable_inspection_fold_max_size,
         )?;
+        let schema_fetch_retry_defaults =
+            crabka_schema_serde::SchemaFetchRetryPolicy::default();
+        let schema_fetch_retry_policy = crabka_schema_serde::SchemaFetchRetryPolicy::new(
+            self.schema_fetch_retry_initial_backoff
+                .unwrap_or_else(|| schema_fetch_retry_defaults.initial_backoff()),
+            self.schema_fetch_retry_max_backoff
+                .unwrap_or_else(|| schema_fetch_retry_defaults.max_backoff()),
+        )
+        .map_err(|error| {
+            let field = if error.starts_with("maximum") {
+                "schemaFetchRetryMaxBackoff"
+            } else {
+                "schemaFetchRetryInitialBackoff"
+            };
+            format!("spec.compute.{field}: {error}")
+        })?;
 
         Ok(EffectiveGresComputePolicy {
             readiness_probe_period_seconds: self.effective_readiness_probe_period_seconds()?,
@@ -534,6 +563,7 @@ impl GresComputeSpec {
                     .to_std(),
             )
             .map_err(|error| format!("spec.compute.fdwBrokerDnsTimeout: {error}"))?,
+            schema_fetch_retry_policy,
             wal_recovery_fetch_max_wait_ms: PositiveI32::new(whole_millis_i32(
                 "spec.compute.walRecoveryFetchMaxWait",
                 self.wal_recovery_fetch_max_wait
@@ -1951,6 +1981,74 @@ mod tests {
         .effective_policy()
         .expect_err("zero must fail");
         assert!(error.starts_with("spec.compute.fdwBrokerDnsTimeout:"));
+    }
+
+    #[test]
+    fn schema_fetch_retry_has_exact_schema_defaults_overrides_and_errors() {
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let compute = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"];
+        for field in [
+            "schemaFetchRetryInitialBackoff",
+            "schemaFetchRetryMaxBackoff",
+        ] {
+            assert_eq!(compute["properties"][field]["type"], "string");
+            assert!(
+                !compute["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|value| value == field))
+            );
+        }
+
+        let defaults = GresComputeSpec::default()
+            .effective_policy()
+            .expect("default policy")
+            .schema_fetch_retry_policy;
+        assert_eq!(defaults.initial_backoff(), crabka_units::millis(10));
+        assert_eq!(defaults.max_backoff(), crabka_units::secs(1));
+
+        let configured = GresComputeSpec {
+            schema_fetch_retry_initial_backoff: Some(crabka_units::millis(37)),
+            schema_fetch_retry_max_backoff: Some(crabka_units::millis(91)),
+            ..GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("configured policy")
+        .schema_fetch_retry_policy;
+        assert_eq!(configured.initial_backoff(), crabka_units::millis(37));
+        assert_eq!(configured.max_backoff(), crabka_units::millis(91));
+
+        for (initial, max, path) in [
+            (
+                Some(Time::ZERO),
+                None,
+                "spec.compute.schemaFetchRetryInitialBackoff:",
+            ),
+            (
+                None,
+                Some(Time::ZERO),
+                "spec.compute.schemaFetchRetryMaxBackoff:",
+            ),
+            (
+                Some(Time::from_secs_f64(f64::INFINITY)),
+                None,
+                "spec.compute.schemaFetchRetryInitialBackoff:",
+            ),
+            (
+                Some(crabka_units::millis(91)),
+                Some(crabka_units::millis(37)),
+                "spec.compute.schemaFetchRetryInitialBackoff:",
+            ),
+        ] {
+            let error = GresComputeSpec {
+                schema_fetch_retry_initial_backoff: initial,
+                schema_fetch_retry_max_backoff: max,
+                ..GresComputeSpec::default()
+            }
+            .effective_policy()
+            .expect_err("invalid schema fetch retry policy");
+            assert!(error.starts_with(path), "{error}");
+        }
     }
 
     #[test]

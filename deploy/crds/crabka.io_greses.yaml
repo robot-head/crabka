@@ -231,6 +231,14 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  schemaFetchRetryInitialBackoff:
+                    description: Initial delay before retrying a transient Schema Registry fetch failure.
+                    nullable: true
+                    type: string
+                  schemaFetchRetryMaxBackoff:
+                    description: Maximum delay between transient Schema Registry fetch retries.
+                    nullable: true
+                    type: string
                   walAdminConnectTimeout:
                     description: Timeout for opening WAL admin connections.
                     nullable: true
