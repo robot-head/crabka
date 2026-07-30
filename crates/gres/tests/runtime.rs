@@ -259,6 +259,8 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         wal_producer_flush_timeout: None,
         wal_producer_dns_timeout: None,
         fdw_broker_dns_timeout: None,
+        schema_fetch_retry_initial_backoff: None,
+        schema_fetch_retry_max_backoff: None,
         wal_producer_request_timeout: None,
         wal_producer_retries: None,
         wal_producer_retry_backoff: None,
@@ -451,6 +453,7 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
         &mut runtime.engine,
         Some(bootstrap),
         crabka_client_core::ClientDnsTimeout::default(),
+        crabka_gres_fdw::SchemaFetchRetryPolicy::default(),
     );
     let mut session = runtime.engine.connect();
     session

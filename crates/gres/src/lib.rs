@@ -325,6 +325,22 @@ pub struct ServeArgs {
     )]
     pub fdw_broker_dns_timeout: Option<Time>,
 
+    /// Initial delay before retrying a transient Schema Registry fetch failure.
+    #[arg(
+        long = "schema-fetch-retry-initial-backoff",
+        env = "CRABKA_GRES_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    pub schema_fetch_retry_initial_backoff: Option<Time>,
+
+    /// Maximum delay between transient Schema Registry fetch retries.
+    #[arg(
+        long = "schema-fetch-retry-max-backoff",
+        env = "CRABKA_GRES_SCHEMA_FETCH_RETRY_MAX_BACKOFF",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    pub schema_fetch_retry_max_backoff: Option<Time>,
+
     /// Timeout for WAL producer broker requests.
     #[arg(
         long = "wal-producer-request-timeout",
@@ -757,6 +773,7 @@ fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
     effective_wal_producer_flush_timeout(args)?;
     effective_wal_producer_dns_timeout(args)?;
     effective_fdw_broker_dns_timeout(args)?;
+    effective_schema_fetch_retry_policy(args)?;
     effective_wal_producer_retry_policy(args)?;
     effective_wal_producer_throughput_policy(args)?;
     Ok(())
@@ -824,6 +841,19 @@ fn effective_fdw_broker_dns_timeout(
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
+}
+
+fn effective_schema_fetch_retry_policy(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_gres_fdw::SchemaFetchRetryPolicy> {
+    let defaults = crabka_gres_fdw::SchemaFetchRetryPolicy::default();
+    crabka_gres_fdw::SchemaFetchRetryPolicy::new(
+        args.schema_fetch_retry_initial_backoff
+            .unwrap_or_else(|| defaults.initial_backoff()),
+        args.schema_fetch_retry_max_backoff
+            .unwrap_or_else(|| defaults.max_backoff()),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
 
 fn effective_wal_producer_retry_policy(
@@ -2694,6 +2724,7 @@ pub async fn serve_listener_with_tenant_config_loader(
         &mut runtime.engine,
         kafka_scanner_default_bootstrap(&effective_args),
         effective_fdw_broker_dns_timeout(&effective_args)?,
+        effective_schema_fetch_retry_policy(&effective_args)?,
     );
     let session_config = build_session_config_from_tenant(&effective_args, tenant_record.as_ref())?;
 
@@ -7721,15 +7752,18 @@ pub fn register_kafka_scanner(engine: &mut SqlEngine) {
     engine.set_foreign_scanner(Arc::new(kafka_scanner(
         None,
         crabka_client_core::ClientDnsTimeout::default(),
+        crabka_gres_fdw::SchemaFetchRetryPolicy::default(),
     )));
 }
 
 fn kafka_scanner(
     default_bootstrap: Option<String>,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
+    schema_fetch_retry_policy: crabka_gres_fdw::SchemaFetchRetryPolicy,
 ) -> crabka_gres_fdw::KafkaFdw {
     crabka_gres_fdw::KafkaFdw::with_defaults(default_bootstrap)
         .with_broker_dns_timeout(broker_dns_timeout)
+        .with_schema_fetch_retry_policy(schema_fetch_retry_policy)
 }
 
 /// Register Crabka's Kafka foreign-data scanner with an optional default bootstrap.
@@ -7737,9 +7771,13 @@ pub fn register_kafka_scanner_with_default_bootstrap(
     engine: &mut RuntimeEngine,
     default_bootstrap: Option<String>,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
+    schema_fetch_retry_policy: crabka_gres_fdw::SchemaFetchRetryPolicy,
 ) {
-    let scanner: Arc<dyn crabka_pgexec::foreign::ForeignScanner> =
-        Arc::new(kafka_scanner(default_bootstrap, broker_dns_timeout));
+    let scanner: Arc<dyn crabka_pgexec::foreign::ForeignScanner> = Arc::new(kafka_scanner(
+        default_bootstrap,
+        broker_dns_timeout,
+        schema_fetch_retry_policy,
+    ));
     match engine {
         RuntimeEngine::Single(engine) => engine.set_foreign_scanner(scanner),
         RuntimeEngine::Multi(tenant) => tenant.set_foreign_scanner(&scanner),
@@ -8857,6 +8895,8 @@ mod tests {
             wal_producer_flush_timeout: None,
             wal_producer_dns_timeout: None,
             fdw_broker_dns_timeout: None,
+            schema_fetch_retry_initial_backoff: None,
+            schema_fetch_retry_max_backoff: None,
             wal_producer_request_timeout: None,
             wal_producer_retries: None,
             wal_producer_retry_backoff: None,
@@ -10482,6 +10522,103 @@ mod tests {
     }
 
     #[test]
+    fn schema_fetch_retry_uses_default_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_SCHEMA_FETCH_RETRY_CHILD";
+        const INITIAL_ENV: &str = "CRABKA_GRES_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF";
+        const MAX_ENV: &str = "CRABKA_GRES_SCHEMA_FETCH_RETRY_MAX_BACKOFF";
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::schema_fetch_retry_uses_default_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode)
+                    .env_remove(INITIAL_ENV)
+                    .env_remove(MAX_ENV);
+                if mode == "environment" {
+                    child.env(INITIAL_ENV, "37ms").env(MAX_ENV, "91ms");
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let args = <Cli as clap::Parser>::try_parse_from(["crabka-gres"])
+            .expect("schema fetch retry defaults")
+            .serve;
+        let policy =
+            effective_schema_fetch_retry_policy(&args).expect("valid schema fetch retry policy");
+        let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            (crabka_units::millis(37), crabka_units::millis(91))
+        } else {
+            (crabka_units::millis(10), crabka_units::secs(1))
+        };
+        assert_eq!(
+            (policy.initial_backoff(), policy.max_backoff()),
+            expected
+        );
+
+        let args = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--schema-fetch-retry-initial-backoff=41ms",
+            "--schema-fetch-retry-max-backoff=97ms",
+        ])
+        .expect("CLI schema fetch retry")
+        .serve;
+        let policy =
+            effective_schema_fetch_retry_policy(&args).expect("valid CLI schema fetch retry");
+        assert_eq!(policy.initial_backoff(), crabka_units::millis(41));
+        assert_eq!(policy.max_backoff(), crabka_units::millis(97));
+    }
+
+    #[test]
+    fn schema_fetch_retry_rejects_zero_and_inverted_ranges() {
+        for flag in [
+            "--schema-fetch-retry-initial-backoff=0ms",
+            "--schema-fetch-retry-max-backoff=0ms",
+        ] {
+            Cli::try_parse_from(["crabka-gres", flag]).expect_err("zero retry bound");
+        }
+
+        let args = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--schema-fetch-retry-initial-backoff=91ms",
+            "--schema-fetch-retry-max-backoff=37ms",
+        ])
+        .expect("positive bounds")
+        .serve;
+        let error =
+            effective_schema_fetch_retry_policy(&args).expect_err("inverted retry range");
+        assert!(error.to_string().contains("91ms"));
+        assert!(error.to_string().contains("37ms"));
+    }
+
+    #[test]
+    fn schema_fetch_retry_reaches_registered_scanner() {
+        let args = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--schema-fetch-retry-initial-backoff=37ms",
+            "--schema-fetch-retry-max-backoff=91ms",
+        ])
+        .expect("substrate schema fetch retry")
+        .serve;
+        let policy =
+            effective_schema_fetch_retry_policy(&args).expect("valid schema fetch retry policy");
+        let scanner = kafka_scanner(
+            kafka_scanner_default_bootstrap(&args),
+            effective_fdw_broker_dns_timeout(&args).expect("valid FDW DNS timeout"),
+            policy,
+        );
+
+        assert_eq!(scanner.schema_fetch_retry_policy(), policy);
+    }
+
+    #[test]
     fn substrate_fdw_broker_dns_timeout_reaches_registered_scanner() {
         let args = <Cli as clap::Parser>::try_parse_from([
             "crabka-gres",
@@ -10495,6 +10632,7 @@ mod tests {
         let scanner = kafka_scanner(
             kafka_scanner_default_bootstrap(&args),
             effective_fdw_broker_dns_timeout(&args).expect("valid FDW DNS timeout"),
+            crabka_gres_fdw::SchemaFetchRetryPolicy::default(),
         );
 
         assert_eq!(scanner.default_bootstrap(), Some("memory://"));

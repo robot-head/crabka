@@ -22,6 +22,7 @@ pub mod types;
 pub use config::{ConnProfile, ServerProfile, resolve, resolve_server};
 pub use decode::{DecodedValue, Wire, decode_value};
 pub use error::KafkaFdwError;
+pub use crabka_schema_serde::SchemaFetchRetryPolicy;
 pub use source::{FetchPlan, RawRecord, plan_fetch, scan_topic, scan_topic_with_dns_timeout};
 pub use types::{
     avro_schema_to_columns, json_schema_to_columns, project, protobuf_message_to_columns,
@@ -40,6 +41,7 @@ pub use types::{
 pub struct KafkaFdw {
     default_bootstrap: Option<String>,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
+    schema_fetch_retry_policy: SchemaFetchRetryPolicy,
 }
 
 impl KafkaFdw {
@@ -49,6 +51,7 @@ impl KafkaFdw {
         Self {
             default_bootstrap,
             broker_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+            schema_fetch_retry_policy: SchemaFetchRetryPolicy::default(),
         }
     }
 
@@ -68,6 +71,19 @@ impl KafkaFdw {
         self.broker_dns_timeout
     }
 
+    /// Override the retry range for transient schema fetch failures.
+    #[must_use]
+    pub fn with_schema_fetch_retry_policy(mut self, policy: SchemaFetchRetryPolicy) -> Self {
+        self.schema_fetch_retry_policy = policy;
+        self
+    }
+
+    /// Return the retry range for transient schema fetch failures.
+    #[must_use]
+    pub fn schema_fetch_retry_policy(&self) -> SchemaFetchRetryPolicy {
+        self.schema_fetch_retry_policy
+    }
+
     /// Return the configured default bootstrap, when this scanner has one.
     #[must_use]
     pub fn default_bootstrap(&self) -> Option<&str> {
@@ -83,10 +99,16 @@ fn to_exec_err(err: &KafkaFdwError) -> ExecError {
 }
 
 /// Build a [`SchemaCache`] for one scan from the profile's registry URL.
-fn build_cache(profile: &ConnProfile) -> Arc<SchemaCache> {
+fn build_cache(
+    profile: &ConnProfile,
+    fetch_retry_policy: SchemaFetchRetryPolicy,
+) -> Arc<SchemaCache> {
     SchemaCache::new(
         RegistryClient::new(profile.registry_url.clone()),
-        CacheConfig::default(),
+        CacheConfig {
+            fetch_retry_policy,
+            ..CacheConfig::default()
+        },
     )
 }
 
@@ -109,7 +131,7 @@ impl ForeignScanner for KafkaFdw {
 
         let profile = config::resolve(server, mapping, &foreign.options, self.default_bootstrap())
             .map_err(|err| to_exec_err(&err))?;
-        let cache = build_cache(&profile);
+        let cache = build_cache(&profile, self.schema_fetch_retry_policy);
 
         // Drive the async fetch + decode on the current multi-thread runtime
         // without blocking its worker pool (`block_in_place` moves this task to
@@ -302,6 +324,29 @@ async fn fetch_value_columns(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_fetch_retry_policy_reaches_per_scan_cache() {
+        let policy = crabka_schema_serde::SchemaFetchRetryPolicy::new(
+            crabka_units::millis(37),
+            crabka_units::millis(91),
+        )
+        .unwrap();
+        let fdw = KafkaFdw::with_defaults(Some("broker:9092".into()))
+            .with_schema_fetch_retry_policy(policy);
+        assert_eq!(fdw.schema_fetch_retry_policy(), policy);
+
+        let profile = ConnProfile {
+            bootstrap: vec!["broker:9092".to_string()],
+            registry_url: "http://registry:8081".to_string(),
+            security: None,
+            topic: "orders".to_string(),
+            value_format: Wire::Raw,
+            key_format: Wire::Raw,
+        };
+        let cache = build_cache(&profile, policy);
+        assert_eq!(cache.fetch_retry_policy(), policy);
+    }
 
     #[test]
     fn fdw_carries_typed_broker_dns_timeout() {
