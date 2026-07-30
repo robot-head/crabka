@@ -5,6 +5,7 @@
 use std::{collections::BTreeMap, net::IpAddr};
 
 use crabka_security::{ListenerProtocol, SaslMechanism, ca::SubjectAltName};
+use crabka_units::fmt::Human as _;
 use k8s_openapi::api::{
     core::v1::{Node, Service},
     networking::v1::Ingress,
@@ -3139,6 +3140,24 @@ fn render_remote_storage(
                 if let Some(rf) = t.replication {
                     let _ = writeln!(out, "replication = {rf}");
                 }
+                if let Some(value) = t.topic_create_timeout {
+                    let _ = writeln!(out, "topic_create_timeout = \"{}\"", value.human());
+                }
+                if let Some(value) = t.fetch_max_wait {
+                    let _ = writeln!(out, "fetch_max_wait = \"{}\"", value.human());
+                }
+                if let Some(value) = t.fetch_max_bytes {
+                    let _ = writeln!(out, "fetch_max_bytes = \"{}\"", value.human());
+                }
+                if let Some(value) = t.fetch_retry_backoff {
+                    let _ = writeln!(out, "fetch_retry_backoff = \"{}\"", value.human());
+                }
+                if let Some(value) = t.event_queue_capacity {
+                    let _ = writeln!(out, "event_queue_capacity = {value}");
+                }
+                if let Some(value) = t.snapshot_interval {
+                    let _ = writeln!(out, "snapshot_interval = \"{}\"", value.human());
+                }
             }
         }
         out.push('\n');
@@ -4111,6 +4130,12 @@ mod toml_rendering_tests {
                     bootstrap: "127.0.0.1:9094".into(),
                     num_partitions: Some(8),
                     replication: Some(1),
+                    topic_create_timeout: Some(crabka_units::secs(45)),
+                    fetch_max_wait: Some(crabka_units::millis(750)),
+                    fetch_max_bytes: Some(crabka_units::mebibytes(2)),
+                    fetch_retry_backoff: Some(crabka_units::millis(300)),
+                    event_queue_capacity: Some(2048),
+                    snapshot_interval: Some(crabka_units::secs(90)),
                 }),
             }),
             persistence: None,
@@ -4127,6 +4152,12 @@ mod toml_rendering_tests {
             "bootstrap = \"127.0.0.1:9094\"",
             "num_partitions = 8",
             "replication = 1",
+            "topic_create_timeout = \"45s\"",
+            "fetch_max_wait = \"750ms\"",
+            "fetch_max_bytes = \"2MiB\"",
+            "fetch_retry_backoff = \"300ms\"",
+            "event_queue_capacity = 2048",
+            "snapshot_interval = \"1.5m\"",
         ] {
             assert!(t.contains(needle), "needle {needle:?} missing, got:\n{t}");
         }
@@ -4135,12 +4166,32 @@ mod toml_rendering_tests {
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
         let km = parsed
             .remote_storage
+            .as_ref()
             .expect("[remote_storage] round-trips")
             .kafka_metadata
+            .as_ref()
             .expect("kafka_metadata round-trips");
         check!(km.bootstrap == "127.0.0.1:9094");
         check!(km.num_partitions == Some(8));
         check!(km.replication == Some(1));
+        check!(km.topic_create_timeout == Some(crabka_units::secs(45)));
+        check!(km.fetch_max_wait == Some(crabka_units::millis(750)));
+        check!(km.fetch_max_bytes == Some(crabka_units::mebibytes(2)));
+        check!(km.fetch_retry_backoff == Some(crabka_units::millis(300)));
+        check!(km.event_queue_capacity == Some(2048));
+        check!(km.snapshot_interval == Some(crabka_units::secs(90)));
+
+        let mut broker = crabka_broker::BrokerConfig::default();
+        parsed.apply_to(&mut broker).expect("apply rendered TOML");
+        let crabka_broker::RlmmKind::TopicBacked(policy) = broker.remote_log_metadata else {
+            panic!("rendered policy must select topic-backed RLMM");
+        };
+        check!(policy.topic_create_timeout == crabka_units::secs(45));
+        check!(policy.fetch_max_wait == crabka_units::millis(750));
+        check!(policy.fetch_max_bytes == crabka_units::mebibytes(2));
+        check!(policy.fetch_retry_backoff == crabka_units::millis(300));
+        check!(policy.event_queue_capacity.capacity() == 2048);
+        check!(policy.snapshot_interval == crabka_units::secs(90));
     }
 
     #[test]

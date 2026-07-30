@@ -1243,6 +1243,24 @@ spec:
                               publishing / consuming `__remote_log_metadata`. Typically the
                               pod's loopback inter-broker listener (e.g. `127.0.0.1:9094`).
                             type: string
+                          eventQueueCapacity:
+                            description: Capacity of the shared metadata-event delivery queue.
+                            format: uint
+                            minimum: 1.0
+                            nullable: true
+                            type: integer
+                          fetchMaxBytes:
+                            description: Maximum bytes returned by each per-partition metadata fetch.
+                            nullable: true
+                            type: string
+                          fetchMaxWait:
+                            description: Maximum wait for each per-partition metadata fetch.
+                            nullable: true
+                            type: string
+                          fetchRetryBackoff:
+                            description: Backoff after a failed metadata fetch.
+                            nullable: true
+                            type: string
                           numPartitions:
                             description: |-
                               Partition count for `__remote_log_metadata` on first creation.
@@ -1259,6 +1277,14 @@ spec:
                             format: int32
                             nullable: true
                             type: integer
+                          snapshotInterval:
+                            description: RLMM cache snapshot cadence.
+                            nullable: true
+                            type: string
+                          topicCreateTimeout:
+                            description: Timeout for provisioning each internal metadata topic.
+                            nullable: true
+                            type: string
                         required:
                         - bootstrap
                         type: object

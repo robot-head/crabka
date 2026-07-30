@@ -882,7 +882,7 @@ pub struct Krb5ConfSecretRef {
 /// without `spec.s3`, `type = "Gcs"` without `spec.gcs`, or
 /// `type = "Local"` with `spec.s3` / `spec.gcs` set — are rejected by the
 /// operator reconciler with a `TieredStorageInvalid` status condition.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TieredStorage {
     /// Backend kind selector.
@@ -1160,7 +1160,7 @@ impl TieredStorage {
 /// `RemoteLogMetadataManager` the broker pods use. Defaults to topic-backed
 /// (`type: Topic`)
 /// when this field is omitted.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MetadataManagerSpec {
     /// Implementation selector.
@@ -1213,7 +1213,7 @@ pub enum MetadataManagerType {
 
 /// KIP-405: topic-backed RLMM tuning. Renders into the
 /// broker TOML's `[remote_storage.kafka_metadata]` block.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TopicMetadataManagerSpec {
     /// `host:port` the broker pod dials to reach its own listener for
@@ -1230,6 +1230,35 @@ pub struct TopicMetadataManagerSpec {
     /// `remote.log.metadata.topic.replication.factor`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replication: Option<i32>,
+    /// Timeout for provisioning each internal metadata topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub topic_create_timeout: Option<Time>,
+    /// Maximum wait for each per-partition metadata fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_max_wait: Option<Time>,
+    /// Maximum bytes returned by each per-partition metadata fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_max_bytes: Option<ByteSize>,
+    /// Backoff after a failed metadata fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_retry_backoff: Option<Time>,
+    /// Capacity of the shared metadata-event delivery queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub event_queue_capacity: Option<usize>,
+    /// RLMM cache snapshot cadence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub snapshot_interval: Option<Time>,
 }
 
 impl TopicMetadataManagerSpec {
@@ -1257,7 +1286,34 @@ impl TopicMetadataManagerSpec {
                 "metadataManager.topic.replication must be > 0 (got {r})"
             ));
         }
-        Ok(())
+        let defaults = crabka_broker::KafkaRlmmConfig::default();
+        let mut policy = crabka_broker::KafkaRlmmConfig {
+            bootstrap: self.bootstrap.clone(),
+            num_partitions: self
+                .num_partitions
+                .unwrap_or(defaults.num_partitions),
+            replication: self
+                .replication
+                .unwrap_or(defaults.replication),
+            ..defaults
+        };
+        policy.topic_create_timeout = self
+            .topic_create_timeout
+            .unwrap_or(policy.topic_create_timeout);
+        policy.fetch_max_wait = self.fetch_max_wait.unwrap_or(policy.fetch_max_wait);
+        policy.fetch_max_bytes = self.fetch_max_bytes.unwrap_or(policy.fetch_max_bytes);
+        policy.fetch_retry_backoff = self
+            .fetch_retry_backoff
+            .unwrap_or(policy.fetch_retry_backoff);
+        if let Some(capacity) = self.event_queue_capacity {
+            refined_type::rule::GreaterUsize::<0>::new(capacity).map_err(|error| {
+                format!("metadataManager.topic.event_queue_capacity: {error}")
+            })?;
+        }
+        policy.snapshot_interval = self.snapshot_interval.unwrap_or(policy.snapshot_interval);
+        policy
+            .validate()
+            .map_err(|error| format!("metadataManager.topic: {error}"))
     }
 }
 
@@ -2540,6 +2596,7 @@ authorization:
                     bootstrap: "127.0.0.1:9092".into(),
                     num_partitions: None,
                     replication: None,
+                    ..Default::default()
                 }),
             }),
             persistence: None,
@@ -2577,6 +2634,7 @@ authorization:
                     bootstrap: "  ".into(),
                     num_partitions: None,
                     replication: None,
+                    ..Default::default()
                 }),
             }),
             persistence: None,
@@ -2597,6 +2655,7 @@ authorization:
                     bootstrap: "127.0.0.1:9094".into(),
                     num_partitions: Some(0),
                     replication: None,
+                    ..Default::default()
                 }),
             }),
             persistence: None,
@@ -2617,11 +2676,114 @@ authorization:
                     bootstrap: "127.0.0.1:9094".into(),
                     num_partitions: None,
                     replication: None,
+                    ..Default::default()
                 }),
             }),
             persistence: None,
         };
         assert!(ts.validate().is_ok());
+    }
+
+    #[test]
+    fn topic_metadata_policy_round_trips_with_human_units() {
+        let value = serde_json::json!({
+            "bootstrap": "127.0.0.1:9094",
+            "numPartitions": 8,
+            "replication": 1,
+            "topicCreateTimeout": "45s",
+            "fetchMaxWait": "750ms",
+            "fetchMaxBytes": "2MiB",
+            "fetchRetryBackoff": "300ms",
+            "eventQueueCapacity": 2048,
+            "snapshotInterval": "1.5m"
+        });
+        let policy: TopicMetadataManagerSpec =
+            serde_json::from_value(value.clone()).expect("deserialize metadata policy");
+
+        check!(policy.topic_create_timeout == Some(crabka_units::secs(45)));
+        check!(policy.fetch_max_wait == Some(crabka_units::millis(750)));
+        check!(policy.fetch_max_bytes == Some(crabka_units::mebibytes(2)));
+        check!(policy.fetch_retry_backoff == Some(crabka_units::millis(300)));
+        check!(policy.event_queue_capacity == Some(2048));
+        check!(policy.snapshot_interval == Some(crabka_units::secs(90)));
+        policy.validate().unwrap();
+        assert!(serde_json::to_value(policy).unwrap() == value);
+    }
+
+    #[test]
+    fn topic_metadata_policy_rejects_invalid_runtime_values() {
+        for (field, policy) in [
+            (
+                "topic_create_timeout",
+                TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9094".into(),
+                    topic_create_timeout: Some(Time::ZERO),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fetch_max_bytes",
+                TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9094".into(),
+                    fetch_max_bytes: Some(ByteSize::ZERO),
+                    ..Default::default()
+                },
+            ),
+            (
+                "event_queue_capacity",
+                TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9094".into(),
+                    event_queue_capacity: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "snapshot_interval",
+                TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9094".into(),
+                    snapshot_interval: Some(Time::ZERO),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let error = policy.validate().expect_err("invalid policy must fail");
+            assert!(error.contains(field), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn topic_metadata_policy_schema_has_units_and_capacity_bound() {
+        let crd = serde_json::to_value(Kafka::crd()).expect("serialize Kafka CRD");
+        let topic = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["tieredStorage"]["properties"]["metadataManager"]["properties"]["topic"];
+
+        for field in [
+            "topicCreateTimeout",
+            "fetchMaxWait",
+            "fetchMaxBytes",
+            "fetchRetryBackoff",
+            "snapshotInterval",
+        ] {
+            assert!(topic["properties"][field]["type"] == "string", "{field}");
+        }
+        assert!(topic["properties"]["eventQueueCapacity"]["type"] == "integer");
+        assert!(
+            topic["properties"]["eventQueueCapacity"]["minimum"].as_f64() == Some(1.0)
+        );
+        let required = topic["required"].as_array().expect("topic required fields");
+        for optional in [
+            "topicCreateTimeout",
+            "fetchMaxWait",
+            "fetchMaxBytes",
+            "fetchRetryBackoff",
+            "eventQueueCapacity",
+            "snapshotInterval",
+        ] {
+            assert!(
+                !required.iter().any(|field| field == optional),
+                "{optional} must remain optional"
+            );
+        }
     }
 
     #[test]
