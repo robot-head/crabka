@@ -11,13 +11,16 @@ one of the affected deployed processes.
 This slice covers only operator-rendered workloads:
 
 - broker pods owned by `KafkaNodePool`;
-- the Gres registry process owned by `Kafka.spec.gresRegistry`;
+- the shared Gres registry reader policy owned by
+  `Kafka.spec.gresRegistry`;
+- Gres activator processes owned by `Gres.spec.activator`;
 - Gres compute processes owned by `Gres.spec.compute`;
 - gateway pods owned by `KafkaGrpcGateway`; and
 - registry pods owned by `SchemaRegistry`.
 
 Standalone processes without an owning CRD keep their existing CLI and
-environment surfaces. The operator's own cached admin clients remain
+environment surfaces. The Gres activator adds the three inputs required to
+consume its owning CRD policy. The operator's own cached admin clients remain
 process-configured because one operator instance serves many clusters.
 
 ## CRD Shape
@@ -28,7 +31,8 @@ introduce a shared flattened CRD type.
 | Owner | Fields |
 |---|---|
 | `KafkaNodePool.spec` | `clientDispatchQueueCapacity`, `clientFrameMax` |
-| `Kafka.spec.gresRegistry` | `clientDispatchQueueCapacity`, `clientFrameMax`, `readerFetchMin` |
+| `Kafka.spec.gresRegistry` | `readerFetchMin` |
+| `Gres.spec.activator` | `clientDispatchQueueCapacity`, `clientFrameMax` |
 | `Gres.spec.compute` | `clientDispatchQueueCapacity`, `clientFrameMax`, `fdwFetchMin`, `walRecoveryFetchMin` |
 | `KafkaGrpcGateway.spec.tuning` | `clientDispatchQueueCapacity`, `clientFrameMax` |
 | `SchemaRegistry.spec.runtime` | `clientDispatchQueueCapacity`, `clientFrameMax` |
@@ -41,6 +45,19 @@ human UOM serializer, and appear as strings in generated OpenAPI schemas.
 Omission preserves the process's current binary default. Setting only one
 member of the queue/frame pair overrides only that member; the other retains
 its binary default.
+
+`Kafka.spec.gresRegistry` is consumed by both activator and compute processes,
+so it must not own process-wide queue/frame values. Each process gets that pair
+from its own `Gres` workload policy, while the registry reader fetch minimum
+remains shared registry-topic policy.
+
+The activator binary gains the missing standalone
+`--client-dispatch-queue-capacity` /
+`CRABKA_GRES_ACTIVATOR_CLIENT_DISPATCH_QUEUE_CAPACITY`,
+`--client-frame-max` / `CRABKA_GRES_ACTIVATOR_CLIENT_FRAME_MAX`, and
+`--registry-reader-fetch-min` /
+`CRABKA_GRES_REGISTRY_READER_FETCH_MIN` inputs. This is required for its CRD
+owner to render the same validated settings; it is not a separate policy.
 
 ## Validation
 
@@ -78,6 +95,11 @@ Role-specific Gres values are never rendered into a process mode that rejects
 them. A configured field that has no consuming compute role is rejected during
 effective-policy validation rather than silently ignored.
 
+The registry reader fetch minimum is rendered to both activator and compute
+processes because both construct a registry reader. Activator queue/frame
+values come only from `Gres.spec.activator`; compute queue/frame values come
+only from `Gres.spec.compute`.
+
 ## Compatibility and Failure Behavior
 
 Existing CRs remain valid because every new field is optional. An omitted field
@@ -99,6 +121,7 @@ Each owner requires focused tests proving:
   minima are rejected before rendering;
 - each configured value appears exactly once in the rendered container;
 - Gres role restrictions and both single- and multi-range paths are correct;
+  activator defaults, environment parsing, and CLI precedence are covered;
   and
 - generated CRDs are deterministic and match `deploy/crds`.
 
