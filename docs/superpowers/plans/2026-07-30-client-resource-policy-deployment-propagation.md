@@ -265,7 +265,7 @@ rg -n 'Client::builder\(|Producer::builder\(|ConnectionOptions \{|IsolatedFetch 
   - fixed protocol/test behavior documented in the audit.
 - [x] Update `docs/configuration-audit.md` with exact CLI/environment names and
   remaining CRD-only work.
-- [ ] Run:
+- [x] Run:
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -277,7 +277,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 git diff --check
 ```
 
-- [ ] Run affected package all-target tests after the final formatting pass.
+- [x] Run affected package all-target tests after the final formatting pass.
 - [ ] Commit the audit:
 
 ```bash
