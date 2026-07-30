@@ -419,6 +419,11 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
     produce_raw_fixture(&bootstrap, "g6-runtime-events", b"substrate-fdw").await;
 
     let mut runtime = crabka_gres::open_substrate_runtime(&crabka_gres::SubstrateRuntimeConfig {
+        client_dispatch_queue_capacity:
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        client_frame_max: crabka_client_core::ClientFrameMax::default(),
+        fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+        wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
         bootstrap: bootstrap.clone(),
         tenant: "g6-runtime".to_string(),
         cache_dir: None,
@@ -496,6 +501,11 @@ async fn live_multirange_substrate_hlc_mode_commits_and_mints_wall_anchored_stam
 
     let before_ms = crabka_pgexec::SystemWallClock.now_ms();
     let runtime = crabka_gres::open_substrate_runtime(&crabka_gres::SubstrateRuntimeConfig {
+        client_dispatch_queue_capacity:
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        client_frame_max: crabka_client_core::ClientFrameMax::default(),
+        fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+        wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
         bootstrap,
         tenant: "g6-hlc-runtime".to_string(),
         cache_dir: None,
@@ -659,6 +669,11 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
     let checkpoint_dir = tempfile::tempdir().expect("checkpoint tempdir");
     let tenant = "runtime-transfer";
     let runtime = crabka_gres::open_substrate_runtime(&crabka_gres::SubstrateRuntimeConfig {
+        client_dispatch_queue_capacity:
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        client_frame_max: crabka_client_core::ClientFrameMax::default(),
+        fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+        wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
         bootstrap: broker.listen_addr().to_string(),
         tenant: tenant.to_string(),
         cache_dir: None,
@@ -1029,6 +1044,11 @@ fn activation_crash_config(
     checkpoint_root: PathBuf,
 ) -> crabka_gres::SubstrateRuntimeConfig {
     crabka_gres::SubstrateRuntimeConfig {
+        client_dispatch_queue_capacity:
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        client_frame_max: crabka_client_core::ClientFrameMax::default(),
+        fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+        wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
         bootstrap,
         tenant,
         cache_dir: None,
@@ -2590,6 +2610,11 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         .expect("broker start");
     let checkpoint_dir = tempfile::tempdir().expect("checkpoint tempdir");
     let runtime = crabka_gres::open_substrate_runtime(&crabka_gres::SubstrateRuntimeConfig {
+        client_dispatch_queue_capacity:
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        client_frame_max: crabka_client_core::ClientFrameMax::default(),
+        fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+        wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
         bootstrap: broker.listen_addr().to_string(),
         tenant: "runtime-physical-t10".to_string(),
         cache_dir: None,
@@ -2770,6 +2795,11 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
         .expect("broker start");
     let checkpoint_dir = tempfile::tempdir().expect("checkpoint tempdir");
     let runtime = crabka_gres::open_substrate_runtime(&crabka_gres::SubstrateRuntimeConfig {
+        client_dispatch_queue_capacity:
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        client_frame_max: crabka_client_core::ClientFrameMax::default(),
+        fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+        wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
         bootstrap: broker.listen_addr().to_string(),
         tenant: "runtime-transfer-pause".to_string(),
         cache_dir: None,
@@ -2859,6 +2889,11 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
 async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
     let _permit = broker_test_permit().await;
     let single = crabka_gres::open_substrate_runtime(&crabka_gres::SubstrateRuntimeConfig {
+        client_dispatch_queue_capacity:
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        client_frame_max: crabka_client_core::ClientFrameMax::default(),
+        fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+        wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
         bootstrap: "memory://".to_string(),
         tenant: "runtime-transfer".to_string(),
         cache_dir: None,
@@ -2892,6 +2927,11 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
     let multi = crabka_gres::open_substrate_runtime(&crabka_gres::SubstrateRuntimeConfig {
         ranges: Some("0,100".to_string()),
         ..crabka_gres::SubstrateRuntimeConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
+            fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+            wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
             bootstrap: "memory://".to_string(),
             tenant: "runtime-transfer".to_string(),
             cache_dir: None,
