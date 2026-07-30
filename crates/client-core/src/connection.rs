@@ -181,6 +181,8 @@ pub struct ConnectionOptions {
     pub dns_timeout: ClientDnsTimeout,
     pub connect_timeout: Time,
     pub request_timeout: Time,
+    pub dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    pub frame_max: ClientFrameMax,
     /// Client-side TLS/SASL policy. `None` = plaintext (default).
     ///
     /// Boxed so `ConnectionOptions` stays small: it is cloned widely and
@@ -197,6 +199,8 @@ impl Default for ConnectionOptions {
             dns_timeout: ClientDnsTimeout::default(),
             connect_timeout: DEFAULT_CLIENT_CONNECT_TIMEOUT,
             request_timeout: DEFAULT_CLIENT_REQUEST_TIMEOUT,
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::default(),
+            frame_max: ClientFrameMax::default(),
             security: None,
         }
     }
@@ -353,12 +357,19 @@ impl Connection {
         stream: Box<dyn ClientDuplex>,
         options: ConnectionOptions,
     ) -> Result<Self, ClientError> {
-        let (writer_tx, writer_rx) = mpsc::channel::<DispatchItem>(64);
+        let (writer_tx, writer_rx) =
+            mpsc::channel::<DispatchItem>(options.dispatch_queue_capacity.get());
         let shutdown = CancellationToken::new();
         let pending: Pending = Arc::new(DashMap::new());
 
         let (reader_handle, writer_handle) =
-            spawn_io_tasks(stream, writer_rx, shutdown.clone(), Arc::clone(&pending));
+            spawn_io_tasks(
+                stream,
+                writer_rx,
+                shutdown.clone(),
+                Arc::clone(&pending),
+                options.frame_max,
+            );
 
         let mut conn = Self {
             inner: Arc::new(ConnectionInner {
@@ -569,13 +580,16 @@ fn spawn_io_tasks(
     mut writer_rx: mpsc::Receiver<DispatchItem>,
     shutdown: CancellationToken,
     pending: Pending,
+    frame_max: ClientFrameMax,
 ) -> (JoinHandle<()>, JoinHandle<()>) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_util::codec::{FramedRead, FramedWrite};
 
     let (read_half, write_half) = tokio::io::split(stream);
-    let mut framed_read = FramedRead::new(read_half, crate::transport::codec());
-    let mut framed_write = FramedWrite::new(write_half, crate::transport::codec());
+    let mut framed_read =
+        FramedRead::new(read_half, crate::transport::codec_with_max(frame_max));
+    let mut framed_write =
+        FramedWrite::new(write_half, crate::transport::codec_with_max(frame_max));
 
     // WRITER: drains the dispatch channel, flushing each frame in receive
     // order. Owns only the write half, so a not-yet-writable socket can never

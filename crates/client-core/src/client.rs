@@ -7,7 +7,9 @@ use crabka_units::Time;
 
 use crate::{
     bootstrap,
-    connection::{ClientDnsTimeout, ConnectionOptions},
+    connection::{
+        ClientDnsTimeout, ClientFrameMax, ConnectionDispatchQueueCapacity, ConnectionOptions,
+    },
     error::ClientError,
     pool::{BrokerInfo, BrokerPool},
     request::ProtocolRequest,
@@ -44,14 +46,23 @@ impl Client {
         #[builder(default = crate::DEFAULT_CLIENT_DNS_TIMEOUT)] dns_timeout: Time,
         #[builder(default = crate::DEFAULT_CLIENT_CONNECT_TIMEOUT)] connect_timeout: Time,
         #[builder(default = crate::DEFAULT_CLIENT_REQUEST_TIMEOUT)] request_timeout: Time,
+        #[builder(default = crate::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY)]
+        dispatch_queue_capacity: usize,
+        #[builder(default = crate::DEFAULT_CLIENT_FRAME_MAX)] frame_max: crabka_units::ByteSize,
         security: Option<crate::security::ClientSecurity>,
     ) -> Result<Self, ClientError> {
         let dns_timeout = ClientDnsTimeout::new(dns_timeout).map_err(ClientError::InvalidConfig)?;
+        let dispatch_queue_capacity = ConnectionDispatchQueueCapacity::new(dispatch_queue_capacity)
+            .map_err(ClientError::InvalidConfig)?;
+        let frame_max =
+            ClientFrameMax::try_from(frame_max).map_err(ClientError::InvalidConfig)?;
         let options = ConnectionOptions {
             client_id,
             dns_timeout,
             connect_timeout,
             request_timeout,
+            dispatch_queue_capacity,
+            frame_max,
             security: security.map(Box::new),
         };
         Self::start_with_options(bootstrap, options).await
@@ -364,7 +375,7 @@ mod bootstrap_failover_tests {
             },
         },
     };
-    use crabka_units::millis;
+    use crabka_units::{bytes, mebibytes, millis};
 
     use super::*;
     use crate::mock::MockBroker;
@@ -377,6 +388,29 @@ mod bootstrap_failover_tests {
             .build()
             .await;
         assert2::assert!(matches!(result, Err(ClientError::InvalidConfig(_))));
+    }
+
+    #[tokio::test]
+    async fn invalid_connection_resource_policy_fails_before_resolution() {
+        let queue_result = Client::builder()
+            .bootstrap("unused.invalid:9092")
+            .dispatch_queue_capacity(0)
+            .build()
+            .await;
+        let Err(queue_error) = queue_result else {
+            panic!("zero queue capacity must fail");
+        };
+        assert2::assert!(queue_error.to_string().contains("dispatch queue capacity"));
+
+        let frame_result = Client::builder()
+            .bootstrap("unused.invalid:9092")
+            .frame_max(mebibytes(100) + bytes(1))
+            .build()
+            .await;
+        let Err(frame_error) = frame_result else {
+            panic!("frame limit above fixed ceiling must fail");
+        };
+        assert2::assert!(frame_error.to_string().contains("client frame max"));
     }
 
     fn api_versions_v0() -> Vec<u8> {
