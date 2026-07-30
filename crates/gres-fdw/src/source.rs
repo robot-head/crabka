@@ -190,14 +190,41 @@ pub async fn scan_topic_with_dns_timeout(
     bounds: &ScanBounds,
     dns_timeout: crabka_client_core::ClientDnsTimeout,
 ) -> Result<Vec<RawRecord>, KafkaFdwError> {
+    scan_topic_with_policy(
+        profile,
+        topic,
+        bounds,
+        dns_timeout,
+        crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        crabka_client_core::ClientFrameMax::default(),
+        crabka_client_core::FetchMinBytes::default(),
+    )
+    .await
+}
+
+pub(crate) async fn scan_topic_with_policy(
+    profile: &ConnProfile,
+    topic: &str,
+    bounds: &ScanBounds,
+    dns_timeout: crabka_client_core::ClientDnsTimeout,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
+    fetch_min: crabka_client_core::FetchMinBytes,
+) -> Result<Vec<RawRecord>, KafkaFdwError> {
     // Step 1: ensure the rustcrypto TLS provider is installed.
     crate::provider::install_default_provider();
 
     // Step 2: resolve partition metadata.
-    let mut admin = AdminClient::connect_secured_with_dns_timeout(
+    let mut admin = AdminClient::connect_with_options(
         &profile.bootstrap,
-        profile.security.clone(),
-        dns_timeout,
+        crabka_client_core::ConnectionOptions {
+            client_id: "crabka-fdw".into(),
+            dns_timeout,
+            dispatch_queue_capacity,
+            frame_max,
+            security: profile.security.clone().map(Box::new),
+            ..crabka_client_core::ConnectionOptions::default()
+        },
     )
     .await
     .map_err(|e| KafkaFdwError::Other(format!("admin connect: {e}")))?;
@@ -255,7 +282,7 @@ pub async fn scan_topic_with_dns_timeout(
     }
 
     // Step 3: open ONE connection and reuse it for ListOffsets + Fetch.
-    let conn = open_connection(profile, dns_timeout).await?;
+    let conn = open_connection(profile, dns_timeout, dispatch_queue_capacity, frame_max).await?;
 
     // Step 4: ListOffsets — batch earliest + HWM for all partitions in one RPC.
     let list_offsets_req_earliest = ListOffsetsRequest {
@@ -373,7 +400,7 @@ pub async fn scan_topic_with_dns_timeout(
                     max_wait,
                     max: DEFAULT_FETCH_RESPONSE_MAX,
                     partition_max,
-                    fetch_min: crabka_client_core::FetchMinBytes::default(),
+                    fetch_min,
                     isolation_level: READ_COMMITTED,
                 },
             )
@@ -460,6 +487,8 @@ where
 async fn open_connection(
     profile: &ConnProfile,
     dns_timeout: crabka_client_core::ClientDnsTimeout,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
 ) -> Result<Connection, KafkaFdwError> {
     let host_port = profile.bootstrap.first().ok_or_else(|| {
         KafkaFdwError::Config("no bootstrap address in connection profile".to_string())
@@ -467,17 +496,26 @@ async fn open_connection(
 
     let addr = lookup_first(host_port, dns_timeout, tokio::net::lookup_host(host_port)).await?;
 
-    crabka_client_core::Connection::connect_with_options(addr, connection_options(profile))
-        .await
-        .map_err(|e| KafkaFdwError::Other(format!("connect to {host_port}: {e}")))
+    crabka_client_core::Connection::connect_with_options(
+        addr,
+        connection_options(profile, dispatch_queue_capacity, frame_max),
+    )
+    .await
+    .map_err(|e| KafkaFdwError::Other(format!("connect to {host_port}: {e}")))
 }
 
 /// The scan connection's knobs.
-fn connection_options(profile: &ConnProfile) -> crabka_client_core::ConnectionOptions {
+fn connection_options(
+    profile: &ConnProfile,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
+) -> crabka_client_core::ConnectionOptions {
     crabka_client_core::ConnectionOptions {
         client_id: "crabka-fdw".to_string(),
         connect_timeout: CONNECT_TIMEOUT,
         request_timeout: REQUEST_TIMEOUT,
+        dispatch_queue_capacity,
+        frame_max,
         security: profile.security.clone().map(Box::new),
         ..crabka_client_core::ConnectionOptions::default()
     }
@@ -613,7 +651,7 @@ mod tests {
     /// The connection deadlines reach `crabka-client-core` as the durations the
     /// quantities name.
     #[test]
-    fn connection_options_carry_the_configured_deadlines() {
+    fn connection_options_carry_the_configured_policy() {
         let profile = ConnProfile {
             bootstrap: vec!["b:9092".into()],
             registry_url: String::new(),
@@ -623,9 +661,15 @@ mod tests {
             key_format: crate::decode::Wire::Raw,
         };
 
-        let options = connection_options(&profile);
+        let dispatch =
+            crabka_client_core::ConnectionDispatchQueueCapacity::new(7).expect("positive");
+        let frame_max = crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32))
+            .expect("valid frame max");
+        let options = connection_options(&profile, dispatch, frame_max);
 
         assert!((options.connect_timeout, options.request_timeout) == (secs(10), secs(30)));
+        assert!(options.dispatch_queue_capacity == dispatch);
+        assert!(options.frame_max == frame_max);
     }
 
     #[tokio::test(start_paused = true)]

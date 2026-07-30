@@ -41,6 +41,9 @@ pub use types::{
 pub struct KafkaFdw {
     default_bootstrap: Option<String>,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
+    fetch_min: crabka_client_core::FetchMinBytes,
     schema_fetch_retry_policy: SchemaFetchRetryPolicy,
 }
 
@@ -51,6 +54,9 @@ impl KafkaFdw {
         Self {
             default_bootstrap,
             broker_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+            dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            frame_max: crabka_client_core::ClientFrameMax::default(),
+            fetch_min: crabka_client_core::FetchMinBytes::default(),
             schema_fetch_retry_policy: SchemaFetchRetryPolicy::default(),
         }
     }
@@ -69,6 +75,20 @@ impl KafkaFdw {
     #[must_use]
     pub fn broker_dns_timeout(&self) -> crabka_client_core::ClientDnsTimeout {
         self.broker_dns_timeout
+    }
+
+    /// Override client connection and fetch resource policy.
+    #[must_use]
+    pub fn with_client_resource_policy(
+        mut self,
+        dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+        frame_max: crabka_client_core::ClientFrameMax,
+        fetch_min: crabka_client_core::FetchMinBytes,
+    ) -> Self {
+        self.dispatch_queue_capacity = dispatch_queue_capacity;
+        self.frame_max = frame_max;
+        self.fetch_min = fetch_min;
+        self
     }
 
     /// Override the retry range for transient schema fetch failures.
@@ -138,11 +158,14 @@ impl ForeignScanner for KafkaFdw {
         // a blocking thread).
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let raws = source::scan_topic_with_dns_timeout(
+                let raws = source::scan_topic_with_policy(
                     &profile,
                     &profile.topic,
                     bounds,
                     self.broker_dns_timeout,
+                    self.dispatch_queue_capacity,
+                    self.frame_max,
+                    self.fetch_min,
                 )
                 .await
                 .map_err(|err| to_exec_err(&err))?;
@@ -173,13 +196,19 @@ impl ForeignScanner for KafkaFdw {
             tokio::runtime::Handle::current().block_on(async {
                 // Enumerate every topic via the admin metadata RPC (empty topic
                 // list = all topics, per Kafka semantics).
-                let mut admin = AdminClient::connect_secured_with_dns_timeout(
-                    &profile.bootstrap,
-                    profile.security.clone(),
-                    self.broker_dns_timeout,
-                )
-                .await
-                .map_err(|e| ExecError::Unsupported(format!("import: admin connect: {e}")))?;
+                let mut options = crabka_client_core::ConnectionOptions {
+                    client_id: "crabka-fdw".into(),
+                    dns_timeout: self.broker_dns_timeout,
+                    dispatch_queue_capacity: self.dispatch_queue_capacity,
+                    frame_max: self.frame_max,
+                    security: profile.security.clone().map(Box::new),
+                    ..crabka_client_core::ConnectionOptions::default()
+                };
+                options.connect_timeout = crabka_units::secs(5);
+                options.request_timeout = crabka_units::secs(30);
+                let mut admin = AdminClient::connect_with_options(&profile.bootstrap, options)
+                    .await
+                    .map_err(|e| ExecError::Unsupported(format!("import: admin connect: {e}")))?;
                 let meta = admin.metadata(&[]).await.map_err(|e| {
                     ExecError::Unsupported(format!("import: list topics metadata: {e}"))
                 })?;
@@ -352,10 +381,20 @@ mod tests {
     fn fdw_carries_typed_broker_dns_timeout() {
         let timeout = crabka_client_core::ClientDnsTimeout::new(crabka_units::millis(37))
             .expect("positive timeout");
-        let fdw =
-            KafkaFdw::with_defaults(Some("broker:9092".into())).with_broker_dns_timeout(timeout);
+        let dispatch =
+            crabka_client_core::ConnectionDispatchQueueCapacity::new(7).expect("positive");
+        let frame_max = crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32))
+            .expect("valid frame max");
+        let fetch_min = crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(9))
+            .expect("valid fetch min");
+        let fdw = KafkaFdw::with_defaults(Some("broker:9092".into()))
+            .with_broker_dns_timeout(timeout)
+            .with_client_resource_policy(dispatch, frame_max, fetch_min);
 
         assert_eq!(fdw.default_bootstrap(), Some("broker:9092"));
         assert_eq!(fdw.broker_dns_timeout(), timeout);
+        assert_eq!(fdw.dispatch_queue_capacity, dispatch);
+        assert_eq!(fdw.frame_max, frame_max);
+        assert_eq!(fdw.fetch_min, fetch_min);
     }
 }
