@@ -12,7 +12,8 @@ use std::{
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_core::{
-    ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX, IsolatedFetch,
+    ClientDnsTimeout, ClientFrameMax, Connection, ConnectionDispatchQueueCapacity,
+    ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX, FetchMinBytes, IsolatedFetch,
     fetch_partition_with_isolation_progress,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, Transaction};
@@ -154,6 +155,9 @@ pub struct RegistryPolicy {
     fetch_partition_max: ByteSize,
     producer_dns_timeout: ClientDnsTimeout,
     reader_admin_dns_timeout: ClientDnsTimeout,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
+    reader_fetch_min: FetchMinBytes,
 }
 
 impl RegistryPolicy {
@@ -177,6 +181,9 @@ impl RegistryPolicy {
             fetch_partition_max: whole_bytes_i32("fetch_partition_max", fetch_partition_max)?,
             producer_dns_timeout: ClientDnsTimeout::default(),
             reader_admin_dns_timeout: ClientDnsTimeout::default(),
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::default(),
+            frame_max: ClientFrameMax::default(),
+            reader_fetch_min: FetchMinBytes::default(),
         })
     }
 
@@ -244,6 +251,20 @@ impl RegistryPolicy {
         self.reader_admin_dns_timeout =
             ClientDnsTimeout::new(whole_millis_i64("reader_admin_dns_timeout", timeout)?)?;
         Ok(self)
+    }
+
+    /// Override registry client connection and reader fetch policy.
+    #[must_use]
+    pub fn with_client_resource_policy(
+        mut self,
+        dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+        frame_max: ClientFrameMax,
+        reader_fetch_min: FetchMinBytes,
+    ) -> Self {
+        self.dispatch_queue_capacity = dispatch_queue_capacity;
+        self.frame_max = frame_max;
+        self.reader_fetch_min = reader_fetch_min;
+        self
     }
 }
 
@@ -758,6 +779,8 @@ impl Registry {
             .bootstrap(bootstrap.to_string())
             .client_id("crabka-gres-control-writer")
             .dns_timeout(policy.producer_dns_timeout().time())
+            .dispatch_queue_capacity(policy.dispatch_queue_capacity.get())
+            .frame_max(policy.frame_max.size())
             .enable_idempotence(true)
             .acks(Acks::All)
             .transactional_id(REGISTRY_TRANSACTIONAL_ID)
@@ -1315,9 +1338,9 @@ impl Registry {
 
     async fn refresh(&self) -> Result<(), ControlError> {
         let bootstrap_addrs = split_bootstrap(&self.bootstrap);
-        let mut admin = AdminClient::connect_with_dns_timeout(
+        let mut admin = AdminClient::connect_with_options(
             &bootstrap_addrs,
-            self.policy.reader_admin_dns_timeout(),
+            registry_admin_options(&self.policy),
         )
         .await?;
         let metadata = admin.metadata(&[TENANT_REGISTRY_TOPIC]).await?;
@@ -1336,6 +1359,8 @@ impl Registry {
         let opts = ConnectionOptions {
             dns_timeout: self.policy.reader_admin_dns_timeout(),
             client_id: "crabka-gres-control-refresh".to_string(),
+            dispatch_queue_capacity: self.policy.dispatch_queue_capacity,
+            frame_max: self.policy.frame_max,
             ..Default::default()
         };
         let conn = Connection::connect_with_options(addr, opts).await?;
@@ -1664,8 +1689,7 @@ async fn ensure_compacted_single_partition_topic(
 ) -> Result<crabka_client_admin::TopicMetadataEntry, ControlError> {
     let bootstrap_addrs = split_bootstrap(bootstrap);
     let mut admin =
-        AdminClient::connect_with_dns_timeout(&bootstrap_addrs, policy.reader_admin_dns_timeout())
-            .await?;
+        AdminClient::connect_with_options(&bootstrap_addrs, registry_admin_options(policy)).await?;
     let (spec, timeout) = compacted_topic_request(topic, replicas, policy);
     let outcomes = admin.create_topics(&[spec], timeout).await?;
     if let Some(outcome) = outcomes.into_iter().next() {
@@ -1718,7 +1742,7 @@ fn registry_fetch(
         max_wait: policy.fetch_max_wait,
         max: DEFAULT_FETCH_RESPONSE_MAX,
         partition_max: policy.fetch_partition_max,
-        fetch_min: crabka_client_core::FetchMinBytes::default(),
+        fetch_min: policy.reader_fetch_min,
         isolation_level: READ_COMMITTED,
     }
 }
@@ -1758,6 +1782,8 @@ fn spawn_reader(
             let opts = ConnectionOptions {
                 dns_timeout: policy.reader_admin_dns_timeout(),
                 client_id: "crabka-gres-control-reader".to_string(),
+                dispatch_queue_capacity: policy.dispatch_queue_capacity,
+                frame_max: policy.frame_max,
                 ..Default::default()
             };
             let conn = match Connection::connect_with_options(addr, opts).await {
@@ -1826,6 +1852,18 @@ fn split_bootstrap(bootstrap: &str) -> Vec<String> {
         .filter(|entry| !entry.is_empty())
         .map(str::to_string)
         .collect()
+}
+
+fn registry_admin_options(policy: &RegistryPolicy) -> ConnectionOptions {
+    ConnectionOptions {
+        dns_timeout: policy.reader_admin_dns_timeout(),
+        connect_timeout: crabka_units::secs(5),
+        request_timeout: crabka_units::secs(30),
+        client_id: "crabka-operator".to_string(),
+        dispatch_queue_capacity: policy.dispatch_queue_capacity,
+        frame_max: policy.frame_max,
+        security: None,
+    }
 }
 
 async fn resolve_bootstrap_addr(
@@ -2007,6 +2045,23 @@ mod tests {
                 .with_producer_dns_timeout(millis(0))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn registry_client_resource_policy_defaults_and_replaces_exactly() {
+        let dispatch = ConnectionDispatchQueueCapacity::new(7).unwrap();
+        let frame_max = ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap();
+        let fetch_min = FetchMinBytes::try_from(bytes(9)).unwrap();
+        let policy =
+            RegistryPolicy::default().with_client_resource_policy(dispatch, frame_max, fetch_min);
+
+        assert!(policy.dispatch_queue_capacity == dispatch);
+        assert!(policy.frame_max == frame_max);
+        assert!(policy.reader_fetch_min == fetch_min);
+        let admin = registry_admin_options(&policy);
+        assert!(admin.dispatch_queue_capacity == dispatch);
+        assert!(admin.frame_max == frame_max);
+        assert!(registry_fetch(0, WireUuid::ZERO, &policy).fetch_min == fetch_min);
     }
 
     #[test]
