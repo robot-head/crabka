@@ -902,31 +902,43 @@ mod tests {
 
     #[test]
     fn debuginfod_urls_default_is_empty() {
-        // Security default: no outbound debuginfod egress unless the operator
-        // explicitly opts in. The list must be empty when the flag is absent.
-        let cli = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
+        let _guard = ENV_LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .expect("environment lock");
+        temp_env::with_var("CRABKA_PROFILES_DEBUGINFOD_URLS", None::<&str>, || {
+            // Security default: no outbound debuginfod egress unless the operator
+            // explicitly opts in. The list must be empty when the flag is absent.
+            let cli = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
 
-        assert!(cli.debuginfod_urls.is_empty());
+            assert!(cli.debuginfod_urls.is_empty());
+        });
     }
 
     #[test]
     fn parses_debuginfod_urls() {
-        let cli = Cli::try_parse_from([
-            "crabka-profiles",
-            "--target",
-            "querier",
-            "--debuginfod-url",
-            "http://one.example,http://two.example",
-        ])
-        .unwrap();
+        let _guard = ENV_LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .expect("environment lock");
+        temp_env::with_var("CRABKA_PROFILES_DEBUGINFOD_URLS", None::<&str>, || {
+            let cli = Cli::try_parse_from([
+                "crabka-profiles",
+                "--target",
+                "querier",
+                "--debuginfod-url",
+                "http://one.example,http://two.example",
+            ])
+            .unwrap();
 
-        assert!(
-            cli.debuginfod_urls
-                == vec![
-                    "http://one.example".to_string(),
-                    "http://two.example".to_string()
-                ]
-        );
+            assert!(
+                cli.debuginfod_urls
+                    == vec![
+                        "http://one.example".to_string(),
+                        "http://two.example".to_string()
+                    ]
+            );
+        });
     }
 
     #[test]
