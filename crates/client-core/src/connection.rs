@@ -11,9 +11,13 @@ use std::{
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_ids::{ApiKey, ApiVersion};
-use crabka_units::{Time, convert::TimeExt as _, secs};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes, secs,
+};
 use dashmap::DashMap;
-use refined_type::rule::GreaterI64;
+use refined_type::rule::{GreaterI64, GreaterUsize};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
@@ -45,6 +49,12 @@ pub const DEFAULT_CLIENT_DNS_TIMEOUT: Time = secs(10);
 pub const DEFAULT_CLIENT_CONNECT_TIMEOUT: Time = secs(30);
 /// Default deadline for one client request.
 pub const DEFAULT_CLIENT_REQUEST_TIMEOUT: Time = secs(30);
+/// Default capacity of one connection's pending request dispatch queue.
+pub const DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY: usize = 64;
+/// Fixed security ceiling for accepted client frames.
+pub const MAX_CLIENT_FRAME_BYTES: ByteSize = mebibytes(100);
+/// Default maximum accepted client frame size.
+pub const DEFAULT_CLIENT_FRAME_MAX: ByteSize = MAX_CLIENT_FRAME_BYTES;
 
 /// Positive, whole-millisecond DNS lookup deadline.
 ///
@@ -87,6 +97,80 @@ impl ClientDnsTimeout {
 impl Default for ClientDnsTimeout {
     fn default() -> Self {
         Self::new(DEFAULT_CLIENT_DNS_TIMEOUT).expect("default client DNS timeout is valid")
+    }
+}
+
+/// Positive capacity of one connection's pending request dispatch queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConnectionDispatchQueueCapacity(usize);
+
+impl ConnectionDispatchQueueCapacity {
+    /// Validate a dispatch queue capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: usize) -> Result<Self, String> {
+        GreaterUsize::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("client dispatch queue capacity: {error}"))
+    }
+
+    /// Return the validated capacity.
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for ConnectionDispatchQueueCapacity {
+    fn default() -> Self {
+        Self::new(DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY)
+            .expect("default client dispatch queue capacity is valid")
+    }
+}
+
+/// Positive whole-byte accepted-frame limit bounded by the fixed security ceiling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientFrameMax(usize);
+
+impl ClientFrameMax {
+    /// Return the validated byte count.
+    #[must_use]
+    pub const fn bytes(self) -> usize {
+        self.0
+    }
+
+    /// Return the validated limit as a dimensioned quantity.
+    #[must_use]
+    pub fn size(self) -> ByteSize {
+        ByteSize::from_bytes(u64::try_from(self.0).unwrap_or(u64::MAX))
+    }
+}
+
+impl TryFrom<ByteSize> for ClientFrameMax {
+    type Error = String;
+
+    fn try_from(value: ByteSize) -> Result<Self, Self::Error> {
+        let bytes = value.bytes_f64();
+        if !bytes.is_finite()
+            || bytes.fract() != 0.0
+            || !(1.0..=MAX_CLIENT_FRAME_BYTES.bytes_f64()).contains(&bytes)
+        {
+            return Err(
+                "client frame max must be a positive whole-byte value no greater than 100MiB"
+                    .to_owned(),
+            );
+        }
+        usize::try_from(value.bytes_u64())
+            .map(Self)
+            .map_err(|_| "client frame max does not fit usize".to_owned())
+    }
+}
+
+impl Default for ClientFrameMax {
+    fn default() -> Self {
+        Self::try_from(DEFAULT_CLIENT_FRAME_MAX).expect("default client frame max is valid")
     }
 }
 
@@ -646,7 +730,10 @@ async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, Client
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_units::{micros, millis};
+    use crabka_units::{
+        ByteSize, bytes, kibibytes, mebibytes, micros, millis,
+        convert::ByteSizeExt as _,
+    };
 
     use super::*;
 
@@ -670,6 +757,28 @@ mod tests {
         assert!(options.dns_timeout.time() == DEFAULT_CLIENT_DNS_TIMEOUT);
         assert!(options.connect_timeout == DEFAULT_CLIENT_CONNECT_TIMEOUT);
         assert!(options.request_timeout == DEFAULT_CLIENT_REQUEST_TIMEOUT);
+    }
+
+    #[test]
+    fn connection_resource_defaults_preserve_existing_values() {
+        assert!(
+            ConnectionDispatchQueueCapacity::default().get()
+                == DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY
+        );
+        assert!(ConnectionDispatchQueueCapacity::default().get() == 64);
+        assert!(ClientFrameMax::default().size() == mebibytes(100));
+        assert!(MAX_CLIENT_FRAME_BYTES == mebibytes(100));
+    }
+
+    #[test]
+    fn connection_resource_policy_validates_boundaries() {
+        assert!(ConnectionDispatchQueueCapacity::new(0).is_err());
+        assert!(ConnectionDispatchQueueCapacity::new(7).unwrap().get() == 7);
+
+        assert!(ClientFrameMax::try_from(bytes(0)).is_err());
+        assert!(ClientFrameMax::try_from(ByteSize::from_bytes_f64(1.5)).is_err());
+        assert!(ClientFrameMax::try_from(mebibytes(100) + bytes(1)).is_err());
+        assert!(ClientFrameMax::try_from(kibibytes(32)).unwrap().size() == kibibytes(32));
     }
 }
 

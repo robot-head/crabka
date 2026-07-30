@@ -68,8 +68,10 @@ mod mock;
 
 pub use client::{BrokerHandle, Client};
 pub use connection::{
-    ClientDnsTimeout, ClientDuplex, Connection, ConnectionOptions, DEFAULT_CLIENT_CONNECT_TIMEOUT,
-    DEFAULT_CLIENT_DNS_TIMEOUT, DEFAULT_CLIENT_REQUEST_TIMEOUT,
+    ClientDnsTimeout, ClientDuplex, ClientFrameMax, Connection, ConnectionDispatchQueueCapacity,
+    ConnectionOptions, DEFAULT_CLIENT_CONNECT_TIMEOUT, DEFAULT_CLIENT_DNS_TIMEOUT,
+    DEFAULT_CLIENT_FRAME_MAX, DEFAULT_CLIENT_REQUEST_TIMEOUT,
+    DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY, MAX_CLIENT_FRAME_BYTES,
 };
 pub use error::ClientError;
 pub use fetch::{
