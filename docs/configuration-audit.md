@@ -24,23 +24,24 @@ applicable rule below:
 ## Coverage Status
 
 - Complete: `admin-ui`, `audit`, `authz`, `bench-driver`, `blockstore`,
-  `broker`, `cli`, `client-admin`, `client-producer`, `compression`,
+  `broker`, `broker/test-helpers`, `cli`, `client-admin`, `client-producer`,
+  `compression`,
   `connect`, `connect-derive`, `connect-postgres`,
-  `docgen`, `gres`, `gres-activator`, `gres-control`, `grpc-gateway`, `ids`,
-  `integration-tests`, `kafka-tap`,
-  `log-iobench`, `logfmt`, `logql`, `metadata`, `object-store`, `operator`,
-  `pgcatalog`, `pgmvcc`, `pgtypes`, `protocol-codegen`, `records-legacy`,
-  `remote-storage`,
+  `docgen`, `gres`, `gres-activator`, `gres-balancer`, `gres-control`,
+  `grpc-gateway`, `ids`,
+  `gres-conformance`, `integration-tests`, `kafka-tap`, `log`,
+  `kraft-core`, `log-iobench`, `logfmt`, `logql`, `metadata`, `object-store`, `operator`,
+  `pgcatalog`, `pgmvcc`, `pgtypes`, `protocol`, `protocol-codegen`,
+  `records-legacy`, `remote-storage`,
   `pgparser`, `playground`,
-  `schema-registry`, `throttle`, `verified`, `voters`.
+  `schema-registry`, `throttle`, `units`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-streams`,
-  `gres-balancer`,
-  `gres-conformance`, `gres-fdw`, `gres-loadtest`,
+  `gres-fdw`, `gres-loadtest`,
   `gres-ranges`, `gres-substrate`,
-  `kraft-core`, `log`, `metrics`,
+  `metrics`,
   `metrics-service`, `observability`, `observability-demo-app`,
   `pgexec`, `pgkv`, `pgwire`,
-  `pprof`, `profiles`, `promql`, `protocol`, `raft`,
+  `pprof`, `profiles`, `promql`, `raft`,
   `rebalancer`, `remote-storage-topic`, `replicator`,
   `schema-serde`, `security`, `telemetry`,
   `traceql`, and `traces`.
@@ -4079,6 +4080,25 @@ claim is made that they are all production tunables.
   uses string-valued `otlp.timeout`. The standard
   `OTEL_EXPORTER_OTLP_TIMEOUT_SECS` remains an external OpenTelemetry contract.
 
+### Post-Closure UOM API Checks
+
+A follow-up caller audit found two internal policy constructors that stored
+UOM quantities but still accepted unit-suffixed primitives.
+`RecoveryReadPolicy` now accepts `Time` and `ByteSize`, and `WalAdminPolicy`
+accepts `Time` for all three timeouts. Both validate exact positive protocol
+units at the shared substrate boundary; Gres passes its CLI/CRD-derived
+quantities through directly and lowers only when building Kafka requests.
+
+The same branch-diff pass found share-consumer heartbeat settings still exposed
+as `Duration`. The real heartbeat and leave timeout settings now accept and
+carry `Time`, and share-fetch sizes reject fractional, nonfinite, or overflowing
+`ByteSize` values before broker I/O. The ignored share `session_timeout`
+builder option was removed instead of preserving a knob with no effect.
+
+The affected Gres all-target tests and strict Clippy passed. Client-consumer
+reported 157 unit and three integration tests passing, its strict all-target
+Clippy passed, and the share-consumer integration target compiled successfully.
+
 ### Renamed Public Surfaces
 
 No compatibility aliases remain for the migrated branch-added settings.
@@ -4667,19 +4687,267 @@ variable, or CRD field is warranted. The current all-target gate passed 218
 tests; two external-PostgreSQL oracle tests were explicitly ignored. Strict
 all-target Clippy passed.
 
+## Client Core UOM Closure and Remaining Policy
+
+The shared Kafka DNS deadline now uses UOM at every configuration boundary.
+`DEFAULT_CLIENT_DNS_TIMEOUT` is a `Time`,
+`ClientDnsTimeout::new` accepts `Time`, and `ClientDnsTimeout::time` returns
+`Time`. The validated type stores its positive whole-millisecond `i64` value so
+operator effective-policy structs retain `Eq`; validation uses
+`refined_type::rule::GreaterI64` and rejects non-finite or fractional values.
+Only the `tokio::time::timeout` call sites lower the value to
+`std::time::Duration`. The producer builder now also accepts `Time` directly,
+and the prior `Time -> Duration -> Time` conversions were removed from all
+workspace callers.
+
+The current scanner reports exactly 25 `client-core` rows. Eleven are test
+inputs. Four named defaults are existing configuration: DNS, connect, request,
+and fetch-response limits. Six production rows are fixed: four Kafka API or
+bootstrap sentinels, the auth-only GSSAPI receive offer, and one exact
+preallocation hint. Four operational rows still need an approved configuration
+design:
+
+- the per-connection dispatch queue capacity of 64;
+- the single-partition fetch minimum of one byte;
+- the 100 MiB accepted-frame cap; and
+- the SASL header's fixed client id, which should reuse the existing configured
+  client id rather than add another setting.
+
+The proposed minimal surface is to add the queue and frame limits to
+`ConnectionOptions`, add the fetch minimum to `IsolatedFetch`, and thread the
+existing client id through SASL. Defaults preserve current behavior. Deployment
+owners would expose the actual runtime values through their existing
+CLI/environment or CRD paths; no independent SASL-client-id knob is warranted.
+
+The fresh UOM closure gates passed:
+
+- `cargo check --workspace --all-targets --locked`;
+- all targets for `crabka-client-core`, `crabka-client-producer`,
+  `crabka-client-admin`, and `crabka-client-streams`;
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`;
+- `cargo +nightly fmt --all`; and
+- `git diff --check`.
+
+## KRaft Core Snapshot Fetch Audit
+
+The `kraft-core` owner has exactly five scanner rows. Four are test or
+deterministic simulator inputs. The sole production value is the one-GiB
+snapshot reassembly limit, which bounds memory a follower can be made to retain
+while accepting KIP-630 snapshot chunks from its leader.
+
+The limit has both deployment-policy and security roles. The proposed minimal
+surface is a validated positive whole-byte `ByteSize` setting that deployments
+may lower but not raise above the existing one-GiB hard ceiling. It would flow
+through `raft::ControllerConfig`, broker CLI/environment/file configuration,
+and the Kafka CRD as `metadata_snapshot_fetch_max`, with
+`CRABKA_METADATA_SNAPSHOT_FETCH_MAX` as the environment variable. The default
+remains one GiB, preserving current behavior; the ceiling itself remains a
+fixed security invariant rather than becoming tunable.
+
+The approved design is implemented. `MetadataSnapshotFetchMax` validates the
+UOM value through `refined_type`, requiring a positive whole-byte count at or
+below the immutable one-GiB ceiling. The value now flows through
+`raft::ControllerConfig`, broker CLI/environment/file configuration, and
+`spec.brokerTuning.metadataSnapshotFetchMax`; the operator renders it into the
+broker runtime TOML. The generated Kafka CRD is updated. The Raft controller's
+separate eight-MiB decoded-log read and snapshot chunk budget belongs to the
+Raft owner audit and is not part of this setting.
+
+Closure gates passed:
+
+- all 37 `crabka-kraft-core` tests;
+- 151 `crabka-raft` library tests, with the Docker-only snapshot test ignored;
+- focused broker validation, CLI/environment, and file-config tests;
+- focused operator CRD validation and broker-TOML handoff tests;
+- `cargo clippy --workspace --all-targets --locked -- -D warnings`;
+- `cargo +nightly fmt --all`; and
+- `git diff --check`.
+
+## Raft Runtime Policy Audit
+
+The Raft scanner rows are predominantly tests, protocol identifiers and
+versions, serialized layout sizes, sentinels, exact preallocation, and fixed
+progress invariants. In particular, the one-byte observer fetch floor prevents
+a zero-byte request from permanently stalling, and should not be configurable.
+
+Four runtime-policy findings remain:
+
+- `controller_heartbeat_interval` is already exposed through broker
+  CLI/environment/file configuration and the Kafka CRD, but is dropped before
+  the KRaft engine. The engine instead derives its cadence as one third of the
+  election timeout. Honoring the documented 500-ms default would change the
+  current effective default from roughly 1.667 seconds, so this behavior
+  correction needs explicit approval.
+- Three consecutive fetch misses are tolerated before election. This is a
+  distinct failure-detection policy layered on the election timeout.
+- The controller actor mailbox has a fixed capacity of 256.
+- One eight-MiB value currently couples replication response size, snapshot
+  request chunk size, committed-record application, and restart replay.
+
+The proposed minimal design is to thread the existing heartbeat setting into
+the engine; add validated positive `controller_fetch_miss_limit` and
+`metadata_raft_command_queue_capacity` values; and replace the coupled
+eight-MiB value with a UOM `metadata_raft_fetch_max` policy. Application and
+replay would iterate over bounded reads until their target offset so lowering
+the byte budget cannot silently skip committed metadata. The byte setting
+would flow through broker CLI/environment/file configuration and the Kafka CRD
+as `CRABKA_METADATA_RAFT_FETCH_MAX`; the two counts would use
+`CRABKA_CONTROLLER_FETCH_MISS_LIMIT` and
+`CRABKA_METADATA_RAFT_COMMAND_QUEUE_CAPACITY`. Existing effective values remain
+the defaults except for the heartbeat discrepancy described above.
+
+This design is pending explicit approval and has not been implemented.
+
+## Log
+
+The `log` owner has 23 scanner rows. Five are existing UOM-backed `LogConfig`
+defaults corresponding to Kafka topic policy: segment size and roll interval,
+retention, index interval, and delete retention. They already flow through the
+topic configuration path and need no new environment variable or CRD field.
+
+The index entry sizes, filename width, transaction/stamp entry widths, undefined
+epoch and offset values, and test-only budgets are persisted-format,
+compatibility, or test invariants. The four-MiB read-buffer cap limits only an
+initial allocation; reads still accept the caller's full budget. The 64-KiB
+timestamp scan window grows and repeats until it finds the result or reaches
+the end of the segment. Neither changes accepted data or query results, so both
+remain fixed implementation details rather than deployment knobs.
+
+The all-target crate gate passed 185 unit tests and two property tests; the
+Docker-only JVM integration test was explicitly ignored. Every benchmark
+target also completed successfully.
+
+## Metrics UOM Closure and Remaining Policy
+
+The `crabka-metrics` binary now accepts unit-bearing compactor retention and
+sweep intervals instead of raw milliseconds. The demo uses `1h` and `30s`,
+and every binary option is backed by a `CRABKA_METRICS_*` environment
+variable. Positive time settings reject zero or negative values at parsing;
+the retention window remains nonnegative because zero disables retention.
+
+The scanner reports 42 rows. Schema column names, WAL and HA topic names,
+native-histogram schema bounds, the Prometheus-compatible exemplar and tenant
+limits, timestamp safety bounds, encoding tables, and test inputs are fixed
+format, compatibility, safety, or test values. Compactor flush thresholds are
+already CLI/environment configuration. The remote-read decompression default
+is a library fallback for callers that do not supply their own `ByteSize`; no
+production route currently calls that decoder, so adding a deployment knob now
+would configure unused code.
+
+Three distributor policies remain pending:
+
+- the 30-second HA replica failover timeout;
+- the 100,000-tenant ingestion-rate bucket cap; and
+- the 32-MiB distributor decompression cap.
+
+The proposed minimal surface is to reuse the existing `Time`, `ByteSize`,
+`HaTracker::elect` timeout argument, `IngestEnforcer::with_max_rate_buckets`,
+and `DistributorState::with_max_decompressed` paths. The binary would expose
+`CRABKA_METRICS_HA_FAILOVER_TIMEOUT`,
+`CRABKA_METRICS_INGEST_RATE_BUCKET_CAP`, and
+`CRABKA_METRICS_DISTRIBUTOR_MAX_DECOMPRESSED`, preserving current defaults.
+The positive count would use a validated `refined_type` newtype; the
+dimensioned values remain UOM quantities. No CRD currently owns this
+standalone service.
+
+This design is pending explicit approval and has not been implemented. The
+completed UOM/env slice passed all 188 library tests, 15 binary tests, six
+integration/property tests, and strict all-target Clippy.
+
+## Metrics Service UOM Closure and Remaining Policy
+
+The metrics-service WAL-head retention flag now accepts `Time` directly and
+the demo uses `5m` instead of raw milliseconds. Every service option is backed
+by a `CRABKA_METRICS_*` environment variable, and positive intervals reject
+zero or negative values at parsing.
+
+The scanner reports 12 rows. Eight are tests or embedded test YAML and the
+ruler-state topic is a compatibility name. Two runtime policies remain: the
+30-second cold-manifest cache TTL and the one-hour lookback substituted for an
+unbounded compatibility query.
+
+The proposed minimal surface is to store both `Time` values in
+`RefreshingMetricBlockStore` and expose `CRABKA_METRICS_COLD_CACHE_TTL` and
+`CRABKA_METRICS_UNBOUNDED_COMPATIBILITY_LOOKBACK` through the existing
+standalone binary CLI. Defaults preserve current behavior. No CRD currently
+owns this standalone service.
+
+This design is pending explicit approval and has not been implemented. The
+completed UOM/env slice passed 25 library tests, 13 binary tests, the
+non-Docker integration test, and strict all-target Clippy; three Docker-only
+compatibility tests were explicitly ignored.
+
+## Observability UOM Closure and Remaining Policy
+
+Every existing `ServiceConfig` option is now backed by a
+`CRABKA_OBSERVABILITY_*` environment variable. The `max_query_length` byte
+limit now remains a `ByteSize` from CLI/environment parsing through
+`QuerierState` and is lowered to `usize` only where the query string length is
+compared. All duration and byte-limit parsers reject negative values, matching
+the unsigned raw fields they replaced. Absolute query start and end
+nanosecond timestamps remain raw `i64` instants rather than UOM extents.
+
+The scanner reports 43 observability rows. Fixed rows are the compaction
+frontier manifest version/path, Kafka quota key, Loki Parquet media type,
+metric decimal scale, hexadecimal alphabet, role-operation tables, service
+discovery labels, exact time-unit scales, progress guards, preallocation
+hints, and test inputs. Loki request-default and compatibility behavior also
+stays fixed: the one-hour query range, six-hour metadata range, default tail
+limit, 11,000-point resolution ceiling, five-second `delay_for` ceiling, and
+30-day-one-hour volume-query ceiling. Clients already control the applicable
+request values, and changing these server constants would make the compatible
+API diverge rather than tune deployment resources.
+
+The remaining deployment policies are:
+
+- distributor ingest age, future-timestamp grace, and quota burst window;
+- distributor WAL dependency startup deadline, per-attempt timeout, and
+  initial/maximum retry backoff;
+- compactor WAL poll timeout, accumulation window, accumulation poll timeout,
+  maximum records per batch, idle interval, and initial/maximum object-store
+  retry backoff;
+- querier compaction-frontier refresh interval, dynamic-index cache TTL,
+  shard-index cache TTL, shard-fetch concurrency, cold-block fetch
+  concurrency, hot-tail bucket width, hot-tail poll/delivery interval, and
+  dependency reconnect interval.
+
+The proposed minimal surface adds these values directly to the existing
+role-selectable `ServiceConfig`, preserving every current value as its
+default. Times remain `Time`; byte extents remain `ByteSize`; positive
+concurrency and batch counts use `NonZeroUsize`. The two equal 50-ms hot-tail
+poll/backoff/delivery cadences share one setting, and the two equal 500-ms
+querier WAL/authorizer reconnect cadences share one setting; unrelated equal
+numbers remain separate. Each field gets a `CRABKA_OBSERVABILITY_*`
+environment variable and is supplied only to its owning demo role. No CRD
+currently owns this standalone service.
+
+This design is pending explicit approval and has not been implemented. The
+completed UOM/env slice passed all 50 library tests, 10 CLI tests, the
+environment test, 35 compactor tests, 480 HTTP tests, 69 querier tests, and
+strict all-target Clippy.
+
 ## Kafka Record Decompression Policy
 
 The `records-legacy` scanner has five rows. The compression mask and timestamp
 bit remain fixed Kafka v0/v1 wire-format invariants. Its former three
 decompression-budget constants were deployment policy and have been removed.
 
-The `protocol` scanner has 2,226 rows. Generated Kafka API keys, version
-ranges, schema defaults, and fixture values are wire-compatibility data rather
-than deployment policy. Handwritten varint widths, record-header lengths,
-attribute masks, metadata/control/envelope versions, allocation hints, and
-test values are likewise format or verification invariants. The duplicated
-100x/16-MiB/1-GiB decompression budgets in the modern v2 borrowed and owned
-record decoders have also been removed.
+The current `protocol` scanner has 2,223 rows across 455 files. Generated
+output accounts for 2,172 rows across 440 files: 2,050 API-key/version
+constants and 122 schema defaults, populated-value helpers, and differential
+table entries. These values are generated from the checked-in Kafka schemas;
+they describe the wire contract or supply test values. Operational callers
+own and override request timeouts, byte limits, and intervals rather than
+configuring the codec's schema defaults.
+
+The remaining 51 rows span 15 handwritten files: four request-trait associated
+constant declarations, 18 wire/layout invariants, and 29 test fixtures. The
+invariants are varint widths, UUID and record-header sizes, attribute bits,
+CRC ranges, protocol version thresholds, metadata/control/envelope versions,
+and exact allocation sizes derived from those formats. None is deployment
+policy. The duplicated 100x/16-MiB/1-GiB decompression budgets in the modern
+v2 borrowed and owned record decoders were the only operational policy owned
+by this crate and have been removed.
 
 Modern and legacy records are two encodings of the same broker traffic class,
 so one `RecordDecompressionPolicy` in `crabka-compression` now owns both
@@ -4707,8 +4975,603 @@ decode entry points retain default-compatible wrappers, with explicit
 policy-aware variants for the broker trust boundary.
 
 Telemetry decompression remains independently configurable because it is a
-different traffic class. `records-legacy` is complete; broader generated and
-handwritten `protocol` classification remains pending.
+different traffic class. `records-legacy` and `protocol` are complete. No
+additional protocol CLI, environment variable, or CRD field is warranted.
+Caller-owned request policy remains classified with each service; the next
+scanner-visible unresolved owner is the rebalancer's reassignment request
+timeout.
+
+
+
+## Telemetry UOM Closure and Profiling Policy
+
+`OtlpConfig` now retains `CRABKA_OTLP_TIMEOUT` and
+`CRABKA_OTLP_HEARTBEAT_INTERVAL` as UOM `Time` values. Conversion to
+`std::time::Duration` happens only at the OpenTelemetry exporter and Tokio
+sleep boundaries. The standard `OTEL_EXPORTER_OTLP_TIMEOUT_SECS` spelling and
+integer-seconds interpretation remain an external OpenTelemetry compatibility
+contract, but are lifted into `Time` immediately.
+
+The telemetry scanner now reports only the two W3C propagation header names,
+`traceparent` and `tracestate`; both are fixed protocol identifiers. A manual
+profiling-route review found policy outside the scanner:
+
+- CPU profile default and maximum durations, plus sampling frequency;
+- heap profile activation default and maximum durations; and
+- the native-frame blocklist.
+
+The request already controls profile duration within the current bounds.
+Duration defaults/caps, sampling frequency, and the blocklist remain pending
+deployment policy; gzip format/compression, pprof media type, route names, and
+allocation hints remain fixed implementation/API behavior. A shared profiling
+configuration should be threaded through the existing router constructors and
+flattened into each owning binary's CLI/environment boundary rather than read
+from process-global environment inside request handlers.
+
+The UOM closure passed all 30 all-target tests and strict all-target Clippy.
+The profiling design is pending explicit approval, so `telemetry` remains
+Pending in Coverage Status.
+
+## Security GSSAPI Clock-Skew Policy
+
+The `security` scanner has 23 rows. Example fixture credentials/timing,
+Kerberos enctype and security-layer identifiers, W3C/JWT claim names,
+cryptographic key sizes, SCRAM compatibility bounds, PostgreSQL verifier
+prefixes, allocation hints, and test data are fixed. The one-slot JWKS refresh
+signal is deliberate coalescing semantics: validators only need to record that
+at least one refresh is pending.
+
+SCRAM credential iterations and OAuth clock skew/cache expiry already flow
+through their owning configuration. The accept-path KDC URL fallback is
+required only to construct the SSPI server context; that path performs no KDC
+network I/O, so making the fallback separately tunable would not change
+runtime behavior.
+
+The remaining deployment policy is the five-minute maximum clock skew used
+when validating incoming Kerberos AP-REQs. The proposed minimal design adds
+`max_time_skew: Time` to the existing `GssapiConfig` and
+`FileGssapiConfig`, preserving five minutes as the default and accepting a
+nonnegative UOM duration. `SspiAcceptor` receives that value explicitly and
+lowers it to `std::time::Duration` only at the SSPI boundary.
+
+The Kafka CRD's existing `ListenerAuthenticationGssapi` object would expose
+the same unit-bearing field and the operator would render it into the existing
+broker-global `[gssapi]` TOML block. No new configuration subtree or
+environment-only library lookup is needed.
+
+This design is pending explicit approval and has not been implemented. All 208
+unit tests and the SCRAM benchmark targets pass; the external-KDC integration
+test remains intentionally ignored. Strict all-target Clippy passes.
+
+## Replicator Runtime and Topic Policy
+
+The `replicator` scanner has 23 rows. Kafka error codes, MM2 record versions
+and internal topic names, the provenance header, epoch timestamp handling,
+test fixtures, and serialization goldens are fixed. The production deployment
+policy currently hidden in constants or literals is:
+
+- topic-creation timeout;
+- source and internal-drain poll timeouts plus consecutive-empty drain count;
+- worker-build retry budget and initial/maximum backoff;
+- connect commit interval and maximum batch size;
+- supervisor, heartbeat, and checkpoint intervals; and
+- target-data and internal-topic replication factors.
+
+The equal 500-ms defaults serve different source-poll, drain-poll, and commit
+semantics and therefore remain separate settings. Defaults preserve all
+current timing/count values and single-replica behavior.
+
+The proposed minimal design threads one `ReplicatorRuntimePolicy` through the
+existing supervisor/worker/task constructors. Times remain positive UOM
+`Time`; positive counts and batch sizes use `NonZeroUsize`; replication
+factors use the repository's existing validated positive Kafka replication
+type. The standalone binary exposes direct flags backed by
+`CRABKA_REPLICATOR_*` environment variables rather than adding another YAML
+subtree solely for Kubernetes overrides.
+
+The hardcoded one-partition shape for replicated data topics should not become
+a knob. The supervisor already reads source metadata, so it should retain each
+source topic's partition count, create the target with that count, and preserve
+the source partition on each produced record. Replicator internal topics remain
+single-partition for ordering/compatibility, while their replication factor is
+configurable.
+
+This design is pending explicit approval and has not been implemented. All 42
+all-target tests, including recovery and two-cluster behavior, pass. Strict
+all-target Clippy passes.
+
+## Gres Conformance Harness
+
+The `gres-conformance` scanner has 17 rows. Report and fixture schema
+versions, pinned PostgreSQL/PgDog artifacts, SQL probe manifests and
+SQLSTATEs, the case identifier token, protocol encodings, golden driver
+versions, test counts, and test data are compatibility fixtures rather than
+deployment policy. The 16-MiB backend-message ceiling is a local capture
+safety bound paired with its boundary test, not a production server limit.
+
+The harness already exposes its meaningful inputs directly through CLI
+arguments: endpoints, corpus and baseline paths, output paths, and subject
+execution modes. It has no runtime service or CRD owner, so adding Kubernetes
+environment aliases would create dead configuration.
+
+No configuration change is needed. All 43 all-target tests and strict
+all-target Clippy pass.
+
+## Gres Ranges Runtime Policy
+
+The `gres-ranges` scanner has 79 rows. Range/coordinator zero identifiers,
+range-map and metadata format versions, FNV constants, the range-WAL frame
+version, wire token widths, hexadecimal encoding, protocol bounds, allocation
+hints, synchronization sentinels, and inline test values are fixed. The SQL
+chunk target remains derived from the frame ceiling rather than becoming an
+independent knob.
+
+The real deployment policy is:
+
+- range RPC frame size, request timeout, server idle timeout, client-pool idle
+  TTL, and maximum pooled connections per endpoint;
+- hosted remote-session idle retention and maximum session count;
+- range-0 catch-up and whole-reply budgets plus the cross-range lock-wait cap;
+- durable-inspection page record and byte ceilings;
+- decision-release lag retry count and retry backoff; and
+- timestamp-oracle heartbeat cadence, logical horizon base/maximum stride and
+  persistence cadence, and HLC horizon headroom.
+
+The proposed minimal design keeps these values in the existing Gres compute
+configuration boundary. `ServeArgs` exposes unit-bearing
+`CRABKA_GRES_RANGE_*` CLI/environment options, `RangeRpcRuntimeConfig` carries
+the validated effective policy into `crabka-gres-ranges`, and
+`GresComputeSpec` exposes the same fields in the existing CRD compute object.
+Times and sizes remain UOM `Time` and `ByteSize`; positive counts and strides
+use repository `refined_type` aliases.
+
+Validation preserves the current coupled invariants: the lock and barrier
+reply budgets remain below the RPC timeout, pooled connections expire before
+the server idle timeout, the frame ceiling remains larger than its fixed
+encoding envelope, and logical base stride does not exceed its maximum.
+Defaults preserve 1 MiB frames, five-second RPCs, one-minute server/session
+idle periods, five-second pool TTL, 32 pooled connections, 1,024 hosted
+sessions, ten/four/two-second barrier and lock budgets, 4,096 records and
+128 KiB per durable-inspection page, ten 200-ms release retries, 10-ms TSO
+heartbeats, 100-ms logical persistence pacing, 1,024/2^24 logical strides, and
+128-ms HLC horizon headroom.
+
+This design is pending explicit approval and has not been implemented. All 426
+all-target tests pass, with one timing benchmark intentionally ignored. Strict
+all-target Clippy passes.
+
+## Pgkv Fjall Policy
+
+The `pgkv` scanner has 33 rows. Key/index identifiers, FNV constants, row and
+notification encoding tags and versions, PostgreSQL notification size limits,
+exact key/token allocation widths, the in-memory restore chunk, and test
+values are fixed implementation or compatibility behavior.
+
+Two Fjall settings are workload policy: the 8-MiB memtable cap and the
+262,144-operation rotation threshold. The rotation threshold already reads
+`CRABKA_PGKV_ROTATE_AFTER_OPS` from inside the library, but invalid values are
+silently replaced and no owning CLI or CRD validates or carries it.
+
+The proposed minimal design adds one `FjallOptions` value containing UOM
+`max_memtable_size: ByteSize` and a `refined_type` positive
+`rotate_after_ops`. Default `FjallKv::open` behavior remains available for
+library/test callers; Gres passes explicit options to its durable and
+disposable-cache stores. The existing environment spelling backs a new
+`--pgkv-rotate-after-ops` argument, and
+`CRABKA_PGKV_MAX_MEMTABLE_SIZE` backs `--pgkv-max-memtable-size`.
+`GresComputeSpec` exposes both fields in the existing compute CRD object.
+Defaults and Fjall block partitioning/pinning behavior remain unchanged.
+
+This design is pending explicit approval and has not been implemented. All 80
+all-target tests and strict all-target Clippy pass.
+
+## Promql Query Policy
+
+The `promql` scanner has 49 rows. Storage/schema and planner column names,
+Prometheus stale-NaN bits, FNV constants, HTTP range-boundary tags, function
+names, exact allocation hints, the 11,000-point Prometheus compatibility
+ceiling, and tests are fixed. The six-hour in-memory retention default already
+has explicit constructor/setter overrides, and the metrics service supplies
+its production WAL-head retention, so no library-global retention setting is
+needed.
+
+The remaining deployment policy is the engine's five-minute lookback,
+one-minute default subquery evaluation interval, 50,000,000-sample query cap,
+and the 64-MiB compressed/decompressed remote-read body cap. The proposed
+minimal design keeps these in `EngineOpts`/`PrometheusApiState` and adds
+metrics-service CLI arguments backed by:
+
+```text
+CRABKA_METRICS_QUERY_LOOKBACK_DELTA
+CRABKA_METRICS_QUERY_EVAL_INTERVAL
+CRABKA_METRICS_QUERY_MAX_SAMPLES
+CRABKA_METRICS_REMOTE_READ_MAX_BODY
+```
+
+Times and the body cap remain UOM `Time`/`ByteSize`; the positive sample count
+uses a `refined_type` newtype. The existing runtime per-tenant overrides still
+apply their stricter limits. No CRD currently owns the standalone metrics
+service.
+
+This design is pending explicit approval and has not been implemented. All 559
+all-target tests and strict all-target Clippy pass.
+
+## Traceql Engine Policy
+
+The `traceql` scanner has 42 rows. Span/block column names, intrinsic/tag
+names, ID widths, metadata markers, hexadecimal encoding, allocation hints,
+and tests are fixed. Tempo's omitted-argument `compare()` top-N remains
+compatibility behavior.
+
+The existing `EngineOpts` already owns search defaults and caps. The missing
+deployment surface is its 20-trace default result limit, three spans per span
+set, 1,000-trace maximum, disabled-by-default metric exemplars, the
+256-distinct-values-per-attribute compare cap, and the default duration
+histogram buckets. The Traces binary currently exposes only the trace and
+exemplar maxima, without environment backing.
+
+The proposed minimal design reuses and extends `EngineOpts`, with positive
+counts validated by repository `refined_type` aliases and histogram
+boundaries stored as ordered positive UOM `Time` values. The existing
+`crabka-traces` flags remain compatible and every field receives a
+`CRABKA_TRACES_TRACEQL_*` environment-backed spelling. Defaults preserve the
+current counts and the 2-ms-through-16.384-second doubling bucket layout. No
+CRD currently owns the standalone Traces service.
+
+This design is pending explicit approval and has not been implemented. All 400
+all-target tests and strict all-target Clippy pass.
+
+
+## Security GSSAPI Policy
+
+The `security` scanner has 17 rows. GSSAPI encryption and security-layer
+codes, OAuth reserved claim names, PostgreSQL SCRAM verifier shape, exact
+elliptic-curve point allocation, single-slot coalescing channels, examples,
+and test fixtures are fixed. SCRAM's 4,096-to-16,384 Kafka acceptance range is
+wire-compatible validation, while each credential's iteration count is
+already an explicit KafkaUser/GresTenant input with an 8,192 default.
+
+The one hidden deployment policy is the five-minute clock-skew tolerance used
+to validate incoming Kerberos AP-REQs. The proposed minimal design adds UOM
+`allowable_clock_skew: Time` to the existing `GssapiConfig`, broker TOML, and
+`ListenerAuthenticationGssapi` CRD object, preserving five minutes as the
+default and rejecting negative values.
+
+The acceptor's `tcp://localhost:88` URL is a constructor placeholder required
+by `sspi`; the accept path does not contact a KDC. It should remain fixed
+rather than be a fake tuning surface. The client initiate path already takes
+the configured KDC endpoint explicitly.
+
+The KafkaUser CRD currently advertises SCRAM iteration values through
+1,000,000 even though the broker correctly rejects values above 16,384. Its
+schema and generated CRD should be narrowed to the broker limit so invalid
+configuration fails at admission rather than reconciliation.
+
+This design is pending explicit approval and has not been implemented. All
+208 all-target tests and every benchmark check pass; one KDC-backed test is
+explicitly ignored. Strict all-target Clippy passes.
+
+## Profiles Runtime Policy
+
+The `profiles` scanner has 63 rows. Generated-file lists and source markers,
+profile/WAL encoding identifiers, Kafka partition zero, FNV and hexadecimal
+constants, exact time-unit conversion, internal labels/messages, upstream
+tenant-id compatibility, allocation hints, and test values are fixed. Tenant
+ingest/query limits and their Pyroscope-compatible defaults are already
+configurable through the existing per-tenant limit files.
+
+The recently added WAL fetch, poll, and block-index snapshot settings are
+UOM-backed CLI/environment options, but they do not complete this owner. The
+remaining deployment policy is:
+
+- the shared profiles WAL topic, block-builder consumer group, and profile
+  index object key;
+- profile-index refresh interval;
+- distributor request/decompressed-body cap and tracked-tenant cap;
+- legacy tree/trie node, materialized-path byte, and depth budgets;
+- hot WAL-tail retention age and record cap;
+- query heatmap value-bucket default and time-bucket ceiling; and
+- compactor job size/downsample resolution, block-builder flush size/age, and
+  query-frontend shard width already exposed by primitive CLI values.
+
+The distributor raw HTTP, Connect receive, and decompression paths must share
+one body-size setting rather than expose three knobs. The hot-store rebuild
+factor remains an internal amortization choice, and the fixed tenant-ID length
+continues to match the upstream API. Compactor jobs require at least two
+blocks; other positive counts should reject zero instead of silently clamping
+it.
+
+Every existing deployment argument also needs environment backing, including
+target, listen/bootstrap endpoints, object-store URL, limit-file paths, WAL
+consumer groups, compactor and block-builder settings, query shard width, and
+debuginfod URLs. Existing `*-ms` and `*-ns` CLI spellings remain compatibility
+aliases; new canonical options and all new environment variables use
+human-unit UOM `Time`/`ByteSize` values. Positive counts and non-empty
+identifiers use repository `refined_type` newtypes.
+
+No CRD owns the standalone Profiles roles. The proposed minimal implementation
+adds the validated options directly to `crabka-profiles` and threads only each
+role's applicable values through its existing state/config type. Defaults
+preserve the current topic/key/group names, 15-second index refresh, 16-MiB
+request budget, 4,096 tracked tenants, 500,000 tree nodes, 64-MiB materialized
+paths, 4,096 trie depth, six-hour/1,000,000-record hot retention, 32 value
+buckets, 4,096 time buckets, eight-block compaction, 1,024-record/ten-second
+flushes, and 15-minute query shards.
+
+This design is pending explicit approval and has not been implemented. All
+239 all-target tests pass; four external integration tests are explicitly
+ignored. Strict all-target Clippy passes.
+
+## Telemetry and Profiling Policy
+
+The telemetry scanner reports only `traceparent` and `tracestate`; both are
+fixed W3C protocol identifiers. Default OTLP endpoints/ports and protocol
+spellings follow the OpenTelemetry contract, while heartbeat trace/span ID
+prefixes, gzip encoding, and allocation hints are internal format or
+implementation choices.
+
+OTLP endpoint, protocol, filter, timeout, heartbeat cadence, service name, and
+sampling ratio already have environment surfaces. This branch keeps timeout
+and heartbeat as UOM `Time` values, with human-unit
+`CRABKA_OTLP_TIMEOUT`/`CRABKA_OTLP_HEARTBEAT_INTERVAL` inputs and the standard
+OTel seconds input retained for compatibility. The sampling ratio still parses
+to raw `f64`, silently ignores malformed values, and clamps out-of-range
+values; it should instead use validated UOM `Ratio` and reject invalid
+configuration.
+
+The hidden pprof deployment policy is the 99-Hz CPU sample frequency and the
+60-second CPU/30-second heap request ceilings. The 30-second CPU and
+five-second heap durations used when a request omits `seconds` are
+pprof-compatible API defaults; the one-second minimum is request validation.
+The proposed minimal design adds a small `ProfilingConfig` carrying UOM
+`Frequency` and `Time` values into `pprof_router`/`serve_admin`. Each owning
+binary exposes its applicable fields as CLI arguments backed by
+`CRABKA_PROFILING_*` environment variables; no library-global environment
+lookup is added.
+
+No CRD owns the cross-service diagnostics endpoint. Defaults preserve 99 Hz,
+60 seconds, and 30 seconds.
+
+This design is pending explicit approval and has not been implemented. All 30
+all-target tests and strict all-target Clippy pass.
+
+## Pgwire Runtime Policy
+
+The `pgwire` scanner has 30 rows. PostgreSQL protocol/version/request codes,
+message field widths, SQLSTATEs, type OIDs, special packet lengths, the exact
+10,000-byte PostgreSQL startup-packet compatibility cap, SCRAM salt/hash
+shapes, server parameter values, allocation hints, and stub/test data are
+fixed.
+
+The 64-MiB regular frontend-message ceiling is Gres deployment policy. The
+proposed minimal design adds UOM `max_message_size: ByteSize` to a small
+pgwire decode policy, supplied by Gres CLI/environment and
+`GresComputeSpec` as:
+
+```text
+pgwire_max_message_size
+CRABKA_GRES_PGWIRE_MAX_MESSAGE_SIZE
+```
+
+The ad-hoc standalone Gres `--auth scram --user-cred` path also hardcodes
+PostgreSQL's 4,096-iteration verifier default. It should accept a validated
+`--pgwire-scram-iterations` backed by
+`CRABKA_GRES_PGWIRE_SCRAM_ITERATIONS`, while tenant-backed authentication
+continues to use the iteration count embedded in each configured verifier.
+Unknown-user mock verifiers must derive the applicable iteration count from
+the real verifier policy rather than gain an independent knob.
+
+The existing connection-cap, authentication-timeout, and cumulative-COPY
+safeguard TODO is not a hardcoded value and is outside this constant-removal
+slice; inventing defaults for it would change current behavior. Defaults here
+preserve 64 MiB and 4,096 iterations.
+
+This design is pending explicit approval and has not been implemented. All
+106 all-target tests and strict all-target Clippy pass.
+
+## Pgexec Runtime Policy
+
+The `pgexec` scanner has 80 rows. PostgreSQL catalog OIDs, database/SQL
+compatibility values, datetime units, field and NOTIFY payload/name limits,
+HLC bit layout, persisted key prefixes, recursion guards, allocation hints,
+logging rate limits, cooperative-yield cadence, and test values are fixed.
+The local-vacuum pacing budget and intervals already have validated Gres
+CLI/environment overrides.
+
+The remaining deployment policy is:
+
+- blocking-query memory and distributed-join broadcast threshold;
+- distributed-join key/projection/predicate, snapshot-XID, broadcast-row,
+  row-byte, and result-row limits;
+- per-session notification queue capacity;
+- durable XID and sequence reservation block sizes; and
+- timestamp-version prune count per written row and reclaim-floor lag.
+
+The one-MiB streamed result page ceiling should derive from the configured
+range transport frame budget rather than become an independent knob. Likewise,
+clog deletion batches should consume the existing local-vacuum key budget
+instead of adding another batch-size setting.
+
+The proposed minimal design adds one defaultable `PgExecRuntimePolicy` to
+`SqlEngine` construction. Gres carries its fields through existing
+CLI/environment and `GresComputeSpec` boundaries. Byte extents remain UOM
+`ByteSize`, the reclaim lag remains UOM `Time`, and positive counts use
+repository `refined_type` newtypes. Validation keeps the join broadcast
+threshold and encoded request/result bounds within the configured range
+transport budget.
+
+Defaults preserve 16-MiB blocking memory, 64-MiB broadcast selection, 16 join
+keys, 256 projections/predicates, 65,536 snapshot XIDs/result rows, 8,192
+broadcast rows, 256-KiB rows, 16,384 queued notifications, 1,024-entry XID and
+sequence reservations, 64 opportunistic prunes per row, and a five-second
+timestamp-GC floor lag.
+
+This design is pending explicit approval and has not been implemented. All
+988 all-target tests and strict all-target Clippy pass.
+
+## Gres Balancer Policy
+
+The `gres-balancer` scanner has four rows. The two expected JSON strings and
+the two-minute timestamp are test inputs. The remaining production expression,
+`stride.max(1)`, is a defensive arithmetic invariant that prevents an
+unbounded range split from selecting its existing lower bound; zero is not a
+meaningful deployment policy.
+
+All actual planner policy is already explicit. `BalancerConfig` carries goal
+enablement plus range-size, split-stride, load-skew, range-count,
+operation-count, and cooldown settings. `TablePolicy` carries the per-table
+auto-sharding thresholds. The standalone Gres CLI reads these values from its
+JSON planning input, while the dry-run-only Gres CRD exposes the fleet
+thresholds used with externally supplied plan snapshots. Snapshot freshness is
+also an explicit UOM `Time` argument at the provider-planning boundary rather
+than a library default.
+
+No process in this crate owns an implicit deployment environment, and the
+operator does not currently invoke the planner. Adding CLI/environment
+variables inside the library or wiring unused CRD values into a nonexistent
+operator planning loop would add behavior rather than expose a hardcoded
+constant. No configuration change is warranted.
+
+All 20 all-target tests and strict all-target Clippy pass.
+
+## Observability Demo Application Policy
+
+The `observability-demo-app` scanner has ten rows. Its generated protobuf
+descriptor, category/region/warehouse/payment/tier vocabularies, and
+deterministic fixture values are the definition of the repeatable demo
+scenario. The anomaly and fraud cases, topology store name, stage names,
+relative synthetic stage work, and periodic progress log are likewise demo
+content rather than deployment safety or capacity policy.
+
+The existing deployment surface is incomplete in four places:
+
+- input/output topics are CLI-only, while the Streams application ID and
+  consumer group ID are still embedded strings;
+- the producer rate is exposed as a raw `orders_per_sec: u32` even though the
+  runtime immediately converts it to UOM `Frequency`;
+- the consumer loop embeds a 500-ms poll timeout; and
+- the four simulated processing-stage delays are hidden workload-shaping
+  policy.
+
+The proposed minimal surface adds environment backing for the existing topic
+arguments, exposes application/group identity, parses the canonical producer
+rate as UOM `Frequency`, exposes the poll timeout as UOM `Time`, and exposes
+the four stage delays as UOM `Time`. The current
+`CRABKA_DEMO_ORDERS_PER_SEC` bare integer remains a compatibility input; the
+canonical option and environment variable use a human frequency value.
+Defaults preserve `orders`, `order-counts`, `orders-analytics`,
+`orders-processor`, 50 orders/second, a 500-ms poll, and 150/400/200/300
+microseconds of validate/enrich/fraud-check/fulfill work. Zero remains valid
+for the producer rate and stage work because it intentionally pauses
+production or disables simulated latency.
+
+This standalone demo has no CRD owner. The existing admin listener already has
+environment override support through the shared telemetry helper.
+
+This design is pending explicit approval and has not been implemented. The
+stale compose contract assertion found by the gate was updated to match this
+branch's already-approved human-unit metrics compactor flags. All 64
+all-target tests and strict all-target Clippy pass.
+
+## Gres Substrate Policy
+
+The `gres-substrate` scanner has 64 rows. Most are test values or durable
+contracts: GRW1 and checkpoint manifest versions, encoded key/tag widths,
+Kafka protocol codes, the single-partition tenant WAL layout, recovery
+sentinels, monotone offset clamps, and exact allocation hints. The one-permit
+commit/checkpoint gates enforce serialization. The eight-slot checkpoint
+control channel only bounds callers waiting for that serialized service, and
+the one-byte planner normalization represents an existing empty checkpoint;
+neither is independent deployment policy. The raw-KV split runtime explicitly
+exists only to exercise durable split seams, so its tiny checkpoint values are
+fixed test-runtime inputs.
+
+Checkpoint thresholds, object part size, retained manifests, polling and
+delete-records deadlines, durable-fold record/byte/deadline limits, WAL
+recovery fetch/response/retry/DNS/connect/request policy, WAL topic
+replication and admin timeouts, and WAL producer retry/throughput/flush/DNS
+policy are already explicit. Gres supplies them through validated
+CLI/environment options and, where fleet-owned, UOM-backed `GresComputeSpec`
+fields.
+
+The remaining deployment value is `DEFAULT_MAX_FRAME_SIZE`: the one-MiB target
+used to split one logical commit into GRW1 WAL records. The library already
+supports overriding it with `SubstrateCommitter::with_max_frame_size`, but the
+Gres construction path always leaves the default in place. This is not the
+producer's 16-KiB batching target: a logical WAL record may exceed a producer
+batch, and the frame target independently controls journal granularity and
+recovery work.
+
+The proposed minimal surface is a positive UOM `ByteSize` value named
+`wal_frame_max_size`, exposed as `--wal-frame-max-size`,
+`CRABKA_GRES_WAL_FRAME_MAX_SIZE`, and `GresComputeSpec.walFrameMaxSize`, then
+passed to every live `SubstrateCommitter`. The default remains one MiB. The
+existing behavior that allows one indivisible operation to exceed the target
+is preserved; the setting remains a chunking target rather than pretending to
+be a hard rejection limit.
+
+This design is pending explicit approval and has not been implemented. All
+204 all-target tests and strict all-target Clippy pass.
+
+## Gres Load-Test Harness Policy
+
+The `gres-loadtest` scanner has 72 rows. Test fixtures account for most of
+them. The isolated tenant/database/TLS/broker identities, range-to-table ID
+stride, worker ID partition, fault action names, Linux `/proc` constants, and
+exact allocation hints are fixed harness contracts. The one-second sampler
+and timeline cadence define the durable report schema; histogram resolution
+and bounds match the workspace benchmark format; proxy chunking/burst
+mechanics, the minimum flap period, and Markdown elision thresholds keep runs
+comparable rather than represent target-cluster deployment policy.
+
+Scenario YAML already owns topology, CPU allocation, HLC skew, warmup and
+measured durations, connection count, UOM transaction rate, operation mix,
+contention shape, and fully dimensioned fault timing/rate. Registry policy is
+already validated UOM CLI/environment configuration and is passed to spawned
+Gres nodes.
+
+The remaining workload policy is the read slice and schema seed batch sizes,
+serialization retry count/backoff/jitter, per-operation and connection
+timeouts, startup retry deadline/cadence, worker shutdown grace, and reconnect
+backoff floor/ceiling. These values change what a run measures, so the
+proposed minimal design adds them to a defaultable `workload.runtime` scenario
+section. Time values remain UOM `Time`; positive/non-negative counts use
+repository `refined_type` newtypes. Defaults preserve 1,024 read rows, 500-row
+seed batches, five serialization retries with the existing two-millisecond
+step and two-millisecond jitter, 30-second operations, five-second
+connections, a 30-second/250-millisecond startup loop, five-second shutdown,
+and 100-millisecond/two-second reconnect bounds.
+
+Child launch/reap/log-drain deadlines, broker readiness polling, and diagnostic
+log-tail length are host-harness policy rather than workload semantics. A
+shared `HarnessPolicy` should expose them to `run` and `compare` as CLI options
+backed by `CRABKA_GRES_LOADTEST_*` environment variables, using UOM `Time` and
+validated positive counts. Defaults preserve two minutes, ten seconds, five
+seconds, 100 milliseconds, and 40 lines. The separate hardcoded 30-second WAL
+topic creation timeout should be deleted and reuse the already-configured
+registry topic-create timeout.
+
+This test harness has no CRD owner. This design is pending explicit approval
+and has not been implemented. All 100 runnable all-target tests pass; one
+end-to-end cluster test requiring prebuilt binaries is explicitly ignored.
+Strict all-target Clippy passes.
+
+## Units and Broker Test Facade
+
+The `units` scanner has 17 rows. Every value is a mathematical or
+serialization contract: additive/multiplicative identities, SI and IEC scale
+factors, exact wire sentinels, and the stable unit table and floating-point
+tolerance used to round-trip human configuration values. Making any of these
+deployment-configurable would make the meaning of existing configuration
+itself mutable.
+
+The nested unpublished `broker/test-helpers` workspace package contains only a
+re-export of the broker with its test-helper feature activated. It has no
+runtime values or production configuration owner.
+
+No CLI, environment variable, or CRD field is warranted. All 25 `units`
+all-target tests pass; the facade has no tests. Strict all-target Clippy passes
+for both packages.
 
 ## Remote Storage Topic Client Policy
 
