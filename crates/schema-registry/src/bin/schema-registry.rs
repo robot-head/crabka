@@ -14,6 +14,9 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
 use crabka_client_admin::AdminClient;
+use crabka_client_core::{
+    ClientFrameMax, ConnectionDispatchQueueCapacity, DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+};
 use crabka_schema_registry::{
     auth::{AuthState, basic::BasicAuthStore},
     authz::SchemaRegistryAuthz,
@@ -39,6 +42,20 @@ use tracing::info;
 struct Args {
     #[arg(long, env = "CRABKA_BOOTSTRAP_SERVERS")]
     bootstrap_servers: String,
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    #[arg(
+        long,
+        env = "SCHEMA_REGISTRY_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
     #[arg(
         long,
         env = "SCHEMA_REGISTRY_LISTEN_ADDR",
@@ -364,9 +381,17 @@ async fn main() -> anyhow::Result<()> {
     let authz = match &cfg.security.authz {
         Some(a) if a.enabled => {
             let az = Arc::new(SchemaRegistryAuthz::new(a.super_users.clone(), true));
-            let admin = AdminClient::connect_secured(
+            let admin = AdminClient::connect_with_options(
                 &split_bootstrap(&cfg.bootstrap),
-                cfg.security.client.clone(),
+                crabka_client_core::ConnectionOptions {
+                    dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+                    connect_timeout: secs(5),
+                    request_timeout: secs(30),
+                    client_id: "crabka-operator".to_owned(),
+                    dispatch_queue_capacity: cfg.runtime.client_dispatch_queue_capacity,
+                    frame_max: cfg.runtime.client_frame_max,
+                    security: cfg.security.client.clone().map(Box::new),
+                },
             )
             .await?;
             let az_for_task = az.clone();
@@ -419,6 +444,12 @@ impl Args {
     fn runtime_config(&self) -> anyhow::Result<RegistryRuntimeConfig> {
         let defaults = RegistryRuntimeConfig::default();
         let runtime = RegistryRuntimeConfig {
+            client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity::new(
+                self.client_dispatch_queue_capacity,
+            )
+            .expect("validated by clap"),
+            client_frame_max: ClientFrameMax::try_from(self.client_frame_max)
+                .expect("validated by clap"),
             election_session_timeout: self
                 .election_session_timeout
                 .unwrap_or(defaults.election_session_timeout),
@@ -486,6 +517,16 @@ impl Args {
             kafka_tls_server_name: self.kafka_tls_server_name.clone(),
         }
     }
+}
+
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    ConnectionDispatchQueueCapacity::new(value).map(ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ClientFrameMax::try_from(value).map(ClientFrameMax::size)
 }
 
 fn parse_compatibility_level(value: &str) -> Result<String, String> {
@@ -579,6 +620,88 @@ mod tests {
     use super::Args;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn client_resource_policy_parses_defaults_and_overrides() {
+        let defaults = Args::try_parse_from([
+            "crabka-schema-registry",
+            "--bootstrap-servers=localhost:9092",
+            "--admin-listen-addr=0.0.0.0:9404",
+        ])
+        .unwrap();
+        assert!(defaults.client_dispatch_queue_capacity == 64);
+        assert!(defaults.client_frame_max == mebibytes(100));
+
+        let custom = Args::try_parse_from([
+            "crabka-schema-registry",
+            "--bootstrap-servers=localhost:9092",
+            "--admin-listen-addr=0.0.0.0:9404",
+            "--client-dispatch-queue-capacity=7",
+            "--client-frame-max=32KiB",
+        ])
+        .unwrap();
+        assert!(custom.client_dispatch_queue_capacity == 7);
+        assert!(custom.client_frame_max == kibibytes(32));
+        let runtime = custom.runtime_config().unwrap();
+        assert!(runtime.client_dispatch_queue_capacity.get() == 7);
+        assert!(runtime.client_frame_max.size() == kibibytes(32));
+
+        for invalid in [
+            "--client-dispatch-queue-capacity=0",
+            "--client-frame-max=101MiB",
+        ] {
+            assert!(
+                Args::try_parse_from([
+                    "crabka-schema-registry",
+                    "--bootstrap-servers=localhost:9092",
+                    "--admin-listen-addr=0.0.0.0:9404",
+                    invalid,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn client_resource_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "SCHEMA_REGISTRY_CLIENT_RESOURCE_POLICY_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::client_resource_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("SCHEMA_REGISTRY_CLIENT_DISPATCH_QUEUE_CAPACITY", "7")
+                    .env("SCHEMA_REGISTRY_CLIENT_FRAME_MAX", "32KiB")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Args::try_parse_from([
+            "crabka-schema-registry",
+            "--bootstrap-servers=localhost:9092",
+            "--admin-listen-addr=0.0.0.0:9404",
+        ])
+        .unwrap();
+        assert!(from_env.client_dispatch_queue_capacity == 7);
+        assert!(from_env.client_frame_max == kibibytes(32));
+
+        let from_cli = Args::try_parse_from([
+            "crabka-schema-registry",
+            "--bootstrap-servers=localhost:9092",
+            "--admin-listen-addr=0.0.0.0:9404",
+            "--client-dispatch-queue-capacity=9",
+            "--client-frame-max=64KiB",
+        ])
+        .unwrap();
+        assert!(from_cli.client_dispatch_queue_capacity == 9);
+        assert!(from_cli.client_frame_max == kibibytes(64));
+    }
 
     const CLEAN_RUNTIME_ENV: [(&str, Option<&str>); 15] = [
         ("CRABKA_ADMIN_LISTEN_ADDR", None),
@@ -691,6 +814,9 @@ mod tests {
         assert!(
             args.runtime_config().expect("validate runtime")
                 == RegistryRuntimeConfig {
+                    client_dispatch_queue_capacity:
+                        crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+                    client_frame_max: crabka_client_core::ClientFrameMax::default(),
                     election_session_timeout: millis(11_000),
                     election_rebalance_timeout: millis(32_000),
                     election_heartbeat_interval: millis(3_001),

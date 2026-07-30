@@ -139,10 +139,14 @@ pub fn spawn(
     let client_id = format!("{}-reader", cfg.client_id);
     let store_bg = store.clone();
     let policy = reader_policy(&cfg.runtime);
+    let dispatch_queue_capacity = cfg.runtime.client_dispatch_queue_capacity;
+    let frame_max = cfg.runtime.client_frame_max;
 
     tokio::spawn(async move {
         let opts = ConnectionOptions {
             client_id,
+            dispatch_queue_capacity,
+            frame_max,
             security: security.map(Box::new),
             ..Default::default()
         };

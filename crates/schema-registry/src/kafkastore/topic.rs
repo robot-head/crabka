@@ -43,7 +43,19 @@ pub async fn ensure_schemas_topic(
         .split(',')
         .map(|s| s.trim().to_string())
         .collect();
-    let mut admin = AdminClient::connect_secured(&bootstrap, security).await?;
+    let mut admin = AdminClient::connect_with_options(
+        &bootstrap,
+        crabka_client_core::ConnectionOptions {
+            dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+            connect_timeout: crabka_units::secs(5),
+            request_timeout: crabka_units::secs(30),
+            client_id: "crabka-operator".to_owned(),
+            dispatch_queue_capacity: cfg.runtime.client_dispatch_queue_capacity,
+            frame_max: cfg.runtime.client_frame_max,
+            security: security.map(Box::new),
+        },
+    )
+    .await?;
 
     let (spec, timeout_ms) = schemas_topic_spec(cfg);
     let outcomes = admin.create_topics(&[spec], timeout_ms).await?;

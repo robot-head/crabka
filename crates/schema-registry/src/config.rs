@@ -74,6 +74,8 @@ pub struct RegistryConfig {
 /// (both store `f64`); nothing keys a map or set on a runtime config.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RegistryRuntimeConfig {
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub election_session_timeout: Time,
     pub election_rebalance_timeout: Time,
     pub election_heartbeat_interval: Time,
@@ -128,6 +130,9 @@ impl RegistryRuntimeConfig {
 impl Default for RegistryRuntimeConfig {
     fn default() -> Self {
         Self {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             election_session_timeout: secs(10),
             election_rebalance_timeout: secs(30),
             election_heartbeat_interval: secs(3),
@@ -216,6 +221,9 @@ mod tests {
         check!(
             RegistryRuntimeConfig::default()
                 == RegistryRuntimeConfig {
+                    client_dispatch_queue_capacity:
+                        crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+                    client_frame_max: crabka_client_core::ClientFrameMax::default(),
                     election_session_timeout: secs(10),
                     election_rebalance_timeout: secs(30),
                     election_heartbeat_interval: secs(3),

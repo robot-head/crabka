@@ -48,7 +48,7 @@ settings.
 | profiles | `CRABKA_PROFILES_` | none |
 | rebalancer | `CRABKA_REBALANCER_` | none |
 | replicator | `CRABKA_REPLICATOR_` | none |
-| schema-registry | `CRABKA_SCHEMA_REGISTRY_` | none |
+| schema-registry | `SCHEMA_REGISTRY_` | none |
 | traces | `CRABKA_TRACES_` | none |
 
 If a binary's checked-in parser uses a different established prefix, preserve

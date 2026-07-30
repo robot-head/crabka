@@ -154,6 +154,8 @@ impl ElectionClient {
         let boot = Client::builder()
             .bootstrap(self.bootstrap.clone())
             .client_id(self.client_id.clone())
+            .dispatch_queue_capacity(self.runtime.client_dispatch_queue_capacity.get())
+            .frame_max(self.runtime.client_frame_max.size())
             .maybe_security(self.security.clone())
             .build()
             .await?;
@@ -177,6 +179,8 @@ impl ElectionClient {
         Ok(Client::builder()
             .bootstrap(format!("{host}:{port}"))
             .client_id(self.client_id.clone())
+            .dispatch_queue_capacity(self.runtime.client_dispatch_queue_capacity.get())
+            .frame_max(self.runtime.client_frame_max.size())
             .maybe_security(self.security.clone())
             .build()
             .await?)
