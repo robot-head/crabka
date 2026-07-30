@@ -11,6 +11,9 @@ use std::{
 use clap::{Parser, ValueEnum};
 use crabka_blockstore::{IndexSnapshotRetain, ProfileIndex};
 use crabka_client_consumer::ConsumerFetchMaxBytes;
+use crabka_client_core::{
+    ClientFrameMax, ConnectionDispatchQueueCapacity, DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+};
 use crabka_client_producer::Producer;
 use crabka_pprof::{DebuginfodConfig, UnionProfileStore};
 use crabka_profiles::{
@@ -43,6 +46,20 @@ struct Cli {
     admin_listen_addr: SocketAddr,
     #[arg(long, default_value = "127.0.0.1:9092")]
     bootstrap: String,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
     #[arg(
         long,
         env = "CRABKA_PROFILES_WAL_FETCH_MAX",
@@ -163,6 +180,16 @@ fn parse_positive_whole_byte_size(value: &str) -> Result<ByteSize, String> {
     Ok(size)
 }
 
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    ConnectionDispatchQueueCapacity::new(value).map(ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ClientFrameMax::try_from(value).map(ClientFrameMax::size)
+}
+
 fn debuginfod_config(cli: &Cli) -> Result<DebuginfodConfig, String> {
     let defaults = DebuginfodConfig::default();
     DebuginfodConfig::new(
@@ -259,6 +286,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             let producer = Producer::builder()
                 .bootstrap(&cli.bootstrap)
+                .dispatch_queue_capacity(cli.client_dispatch_queue_capacity)
+                .frame_max(cli.client_frame_max)
                 .build()
                 .await?;
             let state = Arc::new(DistributorState {
@@ -466,6 +495,83 @@ mod tests {
     use crabka_units::{bytes, per_sec};
 
     use super::*;
+
+    #[test]
+    fn client_resource_policy_parses_defaults_and_overrides() {
+        let defaults = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
+        assert!(defaults.client_dispatch_queue_capacity == 64);
+        assert!(defaults.client_frame_max == mebibytes(100));
+
+        let custom = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "querier",
+            "--client-dispatch-queue-capacity",
+            "7",
+            "--client-frame-max",
+            "32KiB",
+        ])
+        .unwrap();
+        assert!(custom.client_dispatch_queue_capacity == 7);
+        assert!(custom.client_frame_max == crabka_units::kibibytes(32));
+
+        for args in [
+            vec![
+                "crabka-profiles",
+                "--target",
+                "querier",
+                "--client-dispatch-queue-capacity",
+                "0",
+            ],
+            vec![
+                "crabka-profiles",
+                "--target",
+                "querier",
+                "--client-frame-max",
+                "101MiB",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn client_resource_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_PROFILES_CLIENT_RESOURCE_POLICY_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::client_resource_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_PROFILES_CLIENT_DISPATCH_QUEUE_CAPACITY", "7")
+                    .env("CRABKA_PROFILES_CLIENT_FRAME_MAX", "32KiB")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
+        assert!(from_env.client_dispatch_queue_capacity == 7);
+        assert!(from_env.client_frame_max == crabka_units::kibibytes(32));
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "querier",
+            "--client-dispatch-queue-capacity",
+            "9",
+            "--client-frame-max",
+            "64KiB",
+        ])
+        .unwrap();
+        assert!(from_cli.client_dispatch_queue_capacity == 9);
+        assert!(from_cli.client_frame_max == crabka_units::kibibytes(64));
+    }
 
     static ENV_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
     const DEBUGINFOD_ENV: [(&str, Option<&str>); 4] = [
