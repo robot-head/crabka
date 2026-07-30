@@ -106,6 +106,7 @@ impl InterBrokerClient {
         port: u16,
         listener_protocol: ListenerProtocol,
         server_name: &str,
+        options: &crabka_client_core::ConnectionOptions,
     ) -> Result<Box<dyn DuplexStream>, InterBrokerError> {
         let tcp = TcpStream::connect((host, port)).await?;
         let mut stream: Box<dyn DuplexStream> = if listener_protocol.requires_tls() {
@@ -127,9 +128,15 @@ impl InterBrokerClient {
             let creds = self.creds.clone().ok_or_else(|| {
                 InterBrokerError::Config("SASL listener without inter_broker_credentials".into())
             })?;
-            crabka_client_core::outbound_sasl(&mut *stream, &to_client_creds(&creds), server_name)
-                .await
-                .map_err(|e| InterBrokerError::Sasl(e.to_string()))?;
+            crabka_client_core::outbound_sasl(
+                &mut *stream,
+                &to_client_creds(&creds),
+                server_name,
+                &options.client_id,
+                options.frame_max,
+            )
+            .await
+            .map_err(|e| InterBrokerError::Sasl(e.to_string()))?;
         }
         Ok(stream)
     }
@@ -175,9 +182,15 @@ impl InterBrokerClient {
             let creds = self.creds.clone().ok_or_else(|| {
                 InterBrokerError::Config("SASL listener without inter_broker_credentials".into())
             })?;
-            crabka_client_core::outbound_sasl(&mut *stream, &to_client_creds(&creds), server_name)
-                .await
-                .map_err(|e| InterBrokerError::Sasl(e.to_string()))?;
+            crabka_client_core::outbound_sasl(
+                &mut *stream,
+                &to_client_creds(&creds),
+                server_name,
+                &options.client_id,
+                options.frame_max,
+            )
+            .await
+            .map_err(|e| InterBrokerError::Sasl(e.to_string()))?;
         }
         crabka_client_core::Connection::from_stream(stream, options)
             .await

@@ -2690,12 +2690,17 @@ async fn drive_inter_broker_client_then_apiversions(
     client: &crabka_broker::network::client::InterBrokerClient,
     addr: SocketAddr,
 ) -> Result<(), io::Error> {
+    let options = crabka_client_core::ConnectionOptions {
+        client_id: "crabka-t16-test".to_owned(),
+        ..Default::default()
+    };
     let mut stream = client
         .connect(
             &addr.ip().to_string(),
             addr.port(),
             ListenerProtocol::SaslPlaintext,
             "localhost",
+            &options,
         )
         .await
         .map_err(|e| io::Error::other(format!("InterBrokerClient::connect: {e}")))?;

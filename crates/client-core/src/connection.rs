@@ -332,7 +332,13 @@ impl Connection {
             // the principal matches the broker's advertised hostname.
             let target = addr.ip().to_string();
             let server_name = security.sasl_handshake_host(Some(target.as_str()));
-            crate::sasl::outbound_sasl(&mut *stream, creds, server_name)
+            crate::sasl::outbound_sasl(
+                &mut *stream,
+                creds,
+                server_name,
+                &options.client_id,
+                options.frame_max,
+            )
                 .await
                 .map_err(|e| ClientError::Io(std::io::Error::other(e.to_string())))?;
         }
