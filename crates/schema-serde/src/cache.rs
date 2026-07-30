@@ -97,8 +97,8 @@ impl Default for SchemaFetchRetryPolicy {
 }
 
 fn validated_duration(label: &str, value: Time) -> Result<Duration, String> {
-    let duration =
-        Duration::try_from_secs_f64(value.secs_f64()).map_err(|error| format!("{label}: {error}"))?;
+    let duration = Duration::try_from_secs_f64(value.secs_f64())
+        .map_err(|error| format!("{label}: {error}"))?;
     if duration.is_zero() {
         return Err(format!("{label} must be greater than zero"));
     }

@@ -489,8 +489,7 @@ impl GresComputeSpec {
             "spec.compute.durableInspectionFoldMaxSize",
             durable_inspection_fold_max_size,
         )?;
-        let schema_fetch_retry_defaults =
-            crabka_schema_serde::SchemaFetchRetryPolicy::default();
+        let schema_fetch_retry_defaults = crabka_schema_serde::SchemaFetchRetryPolicy::default();
         let schema_fetch_retry_policy = crabka_schema_serde::SchemaFetchRetryPolicy::new(
             self.schema_fetch_retry_initial_backoff
                 .unwrap_or_else(|| schema_fetch_retry_defaults.initial_backoff()),

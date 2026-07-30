@@ -20,9 +20,9 @@ pub mod source;
 pub mod types;
 
 pub use config::{ConnProfile, ServerProfile, resolve, resolve_server};
+pub use crabka_schema_serde::SchemaFetchRetryPolicy;
 pub use decode::{DecodedValue, Wire, decode_value};
 pub use error::KafkaFdwError;
-pub use crabka_schema_serde::SchemaFetchRetryPolicy;
 pub use source::{FetchPlan, RawRecord, plan_fetch, scan_topic, scan_topic_with_dns_timeout};
 pub use types::{
     avro_schema_to_columns, json_schema_to_columns, project, protobuf_message_to_columns,

@@ -10556,10 +10556,7 @@ mod tests {
         } else {
             (crabka_units::millis(10), crabka_units::secs(1))
         };
-        assert_eq!(
-            (policy.initial_backoff(), policy.max_backoff()),
-            expected
-        );
+        assert_eq!((policy.initial_backoff(), policy.max_backoff()), expected);
 
         let args = <Cli as clap::Parser>::try_parse_from([
             "crabka-gres",
@@ -10590,8 +10587,7 @@ mod tests {
         ])
         .expect("positive bounds")
         .serve;
-        let error =
-            effective_schema_fetch_retry_policy(&args).expect_err("inverted retry range");
+        let error = effective_schema_fetch_retry_policy(&args).expect_err("inverted retry range");
         assert!(error.to_string().contains("91ms"));
         assert!(error.to_string().contains("37ms"));
     }

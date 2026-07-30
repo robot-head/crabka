@@ -3437,9 +3437,7 @@ mod tests {
         .effective_policy()
         .expect("compute policy");
 
-        for (range_control_enabled, active_ranges) in
-            [(false, &ranges[..1]), (true, &ranges[..])]
-        {
+        for (range_control_enabled, active_ranges) in [(false, &ranges[..1]), (true, &ranges[..])] {
             for range in active_ranges {
                 let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
                 let deployment = render_deployment(
