@@ -12,9 +12,9 @@ use arrow::{
 };
 use crabka_blockstore::{LabelMatcher, ProfileIndex, SeriesFingerprint};
 use crabka_pprof::{
-    ChainedResolver, DebuginfodResolver, FileSystemResolver, Frame, LazySymbolizer, NativeResolver,
-    ProfileError, ProfileScan, ProfileStats, ProfileStore, SymbolDb, SymbolSource,
-    profile_samples_schema,
+    ChainedResolver, DebuginfodConfig, DebuginfodResolver, FileSystemResolver, Frame,
+    LazySymbolizer, NativeResolver, ProfileError, ProfileScan, ProfileStats, ProfileStore,
+    SymbolDb, SymbolSource, profile_samples_schema,
 };
 use datafusion::{catalog::MemTable, prelude::SessionContext};
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
@@ -56,10 +56,26 @@ impl ColdProfileStore {
         index: Arc<ProfileIndex>,
         urls: Vec<String>,
     ) -> Result<Self, ProfileError> {
+        Self::new_with_debuginfod_config(store, index, urls, DebuginfodConfig::default())
+    }
+
+    /// Create a cold profile store with explicit debuginfod resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a configured debuginfod URL is invalid or its HTTP
+    /// client cannot be built.
+    pub fn new_with_debuginfod_config(
+        store: Arc<dyn ObjectStore>,
+        index: Arc<ProfileIndex>,
+        urls: Vec<String>,
+        config: DebuginfodConfig,
+    ) -> Result<Self, ProfileError> {
         let mut resolvers: Vec<Arc<dyn NativeResolver>> =
             vec![Arc::new(FileSystemResolver::default())];
         if !urls.is_empty() {
-            let debuginfod = DebuginfodResolver::new(urls).map_err(ProfileError::Store)?;
+            let debuginfod =
+                DebuginfodResolver::with_config(urls, config).map_err(ProfileError::Store)?;
             resolvers.push(Arc::new(debuginfod));
         }
         resolvers.push(Arc::new(AddressFallbackResolver));
@@ -535,7 +551,8 @@ mod tests {
 
     use assert2::{assert, check};
     use crabka_blockstore::{BlockIndex, Labels, MatchOp};
-    use crabka_pprof::{EngineOpts, FlameEngine, SymbolizeRequest};
+    use crabka_pprof::{DebuginfodConfig, EngineOpts, FlameEngine, SymbolizeRequest};
+    use crabka_units::{mebibytes, millis, secs};
     use object_store::{ObjectStore, memory::InMemory};
 
     use super::*;
@@ -545,6 +562,20 @@ mod tests {
     };
 
     const PT: &str = "process_cpu:cpu:nanoseconds:cpu:nanoseconds";
+
+    #[test]
+    fn cold_store_accepts_explicit_debuginfod_config() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let config = DebuginfodConfig::new(mebibytes(64), millis(250), secs(3)).unwrap();
+
+        ColdProfileStore::new_with_debuginfod_config(
+            store,
+            Arc::new(ProfileIndex::new()),
+            vec!["http://127.0.0.1:1".to_string()],
+            config,
+        )
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn cold_store_merges_blocks_with_local_symbol_partitions() {
