@@ -4,6 +4,10 @@
 use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
+use crabka_client_core::{
+    ClientFrameMax, ConnectionDispatchQueueCapacity, ConnectionOptions,
+    DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+};
 use crabka_rebalancer::{
     api::{GoalRegistry, handlers::AppState},
     executor::{
@@ -17,9 +21,9 @@ use crabka_rebalancer::{
     model::{proposal::ProposalStatus, store::ProposalStore},
 };
 use crabka_units::{
-    ByteRate, Ratio, Time,
+    ByteRate, ByteSize, Ratio, Time,
     convert::{ByteRateExt as _, StdDurationExt as _, TimeExt as _},
-    fraction, millis, percent, secs,
+    fraction, millis, parse, percent, secs,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -98,6 +102,8 @@ async fn connect_client(args: &Args) -> anyhow::Result<crabka_client_core::Clien
     Ok(crabka_client_core::Client::builder()
         .bootstrap(args.bootstrap_servers.clone())
         .client_id("crabka-rebalancer")
+        .dispatch_queue_capacity(args.client_dispatch_queue_capacity)
+        .frame_max(args.client_frame_max)
         .build()
         .await?)
 }
@@ -112,6 +118,20 @@ struct Args {
     /// `host:port,host:port,...` of brokers to use for bootstrap.
     #[arg(long, env = "CRABKA_BOOTSTRAP_SERVERS")]
     bootstrap_servers: String,
+    #[arg(
+        long,
+        env = "CRABKA_REBALANCER_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    #[arg(
+        long,
+        env = "CRABKA_REBALANCER_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
 
     /// Bind address for the Connect-RPC + operational HTTP server.
     #[arg(
@@ -331,6 +351,16 @@ struct StateTopicSetup {
     backend: Arc<dyn crabka_rebalancer::state_topic::StateBackend>,
 }
 
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    ConnectionDispatchQueueCapacity::new(value).map(ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ClientFrameMax::try_from(value).map(ClientFrameMax::size)
+}
+
 async fn start_state_topic(
     args: &Args,
     client: &crabka_client_core::Client,
@@ -341,9 +371,20 @@ async fn start_state_topic(
         .split(',')
         .map(|address| address.trim().to_string())
         .collect();
-    let mut admin = crabka_client_admin::AdminClient::connect(&addrs)
-        .await
-        .map_err(|error| anyhow::anyhow!("admin client connect: {error}"))?;
+    let mut admin = crabka_client_admin::AdminClient::connect_with_options(
+        &addrs,
+        ConnectionOptions {
+            client_id: "crabka-rebalancer".to_owned(),
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::new(
+                args.client_dispatch_queue_capacity,
+            )
+            .expect("validated by clap"),
+            frame_max: ClientFrameMax::try_from(args.client_frame_max).expect("validated by clap"),
+            ..ConnectionOptions::default()
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("admin client connect: {error}"))?;
     crabka_rebalancer::state_topic::topic_admin::ensure_topic(
         &mut admin,
         &args.state_topic_name,
@@ -701,6 +742,84 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+
+    #[test]
+    fn client_resource_policy_parses_defaults_and_overrides() {
+        let defaults =
+            Args::try_parse_from(["crabka-rebalancer", "--bootstrap-servers", "127.0.0.1:9092"])
+                .unwrap();
+        assert2::assert!(defaults.client_dispatch_queue_capacity == 64);
+        assert2::assert!(defaults.client_frame_max == crabka_units::mebibytes(100));
+
+        let custom = Args::try_parse_from([
+            "crabka-rebalancer",
+            "--bootstrap-servers",
+            "127.0.0.1:9092",
+            "--client-dispatch-queue-capacity",
+            "7",
+            "--client-frame-max",
+            "32KiB",
+        ])
+        .unwrap();
+        assert2::assert!(custom.client_dispatch_queue_capacity == 7);
+        assert2::assert!(custom.client_frame_max == crabka_units::kibibytes(32));
+
+        for (option, invalid) in [
+            ("--client-dispatch-queue-capacity", "0"),
+            ("--client-frame-max", "101MiB"),
+        ] {
+            assert2::assert!(
+                Args::try_parse_from([
+                    "crabka-rebalancer",
+                    "--bootstrap-servers",
+                    "127.0.0.1:9092",
+                    option,
+                    invalid,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn client_resource_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_REBALANCER_CLIENT_RESOURCE_POLICY_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::client_resource_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_REBALANCER_CLIENT_DISPATCH_QUEUE_CAPACITY", "7")
+                    .env("CRABKA_REBALANCER_CLIENT_FRAME_MAX", "32KiB")
+                    .status()
+                    .expect("child test");
+            assert2::assert!(status.success());
+            return;
+        }
+
+        let from_env =
+            Args::try_parse_from(["crabka-rebalancer", "--bootstrap-servers", "127.0.0.1:9092"])
+                .unwrap();
+        assert2::assert!(from_env.client_dispatch_queue_capacity == 7);
+        assert2::assert!(from_env.client_frame_max == crabka_units::kibibytes(32));
+
+        let from_cli = Args::try_parse_from([
+            "crabka-rebalancer",
+            "--bootstrap-servers",
+            "127.0.0.1:9092",
+            "--client-dispatch-queue-capacity",
+            "9",
+            "--client-frame-max",
+            "64KiB",
+        ])
+        .unwrap();
+        assert2::assert!(from_cli.client_dispatch_queue_capacity == 9);
+        assert2::assert!(from_cli.client_frame_max == crabka_units::kibibytes(64));
+    }
 
     #[test]
     fn state_topic_load_warning_only_before_loaded() {
