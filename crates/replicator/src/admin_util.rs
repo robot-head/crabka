@@ -10,6 +10,8 @@ use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::security::ClientSecurity;
 
+use crate::config::ClientResourcePolicy;
+
 /// Kafka error code: the topic already exists.
 const TOPIC_ALREADY_EXISTS: i16 = 36;
 
@@ -29,9 +31,35 @@ pub async fn ensure_topic(
     partitions: i32,
     security: Option<ClientSecurity>,
 ) -> Result<(), String> {
-    let mut admin = AdminClient::connect_secured(&[bootstrap.to_string()], security)
-        .await
-        .map_err(|e| e.to_string())?;
+    ensure_topic_with_policy(
+        bootstrap,
+        topic,
+        partitions,
+        security,
+        ClientResourcePolicy::default(),
+    )
+    .await
+}
+
+/// Ensure a topic using the deployment's client resource policy.
+///
+/// # Errors
+///
+/// Returns an error when configuration is invalid, protocol encoding fails,
+/// the broker rejects the request, or transport I/O fails.
+pub async fn ensure_topic_with_policy(
+    bootstrap: &str,
+    topic: &str,
+    partitions: i32,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+) -> Result<(), String> {
+    let mut admin = AdminClient::connect_with_options(
+        &[bootstrap.to_string()],
+        admin_options(security, client_resource_policy),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let outcomes = admin
         .create_topics(
@@ -74,9 +102,28 @@ pub async fn ensure_compacted_topic(
     topic: &str,
     security: Option<ClientSecurity>,
 ) -> Result<(), String> {
-    let mut admin = AdminClient::connect_secured(&[bootstrap.to_string()], security)
+    ensure_compacted_topic_with_policy(bootstrap, topic, security, ClientResourcePolicy::default())
         .await
-        .map_err(|e| e.to_string())?;
+}
+
+/// Ensure a compacted topic using the deployment's client resource policy.
+///
+/// # Errors
+///
+/// Returns an error when configuration is invalid, protocol encoding fails,
+/// the broker rejects the request, or transport I/O fails.
+pub async fn ensure_compacted_topic_with_policy(
+    bootstrap: &str,
+    topic: &str,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+) -> Result<(), String> {
+    let mut admin = AdminClient::connect_with_options(
+        &[bootstrap.to_string()],
+        admin_options(security, client_resource_policy),
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let mut configs = BTreeMap::new();
     configs.insert("cleanup.policy".to_string(), "compact".to_string());
@@ -108,6 +155,21 @@ pub async fn ensure_compacted_topic(
     Ok(())
 }
 
+fn admin_options(
+    security: Option<ClientSecurity>,
+    policy: ClientResourcePolicy,
+) -> crabka_client_core::ConnectionOptions {
+    crabka_client_core::ConnectionOptions {
+        dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+        connect_timeout: secs(5),
+        request_timeout: secs(30),
+        client_id: "crabka-operator".to_owned(),
+        dispatch_queue_capacity: policy.dispatch_queue_capacity,
+        frame_max: policy.frame_max,
+        security: security.map(Box::new),
+    }
+}
+
 /// Build a drain consumer for the given topic.  Security is threaded through
 /// conditionally — `bon` wraps bare `T` setters in `Some`, so passing `None`
 /// means simply omitting the `.security()` call.
@@ -116,12 +178,15 @@ async fn build_drain_consumer(
     group_id: String,
     topic: &str,
     security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
 ) -> Result<Consumer, crabka_client_consumer::ConsumerError> {
     if let Some(sec) = security {
         Consumer::builder()
             .bootstrap(bootstrap)
             .group_id(group_id)
             .client_id("crabka-replicator-util")
+            .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+            .frame_max(client_resource_policy.frame_max.size())
             .subscribe(vec![topic.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .security(sec)
@@ -132,6 +197,8 @@ async fn build_drain_consumer(
             .bootstrap(bootstrap)
             .group_id(group_id)
             .client_id("crabka-replicator-util")
+            .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+            .frame_max(client_resource_policy.frame_max.size())
             .subscribe(vec![topic.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .build()
@@ -159,20 +226,38 @@ pub async fn read_all(
     topic: &str,
     security: Option<ClientSecurity>,
 ) -> Result<Vec<RawRecord>, String> {
+    read_all_with_policy(bootstrap, topic, security, ClientResourcePolicy::default()).await
+}
+
+/// Drain a topic using the deployment's client resource policy.
+///
+/// # Errors
+///
+/// Returns an error when configuration is invalid, protocol encoding fails,
+/// the broker rejects the request, or transport I/O fails.
+pub async fn read_all_with_policy(
+    bootstrap: &str,
+    topic: &str,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+) -> Result<Vec<RawRecord>, String> {
     const MAX_EMPTY: usize = 3;
 
     let group_id = format!("crabka-replicator-reader-{topic}");
 
-    let mut consumer = match build_drain_consumer(bootstrap, group_id, topic, security).await {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = e.to_string();
-            if is_unknown_topic_error(&msg) {
-                return Ok(Vec::new());
+    let mut consumer =
+        match build_drain_consumer(bootstrap, group_id, topic, security, client_resource_policy)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = e.to_string();
+                if is_unknown_topic_error(&msg) {
+                    return Ok(Vec::new());
+                }
+                return Err(msg);
             }
-            return Err(msg);
-        }
-    };
+        };
 
     let mut records = Vec::new();
     let mut consecutive_empty = 0usize;
@@ -219,7 +304,30 @@ pub async fn read_last_value_for_key(
     key: &[u8],
     security: Option<ClientSecurity>,
 ) -> Result<Option<Vec<u8>>, String> {
-    let all = read_all(bootstrap, topic, security).await?;
+    read_last_value_for_key_with_policy(
+        bootstrap,
+        topic,
+        key,
+        security,
+        ClientResourcePolicy::default(),
+    )
+    .await
+}
+
+/// Read a key using the deployment's client resource policy.
+///
+/// # Errors
+///
+/// Returns an error when configuration is invalid, protocol encoding fails,
+/// the broker rejects the request, or transport I/O fails.
+pub async fn read_last_value_for_key_with_policy(
+    bootstrap: &str,
+    topic: &str,
+    key: &[u8],
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+) -> Result<Option<Vec<u8>>, String> {
+    let all = read_all_with_policy(bootstrap, topic, security, client_resource_policy).await?;
 
     let matched = if key.is_empty() {
         all.into_iter().last()

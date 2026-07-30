@@ -13,7 +13,7 @@ use tokio::sync::oneshot::Receiver;
 use tracing::warn;
 
 use crate::{
-    config::{NamingPolicy, PolicyConfig},
+    config::{ClientResourcePolicy, NamingPolicy, PolicyConfig},
     ids::{DownstreamOffset, PartitionIndex, UpstreamOffset},
     mm2::OffsetSync,
     naming::{PROVENANCE_HEADER, Renamer},
@@ -68,6 +68,7 @@ pub struct TargetSink {
     target_bootstrap: String,
     /// Security config retained for lazy topic creation calls.
     security: Option<crabka_client_core::security::ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
     /// Target topics that have already been ensured (to avoid redundant admin calls).
     created_topics: HashSet<String>,
     /// In-flight produces awaiting broker acks (see [`PendingProduce`]).
@@ -91,22 +92,40 @@ impl TargetSink {
         err,
     )]
     pub async fn start(params: SinkParams) -> Result<Self, ConnectError> {
+        Self::start_with_policy(params, ClientResourcePolicy::default()).await
+    }
+
+    /// Start with the deployment's client resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectError::Backend`] if the producer cannot connect or the
+    /// offset-syncs topic cannot be created.
+    pub async fn start_with_policy(
+        params: SinkParams,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> Result<Self, ConnectError> {
         let offset_syncs_topic = OffsetSync::topic_name(&params.source_alias);
 
         // Ensure the offset-syncs topic exists before we start producing.
-        crate::admin_util::ensure_topic(
+        crate::admin_util::ensure_topic_with_policy(
             &params.target_bootstrap,
             &offset_syncs_topic,
             1,
             params.security.clone(),
+            client_resource_policy,
         )
         .await
         .map_err(ConnectError::Backend)?;
 
         // Build the producer (non-idempotent for at-least-once Slice 1).
-        let producer = build_producer(&params.target_bootstrap, params.security.clone())
-            .await
-            .map_err(|e| ConnectError::Backend(e.to_string()))?;
+        let producer = build_producer(
+            &params.target_bootstrap,
+            params.security.clone(),
+            client_resource_policy,
+        )
+        .await
+        .map_err(|e| ConnectError::Backend(e.to_string()))?;
 
         let renamer = Renamer::new(params.naming, &params.source_alias);
 
@@ -122,6 +141,7 @@ impl TargetSink {
             source_alias: params.source_alias,
             target_bootstrap: params.target_bootstrap,
             security: params.security,
+            client_resource_policy,
             created_topics: HashSet::new(),
             pending: Vec::new(),
             offset_syncs: Vec::new(),
@@ -139,9 +159,12 @@ impl TargetSink {
 async fn build_producer(
     bootstrap: &str,
     security: Option<crabka_client_core::security::ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
 ) -> Result<Producer, crabka_client_producer::ProducerError> {
     let builder = Producer::builder()
         .bootstrap(bootstrap)
+        .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+        .frame_max(client_resource_policy.frame_max.size())
         .enable_idempotence(false)
         .acks(Acks::All);
     match security {
@@ -201,11 +224,12 @@ impl Sink<(), ReplicatedRecord> for TargetSink {
 
             // Lazily ensure the target topic exists (no-op after first visit).
             if !self.created_topics.contains(&target_topic) {
-                crate::admin_util::ensure_topic(
+                crate::admin_util::ensure_topic_with_policy(
                     &self.target_bootstrap,
                     &target_topic,
                     1,
                     self.security.clone(),
+                    self.client_resource_policy,
                 )
                 .await
                 .map_err(ConnectError::Backend)?;

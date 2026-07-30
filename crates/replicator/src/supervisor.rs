@@ -12,7 +12,7 @@ use crabka_connect::RuntimeState;
 use tokio::{sync::watch, task::JoinHandle};
 
 use crate::{
-    config::{NamingPolicy, PolicyConfig, ReplicatorConfig},
+    config::{ClientResourcePolicy, NamingPolicy, PolicyConfig, ReplicatorConfig},
     error::ReplicatorError,
     naming::Renamer,
     selector::Selector,
@@ -39,6 +39,7 @@ struct RebuildSpec {
     target_zones: Vec<String>,
     policies: Vec<PolicyConfig>,
     group_selector: Selector,
+    client_resource_policy: ClientResourcePolicy,
 }
 
 /// Build a fresh [`FlowWorkerParams`] from a [`RebuildSpec`]. All security is
@@ -57,6 +58,7 @@ fn make_params(spec: &RebuildSpec) -> FlowWorkerParams {
         group_selector: spec.group_selector.clone(),
         security_source: None,
         security_target: None,
+        client_resource_policy: spec.client_resource_policy,
     }
 }
 
@@ -82,6 +84,16 @@ pub struct FlowSupervisor {
 }
 
 impl FlowSupervisor {
+    /// Start with the default Kafka client resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when configuration validation, metadata discovery, or
+    /// worker startup fails.
+    pub async fn run(config: ReplicatorConfig) -> crate::Result<Self> {
+        Self::run_with_policy(config, ClientResourcePolicy::default()).await
+    }
+
     /// Validate `config`, resolve and start one [`FlowWorker`] per flow, then
     /// spawn a supervision loop that owns the workers and restarts any that
     /// enter [`RuntimeState::Failed`].
@@ -101,7 +113,10 @@ impl FlowSupervisor {
         fields(flows = config.flows.len(), clusters = config.clusters.len()),
         err,
     )]
-    pub async fn run(config: ReplicatorConfig) -> crate::Result<Self> {
+    pub async fn run_with_policy(
+        config: ReplicatorConfig,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> crate::Result<Self> {
         config.validate()?;
 
         let mut entries: Vec<(RebuildSpec, FlowWorker)> = Vec::with_capacity(config.flows.len());
@@ -114,9 +129,20 @@ impl FlowSupervisor {
             let flow_name = format!("{}__{}", flow.from, flow.to);
 
             // Resolve the concrete topic list from the source cluster's metadata.
-            let mut admin = AdminClient::connect(std::slice::from_ref(&from.bootstrap))
-                .await
-                .map_err(|e| ReplicatorError::Client(e.to_string()))?;
+            let mut admin = AdminClient::connect_with_options(
+                std::slice::from_ref(&from.bootstrap),
+                crabka_client_core::ConnectionOptions {
+                    dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+                    connect_timeout: crabka_units::secs(5),
+                    request_timeout: crabka_units::secs(30),
+                    client_id: "crabka-operator".to_owned(),
+                    dispatch_queue_capacity: client_resource_policy.dispatch_queue_capacity,
+                    frame_max: client_resource_policy.frame_max,
+                    security: None,
+                },
+            )
+            .await
+            .map_err(|e| ReplicatorError::Client(e.to_string()))?;
             let md = admin
                 .metadata(&[])
                 .await
@@ -149,6 +175,7 @@ impl FlowSupervisor {
                 target_zones: to.zones.clone(),
                 policies: config.policies.clone(),
                 group_selector,
+                client_resource_policy,
             };
 
             let worker = Box::pin(FlowWorker::start(make_params(&spec))).await?;

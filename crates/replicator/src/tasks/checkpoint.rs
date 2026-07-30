@@ -7,10 +7,14 @@
 use bytes::Bytes;
 use crabka_client_admin::AdminClient;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_units::{
+    fmt::Human as _,
+    prelude::{Time, TimeExt as _},
+};
 use tracing::warn;
 
 use crate::{
-    config::NamingPolicy,
+    config::{ClientResourcePolicy, NamingPolicy},
     error::ReplicatorError,
     ids::{CommittedOffset, PartitionIndex},
     mm2::{Checkpoint, OffsetSync},
@@ -51,22 +55,45 @@ pub async fn run_once(
     params: &CheckpointParams,
     store: &OffsetSyncStore,
 ) -> Result<(), ReplicatorError> {
+    run_once_with_policy(params, store, ClientResourcePolicy::default()).await
+}
+
+/// Run one checkpoint pass with the deployment's client resource policy.
+///
+/// # Errors
+///
+/// Returns [`ReplicatorError`] on topic-ensure, admin-connect, or produce
+/// failures.
+pub async fn run_once_with_policy(
+    params: &CheckpointParams,
+    store: &OffsetSyncStore,
+    client_resource_policy: ClientResourcePolicy,
+) -> Result<(), ReplicatorError> {
     let checkpoint_topic = Checkpoint::topic_name(&params.source_alias);
 
     // 1. Ensure the checkpoints topic exists on the target.
-    crate::admin_util::ensure_topic(
+    crate::admin_util::ensure_topic_with_policy(
         &params.target_bootstrap,
         &checkpoint_topic,
         1,
         params.security.clone(),
+        client_resource_policy,
     )
     .await
     .map_err(|e| ReplicatorError::Client(format!("ensure checkpoints topic: {e}")))?;
 
     // 2. Connect to the source cluster to list group offsets.
-    let mut admin = AdminClient::connect_secured(
+    let mut admin = AdminClient::connect_with_options(
         std::slice::from_ref(&params.source_bootstrap),
-        None, // source cluster: no security (security param applies to target only)
+        crabka_client_core::ConnectionOptions {
+            dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+            connect_timeout: crabka_units::secs(5),
+            request_timeout: crabka_units::secs(30),
+            client_id: "crabka-operator".to_owned(),
+            dispatch_queue_capacity: client_resource_policy.dispatch_queue_capacity,
+            frame_max: client_resource_policy.frame_max,
+            security: None, // source cluster: target security does not apply
+        },
     )
     .await
     .map_err(|e| ReplicatorError::Client(format!("source admin connect: {e}")))?;
@@ -85,9 +112,13 @@ pub async fn run_once(
     tracing::Span::current().record("groups", groups.len());
 
     // 4. Build a producer to write checkpoint records to the target.
-    let producer = build_producer(&params.target_bootstrap, params.security.clone())
-        .await
-        .map_err(|e| ReplicatorError::Client(format!("build target producer: {e}")))?;
+    let producer = build_producer(
+        &params.target_bootstrap,
+        params.security.clone(),
+        client_resource_policy,
+    )
+    .await
+    .map_err(|e| ReplicatorError::Client(format!("build target producer: {e}")))?;
 
     // 5. For each matched group, translate committed offsets and produce checkpoints.
     // The checkpoint's topic is the REMOTE (renamed) topic a failed-over consumer
@@ -165,9 +196,19 @@ impl CheckpointTask {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(source_alias = %params.source_alias, interval_ms = interval.as_millis()),
+        fields(source_alias = %params.source_alias, interval = %interval.human()),
     )]
-    pub fn start(params: CheckpointParams, interval: std::time::Duration) -> Self {
+    pub fn start(params: CheckpointParams, interval: Time) -> Self {
+        Self::start_with_policy(params, interval, ClientResourcePolicy::default())
+    }
+
+    /// Start with the deployment's client resource policy.
+    #[must_use]
+    pub fn start_with_policy(
+        params: CheckpointParams,
+        interval: Time,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> Self {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
         let handle = tokio::spawn(async move {
@@ -176,10 +217,11 @@ impl CheckpointTask {
                 let mut store = OffsetSyncStore::default();
                 let offset_syncs_topic = OffsetSync::topic_name(&params.source_alias);
 
-                match crate::admin_util::read_all(
+                match crate::admin_util::read_all_with_policy(
                     &params.target_bootstrap,
                     &offset_syncs_topic,
                     params.security.clone(),
+                    client_resource_policy,
                 )
                 .await
                 {
@@ -200,13 +242,14 @@ impl CheckpointTask {
                     }
                 }
 
-                if let Err(e) = run_once(&params, &store).await {
+                if let Err(e) = run_once_with_policy(&params, &store, client_resource_policy).await
+                {
                     warn!(error = %e, "checkpoint run_once failed");
                 }
 
                 // Wait for the next interval or a shutdown signal.
                 tokio::select! {
-                    () = tokio::time::sleep(interval) => {}
+                    () = tokio::time::sleep(interval.to_std()) => {}
                     _ = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
                             break;
@@ -235,9 +278,12 @@ impl CheckpointTask {
 async fn build_producer(
     bootstrap: &str,
     security: Option<crabka_client_core::security::ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
 ) -> Result<Producer, crabka_client_producer::ProducerError> {
     let builder = Producer::builder()
         .bootstrap(bootstrap)
+        .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+        .frame_max(client_resource_policy.frame_max.size())
         .enable_idempotence(false)
         .acks(Acks::All);
     match security {

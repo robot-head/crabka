@@ -6,6 +6,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::ReplicatorError;
 
+/// Kafka client resource policy owned by the replicator process.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ClientResourcePolicy {
+    pub dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    pub frame_max: crabka_client_core::ClientFrameMax,
+}
+
 /// Top-level replicator configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplicatorConfig {

@@ -11,6 +11,7 @@ use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_connect::{ConnectError, ConnectRecord, OffsetMap, OffsetValue, Source, SourceOffset};
 
 use crate::{
+    config::ClientResourcePolicy,
     ids::{Offset, PartitionIndex, Timestamp},
     record::ReplicatedRecord,
 };
@@ -68,8 +69,32 @@ impl SourceConsumer {
         topics: &[String],
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ConnectError> {
+        Self::start_with_policy(
+            bootstrap,
+            group_id,
+            topics,
+            security,
+            ClientResourcePolicy::default(),
+        )
+        .await
+    }
+
+    /// Build with the deployment's client resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConnectError`] if the consumer cannot connect.
+    pub async fn start_with_policy(
+        bootstrap: &str,
+        group_id: &str,
+        topics: &[String],
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> Result<Self, ConnectError> {
         let builder = Consumer::builder()
             .bootstrap(bootstrap)
+            .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+            .frame_max(client_resource_policy.frame_max.size())
             .group_id(group_id)
             .subscribe(topics.to_vec())
             .auto_offset_reset(AutoOffsetReset::Earliest);

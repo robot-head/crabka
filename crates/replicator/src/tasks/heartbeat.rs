@@ -7,7 +7,7 @@ use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use tokio::sync::watch;
 use tracing::warn;
 
-use crate::{error::ReplicatorError, mm2::Heartbeat};
+use crate::{config::ClientResourcePolicy, error::ReplicatorError, mm2::Heartbeat};
 
 /// Parameters for the [`HeartbeatTask`].
 pub struct HeartbeatParams {
@@ -53,18 +53,32 @@ impl HeartbeatTask {
         err,
     )]
     pub async fn start(p: HeartbeatParams) -> Result<Self, ReplicatorError> {
+        Self::start_with_policy(p, ClientResourcePolicy::default()).await
+    }
+
+    /// Start with the deployment's client resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplicatorError::Client`] if topic creation or producer
+    /// construction fails.
+    pub async fn start_with_policy(
+        p: HeartbeatParams,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> Result<Self, ReplicatorError> {
         // Ensure the heartbeats topic exists before we start producing.
-        crate::admin_util::ensure_topic(
+        crate::admin_util::ensure_topic_with_policy(
             &p.target_bootstrap,
             Heartbeat::TOPIC,
             1,
             p.security.clone(),
+            client_resource_policy,
         )
         .await
         .map_err(ReplicatorError::Client)?;
 
         // Build the producer once — reused for every heartbeat.
-        let producer = build_producer(&p.target_bootstrap, p.security)
+        let producer = build_producer(&p.target_bootstrap, p.security, client_resource_policy)
             .await
             .map_err(|e| ReplicatorError::Client(e.to_string()))?;
 
@@ -151,9 +165,12 @@ impl HeartbeatTask {
 async fn build_producer(
     bootstrap: &str,
     security: Option<crabka_client_core::security::ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
 ) -> Result<Producer, crabka_client_producer::ProducerError> {
     let builder = Producer::builder()
         .bootstrap(bootstrap)
+        .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+        .frame_max(client_resource_policy.frame_max.size())
         .enable_idempotence(false)
         .acks(Acks::All);
     match security {

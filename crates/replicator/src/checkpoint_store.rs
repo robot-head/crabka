@@ -9,6 +9,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use crabka_connect::{CheckpointStore, ConnectError, SourceOffset};
 
+use crate::config::ClientResourcePolicy;
+
 /// The internal compacted topic used to store replicator checkpoints.
 const STATE_TOPIC: &str = "crabka-replicator-offsets";
 
@@ -24,6 +26,7 @@ pub struct InternalTopicCheckpointStore {
     topic: String,
     key: String,
     security: Option<crabka_client_core::security::ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
 }
 
 impl InternalTopicCheckpointStore {
@@ -39,12 +42,40 @@ impl InternalTopicCheckpointStore {
         flow_name: &str,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ConnectError> {
-        crate::admin_util::ensure_compacted_topic(target_bootstrap, STATE_TOPIC, security.clone())
-            .await
-            .map_err(ConnectError::Offset)?;
+        Self::start_with_policy(
+            target_bootstrap,
+            flow_name,
+            security,
+            ClientResourcePolicy::default(),
+        )
+        .await
+    }
+
+    /// Start with the deployment's client resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConnectError::Offset`] if the topic cannot be created or the
+    /// producer cannot connect.
+    pub async fn start_with_policy(
+        target_bootstrap: &str,
+        flow_name: &str,
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> Result<Self, ConnectError> {
+        crate::admin_util::ensure_compacted_topic_with_policy(
+            target_bootstrap,
+            STATE_TOPIC,
+            security.clone(),
+            client_resource_policy,
+        )
+        .await
+        .map_err(ConnectError::Offset)?;
 
         let builder = crabka_client_producer::Producer::builder()
             .bootstrap(target_bootstrap)
+            .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+            .frame_max(client_resource_policy.frame_max.size())
             .enable_idempotence(false)
             .acks(crabka_client_producer::Acks::All);
 
@@ -60,6 +91,7 @@ impl InternalTopicCheckpointStore {
             topic: STATE_TOPIC.into(),
             key: flow_name.into(),
             security,
+            client_resource_policy,
         })
     }
 }
@@ -99,11 +131,12 @@ impl CheckpointStore for InternalTopicCheckpointStore {
 
     #[tracing::instrument(level = "info", skip_all, fields(key = %self.key), err)]
     async fn load(&self) -> Result<Option<SourceOffset>, ConnectError> {
-        let latest = crate::admin_util::read_last_value_for_key(
+        let latest = crate::admin_util::read_last_value_for_key_with_policy(
             &self.target_bootstrap,
             &self.topic,
             self.key.as_bytes(),
             self.security.clone(),
+            self.client_resource_policy,
         )
         .await
         .map_err(ConnectError::Offset)?;
