@@ -4723,9 +4723,29 @@ generic client boundary:
 
 Existing direct `ConnectionOptions` and `IsolatedFetch` constructors select the
 typed defaults, preserving wire behavior while preventing invalid state inside
-client-core. Library propagation, deployment CLI/environment surfaces, and
-Kafka/Gres CRD fields remain open as separate ownership phases; those surfaces
-must forward these types without reinterpreting them.
+client-core. The reusable library owners now carry typed policy without reading
+the environment:
+
+- producer primary, transaction-coordinator, and group-coordinator clients;
+- admin initial connections and both reconnect paths;
+- streams membership, metadata, fetch, producer, offset, and EOS clients;
+- Gres FDW admin/scan clients and isolated fetches;
+- Gres WAL admin, producer, end-sampler, replay, and reconstructed readers; and
+- Gres registry writer, admin, refresh, reconnecting reader, and fetch paths.
+
+The workspace construction-site inventory is:
+
+```bash
+rg -n 'Client::builder\(|Producer::builder\(|ConnectionOptions \{|IsolatedFetch \{' \
+  crates --glob '*.rs'
+```
+
+Remaining production hits belong to deployed binaries or their private
+components (for example rebalancer, remote-storage-topic, schema-registry,
+replicator, and gRPC gateway). They remain open for the deployment
+CLI/environment phase because that phase must introduce the process owner and
+thread its values through those components together. Kafka/Gres CRD fields
+remain a separate final ownership phase.
 
 The generic resource-policy gates passed:
 
