@@ -418,6 +418,9 @@ pub fn op_config(namespace: &str) -> OperatorConfig {
         lease_name: "l".into(),
         pod_name: "p".into(),
         health_addr: "0.0.0.0:0".parse().unwrap(),
+        client_dispatch_queue_capacity:
+            crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        client_frame_max: crabka_units::mebibytes(100),
         log_filter: "info".into(),
         default_broker_image: None,
         default_gateway_image: None,

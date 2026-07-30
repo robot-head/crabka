@@ -1,7 +1,7 @@
 use std::{net::SocketAddr, str::FromStr};
 
 use clap::{Args, ValueEnum};
-use crabka_units::{Time, convert::TimeExt as _, parse};
+use crabka_units::{ByteSize, Time, convert::TimeExt as _, parse};
 use refined_type::rule::GreaterU64;
 use serde::{Deserialize, Serialize};
 
@@ -73,6 +73,24 @@ pub struct OperatorConfig {
     /// Address for `/healthz`, `/readyz`, `/metrics`.
     #[arg(long, env = "HEALTH_ADDR", default_value = "0.0.0.0:8080")]
     pub health_addr: SocketAddr,
+
+    /// Capacity shared by every outbound Kafka admin connection.
+    #[arg(
+        long,
+        env = "OPERATOR_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    pub client_dispatch_queue_capacity: usize,
+
+    /// Maximum frame size shared by every outbound Kafka admin connection.
+    #[arg(
+        long,
+        env = "OPERATOR_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    pub client_frame_max: ByteSize,
 
     /// Tracing filter (e.g. `info,kube=warn`).
     #[arg(
@@ -299,6 +317,18 @@ pub struct OperatorConfig {
     pub gres_checkpoint_gcs_application_credentials_path: Option<String>,
 }
 
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    crabka_client_core::ConnectionDispatchQueueCapacity::new(value)
+        .map(crabka_client_core::ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    crabka_client_core::ClientFrameMax::try_from(value)
+        .map(crabka_client_core::ClientFrameMax::size)
+}
+
 /// Supported durable checkpoint object-store providers for tenant WAL parking.
 #[derive(Debug, Clone, Copy, ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -326,6 +356,10 @@ impl OperatorConfig {
     ///
     /// Returns the invalid relationship before any external I/O begins.
     pub fn validate(&self) -> Result<(), String> {
+        crabka_client_core::ConnectionDispatchQueueCapacity::new(
+            self.client_dispatch_queue_capacity,
+        )?;
+        crabka_client_core::ClientFrameMax::try_from(self.client_frame_max)?;
         let lease_seconds_f64 = self.leader_lease_duration.secs_f64();
         if !lease_seconds_f64.is_finite() || lease_seconds_f64.fract() != 0.0 {
             return Err("leader lease duration must be a whole number of seconds".to_owned());
@@ -368,12 +402,34 @@ mod tests {
         let parsed = Wrap::parse_from(["bin"]);
         assert!(parsed.cfg.watched().is_none());
         assert!(parsed.cfg.operator_namespace == "crabka-operator");
+        assert!(parsed.cfg.client_dispatch_queue_capacity == 64);
+        assert!(parsed.cfg.client_frame_max == crabka_units::mebibytes(100));
         assert!(parsed.cfg.pgdog_reload_attempts.into_value() == 3);
         assert!(parsed.cfg.pgdog_reload_backoff == millis(100));
         assert!(parsed.cfg.pgdog_reload_requeue == secs(15));
         assert!(parsed.cfg.pgdog_admin_timeout == secs(20));
         assert!(parsed.cfg.pgdog_transition_poll == secs(60));
         assert!(parsed.cfg.controller_error_requeue == secs(15));
+    }
+
+    #[test]
+    fn client_resource_policy_accepts_uom_overrides_and_rejects_invalid_values() {
+        let configured = Wrap::parse_from([
+            "bin",
+            "--client-dispatch-queue-capacity=7",
+            "--client-frame-max=32KiB",
+        ])
+        .cfg;
+        assert!(configured.client_dispatch_queue_capacity == 7);
+        assert!(configured.client_frame_max == crabka_units::kibibytes(32));
+
+        for option in [
+            "--client-dispatch-queue-capacity=0",
+            "--client-frame-max=101MiB",
+            "--client-frame-max=1.5B",
+        ] {
+            assert!(Wrap::try_parse_from(["bin", option]).is_err());
+        }
     }
 
     #[test]
@@ -520,6 +576,8 @@ mod tests {
                 .env("PGDOG_ADMIN_TIMEOUT", "7ms")
                 .env("PGDOG_TRANSITION_POLL", "8ms")
                 .env("CONTROLLER_ERROR_REQUEUE", "9ms")
+                .env("OPERATOR_CLIENT_DISPATCH_QUEUE_CAPACITY", "7")
+                .env("OPERATOR_CLIENT_FRAME_MAX", "32KiB")
                 .output()
                 .expect("spawn isolated environment test");
             assert!(
@@ -537,6 +595,8 @@ mod tests {
         assert!(environment.cfg.pgdog_admin_timeout == millis(7));
         assert!(environment.cfg.pgdog_transition_poll == millis(8));
         assert!(environment.cfg.controller_error_requeue == millis(9));
+        assert!(environment.cfg.client_dispatch_queue_capacity == 7);
+        assert!(environment.cfg.client_frame_max == crabka_units::kibibytes(32));
 
         let parsed = Wrap::parse_from([
             "bin",
@@ -552,6 +612,10 @@ mod tests {
             "14ms",
             "--controller-error-requeue",
             "15ms",
+            "--client-dispatch-queue-capacity",
+            "9",
+            "--client-frame-max",
+            "64KiB",
         ]);
         assert!(parsed.cfg.pgdog_reload_attempts.into_value() == 10);
         assert!(parsed.cfg.pgdog_reload_backoff == millis(11));
@@ -559,6 +623,8 @@ mod tests {
         assert!(parsed.cfg.pgdog_admin_timeout == millis(13));
         assert!(parsed.cfg.pgdog_transition_poll == millis(14));
         assert!(parsed.cfg.controller_error_requeue == millis(15));
+        assert!(parsed.cfg.client_dispatch_queue_capacity == 9);
+        assert!(parsed.cfg.client_frame_max == crabka_units::kibibytes(64));
     }
 
     #[test]

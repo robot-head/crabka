@@ -920,7 +920,21 @@ impl Context {
         if let Some(client) = map.get(cluster) {
             return Ok(client.clone());
         }
-        let admin = AdminClient::connect(&[bootstrap.to_string()]).await?;
+        let admin = AdminClient::connect_with_options(
+            &[bootstrap.to_string()],
+            crabka_client_core::ConnectionOptions {
+                dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::new(
+                    self.config.client_dispatch_queue_capacity,
+                )
+                .map_err(crabka_client_admin::AdminError::Protocol)?,
+                frame_max: crabka_client_core::ClientFrameMax::try_from(
+                    self.config.client_frame_max,
+                )
+                .map_err(crabka_client_admin::AdminError::Protocol)?,
+                ..crabka_client_core::ConnectionOptions::default()
+            },
+        )
+        .await?;
         let entry: AdminClientHandle = Arc::new(Mutex::new(admin));
         map.insert(cluster.to_string(), entry.clone());
         Ok(entry)
