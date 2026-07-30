@@ -2881,6 +2881,7 @@ dependencies = [
  "assert2",
  "clap",
  "crabka-client-admin",
+ "crabka-client-core",
  "crabka-gres-control",
  "crabka-security",
  "futures",

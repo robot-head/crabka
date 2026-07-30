@@ -11,7 +11,10 @@ use crabka_client_admin::{
     AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType,
     ScramIterations, ScramUpsertion,
 };
-use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+use crabka_client_core::{
+    ClientFrameMax, ConnectionDispatchQueueCapacity, FetchMinBytes,
+    security::{ClientSecurity, SaslCredentials},
+};
 use crabka_gres_balancer::{
     BalanceOperation, BalancerConfig, ExecutionPolicy, ExecutionReport, Planner, TenantMetrics,
     UnsupportedExecutor, execute_plan,
@@ -41,6 +44,27 @@ pub struct GresArgs {
 
 #[derive(Args, Debug)]
 struct RegistryOptions {
+    #[arg(
+        long = "client-dispatch-queue-capacity",
+        env = "CRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    #[arg(
+        long = "client-frame-max",
+        env = "CRABKA_GRES_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
+    #[arg(
+        long = "registry-reader-fetch-min",
+        env = "CRABKA_GRES_REGISTRY_READER_FETCH_MIN",
+        default_value = "1B",
+        value_parser = parse_fetch_min
+    )]
+    registry_reader_fetch_min: ByteSize,
     #[arg(
         long = "registry-replication-factor",
         env = "CRABKA_GRES_REGISTRY_REPLICATION_FACTOR",
@@ -111,7 +135,32 @@ impl RegistryOptions {
                 .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
         )
         .expect("validated registry reader/admin DNS timeout")
+        .with_client_resource_policy(
+            ConnectionDispatchQueueCapacity::new(self.client_dispatch_queue_capacity)
+                .expect("validated client dispatch queue capacity"),
+            ClientFrameMax::try_from(self.client_frame_max)
+                .expect("validated client frame maximum"),
+            FetchMinBytes::try_from(self.registry_reader_fetch_min)
+                .expect("validated registry reader fetch minimum"),
+        )
     }
+}
+
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    ConnectionDispatchQueueCapacity::new(value).map(ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ClientFrameMax::try_from(value).map(ClientFrameMax::size)
+}
+
+fn parse_fetch_min(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    FetchMinBytes::try_from(value).map(FetchMinBytes::size)
 }
 
 #[derive(Subcommand, Debug)]
@@ -822,6 +871,7 @@ async fn create_tenant(args: CreateTenantArgs, policy: &RegistryPolicy) -> Resul
         &record.name,
         &password,
         args.scram_iterations,
+        policy,
     )
     .await?;
     println!("created tenant {}", record.name);
@@ -833,6 +883,7 @@ async fn provision_tenant_kafka_access(
     tenant: &TenantName,
     password: &str,
     scram_iterations: ScramIterations,
+    policy: &RegistryPolicy,
 ) -> Result<(), String> {
     let bootstrap_addrs = bootstrap
         .split(',')
@@ -844,9 +895,16 @@ async fn provision_tenant_kafka_access(
         return Err("bootstrap address list must not be empty".to_string());
     }
     let username = tenant_kafka_username(tenant);
-    let mut admin = AdminClient::connect(&bootstrap_addrs)
-        .await
-        .map_err(|e| format!("tenant Kafka admin connect: {e}"))?;
+    let mut admin = AdminClient::connect_with_options(
+        &bootstrap_addrs,
+        crabka_client_core::ConnectionOptions {
+            dispatch_queue_capacity: policy.dispatch_queue_capacity(),
+            frame_max: policy.frame_max(),
+            ..crabka_client_core::ConnectionOptions::default()
+        },
+    )
+    .await
+    .map_err(|e| format!("tenant Kafka admin connect: {e}"))?;
     admin
         .alter_user_scram_credentials_sha512(
             &[ScramUpsertion {
@@ -1414,6 +1472,9 @@ mod tests {
             "--registry-fetch-partition-max=0B",
             "--registry-producer-dns-timeout=0ms",
             "--registry-reader-admin-dns-timeout=0ms",
+            "--client-dispatch-queue-capacity=0",
+            "--client-frame-max=101MiB",
+            "--registry-reader-fetch-min=0B",
         ] {
             assert!(
                 TestCli::try_parse_from(["test", option, "list", "--bootstrap=broker:9092",])
@@ -1433,6 +1494,9 @@ mod tests {
             ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX", "1048577B"),
             ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
             ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
+            ("CRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY", "7"),
+            ("CRABKA_GRES_CLIENT_FRAME_MAX", "32KiB"),
+            ("CRABKA_GRES_REGISTRY_READER_FETCH_MIN", "3B"),
         ];
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
@@ -1460,7 +1524,12 @@ mod tests {
         .with_producer_dns_timeout(crabka_units::millis(37))
         .expect("environment DNS timeout")
         .with_reader_admin_dns_timeout(crabka_units::millis(37))
-        .expect("environment reader/admin DNS timeout");
+        .expect("environment reader/admin DNS timeout")
+        .with_client_resource_policy(
+            ConnectionDispatchQueueCapacity::new(7).unwrap(),
+            ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap(),
+            FetchMinBytes::try_from(crabka_units::bytes(3)).unwrap(),
+        );
         assert!(environment.gres.registry.policy() == environment_policy);
         let cli = TestCli::try_parse_from([
             "test",
@@ -1471,6 +1540,9 @@ mod tests {
             "--registry-fetch-partition-max=1048578B",
             "--registry-producer-dns-timeout=47ms",
             "--registry-reader-admin-dns-timeout=47ms",
+            "--client-dispatch-queue-capacity=9",
+            "--client-frame-max=64KiB",
+            "--registry-reader-fetch-min=5B",
             "list",
             "--bootstrap=broker:9092",
         ])
@@ -1486,7 +1558,12 @@ mod tests {
         .with_producer_dns_timeout(crabka_units::millis(47))
         .expect("CLI DNS timeout")
         .with_reader_admin_dns_timeout(crabka_units::millis(47))
-        .expect("CLI reader/admin DNS timeout");
+        .expect("CLI reader/admin DNS timeout")
+        .with_client_resource_policy(
+            ConnectionDispatchQueueCapacity::new(9).unwrap(),
+            ClientFrameMax::try_from(crabka_units::kibibytes(64)).unwrap(),
+            FetchMinBytes::try_from(crabka_units::bytes(5)).unwrap(),
+        );
         assert!(cli.gres.registry.policy() == cli_policy);
     }
 

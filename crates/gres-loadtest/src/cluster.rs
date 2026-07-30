@@ -864,7 +864,7 @@ fn build_spec(
     }
 }
 
-fn registry_policy_args(policy: &RegistryPolicy) -> [String; 14] {
+fn registry_policy_args(policy: &RegistryPolicy) -> [String; 20] {
     [
         "--registry-replication-factor".to_owned(),
         policy.replication_factor().to_string(),
@@ -880,6 +880,12 @@ fn registry_policy_args(policy: &RegistryPolicy) -> [String; 14] {
         policy.producer_dns_timeout().time().human().to_string(),
         "--registry-reader-admin-dns-timeout".to_owned(),
         policy.reader_admin_dns_timeout().time().human().to_string(),
+        "--client-dispatch-queue-capacity".to_owned(),
+        policy.dispatch_queue_capacity().get().to_string(),
+        "--client-frame-max".to_owned(),
+        policy.frame_max().size().human().to_string(),
+        "--registry-reader-fetch-min".to_owned(),
+        policy.reader_fetch_min().size().human().to_string(),
     ]
 }
 
@@ -1152,9 +1158,16 @@ async fn provision_tenant(
     sql_password: &str,
     registry_policy: &RegistryPolicy,
 ) -> anyhow::Result<()> {
-    let mut admin = AdminClient::connect(&[bootstrap.to_owned()])
-        .await
-        .context("connect admin client")?;
+    let mut admin = AdminClient::connect_with_options(
+        &[bootstrap.to_owned()],
+        crabka_client_core::ConnectionOptions {
+            dispatch_queue_capacity: registry_policy.dispatch_queue_capacity(),
+            frame_max: registry_policy.frame_max(),
+            ..crabka_client_core::ConnectionOptions::default()
+        },
+    )
+    .await
+    .context("connect admin client")?;
     let topics = (0..ranges)
         .map(|range| CreateTopicSpec {
             name: format!("__gres_wal.{TENANT}.r{range}"),
@@ -1562,7 +1575,12 @@ mod tests {
         .with_producer_dns_timeout(crabka_units::millis(37))
         .expect("DNS timeout")
         .with_reader_admin_dns_timeout(crabka_units::millis(37))
-        .expect("reader/admin DNS timeout");
+        .expect("reader/admin DNS timeout")
+        .with_client_resource_policy(
+            crabka_client_core::ConnectionDispatchQueueCapacity::new(7).unwrap(),
+            crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap(),
+            crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(3)).unwrap(),
+        );
         let context = SpecContext {
             topology: &topology,
             mode: ModeSpec::LogicalTso,
@@ -1589,6 +1607,9 @@ mod tests {
         assert!(arg_value(&spawned_args, "--registry-fetch-partition-max") == Some("1048578B"));
         assert!(arg_value(&spawned_args, "--registry-producer-dns-timeout") == Some("37ms"));
         assert!(arg_value(&spawned_args, "--registry-reader-admin-dns-timeout",) == Some("37ms"));
+        assert!(arg_value(&spawned_args, "--client-dispatch-queue-capacity") == Some("7"));
+        assert!(arg_value(&spawned_args, "--client-frame-max") == Some("32768B"));
+        assert!(arg_value(&spawned_args, "--registry-reader-fetch-min") == Some("3B"));
     }
 
     #[test]

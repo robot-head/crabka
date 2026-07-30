@@ -266,6 +266,21 @@ impl RegistryPolicy {
         self.reader_fetch_min = reader_fetch_min;
         self
     }
+
+    #[must_use]
+    pub const fn dispatch_queue_capacity(&self) -> ConnectionDispatchQueueCapacity {
+        self.dispatch_queue_capacity
+    }
+
+    #[must_use]
+    pub const fn frame_max(&self) -> ClientFrameMax {
+        self.frame_max
+    }
+
+    #[must_use]
+    pub const fn reader_fetch_min(&self) -> FetchMinBytes {
+        self.reader_fetch_min
+    }
 }
 
 impl Default for RegistryPolicy {

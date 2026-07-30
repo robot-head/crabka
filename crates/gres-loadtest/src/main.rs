@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use clap::{Args, Parser, Subcommand};
+use crabka_client_core::{ClientFrameMax, ConnectionDispatchQueueCapacity, FetchMinBytes};
 use crabka_gres_control::{RegistryPolicy, RegistryReplicationFactor};
 use crabka_gres_loadtest::{
     cluster::Binaries,
@@ -83,6 +84,27 @@ enum CliCommand {
 #[derive(Args)]
 struct RegistryOptions {
     #[arg(
+        long = "client-dispatch-queue-capacity",
+        env = "CRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    #[arg(
+        long = "client-frame-max",
+        env = "CRABKA_GRES_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
+    #[arg(
+        long = "registry-reader-fetch-min",
+        env = "CRABKA_GRES_REGISTRY_READER_FETCH_MIN",
+        default_value = "1B",
+        value_parser = parse_fetch_min
+    )]
+    registry_reader_fetch_min: ByteSize,
+    #[arg(
         long = "registry-replication-factor",
         env = "CRABKA_GRES_REGISTRY_REPLICATION_FACTOR",
         default_value = "1"
@@ -152,7 +174,32 @@ impl RegistryOptions {
                 .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
         )
         .expect("validated registry reader/admin DNS timeout")
+        .with_client_resource_policy(
+            ConnectionDispatchQueueCapacity::new(self.client_dispatch_queue_capacity)
+                .expect("validated client dispatch queue capacity"),
+            ClientFrameMax::try_from(self.client_frame_max)
+                .expect("validated client frame maximum"),
+            FetchMinBytes::try_from(self.registry_reader_fetch_min)
+                .expect("validated registry reader fetch minimum"),
+        )
     }
+}
+
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    ConnectionDispatchQueueCapacity::new(value).map(ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ClientFrameMax::try_from(value).map(ClientFrameMax::size)
+}
+
+fn parse_fetch_min(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    FetchMinBytes::try_from(value).map(FetchMinBytes::size)
 }
 
 /// The `--external*` flag family: benchmark an existing pgwire-speaking SQL
@@ -445,6 +492,9 @@ mod tests {
             "--registry-fetch-partition-max=0B",
             "--registry-producer-dns-timeout=0ms",
             "--registry-reader-admin-dns-timeout=0ms",
+            "--client-dispatch-queue-capacity=0",
+            "--client-frame-max=101MiB",
+            "--registry-reader-fetch-min=0B",
         ] {
             assert!(
                 Cli::try_parse_from(["loadtest", "run", "--scenario=test.yaml", option]).is_err()
@@ -463,6 +513,9 @@ mod tests {
             ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX", "1048577B"),
             ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
             ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
+            ("CRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY", "7"),
+            ("CRABKA_GRES_CLIENT_FRAME_MAX", "32KiB"),
+            ("CRABKA_GRES_REGISTRY_READER_FETCH_MIN", "3B"),
         ];
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
@@ -493,7 +546,12 @@ mod tests {
         .with_producer_dns_timeout(crabka_units::millis(37))
         .expect("environment DNS timeout")
         .with_reader_admin_dns_timeout(crabka_units::millis(37))
-        .expect("environment reader/admin DNS timeout");
+        .expect("environment reader/admin DNS timeout")
+        .with_client_resource_policy(
+            ConnectionDispatchQueueCapacity::new(7).unwrap(),
+            ClientFrameMax::try_from(kibibytes(32)).unwrap(),
+            FetchMinBytes::try_from(bytes(3)).unwrap(),
+        );
         assert!(registry.policy() == environment_policy);
         let cli = Cli::try_parse_from([
             "loadtest",
@@ -506,6 +564,9 @@ mod tests {
             "--registry-fetch-partition-max=1048578B",
             "--registry-producer-dns-timeout=47ms",
             "--registry-reader-admin-dns-timeout=47ms",
+            "--client-dispatch-queue-capacity=9",
+            "--client-frame-max=64KiB",
+            "--registry-reader-fetch-min=5B",
         ])
         .expect("CLI over environment");
         let CliCommand::Run { registry, .. } = cli.command else {
@@ -522,7 +583,12 @@ mod tests {
         .with_producer_dns_timeout(crabka_units::millis(47))
         .expect("CLI DNS timeout")
         .with_reader_admin_dns_timeout(crabka_units::millis(47))
-        .expect("CLI reader/admin DNS timeout");
+        .expect("CLI reader/admin DNS timeout")
+        .with_client_resource_policy(
+            ConnectionDispatchQueueCapacity::new(9).unwrap(),
+            ClientFrameMax::try_from(kibibytes(64)).unwrap(),
+            FetchMinBytes::try_from(bytes(5)).unwrap(),
+        );
         assert!(registry.policy() == cli_policy);
     }
 
