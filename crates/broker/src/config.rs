@@ -714,6 +714,16 @@ pub struct KafkaRlmmConfig {
     /// `remote.log.metadata.snapshot.interval`. Default
     /// [`DEFAULT_RLMM_SNAPSHOT_INTERVAL`].
     pub snapshot_interval: Time,
+    /// Timeout for provisioning each internal metadata topic.
+    pub topic_create_timeout: Time,
+    /// Maximum wait for each per-partition metadata fetch.
+    pub fetch_max_wait: Time,
+    /// Maximum bytes returned by each per-partition metadata fetch.
+    pub fetch_max_bytes: ByteSize,
+    /// Backoff after a failed metadata fetch.
+    pub fetch_retry_backoff: Time,
+    /// Capacity of the shared metadata-event delivery queue.
+    pub event_queue_capacity: crabka_remote_storage_topic::MetadataEventQueueCapacity,
     /// Directory the RLMM cache snapshot is written to (one
     /// `snapshot` file). Derived from the broker `log.dir`.
     pub snapshot_dir: std::path::PathBuf,
@@ -757,9 +767,56 @@ impl Default for KafkaRlmmConfig {
             num_partitions: DEFAULT_RLMM_TOPIC_NUM_PARTITIONS,
             replication: DEFAULT_RLMM_TOPIC_REPLICATION_FACTOR,
             snapshot_interval: DEFAULT_RLMM_SNAPSHOT_INTERVAL,
+            topic_create_timeout:
+                crabka_remote_storage_topic::DEFAULT_METADATA_TOPIC_CREATE_TIMEOUT,
+            fetch_max_wait: crabka_remote_storage_topic::DEFAULT_METADATA_FETCH_MAX_WAIT,
+            fetch_max_bytes: crabka_remote_storage_topic::DEFAULT_METADATA_FETCH_MAX_BYTES,
+            fetch_retry_backoff:
+                crabka_remote_storage_topic::DEFAULT_METADATA_FETCH_RETRY_BACKOFF,
+            event_queue_capacity:
+                crabka_remote_storage_topic::MetadataEventQueueCapacity::default(),
             snapshot_dir: std::path::PathBuf::new(),
             security: None,
         }
+    }
+}
+
+impl KafkaRlmmConfig {
+    /// Validate the shared metadata transport and RLMM snapshot policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-runtime error when a value cannot safely reach its
+    /// runtime consumer.
+    pub fn validate(&self) -> Result<(), BrokerError> {
+        let transport = crabka_remote_storage_topic::KafkaMetadataLogConfig {
+            topic_create_timeout: self.topic_create_timeout,
+            fetch_max_wait: self.fetch_max_wait,
+            fetch_max_bytes: self.fetch_max_bytes,
+            fetch_retry_backoff: self.fetch_retry_backoff,
+            event_queue_capacity: self.event_queue_capacity,
+            ..crabka_remote_storage_topic::KafkaMetadataLogConfig::new(&self.bootstrap)
+        };
+        transport.validate().map_err(|error| {
+            BrokerError::InvalidRuntimeConfig(format!(
+                "remote_storage.kafka_metadata: {error}"
+            ))
+        })?;
+
+        let snapshot_interval =
+            std::time::Duration::try_from_secs_f64(self.snapshot_interval.secs_f64()).map_err(
+                |error| {
+                    BrokerError::InvalidRuntimeConfig(format!(
+                        "remote_storage.kafka_metadata.snapshot_interval: {error}"
+                    ))
+                },
+            )?;
+        if snapshot_interval.is_zero() {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "remote_storage.kafka_metadata.snapshot_interval must be positive".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -1312,6 +1369,9 @@ impl BrokerConfig {
             None,
         )?;
 
+        if let RlmmKind::TopicBacked(config) = &self.remote_log_metadata {
+            config.validate()?;
+        }
         self.validate_leader_rebalance()
     }
 
@@ -2534,18 +2594,80 @@ mod tests {
         check!(c.bootstrap.is_empty());
         check!(c.snapshot_dir == std::path::PathBuf::new());
         check!(c.snapshot_interval == DEFAULT_RLMM_SNAPSHOT_INTERVAL);
+        check!(c.topic_create_timeout == secs(30));
+        check!(c.fetch_max_wait == millis(500));
+        check!(c.fetch_max_bytes == mebibytes(1));
+        check!(c.fetch_retry_backoff == millis(200));
+        check!(c.event_queue_capacity.capacity() == 1024);
         check!(c.security.is_none());
+        c.validate().unwrap();
+    }
+
+    #[test]
+    fn kafka_rlmm_config_validates_transport_and_snapshot_policy() {
+        let valid = KafkaRlmmConfig {
+            topic_create_timeout: secs(45),
+            fetch_max_wait: millis(750),
+            fetch_max_bytes: mebibytes(2),
+            fetch_retry_backoff: millis(300),
+            event_queue_capacity:
+                crabka_remote_storage_topic::MetadataEventQueueCapacity::new(2048).unwrap(),
+            snapshot_interval: secs(90),
+            ..KafkaRlmmConfig::default()
+        };
+        valid.validate().unwrap();
+
+        for (field, config) in [
+            (
+                "fetch_max_wait",
+                KafkaRlmmConfig {
+                    fetch_max_wait: Time::ZERO,
+                    ..KafkaRlmmConfig::default()
+                },
+            ),
+            (
+                "snapshot_interval",
+                KafkaRlmmConfig {
+                    snapshot_interval: Time::ZERO,
+                    ..KafkaRlmmConfig::default()
+                },
+            ),
+            (
+                "snapshot_interval",
+                KafkaRlmmConfig {
+                    snapshot_interval: Time::from_secs_f64(f64::INFINITY),
+                    ..KafkaRlmmConfig::default()
+                },
+            ),
+        ] {
+            let error = config.validate().expect_err("invalid policy must fail");
+            assert!(error.to_string().contains(field), "{error}");
+        }
+    }
+
+    #[test]
+    fn broker_validation_rejects_invalid_topic_metadata_policy() {
+        let config = BrokerConfig {
+            remote_log_metadata: RlmmKind::TopicBacked(KafkaRlmmConfig {
+                fetch_max_bytes: ByteSize::ZERO,
+                ..KafkaRlmmConfig::default()
+            }),
+            ..BrokerConfig::default()
+        };
+
+        let error = config
+            .validate()
+            .expect_err("invalid embedded metadata policy must fail");
+        assert!(error.to_string().contains("fetch_max_bytes"), "{error}");
     }
 
     #[test]
     fn kafka_rlmm_config_carries_snapshot_settings() {
         let c = KafkaRlmmConfig {
             bootstrap: "127.0.0.1:9092".into(),
-            num_partitions: 50,
-            replication: 1,
             snapshot_interval: minutes(1),
             snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
-            security: None,
+            ..KafkaRlmmConfig::default()
         };
         assert!(c.snapshot_interval == minutes(1));
         assert!(c.snapshot_dir == std::path::PathBuf::from("/data/remote-log-metadata"));
@@ -2557,9 +2679,8 @@ mod tests {
             bootstrap: "127.0.0.1:9092".into(),
             num_partitions: 1,
             replication: 1,
-            snapshot_interval: minutes(1),
             snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
-            security: None,
+            ..KafkaRlmmConfig::default()
         };
         assert!(c.security.is_none());
     }

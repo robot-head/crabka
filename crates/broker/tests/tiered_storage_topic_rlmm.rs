@@ -97,6 +97,7 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
         snapshot_interval: Duration::from_hours(1),
         snapshot_dir: log_dir.path().join("remote-log-metadata"),
         security: None,
+        ..KafkaRlmmConfig::default()
     });
 
     let data_listener = client_listeners.into_iter().next().unwrap();
@@ -459,6 +460,7 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
         snapshot_interval: Duration::from_hours(1),
         snapshot_dir: log_dir.path().join("remote-log-metadata"),
         security: None,
+        ..KafkaRlmmConfig::default()
     });
 
     let data_listener = client_listeners.into_iter().next().unwrap();
@@ -516,6 +518,7 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready_case() {
         snapshot_interval: Duration::from_hours(1),
         snapshot_dir: log_dir.path().join("rlmm-snap"),
         security: None,
+        ..KafkaRlmmConfig::default()
     });
 
     let data_listener = client_listeners.into_iter().next().unwrap();

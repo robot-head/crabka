@@ -1308,6 +1308,11 @@ fn kafka_swap_kickoff(config: &BrokerConfig) -> Option<KafkaSwapKickoff> {
             num_partitions: metadata_config.num_partitions,
             replication: metadata_config.replication,
             snapshot_interval: metadata_config.snapshot_interval,
+            topic_create_timeout: metadata_config.topic_create_timeout,
+            fetch_max_wait: metadata_config.fetch_max_wait,
+            fetch_max_bytes: metadata_config.fetch_max_bytes,
+            fetch_retry_backoff: metadata_config.fetch_retry_backoff,
+            event_queue_capacity: metadata_config.event_queue_capacity,
             snapshot_dir: if metadata_config.snapshot_dir.as_os_str().is_empty() {
                 config.log_dir.join("remote-log-metadata")
             } else {
@@ -3819,6 +3824,7 @@ async fn bootstrap_topic_rlmm(
         replication: cfg.cfg.replication,
         client_id: format!("crabka-rlmm-broker-{}", cfg.broker_id),
         security: cfg.cfg.security.map(|b| *b),
+        ..crabka_remote_storage_topic::KafkaMetadataLogConfig::new("")
     };
 
     // Retry the topic-backed bootstrap with bounded backoff until it succeeds
@@ -3913,6 +3919,7 @@ async fn bootstrap_diskless_index_log(
         replication: config.cfg.replication,
         client_id: format!("crabka-diskless-index-broker-{}", config.broker_id),
         security: config.cfg.security.map(|security| *security),
+        ..crabka_remote_storage_topic::KafkaMetadataLogConfig::new("")
     };
     let mut backoff = config.bootstrap_backoff_initial;
     loop {
@@ -6526,6 +6533,7 @@ protocol = "Plaintext"
                 snapshot_interval: std::time::Duration::from_mins(1),
                 snapshot_dir: snapshot_dir.path().to_path_buf(),
                 security: None,
+                ..crate::config::KafkaRlmmConfig::default()
             },
             broker_id: 1,
             bootstrap_backoff_initial: std::time::Duration::from_millis(10),

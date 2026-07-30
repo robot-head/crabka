@@ -8051,6 +8051,7 @@ async fn tiered_storage_topic_rlmm_survives_restart() {
             snapshot_interval: std::time::Duration::from_secs(2),
             snapshot_dir: std::path::PathBuf::new(),
             security: None,
+            ..crabka_broker::KafkaRlmmConfig::default()
         }),
     )
     .await;
@@ -8753,6 +8754,7 @@ async fn start_two_brokers_with_minio_tier(
         snapshot_interval: std::time::Duration::from_secs(2),
         snapshot_dir: std::path::PathBuf::new(), // derived from log.dir
         security: None,
+        ..crabka_broker::KafkaRlmmConfig::default()
     };
 
     let s3_b0 = s3.clone();

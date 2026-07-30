@@ -546,7 +546,7 @@ pub struct FileRemoteStorageConfig {
 
 /// TOML shape of `[remote_storage.kafka_metadata]`. Maps to
 /// [`crate::config::KafkaRlmmConfig`].
-#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, JsonSchema, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FileKafkaRlmmConfig {
     /// `host:port` the manager dials to reach its own broker.
@@ -564,6 +564,30 @@ pub struct FileKafkaRlmmConfig {
     /// `remote.log.metadata.topic.replication.factor`).
     #[serde(default)]
     pub replication: Option<i32>,
+    /// Timeout for provisioning each internal metadata topic.
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub topic_create_timeout: Option<Time>,
+    /// Maximum wait for each per-partition metadata fetch.
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_max_wait: Option<Time>,
+    /// Maximum bytes returned by each per-partition metadata fetch.
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_max_bytes: Option<ByteSize>,
+    /// Backoff after a failed metadata fetch.
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_retry_backoff: Option<Time>,
+    /// Capacity of the shared metadata-event delivery queue.
+    #[serde(default)]
+    #[schemars(range(min = 1))]
+    pub event_queue_capacity: Option<usize>,
+    /// RLMM cache snapshot cadence.
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub snapshot_interval: Option<Time>,
     /// Explicit opt-out: run the non-durable in-memory RLMM instead of the
     /// topic-backed default. Tests / single-node dev only.
     #[serde(default)]
@@ -1420,19 +1444,38 @@ fn apply_remote_storage(
         if km.is_some_and(|k| k.in_memory) {
             cfg.remote_log_metadata = crate::config::RlmmKind::InMemory;
         } else {
-            cfg.remote_log_metadata =
-                crate::config::RlmmKind::TopicBacked(crate::config::KafkaRlmmConfig {
-                    bootstrap: km.map(|k| k.bootstrap.clone()).unwrap_or_default(),
-                    num_partitions: km
-                        .and_then(|k| k.num_partitions)
-                        .unwrap_or(crate::config::DEFAULT_RLMM_TOPIC_NUM_PARTITIONS),
-                    replication: km
-                        .and_then(|k| k.replication)
-                        .unwrap_or(crate::config::DEFAULT_RLMM_TOPIC_REPLICATION_FACTOR),
-                    snapshot_interval: crate::config::DEFAULT_RLMM_SNAPSHOT_INTERVAL,
-                    snapshot_dir: cfg.log_dir.join("remote-log-metadata"),
-                    security: None,
-                });
+            let mut policy = crate::config::KafkaRlmmConfig {
+                bootstrap: km.map(|k| k.bootstrap.clone()).unwrap_or_default(),
+                num_partitions: km
+                    .and_then(|k| k.num_partitions)
+                    .unwrap_or(crate::config::DEFAULT_RLMM_TOPIC_NUM_PARTITIONS),
+                replication: km
+                    .and_then(|k| k.replication)
+                    .unwrap_or(crate::config::DEFAULT_RLMM_TOPIC_REPLICATION_FACTOR),
+                snapshot_dir: cfg.log_dir.join("remote-log-metadata"),
+                ..crate::config::KafkaRlmmConfig::default()
+            };
+            if let Some(km) = km {
+                policy.topic_create_timeout =
+                    km.topic_create_timeout.unwrap_or(policy.topic_create_timeout);
+                policy.fetch_max_wait = km.fetch_max_wait.unwrap_or(policy.fetch_max_wait);
+                policy.fetch_max_bytes = km.fetch_max_bytes.unwrap_or(policy.fetch_max_bytes);
+                policy.fetch_retry_backoff =
+                    km.fetch_retry_backoff.unwrap_or(policy.fetch_retry_backoff);
+                if let Some(capacity) = km.event_queue_capacity {
+                    policy.event_queue_capacity =
+                        crabka_remote_storage_topic::MetadataEventQueueCapacity::new(capacity)
+                            .map_err(|error| {
+                                invalid_runtime_value("event_queue_capacity", error)
+                            })?;
+                }
+                policy.snapshot_interval =
+                    km.snapshot_interval.unwrap_or(policy.snapshot_interval);
+            }
+            policy.validate().map_err(|error| {
+                invalid_runtime_value("remote_storage.kafka_metadata", error)
+            })?;
+            cfg.remote_log_metadata = crate::config::RlmmKind::TopicBacked(policy);
         }
     }
     Ok(())
@@ -3793,6 +3836,12 @@ bootstrap = "127.0.0.1:9092"
         check!(km.bootstrap.as_str() == "127.0.0.1:9092");
         check!(km.num_partitions == 50);
         check!(km.replication == 3);
+        check!(km.topic_create_timeout == secs(30));
+        check!(km.fetch_max_wait == millis(500));
+        check!(km.fetch_max_bytes == mebibytes(1));
+        check!(km.fetch_retry_backoff == millis(200));
+        check!(km.event_queue_capacity.capacity() == 1024);
+        check!(km.snapshot_interval == secs(60));
     }
 
     #[test]
@@ -3805,6 +3854,12 @@ storage_dir = "/tmp/tier"
 bootstrap = "broker-0:9094"
 num_partitions = 8
 replication = 1
+topic_create_timeout = "45s"
+fetch_max_wait = "750ms"
+fetch_max_bytes = "2MiB"
+fetch_retry_backoff = "300ms"
+event_queue_capacity = 2048
+snapshot_interval = "90s"
 "#;
         let file: FileConfig = toml::from_str(toml).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
@@ -3816,6 +3871,39 @@ replication = 1
         check!(km.bootstrap.as_str() == "broker-0:9094");
         check!(km.num_partitions == 8);
         check!(km.replication == 1);
+        check!(km.topic_create_timeout == secs(45));
+        check!(km.fetch_max_wait == millis(750));
+        check!(km.fetch_max_bytes == mebibytes(2));
+        check!(km.fetch_retry_backoff == millis(300));
+        check!(km.event_queue_capacity.capacity() == 2048);
+        check!(km.snapshot_interval == secs(90));
+    }
+
+    #[test]
+    fn kafka_metadata_section_rejects_invalid_policy() {
+        for (field, value) in [
+            ("topic_create_timeout", "\"0ms\""),
+            ("topic_create_timeout", "\"0.5ms\""),
+            ("topic_create_timeout", "\"2147483648ms\""),
+            ("fetch_max_wait", "\"0ms\""),
+            ("fetch_max_bytes", "\"0B\""),
+            ("fetch_max_bytes", "\"0.5B\""),
+            ("fetch_max_bytes", "\"2147483648B\""),
+            ("fetch_retry_backoff", "\"0ms\""),
+            ("event_queue_capacity", "0"),
+            ("snapshot_interval", "\"0s\""),
+        ] {
+            let source = format!(
+                "[remote_storage]\nstorage_dir = \"/tmp/tier\"\n\
+                 [remote_storage.kafka_metadata]\n{field} = {value}\n"
+            );
+            let file: FileConfig = toml::from_str(&source).expect("parse policy syntax");
+            let mut config = crate::config::BrokerConfig::default();
+            let error = file
+                .apply_to(&mut config)
+                .expect_err("invalid metadata policy must fail");
+            assert!(error.to_string().contains(field), "{field}: {error}");
+        }
     }
 
     #[test]

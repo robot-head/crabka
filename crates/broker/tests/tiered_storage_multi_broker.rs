@@ -139,6 +139,7 @@ async fn start_three_tiered_brokers() -> (
                 snapshot_interval: Duration::from_hours(1),
                 snapshot_dir: std::path::PathBuf::new(), // derived from log_dir
                 security: None,
+                ..KafkaRlmmConfig::default()
             });
             cfg
         })
