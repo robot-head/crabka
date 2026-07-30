@@ -4709,3 +4709,58 @@ policy-aware variants for the broker trust boundary.
 Telemetry decompression remains independently configurable because it is a
 different traffic class. `records-legacy` is complete; broader generated and
 handwritten `protocol` classification remains pending.
+
+## Remote Storage Topic Client Policy
+
+The topic-backed production metadata client now exposes all six operational
+settings end to end:
+
+| Policy | Rust field | TOML field | Kafka CRD field | Preserved default |
+|---|---|---|---|---|
+| topic creation timeout | `topic_create_timeout` | `topic_create_timeout` | `topicCreateTimeout` | `30s` |
+| fetch maximum wait | `fetch_max_wait` | `fetch_max_wait` | `fetchMaxWait` | `500ms` |
+| fetch byte budget | `fetch_max_bytes` | `fetch_max_bytes` | `fetchMaxBytes` | `1MiB` |
+| failed-fetch backoff | `fetch_retry_backoff` | `fetch_retry_backoff` | `fetchRetryBackoff` | `200ms` |
+| event queue capacity | `event_queue_capacity` | `event_queue_capacity` | `eventQueueCapacity` | `1024` |
+| RLMM snapshot cadence | `snapshot_interval` | `snapshot_interval` | `snapshotInterval` | `1m` |
+
+The five dimensioned settings remain UOM `Time` or `ByteSize` values through
+the public, broker TOML, and CRD boundaries. Queue capacity is represented by
+`MetadataEventQueueCapacity`, constructed through
+`refined_type::rule::GreaterUsize<0>`. Broker TOML owns the standalone surface
+under `[remote_storage.kafka_metadata]`; the operator owns deployed policy
+under `Kafka.spec.tieredStorage.metadataManager.topic`. No CLI or environment
+surface is added because neither owns this deployment policy.
+
+One broker mapper applies the five transport settings to both the RLMM
+metadata log and the diskless WAL-index log. Only the RLMM receives
+`snapshot_interval`. Direct construction is still validated at the
+remote-storage topic, broker, file-config, and CRD boundaries.
+
+The metadata topic name, cleanup and retention settings, partition hashing,
+request and high-water-mark sentinels, topic-id checks, assignment semantics,
+snapshot format version and filename, serialization allocation hint, security
+derivation, and the in-memory fixture capacity remain fixed. They are
+protocol, durable-format, security, deterministic-routing, or test-fixture
+behavior rather than deployment policy.
+
+Verification used:
+
+```text
+cargo test -p crabka-remote-storage-topic --all-targets --locked
+cargo test -p crabka-broker --all-targets --locked
+cargo test -p crabka-operator --all-targets --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo +nightly fmt --all -- --check
+cargo run -p crabka-operator --locked -- gen-crds <temporary-directory>
+tools/audit-runtime-values.sh
+```
+
+The deployed Kafka CRD is byte-for-byte identical to fresh generated output.
+The first broker all-target run exhausted this host's 1,024-file-descriptor
+soft limit; every named failure passed in isolation, and the complete suite
+passed unchanged with a per-process limit of 8,192. The focused
+`remote-storage-topic` scanner remains at 25 rows across 5 files. Those rows
+are the exposed named defaults, the already-configurable partition and
+replication defaults, or the fixed semantics and tests described above. The
+full scanner reports 5,592 rows across 1,037 files.
