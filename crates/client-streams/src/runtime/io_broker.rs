@@ -18,7 +18,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use crabka_client_core::{
-    Client, ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX_BYTES,
+    Client, ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX,
     IsolatedFetch, fetch_partition_with_isolation,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
@@ -36,6 +36,7 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use crabka_units::prelude::*;
 use tokio::sync::{Mutex, oneshot};
 
 use crate::{
@@ -59,10 +60,10 @@ pub(crate) struct BrokerFetcher {
     client: Client,
     /// Cache of topic name → `topic_id` (populated lazily via metadata refresh).
     topic_ids: Mutex<HashMap<String, WireUuid>>,
-    /// Maximum time the broker waits before returning an empty fetch (ms).
-    max_wait_ms: i32,
-    /// Maximum bytes the broker returns per partition per fetch.
-    partition_max_bytes: i32,
+    /// Maximum time the broker waits before returning an empty fetch.
+    max_wait: Time,
+    /// Maximum the broker returns per partition per fetch.
+    partition_max: ByteSize,
 }
 
 #[async_trait::async_trait]
@@ -90,9 +91,12 @@ impl RecordFetcher for BrokerFetcher {
                 topic_id,
                 partition,
                 fetch_offset: offset,
-                max_wait_ms: self.max_wait_ms,
-                max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-                partition_max_bytes: self.partition_max_bytes,
+                // `IsolatedFetch` mirrors the Kafka `Fetch` wire fields, so the
+                // quantities render back to raw integers here.
+                max_wait: self.max_wait,
+                max: DEFAULT_FETCH_RESPONSE_MAX,
+                partition_max: self.partition_max,
+                fetch_min: crabka_client_core::FetchMinBytes::default(),
                 isolation_level,
             },
         )
@@ -798,8 +802,8 @@ pub(crate) async fn build(
         conn: fetch_conn,
         client: metadata_client,
         topic_ids: Mutex::new(HashMap::new()),
-        max_wait_ms: 500,
-        partition_max_bytes: 1 << 20,
+        max_wait: millis(500),
+        partition_max: mebibytes(1),
     };
     let broker_producer = Arc::new(BrokerProducer {
         inner: producer,
@@ -880,8 +884,8 @@ pub(crate) async fn build_eos(
         conn: fetch_conn,
         client: metadata_client,
         topic_ids: Mutex::new(HashMap::new()),
-        max_wait_ms: 500,
-        partition_max_bytes: 1 << 20,
+        max_wait: millis(500),
+        partition_max: mebibytes(1),
     };
     let txn_producer = Arc::new(BrokerTransactionalProducer {
         inner: Arc::new(producer),

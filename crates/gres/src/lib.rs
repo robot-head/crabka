@@ -4121,6 +4121,7 @@ fn live_split_operation_fetch<'a>(
         max_wait: policy.fetch_max_wait(),
         max: crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX,
         partition_max: policy.fetch_partition_max(),
+        fetch_min: crabka_client_core::FetchMinBytes::default(),
         isolation_level: 1,
     }
 }

@@ -373,6 +373,7 @@ pub async fn scan_topic_with_dns_timeout(
                     max_wait,
                     max: DEFAULT_FETCH_RESPONSE_MAX,
                     partition_max,
+                    fetch_min: crabka_client_core::FetchMinBytes::default(),
                     isolation_level: READ_COMMITTED,
                 },
             )

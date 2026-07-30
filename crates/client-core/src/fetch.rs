@@ -16,11 +16,71 @@ use crabka_protocol::{
     primitives::uuid::Uuid as WireUuid,
     records::RecordHeader,
 };
+use crabka_units::{
+    ByteSize, Time, bytes,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes,
+};
+use refined_type::rule::GreaterI32;
 
 use crate::{connection::Connection, error::ClientError};
 
 /// Default whole-response byte limit for single-partition fetch helpers.
-pub const DEFAULT_FETCH_RESPONSE_MAX_BYTES: i32 = 50 * 1024 * 1024;
+pub const DEFAULT_FETCH_RESPONSE_MAX: ByteSize = mebibytes(50);
+/// Default minimum response size for a single-partition fetch.
+pub const DEFAULT_FETCH_MIN: ByteSize = bytes(1);
+
+/// Positive whole-byte minimum response size for a single-partition fetch.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FetchMinBytes(i32);
+
+impl FetchMinBytes {
+    /// Validate a protocol `min_bytes` value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero or negative.
+    pub fn new(value: i32) -> Result<Self, String> {
+        GreaterI32::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("fetch min bytes: {error}"))
+    }
+
+    /// Return the validated protocol byte count.
+    #[must_use]
+    pub const fn bytes(self) -> i32 {
+        self.0
+    }
+
+    /// Return the validated byte count as a dimensioned quantity.
+    #[must_use]
+    pub fn size(self) -> ByteSize {
+        ByteSize::from_bytes_i64(i64::from(self.0))
+    }
+}
+
+impl TryFrom<ByteSize> for FetchMinBytes {
+    type Error = String;
+
+    fn try_from(value: ByteSize) -> Result<Self, Self::Error> {
+        let bytes = value.bytes_f64();
+        if !bytes.is_finite()
+            || bytes.fract() != 0.0
+            || !(1.0..=f64::from(i32::MAX)).contains(&bytes)
+        {
+            return Err(
+                "fetch min must be a positive whole-byte value that fits i32".to_owned(),
+            );
+        }
+        Self::new(value.bytes_i32())
+    }
+}
+
+impl Default for FetchMinBytes {
+    fn default() -> Self {
+        Self::try_from(DEFAULT_FETCH_MIN).expect("default fetch min bytes is valid")
+    }
+}
 
 /// The single live-IO dependency [`fetch_partition_with_isolation`] needs: send
 /// a typed [`FetchRequest`] and get the decoded [`FetchResponse`] back.
@@ -69,9 +129,10 @@ pub struct IsolatedFetch<'a> {
     pub topic_id: WireUuid,
     pub partition: i32,
     pub fetch_offset: i64,
-    pub max_wait_ms: i32,
-    pub max_bytes: i32,
-    pub partition_max_bytes: i32,
+    pub max_wait: Time,
+    pub max: ByteSize,
+    pub partition_max: ByteSize,
+    pub fetch_min: FetchMinBytes,
     pub isolation_level: i8,
 }
 
@@ -91,12 +152,12 @@ pub struct FetchPartitionResult {
 /// One Kafka record header decoded from a fetched record.
 pub type FetchedHeader = RecordHeader;
 
-/// Fetch up to `partition_max_bytes` from `(topic, partition)` starting
+/// Fetch up to `partition_max` from `(topic, partition)` starting
 /// at `fetch_offset`, decoding every v2 `RecordBatch` into
 /// [`FetchedRecord`]s.
 ///
 /// Records are returned in offset order. An empty result means the
-/// partition had nothing at/after `fetch_offset` within `max_wait_ms`.
+/// partition had nothing at/after `fetch_offset` within `max_wait`.
 /// Legacy (non-v2) message sets are skipped.
 ///
 /// # Errors
@@ -120,8 +181,8 @@ pub async fn fetch_partition(
     topic_id: WireUuid,
     partition: i32,
     fetch_offset: i64,
-    max_wait_ms: i32,
-    partition_max_bytes: i32,
+    max_wait: Time,
+    partition_max: ByteSize,
 ) -> Result<Vec<FetchedRecord>, ClientError> {
     fetch_partition_on(
         conn,
@@ -129,8 +190,8 @@ pub async fn fetch_partition(
         topic_id,
         partition,
         fetch_offset,
-        max_wait_ms,
-        partition_max_bytes,
+        max_wait,
+        partition_max,
     )
     .await
 }
@@ -144,8 +205,8 @@ async fn fetch_partition_on<T: FetchTransport + ?Sized>(
     topic_id: WireUuid,
     partition: i32,
     fetch_offset: i64,
-    max_wait_ms: i32,
-    partition_max_bytes: i32,
+    max_wait: Time,
+    partition_max: ByteSize,
 ) -> Result<Vec<FetchedRecord>, ClientError> {
     // Default to READ_UNCOMMITTED (isolation_level = 0): every record visible.
     fetch_partition_with_isolation_on(
@@ -155,9 +216,10 @@ async fn fetch_partition_on<T: FetchTransport + ?Sized>(
             topic_id,
             partition,
             fetch_offset,
-            max_wait_ms,
-            max_bytes: DEFAULT_FETCH_RESPONSE_MAX_BYTES,
-            partition_max_bytes,
+            max_wait,
+            max: DEFAULT_FETCH_RESPONSE_MAX,
+            partition_max,
+            fetch_min: FetchMinBytes::default(),
             isolation_level: 0,
         },
     )
@@ -239,9 +301,9 @@ async fn fetch_partition_with_isolation_progress_on<T: FetchTransport + ?Sized>(
 
 fn build_fetch_request(fetch: IsolatedFetch<'_>) -> FetchRequest {
     FetchRequest {
-        max_wait_ms: fetch.max_wait_ms,
-        min_bytes: 1,
-        max_bytes: fetch.max_bytes,
+        max_wait_ms: fetch.max_wait.millis_i32(),
+        min_bytes: fetch.fetch_min.bytes(),
+        max_bytes: fetch.max.bytes_i32(),
         isolation_level: fetch.isolation_level,
         topics: vec![FetchTopic {
             topic: fetch.topic.to_string(),
@@ -249,7 +311,7 @@ fn build_fetch_request(fetch: IsolatedFetch<'_>) -> FetchRequest {
             partitions: vec![FetchPartition {
                 partition: fetch.partition,
                 fetch_offset: fetch.fetch_offset,
-                partition_max_bytes: fetch.partition_max_bytes,
+                partition_max_bytes: fetch.partition_max.bytes_i32(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -359,6 +421,10 @@ mod tests {
             },
         },
         records::{Attributes, Record, RecordBatch, RecordsPayload},
+    };
+    use crabka_units::{
+        ByteSize, bytes, kibibytes, millis,
+        convert::ByteSizeExt as _,
     };
 
     use super::*;
@@ -565,9 +631,10 @@ mod tests {
             topic_id,
             partition: 3,
             fetch_offset: 123,
-            max_wait_ms: 250,
-            max_bytes: 96 * 1024,
-            partition_max_bytes: 64 * 1024,
+            max_wait: millis(250),
+            max: kibibytes(96),
+            partition_max: kibibytes(64),
+            fetch_min: FetchMinBytes::try_from(bytes(17)).unwrap(),
             isolation_level: 1,
         });
 
@@ -575,7 +642,7 @@ mod tests {
             req == FetchRequest {
                 replica_id: -1,
                 max_wait_ms: 250,
-                min_bytes: 1,
+                min_bytes: 17,
                 max_bytes: 96 * 1024,
                 isolation_level: 1,
                 session_id: 0,
@@ -607,6 +674,17 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields(vec![]),
             }
         );
+    }
+
+    #[test]
+    fn fetch_min_validates_protocol_boundaries() {
+        assert!(FetchMinBytes::default().size() == bytes(1));
+        assert!(FetchMinBytes::try_from(bytes(0)).is_err());
+        assert!(FetchMinBytes::try_from(ByteSize::from_bytes_f64(1.5)).is_err());
+        assert!(
+            FetchMinBytes::try_from(ByteSize::from_bytes_i64(i64::from(i32::MAX) + 1)).is_err()
+        );
+        assert!(FetchMinBytes::try_from(bytes(17)).unwrap().bytes() == 17);
     }
 
     #[test]
@@ -710,9 +788,10 @@ mod tests {
                 })
             });
 
-        let got = super::fetch_partition_on(&transport, "t", topic_id, 2, 5, 250, 4096)
-            .await
-            .unwrap();
+        let got =
+            super::fetch_partition_on(&transport, "t", topic_id, 2, 5, millis(250), bytes(4096))
+                .await
+                .unwrap();
         assert!(
             got == vec![
                 FetchedRecord {
@@ -750,9 +829,10 @@ mod tests {
                 topic_id,
                 partition: 0,
                 fetch_offset: 0,
-                max_wait_ms: 100,
-                max_bytes: 2048,
-                partition_max_bytes: 1024,
+                max_wait: millis(100),
+                max: bytes(2048),
+                partition_max: bytes(1024),
+                fetch_min: FetchMinBytes::default(),
                 isolation_level: 1,
             },
         )
@@ -769,9 +849,17 @@ mod tests {
             .expect_fetch()
             .returning(|_req| Err(ClientError::Disconnected));
 
-        let err = super::fetch_partition_on(&transport, "t", WireUuid([0; 16]), 0, 0, 100, 1024)
-            .await
-            .unwrap_err();
+        let err = super::fetch_partition_on(
+            &transport,
+            "t",
+            WireUuid([0; 16]),
+            0,
+            0,
+            millis(100),
+            bytes(1024),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ClientError::Disconnected));
     }
 
@@ -795,9 +883,17 @@ mod tests {
             })
         });
 
-        let err = super::fetch_partition_on(&transport, "t", WireUuid([0; 16]), 0, 0, 100, 1024)
-            .await
-            .unwrap_err();
+        let err = super::fetch_partition_on(
+            &transport,
+            "t",
+            WireUuid([0; 16]),
+            0,
+            0,
+            millis(100),
+            bytes(1024),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(err, ClientError::Server { error_code: 1 }));
     }
 }

@@ -1291,6 +1291,7 @@ fn recovery_fetch(
         max_wait: read_policy.fetch_max_wait(),
         max: read_policy.fetch_response_max(),
         partition_max: read_policy.fetch_partition_max(),
+        fetch_min: crabka_client_core::FetchMinBytes::default(),
         isolation_level: READ_COMMITTED,
     }
 }
