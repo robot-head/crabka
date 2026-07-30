@@ -408,6 +408,11 @@ async fn run_compactor(
     let retention = cli.compactor_retention;
     let sweep_interval = cli.compactor_retention_sweep_interval;
     let mut config = MetricsCompactorConfig::new(cli.bootstrap);
+    config.client_dispatch_queue_capacity =
+        ConnectionDispatchQueueCapacity::new(cli.client_dispatch_queue_capacity)
+            .expect("validated metrics client dispatch queue capacity");
+    config.client_frame_max =
+        ClientFrameMax::try_from(cli.client_frame_max).expect("validated metrics frame maximum");
     config.group_id = cli.compactor_group_id;
     config.client_id = cli.compactor_client_id;
     config.poll_timeout = cli.compactor_poll_timeout;

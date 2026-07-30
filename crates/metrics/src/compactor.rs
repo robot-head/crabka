@@ -208,6 +208,8 @@ const COMPACTION_OBJECT_PREFIX: &str = "metrics";
 /// Configuration for the metrics compactor role.
 #[derive(Clone, Debug)]
 pub struct MetricsCompactorConfig {
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub bootstrap: String,
     pub group_id: String,
     pub client_id: String,
@@ -504,6 +506,9 @@ impl MetricsCompactorConfig {
     #[must_use]
     pub fn new(bootstrap: impl Into<String>) -> Self {
         Self {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             bootstrap: bootstrap.into(),
             group_id: "crabka-metrics-compactor".to_string(),
             client_id: "crabka-metrics-compactor".to_string(),
@@ -556,6 +561,8 @@ impl MetricsCompactorConfig {
         self.validate()?;
         Consumer::builder()
             .bootstrap(self.bootstrap.clone())
+            .dispatch_queue_capacity(self.client_dispatch_queue_capacity.get())
+            .frame_max(self.client_frame_max.size())
             .group_id(self.group_id.clone())
             .client_id(self.client_id.clone())
             .auto_offset_reset(self.auto_offset_reset)
@@ -2427,6 +2434,9 @@ mod tests {
     #[test]
     fn metrics_compactor_config_validates_required_consumer_fields() {
         let cfg = super::MetricsCompactorConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             bootstrap: String::new(),
             group_id: "metrics-compactor".to_string(),
             client_id: "crabka-metrics-compactor".to_string(),
@@ -2445,6 +2455,9 @@ mod tests {
     async fn metrics_compactor_config_builds_runtime_with_shared_object_store() {
         let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let cfg = super::MetricsCompactorConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             bootstrap: "127.0.0.1:9092".to_string(),
             group_id: "metrics-compactor".to_string(),
             client_id: "crabka-metrics-compactor".to_string(),

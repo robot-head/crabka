@@ -190,6 +190,22 @@ fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
     ClientFrameMax::try_from(value).map(ClientFrameMax::size)
 }
 
+fn client_resource_policy(
+    cli: &Cli,
+) -> (
+    crabka_client_core::ConnectionDispatchQueueCapacity,
+    crabka_client_core::ClientFrameMax,
+) {
+    (
+        crabka_client_core::ConnectionDispatchQueueCapacity::new(
+            cli.client_dispatch_queue_capacity,
+        )
+        .expect("validated profiles client dispatch queue capacity"),
+        crabka_client_core::ClientFrameMax::try_from(cli.client_frame_max)
+            .expect("validated profiles client frame maximum"),
+    )
+}
+
 fn debuginfod_config(cli: &Cli) -> Result<DebuginfodConfig, String> {
     let defaults = DebuginfodConfig::default();
     DebuginfodConfig::new(
@@ -257,8 +273,10 @@ fn spawn_profile_index_refresh(
 }
 
 #[tokio::main]
+#[allow(clippy::too_many_lines)]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let (client_dispatch_queue_capacity, client_frame_max) = client_resource_policy(&cli);
     let debuginfod_config = debuginfod_config(&cli)?;
     let _telemetry = crabka_telemetry::init(
         OtlpConfig::from_env(
@@ -286,8 +304,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             let producer = Producer::builder()
                 .bootstrap(&cli.bootstrap)
-                .dispatch_queue_capacity(cli.client_dispatch_queue_capacity)
-                .frame_max(cli.client_frame_max)
+                .dispatch_queue_capacity(client_dispatch_queue_capacity.get())
+                .frame_max(client_frame_max.size())
                 .build()
                 .await?;
             let state = Arc::new(DistributorState {
@@ -312,6 +330,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("object store: {e}"))?;
             let mut config =
                 BlockBuilderConfig::new(cli.bootstrap, configured.store).with_metrics(metrics);
+            config.client_dispatch_queue_capacity = client_dispatch_queue_capacity;
+            config.client_frame_max = client_frame_max;
             config.wal_fetch_max = cli.wal_fetch_max;
             config.wal_fetch_partition_max = cli.wal_fetch_partition_max;
             config.flush_records = cli.block_builder_flush_records;
@@ -349,7 +369,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cli.index_snapshot_max,
             );
             let hot = WalTailProfileStore::new();
-            spawn_wal_tail(&cli, hot.clone());
+            spawn_wal_tail(
+                &cli,
+                hot.clone(),
+                client_dispatch_queue_capacity,
+                client_frame_max,
+            );
             let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
             let state = Arc::new(
                 QuerierState::new_with_overrides(union, overrides).with_metrics(metrics.clone()),
@@ -389,7 +414,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cli.index_snapshot_max,
             );
             let hot = WalTailProfileStore::new();
-            spawn_wal_tail(&cli, hot.clone());
+            spawn_wal_tail(
+                &cli,
+                hot.clone(),
+                client_dispatch_queue_capacity,
+                client_frame_max,
+            );
             let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
             let state = Arc::new(
                 QuerierState::new_frontend_with_overrides(
@@ -475,12 +505,26 @@ fn load_profiles_limits_overrides_config(
     Ok(OverridesProvider::from_yaml(&text)?)
 }
 
-fn spawn_wal_tail(cli: &Cli, hot: WalTailProfileStore) {
+fn spawn_wal_tail(
+    cli: &Cli,
+    hot: WalTailProfileStore,
+    client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    client_frame_max: crabka_client_core::ClientFrameMax,
+) {
     let bootstrap = cli.bootstrap.clone();
     let group_id = cli.query_wal_tail_group_id.clone();
     let poll_timeout = cli.wal_poll_timeout;
     tokio::spawn(async move {
-        if let Err(err) = run_wal_tail(hot, bootstrap, group_id, poll_timeout).await {
+        if let Err(err) = run_wal_tail(
+            hot,
+            bootstrap,
+            group_id,
+            poll_timeout,
+            client_dispatch_queue_capacity,
+            client_frame_max,
+        )
+        .await
+        {
             tracing::warn!(%err, "profiles hot WAL-tail stopped");
         }
     });

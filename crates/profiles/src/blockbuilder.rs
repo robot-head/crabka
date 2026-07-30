@@ -55,6 +55,8 @@ pub struct BuiltSample {
 
 #[derive(Clone)]
 pub struct BlockBuilderConfig {
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub bootstrap: String,
     pub group_id: String,
     pub store: Arc<dyn ObjectStore>,
@@ -79,6 +81,9 @@ impl BlockBuilderConfig {
     #[must_use]
     pub fn new(bootstrap: String, store: Arc<dyn ObjectStore>) -> Self {
         Self {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             bootstrap,
             group_id: "crabka-profiles-block-builder".to_string(),
             store,
@@ -310,6 +315,8 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
     };
     let mut consumer = Consumer::builder()
         .bootstrap(config.bootstrap)
+        .dispatch_queue_capacity(config.client_dispatch_queue_capacity.get())
+        .frame_max(config.client_frame_max.size())
         .group_id(config.group_id.clone())
         .group_instance_id(config.group_id)
         .fetch_max(config.wal_fetch_max)
