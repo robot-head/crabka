@@ -29,7 +29,8 @@ applicable rule below:
   `docgen`, `gres`, `gres-activator`, `gres-control`, `grpc-gateway`, `ids`,
   `integration-tests`, `kafka-tap`,
   `log-iobench`, `logfmt`, `logql`, `metadata`, `object-store`, `operator`,
-  `pgcatalog`, `pgmvcc`, `pgtypes`, `protocol-codegen`, `remote-storage`,
+  `pgcatalog`, `pgmvcc`, `pgtypes`, `protocol-codegen`, `records-legacy`,
+  `remote-storage`,
   `pgparser`, `playground`,
   `schema-registry`, `throttle`, `verified`, `voters`.
 - Pending: `client-consumer`, `client-core`, `client-streams`,
@@ -40,7 +41,7 @@ applicable rule below:
   `metrics-service`, `observability`, `observability-demo-app`,
   `pgexec`, `pgkv`, `pgwire`,
   `pprof`, `profiles`, `promql`, `protocol`, `raft`,
-  `rebalancer`, `records-legacy`, `remote-storage-topic`, `replicator`,
+  `rebalancer`, `remote-storage-topic`, `replicator`,
   `schema-serde`, `security`, `telemetry`,
   `traceql`, and `traces`.
 
@@ -4665,3 +4666,46 @@ runtime timing, queue, retry, or resource policy, so no CLI, environment
 variable, or CRD field is warranted. The current all-target gate passed 218
 tests; two external-PostgreSQL oracle tests were explicitly ignored. Strict
 all-target Clippy passed.
+
+## Kafka Record Decompression Policy
+
+The `records-legacy` scanner has five rows. The compression mask and timestamp
+bit remain fixed Kafka v0/v1 wire-format invariants. Its former three
+decompression-budget constants were deployment policy and have been removed.
+
+The `protocol` scanner has 2,226 rows. Generated Kafka API keys, version
+ranges, schema defaults, and fixture values are wire-compatibility data rather
+than deployment policy. Handwritten varint widths, record-header lengths,
+attribute masks, metadata/control/envelope versions, allocation hints, and
+test values are likewise format or verification invariants. The duplicated
+100x/16-MiB/1-GiB decompression budgets in the modern v2 borrowed and owned
+record decoders have also been removed.
+
+Modern and legacy records are two encodings of the same broker traffic class,
+so one `RecordDecompressionPolicy` in `crabka-compression` now owns both
+decoding paths. It contains UOM `Ratio` and `ByteSize` values, uses
+`refined_type` for positive whole-byte validation, and preserves the existing
+100x ratio, 16-MiB floor, and 1-GiB ceiling defaults. Operators may lower the
+ratio and ceiling but cannot raise the fixed 100x and 1-GiB security bounds.
+
+Broker configuration, CLI/environment, and `BrokerTuning` expose:
+
+```text
+record_decompression_max_ratio
+record_decompression_output_floor
+record_decompression_output_ceiling
+CRABKA_RECORD_DECOMPRESSION_MAX_RATIO
+CRABKA_RECORD_DECOMPRESSION_OUTPUT_FLOOR
+CRABKA_RECORD_DECOMPRESSION_OUTPUT_CEILING
+```
+
+The Kafka CRD uses camel-case equivalents and the operator renders the same
+broker `[runtime]` keys. Produce constructs the validated policy once per
+request and supplies it only to owned modern/legacy fallback decoding; the
+header-only v2 verbatim path remains unchanged. Public protocol and legacy
+decode entry points retain default-compatible wrappers, with explicit
+policy-aware variants for the broker trust boundary.
+
+Telemetry decompression remains independently configurable because it is a
+different traffic class. `records-legacy` is complete; broader generated and
+handwritten `protocol` classification remains pending.

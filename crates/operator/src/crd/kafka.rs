@@ -528,6 +528,9 @@ define_broker_tuning! {
     ratio_positive #[serde(with = "crabka_units::serde_units::human::option_ratio")] #[schemars(with = "Option<String>")] telemetry_max_decompression_ratio: Ratio => ();
     size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] telemetry_decompressed_output_floor: ByteSize => ();
     size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] telemetry_decompressed_output_ceiling: ByteSize => ();
+    ratio_positive #[serde(with = "crabka_units::serde_units::human::option_ratio")] #[schemars(with = "Option<String>")] record_decompression_max_ratio: Ratio => ();
+    size_u64 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] record_decompression_output_floor: ByteSize => ();
+    size_u64 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] record_decompression_output_ceiling: ByteSize => ();
     string #[schemars(length(min = 1))] inter_broker_server_name: String => ();
     time_i64 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] producer_id_expiration: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] producer_id_expiration_scan_interval: Time => ();
@@ -741,6 +744,7 @@ impl BrokerTuning {
             telemetry_decompressed_output_ceiling,
             ByteSize::from_bytes(1_073_741_824)
         );
+        self.validate_record_decompression()?;
         ordered!(
             transaction_min_timeout,
             Time::from_millis(1_000),
@@ -821,6 +825,27 @@ impl BrokerTuning {
             ));
         }
         Ok(())
+    }
+
+    fn validate_record_decompression(&self) -> Result<(), String> {
+        let defaults = crabka_compression::RecordDecompressionPolicy::default();
+        crabka_compression::RecordDecompressionPolicy::new(
+            self.record_decompression_max_ratio
+                .unwrap_or(defaults.max_ratio()),
+            self.record_decompression_output_floor
+                .unwrap_or(defaults.output_floor()),
+            self.record_decompression_output_ceiling
+                .unwrap_or(defaults.output_ceiling()),
+        )
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "{}, {}, and {}: {error}",
+                Self::path("record_decompression_max_ratio"),
+                Self::path("record_decompression_output_floor"),
+                Self::path("record_decompression_output_ceiling"),
+            )
+        })
     }
 }
 
@@ -1584,6 +1609,8 @@ mod tests {
             "aclMaxResourceName",
             "telemetryDecompressedOutputFloor",
             "telemetryDecompressedOutputCeiling",
+            "recordDecompressionOutputFloor",
+            "recordDecompressionOutputCeiling",
             "futureLogMoveReadChunk",
             "metadataMaxBetweenSnapshots",
         ] {
@@ -1595,12 +1622,50 @@ mod tests {
 
         for (field, value) in [
             ("telemetryMaxDecompressionRatio", "0"),
+            ("recordDecompressionMaxRatio", "0"),
             ("leaderImbalancePerBroker", "101%"),
         ] {
             let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({field: value}))
                 .expect("deserialize ratio");
             let error = tuning.validate().expect_err("invalid ratio must fail");
             assert!(error.contains(field), "{error}");
+        }
+    }
+
+    #[test]
+    fn broker_tuning_record_decompression_round_trips_and_validates() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "recordDecompressionMaxRatio": "50",
+            "recordDecompressionOutputFloor": "8MiB",
+            "recordDecompressionOutputCeiling": "512MiB"
+        }))
+        .expect("deserialize record decompression policy");
+        tuning
+            .validate()
+            .expect("valid record decompression policy");
+        let rendered = tuning.render_runtime_toml();
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&rendered).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        let policy = broker.record_decompression_policy().unwrap();
+        assert!(policy.max_ratio() == crabka_units::fraction(50.0));
+        assert!(policy.output_floor() == crabka_units::mebibytes(8));
+        assert!(policy.output_ceiling() == crabka_units::mebibytes(512));
+
+        for value in [
+            serde_json::json!({"recordDecompressionMaxRatio": "101"}),
+            serde_json::json!({
+                "recordDecompressionOutputFloor": "1GiB",
+                "recordDecompressionOutputCeiling": "16MiB"
+            }),
+            serde_json::json!({"recordDecompressionOutputCeiling": "2GiB"}),
+        ] {
+            let tuning: BrokerTuning =
+                serde_json::from_value(value).expect("deserialize invalid policy");
+            let error = tuning.validate().expect_err("invalid policy must fail");
+            assert!(error.contains("recordDecompression"), "{error}");
         }
     }
 

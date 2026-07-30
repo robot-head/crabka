@@ -246,6 +246,9 @@ spec:
                   metadataMaxSnapshotInterval:
                     nullable: true
                     type: string
+                  metadataSnapshotFetchMax:
+                    nullable: true
+                    type: string
                   metadataSnapshotIntervalRecords:
                     format: uint64
                     minimum: 1.0
@@ -289,6 +292,15 @@ spec:
                     nullable: true
                     type: string
                   quotaThrottleMax:
+                    nullable: true
+                    type: string
+                  recordDecompressionMaxRatio:
+                    nullable: true
+                    type: string
+                  recordDecompressionOutputCeiling:
+                    nullable: true
+                    type: string
+                  recordDecompressionOutputFloor:
                     nullable: true
                     type: string
                   remoteLogManagerInterval:

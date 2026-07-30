@@ -1,6 +1,8 @@
 //! Borrowed `RecordBatch<'a>`, `Record<'a>`, and `RecordHeader<'a>`.
 
 use bytes::Bytes;
+use crabka_compression::RecordDecompressionPolicy;
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use zerocopy::FromBytes as _;
 
 use crate::{
@@ -76,11 +78,30 @@ impl<'a> Default for RecordBatch<'a> {
 
 impl<'de> crate::DecodeBorrow<'de> for RecordBatch<'de> {
     fn decode_borrow(buf: &mut &'de [u8], _version: i16) -> Result<Self, crate::ProtocolError> {
-        decode_borrow_impl(buf).map_err(Into::into)
+        Self::decode_borrow_with_policy(buf, RecordDecompressionPolicy::default())
+            .map_err(Into::into)
     }
 }
 
-fn decode_borrow_impl<'de>(buf: &mut &'de [u8]) -> Result<RecordBatch<'de>, RecordsError> {
+impl<'de> RecordBatch<'de> {
+    /// Decode a borrowed v2 record batch with explicit decompression limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying records error for malformed, truncated, corrupt,
+    /// or over-limit input.
+    pub fn decode_borrow_with_policy(
+        buf: &mut &'de [u8],
+        policy: RecordDecompressionPolicy,
+    ) -> Result<Self, RecordsError> {
+        decode_borrow_impl(buf, policy)
+    }
+}
+
+fn decode_borrow_impl<'de>(
+    buf: &mut &'de [u8],
+    policy: RecordDecompressionPolicy,
+) -> Result<RecordBatch<'de>, RecordsError> {
     if buf.len() < HEADER_LEN {
         return Err(RecordsError::HeaderTooShort {
             needed: HEADER_LEN - buf.len(),
@@ -120,17 +141,11 @@ fn decode_borrow_impl<'de>(buf: &mut &'de [u8]) -> Result<RecordBatch<'de>, Reco
     let body = if codec == crabka_compression::CompressionType::None {
         RecordBody::Borrowed(raw_body)
     } else {
-        // Bound decompressed output: generous vs. legit ratios, but finite.
-        // A small compressed batch must not be able to expand to gigabytes and
-        // OOM the broker (decompression bomb).
-        const DECOMPRESS_MIN_CAP: usize = 16 * 1024 * 1024; // 16 MiB floor (small inputs)
-        const DECOMPRESS_MAX_RATIO: usize = 100; // ≤100x the compressed size
-        const DECOMPRESS_ABSOLUTE_CEILING: usize = 1024 * 1024 * 1024; // 1 GiB hard ceiling
-        let max_output = raw_body
-            .len()
-            .saturating_mul(DECOMPRESS_MAX_RATIO)
-            .clamp(DECOMPRESS_MIN_CAP, DECOMPRESS_ABSOLUTE_CEILING);
-        let decompressed = crabka_compression::decompress(codec, raw_body, max_output)?;
+        let decompressed = crabka_compression::decompress(
+            codec,
+            raw_body,
+            policy.output_limit(ByteSize::from_bytes(raw_body.len() as u64)),
+        )?;
         RecordBody::Owned(decompressed)
     };
 
@@ -513,7 +528,8 @@ impl crate::Encode for RecordBatch<'_> {
 mod tests {
 
     use bytes::BytesMut;
-    use crabka_compression::CompressionType;
+    use crabka_compression::{CompressionError, CompressionType, RecordDecompressionPolicy};
+    use crabka_units::{bytes, fraction};
 
     use super::*;
     use crate::DecodeBorrow;
@@ -561,6 +577,32 @@ mod tests {
             let back_owned = borrowed.to_owned().unwrap();
             assert2::assert!(back_owned == owned);
         }
+    }
+
+    #[test]
+    fn decompression_policy_limits_borrowed_decode() {
+        let mut owned = super::super::owned::RecordBatch {
+            attributes: Attributes::default().with_compression(CompressionType::Lz4),
+            records: vec![super::super::owned::Record {
+                value: Some(Bytes::from(vec![b'x'; 4096])),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        owned.last_offset_delta = 0;
+        let encoded = encode_owned_then_borrow(&owned);
+
+        let mut default_cur = &encoded[..];
+        RecordBatch::decode_borrow(&mut default_cur, 0).unwrap();
+
+        let policy = RecordDecompressionPolicy::new(fraction(1.0), bytes(1), bytes(32)).unwrap();
+        let mut limited_cur = &encoded[..];
+        assert2::assert!(matches!(
+            RecordBatch::decode_borrow_with_policy(&mut limited_cur, policy),
+            Err(RecordsError::Compression(CompressionError::TooLarge {
+                limit: 32
+            }))
+        ));
     }
 
     #[test]

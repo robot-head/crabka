@@ -405,6 +405,15 @@ pub struct RuntimeFileConfig {
     #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
     #[schemars(with = "Option<String>")]
     pub telemetry_decompressed_output_ceiling: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_ratio")]
+    #[schemars(with = "Option<String>")]
+    pub record_decompression_max_ratio: Option<Ratio>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub record_decompression_output_floor: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub record_decompression_output_ceiling: Option<ByteSize>,
     pub inter_broker_server_name: Option<String>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
@@ -2295,6 +2304,22 @@ impl RuntimeFileConfig {
             telemetry_decompressed_output_ceiling,
             cfg.telemetry_decompressed_output_ceiling,
             whole_bytes_usize
+        );
+        if let Some(value) = runtime.record_decompression_max_ratio {
+            cfg.record_decompression_max_ratio =
+                positive_ratio("record_decompression_max_ratio", value)?;
+        }
+        set_runtime_size_bytes!(
+            runtime,
+            record_decompression_output_floor,
+            cfg.record_decompression_output_floor,
+            whole_bytes_u64
+        );
+        set_runtime_size_bytes!(
+            runtime,
+            record_decompression_output_ceiling,
+            cfg.record_decompression_output_ceiling,
+            whole_bytes_u64
         );
         Ok(())
     }
@@ -4841,6 +4866,44 @@ replication_fetch_min = "1B"
     }
 
     #[test]
+    fn runtime_file_config_applies_record_decompression_policy() {
+        let source = r#"
+[runtime]
+record_decompression_max_ratio = "50"
+record_decompression_output_floor = "8MiB"
+record_decompression_output_ceiling = "512MiB"
+"#;
+        let file: FileConfig = toml::from_str(source).expect("parse runtime config");
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).expect("apply runtime config");
+
+        let policy = cfg
+            .record_decompression_policy()
+            .expect("validated decompression policy");
+        assert!(policy.max_ratio() == crabka_units::fraction(50.0));
+        assert!(policy.output_floor() == crabka_units::mebibytes(8));
+        assert!(policy.output_ceiling() == crabka_units::mebibytes(512));
+    }
+
+    #[test]
+    fn runtime_file_config_rejects_invalid_record_decompression_relations() {
+        for body in [
+            "record_decompression_max_ratio = \"101\"\n",
+            concat!(
+                "record_decompression_output_floor = \"1GiB\"\n",
+                "record_decompression_output_ceiling = \"16MiB\"\n",
+            ),
+        ] {
+            let source = format!("[runtime]\n{body}");
+            let file: FileConfig = toml::from_str(&source).expect("parse runtime config");
+            let error = file
+                .apply_to(&mut crate::config::BrokerConfig::default())
+                .expect_err("invalid record decompression policy must fail");
+            assert!(error.to_string().contains("record_decompression"));
+        }
+    }
+
+    #[test]
     fn runtime_file_config_rejects_invalid_dimensioned_sizes_and_ratios() {
         for field in [
             "client_metrics_telemetry_max",
@@ -4857,6 +4920,8 @@ replication_fetch_min = "1B"
             "acl_max_resource_name",
             "telemetry_decompressed_output_floor",
             "telemetry_decompressed_output_ceiling",
+            "record_decompression_output_floor",
+            "record_decompression_output_ceiling",
             "future_log_move_read_chunk",
             "metadata_max_between_snapshots",
         ] {
@@ -4871,6 +4936,7 @@ replication_fetch_min = "1B"
 
         for (field, value) in [
             ("telemetry_max_decompression_ratio", "0"),
+            ("record_decompression_max_ratio", "0"),
             ("leader_imbalance_per_broker", "101%"),
         ] {
             let source = format!("[runtime]\n{field} = \"{value}\"\n");
@@ -4891,6 +4957,8 @@ replication_fetch_min = "1B"
             ("observer_fetch_max", "4294967296B"),
             ("socket_request_max", "4294967296B"),
             ("audit_tail_read_max", "1.5B"),
+            ("record_decompression_output_floor", "1.5B"),
+            ("record_decompression_output_ceiling", "1073741825B"),
             ("metadata_max_between_snapshots", "18446744073709551616B"),
         ] {
             let source = format!("[runtime]\n{field} = \"{value}\"\n");
@@ -4899,7 +4967,12 @@ replication_fetch_min = "1B"
             let error = file
                 .apply_to(&mut cfg)
                 .expect_err("fractional or overflowing byte size must fail");
-            assert!(error.to_string().contains(field), "{error}");
+            let expected = if field == "record_decompression_output_ceiling" {
+                "record_decompression"
+            } else {
+                field
+            };
+            assert!(error.to_string().contains(expected), "{error}");
         }
     }
 

@@ -3,10 +3,16 @@
 
 use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 
+use crabka_compression::RecordDecompressionPolicy;
 use crabka_log::LogConfig;
 pub use crabka_raft::BootstrapMode;
 use crabka_raft::NodeId;
 use crabka_security::{ListenerProtocol, SaslMechanism, TlsConfig};
+use crabka_units::{
+    ByteSize, Ratio, Time, bytes,
+    convert::{ByteSizeExt, RatioExt, TimeExt},
+    days, fraction, gibibytes, hours, kibibytes, mebibytes, millis, minutes, percent, secs,
+};
 
 use crate::BrokerError;
 
@@ -85,44 +91,50 @@ pub struct BrokerFeatureFlags {
     pub transaction_two_phase_commit_enable: bool,
 }
 
-/// Runtime policy used by follower replication tasks.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Runtime policy used by follower replication tasks: the size and patience of
+/// each replication fetch, and the backoffs the follower loop waits out between
+/// them.
+///
+/// Not `Eq`: every knob here is a quantity, whose `f64` storage is only
+/// `PartialEq`. The three fetch knobs are the ones that reach the wire, as
+/// `FetchRequest`'s `max_bytes`, `min_bytes`, and `max_wait_ms`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ReplicationRuntimeConfig {
     /// Maximum bytes requested from a leader in one replication fetch.
-    pub fetch_max_bytes: i32,
+    pub fetch_max: ByteSize,
     /// Maximum leader wait for a replication fetch.
-    pub fetch_max_wait_ms: i32,
+    pub fetch_max_wait: Time,
     /// Minimum bytes that satisfy a replication fetch.
-    pub fetch_min_bytes: i32,
+    pub fetch_min: ByteSize,
     /// Delay after a replication throttle budget is exhausted.
-    pub throttle_exhausted_backoff: Duration,
+    pub throttle_exhausted_backoff: Time,
     /// Retry delay after sending a replication request fails.
-    pub send_error_backoff: Duration,
+    pub send_error_backoff: Time,
     /// Retry delay when the leader does not yet know the topic.
-    pub unknown_topic_retry_delay: Duration,
+    pub unknown_topic_retry_delay: Time,
     /// Retry delay after a leader-epoch fence.
-    pub epoch_fence_backoff: Duration,
+    pub epoch_fence_backoff: Time,
     /// Retry delay after an unexpected replication error.
-    pub unexpected_error_backoff: Duration,
+    pub unexpected_error_backoff: Time,
     /// Initial delay before reconnecting to a leader.
-    pub reconnect_initial_delay: Duration,
+    pub reconnect_initial_delay: Time,
     /// Maximum delay between leader reconnection attempts.
-    pub reconnect_delay_cap: Duration,
+    pub reconnect_delay_cap: Time,
 }
 
 impl Default for ReplicationRuntimeConfig {
     fn default() -> Self {
         Self {
-            fetch_max_bytes: 1_048_576,
-            fetch_max_wait_ms: 500,
-            fetch_min_bytes: 1,
-            throttle_exhausted_backoff: Duration::from_millis(100),
-            send_error_backoff: Duration::from_secs(1),
-            unknown_topic_retry_delay: Duration::from_millis(100),
-            epoch_fence_backoff: Duration::from_millis(200),
-            unexpected_error_backoff: Duration::from_millis(500),
-            reconnect_initial_delay: Duration::from_millis(100),
-            reconnect_delay_cap: Duration::from_secs(5),
+            fetch_max: mebibytes(1),
+            fetch_max_wait: millis(500),
+            fetch_min: bytes(1),
+            throttle_exhausted_backoff: millis(100),
+            send_error_backoff: secs(1),
+            unknown_topic_retry_delay: millis(100),
+            epoch_fence_backoff: millis(200),
+            unexpected_error_backoff: millis(500),
+            reconnect_initial_delay: millis(100),
+            reconnect_delay_cap: secs(5),
         }
     }
 }
@@ -131,87 +143,87 @@ impl Default for ReplicationRuntimeConfig {
 // a broad config struct; flags are independent knobs
 pub struct BrokerConfig {
     /// Maximum time to wait for a controller leader during startup.
-    pub startup_leader_wait_timeout: Duration,
+    pub startup_leader_wait_timeout: Time,
     /// Initial delay between self-registration attempts.
-    pub self_registration_backoff_min: Duration,
+    pub self_registration_backoff_min: Time,
     /// Maximum delay between self-registration attempts.
-    pub self_registration_backoff_max: Duration,
+    pub self_registration_backoff_max: Time,
     /// Observer promotion polling cadence.
-    pub observer_poll_interval: Duration,
+    pub observer_poll_interval: Time,
     /// Audit spool replay cadence.
-    pub audit_spool_replay_interval: Duration,
+    pub audit_spool_replay_interval: Time,
     /// Audit statistics polling cadence.
-    pub audit_stats_poll_interval: Duration,
+    pub audit_stats_poll_interval: Time,
     /// Maximum wait for the audit partition to become available.
-    pub audit_partition_wait_timeout: Duration,
+    pub audit_partition_wait_timeout: Time,
     /// Broker liveness maintenance cadence.
-    pub liveness_tick_interval: Duration,
+    pub liveness_tick_interval: Time,
     /// Broker gauge refresh cadence.
-    pub gauge_poll_interval: Duration,
+    pub gauge_poll_interval: Time,
     /// In-sync replica maintenance cadence.
-    pub isr_scan_interval: Duration,
+    pub isr_scan_interval: Time,
     /// Log cleaner maintenance cadence.
-    pub cleaner_interval: Duration,
+    pub cleaner_interval: Time,
     /// Retry delay when moving a future log fails.
-    pub future_log_move_retry_backoff: Duration,
+    pub future_log_move_retry_backoff: Time,
     /// Client-metrics cache eviction cadence.
-    pub client_metrics_eviction_tick: Duration,
+    pub client_metrics_eviction_tick: Time,
     /// Minimum age at which client metrics are stale.
-    pub client_metrics_stale_floor: Duration,
+    pub client_metrics_stale_floor: Time,
     /// Default client telemetry subscription interval.
-    pub client_metrics_default_interval_ms: i32,
+    pub client_metrics_default_interval: Time,
     /// Capacity of the client-metrics OTLP forwarding queue.
     pub client_metrics_otlp_queue_capacity: usize,
     /// Maximum accepted client telemetry payload size.
-    pub client_metrics_telemetry_max_bytes: i32,
+    pub client_metrics_telemetry_max: ByteSize,
     /// Prometheus client-metrics snapshot lifetime.
-    pub client_metrics_prom_snapshot_ttl: Duration,
+    pub client_metrics_prom_snapshot_ttl: Time,
     /// Remote-log metadata reconciliation cadence.
-    pub rlmm_reconcile_tick: Duration,
+    pub rlmm_reconcile_tick: Time,
     /// Initial remote-log metadata bootstrap retry delay.
-    pub rlmm_bootstrap_backoff_initial: Duration,
+    pub rlmm_bootstrap_backoff_initial: Time,
     /// Maximum remote-log metadata bootstrap retry delay.
-    pub rlmm_bootstrap_backoff_max: Duration,
+    pub rlmm_bootstrap_backoff_max: Time,
     /// Maximum connection-creation quota delay.
-    pub connection_creation_throttle_max: Duration,
+    pub connection_creation_throttle_max: Time,
     /// OPA authorization request timeout.
-    pub opa_http_timeout: Duration,
+    pub opa_http_timeout: Time,
     /// OAuth JWKS HTTP request timeout.
-    pub oauth_jwks_http_timeout: Duration,
+    pub oauth_jwks_http_timeout: Time,
     /// Dynamic-quorum auto-join retry delay.
-    pub auto_join_retry_backoff: Duration,
+    pub auto_join_retry_backoff: Time,
     /// Timeout carried by dynamic-quorum `AddRaftVoter` requests.
-    pub auto_join_voter_request_timeout: Duration,
+    pub auto_join_voter_request_timeout: Time,
     /// Follower replication runtime policy.
     pub replication: ReplicationRuntimeConfig,
     /// Consumer-group session expiry scan cadence.
-    pub coordinator_session_expiry_tick: Duration,
+    pub coordinator_session_expiry_tick: Time,
     /// Maximum wait for coordinator shutdown acknowledgements.
-    pub coordinator_shutdown_ack_timeout: Duration,
+    pub coordinator_shutdown_ack_timeout: Time,
     /// Initial delay before a classic group begins rebalancing.
-    pub classic_group_initial_rebalance_delay: Duration,
+    pub classic_group_initial_rebalance_delay: Time,
     /// Maximum time a follower waits for a `SyncGroup` assignment.
-    pub sync_group_follower_wait: Duration,
+    pub sync_group_follower_wait: Time,
     /// Aggressive unclean-recovery collection deadline.
-    pub unclean_recovery_aggressive_deadline: Duration,
+    pub unclean_recovery_aggressive_deadline: Time,
     /// Balanced unclean-recovery collection deadline.
-    pub unclean_recovery_balanced_deadline: Duration,
+    pub unclean_recovery_balanced_deadline: Time,
     /// Operator-triggered recovery deadline.
-    pub operator_recovery_deadline: Duration,
+    pub operator_recovery_deadline: Time,
     /// Maximum quota throttle delay.
-    pub quota_throttle_max: Duration,
+    pub quota_throttle_max: Time,
     /// Maximum self-registration attempts before startup fails.
     pub self_registration_max_attempts: u32,
     /// Maximum bytes fetched by a metadata observer request.
-    pub observer_fetch_max_bytes: u32,
+    pub observer_fetch_max: ByteSize,
     /// Capacity of the asynchronous audit event queue.
     pub audit_event_queue_capacity: usize,
     /// Number of offsets included in an audit tail request.
     pub audit_tail_window_offsets: i64,
     /// Maximum bytes read by an audit tail request.
-    pub audit_tail_read_max_bytes: usize,
+    pub audit_tail_read_max: ByteSize,
     /// Maximum wait for offsets-topic metadata.
-    pub offsets_topic_metadata_wait_timeout: Duration,
+    pub offsets_topic_metadata_wait_timeout: Time,
     /// Push intervals after which client metrics become stale.
     pub client_metrics_stale_push_intervals: u32,
     /// Capacity of each coordinator actor mailbox.
@@ -219,33 +231,39 @@ pub struct BrokerConfig {
     /// Capacity of the unclean-recovery work queue.
     pub unclean_recovery_queue_capacity: usize,
     /// Maximum bytes read while recovering share state.
-    pub share_recovery_read_max_bytes: usize,
+    pub share_recovery_read_max: ByteSize,
     /// Share-session cache ceiling when group count is unlimited.
     pub share_session_cache_max_when_unlimited: usize,
     /// Maximum encoded request size accepted from a socket.
-    pub socket_request_max_bytes: usize,
+    pub socket_request_max: ByteSize,
     /// Minimum response size eligible for `sendfile`.
-    pub sendfile_min_bytes: usize,
+    pub sendfile_min: ByteSize,
     /// Broker socket send-buffer size.
-    pub socket_send_buffer_bytes: usize,
+    pub socket_send_buffer: ByteSize,
     /// Broker socket receive-buffer size.
-    pub socket_receive_buffer_bytes: usize,
+    pub socket_receive_buffer: ByteSize,
     /// Maximum encoded ACL principal length.
-    pub acl_max_principal_bytes: usize,
+    pub acl_max_principal: ByteSize,
     /// Maximum encoded ACL resource-name length.
-    pub acl_max_resource_name_bytes: usize,
+    pub acl_max_resource_name: ByteSize,
     /// Maximum accepted telemetry decompression ratio.
-    pub telemetry_max_decompression_ratio: usize,
+    pub telemetry_max_decompression_ratio: Ratio,
     /// Minimum telemetry decompression output allowance.
-    pub telemetry_decompressed_output_floor_bytes: usize,
+    pub telemetry_decompressed_output_floor: ByteSize,
     /// Maximum telemetry decompression output allowance.
-    pub telemetry_decompressed_output_ceiling_bytes: usize,
+    pub telemetry_decompressed_output_ceiling: ByteSize,
+    /// Maximum accepted Kafka record decompression ratio.
+    pub record_decompression_max_ratio: Ratio,
+    /// Minimum Kafka record decompression output allowance.
+    pub record_decompression_output_floor: ByteSize,
+    /// Maximum Kafka record decompression output allowance.
+    pub record_decompression_output_ceiling: ByteSize,
     /// TLS server name used for outbound inter-broker connections.
     pub inter_broker_server_name: String,
     /// Producer-id inactivity period before state expires.
-    pub producer_id_expiration_ms: i64,
+    pub producer_id_expiration: Time,
     /// Producer-state expiry scan cadence.
-    pub producer_id_expiration_scan_interval: Duration,
+    pub producer_id_expiration_scan_interval: Time,
     /// Maximum produce requests combined into one append group.
     pub max_produce_group: usize,
     /// Capacity of each partition-writer request queue.
@@ -253,15 +271,15 @@ pub struct BrokerConfig {
     /// Default minimum in-sync replica count.
     pub default_min_insync_replicas: i32,
     /// Bytes copied per future-log move read.
-    pub future_log_move_read_chunk_bytes: usize,
+    pub future_log_move_read_chunk: ByteSize,
     /// Partition count for the transaction-state internal topic.
     pub transaction_state_num_partitions: i32,
     /// Desired replication factor for the transaction-state internal topic.
     pub transaction_state_replication_factor: i16,
     /// Minimum accepted transaction timeout.
-    pub transaction_min_timeout_ms: i32,
+    pub transaction_min_timeout: Time,
     /// Maximum accepted transaction timeout.
-    pub transaction_max_timeout_ms: i32,
+    pub transaction_max_timeout: Time,
 
     /// Broker id reported in `Metadata` responses. Default: 1.
     pub broker_id: i32,
@@ -342,14 +360,14 @@ pub struct BrokerConfig {
     pub observer_lag_bound: u64,
 
     /// How often each broker sends `BrokerHeartbeat` to the controller
-    /// leader. Default 3,000ms.
-    pub heartbeat_interval_ms: u64,
-    /// Controller marks a broker dead after this many ms without a
-    /// heartbeat. Default 9,000ms.
-    pub heartbeat_timeout_ms: u64,
-    /// Leader proposes ISR shrink when a follower lags more than this
-    /// many ms. Default 30,000ms.
-    pub replica_lag_time_max_ms: u64,
+    /// leader. Default 3s.
+    pub heartbeat_interval: Time,
+    /// Controller marks a broker dead after this long without a
+    /// heartbeat. Default 9s.
+    pub heartbeat_timeout: Time,
+    /// Leader proposes ISR shrink when a follower lags more than this.
+    /// Default 30s.
+    pub replica_lag_time_max: Time,
 
     /// Openraft election timeout (sets `election_timeout_min`; max is 2×).
     /// Indirectly sets `leader_lease = election_timeout_max` inside
@@ -357,17 +375,17 @@ pub struct BrokerConfig {
     /// until the lease expires, so this is also the lower bound on how
     /// fast a 3-broker cluster can recover from a dead controller leader.
     /// Default 5s (conservative; avoids split-vote on slow runners).
-    pub controller_election_timeout: std::time::Duration,
+    pub controller_election_timeout: Time,
 
     /// Openraft heartbeat interval. Default 500ms. Should be ≤
     /// `controller_election_timeout / 3` per raft consensus norms.
-    pub controller_heartbeat_interval: std::time::Duration,
+    pub controller_heartbeat_interval: Time,
 
     /// `metadata.log.max.record.bytes.between.snapshots` (default 20 MiB).
-    pub metadata_max_bytes_between_snapshots: u64,
+    pub metadata_max_bytes_between_snapshots: ByteSize,
 
-    /// `metadata.log.max.snapshot.interval.ms` (default 1 h; 0 = disabled).
-    pub metadata_max_snapshot_interval: std::time::Duration,
+    /// `metadata.log.max.snapshot.interval.ms` (default 1 h; zero = disabled).
+    pub metadata_max_snapshot_interval: Time,
 
     /// KIP-630: snapshot the metadata log once committed offset advances this
     /// many records past the last snapshot, then prune below it.
@@ -461,20 +479,19 @@ pub struct BrokerConfig {
     pub oauthbearer_jwks_endpoint: Option<String>,
 
     /// How often to re-fetch the JWKS. Default 5 minutes.
-    pub oauthbearer_jwks_refresh_interval: std::time::Duration,
+    pub oauthbearer_jwks_refresh_interval: Time,
 
     /// Optional PEM path for outbound
     /// HTTPS to the `IdP`. Shared across JWKS, introspection, and
     /// userinfo. None → reqwest's default webpki-roots.
     pub oauthbearer_idp_tls_trust: Option<std::path::PathBuf>,
 
-    /// Optional ceiling on OAUTHBEARER session lifetime, in
-    /// seconds. When set, the broker reports
-    /// `session_lifetime_ms = min(token_exp_ms - now_ms, cap * 1000)`
-    /// and the dispatch-loop re-auth timer fires at the clamped time.
-    /// When unset, sessions last until the token's natural `exp`
+    /// Optional ceiling on OAUTHBEARER session lifetime. When set, the
+    /// broker reports `session_lifetime_ms = min(token_exp_ms - now_ms,
+    /// cap)` and the dispatch-loop re-auth timer fires at the clamped
+    /// time. When unset, sessions last until the token's natural `exp`
     /// (the default).
-    pub oauthbearer_max_session_lifetime_seconds: Option<u32>,
+    pub oauthbearer_max_session_lifetime: Option<Time>,
 
     /// Receiver half of the JWKS refresher signal channel.
     /// `apply_to` creates the channel pair: the sender is wired into the
@@ -504,7 +521,7 @@ pub struct BrokerConfig {
     /// `FileOAuthBearerConfig::jwks_min_refresh_pause_seconds`;
     /// `Broker::start` passes it into `JwksRefresher`. Strimzi default
     /// 1 second; we default to 1 second too.
-    pub oauthbearer_jwks_min_on_demand_pause: std::time::Duration,
+    pub oauthbearer_jwks_min_on_demand_pause: Time,
 
     /// Independent compatibility and protocol feature gates.
     pub features: BrokerFeatureFlags,
@@ -513,11 +530,11 @@ pub struct BrokerConfig {
     /// `Ongoing` transactions whose timeout has elapsed and aborts them (2PC
     /// transactions are never reaped). Mirrors Kafka's
     /// `transaction.abort.timed.out.transaction.cleanup.interval.ms` (10s).
-    /// `Duration::ZERO` disables the reaper entirely (no background task
+    /// A zero interval disables the reaper entirely (no background task
     /// spawned) — the default in `for_tests` so unit/integration tests aren't
     /// disturbed by a background abort; tests that exercise the reaper set it
     /// explicitly low.
-    pub txn_abort_cleanup_interval: std::time::Duration,
+    pub txn_abort_cleanup_interval: Time,
 
     /// KIP-848 next-gen consumer group protocol configuration. Controls
     /// which rebalance protocols are advertised, session/heartbeat
@@ -534,28 +551,27 @@ pub struct BrokerConfig {
     /// `__share_group_state` internal topic geometry and snapshot folding.
     pub share_coordinator: Box<crate::share_coordinator::config::ShareCoordinatorConfig>,
 
-    /// How often the auto-rebalance ticker fires, in seconds. Default
-    /// 300 (5 minutes). Matches Kafka's
-    /// `leader.imbalance.check.interval.seconds`.
-    pub leader_imbalance_check_interval_secs: u64,
+    /// How often the auto-rebalance ticker fires. Default 5 minutes.
+    /// Matches Kafka's `leader.imbalance.check.interval.seconds`.
+    pub leader_imbalance_check_interval: Time,
 
-    /// Minimum percentage of imbalanced partitions before the
-    /// auto-rebalance ticker submits any changes. Default 10. Matches
+    /// Minimum fraction of imbalanced partitions before the
+    /// auto-rebalance ticker submits any changes. Default 10%. Matches
     /// Kafka's `leader.imbalance.per.broker.percentage`.
-    pub leader_imbalance_per_broker_percentage: u32,
+    pub leader_imbalance_per_broker: Ratio,
 
     /// Test-only: override the cleaner ticker interval.
     /// Production callers leave this as `None` (default 30s).
     #[cfg(any(test, feature = "test-helpers"))]
-    pub cleaner_interval_override: Option<std::time::Duration>,
+    pub cleaner_interval_override: Option<Time>,
 
     /// How often the TLS reload watcher polls cert / key /
     /// client-CA file mtimes and rebuilds the `ServerConfig` if any
     /// changed. Defaults to 30s. Set lower in tests to keep watcher
-    /// latency tight. `Duration::ZERO` disables the periodic watcher
+    /// latency tight. A zero interval disables the periodic watcher
     /// — callers can still trigger an immediate reload via
     /// [`crate::BrokerHandle::reload_tls`].
-    pub tls_reload_interval: std::time::Duration,
+    pub tls_reload_interval: Time,
 
     /// Bind address for the Prometheus `/metrics` HTTP
     /// endpoint. `None` disables the server entirely (the broker still
@@ -592,13 +608,13 @@ pub struct BrokerConfig {
     /// `usize::MAX` (unlimited).
     pub max_connections_per_ip: usize,
 
-    /// Partition disk-usage scan cadence, in seconds. `0`
+    /// Partition disk-usage scan cadence. A zero interval
     /// disables the scanner entirely (no background task spawned).
     /// Production default: 60s. The scanner walks every known
     /// (topic, partition) under `log_dir` each tick, sums regular-file
     /// sizes, and updates the `partition_disk_bytes` gauge consumed by
     /// the rebalancer's usage scraper.
-    pub partition_disk_scan_interval_secs: u64,
+    pub partition_disk_scan_interval: Time,
 
     /// KIP-48: HMAC-SHA-256 master key used to mint + verify
     /// delegation tokens. When `None`, the broker rejects all four
@@ -609,29 +625,29 @@ pub struct BrokerConfig {
     /// `SecretBytes` so `Debug` redacts the bytes.
     pub delegation_token_secret_key: Option<crabka_security::SecretBytes>,
 
-    /// KIP-48: hard upper bound on delegation-token lifetime,
-    /// in milliseconds. A token's `max_timestamp_ms` is set to
-    /// `issue_timestamp_ms + delegation_token_max_lifetime_ms` and the
+    /// KIP-48: hard upper bound on delegation-token lifetime.
+    /// A token's `max_timestamp_ms` is set to
+    /// `issue_timestamp_ms + delegation_token_max_lifetime` and the
     /// renew handler clamps any caller-requested expiry to this. Default
     /// 7 days (`delegation.token.max.lifetime.ms` in Kafka).
-    pub delegation_token_max_lifetime_ms: i64,
+    pub delegation_token_max_lifetime: Time,
 
     /// KIP-48: cadence of the background sweep task that
     /// proposes `V1DeleteDelegationToken` tombstones for tokens whose
     /// `expiry_timestamp_ms` or `max_timestamp_ms` is in the past. Default
     /// 1 hour (`delegation.token.expiry.check.interval.ms` in Kafka).
-    pub delegation_token_expiry_check_interval_ms: i64,
+    pub delegation_token_expiry_check_interval: Time,
 
     /// KIP-48: default renew period used as the *initial*
     /// `expiry_timestamp_ms` offset at create time, and as the implicit
     /// renew period when `RenewDelegationToken.renew_period_ms == -1`.
-    /// Distinct from `delegation_token_max_lifetime_ms` (the absolute
+    /// Distinct from `delegation_token_max_lifetime` (the absolute
     /// ceiling that `expiry_timestamp_ms` can never be pushed past via
     /// `Renew`): a fresh token gets `expiry_timestamp_ms = now +
     /// min(default_renew_period, chosen_max_lifetime)` while
     /// `max_timestamp_ms = now + chosen_max_lifetime`. Default 24 hours
     /// (`delegation.token.expiry.time.ms` in Kafka).
-    pub delegation_token_default_renew_period_ms: i64,
+    pub delegation_token_default_renew_period: Time,
 
     /// KIP-405: tiered-storage backend selection. `Some(_)`
     /// enables tiered storage broker-wide (collapsing Kafka's
@@ -650,7 +666,7 @@ pub struct BrokerConfig {
     /// `remote.log.manager.task.interval.ms`). Acceptance tests lower this
     /// so segments are tiered and locally evicted in seconds rather than
     /// minutes; production deployments leave it at the default.
-    pub remote_log_manager_interval: std::time::Duration,
+    pub remote_log_manager_interval: Time,
 
     /// KIP-405: which RLMM the broker runs when tiered storage is enabled.
     /// Defaults to [`RlmmKind::TopicBacked`] in production; [`RlmmKind::InMemory`]
@@ -667,12 +683,12 @@ pub struct BrokerConfig {
     pub audit_signing_key_id: Option<String>,
     /// Emit a checkpoint after this many audit records.
     pub audit_checkpoint_every_n: u64,
-    /// Emit a checkpoint at least this often (seconds).
-    pub audit_checkpoint_every_secs: u64,
+    /// Emit a checkpoint at least this often.
+    pub audit_checkpoint_every: Time,
     /// Directory for the durable audit spool (relative paths resolve under the broker's log dir).
     pub audit_spool_dir: std::path::PathBuf,
-    /// Cap on the audit spool size in bytes.
-    pub audit_spool_max_bytes: u64,
+    /// Cap on the audit spool size.
+    pub audit_spool_max: ByteSize,
 }
 
 /// Parameters for the topic-backed
@@ -697,7 +713,7 @@ pub struct KafkaRlmmConfig {
     /// snapshot to disk. Maps to Kafka's
     /// `remote.log.metadata.snapshot.interval`. Default
     /// [`DEFAULT_RLMM_SNAPSHOT_INTERVAL`].
-    pub snapshot_interval: std::time::Duration,
+    pub snapshot_interval: Time,
     /// Directory the RLMM cache snapshot is written to (one
     /// `snapshot` file). Derived from the broker `log.dir`.
     pub snapshot_dir: std::path::PathBuf,
@@ -715,7 +731,7 @@ pub struct KafkaRlmmConfig {
 
 /// Default cadence of the topic-backed RLMM snapshot flush. 60s,
 /// matching Kafka's `remote.log.metadata.snapshot.interval` default.
-pub const DEFAULT_RLMM_SNAPSHOT_INTERVAL: std::time::Duration = std::time::Duration::from_mins(1);
+pub const DEFAULT_RLMM_SNAPSHOT_INTERVAL: Time = minutes(1);
 
 /// Which `RemoteLogMetadataManager` the broker runs when tiered storage is enabled.
 ///
@@ -765,29 +781,24 @@ pub enum RemoteStorageBackend {
     Gcs(crabka_remote_storage::GcsConfig),
 }
 
-/// Default broker→controller `BrokerHeartbeat` cadence, in milliseconds.
-pub const DEFAULT_HEARTBEAT_INTERVAL_MS: u64 = 3_000;
+/// Default broker→controller `BrokerHeartbeat` cadence.
+pub const DEFAULT_HEARTBEAT_INTERVAL: Time = secs(3);
 
-/// Default controller-side broker-session timeout, in milliseconds (3× the
-/// heartbeat interval, so a broker survives two missed heartbeats).
-pub const DEFAULT_HEARTBEAT_TIMEOUT_MS: u64 = 9_000;
+/// Default controller-side broker-session timeout (3× the heartbeat
+/// interval, so a broker survives two missed heartbeats).
+pub const DEFAULT_HEARTBEAT_TIMEOUT: Time = secs(9);
 
-/// Default maximum follower lag before the leader proposes ISR shrink, in
-/// milliseconds. Matches Kafka's `replica.lag.time.max.ms` default.
-pub const DEFAULT_REPLICA_LAG_TIME_MAX_MS: u64 = 30_000;
+/// Default maximum follower lag before the leader proposes ISR shrink.
+/// Matches Kafka's `replica.lag.time.max.ms` default.
+pub const DEFAULT_REPLICA_LAG_TIME_MAX: Time = secs(30);
 
 /// Default byte gap between metadata-log snapshots: 20 MiB, matching Kafka's
 /// `metadata.log.max.record.bytes.between.snapshots`.
-pub const DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS: u64 = 20 * 1024 * 1024;
-
-/// Default time cap between metadata-log snapshots in milliseconds: 1 hour,
-/// matching Kafka's `metadata.log.max.snapshot.interval.ms`.
-pub const DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL_MS: u64 = 3_600_000;
+pub const DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS: ByteSize = mebibytes(20);
 
 /// Default time cap between metadata-log snapshots: 1 hour, matching Kafka's
 /// `metadata.log.max.snapshot.interval.ms`.
-pub const DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL: std::time::Duration =
-    std::time::Duration::from_millis(DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL_MS);
+pub const DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL: Time = hours(1);
 
 /// KIP-630: default committed-record gap between metadata-log snapshots.
 pub const DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS: u64 = 10_000;
@@ -796,32 +807,32 @@ pub const DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS: u64 = 10_000;
 /// promotable to a quorum voter.
 pub const DEFAULT_OBSERVER_LAG_BOUND: u64 = 100;
 
-/// Default controller election timeout, in milliseconds.
-pub const DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS: u64 = 5_000;
+/// Default controller election timeout.
+pub const DEFAULT_CONTROLLER_ELECTION_TIMEOUT: Time = secs(5);
 
-/// Default controller heartbeat interval, in milliseconds.
-pub const DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS: u64 = 500;
+/// Default controller heartbeat interval.
+pub const DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL: Time = millis(500);
 
-/// Default controlled-shutdown leadership drain timeout, in milliseconds.
-pub const DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT_MS: u64 = 20_000;
+/// Default controlled-shutdown leadership drain timeout.
+pub const DEFAULT_CONTROLLED_SHUTDOWN_DRAIN_TIMEOUT: Time = secs(20);
 
-/// Default idle-transaction abort cleanup interval, in milliseconds.
-pub const DEFAULT_TXN_ABORT_CLEANUP_INTERVAL_MS: u64 = 10_000;
+/// Default idle-transaction abort cleanup interval.
+pub const DEFAULT_TXN_ABORT_CLEANUP_INTERVAL: Time = secs(10);
 
-/// Default TLS material reload polling interval, in milliseconds.
-pub const DEFAULT_TLS_RELOAD_INTERVAL_MS: u64 = 30_000;
+/// Default TLS material reload polling interval.
+pub const DEFAULT_TLS_RELOAD_INTERVAL: Time = secs(30);
 
-/// Default `RemoteLogManager` copy / retention cadence, in milliseconds.
-pub const DEFAULT_REMOTE_LOG_MANAGER_INTERVAL_MS: u64 = 30_000;
+/// Default `RemoteLogManager` copy / retention cadence.
+pub const DEFAULT_REMOTE_LOG_MANAGER_INTERVAL: Time = secs(30);
 
-/// KIP-460: default auto-rebalance tick cadence, in seconds. Matches Kafka's
+/// KIP-460: default auto-rebalance tick cadence. Matches Kafka's
 /// `leader.imbalance.check.interval.seconds`.
-pub const DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL_SECS: u64 = 300;
+pub const DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL: Time = minutes(5);
 
-/// KIP-460: default minimum percentage of imbalanced partitions before the
+/// KIP-460: default minimum fraction of imbalanced partitions before the
 /// auto-rebalance ticker acts. Matches Kafka's
 /// `leader.imbalance.per.broker.percentage`.
-pub const DEFAULT_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE: u32 = 10;
+pub const DEFAULT_LEADER_IMBALANCE_PER_BROKER: Ratio = percent(10);
 
 /// KIP-227: default incremental-fetch session cache capacity. Matches Kafka's
 /// `max.incremental.fetch.session.cache.slots`.
@@ -829,11 +840,11 @@ pub const DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS: usize = 1000;
 
 /// Default cadence of the background JWKS re-fetch for the signed
 /// OAUTHBEARER validator: 5 minutes.
-pub const DEFAULT_JWKS_REFRESH_INTERVAL: std::time::Duration = std::time::Duration::from_mins(5);
+pub const DEFAULT_JWKS_REFRESH_INTERVAL: Time = minutes(5);
 
 /// Default minimum pause between on-demand JWKS refreshes triggered by
 /// validator signals: 1 second (Strimzi parity).
-pub const DEFAULT_JWKS_MIN_ON_DEMAND_PAUSE: std::time::Duration = std::time::Duration::from_secs(1);
+pub const DEFAULT_JWKS_MIN_ON_DEMAND_PAUSE: Time = secs(1);
 
 /// KIP-405: default partition count for `__remote_log_metadata` on first
 /// creation. Matches Kafka's `remote.log.metadata.topic.num.partitions`.
@@ -849,29 +860,29 @@ pub const DEFAULT_AUDIT_TOPIC: &str = "__crabka_audit";
 /// Default number of audit records between signed checkpoints.
 pub const DEFAULT_AUDIT_CHECKPOINT_EVERY_N: u64 = 1000;
 
-/// Default maximum seconds between signed audit checkpoints.
-pub const DEFAULT_AUDIT_CHECKPOINT_EVERY_SECS: u64 = 60;
+/// Default maximum interval between signed audit checkpoints.
+pub const DEFAULT_AUDIT_CHECKPOINT_EVERY: Time = secs(60);
 
 /// Default durable audit-spool directory (relative paths resolve under the
 /// broker's log dir).
 pub const DEFAULT_AUDIT_SPOOL_DIR: &str = "audit-spool";
 
 /// Default cap on the durable audit spool: 1 GiB.
-pub const DEFAULT_AUDIT_SPOOL_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+pub const DEFAULT_AUDIT_SPOOL_MAX: ByteSize = gibibytes(1);
 
 /// KIP-48: default hard upper bound on delegation-token lifetime.
 /// 7 days, matches Kafka's `delegation.token.max.lifetime.ms` default.
-pub const DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS: i64 = 7 * 24 * 60 * 60 * 1_000;
+pub const DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME: Time = days(7);
 
 /// KIP-48: default cadence of the background expiry sweep task.
 /// 1 hour, matches Kafka's `delegation.token.expiry.check.interval.ms`.
-pub const DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS: i64 = 60 * 60 * 1_000;
+pub const DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL: Time = hours(1);
 
 /// KIP-48: default renew period used as the initial
 /// `expiry_timestamp_ms` offset at create time, and as the implicit
 /// renew period when `RenewDelegationToken.renew_period_ms == -1`.
 /// 24 hours, matches Kafka's `delegation.token.expiry.time.ms` default.
-pub const DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS: i64 = 24 * 60 * 60 * 1_000;
+pub const DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD: Time = hours(24);
 
 impl BrokerConfig {
     /// Helpful for tests: a config that listens on an OS-assigned port
@@ -882,73 +893,77 @@ impl BrokerConfig {
     pub fn for_tests(log_dir: PathBuf) -> Self {
         let listen_addr: SocketAddr = "127.0.0.1:0".parse().expect("static");
         let controller_addr: SocketAddr = "127.0.0.1:0".parse().expect("static");
+        let record_decompression = RecordDecompressionPolicy::default();
         Self {
-            startup_leader_wait_timeout: Duration::from_mins(2),
-            self_registration_backoff_min: Duration::from_millis(100),
-            self_registration_backoff_max: Duration::from_secs(5),
-            observer_poll_interval: Duration::from_millis(100),
-            audit_spool_replay_interval: Duration::from_secs(2),
-            audit_stats_poll_interval: Duration::from_secs(1),
-            audit_partition_wait_timeout: Duration::from_secs(10),
-            liveness_tick_interval: Duration::from_secs(1),
-            gauge_poll_interval: Duration::from_secs(1),
-            isr_scan_interval: Duration::from_secs(1),
-            cleaner_interval: Duration::from_secs(30),
-            future_log_move_retry_backoff: Duration::from_millis(50),
-            client_metrics_eviction_tick: Duration::from_mins(1),
-            client_metrics_stale_floor: Duration::from_mins(10),
-            client_metrics_default_interval_ms: 300_000,
+            startup_leader_wait_timeout: minutes(2),
+            self_registration_backoff_min: millis(100),
+            self_registration_backoff_max: secs(5),
+            observer_poll_interval: millis(100),
+            audit_spool_replay_interval: secs(2),
+            audit_stats_poll_interval: secs(1),
+            audit_partition_wait_timeout: secs(10),
+            liveness_tick_interval: secs(1),
+            gauge_poll_interval: secs(1),
+            isr_scan_interval: secs(1),
+            cleaner_interval: secs(30),
+            future_log_move_retry_backoff: millis(50),
+            client_metrics_eviction_tick: minutes(1),
+            client_metrics_stale_floor: minutes(10),
+            client_metrics_default_interval: minutes(5),
             client_metrics_otlp_queue_capacity: 256,
-            client_metrics_telemetry_max_bytes: 1_048_576,
-            client_metrics_prom_snapshot_ttl: Duration::from_mins(5),
-            rlmm_reconcile_tick: Duration::from_secs(30),
-            rlmm_bootstrap_backoff_initial: Duration::from_millis(250),
-            rlmm_bootstrap_backoff_max: Duration::from_secs(10),
-            connection_creation_throttle_max: Duration::from_secs(1),
-            opa_http_timeout: Duration::from_secs(5),
-            oauth_jwks_http_timeout: Duration::from_secs(10),
-            auto_join_retry_backoff: Duration::from_millis(500),
-            auto_join_voter_request_timeout: Duration::from_secs(30),
+            client_metrics_telemetry_max: mebibytes(1),
+            client_metrics_prom_snapshot_ttl: minutes(5),
+            rlmm_reconcile_tick: secs(30),
+            rlmm_bootstrap_backoff_initial: millis(250),
+            rlmm_bootstrap_backoff_max: secs(10),
+            connection_creation_throttle_max: secs(1),
+            opa_http_timeout: secs(5),
+            oauth_jwks_http_timeout: secs(10),
+            auto_join_retry_backoff: millis(500),
+            auto_join_voter_request_timeout: secs(30),
             replication: ReplicationRuntimeConfig::default(),
-            coordinator_session_expiry_tick: Duration::from_secs(1),
-            coordinator_shutdown_ack_timeout: Duration::from_secs(5),
-            classic_group_initial_rebalance_delay: Duration::from_secs(3),
-            sync_group_follower_wait: Duration::from_secs(30),
-            unclean_recovery_aggressive_deadline: Duration::from_secs(2),
-            unclean_recovery_balanced_deadline: Duration::from_secs(30),
-            operator_recovery_deadline: Duration::from_secs(25),
-            quota_throttle_max: Duration::from_secs(1),
+            coordinator_session_expiry_tick: secs(1),
+            coordinator_shutdown_ack_timeout: secs(5),
+            classic_group_initial_rebalance_delay: secs(3),
+            sync_group_follower_wait: secs(30),
+            unclean_recovery_aggressive_deadline: secs(2),
+            unclean_recovery_balanced_deadline: secs(30),
+            operator_recovery_deadline: secs(25),
+            quota_throttle_max: secs(1),
             self_registration_max_attempts: 8,
-            observer_fetch_max_bytes: 1_048_576,
+            observer_fetch_max: mebibytes(1),
             audit_event_queue_capacity: 8_192,
             audit_tail_window_offsets: 4_096,
-            audit_tail_read_max_bytes: 1_048_576,
-            offsets_topic_metadata_wait_timeout: Duration::from_secs(30),
+            audit_tail_read_max: mebibytes(1),
+            offsets_topic_metadata_wait_timeout: secs(30),
             client_metrics_stale_push_intervals: 3,
             coordinator_actor_mailbox_capacity: 64,
             unclean_recovery_queue_capacity: 256,
-            share_recovery_read_max_bytes: 1_048_576,
+            share_recovery_read_max: mebibytes(1),
             share_session_cache_max_when_unlimited: 10_000,
-            socket_request_max_bytes: 104_857_600,
-            sendfile_min_bytes: 32_768,
-            socket_send_buffer_bytes: 1_048_576,
-            socket_receive_buffer_bytes: 1_048_576,
-            acl_max_principal_bytes: 256,
-            acl_max_resource_name_bytes: 256,
-            telemetry_max_decompression_ratio: 100,
-            telemetry_decompressed_output_floor_bytes: 16_777_216,
-            telemetry_decompressed_output_ceiling_bytes: 1_073_741_824,
+            socket_request_max: mebibytes(100),
+            sendfile_min: kibibytes(32),
+            socket_send_buffer: mebibytes(1),
+            socket_receive_buffer: mebibytes(1),
+            acl_max_principal: bytes(256),
+            acl_max_resource_name: bytes(256),
+            telemetry_max_decompression_ratio: fraction(100.0),
+            telemetry_decompressed_output_floor: mebibytes(16),
+            telemetry_decompressed_output_ceiling: gibibytes(1),
+            record_decompression_max_ratio: record_decompression.max_ratio(),
+            record_decompression_output_floor: record_decompression.output_floor(),
+            record_decompression_output_ceiling: record_decompression.output_ceiling(),
             inter_broker_server_name: "localhost".to_string(),
-            producer_id_expiration_ms: 86_400_000,
-            producer_id_expiration_scan_interval: Duration::from_mins(10),
+            producer_id_expiration: hours(24),
+            producer_id_expiration_scan_interval: minutes(10),
             max_produce_group: 1_024,
             partition_writer_queue_depth: 64,
             default_min_insync_replicas: 1,
-            future_log_move_read_chunk_bytes: 1_048_576,
+            future_log_move_read_chunk: mebibytes(1),
             transaction_state_num_partitions: 50,
             transaction_state_replication_factor: 3,
-            transaction_min_timeout_ms: 1_000,
-            transaction_max_timeout_ms: 900_000,
+            transaction_min_timeout: secs(1),
+            transaction_max_timeout: minutes(15),
             broker_id: 1,
             roles: vec![NodeRole::Controller, NodeRole::Broker],
             listen_addr,
@@ -965,9 +980,9 @@ impl BrokerConfig {
             incarnation_id: uuid::Uuid::new_v4(),
             auto_join: false,
             observer_lag_bound: DEFAULT_OBSERVER_LAG_BOUND,
-            heartbeat_interval_ms: 200,
-            heartbeat_timeout_ms: 2_000,
-            replica_lag_time_max_ms: 2_000,
+            heartbeat_interval: millis(200),
+            heartbeat_timeout: secs(2),
+            replica_lag_time_max: secs(2),
             // Short timings: single-node tests don't need quorum so split-vote
             // isn't a risk; multi-broker tests use these (via the shared
             // `support::start_n_node_with_retry` helper) so failover from a
@@ -975,8 +990,8 @@ impl BrokerConfig {
             // 10s timeout. The factor of ~10× vs. production defaults
             // is what makes `acks_all_completes_via_isr_shrink_when_follower_dead`
             // pass within its 5s assertion window.
-            controller_election_timeout: std::time::Duration::from_millis(500),
-            controller_heartbeat_interval: std::time::Duration::from_millis(100),
+            controller_election_timeout: millis(500),
+            controller_heartbeat_interval: millis(100),
             metadata_max_bytes_between_snapshots: DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS,
             metadata_max_snapshot_interval: DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL,
             metadata_snapshot_interval_records: DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS,
@@ -998,7 +1013,7 @@ impl BrokerConfig {
             oauthbearer_jwks_endpoint: None,
             oauthbearer_jwks_refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             oauthbearer_idp_tls_trust: None,
-            oauthbearer_max_session_lifetime_seconds: None,
+            oauthbearer_max_session_lifetime: None,
             oauthbearer_jwks_signal_rx: std::sync::Arc::new(std::sync::Mutex::new(None)),
             oauthbearer_jwks_last_successful_fetch_ms: std::sync::Arc::new(
                 std::sync::atomic::AtomicI64::new(0),
@@ -1009,7 +1024,7 @@ impl BrokerConfig {
             oauthbearer_jwks_min_on_demand_pause: DEFAULT_JWKS_MIN_ON_DEMAND_PAUSE,
             features: test_feature_flags(),
             // Reaper disabled in tests; suites that exercise it set it low.
-            txn_abort_cleanup_interval: std::time::Duration::ZERO,
+            txn_abort_cleanup_interval: <Time as TimeExt>::ZERO,
             next_gen_consumer_group: Box::new(
                 crate::coordinator::unified::config::NextGenConfig::default(),
             ),
@@ -1022,13 +1037,13 @@ impl BrokerConfig {
             share_coordinator: Box::new(
                 crate::share_coordinator::config::ShareCoordinatorConfig::default(),
             ),
-            leader_imbalance_check_interval_secs: DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL_SECS,
-            leader_imbalance_per_broker_percentage: DEFAULT_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE,
+            leader_imbalance_check_interval: DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL,
+            leader_imbalance_per_broker: DEFAULT_LEADER_IMBALANCE_PER_BROKER,
             #[cfg(any(test, feature = "test-helpers"))]
             cleaner_interval_override: None,
             // Short interval so hot-reload tests don't wait long for a
             // watcher tick. Tests that don't care can ignore it.
-            tls_reload_interval: std::time::Duration::from_millis(200),
+            tls_reload_interval: millis(200),
             // Tests opt into the metrics endpoint individually by
             // setting this to `Some(127.0.0.1:0)`; sharing a default
             // port would race in parallel test runs.
@@ -1037,7 +1052,7 @@ impl BrokerConfig {
             // Disable the disk scanner by default in tests so the
             // background task doesn't tick during short-lived fixtures.
             // Integration tests enable this explicitly when needed.
-            partition_disk_scan_interval_secs: 0,
+            partition_disk_scan_interval: <Time as TimeExt>::ZERO,
             max_incremental_fetch_session_cache_slots:
                 DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS,
             // Connection caps unlimited by default (Kafka's
@@ -1049,15 +1064,14 @@ impl BrokerConfig {
             // `delegation_token_secret_key`; default off keeps the
             // four DT RPCs returning DELEGATION_TOKEN_AUTH_DISABLED.
             delegation_token_secret_key: None,
-            delegation_token_max_lifetime_ms: DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS,
-            delegation_token_expiry_check_interval_ms:
-                DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
-            delegation_token_default_renew_period_ms: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
+            delegation_token_max_lifetime: DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME,
+            delegation_token_expiry_check_interval: DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL,
+            delegation_token_default_renew_period: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD,
             // Tiered storage off by default in tests.
             remote_storage_backend: None,
             // Tests that turn tiered storage on want quick offload, so the
             // for_tests default is well below the 30s production value.
-            remote_log_manager_interval: std::time::Duration::from_secs(2),
+            remote_log_manager_interval: secs(2),
             // Tests use the in-memory RLMM fixture.
             remote_log_metadata: RlmmKind::InMemory,
             // Audit enabled by default (secure-by-default / `FedRAMP` MLA).
@@ -1066,9 +1080,9 @@ impl BrokerConfig {
             audit_signing_key_path: None,
             audit_signing_key_id: None,
             audit_checkpoint_every_n: DEFAULT_AUDIT_CHECKPOINT_EVERY_N,
-            audit_checkpoint_every_secs: DEFAULT_AUDIT_CHECKPOINT_EVERY_SECS,
+            audit_checkpoint_every: DEFAULT_AUDIT_CHECKPOINT_EVERY,
             audit_spool_dir: std::path::PathBuf::from(DEFAULT_AUDIT_SPOOL_DIR),
-            audit_spool_max_bytes: DEFAULT_AUDIT_SPOOL_MAX_BYTES,
+            audit_spool_max: DEFAULT_AUDIT_SPOOL_MAX,
         }
     }
 
@@ -1169,6 +1183,7 @@ impl BrokerConfig {
         }
         self.validate_positive_runtime_scalars()?;
         self.validate_additional_runtime_scalars()?;
+        self.record_decompression_policy()?;
 
         if self.self_registration_backoff_min > self.self_registration_backoff_max {
             return Err(BrokerError::InvalidRuntimeConfig(
@@ -1180,7 +1195,7 @@ impl BrokerConfig {
                 "RLMM bootstrap initial backoff exceeds maximum".into(),
             ));
         }
-        if self.replication.fetch_min_bytes > self.replication.fetch_max_bytes {
+        if self.replication.fetch_min > self.replication.fetch_max {
             return Err(BrokerError::InvalidRuntimeConfig(
                 "replication fetch minimum bytes exceeds maximum".into(),
             ));
@@ -1190,7 +1205,7 @@ impl BrokerConfig {
                 "replication reconnect initial delay exceeds cap".into(),
             ));
         }
-        if self.heartbeat_interval_ms >= self.heartbeat_timeout_ms {
+        if self.heartbeat_interval >= self.heartbeat_timeout {
             return Err(BrokerError::InvalidRuntimeConfig(
                 "broker heartbeat interval must be below timeout".into(),
             ));
@@ -1200,7 +1215,7 @@ impl BrokerConfig {
                 "controller heartbeat interval must be below election timeout".into(),
             ));
         }
-        if self.delegation_token_default_renew_period_ms > self.delegation_token_max_lifetime_ms {
+        if self.delegation_token_default_renew_period > self.delegation_token_max_lifetime {
             return Err(BrokerError::InvalidRuntimeConfig(
                 "delegation token default renew period exceeds maximum lifetime".into(),
             ));
@@ -1300,27 +1315,46 @@ impl BrokerConfig {
         self.validate_leader_rebalance()
     }
 
+    /// Build the validated Kafka record decompression policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invalid-runtime error when the configured values violate the
+    /// fixed decompression security bounds.
+    pub fn record_decompression_policy(&self) -> Result<RecordDecompressionPolicy, BrokerError> {
+        RecordDecompressionPolicy::new(
+            self.record_decompression_max_ratio,
+            self.record_decompression_output_floor,
+            self.record_decompression_output_ceiling,
+        )
+        .map_err(|error| {
+            BrokerError::InvalidRuntimeConfig(format!(
+                "record_decompression policy is invalid: {error}"
+            ))
+        })
+    }
+
     fn validate_leader_rebalance(&self) -> Result<(), BrokerError> {
-        if self.leader_imbalance_check_interval_secs == 0 {
+        if self.leader_imbalance_check_interval <= <Time as TimeExt>::ZERO {
             return Err(BrokerError::InvalidLeaderRebalanceInterval { value: 0 });
         }
-        if self.leader_imbalance_per_broker_percentage > 100 {
+        if self.leader_imbalance_per_broker > <Ratio as RatioExt>::ONE {
+            // The error reports the operator-facing percentage, which is how
+            // `leader.imbalance.per.broker.percentage` is written.
             return Err(BrokerError::InvalidLeaderRebalanceThreshold {
-                value: self.leader_imbalance_per_broker_percentage,
+                percent: self.leader_imbalance_per_broker.percent_f64(),
             });
         }
         Ok(())
     }
 
     fn validate_additional_runtime_relations(&self) -> Result<(), BrokerError> {
-        if self.socket_request_max_bytes > u32::MAX as usize {
+        if self.socket_request_max > ByteSize::from_bytes(u64::from(u32::MAX)) {
             return Err(BrokerError::InvalidRuntimeConfig(
-                "socket_request_max_bytes exceeds u32::MAX".into(),
+                "socket_request_max exceeds u32::MAX bytes".into(),
             ));
         }
-        if self.telemetry_decompressed_output_floor_bytes
-            > self.telemetry_decompressed_output_ceiling_bytes
-        {
+        if self.telemetry_decompressed_output_floor > self.telemetry_decompressed_output_ceiling {
             return Err(BrokerError::InvalidRuntimeConfig(
                 "telemetry decompressed output floor exceeds ceiling".into(),
             ));
@@ -1330,14 +1364,16 @@ impl BrokerConfig {
                 "inter_broker_server_name must be nonempty".into(),
             ));
         }
-        if self.transaction_min_timeout_ms >= self.transaction_max_timeout_ms {
+        if self.transaction_min_timeout >= self.transaction_max_timeout {
             return Err(BrokerError::InvalidRuntimeConfig(
                 "transaction minimum timeout must be below maximum".into(),
             ));
         }
-        if self.transaction_max_timeout_ms == i32::MAX {
+        // `transaction_max_timeout` is written into an `int32` millisecond wire
+        // field, so the saturating conversion must not be the value that pins it.
+        if self.transaction_max_timeout.millis_i32() == i32::MAX {
             return Err(BrokerError::InvalidRuntimeConfig(
-                "transaction maximum timeout must be below i32::MAX".into(),
+                "transaction maximum timeout must be below i32::MAX milliseconds".into(),
             ));
         }
         Ok(())
@@ -1404,34 +1440,6 @@ impl BrokerConfig {
             ("oauth_jwks_http_timeout", self.oauth_jwks_http_timeout),
             ("auto_join_retry_backoff", self.auto_join_retry_backoff),
             (
-                "replication.throttle_exhausted_backoff",
-                self.replication.throttle_exhausted_backoff,
-            ),
-            (
-                "replication.send_error_backoff",
-                self.replication.send_error_backoff,
-            ),
-            (
-                "replication.unknown_topic_retry_delay",
-                self.replication.unknown_topic_retry_delay,
-            ),
-            (
-                "replication.epoch_fence_backoff",
-                self.replication.epoch_fence_backoff,
-            ),
-            (
-                "replication.unexpected_error_backoff",
-                self.replication.unexpected_error_backoff,
-            ),
-            (
-                "replication.reconnect_initial_delay",
-                self.replication.reconnect_initial_delay,
-            ),
-            (
-                "replication.reconnect_delay_cap",
-                self.replication.reconnect_delay_cap,
-            ),
-            (
                 "coordinator_session_expiry_tick",
                 self.coordinator_session_expiry_tick,
             ),
@@ -1469,105 +1477,105 @@ impl BrokerConfig {
                 "producer_id_expiration_scan_interval",
                 self.producer_id_expiration_scan_interval,
             ),
+            (
+                "client_metrics_default_interval",
+                self.client_metrics_default_interval,
+            ),
+            ("heartbeat_interval", self.heartbeat_interval),
+            ("replica_lag_time_max", self.replica_lag_time_max),
+            (
+                "delegation_token_max_lifetime",
+                self.delegation_token_max_lifetime,
+            ),
+            (
+                "delegation_token_expiry_check_interval",
+                self.delegation_token_expiry_check_interval,
+            ),
+            (
+                "delegation_token_default_renew_period",
+                self.delegation_token_default_renew_period,
+            ),
         ] {
-            if value.is_zero() {
-                return Err(BrokerError::InvalidRuntimeConfig(format!(
-                    "{name} must be positive"
-                )));
-            }
+            require_positive_time(name, value)?;
         }
         for (name, value) in [
             (
-                "client_metrics_default_interval_ms",
-                self.client_metrics_default_interval_ms,
+                "replication.fetch_max_wait",
+                self.replication.fetch_max_wait,
             ),
             (
-                "client_metrics_telemetry_max_bytes",
-                self.client_metrics_telemetry_max_bytes,
+                "replication.throttle_exhausted_backoff",
+                self.replication.throttle_exhausted_backoff,
             ),
             (
-                "replication.fetch_max_bytes",
-                self.replication.fetch_max_bytes,
+                "replication.send_error_backoff",
+                self.replication.send_error_backoff,
             ),
             (
-                "replication.fetch_max_wait_ms",
-                self.replication.fetch_max_wait_ms,
+                "replication.unknown_topic_retry_delay",
+                self.replication.unknown_topic_retry_delay,
             ),
             (
-                "replication.fetch_min_bytes",
-                self.replication.fetch_min_bytes,
+                "replication.epoch_fence_backoff",
+                self.replication.epoch_fence_backoff,
+            ),
+            (
+                "replication.unexpected_error_backoff",
+                self.replication.unexpected_error_backoff,
+            ),
+            (
+                "replication.reconnect_initial_delay",
+                self.replication.reconnect_initial_delay,
+            ),
+            (
+                "replication.reconnect_delay_cap",
+                self.replication.reconnect_delay_cap,
             ),
         ] {
-            if value <= 0 {
-                return Err(BrokerError::InvalidRuntimeConfig(format!(
-                    "{name} must be positive"
-                )));
-            }
+            require_positive_time(name, value)?;
         }
         for (name, value) in [
-            ("heartbeat_interval_ms", self.heartbeat_interval_ms),
-            ("replica_lag_time_max_ms", self.replica_lag_time_max_ms),
+            (
+                "client_metrics_telemetry_max",
+                self.client_metrics_telemetry_max,
+            ),
             (
                 "metadata_max_bytes_between_snapshots",
                 self.metadata_max_bytes_between_snapshots,
             ),
-            (
-                "metadata_snapshot_interval_records",
-                self.metadata_snapshot_interval_records,
-            ),
+            ("replication.fetch_max", self.replication.fetch_max),
+            ("replication.fetch_min", self.replication.fetch_min),
         ] {
-            if value == 0 {
-                return Err(BrokerError::InvalidRuntimeConfig(format!(
-                    "{name} must be positive"
-                )));
-            }
+            require_positive_size(name, value)?;
         }
-        for (name, value) in [
-            (
-                "delegation_token_max_lifetime_ms",
-                self.delegation_token_max_lifetime_ms,
-            ),
-            (
-                "delegation_token_expiry_check_interval_ms",
-                self.delegation_token_expiry_check_interval_ms,
-            ),
-            (
-                "delegation_token_default_renew_period_ms",
-                self.delegation_token_default_renew_period_ms,
-            ),
-        ] {
-            if value <= 0 {
-                return Err(BrokerError::InvalidRuntimeConfig(format!(
-                    "{name} must be positive"
-                )));
-            }
+        if self.metadata_snapshot_interval_records == 0 {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "metadata_snapshot_interval_records must be positive".into(),
+            ));
         }
         Ok(())
     }
 
     fn validate_additional_runtime_scalars(&self) -> Result<(), BrokerError> {
-        let voter_request_timeout_ms = self.auto_join_voter_request_timeout.as_millis();
-        if !(1..=u128::from(i32::MAX.cast_unsigned())).contains(&voter_request_timeout_ms) {
+        // The timeout is carried verbatim in `AddRaftVoter.timeout_ms`, an
+        // `int32` millisecond wire field, so it has to survive that narrowing.
+        let voter_request_timeout_ms = self.auto_join_voter_request_timeout.millis_i64();
+        if !(1..=i64::from(i32::MAX)).contains(&voter_request_timeout_ms) {
             return Err(BrokerError::InvalidRuntimeConfig(
                 "auto_join_voter_request_timeout must be within 1..=i32::MAX milliseconds".into(),
             ));
         }
-        if self.offsets_topic_metadata_wait_timeout.is_zero() {
-            return Err(BrokerError::InvalidRuntimeConfig(
-                "offsets_topic_metadata_wait_timeout must be positive".into(),
-            ));
-        }
-        if self.offsets_topic_metadata_wait_timeout < Duration::from_millis(1) {
+        if self.offsets_topic_metadata_wait_timeout < millis(1) {
             return Err(BrokerError::InvalidRuntimeConfig(
                 "offsets_topic_metadata_wait_timeout must be at least 1ms".into(),
             ));
         }
+        require_positive_size("observer_fetch_max", self.observer_fetch_max)?;
         for (name, value) in [
             (
                 "self_registration_max_attempts",
                 self.self_registration_max_attempts,
             ),
-            ("observer_fetch_max_bytes", self.observer_fetch_max_bytes),
             (
                 "client_metrics_stale_push_intervals",
                 self.client_metrics_stale_push_intervals,
@@ -1588,7 +1596,6 @@ impl BrokerConfig {
                 "audit_event_queue_capacity",
                 self.audit_event_queue_capacity,
             ),
-            ("audit_tail_read_max_bytes", self.audit_tail_read_max_bytes),
             (
                 "coordinator_actor_mailbox_capacity",
                 self.coordinator_actor_mailbox_capacity,
@@ -1598,45 +1605,13 @@ impl BrokerConfig {
                 self.unclean_recovery_queue_capacity,
             ),
             (
-                "share_recovery_read_max_bytes",
-                self.share_recovery_read_max_bytes,
-            ),
-            (
                 "share_session_cache_max_when_unlimited",
                 self.share_session_cache_max_when_unlimited,
-            ),
-            ("socket_request_max_bytes", self.socket_request_max_bytes),
-            ("sendfile_min_bytes", self.sendfile_min_bytes),
-            ("socket_send_buffer_bytes", self.socket_send_buffer_bytes),
-            (
-                "socket_receive_buffer_bytes",
-                self.socket_receive_buffer_bytes,
-            ),
-            ("acl_max_principal_bytes", self.acl_max_principal_bytes),
-            (
-                "acl_max_resource_name_bytes",
-                self.acl_max_resource_name_bytes,
-            ),
-            (
-                "telemetry_max_decompression_ratio",
-                self.telemetry_max_decompression_ratio,
-            ),
-            (
-                "telemetry_decompressed_output_floor_bytes",
-                self.telemetry_decompressed_output_floor_bytes,
-            ),
-            (
-                "telemetry_decompressed_output_ceiling_bytes",
-                self.telemetry_decompressed_output_ceiling_bytes,
             ),
             ("max_produce_group", self.max_produce_group),
             (
                 "partition_writer_queue_depth",
                 self.partition_writer_queue_depth,
-            ),
-            (
-                "future_log_move_read_chunk_bytes",
-                self.future_log_move_read_chunk_bytes,
             ),
         ] {
             if value == 0 {
@@ -1646,14 +1621,39 @@ impl BrokerConfig {
             }
         }
         for (name, value) in [
-            ("audit_tail_window_offsets", self.audit_tail_window_offsets),
-            ("producer_id_expiration_ms", self.producer_id_expiration_ms),
+            ("audit_tail_read_max", self.audit_tail_read_max),
+            ("share_recovery_read_max", self.share_recovery_read_max),
+            ("socket_request_max", self.socket_request_max),
+            ("sendfile_min", self.sendfile_min),
+            ("socket_send_buffer", self.socket_send_buffer),
+            ("socket_receive_buffer", self.socket_receive_buffer),
+            ("acl_max_principal", self.acl_max_principal),
+            ("acl_max_resource_name", self.acl_max_resource_name),
+            (
+                "telemetry_decompressed_output_floor",
+                self.telemetry_decompressed_output_floor,
+            ),
+            (
+                "telemetry_decompressed_output_ceiling",
+                self.telemetry_decompressed_output_ceiling,
+            ),
+            (
+                "future_log_move_read_chunk",
+                self.future_log_move_read_chunk,
+            ),
         ] {
-            if value <= 0 {
-                return Err(BrokerError::InvalidRuntimeConfig(format!(
-                    "{name} must be positive"
-                )));
-            }
+            require_positive_size(name, value)?;
+        }
+        if self.telemetry_max_decompression_ratio <= <Ratio as RatioExt>::ZERO {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "telemetry_max_decompression_ratio must be positive".into(),
+            ));
+        }
+        require_positive_time("producer_id_expiration", self.producer_id_expiration)?;
+        if self.audit_tail_window_offsets <= 0 {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "audit_tail_window_offsets must be positive".into(),
+            ));
         }
         for (name, value) in [
             (
@@ -1668,20 +1668,18 @@ impl BrokerConfig {
                 "transaction_state_num_partitions",
                 self.transaction_state_num_partitions,
             ),
-            (
-                "transaction_min_timeout_ms",
-                self.transaction_min_timeout_ms,
-            ),
-            (
-                "transaction_max_timeout_ms",
-                self.transaction_max_timeout_ms,
-            ),
         ] {
             if value <= 0 {
                 return Err(BrokerError::InvalidRuntimeConfig(format!(
                     "{name} must be positive"
                 )));
             }
+        }
+        for (name, value) in [
+            ("transaction_min_timeout", self.transaction_min_timeout),
+            ("transaction_max_timeout", self.transaction_max_timeout),
+        ] {
+            require_positive_time(name, value)?;
         }
         for (name, value) in [
             (
@@ -1759,73 +1757,77 @@ impl Default for BrokerConfig {
     fn default() -> Self {
         let addr: SocketAddr = "127.0.0.1:9092".parse().expect("hard-coded valid addr");
         let controller_addr: SocketAddr = "127.0.0.1:9093".parse().expect("hard-coded valid addr");
+        let record_decompression = RecordDecompressionPolicy::default();
         Self {
-            startup_leader_wait_timeout: Duration::from_mins(2),
-            self_registration_backoff_min: Duration::from_millis(100),
-            self_registration_backoff_max: Duration::from_secs(5),
-            observer_poll_interval: Duration::from_millis(100),
-            audit_spool_replay_interval: Duration::from_secs(2),
-            audit_stats_poll_interval: Duration::from_secs(1),
-            audit_partition_wait_timeout: Duration::from_secs(10),
-            liveness_tick_interval: Duration::from_secs(1),
-            gauge_poll_interval: Duration::from_secs(1),
-            isr_scan_interval: Duration::from_secs(1),
-            cleaner_interval: Duration::from_secs(30),
-            future_log_move_retry_backoff: Duration::from_millis(50),
-            client_metrics_eviction_tick: Duration::from_mins(1),
-            client_metrics_stale_floor: Duration::from_mins(10),
-            client_metrics_default_interval_ms: 300_000,
+            startup_leader_wait_timeout: minutes(2),
+            self_registration_backoff_min: millis(100),
+            self_registration_backoff_max: secs(5),
+            observer_poll_interval: millis(100),
+            audit_spool_replay_interval: secs(2),
+            audit_stats_poll_interval: secs(1),
+            audit_partition_wait_timeout: secs(10),
+            liveness_tick_interval: secs(1),
+            gauge_poll_interval: secs(1),
+            isr_scan_interval: secs(1),
+            cleaner_interval: secs(30),
+            future_log_move_retry_backoff: millis(50),
+            client_metrics_eviction_tick: minutes(1),
+            client_metrics_stale_floor: minutes(10),
+            client_metrics_default_interval: minutes(5),
             client_metrics_otlp_queue_capacity: 256,
-            client_metrics_telemetry_max_bytes: 1_048_576,
-            client_metrics_prom_snapshot_ttl: Duration::from_mins(5),
-            rlmm_reconcile_tick: Duration::from_secs(30),
-            rlmm_bootstrap_backoff_initial: Duration::from_millis(250),
-            rlmm_bootstrap_backoff_max: Duration::from_secs(10),
-            connection_creation_throttle_max: Duration::from_secs(1),
-            opa_http_timeout: Duration::from_secs(5),
-            oauth_jwks_http_timeout: Duration::from_secs(10),
-            auto_join_retry_backoff: Duration::from_millis(500),
-            auto_join_voter_request_timeout: Duration::from_secs(30),
+            client_metrics_telemetry_max: mebibytes(1),
+            client_metrics_prom_snapshot_ttl: minutes(5),
+            rlmm_reconcile_tick: secs(30),
+            rlmm_bootstrap_backoff_initial: millis(250),
+            rlmm_bootstrap_backoff_max: secs(10),
+            connection_creation_throttle_max: secs(1),
+            opa_http_timeout: secs(5),
+            oauth_jwks_http_timeout: secs(10),
+            auto_join_retry_backoff: millis(500),
+            auto_join_voter_request_timeout: secs(30),
             replication: ReplicationRuntimeConfig::default(),
-            coordinator_session_expiry_tick: Duration::from_secs(1),
-            coordinator_shutdown_ack_timeout: Duration::from_secs(5),
-            classic_group_initial_rebalance_delay: Duration::from_secs(3),
-            sync_group_follower_wait: Duration::from_secs(30),
-            unclean_recovery_aggressive_deadline: Duration::from_secs(2),
-            unclean_recovery_balanced_deadline: Duration::from_secs(30),
-            operator_recovery_deadline: Duration::from_secs(25),
-            quota_throttle_max: Duration::from_secs(1),
+            coordinator_session_expiry_tick: secs(1),
+            coordinator_shutdown_ack_timeout: secs(5),
+            classic_group_initial_rebalance_delay: secs(3),
+            sync_group_follower_wait: secs(30),
+            unclean_recovery_aggressive_deadline: secs(2),
+            unclean_recovery_balanced_deadline: secs(30),
+            operator_recovery_deadline: secs(25),
+            quota_throttle_max: secs(1),
             self_registration_max_attempts: 8,
-            observer_fetch_max_bytes: 1_048_576,
+            observer_fetch_max: mebibytes(1),
             audit_event_queue_capacity: 8_192,
             audit_tail_window_offsets: 4_096,
-            audit_tail_read_max_bytes: 1_048_576,
-            offsets_topic_metadata_wait_timeout: Duration::from_secs(30),
+            audit_tail_read_max: mebibytes(1),
+            offsets_topic_metadata_wait_timeout: secs(30),
             client_metrics_stale_push_intervals: 3,
             coordinator_actor_mailbox_capacity: 64,
             unclean_recovery_queue_capacity: 256,
-            share_recovery_read_max_bytes: 1_048_576,
+            share_recovery_read_max: mebibytes(1),
             share_session_cache_max_when_unlimited: 10_000,
-            socket_request_max_bytes: 104_857_600,
-            sendfile_min_bytes: 32_768,
-            socket_send_buffer_bytes: 1_048_576,
-            socket_receive_buffer_bytes: 1_048_576,
-            acl_max_principal_bytes: 256,
-            acl_max_resource_name_bytes: 256,
-            telemetry_max_decompression_ratio: 100,
-            telemetry_decompressed_output_floor_bytes: 16_777_216,
-            telemetry_decompressed_output_ceiling_bytes: 1_073_741_824,
+            socket_request_max: mebibytes(100),
+            sendfile_min: kibibytes(32),
+            socket_send_buffer: mebibytes(1),
+            socket_receive_buffer: mebibytes(1),
+            acl_max_principal: bytes(256),
+            acl_max_resource_name: bytes(256),
+            telemetry_max_decompression_ratio: fraction(100.0),
+            telemetry_decompressed_output_floor: mebibytes(16),
+            telemetry_decompressed_output_ceiling: gibibytes(1),
+            record_decompression_max_ratio: record_decompression.max_ratio(),
+            record_decompression_output_floor: record_decompression.output_floor(),
+            record_decompression_output_ceiling: record_decompression.output_ceiling(),
             inter_broker_server_name: "localhost".to_string(),
-            producer_id_expiration_ms: 86_400_000,
-            producer_id_expiration_scan_interval: Duration::from_mins(10),
+            producer_id_expiration: hours(24),
+            producer_id_expiration_scan_interval: minutes(10),
             max_produce_group: 1_024,
             partition_writer_queue_depth: 64,
             default_min_insync_replicas: 1,
-            future_log_move_read_chunk_bytes: 1_048_576,
+            future_log_move_read_chunk: mebibytes(1),
             transaction_state_num_partitions: 50,
             transaction_state_replication_factor: 3,
-            transaction_min_timeout_ms: 1_000,
-            transaction_max_timeout_ms: 900_000,
+            transaction_min_timeout: secs(1),
+            transaction_max_timeout: minutes(15),
             broker_id: 1,
             roles: vec![NodeRole::Controller, NodeRole::Broker],
             listen_addr: addr,
@@ -1842,11 +1844,11 @@ impl Default for BrokerConfig {
             incarnation_id: uuid::Uuid::nil(),
             auto_join: false,
             observer_lag_bound: DEFAULT_OBSERVER_LAG_BOUND,
-            heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
-            heartbeat_timeout_ms: DEFAULT_HEARTBEAT_TIMEOUT_MS,
-            replica_lag_time_max_ms: DEFAULT_REPLICA_LAG_TIME_MAX_MS,
-            controller_election_timeout: duration_ms(DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS),
-            controller_heartbeat_interval: duration_ms(DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS),
+            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+            heartbeat_timeout: DEFAULT_HEARTBEAT_TIMEOUT,
+            replica_lag_time_max: DEFAULT_REPLICA_LAG_TIME_MAX,
+            controller_election_timeout: DEFAULT_CONTROLLER_ELECTION_TIMEOUT,
+            controller_heartbeat_interval: DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL,
             metadata_max_bytes_between_snapshots: DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS,
             metadata_max_snapshot_interval: DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL,
             metadata_snapshot_interval_records: DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS,
@@ -1868,7 +1870,7 @@ impl Default for BrokerConfig {
             oauthbearer_jwks_endpoint: None,
             oauthbearer_jwks_refresh_interval: DEFAULT_JWKS_REFRESH_INTERVAL,
             oauthbearer_idp_tls_trust: None,
-            oauthbearer_max_session_lifetime_seconds: None,
+            oauthbearer_max_session_lifetime: None,
             oauthbearer_jwks_signal_rx: std::sync::Arc::new(std::sync::Mutex::new(None)),
             oauthbearer_jwks_last_successful_fetch_ms: std::sync::Arc::new(
                 std::sync::atomic::AtomicI64::new(0),
@@ -1880,7 +1882,7 @@ impl Default for BrokerConfig {
             features: default_feature_flags(),
             // KIP-98/KIP-939 idle-transaction reaper cadence (Kafka's
             // `transaction.abort.timed.out.transaction.cleanup.interval.ms`).
-            txn_abort_cleanup_interval: duration_ms(DEFAULT_TXN_ABORT_CLEANUP_INTERVAL_MS),
+            txn_abort_cleanup_interval: DEFAULT_TXN_ABORT_CLEANUP_INTERVAL,
             next_gen_consumer_group: Box::new(
                 crate::coordinator::unified::config::NextGenConfig::default(),
             ),
@@ -1893,11 +1895,11 @@ impl Default for BrokerConfig {
             share_coordinator: Box::new(
                 crate::share_coordinator::config::ShareCoordinatorConfig::default(),
             ),
-            leader_imbalance_check_interval_secs: DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL_SECS,
-            leader_imbalance_per_broker_percentage: DEFAULT_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE,
+            leader_imbalance_check_interval: DEFAULT_LEADER_IMBALANCE_CHECK_INTERVAL,
+            leader_imbalance_per_broker: DEFAULT_LEADER_IMBALANCE_PER_BROKER,
             #[cfg(any(test, feature = "test-helpers"))]
             cleaner_interval_override: None,
-            tls_reload_interval: duration_ms(DEFAULT_TLS_RELOAD_INTERVAL_MS),
+            tls_reload_interval: DEFAULT_TLS_RELOAD_INTERVAL,
             // Default to `None` so multi-broker library users (and
             // multi-broker tests) don't race on a fixed port. The
             // `crabka-broker` binary opts in to `Some(0.0.0.0:9404)`
@@ -1906,7 +1908,7 @@ impl Default for BrokerConfig {
             // metrics by default.
             metrics_listen_addr: None,
             client_metrics_otlp_endpoint: None,
-            partition_disk_scan_interval_secs: 60,
+            partition_disk_scan_interval: secs(60),
             max_incremental_fetch_session_cache_slots:
                 DEFAULT_MAX_INCREMENTAL_FETCH_SESSION_CACHE_SLOTS,
             // Connection caps unlimited by default, matching Kafka's
@@ -1917,14 +1919,13 @@ impl Default for BrokerConfig {
             // via `CRABKA_DELEGATION_TOKEN_SECRET_KEY` env var or the
             // `[delegation_token] secret_key` TOML stanza.
             delegation_token_secret_key: None,
-            delegation_token_max_lifetime_ms: DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME_MS,
-            delegation_token_expiry_check_interval_ms:
-                DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS,
-            delegation_token_default_renew_period_ms: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD_MS,
+            delegation_token_max_lifetime: DEFAULT_DELEGATION_TOKEN_MAX_LIFETIME,
+            delegation_token_expiry_check_interval: DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL,
+            delegation_token_default_renew_period: DEFAULT_DELEGATION_TOKEN_RENEW_PERIOD,
             // Tiered storage off by default. Operators enable it
             // via `[remote_storage] storage_dir` in `broker.toml`.
             remote_storage_backend: None,
-            remote_log_manager_interval: duration_ms(DEFAULT_REMOTE_LOG_MANAGER_INTERVAL_MS),
+            remote_log_manager_interval: DEFAULT_REMOTE_LOG_MANAGER_INTERVAL,
             // Production default: topic-backed RLMM. `bootstrap` and
             // `snapshot_dir` are empty; the broker derives them at startup.
             remote_log_metadata: RlmmKind::TopicBacked(KafkaRlmmConfig::default()),
@@ -1934,15 +1935,31 @@ impl Default for BrokerConfig {
             audit_signing_key_path: None,
             audit_signing_key_id: None,
             audit_checkpoint_every_n: DEFAULT_AUDIT_CHECKPOINT_EVERY_N,
-            audit_checkpoint_every_secs: DEFAULT_AUDIT_CHECKPOINT_EVERY_SECS,
+            audit_checkpoint_every: DEFAULT_AUDIT_CHECKPOINT_EVERY,
             audit_spool_dir: std::path::PathBuf::from(DEFAULT_AUDIT_SPOOL_DIR),
-            audit_spool_max_bytes: DEFAULT_AUDIT_SPOOL_MAX_BYTES,
+            audit_spool_max: DEFAULT_AUDIT_SPOOL_MAX,
         }
     }
 }
 
-const fn duration_ms(milliseconds: u64) -> std::time::Duration {
-    std::time::Duration::from_millis(milliseconds)
+/// Rejects a non-positive time extent, naming the config field in the error.
+fn require_positive_time(name: &str, value: Time) -> Result<(), BrokerError> {
+    if value <= <Time as TimeExt>::ZERO {
+        return Err(BrokerError::InvalidRuntimeConfig(format!(
+            "{name} must be positive"
+        )));
+    }
+    Ok(())
+}
+
+/// Rejects a non-positive byte count, naming the config field in the error.
+fn require_positive_size(name: &str, value: ByteSize) -> Result<(), BrokerError> {
+    if value <= <ByteSize as ByteSizeExt>::ZERO {
+        return Err(BrokerError::InvalidRuntimeConfig(format!(
+            "{name} must be positive"
+        )));
+    }
+    Ok(())
 }
 
 const fn test_feature_flags() -> BrokerFeatureFlags {
@@ -1964,6 +1981,7 @@ const fn default_feature_flags() -> BrokerFeatureFlags {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::nanos;
 
     use super::*;
     use crate::BrokerError as BrokerStartError;
@@ -1983,14 +2001,14 @@ mod tests {
                 config.audit_partition_wait_timeout,
                 config.liveness_tick_interval,
             ) == (
-                std::time::Duration::from_mins(2),
-                std::time::Duration::from_millis(100),
-                std::time::Duration::from_secs(5),
-                std::time::Duration::from_millis(100),
-                std::time::Duration::from_secs(2),
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(1),
+                minutes(2),
+                millis(100),
+                secs(5),
+                millis(100),
+                secs(2),
+                secs(1),
+                secs(10),
+                secs(1),
             )
         );
         assert!(
@@ -2002,19 +2020,19 @@ mod tests {
                 config.client_metrics_eviction_tick,
                 config.client_metrics_stale_floor,
             ) == (
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(30),
-                std::time::Duration::from_millis(50),
-                std::time::Duration::from_mins(1),
-                std::time::Duration::from_mins(10),
+                secs(1),
+                secs(1),
+                secs(30),
+                millis(50),
+                minutes(1),
+                minutes(10)
             )
         );
         assert!(
             (
-                config.client_metrics_default_interval_ms,
+                config.client_metrics_default_interval,
                 config.client_metrics_otlp_queue_capacity,
-                config.client_metrics_telemetry_max_bytes,
+                config.client_metrics_telemetry_max,
                 config.client_metrics_prom_snapshot_ttl,
                 config.rlmm_reconcile_tick,
                 config.rlmm_bootstrap_backoff_initial,
@@ -2024,32 +2042,32 @@ mod tests {
                 config.oauth_jwks_http_timeout,
                 config.auto_join_retry_backoff,
             ) == (
-                300_000,
+                minutes(5),
                 256,
-                1_048_576,
-                std::time::Duration::from_mins(5),
-                std::time::Duration::from_secs(30),
-                std::time::Duration::from_millis(250),
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(5),
-                std::time::Duration::from_secs(10),
-                std::time::Duration::from_millis(500),
+                mebibytes(1),
+                minutes(5),
+                secs(30),
+                millis(250),
+                secs(10),
+                secs(1),
+                secs(5),
+                secs(10),
+                millis(500),
             )
         );
         assert!(
             config.replication
                 == ReplicationRuntimeConfig {
-                    fetch_max_bytes: 1_048_576,
-                    fetch_max_wait_ms: 500,
-                    fetch_min_bytes: 1,
-                    throttle_exhausted_backoff: std::time::Duration::from_millis(100),
-                    send_error_backoff: std::time::Duration::from_secs(1),
-                    unknown_topic_retry_delay: std::time::Duration::from_millis(100),
-                    epoch_fence_backoff: std::time::Duration::from_millis(200),
-                    unexpected_error_backoff: std::time::Duration::from_millis(500),
-                    reconnect_initial_delay: std::time::Duration::from_millis(100),
-                    reconnect_delay_cap: std::time::Duration::from_secs(5),
+                    fetch_max: mebibytes(1),
+                    fetch_max_wait: millis(500),
+                    fetch_min: bytes(1),
+                    throttle_exhausted_backoff: millis(100),
+                    send_error_backoff: secs(1),
+                    unknown_topic_retry_delay: millis(100),
+                    epoch_fence_backoff: millis(200),
+                    unexpected_error_backoff: millis(500),
+                    reconnect_initial_delay: millis(100),
+                    reconnect_delay_cap: secs(5),
                 }
         );
         assert!(
@@ -2063,14 +2081,14 @@ mod tests {
                 config.operator_recovery_deadline,
                 config.quota_throttle_max,
             ) == (
-                std::time::Duration::from_secs(1),
-                std::time::Duration::from_secs(5),
-                std::time::Duration::from_secs(3),
-                std::time::Duration::from_secs(30),
-                std::time::Duration::from_secs(2),
-                std::time::Duration::from_secs(30),
-                std::time::Duration::from_secs(25),
-                std::time::Duration::from_secs(1),
+                secs(1),
+                secs(5),
+                secs(3),
+                secs(30),
+                secs(2),
+                secs(30),
+                secs(25),
+                secs(1),
             )
         );
     }
@@ -2078,47 +2096,54 @@ mod tests {
     fn additional_policy_snapshot(config: BrokerConfig) -> [String; 31] {
         [
             config.self_registration_max_attempts.to_string(),
-            config.observer_fetch_max_bytes.to_string(),
+            config.observer_fetch_max.bytes_u64().to_string(),
             config.audit_event_queue_capacity.to_string(),
             config.audit_tail_window_offsets.to_string(),
-            config.audit_tail_read_max_bytes.to_string(),
+            config.audit_tail_read_max.bytes_u64().to_string(),
             config
                 .offsets_topic_metadata_wait_timeout
-                .as_millis()
+                .millis_i64()
                 .to_string(),
             config.client_metrics_stale_push_intervals.to_string(),
             config.coordinator_actor_mailbox_capacity.to_string(),
             config.unclean_recovery_queue_capacity.to_string(),
-            config.share_recovery_read_max_bytes.to_string(),
+            config.share_recovery_read_max.bytes_u64().to_string(),
             config.share_session_cache_max_when_unlimited.to_string(),
-            config.socket_request_max_bytes.to_string(),
-            config.sendfile_min_bytes.to_string(),
-            config.socket_send_buffer_bytes.to_string(),
-            config.socket_receive_buffer_bytes.to_string(),
-            config.acl_max_principal_bytes.to_string(),
-            config.acl_max_resource_name_bytes.to_string(),
-            config.telemetry_max_decompression_ratio.to_string(),
-            config.telemetry_decompressed_output_floor_bytes.to_string(),
+            config.socket_request_max.bytes_u64().to_string(),
+            config.sendfile_min.bytes_u64().to_string(),
+            config.socket_send_buffer.bytes_u64().to_string(),
+            config.socket_receive_buffer.bytes_u64().to_string(),
+            config.acl_max_principal.bytes_u64().to_string(),
+            config.acl_max_resource_name.bytes_u64().to_string(),
             config
-                .telemetry_decompressed_output_ceiling_bytes
+                .telemetry_max_decompression_ratio
+                .as_f64()
+                .to_string(),
+            config
+                .telemetry_decompressed_output_floor
+                .bytes_u64()
+                .to_string(),
+            config
+                .telemetry_decompressed_output_ceiling
+                .bytes_u64()
                 .to_string(),
             config.inter_broker_server_name,
-            config.producer_id_expiration_ms.to_string(),
+            config.producer_id_expiration.millis_i64().to_string(),
             config
                 .producer_id_expiration_scan_interval
-                .as_millis()
+                .millis_i64()
                 .to_string(),
             config.max_produce_group.to_string(),
             config.partition_writer_queue_depth.to_string(),
             config.default_min_insync_replicas.to_string(),
-            config.future_log_move_read_chunk_bytes.to_string(),
+            config.future_log_move_read_chunk.bytes_u64().to_string(),
             config
                 .share_coordinator
                 .state_topic_num_partitions
                 .to_string(),
             config.transaction_state_num_partitions.to_string(),
-            config.transaction_min_timeout_ms.to_string(),
-            config.transaction_max_timeout_ms.to_string(),
+            config.transaction_min_timeout.millis_i32().to_string(),
+            config.transaction_max_timeout.millis_i32().to_string(),
         ]
     }
 
@@ -2176,23 +2201,23 @@ mod tests {
     #[test]
     fn rejects_invalid_runtime_relations() {
         let mut config = BrokerConfig::default();
-        config.self_registration_backoff_min = config.self_registration_backoff_max * 2;
+        config.self_registration_backoff_min = config.self_registration_backoff_max * 2.0;
         assert_invalid_runtime(&config, "self registration minimum backoff exceeds maximum");
 
         let mut config = BrokerConfig::default();
-        config.rlmm_bootstrap_backoff_initial = config.rlmm_bootstrap_backoff_max * 2;
+        config.rlmm_bootstrap_backoff_initial = config.rlmm_bootstrap_backoff_max * 2.0;
         assert_invalid_runtime(&config, "RLMM bootstrap initial backoff exceeds maximum");
 
         let mut config = BrokerConfig::default();
-        config.replication.fetch_min_bytes = config.replication.fetch_max_bytes + 1;
+        config.replication.fetch_min = config.replication.fetch_max + bytes(1);
         assert_invalid_runtime(&config, "replication fetch minimum bytes exceeds maximum");
 
         let mut config = BrokerConfig::default();
-        config.replication.reconnect_initial_delay = config.replication.reconnect_delay_cap * 2;
+        config.replication.reconnect_initial_delay = config.replication.reconnect_delay_cap * 2.0;
         assert_invalid_runtime(&config, "replication reconnect initial delay exceeds cap");
 
         let mut config = BrokerConfig::default();
-        config.heartbeat_interval_ms = config.heartbeat_timeout_ms;
+        config.heartbeat_interval = config.heartbeat_timeout;
         assert_invalid_runtime(&config, "broker heartbeat interval must be below timeout");
 
         let mut config = BrokerConfig::default();
@@ -2203,19 +2228,20 @@ mod tests {
         );
 
         let mut config = BrokerConfig::default();
-        config.delegation_token_default_renew_period_ms =
-            config.delegation_token_max_lifetime_ms + 1;
+        config.delegation_token_default_renew_period =
+            config.delegation_token_max_lifetime + millis(1);
         assert_invalid_runtime(
             &config,
             "delegation token default renew period exceeds maximum lifetime",
         );
 
         let mut config = BrokerConfig::default();
-        config.client_metrics_stale_floor = config.client_metrics_eviction_tick / 2;
+        config.client_metrics_stale_floor = config.client_metrics_eviction_tick / 2.0;
         assert_invalid_runtime(&config, "client metrics stale floor is below eviction tick");
 
         let mut config = BrokerConfig::default();
-        config.unclean_recovery_aggressive_deadline = config.unclean_recovery_balanced_deadline * 2;
+        config.unclean_recovery_aggressive_deadline =
+            config.unclean_recovery_balanced_deadline * 2.0;
         assert_invalid_runtime(
             &config,
             "unclean recovery aggressive deadline exceeds balanced deadline",
@@ -2226,59 +2252,61 @@ mod tests {
     fn rejects_non_positive_runtime_scalars() {
         let cases: [RuntimeInvalidator; 19] = [
             ("startup_leader_wait_timeout", |c| {
-                c.startup_leader_wait_timeout = Duration::ZERO;
+                c.startup_leader_wait_timeout = <Time as TimeExt>::ZERO;
             }),
             ("cleaner_interval", |c| {
-                c.cleaner_interval = Duration::ZERO;
+                c.cleaner_interval = <Time as TimeExt>::ZERO;
             }),
-            ("client_metrics_default_interval_ms", |c| {
-                c.client_metrics_default_interval_ms = 0;
+            ("client_metrics_default_interval", |c| {
+                c.client_metrics_default_interval = <Time as TimeExt>::ZERO;
             }),
-            ("client_metrics_telemetry_max_bytes", |c| {
-                c.client_metrics_telemetry_max_bytes = 0;
+            ("client_metrics_telemetry_max", |c| {
+                c.client_metrics_telemetry_max = <ByteSize as ByteSizeExt>::ZERO;
             }),
             ("client_metrics_otlp_queue_capacity", |c| {
                 c.client_metrics_otlp_queue_capacity = 0;
             }),
-            ("replication.fetch_max_bytes", |c| {
-                c.replication.fetch_max_bytes = 0;
+            ("replication.fetch_max", |c| {
+                c.replication.fetch_max = <ByteSize as ByteSizeExt>::ZERO;
             }),
-            ("replication.fetch_max_wait_ms", |c| {
-                c.replication.fetch_max_wait_ms = 0;
+            ("replication.fetch_max_wait", |c| {
+                c.replication.fetch_max_wait = <Time as TimeExt>::ZERO;
             }),
-            ("replication.fetch_min_bytes", |c| {
-                c.replication.fetch_min_bytes = 0;
+            ("replication.fetch_min", |c| {
+                c.replication.fetch_min = <ByteSize as ByteSizeExt>::ZERO;
             }),
             ("replication.send_error_backoff", |c| {
-                c.replication.send_error_backoff = Duration::ZERO;
+                c.replication.send_error_backoff = <Time as TimeExt>::ZERO;
             }),
-            ("heartbeat_interval_ms", |c| c.heartbeat_interval_ms = 0),
-            ("replica_lag_time_max_ms", |c| {
-                c.replica_lag_time_max_ms = 0;
+            ("heartbeat_interval", |c| {
+                c.heartbeat_interval = <Time as TimeExt>::ZERO;
+            }),
+            ("replica_lag_time_max", |c| {
+                c.replica_lag_time_max = <Time as TimeExt>::ZERO;
             }),
             ("controller_heartbeat_interval", |c| {
-                c.controller_heartbeat_interval = Duration::ZERO;
+                c.controller_heartbeat_interval = <Time as TimeExt>::ZERO;
             }),
             ("metadata_max_bytes_between_snapshots", |c| {
-                c.metadata_max_bytes_between_snapshots = 0;
+                c.metadata_max_bytes_between_snapshots = <ByteSize as ByteSizeExt>::ZERO;
             }),
             ("metadata_snapshot_interval_records", |c| {
                 c.metadata_snapshot_interval_records = 0;
             }),
-            ("delegation_token_max_lifetime_ms", |c| {
-                c.delegation_token_max_lifetime_ms = 0;
+            ("delegation_token_max_lifetime", |c| {
+                c.delegation_token_max_lifetime = <Time as TimeExt>::ZERO;
             }),
-            ("delegation_token_expiry_check_interval_ms", |c| {
-                c.delegation_token_expiry_check_interval_ms = 0;
+            ("delegation_token_expiry_check_interval", |c| {
+                c.delegation_token_expiry_check_interval = <Time as TimeExt>::ZERO;
             }),
-            ("delegation_token_default_renew_period_ms", |c| {
-                c.delegation_token_default_renew_period_ms = -1;
+            ("delegation_token_default_renew_period", |c| {
+                c.delegation_token_default_renew_period = -millis(1);
             }),
             ("remote_log_manager_interval", |c| {
-                c.remote_log_manager_interval = Duration::ZERO;
+                c.remote_log_manager_interval = <Time as TimeExt>::ZERO;
             }),
-            ("delegation_token_max_lifetime_ms", |c| {
-                c.delegation_token_max_lifetime_ms = -1;
+            ("delegation_token_max_lifetime", |c| {
+                c.delegation_token_max_lifetime = -millis(1);
             }),
         ];
 
@@ -2295,8 +2323,8 @@ mod tests {
             ("self_registration_max_attempts must be positive", |c| {
                 c.self_registration_max_attempts = 0;
             }),
-            ("observer_fetch_max_bytes must be positive", |c| {
-                c.observer_fetch_max_bytes = 0;
+            ("observer_fetch_max must be positive", |c| {
+                c.observer_fetch_max = <ByteSize as ByteSizeExt>::ZERO;
             }),
             ("audit_event_queue_capacity must be positive", |c| {
                 c.audit_event_queue_capacity = 0;
@@ -2304,16 +2332,16 @@ mod tests {
             ("audit_tail_window_offsets must be positive", |c| {
                 c.audit_tail_window_offsets = 0;
             }),
-            ("audit_tail_read_max_bytes must be positive", |c| {
-                c.audit_tail_read_max_bytes = 0;
+            ("audit_tail_read_max must be positive", |c| {
+                c.audit_tail_read_max = <ByteSize as ByteSizeExt>::ZERO;
             }),
             (
-                "offsets_topic_metadata_wait_timeout must be positive",
-                |c| c.offsets_topic_metadata_wait_timeout = Duration::ZERO,
+                "offsets_topic_metadata_wait_timeout must be at least 1ms",
+                |c| c.offsets_topic_metadata_wait_timeout = <Time as TimeExt>::ZERO,
             ),
             (
                 "offsets_topic_metadata_wait_timeout must be at least 1ms",
-                |c| c.offsets_topic_metadata_wait_timeout = Duration::from_nanos(1),
+                |c| c.offsets_topic_metadata_wait_timeout = nanos(1),
             ),
             (
                 "client_metrics_stale_push_intervals must be positive",
@@ -2325,59 +2353,59 @@ mod tests {
             ("unclean_recovery_queue_capacity must be positive", |c| {
                 c.unclean_recovery_queue_capacity = 0;
             }),
-            ("share_recovery_read_max_bytes must be positive", |c| {
-                c.share_recovery_read_max_bytes = 0;
+            ("share_recovery_read_max must be positive", |c| {
+                c.share_recovery_read_max = <ByteSize as ByteSizeExt>::ZERO;
             }),
             (
                 "share_session_cache_max_when_unlimited must be positive",
                 |c| c.share_session_cache_max_when_unlimited = 0,
             ),
-            ("socket_request_max_bytes must be positive", |c| {
-                c.socket_request_max_bytes = 0;
+            ("socket_request_max must be positive", |c| {
+                c.socket_request_max = <ByteSize as ByteSizeExt>::ZERO;
             }),
-            ("sendfile_min_bytes must be positive", |c| {
-                c.sendfile_min_bytes = 0;
+            ("sendfile_min must be positive", |c| {
+                c.sendfile_min = <ByteSize as ByteSizeExt>::ZERO;
             }),
-            ("socket_send_buffer_bytes must be positive", |c| {
-                c.socket_send_buffer_bytes = 0;
+            ("socket_send_buffer must be positive", |c| {
+                c.socket_send_buffer = <ByteSize as ByteSizeExt>::ZERO;
             }),
-            ("socket_receive_buffer_bytes must be positive", |c| {
-                c.socket_receive_buffer_bytes = 0;
+            ("socket_receive_buffer must be positive", |c| {
+                c.socket_receive_buffer = <ByteSize as ByteSizeExt>::ZERO;
             }),
-            ("acl_max_principal_bytes must be positive", |c| {
-                c.acl_max_principal_bytes = 0;
+            ("acl_max_principal must be positive", |c| {
+                c.acl_max_principal = <ByteSize as ByteSizeExt>::ZERO;
             }),
-            ("acl_max_resource_name_bytes must be positive", |c| {
-                c.acl_max_resource_name_bytes = 0;
+            ("acl_max_resource_name must be positive", |c| {
+                c.acl_max_resource_name = <ByteSize as ByteSizeExt>::ZERO;
             }),
             ("telemetry_max_decompression_ratio must be positive", |c| {
-                c.telemetry_max_decompression_ratio = 0;
+                c.telemetry_max_decompression_ratio = <Ratio as RatioExt>::ZERO;
             }),
             (
-                "telemetry_decompressed_output_floor_bytes must be positive",
-                |c| c.telemetry_decompressed_output_floor_bytes = 0,
+                "telemetry_decompressed_output_floor must be positive",
+                |c| c.telemetry_decompressed_output_floor = <ByteSize as ByteSizeExt>::ZERO,
             ),
             (
-                "telemetry_decompressed_output_ceiling_bytes must be positive",
-                |c| c.telemetry_decompressed_output_ceiling_bytes = 0,
+                "telemetry_decompressed_output_ceiling must be positive",
+                |c| c.telemetry_decompressed_output_ceiling = <ByteSize as ByteSizeExt>::ZERO,
             ),
-            ("producer_id_expiration_ms must be positive", |c| {
-                c.producer_id_expiration_ms = 0;
+            ("producer_id_expiration must be positive", |c| {
+                c.producer_id_expiration = <Time as TimeExt>::ZERO;
             }),
             (
                 "producer_id_expiration_scan_interval must be positive",
-                |c| c.producer_id_expiration_scan_interval = Duration::ZERO,
+                |c| c.producer_id_expiration_scan_interval = <Time as TimeExt>::ZERO,
             ),
             (
                 "auto_join_voter_request_timeout must be within 1..=i32::MAX milliseconds",
                 |c| {
-                    c.auto_join_voter_request_timeout = Duration::ZERO;
+                    c.auto_join_voter_request_timeout = <Time as TimeExt>::ZERO;
                 },
             ),
             (
                 "auto_join_voter_request_timeout must be within 1..=i32::MAX milliseconds",
                 |c| {
-                    c.auto_join_voter_request_timeout = Duration::from_nanos(1);
+                    c.auto_join_voter_request_timeout = nanos(1);
                 },
             ),
             ("max_produce_group must be positive", |c| {
@@ -2389,8 +2417,8 @@ mod tests {
             ("default_min_insync_replicas must be positive", |c| {
                 c.default_min_insync_replicas = 0;
             }),
-            ("future_log_move_read_chunk_bytes must be positive", |c| {
-                c.future_log_move_read_chunk_bytes = 0;
+            ("future_log_move_read_chunk must be positive", |c| {
+                c.future_log_move_read_chunk = <ByteSize as ByteSizeExt>::ZERO;
             }),
             ("share_state_num_partitions must be positive", |c| {
                 c.share_coordinator.state_topic_num_partitions = 0;
@@ -2409,11 +2437,11 @@ mod tests {
                 "streams_internal_topic_replication_factor must be positive",
                 |c| c.streams_group.internal_topic_replication_factor = 0,
             ),
-            ("transaction_min_timeout_ms must be positive", |c| {
-                c.transaction_min_timeout_ms = 0;
+            ("transaction_min_timeout must be positive", |c| {
+                c.transaction_min_timeout = <Time as TimeExt>::ZERO;
             }),
-            ("transaction_max_timeout_ms must be positive", |c| {
-                c.transaction_max_timeout_ms = 0;
+            ("transaction_max_timeout must be positive", |c| {
+                c.transaction_max_timeout = <Time as TimeExt>::ZERO;
             }),
         ];
 
@@ -2427,22 +2455,23 @@ mod tests {
     #[test]
     fn rejects_invalid_additional_runtime_relations() {
         let cases: &[RuntimeInvalidator] = &[
-            ("socket_request_max_bytes exceeds u32::MAX", |c| {
-                c.socket_request_max_bytes = usize::try_from(u64::from(u32::MAX) + 1).unwrap();
+            ("socket_request_max exceeds u32::MAX bytes", |c| {
+                c.socket_request_max = ByteSize::from_bytes(u64::from(u32::MAX) + 1);
             }),
             ("telemetry decompressed output floor exceeds ceiling", |c| {
-                c.telemetry_decompressed_output_floor_bytes =
-                    c.telemetry_decompressed_output_ceiling_bytes + 1;
+                c.telemetry_decompressed_output_floor =
+                    c.telemetry_decompressed_output_ceiling + bytes(1);
             }),
             ("inter_broker_server_name must be nonempty", |c| {
                 c.inter_broker_server_name.clear();
             }),
             ("transaction minimum timeout must be below maximum", |c| {
-                c.transaction_min_timeout_ms = c.transaction_max_timeout_ms;
+                c.transaction_min_timeout = c.transaction_max_timeout;
             }),
-            ("transaction maximum timeout must be below i32::MAX", |c| {
-                c.transaction_max_timeout_ms = i32::MAX;
-            }),
+            (
+                "transaction maximum timeout must be below i32::MAX milliseconds",
+                |c| c.transaction_max_timeout = Time::from_millis(i64::from(i32::MAX)),
+            ),
         ];
 
         for (expected, invalidate) in cases {
@@ -2514,11 +2543,11 @@ mod tests {
             bootstrap: "127.0.0.1:9092".into(),
             num_partitions: 50,
             replication: 1,
-            snapshot_interval: std::time::Duration::from_mins(1),
+            snapshot_interval: minutes(1),
             snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
             security: None,
         };
-        assert!(c.snapshot_interval == std::time::Duration::from_mins(1));
+        assert!(c.snapshot_interval == minutes(1));
         assert!(c.snapshot_dir == std::path::PathBuf::from("/data/remote-log-metadata"));
     }
 
@@ -2528,7 +2557,7 @@ mod tests {
             bootstrap: "127.0.0.1:9092".into(),
             num_partitions: 1,
             replication: 1,
-            snapshot_interval: std::time::Duration::from_mins(1),
+            snapshot_interval: minutes(1),
             snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
             security: None,
         };
@@ -2618,14 +2647,8 @@ mod tests {
     #[test]
     fn defaults_use_conservative_raft_timings() {
         let c = BrokerConfig::default();
-        assert!(
-            c.controller_election_timeout
-                == std::time::Duration::from_millis(DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS)
-        );
-        assert!(
-            c.controller_heartbeat_interval
-                == std::time::Duration::from_millis(DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS)
-        );
+        assert!(c.controller_election_timeout == DEFAULT_CONTROLLER_ELECTION_TIMEOUT);
+        assert!(c.controller_heartbeat_interval == DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL);
     }
 
     #[test]
@@ -2635,11 +2658,45 @@ mod tests {
     }
 
     #[test]
+    fn record_decompression_defaults_match_shared_policy() {
+        let cfg = BrokerConfig::default();
+        assert!(
+            cfg.record_decompression_policy().unwrap()
+                == crabka_compression::RecordDecompressionPolicy::default()
+        );
+    }
+
+    #[test]
+    fn record_decompression_rejects_invalid_security_bounds() {
+        for cfg in [
+            BrokerConfig {
+                record_decompression_max_ratio: fraction(101.0),
+                ..BrokerConfig::default()
+            },
+            BrokerConfig {
+                record_decompression_output_floor: gibibytes(1),
+                record_decompression_output_ceiling: mebibytes(16),
+                ..BrokerConfig::default()
+            },
+            BrokerConfig {
+                record_decompression_output_ceiling: gibibytes(2),
+                ..BrokerConfig::default()
+            },
+            BrokerConfig {
+                record_decompression_output_floor: ByteSize::from_bytes_f64(1.5),
+                ..BrokerConfig::default()
+            },
+        ] {
+            let error = cfg.validate().expect_err("invalid policy must fail");
+            assert!(error.to_string().contains("record_decompression"));
+        }
+    }
+
+    #[test]
     fn for_tests_uses_20_mib_metadata_snapshot_threshold() {
         let cfg = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        let mib = 1024 * 1024;
-        assert!(cfg.metadata_max_bytes_between_snapshots == 20 * mib);
-        assert!(cfg.metadata_max_bytes_between_snapshots / mib == 20);
+        assert!(cfg.metadata_max_bytes_between_snapshots == mebibytes(20));
+        assert!(cfg.metadata_max_bytes_between_snapshots.bytes_u64() == 20 * 1024 * 1024);
     }
 
     #[test]
@@ -2648,8 +2705,8 @@ mod tests {
         // Short enough that a 3-broker test can detect a dead leader and
         // re-elect within a few hundred ms — the failover tests
         // need failover well under their 10s producer timeout.
-        assert!(c.controller_election_timeout <= std::time::Duration::from_millis(750));
-        assert!(c.controller_heartbeat_interval <= std::time::Duration::from_millis(200));
+        assert!(c.controller_election_timeout <= millis(750));
+        assert!(c.controller_heartbeat_interval <= millis(200));
     }
 
     #[test]
@@ -2838,8 +2895,8 @@ mod tests {
     fn auto_leader_rebalance_defaults_to_true_in_default() {
         let c = BrokerConfig::default();
         check!(c.features.auto_leader_rebalance_enable);
-        check!(c.leader_imbalance_check_interval_secs == 300);
-        check!(c.leader_imbalance_per_broker_percentage == 10);
+        check!(c.leader_imbalance_check_interval == minutes(5));
+        check!(c.leader_imbalance_per_broker == percent(10));
     }
 
     #[test]
@@ -2851,7 +2908,7 @@ mod tests {
     #[test]
     fn rebalance_zero_interval_rejected_by_validate() {
         let c = BrokerConfig {
-            leader_imbalance_check_interval_secs: 0,
+            leader_imbalance_check_interval: <Time as TimeExt>::ZERO,
             ..BrokerConfig::default()
         };
         assert!(matches!(
@@ -2863,19 +2920,20 @@ mod tests {
     #[test]
     fn rebalance_threshold_over_100_rejected_by_validate() {
         let c = BrokerConfig {
-            leader_imbalance_per_broker_percentage: 101,
+            leader_imbalance_per_broker: percent(101),
             ..BrokerConfig::default()
         };
         assert!(matches!(
             c.validate(),
-            Err(BrokerError::InvalidLeaderRebalanceThreshold { value: 101 })
+            Err(BrokerError::InvalidLeaderRebalanceThreshold { percent })
+                if (percent - 101.0).abs() < 1e-9
         ));
     }
 
     #[test]
     fn rebalance_threshold_100_is_allowed_by_validate() {
         let c = BrokerConfig {
-            leader_imbalance_per_broker_percentage: 100,
+            leader_imbalance_per_broker: percent(100),
             ..BrokerConfig::default()
         };
 

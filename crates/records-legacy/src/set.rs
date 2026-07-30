@@ -11,13 +11,22 @@
 //! message; decoding transparently unwraps a single layer.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
-use crabka_compression::CompressionType;
+use crabka_compression::{CompressionType, RecordDecompressionPolicy};
 use crabka_ids::Offset;
+use crabka_units::prelude::{ByteSize, ByteSizeExt as _};
 
 use crate::{
     error::LegacyRecordsError,
     message::{Magic, Message, attrs_with_compression, compression_from_attrs},
 };
+
+/// The length of a wire slice as a byte count.
+///
+/// Saturates rather than wrapping; a `usize` above `u64::MAX` cannot occur on
+/// any target Crabka builds for.
+fn size_of_slice(slice: &[u8]) -> ByteSize {
+    ByteSize::from_bytes(u64::try_from(slice.len()).unwrap_or(u64::MAX))
+}
 
 /// A single decoded `MessageSet` entry: the offset-tagged payload of one
 /// logical record after compression unwrapping.
@@ -41,6 +50,20 @@ pub fn decode_message_set<B: Buf>(
     buf: &mut B,
     set_size_bytes: usize,
 ) -> Result<Vec<ParsedRecord>, LegacyRecordsError> {
+    decode_message_set_with_policy(buf, set_size_bytes, RecordDecompressionPolicy::default())
+}
+
+/// Decode a legacy `MessageSet` with explicit decompression limits.
+///
+/// # Errors
+///
+/// Returns the underlying legacy records error for malformed, truncated,
+/// corrupt, nested-compression, or over-limit input.
+pub fn decode_message_set_with_policy<B: Buf>(
+    buf: &mut B,
+    set_size_bytes: usize,
+    policy: RecordDecompressionPolicy,
+) -> Result<Vec<ParsedRecord>, LegacyRecordsError> {
     if buf.remaining() < set_size_bytes {
         return Err(LegacyRecordsError::Truncated {
             needed: set_size_bytes - buf.remaining(),
@@ -49,7 +72,9 @@ pub fn decode_message_set<B: Buf>(
     let mut region = vec![0u8; set_size_bytes];
     buf.copy_to_slice(&mut region);
     let mut out = Vec::new();
-    decode_into(&region, &mut out, /* allow_compression = */ true)?;
+    decode_into(
+        &region, &mut out, /* allow_compression = */ true, policy,
+    )?;
     Ok(out)
 }
 
@@ -57,6 +82,7 @@ fn decode_into(
     bytes: &[u8],
     out: &mut Vec<ParsedRecord>,
     allow_compression: bool,
+    policy: RecordDecompressionPolicy,
 ) -> Result<(), LegacyRecordsError> {
     let mut cur = bytes;
     while !cur.is_empty() {
@@ -96,17 +122,13 @@ fn decode_into(
                 LegacyRecordsError::Malformed("compressed wrapper has null value".into())
             })?;
             // Bound decompressed output to guard against a decompression bomb
-            // in a legacy compressed wrapper: ≤100x the compressed size, with a
-            // 16 MiB floor and a 1 GiB ceiling.
-            let max_output = inner_compressed
-                .len()
-                .saturating_mul(100)
-                .clamp(16 * 1024 * 1024, 1024 * 1024 * 1024);
+            // in a legacy compressed wrapper.
+            let max_output = policy.output_limit(size_of_slice(&inner_compressed));
             let inner_bytes = crabka_compression::decompress(codec, &inner_compressed, max_output)?;
 
             // Parse the inner set (no nested compression allowed).
             let start_len = out.len();
-            decode_into(&inner_bytes, out, false)?;
+            decode_into(&inner_bytes, out, false, policy)?;
 
             // v1 wrapper-offset rewriting (KIP-32): inner offsets are
             // relative (0..count-1); absolute offset for inner[i] is
@@ -247,7 +269,41 @@ pub fn encode_compressed_message_set<B: BufMut>(
 #[cfg(test)]
 mod tests {
 
+    use crabka_compression::{CompressionError, RecordDecompressionPolicy};
+    use crabka_units::prelude::{bytes, kibibytes};
+
     use super::*;
+
+    #[test]
+    fn slice_length_lifts_to_a_byte_count() {
+        assert2::check!(size_of_slice(&[]) == ByteSize::ZERO);
+        assert2::check!(size_of_slice(&[0u8; 4096]) == kibibytes(4));
+    }
+
+    #[test]
+    fn decompression_policy_limits_legacy_decode() {
+        let records = vec![ParsedRecord {
+            offset: Offset(0),
+            timestamp: Some(1),
+            key: None,
+            value: Some(Bytes::from(vec![b'x'; 4096])),
+        }];
+        let mut wire = BytesMut::new();
+        encode_compressed_message_set(&records, Magic::V1, CompressionType::Lz4, &mut wire)
+            .unwrap();
+
+        decode_message_set(&mut &wire[..], wire.len()).unwrap();
+
+        let policy =
+            RecordDecompressionPolicy::new(crabka_units::fraction(1.0), bytes(1), bytes(32))
+                .unwrap();
+        assert2::assert!(matches!(
+            decode_message_set_with_policy(&mut &wire[..], wire.len(), policy),
+            Err(LegacyRecordsError::Compression(
+                CompressionError::TooLarge { limit: 32 }
+            ))
+        ));
+    }
 
     fn sample_records_v1() -> Vec<ParsedRecord> {
         vec![

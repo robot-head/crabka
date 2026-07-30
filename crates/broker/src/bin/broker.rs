@@ -207,6 +207,12 @@ struct RuntimeArgs {
     telemetry_decompressed_output_floor: Option<ByteSize>,
     #[arg(long, env = "CRABKA_TELEMETRY_DECOMPRESSED_OUTPUT_CEILING", value_parser = crabka_units::parse::positive_byte_size)]
     telemetry_decompressed_output_ceiling: Option<ByteSize>,
+    #[arg(long, env = "CRABKA_RECORD_DECOMPRESSION_MAX_RATIO", value_parser = crabka_units::parse::positive_ratio)]
+    record_decompression_max_ratio: Option<Ratio>,
+    #[arg(long, env = "CRABKA_RECORD_DECOMPRESSION_OUTPUT_FLOOR", value_parser = crabka_units::parse::positive_byte_size)]
+    record_decompression_output_floor: Option<ByteSize>,
+    #[arg(long, env = "CRABKA_RECORD_DECOMPRESSION_OUTPUT_CEILING", value_parser = crabka_units::parse::positive_byte_size)]
+    record_decompression_output_ceiling: Option<ByteSize>,
     #[arg(long, env = "CRABKA_INTER_BROKER_SERVER_NAME")]
     inter_broker_server_name: Option<String>,
     #[arg(long, env = "CRABKA_PRODUCER_ID_EXPIRATION", value_parser = crabka_units::parse::positive_time)]
@@ -415,6 +421,9 @@ impl RuntimeArgs {
             telemetry_max_decompression_ratio,
             telemetry_decompressed_output_floor,
             telemetry_decompressed_output_ceiling,
+            record_decompression_max_ratio,
+            record_decompression_output_floor,
+            record_decompression_output_ceiling,
         );
         runtime
             .inter_broker_server_name
@@ -1246,6 +1255,25 @@ mod tests {
             ),
             (vec!["crabka-broker", "--replication-fetch-min=0B"], false),
             (vec!["crabka-broker", "--replication-fetch-min=1B"], true),
+            (
+                vec!["crabka-broker", "--record-decompression-max-ratio=0"],
+                false,
+            ),
+            (
+                vec!["crabka-broker", "--record-decompression-max-ratio=50"],
+                true,
+            ),
+            (
+                vec!["crabka-broker", "--record-decompression-output-floor=0B"],
+                false,
+            ),
+            (
+                vec![
+                    "crabka-broker",
+                    "--record-decompression-output-ceiling=512MiB",
+                ],
+                true,
+            ),
         ];
 
         for (args, accepted) in cases {
@@ -1254,6 +1282,13 @@ mod tests {
 
         let args = Args::try_parse_from(["crabka-broker", "--leader-imbalance-per-broker=101%"])
             .expect("parse ratio");
+        assert!(
+            args.apply_runtime_to(&mut BrokerConfig::default(), None)
+                .is_err()
+        );
+
+        let args = Args::try_parse_from(["crabka-broker", "--record-decompression-max-ratio=101"])
+            .expect("parse positive ratio");
         assert!(
             args.apply_runtime_to(&mut BrokerConfig::default(), None)
                 .is_err()
@@ -1277,12 +1312,26 @@ mod tests {
                 ("CRABKA_CLEANER_INTERVAL", Some("17ms")),
                 ("CRABKA_SOCKET_REQUEST_MAX", Some("100MiB")),
                 ("CRABKA_LEADER_IMBALANCE_PER_BROKER", Some("10%")),
+                ("CRABKA_RECORD_DECOMPRESSION_MAX_RATIO", Some("50")),
+                ("CRABKA_RECORD_DECOMPRESSION_OUTPUT_FLOOR", Some("8MiB")),
+                ("CRABKA_RECORD_DECOMPRESSION_OUTPUT_CEILING", Some("512MiB")),
             ],
             || {
                 let args = Args::try_parse_from(["crabka-broker"]).expect("parse environment");
                 assert!(args.runtime.cleaner_interval == Some(Time::from_millis(17)));
                 assert!(args.runtime.socket_request_max == Some(crabka_units::mebibytes(100)));
                 assert!(args.leader_imbalance_per_broker == Some(crabka_units::fraction(0.1)));
+                assert!(
+                    args.runtime.record_decompression_max_ratio
+                        == Some(crabka_units::fraction(50.0))
+                );
+                let mut config = BrokerConfig::default();
+                args.apply_runtime_to(&mut config, None)
+                    .expect("apply environment runtime");
+                assert!(
+                    config.record_decompression_policy().unwrap().output_floor()
+                        == crabka_units::mebibytes(8)
+                );
             },
         );
     }

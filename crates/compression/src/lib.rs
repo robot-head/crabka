@@ -21,10 +21,11 @@
 //!
 //! ```rust
 //! use crabka_compression::{CompressionType, compress, decompress};
+//! use crabka_units::kibibytes;
 //!
 //! # fn run() -> Result<(), Box<dyn std::error::Error>> {
 //! let compressed = compress(CompressionType::Lz4, b"order-created")?;
-//! let plain = decompress(CompressionType::Lz4, &compressed, 1024)?;
+//! let plain = decompress(CompressionType::Lz4, &compressed, kibibytes(1))?;
 //! assert_eq!(plain.as_ref(), b"order-created");
 //! # Ok(())
 //! # }
@@ -35,7 +36,112 @@ mod error;
 
 use bytes::Bytes;
 pub use codec_type::CompressionType;
+use crabka_units::{
+    ByteSize, Ratio,
+    convert::{ByteSizeExt as _, RatioExt as _},
+    fraction, gibibytes, mebibytes,
+};
 pub use error::CompressionError;
+use refined_type::rule::MinMaxU64;
+
+/// Fixed security ceiling for record decompression expansion.
+pub const RECORD_DECOMPRESSION_HARD_MAX_RATIO: Ratio = fraction(100.0);
+
+/// Fixed security ceiling for a decompressed record payload.
+pub const RECORD_DECOMPRESSION_HARD_MAX_OUTPUT: ByteSize = gibibytes(1);
+
+const RECORD_DECOMPRESSION_HARD_MAX_OUTPUT_BYTES: u64 = 1_073_741_824;
+type RefinedRecordDecompressionBytes = MinMaxU64<1, RECORD_DECOMPRESSION_HARD_MAX_OUTPUT_BYTES>;
+
+/// Validated limits for decompressing untrusted Kafka record payloads.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RecordDecompressionPolicy {
+    max_ratio: Ratio,
+    output_floor: ByteSize,
+    output_ceiling: ByteSize,
+}
+
+impl RecordDecompressionPolicy {
+    /// Validate policy values against the fixed decompression security bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a non-positive or non-finite ratio, fractional or
+    /// non-positive byte limits, an inverted range, or a weakened hard bound.
+    pub fn new(
+        max_ratio: Ratio,
+        output_floor: ByteSize,
+        output_ceiling: ByteSize,
+    ) -> Result<Self, String> {
+        let ratio = max_ratio.as_f64();
+        if !ratio.is_finite()
+            || ratio <= 0.0
+            || ratio > RECORD_DECOMPRESSION_HARD_MAX_RATIO.as_f64()
+        {
+            return Err(
+                "record decompression ratio must be finite and within 0 < ratio <= 100".into(),
+            );
+        }
+        let floor = validated_whole_bytes("record decompression output floor", output_floor)?;
+        let ceiling = validated_whole_bytes("record decompression output ceiling", output_ceiling)?;
+        if floor > ceiling {
+            return Err("record decompression output floor exceeds ceiling".into());
+        }
+        Ok(Self {
+            max_ratio,
+            output_floor,
+            output_ceiling,
+        })
+    }
+
+    /// Return the maximum decompression expansion ratio.
+    #[must_use]
+    pub fn max_ratio(self) -> Ratio {
+        self.max_ratio
+    }
+
+    /// Return the minimum decompression output budget.
+    #[must_use]
+    pub fn output_floor(self) -> ByteSize {
+        self.output_floor
+    }
+
+    /// Return the maximum decompression output budget.
+    #[must_use]
+    pub fn output_ceiling(self) -> ByteSize {
+        self.output_ceiling
+    }
+
+    /// Calculate the output budget for a compressed payload.
+    #[must_use]
+    pub fn output_limit(self, compressed: ByteSize) -> ByteSize {
+        ByteSize::from_bytes_f64(
+            (compressed.bytes_f64() * self.max_ratio.as_f64())
+                .max(self.output_floor.bytes_f64())
+                .min(self.output_ceiling.bytes_f64()),
+        )
+    }
+}
+
+impl Default for RecordDecompressionPolicy {
+    fn default() -> Self {
+        Self {
+            max_ratio: RECORD_DECOMPRESSION_HARD_MAX_RATIO,
+            output_floor: mebibytes(16),
+            output_ceiling: RECORD_DECOMPRESSION_HARD_MAX_OUTPUT,
+        }
+    }
+}
+
+fn validated_whole_bytes(name: &str, value: ByteSize) -> Result<u64, String> {
+    let raw = value.bytes_f64();
+    if !raw.is_finite() || raw.fract() != 0.0 {
+        return Err(format!("{name} must be a positive whole number of bytes"));
+    }
+    RefinedRecordDecompressionBytes::new(value.bytes_u64())
+        .map(refined_type::Refined::into_value)
+        .map_err(|error| format!("{name}: {error}"))
+}
 
 /// Compress `data` using the codec identified by `ct`.
 ///
@@ -68,8 +174,11 @@ pub fn compress(ct: CompressionType, data: &[u8]) -> Result<Bytes, CompressionEr
 pub fn decompress(
     ct: CompressionType,
     data: &[u8],
-    max_output: usize,
+    max_output: ByteSize,
 ) -> Result<Bytes, CompressionError> {
+    // The per-codec decoders compare against buffer lengths and size
+    // allocations, so they keep the exact `usize` count.
+    let max_output = max_output.bytes_usize();
     match ct {
         CompressionType::None => {
             if data.len() > max_output {
@@ -141,6 +250,9 @@ fn zstd_decompress(_: &[u8], _: usize) -> Result<Bytes, CompressionError> {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::{
+        bytes, convert::ByteSizeExt as _, fraction, gibibytes, kibibytes, mebibytes,
+    };
 
     use super::*;
 
@@ -152,7 +264,7 @@ mod tests {
 
     #[test]
     fn passthrough_none_decompress() {
-        let out = decompress(CompressionType::None, b"abcdef", 1024).unwrap();
+        let out = decompress(CompressionType::None, b"abcdef", kibibytes(1)).unwrap();
         assert2::assert!(out.as_ref() == b"abcdef");
     }
 
@@ -160,7 +272,7 @@ mod tests {
     fn passthrough_none_decompress_respects_cap() {
         // Input larger than the cap is rejected even for the None passthrough.
         assert2::assert!(matches!(
-            decompress(CompressionType::None, b"abcdef", 3),
+            decompress(CompressionType::None, b"abcdef", bytes(3)),
             Err(CompressionError::TooLarge { limit: 3 })
         ));
     }
@@ -169,7 +281,32 @@ mod tests {
     fn passthrough_none_decompress_at_exact_cap() {
         // Boundary: input of exactly `max_output` bytes is allowed (the cap
         // check is `len > max_output`, not `>=`).
-        let out = decompress(CompressionType::None, b"abcdef", 6).unwrap();
+        let out = decompress(CompressionType::None, b"abcdef", bytes(6)).unwrap();
         assert2::assert!(out.as_ref() == b"abcdef");
+    }
+
+    #[test]
+    fn record_policy_preserves_existing_budget_curve() {
+        let policy = RecordDecompressionPolicy::default();
+        assert2::check!(policy.output_limit(bytes(1)) == mebibytes(16));
+        assert2::check!(policy.output_limit(mebibytes(1)) == mebibytes(100));
+        assert2::check!(policy.output_limit(mebibytes(11)) == gibibytes(1));
+    }
+
+    #[test]
+    fn record_policy_rejects_invalid_or_weakened_security_bounds() {
+        for result in [
+            RecordDecompressionPolicy::new(fraction(0.0), mebibytes(16), gibibytes(1)),
+            RecordDecompressionPolicy::new(fraction(101.0), mebibytes(16), gibibytes(1)),
+            RecordDecompressionPolicy::new(fraction(100.0), gibibytes(1), mebibytes(16)),
+            RecordDecompressionPolicy::new(fraction(100.0), mebibytes(16), gibibytes(2)),
+            RecordDecompressionPolicy::new(
+                fraction(100.0),
+                ByteSize::from_bytes_f64(0.5),
+                gibibytes(1),
+            ),
+        ] {
+            assert2::check!(result.is_err());
+        }
     }
 }
