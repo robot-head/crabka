@@ -12,7 +12,7 @@ use clap::{Parser, ValueEnum};
 use crabka_blockstore::{IndexSnapshotRetain, ProfileIndex};
 use crabka_client_consumer::ConsumerFetchMaxBytes;
 use crabka_client_producer::Producer;
-use crabka_pprof::UnionProfileStore;
+use crabka_pprof::{DebuginfodConfig, UnionProfileStore};
 use crabka_profiles::{
     blockbuilder::BlockBuilderConfig,
     cold_store::ColdProfileStore,
@@ -104,8 +104,30 @@ struct Cli {
     /// debuginfod base URLs (comma-separated) to fetch DWARF for unsymbolized
     /// native frames. Empty by default: the symbolizer makes NO outbound
     /// requests unless an operator explicitly opts in by supplying URLs.
-    #[arg(long = "debuginfod-url", value_delimiter = ',')]
+    #[arg(
+        long = "debuginfod-url",
+        env = "CRABKA_PROFILES_DEBUGINFOD_URLS",
+        value_delimiter = ','
+    )]
     debuginfod_urls: Vec<String>,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_DEBUGINFOD_MAX_ARTIFACT_SIZE",
+        value_parser = parse_positive_whole_byte_size
+    )]
+    debuginfod_max_artifact_size: Option<ByteSize>,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_DEBUGINFOD_CONNECT_TIMEOUT",
+        value_parser = parse::positive_time
+    )]
+    debuginfod_connect_timeout: Option<Time>,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_DEBUGINFOD_REQUEST_TIMEOUT",
+        value_parser = parse::positive_time
+    )]
+    debuginfod_request_timeout: Option<Time>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -139,6 +161,18 @@ fn parse_positive_whole_byte_size(value: &str) -> Result<ByteSize, String> {
         );
     }
     Ok(size)
+}
+
+fn debuginfod_config(cli: &Cli) -> Result<DebuginfodConfig, String> {
+    let defaults = DebuginfodConfig::default();
+    DebuginfodConfig::new(
+        cli.debuginfod_max_artifact_size
+            .unwrap_or(defaults.max_artifact_size()),
+        cli.debuginfod_connect_timeout
+            .unwrap_or(defaults.connect_timeout()),
+        cli.debuginfod_request_timeout
+            .unwrap_or(defaults.request_timeout()),
+    )
 }
 
 impl ConfiguredObjectStore {
@@ -198,6 +232,7 @@ fn spawn_profile_index_refresh(
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
+    let debuginfod_config = debuginfod_config(&cli)?;
     let _telemetry = crabka_telemetry::init(
         OtlpConfig::from_env(
             |k| std::env::var(k).ok(),
@@ -272,10 +307,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .unwrap_or_else(|_| ProfileIndex::new());
             let refresh_store = Arc::clone(&configured.store);
-            let cold = Arc::new(ColdProfileStore::new_with_debuginfod_urls(
+            let cold = Arc::new(ColdProfileStore::new_with_debuginfod_config(
                 configured.store,
                 Arc::new(index),
                 cli.debuginfod_urls.clone(),
+                debuginfod_config,
             )?);
             spawn_profile_index_refresh(
                 Arc::clone(&cold),
@@ -311,10 +347,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await
             .unwrap_or_else(|_| ProfileIndex::new());
             let refresh_store = Arc::clone(&configured.store);
-            let cold = Arc::new(ColdProfileStore::new_with_debuginfod_urls(
+            let cold = Arc::new(ColdProfileStore::new_with_debuginfod_config(
                 configured.store,
                 Arc::new(index),
                 cli.debuginfod_urls.clone(),
+                debuginfod_config,
             )?);
             spawn_profile_index_refresh(
                 Arc::clone(&cold),
@@ -347,7 +384,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let _ = tokio::signal::ctrl_c().await;
         }
         Target::Symbolizer => {
-            crabka_profiles::symbolizer::run(cli.debuginfod_urls).await?;
+            crabka_profiles::symbolizer::run_with_config(cli.debuginfod_urls, debuginfod_config)
+                .await?;
         }
         Target::Compactor => {
             let configured = build_object_store(&cli.object_store_url)
@@ -421,11 +459,103 @@ fn spawn_wal_tail(cli: &Cli, hot: WalTailProfileStore) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
     use assert2::{assert, check};
     use clap::Parser;
     use crabka_units::{bytes, per_sec};
 
     use super::*;
+
+    static ENV_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+    const DEBUGINFOD_ENV: [(&str, Option<&str>); 4] = [
+        ("CRABKA_PROFILES_DEBUGINFOD_URLS", None),
+        ("CRABKA_PROFILES_DEBUGINFOD_MAX_ARTIFACT_SIZE", None),
+        ("CRABKA_PROFILES_DEBUGINFOD_CONNECT_TIMEOUT", None),
+        ("CRABKA_PROFILES_DEBUGINFOD_REQUEST_TIMEOUT", None),
+    ];
+
+    #[test]
+    fn debuginfod_config_preserves_defaults_and_accepts_cli_units() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .expect("environment lock");
+        temp_env::with_vars(DEBUGINFOD_ENV, || {
+            let defaults = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
+            assert!(debuginfod_config(&defaults).unwrap() == DebuginfodConfig::default());
+
+            let custom = Cli::try_parse_from([
+                "crabka-profiles",
+                "--target",
+                "querier",
+                "--debuginfod-max-artifact-size",
+                "64MiB",
+                "--debuginfod-connect-timeout",
+                "250ms",
+                "--debuginfod-request-timeout",
+                "3s",
+            ])
+            .unwrap();
+            let config = debuginfod_config(&custom).unwrap();
+            assert!(config.max_artifact_size() == mebibytes(64));
+            assert!(config.connect_timeout() == crabka_units::millis(250));
+            assert!(config.request_timeout() == secs(3));
+        });
+    }
+
+    #[test]
+    fn debuginfod_config_reads_environment() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .expect("environment lock");
+        temp_env::with_vars(
+            [
+                (
+                    "CRABKA_PROFILES_DEBUGINFOD_URLS",
+                    Some("http://one.example,http://two.example"),
+                ),
+                (
+                    "CRABKA_PROFILES_DEBUGINFOD_MAX_ARTIFACT_SIZE",
+                    Some("32MiB"),
+                ),
+                ("CRABKA_PROFILES_DEBUGINFOD_CONNECT_TIMEOUT", Some("500ms")),
+                ("CRABKA_PROFILES_DEBUGINFOD_REQUEST_TIMEOUT", Some("4s")),
+            ],
+            || {
+                let cli =
+                    Cli::try_parse_from(["crabka-profiles", "--target", "symbolizer"]).unwrap();
+                let config = debuginfod_config(&cli).unwrap();
+                assert!(
+                    cli.debuginfod_urls
+                        == vec![
+                            "http://one.example".to_string(),
+                            "http://two.example".to_string()
+                        ]
+                );
+                assert!(config.max_artifact_size() == mebibytes(32));
+                assert!(config.connect_timeout() == crabka_units::millis(500));
+                assert!(config.request_timeout() == secs(4));
+            },
+        );
+    }
+
+    #[test]
+    fn debuginfod_config_rejects_connect_timeout_beyond_request_timeout() {
+        let cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "symbolizer",
+            "--debuginfod-connect-timeout",
+            "5s",
+            "--debuginfod-request-timeout",
+            "4s",
+        ])
+        .unwrap();
+
+        assert!(debuginfod_config(&cli).is_err());
+    }
 
     #[test]
     fn parses_distributor_target() {
