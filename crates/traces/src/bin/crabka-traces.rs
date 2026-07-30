@@ -402,6 +402,8 @@ async fn run_block_builder(
         Some("crabka-traces-block-builder"),
         cli.wal_fetch_max,
         cli.wal_fetch_partition_max,
+        cli.client_dispatch_queue_capacity,
+        cli.client_frame_max,
     )
     .await?;
     let configured = build_object_store(&cli)?;
@@ -448,6 +450,8 @@ async fn run_live_store(
         None,
         cli.wal_fetch_max,
         cli.wal_fetch_partition_max,
+        cli.client_dispatch_queue_capacity,
+        cli.client_frame_max,
     )
     .await?;
     let store = Arc::new(RwLock::new(LiveStore::new(cli.retention_ns)));
@@ -488,6 +492,8 @@ async fn run_querier(
             None,
             cli.wal_fetch_max,
             cli.wal_fetch_partition_max,
+            cli.client_dispatch_queue_capacity,
+            cli.client_frame_max,
         )
         .await?;
         let live_shutdown = shutdown.clone();
@@ -963,6 +969,8 @@ async fn run_metrics_generator(
         None,
         cli.wal_fetch_max,
         cli.wal_fetch_partition_max,
+        cli.client_dispatch_queue_capacity,
+        cli.client_frame_max,
     )
     .await?;
     let source = Arc::new(KafkaSpanSource::new(consumer));
@@ -1025,6 +1033,8 @@ async fn wal_consumer(
     group_instance_id: Option<&str>,
     fetch_max: ByteSize,
     fetch_partition_max: ByteSize,
+    client_dispatch_queue_capacity: usize,
+    client_frame_max: ByteSize,
 ) -> Result<Consumer, crabka_client_consumer::ConsumerError> {
     // Boxed: consumer startup (bootstrap resolve, double `JoinGroup`,
     // `SyncGroup`, offset priming) builds a ~13 KB future. Every role that
@@ -1038,6 +1048,8 @@ async fn wal_consumer(
             .maybe_group_instance_id(group_instance_id)
             .fetch_max(fetch_max)
             .fetch_partition_max(fetch_partition_max)
+            .dispatch_queue_capacity(client_dispatch_queue_capacity)
+            .frame_max(client_frame_max)
             .subscribe(vec![TRACES_WAL_TOPIC.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .build(),
