@@ -23,6 +23,8 @@ use crate::{partition::Partition, partition_registry::PartitionRegistry};
 const UNKNOWN_BROKER_EPOCH: i64 = -1;
 
 pub(crate) struct Config {
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub node_id: NodeId,
     pub scan_interval: Duration,
     pub partitions: Arc<PartitionRegistry>,
@@ -84,6 +86,7 @@ pub(crate) async fn run(cfg: Config) {
                 part.index.get(),
                 proposal.new_isr,
                 proposal.leader_epoch.0,
+                (cfg.client_dispatch_queue_capacity, cfg.client_frame_max),
             )
             .await
             {
@@ -160,6 +163,10 @@ async fn send_alter_partition(
     partition: i32,
     new_isr: Vec<NodeId>,
     leader_epoch: i32,
+    client_resource_policy: (
+        crabka_client_core::ConnectionDispatchQueueCapacity,
+        crabka_client_core::ClientFrameMax,
+    ),
 ) -> Result<(), String> {
     let image = controller.current_image();
     let leader_id = *controller.watch_leader().borrow();
@@ -175,7 +182,15 @@ async fn send_alter_partition(
         build_alter_partition_request(&image, broker_id, topic, partition, &new_isr, leader_epoch);
     let mut last_err = String::new();
     for (target_id, addr) in targets {
-        match send_alter_partition_to(broker_id, &addr, req.clone()).await {
+        match send_alter_partition_to(
+            broker_id,
+            &addr,
+            req.clone(),
+            client_resource_policy.0,
+            client_resource_policy.1,
+        )
+        .await
+        {
             Ok(()) => {
                 debug!(
                     topic = topic,
@@ -309,10 +324,14 @@ async fn send_alter_partition_to(
     broker_id: i32,
     addr: &str,
     req: AlterPartitionRequest,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
 ) -> Result<(), AlterPartitionSendError> {
     let client = crabka_client_core::Client::builder()
         .bootstrap(addr.to_string())
         .client_id(format!("crabka-broker-{broker_id}-isr"))
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await
         .map_err(|e| AlterPartitionSendError::Transport(format!("connect: {e}")))?;
@@ -627,6 +646,9 @@ mod tests {
         let metrics = crate::metrics::BrokerMetrics::default();
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(run(Config {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             node_id: NodeId(1),
             scan_interval: Duration::from_millis(7),
             partitions,
@@ -719,9 +741,20 @@ mod tests {
             TestMetadataSource::new(MetadataImage::new(uuid::Uuid::nil()), None),
         );
 
-        let err = send_alter_partition(&controller, 1, "orders", 0, vec![NodeId(1)], 3)
-            .await
-            .expect_err("missing controller leader should reject the send");
+        let err = send_alter_partition(
+            &controller,
+            1,
+            "orders",
+            0,
+            vec![NodeId(1)],
+            3,
+            (
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+                crabka_client_core::ClientFrameMax::default(),
+            ),
+        )
+        .await
+        .expect_err("missing controller leader should reject the send");
 
         assert_eq!(err, "no controller leader");
     }
@@ -732,9 +765,15 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
 
-        let err = send_alter_partition_to(1, &addr.to_string(), AlterPartitionRequest::default())
-            .await
-            .expect_err("closed local port should fail as transport");
+        let err = send_alter_partition_to(
+            1,
+            &addr.to_string(),
+            AlterPartitionRequest::default(),
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            crabka_client_core::ClientFrameMax::default(),
+        )
+        .await
+        .expect_err("closed local port should fail as transport");
 
         assert!(matches!(err, AlterPartitionSendError::Transport(_)));
     }

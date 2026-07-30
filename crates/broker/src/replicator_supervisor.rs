@@ -239,7 +239,11 @@ trait AssignDirsReporter: Send + Sync {
     ) -> Result<(), String>;
 }
 
-struct NetworkAssignDirsReporter;
+#[derive(Default)]
+struct NetworkAssignDirsReporter {
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
+}
 
 #[async_trait::async_trait]
 impl AssignDirsReporter for NetworkAssignDirsReporter {
@@ -249,7 +253,14 @@ impl AssignDirsReporter for NetworkAssignDirsReporter {
         client_id: &str,
         req: crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest,
     ) -> Result<(), String> {
-        crate::assign_dirs::send_assignments(controller, client_id, req).await
+        crate::assign_dirs::send_assignments_with_policy(
+            controller,
+            client_id,
+            req,
+            self.dispatch_queue_capacity,
+            self.frame_max,
+        )
+        .await
     }
 }
 
@@ -323,6 +334,8 @@ pub(crate) struct ReplicatorSupervisor {
 }
 
 pub(crate) struct ReplicatorSupervisorConfig {
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub node_id: NodeId,
     pub broker_id: i32,
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
@@ -353,6 +366,8 @@ pub(crate) struct ReplicatorSupervisorConfig {
 impl ReplicatorSupervisor {
     pub(crate) fn new(config: ReplicatorSupervisorConfig) -> Self {
         let ReplicatorSupervisorConfig {
+            client_dispatch_queue_capacity,
+            client_frame_max,
             node_id,
             broker_id,
             controller,
@@ -414,7 +429,10 @@ impl ReplicatorSupervisor {
             wal_shards,
             reported_dirs: dashmap::DashMap::new(),
             known_topic_ids: Mutex::new(known_topic_ids),
-            assign_dirs_reporter: Arc::new(NetworkAssignDirsReporter),
+            assign_dirs_reporter: Arc::new(NetworkAssignDirsReporter {
+                dispatch_queue_capacity: client_dispatch_queue_capacity,
+                frame_max: client_frame_max,
+            }),
         }
     }
 
@@ -954,6 +972,9 @@ mod tests {
         let partitions = Arc::new(PartitionRegistry::new());
         let reporter = Arc::new(CountingAssignDirsReporter::default());
         let mut supervisor = ReplicatorSupervisor::new(ReplicatorSupervisorConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             node_id: NodeId(2),
             broker_id: 2,
             controller: Arc::new(StaticMetadataSource::new(image)),
@@ -992,7 +1013,7 @@ mod tests {
         // (here: no controller leader elected), not swallow it into Ok(()).
         let source: Arc<dyn crate::metadata_source::MetadataSource> =
             Arc::new(StaticMetadataSource::new(MetadataImage::new(Uuid::nil())));
-        let err = NetworkAssignDirsReporter
+        let err = NetworkAssignDirsReporter::default()
             .send(
                 &source,
                 "test",

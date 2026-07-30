@@ -19,6 +19,10 @@ use tracing::{debug, warn};
 /// Static configuration for the observer.
 #[derive(Clone)]
 pub struct ObserverConfig {
+    /// Capacity used by outbound observer connections.
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    /// Maximum frame size used by outbound observer connections.
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     /// Controller-listener voter map `(id, "<host>:<port>")` from
     /// `controller_quorum_voters`. The host is carried verbatim; the dialer
     /// re-resolves it per connect so a rejoining peer's new pod IP is reached.
@@ -118,6 +122,8 @@ async fn fetch_once(
 
     let opts = crabka_client_core::ConnectionOptions {
         client_id: config.client_id.clone(),
+        dispatch_queue_capacity: config.client_dispatch_queue_capacity,
+        frame_max: config.client_frame_max,
         ..crabka_client_core::ConnectionOptions::default()
     };
     let conn = match config.dialer.dial(target, addr, opts).await {
@@ -462,6 +468,9 @@ mod tests {
     #[tokio::test]
     async fn cancel_drains_background_task() {
         let observer = MetadataObserver::start(ObserverConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             voters: vec![],
             dialer: Arc::new(crabka_raft::PlaintextDialer),
             client_id: "cancel-test".into(),
@@ -496,6 +505,9 @@ mod tests {
         let sleeper = MockSleeper::new();
         let timeline = sleeper.timeline();
         let observer = MetadataObserver::start(ObserverConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             voters: vec![(crabka_raft::NodeId(1), mock.addr.to_string())],
             dialer: Arc::new(CountingDialer {
                 dial_count: dial_count.clone(),
@@ -569,6 +581,9 @@ mod tests {
         let client_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let observer = MetadataObserver::start(ObserverConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             voters: vec![(crabka_raft::NodeId(1), ctrl_addr.to_string())],
             dialer: Arc::new(RecordingDialer {
                 client_ids: client_ids.clone(),

@@ -92,6 +92,8 @@ pub struct ControllerHandle {
     /// Directory holding the metadata log + KIP-630 `.checkpoint` artifacts.
     data_dir: std::path::PathBuf,
     client_id: String,
+    client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    client_frame_max: crabka_client_core::ClientFrameMax,
     /// This node's own id. Used by [`ReconfigOps::is_leader`].
     self_node_id: NodeId,
     /// Static voter set. KIP-853 dynamic membership is not supported.
@@ -339,6 +341,8 @@ impl ControllerHandle {
         let transport = DialerSubmitTransport {
             dialer: self.dialer.as_ref(),
             client_id: &self.client_id,
+            client_dispatch_queue_capacity: self.client_dispatch_queue_capacity,
+            client_frame_max: self.client_frame_max,
         };
         forward_submit_via(&transport, leader, addr, records).await
     }
@@ -364,6 +368,8 @@ impl ControllerHandle {
 
         let opts = crabka_client_core::ConnectionOptions {
             client_id: self.client_id.clone(),
+            dispatch_queue_capacity: self.client_dispatch_queue_capacity,
+            frame_max: self.client_frame_max,
             ..crabka_client_core::ConnectionOptions::default()
         };
         let conn = self
@@ -448,6 +454,8 @@ trait SubmitChangeTransport: Send + Sync {
 struct DialerSubmitTransport<'a> {
     dialer: &'a dyn OutboundDialer,
     client_id: &'a str,
+    client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    client_frame_max: crabka_client_core::ClientFrameMax,
 }
 
 #[async_trait::async_trait]
@@ -466,6 +474,8 @@ impl SubmitChangeTransport for DialerSubmitTransport<'_> {
     ) -> Result<bytes::Bytes, crabka_client_core::ClientError> {
         let opts = crabka_client_core::ConnectionOptions {
             client_id: self.client_id.to_owned(),
+            dispatch_queue_capacity: self.client_dispatch_queue_capacity,
+            frame_max: self.client_frame_max,
             ..crabka_client_core::ConnectionOptions::default()
         };
         let conn = self.dialer.dial(leader, addr, opts).await?;
@@ -708,6 +718,8 @@ impl Controller {
             voters.clone(),
             config.client_id.clone(),
             Arc::clone(&dialer),
+            config.client_dispatch_queue_capacity,
+            config.client_frame_max,
         ));
 
         let election_ms = u64::try_from(config.election_timeout.as_millis()).unwrap_or(1_000);
@@ -757,6 +769,8 @@ impl Controller {
             listener_task: Mutex::new(Some(listener_task)),
             data_dir,
             client_id: config.client_id.clone(),
+            client_dispatch_queue_capacity: config.client_dispatch_queue_capacity,
+            client_frame_max: config.client_frame_max,
             self_node_id: config.node_id,
             voters,
             dialer,

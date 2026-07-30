@@ -36,7 +36,9 @@ use std::{
 use async_trait::async_trait;
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_client_core::Client;
+use crabka_client_core::{
+    Client, ClientFrameMax, ConnectionDispatchQueueCapacity, ConnectionOptions,
+};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use crabka_protocol::{
     owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
@@ -152,6 +154,10 @@ pub struct KafkaMetadataLogConfig {
     pub fetch_retry_backoff: Time,
     /// Capacity of the shared metadata-event delivery queue.
     pub event_queue_capacity: MetadataEventQueueCapacity,
+    /// Capacity of every outbound Kafka connection's dispatch queue.
+    pub dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    /// Maximum frame size for every outbound Kafka connection.
+    pub frame_max: ClientFrameMax,
 }
 
 impl KafkaMetadataLogConfig {
@@ -170,6 +176,8 @@ impl KafkaMetadataLogConfig {
             fetch_max_bytes: DEFAULT_METADATA_FETCH_MAX_BYTES,
             fetch_retry_backoff: DEFAULT_METADATA_FETCH_RETRY_BACKOFF,
             event_queue_capacity: MetadataEventQueueCapacity::default(),
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::default(),
+            frame_max: ClientFrameMax::default(),
         }
     }
 
@@ -240,6 +248,8 @@ pub struct KafkaMetadataEventLog {
     fetch_max_bytes: ByteSize,
     fetch_retry_backoff: Time,
     event_queue_capacity: MetadataEventQueueCapacity,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
     subscriptions: tokio::sync::Mutex<Vec<Arc<ConsumerState>>>,
 }
 
@@ -266,6 +276,8 @@ impl KafkaMetadataEventLog {
         let producer = Producer::builder()
             .bootstrap(cfg.bootstrap.clone())
             .client_id(format!("{}-producer", cfg.client_id))
+            .dispatch_queue_capacity(cfg.dispatch_queue_capacity.get())
+            .frame_max(cfg.frame_max.size())
             .acks(Acks::All)
             .enable_idempotence(true)
             .maybe_security(cfg.security.clone())
@@ -277,6 +289,8 @@ impl KafkaMetadataEventLog {
         let client = Client::builder()
             .bootstrap(cfg.bootstrap.clone())
             .client_id(format!("{}-client", cfg.client_id))
+            .dispatch_queue_capacity(cfg.dispatch_queue_capacity.get())
+            .frame_max(cfg.frame_max.size())
             .maybe_security(cfg.security.clone())
             .build()
             .await
@@ -295,6 +309,8 @@ impl KafkaMetadataEventLog {
             fetch_max_bytes: cfg.fetch_max_bytes,
             fetch_retry_backoff: cfg.fetch_retry_backoff,
             event_queue_capacity: cfg.event_queue_capacity,
+            dispatch_queue_capacity: cfg.dispatch_queue_capacity,
+            frame_max: cfg.frame_max,
             subscriptions: tokio::sync::Mutex::new(Vec::new()),
         }))
     }
@@ -330,6 +346,8 @@ struct ConsumerState {
     fetch_max_wait: Time,
     fetch_max_bytes: ByteSize,
     fetch_retry_backoff: Time,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
     /// partition -> cancel token for its fetch task.
     tasks: StdMutex<HashMap<i32, CancellationToken>>,
 }
@@ -444,6 +462,8 @@ impl MetadataEventLog for KafkaMetadataEventLog {
             fetch_max_wait: self.fetch_max_wait,
             fetch_max_bytes: self.fetch_max_bytes,
             fetch_retry_backoff: self.fetch_retry_backoff,
+            dispatch_queue_capacity: self.dispatch_queue_capacity,
+            frame_max: self.frame_max,
             tasks: StdMutex::new(HashMap::new()),
         });
         for ps in assignment {
@@ -527,10 +547,18 @@ fn metadata_event_channel(
 /// `CreateTopics` outcome does not reliably carry it).
 #[instrument(skip_all, fields(topic = %cfg.topic), err)]
 async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), MetadataLogError> {
-    let mut admin =
-        AdminClient::connect_secured(std::slice::from_ref(&cfg.bootstrap), cfg.security.clone())
-            .await
-            .map_err(|e| MetadataLogError::Other(format!("admin connect failed: {e}")))?;
+    let mut admin = AdminClient::connect_with_options(
+        std::slice::from_ref(&cfg.bootstrap),
+        ConnectionOptions {
+            client_id: format!("{}-admin", cfg.client_id),
+            dispatch_queue_capacity: cfg.dispatch_queue_capacity,
+            frame_max: cfg.frame_max,
+            security: cfg.security.clone().map(Box::new),
+            ..ConnectionOptions::default()
+        },
+    )
+    .await
+    .map_err(|e| MetadataLogError::Other(format!("admin connect failed: {e}")))?;
 
     let topic_ref = cfg.topic.as_str();
     let meta = admin
@@ -635,7 +663,7 @@ async fn partition_fetch_loop(
 ) {
     use std::net::ToSocketAddrs;
 
-    use crabka_client_core::{Connection, ConnectionOptions, fetch_partition};
+    use crabka_client_core::{Connection, fetch_partition};
 
     // Dedicated connection for this partition's fetch loop. Resolve the
     // bootstrap address; on failure, warn and exit. The partition then
@@ -653,6 +681,8 @@ async fn partition_fetch_loop(
     };
     let opts = ConnectionOptions {
         client_id: state.client_id.clone(),
+        dispatch_queue_capacity: state.dispatch_queue_capacity,
+        frame_max: state.frame_max,
         security: state.security.clone().map(Box::new),
         ..Default::default()
     };
@@ -892,6 +922,17 @@ mod tests {
     }
 
     #[test]
+    fn config_carries_client_resource_policy() {
+        let cfg = KafkaMetadataLogConfig {
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::new(7).unwrap(),
+            frame_max: ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap(),
+            ..KafkaMetadataLogConfig::new("127.0.0.1:9092")
+        };
+        check!(cfg.dispatch_queue_capacity.get() == 7);
+        check!(cfg.frame_max.size() == crabka_units::kibibytes(32));
+    }
+
+    #[test]
     fn config_carries_security() {
         use crabka_client_core::security::{ClientSecurity, SaslCredentials};
         use crabka_security::ListenerProtocol;
@@ -928,6 +969,8 @@ mod tests {
             fetch_max_wait: millis(750),
             fetch_max_bytes: mebibytes(2),
             fetch_retry_backoff: millis(300),
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::default(),
+            frame_max: ClientFrameMax::default(),
             tasks: StdMutex::new(HashMap::new()),
         });
         check!(state.fetch_max_wait == millis(750));

@@ -83,14 +83,39 @@ impl<T: AsyncRead + AsyncWrite + Unpin + Send + ?Sized> DuplexStream for T {}
 pub struct InterBrokerClient {
     tls_connector: Option<TlsConnector>,
     creds: Option<InterBrokerCredentials>,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
 }
 
 impl InterBrokerClient {
+    fn apply_resource_policy(&self, options: &mut crabka_client_core::ConnectionOptions) {
+        options.dispatch_queue_capacity = self.dispatch_queue_capacity;
+        options.frame_max = self.frame_max;
+    }
+
     #[must_use]
     pub fn new(tls_connector: Option<TlsConnector>, creds: Option<InterBrokerCredentials>) -> Self {
+        Self::new_with_policy(
+            tls_connector,
+            creds,
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            crabka_client_core::ClientFrameMax::default(),
+        )
+    }
+
+    /// Construct with the broker process's outbound client resource policy.
+    #[must_use]
+    pub fn new_with_policy(
+        tls_connector: Option<TlsConnector>,
+        creds: Option<InterBrokerCredentials>,
+        dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+        frame_max: crabka_client_core::ClientFrameMax,
+    ) -> Self {
         Self {
             tls_connector,
             creds,
+            dispatch_queue_capacity,
+            frame_max,
         }
     }
 
@@ -154,8 +179,9 @@ impl InterBrokerClient {
         port: u16,
         listener_protocol: ListenerProtocol,
         server_name: &str,
-        options: crabka_client_core::ConnectionOptions,
+        mut options: crabka_client_core::ConnectionOptions,
     ) -> Result<crabka_client_core::Connection, InterBrokerError> {
+        self.apply_resource_policy(&mut options);
         // Build the auth'd stream directly into a `Box<dyn ClientDuplex>`
         // (rather than `Box<dyn DuplexStream>`) so it lines up with
         // `Connection::from_stream` without an unsizing coercion that
@@ -271,5 +297,24 @@ impl crabka_raft::OutboundDialer for InterBrokerDialer {
                     "InterBrokerClient dial: {other}"
                 ))),
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::InterBrokerClient;
+
+    #[test]
+    fn process_policy_overrides_call_site_defaults() {
+        let client = InterBrokerClient::new_with_policy(
+            None,
+            None,
+            crabka_client_core::ConnectionDispatchQueueCapacity::new(7).unwrap(),
+            crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap(),
+        );
+        let mut options = crabka_client_core::ConnectionOptions::default();
+        client.apply_resource_policy(&mut options);
+        assert2::assert!(options.dispatch_queue_capacity.get() == 7);
+        assert2::assert!(options.frame_max.size() == crabka_units::kibibytes(32));
     }
 }

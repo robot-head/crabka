@@ -22,6 +22,9 @@ use crabka_broker::{
         parse_positive_i16, parse_positive_i32, parse_positive_i64,
     },
 };
+use crabka_client_core::{
+    ClientFrameMax, ConnectionDispatchQueueCapacity, DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+};
 use crabka_log::LogConfig;
 use crabka_units::{ByteSize, Ratio, Time, convert::TimeExt as _, fmt::Human as _};
 
@@ -65,6 +68,20 @@ fn parse_streams_assignor(
 
 #[derive(Debug, clap::Args)]
 struct RuntimeArgs {
+    #[arg(
+        long,
+        env = "CRABKA_BROKER_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    #[arg(
+        long,
+        env = "CRABKA_BROKER_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
     #[arg(long, env = "CRABKA_STARTUP_LEADER_WAIT_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
     startup_leader_wait_timeout: Option<Time>,
     #[arg(long, env = "CRABKA_SELF_REGISTRATION_BACKOFF_MIN", value_parser = crabka_units::parse::positive_time)]
@@ -841,6 +858,11 @@ impl Args {
         let runtime = self.runtime_overlay();
         let cli_shutdown = runtime.controlled_shutdown_drain_timeout;
         runtime.apply_to(cfg).map_err(|error| error.to_string())?;
+        cfg.client_dispatch_queue_capacity =
+            ConnectionDispatchQueueCapacity::new(self.runtime.client_dispatch_queue_capacity)
+                .expect("validated by clap");
+        cfg.client_frame_max =
+            ClientFrameMax::try_from(self.runtime.client_frame_max).expect("validated by clap");
         cfg.validate().map_err(|error| error.to_string())?;
         Ok(cli_shutdown
             .or(file_shutdown)
@@ -905,6 +927,17 @@ impl Args {
             _ => None,
         }
     }
+}
+
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    ConnectionDispatchQueueCapacity::new(value).map(ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ClientFrameMax::try_from(value).map(ClientFrameMax::size)
 }
 
 #[tokio::main]
@@ -1285,6 +1318,19 @@ mod tests {
                 false,
             ),
             (
+                vec!["crabka-broker", "--client-dispatch-queue-capacity=0"],
+                false,
+            ),
+            (vec!["crabka-broker", "--client-frame-max=101MiB"], false),
+            (
+                vec![
+                    "crabka-broker",
+                    "--client-dispatch-queue-capacity=7",
+                    "--client-frame-max=32KiB",
+                ],
+                true,
+            ),
+            (
                 vec![
                     "crabka-broker",
                     "--record-decompression-output-ceiling=512MiB",
@@ -1341,6 +1387,8 @@ mod tests {
                 ("CRABKA_RECORD_DECOMPRESSION_MAX_RATIO", Some("50")),
                 ("CRABKA_RECORD_DECOMPRESSION_OUTPUT_FLOOR", Some("8MiB")),
                 ("CRABKA_RECORD_DECOMPRESSION_OUTPUT_CEILING", Some("512MiB")),
+                ("CRABKA_BROKER_CLIENT_DISPATCH_QUEUE_CAPACITY", Some("7")),
+                ("CRABKA_BROKER_CLIENT_FRAME_MAX", Some("32KiB")),
             ],
             || {
                 let args = Args::try_parse_from(["crabka-broker"]).expect("parse environment");
@@ -1360,6 +1408,41 @@ mod tests {
                     config.record_decompression_policy().unwrap().output_floor()
                         == crabka_units::mebibytes(8)
                 );
+                assert!(config.client_dispatch_queue_capacity.get() == 7);
+                assert!(config.client_frame_max.size() == crabka_units::kibibytes(32));
+            },
+        );
+    }
+
+    #[test]
+    fn client_resource_policy_defaults_and_cli_precedence() {
+        let defaults = Args::try_parse_from(["crabka-broker"]).expect("parse defaults");
+        let mut config = BrokerConfig::default();
+        defaults
+            .apply_runtime_to(&mut config, None)
+            .expect("apply defaults");
+        assert!(config.client_dispatch_queue_capacity.get() == 64);
+        assert!(config.client_frame_max.size() == crabka_units::mebibytes(100));
+
+        let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().expect("environment lock");
+        temp_env::with_vars(
+            [
+                ("CRABKA_BROKER_CLIENT_DISPATCH_QUEUE_CAPACITY", Some("7")),
+                ("CRABKA_BROKER_CLIENT_FRAME_MAX", Some("32KiB")),
+            ],
+            || {
+                let args = Args::try_parse_from([
+                    "crabka-broker",
+                    "--client-dispatch-queue-capacity=9",
+                    "--client-frame-max=64KiB",
+                ])
+                .expect("parse CLI overrides");
+                let mut config = BrokerConfig::default();
+                args.apply_runtime_to(&mut config, None)
+                    .expect("apply CLI overrides");
+                assert!(config.client_dispatch_queue_capacity.get() == 9);
+                assert!(config.client_frame_max.size() == crabka_units::kibibytes(64));
             },
         );
     }

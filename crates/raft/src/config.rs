@@ -72,6 +72,10 @@ pub enum BootstrapMode {
 
 #[derive(Clone)]
 pub struct ControllerConfig {
+    /// Capacity used by outbound controller client connections.
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    /// Maximum frame size used by outbound controller client connections.
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub node_id: NodeId,
     /// Endpoints used only to discover the leader at cold start (KIP-853 dynamic).
     pub bootstrap_servers: Vec<SocketAddr>,
@@ -122,6 +126,11 @@ pub struct ControllerConfig {
 impl std::fmt::Debug for ControllerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ControllerConfig")
+            .field(
+                "client_dispatch_queue_capacity",
+                &self.client_dispatch_queue_capacity,
+            )
+            .field("client_frame_max", &self.client_frame_max)
             .field("node_id", &self.node_id.0)
             .field("bootstrap_servers", &self.bootstrap_servers)
             .field("directory_id", &self.directory_id)
@@ -171,6 +180,9 @@ impl ControllerConfig {
         let listen: SocketAddr = "127.0.0.1:0".parse().expect("static");
         let directory_id = Uuid::from_u128(u128::from(node_id.0));
         Self {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             node_id,
             bootstrap_servers: vec![],
             directory_id,

@@ -317,6 +317,8 @@ async fn start_metadata_source(
     } = transport;
     if config.is_controller() {
         let controller_config = crabka_raft::ControllerConfig {
+            client_dispatch_queue_capacity: config.client_dispatch_queue_capacity,
+            client_frame_max: config.client_frame_max,
             node_id: config.node_id,
             bootstrap_servers: config.bootstrap_servers.clone(),
             directory_id: config.directory_id,
@@ -353,6 +355,8 @@ async fn start_metadata_source(
     let dialer = dialer.expect("broker-only node requires a raft dialer");
     let observer = crate::metadata_observer::MetadataObserver::start(
         crate::metadata_observer::ObserverConfig {
+            client_dispatch_queue_capacity: config.client_dispatch_queue_capacity,
+            client_frame_max: config.client_frame_max,
             voters: config.controller_quorum_voters.clone(),
             dialer: Arc::clone(&dialer),
             client_id: format!("crabka-broker-{}-observer", config.broker_id),
@@ -363,6 +367,8 @@ async fn start_metadata_source(
         },
     );
     let forwarder = crate::metadata_source::QuorumForwarder {
+        client_dispatch_queue_capacity: config.client_dispatch_queue_capacity,
+        client_frame_max: config.client_frame_max,
         voters: config.controller_quorum_voters.clone(),
         dialer,
         client_id: format!("crabka-broker-{}-writer", config.broker_id),
@@ -1122,6 +1128,8 @@ fn spawn_storage_security_maintenance(
 ) -> Option<JoinHandle<()>> {
     tokio::spawn(crate::isr_maintenance::run(
         crate::isr_maintenance::Config {
+            client_dispatch_queue_capacity: config.client_dispatch_queue_capacity,
+            client_frame_max: config.client_frame_max,
             node_id: config.node_id,
             partitions: Arc::clone(partitions),
             controller: Arc::clone(controller),
@@ -1305,6 +1313,8 @@ fn kafka_swap_kickoff(config: &BrokerConfig) -> Option<KafkaSwapKickoff> {
     };
     Some(KafkaSwapKickoff {
         cfg: crate::config::KafkaRlmmConfig {
+            dispatch_queue_capacity: config.client_dispatch_queue_capacity,
+            frame_max: config.client_frame_max,
             bootstrap,
             num_partitions: metadata_config.num_partitions,
             replication: metadata_config.replication,
@@ -1803,6 +1813,8 @@ fn spawn_replicator_supervisor(
         });
     crate::replicator_supervisor::ReplicatorSupervisor::new(
         crate::replicator_supervisor::ReplicatorSupervisorConfig {
+            client_dispatch_queue_capacity: config.client_dispatch_queue_capacity,
+            client_frame_max: config.client_frame_max,
             node_id: config.node_id,
             broker_id: config.broker_id,
             controller: Arc::clone(controller),
@@ -2011,9 +2023,11 @@ async fn prepare_startup_transport(config: &BrokerConfig) -> Result<StartupTrans
         .transpose()
         .map_err(|error| BrokerError::Tls(error.to_string()))?
         .map(tokio_rustls::TlsConnector::from);
-    let inter_broker_client = Arc::new(crate::network::client::InterBrokerClient::new(
+    let inter_broker_client = Arc::new(crate::network::client::InterBrokerClient::new_with_policy(
         tls_connector,
         config.inter_broker_credentials.clone(),
+        config.client_dispatch_queue_capacity,
+        config.client_frame_max,
     ));
     Ok(StartupTransport {
         tls_dynamic,
@@ -3815,6 +3829,8 @@ fn metadata_log_config(
     client_id: String,
 ) -> crabka_remote_storage_topic::KafkaMetadataLogConfig {
     crabka_remote_storage_topic::KafkaMetadataLogConfig {
+        dispatch_queue_capacity: config.dispatch_queue_capacity,
+        frame_max: config.frame_max,
         bootstrap: config.bootstrap.clone(),
         topic,
         num_partitions: config.num_partitions,
@@ -6527,6 +6543,10 @@ protocol = "Plaintext"
     #[test]
     fn metadata_log_config_copies_shared_transport_policy() {
         let policy = crate::config::KafkaRlmmConfig {
+            dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::new(7)
+                .unwrap(),
+            frame_max: crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32))
+                .unwrap(),
             bootstrap: "broker-0:9094".into(),
             num_partitions: 8,
             replication: 2,
@@ -6561,6 +6581,8 @@ protocol = "Plaintext"
             check!(config.fetch_max_bytes == mebibytes(2));
             check!(config.fetch_retry_backoff == millis(300));
             check!(config.event_queue_capacity.capacity() == 2048);
+            check!(config.dispatch_queue_capacity.get() == 7);
+            check!(config.frame_max.size() == crabka_units::kibibytes(32));
         }
         check!(rlmm.topic == crabka_remote_storage_topic::METADATA_TOPIC);
         check!(rlmm.client_id == "rlmm-client");

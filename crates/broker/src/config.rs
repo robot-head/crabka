@@ -142,6 +142,12 @@ impl Default for ReplicationRuntimeConfig {
 #[derive(Debug, Clone)]
 // a broad config struct; flags are independent knobs
 pub struct BrokerConfig {
+    /// Capacity used by every outbound Kafka client connection owned by this
+    /// broker process.
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    /// Maximum frame size used by every outbound Kafka client connection owned
+    /// by this broker process.
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     /// Maximum time to wait for a controller leader during startup.
     pub startup_leader_wait_timeout: Time,
     /// Initial delay between self-registration attempts.
@@ -703,6 +709,10 @@ pub struct BrokerConfig {
 /// comparable, and nothing compares this config by value.
 #[derive(Debug, Clone)]
 pub struct KafkaRlmmConfig {
+    /// Capacity of every Kafka metadata-log client dispatch queue.
+    pub dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    /// Maximum frame size for every Kafka metadata-log client.
+    pub frame_max: crabka_client_core::ClientFrameMax,
     /// `host:port` the manager dials to reach its own broker (loopback
     /// in a single-broker setup, the inter-broker listener in a
     /// multi-broker setup).
@@ -767,6 +777,8 @@ pub enum RlmmKind {
 impl Default for KafkaRlmmConfig {
     fn default() -> Self {
         Self {
+            dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            frame_max: crabka_client_core::ClientFrameMax::default(),
             bootstrap: String::new(),
             num_partitions: DEFAULT_RLMM_TOPIC_NUM_PARTITIONS,
             replication: DEFAULT_RLMM_TOPIC_REPLICATION_FACTOR,
@@ -793,6 +805,8 @@ impl KafkaRlmmConfig {
     /// runtime consumer.
     pub fn validate(&self) -> Result<(), BrokerError> {
         let transport = crabka_remote_storage_topic::KafkaMetadataLogConfig {
+            dispatch_queue_capacity: self.dispatch_queue_capacity,
+            frame_max: self.frame_max,
             topic_create_timeout: self.topic_create_timeout,
             fetch_max_wait: self.fetch_max_wait,
             fetch_max_bytes: self.fetch_max_bytes,
@@ -956,6 +970,9 @@ impl BrokerConfig {
         let controller_addr: SocketAddr = "127.0.0.1:0".parse().expect("static");
         let record_decompression = RecordDecompressionPolicy::default();
         Self {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             startup_leader_wait_timeout: minutes(2),
             self_registration_backoff_min: millis(100),
             self_registration_backoff_max: secs(5),
@@ -1832,6 +1849,9 @@ impl Default for BrokerConfig {
         let controller_addr: SocketAddr = "127.0.0.1:9093".parse().expect("hard-coded valid addr");
         let record_decompression = RecordDecompressionPolicy::default();
         Self {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             startup_leader_wait_timeout: minutes(2),
             self_registration_backoff_min: millis(100),
             self_registration_backoff_max: secs(5),
