@@ -3787,6 +3787,7 @@ dependencies = [
  "crabka-security",
  "futures-util",
  "mutants",
+ "refined_type",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",

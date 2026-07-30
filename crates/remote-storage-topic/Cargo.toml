@@ -27,6 +27,7 @@ crabka-ids = { version = "0.3.8", path = "../ids" }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 futures-util = { workspace = true }
+refined_type = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "macros"] }
 tokio-util = { workspace = true }
