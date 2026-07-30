@@ -4830,3 +4830,62 @@ The full runtime-value scanner reports 5,607 rows across 1,037 files; the
 focused `schema-serde` result reports 11 rows across 3 files. Those focused
 rows are the two exposed defaults, fixed exponent/media/reference/magic
 semantics, or retry/test assertions and deadlines described above.
+
+## Rebalancer Runtime Policy
+
+The `rebalancer` scanner has 78 rows. Persisted schema versions and filenames,
+Kafka error/resource/operation codes and configuration keys, goal names,
+zero-value protocol sentinels, CPU unit conversion, capacity clamps,
+preallocation hints, and test values are fixed. The existing scrape,
+optimization, anomaly, execution, persistence, and state-topic identity
+settings are already CLI arguments backed by environment variables and flow
+into UOM values at their owning components.
+
+The generated Kafka request default formerly supplied the 60-second
+`AlterPartitionReassignments` broker-side timeout. Submit and cancel now frame
+an explicit validated `ReassignmentRequestTimeout`; `LiveClient::new` retains
+the 60-second default for compatibility. The standalone binary exposes human
+UOM values through `--reassignment-request-timeout` and
+`CRABKA_REBALANCER_REASSIGNMENT_REQUEST_TIMEOUT`, while the Helm chart exposes
+`reassignmentRequestTimeout: 60s`. Values must be positive whole milliseconds
+within `i32`; this daemon transport policy does not belong in the
+per-proposal `KafkaRebalance` CRD.
+
+The remaining deployment policy is:
+
+- the metrics HTTP request timeout;
+- state-topic poll interval, load quiet period, fetch byte cap, create timeout,
+  produce request timeout, retry count and retry backoff;
+- state-topic segment duration and minimum cleanable dirty ratio;
+- the CancelExecution response wait, executor shutdown drain timeout, and
+  ingester shutdown join timeout.
+
+The recovery wait should reuse the state-topic poll interval rather than gain
+another equal-cadence option. The 25-ms CancelExecution polling step remains
+an internal responsiveness detail. The detector snapshot history capacity
+must be derived from its configured tick interval and longest sustained-rule
+threshold; exposing the current value of ten would let valid threshold
+settings silently discard required history.
+
+The proposed minimal design adds direct `crabka-rebalancer` CLI arguments
+backed by `CRABKA_REBALANCER_*` environment variables and corresponding Helm
+values. Times, bytes, and the dirty ratio remain UOM `Time`, `ByteSize`, and
+`Ratio`; the positive retry count uses a repository `refined_type` newtype.
+Validation requires a positive poll interval, quiet period, request/drain
+timeouts, byte cap and retry count, a dirty ratio strictly between zero and
+one, and metrics retention at least as long as the fixed twelve-hour query
+window. Defaults preserve the current 5-second metrics request timeout,
+100-ms state poll, 500-ms quiet period, 1-MiB fetch cap, 10-second create and
+produce timeouts, 50 attempts with 200-ms backoff, one-minute segments,
+one-percent dirty ratio, five-second cancellation wait, ten-second executor
+drain, and five-second ingester join.
+
+No CRD owns the standalone daemon. `KafkaRebalance` already exposes
+per-proposal goals and throttle and must not absorb service lifecycle or
+state-topic settings.
+
+This broader design is pending explicit approval and has not been implemented.
+The completed reassignment-request-timeout slice passes all 379 runnable
+all-target tests; one real-broker test is explicitly ignored. Helm lint and
+all 20 chart unit tests pass. Strict workspace all-target Clippy, nightly
+formatting, scanner-count, and diff-hygiene gates pass.

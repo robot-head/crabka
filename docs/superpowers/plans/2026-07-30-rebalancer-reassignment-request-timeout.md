@@ -35,7 +35,7 @@
 - Produces: `ReassignmentRequestTimeout::milliseconds(self) -> i32`
 - Produces: `LiveClient::with_reassignment_request_timeout(Client, ReassignmentRequestTimeout) -> Self`
 
-- [ ] **Step 1: Write failing policy and request-builder tests**
+- [x] **Step 1: Write failing policy and request-builder tests**
 
 Add tests in `client_impl.rs`:
 
@@ -74,7 +74,7 @@ fn reassignment_builders_frame_configured_timeout() {
 Update the existing submit/cancel expected-value tests to pass
 `ReassignmentRequestTimeout::default()`.
 
-- [ ] **Step 2: Run the RED gate**
+- [x] **Step 2: Run the RED gate**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -84,7 +84,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 Expected: compilation fails because `ReassignmentRequestTimeout` and the
 policy-aware builder parameters do not exist.
 
-- [ ] **Step 3: Implement the minimal validated newtype**
+- [x] **Step 3: Implement the minimal validated newtype**
 
 Add the existing workspace dependency:
 
@@ -132,7 +132,7 @@ impl ReassignmentRequestTimeout {
 
 Implement `Default` through `new(DEFAULT_REASSIGNMENT_REQUEST_TIMEOUT)`.
 
-- [ ] **Step 4: Thread the policy through request construction**
+- [x] **Step 4: Thread the policy through request construction**
 
 Change the submit, cancel, and shared builders to accept
 `ReassignmentRequestTimeout`; construct the request with:
@@ -156,7 +156,7 @@ pub fn with_reassignment_request_timeout(
 
 Use the stored value for submit and cancel.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -180,7 +180,7 @@ Expected: all focused tests pass.
 - Produces: `--reassignment-request-timeout`
 - Produces: `CRABKA_REBALANCER_REASSIGNMENT_REQUEST_TIMEOUT`
 
-- [ ] **Step 1: Write failing parser tests**
+- [x] **Step 1: Write failing parser tests**
 
 Add `temp-env = "0.3"` as a dev dependency and tests that use the repository's
 standard environment lock:
@@ -268,7 +268,7 @@ fn reassignment_request_timeout_reads_environment() {
 
 Define `static ENV_LOCK: OnceLock<Mutex<()>>` in the test module.
 
-- [ ] **Step 2: Run the RED gate**
+- [x] **Step 2: Run the RED gate**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -277,7 +277,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: compilation fails because the argument does not exist.
 
-- [ ] **Step 3: Add the UOM argument and validate before construction**
+- [x] **Step 3: Add the UOM argument and validate before construction**
 
 Add:
 
@@ -302,7 +302,7 @@ let reassignment_request_timeout =
 Construct the live client with
 `LiveClient::with_reassignment_request_timeout(client.clone(), reassignment_request_timeout)`.
 
-- [ ] **Step 4: Run GREEN and the binary tests**
+- [x] **Step 4: Run GREEN and the binary tests**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -325,7 +325,7 @@ Expected: parser, validation, and existing binary tests pass.
 - Produces: Helm value `reassignmentRequestTimeout`
 - Produces: pod environment variable `CRABKA_REBALANCER_REASSIGNMENT_REQUEST_TIMEOUT`
 
-- [ ] **Step 1: Write the failing Helm assertion**
+- [x] **Step 1: Write the failing Helm assertion**
 
 Add:
 
@@ -341,7 +341,7 @@ Add:
             value: 37ms
 ```
 
-- [ ] **Step 2: Run the RED gate**
+- [x] **Step 2: Run the RED gate**
 
 ```bash
 helm unittest charts/crabka-rebalancer
@@ -349,7 +349,7 @@ helm unittest charts/crabka-rebalancer
 
 Expected: the new assertion fails because the environment variable is absent.
 
-- [ ] **Step 3: Add the minimal Helm value and environment entry**
+- [x] **Step 3: Add the minimal Helm value and environment entry**
 
 Add `reassignmentRequestTimeout: 60s` beside the existing reassignment values,
 and render:
@@ -359,14 +359,14 @@ and render:
   value: {{ .Values.reassignmentRequestTimeout | quote }}
 ```
 
-- [ ] **Step 4: Update audit evidence**
+- [x] **Step 4: Update audit evidence**
 
 Change the rebalancer scanner count to the current value, classify the
 generated 60-second default as replaced by explicit request policy, and record
 the exact CLI, environment, and Helm names. Keep all other unresolved
 rebalancer policies Pending.
 
-- [ ] **Step 5: Run focused and repository gates**
+- [x] **Step 5: Run focused and repository gates**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
