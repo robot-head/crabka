@@ -36,7 +36,7 @@
 - Produces: `DebuginfodConfig::new(ByteSize, Time, Time) -> Result<Self, String>`
 - Produces: `DebuginfodResolver::with_config(Vec<String>, DebuginfodConfig) -> Result<Self, String>`
 
-- [ ] **Step 1: Write failing configuration tests**
+- [x] **Step 1: Write failing configuration tests**
 
 Add tests in `symbolizer.rs`:
 
@@ -75,7 +75,7 @@ fn debuginfod_config_rejects_invalid_values() {
 Change the existing downloaded-artifact test to call the missing
 `DebuginfodResolver::with_config`.
 
-- [ ] **Step 2: Run the RED gate**
+- [x] **Step 2: Run the RED gate**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -85,7 +85,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 Expected: compilation fails because `DebuginfodConfig` and `with_config` do
 not exist.
 
-- [ ] **Step 3: Implement the minimal configuration**
+- [x] **Step 3: Implement the minimal configuration**
 
 Add:
 
@@ -110,7 +110,7 @@ the repository's exact `f64` integer ceiling, then pass `bytes_u64()` through
 `std::time::Duration::try_from_secs_f64`, reject zero, and enforce
 `connect_timeout <= request_timeout`. Add getters and `Default`.
 
-- [ ] **Step 4: Apply the configuration to the resolver**
+- [x] **Step 4: Apply the configuration to the resolver**
 
 Keep:
 
@@ -124,7 +124,7 @@ Add `with_config`, pass its two timeouts to Reqwest, and store
 `config.max_artifact_size()` as the existing cap. Replace the private
 `with_max_debuginfo` test path with a custom `DebuginfodConfig`.
 
-- [ ] **Step 5: Run GREEN**
+- [x] **Step 5: Run GREEN**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -147,7 +147,7 @@ Expected: configuration and explicit-cap tests pass.
 - Produces: `native_resolver_from_debuginfod_config`
 - Produces: `symbolizer::run_with_config`
 
-- [ ] **Step 1: Write failing propagation tests**
+- [x] **Step 1: Write failing propagation tests**
 
 Add tests that construct a custom config and call the missing config-aware
 helpers:
@@ -166,7 +166,7 @@ In `cold_store.rs`, construct an in-memory store and empty index through
 `new_with_debuginfod_config` with the same config. Existing helper tests remain
 unchanged to prove default compatibility.
 
-- [ ] **Step 2: Run the RED gate**
+- [x] **Step 2: Run the RED gate**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -175,7 +175,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: compilation fails on the missing config-aware helpers.
 
-- [ ] **Step 3: Add default wrappers and explicit paths**
+- [x] **Step 3: Add default wrappers and explicit paths**
 
 Route `new_with_debuginfod_urls` through
 `new_with_debuginfod_config(..., DebuginfodConfig::default())`, and construct
@@ -184,7 +184,7 @@ the resolver with `DebuginfodResolver::with_config` in the explicit path.
 Do the same for `native_resolver_from_debuginfod_urls` and `run`, adding
 `native_resolver_from_debuginfod_config` and `run_with_config`.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -210,7 +210,7 @@ Expected: explicit propagation and compatibility tests pass.
 - Produces: `CRABKA_PROFILES_DEBUGINFOD_REQUEST_TIMEOUT`
 - Produces: `CRABKA_PROFILES_DEBUGINFOD_URLS`
 
-- [ ] **Step 1: Write failing CLI and environment tests**
+- [x] **Step 1: Write failing CLI and environment tests**
 
 Add `temp-env = "0.3"` as a dev dependency and use the repository environment
 lock pattern. Assert absent overrides produce `DebuginfodConfig::default`,
@@ -226,7 +226,7 @@ CRABKA_PROFILES_DEBUGINFOD_REQUEST_TIMEOUT=4s
 produce the corresponding URL vector and config. Assert connect `5s` with
 request `4s` fails effective-config validation.
 
-- [ ] **Step 2: Run the RED gate**
+- [x] **Step 2: Run the RED gate**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -236,7 +236,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 Expected: compilation fails because the arguments and effective-config helper
 do not exist.
 
-- [ ] **Step 3: Add optional UOM overrides**
+- [x] **Step 3: Add optional UOM overrides**
 
 Add `env = "CRABKA_PROFILES_DEBUGINFOD_URLS"` to the existing URL argument.
 Add three optional arguments with `parse_positive_whole_byte_size` and
@@ -252,7 +252,7 @@ by overlaying supplied values on `DebuginfodConfig::default()` and calling
 Validate once immediately after `Cli::parse`, then pass the config to
 querier, query-frontend, and symbolizer config-aware helpers.
 
-- [ ] **Step 4: Run GREEN**
+- [x] **Step 4: Run GREEN**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -267,13 +267,13 @@ Expected: all CLI, environment, relation, and existing URL tests pass.
 - Modify: `docs/configuration-audit.md`
 - Modify: `docs/superpowers/plans/2026-07-30-pprof-debuginfod-policy.md`
 
-- [ ] **Step 1: Update audit evidence and plan checkboxes**
+- [x] **Step 1: Update audit evidence and plan checkboxes**
 
 Record the current scanner count, exact CLI/environment names, all three live
 roles, preserved defaults, and verification counts. Keep fixed security
 invariants classified as non-configurable.
 
-- [ ] **Step 2: Run focused and repository gates**
+- [x] **Step 2: Run focused and repository gates**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \

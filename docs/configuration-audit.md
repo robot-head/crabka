@@ -4889,3 +4889,67 @@ The completed reassignment-request-timeout slice passes all 379 runnable
 all-target tests; one real-broker test is explicitly ignored. Helm lint and
 all 20 chart unit tests pass. Strict workspace all-target Clippy, nightly
 formatting, scanner-count, and diff-hygiene gates pass.
+
+## Pprof Debuginfod Resource Policy
+
+The `pprof` scanner has 21 rows. Eleven are fixed data-format or algorithm
+invariants: root and synthetic-node names, the empty-stacktrace sentinel,
+Go-shape prefix, symbolization bit flags, and the minimum-one node clamp. Seven
+are test-only profile fixtures and bounded local-server waits. The remaining
+three are deployment policy.
+
+The three deployment policies belong to the optional debuginfod client: a
+512-MiB downloaded-artifact cap, a five-second connect timeout, and a
+ten-second whole-request timeout. They were already UOM `ByteSize` and `Time`
+values, but were not configurable.
+
+The implemented minimal design adds a `DebuginfodConfig` accepted by
+`DebuginfodResolver`, containing:
+
+```text
+max_artifact_size: ByteSize
+connect_timeout: Time
+request_timeout: Time
+```
+
+All values must be positive and the connect timeout must not exceed the whole
+request timeout. The artifact size must be a whole-byte UOM value. Existing
+constructors remain default-backed compatibility wrappers; config-aware paths
+reach the querier, query-frontend, and symbolizer roles. The existing defaults
+remain unchanged. The owning `crabka-profiles` binary exposes them as
+unit-bearing CLI arguments:
+
+```text
+--debuginfod-max-artifact-size
+--debuginfod-connect-timeout
+--debuginfod-request-timeout
+```
+
+They are backed by:
+
+```text
+CRABKA_PROFILES_DEBUGINFOD_MAX_ARTIFACT_SIZE
+CRABKA_PROFILES_DEBUGINFOD_CONNECT_TIMEOUT
+CRABKA_PROFILES_DEBUGINFOD_REQUEST_TIMEOUT
+```
+
+The existing comma-delimited `--debuginfod-url` option also gains
+`CRABKA_PROFILES_DEBUGINFOD_URLS` backing so the complete debuginfod surface
+can be overridden in Kubernetes without rewriting the container command.
+
+No CRD owns the standalone Profiles service. The URL path construction,
+redirect prohibition, build-id validation, and capped streaming read remain
+fixed security behavior rather than configuration.
+
+The implementation preserves the 512-MiB, five-second, and ten-second
+defaults, validates positive whole bytes and positive finite timeouts with
+`refined_type` and UOM values, and rejects a connect timeout greater than the
+whole-request timeout before role startup. The config-aware path is exercised
+by the querier, query-frontend, and symbolizer roles while the existing public
+constructors remain default-backed compatibility wrappers. An empty URL list
+still prevents outbound debuginfod requests.
+
+The exact scanner remains at 21 rows. The all-target gates passed 120 `pprof`
+tests and 244 runnable `profiles` tests; four Docker-only differential tests
+remain explicitly ignored. Strict workspace all-target Clippy, nightly
+formatting, and diff hygiene pass.
