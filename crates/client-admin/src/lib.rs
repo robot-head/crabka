@@ -790,8 +790,10 @@ mod tests {
             client_id: "custom-admin".into(),
             connect_timeout: crabka_units::millis(100),
             request_timeout: crabka_units::millis(25),
-            dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
-            frame_max: crabka_client_core::ClientFrameMax::default(),
+            dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::new(7)
+                .unwrap(),
+            frame_max: crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32))
+                .unwrap(),
             security: Some(Box::new(ClientSecurity {
                 protocol: ListenerProtocol::SaslPlaintext,
                 tls: None,
@@ -813,6 +815,8 @@ mod tests {
 
     fn assert_custom_connect_timeout_is_stored(admin: &AdminClient) {
         assert2::assert!(admin.options.connect_timeout == crabka_units::millis(100));
+        assert2::assert!(admin.options.dispatch_queue_capacity.get() == 7);
+        assert2::assert!(admin.options.frame_max.size() == crabka_units::kibibytes(32));
     }
 
     #[test]
