@@ -113,6 +113,8 @@ struct StartConfig {
     fetch_max: ByteSize,
     fetch_partition_max: ByteSize,
     request_timeout: Time,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
     leave_group_timeout: Time,
     client_rack: Option<String>,
     security: Option<crabka_client_core::security::ClientSecurity>,
@@ -531,6 +533,9 @@ impl Consumer {
         #[builder(default = crate::poll::DEFAULT_FETCH_PARTITION_MAX)]
         fetch_partition_max: ByteSize,
         #[builder(default = secs(30))] request_timeout: Time,
+        #[builder(default = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY)]
+        dispatch_queue_capacity: usize,
+        #[builder(default = crabka_client_core::DEFAULT_CLIENT_FRAME_MAX)] frame_max: ByteSize,
         #[builder(default = DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT)] leave_group_timeout: Time,
         #[builder(into)] client_rack: Option<String>,
         security: Option<crabka_client_core::security::ClientSecurity>,
@@ -564,6 +569,11 @@ impl Consumer {
                 subscription_metadata_refresh_interval.to_std(),
             )
             .map_err(ConsumerError::RebalanceFailed)?;
+        let dispatch_queue_capacity =
+            crabka_client_core::ConnectionDispatchQueueCapacity::new(dispatch_queue_capacity)
+                .map_err(ConsumerError::RebalanceFailed)?;
+        let frame_max = crabka_client_core::ClientFrameMax::try_from(frame_max)
+            .map_err(ConsumerError::RebalanceFailed)?;
 
         let config = StartConfig {
             bootstrap,
@@ -583,6 +593,8 @@ impl Consumer {
             fetch_max,
             fetch_partition_max,
             request_timeout,
+            dispatch_queue_capacity,
+            frame_max,
             leave_group_timeout: Time::from_std(leave_group_timeout.duration()),
             client_rack,
             security,
@@ -668,6 +680,8 @@ impl Consumer {
             group_instance_id,
             assignor,
             request_timeout,
+            dispatch_queue_capacity,
+            frame_max,
             client_rack,
             security,
             ..
@@ -677,6 +691,8 @@ impl Consumer {
             .client_id(client_id.clone())
             .connect_timeout(request_timeout)
             .request_timeout(request_timeout)
+            .dispatch_queue_capacity(dispatch_queue_capacity.get())
+            .frame_max(frame_max.size())
             .maybe_security(security.clone())
             .build()
             .await?;
@@ -1040,6 +1056,8 @@ async fn spawn_consumer(
         fetch_max,
         fetch_partition_max,
         request_timeout,
+        dispatch_queue_capacity,
+        frame_max,
         leave_group_timeout,
         client_rack,
         security,
@@ -1071,6 +1089,8 @@ async fn spawn_consumer(
         .client_id(client_id.clone())
         .connect_timeout(request_timeout)
         .request_timeout(request_timeout)
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .maybe_security(security.clone())
         .build()
         .await?;
@@ -1435,6 +1455,21 @@ mod security_arg_tests {
             .expect("invalid configuration");
 
         assert2::assert!(error.to_string().contains("consumer leave-group timeout"));
+    }
+
+    #[tokio::test]
+    async fn invalid_client_resource_policy_fails_before_broker_lookup() {
+        let error = Consumer::builder()
+            .bootstrap("invalid.invalid:9092")
+            .group_id("client-policy-validation")
+            .subscribe(["topic".to_owned()])
+            .dispatch_queue_capacity(0)
+            .build()
+            .await
+            .err()
+            .expect("invalid configuration");
+
+        assert2::assert!(error.to_string().contains("client dispatch queue capacity"));
     }
 
     #[tokio::test]

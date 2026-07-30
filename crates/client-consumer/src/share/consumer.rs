@@ -319,6 +319,9 @@ impl ShareConsumer {
         #[builder(default = secs(3))] heartbeat_interval: Time,
         #[builder(default = DEFAULT_SHARE_CONSUMER_LEAVE_HEARTBEAT_TIMEOUT)]
         leave_heartbeat_timeout: Time,
+        #[builder(default = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY)]
+        dispatch_queue_capacity: usize,
+        #[builder(default = crabka_client_core::DEFAULT_CLIENT_FRAME_MAX)] frame_max: ByteSize,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ConsumerError> {
         if subscribe.is_empty() {
@@ -356,10 +359,17 @@ impl ShareConsumer {
         let heartbeat_interval =
             validated_time("share consumer heartbeat interval", heartbeat_interval)
                 .map_err(ConsumerError::RebalanceFailed)?;
+        let dispatch_queue_capacity =
+            crabka_client_core::ConnectionDispatchQueueCapacity::new(dispatch_queue_capacity)
+                .map_err(ConsumerError::RebalanceFailed)?;
+        let frame_max = crabka_client_core::ClientFrameMax::try_from(frame_max)
+            .map_err(ConsumerError::RebalanceFailed)?;
 
         let client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
+            .dispatch_queue_capacity(dispatch_queue_capacity.get())
+            .frame_max(frame_max.size())
             .maybe_security(security.clone())
             .build()
             .await?;
@@ -426,6 +436,8 @@ impl ShareConsumer {
         let coordinator_client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
+            .dispatch_queue_capacity(dispatch_queue_capacity.get())
+            .frame_max(frame_max.size())
             .maybe_security(security.clone())
             .build()
             .await?;
@@ -662,6 +674,21 @@ mod tests {
             .expect("fractional fetch limit must fail");
 
         check!(error.to_string().contains("positive whole-byte"));
+    }
+
+    #[tokio::test]
+    async fn invalid_client_resource_policy_fails_before_broker_lookup() {
+        let error = ShareConsumer::builder()
+            .bootstrap("invalid.invalid:9092")
+            .group_id("client-policy-validation")
+            .subscribe(["topic".to_owned()])
+            .dispatch_queue_capacity(0)
+            .build()
+            .await
+            .err()
+            .expect("invalid client policy");
+
+        check!(error.to_string().contains("client dispatch queue capacity"));
     }
 
     async fn test_consumer() -> ShareConsumer {
