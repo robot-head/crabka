@@ -4,8 +4,9 @@ use std::sync::Arc;
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::{
-    ClientDnsTimeout, Connection, ConnectionOptions, IsolatedFetch,
-    fetch_partition_with_isolation_progress, security::ClientSecurity,
+    ClientDnsTimeout, ClientFrameMax, Connection, ConnectionDispatchQueueCapacity,
+    ConnectionOptions, FetchMinBytes, IsolatedFetch, fetch_partition_with_isolation_progress,
+    security::ClientSecurity,
 };
 use crabka_client_producer::{
     Acks, Producer, ProducerFlushTimeout, ProducerRetryPolicy, ProducerThroughputPolicy,
@@ -266,6 +267,9 @@ pub struct LiveRecoveryConfig {
     read_policy: RecoveryReadPolicy,
     wal_admin_policy: WalAdminPolicy,
     producer_dns_timeout: ClientDnsTimeout,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
+    fetch_min: FetchMinBytes,
     producer_flush_timeout: ProducerFlushTimeout,
     producer_retry_policy: ProducerRetryPolicy,
     producer_throughput_policy: ProducerThroughputPolicy,
@@ -308,6 +312,9 @@ impl LiveRecoveryConfig {
             read_policy: RecoveryReadPolicy::default(),
             wal_admin_policy: WalAdminPolicy::default(),
             producer_dns_timeout: ClientDnsTimeout::default(),
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::default(),
+            frame_max: ClientFrameMax::default(),
+            fetch_min: FetchMinBytes::default(),
             producer_flush_timeout: ProducerFlushTimeout::default(),
             producer_retry_policy: ProducerRetryPolicy::default(),
             producer_throughput_policy: ProducerThroughputPolicy::default(),
@@ -353,6 +360,20 @@ impl LiveRecoveryConfig {
     #[must_use]
     pub const fn producer_dns_timeout(&self) -> ClientDnsTimeout {
         self.producer_dns_timeout
+    }
+
+    /// Override connection and fetch resource policy.
+    #[must_use]
+    pub fn with_client_resource_policy(
+        mut self,
+        dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+        frame_max: ClientFrameMax,
+        fetch_min: FetchMinBytes,
+    ) -> Self {
+        self.dispatch_queue_capacity = dispatch_queue_capacity;
+        self.frame_max = frame_max;
+        self.fetch_min = fetch_min;
+        self
     }
 
     /// Override the WAL producer flush deadline.
@@ -546,14 +567,8 @@ pub async fn read_live_committed_tail(
     let topic = config.wal_topic();
     let mut admin = connect_wal_admin(config, &bootstrap_addrs).await?;
     let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
-    let reader = KafkaCommittedWalReader::new(
-        bootstrap_addrs,
-        topic,
-        topic_uuid,
-        barrier_offset,
-        config.security.clone(),
-        config.read_policy,
-    );
+    let reader =
+        KafkaCommittedWalReader::new(bootstrap_addrs, topic, topic_uuid, barrier_offset, config);
     bounded_committed_tail(&reader, after_offset, barrier_offset).await
 }
 
@@ -569,14 +584,8 @@ pub async fn read_live_retained_committed(
     let topic = config.wal_topic();
     let mut admin = connect_wal_admin(config, &bootstrap_addrs).await?;
     let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
-    let reader = KafkaCommittedWalReader::new(
-        bootstrap_addrs,
-        topic,
-        topic_uuid,
-        barrier_offset,
-        config.security.clone(),
-        config.read_policy,
-    );
+    let reader =
+        KafkaCommittedWalReader::new(bootstrap_addrs, topic, topic_uuid, barrier_offset, config);
     let start = reader.log_start_offset().await?.unwrap_or(0);
     bounded_committed_tail(&reader, start.saturating_sub(1), barrier_offset).await
 }
@@ -614,6 +623,8 @@ impl CommittedEndDialer for LiveEndDialer {
             self.config.security.clone(),
             "crabka-gres-substrate-end-sample",
             self.config.read_policy,
+            self.config.dispatch_queue_capacity,
+            self.config.frame_max,
         )
         .await?;
         Ok(Box::new(LiveEndConnection {
@@ -621,6 +632,7 @@ impl CommittedEndDialer for LiveEndDialer {
             topic,
             topic_uuid,
             read_policy: self.config.read_policy,
+            fetch_min: self.config.fetch_min,
         }))
     }
 }
@@ -631,6 +643,7 @@ struct LiveEndConnection {
     topic: String,
     topic_uuid: WireUuid,
     read_policy: RecoveryReadPolicy,
+    fetch_min: FetchMinBytes,
 }
 
 #[async_trait::async_trait]
@@ -644,6 +657,7 @@ impl CommittedEndConnection for LiveEndConnection {
                 fetch_offset,
                 END_SAMPLE_MAX_WAIT_MS,
                 self.read_policy,
+                self.fetch_min,
             ))
             .await
             .map_err(|error| {
@@ -682,14 +696,7 @@ pub async fn bootstrap_live_range0_follower(
     let topic = config.wal_topic();
     let mut admin = connect_wal_admin(config, &bootstrap_addrs).await?;
     let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
-    let reader = KafkaCommittedWalReader::new(
-        bootstrap_addrs,
-        topic,
-        topic_uuid,
-        end,
-        config.security.clone(),
-        config.read_policy,
-    );
+    let reader = KafkaCommittedWalReader::new(bootstrap_addrs, topic, topic_uuid, end, config);
     crate::follower::ReadOnlyRange0Follower::bootstrap(config, store, &reader, checkpoints).await
 }
 
@@ -764,6 +771,8 @@ async fn recover_live_for_range_inner(
             .linger(config.producer_throughput_policy.linger())
             .batch_size(config.producer_throughput_policy.batch_bytes())
             .dns_timeout(config.producer_dns_timeout().time())
+            .dispatch_queue_capacity(config.dispatch_queue_capacity.get())
+            .frame_max(config.frame_max.size())
             .request_timeout(config.producer_retry_policy.request_timeout())
             .flush_timeout(config.producer_flush_timeout().duration())
             .retries(config.producer_retry_policy.retries())
@@ -801,14 +810,8 @@ async fn recover_live_for_range_inner(
 
     let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
     let checkpoint_namespace = config.checkpoint_namespace();
-    let reader = KafkaCommittedWalReader::new(
-        bootstrap_addrs,
-        topic,
-        topic_uuid,
-        barrier.offset,
-        config.security,
-        config.read_policy,
-    );
+    let reader =
+        KafkaCommittedWalReader::new(bootstrap_addrs, topic, topic_uuid, barrier.offset, &config);
     let recovery_barrier = RecoveryBarrier {
         generation: WriterGeneration(config.wal_generation),
         offset: barrier.offset,
@@ -934,8 +937,8 @@ fn wal_admin_connection_options(config: &LiveRecoveryConfig) -> ConnectionOption
         client_id: config.client_id(),
         connect_timeout: config.wal_admin_policy.connect_timeout(),
         request_timeout: config.wal_admin_policy.request_timeout(),
-        dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
-        frame_max: crabka_client_core::ClientFrameMax::default(),
+        dispatch_queue_capacity: config.dispatch_queue_capacity,
+        frame_max: config.frame_max,
         security: config.security.clone().map(Box::new),
     }
 }
@@ -980,6 +983,9 @@ struct KafkaCommittedWalReader {
     barrier_offset: i64,
     security: Option<ClientSecurity>,
     read_policy: RecoveryReadPolicy,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
+    fetch_min: FetchMinBytes,
 }
 
 /// Construct the private Kafka reader for one already-sampled committed end.
@@ -996,8 +1002,7 @@ pub(crate) async fn live_committed_reader(
         topic,
         topic_uuid,
         sample_offset,
-        config.security.clone(),
-        config.read_policy,
+        config,
     ))
 }
 
@@ -1007,16 +1012,18 @@ impl KafkaCommittedWalReader {
         topic: String,
         topic_uuid: WireUuid,
         barrier_offset: i64,
-        security: Option<ClientSecurity>,
-        read_policy: RecoveryReadPolicy,
+        config: &LiveRecoveryConfig,
     ) -> Self {
         Self {
             bootstrap_addrs,
             topic,
             topic_uuid,
             barrier_offset,
-            security,
-            read_policy,
+            security: config.security.clone(),
+            read_policy: config.read_policy,
+            dispatch_queue_capacity: config.dispatch_queue_capacity,
+            frame_max: config.frame_max,
+            fetch_min: config.fetch_min,
         }
     }
 
@@ -1026,6 +1033,8 @@ impl KafkaCommittedWalReader {
             self.security.clone(),
             "crabka-gres-substrate-replay",
             self.read_policy,
+            self.dispatch_queue_capacity,
+            self.frame_max,
         )
         .await
     }
@@ -1035,14 +1044,16 @@ fn wal_connection_options(
     client_id: &str,
     security: Option<ClientSecurity>,
     read_policy: RecoveryReadPolicy,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
 ) -> ConnectionOptions {
     ConnectionOptions {
         dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
         client_id: client_id.to_string(),
         connect_timeout: read_policy.connect_timeout(),
         request_timeout: read_policy.request_timeout(),
-        dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
-        frame_max: crabka_client_core::ClientFrameMax::default(),
+        dispatch_queue_capacity,
+        frame_max,
         security: security.map(Box::new),
     }
 }
@@ -1075,6 +1086,8 @@ async fn open_wal_connection(
     security: Option<ClientSecurity>,
     client_id: &str,
     read_policy: RecoveryReadPolicy,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
 ) -> Result<Connection, SubstrateError> {
     let host_port = bootstrap_addrs.first().ok_or_else(|| {
         SubstrateError::Unavailable("substrate bootstrap address list is empty".into())
@@ -1087,7 +1100,13 @@ async fn open_wal_connection(
     .await?;
     Connection::connect_with_options(
         addr,
-        wal_connection_options(client_id, security, read_policy),
+        wal_connection_options(
+            client_id,
+            security,
+            read_policy,
+            dispatch_queue_capacity,
+            frame_max,
+        ),
     )
     .await
     .map_err(|error| SubstrateError::Unavailable(format!("connect to {host_port}: {error}")))
@@ -1199,7 +1218,13 @@ impl KafkaCommittedWalReader {
     ) -> Result<FetchedWalPartition, SubstrateError> {
         let result = fetch_partition_with_isolation_progress(
             conn,
-            recovery_fetch(&self.topic, self.topic_uuid, fetch_offset, self.read_policy),
+            recovery_fetch(
+                &self.topic,
+                self.topic_uuid,
+                fetch_offset,
+                self.read_policy,
+                self.fetch_min,
+            ),
         )
         .await
         .map_err(|error| {
@@ -1238,6 +1263,7 @@ impl KafkaCommittedWalReader {
                 0,
                 self.read_policy.fetch_max_wait().millis_i32(),
                 self.read_policy,
+                self.fetch_min,
             ))
             .await
             .map_err(|error| {
@@ -1256,10 +1282,11 @@ fn build_fetch_request(
     fetch_offset: i64,
     max_wait_ms: i32,
     read_policy: RecoveryReadPolicy,
+    fetch_min: FetchMinBytes,
 ) -> FetchRequest {
     FetchRequest {
         max_wait_ms,
-        min_bytes: 1,
+        min_bytes: fetch_min.bytes(),
         max_bytes: read_policy.fetch_response_max().bytes_i32(),
         isolation_level: READ_COMMITTED,
         topics: vec![FetchTopic {
@@ -1282,6 +1309,7 @@ fn recovery_fetch(
     topic_id: WireUuid,
     fetch_offset: i64,
     read_policy: RecoveryReadPolicy,
+    fetch_min: FetchMinBytes,
 ) -> IsolatedFetch<'_> {
     IsolatedFetch {
         topic,
@@ -1291,7 +1319,7 @@ fn recovery_fetch(
         max_wait: read_policy.fetch_max_wait(),
         max: read_policy.fetch_response_max(),
         partition_max: read_policy.fetch_partition_max(),
-        fetch_min: crabka_client_core::FetchMinBytes::default(),
+        fetch_min,
         isolation_level: READ_COMMITTED,
     }
 }
@@ -1892,11 +1920,16 @@ mod tests {
         let policy = RecoveryReadPolicy::default()
             .with_timeouts(millis(77), millis(88))
             .expect("valid timeouts");
-        let options = wal_connection_options("replay-client", Some(security), policy);
+        let dispatch = ConnectionDispatchQueueCapacity::new(7).unwrap();
+        let frame_max = ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap();
+        let options =
+            wal_connection_options("replay-client", Some(security), policy, dispatch, frame_max);
 
         assert!(options.client_id == "replay-client");
         assert!(options.connect_timeout == millis(77));
         assert!(options.request_timeout == millis(88));
+        assert!(options.dispatch_queue_capacity == dispatch);
+        assert!(options.frame_max == frame_max);
         let security = options.security.expect("security");
         assert!(security.protocol == crabka_security::ListenerProtocol::Plaintext);
         assert!(security.sasl_host.as_deref() == Some("broker.internal"));
@@ -1916,6 +1949,23 @@ mod tests {
         )
         .expect("valid policy");
         assert!(config.with_read_policy(replacement).read_policy() == replacement);
+    }
+
+    #[test]
+    fn client_resource_policy_defaults_and_replaces_in_live_config() {
+        let tenant = TenantName::parse("tenant-a").expect("tenant");
+        let dispatch = ConnectionDispatchQueueCapacity::new(7).unwrap();
+        let frame_max = ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap();
+        let fetch_min = FetchMinBytes::try_from(crabka_units::bytes(9)).unwrap();
+        let config = LiveRecoveryConfig::new("localhost:9092", tenant, RangeId::COORDINATOR, None)
+            .with_client_resource_policy(dispatch, frame_max, fetch_min);
+
+        assert!(config.dispatch_queue_capacity == dispatch);
+        assert!(config.frame_max == frame_max);
+        assert!(config.fetch_min == fetch_min);
+        let options = wal_admin_connection_options(&config);
+        assert!(options.dispatch_queue_capacity == dispatch);
+        assert!(options.frame_max == frame_max);
     }
 
     #[test]
@@ -2090,7 +2140,13 @@ mod tests {
             44,
         )
         .expect("valid policy");
-        let fetch = recovery_fetch("topic", WireUuid([7; 16]), 42, policy);
+        let fetch = recovery_fetch(
+            "topic",
+            WireUuid([7; 16]),
+            42,
+            policy,
+            FetchMinBytes::default(),
+        );
 
         assert!(fetch.max_wait == millis(11));
         assert!(fetch.partition_max == crabka_units::bytes(22));
@@ -2112,6 +2168,7 @@ mod tests {
             42,
             END_SAMPLE_MAX_WAIT_MS,
             policy,
+            FetchMinBytes::default(),
         );
 
         assert!(request.max_wait_ms == 0);
@@ -2183,11 +2240,12 @@ mod tests {
     fn fetch_request_carries_the_requested_wait_and_committed_isolation() {
         let topic_id = WireUuid([7_u8; 16]);
         let policy = RecoveryReadPolicy::default();
-        let request = build_fetch_request("__gres_wal.t.r0", topic_id, 42, 250, policy);
+        let fetch_min = FetchMinBytes::try_from(crabka_units::bytes(9)).unwrap();
+        let request = build_fetch_request("__gres_wal.t.r0", topic_id, 42, 250, policy, fetch_min);
 
         assert!(request.max_wait_ms == 250);
         assert!(request.isolation_level == READ_COMMITTED);
-        assert!(request.min_bytes == 1);
+        assert!(request.min_bytes == 9);
         let partition = &request.topics[0].partitions[0];
         assert!(partition.partition == PARTITION);
         assert!(partition.fetch_offset == 42);
@@ -2197,7 +2255,7 @@ mod tests {
 
         // The zero-wait sampler path must stay zero-wait: a positioned fetch at
         // the log end returns immediately instead of long-polling.
-        let poll = build_fetch_request("__gres_wal.t.r0", topic_id, 42, 0, policy);
+        let poll = build_fetch_request("__gres_wal.t.r0", topic_id, 42, 0, policy, fetch_min);
         assert!(poll.max_wait_ms == 0);
     }
 
