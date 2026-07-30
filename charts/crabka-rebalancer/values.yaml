@@ -67,6 +67,7 @@ throttle:
 executeDeadlineSecs: 1800
 reassignmentPollIntervalSecs: 5
 reassignmentBatchSize: 200
+reassignmentRequestTimeout: 60s
 
 persistence:
   size: 1Gi

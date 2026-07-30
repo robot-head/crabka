@@ -58,6 +58,16 @@ tests:
             name: CRABKA_MIN_TOPIC_LEADERS_PER_BROKER
             value: "2"
 
+  - it: passes reassignment request timeout as a human duration
+    set:
+      reassignmentRequestTimeout: 37ms
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_REBALANCER_REASSIGNMENT_REQUEST_TIMEOUT
+            value: 37ms
+
   - it: passes brokerCapacityFile env when brokerCapacities is set
     set:
       brokerCapacities:
