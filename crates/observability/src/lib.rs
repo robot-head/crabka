@@ -344,6 +344,14 @@ struct DeferredWalConsumerConnect {
     bootstrap: String,
     group_id: String,
     topic: String,
+    client_resource_policy: ClientResourcePolicy,
+}
+
+/// Validated Kafka connection resource limits shared by this process.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ClientResourcePolicy {
+    pub dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    pub frame_max: crabka_client_core::ClientFrameMax,
 }
 
 #[derive(Clone, Default)]
@@ -477,11 +485,13 @@ impl ServiceDependencies {
         bootstrap: String,
         group_id: String,
         topic: String,
+        client_resource_policy: ClientResourcePolicy,
     ) -> Self {
         self.deferred_wal_consumer_connect = Some(DeferredWalConsumerConnect {
             bootstrap,
             group_id,
             topic,
+            client_resource_policy,
         });
         self
     }
@@ -624,6 +634,18 @@ where
 pub async fn build_service_dependencies(
     config: &ServiceConfig,
 ) -> Result<ServiceDependencies, ServiceRuntimeError> {
+    build_service_dependencies_with_client_resource_policy(config, ClientResourcePolicy::default())
+        .await
+}
+
+/// Build role dependencies with one validated Kafka client policy.
+///
+/// # Errors
+/// Returns an error when a required Kafka dependency cannot connect.
+pub async fn build_service_dependencies_with_client_resource_policy(
+    config: &ServiceConfig,
+    client_resource_policy: ClientResourcePolicy,
+) -> Result<ServiceDependencies, ServiceRuntimeError> {
     match config.target {
         Role::Distributor => {
             let bootstrap = config
@@ -635,7 +657,14 @@ pub async fn build_service_dependencies(
             let sink = connect_with_startup_retry("wal-sink", WAL_CONNECT_STARTUP_DEADLINE, || {
                 let b = bootstrap_owned.clone();
                 let t = topic.clone();
-                async move { KafkaLogWalSink::connect(&b, t).await }
+                async move {
+                    KafkaLogWalSink::connect_with_client_resource_policy(
+                        &b,
+                        t,
+                        client_resource_policy,
+                    )
+                    .await
+                }
             })
             .await?;
             let bootstrap_owned2 = bootstrap.to_string();
@@ -644,7 +673,9 @@ pub async fn build_service_dependencies(
                 connect_with_startup_retry("ingest-limiter", WAL_CONNECT_STARTUP_DEADLINE, || {
                     let b = bootstrap_owned2.clone();
                     let t = topic2.clone();
-                    async move { BrokerBackedIngestLimiter::connect(&b, t).await }
+                    async move {
+                        BrokerBackedIngestLimiter::connect(&b, t, client_resource_policy).await
+                    }
                 })
                 .await?;
             Ok(ServiceDependencies::default()
@@ -661,7 +692,13 @@ pub async fn build_service_dependencies(
             // `Consumer::start` (called by `KafkaLogWalConsumer::connect`) now
             // retries internally with per-attempt timeouts, so there is no need
             // to double-wrap it in `connect_with_startup_retry`.  Call directly.
-            let consumer = KafkaLogWalConsumer::connect(bootstrap, group_id, topic).await?;
+            let consumer = KafkaLogWalConsumer::connect_with_client_resource_policy(
+                bootstrap,
+                group_id,
+                topic,
+                client_resource_policy,
+            )
+            .await?;
             Ok(ServiceDependencies::default().with_wal_consumer(consumer))
         }
         Role::Querier => {
@@ -679,6 +716,7 @@ pub async fn build_service_dependencies(
                     bootstrap.to_string(),
                     config.wal_group_id.clone(),
                     config.wal_topic.clone(),
+                    client_resource_policy,
                 ),
             )
         }
@@ -2333,8 +2371,16 @@ struct BrokerBackedQueryAuthorizer {
 }
 
 impl BrokerBackedQueryAuthorizer {
-    async fn connect(bootstrap: &str, wal_topic: String) -> Result<Self, AdminError> {
-        let admin = AdminClient::connect(&[bootstrap.to_string()]).await?;
+    async fn connect(
+        bootstrap: &str,
+        wal_topic: String,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> Result<Self, AdminError> {
+        let admin = AdminClient::connect_with_options(
+            &[bootstrap.to_string()],
+            admin_connection_options(client_resource_policy),
+        )
+        .await?;
         Ok(Self {
             admin: tokio::sync::Mutex::new(admin),
             wal_topic,
@@ -2399,13 +2445,31 @@ struct BrokerBackedIngestLimiter {
 }
 
 impl BrokerBackedIngestLimiter {
-    async fn connect(bootstrap: &str, wal_topic: String) -> Result<Self, AdminError> {
-        let admin = AdminClient::connect(&[bootstrap.to_string()]).await?;
+    async fn connect(
+        bootstrap: &str,
+        wal_topic: String,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> Result<Self, AdminError> {
+        let admin = AdminClient::connect_with_options(
+            &[bootstrap.to_string()],
+            admin_connection_options(client_resource_policy),
+        )
+        .await?;
         Ok(Self {
             admin: tokio::sync::Mutex::new(admin),
             wal_topic,
             buckets: Mutex::new(BTreeMap::new()),
         })
+    }
+}
+
+fn admin_connection_options(
+    client_resource_policy: ClientResourcePolicy,
+) -> crabka_client_core::ConnectionOptions {
+    crabka_client_core::ConnectionOptions {
+        dispatch_queue_capacity: client_resource_policy.dispatch_queue_capacity,
+        frame_max: client_resource_policy.frame_max,
+        ..crabka_client_core::ConnectionOptions::default()
     }
 }
 
@@ -2819,9 +2883,24 @@ impl KafkaLogWalSink {
         bootstrap: impl Into<String>,
         topic: impl Into<String>,
     ) -> Result<Self, ProducerError> {
+        Self::connect_with_client_resource_policy(bootstrap, topic, ClientResourcePolicy::default())
+            .await
+    }
+
+    /// Connect using the supplied validated Kafka connection limits.
+    ///
+    /// # Errors
+    /// Returns an error when the producer cannot start.
+    pub async fn connect_with_client_resource_policy(
+        bootstrap: impl Into<String>,
+        topic: impl Into<String>,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> Result<Self, ProducerError> {
         let producer = Producer::builder()
             .bootstrap(bootstrap)
             .client_id("crabka-observability-distributor")
+            .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+            .frame_max(client_resource_policy.frame_max.size())
             .acks(Acks::All)
             .build()
             .await?;
@@ -2857,10 +2936,31 @@ impl KafkaLogWalConsumer {
         group_id: impl Into<String>,
         topic: impl Into<String>,
     ) -> Result<Self, ConsumerError> {
+        Self::connect_with_client_resource_policy(
+            bootstrap,
+            group_id,
+            topic,
+            ClientResourcePolicy::default(),
+        )
+        .await
+    }
+
+    /// Connect using the supplied validated Kafka connection limits.
+    ///
+    /// # Errors
+    /// Returns an error when the consumer cannot start.
+    pub async fn connect_with_client_resource_policy(
+        bootstrap: impl Into<String>,
+        group_id: impl Into<String>,
+        topic: impl Into<String>,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> Result<Self, ConsumerError> {
         let topic = topic.into();
         let consumer = Consumer::builder()
             .bootstrap(bootstrap)
             .client_id("crabka-observability-compactor")
+            .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+            .frame_max(client_resource_policy.frame_max.size())
             .group_id(group_id)
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .subscribe(vec![topic])
@@ -3052,12 +3152,18 @@ fn spawn_wal_hot_tail_connect_and_poll(
     hot_tail: BufferedLogHotTail,
     frontier: Option<SharedCompactionFrontier>,
     token: CancellationToken,
+    client_resource_policy: ClientResourcePolicy,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut consumer = loop {
             tokio::select! {
                 () = token.cancelled() => return,
-                result = KafkaLogWalConsumer::connect(&bootstrap, group_id.clone(), topic.clone()) => {
+                result = KafkaLogWalConsumer::connect_with_client_resource_policy(
+                    &bootstrap,
+                    group_id.clone(),
+                    topic.clone(),
+                    client_resource_policy,
+                ) => {
                     match result {
                         Ok(c) => break c,
                         Err(error) => {
@@ -3100,10 +3206,17 @@ fn spawn_query_authorizer_connect(
     bootstrap: String,
     topic: String,
     slot: Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>>,
+    client_resource_policy: ClientResourcePolicy,
 ) {
     tokio::spawn(async move {
         let authorizer = loop {
-            match BrokerBackedQueryAuthorizer::connect(&bootstrap, topic.clone()).await {
+            match BrokerBackedQueryAuthorizer::connect(
+                &bootstrap,
+                topic.clone(),
+                client_resource_policy,
+            )
+            .await
+            {
                 Ok(a) => break a,
                 Err(error) => {
                     eprintln!(
@@ -6265,12 +6378,18 @@ async fn build_service_router_with_shutdown(
                     hot_tail.clone(),
                     frontier.clone(),
                     token,
+                    deferred.client_resource_policy,
                 ));
 
                 // Install a swappable authorizer that starts as AllowAll and gets promoted
                 // to BrokerBackedQueryAuthorizer once connected in the background.
                 let (swappable, slot) = SwappableQueryAuthorizer::new();
-                spawn_query_authorizer_connect(deferred.bootstrap, deferred.topic, slot);
+                spawn_query_authorizer_connect(
+                    deferred.bootstrap,
+                    deferred.topic,
+                    slot,
+                    deferred.client_resource_policy,
+                );
                 state = state.with_query_authorizer(swappable);
 
                 if let Some(frontier) = frontier {
@@ -21539,6 +21658,12 @@ mod tests {
 
         let metrics = ServiceMetrics::new();
         let frontier = SharedCompactionFrontier::default();
+        let client_resource_policy = ClientResourcePolicy {
+            dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::new(7)
+                .unwrap(),
+            frame_max: crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32))
+                .unwrap(),
+        };
         let deps = ServiceDependencies::default()
             .with_metrics(metrics.clone())
             .with_wal_sink(InMemoryWalSink::default())
@@ -21549,6 +21674,7 @@ mod tests {
                 "broker:9092".to_string(),
                 "group".to_string(),
                 "topic".to_string(),
+                client_resource_policy,
             );
 
         check!(deps.metrics.is_some());
@@ -21571,6 +21697,13 @@ mod tests {
         assert_eq!(deferred.bootstrap, "broker:9092");
         assert_eq!(deferred.group_id, "group");
         assert_eq!(deferred.topic, "topic");
+        assert_eq!(deferred.client_resource_policy, client_resource_policy);
+        let options = admin_connection_options(client_resource_policy);
+        assert_eq!(
+            options.dispatch_queue_capacity,
+            client_resource_policy.dispatch_queue_capacity
+        );
+        assert_eq!(options.frame_max, client_resource_policy.frame_max);
     }
 
     #[test]

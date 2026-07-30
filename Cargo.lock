@@ -3300,6 +3300,7 @@ dependencies = [
  "crabka-blockstore",
  "crabka-client-admin",
  "crabka-client-consumer",
+ "crabka-client-core",
  "crabka-client-producer",
  "crabka-ids",
  "crabka-logql",

@@ -26,6 +26,7 @@ base64 = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 crabka-blockstore = { version = "0.3.7", path = "../blockstore" }
 crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
 crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
 crabka-ids = { version = "0.3.8", path = "../ids" }
