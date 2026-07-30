@@ -771,10 +771,9 @@ impl Default for KafkaRlmmConfig {
                 crabka_remote_storage_topic::DEFAULT_METADATA_TOPIC_CREATE_TIMEOUT,
             fetch_max_wait: crabka_remote_storage_topic::DEFAULT_METADATA_FETCH_MAX_WAIT,
             fetch_max_bytes: crabka_remote_storage_topic::DEFAULT_METADATA_FETCH_MAX_BYTES,
-            fetch_retry_backoff:
-                crabka_remote_storage_topic::DEFAULT_METADATA_FETCH_RETRY_BACKOFF,
-            event_queue_capacity:
-                crabka_remote_storage_topic::MetadataEventQueueCapacity::default(),
+            fetch_retry_backoff: crabka_remote_storage_topic::DEFAULT_METADATA_FETCH_RETRY_BACKOFF,
+            event_queue_capacity: crabka_remote_storage_topic::MetadataEventQueueCapacity::default(
+            ),
             snapshot_dir: std::path::PathBuf::new(),
             security: None,
         }
@@ -798,19 +797,17 @@ impl KafkaRlmmConfig {
             ..crabka_remote_storage_topic::KafkaMetadataLogConfig::new(&self.bootstrap)
         };
         transport.validate().map_err(|error| {
-            BrokerError::InvalidRuntimeConfig(format!(
-                "remote_storage.kafka_metadata: {error}"
-            ))
+            BrokerError::InvalidRuntimeConfig(format!("remote_storage.kafka_metadata: {error}"))
         })?;
 
-        let snapshot_interval =
-            std::time::Duration::try_from_secs_f64(self.snapshot_interval.secs_f64()).map_err(
-                |error| {
-                    BrokerError::InvalidRuntimeConfig(format!(
-                        "remote_storage.kafka_metadata.snapshot_interval: {error}"
-                    ))
-                },
-            )?;
+        let snapshot_interval = std::time::Duration::try_from_secs_f64(
+            self.snapshot_interval.secs_f64(),
+        )
+        .map_err(|error| {
+            BrokerError::InvalidRuntimeConfig(format!(
+                "remote_storage.kafka_metadata.snapshot_interval: {error}"
+            ))
+        })?;
         if snapshot_interval.is_zero() {
             return Err(BrokerError::InvalidRuntimeConfig(
                 "remote_storage.kafka_metadata.snapshot_interval must be positive".into(),
@@ -2610,8 +2607,10 @@ mod tests {
             fetch_max_wait: millis(750),
             fetch_max_bytes: mebibytes(2),
             fetch_retry_backoff: millis(300),
-            event_queue_capacity:
-                crabka_remote_storage_topic::MetadataEventQueueCapacity::new(2048).unwrap(),
+            event_queue_capacity: crabka_remote_storage_topic::MetadataEventQueueCapacity::new(
+                2048,
+            )
+            .unwrap(),
             snapshot_interval: secs(90),
             ..KafkaRlmmConfig::default()
         };

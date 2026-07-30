@@ -1456,8 +1456,9 @@ fn apply_remote_storage(
                 ..crate::config::KafkaRlmmConfig::default()
             };
             if let Some(km) = km {
-                policy.topic_create_timeout =
-                    km.topic_create_timeout.unwrap_or(policy.topic_create_timeout);
+                policy.topic_create_timeout = km
+                    .topic_create_timeout
+                    .unwrap_or(policy.topic_create_timeout);
                 policy.fetch_max_wait = km.fetch_max_wait.unwrap_or(policy.fetch_max_wait);
                 policy.fetch_max_bytes = km.fetch_max_bytes.unwrap_or(policy.fetch_max_bytes);
                 policy.fetch_retry_backoff =
@@ -1469,12 +1470,11 @@ fn apply_remote_storage(
                                 invalid_runtime_value("event_queue_capacity", error)
                             })?;
                 }
-                policy.snapshot_interval =
-                    km.snapshot_interval.unwrap_or(policy.snapshot_interval);
+                policy.snapshot_interval = km.snapshot_interval.unwrap_or(policy.snapshot_interval);
             }
-            policy.validate().map_err(|error| {
-                invalid_runtime_value("remote_storage.kafka_metadata", error)
-            })?;
+            policy
+                .validate()
+                .map_err(|error| invalid_runtime_value("remote_storage.kafka_metadata", error))?;
             cfg.remote_log_metadata = crate::config::RlmmKind::TopicBacked(policy);
         }
     }

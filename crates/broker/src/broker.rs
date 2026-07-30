@@ -6533,8 +6533,10 @@ protocol = "Plaintext"
             fetch_max_wait: millis(750),
             fetch_max_bytes: mebibytes(2),
             fetch_retry_backoff: millis(300),
-            event_queue_capacity:
-                crabka_remote_storage_topic::MetadataEventQueueCapacity::new(2048).unwrap(),
+            event_queue_capacity: crabka_remote_storage_topic::MetadataEventQueueCapacity::new(
+                2048,
+            )
+            .unwrap(),
             ..crate::config::KafkaRlmmConfig::default()
         };
 

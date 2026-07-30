@@ -180,10 +180,7 @@ impl KafkaMetadataLogConfig {
     /// Returns an error for non-positive, non-finite, fractional, or
     /// out-of-range wire values.
     pub fn validate(&self) -> Result<(), String> {
-        validate_positive_whole_millis_i32(
-            "topic_create_timeout",
-            self.topic_create_timeout,
-        )?;
+        validate_positive_whole_millis_i32("topic_create_timeout", self.topic_create_timeout)?;
         validate_positive_whole_millis_i32("fetch_max_wait", self.fetch_max_wait)?;
         validate_positive_whole_bytes_i32("fetch_max_bytes", self.fetch_max_bytes)?;
         validate_positive_duration("fetch_retry_backoff", self.fetch_retry_backoff)
@@ -797,8 +794,7 @@ mod tests {
             (
                 "topic_create_timeout",
                 configured(|cfg| {
-                    cfg.topic_create_timeout =
-                        Time::from_millis(i64::from(i32::MAX) + 1);
+                    cfg.topic_create_timeout = Time::from_millis(i64::from(i32::MAX) + 1);
                 }),
             ),
             (
@@ -836,8 +832,7 @@ mod tests {
             (
                 "fetch_max_bytes",
                 configured(|cfg| {
-                    cfg.fetch_max_bytes =
-                        ByteSize::from_bytes_i64(i64::from(i32::MAX) + 1);
+                    cfg.fetch_max_bytes = ByteSize::from_bytes_i64(i64::from(i32::MAX) + 1);
                 }),
             ),
             (
@@ -866,8 +861,7 @@ mod tests {
 
     #[test]
     fn metadata_event_channel_uses_configured_capacity() {
-        let (tx, _rx) =
-            metadata_event_channel(MetadataEventQueueCapacity::new(2048).unwrap());
+        let (tx, _rx) = metadata_event_channel(MetadataEventQueueCapacity::new(2048).unwrap());
         check!(tx.max_capacity() == 2048);
     }
 
@@ -894,9 +888,7 @@ mod tests {
         check!(cfg.topic_create_timeout.millis_i32() == 30_000);
         check!(cfg.fetch_max_wait.millis_i32() == 500);
         check!(cfg.fetch_max_bytes.bytes_i32() == 1 << 20);
-        check!(
-            cfg.fetch_retry_backoff.to_std() == std::time::Duration::from_millis(200)
-        );
+        check!(cfg.fetch_retry_backoff.to_std() == std::time::Duration::from_millis(200));
     }
 
     #[test]

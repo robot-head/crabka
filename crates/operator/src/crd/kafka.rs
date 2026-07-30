@@ -1289,12 +1289,8 @@ impl TopicMetadataManagerSpec {
         let defaults = crabka_broker::KafkaRlmmConfig::default();
         let mut policy = crabka_broker::KafkaRlmmConfig {
             bootstrap: self.bootstrap.clone(),
-            num_partitions: self
-                .num_partitions
-                .unwrap_or(defaults.num_partitions),
-            replication: self
-                .replication
-                .unwrap_or(defaults.replication),
+            num_partitions: self.num_partitions.unwrap_or(defaults.num_partitions),
+            replication: self.replication.unwrap_or(defaults.replication),
             ..defaults
         };
         policy.topic_create_timeout = self
@@ -1306,9 +1302,8 @@ impl TopicMetadataManagerSpec {
             .fetch_retry_backoff
             .unwrap_or(policy.fetch_retry_backoff);
         if let Some(capacity) = self.event_queue_capacity {
-            refined_type::rule::GreaterUsize::<0>::new(capacity).map_err(|error| {
-                format!("metadataManager.topic.event_queue_capacity: {error}")
-            })?;
+            refined_type::rule::GreaterUsize::<0>::new(capacity)
+                .map_err(|error| format!("metadataManager.topic.event_queue_capacity: {error}"))?;
         }
         policy.snapshot_interval = self.snapshot_interval.unwrap_or(policy.snapshot_interval);
         policy
@@ -2767,9 +2762,7 @@ authorization:
             assert!(topic["properties"][field]["type"] == "string", "{field}");
         }
         assert!(topic["properties"]["eventQueueCapacity"]["type"] == "integer");
-        assert!(
-            topic["properties"]["eventQueueCapacity"]["minimum"].as_f64() == Some(1.0)
-        );
+        assert!(topic["properties"]["eventQueueCapacity"]["minimum"].as_f64() == Some(1.0));
         let required = topic["required"].as_array().expect("topic required fields");
         for optional in [
             "topicCreateTimeout",
