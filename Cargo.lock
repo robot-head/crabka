@@ -9076,6 +9076,7 @@ dependencies = [
  "bytes",
  "clap",
  "crabka-client-consumer",
+ "crabka-client-core",
  "crabka-client-producer",
  "crabka-client-streams",
  "crabka-schema-serde",

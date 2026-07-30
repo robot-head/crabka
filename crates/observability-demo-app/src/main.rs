@@ -22,6 +22,10 @@ use crabka_client_consumer::{
     Consumer, ConsumerLeaveGroupTimeout, ConsumerRecord,
     ConsumerSubscriptionMetadataRefreshInterval,
 };
+use crabka_client_core::{
+    ClientFrameMax, ConnectionDispatchQueueCapacity, DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+    FetchMinBytes,
+};
 use crabka_client_producer::{Acks, Header, Producer, ProducerRecord};
 use crabka_client_streams::{
     ClientDnsTimeout, SchemaSerde, Serde, StreamsCommitInterval,
@@ -62,6 +66,22 @@ struct Cli {
     role: Role,
     #[arg(long, env = "CRABKA_DEMO_BOOTSTRAP", default_value = "127.0.0.1:9092")]
     bootstrap: String,
+    /// Capacity shared by every outbound Kafka client owned by this process.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    /// Maximum frame size shared by every outbound Kafka client.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
     #[arg(
         long,
         env = "CRABKA_DEMO_REGISTRY",
@@ -154,6 +174,57 @@ struct Cli {
         value_parser = parse::non_negative_byte_size
     )]
     streams_state_store_cache_max: Option<ByteSize>,
+    /// Minimum bytes requested by the Streams fetcher.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_STREAMS_FETCH_MIN",
+        value_parser = parse_fetch_min
+    )]
+    streams_fetch_min: Option<ByteSize>,
+}
+
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    ConnectionDispatchQueueCapacity::new(value).map(ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ClientFrameMax::try_from(value).map(ClientFrameMax::size)
+}
+
+fn parse_fetch_min(value: &str) -> Result<ByteSize, String> {
+    let value = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    FetchMinBytes::try_from(value).map(FetchMinBytes::size)
+}
+
+fn client_resource_policy(cli: &Cli) -> (ConnectionDispatchQueueCapacity, ClientFrameMax) {
+    (
+        ConnectionDispatchQueueCapacity::new(cli.client_dispatch_queue_capacity)
+            .expect("validated demo client dispatch queue capacity"),
+        ClientFrameMax::try_from(cli.client_frame_max)
+            .expect("validated demo client frame maximum"),
+    )
+}
+
+fn effective_streams_fetch_min(cli: &Cli) -> std::io::Result<FetchMinBytes> {
+    if cli.role != Role::Stream
+        && let Some(fetch_min) = cli.streams_fetch_min
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "--streams-fetch-min ({}) is only valid with --role stream",
+                fetch_min.human(),
+            ),
+        ));
+    }
+
+    Ok(cli
+        .streams_fetch_min
+        .map_or_else(FetchMinBytes::default, |fetch_min| {
+            FetchMinBytes::try_from(fetch_min).expect("validated Streams fetch minimum")
+        }))
 }
 
 fn effective_consumer_leave_group_timeout(cli: &Cli) -> std::io::Result<ConsumerLeaveGroupTimeout> {
@@ -396,6 +467,8 @@ fn schema_fetch_retry_policy(cli: &Cli) -> std::io::Result<SchemaFetchRetryPolic
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
+    let (client_dispatch_queue_capacity, client_frame_max) = client_resource_policy(&cli);
+    let streams_fetch_min = effective_streams_fetch_min(&cli)?;
     let schema_fetch_retry_policy = schema_fetch_retry_policy(&cli)?;
     let consumer_leave_group_timeout = effective_consumer_leave_group_timeout(&cli)?;
     let consumer_subscription_metadata_refresh_interval =
@@ -430,7 +503,16 @@ async fn main() -> Result<(), BoxError> {
     .await?;
 
     match cli.role {
-        Role::Produce => run_produce(&cli, &metrics, schema_fetch_retry_policy).await?,
+        Role::Produce => {
+            run_produce(
+                &cli,
+                &metrics,
+                schema_fetch_retry_policy,
+                client_dispatch_queue_capacity,
+                client_frame_max,
+            )
+            .await?;
+        }
         Role::Stream => {
             run_stream(
                 &cli,
@@ -443,6 +525,9 @@ async fn main() -> Result<(), BoxError> {
                 streams_join_retry_backoff,
                 streams_interactive_query_queue_capacity,
                 streams_state_store_cache_max_bytes,
+                client_dispatch_queue_capacity,
+                client_frame_max,
+                streams_fetch_min,
             )
             .await?;
         }
@@ -453,6 +538,8 @@ async fn main() -> Result<(), BoxError> {
                 schema_fetch_retry_policy,
                 consumer_leave_group_timeout,
                 consumer_subscription_metadata_refresh_interval,
+                client_dispatch_queue_capacity,
+                client_frame_max,
             )
             .await?;
         }
@@ -489,12 +576,16 @@ async fn run_produce(
     cli: &Cli,
     metrics: &DemoMetrics,
     schema_fetch_retry_policy: SchemaFetchRetryPolicy,
+    client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    client_frame_max: ClientFrameMax,
 ) -> Result<(), BoxError> {
     let serde = order_serde(cli, &cli.input_topic, schema_fetch_retry_policy).await?;
 
     let producer = Arc::new(
         Producer::builder()
             .bootstrap(cli.bootstrap.clone())
+            .dispatch_queue_capacity(client_dispatch_queue_capacity.get())
+            .frame_max(client_frame_max.size())
             .acks(Acks::All)
             .build()
             .await?,
@@ -605,6 +696,9 @@ async fn run_stream(
     streams_join_retry_backoff: StreamsJoinRetryBackoff,
     streams_interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
     streams_state_store_cache_max_bytes: StreamsStateStoreCacheMaxBytes,
+    client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    client_frame_max: ClientFrameMax,
+    streams_fetch_min: FetchMinBytes,
 ) -> Result<(), BoxError> {
     let app = crabka_client_streams::StreamsApp::builder()
         .bootstrap(cli.bootstrap.clone())
@@ -615,6 +709,9 @@ async fn run_stream(
             ..CacheConfig::default()
         })
         .broker_dns_timeout(broker_dns_timeout)
+        .client_dispatch_queue_capacity(client_dispatch_queue_capacity)
+        .client_frame_max(client_frame_max)
+        .fetch_min(streams_fetch_min)
         .poll_interval(streams_poll_interval)
         .commit_interval(streams_commit_interval)
         .rebalance_timeout(streams_rebalance_timeout)
@@ -648,6 +745,8 @@ async fn run_consume(
     schema_fetch_retry_policy: SchemaFetchRetryPolicy,
     consumer_leave_group_timeout: ConsumerLeaveGroupTimeout,
     consumer_subscription_metadata_refresh_interval: ConsumerSubscriptionMetadataRefreshInterval,
+    client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    client_frame_max: ClientFrameMax,
 ) -> Result<(), BoxError> {
     let serde = order_serde(cli, &cli.input_topic, schema_fetch_retry_policy).await?;
 
@@ -655,6 +754,8 @@ async fn run_consume(
         .bootstrap(cli.bootstrap.clone())
         .group_id("orders-processor")
         .subscribe([cli.input_topic.clone()])
+        .dispatch_queue_capacity(client_dispatch_queue_capacity.get())
+        .frame_max(client_frame_max.size())
         .leave_group_timeout(consumer_leave_group_timeout.duration().as_time())
         .subscription_metadata_refresh_interval(
             consumer_subscription_metadata_refresh_interval
@@ -866,6 +967,8 @@ mod tests {
         let defaults = Cli {
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
+            client_dispatch_queue_capacity: DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+            client_frame_max: mebibytes(100),
             registry: "http://127.0.0.1:8081".to_owned(),
             schema_fetch_retry_initial_backoff: None,
             schema_fetch_retry_max_backoff: None,
@@ -882,6 +985,7 @@ mod tests {
             streams_join_retry_backoff: None,
             streams_interactive_query_queue_capacity: None,
             streams_state_store_cache_max: None,
+            streams_fetch_min: None,
         };
         assert_eq!(
             effective_streams_broker_dns_timeout(&defaults).expect("typed default"),
@@ -931,6 +1035,8 @@ mod tests {
         let defaults = Cli {
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
+            client_dispatch_queue_capacity: DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+            client_frame_max: mebibytes(100),
             registry: "http://127.0.0.1:8081".to_owned(),
             schema_fetch_retry_initial_backoff: None,
             schema_fetch_retry_max_backoff: None,
@@ -947,6 +1053,7 @@ mod tests {
             streams_join_retry_backoff: None,
             streams_interactive_query_queue_capacity: None,
             streams_state_store_cache_max: None,
+            streams_fetch_min: None,
         };
         let (poll, commit) = effective_streams_runtime_cadence(&defaults).expect("typed defaults");
         assert_eq!(poll, crabka_client_streams::StreamsPollInterval::default());
@@ -1005,6 +1112,8 @@ mod tests {
         let defaults = Cli {
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
+            client_dispatch_queue_capacity: DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+            client_frame_max: mebibytes(100),
             registry: "http://127.0.0.1:8081".to_owned(),
             schema_fetch_retry_initial_backoff: None,
             schema_fetch_retry_max_backoff: None,
@@ -1021,6 +1130,7 @@ mod tests {
             streams_join_retry_backoff: None,
             streams_interactive_query_queue_capacity: None,
             streams_state_store_cache_max: None,
+            streams_fetch_min: None,
         };
         assert_eq!(
             effective_streams_rebalance_timeout(&defaults).expect("typed default"),
@@ -1082,6 +1192,8 @@ mod tests {
         let defaults = Cli {
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
+            client_dispatch_queue_capacity: DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+            client_frame_max: mebibytes(100),
             registry: "http://127.0.0.1:8081".to_owned(),
             schema_fetch_retry_initial_backoff: None,
             schema_fetch_retry_max_backoff: None,
@@ -1098,6 +1210,7 @@ mod tests {
             streams_join_retry_backoff: None,
             streams_interactive_query_queue_capacity: None,
             streams_state_store_cache_max: None,
+            streams_fetch_min: None,
         };
         assert_eq!(
             effective_streams_join_retry_backoff(&defaults).expect("typed default"),
@@ -1121,6 +1234,8 @@ mod tests {
         let defaults = Cli {
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
+            client_dispatch_queue_capacity: DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+            client_frame_max: mebibytes(100),
             registry: "http://127.0.0.1:8081".to_owned(),
             schema_fetch_retry_initial_backoff: None,
             schema_fetch_retry_max_backoff: None,
@@ -1137,6 +1252,7 @@ mod tests {
             streams_join_retry_backoff: None,
             streams_interactive_query_queue_capacity: None,
             streams_state_store_cache_max: None,
+            streams_fetch_min: None,
         };
         assert_eq!(
             effective_streams_interactive_query_queue_capacity(&defaults).expect("typed default"),
@@ -1153,5 +1269,123 @@ mod tests {
                 .capacity(),
             37
         );
+    }
+
+    #[test]
+    fn client_resource_policy_parses_defaults_overrides_and_invalid_values() {
+        let defaults = Cli::try_parse_from(["observability-demo-app", "--role", "stream"])
+            .expect("default CLI");
+        let (dispatch, frame) = client_resource_policy(&defaults);
+        assert_eq!(dispatch.get(), 64);
+        assert_eq!(frame.size(), mebibytes(100));
+        assert_eq!(
+            effective_streams_fetch_min(&defaults)
+                .expect("default fetch minimum")
+                .bytes(),
+            1
+        );
+
+        let custom = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "stream",
+            "--client-dispatch-queue-capacity",
+            "7",
+            "--client-frame-max",
+            "32KiB",
+            "--streams-fetch-min",
+            "3B",
+        ])
+        .expect("custom CLI");
+        let (dispatch, frame) = client_resource_policy(&custom);
+        assert_eq!(dispatch.get(), 7);
+        assert_eq!(frame.size(), kibibytes(32));
+        assert_eq!(
+            effective_streams_fetch_min(&custom)
+                .expect("custom fetch minimum")
+                .bytes(),
+            3
+        );
+
+        for option in [
+            "--client-dispatch-queue-capacity=0",
+            "--client-frame-max=101MiB",
+            "--client-frame-max=1.5B",
+            "--streams-fetch-min=0B",
+        ] {
+            Cli::try_parse_from(["observability-demo-app", "--role", "stream", option])
+                .expect_err(option);
+        }
+
+        let produce = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "produce",
+            "--streams-fetch-min",
+            "3B",
+        ])
+        .expect("parse before role validation");
+        assert_eq!(
+            effective_streams_fetch_min(&produce)
+                .expect_err("Streams-only option")
+                .to_string(),
+            "--streams-fetch-min (3B) is only valid with --role stream"
+        );
+    }
+
+    #[test]
+    fn client_resource_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TEST_DEMO_CLIENT_POLICY_ENV_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let environment = Cli::try_parse_from(["observability-demo-app", "--role", "stream"])
+                .expect("environment policy");
+            let (dispatch, frame) = client_resource_policy(&environment);
+            assert_eq!(dispatch.get(), 7);
+            assert_eq!(frame.size(), kibibytes(32));
+            assert_eq!(
+                effective_streams_fetch_min(&environment)
+                    .expect("environment fetch minimum")
+                    .bytes(),
+                3
+            );
+
+            let cli = Cli::try_parse_from([
+                "observability-demo-app",
+                "--role",
+                "stream",
+                "--client-dispatch-queue-capacity",
+                "9",
+                "--client-frame-max",
+                "64KiB",
+                "--streams-fetch-min",
+                "5B",
+            ])
+            .expect("CLI over environment");
+            let (dispatch, frame) = client_resource_policy(&cli);
+            assert_eq!(dispatch.get(), 9);
+            assert_eq!(frame.size(), kibibytes(64));
+            assert_eq!(
+                effective_streams_fetch_min(&cli)
+                    .expect("environment policy")
+                    .bytes(),
+                5
+            );
+            return;
+        }
+
+        let status =
+            std::process::Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "tests::client_resource_policy_reads_environment_and_prefers_cli",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .env("CRABKA_DEMO_CLIENT_DISPATCH_QUEUE_CAPACITY", "7")
+                .env("CRABKA_DEMO_CLIENT_FRAME_MAX", "32KiB")
+                .env("CRABKA_DEMO_STREAMS_FETCH_MIN", "3B")
+                .status()
+                .expect("run isolated environment parser test");
+        assert!(status.success());
     }
 }

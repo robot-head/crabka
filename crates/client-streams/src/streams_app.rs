@@ -50,6 +50,7 @@ use crabka_schema_serde::{
     cache::{CacheConfig, SchemaCache},
     set_default_registry,
 };
+use crabka_units::prelude::*;
 
 use crate::{
     DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES, StreamsInteractiveQueryQueueCapacity,
@@ -76,7 +77,10 @@ pub struct StreamsApp {
     join_retry_backoff: StreamsJoinRetryBackoff,
     leave_heartbeat_timeout: StreamsLeaveHeartbeatTimeout,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
-    cache_max_bytes: i64,
+    client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    client_frame_max: crabka_client_core::ClientFrameMax,
+    fetch_min: crabka_client_core::FetchMinBytes,
+    cache_max_bytes: ByteSize,
     interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
 }
 
@@ -116,10 +120,19 @@ impl StreamsApp {
         /// Deadline for each Kafka broker DNS lookup owned by this process.
         #[builder(default)]
         broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
+        /// Capacity shared by every outbound Kafka connection.
+        #[builder(default)]
+        client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+        /// Maximum frame size shared by every outbound Kafka connection.
+        #[builder(default)]
+        client_frame_max: crabka_client_core::ClientFrameMax,
+        /// Minimum bytes requested by broker fetches.
+        #[builder(default)]
+        fetch_min: crabka_client_core::FetchMinBytes,
         /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
         /// caching. Defaults to 10 MiB, matching the JVM default.
         #[builder(default = DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES)]
-        cache_max_bytes: i64,
+        cache_max_bytes: ByteSize,
         /// Capacity shared by the v1 and v2 interactive-query request queues.
         #[builder(default)]
         interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
@@ -141,6 +154,9 @@ impl StreamsApp {
             join_retry_backoff,
             leave_heartbeat_timeout,
             broker_dns_timeout,
+            client_dispatch_queue_capacity,
+            client_frame_max,
+            fetch_min,
             cache_max_bytes,
             interactive_query_queue_capacity,
         }
@@ -210,6 +226,9 @@ impl StreamsApp {
             .join_retry_backoff(self.join_retry_backoff.duration())
             .leave_heartbeat_timeout(self.leave_heartbeat_timeout.duration())
             .broker_dns_timeout(self.broker_dns_timeout)
+            .client_dispatch_queue_capacity(self.client_dispatch_queue_capacity.get())
+            .client_frame_max(self.client_frame_max.size())
+            .fetch_min(self.fetch_min.size())
             .cache_max_bytes(self.cache_max_bytes)
             .interactive_query_queue_capacity(self.interactive_query_queue_capacity)
             .build()
@@ -219,6 +238,8 @@ impl StreamsApp {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
 
     #[test]
@@ -248,15 +269,15 @@ mod tests {
             .application_id("cache-default")
             .schema_registry("http://127.0.0.1:8081")
             .build();
-        assert_eq!(defaults.cache_max_bytes, 10_485_760);
+        check!(defaults.cache_max_bytes == mebibytes(10));
 
         let overridden = StreamsApp::builder()
             .bootstrap("127.0.0.1:9092")
             .application_id("cache-override")
             .schema_registry("http://127.0.0.1:8081")
-            .cache_max_bytes(37)
+            .cache_max_bytes(bytes(37))
             .build();
-        assert_eq!(overridden.cache_max_bytes, 37);
+        check!(overridden.cache_max_bytes == bytes(37));
     }
 
     #[test]
@@ -314,6 +335,28 @@ mod tests {
             .broker_dns_timeout(timeout)
             .build();
         assert_eq!(overridden.broker_dns_timeout, timeout);
+    }
+
+    #[test]
+    fn client_resource_policy_uses_typed_defaults_and_overrides() {
+        let dispatch =
+            crabka_client_core::ConnectionDispatchQueueCapacity::new(7).expect("positive capacity");
+        let frame = crabka_client_core::ClientFrameMax::try_from(kibibytes(32))
+            .expect("bounded frame maximum");
+        let fetch =
+            crabka_client_core::FetchMinBytes::try_from(bytes(3)).expect("positive fetch minimum");
+        let app = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("client-policy")
+            .schema_registry("http://127.0.0.1:8081")
+            .client_dispatch_queue_capacity(dispatch)
+            .client_frame_max(frame)
+            .fetch_min(fetch)
+            .build();
+
+        assert_eq!(app.client_dispatch_queue_capacity, dispatch);
+        assert_eq!(app.client_frame_max, frame);
+        assert_eq!(app.fetch_min, fetch);
     }
 
     #[test]

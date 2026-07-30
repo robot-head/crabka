@@ -20,6 +20,7 @@ heap-profiling = ["crabka-telemetry/heap-profiling"]
 
 [dependencies]
 assert2 = { workspace = true }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-client-streams = { version = "0.3.9", path = "../client-streams" }
 crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
 crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
