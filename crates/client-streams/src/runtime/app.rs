@@ -7,7 +7,11 @@
 
 use std::{sync::Arc, time::Duration};
 
-use crabka_client_core::ClientDnsTimeout;
+use crabka_client_core::{
+    ClientDnsTimeout, ClientFrameMax, ConnectionDispatchQueueCapacity, DEFAULT_CLIENT_FRAME_MAX,
+    DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY, DEFAULT_FETCH_MIN, FetchMinBytes,
+};
+use crabka_units::prelude::*;
 use refined_type::rule::{MinMaxI64, MinMaxU128, MinMaxUsize};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -39,8 +43,8 @@ pub const DEFAULT_STREAMS_POLL_INTERVAL: Duration = Duration::from_millis(200);
 pub const DEFAULT_STREAMS_COMMIT_INTERVAL: Duration = Duration::from_secs(5);
 /// Default capacity of each Client Streams interactive-query request queue.
 pub const DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY: usize = 64;
-/// Default Client Streams state-store record-cache budget in bytes.
-pub const DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES: i64 = 10_485_760;
+/// Default Client Streams state-store record-cache budget (the JVM default).
+pub const DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES: ByteSize = mebibytes(10);
 
 /// Largest cache budget representable by both the public `i64` API and the
 /// target's internal `usize` cache accounting.
@@ -51,29 +55,33 @@ pub const MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES: i64 = if usize::BITS >= i64::
     usize::MAX as i64
 };
 
-/// Target-supported Client Streams state-store record-cache budget in bytes.
+/// Target-supported Client Streams state-store record-cache budget.
+///
+/// The validated magnitude is held as the raw `i64` byte count the refinement
+/// bounds are written over, so this stays `Eq` (a [`ByteSize`] stores `f64` and
+/// cannot be); [`size`](Self::size) puts the dimension back on at the seam.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamsStateStoreCacheMaxBytes(i64);
 
 impl StreamsStateStoreCacheMaxBytes {
-    /// Validate a state-store cache byte budget.
+    /// Validate a state-store cache budget.
     ///
-    /// Zero disables caching.
+    /// A zero budget disables caching.
     ///
     /// # Errors
     ///
     /// Returns an error for negative values or values that cannot be represented
     /// by the target's internal cache accounting.
-    pub fn new(value: i64) -> Result<Self, String> {
-        MinMaxI64::<0, MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES>::new(value)
+    pub fn new(value: ByteSize) -> Result<Self, String> {
+        MinMaxI64::<0, MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES>::new(value.bytes_i64())
             .map(|value| Self(value.into_value()))
             .map_err(|error| format!("streams state-store cache max bytes: {error}"))
     }
 
-    /// Return the validated byte budget.
+    /// Return the validated budget.
     #[must_use]
-    pub const fn bytes(self) -> i64 {
-        self.0
+    pub fn size(self) -> ByteSize {
+        ByteSize::from_bytes_i64(self.0)
     }
 }
 
@@ -217,7 +225,7 @@ fn validate_runtime_configuration(
     rebalance_timeout: Duration,
     join_retry_backoff: Duration,
     leave_heartbeat_timeout: Duration,
-    cache_max_bytes: i64,
+    cache_max_bytes: ByteSize,
 ) -> Result<
     (
         StreamsPollInterval,
@@ -298,10 +306,14 @@ impl KafkaStreams {
         /// Deadline for each Kafka broker DNS lookup owned by this process.
         #[builder(default)]
         broker_dns_timeout: ClientDnsTimeout,
+        #[builder(default = DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY)]
+        client_dispatch_queue_capacity: usize,
+        #[builder(default = DEFAULT_CLIENT_FRAME_MAX)] client_frame_max: ByteSize,
+        #[builder(default = DEFAULT_FETCH_MIN)] fetch_min: ByteSize,
         /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
         /// caching. Threaded onto each task graph at `instantiate`.
         #[builder(default = DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES)]
-        cache_max_bytes: i64,
+        cache_max_bytes: ByteSize,
         /// Capacity shared by the v1 and v2 interactive-query request queues.
         #[builder(default)]
         interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
@@ -321,7 +333,18 @@ impl KafkaStreams {
             leave_heartbeat_timeout,
             cache_max_bytes,
         )?;
-        let cache_max_bytes = cache_max_bytes.bytes();
+        let cache_max_bytes = cache_max_bytes.size();
+        let client_dispatch_queue_capacity =
+            ConnectionDispatchQueueCapacity::new(client_dispatch_queue_capacity)
+                .map_err(StreamsClientError::Runtime)?;
+        let client_frame_max =
+            ClientFrameMax::try_from(client_frame_max).map_err(StreamsClientError::Runtime)?;
+        let fetch_min = FetchMinBytes::try_from(fetch_min).map_err(StreamsClientError::Runtime)?;
+        let client_resource_policy = io_broker::ClientResourcePolicy {
+            dispatch_queue_capacity: client_dispatch_queue_capacity,
+            frame_max: client_frame_max,
+            fetch_min,
+        };
         let built = Arc::new(topology);
 
         // Broker I/O. Under EOS-v2 the producer is transactional: the SAME object
@@ -339,6 +362,7 @@ impl KafkaStreams {
                     &application_id,
                     &application_id,
                     broker_dns_timeout,
+                    client_resource_policy,
                 )
                 .await?;
                 fetcher = Arc::new(f);
@@ -354,6 +378,7 @@ impl KafkaStreams {
                     &application_id,
                     &txn_id,
                     broker_dns_timeout,
+                    client_resource_policy,
                 )
                 .await?;
                 fetcher = Arc::new(f);
@@ -370,6 +395,8 @@ impl KafkaStreams {
             .group_id(application_id.clone())
             .topology(Arc::clone(&built))
             .broker_dns_timeout(broker_dns_timeout)
+            .dispatch_queue_capacity(client_dispatch_queue_capacity)
+            .frame_max(client_frame_max)
             .rebalance_timeout(rebalance_timeout.duration())
             .join_retry_backoff(join_retry_backoff.duration())
             .leave_heartbeat_timeout(leave_heartbeat_timeout.duration())
@@ -576,6 +603,9 @@ impl KafkaStreams {
 mod tests {
     use std::time::Duration;
 
+    use assert2::check;
+    use crabka_units::prelude::*;
+
     use super::{
         DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES, KafkaStreams,
         MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES, StreamsCommitInterval,
@@ -624,35 +654,38 @@ mod tests {
     #[test]
     fn state_store_cache_max_bytes_uses_default_and_valid_overrides() {
         let default = StreamsStateStoreCacheMaxBytes::default();
-        assert_eq!(default.bytes(), 10_485_760);
-        assert_eq!(
-            StreamsStateStoreCacheMaxBytes::new(0)
+        check!(default.size() == mebibytes(10));
+        check!(
+            StreamsStateStoreCacheMaxBytes::new(ByteSize::ZERO)
                 .expect("zero disables caching")
-                .bytes(),
-            0
+                .size()
+                == ByteSize::ZERO
         );
-        assert_eq!(
-            StreamsStateStoreCacheMaxBytes::new(37)
+        check!(
+            StreamsStateStoreCacheMaxBytes::new(bytes(37))
                 .expect("positive cache budget")
-                .bytes(),
-            37
+                .size()
+                == bytes(37)
         );
     }
 
     #[test]
     fn state_store_cache_max_bytes_rejects_negative_values() {
-        let error = StreamsStateStoreCacheMaxBytes::new(-1).expect_err("negative cache budget");
-        assert2::assert!(error.contains("streams state-store cache max bytes"));
+        let error = StreamsStateStoreCacheMaxBytes::new(ByteSize::from_bytes_i64(-1))
+            .expect_err("negative cache budget");
+        check!(error.contains("streams state-store cache max bytes"));
     }
 
     #[test]
     fn state_store_cache_max_bytes_matches_target_boundaries() {
-        let maximum = StreamsStateStoreCacheMaxBytes::new(MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES)
-            .expect("target-supported maximum");
-        assert_eq!(maximum.bytes(), MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES);
+        let maximum = StreamsStateStoreCacheMaxBytes::new(ByteSize::from_bytes_i64(
+            MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
+        ))
+        .expect("target-supported maximum");
+        check!(maximum.size() == ByteSize::from_bytes_i64(MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES));
 
         if let Some(too_large) = MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES.checked_add(1) {
-            StreamsStateStoreCacheMaxBytes::new(too_large)
+            StreamsStateStoreCacheMaxBytes::new(ByteSize::from_bytes_i64(too_large))
                 .expect_err("value above target-supported maximum");
         }
     }
@@ -759,10 +792,10 @@ mod tests {
             Duration::from_secs(30),
             DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
             DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
-            -1,
+            ByteSize::from_bytes_i64(-1),
         )
         .expect_err("negative cache budget");
-        assert2::assert!(
+        check!(
             cache_error
                 .to_string()
                 .contains("streams state-store cache max bytes")
@@ -824,7 +857,7 @@ mod tests {
             .bootstrap("invalid.invalid:9092")
             .application_id("cache-budget-validation")
             .topology(topology)
-            .cache_max_bytes(-1)
+            .cache_max_bytes(ByteSize::from_bytes_i64(-1))
             .build()
             .await
             .err()
@@ -835,5 +868,27 @@ mod tests {
                 .to_string()
                 .contains("streams state-store cache max bytes")
         );
+    }
+
+    #[tokio::test]
+    async fn invalid_client_resource_policy_fails_before_broker_lookup() {
+        let mut topology = Topology::new();
+        let source = topology.add_source::<String, String>("source", ["input"]);
+        topology.add_sink("sink", "output", [&source]);
+        let topology = topology
+            .build("client-policy-validation")
+            .expect("topology");
+
+        let error = KafkaStreams::builder()
+            .bootstrap("invalid.invalid:9092")
+            .application_id("client-policy-validation")
+            .topology(topology)
+            .client_dispatch_queue_capacity(0)
+            .build()
+            .await
+            .err()
+            .expect("invalid client policy");
+
+        assert2::assert!(error.to_string().contains("client dispatch queue capacity"));
     }
 }

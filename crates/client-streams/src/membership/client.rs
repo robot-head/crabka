@@ -9,7 +9,9 @@
 
 use std::{sync::Arc, time::Duration};
 
-use crabka_client_core::{Client, ClientDnsTimeout};
+use crabka_client_core::{
+    Client, ClientDnsTimeout, ClientFrameMax, ConnectionDispatchQueueCapacity,
+};
 use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest;
 use refined_type::rule::MinMaxU128;
 use tokio::{
@@ -235,6 +237,8 @@ impl StreamsMembership {
         #[builder(default = DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT)]
         leave_heartbeat_timeout: Duration,
         #[builder(default)] broker_dns_timeout: ClientDnsTimeout,
+        #[builder(default)] dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+        #[builder(default)] frame_max: ClientFrameMax,
         security: Option<crabka_client_core::security::ClientSecurity>,
         schema_prewarm: Option<std::sync::Arc<dyn SchemaPrewarm>>,
     ) -> Result<Self, StreamsClientError> {
@@ -259,6 +263,8 @@ impl StreamsMembership {
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
             .dns_timeout(broker_dns_timeout.time())
+            .dispatch_queue_capacity(dispatch_queue_capacity.get())
+            .frame_max(frame_max.size())
             .maybe_security(security.clone())
             .build()
             .await?;
@@ -308,6 +314,8 @@ impl StreamsMembership {
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
             .dns_timeout(broker_dns_timeout.time())
+            .dispatch_queue_capacity(dispatch_queue_capacity.get())
+            .frame_max(frame_max.size())
             .maybe_security(security.clone())
             .build()
             .await?;

@@ -18,8 +18,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use crabka_client_core::{
-    Client, ClientDnsTimeout, Connection, ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX,
-    IsolatedFetch, fetch_partition_with_isolation,
+    Client, ClientDnsTimeout, ClientFrameMax, Connection, ConnectionDispatchQueueCapacity,
+    ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX, FetchMinBytes, IsolatedFetch,
+    fetch_partition_with_isolation,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_protocol::{
@@ -64,6 +65,14 @@ pub(crate) struct BrokerFetcher {
     max_wait: Time,
     /// Maximum the broker returns per partition per fetch.
     partition_max: ByteSize,
+    fetch_min: FetchMinBytes,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ClientResourcePolicy {
+    pub(crate) dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    pub(crate) frame_max: ClientFrameMax,
+    pub(crate) fetch_min: FetchMinBytes,
 }
 
 #[async_trait::async_trait]
@@ -96,7 +105,7 @@ impl RecordFetcher for BrokerFetcher {
                 max_wait: self.max_wait,
                 max: DEFAULT_FETCH_RESPONSE_MAX,
                 partition_max: self.partition_max,
-                fetch_min: crabka_client_core::FetchMinBytes::default(),
+                fetch_min: self.fetch_min,
                 isolation_level,
             },
         )
@@ -735,10 +744,14 @@ where
 fn fetch_connection_options(
     client_id: &str,
     broker_dns_timeout: ClientDnsTimeout,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
 ) -> ConnectionOptions {
     ConnectionOptions {
         client_id: client_id.to_owned(),
         dns_timeout: broker_dns_timeout,
+        dispatch_queue_capacity,
+        frame_max,
         ..ConnectionOptions::default()
     }
 }
@@ -754,12 +767,20 @@ pub(crate) async fn build(
     group_id: &str,
     client_id: &str,
     broker_dns_timeout: ClientDnsTimeout,
+    policy: ClientResourcePolicy,
 ) -> Result<(BrokerFetcher, Arc<BrokerProducer>, Arc<BrokerOffsetStore>), StreamsClientError> {
+    let ClientResourcePolicy {
+        dispatch_queue_capacity,
+        frame_max,
+        fetch_min,
+    } = policy;
     // 1. Client for metadata + offset RPCs.
     let metadata_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
         .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await?;
 
@@ -773,7 +794,12 @@ pub(crate) async fn build(
     .await?;
     let fetch_conn = Connection::connect_with_options(
         addr,
-        fetch_connection_options(client_id, broker_dns_timeout),
+        fetch_connection_options(
+            client_id,
+            broker_dns_timeout,
+            dispatch_queue_capacity,
+            frame_max,
+        ),
     )
     .await?;
 
@@ -784,6 +810,8 @@ pub(crate) async fn build(
         .enable_idempotence(true)
         .acks(Acks::All)
         .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
@@ -795,6 +823,8 @@ pub(crate) async fn build(
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-offsets"))
         .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await?;
 
@@ -804,6 +834,7 @@ pub(crate) async fn build(
         topic_ids: Mutex::new(HashMap::new()),
         max_wait: millis(500),
         partition_max: mebibytes(1),
+        fetch_min,
     };
     let broker_producer = Arc::new(BrokerProducer {
         inner: producer,
@@ -828,6 +859,7 @@ pub(crate) async fn build_eos(
     client_id: &str,
     transactional_id: &str,
     broker_dns_timeout: ClientDnsTimeout,
+    policy: ClientResourcePolicy,
 ) -> Result<
     (
         BrokerFetcher,
@@ -836,11 +868,18 @@ pub(crate) async fn build_eos(
     ),
     StreamsClientError,
 > {
+    let ClientResourcePolicy {
+        dispatch_queue_capacity,
+        frame_max,
+        fetch_min,
+    } = policy;
     // 1. Client for metadata + offset RPCs.
     let metadata_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
         .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await?;
 
@@ -854,7 +893,12 @@ pub(crate) async fn build_eos(
     .await?;
     let fetch_conn = Connection::connect_with_options(
         addr,
-        fetch_connection_options(client_id, broker_dns_timeout),
+        fetch_connection_options(
+            client_id,
+            broker_dns_timeout,
+            dispatch_queue_capacity,
+            frame_max,
+        ),
     )
     .await?;
 
@@ -866,6 +910,8 @@ pub(crate) async fn build_eos(
         .acks(Acks::All)
         .transactional_id(transactional_id.to_string())
         .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
@@ -877,6 +923,8 @@ pub(crate) async fn build_eos(
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-offsets"))
         .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await?;
 
@@ -886,6 +934,7 @@ pub(crate) async fn build_eos(
         topic_ids: Mutex::new(HashMap::new()),
         max_wait: millis(500),
         partition_max: mebibytes(1),
+        fetch_min,
     };
     let txn_producer = Arc::new(BrokerTransactionalProducer {
         inner: Arc::new(producer),
@@ -905,10 +954,12 @@ mod tests {
 
     use bytes::Bytes;
     use crabka_broker::{Broker, BrokerConfig};
-    use crabka_client_core::{Client, ClientDnsTimeout};
+    use crabka_client_core::{
+        Client, ClientDnsTimeout, ClientFrameMax, ConnectionDispatchQueueCapacity,
+    };
     use crabka_client_producer::Producer;
     use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
-    use crabka_units::millis;
+    use crabka_units::{kibibytes, millis};
     use tokio::sync::Mutex;
 
     use super::{
@@ -1001,12 +1052,16 @@ mod tests {
     }
 
     #[test]
-    fn fetch_connection_options_carry_the_typed_dns_timeout() {
+    fn fetch_connection_options_carry_client_policy() {
         let timeout = ClientDnsTimeout::new(millis(41)).expect("positive timeout");
-        let options = fetch_connection_options("streams-fetch", timeout);
+        let dispatch = ConnectionDispatchQueueCapacity::new(7).unwrap();
+        let frame_max = ClientFrameMax::try_from(kibibytes(32)).unwrap();
+        let options = fetch_connection_options("streams-fetch", timeout, dispatch, frame_max);
 
         assert2::assert!(options.client_id == "streams-fetch");
         assert2::assert!(options.dns_timeout == timeout);
+        assert2::assert!(options.dispatch_queue_capacity == dispatch);
+        assert2::assert!(options.frame_max == frame_max);
         assert2::assert!(
             options.connect_timeout == crabka_client_core::DEFAULT_CLIENT_CONNECT_TIMEOUT
         );
