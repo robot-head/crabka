@@ -41,5 +41,9 @@ Copyright (c) 1996-2026, PostgreSQL Global Development Group
 
 The Gres conformance pg_regress corpus under
 crates/gres-conformance/corpus-regress/ includes files vendored from the
-PostgreSQL project (https://github.com/postgres/postgres) at tag REL_18_0
-under the PostgreSQL License.
+PostgreSQL project (https://github.com/postgres/postgres) under the
+PostgreSQL License. Each adopted file carries a provenance header naming the
+tag it was fetched from: boolean and int4 were vendored at tag REL_18_0, and
+every other adopted file at tag REL_18_4 (the tag matching the pinned
+PostgreSQL 18.4 conformance oracle). The boolean and int4 sources are
+byte-identical between the two tags.

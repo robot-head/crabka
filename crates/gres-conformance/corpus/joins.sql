@@ -36,17 +36,17 @@ INSERT INTO node VALUES (1,NULL),(2,1),(3,2);
 SELECT c.id, p.id FROM node c JOIN node p ON c.parent = p.id ORDER BY c.id;
 
 -- Multi-way (3-table) join.
-CREATE TABLE t1 (id int4);
-CREATE TABLE t2 (id int4, v int4);
-CREATE TABLE t3 (id int4, w int4);
-INSERT INTO t1 VALUES (1),(2);
-INSERT INTO t2 VALUES (1,10),(2,20);
-INSERT INTO t3 VALUES (10,100),(20,200);
-SELECT t1.id, t3.w FROM t1 JOIN t2 ON t1.id = t2.id JOIN t3 ON t2.v = t3.id ORDER BY t1.id;
+CREATE TABLE jn_t1 (id int4);
+CREATE TABLE jn_t2 (id int4, v int4);
+CREATE TABLE jn_t3 (id int4, w int4);
+INSERT INTO jn_t1 VALUES (1),(2);
+INSERT INTO jn_t2 VALUES (1,10),(2,20);
+INSERT INTO jn_t3 VALUES (10,100),(20,200);
+SELECT jn_t1.id, jn_t3.w FROM jn_t1 JOIN jn_t2 ON jn_t1.id = jn_t2.id JOIN jn_t3 ON jn_t2.v = jn_t3.id ORDER BY jn_t1.id;
 
 -- Derived table (subquery in FROM).
 SELECT d.name FROM (SELECT name, dept_id FROM emp WHERE dept_id IS NOT NULL) d ORDER BY d.name;
-SELECT t2.id, d.mx FROM t2 JOIN (SELECT max(v) AS mx FROM t2) d ON t2.v = d.mx ORDER BY t2.id;
+SELECT jn_t2.id, d.mx FROM jn_t2 JOIN (SELECT max(v) AS mx FROM jn_t2) d ON jn_t2.v = d.mx ORDER BY jn_t2.id;
 
 -- USING and NATURAL: the join column is merged once (referenced bare) and
 -- positioned first by SELECT *.

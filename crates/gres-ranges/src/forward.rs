@@ -4180,15 +4180,11 @@ mod tests {
         Table {
             id: 11,
             name: "t11".to_string(),
-            columns: vec![Column {
-                name: "id".to_string(),
-                ty: ColumnType::Int4,
-                not_null: false,
-                default: None,
-            }],
+            columns: vec![Column::new("id", ColumnType::Int4)],
             sharded: true,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         }
     }
 

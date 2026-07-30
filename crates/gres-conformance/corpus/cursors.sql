@@ -1,0 +1,151 @@
+-- S2 cursor corpus: DECLARE / FETCH every direction / MOVE / CLOSE, WITH HOLD
+-- across a commit, and the NO SCROLL backward-scan refusal.
+CREATE TABLE cur_t (id int4, s text);
+INSERT INTO cur_t VALUES (1, 'a'), (2, 'b'), (3, 'c'), (4, 'd'), (5, 'e');
+
+-- A non-holdable cursor needs a transaction block.
+DECLARE cur_outside CURSOR FOR SELECT id FROM cur_t ORDER BY id;
+
+BEGIN;
+DECLARE c1 CURSOR FOR SELECT id FROM cur_t ORDER BY id;
+DECLARE c1 CURSOR FOR SELECT id FROM cur_t ORDER BY id;
+ROLLBACK;
+
+BEGIN;
+DECLARE c1 CURSOR FOR SELECT id FROM cur_t ORDER BY id;
+FETCH c1;
+FETCH NEXT c1;
+FETCH NEXT FROM c1;
+FETCH 2 FROM c1;
+FETCH ALL FROM c1;
+FETCH c1;
+FETCH PRIOR FROM c1;
+FETCH FIRST FROM c1;
+FETCH LAST FROM c1;
+FETCH ABSOLUTE 2 FROM c1;
+FETCH RELATIVE 2 FROM c1;
+FETCH BACKWARD 2 FROM c1;
+FETCH BACKWARD ALL FROM c1;
+FETCH FORWARD 3 FROM c1;
+FETCH -1 FROM c1;
+FETCH ABSOLUTE 0 FROM c1;
+FETCH ABSOLUTE -1 FROM c1;
+FETCH RELATIVE 0 FROM c1;
+FETCH ABSOLUTE 99 FROM c1;
+MOVE c1;
+MOVE BACKWARD ALL IN c1;
+MOVE 2 FROM c1;
+MOVE ALL IN c1;
+FETCH ALL FROM c1;
+CLOSE c1;
+FETCH c1;
+CLOSE c1;
+COMMIT;
+
+-- Multi-column projection and an empty result.
+BEGIN;
+DECLARE c2 CURSOR FOR SELECT id, s FROM cur_t WHERE id > 3 ORDER BY id;
+FETCH ALL FROM c2;
+DECLARE c3 CURSOR FOR SELECT id FROM cur_t WHERE id > 100;
+FETCH ALL FROM c3;
+FETCH BACKWARD ALL FROM c3;
+CLOSE ALL;
+FETCH c2;
+COMMIT;
+
+-- SCROLL / NO SCROLL / BINARY / INSENSITIVE spellings.
+BEGIN;
+DECLARE c4 SCROLL CURSOR FOR SELECT id FROM cur_t ORDER BY id;
+FETCH LAST FROM c4;
+FETCH PRIOR FROM c4;
+DECLARE c5 INSENSITIVE CURSOR FOR SELECT id FROM cur_t ORDER BY id;
+FETCH 1 FROM c5;
+DECLARE c6 NO SCROLL CURSOR FOR SELECT id FROM cur_t ORDER BY id;
+FETCH 2 FROM c6;
+FETCH PRIOR FROM c6;
+ROLLBACK;
+
+-- WITH HOLD survives the commit; a plain cursor does not.
+BEGIN;
+DECLARE c7 CURSOR WITH HOLD FOR SELECT id FROM cur_t ORDER BY id;
+DECLARE c8 CURSOR WITHOUT HOLD FOR SELECT id FROM cur_t ORDER BY id;
+FETCH 1 FROM c7;
+COMMIT;
+FETCH 2 FROM c7;
+FETCH ALL FROM c7;
+FETCH 1 FROM c8;
+CLOSE c7;
+
+-- A holdable cursor may be declared outside a transaction block.
+DECLARE c9 CURSOR WITH HOLD FOR SELECT id FROM cur_t ORDER BY id;
+FETCH 2 FROM c9;
+CLOSE c9;
+CLOSE c9;
+
+DROP TABLE cur_t;
+
+-- ROLLBACK TO destroys the sub-transaction a cursor was declared in, WITH HOLD
+-- included; a cursor declared outside survives with its position intact.
+CREATE TABLE cur_sp (id int4);
+INSERT INTO cur_sp VALUES (1), (2), (3), (4);
+BEGIN;
+DECLARE sp_outer CURSOR FOR SELECT id FROM cur_sp ORDER BY id;
+FETCH 2 FROM sp_outer;
+SAVEPOINT s1;
+FETCH 1 FROM sp_outer;
+DECLARE sp_hold CURSOR WITH HOLD FOR SELECT id FROM cur_sp ORDER BY id;
+DECLARE sp_plain CURSOR FOR SELECT id FROM cur_sp ORDER BY id;
+ROLLBACK TO s1;
+FETCH 1 FROM sp_outer;
+ROLLBACK;
+BEGIN;
+SAVEPOINT s1;
+DECLARE sp_hold2 CURSOR WITH HOLD FOR SELECT id FROM cur_sp ORDER BY id;
+ROLLBACK TO s1;
+FETCH ALL FROM sp_hold2;
+ROLLBACK;
+FETCH ALL FROM sp_hold2;
+BEGIN;
+SAVEPOINT s1;
+SAVEPOINT s2;
+DECLARE sp_deep CURSOR WITH HOLD FOR SELECT id FROM cur_sp ORDER BY id;
+ROLLBACK TO s1;
+FETCH 1 FROM sp_deep;
+ROLLBACK;
+
+-- RELEASE reassigns a cursor to the parent level, so a later ROLLBACK TO an
+-- outer savepoint leaves it alone.
+BEGIN;
+SAVEPOINT s1;
+DECLARE sp_kept CURSOR FOR SELECT id FROM cur_sp ORDER BY id;
+RELEASE s1;
+SAVEPOINT s2;
+ROLLBACK TO s2;
+FETCH 1 FROM sp_kept;
+ROLLBACK;
+
+-- A WITH HOLD cursor survives COMMIT but not ROLLBACK.
+BEGIN;
+DECLARE sp_h3 CURSOR WITH HOLD FOR SELECT id FROM cur_sp ORDER BY id;
+ROLLBACK;
+FETCH 1 FROM sp_h3;
+BEGIN;
+DECLARE sp_h4 CURSOR WITH HOLD FOR SELECT id FROM cur_sp ORDER BY id;
+COMMIT;
+FETCH 1 FROM sp_h4;
+CLOSE sp_h4;
+
+-- A cursor held across a COMMIT re-anchors at the top level, so a ROLLBACK TO
+-- in a later block does not drop it.
+BEGIN;
+SAVEPOINT s1;
+SAVEPOINT s2;
+DECLARE sp_h5 CURSOR WITH HOLD FOR SELECT id FROM cur_sp ORDER BY id;
+COMMIT;
+BEGIN;
+SAVEPOINT s3;
+ROLLBACK TO s3;
+FETCH 1 FROM sp_h5;
+COMMIT;
+CLOSE sp_h5;
+DROP TABLE cur_sp;

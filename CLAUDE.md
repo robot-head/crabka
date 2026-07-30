@@ -37,6 +37,8 @@ When executing implementation plans, always use **subagent-driven development in
 
 A "conflict" between parallel implementers requires the same file being edited by both. Tasks like "add wire codes" (codes.rs) and "add metadata fields" (records.rs) don't conflict and should run together. When in doubt, list the file set each task touches before deciding.
 
+**Never discard working-tree state while parallel implementers are running.** `git checkout -- <path>`, `git restore`, `git stash`, and `git clean` all destroy *every* uncommitted change in the files they touch, not just yours — and in a shared worktree those files usually hold someone else's unfinished work. To undo your own edit, reverse it directly: re-edit the region, or apply a reverse patch of your own diff. This has already cost one agent's uncommitted work.
+
 Tests must exercise behavior, not source text. Do not read source files in tests (for example with `include_str!`/`fs::read_to_string`) and assert against their contents. If a behavior is hard to test, introduce a narrow helper or seam and test that behavior directly.
 
 When checking generated protocol records or other structured values in tests, prefer comparing the whole expected struct over long chains of field-by-field assertions. Use table-driven or parameterized tests for repeated scenarios that differ only by inputs, protocol version, or expected request shape.

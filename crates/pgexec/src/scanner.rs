@@ -1641,14 +1641,14 @@ fn finalize_avg_parts(parts: &[crabka_pgtypes::Datum]) -> Result<crabka_pgtypes:
 }
 
 fn avg_numeric_value(value: &crabka_pgtypes::Datum) -> Result<crabka_pgtypes::Datum, ExecError> {
-    use bigdecimal::BigDecimal;
+    use crabka_pgtypes::numeric::NumericValue;
 
     match value {
         crabka_pgtypes::Datum::Int4(value) => {
-            Ok(crabka_pgtypes::Datum::Numeric(BigDecimal::from(*value)))
+            Ok(crabka_pgtypes::Datum::Numeric(NumericValue::from(*value)))
         }
         crabka_pgtypes::Datum::Int8(value) => {
-            Ok(crabka_pgtypes::Datum::Numeric(BigDecimal::from(*value)))
+            Ok(crabka_pgtypes::Datum::Numeric(NumericValue::from(*value)))
         }
         crabka_pgtypes::Datum::Numeric(value) => Ok(crabka_pgtypes::Datum::Numeric(value.clone())),
         _ => Err(ExecError::Unsupported(
@@ -1778,24 +1778,35 @@ fn compute_partial_min_max(
 enum PartialSum {
     Int(i64),
     Float(f64),
+    Float4(f32),
     Numeric(crabka_pgtypes::Datum),
 }
 
 impl PartialSum {
     fn try_from_first(value: &crabka_pgtypes::Datum) -> Result<Self, ExecError> {
         match value {
+            crabka_pgtypes::Datum::Int2(value) => Ok(Self::Int(i64::from(*value))),
             crabka_pgtypes::Datum::Int4(value) => Ok(Self::Int(i64::from(*value))),
             crabka_pgtypes::Datum::Int8(value) => Ok(Self::Int(*value)),
+            // `sum(real)` is `real`, so its partials must stay single-precision
+            // all the way to the coordinator rather than widening to float8.
+            crabka_pgtypes::Datum::Float4(value) => Ok(Self::Float4(*value)),
             crabka_pgtypes::Datum::Float8(value) => Ok(Self::Float(*value)),
             crabka_pgtypes::Datum::Numeric(_) => Ok(Self::Numeric(value.clone())),
             _ => Err(ExecError::Unsupported(
-                "partial SUM pushdown supports only int4/int8/float8/numeric inputs".into(),
+                "partial SUM pushdown supports only int2/int4/int8/float4/float8/numeric inputs"
+                    .into(),
             )),
         }
     }
 
     fn add(&mut self, value: &crabka_pgtypes::Datum) -> Result<(), ExecError> {
         match (self, value) {
+            (Self::Int(acc), crabka_pgtypes::Datum::Int2(value)) => {
+                *acc = acc
+                    .checked_add(i64::from(*value))
+                    .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow))?;
+            }
             (Self::Int(acc), crabka_pgtypes::Datum::Int4(value)) => {
                 *acc = acc
                     .checked_add(i64::from(*value))
@@ -1807,6 +1818,7 @@ impl PartialSum {
                     .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow))?;
             }
             (Self::Float(acc), crabka_pgtypes::Datum::Float8(value)) => *acc += *value,
+            (Self::Float4(acc), crabka_pgtypes::Datum::Float4(value)) => *acc += *value,
             (Self::Numeric(acc), crabka_pgtypes::Datum::Numeric(_)) => {
                 *acc = crabka_pgtypes::ops::add(acc, value)?;
             }
@@ -1823,6 +1835,7 @@ impl PartialSum {
         match self {
             Self::Int(value) => crabka_pgtypes::Datum::Int8(value),
             Self::Float(value) => crabka_pgtypes::Datum::Float8(value),
+            Self::Float4(value) => crabka_pgtypes::Datum::Float4(value),
             Self::Numeric(value) => value,
         }
     }
@@ -1833,8 +1846,10 @@ fn ensure_partial_min_max_value_is_supported(
 ) -> Result<(), ExecError> {
     if matches!(
         value,
-        crabka_pgtypes::Datum::Int4(_)
+        crabka_pgtypes::Datum::Int2(_)
+            | crabka_pgtypes::Datum::Int4(_)
             | crabka_pgtypes::Datum::Int8(_)
+            | crabka_pgtypes::Datum::Float4(_)
             | crabka_pgtypes::Datum::Float8(_)
             | crabka_pgtypes::Datum::Numeric(_)
             | crabka_pgtypes::Datum::Text(_)
@@ -2136,6 +2151,7 @@ mod cursor_contract_tests {
             sharded: true,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         };
 
         let mut cursor = scanner
@@ -2178,6 +2194,7 @@ mod cursor_contract_tests {
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         };
         let error = super::collect_cursor_bounded(
             &MaterializedOnlyScanner(vec![super::ScannedRow {
@@ -2249,6 +2266,7 @@ mod streaming_aggregate_tests {
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         }
     }
 
@@ -2294,7 +2312,6 @@ mod streaming_aggregate_tests {
 
     #[test]
     fn streaming_fold_computes_every_aggregate_under_a_per_page_budget() {
-        use std::str::FromStr;
         let rows = int_rows(2500);
         let whole_table_bytes = rows
             .iter()
@@ -2352,9 +2369,7 @@ mod streaming_aggregate_tests {
                     Datum::Int8(3_126_250),
                     Datum::Int8(1),
                     Datum::Int8(2500),
-                    Datum::Numeric(
-                        bigdecimal::BigDecimal::from_str("1250.5").expect("test literal")
-                    ),
+                    Datum::Numeric(crabka_pgtypes::numeric::parse("1250.5").expect("test literal")),
                 ]
         );
     }

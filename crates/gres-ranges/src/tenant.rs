@@ -6680,19 +6680,28 @@ fn parse_leading_u64(value: &str) -> Option<u64> {
 fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
     match value {
         Datum::Bool(value) => Some(vec![u8::from(*value)]),
+        Datum::Int2(value) => Some(value.to_be_bytes().to_vec()),
         Datum::Int4(value) => Some(value.to_be_bytes().to_vec()),
         Datum::Int8(value) => Some(value.to_be_bytes().to_vec()),
         Datum::Text(value) => Some(value.as_bytes().to_vec()),
         Datum::Bytea(value) => Some(value.clone()),
+        // The float widths are excluded together: a shard key must have exactly
+        // one byte spelling per value, and `-0.0`/`NaN` do not.
         Datum::Null
+        | Datum::Float4(_)
         | Datum::Float8(_)
         | Datum::Numeric(_)
         | Datum::Date(_)
         | Datum::Time(_)
+        | Datum::Timetz(_)
         | Datum::Timestamp(_)
         | Datum::Timestamptz(_)
         | Datum::Interval(_)
         | Datum::Jsonb(_)
+        // A composite or enum shard key would need its type's identity in the
+        // hash as well as the value, so both are excluded like the floats.
+        | Datum::Record(_)
+        | Datum::Enum(_)
         | Datum::Array(_) => None,
     }
 }

@@ -3,8 +3,8 @@
 -- numeric is exact, so unlike the float8 corpus there is no magnitude/rounding
 -- caveat: bare decimal literals are `numeric` in BOTH crabgresql and PostgreSQL,
 -- and arithmetic/aggregate results follow PostgreSQL's scale rules (max scale for
--- +/-, summed scale for *, and `select_div_scale` for / and avg). The deferred
--- specials (`NaN`/`Infinity`) have no SQL literal here, so they do not appear.
+-- +/-, summed scale for *, and `select_div_scale` for / and avg). The special
+-- values (`NaN`/`Infinity`) have their own corpus file, `numeric_special.sql`.
 CREATE TABLE num_acct (id int4, bal numeric(10,2), ratio numeric);
 INSERT INTO num_acct VALUES (1, 10, 1.5), (2, 2.5, 0.333), (3, 9.999, 2);
 

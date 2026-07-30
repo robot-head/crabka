@@ -31,10 +31,10 @@ const MAX_SETOP_DEPTH: usize = 150;
 /// literal), which PostgreSQL leaves as the `unknown` pseudo-type. An unknown column
 /// takes whatever a typed branch resolves to; if it stays unknown across every branch
 /// it becomes `text` (PG's final unknown→text rule).
-struct ResolvedCol {
+pub(crate) struct ResolvedCol {
     name: String,
-    ty: ColumnType,
-    unknown: bool,
+    pub(crate) ty: ColumnType,
+    pub(crate) unknown: bool,
 }
 
 /// A bare untyped literal — `NULL` or a string literal — is PostgreSQL's `unknown`
@@ -99,6 +99,9 @@ fn resolve_set_columns(
                 &s.projection,
                 ctes,
             )?;
+            // A branch's window results are synthetic columns of its own row, so
+            // its column types resolve against the widened scope.
+            let scope = crate::window::describe_scope(s, &scope)?;
             let (fields, exprs, tys) = crate::exec::resolve_projection(&projection, &scope)?;
             Ok(fields
                 .into_iter()
@@ -169,6 +172,20 @@ fn output_type(c: &ResolvedCol) -> ColumnType {
     if c.unknown { ColumnType::Text } else { c.ty }
 }
 
+/// The output columns of a set-op subtree, schema-only, with `PostgreSQL`'s
+/// `unknown` flag still attached.
+///
+/// The `WITH RECURSIVE` type check needs the flag: an `unknown` recursive-term
+/// column adopts the non-recursive term's type rather than clashing with it, so
+/// it must not be collapsed to `text` first the way [`output_type`] does.
+pub(crate) fn set_expr_columns(
+    catalog_kv: &dyn Kv,
+    body: &SetExpr,
+    ctes: &crate::cte::CteContext,
+) -> Result<Vec<ResolvedCol>, ExecError> {
+    resolve_set_columns(catalog_kv, body, ctes, 0)
+}
+
 pub(crate) fn describe_set_expr_with_ctes(
     catalog_kv: &dyn Kv,
     body: &SetExpr,
@@ -181,16 +198,39 @@ pub(crate) fn describe_set_expr_with_ctes(
         .collect())
 }
 
+/// One branch of a set-operation tree evaluated on its own, with no result-level
+/// tail. Used by the `WITH RECURSIVE` fixpoint, where the non-recursive and
+/// recursive terms are evaluated separately and the tail belongs to the whole
+/// recursion rather than to either term.
+pub(crate) fn set_expr_relation(
+    ctx: &crate::subquery::SubCtx<'_>,
+    body: &SetExpr,
+) -> Result<crate::join::Relation, ExecError> {
+    let cols = resolve_set_columns(ctx.catalog_kv, body, ctx.ctes, 0)?;
+    let out_tys: Vec<ColumnType> = cols.iter().map(output_type).collect();
+    let rows = fold(ctx, body, &out_tys, 0)?;
+    let scope = Scope {
+        columns: cols
+            .iter()
+            .map(|c| ColumnBinding {
+                qualifier: None,
+                name: c.name.clone(),
+                ty: output_type(c),
+            })
+            .collect(),
+    };
+    Ok(crate::join::Relation { scope, rows })
+}
+
 pub(crate) fn set_expr_to_relation(
     ctx: &crate::subquery::SubCtx<'_>,
     body: &SetExpr,
     order_by: &[crabka_pgparser::ast::OrderItem],
-    offset: Option<i64>,
-    limit: Option<i64>,
+    window: crate::exec::RowWindow,
 ) -> Result<crate::join::Relation, ExecError> {
     let cols = resolve_set_columns(ctx.catalog_kv, body, ctx.ctes, 0)?;
     let out_tys: Vec<ColumnType> = cols.iter().map(output_type).collect();
-    let mut rows = fold(ctx, body, &out_tys, 0)?;
+    let rows = fold(ctx, body, &out_tys, 0)?;
 
     let scope = Scope {
         columns: cols
@@ -203,19 +243,18 @@ pub(crate) fn set_expr_to_relation(
             .collect(),
     };
 
-    if !order_by.is_empty() {
-        let mut keyed: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::with_capacity(rows.len());
-        for row in rows {
-            let mut keys = Vec::with_capacity(order_by.len());
-            for item in order_by {
-                keys.push(order_key(&item.expr, &scope, &row, ctx.eval_ctx)?);
-            }
-            keyed.push((keys, row));
+    let mut keyed: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let mut keys = Vec::with_capacity(order_by.len());
+        for item in order_by {
+            keys.push(order_key(&item.expr, &scope, &row, ctx.eval_ctx)?);
         }
-        keyed.sort_by(|a, b| crate::exec::order_cmp(&a.0, &b.0, order_by));
-        rows = keyed.into_iter().map(|(_, r)| r).collect();
+        keyed.push((keys, row));
     }
-    crate::exec::apply_offset_limit(&mut rows, offset, limit);
+    if !order_by.is_empty() {
+        keyed.sort_by(|a, b| crate::exec::order_cmp(&a.0, &b.0, order_by));
+    }
+    let rows = crate::exec::apply_row_window(keyed, window, order_by);
 
     Ok(crate::join::Relation { scope, rows })
 }
@@ -223,20 +262,12 @@ pub(crate) fn set_expr_to_relation(
 /// One ORDER BY key for the set-op output: integer literal → 1-based position;
 /// otherwise evaluate against the output scope (output column name / expression).
 fn order_key(expr: &Expr, scope: &Scope, row: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
-    if let Expr::IntLiteral(s) = expr {
-        // PG: a positional ORDER BY out of range is 42P10 (invalid_column_reference),
-        // not 0A000 — the feature IS supported, the position is just invalid.
-        let pos: usize = s.parse().map_err(|_| {
-            ExecError::InvalidColumnReference(format!(
-                "ORDER BY position {s} is not in select list"
-            ))
-        })?;
-        if pos == 0 || pos > scope.width() {
-            return Err(ExecError::InvalidColumnReference(format!(
-                "ORDER BY position {pos} is not in select list"
-            )));
-        }
-        return Ok(row[pos - 1].clone());
+    // PG: a positional ORDER BY out of range is 42P10 (invalid_column_reference),
+    // not 0A000 — the feature IS supported, the position is just invalid.
+    if let Some(index) =
+        crate::sql92::output_position(expr, scope.width(), crate::sql92::Sql92Clause::OrderBy)?
+    {
+        return Ok(row[index].clone());
     }
     crate::eval::eval(expr, scope, row, ctx)
 }

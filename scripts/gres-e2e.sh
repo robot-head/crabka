@@ -600,7 +600,6 @@ CRABKA_GRES_PGDOG_TEST_URL="postgresql://carol:carol-secret@localhost:${PGDOG_PO
 ./target/debug/crabka-gres-conformance \
     --oracle-url "host=127.0.0.1 port=${ORACLE_PORT} user=postgres dbname=postgres" \
     --subject-url "host=localhost port=${PGDOG_PORT} dbname=tenant-c user=carol password=carol-secret sslmode=require" \
-    --subject-reconnect-per-file \
     --corpus crates/gres-conformance/corpus \
     --baseline crates/gres-conformance/pooler-baseline.json \
     --extended-corpus crates/gres-conformance/corpus-extended \

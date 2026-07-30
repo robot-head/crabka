@@ -13,3 +13,14 @@ SELECT id, name FROM u ORDER BY id;
 DELETE FROM u;
 SELECT id FROM u ORDER BY id;
 DROP TABLE u;
+
+-- A SET target is `ColId opt_indirection`, so a relation- or schema-qualified
+-- target is not a syntax error: PostgreSQL looks for a column named by the
+-- FIRST component and does not find one.
+CREATE TABLE uq (a int4, b int4);
+UPDATE uq SET uq.a = 1;
+UPDATE uq SET public.uq.a = 1;
+UPDATE uq SET "public".uq.a = 1;
+UPDATE uq SET db.public.uq.a = 1;
+UPDATE uq SET a = 1;
+DROP TABLE uq;

@@ -106,7 +106,10 @@ impl RowLockManager {
     /// Non-blocking acquire. Idempotent if `my_xid` already holds compatibly; a
     /// sole shared holder may upgrade to exclusive. Thin wrapper that locks and
     /// delegates to [`try_acquire_locked`].
-    #[cfg(test)]
+    ///
+    /// This is how `NOWAIT` and `SKIP LOCKED` are served: both need to know
+    /// whether the row is free *without* waiting, and differ only in what they do
+    /// with a conflict.
     pub(crate) fn try_acquire(
         &self,
         table: crabka_pgcatalog::TableId,
@@ -375,6 +378,383 @@ fn check_cycle(wait_for: &HashMap<u64, u64>, holder: u64, my_xid: u64) -> CycleC
             Some(&next) => cur = next,
             None => return CycleCheck::Ok,
         }
+    }
+}
+
+/// A session's identity in the S3 table/advisory lock tables. Sessions are the
+/// lock holders there, not transactions: `LOCK TABLE` and the advisory-lock
+/// family both work in a read-only transaction that never assigns an xid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SessionLockId(pub u64);
+
+/// One session's hold on a relation, with the re-entrancy count `PostgreSQL`
+/// keeps (`LOCK TABLE t; LOCK TABLE t;` is two holds of the same mode).
+#[derive(Debug, Clone, Copy)]
+struct TableHold {
+    session: SessionLockId,
+    mode: crabka_pgparser::ast::TableLockMode,
+}
+
+/// S3: relation-level locks with `PostgreSQL`'s eight modes and conflict matrix.
+///
+/// Holds are session-scoped and released together at the end of the transaction
+/// that took them, exactly as `PostgreSQL` releases relation locks. Locks a
+/// session already holds never conflict with its own new request, so a
+/// transaction can escalate freely.
+#[derive(Debug, Default)]
+pub struct TableLockManager {
+    holds: Mutex<Vec<(crabka_pgcatalog::TableId, TableHold)>>,
+}
+
+/// Why a table-lock acquisition failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableLockError {
+    /// `NOWAIT` was requested and another session holds a conflicting mode.
+    NotAvailable,
+}
+
+impl TableLockManager {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The session that currently blocks `mode` on `table`, if any.
+    fn conflicting_holder(
+        holds: &[(crabka_pgcatalog::TableId, TableHold)],
+        table: crabka_pgcatalog::TableId,
+        session: SessionLockId,
+        mode: crabka_pgparser::ast::TableLockMode,
+    ) -> Option<SessionLockId> {
+        holds
+            .iter()
+            .filter(|(held_table, hold)| *held_table == table && hold.session != session)
+            .find(|(_, hold)| mode.conflicts_with(hold.mode))
+            .map(|(_, hold)| hold.session)
+    }
+
+    /// Take `mode` on `table` for `session`, recording the hold.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TableLockError::NotAvailable`] when another session holds a
+    /// conflicting mode.
+    pub fn acquire(
+        &self,
+        table: crabka_pgcatalog::TableId,
+        session: SessionLockId,
+        mode: crabka_pgparser::ast::TableLockMode,
+    ) -> Result<(), TableLockError> {
+        let mut holds = self.holds.lock().expect("table lock manager");
+        if Self::conflicting_holder(&holds, table, session, mode).is_some() {
+            return Err(TableLockError::NotAvailable);
+        }
+        holds.push((table, TableHold { session, mode }));
+        Ok(())
+    }
+
+    /// Release every relation lock `session` holds.
+    pub fn release_all(&self, session: SessionLockId) {
+        self.holds
+            .lock()
+            .expect("table lock manager")
+            .retain(|(_, hold)| hold.session != session);
+    }
+
+    /// The modes `session` currently holds on `table`, weakest first.
+    #[cfg(test)]
+    #[must_use]
+    pub fn held_modes(
+        &self,
+        table: crabka_pgcatalog::TableId,
+        session: SessionLockId,
+    ) -> Vec<crabka_pgparser::ast::TableLockMode> {
+        let mut modes: Vec<_> = self
+            .holds
+            .lock()
+            .expect("table lock manager")
+            .iter()
+            .filter(|(held_table, hold)| *held_table == table && hold.session == session)
+            .map(|(_, hold)| hold.mode)
+            .collect();
+        modes.sort_unstable();
+        modes
+    }
+}
+
+/// The scope an advisory lock is released at.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdvisoryScope {
+    /// Held until explicitly unlocked or the session ends.
+    Session,
+    /// Released automatically at the end of the current transaction.
+    Transaction,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct AdvisoryHold {
+    session: SessionLockId,
+    key: i64,
+    shared: bool,
+    scope: AdvisoryScope,
+}
+
+/// S3: the advisory-lock family's shared state.
+///
+/// `PostgreSQL` advisory locks are counted: taking the same key twice requires
+/// two unlocks. Both the 64-bit and the `(int4, int4)` key spellings map onto
+/// one `i64` key, exactly as `PostgreSQL` packs them.
+#[derive(Debug, Default)]
+pub struct AdvisoryLockManager {
+    holds: Mutex<Vec<AdvisoryHold>>,
+}
+
+impl AdvisoryLockManager {
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `PostgreSQL`'s packing of the two-`int4` advisory key spelling.
+    #[must_use]
+    pub const fn pack_key(high: i32, low: i32) -> i64 {
+        ((high as i64) << 32) | (low as u32) as i64
+    }
+
+    /// Take `key` for `session` when no other session conflicts. Returns whether
+    /// the lock was granted (`pg_try_advisory_lock`'s boolean).
+    pub fn try_lock(
+        &self,
+        key: i64,
+        session: SessionLockId,
+        shared: bool,
+        scope: AdvisoryScope,
+    ) -> bool {
+        let mut holds = self.holds.lock().expect("advisory lock manager");
+        let conflict = holds
+            .iter()
+            .any(|hold| hold.key == key && hold.session != session && !(shared && hold.shared));
+        if conflict {
+            return false;
+        }
+        holds.push(AdvisoryHold {
+            session,
+            key,
+            shared,
+            scope,
+        });
+        true
+    }
+
+    /// Drop one hold of `key` in the requested sharing mode. Returns whether a
+    /// matching hold existed (`pg_advisory_unlock`'s boolean).
+    pub fn unlock(&self, key: i64, session: SessionLockId, shared: bool) -> bool {
+        let mut holds = self.holds.lock().expect("advisory lock manager");
+        let found = holds.iter().rposition(|hold| {
+            hold.key == key
+                && hold.session == session
+                && hold.shared == shared
+                && hold.scope == AdvisoryScope::Session
+        });
+        match found {
+            Some(index) => {
+                holds.remove(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Release every session-scoped advisory lock `session` holds
+    /// (`pg_advisory_unlock_all`).
+    pub fn unlock_all(&self, session: SessionLockId) {
+        self.holds
+            .lock()
+            .expect("advisory lock manager")
+            .retain(|hold| hold.session != session || hold.scope != AdvisoryScope::Session);
+    }
+
+    /// Release `session`'s transaction-scoped advisory locks at transaction end.
+    pub fn release_transaction(&self, session: SessionLockId) {
+        self.holds
+            .lock()
+            .expect("advisory lock manager")
+            .retain(|hold| hold.session != session || hold.scope != AdvisoryScope::Transaction);
+    }
+
+    /// Release everything `session` holds, at disconnect.
+    pub fn release_session(&self, session: SessionLockId) {
+        self.holds
+            .lock()
+            .expect("advisory lock manager")
+            .retain(|hold| hold.session != session);
+    }
+
+    /// How many holds `session` currently has on `key`.
+    #[cfg(test)]
+    #[must_use]
+    pub fn hold_count(&self, key: i64, session: SessionLockId) -> usize {
+        self.holds
+            .lock()
+            .expect("advisory lock manager")
+            .iter()
+            .filter(|hold| hold.key == key && hold.session == session)
+            .count()
+    }
+}
+
+/// The engine-wide S3 lock state every session shares: relation locks, advisory
+/// locks, and the allocator for session lock identities.
+#[derive(Debug, Default)]
+pub struct SessionLocks {
+    pub tables: TableLockManager,
+    pub advisory: AdvisoryLockManager,
+    next_session: std::sync::atomic::AtomicU64,
+}
+
+impl SessionLocks {
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            tables: TableLockManager::new(),
+            advisory: AdvisoryLockManager::new(),
+            next_session: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    /// Hand out a fresh session lock identity.
+    pub fn next_session_id(&self) -> SessionLockId {
+        SessionLockId(
+            self.next_session
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Drop every lock `session` holds, at disconnect.
+    pub fn release_session(&self, session: SessionLockId) {
+        self.tables.release_all(session);
+        self.advisory.release_session(session);
+    }
+}
+
+#[cfg(test)]
+mod session_lock_tests {
+    use assert2::assert;
+    use crabka_pgparser::ast::TableLockMode;
+
+    use super::*;
+
+    #[test]
+    fn the_lock_conflict_matrix_matches_postgres() {
+        use TableLockMode as M;
+        // PostgreSQL's `LockConflicts[]`, weakest mode first, as a bitmask row
+        // per mode: bit i is set when the row's mode conflicts with modes[i].
+        let modes = [
+            M::AccessShare,
+            M::RowShare,
+            M::RowExclusive,
+            M::ShareUpdateExclusive,
+            M::Share,
+            M::ShareRowExclusive,
+            M::Exclusive,
+            M::AccessExclusive,
+        ];
+        let expected = [
+            0b0000_0001_u8,
+            0b0000_0011,
+            0b0000_1111,
+            0b0001_1111,
+            0b0011_0111,
+            0b0011_1111,
+            0b0111_1111,
+            0b1111_1111,
+        ];
+        for (row, mode) in modes.iter().enumerate() {
+            let mut mask = 0_u8;
+            for (column, other) in modes.iter().enumerate() {
+                if mode.conflicts_with(*other) {
+                    mask |= 0b1000_0000 >> column;
+                }
+            }
+            assert!(mask == expected[row], "row {row} mask {mask:08b}");
+        }
+    }
+
+    #[test]
+    fn a_session_never_conflicts_with_its_own_relation_locks() {
+        let manager = TableLockManager::new();
+        let me = SessionLockId(1);
+        assert!(
+            manager
+                .acquire(7, me, TableLockMode::AccessExclusive)
+                .is_ok()
+        );
+        assert!(manager.acquire(7, me, TableLockMode::AccessShare).is_ok());
+        assert!(
+            manager.held_modes(7, me)
+                == vec![TableLockMode::AccessShare, TableLockMode::AccessExclusive]
+        );
+    }
+
+    #[test]
+    fn a_conflicting_mode_from_another_session_is_unavailable_until_release() {
+        let manager = TableLockManager::new();
+        let holder = SessionLockId(1);
+        let other = SessionLockId(2);
+        assert!(
+            manager
+                .acquire(7, holder, TableLockMode::AccessExclusive)
+                .is_ok()
+        );
+        assert!(
+            manager.acquire(7, other, TableLockMode::AccessShare)
+                == Err(TableLockError::NotAvailable)
+        );
+        // A different relation is untouched.
+        assert!(
+            manager
+                .acquire(8, other, TableLockMode::AccessShare)
+                .is_ok()
+        );
+        manager.release_all(holder);
+        assert!(
+            manager
+                .acquire(7, other, TableLockMode::AccessShare)
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn advisory_locks_count_shared_and_scope_exactly_like_postgres() {
+        let manager = AdvisoryLockManager::new();
+        let me = SessionLockId(1);
+        let other = SessionLockId(2);
+        assert!(manager.try_lock(1, me, false, AdvisoryScope::Session));
+        assert!(manager.try_lock(1, me, false, AdvisoryScope::Session));
+        assert!(manager.hold_count(1, me) == 2);
+        assert!(!manager.try_lock(1, other, false, AdvisoryScope::Session));
+        assert!(!manager.try_lock(1, other, true, AdvisoryScope::Session));
+        assert!(manager.unlock(1, me, false));
+        assert!(manager.unlock(1, me, false));
+        assert!(!manager.unlock(1, me, false));
+        // Shared holds coexist across sessions but block an exclusive request.
+        assert!(manager.try_lock(2, me, true, AdvisoryScope::Session));
+        assert!(manager.try_lock(2, other, true, AdvisoryScope::Session));
+        assert!(!manager.try_lock(2, SessionLockId(3), false, AdvisoryScope::Session));
+        // A transaction-scoped hold is not released by `pg_advisory_unlock`.
+        assert!(manager.try_lock(3, me, false, AdvisoryScope::Transaction));
+        assert!(!manager.unlock(3, me, false));
+        manager.release_transaction(me);
+        assert!(manager.hold_count(3, me) == 0);
+        manager.unlock_all(me);
+        assert!(manager.hold_count(2, me) == 0);
+    }
+
+    #[test]
+    fn the_two_int4_advisory_key_packs_the_way_postgres_packs_it() {
+        assert!(AdvisoryLockManager::pack_key(0, 1) == 1);
+        assert!(AdvisoryLockManager::pack_key(1, 0) == 1_i64 << 32);
+        assert!(AdvisoryLockManager::pack_key(-1, -1) == -1);
     }
 }
 

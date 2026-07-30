@@ -101,7 +101,8 @@ async fn locking_select_still_uses_locking_path() {
         rows(&c, "SELECT id FROM t FOR UPDATE").await,
         vec![vec![Some("1".into())]]
     );
-    assert_eq!(err_code(&c, "VALUES (1) FOR UPDATE").await, "42601");
+    // PostgreSQL's `transformValuesClause` refusal, not a syntax error.
+    assert_eq!(err_code(&c, "VALUES (1) FOR UPDATE").await, "0A000");
 }
 
 #[tokio::test]

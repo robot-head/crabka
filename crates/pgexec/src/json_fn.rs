@@ -19,7 +19,8 @@
 
 use std::borrow::Cow;
 
-use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
+use bigdecimal::BigDecimal;
+use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall, SqlJsonExpr};
 use crabka_pgtypes::{
     ArrayValue, ColumnType, Datum, ElemType, JsonbValue, TypeError, jsonb, numeric,
 };
@@ -45,20 +46,69 @@ enum JsonFunc {
     Set,
     /// `to_jsonb(anyelement)`.
     ToJsonb,
+    /// `jsonb_strip_nulls(jsonb)` — drop every object field whose value is the
+    /// JSON `null` literal, recursively. Array nulls are kept.
+    StripNulls,
+    /// `jsonb_pretty(jsonb)` — the indented rendering, as `text`.
+    Pretty,
+    /// `jsonb_insert(target, path, new_value [, insert_after])`.
+    Insert,
+    /// `jsonb_delete_path(target, path)` — the `#-` operator's function form.
+    DeletePath,
+    /// `jsonb_set_lax(target, path, new_value [, create_if_missing [, null_value_treatment]])`.
+    SetLax,
+    /// `json_object(text[])` / `json_object(text[], text[])` — an object built
+    /// from a flat or two-column key/value array. Every value is a JSON string.
+    Object,
+    /// `jsonb_path_exists(target, path [, vars [, silent]])` — the `@?` function form.
+    PathExists,
+    /// `jsonb_path_match(target, path [, vars [, silent]])` — the `@@` function form.
+    PathMatch,
+    /// `jsonb_path_query_array(target, path [, vars [, silent]])`.
+    PathQueryArray,
+    /// `jsonb_path_query_first(target, path [, vars [, silent]])`.
+    PathQueryFirst,
+    /// `jsonb_contains` / `jsonb_contained` / `jsonb_exists` / `jsonb_exists_any`
+    /// / `jsonb_exists_all` / `jsonb_delete` / `jsonb_concat` — the function
+    /// spellings of the operators, which `\df` and the regress corpus both use.
+    Operator(JsonOp),
 }
 
 /// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
 /// `None` means "not a jsonb function".
+///
+/// The `json_*` spellings resolve to the same implementations as their `jsonb_*`
+/// counterparts, because crabka stores `json` as `jsonb` (see the compatibility
+/// matrix row). `_tz` jsonpath variants likewise share their implementation:
+/// crabka's jsonpath datetime items are rendered strings, so no comparison in
+/// them depends on the session time zone.
 fn json_func(name: &str) -> Option<JsonFunc> {
     Some(match name {
-        "jsonb_build_object" => JsonFunc::BuildObject,
-        "jsonb_build_array" => JsonFunc::BuildArray,
-        "jsonb_array_length" => JsonFunc::ArrayLength,
-        "jsonb_typeof" => JsonFunc::Typeof,
-        "jsonb_extract_path" => JsonFunc::ExtractPath,
-        "jsonb_extract_path_text" => JsonFunc::ExtractPathText,
+        "jsonb_build_object" | "json_build_object" => JsonFunc::BuildObject,
+        "jsonb_build_array" | "json_build_array" => JsonFunc::BuildArray,
+        "jsonb_array_length" | "json_array_length" => JsonFunc::ArrayLength,
+        "jsonb_typeof" | "json_typeof" => JsonFunc::Typeof,
+        "jsonb_extract_path" | "json_extract_path" => JsonFunc::ExtractPath,
+        "jsonb_extract_path_text" | "json_extract_path_text" => JsonFunc::ExtractPathText,
         "jsonb_set" => JsonFunc::Set,
-        "to_jsonb" => JsonFunc::ToJsonb,
+        "jsonb_set_lax" => JsonFunc::SetLax,
+        "to_jsonb" | "to_json" => JsonFunc::ToJsonb,
+        "jsonb_strip_nulls" | "json_strip_nulls" => JsonFunc::StripNulls,
+        "jsonb_pretty" => JsonFunc::Pretty,
+        "jsonb_insert" => JsonFunc::Insert,
+        "jsonb_delete_path" => JsonFunc::DeletePath,
+        "jsonb_object" | "json_object" => JsonFunc::Object,
+        "jsonb_path_exists" | "jsonb_path_exists_tz" => JsonFunc::PathExists,
+        "jsonb_path_match" | "jsonb_path_match_tz" => JsonFunc::PathMatch,
+        "jsonb_path_query_array" | "jsonb_path_query_array_tz" => JsonFunc::PathQueryArray,
+        "jsonb_path_query_first" | "jsonb_path_query_first_tz" => JsonFunc::PathQueryFirst,
+        "jsonb_contains" => JsonFunc::Operator(JsonOp::Contains),
+        "jsonb_contained" => JsonFunc::Operator(JsonOp::ContainedBy),
+        "jsonb_exists" => JsonFunc::Operator(JsonOp::KeyExists),
+        "jsonb_exists_any" => JsonFunc::Operator(JsonOp::KeyExistsAny),
+        "jsonb_exists_all" => JsonFunc::Operator(JsonOp::KeyExistsAll),
+        "jsonb_delete" => JsonFunc::Operator(JsonOp::Delete),
+        "jsonb_concat" => JsonFunc::Operator(JsonOp::Concat),
         _ => return None,
     })
 }
@@ -97,12 +147,41 @@ fn param_types(f: JsonFunc, given: &[ArgType]) -> Result<Vec<Option<ColumnType>>
                 n.saturating_sub(1),
             ))
             .collect(),
-        JsonFunc::Set => vec![
+        JsonFunc::Set | JsonFunc::Insert => vec![
             jsonb,
             ColumnType::array_of(ColumnType::Text),
             jsonb,
             Some(ColumnType::Bool),
         ],
+        JsonFunc::SetLax => vec![
+            jsonb,
+            ColumnType::array_of(ColumnType::Text),
+            jsonb,
+            Some(ColumnType::Bool),
+            Some(ColumnType::Text),
+        ],
+        // PG18's `strip_nulls(jsonb, strip_in_arrays boolean)`.
+        JsonFunc::StripNulls => vec![jsonb, Some(ColumnType::Bool)],
+        JsonFunc::Pretty => vec![jsonb],
+        JsonFunc::DeletePath => vec![jsonb, ColumnType::array_of(ColumnType::Text)],
+        JsonFunc::Object => vec![ColumnType::array_of(ColumnType::Text); n.max(1)],
+        // `(jsonb, jsonpath [, jsonb vars [, boolean silent]])`. crabka spells
+        // `jsonpath` `text`, so the second parameter takes an `unknown` literal
+        // as text and the path is compiled at evaluation.
+        JsonFunc::PathExists
+        | JsonFunc::PathMatch
+        | JsonFunc::PathQueryArray
+        | JsonFunc::PathQueryFirst => {
+            vec![jsonb, Some(ColumnType::Text), jsonb, Some(ColumnType::Bool)]
+        }
+        JsonFunc::Operator(op) => match op {
+            JsonOp::KeyExists => vec![jsonb, Some(ColumnType::Text)],
+            JsonOp::KeyExistsAny | JsonOp::KeyExistsAll => {
+                vec![jsonb, ColumnType::array_of(ColumnType::Text)]
+            }
+            JsonOp::Delete => vec![jsonb, None],
+            _ => vec![jsonb, jsonb],
+        },
         // `to_jsonb(anyelement)`: nothing else in the call can resolve the
         // parameter, so an `unknown` literal there is 42804 — not a JSON string.
         JsonFunc::ToJsonb => {
@@ -153,7 +232,7 @@ pub(crate) fn json_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colu
                 ColumnType::Text
             }
         }
-        JsonFunc::Set => {
+        JsonFunc::Set | JsonFunc::Insert => {
             require_arity(fc, n == 3 || n == 4)?;
             require_jsonb_arg(fc, types[0])?;
             if types[1] != ColumnType::Array(ElemType::Text) {
@@ -165,6 +244,58 @@ pub(crate) fn json_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colu
         JsonFunc::ToJsonb => {
             require_arity(fc, n == 1)?;
             ColumnType::Jsonb
+        }
+        JsonFunc::StripNulls => {
+            require_arity(fc, n == 1 || n == 2)?;
+            require_jsonb_arg(fc, types[0])?;
+            ColumnType::Jsonb
+        }
+        JsonFunc::Pretty => {
+            require_arity(fc, n == 1)?;
+            require_jsonb_arg(fc, types[0])?;
+            ColumnType::Text
+        }
+        JsonFunc::DeletePath => {
+            require_arity(fc, n == 2)?;
+            require_jsonb_arg(fc, types[0])?;
+            if types[1] != ColumnType::Array(ElemType::Text) {
+                return Err(undefined_function(&fc.name));
+            }
+            ColumnType::Jsonb
+        }
+        JsonFunc::SetLax => {
+            require_arity(fc, (3..=5).contains(&n))?;
+            require_jsonb_arg(fc, types[0])?;
+            if types[1] != ColumnType::Array(ElemType::Text) {
+                return Err(undefined_function(&fc.name));
+            }
+            require_jsonb_arg(fc, types[2])?;
+            ColumnType::Jsonb
+        }
+        JsonFunc::Object => {
+            require_arity(fc, n == 1 || n == 2)?;
+            if types
+                .iter()
+                .any(|t| *t != ColumnType::Array(ElemType::Text))
+            {
+                return Err(undefined_function(&fc.name));
+            }
+            ColumnType::Jsonb
+        }
+        JsonFunc::PathExists | JsonFunc::PathMatch => {
+            require_arity(fc, (2..=4).contains(&n))?;
+            require_jsonb_arg(fc, types[0])?;
+            ColumnType::Bool
+        }
+        JsonFunc::PathQueryArray | JsonFunc::PathQueryFirst => {
+            require_arity(fc, (2..=4).contains(&n))?;
+            require_jsonb_arg(fc, types[0])?;
+            ColumnType::Jsonb
+        }
+        JsonFunc::Operator(op) => {
+            require_arity(fc, n == 2)?;
+            json_operator_result_type(op, types[0], types[1])
+                .ok_or_else(|| undefined_function(&fc.name))?
         }
     })
 }
@@ -272,6 +403,1141 @@ pub(crate) fn eval_json(
             }
             Ok(Datum::Jsonb(to_jsonb(&vals[0], ctx)?))
         }
+        JsonFunc::StripNulls => {
+            require_arity(fc, n == 1 || n == 2)?;
+            if vals.iter().any(Datum::is_null) {
+                return Ok(Datum::Null);
+            }
+            let in_arrays = match vals.get(1) {
+                None => false,
+                Some(Datum::Bool(b)) => *b,
+                Some(other) => return Err(type_error(&fc.name, other)),
+            };
+            let value = jsonb_operand(&vals[0], &fc.name)?;
+            Ok(Datum::Jsonb(strip_nulls(value.as_ref(), in_arrays)))
+        }
+        JsonFunc::Pretty => {
+            require_arity(fc, n == 1)?;
+            if vals[0].is_null() {
+                return Ok(Datum::Null);
+            }
+            let value = jsonb_operand(&vals[0], &fc.name)?;
+            Ok(Datum::Text(pretty(value.as_ref(), 0)))
+        }
+        JsonFunc::Insert => {
+            require_arity(fc, n == 3 || n == 4)?;
+            if vals.iter().any(Datum::is_null) {
+                return Ok(Datum::Null);
+            }
+            let target = jsonb_operand(&vals[0], &fc.name)?;
+            let path = text_path(&vals[1], &fc.name)?;
+            let new_value = jsonb_operand(&vals[2], &fc.name)?;
+            let after = match vals.get(3) {
+                Some(Datum::Bool(b)) => *b,
+                None => false,
+                Some(other) => return Err(type_error(&fc.name, other)),
+            };
+            if !matches!(
+                target.as_ref(),
+                JsonbValue::Object(_) | JsonbValue::Array(_)
+            ) {
+                return Err(invalid_parameter("cannot set path in scalar"));
+            }
+            Ok(Datum::Jsonb(insert_path(
+                target.as_ref(),
+                &path,
+                new_value.as_ref(),
+                after,
+            )?))
+        }
+        JsonFunc::DeletePath => {
+            require_arity(fc, n == 2)?;
+            if vals.iter().any(Datum::is_null) {
+                return Ok(Datum::Null);
+            }
+            let target = jsonb_operand(&vals[0], &fc.name)?;
+            let path = text_path(&vals[1], &fc.name)?;
+            if !matches!(
+                target.as_ref(),
+                JsonbValue::Object(_) | JsonbValue::Array(_)
+            ) {
+                return Err(invalid_parameter("cannot delete path in scalar"));
+            }
+            Ok(Datum::Jsonb(delete_path(target.as_ref(), &path)))
+        }
+        JsonFunc::SetLax => {
+            require_arity(fc, (3..=5).contains(&n))?;
+            eval_set_lax(fc, &vals)
+        }
+        JsonFunc::Object => {
+            require_arity(fc, n == 1 || n == 2)?;
+            if vals.iter().any(Datum::is_null) {
+                return Ok(Datum::Null);
+            }
+            eval_json_object(&fc.name, &vals)
+        }
+        JsonFunc::PathExists
+        | JsonFunc::PathMatch
+        | JsonFunc::PathQueryArray
+        | JsonFunc::PathQueryFirst => {
+            require_arity(fc, (2..=4).contains(&n))?;
+            eval_path_func(f, &fc.name, &vals)
+        }
+        JsonFunc::Operator(op) => {
+            require_arity(fc, n == 2)?;
+            eval_json_operator(op, &vals[0], &vals[1])
+        }
+    }
+}
+
+// ---- jsonpath ----
+
+/// One resolved `jsonb_path_*` call: the target document, the compiled path,
+/// the optional `vars` object and the `silent` flag.
+struct PathCall {
+    target: JsonbValue,
+    path: crate::jsonpath::JsonPath,
+    vars: Option<JsonbValue>,
+    silent: bool,
+}
+
+/// Resolve the arguments every `jsonb_path_*` function shares. `None` means the
+/// whole call is SQL NULL: all of them are STRICT in the target and the path.
+fn path_args(name: &str, args: &[Datum]) -> Result<Option<PathCall>, ExecError> {
+    if args[0].is_null() || args[1].is_null() {
+        return Ok(None);
+    }
+    let target = jsonb_operand(&args[0], name)?.into_owned();
+    let path = crate::jsonpath::JsonPath::parse(text_arg(&args[1], name)?)?;
+    let vars = match args.get(2) {
+        None | Some(Datum::Null) => None,
+        Some(given) => {
+            let object = jsonb_operand(given, name)?.into_owned();
+            crate::jsonpath::check_vars(&object)?;
+            Some(object)
+        }
+    };
+    let silent = match args.get(3) {
+        None | Some(Datum::Null) => false,
+        Some(Datum::Bool(b)) => *b,
+        Some(other) => return Err(type_error(name, other)),
+    };
+    Ok(Some(PathCall {
+        target,
+        path,
+        vars,
+        silent,
+    }))
+}
+
+fn eval_path_func(f: JsonFunc, name: &str, args: &[Datum]) -> Result<Datum, ExecError> {
+    let Some(call) = path_args(name, args)? else {
+        return Ok(Datum::Null);
+    };
+    let (target, path, silent) = (&call.target, &call.path, call.silent);
+    let vars = call.vars.as_ref();
+    Ok(match f {
+        JsonFunc::PathExists => match path.exists(target, vars, silent)? {
+            Some(b) => Datum::Bool(b),
+            None => Datum::Null,
+        },
+        JsonFunc::PathMatch => match path.predicate(target, vars, silent)? {
+            Some(b) => Datum::Bool(b),
+            None => Datum::Null,
+        },
+        JsonFunc::PathQueryArray => {
+            Datum::Jsonb(JsonbValue::Array(path.query(target, vars, silent)?))
+        }
+        // `jsonb_path_query_first` keeps only the first item; an empty result is
+        // SQL NULL, not an empty array.
+        _ => match path.query(target, vars, silent)?.into_iter().next() {
+            Some(v) => Datum::Jsonb(v),
+            None => Datum::Null,
+        },
+    })
+}
+
+/// `jsonb @? jsonpath` / `jsonb @@ jsonpath`. Both operators run `silent`, so a
+/// structural error is SQL NULL rather than a raised error.
+fn json_path_operator(left: &Datum, right: &Datum, predicate: bool) -> Result<Datum, ExecError> {
+    let op = if predicate {
+        JsonOp::PathMatch
+    } else {
+        JsonOp::PathExists
+    };
+    if left.is_null() || right.is_null() {
+        return Ok(Datum::Null);
+    }
+    let Some(target) = jsonb_or_null(left, op)? else {
+        return Ok(Datum::Null);
+    };
+    let path = crate::jsonpath::JsonPath::parse(text_arg(right, op.spelling())?)?;
+    let result = if predicate {
+        path.predicate(target.as_ref(), None, true)?
+    } else {
+        path.exists(target.as_ref(), None, true)?
+    };
+    Ok(match result {
+        Some(b) => Datum::Bool(b),
+        None => Datum::Null,
+    })
+}
+
+/// `jsonb_set_lax(target, path, new_value, create_if_missing, null_value_treatment)`
+/// — `jsonb_set` plus an explicit policy for a SQL NULL `new_value`.
+fn eval_set_lax(fc: &FuncCall, vals: &[Datum]) -> Result<Datum, ExecError> {
+    let treatment = match vals.get(4) {
+        None => "use_json_null".to_string(),
+        Some(Datum::Null) => return Ok(Datum::Null),
+        Some(v) => text_arg(v, &fc.name)?.to_ascii_lowercase(),
+    };
+    if !matches!(
+        treatment.as_str(),
+        "raise_exception" | "use_json_null" | "delete_key" | "return_target"
+    ) {
+        return Err(ExecError::FunctionError {
+            sqlstate: "22023",
+            message: "null_value_treatment must be \"delete_key\", \"return_target\", \"use_json_null\", or \"raise_exception\"".into(),
+        });
+    }
+    if vals[0].is_null() || vals[1].is_null() {
+        return Ok(Datum::Null);
+    }
+    let create = match vals.get(3) {
+        None => true,
+        Some(Datum::Null) => return Ok(Datum::Null),
+        Some(Datum::Bool(b)) => *b,
+        Some(other) => return Err(type_error(&fc.name, other)),
+    };
+    let target = jsonb_operand(&vals[0], &fc.name)?;
+    let path = text_path(&vals[1], &fc.name)?;
+    if vals[2].is_null() {
+        return match treatment.as_str() {
+            "raise_exception" => Err(ExecError::FunctionError {
+                sqlstate: "22004",
+                message: "JSON value must not be null".into(),
+            }),
+            "return_target" => Ok(Datum::Jsonb(target.into_owned())),
+            "delete_key" => {
+                if !matches!(
+                    target.as_ref(),
+                    JsonbValue::Object(_) | JsonbValue::Array(_)
+                ) {
+                    return Err(invalid_parameter("cannot delete path in scalar"));
+                }
+                Ok(Datum::Jsonb(delete_path(target.as_ref(), &path)))
+            }
+            _ => jsonb_set(target.as_ref(), &path, &JsonbValue::Null, create),
+        };
+    }
+    let new_value = jsonb_operand(&vals[2], &fc.name)?;
+    jsonb_set(target.as_ref(), &path, new_value.as_ref(), create)
+}
+
+/// `json_object(text[])` / `json_object(text[], text[])`: an object whose values
+/// are all JSON strings (a NULL element becomes the JSON `null` literal).
+fn eval_json_object(name: &str, vals: &[Datum]) -> Result<Datum, ExecError> {
+    let flat = |d: &Datum| -> Result<Vec<Datum>, ExecError> {
+        match d {
+            Datum::Array(a) => Ok(a.elems.clone()),
+            other => Err(type_error(name, other)),
+        }
+    };
+    let element = |d: &Datum| -> JsonbValue {
+        match d {
+            Datum::Null => JsonbValue::Null,
+            Datum::Text(s) => JsonbValue::String(s.clone()),
+            other => JsonbValue::String(
+                String::from_utf8(crabka_pgtypes::encoding::encode_text(
+                    other,
+                    &jiff::tz::TimeZone::UTC,
+                ))
+                .unwrap_or_default(),
+            ),
+        }
+    };
+    let key_text = |d: &Datum| -> Result<String, ExecError> {
+        match d {
+            Datum::Null => Err(invalid_parameter("null value not allowed for object key")),
+            Datum::Text(s) => Ok(s.clone()),
+            other => Err(type_error(name, other)),
+        }
+    };
+    let mut pairs = Vec::new();
+    if vals.len() == 1 {
+        let items = flat(&vals[0])?;
+        if items.len() % 2 != 0 {
+            return Err(ExecError::FunctionError {
+                sqlstate: "2202E",
+                message: "array must have even number of elements".into(),
+            });
+        }
+        for pair in items.chunks_exact(2) {
+            pairs.push((key_text(&pair[0])?, element(&pair[1])));
+        }
+    } else {
+        let keys = flat(&vals[0])?;
+        let values = flat(&vals[1])?;
+        if keys.len() != values.len() {
+            return Err(ExecError::FunctionError {
+                sqlstate: "2202E",
+                message: "mismatched array dimensions".into(),
+            });
+        }
+        for (k, v) in keys.iter().zip(&values) {
+            pairs.push((key_text(k)?, element(v)));
+        }
+    }
+    Ok(Datum::Jsonb(JsonbValue::object_from_pairs(pairs)))
+}
+
+// ---- the SQL/JSON standard expressions ----
+
+/// Evaluate one SQL/JSON standard expression (`IS JSON`, `JSON_OBJECT`,
+/// `JSON_ARRAY`, `JSON_SCALAR`, `JSON_SERIALIZE`, `JSON()`, `JSON_EXISTS`,
+/// `JSON_VALUE`, `JSON_QUERY`).
+pub(crate) fn eval_sql_json(
+    node: &SqlJsonExpr,
+    ctx: &EvalCtx,
+    mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+) -> Result<Datum, ExecError> {
+    match node {
+        SqlJsonExpr::IsJson {
+            expr,
+            negated,
+            item,
+            unique_keys,
+        } => {
+            let value = eval_child(expr)?;
+            // A NULL operand makes the whole predicate NULL, unlike `IS NULL`.
+            if value.is_null() {
+                return Ok(Datum::Null);
+            }
+            let holds = is_json(&value, *item, *unique_keys)?;
+            Ok(Datum::Bool(holds ^ *negated))
+        }
+        SqlJsonExpr::Object {
+            entries,
+            absent_on_null,
+            unique_keys,
+            returning,
+        } => {
+            let mut pairs: Vec<(String, JsonbValue)> = Vec::with_capacity(entries.len());
+            for (key, value) in entries {
+                let value = eval_child(value)?;
+                if *absent_on_null && value.is_null() {
+                    continue;
+                }
+                let key = eval_child(key)?;
+                if key.is_null() {
+                    return Err(invalid_parameter_owned(format!(
+                        "argument {}: key must not be null",
+                        pairs.len() * 2 + 1
+                    )));
+                }
+                let key = object_key_text(&key, ctx)?;
+                if *unique_keys && pairs.iter().any(|(k, _)| *k == key) {
+                    return Err(ExecError::FunctionError {
+                        sqlstate: "22030",
+                        message: "duplicate JSON object key value".into(),
+                    });
+                }
+                pairs.push((key, to_jsonb(&value, ctx)?));
+            }
+            returning_json(JsonbValue::object_from_pairs(pairs), *returning, ctx)
+        }
+        SqlJsonExpr::Array {
+            items,
+            absent_on_null,
+            returning,
+        } => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                let value = eval_child(item)?;
+                if *absent_on_null && value.is_null() {
+                    continue;
+                }
+                out.push(to_jsonb(&value, ctx)?);
+            }
+            returning_json(JsonbValue::Array(out), *returning, ctx)
+        }
+        SqlJsonExpr::Scalar(expr) => {
+            let value = eval_child(expr)?;
+            if value.is_null() {
+                return Ok(Datum::Null);
+            }
+            Ok(Datum::Jsonb(to_jsonb(&value, ctx)?))
+        }
+        SqlJsonExpr::Serialize { expr, returning } => {
+            let value = eval_child(expr)?;
+            if value.is_null() {
+                return Ok(Datum::Null);
+            }
+            let text = Datum::Text(json_document(&value)?.to_text());
+            match returning {
+                Some(ty) => Ok(crabka_pgtypes::cast::cast(&text, *ty, &ctx.time_zone)?),
+                None => Ok(text),
+            }
+        }
+        SqlJsonExpr::Parse { expr, unique_keys } => {
+            let value = eval_child(expr)?;
+            if value.is_null() {
+                return Ok(Datum::Null);
+            }
+            let (document, duplicate) = match &value {
+                Datum::Jsonb(j) => (j.clone(), false),
+                Datum::Text(text) => {
+                    jsonb::parse_with_options(text, false).map_err(ExecError::Type)?
+                }
+                other => return Err(type_error("json", other)),
+            };
+            if *unique_keys && duplicate {
+                return Err(ExecError::FunctionError {
+                    sqlstate: "22030",
+                    message: "duplicate JSON object key value".into(),
+                });
+            }
+            Ok(Datum::Jsonb(document))
+        }
+        SqlJsonExpr::Query(q) => eval_json_query(q, ctx, eval_child),
+    }
+}
+
+/// `RETURNING <type>` on a constructor: the document is produced as `jsonb` and
+/// converted, so `RETURNING text` renders it and `RETURNING jsonb` is identity.
+fn returning_json(
+    value: JsonbValue,
+    returning: Option<ColumnType>,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    let datum = Datum::Jsonb(value);
+    match returning {
+        None | Some(ColumnType::Jsonb) => Ok(datum),
+        Some(ty) => Ok(crabka_pgtypes::cast::cast(&datum, ty, &ctx.time_zone)?),
+    }
+}
+
+/// `IS [NOT] JSON [<item>] [WITH UNIQUE KEYS]` over an already-evaluated,
+/// non-NULL value. Only the string family and `jsonb` have a JSON reading at
+/// all; every other type is 42804, as in `PostgreSQL`.
+fn is_json(
+    value: &Datum,
+    item: crabka_pgparser::ast::JsonItemType,
+    unique_keys: bool,
+) -> Result<bool, ExecError> {
+    use crabka_pgparser::ast::JsonItemType;
+
+    let (document, duplicate) = match value {
+        Datum::Jsonb(j) => (j.clone(), false),
+        // Text that does not parse is simply not JSON.
+        Datum::Text(text) => match jsonb::parse_with_options(text, false) {
+            Ok(pair) => pair,
+            Err(_) => return Ok(false),
+        },
+        other => {
+            return Err(ExecError::TypeMismatch(format!(
+                "cannot use type {} in IS JSON predicate",
+                type_name(other)
+            )));
+        }
+    };
+    if unique_keys && duplicate {
+        return Ok(false);
+    }
+    Ok(match item {
+        JsonItemType::Value => true,
+        JsonItemType::Object => matches!(document, JsonbValue::Object(_)),
+        JsonItemType::Array => matches!(document, JsonbValue::Array(_)),
+        JsonItemType::Scalar => !matches!(document, JsonbValue::Object(_) | JsonbValue::Array(_)),
+    })
+}
+
+/// The plan-time counterpart: `IS JSON` accepts only the string family and
+/// `jsonb`, so `1 IS JSON` is 42804 before a row is ever read.
+pub(crate) fn is_json_operand_type(ty: ColumnType) -> Result<(), ExecError> {
+    if ty.is_string() || ty == ColumnType::Jsonb {
+        Ok(())
+    } else {
+        Err(ExecError::TypeMismatch(format!(
+            "cannot use type {} in IS JSON predicate",
+            ty.name()
+        )))
+    }
+}
+
+/// The jsonb document an argument denotes: a `jsonb` value as-is, `text` parsed.
+fn json_document(value: &Datum) -> Result<Cow<'_, JsonbValue>, ExecError> {
+    match value {
+        Datum::Jsonb(j) => Ok(Cow::Borrowed(j)),
+        Datum::Text(text) => jsonb::parse(text).map(Cow::Owned).map_err(ExecError::Type),
+        other => Err(type_error("json", other)),
+    }
+}
+
+/// `JSON_EXISTS` / `JSON_VALUE` / `JSON_QUERY`.
+fn eval_json_query(
+    q: &crabka_pgparser::ast::JsonQuery,
+    ctx: &EvalCtx,
+    mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+) -> Result<Datum, ExecError> {
+    use crabka_pgparser::ast::{JsonQueryOp, JsonWrapper};
+
+    let context = eval_child(&q.context)?;
+    let path_text = eval_child(&q.path)?;
+    if context.is_null() || path_text.is_null() {
+        return Ok(Datum::Null);
+    }
+    let mut vars = Vec::with_capacity(q.passing.len());
+    for (name, expr) in &q.passing {
+        let value = eval_child(expr)?;
+        vars.push((name.clone(), to_jsonb(&value, ctx)?));
+    }
+    let vars = JsonbValue::object_from_pairs(vars);
+    // Everything from here on is subject to `ON ERROR`, so it is computed inside
+    // a closure whose error the behavior clause decides what to do with.
+    let computed = (|| -> Result<Option<Datum>, ExecError> {
+        let document = json_document(&context)?;
+        let path = crate::jsonpath::JsonPath::parse(text_arg(&path_text, "jsonpath")?)?;
+        let items = path.query(document.as_ref(), Some(&vars), false)?;
+        Ok(match q.op {
+            JsonQueryOp::Exists => Some(Datum::Bool(!items.is_empty())),
+            JsonQueryOp::Value => match items.as_slice() {
+                [] => None,
+                [JsonbValue::Null] => Some(Datum::Null),
+                [JsonbValue::Object(_) | JsonbValue::Array(_)] => {
+                    return Err(json_value_not_scalar());
+                }
+                [single] => Some(sql_json_value(single, q.returning, ctx)?),
+                _ => return Err(json_value_not_scalar()),
+            },
+            JsonQueryOp::Query => {
+                let wrapped = match (q.wrapper, items.len()) {
+                    (JsonWrapper::Unconditional, _) | (JsonWrapper::Conditional, 0) => {
+                        Some(JsonbValue::Array(items))
+                    }
+                    (JsonWrapper::Conditional, 1) => items.into_iter().next(),
+                    (JsonWrapper::Conditional, _) => Some(JsonbValue::Array(items)),
+                    (JsonWrapper::Without, 0) => None,
+                    (JsonWrapper::Without, 1) => items.into_iter().next(),
+                    (JsonWrapper::Without, _) => {
+                        return Err(ExecError::FunctionError {
+                            sqlstate: "22034",
+                            message: "JSON path expression in JSON_QUERY must return single item when no wrapper is requested".into(),
+                        });
+                    }
+                };
+                match wrapped {
+                    None => None,
+                    Some(value) => {
+                        // `OMIT QUOTES` unwraps a JSON string, which then has to
+                        // parse as a document again for a `jsonb` result.
+                        let rendered = match (&value, q.omit_quotes) {
+                            (JsonbValue::String(s), true) => s.clone(),
+                            (other, _) => other.to_text(),
+                        };
+                        Some(sql_json_text(&rendered, q.returning, ctx)?)
+                    }
+                }
+            }
+        })
+    })();
+    let empty_default = match q.op {
+        // `JSON_EXISTS` has no empty case: no items is simply false.
+        JsonQueryOp::Exists => Datum::Bool(false),
+        _ => Datum::Null,
+    };
+    match computed {
+        Ok(Some(value)) => Ok(value),
+        Ok(None) => match &q.on_empty {
+            None => Ok(empty_default),
+            Some(behavior) => apply_behavior(behavior, q, ctx, eval_child, true),
+        },
+        Err(error) => match &q.on_error {
+            // PostgreSQL's defaults: `JSON_EXISTS` is FALSE ON ERROR, the other
+            // two are NULL ON ERROR.
+            None => Ok(match q.op {
+                JsonQueryOp::Exists => Datum::Bool(false),
+                _ => Datum::Null,
+            }),
+            Some(crabka_pgparser::ast::JsonBehavior::Error) => Err(error),
+            Some(behavior) => apply_behavior(behavior, q, ctx, eval_child, false),
+        },
+    }
+}
+
+/// What an `ON EMPTY` / `ON ERROR` clause produces.
+fn apply_behavior(
+    behavior: &crabka_pgparser::ast::JsonBehavior,
+    q: &crabka_pgparser::ast::JsonQuery,
+    ctx: &EvalCtx,
+    mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+    on_empty: bool,
+) -> Result<Datum, ExecError> {
+    use crabka_pgparser::ast::JsonBehavior;
+
+    Ok(match behavior {
+        JsonBehavior::Error => {
+            return Err(ExecError::FunctionError {
+                sqlstate: "22035",
+                message: if on_empty {
+                    "no SQL/JSON item found for specified path".into()
+                } else {
+                    "SQL/JSON member not found".into()
+                },
+            });
+        }
+        JsonBehavior::Null => Datum::Null,
+        JsonBehavior::True => Datum::Bool(true),
+        JsonBehavior::False => Datum::Bool(false),
+        JsonBehavior::Unknown => Datum::Null,
+        JsonBehavior::EmptyArray => sql_json_text("[]", q.returning, ctx)?,
+        JsonBehavior::EmptyObject => sql_json_text("{}", q.returning, ctx)?,
+        JsonBehavior::Default(expr) => {
+            let value = eval_child(expr)?;
+            let target = q.returning.unwrap_or(match q.op {
+                crabka_pgparser::ast::JsonQueryOp::Exists => ColumnType::Bool,
+                crabka_pgparser::ast::JsonQueryOp::Value => ColumnType::Text,
+                crabka_pgparser::ast::JsonQueryOp::Query => ColumnType::Jsonb,
+            });
+            crabka_pgtypes::cast::cast(&value, target, &ctx.time_zone)?
+        }
+    })
+}
+
+fn json_value_not_scalar() -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "2203F",
+        message: "JSON path expression in JSON_VALUE must return single scalar item".into(),
+    }
+}
+
+/// `JSON_VALUE`'s scalar unwrapping: a JSON string loses its quotes, every other
+/// scalar keeps its canonical rendering, and the result is cast to `RETURNING`.
+fn sql_json_value(
+    item: &JsonbValue,
+    returning: Option<ColumnType>,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    let text = match item {
+        JsonbValue::String(s) => s.clone(),
+        other => other.to_text(),
+    };
+    let datum = Datum::Text(text);
+    match returning {
+        None | Some(ColumnType::Text) => Ok(datum),
+        Some(ty) => Ok(crabka_pgtypes::cast::cast(&datum, ty, &ctx.time_zone)?),
+    }
+}
+
+/// `JSON_QUERY`'s result: JSON text converted to the `RETURNING` type (`jsonb`
+/// by default).
+fn sql_json_text(
+    text: &str,
+    returning: Option<ColumnType>,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    let target = returning.unwrap_or(ColumnType::Jsonb);
+    crabka_pgtypes::cast::cast(&Datum::Text(text.to_string()), target, &ctx.time_zone)
+        .map_err(ExecError::Type)
+}
+
+// ---- subscripting ----
+
+/// One jsonb subscript as `PostgreSQL` stores it: a `text` path element. An
+/// integer subscript is converted to its decimal text, which is why
+/// `('{"0": 1}'::jsonb)[0]` finds the key `"0"` and `('[1, 2]'::jsonb)['1']`
+/// finds element 1.
+///
+/// `PostgreSQL` accepts only text-ish and `integer` subscripts; everything else,
+/// `bigint` and `numeric` included, is 42804 at parse-analysis time.
+fn subscript_path_element(index: &Datum) -> Result<Option<String>, ExecError> {
+    Ok(match index {
+        Datum::Null => None,
+        Datum::Text(s) => Some(s.clone()),
+        Datum::Int2(n) => Some(n.to_string()),
+        Datum::Int4(n) => Some(n.to_string()),
+        other => {
+            return Err(ExecError::TypeMismatch(format!(
+                "subscript type {} is not supported",
+                type_name(other)
+            )));
+        }
+    })
+}
+
+/// `j[subscript]` — `PostgreSQL`'s jsonb subscripting *read*. A missing key, an
+/// out-of-range index, a NULL subscript and a scalar container are all SQL NULL;
+/// nothing here is an error.
+pub(crate) fn jsonb_subscript(base: &Datum, index: &Datum) -> Result<Datum, ExecError> {
+    let step = subscript_path_element(index)?;
+    if base.is_null() {
+        return Ok(Datum::Null);
+    }
+    let value = jsonb_operand(base, "jsonb subscript")?;
+    Ok(
+        match navigate(value.as_ref(), std::slice::from_ref(&step)) {
+            Some(v) => Datum::Jsonb(v.clone()),
+            None => Datum::Null,
+        },
+    )
+}
+
+/// `UPDATE t SET j[s1][s2] = v` — `PostgreSQL`'s `jsonb_set_element`, which is
+/// `setPath` with *create*, *fill gaps* and *consistent position*: missing
+/// intermediate levels are built (an integer step makes an array, a text step an
+/// object), a positive index past the end is padded with JSON nulls, and a
+/// negative index reaching before the start is an error rather than a prepend.
+pub(crate) fn jsonb_subscript_assign(
+    target: &Datum,
+    subscripts: &[Datum],
+    new_value: &Datum,
+) -> Result<Datum, ExecError> {
+    let mut path = Vec::with_capacity(subscripts.len());
+    for s in subscripts {
+        let Some(step) = subscript_path_element(s)? else {
+            return Err(ExecError::FunctionError {
+                sqlstate: "22004",
+                message: "jsonb subscript in assignment must not be null".into(),
+            });
+        };
+        path.push(step);
+    }
+    // A SQL NULL new value writes the JSON `null` literal.
+    let value = match new_value {
+        Datum::Null => JsonbValue::Null,
+        other => jsonb_operand(other, "jsonb subscript")?.into_owned(),
+    };
+    // A NULL container is created from scratch: an array when the first
+    // subscript was written as an integer, an object otherwise.
+    let container = match target {
+        Datum::Null => {
+            if matches!(subscripts.first(), Some(Datum::Int2(_) | Datum::Int4(_))) {
+                JsonbValue::Array(Vec::new())
+            } else {
+                JsonbValue::Object(Vec::new())
+            }
+        }
+        other => jsonb_operand(other, "jsonb subscript")?.into_owned(),
+    };
+    Ok(Datum::Jsonb(set_element(&container, &path, 0, &value)?))
+}
+
+fn cannot_replace_existing_key() -> ExecError {
+    invalid_parameter("cannot replace existing key")
+}
+
+/// `PostgreSQL`'s `setPath`, specialized to the subscript-assignment flags.
+fn set_element(
+    value: &JsonbValue,
+    path: &[String],
+    level: usize,
+    new_value: &JsonbValue,
+) -> Result<JsonbValue, ExecError> {
+    match value {
+        JsonbValue::Object(pairs) => set_element_object(pairs, path, level, new_value),
+        JsonbValue::Array(items) => set_element_array(items, path, level, new_value),
+        // A scalar cannot hold a further path step. `PostgreSQL` raises the same
+        // error for a nested scalar and for a raw-scalar document.
+        scalar => {
+            if level < path.len() {
+                Err(cannot_replace_existing_key())
+            } else {
+                Ok(scalar.clone())
+            }
+        }
+    }
+}
+
+fn set_element_object(
+    pairs: &[(String, JsonbValue)],
+    path: &[String],
+    level: usize,
+    new_value: &JsonbValue,
+) -> Result<JsonbValue, ExecError> {
+    let key = &path[level];
+    let last = level == path.len() - 1;
+    let mut out: Vec<(String, JsonbValue)> = Vec::with_capacity(pairs.len() + 1);
+    let mut done = false;
+    // An empty object at the final step takes the new key directly.
+    if pairs.is_empty() && last {
+        out.push((key.clone(), new_value.clone()));
+        done = true;
+    }
+    for (i, (k, v)) in pairs.iter().enumerate() {
+        if !done && k == key {
+            done = true;
+            if last {
+                out.push((k.clone(), new_value.clone()));
+            } else {
+                out.push((k.clone(), set_element(v, path, level + 1, new_value)?));
+            }
+            continue;
+        }
+        // A missing key at the final step is appended after the last member.
+        if !done && last && i == pairs.len() - 1 {
+            out.push((key.clone(), new_value.clone()));
+            done = true;
+        }
+        out.push((k.clone(), v.clone()));
+    }
+    if !done && !last {
+        out.push((key.clone(), build_path(path, level, new_value)));
+    }
+    Ok(JsonbValue::object_from_pairs(out))
+}
+
+fn set_element_array(
+    items: &[JsonbValue],
+    path: &[String],
+    level: usize,
+    new_value: &JsonbValue,
+) -> Result<JsonbValue, ExecError> {
+    let nelems = i64::try_from(items.len()).unwrap_or(i64::MAX);
+    let raw: i64 = path[level]
+        .parse::<i32>()
+        .map_err(|_| {
+            invalid_parameter_owned(format!(
+                "path element at position {} is not an integer",
+                level + 1
+            ))
+        })?
+        .into();
+    let mut idx = raw;
+    if idx < 0 {
+        if -idx > nelems {
+            // `JB_PATH_CONSISTENT_POSITION`: a negative index that would land
+            // before the start is refused rather than prepended.
+            return Err(invalid_parameter_owned(format!(
+                "path element at position {} is out of range: {raw}",
+                level + 1
+            )));
+        }
+        idx += nelems;
+    }
+    let last = level == path.len() - 1;
+    let mut out: Vec<JsonbValue> = Vec::with_capacity(items.len() + 1);
+    let mut done = false;
+    if items.is_empty() && last {
+        push_nulls(&mut out, idx);
+        out.push(new_value.clone());
+        done = true;
+    }
+    for (i, item) in items.iter().enumerate() {
+        if !done && i64::try_from(i).unwrap_or(i64::MAX) == idx {
+            done = true;
+            if last {
+                out.push(new_value.clone());
+            } else {
+                out.push(set_element(item, path, level + 1, new_value)?);
+            }
+            continue;
+        }
+        out.push(item.clone());
+    }
+    if !done && last {
+        push_nulls(&mut out, idx - nelems);
+        out.push(new_value.clone());
+        done = true;
+    }
+    if !done {
+        push_nulls(&mut out, idx - nelems);
+        out.push(build_path(path, level, new_value));
+    }
+    Ok(JsonbValue::Array(out))
+}
+
+fn push_nulls(out: &mut Vec<JsonbValue>, count: i64) {
+    for _ in 0..count.max(0) {
+        out.push(JsonbValue::Null);
+    }
+}
+
+/// `PostgreSQL`'s `push_path`: the nested containers `path[level + 1 ..]`
+/// describes, with `new_value` at the bottom. An integer step builds an array
+/// (padded with JSON nulls up to that index), a text step an object.
+fn build_path(path: &[String], level: usize, new_value: &JsonbValue) -> JsonbValue {
+    let mut value = new_value.clone();
+    for step in path[level + 1..].iter().rev() {
+        value = match step.parse::<i32>() {
+            Ok(index) => {
+                let mut items = Vec::new();
+                push_nulls(&mut items, i64::from(index));
+                items.push(value);
+                JsonbValue::Array(items)
+            }
+            Err(_) => JsonbValue::object_from_pairs(vec![(step.clone(), value)]),
+        };
+    }
+    value
+}
+
+// ---- the jsonb set-returning functions ----
+
+/// The `jsonb` set-returning functions, expanded by `srf.rs` through the same
+/// registry every other SRF goes through.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JsonbSrf {
+    /// `jsonb_each(jsonb)` → `(key text, value jsonb)`.
+    Each,
+    /// `jsonb_each_text(jsonb)` → `(key text, value text)`.
+    EachText,
+    /// `jsonb_object_keys(jsonb)` → `text`.
+    ObjectKeys,
+    /// `jsonb_array_elements(jsonb)` → `value jsonb`.
+    ArrayElements,
+    /// `jsonb_array_elements_text(jsonb)` → `value text`.
+    ArrayElementsText,
+}
+
+/// `jsonb_path_query(target, path [, vars [, silent]])` — one row per item the
+/// jsonpath produces.
+pub(crate) fn jsonb_path_query_rows(
+    name: &str,
+    args: &[Datum],
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let Some(call) = path_args(name, args)? else {
+        return Ok(Vec::new());
+    };
+    Ok(call
+        .path
+        .query(&call.target, call.vars.as_ref(), call.silent)?
+        .into_iter()
+        .map(|item| vec![Datum::Jsonb(item)])
+        .collect())
+}
+
+/// Expand a jsonb set-returning function over its single already-evaluated
+/// argument. Object keys come out in the canonical jsonb order the value is
+/// already stored in; the `_text` flavours unquote a JSON string and turn the
+/// JSON `null` literal into SQL NULL, exactly as `->>` does.
+pub(crate) fn jsonb_srf_rows(kind: JsonbSrf, vals: &[Datum]) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let name = match kind {
+        JsonbSrf::Each => "jsonb_each",
+        JsonbSrf::EachText => "jsonb_each_text",
+        JsonbSrf::ObjectKeys => "jsonb_object_keys",
+        JsonbSrf::ArrayElements => "jsonb_array_elements",
+        JsonbSrf::ArrayElementsText => "jsonb_array_elements_text",
+    };
+    let value = jsonb_operand(&vals[0], name)?;
+    Ok(match kind {
+        JsonbSrf::Each | JsonbSrf::EachText => {
+            let JsonbValue::Object(pairs) = value.as_ref() else {
+                return Err(invalid_parameter(match kind {
+                    JsonbSrf::Each => "cannot call jsonb_each on a non-object",
+                    _ => "cannot call jsonb_each_text on a non-object",
+                }));
+            };
+            pairs
+                .iter()
+                .map(|(key, item)| {
+                    let cell = if kind == JsonbSrf::Each {
+                        Datum::Jsonb(item.clone())
+                    } else {
+                        jsonb_as_sql_text(item)
+                    };
+                    vec![Datum::Text(key.clone()), cell]
+                })
+                .collect()
+        }
+        JsonbSrf::ObjectKeys => match value.as_ref() {
+            JsonbValue::Object(pairs) => pairs
+                .iter()
+                .map(|(key, _)| vec![Datum::Text(key.clone())])
+                .collect(),
+            JsonbValue::Array(_) => {
+                return Err(invalid_parameter(
+                    "cannot call jsonb_object_keys on an array",
+                ));
+            }
+            _ => {
+                return Err(invalid_parameter(
+                    "cannot call jsonb_object_keys on a scalar",
+                ));
+            }
+        },
+        JsonbSrf::ArrayElements | JsonbSrf::ArrayElementsText => match value.as_ref() {
+            JsonbValue::Array(items) => items
+                .iter()
+                .map(|item| {
+                    let cell = if kind == JsonbSrf::ArrayElements {
+                        Datum::Jsonb(item.clone())
+                    } else {
+                        jsonb_as_sql_text(item)
+                    };
+                    vec![cell]
+                })
+                .collect(),
+            JsonbValue::Object(_) => {
+                return Err(invalid_parameter("cannot extract elements from an object"));
+            }
+            _ => {
+                return Err(invalid_parameter("cannot extract elements from a scalar"));
+            }
+        },
+    })
+}
+
+/// `jsonb_strip_nulls`: an object field whose value is the JSON `null` literal
+/// disappears, recursively. A `null` ARRAY element is kept — PostgreSQL only
+/// strips fields, because dropping an element would renumber the array.
+fn strip_nulls(value: &JsonbValue, in_arrays: bool) -> JsonbValue {
+    match value {
+        JsonbValue::Object(pairs) => JsonbValue::Object(
+            pairs
+                .iter()
+                .filter(|(_, v)| !matches!(v, JsonbValue::Null))
+                .map(|(k, v)| (k.clone(), strip_nulls(v, in_arrays)))
+                .collect(),
+        ),
+        JsonbValue::Array(items) => JsonbValue::Array(
+            items
+                .iter()
+                .filter(|v| !in_arrays || !matches!(v, JsonbValue::Null))
+                .map(|v| strip_nulls(v, in_arrays))
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+/// `jsonb_pretty`: four-space indentation, one member/element per line, and an
+/// empty container rendered as its two brackets on consecutive lines. A scalar
+/// keeps its canonical one-line rendering.
+fn pretty(value: &JsonbValue, indent: usize) -> String {
+    let pad = |n: usize| " ".repeat(n);
+    match value {
+        JsonbValue::Object(pairs) if pairs.is_empty() => format!("{{\n{}}}", pad(indent)),
+        JsonbValue::Object(pairs) => {
+            let body = pairs
+                .iter()
+                .map(|(k, v)| {
+                    format!(
+                        "{}{}: {}",
+                        pad(indent + 4),
+                        JsonbValue::String(k.clone()).to_text(),
+                        pretty(v, indent + 4)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",\n");
+            format!("{{\n{body}\n{}}}", pad(indent))
+        }
+        JsonbValue::Array(items) if items.is_empty() => format!("[\n{}]", pad(indent)),
+        JsonbValue::Array(items) => {
+            let body = items
+                .iter()
+                .map(|v| format!("{}{}", pad(indent + 4), pretty(v, indent + 4)))
+                .collect::<Vec<_>>()
+                .join(",\n");
+            format!("[\n{body}\n{}]", pad(indent))
+        }
+        scalar => scalar.to_text(),
+    }
+}
+
+/// `jsonb_insert(target, path, new_value, insert_after)`.
+///
+/// The path's final step names the position to insert AT (before it, or after it
+/// when `after` is set). In an object the key must not already exist — replacing
+/// one is `jsonb_set`'s job and 22023 here; in an array an out-of-range index
+/// appends (or prepends for a negative one).
+fn insert_path(
+    target: &JsonbValue,
+    path: &[String],
+    new_value: &JsonbValue,
+    after: bool,
+) -> Result<JsonbValue, ExecError> {
+    let Some((step, rest)) = path.split_first() else {
+        return Ok(target.clone());
+    };
+    Ok(match target {
+        JsonbValue::Object(pairs) => {
+            let existing = pairs.iter().position(|(k, _)| k == step);
+            match (existing, rest.is_empty()) {
+                (Some(_), true) => return Err(invalid_parameter("cannot replace existing key")),
+                (Some(at), false) => {
+                    let mut pairs = pairs.clone();
+                    pairs[at].1 = insert_path(&pairs[at].1, rest, new_value, after)?;
+                    JsonbValue::Object(pairs)
+                }
+                (None, true) => {
+                    let mut pairs = pairs.clone();
+                    pairs.push((step.clone(), new_value.clone()));
+                    JsonbValue::object_from_pairs(pairs)
+                }
+                (None, false) => JsonbValue::Object(pairs.clone()),
+            }
+        }
+        JsonbValue::Array(items) => {
+            let index = step.parse::<i64>().map_err(|_| {
+                ExecError::Type(TypeError::Domain {
+                    sqlstate: "22P02",
+                    message: "path element is not an integer",
+                })
+            })?;
+            match (resolve_index(index, items.len()), rest.is_empty()) {
+                (Some(at), true) => {
+                    let mut items = items.clone();
+                    items.insert(if after { at + 1 } else { at }, new_value.clone());
+                    JsonbValue::Array(items)
+                }
+                (Some(at), false) => {
+                    let mut items = items.clone();
+                    items[at] = insert_path(&items[at], rest, new_value, after)?;
+                    JsonbValue::Array(items)
+                }
+                (None, true) => {
+                    let mut items = items.clone();
+                    if index < 0 {
+                        items.insert(0, new_value.clone());
+                    } else {
+                        items.push(new_value.clone());
+                    }
+                    JsonbValue::Array(items)
+                }
+                (None, false) => JsonbValue::Array(items.clone()),
+            }
+        }
+        other => other.clone(),
+    })
+}
+
+/// `jsonb_delete_path(target, path)` — the `#-` operator's function form. A path
+/// that does not resolve leaves the target unchanged; an empty path is a no-op.
+fn delete_path(target: &JsonbValue, path: &[String]) -> JsonbValue {
+    let Some((step, rest)) = path.split_first() else {
+        return target.clone();
+    };
+    match target {
+        JsonbValue::Object(pairs) => {
+            let Some(at) = pairs.iter().position(|(k, _)| k == step) else {
+                return JsonbValue::Object(pairs.clone());
+            };
+            let mut pairs = pairs.clone();
+            if rest.is_empty() {
+                pairs.remove(at);
+            } else {
+                pairs[at].1 = delete_path(&pairs[at].1, rest);
+            }
+            JsonbValue::Object(pairs)
+        }
+        JsonbValue::Array(items) => {
+            let Some(at) = step
+                .parse::<i64>()
+                .ok()
+                .and_then(|index| resolve_index(index, items.len()))
+            else {
+                return JsonbValue::Array(items.clone());
+            };
+            let mut items = items.clone();
+            if rest.is_empty() {
+                items.remove(at);
+            } else {
+                items[at] = delete_path(&items[at], rest);
+            }
+            JsonbValue::Array(items)
+        }
+        other => other.clone(),
     }
 }
 
@@ -311,7 +1577,7 @@ fn object_key_text(d: &Datum, ctx: &EvalCtx) -> Result<String, ExecError> {
     Ok(match to_jsonb(d, ctx)? {
         JsonbValue::String(s) => s,
         JsonbValue::Bool(b) => b.to_string(),
-        JsonbValue::Number(n) => numeric::to_text(&n),
+        JsonbValue::Number(n) => numeric::finite_to_text(&n),
         // `build_object` rejects null and container keys before calling this.
         other => other.to_text(),
     })
@@ -327,13 +1593,33 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
     Ok(match d {
         Datum::Null => JsonbValue::Null,
         Datum::Bool(b) => JsonbValue::Bool(*b),
-        Datum::Int4(n) => JsonbValue::Number(numeric::from_i64(i64::from(*n))),
-        Datum::Int8(n) => JsonbValue::Number(numeric::from_i64(*n)),
-        Datum::Numeric(n) => JsonbValue::Number(n.clone()),
+        Datum::Int2(n) => JsonbValue::Number(BigDecimal::from(*n)),
+        Datum::Int4(n) => JsonbValue::Number(BigDecimal::from(*n)),
+        Datum::Int8(n) => JsonbValue::Number(BigDecimal::from(*n)),
+        // JSON has no `NaN`/`Infinity` spelling either, so a special `numeric`
+        // becomes a JSON string exactly like a non-finite float below.
+        Datum::Numeric(n) => match n.as_finite() {
+            Some(bd) => JsonbValue::Number(bd.clone()),
+            None => JsonbValue::String(numeric::to_text(n)),
+        },
         // JSON has no non-finite number, so PostgreSQL renders `NaN`/`Infinity`
         // as JSON *strings* rather than failing.
+        Datum::Float4(f) if !f.is_finite() => JsonbValue::String(datum_text(d, ctx)),
+        // PostgreSQL runs the value through its OUTPUT function and then
+        // `numeric_in`, so a `real` keeps every digit `float4out` prints
+        // (`to_jsonb(16777216::float4)` is `16777216`). That is deliberately
+        // NOT the `::numeric` cast, which loses digits through `%.6g`.
+        Datum::Float4(_) => JsonbValue::Number(
+            numeric::parse_finite(&datum_text(d, ctx))
+                .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow))?,
+        ),
         Datum::Float8(f) if !f.is_finite() => JsonbValue::String(datum_text(d, ctx)),
-        Datum::Float8(f) => JsonbValue::Number(numeric::from_f64(*f).map_err(ExecError::Type)?),
+        Datum::Float8(f) => JsonbValue::Number(
+            numeric::from_f64(*f)
+                .as_finite()
+                .cloned()
+                .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow))?,
+        ),
         Datum::Jsonb(j) => j.clone(),
         Datum::Array(a) => JsonbValue::Array(
             a.elems
@@ -341,13 +1627,46 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
                 .map(|e| to_jsonb(e, ctx))
                 .collect::<Result<Vec<_>, _>>()?,
         ),
+        // A composite becomes a JSON object keyed by its field names — the same
+        // rendering `row_to_json` produces, which is why that function is this
+        // arm applied to its argument.
+        Datum::Record(r) => JsonbValue::Object(record_pairs(r, ctx)?),
         Datum::Timestamp(_) | Datum::Timestamptz(_) => {
             JsonbValue::String(iso_8601_datetime(&datum_text(d, ctx)))
         }
-        Datum::Text(_) | Datum::Date(_) | Datum::Time(_) | Datum::Interval(_) | Datum::Bytea(_) => {
-            JsonbValue::String(datum_text(d, ctx))
-        }
+        Datum::Text(_)
+        | Datum::Date(_)
+        | Datum::Time(_)
+        | Datum::Timetz(_)
+        | Datum::Interval(_)
+        | Datum::Enum(_)
+        | Datum::Bytea(_) => JsonbValue::String(datum_text(d, ctx)),
     })
+}
+
+/// A composite's fields as JSON object pairs, in declaration order.
+///
+/// `PostgreSQL` names an anonymous record's fields `f1`…`fn`; a named composite
+/// uses its attribute names. Duplicate names are possible in a record built from
+/// a join, and `PostgreSQL` keeps both pairs in `row_to_json` (a `json` value is
+/// not de-duplicated); `jsonb` keeps only the last, which is what
+/// [`JsonbValue::Object`] does on construction.
+pub(crate) fn record_pairs(
+    r: &crabka_pgtypes::RecordValue,
+    ctx: &EvalCtx,
+) -> Result<Vec<(String, JsonbValue)>, ExecError> {
+    r.values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            let name = r
+                .names
+                .get(index)
+                .cloned()
+                .unwrap_or_else(|| format!("f{}", index + 1));
+            Ok((name, to_jsonb(value, ctx)?))
+        })
+        .collect()
 }
 
 /// PostgreSQL's JSON date/time spelling from its SQL (ISO `DateStyle`) spelling:
@@ -394,6 +1713,10 @@ pub(crate) enum JsonOp {
     Concat,
     /// `-` — delete a key, an index, or a set of keys.
     Delete,
+    /// `@?` — the jsonpath finds at least one item.
+    PathExists,
+    /// `@@` — the jsonpath predicate, as a three-valued boolean.
+    PathMatch,
 }
 
 impl JsonOp {
@@ -411,6 +1734,8 @@ impl JsonOp {
             JsonOp::KeyExistsAll => "?&",
             JsonOp::Concat => "||",
             JsonOp::Delete => "-",
+            JsonOp::PathExists => "@?",
+            JsonOp::PathMatch => "@@",
         }
     }
 }
@@ -443,6 +1768,9 @@ pub(crate) fn json_operator_result_type(
         JsonOp::Delete if right.is_string() || integral || right == text_array => {
             Some(ColumnType::Jsonb)
         }
+        // The jsonpath operand is a `jsonpath` in PostgreSQL; crabka spells
+        // that type `text` (see the module divergence note).
+        JsonOp::PathExists | JsonOp::PathMatch if right.is_string() => Some(ColumnType::Bool),
         _ => None,
     }
 }
@@ -466,6 +1794,8 @@ pub(crate) fn eval_json_operator(
         JsonOp::KeyExistsAll => json_key_exists_all(left, right),
         JsonOp::Concat => json_concat(left, right),
         JsonOp::Delete => json_delete(left, right),
+        JsonOp::PathExists => json_path_operator(left, right, false),
+        JsonOp::PathMatch => json_path_operator(left, right, true),
     }
 }
 
@@ -933,6 +2263,15 @@ fn invalid_parameter(message: &'static str) -> ExecError {
     })
 }
 
+/// [`invalid_parameter`] for a message that names a value, so it cannot be a
+/// `&'static str`.
+fn invalid_parameter_owned(message: String) -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "22023",
+        message,
+    }
+}
+
 fn type_error(what: &str, got: &Datum) -> ExecError {
     ExecError::TypeMismatch(format!(
         "{what} does not accept an argument of type {}",
@@ -1068,9 +2407,20 @@ fn text_arg<'a>(d: &'a Datum, name: &str) -> Result<&'a str, ExecError> {
     }
 }
 
-/// A non-NULL datum's PostgreSQL text output.
+/// A non-NULL datum's PostgreSQL text output, as JSON spells it.
+///
+/// JSON always uses the ISO date spelling whatever `DateStyle` says (the
+/// separate `json_datetime_text` step turns it into the RFC 3339 form), but an
+/// `interval` inside JSON *does* follow `IntervalStyle` — `to_json(interval '1
+/// day')` is `"@ 1 day"` under `postgres_verbose`.
 fn datum_text(d: &Datum, ctx: &EvalCtx) -> String {
-    String::from_utf8(crabka_pgtypes::encoding::encode_text(d, &ctx.time_zone))
+    let style = crabka_pgtypes::encoding::OutputStyle {
+        time_zone: &ctx.time_zone,
+        date_style: crabka_pgtypes::datetime::DateStyle::Iso,
+        date_order: ctx.date_order,
+        interval_style: ctx.interval_style,
+    };
+    String::from_utf8(crabka_pgtypes::encoding::encode_text_in(d, style))
         .expect("a Datum's text encoding is always valid UTF-8")
 }
 
@@ -1146,6 +2496,7 @@ mod tests {
             name: name.to_string(),
             distinct: false,
             args: FuncArgs::Exprs(args),
+            filter: None,
         }
     }
 
@@ -1340,11 +2691,21 @@ mod tests {
             "jsonb_extract_path_text",
             "jsonb_set",
             "to_jsonb",
+            // The `json_*` spellings resolve to the same implementations,
+            // because `json` is stored as `jsonb`.
+            "json_build_object",
+            "to_json",
+            "jsonb_path_query_array",
+            "jsonb_path_exists_tz",
         ] {
             assert!(is_json_func(name));
         }
+        // The aggregates and the set-returning functions have their own
+        // registries, and an unrelated name is not claimed here.
         assert!(!is_json_func("jsonb_agg"));
-        assert!(!is_json_func("json_build_object"));
+        assert!(!is_json_func("jsonb_each"));
+        assert!(!is_json_func("jsonb_path_query"));
+        assert!(!is_json_func("json_nope"));
     }
 
     #[test]
@@ -1897,5 +3258,149 @@ mod tests {
                 result_type("jsonb_typeof", vec![Expr::IntLiteral("1".into())]).expect_err("type")
             ) == "42883"
         );
+    }
+
+    /// A jsonb subscript *read* is `navigate` over one text path element: a
+    /// missing key, an out-of-range index, a NULL subscript and a scalar
+    /// container are all SQL NULL, and an integer subscript becomes its decimal
+    /// text (so `('{"0": 1}'::jsonb)[0]` finds the key `"0"`). Rows measured
+    /// against PostgreSQL 18.4.
+    #[test]
+    fn jsonb_subscript_reads_by_key_or_index() {
+        let cases: &[(&str, Datum, Datum)] = &[
+            (r#"{"a": 1}"#, t("a"), j("1")),
+            (r#"{"a": 1}"#, t("nope"), Datum::Null),
+            (r#"{"a": 1}"#, Datum::Int4(0), Datum::Null),
+            (r#"{"0": 1}"#, Datum::Int4(0), j("1")),
+            (r#"{"a": 1}"#, Datum::Null, Datum::Null),
+            (r#"[1, "2", null]"#, Datum::Int4(0), j("1")),
+            (r#"[1, "2", null]"#, Datum::Int4(2), j("null")),
+            (r#"[1, "2", null]"#, Datum::Int4(3), Datum::Null),
+            (r#"[1, "2", null]"#, Datum::Int4(-2), j(r#""2""#)),
+            (r#"[1, "2", null]"#, t("1"), j(r#""2""#)),
+            (r#"[1, "2", null]"#, t("-1"), j("null")),
+            (r#"[1, "2", null]"#, t("a"), Datum::Null),
+            ("123", t("a"), Datum::Null),
+            ("123", Datum::Int4(0), Datum::Null),
+        ];
+        for (target, index, want) in cases {
+            let got = jsonb_subscript(&j(target), index).expect("subscript");
+            assert!(got == *want, "{target}[{index:?}]");
+        }
+        // A NULL container is SQL NULL whatever the subscript is.
+        assert!(jsonb_subscript(&Datum::Null, &t("a")).expect("null base") == Datum::Null);
+        // Only text-ish and `integer` subscripts exist; `bigint` is 42804.
+        let err = jsonb_subscript(&j("[1]"), &Datum::Int8(1)).expect_err("bigint subscript");
+        assert!(err.into_pg().code == "42804");
+    }
+
+    /// `UPDATE t SET j[…] = v` is PostgreSQL's `jsonb_set_element`: it creates
+    /// missing path steps (an integer step makes an array, a text step an
+    /// object), pads a positive index past the end with JSON nulls, refuses a
+    /// negative index that reaches before the start, and refuses a path step
+    /// through a scalar. Rows measured against PostgreSQL 18.4.
+    #[test]
+    fn jsonb_subscript_assignment_creates_and_fills_paths() {
+        let cases: &[(&str, &[Datum], &str, &str)] = &[
+            ("{}", &[t("a")], "1", r#"{"a": 1}"#),
+            (
+                r#"{"key": "value"}"#,
+                &[t("a")],
+                "1",
+                r#"{"a": 1, "key": "value"}"#,
+            ),
+            (r#"{"a": 1}"#, &[t("a")], r#""x""#, r#"{"a": "x"}"#),
+            (
+                "[0]",
+                &[Datum::Int4(5)],
+                "1",
+                "[0, null, null, null, null, 1]",
+            ),
+            (
+                "[]",
+                &[Datum::Int4(5)],
+                "1",
+                "[null, null, null, null, null, 1]",
+            ),
+            (
+                "[0, null, null, null, null, 1]",
+                &[Datum::Int4(-4)],
+                "1",
+                "[0, null, 1, null, null, 1]",
+            ),
+            (
+                "{}",
+                &[t("a"), Datum::Int4(0), t("b"), Datum::Int4(0), t("c")],
+                "1",
+                r#"{"a": [{"b": [{"c": 1}]}]}"#,
+            ),
+            (
+                "{}",
+                &[
+                    t("a"),
+                    Datum::Int4(2),
+                    t("b"),
+                    Datum::Int4(2),
+                    t("c"),
+                    Datum::Int4(2),
+                ],
+                "1",
+                r#"{"a": [null, null, {"b": [null, null, {"c": [null, null, 1]}]}]}"#,
+            ),
+            (
+                r#"{"b": 1}"#,
+                &[t("a"), Datum::Int4(0)],
+                "2",
+                r#"{"a": [2], "b": 1}"#,
+            ),
+            // An object container reads an integer subscript as a key.
+            ("{}", &[Datum::Int4(0), t("a")], "1", r#"{"0": {"a": 1}}"#),
+            ("[]", &[Datum::Int4(0), t("a")], "1", r#"[{"a": 1}]"#),
+            (
+                r#"{"a": {}}"#,
+                &[t("a"), t("b"), t("c"), Datum::Int4(2)],
+                "1",
+                r#"{"a": {"b": {"c": [null, null, 1]}}}"#,
+            ),
+            (
+                r#"{"a": []}"#,
+                &[t("a"), Datum::Int4(1), t("c"), Datum::Int4(2)],
+                "1",
+                r#"{"a": [null, {"c": [null, null, 1]}]}"#,
+            ),
+        ];
+        for (target, subscripts, value, want) in cases {
+            let got = jsonb_subscript_assign(&j(target), subscripts, &j(value))
+                .expect("subscripted assignment");
+            assert!(got == j(want), "{target} {subscripts:?}");
+        }
+        // A NULL container is created from scratch, as an array when the first
+        // subscript was written as an integer and an object otherwise.
+        assert!(
+            jsonb_subscript_assign(&Datum::Null, &[t("a")], &j("1")).expect("from null")
+                == j(r#"{"a": 1}"#)
+        );
+        assert!(
+            jsonb_subscript_assign(&Datum::Null, &[Datum::Int4(0)], &j("1")).expect("from null")
+                == j("[1]")
+        );
+        // A SQL NULL value writes the JSON `null` literal.
+        assert!(
+            jsonb_subscript_assign(&j("{}"), &[t("a")], &Datum::Null).expect("null value")
+                == j(r#"{"a": null}"#)
+        );
+        // A NULL subscript, an out-of-range negative index, and a path step
+        // through a scalar are PostgreSQL's errors.
+        let cases: &[(&str, &[Datum], &str)] = &[
+            ("{}", &[Datum::Null], "22004"),
+            ("[0]", &[Datum::Int4(-8)], "22023"),
+            (r#"{"a": 1}"#, &[t("a"), t("b")], "22023"),
+            ("null", &[Datum::Int4(0)], "22023"),
+        ];
+        for (target, subscripts, code) in cases {
+            let err = jsonb_subscript_assign(&j(target), subscripts, &j("1"))
+                .expect_err("refused assignment");
+            assert!(err.into_pg().code == *code, "{target} {subscripts:?}");
+        }
     }
 }

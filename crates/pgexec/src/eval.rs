@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use crabka_pgparser::ast::{BinaryOp, Expr, UnaryOp};
+use crabka_pgparser::ast::{BinaryOp, Expr, MatchKind, UnaryOp};
 use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, TypeError, ops};
 
 use crate::{
@@ -11,6 +11,7 @@ use crate::{
     clock::EvalCtx,
     error::ExecError,
     json_fn::{self, JsonOp},
+    rowexpr,
     scope::Scope,
 };
 
@@ -20,12 +21,18 @@ use crate::{
 /// tree deeper than 50 can never reach here in practice — `150` leaves 3x
 /// headroom above that cap so the guard never wrongly rejects a parser-admitted
 /// tree. The value also stays well below the depth at which `eval` itself would
-/// overflow: in production (tokio's ~2 MiB worker stack) `eval` handles many
-/// thousands of frames, and even on the SMALLER stack a `cargo nextest` test
-/// thread gets, the at-limit `eval_accepts_a_tree_at_the_limit` test (≈150
-/// frames) runs safely below the ~350-frame overflow point — so a hypothetical
-/// over-deep tree returns a clean error rather than aborting the process.
-const MAX_EVAL_DEPTH: usize = 150;
+/// overflow: a hypothetical over-deep tree must return a clean error rather than
+/// abort the process.
+///
+/// It is deliberately **2×** the parser's `MAX_DEPTH` of 50, not more. The
+/// parser caps AST depth at parse time, so no tree the parser produces can
+/// exceed 50 and this guard only ever fires on a hand-built one; the multiple is
+/// headroom, not capacity. It was 3× (150), and that slack turned into an
+/// aborting stack overflow three separate times as waves widened `Datum` and
+/// `ExecError` — the recursive frame carries both, so every byte added to them
+/// is multiplied by this constant. Raise it only alongside a measurement of the
+/// frame size on the smallest stack the tests run on.
+const MAX_EVAL_DEPTH: usize = 100;
 
 /// Evaluate `expr` against a row (`values`, aligned to `scope.columns`). `ctx`
 /// carries the session time zone and the transaction/statement clock; non-temporal
@@ -73,9 +80,19 @@ fn eval_depth(
         Expr::Param(_) => Err(ExecError::Unsupported(
             "query parameters ($n) are not supported".into(),
         )),
-        Expr::Default => Err(ExecError::Unsupported(
-            "DEFAULT is only supported in INSERT target values".into(),
+        Expr::Default => Err(ExecError::Syntax(
+            "DEFAULT is not allowed in this context".into(),
         )),
+        // A collation derivation never changes the value: every collation this
+        // engine has orders text by byte value. What survives is PostgreSQL's
+        // type rule — `COLLATE` on a non-collatable operand is 42804.
+        Expr::Collate { expr, .. } => {
+            let value = eval_depth(expr, scope, values, ctx, d)?;
+            if let Some(ty) = value.column_type() {
+                require_collatable(ty)?;
+            }
+            Ok(value)
+        }
         Expr::Column { table, name } => {
             let idx = scope.resolve(table.as_deref(), name)?;
             Ok(values[idx].clone())
@@ -85,6 +102,13 @@ fn eval_depth(
             apply_unary(*op, &v, ctx)
         }
         Expr::Binary { op, left, right } => {
+            // A comparison of two row constructors is evaluated field by field
+            // and never reaches the scalar operator path.
+            if let Some(result) =
+                rowexpr::eval_binary(*op, left, right, |e| eval_depth(e, scope, values, ctx, d))?
+            {
+                return Ok(result);
+            }
             let l = eval_depth(left, scope, values, ctx, d)?;
             let r = eval_depth(right, scope, values, ctx, d)?;
             apply_binary_of(*op, left, right, &l, &r, scope, ctx)
@@ -94,6 +118,12 @@ fn eval_depth(
         // NOT in a valid aggregate position (the aggregate path resolves
         // aggregates from accumulators) — a known aggregate here is misplaced /
         // nested (42803); any other name is undefined (42883).
+        // F-2: the pg_catalog introspection family (`pg_get_viewdef`,
+        // `pg_get_indexdef`, `obj_description`, the `has_*_privilege` family,
+        // …), tried alongside the other post-SP29 families.
+        Expr::Func(fc) if crate::catalog_fn::is_catalog_func(&fc.name) => {
+            crate::catalog_fn::eval_catalog(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
+        }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
             crate::func::eval_scalar(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
         }
@@ -113,8 +143,15 @@ fn eval_depth(
         Expr::Func(fc) if json_fn::is_json_func(&fc.name) => {
             json_fn::eval_json(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
         }
+        // The SQL/JSON standard expression forms.
+        Expr::SqlJson(json) => {
+            json_fn::eval_sql_json(json, ctx, |e| eval_depth(e, scope, values, ctx, d))
+        }
         Expr::Func(fc) if array_fn::is_array_func(&fc.name) => {
             array_fn::eval_array(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
+        }
+        Expr::Func(fc) if crate::window::is_window_only_function(&fc.name) => {
+            Err(crate::window::requires_over_clause(&fc.name))
         }
         Expr::Func(fc) => Err(crate::agg::func_in_scalar_context_error(fc)),
         // SP28: predicate + conditional expressions. The pure-Datum combinators
@@ -122,6 +159,11 @@ fn eval_depth(
         // the grouped evaluator (`agg::eval_grouped`); only the child-evaluation
         // closure differs.
         Expr::IsNull { expr, negated } => {
+            if let Some(result) =
+                rowexpr::eval_is_null(expr, *negated, |e| eval_depth(e, scope, values, ctx, d))?
+            {
+                return Ok(result);
+            }
             let v = eval_depth(expr, scope, values, ctx, d)?;
             Ok(Datum::Bool(v.is_null() ^ *negated))
         }
@@ -130,6 +172,11 @@ fn eval_depth(
             list,
             negated,
         } => {
+            if let Some(result) = rowexpr::eval_in_list(expr, list, *negated, |e| {
+                eval_depth(e, scope, values, ctx, d)
+            })? {
+                return Ok(result);
+            }
             let x = eval_depth(expr, scope, values, ctx, d)?;
             eval_in_list(&x, list, *negated, |e| eval_depth(e, scope, values, ctx, d))
         }
@@ -148,11 +195,16 @@ fn eval_depth(
             expr,
             pattern,
             negated,
-            case_insensitive,
+            kind,
+            escape,
         } => {
             let s = eval_depth(expr, scope, values, ctx, d)?;
             let p = eval_depth(pattern, scope, values, ctx, d)?;
-            eval_like(&s, &p, *negated, *case_insensitive)
+            let e = escape
+                .as_deref()
+                .map(|e| eval_depth(e, scope, values, ctx, d))
+                .transpose()?;
+            eval_like(&s, &p, *negated, *kind, e.as_ref())
         }
         Expr::Case {
             operand,
@@ -181,25 +233,48 @@ fn eval_depth(
             {
                 return crate::exec::resolve_regclass(sequence.kv.as_ref(), name).map(Datum::Int4);
             }
-            Ok(crabka_pgtypes::cast::cast(&v, *ty, &ctx.time_zone)?)
+            let cast = crabka_pgtypes::cast::cast_in(&v, *ty, ctx.output_style())?;
+            // A cast to a domain converts through the base type and then has to
+            // satisfy the domain's own NOT NULL and CHECK constraints.
+            crate::usertype::check_domain(*ty, &cast, ctx)?;
+            Ok(cast)
         }
         // `ARRAY[e1, e2, …]`: every element is coerced to the constructor's
         // unified element type, so the built array is homogeneous.
-        Expr::ArrayLiteral(items) => {
-            let elem = array_literal_elem_type(items, scope)?;
-            let target = elem.column_type();
-            let mut elems = Vec::with_capacity(items.len());
-            for item in items {
-                let v = eval_depth(item, scope, values, ctx, d)?;
-                elems.push(crabka_pgtypes::cast::cast(&v, target, &ctx.time_zone)?);
-            }
-            Ok(Datum::Array(ArrayValue::new(elem, elems)))
+        Expr::ArrayLiteral(items) => eval_array_constructor(items, scope, values, ctx, d),
+        // `ARRAY(subquery)` is resolved to a `Const` by the read pre-pass, so
+        // reaching here means the pre-pass did not run.
+        Expr::ArraySubquery(_) => Err(ExecError::Unsupported(
+            "ARRAY(subquery) is only supported in a query context".into(),
+        )),
+        // A row constructor reaching an ordinary value position renders to
+        // PostgreSQL's composite text form; the row-WISE operations were already
+        // taken by the arms above, before their fields were flattened.
+        Expr::Row(items) => rowexpr::eval_row(items, |e| eval_depth(e, scope, values, ctx, d)),
+        // `(composite).field` — the attribute's value, or NULL when the whole
+        // composite is NULL (PostgreSQL's field selection over a NULL row).
+        Expr::FieldSelect { base, field } => {
+            let value = eval_depth(base, scope, values, ctx, d)?;
+            select_field(&value, field)
         }
-        // `base[index]`: 1-based, and out-of-range / NULL is SQL NULL (not an error).
+        Expr::FieldSelectAll(_) => Err(ExecError::Unsupported(
+            "(row).* is only supported in a SELECT output list".into(),
+        )),
+        // `base[index]`: 1-based over an array, and out-of-range / NULL is SQL
+        // NULL (not an error). A jsonb base subscripts by key or by 0-based
+        // index instead — `json_fn::jsonb_subscript` owns that rule.
         Expr::Subscript { base, index } => {
             let b = eval_depth(base, scope, values, ctx, d)?;
             let i = eval_depth(index, scope, values, ctx, d)?;
+            if matches!(b, Datum::Jsonb(_)) || infer_type(base, scope)? == ColumnType::Jsonb {
+                return json_fn::jsonb_subscript(&b, &i);
+            }
             array_fn::array_subscript(&b, &i)
+        }
+        // `base[s1][s2]…` — a multi-subscript or sliced reference, which
+        // PostgreSQL resolves as ONE array reference rather than a chain.
+        Expr::ArrayRef { base, subscripts } => {
+            eval_array_ref(base, subscripts, scope, values, ctx, d)
         }
         // `x <op> ANY|ALL (array)` — the array form of a quantified comparison,
         // with three-valued logic supplied by `array_fn::eval_quantified`.
@@ -211,6 +286,22 @@ fn eval_depth(
         } => {
             let x = eval_depth(expr, scope, values, ctx, d)?;
             let a = eval_depth(array, scope, values, ctx, d)?;
+            // `33 = ANY('{1,2,3}')`: a bare literal on the array side is
+            // `unknown`, and PostgreSQL resolves it to the array type over the
+            // LEFT operand's type.
+            let a = match (&a, matches!(array.as_ref(), Expr::StringLiteral(_))) {
+                (Datum::Text(_), true) => {
+                    let elem = x.column_type().unwrap_or(ColumnType::Text);
+                    let target = ColumnType::array_of(elem).ok_or_else(|| {
+                        ExecError::Unsupported(format!(
+                            "arrays of {} are not supported",
+                            elem.name()
+                        ))
+                    })?;
+                    crabka_pgtypes::cast::cast(&a, target, &ctx.time_zone)?
+                }
+                _ => a,
+            };
             array_fn::eval_quantified(&a, quantifier_of(*all), |elem| {
                 apply_binary(*op, &x, elem, ctx)
             })
@@ -230,7 +321,8 @@ fn eval_depth(
 }
 
 /// `x IN (list)` / `x NOT IN (list)` with three-valued NULL logic. `eval_child`
-/// evaluates each list element. Truth table for `IN`: NULL lhs → NULL; an
+/// evaluates each list element. Truth table for `IN`: an empty list → false
+/// whatever `x` is, NULL included; NULL lhs against a non-empty list → NULL; an
 /// element comparing Equal → true; otherwise NULL if any element was NULL, else
 /// false. `NOT IN` is the boolean negation (NULL stays NULL).
 pub(crate) fn eval_in_list(
@@ -239,6 +331,12 @@ pub(crate) fn eval_in_list(
     negated: bool,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Datum, ExecError> {
+    // An empty list is decided before the operand is even considered: `x IN ()`
+    // is false and `x NOT IN ()` is true for every `x`, NULL included. Only a
+    // non-empty list lets a NULL operand make the answer unknown.
+    if list.is_empty() {
+        return Ok(Datum::Bool(negated));
+    }
     if x.is_null() {
         return Ok(Datum::Null);
     }
@@ -273,18 +371,29 @@ pub(crate) fn eval_between(
     Ok(if negated { ops::not(&res)? } else { res })
 }
 
-/// `s LIKE pat` / `ILIKE` (and their negations). NULL operand → NULL; a non-text
-/// operand → 42804.
+/// `s LIKE|ILIKE|SIMILAR TO pat [ESCAPE e]` and their negations. A NULL subject,
+/// pattern, or escape string → NULL; a non-text operand → 42804. `escape` is the
+/// evaluated `ESCAPE` clause; without one each pattern language uses `\`.
 pub(crate) fn eval_like(
     s: &Datum,
     pat: &Datum,
     negated: bool,
-    case_insensitive: bool,
+    kind: MatchKind,
+    escape: Option<&Datum>,
 ) -> Result<Datum, ExecError> {
-    if s.is_null() || pat.is_null() {
+    if s.is_null() || pat.is_null() || escape.is_some_and(Datum::is_null) {
         return Ok(Datum::Null);
     }
-    let m = like_match(as_text(s)?, as_text(pat)?, case_insensitive)?;
+    let escape = match escape {
+        Some(e) => crate::pattern::escape_char(e)?,
+        None => Some('\\'),
+    };
+    let (subject, pattern) = (as_text(s)?, as_text(pat)?);
+    let m = match kind {
+        MatchKind::Like => like_match(subject, pattern, false, escape)?,
+        MatchKind::ILike => like_match(subject, pattern, true, escape)?,
+        MatchKind::Similar => crate::pattern::similar_match(subject, pattern, escape)?,
+    };
     Ok(Datum::Bool(m ^ negated))
 }
 
@@ -298,11 +407,19 @@ fn as_text(d: &Datum) -> Result<&str, ExecError> {
 }
 
 /// SQL `LIKE` matcher over Unicode scalar values: `%` matches zero-or-more
-/// characters, `_` exactly one, and `\` escapes the next pattern character.
-/// `ci` folds ASCII case (the `ILIKE` form). A pattern ending in a lone `\` is
-/// an invalid escape sequence (22025). Iterative backtracking to the last `%`,
-/// O(n·m) worst case.
-pub(crate) fn like_match(s: &str, p: &str, ci: bool) -> Result<bool, ExecError> {
+/// characters, `_` exactly one, and `escape` (the `ESCAPE` clause's character,
+/// `\` by default and `None` for `ESCAPE ''`) makes the next pattern character
+/// literal. The escape is tested BEFORE the wildcards, so `ESCAPE '%'` really
+/// does take `%` out of service as a wildcard, as it does in `PostgreSQL`.
+/// `ci` folds ASCII case (the `ILIKE` form). A pattern ending in a lone escape
+/// character is an invalid escape sequence (22025). Iterative backtracking to
+/// the last `%`, O(n·m) worst case.
+pub(crate) fn like_match(
+    s: &str,
+    p: &str,
+    ci: bool,
+    escape: Option<char>,
+) -> Result<bool, ExecError> {
     let fold = |c: char| if ci { c.to_ascii_lowercase() } else { c };
     let sb: Vec<char> = s.chars().map(fold).collect();
     let pb: Vec<char> = p.chars().collect();
@@ -314,7 +431,7 @@ pub(crate) fn like_match(s: &str, p: &str, ci: bool) -> Result<bool, ExecError> 
     while si < sb.len() {
         if pi < pb.len() {
             match pb[pi] {
-                '\\' => {
+                c if Some(c) == escape => {
                     let lit = *pb
                         .get(pi + 1)
                         .ok_or(ExecError::Type(TypeError::InvalidEscape))?;
@@ -354,16 +471,14 @@ pub(crate) fn like_match(s: &str, p: &str, ci: bool) -> Result<bool, ExecError> 
             return Ok(false);
         }
     }
-    // `s` is consumed; the remaining pattern must be only `%` to match (and a
-    // trailing lone `\` is still an invalid escape).
+    // `s` is consumed; the remaining pattern must be only `%` to match. A lone
+    // trailing escape character is NOT an error here — PostgreSQL raises 22025
+    // only while subject characters remain, and simply fails to match once the
+    // subject is exhausted (`'a' LIKE 'a\'` is false, `'ab' LIKE 'a\'` is 22025).
     while pi < pb.len() {
         match pb[pi] {
+            c if Some(c) == escape => return Ok(false),
             '%' => pi += 1,
-            '\\' => {
-                pb.get(pi + 1)
-                    .ok_or(ExecError::Type(TypeError::InvalidEscape))?;
-                return Ok(false);
-            }
             _ => return Ok(false),
         }
     }
@@ -421,9 +536,356 @@ pub(crate) fn apply_unary(op: UnaryOp, v: &Datum, _ctx: &EvalCtx) -> Result<Datu
         // defined operator). Everything else is `0 - v` (int/numeric/float negation).
         UnaryOp::Neg => match v {
             Datum::Interval(i) => Ok(Datum::Interval(crabka_pgtypes::datetime::neg_interval(*i)?)),
+            // Negation stays at the operand's own width, so `-((-32768)::int2)`
+            // is 22003 rather than a silently widened 32768.
+            Datum::Int2(_) => Ok(ops::sub(&Datum::Int2(0), v)?),
+            // The float widths flip the sign bit rather than subtracting from
+            // zero, matching `float4um`/`float8um`: `-('0'::float4)` is `-0`,
+            // which `0 - 0` would render as `0`.
+            Datum::Float4(f) => Ok(Datum::Float4(-f)),
+            Datum::Float8(f) => Ok(Datum::Float8(-f)),
+            // `numeric` has its own `numeric_uminus`, which flips the sign
+            // without inventing a zero operand — so `-'NaN'::numeric` is `NaN`
+            // and the display scale is the operand's own.
+            Datum::Numeric(n) => Ok(Datum::Numeric(crabka_pgtypes::numeric::neg(n))),
             _ => Ok(ops::sub(&Datum::Int4(0), v)?),
         },
+        UnaryOp::Plus | UnaryOp::BitNot | UnaryOp::Abs | UnaryOp::Sqrt | UnaryOp::Cbrt => {
+            apply_prefix_op(op, v)
+        }
+        // The postfix boolean tests. Each is total over its operand — the whole
+        // point of `IS TRUE` over `= TRUE` is that a NULL operand yields FALSE
+        // rather than NULL — so none of them can return NULL.
+        UnaryOp::IsTrue
+        | UnaryOp::IsNotTrue
+        | UnaryOp::IsFalse
+        | UnaryOp::IsNotFalse
+        | UnaryOp::IsUnknown
+        | UnaryOp::IsNotUnknown => {
+            let state = boolean_test_operand(op, v)?;
+            let (want, negated) = match op {
+                UnaryOp::IsTrue => (Some(true), false),
+                UnaryOp::IsNotTrue => (Some(true), true),
+                UnaryOp::IsFalse => (Some(false), false),
+                UnaryOp::IsNotFalse => (Some(false), true),
+                UnaryOp::IsUnknown => (None, false),
+                _ => (None, true),
+            };
+            Ok(Datum::Bool((state == want) ^ negated))
+        }
     }
+}
+
+/// The operand of a boolean test as a three-valued boolean (`None` is UNKNOWN).
+///
+/// A string is still `unknown` to `PostgreSQL` at this point, so it is parsed as
+/// a boolean literal and reports 22P02 when it is not one (`'x' IS TRUE`).
+/// Anything else non-boolean is 42804, worded as `PostgreSQL` words it.
+fn boolean_test_operand(op: UnaryOp, v: &Datum) -> Result<Option<bool>, ExecError> {
+    match v {
+        Datum::Null => Ok(None),
+        Datum::Bool(b) => Ok(Some(*b)),
+        Datum::Text(_) => {
+            match crabka_pgtypes::cast::cast(v, ColumnType::Bool, &jiff::tz::TimeZone::UTC)? {
+                Datum::Bool(b) => Ok(Some(b)),
+                _ => Ok(None),
+            }
+        }
+        other => Err(ExecError::TypeMismatch(format!(
+            "argument of {} must be type boolean, not type {}",
+            boolean_test_spelling(op),
+            other.column_type().map_or("unknown", ColumnType::name)
+        ))),
+    }
+}
+
+/// The SQL spelling of a boolean test, for its 42804 message.
+fn boolean_test_spelling(op: UnaryOp) -> &'static str {
+    match op {
+        UnaryOp::IsTrue => "IS TRUE",
+        UnaryOp::IsNotTrue => "IS NOT TRUE",
+        UnaryOp::IsFalse => "IS FALSE",
+        UnaryOp::IsNotFalse => "IS NOT FALSE",
+        UnaryOp::IsUnknown => "IS UNKNOWN",
+        _ => "IS NOT UNKNOWN",
+    }
+}
+
+/// The generic prefix operators `~` (bitwise NOT), `@` (absolute value), `|/`
+/// (square root) and `||/` (cube root).
+///
+/// `~` and `@` preserve their operand's type (`@ 5.5` is `numeric`), while `|/`
+/// and `||/` are `PostgreSQL`'s `dsqrt`/`dcbrt` — `float8` regardless of the
+/// operand's type, so `|/ 16.0` is `4`, not `4.0000000000000000`.
+fn apply_prefix_op(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
+    if v.is_null() {
+        return Ok(Datum::Null);
+    }
+    match op {
+        // `+` is identity, but only on the numeric types: PostgreSQL defines no
+        // `+ text` / `+ boolean` / `+ interval`, so those are 42883 rather than
+        // a silent pass-through.
+        UnaryOp::Plus => match v {
+            Datum::Int2(_)
+            | Datum::Int4(_)
+            | Datum::Int8(_)
+            | Datum::Float4(_)
+            | Datum::Float8(_)
+            | Datum::Numeric(_) => Ok(v.clone()),
+            other => Err(undefined_prefix_operator(op, other)),
+        },
+        UnaryOp::BitNot => match v {
+            Datum::Int2(x) => Ok(Datum::Int2(!x)),
+            Datum::Int4(x) => Ok(Datum::Int4(!x)),
+            Datum::Int8(x) => Ok(Datum::Int8(!x)),
+            other => Err(undefined_prefix_operator(op, other)),
+        },
+        UnaryOp::Abs => match v {
+            // `@ (-32768)::int2` has no int2 result — 22003, like PostgreSQL.
+            Datum::Int2(x) => x
+                .checked_abs()
+                .map(Datum::Int2)
+                .ok_or_else(|| TypeError::out_of_range_for("smallint"))
+                .map_err(ExecError::Type),
+            // `@ (-2147483648)::int4` has no int4 result — 22003, like PostgreSQL.
+            Datum::Int4(x) => x
+                .checked_abs()
+                .map(Datum::Int4)
+                .ok_or(ExecError::Type(TypeError::Overflow)),
+            Datum::Int8(x) => x
+                .checked_abs()
+                .map(Datum::Int8)
+                .ok_or(ExecError::Type(TypeError::Overflow)),
+            Datum::Float4(f) => Ok(Datum::Float4(f.abs())),
+            Datum::Float8(f) => Ok(Datum::Float8(f.abs())),
+            Datum::Numeric(d) => Ok(Datum::Numeric(crabka_pgtypes::numeric::abs(d))),
+            other => Err(undefined_prefix_operator(op, other)),
+        },
+        UnaryOp::Sqrt | UnaryOp::Cbrt => {
+            let Some(x) = to_f64(v) else {
+                return Err(undefined_prefix_operator(op, v));
+            };
+            if op == UnaryOp::Sqrt {
+                if x < 0.0 {
+                    return Err(domain_error(
+                        "2201F",
+                        "cannot take square root of a negative number",
+                    ));
+                }
+                Ok(Datum::Float8(x.sqrt()))
+            } else {
+                Ok(Datum::Float8(x.cbrt()))
+            }
+        }
+        UnaryOp::Not
+        | UnaryOp::Neg
+        | UnaryOp::IsTrue
+        | UnaryOp::IsNotTrue
+        | UnaryOp::IsFalse
+        | UnaryOp::IsNotFalse
+        | UnaryOp::IsUnknown
+        | UnaryOp::IsNotUnknown => Err(undefined_prefix_operator(op, v)),
+    }
+}
+
+/// Promote a numeric-tower Datum to `f64`, for the operators `PostgreSQL`
+/// defines only over `float8`.
+fn to_f64(d: &Datum) -> Option<f64> {
+    match d {
+        Datum::Int2(n) => Some(f64::from(*n)),
+        Datum::Float4(f) => Some(f64::from(*f)),
+        Datum::Int4(n) => Some(f64::from(*n)),
+        Datum::Int8(n) => Some(crabka_pgtypes::numeric::to_f64(
+            &crabka_pgtypes::numeric::from_i64(*n),
+        )),
+        Datum::Float8(f) => Some(*f),
+        Datum::Numeric(d) => Some(crabka_pgtypes::numeric::to_f64(d)),
+        _ => None,
+    }
+}
+
+/// A math/string domain error carrying its own `PostgreSQL` SQLSTATE.
+fn domain_error(sqlstate: &'static str, message: &'static str) -> ExecError {
+    ExecError::Type(TypeError::Domain { sqlstate, message })
+}
+
+/// A prefix operator's SQL spelling, for error messages.
+fn prefix_spelling(op: UnaryOp) -> &'static str {
+    match op {
+        UnaryOp::BitNot => "~",
+        UnaryOp::Abs => "@",
+        UnaryOp::Sqrt => "|/",
+        UnaryOp::Cbrt => "||/",
+        UnaryOp::Neg => "-",
+        UnaryOp::Plus => "+",
+        _ => "NOT",
+    }
+}
+
+/// 42883 for a prefix operator applied to a type it is not defined for.
+fn undefined_prefix_operator(op: UnaryOp, v: &Datum) -> ExecError {
+    ExecError::UndefinedFunction(format!(
+        "operator does not exist: {} {}",
+        prefix_spelling(op),
+        v.column_type().map_or("unknown", ColumnType::name)
+    ))
+}
+
+/// The POSIX regex-match operators `~`, `~*`, `!~` and `!~*`.
+///
+/// # `PostgreSQL` divergence
+///
+/// `PostgreSQL` matches with its own POSIX *advanced* regular expressions; this
+/// uses the `regex` crate. The two agree across the ERE core that SQL predicates
+/// are written in — literals, bracket expressions and POSIX classes
+/// (`[[:alpha:]]`), alternation, greedy and non-greedy quantifiers, anchors,
+/// capture groups, and the same leftmost-unanchored match semantics. They part
+/// company where `PostgreSQL`'s dialect exceeds what a finite automaton can
+/// express: BACK-REFERENCES (`'aa' ~ '(a)\1'`) and LOOKAROUND compile in
+/// `PostgreSQL` but are reported here as an invalid regular expression (2201B).
+fn apply_regex_match(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
+    if l.is_null() || r.is_null() {
+        return Ok(Datum::Null);
+    }
+    let (Datum::Text(subject), Datum::Text(pattern)) = (l, r) else {
+        return Err(undefined_operator_for(op, l, r));
+    };
+    let regex = regex::RegexBuilder::new(pattern)
+        .case_insensitive(matches!(op, BinaryOp::MatchCi | BinaryOp::NotMatchCi))
+        .build()
+        .map_err(|_| domain_error("2201B", "invalid regular expression"))?;
+    let negated = matches!(op, BinaryOp::NotMatch | BinaryOp::NotMatchCi);
+    Ok(Datum::Bool(regex.is_match(subject) != negated))
+}
+
+/// The integer bitwise operators `&`, `|`, `#` (XOR), `<<` and `>>`.
+///
+/// A shift count is reduced modulo the LEFT operand's width, reproducing what
+/// `PostgreSQL`'s `int4shl`/`int8shl` do: `1::int4 << 32` is 1, `1::int4 << 31`
+/// is −2147483648, and a negative count wraps (`1::int4 << -1` is
+/// −2147483648). `>>` is an ARITHMETIC shift, so `(-1)::int4 >> 1` stays −1.
+fn apply_bitwise(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
+    if l.is_null() || r.is_null() {
+        return Ok(Datum::Null);
+    }
+    if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
+        // Only the left operand's width decides the result type; the count is
+        // always taken as an ordinary integer.
+        let (Some(count), true) = (as_int(r), as_int(l).is_some()) else {
+            return Err(undefined_operator_for(op, l, r));
+        };
+        let left = matches!(op, BinaryOp::Shl);
+        return match l {
+            Datum::Int2(x) => {
+                let n = shift_count(count, 16);
+                Ok(Datum::Int2(if left {
+                    x.wrapping_shl(n)
+                } else {
+                    x.wrapping_shr(n)
+                }))
+            }
+            Datum::Int4(x) => {
+                let n = shift_count(count, 32);
+                Ok(Datum::Int4(if left {
+                    x.wrapping_shl(n)
+                } else {
+                    x.wrapping_shr(n)
+                }))
+            }
+            _ => {
+                let x = as_int(l).unwrap_or_default();
+                let n = shift_count(count, 64);
+                Ok(Datum::Int8(if left {
+                    x.wrapping_shl(n)
+                } else {
+                    x.wrapping_shr(n)
+                }))
+            }
+        };
+    }
+    let combine = |a: i64, b: i64| match op {
+        BinaryOp::BitAnd => a & b,
+        BinaryOp::BitOr => a | b,
+        _ => a ^ b,
+    };
+    let (Some(a), Some(b)) = (as_int(l), as_int(r)) else {
+        return Err(undefined_operator_for(op, l, r));
+    };
+    // `&`/`|`/`#` over two operands of a given width always land back inside
+    // that width, so combining in i64 and narrowing to the operand width — the
+    // width `infer_binary_type` reports — is exact.
+    let combined = combine(a, b);
+    Ok(match (l, r) {
+        (Datum::Int2(_), Datum::Int2(_)) => Datum::Int2(
+            i16::try_from(combined).expect("a bitwise result of two int2 operands fits int2"),
+        ),
+        (Datum::Int2(_) | Datum::Int4(_), Datum::Int2(_) | Datum::Int4(_)) => Datum::Int4(
+            i32::try_from(combined).expect("a bitwise result of two int4 operands fits int4"),
+        ),
+        _ => Datum::Int8(combined),
+    })
+}
+
+/// A shift count reduced to `width`, matching two's-complement masking of the
+/// low `log2(width)` bits (`-1` over 32 bits is 31, as `PostgreSQL` produces).
+fn shift_count(count: i64, width: i64) -> u32 {
+    u32::try_from(count.rem_euclid(width)).unwrap_or(0)
+}
+
+/// An integer Datum as `i64`. Deliberately narrow: `numeric` and `float8` have
+/// no bitwise operators in `PostgreSQL`, so they must reach 42883, not be
+/// silently truncated.
+fn as_int(d: &Datum) -> Option<i64> {
+    match d {
+        Datum::Int2(n) => Some(i64::from(*n)),
+        Datum::Int4(n) => Some(i64::from(*n)),
+        Datum::Int8(n) => Some(*n),
+        _ => None,
+    }
+}
+
+/// `^` — exponentiation. There is no `integer ^ integer` in `PostgreSQL`, so an
+/// all-integer `2^3` resolves to the `float8` operator and yields `8`; a
+/// `numeric` operand with no `float8` operand selects the exact `numeric` form
+/// (`5.0^2` is `25.000000000000000`).
+fn apply_pow(l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
+    if l.is_null() || r.is_null() {
+        return Ok(Datum::Null);
+    }
+    let numeric_pair = |d: &Datum| match d {
+        Datum::Int2(n) => Some(crabka_pgtypes::numeric::from_i64(i64::from(*n))),
+        Datum::Int4(n) => Some(crabka_pgtypes::numeric::from_i64(i64::from(*n))),
+        Datum::Int8(n) => Some(crabka_pgtypes::numeric::from_i64(*n)),
+        Datum::Numeric(d) => Some(d.clone()),
+        _ => None,
+    };
+    if (matches!(l, Datum::Numeric(_)) || matches!(r, Datum::Numeric(_)))
+        && let (Some(base), Some(exp)) = (numeric_pair(l), numeric_pair(r))
+    {
+        return crabka_pgtypes::numeric::num_power(&base, &exp)
+            .map(Datum::Numeric)
+            .map_err(ExecError::Type);
+    }
+    let (Some(base), Some(exp)) = (to_f64(l), to_f64(r)) else {
+        return Err(undefined_operator_for(BinaryOp::Pow, l, r));
+    };
+    if base == 0.0 && exp < 0.0 {
+        return Err(domain_error(
+            "2201F",
+            "zero raised to a negative power is undefined",
+        ));
+    }
+    if base < 0.0 && exp.fract() != 0.0 {
+        return Err(domain_error(
+            "2201F",
+            "a negative number raised to a non-integer power yields a complex result",
+        ));
+    }
+    let result = base.powf(exp);
+    if result.is_infinite() && base.is_finite() && exp.is_finite() {
+        return Err(ExecError::Type(TypeError::Overflow));
+    }
+    Ok(Datum::Float8(result))
 }
 
 /// Apply a binary operator when the operand *expressions* and the scope are also
@@ -469,6 +931,44 @@ fn coerce_untyped_literal_operands(
     // that `ARRAY['a'] || 'b'` still appends an element (PostgreSQL's
     // `anyarray || anyelement`).
     let target = |other: &Datum| -> Option<ColumnType> {
+        // A comparison against a date/time value resolves the literal to that
+        // type, which is how `f1 < '05:06:07'` works on a `time` column.
+        if matches!(
+            other,
+            Datum::Date(_)
+                | Datum::Time(_)
+                | Datum::Timetz(_)
+                | Datum::Timestamp(_)
+                | Datum::Timestamptz(_)
+                | Datum::Interval(_)
+        ) {
+            return match op {
+                BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => other.column_type(),
+                _ => None,
+            };
+        }
+        // An array counterpart resolves the literal to that array type for the
+        // array-only operators and the comparisons — but NOT for `||`, where
+        // `ARRAY['a'] || 'b'` must stay `anyarray || anyelement`.
+        if let Datum::Array(a) = other {
+            return match op {
+                BinaryOp::Contains
+                | BinaryOp::ContainedBy
+                | BinaryOp::Overlaps
+                | BinaryOp::Eq
+                | BinaryOp::Ne
+                | BinaryOp::Lt
+                | BinaryOp::Le
+                | BinaryOp::Gt
+                | BinaryOp::Ge => Some(a.column_type()),
+                _ => None,
+            };
+        }
         if !matches!(other, Datum::Jsonb(_)) {
             return None;
         }
@@ -552,10 +1052,26 @@ pub(crate) fn apply_binary(
         BinaryOp::KeyExists => json_fn::eval_json_operator(JsonOp::KeyExists, l, r),
         BinaryOp::KeyExistsAny => json_fn::eval_json_operator(JsonOp::KeyExistsAny, l, r),
         BinaryOp::KeyExistsAll => json_fn::eval_json_operator(JsonOp::KeyExistsAll, l, r),
+        BinaryOp::JsonPathExists => json_fn::eval_json_operator(JsonOp::PathExists, l, r),
+        BinaryOp::JsonPathMatch => json_fn::eval_json_operator(JsonOp::PathMatch, l, r),
         // `@>` / `<@` are defined for BOTH jsonb and arrays.
         BinaryOp::Contains | BinaryOp::ContainedBy => apply_containment(op, l, r),
         // `&&` is array-only; `array_overlap` already yields NULL for a NULL side.
         BinaryOp::Overlaps => array_fn::array_overlap(l, r),
+        BinaryOp::Match | BinaryOp::MatchCi | BinaryOp::NotMatch | BinaryOp::NotMatchCi => {
+            apply_regex_match(op, l, r)
+        }
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
+            apply_bitwise(op, l, r)
+        }
+        BinaryOp::Pow => apply_pow(l, r),
+        BinaryOp::Mod => Ok(ops::rem(l, r)?),
+        // Null-safe (in)equality: two NULLs are not distinct, a NULL and a
+        // non-NULL are, and the result is never NULL.
+        BinaryOp::IsDistinctFrom | BinaryOp::IsNotDistinctFrom => {
+            let distinct = rowexpr::is_distinct(l, r)?;
+            Ok(Datum::Bool(distinct ^ (op == BinaryOp::IsNotDistinctFrom)))
+        }
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
             let ord = ops::compare(l, r)?;
             Ok(cmp_result(op, ord))
@@ -670,6 +1186,20 @@ fn adopt_json_operand_types(
     lt: ColumnType,
     rt: ColumnType,
 ) -> (ColumnType, ColumnType) {
+    // The array containment/overlap operators have no text overload, so an
+    // `unknown` literal on either side adopts the other's array type — which is
+    // what makes `array_shuffle(a) <@ '{1,2,3}'` resolve in PostgreSQL.
+    if matches!(
+        op,
+        BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps
+    ) {
+        if matches!(right, Expr::StringLiteral(_)) && lt.array_element().is_some() {
+            return (lt, lt);
+        }
+        if matches!(left, Expr::StringLiteral(_)) && rt.array_element().is_some() {
+            return (rt, rt);
+        }
+    }
     if !matches!(right, Expr::StringLiteral(_)) || lt != ColumnType::Jsonb {
         return adopt_string_literal_type(left, right, lt, rt);
     }
@@ -802,8 +1332,93 @@ pub(crate) fn coerce_unknown_args(
     Ok(())
 }
 
+/// Type-check a whole `CHECK` predicate the way `PostgreSQL`'s parse analysis
+/// does when the constraint is created: *every* subexpression has to resolve,
+/// not just the ones whose result type depends on their operands.
+///
+/// A query can leave an operator's operands to the values, so `infer_type`
+/// reports `boolean` for a comparison and a numeric-tower type for arithmetic
+/// without insisting the operands make sense. DDL cannot: the operand types are
+/// fixed by the table, so an operator or function that does not resolve for
+/// them has to fail the DDL rather than every later write to the table.
+pub(crate) fn check_predicate_resolves(expr: &Expr, scope: &Scope) -> Result<(), ExecError> {
+    let mut failure: Option<ExecError> = None;
+    crate::grouping::visit_expr(expr, &mut |node| {
+        if failure.is_some() {
+            return;
+        }
+        // `ARRAY[]` carries no element type of its own — the enclosing cast
+        // supplies it, and that cast node types fine — so it is the one node
+        // that cannot be asked for a type on its own.
+        if matches!(node, Expr::ArrayLiteral(items) if items.is_empty()) {
+            return;
+        }
+        failure = comparison_mismatch(node, scope).or_else(|| infer_type(node, scope).err());
+    });
+    failure.map_or(Ok(()), Err)
+}
+
+/// The 42883 for a comparison whose operands belong to different families.
+///
+/// `infer_binary_type` types a comparison `boolean` without looking at its
+/// operands, which is right for a query (the values decide) but wrong for DDL:
+/// a stored `CHECK` that compares `text` to `integer` would be accepted and
+/// then fail every write to the table. An `unknown` literal on either side is
+/// skipped — it adopts the other operand's type.
+fn comparison_mismatch(node: &Expr, scope: &Scope) -> Option<ExecError> {
+    let Expr::Binary { op, left, right } = node else {
+        return None;
+    };
+    if !matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+    ) || is_unknown_literal(left)
+        || is_unknown_literal(right)
+    {
+        return None;
+    }
+    let (Ok(lt), Ok(rt)) = (infer_type(left, scope), infer_type(right, scope)) else {
+        return None;
+    };
+    let (lc, rc) = (comparison_category(lt)?, comparison_category(rt)?);
+    (lc != rc).then(|| undefined_operator(op_spelling(*op), lt, rt))
+}
+
+/// The families whose members compare with one another. Two types in
+/// *different* families have no comparison operator in `PostgreSQL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ComparisonFamily {
+    Number,
+    String,
+    Date,
+    TimeOfDay,
+    Boolean,
+    Json,
+}
+
+/// The comparison family a type belongs to, or `None` when crabka has no
+/// confident answer — the comparison is then left to the values.
+fn comparison_category(ty: ColumnType) -> Option<ComparisonFamily> {
+    match ty {
+        ColumnType::Int2
+        | ColumnType::Int4
+        | ColumnType::Int8
+        | ColumnType::Float4
+        | ColumnType::Float8 => Some(ComparisonFamily::Number),
+        _ if ty.is_numeric() => Some(ComparisonFamily::Number),
+        _ if ty.is_string() => Some(ComparisonFamily::String),
+        ColumnType::Date | ColumnType::Timestamp | ColumnType::Timestamptz => {
+            Some(ComparisonFamily::Date)
+        }
+        ColumnType::Time | ColumnType::Timetz => Some(ComparisonFamily::TimeOfDay),
+        ColumnType::Bool => Some(ComparisonFamily::Boolean),
+        ColumnType::Jsonb => Some(ComparisonFamily::Json),
+        _ => None,
+    }
+}
+
 /// Is `e` a literal PostgreSQL would still call `unknown`?
-fn is_unknown_literal(e: &Expr) -> bool {
+pub(crate) fn is_unknown_literal(e: &Expr) -> bool {
     matches!(e, Expr::StringLiteral(_) | Expr::NullLiteral)
 }
 
@@ -838,7 +1453,7 @@ fn concat_kind(lt: ColumnType, rt: ColumnType) -> Option<(ConcatKind, ColumnType
 
 fn apply_concat(kind: ConcatKind, l: &Datum, r: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     match kind {
-        ConcatKind::Text => Ok(ops::concat(l, r, &ctx.time_zone)?),
+        ConcatKind::Text => Ok(ops::concat(l, r, ctx.output_style())?),
         ConcatKind::Jsonb => json_fn::eval_json_operator(JsonOp::Concat, l, r),
         ConcatKind::Array(form) => array_fn::array_concat(form, l, r, ctx),
     }
@@ -856,6 +1471,8 @@ fn json_op_of(op: BinaryOp) -> Option<JsonOp> {
         BinaryOp::KeyExists => JsonOp::KeyExists,
         BinaryOp::KeyExistsAny => JsonOp::KeyExistsAny,
         BinaryOp::KeyExistsAll => JsonOp::KeyExistsAll,
+        BinaryOp::JsonPathExists => JsonOp::PathExists,
+        BinaryOp::JsonPathMatch => JsonOp::PathMatch,
         _ => return None,
     })
 }
@@ -877,13 +1494,28 @@ fn op_spelling(op: BinaryOp) -> &'static str {
         BinaryOp::KeyExists => "?",
         BinaryOp::KeyExistsAny => "?|",
         BinaryOp::KeyExistsAll => "?&",
+        BinaryOp::JsonPathExists => "@?",
+        BinaryOp::JsonPathMatch => "@@",
         BinaryOp::Overlaps => "&&",
+        BinaryOp::Match => "~",
+        BinaryOp::MatchCi => "~*",
+        BinaryOp::NotMatch => "!~",
+        BinaryOp::NotMatchCi => "!~*",
+        BinaryOp::BitAnd => "&",
+        BinaryOp::BitOr => "|",
+        BinaryOp::BitXor => "#",
+        BinaryOp::Shl => "<<",
+        BinaryOp::Shr => ">>",
+        BinaryOp::Pow => "^",
+        BinaryOp::Mod => "%",
         BinaryOp::Eq => "=",
         BinaryOp::Ne => "<>",
         BinaryOp::Lt => "<",
         BinaryOp::Le => "<=",
         BinaryOp::Gt => ">",
         BinaryOp::Ge => ">=",
+        BinaryOp::IsDistinctFrom => "IS DISTINCT FROM",
+        BinaryOp::IsNotDistinctFrom => "IS NOT DISTINCT FROM",
         BinaryOp::And => "AND",
         BinaryOp::Or => "OR",
     }
@@ -954,7 +1586,7 @@ fn apply_timestamptz_arith(
         }
         // timestamptz - timestamptz → interval (absolute-instant difference).
         (BinaryOp::Sub, Datum::Timestamptz(a), Datum::Timestamptz(b)) => {
-            Datum::Interval(timestamptz_diff(*a, *b))
+            Datum::Interval(timestamptz_diff(*a, *b)?)
         }
         // Any other combination with a timestamptz operand is undefined — surface
         // the genuine type error via `crabka_pgtypes::ops` (which yields TypeMismatch).
@@ -963,7 +1595,7 @@ fn apply_timestamptz_arith(
     Ok(Some(result))
 }
 
-fn cmp_result(op: BinaryOp, ord: Option<Ordering>) -> Datum {
+pub(crate) fn cmp_result(op: BinaryOp, ord: Option<Ordering>) -> Datum {
     match ord {
         None => Datum::Null,
         Some(o) => {
@@ -979,6 +1611,77 @@ fn cmp_result(op: BinaryOp, ord: Option<Ordering>) -> Datum {
             Datum::Bool(holds)
         }
     }
+}
+
+/// Only the string types carry a collation. `PostgreSQL` rejects `COLLATE` on
+/// anything else at parse analysis, naming the offending type.
+pub(crate) fn require_collatable(ty: ColumnType) -> Result<(), ExecError> {
+    if matches!(
+        ty,
+        ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_)
+    ) {
+        return Ok(());
+    }
+    Err(ExecError::TypeMismatch(format!(
+        "collations are not supported by type {}",
+        ty.name()
+    )))
+}
+
+/// `(composite).field` at run time: the attribute's value, or NULL when the
+/// whole composite is NULL — `PostgreSQL` propagates a NULL row through field
+/// selection rather than failing.
+pub(crate) fn select_field(value: &Datum, field: &str) -> Result<Datum, ExecError> {
+    match value {
+        Datum::Null => Ok(Datum::Null),
+        Datum::Record(record) => record.field(field).cloned().ok_or_else(|| {
+            ExecError::UndefinedColumn(format!(
+                "column \"{field}\" not found in data type {}",
+                record.column_type().name()
+            ))
+        }),
+        other => Err(ExecError::TypeMismatch(format!(
+            "column notation .{field} applied to type {}, which is not a composite type",
+            other
+                .column_type()
+                .map_or("unknown", crabka_pgtypes::ColumnType::name)
+        ))),
+    }
+}
+
+/// The declared type of `field` in the composite type `base`.
+fn field_type(base: ColumnType, field: &str) -> Result<ColumnType, ExecError> {
+    let ColumnType::Record(named) = base.storage_type() else {
+        return Err(ExecError::TypeMismatch(format!(
+            "column notation .{field} applied to type {}, which is not a composite type",
+            base.name()
+        )));
+    };
+    // The anonymous `record` carries no attribute list, so a field of one has
+    // no static type; PostgreSQL says so with the same "not a composite type"
+    // complaint only when it cannot resolve the record, and accepts `f1`…`fn`
+    // when it can. Crabka resolves the value's own names at run time and
+    // reports `text` here, which is what RowDescription needs to be stable.
+    let Some(named) = named else {
+        return Ok(ColumnType::Text);
+    };
+    let Some(ty) = crabka_pgtypes::usertype::lookup_oid(named.oid) else {
+        return Err(ExecError::UndefinedObject(format!(
+            "type \"{}\" does not exist",
+            named.name
+        )));
+    };
+    ty.fields()
+        .unwrap_or(&[])
+        .iter()
+        .find(|attribute| attribute.name == field)
+        .map(|attribute| attribute.ty)
+        .ok_or_else(|| {
+            ExecError::UndefinedColumn(format!(
+                "column \"{field}\" not found in data type {}",
+                named.name
+            ))
+        })
 }
 
 /// Statically infer the result column type of an expression, for RowDescription.
@@ -999,21 +1702,61 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         Expr::Param(_) => Err(ExecError::Unsupported(
             "query parameters ($n) are not supported".into(),
         )),
-        Expr::Default => Err(ExecError::Unsupported(
-            "DEFAULT is only supported in INSERT target values".into(),
+        Expr::Default => Err(ExecError::Syntax(
+            "DEFAULT is not allowed in this context".into(),
         )),
+        Expr::Collate { expr, .. } => {
+            let ty = infer_type(expr, scope)?;
+            require_collatable(ty)?;
+            Ok(ty)
+        }
         Expr::Column { table, name } => {
             let idx = scope.resolve(table.as_deref(), name)?;
             Ok(scope.ty_at(idx))
         }
         Expr::Unary { op, expr } => match op {
             UnaryOp::Not => Ok(ColumnType::Bool),
-            UnaryOp::Neg => infer_type(expr, scope),
+            // `~` and `@` keep the operand's type; `|/` and `||/` are the
+            // `float8`-only `dsqrt`/`dcbrt`, so they report `float8` whatever
+            // the operand is.
+            UnaryOp::Plus | UnaryOp::Neg | UnaryOp::BitNot | UnaryOp::Abs => {
+                infer_type(expr, scope)
+            }
+            UnaryOp::Sqrt | UnaryOp::Cbrt => Ok(ColumnType::Float8),
+            // The boolean tests are boolean-valued, but only over a boolean
+            // operand: PostgreSQL rejects `1 IS TRUE` at parse analysis, which
+            // is here. A bare literal is still `unknown` and adopts `boolean`,
+            // so `'t' IS TRUE` is accepted and coerced when it evaluates.
+            UnaryOp::IsTrue
+            | UnaryOp::IsNotTrue
+            | UnaryOp::IsFalse
+            | UnaryOp::IsNotFalse
+            | UnaryOp::IsUnknown
+            | UnaryOp::IsNotUnknown => {
+                let operand = infer_type(expr, scope)?;
+                if operand != ColumnType::Bool && !is_unknown_literal(expr) {
+                    return Err(ExecError::TypeMismatch(format!(
+                        "argument of {} must be type boolean, not type {}",
+                        boolean_test_spelling(*op),
+                        operand.name()
+                    )));
+                }
+                Ok(ColumnType::Bool)
+            }
         },
         Expr::Binary { op, left, right } => infer_binary_type(*op, left, right, scope),
         // SP29: a scalar function's result type; otherwise an aggregate result
         // type for RowDescription (count/sum -> int8, min/max -> the argument's
         // type); unknown names / bad arity / bad argument type -> 42883.
+        // F-2: the pg_catalog introspection family's static result type, tried
+        // in the same order as `eval` above.
+        // Q3: `GROUPING(…)` is `int4` — the grouping-set rewrite folds it to a
+        // `CASE` over the grouping-set ordinal before anything evaluates it, so
+        // the type pass has to accept it where a scalar function would not be.
+        Expr::Func(fc) if crate::grouping::is_grouping_call(fc) => Ok(ColumnType::Int4),
+        Expr::Func(fc) if crate::catalog_fn::is_catalog_func(&fc.name) => {
+            crate::catalog_fn::catalog_func_result_type(fc, scope)
+        }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
             crate::func::scalar_result_type(fc, scope)
         }
@@ -1029,8 +1772,26 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         Expr::Func(fc) if json_fn::is_json_func(&fc.name) => {
             json_fn::json_func_result_type(fc, scope)
         }
+        // A SQL/JSON expression's type is fixed by its form and its `RETURNING`
+        // clause; the operands still have to type-check.
+        Expr::SqlJson(json) => {
+            let mut types = Vec::new();
+            for child in json.children() {
+                types.push(infer_type(child, scope)?);
+            }
+            if let crabka_pgparser::ast::SqlJsonExpr::IsJson { .. } = json.as_ref() {
+                // `IS JSON` is the one form whose operand type is constrained.
+                json_fn::is_json_operand_type(types[0])?;
+            }
+            Ok(json.result_type())
+        }
         Expr::Func(fc) if array_fn::is_array_func(&fc.name) => {
             array_fn::array_func_result_type(fc, scope)
+        }
+        // A window-only function written without OVER is not an undefined
+        // function: PostgreSQL says so with its own 42809.
+        Expr::Func(fc) if crate::window::is_window_only_function(&fc.name) => {
+            Err(crate::window::requires_over_clause(&fc.name))
         }
         Expr::Func(fc) => crate::agg::func_result_type(fc, scope),
         // SP28: predicates are boolean; CASE unifies its branch result types.
@@ -1072,10 +1833,38 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         | Expr::QuantifiedArray { .. } => Ok(ColumnType::Bool),
         // `ARRAY[…]` types as an array of its unified element type.
         Expr::ArrayLiteral(items) => Ok(ColumnType::Array(array_literal_elem_type(items, scope)?)),
+        // Like a scalar subquery, resolved to `Const` before inference runs.
+        Expr::ArraySubquery(_) => Err(ExecError::Unsupported(
+            "internal: ARRAY(subquery) must be resolved before type inference".into(),
+        )),
+        // A row value in a value position is the anonymous `record` (OID 2249).
+        // Every field must still type-check, so they are inferred and discarded
+        // — the record's own OID does not depend on them.
+        Expr::Row(items) => {
+            for item in items {
+                infer_type(item, scope)?;
+            }
+            Ok(ColumnType::Record(None))
+        }
+        // `(composite).field` reports the attribute's declared type; the
+        // composite has to be a known one for the attribute to have a type at
+        // all, which is exactly PostgreSQL's rule.
+        Expr::FieldSelect { base, field } => {
+            let base_type = infer_type(base, scope)?;
+            field_type(base_type, field)
+        }
+        Expr::FieldSelectAll(_) => Err(ExecError::Unsupported(
+            "(row).* is only supported in a SELECT output list".into(),
+        )),
         // `base[index]` yields the base array's element type; anything else has no
         // subscripting operator.
         Expr::Subscript { base, .. } => {
             let bt = infer_type(base, scope)?;
+            // PostgreSQL's jsonb subscripting yields jsonb at every level, so
+            // `j['a']['b']` type-checks without the base being an array.
+            if bt == ColumnType::Jsonb {
+                return Ok(ColumnType::Jsonb);
+            }
             bt.array_element()
                 .map(ElemType::column_type)
                 .ok_or_else(|| {
@@ -1084,6 +1873,28 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
                         bt.name()
                     ))
                 })
+        }
+        // A subscript chain containing a slice yields the ARRAY type; one made
+        // only of indexes reaches an element.
+        Expr::ArrayRef { base, subscripts } => {
+            let bt = infer_type(base, scope)?;
+            if bt == ColumnType::Jsonb {
+                return Ok(ColumnType::Jsonb);
+            }
+            let elem = bt.array_element().ok_or_else(|| {
+                ExecError::TypeMismatch(format!(
+                    "cannot subscript type {} because it does not support subscripting",
+                    bt.name()
+                ))
+            })?;
+            if subscripts
+                .iter()
+                .any(crabka_pgparser::ast::ArraySubscript::is_slice)
+            {
+                Ok(bt)
+            } else {
+                Ok(elem.column_type())
+            }
         }
         // A scalar subquery's type needs the catalog; both the exec and describe
         // paths substitute it to `Const` before `infer_type` runs, so this is
@@ -1114,7 +1925,20 @@ fn infer_binary_type(
             }
             // SP37: a temporal operand resolves via PG's date/time arithmetic
             // matrix first; a non-temporal pair falls through to the numeric tower.
-            Ok(datetime_result_type(op, lt, rt).unwrap_or_else(|| numeric_result_type(lt, rt)))
+            if let Some(ty) = datetime_result_type(op, lt, rt) {
+                return Ok(ty);
+            }
+            // PostgreSQL resolves `+ - * /` from the operand types, so an
+            // operand no arithmetic operator is defined over is 42883 at parse
+            // analysis rather than a value-time failure on every row. An
+            // `unknown` literal is exempt — it adopts the other operand's type.
+            let usable = |e: &Expr, t: ColumnType| {
+                is_unknown_literal(e) || is_arithmetic_type(t) || is_temporal(t)
+            };
+            if !usable(left, lt) || !usable(right, rt) {
+                return Err(undefined_operator(op_spelling(op), lt, rt));
+            }
+            Ok(numeric_result_type(lt, rt))
         }
         // `||` is text, jsonb, or one of the three array concatenations, resolved
         // from the operand types (42883 when no `||` applies).
@@ -1130,11 +1954,62 @@ fn infer_binary_type(
         | BinaryOp::KeyExists
         | BinaryOp::KeyExistsAny
         | BinaryOp::KeyExistsAll
+        | BinaryOp::JsonPathExists
+        | BinaryOp::JsonPathMatch
         | BinaryOp::Overlaps => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             let (alt, art) = adopt_json_operand_types(op, left, right, lt, rt);
             json_or_array_operator_result_type(op, alt, art)
                 .ok_or_else(|| undefined_operator(op_spelling(op), lt, rt))
+        }
+        // The bitwise operators are integer-only. `&`/`|`/`#` widen to the wider
+        // operand; a shift keeps the LEFT operand's width (its count is an
+        // ordinary integer, not part of the result type).
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            let is_int =
+                |t: ColumnType| matches!(t, ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8);
+            if !is_int(lt) || !is_int(rt) {
+                return Err(undefined_operator(op_spelling(op), lt, rt));
+            }
+            let both = |want: ColumnType| lt == want && rt == want;
+            Ok(match op {
+                BinaryOp::Shl | BinaryOp::Shr => lt,
+                _ if both(ColumnType::Int2) => ColumnType::Int2,
+                _ if matches!(lt, ColumnType::Int2 | ColumnType::Int4)
+                    && matches!(rt, ColumnType::Int2 | ColumnType::Int4) =>
+                {
+                    ColumnType::Int4
+                }
+                _ => ColumnType::Int8,
+            })
+        }
+        // `^` has no integer form in PostgreSQL: an all-integer pair resolves to
+        // the `float8` operator, and a `numeric` operand (with no `float8` one)
+        // selects the exact `numeric` operator.
+        BinaryOp::Pow => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            if lt == ColumnType::Float8 || rt == ColumnType::Float8 {
+                Ok(ColumnType::Float8)
+            } else if lt.is_numeric() || rt.is_numeric() {
+                Ok(ColumnType::Numeric(None))
+            } else {
+                Ok(ColumnType::Float8)
+            }
+        }
+        // `%` is defined for integers and `numeric` only — `float8` has no
+        // modulo in PostgreSQL, so it is 42883 at plan time rather than a
+        // runtime type error.
+        BinaryOp::Mod => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            let modulo_able = |t: ColumnType| {
+                matches!(t, ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8)
+                    || t.is_numeric()
+            };
+            if !modulo_able(lt) || !modulo_able(rt) {
+                return Err(undefined_operator("%", lt, rt));
+            }
+            Ok(numeric_result_type(lt, rt))
         }
         _ => Ok(ColumnType::Bool),
     }
@@ -1179,12 +2054,133 @@ pub(crate) fn array_literal_elem_type(
     }
     let mut acc: Option<ColumnType> = None;
     for item in items {
-        acc = unify_branch(acc, item, scope)?;
+        // A nested constructor contributes its own element type, not an array
+        // type: `ARRAY[ARRAY[1],ARRAY[2]]` is `integer[]` with two dimensions.
+        match item {
+            Expr::ArrayLiteral(inner) => {
+                let elem = array_literal_elem_type(inner, scope)?.column_type();
+                acc = Some(match acc {
+                    None => elem,
+                    Some(seen) => unify_types(seen, elem)?,
+                });
+            }
+            _ => acc = unify_branch(acc, item, scope)?,
+        }
     }
     let elem = acc.unwrap_or(ColumnType::Text);
     ElemType::from_column_type(elem).ok_or_else(|| {
         ExecError::Unsupported(format!("arrays of {} are not supported", elem.name()))
     })
+}
+
+/// `ARRAY[…]`'s evaluation, kept out of [`eval_depth`]'s own frame so the
+/// recursion budget is not spent on this arm's locals.
+#[inline(never)]
+fn eval_array_constructor(
+    items: &[Expr],
+    scope: &Scope,
+    values: &[Datum],
+    ctx: &EvalCtx,
+    depth: usize,
+) -> Result<Datum, ExecError> {
+    let elem = array_literal_elem_type(items, scope)?;
+    let target = elem.column_type();
+    let mut parts = Vec::with_capacity(items.len());
+    for item in items {
+        // A nested constructor contributes a whole sub-array — the dimension it
+        // adds is what makes `ARRAY[[1,2],[3,4]]` two-dimensional.
+        let value = eval_depth(item, scope, values, ctx, depth)?;
+        parts.push(match item {
+            Expr::ArrayLiteral(_) => value,
+            _ => crabka_pgtypes::cast::cast(&value, target, &ctx.time_zone)?,
+        });
+    }
+    array_fn::build_constructor(elem, parts)
+}
+
+/// `base[s1][s2]…`'s evaluation, kept out of [`eval_depth`]'s own frame for the
+/// same reason as [`eval_array_constructor`].
+#[inline(never)]
+fn eval_array_ref(
+    base: &Expr,
+    subscripts: &[crabka_pgparser::ast::ArraySubscript],
+    scope: &Scope,
+    values: &[Datum],
+    ctx: &EvalCtx,
+    depth: usize,
+) -> Result<Datum, ExecError> {
+    let evaluated = eval_depth(base, scope, values, ctx, depth)?;
+    let args = eval_subscripts(subscripts, scope, values, ctx, depth)?;
+    if matches!(evaluated, Datum::Jsonb(_)) || infer_type(base, scope)? == ColumnType::Jsonb {
+        return eval_jsonb_subscript_chain(&evaluated, subscripts, &args);
+    }
+    array_fn::array_ref(&evaluated, &args)
+}
+
+/// [`eval_subscripts`] for an assignment target, whose bounds are evaluated
+/// against the joined row rather than a projection scope.
+pub(crate) fn eval_assignment_subscripts(
+    subscripts: &[crabka_pgparser::ast::ArraySubscript],
+    scope: &Scope,
+    values: &[Datum],
+    ctx: &EvalCtx,
+) -> Result<Vec<array_fn::SubscriptArg>, ExecError> {
+    eval_subscripts(subscripts, scope, values, ctx, 0)
+}
+
+/// Evaluate each bound of a subscript chain into the executor's
+/// [`array_fn::SubscriptArg`] form.
+fn eval_subscripts(
+    subscripts: &[crabka_pgparser::ast::ArraySubscript],
+    scope: &Scope,
+    values: &[Datum],
+    ctx: &EvalCtx,
+    depth: usize,
+) -> Result<Vec<array_fn::SubscriptArg>, ExecError> {
+    use crabka_pgparser::ast::ArraySubscript;
+
+    let bound = |e: &Option<Expr>| -> Result<Option<Datum>, ExecError> {
+        e.as_ref()
+            .map(|e| eval_depth(e, scope, values, ctx, depth))
+            .transpose()
+    };
+    subscripts
+        .iter()
+        .map(|s| match s {
+            ArraySubscript::Index(e) => Ok(array_fn::SubscriptArg::Index(eval_depth(
+                e, scope, values, ctx, depth,
+            )?)),
+            ArraySubscript::Slice { lower, upper } => Ok(array_fn::SubscriptArg::Slice {
+                lower: bound(lower)?,
+                upper: bound(upper)?,
+            }),
+        })
+        .collect()
+}
+
+/// A jsonb base subscripts by key or index at every level, so a chain folds
+/// left to right. `jsonb` has no slice operator.
+fn eval_jsonb_subscript_chain(
+    base: &Datum,
+    subscripts: &[crabka_pgparser::ast::ArraySubscript],
+    args: &[array_fn::SubscriptArg],
+) -> Result<Datum, ExecError> {
+    if subscripts
+        .iter()
+        .any(crabka_pgparser::ast::ArraySubscript::is_slice)
+    {
+        return Err(ExecError::TypeMismatch(
+            "jsonb subscript does not support slices".into(),
+        ));
+    }
+    let mut value = base.clone();
+    for arg in args {
+        let array_fn::SubscriptArg::Index(index) = arg else {
+            unreachable!("the slice case returned above")
+        };
+        value = json_fn::jsonb_subscript(&value, index)?;
+    }
+    Ok(value)
 }
 
 /// `ARRAY[]::int[]`: an empty array constructor has no element type of its own,
@@ -1241,15 +2237,22 @@ pub(crate) fn unify_branch(
 }
 
 pub(crate) fn unify_types(a: ColumnType, b: ColumnType) -> Result<ColumnType, ExecError> {
-    use ColumnType::{Float8, Int4, Int8, Numeric};
-    // The numeric tower: int4/int8 < numeric < float8.
-    let num_family = |t: ColumnType| matches!(t, Int4 | Int8 | Float8) || t.is_numeric();
+    use ColumnType::{Float4, Float8, Int2, Int4, Int8, Numeric};
+    // The numeric tower: int2 < int4/int8 < numeric < float4 < float8. This is
+    // PostgreSQL's `select_common_type` over category N restricted to crabka's
+    // types: the winner is the one every other member casts to IMPLICITLY, and
+    // `numeric → float4` is implicit while `float4 → numeric` is only
+    // assignment, which is why `int2 UNION float4` is `real`, not `numeric`.
+    let num_family =
+        |t: ColumnType| matches!(t, Int2 | Int4 | Int8 | Float4 | Float8) || t.is_numeric();
     Ok(match (a, b) {
         (x, y) if x == y => x,
-        // Mirror the arithmetic int4->int8 promotion rule.
-        (Int4, Int8) | (Int8, Int4) => Int8,
-        // SP30/SP32: any float8 wins; else (a numeric in the mix) → numeric.
+        // Mirror the arithmetic int2->int4->int8 promotion rule.
+        (Int2, Int4) | (Int4, Int2) => Int4,
+        (Int2 | Int4, Int8) | (Int8, Int2 | Int4) => Int8,
+        // SP30/SP32: any float8 wins; then float4; else (a numeric in the mix) → numeric.
         _ if a == Float8 || b == Float8 => Float8,
+        _ if (a == Float4 || b == Float4) && num_family(a) && num_family(b) => Float4,
         _ if num_family(a) && num_family(b) => Numeric(None),
         _ => {
             return Err(ExecError::TypeMismatch(format!(
@@ -1263,8 +2266,8 @@ pub(crate) fn unify_types(a: ColumnType, b: ColumnType) -> Result<ColumnType, Ex
 
 /// Whether a column type is one of the SP37 date/time types.
 fn is_temporal(t: ColumnType) -> bool {
-    use ColumnType::{Date, Interval, Time, Timestamp, Timestamptz};
-    matches!(t, Date | Time | Timestamp | Timestamptz | Interval)
+    use ColumnType::{Date, Interval, Time, Timestamp, Timestamptz, Timetz};
+    matches!(t, Date | Time | Timetz | Timestamp | Timestamptz | Interval)
 }
 
 /// PostgreSQL's date/time arithmetic result-type matrix. Returns `Some(result)`
@@ -1275,14 +2278,23 @@ fn is_temporal(t: ColumnType) -> bool {
 /// temporal pair that PG would reject — eval is the authority).
 fn datetime_result_type(op: BinaryOp, lt: ColumnType, rt: ColumnType) -> Option<ColumnType> {
     use BinaryOp::{Add, Div, Mul, Sub};
-    use ColumnType::{Date, Float8, Int4, Int8, Interval, Numeric, Time, Timestamp, Timestamptz};
+    use ColumnType::{
+        Date, Float8, Int4, Int8, Interval, Numeric, Time, Timestamp, Timestamptz, Timetz,
+    };
     // Only engage the matrix when a temporal operand is present; a purely numeric
     // pair belongs to the numeric tower.
     if !is_temporal(lt) && !is_temporal(rt) {
         return None;
     }
-    let is_int = |t: ColumnType| matches!(t, Int4 | Int8);
-    let is_number = |t: ColumnType| matches!(t, Int4 | Int8 | Float8 | Numeric(_));
+    // `int2` reaches the `date ± integer` and `interval * number` operators
+    // through PostgreSQL's implicit widening cast, so it belongs to both sets.
+    let is_int = |t: ColumnType| matches!(t, ColumnType::Int2 | Int4 | Int8);
+    let is_number = |t: ColumnType| {
+        matches!(
+            t,
+            ColumnType::Int2 | Int4 | Int8 | ColumnType::Float4 | Float8 | Numeric(_)
+        )
+    };
     Some(match (op, lt, rt) {
         // date ± integer → date; integer + date → date.
         (Add, Date, r) | (Sub, Date, r) if is_int(r) => Date,
@@ -1304,6 +2316,10 @@ fn datetime_result_type(op: BinaryOp, lt: ColumnType, rt: ColumnType) -> Option<
         (Mul, l, Interval) if is_number(l) => Interval,
         // time ± interval → time; interval + time → time.
         (Add | Sub, Time, Interval) | (Add, Interval, Time) => Time,
+        // timetz ± interval → timetz; the shift wraps mod 24 h and keeps the
+        // operand's zone offset, which `ops.rs` already implements — only this
+        // plan-time rule was missing, so the call was 42883 before it could run.
+        (Add | Sub, Timetz, Interval) | (Add, Interval, Timetz) => Timetz,
         // date + time / time + date → timestamp (combine the calendar date and
         // the wall-clock time).
         (Add, Date, Time) | (Add, Time, Date) => Timestamp,
@@ -1317,13 +2333,33 @@ fn datetime_result_type(op: BinaryOp, lt: ColumnType, rt: ColumnType) -> Option<
 /// int < numeric < float8: any float8 makes the result float8; else any numeric
 /// makes it numeric; else int4 only if both are int4, else int8. Permissive about
 /// non-numeric operands (a real type error surfaces at evaluation).
+/// The types `PostgreSQL` defines `+ - * /` over once the date/time matrix has
+/// had its say: the numeric tower, and nothing else.
+fn is_arithmetic_type(ty: ColumnType) -> bool {
+    matches!(
+        ty,
+        ColumnType::Int2
+            | ColumnType::Int4
+            | ColumnType::Int8
+            | ColumnType::Float4
+            | ColumnType::Float8
+    ) || ty.is_numeric()
+}
+
 fn numeric_result_type(lt: ColumnType, rt: ColumnType) -> ColumnType {
-    use ColumnType::{Float8, Int4};
-    if lt == Float8 || rt == Float8 {
+    use ColumnType::{Float4, Float8, Int2, Int4};
+    // `float4 ⊕ float4` is the ONLY single-precision pairing: PostgreSQL has no
+    // `float4 ⊕ int` / `float4 ⊕ numeric` operator, so any other mix widens both
+    // sides to the category's preferred type, `float8`.
+    if lt == Float4 && rt == Float4 {
+        Float4
+    } else if lt == Float8 || rt == Float8 || lt == Float4 || rt == Float4 {
         Float8
     } else if lt.is_numeric() || rt.is_numeric() {
         ColumnType::Numeric(None)
-    } else if lt == Int4 && rt == Int4 {
+    } else if lt == Int2 && rt == Int2 {
+        Int2
+    } else if matches!(lt, Int2 | Int4) && matches!(rt, Int2 | Int4) {
         Int4
     } else {
         ColumnType::Int8
@@ -1332,6 +2368,41 @@ fn numeric_result_type(lt: ColumnType, rt: ColumnType) -> ColumnType {
 
 #[cfg(test)]
 mod tests {
+
+    /// PostgreSQL decides an empty `IN` list before it looks at the operand:
+    /// `NULL IN (SELECT 1 WHERE false)` is `f`, not NULL, and `NOT IN` is `t`.
+    #[test]
+    fn an_empty_in_list_is_decided_without_the_operand() {
+        use assert2::assert;
+
+        let no_children = |_: &Expr| -> Result<Datum, ExecError> {
+            panic!("an empty list must not evaluate any child")
+        };
+
+        assert!(
+            eval_in_list(&Datum::Null, &[], false, no_children).expect("empty IN")
+                == Datum::Bool(false)
+        );
+        assert!(
+            eval_in_list(&Datum::Null, &[], true, no_children).expect("empty NOT IN")
+                == Datum::Bool(true)
+        );
+        assert!(
+            eval_in_list(&Datum::Int4(1), &[], false, no_children).expect("empty IN")
+                == Datum::Bool(false)
+        );
+        // A NULL operand against a NON-empty list is still unknown.
+        assert!(
+            eval_in_list(
+                &Datum::Null,
+                &[Expr::IntLiteral("1".into())],
+                false,
+                |_| Ok(Datum::Int4(1))
+            )
+            .expect("NULL IN (1)")
+                == Datum::Null
+        );
+    }
     use crabka_pgcatalog::{Column, Table};
     use crabka_pgparser::parser::parse_expr_for_test as pexpr;
     use crabka_pgtypes::{ColumnType, Datum};
@@ -1349,6 +2420,7 @@ mod tests {
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         }
     }
 
@@ -1364,6 +2436,178 @@ mod tests {
     fn ev(sql: &str, t: Option<&Table>, vals: &[Datum]) -> Datum {
         let ctx = crate::clock::EvalCtx::test_default();
         eval(&pexpr(sql).expect("parse"), &scope_of(t), vals, &ctx).expect("eval")
+    }
+
+    fn ev_err(sql: &str) -> ExecError {
+        let ctx = crate::clock::EvalCtx::test_default();
+        eval(&pexpr(sql).expect("parse"), &Scope::empty(), &[], &ctx).expect_err("must fail")
+    }
+
+    /// The static-type pass runs before any row is produced, so it is what
+    /// rejects a non-boolean boolean test.
+    fn infer_err(sql: &str) -> ExecError {
+        infer_type(&pexpr(sql).expect("parse"), &Scope::empty()).expect_err("must fail")
+    }
+
+    #[test]
+    fn boolean_tests_are_total_over_their_operand() {
+        // (expression, result) — every cell of PostgreSQL 18's truth table.
+        let cases: &[(&str, bool)] = &[
+            ("true IS TRUE", true),
+            ("false IS TRUE", false),
+            ("null IS TRUE", false),
+            ("true IS NOT TRUE", false),
+            ("false IS NOT TRUE", true),
+            ("null IS NOT TRUE", true),
+            ("true IS FALSE", false),
+            ("false IS FALSE", true),
+            ("null IS FALSE", false),
+            ("true IS NOT FALSE", true),
+            ("false IS NOT FALSE", false),
+            ("null IS NOT FALSE", true),
+            ("true IS UNKNOWN", false),
+            ("null IS UNKNOWN", true),
+            ("null IS NOT UNKNOWN", false),
+            ("true IS NOT UNKNOWN", true),
+            // A bare string literal is still `unknown` and adopts boolean.
+            ("'t' IS TRUE", true),
+            ("'f' IS UNKNOWN", false),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(ev(sql, None, &[]) == Datum::Bool(*expected), "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_non_boolean_boolean_test_is_42804_and_a_bad_literal_is_22p02() {
+        for (sql, spelling) in [
+            ("1 IS TRUE", "IS TRUE"),
+            ("1 IS NOT TRUE", "IS NOT TRUE"),
+            ("1 IS FALSE", "IS FALSE"),
+            ("1 IS NOT FALSE", "IS NOT FALSE"),
+            ("1 IS UNKNOWN", "IS UNKNOWN"),
+            ("1 IS NOT UNKNOWN", "IS NOT UNKNOWN"),
+        ] {
+            let error = infer_err(sql).into_pg();
+            assert2::assert!(error.code == "42804", "{sql}");
+            assert2::assert!(
+                error.message
+                    == format!("argument of {spelling} must be type boolean, not type integer"),
+                "{sql}"
+            );
+        }
+        // An `unknown` literal type-checks, then fails to convert at run time —
+        // exactly as it does in PostgreSQL.
+        assert2::assert!(ev_err("'x' IS TRUE").into_pg().code == "22P02");
+    }
+
+    #[test]
+    fn is_distinct_from_is_null_safe_and_never_returns_null() {
+        let cases: &[(&str, bool)] = &[
+            ("null IS DISTINCT FROM null", false),
+            ("1 IS DISTINCT FROM null", true),
+            ("null IS DISTINCT FROM 1", true),
+            ("1 IS DISTINCT FROM 1", false),
+            ("1 IS DISTINCT FROM 2", true),
+            ("null IS NOT DISTINCT FROM null", true),
+            ("1 IS NOT DISTINCT FROM null", false),
+            ("1 IS NOT DISTINCT FROM 1", true),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(ev(sql, None, &[]) == Datum::Bool(*expected), "{sql}");
+        }
+    }
+
+    #[test]
+    fn typed_literal_constants_evaluate_as_their_cast() {
+        let cases: &[(&str, Datum)] = &[
+            ("bool 't'", Datum::Bool(true)),
+            ("int4 '0'", Datum::Int4(0)),
+            ("text 'x'", Datum::Text("x".into())),
+            ("date '2024-01-01'", ev("'2024-01-01'::date", None, &[])),
+            ("numeric '1.50'", ev("'1.50'::numeric", None, &[])),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(ev(sql, None, &[]) == *expected, "{sql}");
+        }
+        // The error is the cast's error, code and message alike.
+        let literal = ev_err("bool 'test'").into_pg();
+        let cast = ev_err("'test'::bool").into_pg();
+        assert2::assert!(literal.code == cast.code && literal.message == cast.message);
+        assert2::assert!(literal.code == "22P02");
+    }
+
+    #[test]
+    fn similar_to_and_the_escape_clause_evaluate() {
+        let cases: &[(&str, Datum)] = &[
+            ("'abc' SIMILAR TO 'a%'", Datum::Bool(true)),
+            ("'abc' SIMILAR TO 'a|b'", Datum::Bool(false)),
+            ("'abc' SIMILAR TO '(a|b)bc'", Datum::Bool(true)),
+            ("'abc' NOT SIMILAR TO 'a%'", Datum::Bool(false)),
+            ("'abc' SIMILAR TO 'a.c'", Datum::Bool(false)),
+            ("null SIMILAR TO 'a'", Datum::Null),
+            ("'abc' SIMILAR TO null", Datum::Null),
+            ("'a%c' SIMILAR TO 'a#%c' ESCAPE '#'", Datum::Bool(true)),
+            ("'a_c' LIKE 'aX_c' ESCAPE 'X'", Datum::Bool(true)),
+            ("'aXc' LIKE 'aXc' ESCAPE 'X'", Datum::Bool(false)),
+            ("'ABC' ILIKE 'aXbc' ESCAPE 'X'", Datum::Bool(true)),
+            ("'a_c' LIKE 'a_c' ESCAPE ''", Datum::Bool(true)),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(ev(sql, None, &[]) == *expected, "{sql}");
+        }
+        for sql in [
+            "'abc' LIKE 'abc' ESCAPE 'xy'",
+            "'a' SIMILAR TO 'a' ESCAPE 'xy'",
+        ] {
+            let error = ev_err(sql).into_pg();
+            assert2::assert!(error.code == "22025", "{sql}");
+            assert2::assert!(error.message == "invalid escape string", "{sql}");
+        }
+    }
+
+    #[test]
+    fn row_expressions_compare_field_wise_and_render_as_composite_text() {
+        // A bare row value is a `record` (OID 2249), as `pg_typeof(ROW(1,2))`
+        // reports on the oracle — not text. What the SQL contract fixes is the
+        // *rendering*, so these four assert the composite text the wire sends
+        // rather than the datum's representation.
+        for (sql, expected) in [
+            ("ROW(1, 2)", "(1,2)"),
+            ("(1, 2)", "(1,2)"),
+            ("ROW(1, 'a', null, true)", "(1,a,,t)"),
+            ("ROW('a b', '')", "(\"a b\",\"\")"),
+        ] {
+            let value = ev(sql, None, &[]);
+            let bytes = crabka_pgtypes::encoding::encode_text(&value, &jiff::tz::TimeZone::UTC);
+            let rendered = String::from_utf8(bytes).expect("composite text is utf-8");
+            assert!(rendered == expected, "{sql}: {rendered} != {expected}");
+        }
+
+        let cases: &[(&str, Datum)] = &[
+            ("(1,2) = (1,2)", Datum::Bool(true)),
+            ("(1,2) < (1,3)", Datum::Bool(true)),
+            ("(2,1) > (1,9)", Datum::Bool(true)),
+            // A field that already decided outranks a later NULL; one reached
+            // first makes the whole comparison NULL.
+            ("(1,null) < (2,2)", Datum::Bool(true)),
+            ("(1,2) < (1,null)", Datum::Null),
+            ("(1,null) = (1,2)", Datum::Null),
+            ("(1,null) = (2,2)", Datum::Bool(false)),
+            // IS NULL / IS NOT NULL are field-wise, not negations of each other.
+            ("ROW(1,null) IS NULL", Datum::Bool(false)),
+            ("ROW(1,null) IS NOT NULL", Datum::Bool(false)),
+            ("ROW(null,null) IS NULL", Datum::Bool(true)),
+            ("ROW(1,2) IS NOT NULL", Datum::Bool(true)),
+            ("(1,2) IN ((1,2),(3,4))", Datum::Bool(true)),
+            ("(5,6) IN ((1,2),(3,4))", Datum::Bool(false)),
+            ("(1,2) NOT IN ((1,2),(3,4))", Datum::Bool(false)),
+            ("ROW(1,2) IS DISTINCT FROM ROW(1,null)", Datum::Bool(true)),
+            ("(1,null) IS NOT DISTINCT FROM (1,null)", Datum::Bool(true)),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(ev(sql, None, &[]) == *expected, "{sql}");
+        }
     }
 
     /// Defense-in-depth: an expression tree deeper than `MAX_EVAL_DEPTH` — built
@@ -1442,6 +2686,106 @@ mod tests {
         assert_eq!(ev("1 + 1", None, &[]), Datum::Int4(2));
         assert_eq!(ev("'x'", None, &[]), Datum::Text("x".into()));
         assert_eq!(ev("not true", None, &[]), Datum::Bool(false));
+    }
+
+    /// The static half of the `int2`/`float4` promotion rules — what
+    /// `RowDescription` reports. Every expectation is `pg_typeof(...)` on
+    /// PostgreSQL 18.4.
+    #[test]
+    fn int2_and_float4_result_types_match_postgres() {
+        use assert2::assert;
+        let f4 = ColumnType::Float4;
+        let f8 = ColumnType::Float8;
+        let num = ColumnType::Numeric(None);
+        let cases: &[(&str, ColumnType)] = &[
+            // Arithmetic keeps int2 only when BOTH operands are int2.
+            ("1::int2 + 1::int2", ColumnType::Int2),
+            ("1::int2 - 1::int2", ColumnType::Int2),
+            ("1::int2 * 1::int2", ColumnType::Int2),
+            ("1::int2 / 1::int2", ColumnType::Int2),
+            ("1::int2 % 1::int2", ColumnType::Int2),
+            ("1::int2 + 1::int4", ColumnType::Int4),
+            ("1::int4 + 1::int2", ColumnType::Int4),
+            ("1::int2 + 1::int8", ColumnType::Int8),
+            ("1::int2 + 1.5", num),
+            ("1::int2 + 1::float8", f8),
+            ("- (1::int2)", ColumnType::Int2),
+            ("@ (1::int2)", ColumnType::Int2),
+            ("abs(1::int2)", ColumnType::Int2),
+            // `float4 ⊕ float4` is the only single-precision pairing.
+            ("1::float4 + 1::float4", f4),
+            ("1::float4 / 1::float4", f4),
+            ("- (1::float4)", f4),
+            ("abs(1::float4)", f4),
+            ("1::float4 + 1::int4", f8),
+            ("1::float4 + 1::int2", f8),
+            ("1::float4 + 1::int8", f8),
+            ("1::float4 + 1::float8", f8),
+            ("1::float4 + 1.5", f8),
+            // `real` has no overload of these, so they resolve to `float8`.
+            ("floor(1::float4)", f8),
+            ("round(1::float4)", f8),
+            ("sign(1::float4)", f8),
+            ("sqrt(4::float4)", f8),
+            // Bitwise ops follow the same width ladder as arithmetic.
+            ("1::int2 & 3::int2", ColumnType::Int2),
+            ("1::int2 & 3::int4", ColumnType::Int4),
+            ("1::int2 << 2", ColumnType::Int2),
+            ("~ (1::int2)", ColumnType::Int2),
+            // CASE / COALESCE unification (PostgreSQL `select_common_type`).
+            ("coalesce(1::int2, 2::int2)", ColumnType::Int2),
+            ("coalesce(1::int2, 2::int4)", ColumnType::Int4),
+            ("coalesce(1::int2, 2::int8)", ColumnType::Int8),
+            ("coalesce(1::int2, 2.5)", num),
+            // `numeric → float4` is implicit but `float4 → numeric` is not, so
+            // `real` wins the unification against `numeric` and `int2`.
+            ("coalesce(1::int2, 2::float4)", f4),
+            ("coalesce(1::float4, 2.5)", f4),
+            ("coalesce(1::float4, 2::float8)", f8),
+            ("greatest(1::int2, 2::int2)", ColumnType::Int2),
+            ("least(1::int2, 2::int4)", ColumnType::Int4),
+        ];
+        for (sql, expected) in cases {
+            let got = infer_type(&pexpr(sql).expect("parse"), &scope_of(None)).expect("infer");
+            assert!(got == *expected, "{sql}");
+        }
+    }
+
+    /// The runtime half, cross-checked against the static half above: the value
+    /// an expression evaluates to carries the type `infer_type` promised.
+    #[test]
+    fn int2_and_float4_evaluation_agrees_with_inference() {
+        use assert2::assert;
+        let cases: &[(&str, Datum)] = &[
+            ("1::int2 + 2::int2", Datum::Int2(3)),
+            ("1::int2 + 2::int4", Datum::Int4(3)),
+            ("7::int2 % 2::int2", Datum::Int2(1)),
+            ("- (100::int2)", Datum::Int2(-100)),
+            ("abs((-100)::int2)", Datum::Int2(100)),
+            ("1::int2 & 3::int2", Datum::Int2(1)),
+            ("1::int2 << 2", Datum::Int2(4)),
+            ("1.5::float4 + 2.5::float4", Datum::Float4(4.0)),
+            ("1.5::float4 + 2::int4", Datum::Float8(3.5)),
+            ("abs((-1.5)::float4)", Datum::Float4(1.5)),
+            ("floor(2.9::float4)", Datum::Float8(2.0)),
+            ("'5'::int2", Datum::Int2(5)),
+            ("int2 '5'", Datum::Int2(5)),
+            ("real '1.5'", Datum::Float4(1.5)),
+        ];
+        for (sql, expected) in cases {
+            let value = ev(sql, None, &[]);
+            assert!(value == *expected, "{sql}");
+            let inferred = infer_type(&pexpr(sql).expect("parse"), &scope_of(None)).expect("infer");
+            assert!(
+                value.column_type() == Some(inferred),
+                "{sql}: evaluated {value:?} but RowDescription says {inferred:?}"
+            );
+        }
+        // `-((-32768)::int2)` and `32767::int2 + 1::int2` are 22003, not widened.
+        for sql in ["- ((-32768)::int2)", "32767::int2 + 1::int2"] {
+            let err = ev_err(sql);
+            assert!(err.into_pg().code == "22003", "{sql}");
+        }
     }
 
     #[test]
@@ -1537,6 +2881,7 @@ mod tests {
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         };
         let tstz_scope = scope_of(Some(&tstz_col));
         assert_eq!(
@@ -1639,27 +2984,38 @@ mod tests {
 
     #[test]
     fn like_matcher_wildcards_escape_and_ilike() {
-        assert!(like_match("abc", "a%", false).expect("m"));
-        assert!(like_match("abc", "a_c", false).expect("m"));
-        assert!(!like_match("ac", "a_c", false).expect("m"));
-        assert!(like_match("anything", "%", false).expect("m"));
-        assert!(like_match("", "%", false).expect("m"));
-        assert!(like_match("axyzc", "a%c", false).expect("m"));
-        assert!(!like_match("abd", "a%c", false).expect("m"));
+        let bs = Some('\\');
+        assert!(like_match("abc", "a%", false, bs).expect("m"));
+        assert!(like_match("abc", "a_c", false, bs).expect("m"));
+        assert!(!like_match("ac", "a_c", false, bs).expect("m"));
+        assert!(like_match("anything", "%", false, bs).expect("m"));
+        assert!(like_match("", "%", false, bs).expect("m"));
+        assert!(like_match("axyzc", "a%c", false, bs).expect("m"));
+        assert!(!like_match("abd", "a%c", false, bs).expect("m"));
         // `\` escapes the next pattern char: `a\%b` matches a literal `%`.
-        assert!(like_match("a%b", "a\\%b", false).expect("m"));
-        assert!(!like_match("axb", "a\\%b", false).expect("m"));
+        assert!(like_match("a%b", "a\\%b", false, bs).expect("m"));
+        assert!(!like_match("axb", "a\\%b", false, bs).expect("m"));
         // ILIKE folds ASCII case.
-        assert!(like_match("ABC", "a%", true).expect("m"));
-        assert!(!like_match("ABC", "a%", false).expect("m"));
-        // a pattern ending in a lone `\` is an invalid escape (22025).
+        assert!(like_match("ABC", "a%", true, bs).expect("m"));
+        assert!(!like_match("ABC", "a%", false, bs).expect("m"));
+        // An `ESCAPE` clause replaces the escape character outright, so the
+        // default `\` is then an ordinary literal and the new one escapes.
+        assert!(like_match("a%b", "a#%b", false, Some('#')).expect("m"));
+        assert!(like_match("a\\b", "a\\b", false, Some('#')).expect("m"));
+        // `ESCAPE ''` disables escaping entirely.
+        assert!(like_match("a\\b", "a\\b", false, None).expect("m"));
+        // A pattern ending in a lone escape character is an invalid escape
+        // (22025) — but only while subject characters remain; once the subject
+        // is exhausted the pattern simply fails to match.
         assert_eq!(
-            like_match("a", "a\\", false)
+            like_match("ab", "a\\", false, bs)
                 .expect_err("invalid escape")
                 .into_pg()
                 .code,
             "22025"
         );
+        assert!(!like_match("a", "a\\", false, bs).expect("m"));
+        assert!(!like_match("a", "a%", false, Some('%')).expect("m"));
     }
 
     #[test]
@@ -1760,6 +3116,7 @@ mod tests {
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         };
         let err = infer_type(&pexpr("a::bool").expect("parse"), &scope_of(Some(&ft)))
             .expect_err("float8->bool is undefined");
@@ -1852,6 +3209,7 @@ mod tests {
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         }
     }
 
@@ -2191,5 +3549,176 @@ mod tests {
                 micros: 0
             })
         );
+    }
+
+    #[test]
+    fn regex_match_operators_evaluate_against_posix_patterns() {
+        use assert2::assert;
+
+        let cases: &[(&str, Datum)] = &[
+            ("'abc' ~ 'b'", Datum::Bool(true)),
+            ("'abc' ~ 'B'", Datum::Bool(false)),
+            ("'abc' ~* 'B'", Datum::Bool(true)),
+            ("'abc' !~ 'B'", Datum::Bool(true)),
+            ("'abc' !~* 'B'", Datum::Bool(false)),
+            ("'abc' ~ '^a'", Datum::Bool(true)),
+            ("'abc' ~ 'c$'", Datum::Bool(true)),
+            ("'abc' ~ '^b'", Datum::Bool(false)),
+            ("'abc' ~ '(b|z)'", Datum::Bool(true)),
+            ("'abc' ~ '[[:alpha:]]+'", Datum::Bool(true)),
+            ("'ABC' ~* 'a.c'", Datum::Bool(true)),
+            ("'a' ~ ''", Datum::Bool(true)),
+            // A match is unanchored, so a pattern that only matches part of the
+            // subject still matches — the same rule PostgreSQL uses.
+            ("'xxbyy' ~ 'b'", Datum::Bool(true)),
+            // Strict: either NULL operand yields NULL, never false.
+            ("null ~ 'a'", Datum::Null),
+            ("'a' ~ null", Datum::Null),
+        ];
+        for (sql, want) in cases {
+            assert!(ev(sql, None, &[]) == *want, "{sql}");
+        }
+        // A non-text operand has no `~` operator (42883).
+        assert!(err_code("'abc' ~ 1", None, &[]) == "42883");
+        // An uncompilable pattern is 2201B, PostgreSQL's invalid_regular_expression.
+        assert!(err_code("'abc' ~ '['", None, &[]) == "2201B");
+    }
+
+    #[test]
+    fn bitwise_operators_evaluate_with_postgres_width_and_shift_rules() {
+        use assert2::assert;
+
+        let cases: &[(&str, Datum)] = &[
+            ("5 & 3", Datum::Int4(1)),
+            ("5 | 3", Datum::Int4(7)),
+            ("5 # 3", Datum::Int4(6)),
+            ("~5", Datum::Int4(-6)),
+            ("1 << 3", Datum::Int4(8)),
+            ("16 >> 2", Datum::Int4(4)),
+            ("0 & 0", Datum::Int4(0)),
+            // A mixed-width pair widens to int8, as PostgreSQL's implicit
+            // int4 -> int8 coercion does.
+            ("5::int8 & 3", Datum::Int8(1)),
+            ("~5::int8", Datum::Int8(-6)),
+            // The shift count wraps to the LEFT operand's width...
+            ("1::int4 << 31", Datum::Int4(i32::MIN)),
+            ("1::int4 << 32", Datum::Int4(1)),
+            ("1::int4 >> 33", Datum::Int4(0)),
+            ("-1::int4 << 31", Datum::Int4(i32::MIN)),
+            ("1::int8 << 63", Datum::Int8(i64::MIN)),
+            ("1::int8 << 64", Datum::Int8(1)),
+            // ...and `>>` is arithmetic, so the sign bit is replicated.
+            ("(-8)::int4 >> 1", Datum::Int4(-4)),
+            ("(-1)::int4 >> 1", Datum::Int4(-1)),
+            ("null & 1", Datum::Null),
+            ("1 & null", Datum::Null),
+        ];
+        for (sql, want) in cases {
+            assert!(ev(sql, None, &[]) == *want, "{sql}");
+        }
+        // Only integers have bitwise operators (42883).
+        for sql in ["2.5 & 1", "1.5::float8 | 1", "'a'::text # 1"] {
+            assert!(infer_err(sql).into_pg().code == "42883", "{sql}");
+        }
+    }
+
+    #[test]
+    fn exponentiation_and_modulo_evaluate_like_postgres() {
+        use assert2::assert;
+
+        let cases: &[(&str, Datum)] = &[
+            // No integer `^` exists, so an all-integer pair is float8.
+            ("2^3", Datum::Float8(8.0)),
+            ("2^0", Datum::Float8(1.0)),
+            ("2 ^ -2", Datum::Float8(0.25)),
+            // Left-associative: (2^3)^2, not 2^(3^2).
+            ("2^3^2", Datum::Float8(64.0)),
+            // Tighter than `*`, looser than unary minus.
+            ("2 ^ 2 * 3", Datum::Float8(12.0)),
+            ("-2^2", Datum::Float8(4.0)),
+            ("4 % 3", Datum::Int4(1)),
+            ("-7 % 3", Datum::Int4(-1)),
+            ("7 % -3", Datum::Int4(1)),
+            ("10 % 5", Datum::Int4(0)),
+            ("7 % 3 + 1", Datum::Int4(2)),
+        ];
+        for (sql, want) in cases {
+            assert!(ev(sql, None, &[]) == *want, "{sql}");
+        }
+        // A numeric operand selects the exact numeric `^`.
+        assert!(matches!(ev("5.0 ^ 2", None, &[]), Datum::Numeric(_)));
+        // Domain errors are 2201F; `% 0` is 22012; float8 has no `%` at all.
+        assert!(err_code("0 ^ -1", None, &[]) == "2201F");
+        assert!(err_code("(-2) ^ 0.5", None, &[]) == "2201F");
+        assert!(err_code("5 % 0", None, &[]) == "22012");
+        assert!(infer_err("1.5::float8 % 2").into_pg().code == "42883");
+    }
+
+    #[test]
+    fn generic_prefix_operators_evaluate_like_postgres() {
+        use assert2::assert;
+
+        let cases: &[(&str, Datum)] = &[
+            ("@ -5", Datum::Int4(5)),
+            ("@ 5", Datum::Int4(5)),
+            ("@ -5::int8", Datum::Int8(5)),
+            ("@ -5::float8", Datum::Float8(5.0)),
+            // `|/` and `||/` are float8 whatever the operand's type is.
+            ("|/ 16.0", Datum::Float8(4.0)),
+            ("|/ 25", Datum::Float8(5.0)),
+            ("||/ 8.0", Datum::Float8(2.0)),
+            ("||/ -8.0", Datum::Float8(-2.0)),
+            // The prefix operators bind LOOSELY, so the operand takes the `+`/`-`.
+            ("~ 5 + 1", Datum::Int4(-7)),
+            ("@ 5 - 8", Datum::Int4(3)),
+            // ...but stop at their own level, so `&` sees the finished `~5`.
+            ("~ 5 & 3", Datum::Int4(2)),
+            ("@ null", Datum::Null),
+        ];
+        for (sql, want) in cases {
+            assert!(ev(sql, None, &[]) == *want, "{sql}");
+        }
+        assert!(matches!(ev("@ -5.5", None, &[]), Datum::Numeric(_)));
+        // `|/` of a negative number is 2201F; `@`/`~` of a non-number is 42883.
+        assert!(err_code("|/ -1", None, &[]) == "2201F");
+        assert!(err_code("@ 'abc'::text", None, &[]) == "42883");
+        assert!(err_code("~ 'abc'::text", None, &[]) == "42883");
+        // int4's most negative value has no int4 absolute value (22003).
+        assert!(err_code("@ (-2147483648)::int4", None, &[]) == "22003");
+    }
+
+    #[test]
+    fn new_operators_infer_their_postgres_result_types() {
+        use assert2::assert;
+
+        let cases: &[(&str, ColumnType)] = &[
+            ("'a' ~ 'b'", ColumnType::Bool),
+            ("'a' !~* 'b'", ColumnType::Bool),
+            ("5 & 3", ColumnType::Int4),
+            ("5::int8 & 3", ColumnType::Int8),
+            ("5 & 3::int8", ColumnType::Int8),
+            // A shift keeps the LEFT operand's width; its count is not part of
+            // the result type.
+            ("1::int4 << 3::int8", ColumnType::Int4),
+            ("1::int8 << 3", ColumnType::Int8),
+            ("~5", ColumnType::Int4),
+            ("~5::int8", ColumnType::Int8),
+            ("2^3", ColumnType::Float8),
+            ("2^3::float8", ColumnType::Float8),
+            ("5.0^2", ColumnType::Numeric(None)),
+            ("4 % 3", ColumnType::Int4),
+            ("4::int8 % 3", ColumnType::Int8),
+            ("@ -5", ColumnType::Int4),
+            ("@ -5::int8", ColumnType::Int8),
+            // `|/`/`||/` report float8 even for a numeric operand.
+            ("|/ 16.0", ColumnType::Float8),
+            ("||/ 27.0", ColumnType::Float8),
+        ];
+        for (sql, want) in cases {
+            assert!(
+                infer_type(&pexpr(sql).expect("parse"), &Scope::empty()).expect("infer") == *want,
+                "{sql}"
+            );
+        }
     }
 }

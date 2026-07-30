@@ -172,6 +172,7 @@ fn table() -> Table {
         sharded: true,
         sharding: None,
         foreign: None,
+        checks: Vec::new(),
     }
 }
 
@@ -876,7 +877,7 @@ fn partial_avg_merges_sum_count_across_uneven_ranges_and_preserves_null_semantic
     let pushed = finalize_partial_aggregate_rows(partials, &spec).expect("AVG parts finalize");
 
     let expected = crabka_pgtypes::ops::div(
-        &Datum::Numeric(bigdecimal::BigDecimal::from(117)),
+        &Datum::Numeric(crabka_pgtypes::numeric::NumericValue::from(117i64)),
         &Datum::Int8(3),
     )
     .expect("expected exact numeric average");
@@ -946,6 +947,7 @@ fn strict_predicate_rejects_const_types_the_scanner_cannot_execute() {
         sharded: true,
         sharding: None,
         foreign: None,
+        checks: Vec::new(),
     };
     let filter = Expr::Binary {
         op: BinaryOp::Eq,

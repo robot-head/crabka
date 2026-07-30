@@ -23,15 +23,17 @@ pub(crate) fn query_to_relation_with_ctes(
             }
             let mut s = (**s).clone();
             s.order_by = q.order_by.clone();
-            s.limit = q.limit;
-            s.offset = q.offset;
-            s.locking = q.locking;
+            s.limit = q.limit.clone();
+            s.offset = q.offset.clone();
+            s.with_ties = q.with_ties;
+            s.locking = q.locking.clone();
             crate::exec::select_to_relation_with_ctes(&query_ctx, &s)
         }
         SetExpr::Query(QueryBody::Values(v)) => {
             let mut rel = crate::values::values_to_relation_with_ctes(&query_ctx, v)?;
             let order_by = crate::subquery::resolve_order_items(&query_ctx, &q.order_by)?;
-            crate::values::apply_query_order(&mut rel, &order_by, q.offset, q.limit, ctx.eval_ctx)?;
+            let window = crate::exec::query_row_window(&query_ctx, q)?;
+            crate::values::apply_query_order(&mut rel, &order_by, window, ctx.eval_ctx)?;
             Ok(rel)
         }
         SetExpr::Query(QueryBody::Nested(nested)) => {
@@ -42,12 +44,14 @@ pub(crate) fn query_to_relation_with_ctes(
             }
             let mut rel = query_to_relation_with_ctes(&query_ctx, nested)?;
             let order_by = crate::subquery::resolve_order_items(&query_ctx, &q.order_by)?;
-            crate::values::apply_query_order(&mut rel, &order_by, q.offset, q.limit, ctx.eval_ctx)?;
+            let window = crate::exec::query_row_window(&query_ctx, q)?;
+            crate::values::apply_query_order(&mut rel, &order_by, window, ctx.eval_ctx)?;
             Ok(rel)
         }
         SetExpr::SetOp { .. } => {
             let order_by = crate::subquery::resolve_order_items(&query_ctx, &q.order_by)?;
-            crate::setops::set_expr_to_relation(&query_ctx, &q.body, &order_by, q.offset, q.limit)
+            let window = crate::exec::query_row_window(&query_ctx, q)?;
+            crate::setops::set_expr_to_relation(&query_ctx, &q.body, &order_by, window)
         }
     }
 }
@@ -79,11 +83,7 @@ fn describe_query_expr_inner(
             "FOR UPDATE/SHARE is not supported in CTEs or derived tables".into(),
         ));
     }
-    if allow_locking
-        && q.locking.is_some()
-        && let Some(with) = &q.with
-    {
-        crate::cte::reject_recursive(with)?;
+    if allow_locking && q.locking.is_some() && q.with.is_some() {
         return Err(ExecError::Unsupported(
             "FOR UPDATE/SHARE with CTEs is not supported".into(),
         ));
@@ -95,6 +95,7 @@ fn describe_query_expr_inner(
                 crate::exec::reject_nested_relation_locking(s)?;
             }
             let scope = if s.from.is_empty() {
+                crate::exec::reject_from_less_wildcard(&s.projection)?;
                 Scope::empty()
             } else {
                 crate::exec::build_from_schema_with_ctes(catalog_kv, &s.from, &query_ctes)?.scope
@@ -104,6 +105,10 @@ fn describe_query_expr_inner(
                 &s.projection,
                 &query_ctes,
             )?;
+            // A window call's result is a synthetic column of the row the
+            // projection resolves against, so Describe types it exactly as
+            // execution does.
+            let scope = crate::window::describe_scope(s, &scope)?;
             let (fields, _exprs, _tys) = crate::exec::resolve_projection(&projection, &scope)?;
             Ok(fields)
         }
@@ -135,7 +140,7 @@ pub(crate) fn relation_to_rows_result(
         .iter()
         .map(|c| crate::exec::field(&c.name, c.ty))
         .collect();
-    crate::exec::rows_result(fields, &rel.rows, &ctx.time_zone)
+    crate::exec::rows_result(fields, &rel.rows, ctx.output_style())
 }
 
 #[cfg(test)]

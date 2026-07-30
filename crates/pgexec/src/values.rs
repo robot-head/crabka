@@ -70,34 +70,38 @@ fn values_to_relation_with_schema(
 pub(crate) fn apply_query_order(
     rel: &mut crate::join::Relation,
     order_by: &[crabka_pgparser::ast::OrderItem],
-    offset: Option<i64>,
-    limit: Option<i64>,
+    window: crate::exec::RowWindow,
     ctx: &EvalCtx,
 ) -> Result<(), ExecError> {
-    if !order_by.is_empty() {
-        let mut keyed: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::with_capacity(rel.rows.len());
-        for row in rel.rows.drain(..) {
-            let mut keys = Vec::with_capacity(order_by.len());
-            for item in order_by {
-                keys.push(order_key(&item.expr, &rel.scope, &row, ctx)?);
-            }
-            keyed.push((keys, row));
+    let mut keyed: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::with_capacity(rel.rows.len());
+    for row in rel.rows.drain(..) {
+        let mut keys = Vec::with_capacity(order_by.len());
+        for item in order_by {
+            keys.push(order_key(&item.expr, &rel.scope, &row, ctx)?);
         }
-        keyed.sort_by(|a, b| crate::exec::order_cmp(&a.0, &b.0, order_by));
-        rel.rows = keyed.into_iter().map(|(_, row)| row).collect();
+        keyed.push((keys, row));
     }
-    crate::exec::apply_offset_limit(&mut rel.rows, offset, limit);
+    if !order_by.is_empty() {
+        keyed.sort_by(|a, b| crate::exec::order_cmp(&a.0, &b.0, order_by));
+    }
+    rel.rows = crate::exec::apply_row_window(keyed, window, order_by);
     Ok(())
 }
 
+/// Apply a FROM item's alias and optional column-alias list.
+///
+/// `PostgreSQL` lets the list be *shorter* than the item's column list — the
+/// named columns are renamed and the rest keep their own names — and rejects
+/// only a list that names more columns than exist (`42P10`).
 pub(crate) fn requalify_derived(
     mut rel: crate::join::Relation,
     alias: &str,
     columns: &Option<Vec<String>>,
 ) -> Result<crate::join::Relation, ExecError> {
     if let Some(names) = columns {
-        if names.len() != rel.scope.width() {
+        if names.len() > rel.scope.width() {
             return Err(ExecError::DerivedColumnAliasCount {
+                table: alias.to_string(),
                 expected: rel.scope.width(),
                 got: names.len(),
             });
@@ -128,18 +132,10 @@ fn scope_from_schema(schema: &ValuesSchema, qualifier: Option<&str>) -> Scope {
 }
 
 fn order_key(expr: &Expr, scope: &Scope, row: &[Datum], ctx: &EvalCtx) -> Result<Datum, ExecError> {
-    if let Expr::IntLiteral(s) = expr {
-        let pos: usize = s.parse().map_err(|_| {
-            ExecError::InvalidColumnReference(format!(
-                "ORDER BY position {s} is not in select list"
-            ))
-        })?;
-        if pos == 0 || pos > scope.width() {
-            return Err(ExecError::InvalidColumnReference(format!(
-                "ORDER BY position {pos} is not in select list"
-            )));
-        }
-        return Ok(row[pos - 1].clone());
+    if let Some(index) =
+        crate::sql92::output_position(expr, scope.width(), crate::sql92::Sql92Clause::OrderBy)?
+    {
+        return Ok(row[index].clone());
     }
     crate::eval::eval(expr, scope, row, ctx)
 }

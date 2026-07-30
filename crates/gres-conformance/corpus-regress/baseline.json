@@ -1,14 +1,254 @@
 {
   "files": [
     {
+      "file": "aggregates/aggregates.sql",
+      "total": 545,
+      "matched": 351
+    },
+    {
+      "file": "alter_table/alter_table.sql",
+      "total": 1675,
+      "matched": 957
+    },
+    {
+      "file": "arrays/arrays.sql",
+      "total": 515,
+      "matched": 390
+    },
+    {
+      "file": "bit/bit.sql",
+      "total": 132,
+      "matched": 0
+    },
+    {
       "file": "boolean/boolean.sql",
       "total": 98,
-      "matched": 0
+      "matched": 94
+    },
+    {
+      "file": "case/case.sql",
+      "total": 64,
+      "matched": 47
+    },
+    {
+      "file": "char/char.sql",
+      "total": 32,
+      "matched": 16
+    },
+    {
+      "file": "comments/comments.sql",
+      "total": 9,
+      "matched": 9
+    },
+    {
+      "file": "copy/copy.sql",
+      "total": 106,
+      "matched": 42
+    },
+    {
+      "file": "create_index/create_index.sql",
+      "total": 682,
+      "matched": 409
+    },
+    {
+      "file": "create_table/create_table.sql",
+      "total": 333,
+      "matched": 188
+    },
+    {
+      "file": "create_view/create_view.sql",
+      "total": 307,
+      "matched": 77
+    },
+    {
+      "file": "date/date.sql",
+      "total": 271,
+      "matched": 256
+    },
+    {
+      "file": "delete/delete.sql",
+      "total": 10,
+      "matched": 10
+    },
+    {
+      "file": "expressions/expressions.sql",
+      "total": 79,
+      "matched": 18
+    },
+    {
+      "file": "float4/float4.sql",
+      "total": 100,
+      "matched": 56
+    },
+    {
+      "file": "float8/float8.sql",
+      "total": 184,
+      "matched": 99
+    },
+    {
+      "file": "groupingsets/groupingsets.sql",
+      "total": 217,
+      "matched": 125
+    },
+    {
+      "file": "insert/insert.sql",
+      "total": 387,
+      "matched": 156
+    },
+    {
+      "file": "int2/int2.sql",
+      "total": 76,
+      "matched": 51
     },
     {
       "file": "int4/int4.sql",
       "total": 94,
-      "matched": 0
+      "matched": 73
+    },
+    {
+      "file": "int8/int8.sql",
+      "total": 174,
+      "matched": 145
+    },
+    {
+      "file": "interval/interval.sql",
+      "total": 446,
+      "matched": 242
+    },
+    {
+      "file": "join/join.sql",
+      "total": 920,
+      "matched": 614
+    },
+    {
+      "file": "json/json.sql",
+      "total": 469,
+      "matched": 189
+    },
+    {
+      "file": "jsonb/jsonb.sql",
+      "total": 1084,
+      "matched": 779
+    },
+    {
+      "file": "limit/limit.sql",
+      "total": 80,
+      "matched": 76
+    },
+    {
+      "file": "name/name.sql",
+      "total": 40,
+      "matched": 28
+    },
+    {
+      "file": "numeric/numeric.sql",
+      "total": 1057,
+      "matched": 899
+    },
+    {
+      "file": "prepare/prepare.sql",
+      "total": 33,
+      "matched": 29
+    },
+    {
+      "file": "select/select.sql",
+      "total": 87,
+      "matched": 54
+    },
+    {
+      "file": "select_distinct/select_distinct.sql",
+      "total": 101,
+      "matched": 92
+    },
+    {
+      "file": "select_having/select_having.sql",
+      "total": 23,
+      "matched": 19
+    },
+    {
+      "file": "select_implicit/select_implicit.sql",
+      "total": 44,
+      "matched": 40
+    },
+    {
+      "file": "select_into/select_into.sql",
+      "total": 67,
+      "matched": 42
+    },
+    {
+      "file": "sequence/sequence.sql",
+      "total": 261,
+      "matched": 122
+    },
+    {
+      "file": "strings/strings.sql",
+      "total": 500,
+      "matched": 345
+    },
+    {
+      "file": "subselect/subselect.sql",
+      "total": 327,
+      "matched": 239
+    },
+    {
+      "file": "text/text.sql",
+      "total": 73,
+      "matched": 52
+    },
+    {
+      "file": "time/time.sql",
+      "total": 44,
+      "matched": 38
+    },
+    {
+      "file": "timestamp/timestamp.sql",
+      "total": 177,
+      "matched": 127
+    },
+    {
+      "file": "timestamptz/timestamptz.sql",
+      "total": 404,
+      "matched": 278
+    },
+    {
+      "file": "timetz/timetz.sql",
+      "total": 57,
+      "matched": 47
+    },
+    {
+      "file": "transactions/transactions.sql",
+      "total": 490,
+      "matched": 360
+    },
+    {
+      "file": "truncate/truncate.sql",
+      "total": 193,
+      "matched": 85
+    },
+    {
+      "file": "union/union.sql",
+      "total": 198,
+      "matched": 127
+    },
+    {
+      "file": "update/update.sql",
+      "total": 286,
+      "matched": 147
+    },
+    {
+      "file": "varchar/varchar.sql",
+      "total": 22,
+      "matched": 12
+    },
+    {
+      "file": "window/window.sql",
+      "total": 391,
+      "matched": 235
+    },
+    {
+      "file": "with/with.sql",
+      "total": 308,
+      "matched": 123
     }
   ]
 }

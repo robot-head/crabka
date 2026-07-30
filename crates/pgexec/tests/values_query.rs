@@ -138,12 +138,19 @@ async fn values_derived_table_uses_alias_column_names() {
     );
 }
 
+/// `PostgreSQL` renames a *prefix* when the alias list is shorter than the
+/// item's column list, and rejects only a list that names more columns than
+/// exist.
 #[tokio::test]
-async fn values_derived_column_alias_count_error_is_42601() {
+async fn values_derived_column_alias_list_may_be_shorter_but_not_longer() {
     let c = connect_new().await;
     assert_eq!(
-        err_code(&c, "SELECT * FROM (VALUES (1, 2)) AS v(one)").await,
-        "42601"
+        rows(&c, "SELECT * FROM (VALUES (1, 2)) AS v(one)").await,
+        vec![vec![Some("1".into()), Some("2".into())]]
+    );
+    assert_eq!(
+        err_code(&c, "SELECT * FROM (VALUES (1, 2)) AS v(a, b, c)").await,
+        "42P10"
     );
 }
 
@@ -157,11 +164,15 @@ async fn derived_select_optional_column_aliases_still_work() {
 }
 
 #[tokio::test]
-async fn derived_select_column_alias_count_error_is_42601() {
+async fn derived_select_column_alias_list_may_be_shorter_but_not_longer() {
     let c = connect_new().await;
     assert_eq!(
-        err_code(&c, "SELECT * FROM (SELECT 1, 2) AS d(one)").await,
-        "42601"
+        rows(&c, "SELECT * FROM (SELECT 1, 2) AS d(one)").await,
+        vec![vec![Some("1".into()), Some("2".into())]]
+    );
+    assert_eq!(
+        err_code(&c, "SELECT * FROM (SELECT 1, 2) AS d(a, b, c)").await,
+        "42P10"
     );
 }
 

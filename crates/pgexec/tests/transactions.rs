@@ -1892,3 +1892,73 @@ async fn ddl_inside_a_writing_transaction_does_not_deadlock() {
     let r = rows(&mut s, "SELECT id FROM t").await;
     assert_eq!(r.len(), 1);
 }
+
+/// The `transaction_mode` list of `BEGIN`/`START TRANSACTION`: `READ ONLY`,
+/// `READ WRITE` and `[NOT] DEFERRABLE`, in any order, with the commas optional,
+/// and mixed with `ISOLATION LEVEL`.
+///
+/// A `READ ONLY` block refuses anything that would change rows or catalog state
+/// with `PostgreSQL`'s 25006, naming the command the way `PostgreSQL` names it, and
+/// `SHOW transaction_read_only` reports the mode the block actually opened with.
+#[tokio::test]
+async fn a_read_only_transaction_refuses_writes_and_reports_its_mode() {
+    use assert2::assert;
+
+    let engine = SqlEngine::new();
+    let mut s = engine.connect();
+    s.simple_query("CREATE TABLE t (id int4)")
+        .await
+        .expect("create");
+
+    for modes in [
+        "READ ONLY",
+        "READ ONLY, DEFERRABLE",
+        "READ ONLY NOT DEFERRABLE",
+        "ISOLATION LEVEL READ COMMITTED, READ ONLY",
+        "READ ONLY, ISOLATION LEVEL REPEATABLE READ",
+    ] {
+        s.simple_query(&format!("START TRANSACTION {modes}"))
+            .await
+            .unwrap_or_else(|e| panic!("START TRANSACTION {modes}: {e:?}"));
+        let reported = text(rows(&mut s, "SHOW transaction_read_only").await[0][0].as_ref());
+        assert!(reported == Some("on".to_string()), "{modes}");
+        // Reads are fine.
+        rows(&mut s, "SELECT count(*) FROM t").await;
+        // Every kind of write is 25006, named as PostgreSQL names it.
+        for (sql, tag) in [
+            ("INSERT INTO t VALUES (1)", "INSERT"),
+            ("UPDATE t SET id = 1", "UPDATE"),
+            ("DELETE FROM t", "DELETE"),
+            ("CREATE TABLE nope (a int)", "CREATE TABLE"),
+            ("DROP TABLE t", "DROP TABLE"),
+        ] {
+            let error = s.simple_query(sql).await.expect_err(sql);
+            assert!(error.code == "25006", "{sql}: {}", error.code);
+            assert!(
+                error.message == format!("cannot execute {tag} in a read-only transaction"),
+                "{sql}: {}",
+                error.message
+            );
+            // The refusal is an ordinary error, so it aborts the block — every
+            // later statement is 25P02 until the block ends, exactly as any
+            // other in-block failure behaves.
+            let aborted = s.simple_query("SELECT 1").await.expect_err("aborted");
+            assert!(aborted.code == "25P02", "{sql}: {}", aborted.code);
+            s.simple_query("ROLLBACK").await.expect("rollback");
+            s.simple_query(&format!("START TRANSACTION {modes}"))
+                .await
+                .expect("reopen");
+        }
+        s.simple_query("ROLLBACK").await.expect("rollback");
+    }
+
+    // READ WRITE, and the default outside any mode list, still write.
+    s.simple_query("START TRANSACTION READ WRITE")
+        .await
+        .expect("read write");
+    s.simple_query("INSERT INTO t VALUES (1)")
+        .await
+        .expect("insert");
+    s.simple_query("COMMIT").await.expect("commit");
+    assert!(rows(&mut s, "SELECT id FROM t").await.len() == 1);
+}

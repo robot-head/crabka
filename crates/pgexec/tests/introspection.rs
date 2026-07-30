@@ -142,20 +142,18 @@ async fn pg_catalog_helper_functions_cover_client_preambles() {
     )
     .await;
 
-    assert_eq!(
-        cell_text(rows(&result)[0][0].as_ref()),
-        Some("public".into())
-    );
-    assert_eq!(
-        cell_text(rows(&result)[0][1].as_ref()),
-        Some("postgres".into())
-    );
-    assert_eq!(
-        cell_text(rows(&result)[0][2].as_ref()),
-        Some("PostgreSQL 18-compatible Crabka".into())
-    );
-    assert_eq!(cell_text(rows(&result)[0][3].as_ref()), Some("int4".into()));
-    assert_eq!(cell_text(rows(&result)[0][4].as_ref()), Some("t".into()));
+    let row = &rows(&result)[0];
+    // `format_type` prints the SQL-standard spelling PostgreSQL prints
+    // (`integer`), not the `pg_type.typname` (`int4`).
+    let expected = [(0, "public"), (1, "postgres"), (3, "integer"), (4, "t")];
+    for (i, want) in expected {
+        assert2::assert!(cell_text(row[i].as_ref()) == Some(want.to_string()));
+    }
+    // `version()` names the PostgreSQL version clients parse out of it, then
+    // the engine that actually answered; the build tag varies per release, so
+    // only the parsed prefix is pinned.
+    let version = cell_text(row[2].as_ref()).expect("version() is not null");
+    assert2::assert!(version.starts_with("PostgreSQL 18.4 (Crabka Gres "));
 }
 
 #[tokio::test]

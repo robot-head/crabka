@@ -42,6 +42,7 @@ sqlx = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 bytes = { workspace = true }
+futures-util = { workspace = true }
 clap = { workspace = true }
 thiserror = { workspace = true }
 crabka-pgparser = { version = "0.3.9", path = "../pgparser" }

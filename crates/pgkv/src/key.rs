@@ -336,15 +336,36 @@ pub fn topology_activation_receipt_prefix(tenant: &str) -> Vec<u8> {
 #[must_use]
 pub fn catalog_key(table_name: &str) -> Vec<u8> {
     let mut k = system_prefix("catalog");
-    k.extend_from_slice(table_name.as_bytes());
+    k.extend_from_slice(unqualified_relation(table_name).as_bytes());
     k
+}
+
+/// A relation name with a redundant schema qualifier removed.
+///
+/// Crabka has ONE flat namespace, which is exactly what `public` names under
+/// `PostgreSQL`'s default `search_path` — and `pg_temp` likewise, there being one
+/// storage class. So `public.t` and `t` are the same relation, as they are in
+/// `PostgreSQL`, and this normalizes them to one key for reads and writes alike.
+///
+/// Every OTHER qualifier is left alone: `information_schema.tables` and
+/// `pg_catalog.*` are resolved BY their dotted names, and a qualifier naming a
+/// schema that holds nothing must keep failing to resolve rather than silently
+/// reaching the unqualified relation.
+#[must_use]
+pub fn unqualified_relation(name: &str) -> &str {
+    for schema in ["public.", "pg_temp."] {
+        if name.len() > schema.len() && name[..schema.len()].eq_ignore_ascii_case(schema) {
+            return &name[schema.len()..];
+        }
+    }
+    name
 }
 
 /// Key for a table's optional sharding strategy: `/0/catalog_sharding/<name>`.
 #[must_use]
 pub fn catalog_sharding_key(table_name: &str) -> Vec<u8> {
     let mut k = system_prefix("catalog_sharding");
-    k.extend_from_slice(table_name.as_bytes());
+    k.extend_from_slice(unqualified_relation(table_name).as_bytes());
     k
 }
 
@@ -367,6 +388,28 @@ pub fn seq_prefix() -> Vec<u8> {
 pub fn meta_next_table_id_key() -> Vec<u8> {
     let mut k = system_prefix("meta");
     k.extend_from_slice(b"next_table_id");
+    k
+}
+
+/// Key for a user-defined type stored in the catalog: `/0/usertype/<name>`.
+#[must_use]
+pub fn user_type_key(name: &str) -> Vec<u8> {
+    let mut k = user_type_prefix();
+    k.extend_from_slice(name.as_bytes());
+    k
+}
+
+/// Shared prefix for every user-defined type, for the hydration scan.
+#[must_use]
+pub fn user_type_prefix() -> Vec<u8> {
+    system_prefix("usertype")
+}
+
+/// Key for the global next-user-type-oid counter: `/0/meta/next_type_oid`.
+#[must_use]
+pub fn meta_next_type_oid_key() -> Vec<u8> {
+    let mut k = system_prefix("meta");
+    k.extend_from_slice(b"next_type_oid");
     k
 }
 

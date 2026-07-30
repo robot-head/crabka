@@ -276,6 +276,8 @@ jobs:
               - 'crates/gres-fdw/**'
               - 'crates/gres-conformance/**'
               - 'scripts/gres-psql-smoke.sh'
+              - 'scripts/gres-psql-introspection-smoke.sh'
+              - 'scripts/fixtures/gres-psql-introspection.txt'
               - 'scripts/gres-durable-restart-smoke.sh'
               - 'scripts/gres-substrate-smoke.sh'
               - 'scripts/gres-e2e.sh'
@@ -1045,6 +1047,8 @@ jobs:
       - name: Captured driver startup replay
         run: CRABKA_GRES_SKIP_BUILD=1 timeout 30s ./scripts/gres-driver-goldens-gate.sh
       - run: ./scripts/gres-psql-smoke.sh
+      - name: psql introspection transcript
+        run: CRABKA_GRES_SKIP_BUILD=1 ./scripts/gres-psql-introspection-smoke.sh
       - name: Durable restart smoke
         run: ./scripts/gres-durable-restart-smoke.sh
       - name: Substrate WAL smoke

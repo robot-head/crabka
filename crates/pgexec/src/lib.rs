@@ -39,37 +39,55 @@
 
 mod agg;
 mod array_fn;
+mod catalog_fn;
+mod catalog_rel;
 pub mod clock;
 mod commit;
 mod cte;
+mod cursor;
 mod datetime_fn;
 mod error;
 mod eval;
 mod exec;
+mod explain;
 pub mod foreign;
 mod format_fn;
 mod func;
+mod grouping;
 mod gtm;
 pub mod hlc;
 pub mod hlc_source;
 mod join;
 mod json_fn;
+mod jsonpath;
 mod local_sequence;
 mod lockmgr;
+mod math_fn;
 pub mod notify;
+mod partition;
+mod pattern;
 pub mod plan_dist;
 mod procarray;
 mod query;
 mod read_gate;
+mod regexp_fn;
+mod routine;
+mod rowexpr;
 pub mod scanner;
 mod scope;
 mod seq;
 mod session;
 mod setops;
+mod sql92;
+mod srf;
+mod string_fn;
 mod subquery;
 pub mod timestamp_txn;
 pub mod ts_gc;
+mod usertype;
 mod values;
+mod viewdef;
+mod window;
 
 use std::{
     collections::HashMap,
@@ -80,7 +98,7 @@ use std::{
 pub use commit::{Committer, LocalCommitter};
 use crabka_pgkv::{FjallKv, Kv, MemKv};
 use crabka_pgwire::engine::Engine;
-pub use error::ExecError;
+pub use error::{ExecError, GucRangeViolation};
 pub use gtm::GlobalXidLease;
 pub use hlc::{Hlc, HybridLogicalClock};
 pub use hlc_source::{
@@ -310,6 +328,8 @@ pub struct SqlEngine {
     pub(crate) procarray: Arc<ProcArray>,
     pub(crate) seq: Arc<SequenceManager>,
     pub(crate) lockmgr: Arc<RowLockManager>,
+    /// S3: engine-wide relation and advisory lock state, shared by every session.
+    pub(crate) session_locks: Arc<crate::lockmgr::SessionLocks>,
     /// The engine-wide `LISTEN`/`NOTIFY` bus. Every session registers on it and
     /// receives its own bounded notification queue; every `clone_handle` shares
     /// the same bus, so all of a node's connections publish into one place.
@@ -704,6 +724,7 @@ impl SqlEngine {
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Durable)),
             lockmgr: Arc::new(RowLockManager::new()),
+            session_locks: Arc::new(crate::lockmgr::SessionLocks::new()),
             notify: Arc::new(notify::NotifyBus::new()),
             notify_replication: Arc::new(NotifyReplication::default()),
             catalog_lock: Arc::clone(&coordination.catalog_lock),
@@ -1288,6 +1309,7 @@ impl SqlEngine {
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Replicated)),
             lockmgr: Arc::new(RowLockManager::new()),
+            session_locks: Arc::new(crate::lockmgr::SessionLocks::new()),
             notify: Arc::new(notify::NotifyBus::new()),
             notify_replication: Arc::new(NotifyReplication::default()),
             catalog_lock: Arc::clone(&coordination.catalog_lock),
@@ -1353,6 +1375,7 @@ impl SqlEngine {
             procarray: Arc::clone(&self.procarray),
             seq: Arc::clone(&self.seq),
             lockmgr: Arc::clone(&self.lockmgr),
+            session_locks: Arc::clone(&self.session_locks),
             notify: Arc::clone(&self.notify),
             notify_replication: Arc::clone(&self.notify_replication),
             catalog_lock: Arc::clone(&self.catalog_lock),
@@ -1717,6 +1740,9 @@ impl SqlEngine {
             now,
             stmt_now: now,
             time_zone: jiff::tz::TimeZone::UTC,
+            date_order: crabka_pgtypes::datetime::DateOrder::default(),
+            date_style: crabka_pgtypes::datetime::DateStyle::default(),
+            interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             clock: Arc::clone(&self.clock),
@@ -3007,6 +3033,7 @@ impl Engine for SqlEngine {
             procarray: Arc::clone(&self.procarray),
             seq: Arc::clone(&self.seq),
             lockmgr: Arc::clone(&self.lockmgr),
+            session_locks: Arc::clone(&self.session_locks),
             catalog_lock: Arc::clone(&self.catalog_lock),
             table_write_gate: Arc::clone(&self.table_write_gate),
             writer_fence: Arc::clone(&self.writer_fence),

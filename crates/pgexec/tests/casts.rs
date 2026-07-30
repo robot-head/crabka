@@ -182,8 +182,9 @@ async fn error_surface() {
     // An undefined cast is 42846 (no float8→bool / bool→int8 cast in PostgreSQL).
     assert_eq!(err_code(&client, "SELECT 1.5::bool").await, "42846");
     assert_eq!(err_code(&client, "SELECT true::int8").await, "42846");
-    // An unknown target type is a syntax error (42601).
-    assert_eq!(err_code(&client, "SELECT 1::widget").await, "42601");
+    // An unknown target type is 42704 (undefined_object), not a syntax error:
+    // PostgreSQL parses the cast fine and fails resolving the type name.
+    assert_eq!(err_code(&client, "SELECT 1::widget").await, "42704");
 }
 
 // ---- assignment-context implicit casts (INSERT VALUES / UPDATE SET) ----

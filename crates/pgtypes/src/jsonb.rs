@@ -145,7 +145,7 @@ impl JsonbValue {
             JsonbValue::Null => out.push_str("null"),
             JsonbValue::Bool(true) => out.push_str("true"),
             JsonbValue::Bool(false) => out.push_str("false"),
-            JsonbValue::Number(n) => out.push_str(&crate::numeric::to_text(n)),
+            JsonbValue::Number(n) => out.push_str(&crate::numeric::finite_to_text(n)),
             JsonbValue::String(s) => write_json_string(s, out),
             JsonbValue::Array(items) => {
                 out.push('[');
@@ -301,10 +301,33 @@ fn write_json_string(s: &str, out: &mut String) {
 /// garbage, `NaN`/`Infinity`, a leading zero), 22003 for a number that overflows
 /// the `numeric` format, and 54001 when nesting exceeds [`MAX_DEPTH`].
 pub fn parse(input: &str) -> Result<JsonbValue, TypeError> {
+    parse_with_options(input, false).map(|(value, _)| value)
+}
+
+/// [`parse`] plus `PostgreSQL`'s `WITH UNIQUE KEYS` observation: the second
+/// element of the pair is `true` when *some* object in the document repeated a
+/// key. Duplicate keys are still resolved last-wins in the returned value, so a
+/// caller that does not care about uniqueness sees exactly what [`parse`]
+/// returns.
+///
+/// `reject_duplicates` makes a duplicate key a parse error instead
+/// (`JSON_OBJECT(… WITH UNIQUE KEYS)`), which is the one place `PostgreSQL`
+/// raises rather than reports.
+///
+/// # Errors
+///
+/// 22P02 for text that is not a JSON document, and 22030 for a duplicate object
+/// key when `reject_duplicates` is set.
+pub fn parse_with_options(
+    input: &str,
+    reject_duplicates: bool,
+) -> Result<(JsonbValue, bool), TypeError> {
     let mut parser = Parser {
         src: input.as_bytes(),
         pos: 0,
         input,
+        reject_duplicates,
+        saw_duplicate: false,
     };
     parser.skip_ws();
     let value = parser.value(0)?;
@@ -312,13 +335,17 @@ pub fn parse(input: &str) -> Result<JsonbValue, TypeError> {
     if parser.pos != parser.src.len() {
         return Err(parser.invalid());
     }
-    Ok(value)
+    Ok((value, parser.saw_duplicate))
 }
 
 struct Parser<'a> {
     src: &'a [u8],
     pos: usize,
     input: &'a str,
+    /// Raise on a duplicate object key rather than merely recording one.
+    reject_duplicates: bool,
+    /// Set when any object in the document repeated a key.
+    saw_duplicate: bool,
 }
 
 impl Parser<'_> {
@@ -420,6 +447,15 @@ impl Parser<'_> {
             }
             self.pos += 1;
             self.skip_ws();
+            if pairs.iter().any(|(existing, _)| *existing == key) {
+                if self.reject_duplicates {
+                    return Err(TypeError::Domain {
+                        sqlstate: "22030",
+                        message: "duplicate JSON object key value",
+                    });
+                }
+                self.saw_duplicate = true;
+            }
             pairs.push((key, self.value(depth + 1)?));
             self.skip_ws();
             match self.peek() {
@@ -551,9 +587,11 @@ impl Parser<'_> {
             self.digits()?;
         }
         let text = &self.input[start..self.pos];
-        // `numeric::parse` rejects values outside PostgreSQL's numeric format
-        // (an adversarial exponent) without materializing their digits.
-        crate::numeric::parse(text)
+        // `numeric::parse_finite` rejects values outside PostgreSQL's numeric
+        // format (an adversarial exponent) without materializing their digits.
+        // JSON has no `NaN`/`Infinity` spelling, so the finite parser is the
+        // right one here.
+        crate::numeric::parse_finite(text)
             .map(JsonbValue::Number)
             .ok_or(TypeError::Overflow)
     }
@@ -584,7 +622,7 @@ mod tests {
     use super::*;
 
     fn num(s: &str) -> JsonbValue {
-        JsonbValue::Number(crate::numeric::parse(s).expect("numeric literal"))
+        JsonbValue::Number(crate::numeric::parse_finite(s).expect("numeric literal"))
     }
 
     fn hash_of(v: &JsonbValue) -> u64 {

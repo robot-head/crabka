@@ -1,0 +1,172 @@
+-- ORDER BY, LIMIT/OFFSET/FETCH and row-locking breadth, diffed against
+-- PostgreSQL 18.4.
+--
+-- ORDER BY: explicit NULLS FIRST/LAST and PostgreSQL's defaults (NULLS LAST for
+-- ASC, NULLS FIRST for DESC), sorting by output ordinal and by output alias, and
+-- ORDER BY over a set operation.
+-- Row counts: LIMIT/OFFSET over arbitrary expressions including a scalar
+-- subquery, LIMIT ALL, `OFFSET n ROW[S]`, `FETCH FIRST/NEXT [n] ROW[S] ONLY`,
+-- `FETCH ... WITH TIES` and the 42601 it raises without ORDER BY, and the
+-- 2201W/2201X negative-count errors.
+-- Row locking: FOR UPDATE / FOR NO KEY UPDATE / FOR SHARE / FOR KEY SHARE, each
+-- with OF, NOWAIT and SKIP LOCKED, plus the 0A000 refusals for aggregates, set
+-- operations, DISTINCT, GROUP BY and HAVING and the 42P01 for an OF naming a
+-- relation not in FROM. Nothing here contends for a lock, so every accepted
+-- locking read returns its rows.
+
+CREATE TABLE q3_ord (id int4, v int4, label text);
+INSERT INTO q3_ord VALUES
+  (1, 30, 'c'),
+  (2, NULL, 'a'),
+  (3, 10, 'b'),
+  (4, 20, NULL),
+  (5, 10, 'd');
+
+-- Default null placement.
+SELECT id, v FROM q3_ord ORDER BY v, id;
+SELECT id, v FROM q3_ord ORDER BY v ASC, id;
+SELECT id, v FROM q3_ord ORDER BY v DESC, id;
+SELECT id, label FROM q3_ord ORDER BY label, id;
+SELECT id, label FROM q3_ord ORDER BY label DESC, id;
+
+-- Explicit NULLS FIRST / NULLS LAST, with and without ASC/DESC.
+SELECT id, v FROM q3_ord ORDER BY v NULLS FIRST, id;
+SELECT id, v FROM q3_ord ORDER BY v NULLS LAST, id;
+SELECT id, v FROM q3_ord ORDER BY v ASC NULLS FIRST, id;
+SELECT id, v FROM q3_ord ORDER BY v ASC NULLS LAST, id;
+SELECT id, v FROM q3_ord ORDER BY v DESC NULLS FIRST, id;
+SELECT id, v FROM q3_ord ORDER BY v DESC NULLS LAST, id;
+SELECT id, label FROM q3_ord ORDER BY label NULLS FIRST, id;
+SELECT id, label FROM q3_ord ORDER BY label DESC NULLS LAST, id;
+SELECT id, v, label FROM q3_ord ORDER BY v DESC NULLS LAST, label NULLS FIRST, id;
+
+-- Ordering by output ordinal and by output alias.
+SELECT v, id FROM q3_ord ORDER BY 1, 2;
+SELECT v, id FROM q3_ord ORDER BY 1 DESC, 2;
+SELECT v, id FROM q3_ord ORDER BY 1 NULLS FIRST, 2;
+SELECT v AS value, id FROM q3_ord ORDER BY value, id;
+SELECT v AS value, id FROM q3_ord ORDER BY value DESC NULLS LAST, id;
+SELECT v + 1 AS bumped, id FROM q3_ord ORDER BY bumped NULLS FIRST, id;
+SELECT id AS a, v AS b FROM q3_ord ORDER BY b, a;
+SELECT v FROM q3_ord ORDER BY 2;
+SELECT v FROM q3_ord ORDER BY 0;
+
+-- ORDER BY over set operations, by ordinal and by the first branch's alias.
+SELECT id FROM q3_ord UNION SELECT 99 ORDER BY 1;
+SELECT id FROM q3_ord UNION SELECT 99 ORDER BY 1 DESC;
+SELECT id AS n FROM q3_ord UNION SELECT 99 ORDER BY n;
+SELECT id AS n FROM q3_ord UNION SELECT 99 ORDER BY n DESC;
+SELECT v FROM q3_ord UNION SELECT NULL ORDER BY 1 NULLS FIRST;
+SELECT v FROM q3_ord UNION ALL SELECT NULL ORDER BY 1 NULLS LAST;
+SELECT id FROM q3_ord UNION SELECT 99 ORDER BY 1 LIMIT 3;
+SELECT id FROM q3_ord UNION SELECT 99 ORDER BY 1 OFFSET 2;
+SELECT id FROM q3_ord EXCEPT SELECT 1 ORDER BY 1;
+SELECT id FROM q3_ord INTERSECT SELECT 3 ORDER BY 1;
+(SELECT id FROM q3_ord ORDER BY id LIMIT 2) UNION ALL (SELECT 99) ORDER BY 1;
+
+-- LIMIT / OFFSET with plain counts.
+SELECT id FROM q3_ord ORDER BY id LIMIT 2;
+SELECT id FROM q3_ord ORDER BY id LIMIT 0;
+SELECT id FROM q3_ord ORDER BY id LIMIT 100;
+SELECT id FROM q3_ord ORDER BY id OFFSET 2;
+SELECT id FROM q3_ord ORDER BY id OFFSET 0;
+SELECT id FROM q3_ord ORDER BY id OFFSET 100;
+SELECT id FROM q3_ord ORDER BY id LIMIT 2 OFFSET 1;
+SELECT id FROM q3_ord ORDER BY id OFFSET 1 LIMIT 2;
+
+-- LIMIT ALL and NULL bounds mean "no bound".
+SELECT id FROM q3_ord ORDER BY id LIMIT ALL;
+SELECT id FROM q3_ord ORDER BY id LIMIT ALL OFFSET 3;
+SELECT id FROM q3_ord ORDER BY id LIMIT NULL;
+SELECT id FROM q3_ord ORDER BY id OFFSET NULL;
+SELECT id FROM q3_ord ORDER BY id LIMIT NULL OFFSET NULL;
+
+-- Arbitrary expressions in LIMIT / OFFSET, including a scalar subquery.
+SELECT id FROM q3_ord ORDER BY id LIMIT 1 + 1;
+SELECT id FROM q3_ord ORDER BY id LIMIT 6 / 2;
+SELECT id FROM q3_ord ORDER BY id OFFSET 1 + 2;
+SELECT id FROM q3_ord ORDER BY id LIMIT (SELECT 2);
+SELECT id FROM q3_ord ORDER BY id OFFSET (SELECT 3);
+SELECT id FROM q3_ord ORDER BY id LIMIT (SELECT count(*) FROM q3_ord WHERE v = 10);
+SELECT id FROM q3_ord ORDER BY id LIMIT (SELECT max(id) FROM q3_ord WHERE false);
+SELECT id FROM q3_ord ORDER BY id LIMIT '2';
+SELECT id FROM q3_ord ORDER BY id LIMIT 2::int8;
+SELECT id FROM q3_ord ORDER BY id LIMIT -1;
+SELECT id FROM q3_ord ORDER BY id OFFSET -1;
+SELECT id FROM q3_ord ORDER BY id LIMIT 'abc';
+
+-- OFFSET n ROW / ROWS, the SQL-standard spelling.
+SELECT id FROM q3_ord ORDER BY id OFFSET 2 ROWS;
+SELECT id FROM q3_ord ORDER BY id OFFSET 1 ROW;
+SELECT id FROM q3_ord ORDER BY id OFFSET 0 ROWS;
+
+-- FETCH FIRST / NEXT [n] ROW[S] ONLY.
+SELECT id FROM q3_ord ORDER BY id FETCH FIRST 2 ROWS ONLY;
+SELECT id FROM q3_ord ORDER BY id FETCH NEXT 2 ROWS ONLY;
+SELECT id FROM q3_ord ORDER BY id FETCH FIRST ROW ONLY;
+SELECT id FROM q3_ord ORDER BY id FETCH NEXT ROW ONLY;
+SELECT id FROM q3_ord ORDER BY id FETCH FIRST 1 ROW ONLY;
+SELECT id FROM q3_ord ORDER BY id OFFSET 2 ROWS FETCH NEXT 2 ROWS ONLY;
+SELECT id FROM q3_ord ORDER BY id OFFSET 1 ROW FETCH FIRST 3 ROWS ONLY;
+SELECT id FROM q3_ord FETCH FIRST 0 ROWS ONLY;
+
+-- FETCH ... WITH TIES needs an ORDER BY, and extends the cut through equal keys.
+SELECT id, v FROM q3_ord ORDER BY v NULLS LAST FETCH FIRST 1 ROW WITH TIES;
+SELECT id, v FROM q3_ord ORDER BY v NULLS LAST FETCH FIRST 2 ROWS WITH TIES;
+SELECT id, v FROM q3_ord ORDER BY v NULLS LAST FETCH FIRST 3 ROWS WITH TIES;
+SELECT v FROM q3_ord ORDER BY v NULLS FIRST FETCH FIRST 1 ROW WITH TIES;
+SELECT id FROM q3_ord ORDER BY id FETCH FIRST 2 ROWS WITH TIES;
+SELECT id, v FROM q3_ord ORDER BY v NULLS LAST OFFSET 1 FETCH FIRST 1 ROW WITH TIES;
+SELECT id FROM q3_ord FETCH FIRST 1 ROW WITH TIES;
+SELECT id FROM q3_ord ORDER BY id FETCH FIRST 0 ROWS WITH TIES;
+
+-- Row locking: every strength, with OF, NOWAIT and SKIP LOCKED.
+SELECT id FROM q3_ord ORDER BY id FOR UPDATE;
+SELECT id FROM q3_ord ORDER BY id FOR NO KEY UPDATE;
+SELECT id FROM q3_ord ORDER BY id FOR SHARE;
+SELECT id FROM q3_ord ORDER BY id FOR KEY SHARE;
+SELECT id FROM q3_ord ORDER BY id FOR UPDATE OF q3_ord;
+SELECT id FROM q3_ord ORDER BY id FOR NO KEY UPDATE OF q3_ord;
+SELECT id FROM q3_ord ORDER BY id FOR SHARE OF q3_ord;
+SELECT id FROM q3_ord ORDER BY id FOR KEY SHARE OF q3_ord;
+SELECT id FROM q3_ord AS t ORDER BY id FOR UPDATE OF t;
+SELECT id FROM q3_ord ORDER BY id FOR UPDATE NOWAIT;
+SELECT id FROM q3_ord ORDER BY id FOR NO KEY UPDATE NOWAIT;
+SELECT id FROM q3_ord ORDER BY id FOR SHARE NOWAIT;
+SELECT id FROM q3_ord ORDER BY id FOR KEY SHARE NOWAIT;
+SELECT id FROM q3_ord ORDER BY id FOR UPDATE SKIP LOCKED;
+SELECT id FROM q3_ord ORDER BY id FOR NO KEY UPDATE SKIP LOCKED;
+SELECT id FROM q3_ord ORDER BY id FOR SHARE SKIP LOCKED;
+SELECT id FROM q3_ord ORDER BY id FOR KEY SHARE SKIP LOCKED;
+SELECT id FROM q3_ord ORDER BY id FOR UPDATE OF q3_ord NOWAIT;
+SELECT id FROM q3_ord ORDER BY id FOR SHARE OF q3_ord SKIP LOCKED;
+SELECT id FROM q3_ord WHERE v = 10 ORDER BY id FOR UPDATE;
+SELECT id FROM q3_ord WHERE false ORDER BY id FOR UPDATE;
+SELECT id FROM q3_ord ORDER BY id LIMIT 2 FOR UPDATE;
+SELECT id FROM q3_ord ORDER BY id FOR UPDATE LIMIT 2;
+
+-- OF must name a relation in the FROM clause (42P01).
+SELECT id FROM q3_ord ORDER BY id FOR UPDATE OF nosuch;
+SELECT id FROM q3_ord AS t ORDER BY id FOR UPDATE OF q3_ord;
+
+-- 0A000: locking is not allowed with these clauses.
+SELECT count(*) FROM q3_ord FOR UPDATE;
+SELECT count(*) FROM q3_ord FOR SHARE;
+SELECT sum(v) FROM q3_ord FOR NO KEY UPDATE;
+SELECT v FROM q3_ord GROUP BY v FOR UPDATE;
+SELECT v FROM q3_ord GROUP BY v HAVING count(*) > 1 FOR UPDATE;
+SELECT DISTINCT v FROM q3_ord FOR UPDATE;
+SELECT DISTINCT v FROM q3_ord FOR KEY SHARE;
+SELECT id FROM q3_ord UNION SELECT 99 FOR UPDATE;
+SELECT id FROM q3_ord INTERSECT SELECT 1 FOR SHARE;
+SELECT id FROM q3_ord EXCEPT SELECT 1 FOR UPDATE;
+VALUES (1) FOR UPDATE;
+
+-- Locking a FROM that has no base table is a no-op, not an error.
+SELECT 1 FOR UPDATE;
+SELECT 1 FOR SHARE;
+SELECT g FROM generate_series(1, 2) g ORDER BY g FOR UPDATE;
+SELECT x FROM (SELECT 1 AS x) d FOR UPDATE;
+SELECT x FROM (SELECT 1 AS x) d FOR UPDATE OF d;
+
+DROP TABLE q3_ord;

@@ -48,3 +48,10 @@ sbom-*.spdx.json
 # Cargo mutant output
 mutants.out
 mutants.out.old
+
+# Default output paths of the gres conformance runner, written into the cwd
+# when --out/--summary are not given.
+/parity.json
+/parity.md
+/regress-parity.json
+/regress-parity.md

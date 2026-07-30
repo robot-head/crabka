@@ -3,7 +3,7 @@
 use std::{cell::Cell, rc::Rc};
 
 use crate::{
-    ast::{BinaryOp, Expr, UnaryOp},
+    ast::{ArraySubscript, BinaryOp, Expr, UnaryOp},
     error::ParseError,
     lexer::lex,
     token::{Keyword, Token},
@@ -33,14 +33,75 @@ use crate::{
 /// what matters for closing the `DoS`.
 pub(crate) const MAX_DEPTH: usize = 50;
 
-type QueryTailAndLocking = (
-    Vec<crate::ast::OrderItem>,
-    Option<i64>,
-    Option<i64>,
-    Option<crate::ast::RowLockStrength>,
-);
+/// The result-level tail of a query expression: `ORDER BY` plus the row-count
+/// window. `limit`/`offset` are arbitrary expressions because `PostgreSQL`
+/// accepts any expression there, including a scalar subquery or a parameter.
+#[derive(Debug, Default)]
+struct SetTail {
+    order_by: Vec<crate::ast::OrderItem>,
+    limit: Option<crate::ast::Expr>,
+    offset: Option<crate::ast::Expr>,
+    with_ties: bool,
+}
 
-type SetTail = (Vec<crate::ast::OrderItem>, Option<i64>, Option<i64>);
+/// `PostgreSQL`'s cap on the grouping sets one query may expand to
+/// (`parse_agg.c`), reported as `54001`.
+const MAX_GROUPING_SETS: usize = 4096;
+
+/// `PostgreSQL`'s cap on `CUBE`'s element list (`parse_clause.c`), reported as
+/// `54011`. `ROLLUP` has no such limit — its expansion is linear.
+const MAX_CUBE_ELEMENTS: usize = 12;
+
+/// A parsed `GROUP BY` clause: the flattened grouping expressions, and the set
+/// structure over their indices when the clause expands to more than one set.
+type GroupByClause = (Vec<crate::ast::Expr>, Option<crate::ast::GroupingClause>);
+
+/// The three set-producing `GROUP BY` constructs, which lex as identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupingKeyword {
+    Rollup,
+    Cube,
+    Sets,
+}
+
+/// Intern one grouping expression into the flattened list, returning its index.
+/// Repeating an expression in a `GROUP BY` clause repeats one grouping column,
+/// which is why `GROUP BY ROLLUP(a), ROLLUP(a)` groups by `{a}` and not `{a, a}`.
+fn intern_group_expr(exprs: &mut Vec<crate::ast::Expr>, expr: crate::ast::Expr) -> usize {
+    if let Some(index) = exprs.iter().position(|e| *e == expr) {
+        return index;
+    }
+    exprs.push(expr);
+    exprs.len() - 1
+}
+
+/// How many grouping sets one `GROUP BY` item expands to.
+fn grouping_set_count(item: &crate::ast::GroupItem) -> usize {
+    use crate::ast::GroupItem;
+    match item {
+        GroupItem::Expr(_) | GroupItem::Empty | GroupItem::Composite(_) => 1,
+        GroupItem::Rollup(elements) => elements.len() + 1,
+        GroupItem::Cube(elements) => 1usize
+            .checked_shl(u32::try_from(elements.len()).unwrap_or(u32::BITS))
+            .unwrap_or(usize::MAX),
+        GroupItem::GroupingSets(items) => items.iter().map(grouping_set_count).sum(),
+    }
+}
+
+/// [`SetTail`] plus the `FOR UPDATE`/`FOR SHARE` clause that may follow it.
+#[derive(Debug, Default)]
+struct QueryTailAndLocking {
+    tail: SetTail,
+    locking: Option<crate::ast::LockingClause>,
+}
+
+/// The parenthesized list after a FROM-function alias: renaming its columns, or
+/// declaring them for a record-returning function.
+#[derive(Debug)]
+enum FuncAliasColumns {
+    Aliases(Vec<String>),
+    Definitions(Vec<crate::ast::TableFuncColumnDef>),
+}
 
 pub(crate) struct Parser {
     toks: Vec<(Token, usize)>,
@@ -54,12 +115,68 @@ pub(crate) struct Parser {
     /// for the guard's whole lifetime). The guard's `Drop` decrements on EVERY
     /// exit path, including a `?` early-return, so the depth is always restored.
     depth: Rc<Cell<usize>>,
+    /// The target named by a `SELECT … INTO <table>` seen while parsing the
+    /// current statement. `INTO` sits between the projection and the `FROM`
+    /// clause rather than at a statement boundary, so `select_core` records it
+    /// here and [`Parser::query_statement`] turns the finished query into a
+    /// [`crate::ast::Statement::CreateTableAs`].
+    select_into: Option<String>,
+    /// One frame per `SELECT` currently being parsed, innermost last: the window
+    /// calls met so far in that SELECT. A subquery pushes its own frame, so a
+    /// window call always lands on the SELECT that owns it.
+    window_calls: Vec<Vec<crate::ast::WindowCall>>,
+    /// How many window specifications enclose the cursor. A window definition is
+    /// evaluated to place the rows a window call runs over, so it cannot itself
+    /// contain one.
+    window_spec_depth: usize,
+    /// How many FROM-subqueries have already been given a synthesized alias, so
+    /// each gets a distinct one. See [`Parser::unnamed_subquery_alias`].
+    unnamed_subqueries: usize,
+}
+
+/// The parsed `transaction_mode` list of a `BEGIN`/`START TRANSACTION`/`SET
+/// TRANSACTION`. Each field is `None` when the statement did not mention it, so
+/// the session keeps its own default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct TransactionModes {
+    isolation: Option<crate::ast::IsolationLevel>,
+    read_only: Option<bool>,
+    deferrable: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 struct ParsedStatement {
     statement: crate::ast::Statement,
     command_identity: crate::command::CommandIdentity,
+}
+
+/// `PostgreSQL`'s `schema_stmt`: the statements a `CREATE SCHEMA` element list
+/// may contain. Anything else ends the list, so a following statement in the
+/// same batch is not swallowed.
+fn starts_schema_element(word: &str) -> bool {
+    matches!(word, "grant")
+}
+
+/// The leading identifiers [`Parser::session_utility_statement`] claims.
+fn is_session_utility_word(word: &str) -> bool {
+    matches!(
+        word,
+        "savepoint"
+            | "release"
+            | "declare"
+            | "fetch"
+            | "move"
+            | "close"
+            | "prepare"
+            | "execute"
+            | "deallocate"
+            | "lock"
+            | "explain"
+            | "analyze"
+            | "cluster"
+            | "reindex"
+            | "checkpoint"
+    )
 }
 
 fn emitted(
@@ -109,6 +226,10 @@ impl Parser {
             source,
             pos: 0,
             depth: Rc::new(Cell::new(0)),
+            select_into: None,
+            window_calls: Vec::new(),
+            window_spec_depth: 0,
+            unnamed_subqueries: 0,
         }
     }
 
@@ -175,6 +296,13 @@ impl Parser {
     fn expect_ident(&mut self) -> Result<String, ParseError> {
         match self.bump() {
             Token::Ident(s) => Ok(s),
+            // `public` is not a keyword in PostgreSQL at all — `pg_get_keywords()`
+            // has no row for it, and `SELECT 1 AS public` is valid. It is lexed as
+            // one here only so GRANT/REVOKE can match it in role position, which
+            // PostgreSQL does by matching the STRING in its `RoleSpec`. Accepting
+            // it wherever an identifier is wanted keeps those matches working while
+            // letting `public.t`, and a column or alias called `public`, parse.
+            Token::Keyword(Keyword::Public) => Ok("public".into()),
             other => Err(ParseError::new(
                 format!("expected identifier, found {other:?}"),
                 self.peek_pos(),
@@ -196,6 +324,145 @@ impl Parser {
         }
     }
 
+    /// `PostgreSQL`'s `ColLabel` — the label after `AS`, which may be an
+    /// identifier or **any** keyword (`SELECT 1 AS true`, `AS select`, `AS from`).
+    fn expect_col_label(&mut self) -> Result<String, ParseError> {
+        if matches!(self.peek(), Token::Keyword(_)) {
+            let label = self.keyword_label();
+            self.bump();
+            return Ok(label);
+        }
+        self.expect_ident()
+    }
+
+    /// `PostgreSQL`'s `BareColLabel` — the no-`AS` alias, which is an identifier
+    /// or a keyword from the `bare_label_keyword` list. Consumes nothing and
+    /// returns `None` when the cursor is on anything else (a clause keyword, an
+    /// operator, the end of the statement).
+    fn opt_bare_col_label(&mut self) -> Option<String> {
+        // A quoted identifier is never a keyword, so `SELECT id "over"` labels the
+        // column `over` even though the bare spelling is refused.
+        if self.peek_is_quoted_ident()
+            && let Token::Ident(name) = self.peek()
+        {
+            let name = name.clone();
+            self.bump();
+            return Some(name);
+        }
+        match self.peek() {
+            Token::Ident(name) if is_bare_label_word(name) => {
+                let name = name.clone();
+                self.bump();
+                Some(name)
+            }
+            Token::Keyword(_) if is_bare_label_word(&self.keyword_label()) => {
+                let label = self.keyword_label();
+                self.bump();
+                Some(label)
+            }
+            _ => None,
+        }
+    }
+
+    /// Is the token at the cursor a *quoted* identifier (`"select"`)? Quoting
+    /// strips a word of every keyword property, so neither the `ColId` nor the
+    /// `BareColLabel` restriction applies to it. The lexer folds the quotes away
+    /// and keeps only the text, so this reads the source byte the token starts
+    /// at.
+    fn peek_is_quoted_ident(&self) -> bool {
+        self.source.as_bytes().get(self.peek_pos()) == Some(&b'"')
+    }
+
+    /// The word at the cursor when it may be spelled as a `ColId`, whether it
+    /// arrives as an identifier or as one of the words this lexer keywords.
+    /// `None` for anything else, so the caller can leave the token for the
+    /// clause it introduces.
+    fn peek_col_id(&self) -> Option<String> {
+        match self.peek() {
+            Token::Ident(word) if self.peek_is_quoted_ident() || is_col_id_word(word) => {
+                Some(word.clone())
+            }
+            Token::Keyword(_) => {
+                let word = self.keyword_label();
+                is_col_id_word(&word).then_some(word)
+            }
+            _ => None,
+        }
+    }
+
+    /// Consume a `ColId`, reporting `PostgreSQL`'s own syntax error when the
+    /// word at the cursor is reserved or a type/function-name keyword.
+    fn expect_col_id(&mut self) -> Result<String, ParseError> {
+        if let Some(name) = self.peek_col_id() {
+            self.bump();
+            return Ok(name);
+        }
+        let pos = self.peek_pos();
+        match self.peek() {
+            Token::Ident(word) => {
+                let word = word.clone();
+                Err(ParseError::new_sqlstate(
+                    "42601",
+                    format!("syntax error at or near \"{word}\""),
+                    pos,
+                ))
+            }
+            Token::Keyword(_) => {
+                let word = self.keyword_label();
+                Err(ParseError::new_sqlstate(
+                    "42601",
+                    format!("syntax error at or near \"{word}\""),
+                    pos,
+                ))
+            }
+            other => Err(ParseError::new(
+                format!("expected identifier, found {other:?}"),
+                pos,
+            )),
+        }
+    }
+
+    /// The source spelling of the keyword at the cursor, lowercased — the column
+    /// name a keyword used as a label produces. A keyword token is never quoted
+    /// (a quoted `"select"` lexes as an identifier), so its word is exactly the
+    /// run of identifier characters at the token's byte offset.
+    fn keyword_label(&self) -> String {
+        let rest = &self.source[self.peek_pos()..];
+        let end = rest
+            .find(|c: char| !(c.is_alphanumeric() || c == '_' || c == '$'))
+            .unwrap_or(rest.len());
+        rest[..end].to_ascii_lowercase()
+    }
+
+    /// Match a word that may lex as an identifier *or* as a reserved keyword.
+    /// The SQL/JSON grammar spells several of its option words with words that
+    /// are keywords elsewhere (`ARRAY`, `WITH`, `UNIQUE`, `ON`, `NULL`,
+    /// `WRAPPER`), so those productions match on the word, not the token kind.
+    fn peek_word_eq(&self, want: &str) -> bool {
+        match self.peek() {
+            Token::Ident(s) => s.eq_ignore_ascii_case(want),
+            Token::Keyword(kw) => keyword_word(*kw) == Some(want),
+            _ => false,
+        }
+    }
+
+    fn peek2_word_eq(&self, want: &str) -> bool {
+        match self.peek2() {
+            Token::Ident(s) => s.eq_ignore_ascii_case(want),
+            Token::Keyword(kw) => keyword_word(*kw) == Some(want),
+            _ => false,
+        }
+    }
+
+    fn eat_word_eq(&mut self, want: &str) -> bool {
+        if self.peek_word_eq(want) {
+            self.bump();
+            true
+        } else {
+            false
+        }
+    }
+
     fn eat_ident_eq(&mut self, want: &str) -> bool {
         if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case(want)) {
             self.bump();
@@ -208,8 +475,8 @@ impl Parser {
     /// Parse a SQL type name into a [`ColumnType`] — shared by `CREATE TABLE`
     /// column definitions and the SP31 cast target (`CAST(_ AS ty)` / `_::ty`).
     /// Folds the two-word `double precision` (SP30) into one normalized name; an
-    /// unknown type name is a 42601 parse error (`PostgreSQL`: 42704 — a documented
-    /// deviation, consistent with the column-type path).
+    /// unknown type name is 42704 (`undefined_object`) with `PostgreSQL`'s
+    /// "type … does not exist" message, in every context that names a type.
     fn parse_type_name(&mut self) -> Result<crabka_pgtypes::ColumnType, ParseError> {
         let type_pos = self.peek_pos();
         let mut type_word = self.expect_ident()?;
@@ -232,6 +499,19 @@ impl Parser {
             self.bump();
             type_word = "character varying".to_string();
         }
+        // A `timestamp(2)` / `time(2)` / `interval(2)` fractional-seconds
+        // precision sits before any `with time zone` qualifier. Crabka stores
+        // every date/time value at microsecond resolution, so the precision is
+        // parsed and discarded rather than rounding the stored value.
+        if matches!(
+            type_word.to_ascii_lowercase().as_str(),
+            "timestamp" | "timestamptz" | "time" | "timetz" | "interval"
+        ) && *self.peek() == Token::LParen
+        {
+            self.bump();
+            self.expect_u16("fractional seconds precision")?;
+            self.expect(&Token::RParen)?;
+        }
         // SP37: fold the multi-word `timestamp`/`time` { with | without } `time zone`
         // spellings into one normalized name (keyword-free — the lexer lowercases
         // idents, so the three trailing words are matched as plain `Token::Ident`s).
@@ -249,8 +529,13 @@ impl Parser {
             let qualifier = if with_zone { "with" } else { "without" };
             type_word = format!("{} {qualifier} time zone", type_word.to_ascii_lowercase());
         }
-        let ty = crabka_pgtypes::ColumnType::from_sql_name(&type_word)
-            .ok_or_else(|| ParseError::new(format!("unknown type \"{type_word}\""), type_pos))?;
+        let ty = crabka_pgtypes::ColumnType::from_sql_name(&type_word).ok_or_else(|| {
+            ParseError::new_sqlstate(
+                "42704",
+                format!("type \"{type_word}\" does not exist"),
+                type_pos,
+            )
+        })?;
         // SP32: `numeric`/`decimal` may carry a `(precision[, scale])` modifier.
         let base = if ty.is_numeric() && *self.peek() == Token::LParen {
             self.parse_numeric_typmod()?
@@ -266,32 +551,44 @@ impl Parser {
         self.parse_array_type_suffix(base, &type_word, type_pos)
     }
 
-    /// Consume an optional `[]` / `[N]` array suffix after a base type name.
-    /// `PostgreSQL` ignores the declared size, so `int[4]` is `int[]`. A second
-    /// `[]` (a multidimensional array) and element types with no array type are
-    /// both refused with 0A000 — the same class the executor uses for
-    /// deliberately unimplemented type constructs.
+    /// Consume an optional array suffix after a base type name — `[]`, `[N]`,
+    /// any number of them (`int[][][]`), or the `ARRAY`/`ARRAY[N]` spelling.
+    ///
+    /// `PostgreSQL` ignores both the declared size and the declared *number* of
+    /// dimensions: `int[4]`, `int[][]` and `integer ARRAY[4]` are all the one
+    /// type `_int4`, and the real dimensionality lives in each value. Element
+    /// types with no array type are refused with 0A000.
     fn parse_array_type_suffix(
         &mut self,
         base: crabka_pgtypes::ColumnType,
         type_word: &str,
         type_pos: usize,
     ) -> Result<crabka_pgtypes::ColumnType, ParseError> {
-        if *self.peek() != Token::LBracket {
-            return Ok(base);
-        }
-        self.bump();
-        // The declared dimension size is parsed and discarded, like PostgreSQL.
-        if matches!(self.peek(), Token::IntLit(_)) {
+        // `ARRAY` / `ARRAY[N]` — the SQL-standard spelling of a one-`[]` suffix.
+        let mut is_array = if *self.peek() == Token::Keyword(Keyword::Array) {
             self.bump();
+            if *self.peek() == Token::LBracket {
+                self.bump();
+                if matches!(self.peek(), Token::IntLit(_)) {
+                    self.bump();
+                }
+                self.expect(&Token::RBracket)?;
+            }
+            true
+        } else {
+            false
+        };
+        while *self.peek() == Token::LBracket {
+            self.bump();
+            // The declared dimension size is parsed and discarded, like PostgreSQL.
+            if matches!(self.peek(), Token::IntLit(_)) {
+                self.bump();
+            }
+            self.expect(&Token::RBracket)?;
+            is_array = true;
         }
-        self.expect(&Token::RBracket)?;
-        if *self.peek() == Token::LBracket {
-            return Err(ParseError::new_sqlstate(
-                "0A000",
-                "multidimensional arrays are not supported",
-                self.peek_pos(),
-            ));
+        if !is_array {
+            return Ok(base);
         }
         crabka_pgtypes::ColumnType::array_of(base).ok_or_else(|| {
             ParseError::new_sqlstate(
@@ -368,64 +665,11 @@ impl Parser {
             if iterations > MAX_DEPTH {
                 return Err(ParseError::too_deep(self.peek_pos()));
             }
-            // SP31: `::` is the tightest-binding operator (tighter than unary
-            // minus and every arithmetic/comparison operator), so it is consumed
-            // unconditionally here — no `min_bp` gate — and left-associatively
-            // (`a::int::text` == `(a::int)::text`). `-2::int` still parses as
-            // `-(2::int)` because the unary-minus prefix recurses into `expr`,
-            // whose innermost frame grabs the `::` before the minus is applied.
-            if *self.peek() == Token::TypeCast {
-                self.bump();
-                let ty = self.parse_type_name()?;
-                lhs = Expr::Cast {
-                    expr: Box::new(lhs),
-                    ty,
-                };
-                continue;
-            }
-            // Array subscripting binds as tightly as `::` and is likewise
-            // consumed with no `min_bp` gate, so `a[1] + b` is `(a[1]) + b` and
-            // `a[1][2]` chains left-associatively.
-            if *self.peek() == Token::LBracket {
-                self.bump();
-                // `a[:2]` — an omitted lower bound is still a slice.
-                if *self.peek() == Token::Colon {
-                    return Err(Self::array_slices_unsupported(self.peek_pos()));
-                }
-                let index = self.expr(0)?;
-                if *self.peek() == Token::Colon {
-                    return Err(Self::array_slices_unsupported(self.peek_pos()));
-                }
-                self.expect(&Token::RBracket)?;
-                lhs = Expr::Subscript {
-                    base: Box::new(lhs),
-                    index: Box::new(index),
-                };
-                continue;
-            }
-            // SP37: `x AT TIME ZONE z` — a postfix operator that lowers onto PG's
-            // internal `timezone(z, x)` form (note arg ORDER: zone first, value
-            // second). It binds TIGHTER than every binary operator (so
-            // `ts AT TIME ZONE 'UTC' = y` groups as `(ts AT TIME ZONE 'UTC') = y`),
-            // so — like `::` — it is consumed unconditionally (no `min_bp` gate).
-            // Keyword-free: `at`/`time`/`zone` are matched as lowercased idents via
-            // a three-token lookahead, so a bare column named `at` is never the
-            // operator. The zone operand is parsed at bp 11 (a high-precedence
-            // operand, like the `*`/`/` level), and recursion terminates because
-            // each iteration consumes the `at time zone` lead-in before recursing.
-            if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("at"))
-                && matches!(self.peek2(), Token::Ident(w) if w.eq_ignore_ascii_case("time"))
-                && matches!(self.peek3(), Token::Ident(w) if w.eq_ignore_ascii_case("zone"))
-            {
-                self.bump(); // at
-                self.bump(); // time
-                self.bump(); // zone
-                let zone = self.expr(11)?;
-                lhs = Expr::Func(crate::ast::FuncCall {
-                    name: "timezone".into(),
-                    distinct: false,
-                    args: crate::ast::FuncArgs::Exprs(vec![zone, lhs]),
-                });
+            // The tight-binding postfix operators (`::`, `COLLATE`, subscript,
+            // `AT TIME ZONE`) are consumed first and without a `min_bp` gate.
+            let (operand, extended) = self.tight_postfix(lhs)?;
+            lhs = operand;
+            if extended {
                 continue;
             }
             // SP28: postfix predicates (IS [NOT] NULL, [NOT] IN, [NOT] BETWEEN,
@@ -433,46 +677,86 @@ impl Parser {
             // handled before the binary-operator match so `a = 1 AND b IN (1,2)`
             // groups as `(a=1) AND (b IN (1,2))`.
             if 5 >= min_bp {
+                use crate::ast::MatchKind;
+                // Each of these words is ALSO a `bare_label_keyword`, so it is
+                // only the operator when something that can continue it follows.
+                // PostgreSQL's LALR grammar makes exactly this decision with one
+                // token of lookahead, which is why `SELECT id is FROM w` names
+                // the column `is` rather than reporting an unfinished predicate.
                 match self.peek() {
-                    Token::Keyword(Keyword::Is) => {
-                        lhs = self.parse_is_null(lhs)?;
+                    Token::Keyword(Keyword::Is) if self.peek_continues_is_predicate() => {
+                        lhs = self.parse_is_predicate(lhs)?;
                         continue;
                     }
-                    Token::Keyword(Keyword::In) => {
+                    Token::Keyword(Keyword::In) if *self.peek2() == Token::LParen => {
                         lhs = self.parse_in(lhs, false)?;
                         continue;
                     }
-                    Token::Keyword(Keyword::Between) => {
+                    Token::Keyword(Keyword::Between) if Self::starts_expr(self.peek2()) => {
                         lhs = self.parse_between(lhs, false)?;
                         continue;
                     }
-                    Token::Keyword(Keyword::Like) => {
-                        lhs = self.parse_like(lhs, false, false)?;
+                    Token::Keyword(Keyword::Like) if Self::starts_expr(self.peek2()) => {
+                        lhs = self.parse_like(lhs, false, MatchKind::Like)?;
                         continue;
                     }
-                    Token::Keyword(Keyword::Ilike) => {
-                        lhs = self.parse_like(lhs, false, true)?;
+                    Token::Keyword(Keyword::Ilike) if Self::starts_expr(self.peek2()) => {
+                        lhs = self.parse_like(lhs, false, MatchKind::ILike)?;
+                        continue;
+                    }
+                    // `x ISNULL` / `x NOTNULL` — PostgreSQL's postfix spellings of
+                    // `IS NULL` / `IS NOT NULL`. Both words are
+                    // type/function-name keywords there, so neither can be a
+                    // column name or a bare label and this reading is never
+                    // ambiguous.
+                    Token::Ident(word)
+                        if word.eq_ignore_ascii_case("isnull") && !self.peek_is_quoted_ident() =>
+                    {
+                        self.bump();
+                        lhs = Expr::IsNull {
+                            expr: Box::new(lhs),
+                            negated: false,
+                        };
+                        continue;
+                    }
+                    Token::Ident(word)
+                        if word.eq_ignore_ascii_case("notnull") && !self.peek_is_quoted_ident() =>
+                    {
+                        self.bump();
+                        lhs = Expr::IsNull {
+                            expr: Box::new(lhs),
+                            negated: true,
+                        };
                         continue;
                     }
                     // Infix `NOT` only when it leads a negated predicate
-                    // (`x NOT IN/BETWEEN/LIKE/ILIKE …`); otherwise `NOT` is the
-                    // prefix operator handled in `prefix`. Two-token lookahead.
+                    // (`x NOT IN/BETWEEN/LIKE/ILIKE/SIMILAR TO …`); otherwise `NOT`
+                    // is the prefix operator handled in `prefix`. Two- (or, for
+                    // `SIMILAR TO`, three-) token lookahead.
                     Token::Keyword(Keyword::Not)
                         if matches!(
                             self.peek2(),
                             Token::Keyword(
                                 Keyword::In | Keyword::Between | Keyword::Like | Keyword::Ilike
                             )
-                        ) =>
+                        ) || self.peek_is_similar_to(1) =>
                     {
                         self.bump(); // NOT
                         lhs = match self.peek() {
                             Token::Keyword(Keyword::In) => self.parse_in(lhs, true)?,
                             Token::Keyword(Keyword::Between) => self.parse_between(lhs, true)?,
-                            Token::Keyword(Keyword::Like) => self.parse_like(lhs, true, false)?,
-                            Token::Keyword(Keyword::Ilike) => self.parse_like(lhs, true, true)?,
-                            _ => unreachable!("lookahead guaranteed a negated predicate"),
+                            Token::Keyword(Keyword::Like) => {
+                                self.parse_like(lhs, true, MatchKind::Like)?
+                            }
+                            Token::Keyword(Keyword::Ilike) => {
+                                self.parse_like(lhs, true, MatchKind::ILike)?
+                            }
+                            _ => self.parse_like(lhs, true, MatchKind::Similar)?,
                         };
+                        continue;
+                    }
+                    _ if self.peek_is_similar_to(0) => {
+                        lhs = self.parse_like(lhs, false, MatchKind::Similar)?;
                         continue;
                     }
                     _ => {}
@@ -484,8 +768,15 @@ impl Parser {
             // `+ - * /`. So `+ - * /` and the unary-minus operand power shift up by
             // two to make room (odd l_bp / even r_bp preserved).
             let (op, l_bp, r_bp) = match self.peek() {
-                Token::Keyword(Keyword::Or) => (BinaryOp::Or, 1, 2),
-                Token::Keyword(Keyword::And) => (BinaryOp::And, 3, 4),
+                // `AND` and `OR` are bare-label keywords too, so — as for the
+                // predicate words above — the operator reading needs an operand
+                // in sight: `SELECT id and FROM w` names the column `and`.
+                Token::Keyword(Keyword::Or) if Self::starts_expr(self.peek2()) => {
+                    (BinaryOp::Or, 1, 2)
+                }
+                Token::Keyword(Keyword::And) if Self::starts_expr(self.peek2()) => {
+                    (BinaryOp::And, 3, 4)
+                }
                 Token::Eq => (BinaryOp::Eq, 5, 6),
                 Token::Ne => (BinaryOp::Ne, 5, 6),
                 Token::Lt => (BinaryOp::Lt, 5, 6),
@@ -507,16 +798,37 @@ impl Parser {
                 Token::KeyExists => (BinaryOp::KeyExists, 7, 8),
                 Token::KeyExistsAny => (BinaryOp::KeyExistsAny, 7, 8),
                 Token::KeyExistsAll => (BinaryOp::KeyExistsAll, 7, 8),
+                Token::JsonPathExists => (BinaryOp::JsonPathExists, 7, 8),
+                Token::JsonPathMatch => (BinaryOp::JsonPathMatch, 7, 8),
                 Token::Overlaps => (BinaryOp::Overlaps, 7, 8),
+                // The regex-match and bitwise operators are "any other operator"
+                // in PostgreSQL's precedence table — the same level as `||` and
+                // the jsonb family, left-associative. `1 | 2 # 3` is therefore
+                // `(1 | 2) # 3` (0), not `1 | (2 # 3)`.
+                Token::Tilde => (BinaryOp::Match, 7, 8),
+                Token::TildeCi => (BinaryOp::MatchCi, 7, 8),
+                Token::NotTilde => (BinaryOp::NotMatch, 7, 8),
+                Token::NotTildeCi => (BinaryOp::NotMatchCi, 7, 8),
+                Token::Amp => (BinaryOp::BitAnd, 7, 8),
+                Token::Pipe => (BinaryOp::BitOr, 7, 8),
+                Token::Hash => (BinaryOp::BitXor, 7, 8),
+                Token::Shl => (BinaryOp::Shl, 7, 8),
+                Token::Shr => (BinaryOp::Shr, 7, 8),
                 Token::Plus => (BinaryOp::Add, 9, 10),
                 Token::Minus => (BinaryOp::Sub, 9, 10),
                 Token::Star => (BinaryOp::Mul, 11, 12),
                 Token::Slash => (BinaryOp::Div, 11, 12),
+                Token::Percent => (BinaryOp::Mod, 11, 12),
+                // `^` binds TIGHTER than `* / %` and LOOSER than unary minus
+                // (whose operand power is 15), so `-2^2` is `(-2)^2` = 4. It is
+                // left-associative in PostgreSQL — `2^3^2` is 64, not 512.
+                Token::Caret => (BinaryOp::Pow, 13, 14),
                 _ => break,
             };
             if l_bp < min_bp {
                 break;
             }
+            let op_pos = self.peek_pos();
             self.bump();
             // SP34: `op ANY|SOME|ALL ( SELECT … )` — a quantified comparison. Only
             // the comparison operators take a quantifier (PostgreSQL).
@@ -540,11 +852,17 @@ impl Parser {
                 // ARRAY form (`= ANY($1)`, `= ANY(ARRAY[…])`, `= ANY(tags)`),
                 // which every driver emits when it binds an IN-list as one
                 // parameter.
+                // A `(` here is the subquery form only when a query keyword
+                // follows it; otherwise it is an ordinary parenthesised array
+                // expression, as in `= ANY((a)[2:4])`.
                 lhs = if matches!(
                     self.peek(),
                     Token::Keyword(Keyword::Select | Keyword::Values | Keyword::With)
-                        | Token::LParen
-                ) {
+                ) || (*self.peek() == Token::LParen
+                    && matches!(
+                        self.peek2(),
+                        Token::Keyword(Keyword::Select | Keyword::Values | Keyword::With)
+                    )) {
                     Expr::Quantified {
                         expr: Box::new(lhs),
                         op,
@@ -564,6 +882,7 @@ impl Parser {
                 continue;
             }
             let rhs = self.expr(r_bp)?;
+            check_row_arity(&lhs, &rhs, op_pos)?;
             lhs = Expr::Binary {
                 op,
                 left: Box::new(lhs),
@@ -571,6 +890,191 @@ impl Parser {
             };
         }
         Ok(lhs)
+    }
+
+    /// Consume one tight-binding postfix operator — `::`, `COLLATE`, an array
+    /// subscript chain, or `AT TIME ZONE` — if the next tokens spell one.
+    ///
+    /// All four bind tighter than every binary operator, so none takes a
+    /// `min_bp` gate. The flag reports whether anything was consumed; when it
+    /// is false the operand is returned untouched.
+    /// `PostgreSQL`'s `opt_indirection` after a parenthesised expression:
+    /// `(expr).field` selects one attribute of a composite value, and the chain
+    /// may repeat (`(expr).a.b`). This production is reachable ONLY after a
+    /// closing parenthesis, which is exactly why `a.b` elsewhere stays a
+    /// table-qualified column reference.
+    fn field_selection(&mut self, mut base: Expr) -> Result<Expr, ParseError> {
+        while *self.peek() == Token::Dot {
+            self.bump();
+            if *self.peek() == Token::Star {
+                self.bump();
+                base = Expr::FieldSelectAll(Box::new(base));
+                continue;
+            }
+            base = Expr::FieldSelect {
+                base: Box::new(base),
+                field: self.expect_ident()?,
+            };
+        }
+        Ok(base)
+    }
+
+    fn tight_postfix(&mut self, lhs: Expr) -> Result<(Expr, bool), ParseError> {
+        let mut lhs = lhs;
+        // SP31: `::` is the tightest-binding operator (tighter than unary
+        // minus and every arithmetic/comparison operator), so it is consumed
+        // unconditionally here — no `min_bp` gate — and left-associatively
+        // (`a::int::text` == `(a::int)::text`). `-2::int` still parses as
+        // `-(2::int)` because the unary-minus prefix recurses into `expr`,
+        // whose innermost frame grabs the `::` before the minus is applied.
+        if *self.peek() == Token::TypeCast {
+            self.bump();
+            let ty = self.parse_type_name()?;
+            lhs = Expr::Cast {
+                expr: Box::new(lhs),
+                ty,
+            };
+            return Ok((lhs, true));
+        }
+        // `COLLATE` binds as tightly as `::` in PostgreSQL's precedence
+        // table, so it is likewise consumed with no `min_bp` gate and
+        // `a COLLATE "C" = b` groups as `(a COLLATE "C") = b`.
+        // `COLLATE` is a `bare_label_keyword` too, so — like the infix
+        // operator keywords below — it is only the operator when a name that
+        // could be a collation follows: `SELECT 1 collate` labels the column.
+        if self.peek_ident_eq("collate") && matches!(self.peek2(), Token::Ident(_)) {
+            self.bump();
+            lhs = Expr::Collate {
+                expr: Box::new(lhs),
+                collation: self.expect_collation_name()?,
+            };
+            return Ok((lhs, true));
+        }
+        // Array subscripting binds as tightly as `::` and is likewise
+        // consumed with no `min_bp` gate, so `a[1] + b` is `(a[1]) + b`.
+        // The whole `[…][…]…` chain is taken at once: `PostgreSQL` treats it
+        // as ONE array reference, so `a[2][3]` reaches into a
+        // two-dimensional array rather than subscripting `a[2]`.
+        if *self.peek() == Token::LBracket {
+            let subscripts = self.subscript_chain()?;
+            lhs = match <[_; 1]>::try_from(subscripts) {
+                // A lone plain subscript keeps the simpler node, which is
+                // also the jsonb subscripting form.
+                Ok([ArraySubscript::Index(index)]) => Expr::Subscript {
+                    base: Box::new(lhs),
+                    index: Box::new(index),
+                },
+                Ok([one]) => Expr::ArrayRef {
+                    base: Box::new(lhs),
+                    subscripts: vec![one],
+                },
+                Err(many) => Expr::ArrayRef {
+                    base: Box::new(lhs),
+                    subscripts: many,
+                },
+            };
+            return Ok((lhs, true));
+        }
+        // SP37: `x AT TIME ZONE z` — a postfix operator that lowers onto PG's
+        // internal `timezone(z, x)` form (note arg ORDER: zone first, value
+        // second). It binds TIGHTER than every binary operator (so
+        // `ts AT TIME ZONE 'UTC' = y` groups as `(ts AT TIME ZONE 'UTC') = y`),
+        // so — like `::` — it is consumed unconditionally (no `min_bp` gate).
+        // Keyword-free: `at`/`time`/`zone` are matched as lowercased idents via
+        // a three-token lookahead, so a bare column named `at` is never the
+        // operator. The zone operand is parsed at bp 11 (a high-precedence
+        // operand, like the `*`/`/` level), and recursion terminates because
+        // each iteration consumes the `at time zone` lead-in before recursing.
+        if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("at"))
+            && matches!(self.peek2(), Token::Ident(w) if w.eq_ignore_ascii_case("time"))
+            && matches!(self.peek3(), Token::Ident(w) if w.eq_ignore_ascii_case("zone"))
+        {
+            self.bump(); // at
+            self.bump(); // time
+            self.bump(); // zone
+            let zone = self.expr(11)?;
+            lhs = Expr::Func(crate::ast::FuncCall {
+                name: "timezone".into(),
+                distinct: false,
+                args: crate::ast::FuncArgs::Exprs(vec![zone, lhs]),
+                filter: None,
+            });
+            return Ok((lhs, true));
+        }
+        Ok((lhs, false))
+    }
+
+    /// The collation named after `COLLATE`. `PostgreSQL` writes it as `any_name`
+    /// — a possibly schema-qualified identifier — and reports `42704` when no
+    /// such collation exists. This engine's `pg_collation` holds exactly
+    /// `default`, `C` and `POSIX`, all of which order text by byte value, so
+    /// those three are accepted (and are then semantically a no-op) and every
+    /// other name gets `PostgreSQL`'s own undefined-object error.
+    fn expect_collation_name(&mut self) -> Result<String, ParseError> {
+        let pos = self.peek_pos();
+        let mut name = self.expect_col_id()?;
+        // `pg_catalog."C"` names the same collation as a bare `"C"`.
+        while *self.peek() == Token::Dot {
+            self.bump();
+            name = self.expect_col_label()?;
+        }
+        if !matches!(name.as_str(), "default" | "C" | "POSIX") {
+            return Err(ParseError::new_sqlstate(
+                "42704",
+                format!("collation \"{name}\" for encoding \"UTF8\" does not exist"),
+                pos,
+            ));
+        }
+        Ok(name)
+    }
+
+    /// Can `tok` begin an expression? Exactly the set [`Parser::prefix`] accepts,
+    /// used as the one-token lookahead that tells an infix operator keyword from
+    /// the same word used as a no-`AS` column label.
+    fn starts_expr(tok: &Token) -> bool {
+        matches!(
+            tok,
+            Token::Ident(_)
+                | Token::IntLit(_)
+                | Token::FloatLit(_)
+                | Token::StringLit(_)
+                | Token::Param(_)
+                | Token::LParen
+                | Token::Minus
+                | Token::Plus
+                | Token::Tilde
+                | Token::At
+                | Token::SquareRoot
+                | Token::CubeRoot
+                | Token::Keyword(
+                    Keyword::Not
+                        | Keyword::Exists
+                        | Keyword::Array
+                        | Keyword::True
+                        | Keyword::False
+                        | Keyword::Null
+                        | Keyword::Case
+                        | Keyword::Cast
+                        | Keyword::CurrentUser
+                        | Keyword::Left
+                        | Keyword::Right
+                )
+        )
+    }
+
+    /// Does an `IS` at the cursor continue into a predicate? The words that may
+    /// follow it are a closed set ([`Parser::parse_is_predicate`]), so anything
+    /// else leaves `IS` free to be a column label.
+    fn peek_continues_is_predicate(&self) -> bool {
+        match self.peek2() {
+            Token::Keyword(
+                Keyword::Not | Keyword::Null | Keyword::Distinct | Keyword::True | Keyword::False,
+            ) => true,
+            Token::Ident(word) => {
+                word.eq_ignore_ascii_case("unknown") || word.eq_ignore_ascii_case("json")
+            }
+            _ => false,
+        }
     }
 
     fn prefix(&mut self) -> Result<Expr, ParseError> {
@@ -584,11 +1088,41 @@ impl Parser {
             }
             Token::Minus => {
                 self.bump();
-                // Unary minus binds tighter than `* /` (now 11/12), so its operand
-                // is parsed above that level (13) — `-a * b` stays `(-a) * b`.
+                // Unary minus is the tightest-binding operator below `::`/`[]`:
+                // tighter than `^` (13/14) and so than `* / %` and everything
+                // looser, hence an operand power of 15. That is PostgreSQL's
+                // ordering, and it is why `-2^2` is `(-2)^2` = 4.
                 Ok(Expr::Unary {
                     op: UnaryOp::Neg,
-                    expr: Box::new(self.expr(13)?),
+                    expr: Box::new(self.expr(15)?),
+                })
+            }
+            // Unary plus binds exactly as tightly as unary minus, but it is a
+            // plain operator: PostgreSQL's `doNegate` folds a `-` into the
+            // literal it precedes and there is no `doPositive` counterpart, so
+            // `+1` never becomes an output-position constant.
+            Token::Plus => {
+                self.bump();
+                Ok(Expr::Unary {
+                    op: UnaryOp::Plus,
+                    expr: Box::new(self.expr(15)?),
+                })
+            }
+            // The generic PREFIX operators. Unlike unary minus these bind
+            // LOOSELY — PostgreSQL gives them the "any other operator" level, so
+            // their operand is parsed at 8 and `~ 5 + 1` is `~(5 + 1)` = -7 while
+            // `~ 5 & 3` is `(~5) & 3` = 2. `~` here is bitwise NOT; the same
+            // token in infix position is the regex-match operator.
+            Token::Tilde | Token::At | Token::SquareRoot | Token::CubeRoot => {
+                let op = match self.bump() {
+                    Token::Tilde => UnaryOp::BitNot,
+                    Token::At => UnaryOp::Abs,
+                    Token::SquareRoot => UnaryOp::Sqrt,
+                    _ => UnaryOp::Cbrt,
+                };
+                Ok(Expr::Unary {
+                    op,
+                    expr: Box::new(self.expr(8)?),
                 })
             }
             Token::LParen => {
@@ -603,9 +1137,19 @@ impl Parser {
                     Ok(Expr::ScalarSubquery(Box::new(sub)))
                 } else {
                     self.bump();
-                    let e = self.expr(0)?;
+                    let first = self.expr(0)?;
+                    // `(a, b, …)` is the bare row-constructor spelling; a single
+                    // parenthesised expression stays plain grouping.
+                    if *self.peek() == Token::Comma {
+                        let mut elements = vec![first];
+                        while self.eat_comma() {
+                            elements.push(self.expr(0)?);
+                        }
+                        self.expect(&Token::RParen)?;
+                        return self.field_selection(Expr::Row(elements));
+                    }
                     self.expect(&Token::RParen)?;
-                    Ok(e)
+                    self.field_selection(first)
                 }
             }
             Token::Keyword(Keyword::Exists) => {
@@ -647,6 +1191,7 @@ impl Parser {
                     name: "current_user".into(),
                     distinct: false,
                     args: crate::ast::FuncArgs::Exprs(vec![]),
+                    filter: None,
                 }))
             }
             // `left`/`right` are PostgreSQL scalar functions AND (LEFT/RIGHT) join
@@ -658,31 +1203,39 @@ impl Parser {
                 self.bump();
                 Ok(Expr::Param(n))
             }
+            // `DEFAULT` is reserved in PostgreSQL and its grammar admits it
+            // anywhere an `a_expr` may go, leaving parse analysis to refuse every
+            // context but an INSERT value and an UPDATE assignment. Those two
+            // positions are claimed by `insert_value_expr` before an expression is
+            // parsed at all, so reaching `DEFAULT` here IS one of the refused
+            // contexts — and refusing it during analysis, rather than when a row
+            // happens to evaluate it, is what makes an empty table report it too.
+            Token::Ident(s)
+                if s.eq_ignore_ascii_case("default") && !self.peek_is_quoted_ident() =>
+            {
+                Err(ParseError::new_sqlstate(
+                    "42601",
+                    "DEFAULT is not allowed in this context",
+                    self.peek_pos(),
+                ))
+            }
             Token::Ident(s) => {
-                // SP37: a typed datetime literal — `DATE '…'` / `TIME '…'` /
-                // `TIMESTAMP '…'` / `TIMESTAMPTZ '…'` / `INTERVAL '…'` — lowers onto
-                // an explicit cast of a string literal. Only the single-word
-                // spellings are typed-literal prefixes (multi-word `TIMESTAMP WITH
-                // TIME ZONE '…'` is out of scope — use `'…'::timestamptz`). This is
-                // checked BEFORE the function-call path so `date('…')` is not
-                // shadowed (a typed literal has NO parenthesis — `peek2` is the
-                // string literal, not `(`).
                 let lower = s.to_ascii_lowercase();
-                if matches!(
-                    lower.as_str(),
-                    "date" | "time" | "timestamp" | "timestamptz" | "interval"
-                ) && matches!(self.peek2(), Token::StringLit(_))
-                {
-                    self.bump(); // the type-name ident
-                    let ty = crabka_pgtypes::ColumnType::from_sql_name(&lower)
-                        .expect("single-word datetime type name resolves");
-                    let Token::StringLit(string) = self.bump() else {
-                        unreachable!("peek2 guaranteed a string literal");
-                    };
-                    return Ok(Expr::Cast {
-                        expr: Box::new(Expr::StringLiteral(string)),
-                        ty,
-                    });
+                // `ROW(a, b, …)` — the explicit row constructor. `ROW` is
+                // reserved in PostgreSQL, so it never resolves to a function
+                // call here; `row` used as a plain column name still does,
+                // because only `row (` takes this path.
+                if lower == "row" && *self.peek2() == Token::LParen {
+                    self.bump(); // ROW
+                    return self.row_constructor();
+                }
+                // `typename 'string'` — PostgreSQL's typed-constant syntax, which
+                // means exactly `'string'::typename`. Checked BEFORE the
+                // function-call and column paths so `int4 '0'` is a constant while
+                // `date('…')` stays a function call and `foo 'x'` — where `foo` is
+                // not a type — still reports PostgreSQL's own diagnosis.
+                if let Some(literal) = self.typed_literal()? {
+                    return Ok(literal);
                 }
                 self.bump();
                 // SP37: niladic keyword functions — `current_date`, `current_time`,
@@ -706,6 +1259,7 @@ impl Parser {
                         name: lower,
                         distinct: false,
                         args: crate::ast::FuncArgs::Exprs(vec![]),
+                        filter: None,
                     }));
                 }
                 // SP37: `EXTRACT(field FROM source)` — a special call form that
@@ -714,6 +1268,23 @@ impl Parser {
                 // so the `FROM` keyword inside the parens is not mis-parsed.
                 if lower == "extract" && *self.peek() == Token::LParen {
                     return self.extract_expr();
+                }
+                // The other SQL-standard call forms that spell their arguments
+                // with keywords instead of commas. Each lowers onto the ordinary
+                // function of the same name, so only the grammar is special.
+                if *self.peek() == Token::LParen
+                    && let Some(expr) = self.keyword_arg_call(&lower)?
+                {
+                    return Ok(expr);
+                }
+                // The SQL/JSON standard constructors and query functions. Each
+                // has its own grammar inside the parentheses (`VALUE`, `ON NULL`,
+                // `PASSING`, `RETURNING`, …), so none of them can reach the
+                // generic comma-separated `func_call`.
+                if *self.peek() == Token::LParen
+                    && let Some(expr) = self.sql_json_expr(&lower)?
+                {
+                    return Ok(expr);
                 }
                 // SP27: `ident (` is a function call; a bare ident is a column.
                 // SP33/F-2: `ident . ident` is either a schema-qualified function
@@ -745,29 +1316,77 @@ impl Parser {
         }
     }
 
-    /// The 0A000 refusal shared by every array-slice spelling (`a[1:2]`,
-    /// `a[:2]`, `a[1:]`), named so the message never degrades into a generic
-    /// "unexpected token" for what is a deliberately unimplemented construct.
-    fn array_slices_unsupported(position: usize) -> ParseError {
-        ParseError::new_sqlstate("0A000", "array slices are not supported", position)
+    /// A whole `[…][…]…` subscript chain, positioned at the first `[`.
+    ///
+    /// Each entry is an index or a slice; a slice bound may be omitted on either
+    /// side (`a[:2]`, `a[2:]`), and `a[:]` — both omitted — is a whole-dimension
+    /// slice, exactly as in `PostgreSQL`.
+    fn subscript_chain(&mut self) -> Result<Vec<ArraySubscript>, ParseError> {
+        let mut subscripts = Vec::new();
+        while *self.peek() == Token::LBracket {
+            self.bump();
+            let lower = if *self.peek() == Token::Colon {
+                None
+            } else {
+                Some(self.expr(0)?)
+            };
+            if *self.peek() == Token::Colon {
+                self.bump();
+                let upper = if *self.peek() == Token::RBracket {
+                    None
+                } else {
+                    Some(self.expr(0)?)
+                };
+                subscripts.push(ArraySubscript::Slice { lower, upper });
+            } else {
+                let index = lower.ok_or_else(|| {
+                    ParseError::new("expected a subscript expression", self.peek_pos())
+                })?;
+                subscripts.push(ArraySubscript::Index(index));
+            }
+            self.expect(&Token::RBracket)?;
+            if subscripts.len() > crabka_pgtypes::MAX_ARRAY_DIM {
+                return Err(ParseError::new_sqlstate(
+                    "54000",
+                    format!(
+                        "number of array dimensions ({}) exceeds the maximum allowed ({})",
+                        subscripts.len(),
+                        crabka_pgtypes::MAX_ARRAY_DIM
+                    ),
+                    self.peek_pos(),
+                ));
+            }
+        }
+        Ok(subscripts)
     }
 
-    /// `ARRAY[e1, e2, …]` — positioned at the `ARRAY` keyword. The element list
-    /// may be empty. `ARRAY(subquery)` is a deliberate 0A000 refusal.
+    /// `ARRAY[e1, e2, …]` or `ARRAY(subquery)` — positioned at the `ARRAY`
+    /// keyword. The element list may be empty, and an element may itself be a
+    /// braceless nested constructor (`ARRAY[[1,2],[3,4]]`), which adds a
+    /// dimension exactly as a spelled-out `ARRAY[ARRAY[1,2],ARRAY[3,4]]` does.
     fn array_literal(&mut self) -> Result<Expr, ParseError> {
         self.expect(&Token::Keyword(Keyword::Array))?;
         if *self.peek() == Token::LParen {
-            return Err(ParseError::new_sqlstate(
-                "0A000",
-                "ARRAY(subquery) is not supported; use ARRAY[...]",
-                self.peek_pos(),
-            ));
+            self.bump();
+            let query = self.query_expr_after_open_paren()?;
+            return Ok(Expr::ArraySubquery(Box::new(query)));
         }
+        self.array_constructor_body()
+    }
+
+    /// The `[e1, e2, …]` part of an array constructor, positioned at the `[`.
+    fn array_constructor_body(&mut self) -> Result<Expr, ParseError> {
         self.expect(&Token::LBracket)?;
         let mut elements = Vec::new();
         if *self.peek() != Token::RBracket {
             loop {
-                elements.push(self.expr(0)?);
+                // A nested `[…]` in element position is a sub-array, not a
+                // subscript — there is no base expression for it to apply to.
+                if *self.peek() == Token::LBracket {
+                    elements.push(self.array_constructor_body()?);
+                } else {
+                    elements.push(self.expr(0)?);
+                }
                 if self.eat_comma() {
                     continue;
                 }
@@ -778,33 +1397,15 @@ impl Parser {
         Ok(Expr::ArrayLiteral(elements))
     }
 
-    /// Parse a function call after its name `ident`, positioned at `(`.
-    /// `f(*)` yields [`FuncArgs::Star`]; `DISTINCT`/`ALL` may lead the argument
-    /// list; otherwise a (possibly empty) comma-separated expression list.
-    fn func_call(&mut self, name: String) -> Result<Expr, ParseError> {
-        use crate::ast::{FuncArgs, FuncCall};
+    /// `ROW(e1, e2, …)` — positioned at `(`, after the `ROW` word. The element
+    /// list may be empty, and a single element is still a row (unlike the bare
+    /// parenthesised form, where `(x)` is grouping).
+    fn row_constructor(&mut self) -> Result<Expr, ParseError> {
         self.expect(&Token::LParen)?;
-        // `f(*)` — the star form (no DISTINCT, no other args).
-        if *self.peek() == Token::Star {
-            self.bump();
-            self.expect(&Token::RParen)?;
-            return Ok(Expr::Func(FuncCall {
-                name,
-                distinct: false,
-                args: FuncArgs::Star,
-            }));
-        }
-        let distinct = if self.eat_keyword(Keyword::Distinct) {
-            true
-        } else {
-            // ALL is the default modifier; accept and ignore it.
-            self.eat_keyword(Keyword::All);
-            false
-        };
-        let mut args = Vec::new();
+        let mut elements = Vec::new();
         if *self.peek() != Token::RParen {
             loop {
-                args.push(self.expr(0)?);
+                elements.push(self.expr(0)?);
                 if self.eat_comma() {
                     continue;
                 }
@@ -812,11 +1413,445 @@ impl Parser {
             }
         }
         self.expect(&Token::RParen)?;
-        Ok(Expr::Func(FuncCall {
+        Ok(Expr::Row(elements))
+    }
+
+    /// `typename 'string'` — `PostgreSQL`'s constant-of-a-given-type syntax
+    /// (`bool 't'`, `int4 '0'`, `numeric '1.5'`, `timestamp with time zone '…'`),
+    /// which is defined to mean exactly `'string'::typename` and therefore lowers
+    /// onto the same [`Expr::Cast`] — errors included.
+    ///
+    /// Returns `Ok(None)`, with the token cursor restored, when the tokens ahead
+    /// are not a type name followed by a string literal; the caller then takes
+    /// the ordinary column / function-call path. A *bare* name that is not a type
+    /// but is directly followed by a string literal can only have been meant as
+    /// this syntax, so it reports `PostgreSQL`'s own 42704 rather than degrading
+    /// into a generic syntax error.
+    fn typed_literal(&mut self) -> Result<Option<Expr>, ParseError> {
+        let start = self.pos;
+        let Ok(ty) = self.parse_type_name() else {
+            self.pos = start;
+            if let (Token::Ident(name), Token::StringLit(_)) = (self.peek(), self.peek2()) {
+                return Err(ParseError::new_sqlstate(
+                    "42704",
+                    format!("type \"{name}\" does not exist"),
+                    self.peek_pos(),
+                ));
+            }
+            return Ok(None);
+        };
+        if !matches!(self.peek(), Token::StringLit(_)) {
+            self.pos = start;
+            return Ok(None);
+        }
+        let Token::StringLit(string) = self.bump() else {
+            unreachable!("the peek above guaranteed a string literal");
+        };
+        if ty == crabka_pgtypes::ColumnType::Interval {
+            return self.interval_literal(string).map(Some);
+        }
+        Ok(Some(Expr::Cast {
+            expr: Box::new(Expr::StringLiteral(string)),
+            ty,
+        }))
+    }
+
+    /// The tail of `INTERVAL 'string' [field [TO field]]`, positioned just after
+    /// the string.
+    ///
+    /// A field qualifier does two things in `PostgreSQL`: it supplies the unit an
+    /// unadorned quantity in the string is measured in (`interval '90' minute` is
+    /// 90 minutes), and it truncates the result to the range's last field
+    /// (`interval '1.5' day` is `1 day`). Both are properties of the *literal*, so
+    /// the qualified form is decoded here, against the field range, and lowered to
+    /// the plain interval literal it denotes.
+    fn interval_literal(&mut self, string: String) -> Result<Expr, ParseError> {
+        use crabka_pgtypes::datetime::IntervalField;
+
+        let interval = |text: String| Expr::Cast {
+            expr: Box::new(Expr::StringLiteral(text)),
+            ty: crabka_pgtypes::ColumnType::Interval,
+        };
+        let field_pos = self.peek_pos();
+        let Some(start) = self.interval_field() else {
+            return Ok(interval(string));
+        };
+        self.bump(); // the field word
+        let end = if *self.peek() == Token::Keyword(Keyword::To) {
+            self.bump();
+            let end = self
+                .interval_field()
+                .ok_or_else(|| ParseError::new("expected an interval field", self.peek_pos()))?;
+            self.bump();
+            end
+        } else {
+            start
+        };
+        let range = IntervalField::parse(start)
+            .zip(IntervalField::parse(end))
+            .ok_or_else(|| ParseError::new("expected an interval field", field_pos))?;
+        let value = crabka_pgtypes::datetime::parse_interval_ranged(&string, Some(range))
+            .map_err(|e| ParseError::new_sqlstate(e.sqlstate(), e.to_string(), field_pos))?;
+        Ok(interval(crabka_pgtypes::datetime::interval_to_text(value)))
+    }
+
+    /// The single-word interval field qualifier at the cursor, if any. Keyword-
+    /// free (the words are ordinary identifiers to this lexer), and singular only
+    /// — as in `PostgreSQL`'s grammar.
+    fn interval_field(&self) -> Option<&'static str> {
+        let Token::Ident(word) = self.peek() else {
+            return None;
+        };
+        ["year", "month", "day", "hour", "minute", "second"]
+            .into_iter()
+            .find(|field| word.eq_ignore_ascii_case(field))
+    }
+
+    /// Parse a function call after its name `ident`, positioned at `(`.
+    /// `f(*)` yields [`FuncArgs::Star`]; `DISTINCT`/`ALL` may lead the argument
+    /// list; otherwise a (possibly empty) comma-separated expression list.
+    ///
+    /// A trailing `FILTER (WHERE …)` and/or `OVER …` turns the call into a
+    /// window call: it is recorded on the enclosing `SELECT` and the expression
+    /// becomes a [`crate::ast::window_placeholder`].
+    fn func_call(&mut self, name: String) -> Result<Expr, ParseError> {
+        use crate::ast::{FuncArgs, FuncCall};
+        self.expect(&Token::LParen)?;
+        // `f(*)` — the star form (no DISTINCT, no other args).
+        let (distinct, args, ordered) = if *self.peek() == Token::Star {
+            self.bump();
+            self.expect(&Token::RParen)?;
+            (false, FuncArgs::Star, false)
+        } else {
+            let distinct = if self.eat_keyword(Keyword::Distinct) {
+                true
+            } else {
+                // ALL is the default modifier; accept and ignore it.
+                self.eat_keyword(Keyword::All);
+                false
+            };
+            let mut args = Vec::new();
+            let mut named: Vec<(String, Expr)> = Vec::new();
+            if *self.peek() != Token::RParen {
+                loop {
+                    // `name := value` — a labeled argument. `ident : =` cannot begin
+                    // an expression, so recognizing it here cannot change how any
+                    // statement that parses today is read.
+                    if let (Token::Ident(label), Token::Colon, Token::Eq) = (
+                        self.peek().clone(),
+                        self.peek2().clone(),
+                        self.peek3().clone(),
+                    ) {
+                        self.bump();
+                        self.bump();
+                        self.bump();
+                        named.push((label.to_ascii_lowercase(), self.expr(0)?));
+                    } else {
+                        args.push(self.expr(0)?);
+                    }
+                    if self.eat_comma() {
+                        continue;
+                    }
+                    break;
+                }
+            }
+            if !named.is_empty() {
+                // PostgreSQL requires every positional argument to precede the
+                // labeled ones.
+                args.extend(Self::positional_from_named(
+                    &name,
+                    &args,
+                    named,
+                    self.peek_pos(),
+                )?);
+            }
+            let ordered = self.eat_aggregate_order_by()?;
+            self.expect(&Token::RParen)?;
+            (distinct, FuncArgs::Exprs(args), ordered)
+        };
+        let filter = self.opt_filter_clause()?;
+        let over = self.opt_over_clause()?;
+        if ordered {
+            // `PostgreSQL` refuses the windowed spelling itself, with this
+            // SQLSTATE and this message. The plain spelling it executes; this
+            // engine's aggregate path cannot order the values it accumulates, so
+            // that one is refused here too rather than silently ignoring the sort.
+            let message = if over.is_some() {
+                "aggregate ORDER BY is not implemented for window functions"
+            } else {
+                "aggregate ORDER BY is not supported"
+            };
+            return Err(ParseError::new_sqlstate("0A000", message, self.peek_pos()));
+        }
+        let Some(over) = over else {
+            // `FILTER` without `OVER` is the plain aggregate spelling; the call
+            // carries the predicate and the aggregate path applies it per row.
+            // A non-aggregate call cannot have one, which the executor rejects
+            // once it knows whether the name is an aggregate.
+            return Ok(Expr::Func(FuncCall {
+                name,
+                distinct,
+                args,
+                filter: filter.map(Box::new),
+            }));
+        };
+        self.push_window_call(crate::ast::WindowCall {
             name,
             distinct,
-            args: FuncArgs::Exprs(args),
+            args,
+            filter,
+            over,
+        })
+    }
+
+    /// `ORDER BY <sort item> [, …]` inside an aggregate's argument list, which
+    /// orders the values fed to the aggregate. Consumed and discarded — the
+    /// caller refuses the call — so a malformed sort list is still a syntax
+    /// error at the right place.
+    fn eat_aggregate_order_by(&mut self) -> Result<bool, ParseError> {
+        if !self.eat_keyword(Keyword::Order) {
+            return Ok(false);
+        }
+        self.expect(&Token::Keyword(Keyword::By))?;
+        loop {
+            self.expr(0)?;
+            if self.eat_keyword(Keyword::Using) {
+                self.expr(0)?;
+            } else if !self.eat_keyword(Keyword::Desc) {
+                self.eat_keyword(Keyword::Asc);
+            }
+            if self.eat_ident_eq("nulls") && !self.eat_ident_eq("first") {
+                self.expect_ident_eq("last")?;
+            }
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        Ok(true)
+    }
+
+    /// Record a window call against the `SELECT` currently being parsed and
+    /// return the placeholder that stands in for it.
+    fn push_window_call(&mut self, call: crate::ast::WindowCall) -> Result<Expr, ParseError> {
+        let pos = self.peek_pos();
+        if self.window_spec_depth > 0 {
+            // A window definition partitions and orders the rows the window node
+            // runs over, so it is evaluated strictly below every window call.
+            return Err(ParseError::new_sqlstate(
+                "42P20",
+                "window functions are not allowed in window definitions",
+                pos,
+            ));
+        }
+        let Some(calls) = self.window_calls.last_mut() else {
+            // No enclosing SELECT: a window call in VALUES, an UPDATE SET, or a
+            // constraint expression. PostgreSQL reports 42P20 for each of these.
+            return Err(ParseError::new_sqlstate(
+                "42P20",
+                format!(
+                    "window functions are not allowed in this context (\"{}\")",
+                    call.name
+                ),
+                pos,
+            ));
+        };
+        let index = calls.len();
+        let label = call.name.clone();
+        calls.push(call);
+        Ok(crate::ast::window_placeholder(index, &label))
+    }
+
+    /// `FILTER ( WHERE <predicate> )` after a function call's argument list.
+    /// `FILTER` is recognized unconditionally here: `PostgreSQL` treats it as a
+    /// keyword in this position too, so `count(*) filter FROM t` is a syntax
+    /// error there rather than an aliased aggregate.
+    fn opt_filter_clause(&mut self) -> Result<Option<Expr>, ParseError> {
+        if !self.eat_ident_eq("filter") {
+            return Ok(None);
+        }
+        self.expect(&Token::LParen)?;
+        self.expect(&Token::Keyword(Keyword::Where))?;
+        let predicate = self.expr(0)?;
+        self.expect(&Token::RParen)?;
+        Ok(Some(predicate))
+    }
+
+    /// `OVER window_name` / `OVER ( window_specification )`.
+    fn opt_over_clause(&mut self) -> Result<Option<crate::ast::WindowRef>, ParseError> {
+        if !self.eat_ident_eq("over") {
+            return Ok(None);
+        }
+        if *self.peek() == Token::LParen {
+            return Ok(Some(crate::ast::WindowRef::Spec(Box::new(
+                self.window_spec()?,
+            ))));
+        }
+        Ok(Some(crate::ast::WindowRef::Named(self.expect_ident()?)))
+    }
+
+    /// `( [existing_window_name] [PARTITION BY …] [ORDER BY …] [frame_clause] )`,
+    /// positioned at the opening parenthesis.
+    ///
+    /// Every word here (`partition`, `range`, `rows`, `groups`, …) is matched as
+    /// a soft identifier, so none of them becomes reserved.
+    fn window_spec(&mut self) -> Result<crate::ast::WindowSpec, ParseError> {
+        self.window_spec_depth += 1;
+        let spec = self.window_spec_body();
+        self.window_spec_depth -= 1;
+        spec
+    }
+
+    fn window_spec_body(&mut self) -> Result<crate::ast::WindowSpec, ParseError> {
+        use crate::ast::WindowSpec;
+        self.expect(&Token::LParen)?;
+        // A leading bare identifier names the window this specification copies
+        // from — unless it opens one of the clauses that may follow, which is how
+        // `PostgreSQL` resolves the same ambiguity (`opt_existing_window_name` is
+        // a `ColId`, and these four words are given clause precedence).
+        let base = match self.peek() {
+            Token::Ident(word)
+                if !["partition", "rows", "range", "groups"]
+                    .iter()
+                    .any(|clause| word.eq_ignore_ascii_case(clause)) =>
+            {
+                let name = word.clone();
+                self.bump();
+                Some(name)
+            }
+            _ => None,
+        };
+        let mut partition_by = Vec::new();
+        if self.peek_ident_eq("partition") {
+            self.bump();
+            self.expect(&Token::Keyword(Keyword::By))?;
+            loop {
+                partition_by.push(self.expr(0)?);
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+        }
+        let order_by = self.parse_order_by()?;
+        let frame = self.opt_frame_clause()?;
+        self.expect(&Token::RParen)?;
+        Ok(WindowSpec {
+            base,
+            partition_by,
+            order_by,
+            frame,
+        })
+    }
+
+    /// `{ ROWS | RANGE | GROUPS } { <bound> | BETWEEN <bound> AND <bound> }
+    /// [ EXCLUDE { CURRENT ROW | GROUP | TIES | NO OTHERS } ]`.
+    fn opt_frame_clause(&mut self) -> Result<Option<crate::ast::WindowFrame>, ParseError> {
+        use crate::ast::{FrameBound, FrameMode, WindowFrame};
+        let mode = if self.eat_ident_eq("rows") {
+            FrameMode::Rows
+        } else if self.eat_ident_eq("range") {
+            FrameMode::Range
+        } else if self.eat_ident_eq("groups") {
+            FrameMode::Groups
+        } else {
+            return Ok(None);
+        };
+        let (start, end) = if self.eat_keyword(Keyword::Between) {
+            let start = self.frame_bound()?;
+            self.expect(&Token::Keyword(Keyword::And))?;
+            (start, self.frame_bound()?)
+        } else {
+            (self.frame_bound()?, FrameBound::CurrentRow)
+        };
+        let exclusion = self.frame_exclusion()?;
+        Ok(Some(WindowFrame {
+            mode,
+            start,
+            end,
+            exclusion,
         }))
+    }
+
+    /// One frame bound: `UNBOUNDED PRECEDING`, `<offset> PRECEDING`,
+    /// `CURRENT ROW`, `<offset> FOLLOWING`, or `UNBOUNDED FOLLOWING`.
+    fn frame_bound(&mut self) -> Result<crate::ast::FrameBound, ParseError> {
+        use crate::ast::FrameBound;
+        if self.eat_ident_eq("unbounded") {
+            return if self.eat_ident_eq("preceding") {
+                Ok(FrameBound::UnboundedPreceding)
+            } else {
+                self.expect_ident_eq("following")?;
+                Ok(FrameBound::UnboundedFollowing)
+            };
+        }
+        if self.peek_ident_eq("current")
+            && matches!(self.peek2(), Token::Ident(w) if w.eq_ignore_ascii_case("row"))
+        {
+            self.bump();
+            self.bump();
+            return Ok(FrameBound::CurrentRow);
+        }
+        // Parsed just above `AND`'s left binding power so a `BETWEEN … AND …`
+        // frame does not swallow its own `AND`.
+        let offset = self.expr(4)?;
+        if self.eat_ident_eq("preceding") {
+            Ok(FrameBound::Preceding(offset))
+        } else {
+            self.expect_ident_eq("following")?;
+            Ok(FrameBound::Following(offset))
+        }
+    }
+
+    fn frame_exclusion(&mut self) -> Result<crate::ast::FrameExclusion, ParseError> {
+        use crate::ast::FrameExclusion;
+        if !self.eat_ident_eq("exclude") {
+            return Ok(FrameExclusion::NoOthers);
+        }
+        if self.eat_ident_eq("ties") {
+            return Ok(FrameExclusion::Ties);
+        }
+        if self.eat_keyword(Keyword::Group) {
+            return Ok(FrameExclusion::Group);
+        }
+        if self.eat_ident_eq("current") {
+            self.expect_ident_eq("row")?;
+            return Ok(FrameExclusion::CurrentRow);
+        }
+        self.expect_ident_eq("no")?;
+        self.expect_ident_eq("others")?;
+        Ok(FrameExclusion::NoOthers)
+    }
+
+    /// `WINDOW name AS ( … ) [, …]`, between `HAVING` and `ORDER BY`.
+    fn window_clause(&mut self) -> Result<Vec<crate::ast::NamedWindow>, ParseError> {
+        use crate::ast::NamedWindow;
+        let mut windows = Vec::new();
+        if !self.eat_ident_eq("window") {
+            return Ok(windows);
+        }
+        loop {
+            let pos = self.peek_pos();
+            let name = self.expect_ident()?;
+            if windows
+                .iter()
+                .any(|w: &NamedWindow| w.name.eq_ignore_ascii_case(&name))
+            {
+                return Err(ParseError::new_sqlstate(
+                    "42P20",
+                    format!("window \"{name}\" is already defined"),
+                    pos,
+                ));
+            }
+            self.expect(&Token::Keyword(Keyword::As))?;
+            let spec = self.window_spec()?;
+            windows.push(NamedWindow { name, spec });
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        Ok(windows)
     }
 
     /// A keyword that doubles as a scalar function name (`left`/`right`, which are
@@ -834,6 +1869,374 @@ impl Parser {
         }
     }
 
+    /// The SQL/JSON standard expression forms, positioned at `(` after the
+    /// function name. `None` means `name` is not one of them, so the caller
+    /// falls through to the ordinary function-call path.
+    ///
+    /// `JSON_OBJECTAGG` and `JSON_ARRAYAGG` lower onto the existing
+    /// `jsonb_object_agg` / `jsonb_agg` aggregates, which is exactly what they
+    /// compute once `json` is stored as `jsonb`.
+    fn sql_json_expr(&mut self, name: &str) -> Result<Option<Expr>, ParseError> {
+        use crate::ast::{JsonQueryOp, SqlJsonExpr};
+
+        let op = match name {
+            "json_object" => return self.json_object_expr().map(Some),
+            "json_array" => return self.json_array_expr().map(Some),
+            "json_objectagg" | "json_arrayagg" => {
+                return self.json_agg_expr(name).map(Some);
+            }
+            "json_scalar" => {
+                self.expect(&Token::LParen)?;
+                let expr = self.expr(0)?;
+                self.expect(&Token::RParen)?;
+                return Ok(Some(sql_json(SqlJsonExpr::Scalar(expr))));
+            }
+            "json_serialize" => {
+                self.expect(&Token::LParen)?;
+                let expr = self.expr(0)?;
+                self.opt_format_json();
+                let returning = self.opt_returning_type()?;
+                self.expect(&Token::RParen)?;
+                return Ok(Some(sql_json(SqlJsonExpr::Serialize { expr, returning })));
+            }
+            "json" => {
+                self.expect(&Token::LParen)?;
+                let expr = self.expr(0)?;
+                self.opt_format_json();
+                let unique_keys = self.opt_unique_keys();
+                self.expect(&Token::RParen)?;
+                return Ok(Some(sql_json(SqlJsonExpr::Parse { expr, unique_keys })));
+            }
+            "json_exists" => JsonQueryOp::Exists,
+            "json_value" => JsonQueryOp::Value,
+            "json_query" => JsonQueryOp::Query,
+            "json_table" => {
+                // `JSON_TABLE` is a FROM item, never an expression; the message
+                // names it so the refusal is not a bare syntax error.
+                return Err(ParseError::new_sqlstate(
+                    "0A000",
+                    "JSON_TABLE is not supported",
+                    self.peek_pos(),
+                ));
+            }
+            _ => return Ok(None),
+        };
+        self.json_query_expr(op).map(Some)
+    }
+
+    /// `JSON_OBJECT( [ k {VALUE | ':'} v, … ] [{NULL | ABSENT} ON NULL]
+    /// [{WITH | WITHOUT} UNIQUE [KEYS]] [RETURNING type] )`.
+    fn json_object_expr(&mut self) -> Result<Expr, ParseError> {
+        use crate::ast::SqlJsonExpr;
+
+        let open = self.pos;
+        self.expect(&Token::LParen)?;
+        let mut entries = Vec::new();
+        while !matches!(self.peek(), Token::RParen) && !self.peek_json_object_tail() {
+            let key = self.expr(0)?;
+            if !(self.eat_word_eq("value") || self.eat_token(&Token::Colon)) {
+                // `json_object('{a,1}'::text[])` is the ordinary two-argument
+                // function, not the constructor. PostgreSQL separates them in
+                // the grammar; here the absence of `VALUE`/`:` after the first
+                // argument decides, so rewind and take the function path.
+                self.pos = open;
+                return self.func_call("json_object".into());
+            }
+            let value = self.expr(0)?;
+            self.opt_format_json();
+            entries.push((key, value));
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        let absent_on_null = self.opt_on_null()?;
+        let unique_keys = self.opt_unique_keys();
+        let returning = self.opt_returning_type()?;
+        self.expect(&Token::RParen)?;
+        Ok(sql_json(SqlJsonExpr::Object {
+            entries,
+            absent_on_null,
+            unique_keys,
+            returning,
+        }))
+    }
+
+    /// `JSON_ARRAY( [ e, … ] [{NULL | ABSENT} ON NULL] [RETURNING type] )`.
+    fn json_array_expr(&mut self) -> Result<Expr, ParseError> {
+        use crate::ast::SqlJsonExpr;
+
+        self.expect(&Token::LParen)?;
+        let mut items = Vec::new();
+        while !matches!(self.peek(), Token::RParen) && !self.peek_json_object_tail() {
+            items.push(self.expr(0)?);
+            self.opt_format_json();
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        // `JSON_ARRAY` defaults to ABSENT ON NULL, the opposite of `JSON_OBJECT`.
+        let absent_on_null = self.opt_on_null_raw()?.unwrap_or(true);
+        let returning = self.opt_returning_type()?;
+        self.expect(&Token::RParen)?;
+        Ok(sql_json(SqlJsonExpr::Array {
+            items,
+            absent_on_null,
+            returning,
+        }))
+    }
+
+    /// `JSON_OBJECTAGG(k VALUE v …)` / `JSON_ARRAYAGG(e …)`, lowered onto the
+    /// `jsonb_object_agg` / `jsonb_agg` aggregates.
+    fn json_agg_expr(&mut self, name: &str) -> Result<Expr, ParseError> {
+        use crate::ast::{FuncArgs, FuncCall};
+
+        self.expect(&Token::LParen)?;
+        let args = if name == "json_objectagg" {
+            let key = self.expr(0)?;
+            if !(self.eat_word_eq("value") || self.eat_token(&Token::Colon)) {
+                return Err(ParseError::new(
+                    "expected VALUE or ':' in JSON_OBJECTAGG entry",
+                    self.peek_pos(),
+                ));
+            }
+            let value = self.expr(0)?;
+            self.opt_format_json();
+            vec![key, value]
+        } else {
+            let item = self.expr(0)?;
+            self.opt_format_json();
+            let _ = self.parse_order_by()?;
+            vec![item]
+        };
+        // The modifiers are parsed and refused rather than silently ignored:
+        // they change which rows contribute, and the plain aggregates cannot.
+        if self.opt_on_null_raw()?.is_some() || self.opt_unique_keys() {
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                "ON NULL and UNIQUE KEYS are not supported on JSON aggregates",
+                self.peek_pos(),
+            ));
+        }
+        let _ = self.opt_returning_type()?;
+        self.expect(&Token::RParen)?;
+        Ok(Expr::Func(FuncCall {
+            name: if name == "json_objectagg" {
+                "jsonb_object_agg".into()
+            } else {
+                "jsonb_agg".into()
+            },
+            distinct: false,
+            args: FuncArgs::Exprs(args),
+            filter: None,
+        }))
+    }
+
+    /// `JSON_EXISTS | JSON_VALUE | JSON_QUERY ( context, path
+    /// [PASSING v AS name, …] [RETURNING type]
+    /// [{WITHOUT | WITH [UNCONDITIONAL | CONDITIONAL]} [ARRAY] WRAPPER]
+    /// [{KEEP | OMIT} QUOTES [ON SCALAR STRING]]
+    /// [behavior ON EMPTY] [behavior ON ERROR] )`.
+    fn json_query_expr(&mut self, op: crate::ast::JsonQueryOp) -> Result<Expr, ParseError> {
+        use crate::ast::{JsonQuery, JsonWrapper, SqlJsonExpr};
+
+        self.expect(&Token::LParen)?;
+        let context = self.expr(0)?;
+        self.opt_format_json();
+        self.expect(&Token::Comma)?;
+        let path = self.expr(0)?;
+        let mut passing = Vec::new();
+        if self.eat_word_eq("passing") {
+            loop {
+                let value = self.expr(0)?;
+                self.expect(&Token::Keyword(Keyword::As))?;
+                passing.push((self.expect_ident()?, value));
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+        }
+        let returning = self.opt_returning_type()?;
+        let mut wrapper = JsonWrapper::Without;
+        if self.peek_word_eq("without") || self.peek_word_eq("with") {
+            let with = self.peek_word_eq("with");
+            // `WITHOUT`/`WITH` also introduce `UNIQUE KEYS`, which this form
+            // does not take, so the word is only consumed for a wrapper.
+            let conditional = ["wrapper", "array", "conditional", "unconditional"]
+                .iter()
+                .any(|w| self.peek2_word_eq(w));
+            if conditional {
+                self.bump();
+                let cond = self.eat_word_eq("conditional");
+                if !cond {
+                    self.eat_word_eq("unconditional");
+                }
+                self.eat_word_eq("array");
+                if !self.eat_word_eq("wrapper") {
+                    return Err(ParseError::new("expected WRAPPER", self.peek_pos()));
+                }
+                wrapper = match (with, cond) {
+                    (false, _) => JsonWrapper::Without,
+                    (true, true) => JsonWrapper::Conditional,
+                    (true, false) => JsonWrapper::Unconditional,
+                };
+            }
+        }
+        let mut omit_quotes = false;
+        if self.peek_word_eq("omit") || self.peek_word_eq("keep") {
+            omit_quotes = self.peek_word_eq("omit");
+            self.bump();
+            if !self.eat_word_eq("quotes") {
+                return Err(ParseError::new("expected QUOTES", self.peek_pos()));
+            }
+            if self.eat_word_eq("on") {
+                self.eat_word_eq("scalar");
+                self.eat_word_eq("string");
+            }
+        }
+        let mut on_empty = None;
+        let mut on_error = None;
+        while let Some((behavior, which)) = self.opt_json_behavior()? {
+            match which {
+                JsonOnClause::Empty => on_empty = Some(behavior),
+                JsonOnClause::Error => on_error = Some(behavior),
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(sql_json(SqlJsonExpr::Query(Box::new(JsonQuery {
+            op,
+            context,
+            path,
+            passing,
+            returning,
+            wrapper,
+            omit_quotes,
+            on_empty,
+            on_error,
+        }))))
+    }
+
+    /// One `<behavior> ON {EMPTY | ERROR}` clause, if the next tokens are one.
+    fn opt_json_behavior(
+        &mut self,
+    ) -> Result<Option<(crate::ast::JsonBehavior, JsonOnClause)>, ParseError> {
+        use crate::ast::JsonBehavior;
+
+        let start = self.pos;
+        let behavior = if self.eat_word_eq("null") {
+            JsonBehavior::Null
+        } else if self.eat_word_eq("error") {
+            JsonBehavior::Error
+        } else if self.eat_word_eq("true") {
+            JsonBehavior::True
+        } else if self.eat_word_eq("false") {
+            JsonBehavior::False
+        } else if self.eat_word_eq("unknown") {
+            JsonBehavior::Unknown
+        } else if self.eat_word_eq("default") {
+            JsonBehavior::Default(self.expr(0)?)
+        } else if self.eat_word_eq("empty") {
+            if self.eat_word_eq("object") {
+                JsonBehavior::EmptyObject
+            } else {
+                self.eat_word_eq("array");
+                JsonBehavior::EmptyArray
+            }
+        } else {
+            return Ok(None);
+        };
+        if !self.eat_word_eq("on") {
+            // Not a behavior clause after all (e.g. a bare `RETURNING` tail).
+            self.pos = start;
+            return Ok(None);
+        }
+        let which = if self.eat_word_eq("empty") {
+            JsonOnClause::Empty
+        } else if self.eat_word_eq("error") {
+            JsonOnClause::Error
+        } else {
+            return Err(ParseError::new("expected EMPTY or ERROR", self.peek_pos()));
+        };
+        Ok(Some((behavior, which)))
+    }
+
+    /// `{NULL | ABSENT} ON NULL`; `true` means ABSENT. Defaults to NULL ON NULL,
+    /// which is `JSON_OBJECT`'s default.
+    fn opt_on_null(&mut self) -> Result<bool, ParseError> {
+        Ok(self.opt_on_null_raw()?.unwrap_or(false))
+    }
+
+    /// [`Self::opt_on_null`] without the default, so `JSON_ARRAY` can apply its
+    /// own (ABSENT ON NULL).
+    fn opt_on_null_raw(&mut self) -> Result<Option<bool>, ParseError> {
+        let absent = if self.peek_word_eq("absent") {
+            true
+        } else if self.peek_word_eq("null") && self.peek2_word_eq("on") {
+            false
+        } else {
+            return Ok(None);
+        };
+        self.bump();
+        if !self.eat_word_eq("on") {
+            return Err(ParseError::new("expected ON NULL", self.peek_pos()));
+        }
+        if !self.eat_word_eq("null") {
+            return Err(ParseError::new("expected ON NULL", self.peek_pos()));
+        }
+        Ok(Some(absent))
+    }
+
+    /// `{WITH | WITHOUT} UNIQUE [KEYS]`; `true` means WITH.
+    fn opt_unique_keys(&mut self) -> bool {
+        let unique = if self.peek_word_eq("with") {
+            true
+        } else if self.peek_word_eq("without") {
+            false
+        } else {
+            return false;
+        };
+        if !self.peek2_word_eq("unique") {
+            return false;
+        }
+        self.bump();
+        self.bump();
+        self.eat_word_eq("keys");
+        unique
+    }
+
+    /// `FORMAT JSON [ENCODING name]` — accepted and ignored: crabka has one JSON
+    /// representation and one server encoding.
+    fn opt_format_json(&mut self) {
+        if self.peek_word_eq("format") && self.peek2_word_eq("json") {
+            self.bump();
+            self.bump();
+            if self.eat_word_eq("encoding") {
+                let _ = self.eat_word_eq("utf8") || self.eat_word_eq("utf-8");
+            }
+        }
+    }
+
+    /// `RETURNING <type> [FORMAT JSON]`.
+    fn opt_returning_type(&mut self) -> Result<Option<crabka_pgtypes::ColumnType>, ParseError> {
+        if !matches!(self.peek(), Token::Keyword(Keyword::Returning)) {
+            return Ok(None);
+        }
+        self.bump();
+        let ty = self.parse_type_name()?;
+        self.opt_format_json();
+        Ok(Some(ty))
+    }
+
+    /// Does the next token open one of `JSON_OBJECT`'s trailing clauses rather
+    /// than another entry? (`JSON_OBJECT()` and `JSON_OBJECT(RETURNING jsonb)`
+    /// are both legal.)
+    fn peek_json_object_tail(&self) -> bool {
+        matches!(self.peek(), Token::Keyword(Keyword::Returning))
+            || self.peek_word_eq("absent")
+            || (self.peek_word_eq("with") || self.peek_word_eq("without"))
+                && self.peek2_word_eq("unique")
+            || self.peek_word_eq("null") && self.peek2_word_eq("on")
+    }
+
     /// `EXTRACT(field FROM source)` — positioned at `(`, after the `extract` ident.
     /// Lowers onto `PostgreSQL`'s internal `extract('<field>', source)` form: the
     /// field is an identifier (lowercased to a string literal), the source is a
@@ -849,18 +2252,336 @@ impl Parser {
             name: "extract".into(),
             distinct: false,
             args: FuncArgs::Exprs(vec![Expr::StringLiteral(field), source]),
+            filter: None,
         }))
     }
 
-    /// `expr IS [NOT] NULL`, positioned at `IS`. (`IS TRUE`/`IS DISTINCT FROM`
-    /// are out of scope — anything but `NULL` after `IS`/`IS NOT` is a 42601.)
-    fn parse_is_null(&mut self, lhs: Expr) -> Result<Expr, ParseError> {
+    /// The SQL-standard call forms that separate their arguments with keywords
+    /// rather than commas, positioned at `(`. `None` means this name has no such
+    /// form and the caller should fall through to the ordinary comma-argument
+    /// `func_call` — including for the comma spellings of these same functions,
+    /// which `PostgreSQL` also accepts.
+    ///
+    /// Every form lowers onto the ordinary function of the same name, so the
+    /// grammar is the only special part. `SUBSTRING` deliberately keeps both the
+    /// numeric and the pattern forms as one parse: `PostgreSQL` distinguishes
+    /// `substring(text, int, int)` from the regex `substring(text, text)` by
+    /// argument type during overload resolution, not in the grammar.
+    fn keyword_arg_call(&mut self, lower: &str) -> Result<Option<Expr>, ParseError> {
+        match lower {
+            "substring" => self.substring_expr(),
+            "trim" => self.trim_expr(),
+            "position" => self.position_expr(),
+            "overlay" => self.overlay_expr(),
+            _ => Ok(None),
+        }
+    }
+
+    /// `SUBSTRING(s FROM start FOR count)` and its shorter spellings. `FOR`
+    /// without `FROM` starts at 1, which is what `PostgreSQL`'s grammar supplies.
+    fn substring_expr(&mut self) -> Result<Option<Expr>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let source = self.expr(0)?;
+        // `substring(s, ...)` is the ordinary call; only the keyword spellings
+        // are ours. Rewind is not available, so the comma form is handled by
+        // finishing the argument list here.
+        if *self.peek() == Token::Comma || *self.peek() == Token::RParen {
+            let mut args = vec![source];
+            while self.eat_comma() {
+                args.push(self.expr(0)?);
+            }
+            self.expect(&Token::RParen)?;
+            return Ok(Some(Self::call("substring", args)));
+        }
+        let mut args = vec![source];
+        if self.eat_keyword(Keyword::From) {
+            args.push(self.expr(0)?);
+            if self.eat_keyword(Keyword::For) {
+                args.push(self.expr(0)?);
+            }
+        } else if self.eat_keyword(Keyword::For) {
+            // `SUBSTRING(s FOR n)` is `substring(s, 1, n)`.
+            args.push(Expr::IntLiteral("1".into()));
+            args.push(self.expr(0)?);
+        } else if self.eat_word_eq("similar") {
+            // `SUBSTRING(s SIMILAR pattern ESCAPE esc)` — the SQL-regex form,
+            // which is the three-argument `substring(text, text, text)`.
+            args.push(self.expr(0)?);
+            self.expect_ident_eq("escape")?;
+            args.push(self.expr(0)?);
+        } else {
+            return Err(ParseError::new(
+                "expected FROM, FOR or SIMILAR in SUBSTRING".to_string(),
+                self.peek_pos(),
+            ));
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Some(Self::call("substring", args)))
+    }
+
+    /// `TRIM([BOTH|LEADING|TRAILING] [characters] FROM source)`, plus the comma
+    /// spelling `TRIM(BOTH characters, source)`. The side chooses the function —
+    /// `btrim`/`ltrim`/`rtrim` — and defaults to `BOTH`; omitted characters mean
+    /// spaces, which is the one-argument form of each.
+    fn trim_expr(&mut self) -> Result<Option<Expr>, ParseError> {
+        self.expect(&Token::LParen)?;
+        // A side keyword only counts when something follows it: `trim(leading)`
+        // is an ordinary trim of a column called `leading`.
+        let mut side = "both";
+        for word in ["both", "leading", "trailing"] {
+            if self.peek_word_eq(word) && !self.peek2_is_arg_end() {
+                self.bump();
+                side = word;
+                break;
+            }
+        }
+        let name = match side {
+            "leading" => "ltrim",
+            "trailing" => "rtrim",
+            _ => "btrim",
+        };
+        // With a side keyword the characters may be omitted (`TRIM(BOTH FROM s)`);
+        // without one there is always at least the source.
+        let mut characters = None;
+        if !self.eat_keyword(Keyword::From) {
+            characters = Some(self.expr(0)?);
+            if !self.eat_keyword(Keyword::From) && !self.eat_comma() {
+                // `TRIM(s)` — what looked like the characters was the source.
+                self.expect(&Token::RParen)?;
+                return Ok(Some(Self::call(
+                    name,
+                    vec![characters.expect("parsed above")],
+                )));
+            }
+        }
+        let source = self.expr(0)?;
+        self.expect(&Token::RParen)?;
+        // PostgreSQL's argument order is (source, characters), the reverse of the
+        // order the SQL spelling writes them in.
+        let args = match characters {
+            Some(characters) => vec![source, characters],
+            None => vec![source],
+        };
+        Ok(Some(Self::call(name, args)))
+    }
+
+    /// `POSITION(substring IN string)` — `strpos` with the arguments swapped, as
+    /// `PostgreSQL`'s grammar swaps them.
+    fn position_expr(&mut self) -> Result<Option<Expr>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let needle = self.expr(0)?;
+        if !self.eat_keyword(Keyword::In) {
+            // The comma spelling is `position(needle, haystack)`, in that order.
+            self.expect(&Token::Comma)?;
+            let haystack = self.expr(0)?;
+            self.expect(&Token::RParen)?;
+            return Ok(Some(Self::call("strpos", vec![haystack, needle])));
+        }
+        let haystack = self.expr(0)?;
+        self.expect(&Token::RParen)?;
+        Ok(Some(Self::call("strpos", vec![haystack, needle])))
+    }
+
+    /// `OVERLAY(string PLACING replacement FROM start [FOR count])`.
+    fn overlay_expr(&mut self) -> Result<Option<Expr>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let source = self.expr(0)?;
+        let mut args = vec![source];
+        if !self.eat_word_eq("placing") {
+            // The comma spelling takes the same arguments in the same order.
+            while self.eat_comma() {
+                args.push(self.expr(0)?);
+            }
+            self.expect(&Token::RParen)?;
+            return Ok(Some(Self::call("overlay", args)));
+        }
+        args.push(self.expr(0)?);
+        self.expect(&Token::Keyword(Keyword::From))?;
+        args.push(self.expr(0)?);
+        if self.eat_keyword(Keyword::For) {
+            args.push(self.expr(0)?);
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Some(Self::call("overlay", args)))
+    }
+
+    /// A name for a FROM-subquery that was written without one.
+    ///
+    /// `PostgreSQL` calls the first such subquery `unnamed_subquery` and makes it
+    /// un-referenceable, so no query can name it and several may appear in one
+    /// FROM. Crabka cannot mark a range-table entry un-referenceable, so each
+    /// gets a distinct name instead — which keeps two unnamed subqueries in one
+    /// FROM from colliding. The divergence is that these names *can* be written
+    /// in a query, where `PostgreSQL` rejects them.
+    fn unnamed_subquery_alias(&mut self) -> String {
+        let n = self.unnamed_subqueries;
+        self.unnamed_subqueries += 1;
+        if n == 0 {
+            "unnamed_subquery".to_string()
+        } else {
+            format!("unnamed_subquery_{n}")
+        }
+    }
+
+    /// Turn labeled arguments into the positional tail the call needs.
+    ///
+    /// Only the functions whose parameter names are known here can take them —
+    /// crabka's built-ins are a positional table with no `pg_proc` parameter names
+    /// to resolve against, so a name this does not know is 42883 rather than being
+    /// silently dropped. `make_interval` is the one the corpus exercises.
+    fn positional_from_named(
+        name: &str,
+        positional: &[Expr],
+        named: Vec<(String, Expr)>,
+        pos: usize,
+    ) -> Result<Vec<Expr>, ParseError> {
+        const MAKE_INTERVAL: [&str; 7] =
+            ["years", "months", "weeks", "days", "hours", "mins", "secs"];
+        let params: &[&str] = match name {
+            "make_interval" => &MAKE_INTERVAL,
+            _ => {
+                return Err(ParseError::new_sqlstate(
+                    "42883",
+                    format!("function {name} does not support named arguments here"),
+                    pos,
+                ));
+            }
+        };
+        let mut slots: Vec<Option<Expr>> = vec![None; params.len()];
+        for (index, arg) in positional.iter().enumerate() {
+            *slots.get_mut(index).ok_or_else(|| {
+                ParseError::new_sqlstate("42883", format!("too many arguments for {name}"), pos)
+            })? = Some(arg.clone());
+        }
+        for (label, value) in named {
+            let index = params.iter().position(|p| *p == label).ok_or_else(|| {
+                ParseError::new_sqlstate(
+                    "42883",
+                    format!("{name} has no parameter named \"{label}\""),
+                    pos,
+                )
+            })?;
+            if slots[index].is_some() {
+                return Err(ParseError::new_sqlstate(
+                    "42P08",
+                    format!("argument \"{label}\" of {name} specified more than once"),
+                    pos,
+                ));
+            }
+            slots[index] = Some(value);
+        }
+        // An unsupplied parameter takes the function's own default, which for every
+        // `make_interval` field is zero.
+        let filled = slots.len() - slots.iter().rev().take_while(|slot| slot.is_none()).count();
+        Ok(slots
+            .into_iter()
+            .take(filled)
+            .skip(positional.len())
+            .map(|slot| slot.unwrap_or_else(|| Expr::IntLiteral("0".into())))
+            .collect())
+    }
+
+    /// A positional call to `name`, the shape every keyword-argument form lowers
+    /// onto.
+    fn call(name: &str, args: Vec<Expr>) -> Expr {
+        Expr::Func(crate::ast::FuncCall {
+            name: name.into(),
+            distinct: false,
+            args: crate::ast::FuncArgs::Exprs(args),
+            filter: None,
+        })
+    }
+
+    /// Is the token after the current one the end of an argument — `)` or `,`?
+    /// Used to tell a `TRIM` side keyword from a column of the same name.
+    fn peek2_is_arg_end(&self) -> bool {
+        matches!(self.peek2(), Token::RParen | Token::Comma)
+    }
+
+    /// The whole `IS` postfix family, positioned at `IS`: `IS [NOT] NULL`, the
+    /// three boolean tests `IS [NOT] TRUE|FALSE|UNKNOWN`, and the null-safe
+    /// comparison `IS [NOT] DISTINCT FROM expr`. Anything else after `IS` is a
+    /// 42601. `UNKNOWN` is matched keyword-free (as a lowercased identifier), so
+    /// a column named `unknown` is unaffected everywhere else.
+    fn parse_is_predicate(&mut self, lhs: Expr) -> Result<Expr, ParseError> {
         self.expect(&Token::Keyword(Keyword::Is))?;
         let negated = self.eat_keyword(Keyword::Not);
-        self.expect(&Token::Keyword(Keyword::Null))?;
-        Ok(Expr::IsNull {
+        if self.eat_keyword(Keyword::Null) {
+            return Ok(Expr::IsNull {
+                expr: Box::new(lhs),
+                negated,
+            });
+        }
+        if self.eat_keyword(Keyword::Distinct) {
+            self.expect(&Token::Keyword(Keyword::From))?;
+            // Parsed at the comparison level's right binding power so the right
+            // operand stays one comparand and a trailing `AND`/`OR` is left to
+            // the enclosing Pratt loop.
+            let right = self.expr(6)?;
+            let op = if negated {
+                BinaryOp::IsNotDistinctFrom
+            } else {
+                BinaryOp::IsDistinctFrom
+            };
+            return Ok(Expr::Binary {
+                op,
+                left: Box::new(lhs),
+                right: Box::new(right),
+            });
+        }
+        // `expr IS [NOT] JSON [VALUE | SCALAR | ARRAY | OBJECT]
+        // [{WITH | WITHOUT} UNIQUE [KEYS]]`.
+        if self.peek_ident_eq("json") {
+            use crate::ast::{JsonItemType, SqlJsonExpr};
+            self.bump();
+            let item = if self.eat_word_eq("scalar") {
+                JsonItemType::Scalar
+            } else if self.eat_word_eq("array") {
+                JsonItemType::Array
+            } else if self.eat_word_eq("object") {
+                JsonItemType::Object
+            } else {
+                self.eat_word_eq("value");
+                JsonItemType::Value
+            };
+            let unique_keys = self.opt_unique_keys();
+            return Ok(sql_json(SqlJsonExpr::IsJson {
+                expr: lhs,
+                negated,
+                item,
+                unique_keys,
+            }));
+        }
+        let op = if self.eat_keyword(Keyword::True) {
+            if negated {
+                UnaryOp::IsNotTrue
+            } else {
+                UnaryOp::IsTrue
+            }
+        } else if self.eat_keyword(Keyword::False) {
+            if negated {
+                UnaryOp::IsNotFalse
+            } else {
+                UnaryOp::IsFalse
+            }
+        } else if self.eat_ident_eq("unknown") {
+            if negated {
+                UnaryOp::IsNotUnknown
+            } else {
+                UnaryOp::IsUnknown
+            }
+        } else {
+            return Err(ParseError::new(
+                format!(
+                    "expected NULL, TRUE, FALSE, UNKNOWN or DISTINCT FROM after IS, found {:?}",
+                    self.peek()
+                ),
+                self.peek_pos(),
+            ));
+        };
+        Ok(Expr::Unary {
+            op,
             expr: Box::new(lhs),
-            negated,
         })
     }
 
@@ -884,7 +2605,10 @@ impl Parser {
         }
         let mut list = Vec::new();
         loop {
-            list.push(self.expr(0)?);
+            let pos = self.peek_pos();
+            let item = self.expr(0)?;
+            check_row_arity(&lhs, &item, pos)?;
+            list.push(item);
             if self.eat_comma() {
                 continue;
             }
@@ -914,24 +2638,42 @@ impl Parser {
         })
     }
 
-    /// `expr [NOT] LIKE pat` / `[NOT] ILIKE pat`, positioned at `LIKE`/`ILIKE`.
-    /// The pattern is parsed at `min_bp = 6` (the right bp of the comparison
-    /// level) so it stays a single comparand and does not swallow a trailing
-    /// `AND`/`OR`.
+    /// `expr [NOT] LIKE|ILIKE pat` / `expr [NOT] SIMILAR TO pat`, each with an
+    /// optional `ESCAPE c` clause, positioned at the operator's first word. The
+    /// pattern and the escape string are parsed at `min_bp = 6` (the right bp of
+    /// the comparison level) so each stays a single comparand and does not
+    /// swallow a trailing `AND`/`OR`.
     fn parse_like(
         &mut self,
         lhs: Expr,
         negated: bool,
-        case_insensitive: bool,
+        kind: crate::ast::MatchKind,
     ) -> Result<Expr, ParseError> {
-        self.bump(); // LIKE or ILIKE
+        self.bump(); // LIKE / ILIKE / SIMILAR
+        if kind == crate::ast::MatchKind::Similar {
+            self.expect(&Token::Keyword(Keyword::To))?;
+        }
         let pattern = self.expr(6)?;
+        let escape = if self.eat_ident_eq("escape") {
+            Some(Box::new(self.expr(6)?))
+        } else {
+            None
+        };
         Ok(Expr::Like {
             expr: Box::new(lhs),
             pattern: Box::new(pattern),
             negated,
-            case_insensitive,
+            kind,
+            escape,
         })
+    }
+
+    /// Is the token `offset` positions ahead the start of a `SIMILAR TO`
+    /// operator? Keyword-free — `similar` is an ordinary identifier to this
+    /// lexer, so only the two-word sequence is the operator.
+    fn peek_is_similar_to(&self, offset: usize) -> bool {
+        matches!(self.peek_n(offset), Token::Ident(w) if w.eq_ignore_ascii_case("similar"))
+            && *self.peek_n(offset + 1) == Token::Keyword(Keyword::To)
     }
 
     /// A `CASE` expression. Simple form (`CASE x WHEN v THEN r …`) carries an
@@ -1020,61 +2762,73 @@ impl Parser {
         Ok(stmts)
     }
 
+    /// The offset of the object keyword in a `CREATE …` statement: 1 normally,
+    /// more when persistence modifiers (`GLOBAL`/`LOCAL`/`TEMP`/`TEMPORARY`/
+    /// `UNLOGGED`) sit between `CREATE` and the object kind.
+    fn create_object_keyword_offset(&self) -> usize {
+        let mut offset = 1;
+        loop {
+            let modifier = match self.peek_n(offset) {
+                Token::Keyword(Keyword::Global | Keyword::Local) => true,
+                Token::Ident(word) => {
+                    word.eq_ignore_ascii_case("temp")
+                        || word.eq_ignore_ascii_case("temporary")
+                        || word.eq_ignore_ascii_case("unlogged")
+                }
+                _ => false,
+            };
+            if !modifier {
+                return offset;
+            }
+            offset += 1;
+        }
+    }
+
     fn statement(&mut self) -> Result<ParsedStatement, ParseError> {
         use crate::command::CommandIdentity as I;
 
+        // A `WITH` list may scope over a data-modifying statement as well as a
+        // query, so the CTE list is parsed first and the body decides which.
+        if *self.peek() == Token::Keyword(Keyword::With) {
+            let with = self.parse_with_clause()?;
+            if self.starts_dml_statement() {
+                let identity = self.dml_command_identity();
+                let mut statement = self.dml_statement()?;
+                match &mut statement {
+                    crate::ast::Statement::Insert { with: slot, .. }
+                    | crate::ast::Statement::Update { with: slot, .. }
+                    | crate::ast::Statement::Delete { with: slot, .. }
+                    | crate::ast::Statement::Merge { with: slot, .. } => *slot = with,
+                    _ => unreachable!("dml_statement only builds DML statements"),
+                }
+                return emitted(identity, Ok(statement));
+            }
+            let query = self.query_expr_after_with(with)?;
+            let statement = self.finish_query_statement(query);
+            let identity = if matches!(statement, crate::ast::Statement::CreateTableAs { .. }) {
+                I::SelectInto
+            } else {
+                I::Select
+            };
+            return emitted(identity, Ok(statement));
+        }
         if self.starts_query_expr() {
             let identity = self.query_command_identity();
-            return emitted(identity, self.query_statement());
+            let statement = self.query_statement()?;
+            // `SELECT … INTO t` is `CREATE TABLE t AS SELECT …` under another
+            // name, so it resolves to the same statement and its own identity.
+            let identity = if matches!(statement, crate::ast::Statement::CreateTableAs { .. }) {
+                I::SelectInto
+            } else {
+                identity
+            };
+            return emitted(identity, Ok(statement));
         }
         match self.peek() {
-            Token::Keyword(Keyword::Create) => {
-                // SP40: lookahead dispatch for FDW DDL vs CREATE TABLE
-                match self.peek2() {
-                    Token::Keyword(
-                        Keyword::Index | Keyword::Unique | Keyword::Global | Keyword::Local,
-                    ) => emitted(I::CreateIndex, self.create_index()),
-                    Token::Keyword(Keyword::View) => emitted(I::CreateView, self.create_view()),
-                    Token::Keyword(Keyword::Foreign) => {
-                        // CREATE FOREIGN ... — look at the third token
-                        match self.peek3() {
-                            Token::Keyword(Keyword::Table) => {
-                                emitted(I::CreateForeignTable, self.create_foreign_table())
-                            }
-                            Token::Keyword(Keyword::Data) => {
-                                emitted(I::CreateForeignDataWrapper, self.create_fdw())
-                            }
-                            _ => Err(ParseError::new(
-                                format!(
-                                    "unexpected token after CREATE FOREIGN: {:?}",
-                                    self.peek3()
-                                ),
-                                self.peek_pos(),
-                            )),
-                        }
-                    }
-                    Token::Keyword(Keyword::Server) => {
-                        emitted(I::CreateServer, self.create_server())
-                    }
-                    Token::Keyword(Keyword::User) => {
-                        if matches!(self.peek3(), Token::Keyword(Keyword::Mapping)) {
-                            emitted(I::CreateUserMapping, self.create_user_mapping())
-                        } else {
-                            emitted(I::CreateUser, self.create_role(true))
-                        }
-                    }
-                    Token::Ident(s) if s == "role" => {
-                        emitted(I::CreateRole, self.create_role(false))
-                    }
-                    Token::Ident(s) if s == "sequence" => {
-                        emitted(I::CreateSequence, self.create_sequence())
-                    }
-                    Token::Ident(s) if s == "database" => {
-                        emitted(I::CreateDatabase, self.create_database_refusal())
-                    }
-                    _ => emitted(I::CreateTable, self.create_table()),
-                }
+            Token::Ident(s) if s == "merge" && *self.peek2() == Token::Keyword(Keyword::Into) => {
+                emitted(I::Merge, self.merge())
             }
+            Token::Keyword(Keyword::Create) => self.create_statement(),
             Token::Keyword(Keyword::Drop) => {
                 // SP40: lookahead dispatch for FDW DDL vs DROP TABLE.
                 // Each drop function handles its own `IF EXISTS` via `eat_if_exists`.
@@ -1105,6 +2859,9 @@ impl Parser {
                             emitted(I::DropUser, self.drop_role())
                         }
                     }
+                    Token::Ident(s) if s == "function" || s == "procedure" || s == "routine" => {
+                        self.drop_routine_statement()
+                    }
                     Token::Ident(s) if s == "role" => emitted(I::DropRole, self.drop_role()),
                     Token::Ident(s) if s == "sequence" => {
                         emitted(I::DropSequence, self.drop_sequence())
@@ -1115,12 +2872,25 @@ impl Parser {
                     Token::Ident(s) if s == "extension" => {
                         emitted(I::DropExtension, self.drop_extension_refusal())
                     }
+                    Token::Ident(s) if s == "statistics" => {
+                        emitted(I::DropStatistics, self.drop_statistics_stmt())
+                    }
+                    Token::Keyword(Keyword::Schema) => emitted(I::DropSchema, self.drop_schema()),
+                    Token::Ident(s) if s == "type" => emitted(I::DropType, self.drop_type()),
+                    Token::Ident(s) if s == "domain" => emitted(I::DropDomain, self.drop_domain()),
                     _ => emitted(I::DropTable, self.drop_table()),
                 }
+            }
+            Token::Ident(s)
+                if s == "comment" && matches!(self.peek2(), Token::Keyword(Keyword::On)) =>
+            {
+                emitted(I::Comment, self.comment_on())
             }
             Token::Ident(s) if s == "listen" => emitted(I::Listen, self.listen_stmt()),
             Token::Ident(s) if s == "notify" => emitted(I::Notify, self.notify_stmt()),
             Token::Ident(s) if s == "unlisten" => emitted(I::Unlisten, self.unlisten_stmt()),
+            Token::Ident(s) if s == "call" => emitted(I::Call, self.call_stmt()),
+            Token::Ident(s) if s == "do" => emitted(I::Do, self.do_stmt()),
             Token::Ident(s) if s == "truncate" => emitted(I::Truncate, self.truncate()),
             Token::Ident(s) if s == "vacuum" => emitted(I::Vacuum, self.vacuum()),
             Token::Ident(s) if s == "grant" => emitted(I::Grant, self.grant_table_privileges()),
@@ -1151,17 +2921,12 @@ impl Parser {
                 } else {
                     I::End
                 };
-                self.bump();
-                emitted(identity, Ok(crate::ast::Statement::Commit))
+                let statement = self.commit_stmt();
+                emitted(identity, Ok(statement))
             }
             Token::Keyword(keyword @ (Keyword::Rollback | Keyword::Abort)) => {
-                let identity = if *keyword == Keyword::Rollback {
-                    I::Rollback
-                } else {
-                    I::Abort
-                };
-                self.bump();
-                emitted(identity, Ok(crate::ast::Statement::Rollback))
+                let leading = *keyword;
+                self.rollback_statement(leading)
             }
             // SP4: DML
             Token::Keyword(Keyword::Update) => emitted(I::Update, self.update()),
@@ -1174,11 +2939,20 @@ impl Parser {
                 } else if matches!(self.peek2(), Token::Keyword(Keyword::Transaction)) {
                     emitted(I::SetTransaction, self.set_stmt())
                 } else {
-                    emitted(I::Set, self.set_stmt())
+                    self.set_statement()
                 }
             }
+            // `PREPARE TRANSACTION` is the 2PC refusal below, not SQL PREPARE.
+            Token::Ident(s)
+                if is_session_utility_word(s)
+                    && !(s == "prepare"
+                        && matches!(self.peek2(), Token::Keyword(Keyword::Transaction))) =>
+            {
+                let word = s.clone();
+                self.session_utility_statement(&word)
+            }
             Token::Ident(s) if s == "show" => emitted(I::Show, self.show_stmt()),
-            Token::Ident(s) if s == "reset" => emitted(I::Reset, self.reset_stmt()),
+            Token::Ident(s) if s == "reset" => self.reset_statement(),
             Token::Ident(s) if s == "discard" => emitted(I::Discard, self.discard_stmt()),
             Token::Ident(s)
                 if s == "prepare"
@@ -1193,7 +2967,11 @@ impl Parser {
             }
             // SP40: ALTER SERVER / ALTER USER MAPPING; bounded ALTER TABLE rename.
             Token::Ident(s) if s == "alter" => match self.peek2() {
+                Token::Ident(s) if s == "function" || s == "procedure" || s == "routine" => {
+                    self.alter_routine_statement()
+                }
                 Token::Keyword(Keyword::Table) => emitted(I::AlterTable, self.alter_table()),
+                Token::Keyword(Keyword::Schema) => emitted(I::AlterSchema, self.alter_schema()),
                 Token::Keyword(Keyword::Server) => emitted(I::AlterServer, self.alter_server()),
                 Token::Keyword(Keyword::User) => {
                     emitted(I::AlterUserMapping, self.alter_user_mapping())
@@ -1204,6 +2982,14 @@ impl Parser {
                 Token::Ident(s) if s == "extension" => {
                     emitted(I::AlterExtension, self.alter_extension_refusal())
                 }
+                Token::Ident(s) if s == "system" => {
+                    emitted(I::AlterSystem, self.alter_system_stmt())
+                }
+                Token::Ident(s) if s == "statistics" => {
+                    emitted(I::AlterStatistics, self.alter_statistics_stmt())
+                }
+                Token::Ident(s) if s == "type" => emitted(I::AlterType, self.alter_type()),
+                Token::Ident(s) if s == "domain" => emitted(I::AlterDomain, self.alter_domain()),
                 _ => Err(ParseError::new(
                     format!("unexpected token after ALTER: {:?}", self.peek2()),
                     self.peek_pos(),
@@ -1223,10 +3009,10 @@ impl Parser {
         while matches!(self.peek_n(offset), Token::LParen) {
             offset += 1;
         }
-        if matches!(self.peek_n(offset), Token::Keyword(Keyword::Values)) {
-            CommandIdentity::Values
-        } else {
-            CommandIdentity::Select
+        match self.peek_n(offset) {
+            Token::Keyword(Keyword::Values) => CommandIdentity::Values,
+            Token::Keyword(Keyword::Table) => CommandIdentity::Table,
+            _ => CommandIdentity::Select,
         }
     }
 
@@ -1311,47 +3097,248 @@ impl Parser {
     }
 
     fn alter_table(&mut self) -> Result<crate::ast::Statement, ParseError> {
-        use crate::ast::{AlterTableRename, Statement};
+        use crate::ast::Statement;
 
         self.expect_ident_eq("alter")?;
         self.expect(&Token::Keyword(Keyword::Table))?;
-        let table = self.expect_ident()?;
+        let if_exists = self.eat_if_exists()?;
+        // `ONLY t` / `t *` control inheritance recursion; a table never has
+        // descendants here, so both spellings name the same relation.
+        self.eat_ident_eq("only");
+        let table = self.expect_relation_name()?;
+        if *self.peek() == Token::Star {
+            self.bump();
+        }
+        let mut actions = vec![self.alter_table_action()?];
+        // Only the ALTER-subcommand form takes a comma list; RENAME and the
+        // ownership/schema movers are standalone in PostgreSQL's grammar too.
+        while self.eat_comma() {
+            actions.push(self.alter_table_action()?);
+        }
+        Ok(Statement::AlterTable {
+            table,
+            if_exists,
+            actions,
+        })
+    }
+
+    fn alter_table_action(&mut self) -> Result<crate::ast::AlterTableAction, ParseError> {
+        use crate::ast::{AlterTableAction, ColumnDef};
+
         if self.eat_ident_eq("add") {
-            let constraint_name = if self.eat_ident_eq("constraint") {
-                Some(self.expect_ident()?)
-            } else {
-                None
-            };
-            self.expect_ident_eq("primary")?;
-            self.expect_ident_eq("key")?;
-            let columns = self.parse_ident_list()?;
-            return Ok(Statement::AlterTableAddPrimaryKey {
-                table,
-                constraint_name,
-                columns,
+            if self.starts_table_constraint() {
+                return Ok(AlterTableAction::AddConstraint(self.table_constraint()?));
+            }
+            let explicit_column = self.eat_ident_eq("column");
+            let if_not_exists = self.eat_if_not_exists();
+            let _ = explicit_column;
+            let name = self.expect_ident()?;
+            let (ty, serial) = self.parse_column_type()?;
+            let constraints = self.column_constraints()?;
+            return Ok(AlterTableAction::AddColumn {
+                if_not_exists,
+                column: ColumnDef {
+                    name,
+                    ty,
+                    serial,
+                    constraints,
+                },
             });
         }
-        self.expect_ident_eq("rename")?;
-        let rename = if self.eat_ident_eq("column") {
+        if self.eat_keyword(Keyword::Drop) {
+            if self.eat_ident_eq("constraint") {
+                let if_exists = self.eat_if_exists()?;
+                let name = self.expect_ident()?;
+                return Ok(AlterTableAction::DropConstraint {
+                    name,
+                    if_exists,
+                    cascade: self.eat_drop_behavior(),
+                });
+            }
+            self.eat_ident_eq("column");
+            let if_exists = self.eat_if_exists()?;
+            let column = self.expect_ident()?;
+            return Ok(AlterTableAction::DropColumn {
+                column,
+                if_exists,
+                cascade: self.eat_drop_behavior(),
+            });
+        }
+        if self.eat_ident_eq("rename") {
+            if self.eat_ident_eq("constraint") {
+                let name = self.expect_ident()?;
+                self.expect_keyword_or_ident(Keyword::To, "to")?;
+                return Ok(AlterTableAction::RenameConstraint {
+                    name,
+                    new_name: self.expect_ident()?,
+                });
+            }
+            if self.eat_keyword(Keyword::To) || self.eat_ident_eq("to") {
+                return Ok(AlterTableAction::RenameTable {
+                    new_name: self.expect_ident()?,
+                });
+            }
+            self.eat_ident_eq("column");
             let column = self.expect_ident()?;
             self.expect_keyword_or_ident(Keyword::To, "to")?;
-            AlterTableRename::Column {
+            return Ok(AlterTableAction::RenameColumn {
                 column,
                 new_name: self.expect_ident()?,
+            });
+        }
+        if self.eat_ident_eq("validate") {
+            self.expect_ident_eq("constraint")?;
+            return Ok(AlterTableAction::ValidateConstraint(self.expect_ident()?));
+        }
+        if self.eat_ident_eq("owner") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            return Ok(AlterTableAction::OwnerTo(self.expect_object_name()?));
+        }
+        if self.peek_ident_eq("attach")
+            && matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("partition"))
+        {
+            self.bump();
+            self.bump();
+            let partition = self.qualified_relation_name()?;
+            return Ok(AlterTableAction::AttachPartition {
+                partition,
+                bound: self.partition_bound()?,
+            });
+        }
+        if self.peek_ident_eq("detach")
+            && matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("partition"))
+        {
+            self.bump();
+            self.bump();
+            let partition = self.qualified_relation_name()?;
+            let concurrently = self.eat_ident_eq("concurrently");
+            let finalize = !concurrently && self.eat_ident_eq("finalize");
+            return Ok(AlterTableAction::DetachPartition {
+                partition,
+                concurrently,
+                finalize,
+            });
+        }
+        if self.eat_ident_eq("alter") {
+            self.eat_ident_eq("column");
+            let column = self.expect_ident()?;
+            if self.eat_keyword(Keyword::Set) || self.eat_ident_eq("set") {
+                if self.eat_keyword(Keyword::Not) {
+                    self.expect(&Token::Keyword(Keyword::Null))?;
+                    return Ok(AlterTableAction::SetNotNull(column));
+                }
+                if self.eat_ident_eq("default") {
+                    return Ok(AlterTableAction::SetDefault {
+                        column,
+                        expr: self.expr(0)?,
+                    });
+                }
+                // `DATA` is a keyword token (FDW DDL), so both spellings must
+                // be accepted here for `SET DATA TYPE`.
+                if self.eat_keyword(Keyword::Data) || self.eat_ident_eq("data") {
+                    return self.alter_column_type(column);
+                }
+                // SET STATISTICS / STORAGE / COMPRESSION / (attoptions) tune
+                // planner and TOAST knobs Crabka has no counterpart for.
+                let label = self.consume_unsupported_subcommand("ALTER COLUMN … SET");
+                return Ok(AlterTableAction::Unsupported(label));
             }
-        } else if self.eat_keyword(Keyword::To) || self.eat_ident_eq("to") {
-            AlterTableRename::Table {
-                new_name: self.expect_ident()?,
+            if self.eat_keyword(Keyword::Drop) {
+                if self.eat_keyword(Keyword::Not) {
+                    self.expect(&Token::Keyword(Keyword::Null))?;
+                    return Ok(AlterTableAction::DropNotNull(column));
+                }
+                if self.eat_ident_eq("default") {
+                    return Ok(AlterTableAction::DropDefault(column));
+                }
+                let label = self.consume_unsupported_subcommand("ALTER COLUMN … DROP");
+                return Ok(AlterTableAction::Unsupported(label));
             }
+            if matches!(self.peek(), Token::Ident(word) if word.eq_ignore_ascii_case("type")) {
+                return self.alter_column_type(column);
+            }
+            let label = self.consume_unsupported_subcommand("ALTER COLUMN");
+            return Ok(AlterTableAction::Unsupported(label));
+        }
+        if self.eat_keyword(Keyword::Set) || self.eat_ident_eq("set") {
+            if *self.peek() == Token::LParen {
+                let params = self.storage_parameter_list()?;
+                return Ok(AlterTableAction::SetStorageParameters(params));
+            }
+            let label = self.consume_unsupported_subcommand("SET");
+            return Ok(AlterTableAction::Unsupported(label));
+        }
+        if self.eat_ident_eq("reset") {
+            self.expect(&Token::LParen)?;
+            let mut params = Vec::new();
+            loop {
+                let mut key = self.expect_ident()?;
+                if *self.peek() == Token::Dot {
+                    self.bump();
+                    key.push('.');
+                    key.push_str(&self.expect_ident()?);
+                }
+                params.push(key);
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Token::RParen)?;
+            return Ok(AlterTableAction::ResetStorageParameters(params));
+        }
+        let label = self.consume_unsupported_subcommand("ALTER TABLE");
+        if label.is_empty() {
+            return Err(ParseError::new(
+                format!("unexpected ALTER TABLE subcommand {:?}", self.peek()),
+                self.peek_pos(),
+            ));
+        }
+        Ok(AlterTableAction::Unsupported(label))
+    }
+
+    /// `TYPE <type> [COLLATE c] [USING <expr>]` — the `TYPE` (or `SET DATA
+    /// TYPE`) lead-in is already consumed.
+    fn alter_column_type(
+        &mut self,
+        column: String,
+    ) -> Result<crate::ast::AlterTableAction, ParseError> {
+        self.expect_ident_eq("type")?;
+        let ty = self.parse_type_name()?;
+        if self.eat_ident_eq("collate") {
+            self.expect_ident()?;
+        }
+        let using = if self.eat_keyword(Keyword::Using) {
+            Some(self.expr(0)?)
         } else {
-            let column = self.expect_ident()?;
-            self.expect_keyword_or_ident(Keyword::To, "to")?;
-            AlterTableRename::Column {
-                column,
-                new_name: self.expect_ident()?,
-            }
+            None
         };
-        Ok(Statement::AlterTableRename { table, rename })
+        Ok(crate::ast::AlterTableAction::SetType { column, ty, using })
+    }
+
+    /// Consume the rest of one `ALTER TABLE` subcommand that Crabka's storage
+    /// model has no counterpart for, returning the source text so the executor
+    /// can name it in its `0A000`. Stops at the subcommand separator (a
+    /// top-level comma) or the end of the statement.
+    fn consume_unsupported_subcommand(&mut self, prefix: &str) -> String {
+        let start = self.peek_pos();
+        let mut depth = 0usize;
+        loop {
+            match self.peek() {
+                Token::Eof | Token::Semicolon => break,
+                Token::Comma if depth == 0 => break,
+                Token::LParen => depth += 1,
+                Token::RParen => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            self.bump();
+        }
+        let tail = self.source[start..self.peek_pos()].trim();
+        if tail.is_empty() {
+            prefix.to_string()
+        } else {
+            format!("{prefix} {tail}")
+        }
     }
 
     fn create_role(&mut self, can_login: bool) -> Result<crate::ast::Statement, ParseError> {
@@ -1418,7 +3405,7 @@ impl Parser {
         } else {
             Some(self.expect_object_name()?)
         };
-        Ok(crate::ast::Statement::SetRole { role })
+        Ok(crate::ast::Statement::SetRole { role, reset: false })
     }
 
     fn privilege_list_until_on(&mut self) -> Result<Vec<String>, ParseError> {
@@ -1468,6 +3455,44 @@ impl Parser {
         }
     }
 
+    /// A relation name, with an optional schema qualifier: `t` or `s.t`.
+    ///
+    /// The qualifier is passed through verbatim rather than interpreted here —
+    /// the parser has no catalog. `crabka_pgkv::key::unqualified_relation` is what
+    /// decides that `public.t` and `pg_temp.t` name the same relation as `t`
+    /// (crabka has one flat namespace, which is what `public` names under
+    /// `PostgreSQL`'s default `search_path`), while `information_schema.tables`
+    /// and `pg_catalog.*` keep resolving by their dotted names and a qualifier
+    /// naming a schema that holds nothing still fails to resolve.
+    fn expect_relation_name(&mut self) -> Result<String, ParseError> {
+        let first = self.expect_ident()?;
+        if *self.peek() != Token::Dot {
+            return Ok(first);
+        }
+        let schema_pos = self.peek_pos();
+        self.bump();
+        let second = self.expect_ident()?;
+        // `public` and `pg_temp` name the one flat namespace crabka has, so they
+        // resolve to the bare relation. No other schema can hold a relation here,
+        // and accepting the qualifier would create one whose NAME contains a dot —
+        // silently succeeding where PostgreSQL reports the schema missing.
+        if first.eq_ignore_ascii_case("public") || first.eq_ignore_ascii_case("pg_temp") {
+            return Ok(second);
+        }
+        // `information_schema` and `pg_catalog` are real here and resolve by their
+        // dotted names.
+        if first.eq_ignore_ascii_case("information_schema")
+            || first.eq_ignore_ascii_case("pg_catalog")
+        {
+            return Ok(format!("{first}.{second}"));
+        }
+        Err(ParseError::new_sqlstate(
+            "3F000",
+            format!("schema \"{first}\" does not exist"),
+            schema_pos,
+        ))
+    }
+
     fn expect_privilege_name(&mut self) -> Result<String, ParseError> {
         match self.bump() {
             Token::Ident(s) => Ok(s.to_ascii_uppercase()),
@@ -1505,9 +3530,28 @@ impl Parser {
             }
             return self.set_transaction_tail();
         }
+        // `SET CONSTRAINTS { ALL | name, … } { DEFERRED | IMMEDIATE }`.
+        if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("constraints")) {
+            self.bump();
+            return self.set_constraints_tail();
+        }
+        // `SET [SESSION | LOCAL] SESSION AUTHORIZATION …`. The scope word is
+        // consumed first, so the authorization spelling is checked before
+        // `SESSION` is eaten as the (default) scope.
+        if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("session"))
+            && matches!(self.peek2(), Token::Ident(w) if w.eq_ignore_ascii_case("authorization"))
+        {
+            self.bump(); // session
+            self.bump(); // authorization
+            return self.set_session_authorization_tail();
+        }
         // `SESSION` is the explicit spelling of the default SET scope.
         if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("session")) {
             self.bump();
+            if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("authorization")) {
+                self.bump();
+                return self.set_session_authorization_tail();
+            }
         }
         // `LOCAL` is the flag only when it leads and is followed by a parameter
         // name (an ident or `TIME ZONE`). It is NEVER a flag after `TIME ZONE`
@@ -1518,6 +3562,13 @@ impl Parser {
             && !matches!(self.peek2(), Token::Eq);
         if local {
             self.bump(); // LOCAL
+            if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("session"))
+                && matches!(self.peek2(), Token::Ident(w) if w.eq_ignore_ascii_case("authorization"))
+            {
+                self.bump(); // session
+                self.bump(); // authorization
+                return self.set_session_authorization_tail();
+            }
         }
         // The `TIME ZONE` special spelling: `SET [LOCAL] TIME ZONE <value>`.
         if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("time"))
@@ -1533,7 +3584,7 @@ impl Parser {
             });
         }
         // `SET [LOCAL] <name> (= | TO) <value>`.
-        let name = self.expect_ident()?.to_ascii_lowercase();
+        let name = self.expect_guc_name()?;
         // `=` is a token; `TO` is now a keyword (Keyword::To) — either separates name from value.
         let sep = *self.peek() == Token::Eq
             || *self.peek() == Token::Keyword(Keyword::To)
@@ -1563,7 +3614,7 @@ impl Parser {
                     } else {
                         "+"
                     };
-                    let Token::IntLit(number) = self.bump() else {
+                    let (Token::IntLit(number) | Token::FloatLit(number)) = self.bump() else {
                         return Err(ParseError::new(
                             "expected a number after SET value sign",
                             self.peek_pos(),
@@ -1637,28 +3688,54 @@ impl Parser {
         Ok(SetValue::Value(rendered))
     }
 
-    fn set_transaction_tail(&mut self) -> Result<crate::ast::Statement, ParseError> {
-        use crate::ast::{IsolationLevel, SetValue, Statement};
-        let isolation = if self.eat_keyword(Keyword::Isolation) {
-            self.expect(&Token::Keyword(Keyword::Level))?;
-            if self.eat_keyword(Keyword::Repeatable) {
-                self.expect(&Token::Keyword(Keyword::Read))?;
-                Some(IsolationLevel::RepeatableRead)
-            } else if self.eat_keyword(Keyword::Read) {
-                self.expect(&Token::Keyword(Keyword::Committed))?;
-                Some(IsolationLevel::ReadCommitted)
-            } else {
-                return Err(ParseError::new(
-                    "expected REPEATABLE READ or READ COMMITTED",
-                    self.peek_pos(),
-                ));
+    /// D6: the tail of `SET CONSTRAINTS { ALL | <name> [, …] } { DEFERRED |
+    /// IMMEDIATE }`, positioned after `CONSTRAINTS`.
+    fn set_constraints_tail(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        if !self.eat_keyword(Keyword::All) {
+            self.object_name_list()?;
+        }
+        let pos = self.peek_pos();
+        if !self.eat_ident_eq("deferred") && !self.eat_ident_eq("immediate") {
+            return Err(ParseError::new(
+                format!(
+                    "expected DEFERRED or IMMEDIATE in SET CONSTRAINTS, found {:?}",
+                    self.peek()
+                ),
+                pos,
+            ));
+        }
+        Ok(crate::ast::Statement::Utility(
+            crate::ast::UtilityStatement::SetConstraints,
+        ))
+    }
+
+    /// D8: the tail of `SET … SESSION AUTHORIZATION { <role> | DEFAULT }`,
+    /// positioned after `AUTHORIZATION`.
+    fn set_session_authorization_tail(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::UtilityStatement;
+        let role = match self.peek().clone() {
+            Token::Ident(word) if word.eq_ignore_ascii_case("default") => {
+                self.bump();
+                None
             }
-        } else {
-            None
+            Token::StringLit(name) => {
+                self.bump();
+                Some(name)
+            }
+            _ => Some(self.expect_object_name()?),
         };
-        let value = match isolation {
-            Some(IsolationLevel::RepeatableRead) => SetValue::Value("repeatable read".into()),
-            Some(IsolationLevel::ReadCommitted) => SetValue::Value("read committed".into()),
+        Ok(crate::ast::Statement::Utility(
+            UtilityStatement::SetSessionAuthorization { role, reset: false },
+        ))
+    }
+
+    fn set_transaction_tail(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{SetValue, Statement};
+        // `SET TRANSACTION` takes the same mode list as `BEGIN`; only the
+        // isolation level reaches the GUC, the access mode being carried by the
+        // transaction itself.
+        let value = match self.transaction_modes()?.isolation {
+            Some(level) => SetValue::Value(level.render().into()),
             None => SetValue::Default,
         };
         Ok(Statement::Set {
@@ -1666,6 +3743,36 @@ impl Parser {
             name: "__set_transaction".into(),
             value,
         })
+    }
+
+    /// The optional `ISOLATION LEVEL { SERIALIZABLE | REPEATABLE READ | READ
+    /// COMMITTED | READ UNCOMMITTED }` tail shared by `BEGIN`/`START
+    /// TRANSACTION` and `SET TRANSACTION`.
+    fn opt_isolation_level(&mut self) -> Result<Option<crate::ast::IsolationLevel>, ParseError> {
+        use crate::ast::IsolationLevel;
+        if !self.eat_keyword(Keyword::Isolation) {
+            return Ok(None);
+        }
+        self.expect(&Token::Keyword(Keyword::Level))?;
+        if self.eat_keyword(Keyword::Repeatable) {
+            self.expect(&Token::Keyword(Keyword::Read))?;
+            return Ok(Some(IsolationLevel::RepeatableRead));
+        }
+        if self.eat_ident_eq("serializable") {
+            return Ok(Some(IsolationLevel::Serializable));
+        }
+        if self.eat_keyword(Keyword::Read) {
+            if self.eat_keyword(Keyword::Committed) {
+                return Ok(Some(IsolationLevel::ReadCommitted));
+            }
+            if self.eat_ident_eq("uncommitted") {
+                return Ok(Some(IsolationLevel::ReadUncommitted));
+            }
+        }
+        Err(ParseError::new(
+            "expected SERIALIZABLE, REPEATABLE READ, READ COMMITTED or READ UNCOMMITTED",
+            self.peek_pos(),
+        ))
     }
 
     /// The value after `SET [LOCAL] TIME ZONE`: like [`set_value`], but the bare
@@ -1698,6 +3805,19 @@ impl Parser {
         }
     }
 
+    /// A configuration parameter name: an identifier, or `PostgreSQL`'s
+    /// two-part `extension.parameter` spelling for a customized option. The
+    /// name is normalized to lowercase, as `PostgreSQL` normalizes it.
+    fn expect_guc_name(&mut self) -> Result<String, ParseError> {
+        let mut name = self.expect_ident()?.to_ascii_lowercase();
+        if *self.peek() == Token::Dot {
+            self.bump();
+            name.push('.');
+            name.push_str(&self.expect_ident()?.to_ascii_lowercase());
+        }
+        Ok(name)
+    }
+
     /// SP37: `SHOW <name>` / `SHOW TIME ZONE`. Positioned at the `show` ident.
     fn show_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
@@ -1715,7 +3835,7 @@ impl Parser {
                 name: "timezone".into(),
             });
         }
-        let name = self.expect_ident()?.to_ascii_lowercase();
+        let name = self.expect_guc_name()?;
         Ok(Statement::Show { name })
     }
 
@@ -1725,7 +3845,24 @@ impl Parser {
         self.bump(); // reset
         if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("role")) {
             self.bump();
-            return Ok(Statement::SetRole { role: None });
+            return Ok(Statement::SetRole {
+                role: None,
+                reset: true,
+            });
+        }
+        // `RESET SESSION AUTHORIZATION` is the `SET SESSION AUTHORIZATION DEFAULT`
+        // spelling; PostgreSQL restores the authenticated user for both.
+        if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("session"))
+            && matches!(self.peek2(), Token::Ident(w) if w.eq_ignore_ascii_case("authorization"))
+        {
+            self.bump(); // session
+            self.bump(); // authorization
+            return Ok(Statement::Utility(
+                crate::ast::UtilityStatement::SetSessionAuthorization {
+                    role: None,
+                    reset: true,
+                },
+            ));
         }
         if self.eat_keyword(Keyword::All) {
             return Ok(Statement::Reset {
@@ -1742,24 +3879,832 @@ impl Parser {
                 target: crate::ast::ResetTarget::Name("timezone".into()),
             });
         }
-        let name = self.expect_ident()?.to_ascii_lowercase();
+        let name = self.expect_guc_name()?;
         Ok(Statement::Reset {
             target: crate::ast::ResetTarget::Name(name),
         })
     }
 
+    /// F-1: `DISCARD { ALL | PLANS | SEQUENCES | TEMPORARY | TEMP }`.
     fn discard_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{DiscardTarget, Statement};
         self.bump(); // discard
-        self.expect(&Token::Keyword(Keyword::All))?;
-        Ok(crate::ast::Statement::Set {
-            local: false,
-            name: "__discard_all".into(),
-            value: crate::ast::SetValue::Default,
+        if self.eat_keyword(Keyword::All) {
+            return Ok(Statement::Discard {
+                target: DiscardTarget::All,
+            });
+        }
+        let pos = self.peek_pos();
+        let target = match self.bump() {
+            Token::Ident(word) if word.eq_ignore_ascii_case("plans") => DiscardTarget::Plans,
+            Token::Ident(word) if word.eq_ignore_ascii_case("sequences") => {
+                DiscardTarget::Sequences
+            }
+            Token::Ident(word)
+                if word.eq_ignore_ascii_case("temp") || word.eq_ignore_ascii_case("temporary") =>
+            {
+                DiscardTarget::Temporary
+            }
+            other => {
+                return Err(ParseError::new(
+                    format!(
+                        "expected ALL, PLANS, SEQUENCES or TEMPORARY in DISCARD, found {other:?}"
+                    ),
+                    pos,
+                ));
+            }
+        };
+        Ok(Statement::Discard { target })
+    }
+
+    /// The `CREATE …` dispatch, split out of [`Self::statement`] so that
+    /// function stays inside the readable-length budget.
+    fn create_statement(&mut self) -> Result<ParsedStatement, ParseError> {
+        use crate::command::CommandIdentity as I;
+
+        // SP40: lookahead dispatch for FDW DDL vs CREATE TABLE. The
+        // persistence modifiers (`TEMP`/`TEMPORARY`/`UNLOGGED`, and the
+        // `GLOBAL`/`LOCAL` noise words that may precede them) sit
+        // between CREATE and the object keyword, so dispatch looks past
+        // them.
+        match self.peek_n(self.create_object_keyword_offset()) {
+            Token::Keyword(Keyword::Or) if self.peeked_create_view() => {
+                emitted(I::CreateView, self.create_view())
+            }
+            Token::Keyword(Keyword::Or) if self.peeked_create_routine().is_some() => {
+                let object = self
+                    .peeked_create_routine()
+                    .expect("the guard matched a routine object word");
+                emitted(
+                    Self::routine_command_identity(object, true, false),
+                    self.create_routine(),
+                )
+            }
+            Token::Ident(word) if word == "function" || word == "procedure" => {
+                let object = self
+                    .peeked_create_routine()
+                    .expect("the arm matched a routine object word");
+                emitted(
+                    Self::routine_command_identity(object, true, false),
+                    self.create_routine(),
+                )
+            }
+            Token::Keyword(Keyword::Index | Keyword::Unique) => {
+                emitted(I::CreateIndex, self.create_index())
+            }
+            Token::Keyword(Keyword::View) => emitted(I::CreateView, self.create_view()),
+            Token::Keyword(Keyword::Foreign) => {
+                // CREATE FOREIGN ... — look at the third token
+                match self.peek3() {
+                    Token::Keyword(Keyword::Table) => {
+                        emitted(I::CreateForeignTable, self.create_foreign_table())
+                    }
+                    Token::Keyword(Keyword::Data) => {
+                        emitted(I::CreateForeignDataWrapper, self.create_fdw())
+                    }
+                    _ => Err(ParseError::new(
+                        format!("unexpected token after CREATE FOREIGN: {:?}", self.peek3()),
+                        self.peek_pos(),
+                    )),
+                }
+            }
+            Token::Keyword(Keyword::Server) => emitted(I::CreateServer, self.create_server()),
+            Token::Keyword(Keyword::User) => {
+                if matches!(self.peek3(), Token::Keyword(Keyword::Mapping)) {
+                    emitted(I::CreateUserMapping, self.create_user_mapping())
+                } else {
+                    emitted(I::CreateUser, self.create_role(true))
+                }
+            }
+            Token::Ident(s) if s == "role" => emitted(I::CreateRole, self.create_role(false)),
+            Token::Ident(s) if s == "sequence" => {
+                emitted(I::CreateSequence, self.create_sequence())
+            }
+            Token::Ident(s) if s == "database" => {
+                emitted(I::CreateDatabase, self.create_database_refusal())
+            }
+            Token::Ident(s) if s == "statistics" => {
+                emitted(I::CreateStatistics, self.create_statistics_stmt())
+            }
+            Token::Keyword(Keyword::Schema) => emitted(I::CreateSchema, self.create_schema()),
+            Token::Ident(s) if s == "type" => emitted(I::CreateType, self.create_type()),
+            Token::Ident(s) if s == "domain" => emitted(I::CreateDomain, self.create_domain()),
+            _ if self.statement_has_top_level_as() => {
+                emitted(I::CreateTableAs, self.create_table_as())
+            }
+            _ => emitted(I::CreateTable, self.create_table()),
+        }
+    }
+
+    /// `ROLLBACK`/`ABORT`, whose command identity follows the parsed shape:
+    /// `ROLLBACK TO [SAVEPOINT] name` is its own PG18 command row.
+    fn rollback_statement(&mut self, leading: Keyword) -> Result<ParsedStatement, ParseError> {
+        use crate::command::CommandIdentity as I;
+        let statement = self.rollback_stmt()?;
+        let identity = match (&statement, leading) {
+            (crate::ast::Statement::RollbackToSavepoint { .. }, _) => I::RollbackToSavepoint,
+            (_, Keyword::Abort) => I::Abort,
+            _ => I::Rollback,
+        };
+        emitted(identity, Ok(statement))
+    }
+
+    /// `SET …`, whose command identity follows the parsed shape: `SET
+    /// CONSTRAINTS` and `SET … SESSION AUTHORIZATION` are their own rows.
+    fn set_statement(&mut self) -> Result<ParsedStatement, ParseError> {
+        use crate::{ast::UtilityStatement, command::CommandIdentity as I};
+        let statement = self.set_stmt()?;
+        let identity = match &statement {
+            crate::ast::Statement::Utility(UtilityStatement::SetConstraints) => I::SetConstraints,
+            crate::ast::Statement::Utility(UtilityStatement::SetSessionAuthorization {
+                ..
+            }) => I::SetSessionAuthorization,
+            _ => I::Set,
+        };
+        emitted(identity, Ok(statement))
+    }
+
+    /// `RESET …`, which is `SET SESSION AUTHORIZATION DEFAULT` in its
+    /// `RESET SESSION AUTHORIZATION` spelling.
+    fn reset_statement(&mut self) -> Result<ParsedStatement, ParseError> {
+        use crate::{ast::UtilityStatement, command::CommandIdentity as I};
+        let statement = self.reset_stmt()?;
+        let identity = if matches!(
+            &statement,
+            crate::ast::Statement::Utility(UtilityStatement::SetSessionAuthorization { .. })
+        ) {
+            I::SetSessionAuthorization
+        } else {
+            I::Reset
+        };
+        emitted(identity, Ok(statement))
+    }
+
+    /// The S1/S2/S3/P5/S6 statements whose leading word is a plain identifier.
+    /// Split out of [`Self::statement`] so that dispatch stays one arm wide.
+    fn session_utility_statement(&mut self, word: &str) -> Result<ParsedStatement, ParseError> {
+        use crate::command::CommandIdentity as I;
+        match word {
+            "savepoint" => emitted(I::Savepoint, self.savepoint_stmt()),
+            "release" => emitted(I::ReleaseSavepoint, self.release_savepoint_stmt()),
+            "declare" => emitted(I::Declare, self.declare_cursor()),
+            "fetch" => emitted(I::Fetch, self.fetch_cursor(false)),
+            "move" => emitted(I::Move, self.fetch_cursor(true)),
+            "close" => emitted(I::Close, self.close_cursor()),
+            "prepare" => emitted(I::Prepare, self.prepare_stmt()),
+            "execute" => emitted(I::Execute, self.execute_stmt()),
+            "deallocate" => emitted(I::Deallocate, self.deallocate_stmt()),
+            "lock" => emitted(I::Lock, self.lock_stmt()),
+            "explain" => emitted(I::Explain, self.explain_stmt()),
+            "analyze" => emitted(I::Analyze, self.analyze_stmt()),
+            "cluster" => emitted(I::Cluster, self.cluster_stmt()),
+            "reindex" => emitted(I::Reindex, self.reindex_stmt()),
+            "checkpoint" => {
+                self.bump();
+                emitted(
+                    I::Checkpoint,
+                    Ok(crate::ast::Statement::Utility(
+                        crate::ast::UtilityStatement::Checkpoint,
+                    )),
+                )
+            }
+            other => Err(ParseError::new(
+                format!("unexpected statement start {other:?}"),
+                self.peek_pos(),
+            )),
+        }
+    }
+
+    /// S1: `SAVEPOINT <name>`. Positioned at the `savepoint` ident.
+    fn savepoint_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.bump(); // savepoint
+        let name = self.expect_ident()?;
+        Ok(crate::ast::Statement::Savepoint { name })
+    }
+
+    /// S1: `RELEASE [SAVEPOINT] <name>`. Positioned at the `release` ident.
+    fn release_savepoint_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.bump(); // release
+        self.eat_ident_eq("savepoint");
+        let name = self.expect_ident()?;
+        Ok(crate::ast::Statement::ReleaseSavepoint { name })
+    }
+
+    /// S1: the `ROLLBACK`/`ABORT` family, including `ROLLBACK TO [SAVEPOINT] <name>`.
+    /// Positioned at `ROLLBACK`/`ABORT`.
+    fn rollback_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.bump(); // ROLLBACK / ABORT
+        // `WORK`/`TRANSACTION` are stock noise words on every spelling.
+        if !self.eat_keyword(Keyword::Transaction) {
+            self.eat_ident_eq("work");
+        }
+        if self.eat_keyword(Keyword::To) || self.eat_ident_eq("to") {
+            self.eat_ident_eq("savepoint");
+            let name = self.expect_ident()?;
+            return Ok(crate::ast::Statement::RollbackToSavepoint { name });
+        }
+        let chain = self.eat_transaction_chain_tail();
+        Ok(crate::ast::Statement::Rollback { chain })
+    }
+
+    /// S1: `COMMIT`/`END [WORK|TRANSACTION] [AND [NO] CHAIN]`. Positioned at the
+    /// leading keyword.
+    fn commit_stmt(&mut self) -> crate::ast::Statement {
+        self.bump(); // COMMIT / END
+        if !self.eat_keyword(Keyword::Transaction) {
+            self.eat_ident_eq("work");
+        }
+        let chain = self.eat_transaction_chain_tail();
+        crate::ast::Statement::Commit { chain }
+    }
+
+    /// The stock `AND [NO] CHAIN` tail; `true` only for the chaining spelling.
+    fn eat_transaction_chain_tail(&mut self) -> bool {
+        if !matches!(self.peek(), Token::Keyword(Keyword::And)) {
+            return false;
+        }
+        let mark = self.pos;
+        self.bump(); // AND
+        let negated = self.eat_keyword(Keyword::Not) || self.eat_ident_eq("no");
+        if self.eat_ident_eq("chain") {
+            return !negated;
+        }
+        self.pos = mark;
+        false
+    }
+
+    /// S2: `DECLARE <name> [BINARY] [INSENSITIVE|ASENSITIVE] [[NO] SCROLL] CURSOR
+    /// [{WITH|WITHOUT} HOLD] FOR <query>`. Positioned at the `declare` ident.
+    fn declare_cursor(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.bump(); // declare
+        let name = self.expect_ident()?;
+        let mut binary = false;
+        let mut scroll = None;
+        loop {
+            if self.eat_ident_eq("binary") {
+                binary = true;
+                continue;
+            }
+            if self.eat_ident_eq("insensitive") || self.eat_ident_eq("asensitive") {
+                continue;
+            }
+            if self.eat_ident_eq("scroll") {
+                scroll = Some(true);
+                continue;
+            }
+            if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("no"))
+                && matches!(self.peek2(), Token::Ident(w) if w.eq_ignore_ascii_case("scroll"))
+            {
+                self.bump();
+                self.bump();
+                scroll = Some(false);
+                continue;
+            }
+            break;
+        }
+        self.expect_ident_eq("cursor")?;
+        let mut hold = false;
+        if self.eat_keyword(Keyword::With) {
+            self.expect_ident_eq("hold")?;
+            hold = true;
+        } else if self.eat_ident_eq("without") {
+            self.expect_ident_eq("hold")?;
+        }
+        self.expect(&Token::Keyword(Keyword::For))?;
+        let query = self.query_expr()?;
+        Ok(crate::ast::Statement::DeclareCursor {
+            name,
+            binary,
+            scroll,
+            hold,
+            query: Box::new(query),
         })
     }
 
+    /// S2: `FETCH`/`MOVE [<direction>] [FROM|IN] <cursor>`. Positioned at the
+    /// leading ident.
+    fn fetch_cursor(&mut self, move_only: bool) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{FetchCount, FetchDirection};
+        self.bump(); // fetch / move
+        let direction = if self.eat_ident_eq("next") {
+            FetchDirection::Relative(FetchCount::Rows(1))
+        } else if self.eat_ident_eq("prior") {
+            FetchDirection::Relative(FetchCount::Rows(-1))
+        } else if self.eat_ident_eq("first") {
+            FetchDirection::Absolute(1)
+        } else if self.eat_ident_eq("last") {
+            FetchDirection::Absolute(-1)
+        } else if self.eat_ident_eq("absolute") {
+            FetchDirection::Absolute(self.signed_fetch_count()?)
+        } else if self.eat_ident_eq("relative") {
+            FetchDirection::RelativeOne(self.signed_fetch_count()?)
+        } else if self.eat_keyword(Keyword::All) {
+            FetchDirection::Relative(FetchCount::AllForward)
+        } else if self.eat_ident_eq("forward") {
+            FetchDirection::Relative(self.fetch_count(false)?)
+        } else if self.eat_ident_eq("backward") {
+            FetchDirection::Relative(self.fetch_count(true)?)
+        } else if matches!(self.peek(), Token::IntLit(_) | Token::Minus | Token::Plus) {
+            FetchDirection::Relative(FetchCount::Rows(self.signed_fetch_count()?))
+        } else {
+            FetchDirection::Relative(FetchCount::Rows(1))
+        };
+        // `FROM`/`IN` before the cursor name are optional noise words.
+        if !self.eat_keyword(Keyword::From) {
+            self.eat_keyword(Keyword::In);
+        }
+        let cursor = self.expect_ident()?;
+        Ok(crate::ast::Statement::FetchCursor {
+            cursor,
+            direction,
+            move_only,
+        })
+    }
+
+    /// The count after `FORWARD`/`BACKWARD`: `ALL`, an explicit signed count, or
+    /// the implicit `1`.
+    fn fetch_count(&mut self, backward: bool) -> Result<crate::ast::FetchCount, ParseError> {
+        use crate::ast::FetchCount;
+        if self.eat_keyword(Keyword::All) {
+            return Ok(if backward {
+                FetchCount::AllBackward
+            } else {
+                FetchCount::AllForward
+            });
+        }
+        let count = if matches!(self.peek(), Token::IntLit(_) | Token::Minus | Token::Plus) {
+            self.signed_fetch_count()?
+        } else {
+            1
+        };
+        Ok(FetchCount::Rows(if backward {
+            count.saturating_neg()
+        } else {
+            count
+        }))
+    }
+
+    /// A `FETCH`/`MOVE` row count, which may carry an explicit sign.
+    fn signed_fetch_count(&mut self) -> Result<i64, ParseError> {
+        let negative = match self.peek() {
+            Token::Minus => {
+                self.bump();
+                true
+            }
+            Token::Plus => {
+                self.bump();
+                false
+            }
+            _ => false,
+        };
+        let count = self.expect_int_count("FETCH")?;
+        Ok(if negative { -count } else { count })
+    }
+
+    /// S2: `CLOSE { <name> | ALL }`. Positioned at the `close` ident.
+    fn close_cursor(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::CursorTarget;
+        self.bump(); // close
+        let target = if self.eat_keyword(Keyword::All) {
+            CursorTarget::All
+        } else {
+            CursorTarget::Name(self.expect_ident()?)
+        };
+        Ok(crate::ast::Statement::CloseCursor { target })
+    }
+
+    /// S2: `PREPARE <name> [ ( <type>, … ) ] AS <statement>`. Positioned at the
+    /// `prepare` ident.
+    fn prepare_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.bump(); // prepare
+        let name = self.expect_ident()?;
+        let mut param_types = Vec::new();
+        if *self.peek() == Token::LParen {
+            self.bump();
+            loop {
+                param_types.push(self.parse_type_name()?);
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Token::RParen)?;
+        }
+        self.expect(&Token::Keyword(Keyword::As))?;
+        let statement = self.statement()?.statement;
+        Ok(crate::ast::Statement::PrepareStatement {
+            name,
+            param_types,
+            source: self.source.clone(),
+            statement: Box::new(statement),
+        })
+    }
+
+    /// S2: `EXECUTE <name> [ ( <expr>, … ) ]`. Positioned at the `execute` ident.
+    fn execute_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.bump(); // execute
+        let name = self.expect_ident()?;
+        let mut args = Vec::new();
+        if *self.peek() == Token::LParen {
+            self.bump();
+            loop {
+                args.push(self.expr(0)?);
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Token::RParen)?;
+        }
+        Ok(crate::ast::Statement::ExecuteStatement { name, args })
+    }
+
+    /// S2: `DEALLOCATE [PREPARE] { <name> | ALL }`. Positioned at the
+    /// `deallocate` ident.
+    fn deallocate_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::CursorTarget;
+        self.bump(); // deallocate
+        self.eat_ident_eq("prepare");
+        let target = if self.eat_keyword(Keyword::All) {
+            CursorTarget::All
+        } else {
+            CursorTarget::Name(self.expect_ident()?)
+        };
+        Ok(crate::ast::Statement::Deallocate { target })
+    }
+
+    /// S3: `LOCK [TABLE] [ONLY] <name> [*] [, …] [IN <mode> MODE] [NOWAIT]`.
+    /// Positioned at the `lock` ident.
+    fn lock_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::TableLockMode;
+        self.bump(); // lock
+        self.eat_keyword(Keyword::Table);
+        let mut tables = Vec::new();
+        loop {
+            self.eat_ident_eq("only");
+            tables.push(self.expect_ident()?);
+            if *self.peek() == Token::Star {
+                self.bump();
+            }
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        // PostgreSQL's default when `IN <mode> MODE` is omitted.
+        let mut mode = TableLockMode::AccessExclusive;
+        if self.eat_keyword(Keyword::In) {
+            mode = self.table_lock_mode()?;
+            self.expect_ident_eq("mode")?;
+        }
+        let nowait = self.eat_ident_eq("nowait");
+        Ok(crate::ast::Statement::LockTable {
+            tables,
+            mode,
+            nowait,
+        })
+    }
+
+    /// The eight `PostgreSQL` table lock-mode spellings.
+    fn table_lock_mode(&mut self) -> Result<crate::ast::TableLockMode, ParseError> {
+        use crate::ast::TableLockMode;
+        let pos = self.peek_pos();
+        if self.eat_ident_eq("access") {
+            if self.eat_keyword(Keyword::Share) {
+                return Ok(TableLockMode::AccessShare);
+            }
+            self.expect_ident_eq("exclusive")?;
+            return Ok(TableLockMode::AccessExclusive);
+        }
+        if self.eat_ident_eq("row") {
+            if self.eat_keyword(Keyword::Share) {
+                return Ok(TableLockMode::RowShare);
+            }
+            self.expect_ident_eq("exclusive")?;
+            return Ok(TableLockMode::RowExclusive);
+        }
+        if self.eat_keyword(Keyword::Share) {
+            // `UPDATE` is a keyword; `ROW`/`EXCLUSIVE` are plain identifiers.
+            if self.eat_keyword(Keyword::Update) || self.eat_ident_eq("update") {
+                self.expect_ident_eq("exclusive")?;
+                return Ok(TableLockMode::ShareUpdateExclusive);
+            }
+            if self.eat_ident_eq("row") {
+                self.expect_ident_eq("exclusive")?;
+                return Ok(TableLockMode::ShareRowExclusive);
+            }
+            return Ok(TableLockMode::Share);
+        }
+        if self.eat_ident_eq("exclusive") {
+            return Ok(TableLockMode::Exclusive);
+        }
+        Err(ParseError::new(
+            format!("expected a table lock mode, found {:?}", self.peek()),
+            pos,
+        ))
+    }
+
+    /// S6: `EXPLAIN [ ( <option>, … ) | ANALYZE | VERBOSE ] <statement>`.
+    /// Positioned at the `explain` ident.
+    fn explain_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{ExplainFormat, ExplainOptions};
+        self.bump(); // explain
+        let mut options = ExplainOptions::default();
+        if *self.peek() == Token::LParen {
+            self.bump();
+            loop {
+                let pos = self.peek_pos();
+                let name = self.expect_ident()?.to_ascii_lowercase();
+                match name.as_str() {
+                    "format" => {
+                        let value_pos = self.peek_pos();
+                        let value = self.expect_ident()?;
+                        options.format = match value.to_ascii_lowercase().as_str() {
+                            "text" => ExplainFormat::Text,
+                            "json" => ExplainFormat::Json,
+                            "yaml" => ExplainFormat::Yaml,
+                            "xml" => ExplainFormat::Xml,
+                            _ => {
+                                // PostgreSQL reports a bad option *value* as
+                                // 22023, not as a syntax error.
+                                return Err(ParseError::new_sqlstate(
+                                    "22023",
+                                    format!(
+                                        "unrecognized value for EXPLAIN option \"format\": \"{value}\""
+                                    ),
+                                    value_pos,
+                                ));
+                            }
+                        };
+                    }
+                    "analyze" => options.analyze = self.explain_option_flag()?,
+                    "verbose" => options.verbose = self.explain_option_flag()?,
+                    "costs" => options.costs = self.explain_option_flag()?,
+                    // The remaining stock options only change instrumentation
+                    // detail the interpreter does not collect; accept their shape.
+                    "buffers" | "wal" | "timing" | "summary" | "settings" | "generic_plan"
+                    | "memory" => {
+                        let _ = self.explain_option_flag()?;
+                    }
+                    "serialize" => {
+                        if matches!(self.peek(), Token::Ident(_)) {
+                            self.bump();
+                        }
+                    }
+                    _ => {
+                        return Err(ParseError::new(
+                            format!("unrecognized EXPLAIN option \"{name}\""),
+                            pos,
+                        ));
+                    }
+                }
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Token::RParen)?;
+        } else {
+            if self.eat_ident_eq("analyze") {
+                options.analyze = true;
+            }
+            if self.eat_ident_eq("verbose") {
+                options.verbose = true;
+            }
+        }
+        let statement = self.statement()?.statement;
+        Ok(crate::ast::Statement::Explain {
+            options,
+            statement: Box::new(statement),
+        })
+    }
+
+    /// An `EXPLAIN` boolean option value: `TRUE`/`FALSE`/`ON`/`OFF`/`1`/`0`, or
+    /// nothing at all (which means `TRUE`).
+    fn explain_option_flag(&mut self) -> Result<bool, ParseError> {
+        let pos = self.peek_pos();
+        match self.peek().clone() {
+            Token::Keyword(Keyword::True | Keyword::On) => {
+                self.bump();
+                Ok(true)
+            }
+            Token::Keyword(Keyword::False) => {
+                self.bump();
+                Ok(false)
+            }
+            Token::Ident(word) if word.eq_ignore_ascii_case("off") => {
+                self.bump();
+                Ok(false)
+            }
+            Token::IntLit(digits) => {
+                self.bump();
+                Ok(digits != "0")
+            }
+            Token::Comma | Token::RParen => Ok(true),
+            other => Err(ParseError::new(
+                format!("expected an EXPLAIN option value, found {other:?}"),
+                pos,
+            )),
+        }
+    }
+
+    /// P5: `ANALYZE [ ( <option>, … ) ] [VERBOSE] [ <table> [ ( <col>, … ) ] [, …] ]`.
+    fn analyze_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.bump(); // analyze
+        self.eat_utility_option_list()?;
+        self.eat_ident_eq("verbose");
+        if matches!(self.peek(), Token::Ident(_)) {
+            loop {
+                self.expect_ident()?;
+                if *self.peek() == Token::LParen {
+                    self.parse_ident_list()?;
+                }
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+        }
+        Ok(crate::ast::Statement::Utility(
+            crate::ast::UtilityStatement::Analyze,
+        ))
+    }
+
+    /// P5: `CLUSTER [ ( <option>, … ) ] [VERBOSE] [ <table> [ USING <index> ] ]`.
+    fn cluster_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.bump(); // cluster
+        self.eat_utility_option_list()?;
+        self.eat_ident_eq("verbose");
+        if matches!(self.peek(), Token::Ident(_)) {
+            self.expect_ident()?;
+            if self.eat_keyword(Keyword::Using) {
+                self.expect_ident()?;
+            }
+        }
+        Ok(crate::ast::Statement::Utility(
+            crate::ast::UtilityStatement::Cluster,
+        ))
+    }
+
+    /// P5: `REINDEX [ ( <option>, … ) ] { INDEX | TABLE | SCHEMA | DATABASE |
+    /// SYSTEM } [CONCURRENTLY] [ <name> ]`.
+    fn reindex_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.bump(); // reindex
+        self.eat_utility_option_list()?;
+        let pos = self.peek_pos();
+        let recognized = self.eat_keyword(Keyword::Index)
+            || self.eat_keyword(Keyword::Table)
+            || self.eat_keyword(Keyword::Schema)
+            || self.eat_ident_eq("database")
+            || self.eat_ident_eq("system");
+        if !recognized {
+            return Err(ParseError::new(
+                format!(
+                    "expected INDEX, TABLE, SCHEMA, DATABASE or SYSTEM in REINDEX, found {:?}",
+                    self.peek()
+                ),
+                pos,
+            ));
+        }
+        self.eat_ident_eq("concurrently");
+        if matches!(
+            self.peek(),
+            Token::Ident(_) | Token::Keyword(Keyword::Public | Keyword::User)
+        ) {
+            self.expect_object_name()?;
+        }
+        Ok(crate::ast::Statement::Utility(
+            crate::ast::UtilityStatement::Reindex,
+        ))
+    }
+
+    /// P5: `ALTER SYSTEM SET <name> = <value>` / `ALTER SYSTEM RESET { <name> | ALL }`.
+    fn alter_system_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::UtilityStatement;
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("system")?;
+        if self.eat_keyword(Keyword::Set) {
+            let name = self.expect_guc_name()?;
+            if *self.peek() == Token::Eq
+                || *self.peek() == Token::Keyword(Keyword::To)
+                || matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("to"))
+            {
+                self.bump();
+                self.set_value()?;
+            }
+            return Ok(crate::ast::Statement::Utility(
+                UtilityStatement::AlterSystem { name: Some(name) },
+            ));
+        }
+        self.expect_ident_eq("reset")?;
+        if self.eat_keyword(Keyword::All) {
+            return Ok(crate::ast::Statement::Utility(
+                UtilityStatement::AlterSystem { name: None },
+            ));
+        }
+        let name = self.expect_guc_name()?;
+        Ok(crate::ast::Statement::Utility(
+            UtilityStatement::AlterSystem { name: Some(name) },
+        ))
+    }
+
+    /// P5: `CREATE STATISTICS [IF NOT EXISTS] <name> [ ( <kind>, … ) ] ON <expr>, …
+    /// FROM <table>`.
+    fn create_statistics_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect_ident_eq("statistics")?;
+        if self.eat_keyword(Keyword::If) {
+            self.expect(&Token::Keyword(Keyword::Not))?;
+            self.expect(&Token::Keyword(Keyword::Exists))?;
+        }
+        if matches!(self.peek(), Token::Ident(_)) {
+            self.expect_ident()?;
+        }
+        if *self.peek() == Token::LParen {
+            self.parse_ident_list()?;
+        }
+        self.expect(&Token::Keyword(Keyword::On))?;
+        loop {
+            self.expr(0)?;
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::Keyword(Keyword::From))?;
+        self.expect_ident()?;
+        Ok(crate::ast::Statement::CompatibilityRefusal(
+            crate::ast::RefusalCommand::CreateStatistics,
+        ))
+    }
+
+    /// P5: `ALTER STATISTICS <name> { OWNER TO … | RENAME TO … | SET SCHEMA … |
+    /// SET STATISTICS … }`.
+    fn alter_statistics_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("statistics")?;
+        self.expect_ident()?;
+        let pos = self.peek_pos();
+        if self.eat_ident_eq("owner") || self.eat_ident_eq("rename") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            self.expect_object_name()?;
+        } else if self.eat_keyword(Keyword::Set) {
+            if self.eat_keyword(Keyword::Schema) {
+                self.expect_ident()?;
+            } else {
+                self.expect_ident_eq("statistics")?;
+                if !self.eat_ident_eq("default") {
+                    self.signed_fetch_count()?;
+                }
+            }
+        } else {
+            return Err(ParseError::new(
+                format!(
+                    "expected OWNER TO, RENAME TO, SET SCHEMA or SET STATISTICS, found {:?}",
+                    self.peek()
+                ),
+                pos,
+            ));
+        }
+        Ok(crate::ast::Statement::CompatibilityRefusal(
+            crate::ast::RefusalCommand::AlterStatistics,
+        ))
+    }
+
+    /// P5: `DROP STATISTICS [IF EXISTS] <name> [, …]`.
+    fn drop_statistics_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("statistics")?;
+        self.eat_if_exists()?;
+        self.object_name_list()?;
+        Ok(crate::ast::Statement::CompatibilityRefusal(
+            crate::ast::RefusalCommand::DropStatistics,
+        ))
+    }
+
+    /// The `( <name> [<value>] [, …] )` option list shared by the utility
+    /// commands whose options carry no semantics here.
+    fn eat_utility_option_list(&mut self) -> Result<bool, ParseError> {
+        if *self.peek() != Token::LParen {
+            return Ok(false);
+        }
+        self.bump();
+        loop {
+            self.expect_ident()?;
+            if !matches!(self.peek(), Token::Comma | Token::RParen) {
+                self.storage_parameter_value()?;
+            }
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(true)
+    }
+
     fn begin(&mut self) -> Result<crate::ast::Statement, ParseError> {
-        use crate::ast::{IsolationLevel, Statement};
+        use crate::ast::Statement;
         let leading = self.bump(); // BEGIN or START
         if leading == Token::Keyword(Keyword::Start) {
             // START TRANSACTION is valid; bare START is not a statement.
@@ -1768,42 +4713,61 @@ impl Parser {
             // TRANSACTION is optional after BEGIN.
             self.eat_keyword(Keyword::Transaction);
         }
-        let isolation = if self.eat_keyword(Keyword::Isolation) {
-            self.expect(&Token::Keyword(Keyword::Level))?;
-            if self.eat_keyword(Keyword::Repeatable) {
-                self.expect(&Token::Keyword(Keyword::Read))?;
-                Some(IsolationLevel::RepeatableRead)
+        let modes = self.transaction_modes()?;
+        Ok(Statement::Begin {
+            isolation: modes.isolation,
+            read_only: modes.read_only,
+            deferrable: modes.deferrable,
+        })
+    }
+
+    /// The comma-separated `transaction_mode` list shared by `BEGIN`, `START
+    /// TRANSACTION` and `SET TRANSACTION`: `ISOLATION LEVEL …`, `READ ONLY`,
+    /// `READ WRITE`, and `[NOT] DEFERRABLE`, in any order. `PostgreSQL` also lets
+    /// the commas be omitted, so the separator is optional.
+    fn transaction_modes(&mut self) -> Result<TransactionModes, ParseError> {
+        let mut modes = TransactionModes::default();
+        loop {
+            if let Some(isolation) = self.opt_isolation_level()? {
+                modes.isolation = Some(isolation);
             } else if self.eat_keyword(Keyword::Read) {
-                self.expect(&Token::Keyword(Keyword::Committed))?;
-                Some(IsolationLevel::ReadCommitted)
+                // `READ ONLY` / `READ WRITE`. `READ` also opens `READ COMMITTED`,
+                // but only inside `ISOLATION LEVEL`, which is handled above.
+                if self.eat_ident_eq("only") {
+                    modes.read_only = Some(true);
+                } else if self.eat_ident_eq("write") {
+                    modes.read_only = Some(false);
+                } else {
+                    return Err(ParseError::new(
+                        "expected ONLY or WRITE after READ",
+                        self.peek_pos(),
+                    ));
+                }
+            } else if self.eat_keyword(Keyword::Not) {
+                self.expect_ident_eq("deferrable")?;
+                modes.deferrable = Some(false);
+            } else if self.eat_ident_eq("deferrable") {
+                modes.deferrable = Some(true);
             } else {
-                return Err(ParseError::new(
-                    "expected REPEATABLE READ or READ COMMITTED",
-                    self.peek_pos(),
-                ));
+                return Ok(modes);
             }
-        } else {
-            None
-        };
-        Ok(Statement::Begin { isolation })
+            // The comma is optional between modes.
+            self.eat_comma();
+        }
     }
 
     fn update(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Update))?;
-        let table = self.expect_ident()?;
+        let table = self.expect_relation_name()?;
+        let alias = self.opt_dml_target_alias()?;
         self.expect(&Token::Keyword(Keyword::Set))?;
-        let mut assignments = Vec::new();
-        loop {
-            let col = self.expect_ident()?;
-            self.expect(&Token::Eq)?;
-            let value = self.expr(0)?;
-            assignments.push((col, value));
-            if self.eat_comma() {
-                continue;
-            }
-            break;
-        }
+        let assignments = self.assignment_list(&table)?;
+        let from = if self.eat_keyword(Keyword::From) {
+            self.parse_from()?
+        } else {
+            Vec::new()
+        };
         let filter = if self.eat_keyword(Keyword::Where) {
             Some(self.expr(0)?)
         } else {
@@ -1812,17 +4776,117 @@ impl Parser {
         let returning = self.returning_clause()?;
         Ok(Statement::Update {
             table,
+            with: None,
+            alias,
             assignments,
+            from,
             filter,
             returning,
         })
+    }
+
+    /// The optional alias on an `UPDATE`/`DELETE`/`MERGE` target. Only the
+    /// explicit `AS name` and a bare identifier are aliases; the clause keywords
+    /// that may follow the target (`SET`, `USING`, `WHERE`, `RETURNING`, …) are
+    /// keyword tokens, so a bare identifier here is never one of them.
+    fn opt_dml_target_alias(&mut self) -> Result<Option<String>, ParseError> {
+        if self.eat_keyword(Keyword::As) {
+            return Ok(Some(self.expect_ident()?));
+        }
+        match self.peek() {
+            Token::Ident(_) => Ok(Some(self.expect_ident()?)),
+            _ => Ok(None),
+        }
+    }
+
+    /// One or more `SET` entries: `col = expr` or the parenthesised multi-column
+    /// `(a, b) = ROW(…) | (…) | (SELECT …)`.
+    ///
+    /// `relation` is the statement's target table, named only to report a
+    /// relation-qualified target the way `PostgreSQL` does.
+    fn assignment_list(
+        &mut self,
+        relation: &str,
+    ) -> Result<Vec<crate::ast::Assignment>, ParseError> {
+        use crate::ast::{Assignment, AssignmentValue, Expr};
+        let mut assignments = Vec::new();
+        loop {
+            if *self.peek() == Token::LParen {
+                let pos = self.peek_pos();
+                let targets = self.parse_parenthesized_ident_list()?;
+                self.expect(&Token::Eq)?;
+                let value = self.expr(0)?;
+                let value = match value {
+                    Expr::Row(items) => AssignmentValue::Row(items),
+                    Expr::ScalarSubquery(query) => AssignmentValue::Subquery(query),
+                    // `SET (a) = (expr)` — a one-element parenthesised target list
+                    // takes an ordinary expression, exactly as `SET a = expr` does.
+                    other if targets.len() == 1 => AssignmentValue::Expr(other),
+                    _ => {
+                        return Err(ParseError::new_sqlstate(
+                            "42601",
+                            "source for a multiple-column UPDATE item must be a sub-SELECT or ROW() expression",
+                            pos,
+                        ));
+                    }
+                };
+                assignments.push(Assignment {
+                    targets,
+                    subscripts: Vec::new(),
+                    value,
+                });
+            } else {
+                let pos = self.peek_pos();
+                // `set_target` is `ColId opt_indirection`, so the target's first
+                // component is a plain `ColId` — including words this lexer
+                // keywords but PostgreSQL does not, such as `public`.
+                let column = self.expect_col_id()?;
+                // A SET target cannot be qualified with the relation name. The
+                // grammar accepts `t.a` and `public.t.a` alike (the whole tail is
+                // indirection), and PostgreSQL then fails to find a column named
+                // by the FIRST component — there being no composite types here,
+                // every qualified target ends that way.
+                if *self.peek() == Token::Dot {
+                    return Err(ParseError::new_sqlstate(
+                        "42703",
+                        format!("column \"{column}\" of relation \"{relation}\" does not exist"),
+                        pos,
+                    ));
+                }
+                // `SET j['a'][0] = e` / `SET a[1:2] = ARRAY[…]` — a subscripted
+                // target updates the value *inside* the column.
+                let subscripts = if *self.peek() == Token::LBracket {
+                    self.subscript_chain()?
+                } else {
+                    Vec::new()
+                };
+                self.expect(&Token::Eq)?;
+                let value = self.insert_value_expr()?;
+                assignments.push(Assignment {
+                    targets: vec![column],
+                    subscripts,
+                    value: AssignmentValue::Expr(value),
+                });
+            }
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        Ok(assignments)
     }
 
     fn delete(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Delete))?;
         self.expect(&Token::Keyword(Keyword::From))?;
-        let table = self.expect_ident()?;
+        let table = self.expect_relation_name()?;
+        let alias = self.opt_dml_target_alias()?;
+        let using = if self.eat_keyword(Keyword::Using) {
+            self.parse_from()?
+        } else {
+            Vec::new()
+        };
         let filter = if self.eat_keyword(Keyword::Where) {
             Some(self.expr(0)?)
         } else {
@@ -1831,64 +4895,337 @@ impl Parser {
         let returning = self.returning_clause()?;
         Ok(Statement::Delete {
             table,
+            with: None,
+            alias,
+            using,
             filter,
             returning,
+        })
+    }
+
+    /// `MERGE INTO target [AS alias] USING source [AS alias] ON cond WHEN … [RETURNING …]`.
+    fn merge(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{MergeSource, Statement};
+        self.expect_ident_eq("merge")?;
+        self.expect(&Token::Keyword(Keyword::Into))?;
+        let table = self.expect_relation_name()?;
+        let alias = self.opt_dml_target_alias()?;
+        self.expect(&Token::Keyword(Keyword::Using))?;
+        let source = if *self.peek() == Token::LParen {
+            self.bump();
+            let query = self.query_expr_after_open_paren()?;
+            let alias = self.opt_alias()?.ok_or_else(|| {
+                ParseError::new(
+                    "subquery in MERGE USING must have an alias",
+                    self.peek_pos(),
+                )
+            })?;
+            let columns = self.opt_column_aliases()?;
+            MergeSource::Query {
+                query: Box::new(query),
+                alias,
+                columns,
+            }
+        } else {
+            let name = self.expect_ident()?;
+            MergeSource::Table {
+                name,
+                alias: self.opt_dml_target_alias()?,
+            }
+        };
+        self.expect(&Token::Keyword(Keyword::On))?;
+        let on = self.expr(0)?;
+        let mut clauses = Vec::new();
+        while *self.peek() == Token::Keyword(Keyword::When) {
+            clauses.push(self.merge_when(&table)?);
+        }
+        if clauses.is_empty() {
+            return Err(ParseError::new_sqlstate(
+                "42601",
+                "MERGE requires at least one WHEN clause",
+                self.peek_pos(),
+            ));
+        }
+        let returning = self.returning_clause()?;
+        Ok(Statement::Merge {
+            table,
+            with: None,
+            alias,
+            source,
+            on,
+            clauses,
+            returning,
+        })
+    }
+
+    fn merge_when(&mut self, relation: &str) -> Result<crate::ast::MergeWhen, ParseError> {
+        use crate::ast::{MergeAction, MergeMatchKind, MergeWhen};
+        self.expect(&Token::Keyword(Keyword::When))?;
+        let kind = if self.eat_keyword(Keyword::Not) {
+            self.expect_ident_eq("matched")?;
+            if self.eat_keyword(Keyword::By) {
+                if self.eat_ident_eq("source") {
+                    MergeMatchKind::NotMatchedBySource
+                } else {
+                    self.expect_ident_eq("target")?;
+                    MergeMatchKind::NotMatchedByTarget
+                }
+            } else {
+                MergeMatchKind::NotMatchedByTarget
+            }
+        } else {
+            self.expect_ident_eq("matched")?;
+            MergeMatchKind::Matched
+        };
+        let condition = if self.eat_keyword(Keyword::And) {
+            Some(self.expr(0)?)
+        } else {
+            None
+        };
+        self.expect(&Token::Keyword(Keyword::Then))?;
+        let action = if self.eat_ident_eq("do") {
+            self.expect_ident_eq("nothing")?;
+            MergeAction::DoNothing
+        } else if self.eat_keyword(Keyword::Update) {
+            self.expect(&Token::Keyword(Keyword::Set))?;
+            MergeAction::Update(self.assignment_list(relation)?)
+        } else if self.eat_keyword(Keyword::Delete) {
+            MergeAction::Delete
+        } else {
+            self.expect(&Token::Keyword(Keyword::Insert))?;
+            let columns = if *self.peek() == Token::LParen {
+                Some(self.parse_parenthesized_ident_list()?)
+            } else {
+                None
+            };
+            let values = if self.eat_ident_eq("default") {
+                self.expect(&Token::Keyword(Keyword::Values))?;
+                None
+            } else {
+                self.expect(&Token::Keyword(Keyword::Values))?;
+                self.expect(&Token::LParen)?;
+                let mut row = vec![self.insert_value_expr()?];
+                while self.eat_comma() {
+                    row.push(self.insert_value_expr()?);
+                }
+                self.expect(&Token::RParen)?;
+                Some(row)
+            };
+            MergeAction::Insert { columns, values }
+        };
+        // PostgreSQL rejects the action/kind pairs that cannot make sense: only a
+        // NOT MATCHED clause may INSERT, and only a MATCHED one may UPDATE/DELETE.
+        let action_ok = matches!(
+            (&kind, &action),
+            (
+                MergeMatchKind::NotMatchedByTarget,
+                MergeAction::Insert { .. }
+            ) | (
+                MergeMatchKind::Matched | MergeMatchKind::NotMatchedBySource,
+                MergeAction::Update(_) | MergeAction::Delete,
+            ) | (_, MergeAction::DoNothing)
+        );
+        if !action_ok {
+            return Err(ParseError::new_sqlstate(
+                "42601",
+                "MERGE WHEN clause action is not allowed for that match condition",
+                self.peek_pos(),
+            ));
+        }
+        Ok(MergeWhen {
+            kind,
+            condition,
+            action,
+        })
+    }
+
+    /// `CREATE TABLE [IF NOT EXISTS] name [(col, …)] AS <query> [WITH [NO] DATA]`.
+    fn create_table_as(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect(&Token::Keyword(Keyword::Table))?;
+        let if_not_exists = self.eat_if_not_exists();
+        let name = self.expect_ident()?;
+        let columns = if *self.peek() == Token::LParen {
+            Some(self.parse_parenthesized_ident_list()?)
+        } else {
+            None
+        };
+        self.expect(&Token::Keyword(Keyword::As))?;
+        let query = self.query_expr()?;
+        let with_data = if self.eat_keyword(Keyword::With) {
+            let no = self.eat_keyword(Keyword::Not) || self.eat_ident_eq("no");
+            self.expect(&Token::Keyword(Keyword::Data))?;
+            !no
+        } else {
+            true
+        };
+        Ok(Statement::CreateTableAs {
+            name,
+            if_not_exists,
+            columns,
+            query: Box::new(query),
+            with_data,
+        })
+    }
+
+    fn eat_if_not_exists(&mut self) -> bool {
+        if *self.peek() == Token::Keyword(Keyword::If)
+            && *self.peek2() == Token::Keyword(Keyword::Not)
+            && *self.peek_n(2) == Token::Keyword(Keyword::Exists)
+        {
+            self.bump();
+            self.bump();
+            self.bump();
+            return true;
+        }
+        false
+    }
+
+    /// True when a top-level (paren-depth zero) `AS` appears before the end of
+    /// this statement — the token that tells `CREATE TABLE … AS <query>` apart
+    /// from an ordinary `CREATE TABLE`, whose only `AS` spellings sit inside the
+    /// column-definition parentheses.
+    fn statement_has_top_level_as(&self) -> bool {
+        let mut depth = 0usize;
+        let mut offset = 0usize;
+        loop {
+            match self.peek_n(offset) {
+                Token::Eof | Token::Semicolon => return false,
+                Token::LParen => depth += 1,
+                Token::RParen => depth = depth.saturating_sub(1),
+                Token::Keyword(Keyword::As) if depth == 0 => return true,
+                _ => {}
+            }
+            offset += 1;
+        }
+    }
+
+    /// The standalone `TABLE name` query, which `PostgreSQL` defines as exactly
+    /// `SELECT * FROM name`.
+    fn table_query_body(&mut self) -> Result<crate::ast::SelectStmt, ParseError> {
+        use crate::ast::{SelectItem, SelectStmt, TableExpr};
+        self.expect(&Token::Keyword(Keyword::Table))?;
+        // `TABLE ONLY t` / `TABLE t *` select the same rows here: inheritance is
+        // not implemented, so a table never has descendants to include or omit.
+        self.eat_ident_eq("only");
+        let name = self.expect_ident()?;
+        if *self.peek() == Token::Star {
+            self.bump();
+        }
+        Ok(SelectStmt {
+            projection: vec![SelectItem::Wildcard],
+            from: vec![TableExpr::Table {
+                name,
+                alias: None,
+                columns: None,
+                sample: None,
+            }],
+            filter: None,
+            distinct: crate::ast::DistinctClause::All,
+            group_by: Vec::new(),
+            grouping: None,
+            having: None,
+            windows: Vec::new(),
+            window_calls: Vec::new(),
+            order_by: Vec::new(),
+            limit: None,
+            offset: None,
+            with_ties: false,
+            locking: None,
         })
     }
 
     fn create_table(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::{ColumnDef, HashShardingSpec, ShardingSpec, Statement};
         self.expect(&Token::Keyword(Keyword::Create))?;
+        // PostgreSQL treats GLOBAL/LOCAL as noise words on a temp table.
+        self.eat_keyword(Keyword::Global);
+        self.eat_keyword(Keyword::Local);
+        let temporary = self.eat_ident_eq("temp") || self.eat_ident_eq("temporary");
+        let unlogged = self.eat_ident_eq("unlogged");
+        let _ = unlogged;
         self.expect(&Token::Keyword(Keyword::Table))?;
-        let name = self.expect_ident()?;
-        self.expect(&Token::LParen)?;
+        let if_not_exists = self.eat_if_not_exists();
+        let name = self.expect_relation_name()?;
         let mut columns = Vec::new();
         let mut constraints = Vec::new();
-        loop {
-            if self.eat_ident_eq("primary") {
-                self.expect_ident_eq("key")?;
-                constraints.push(crate::ast::TableConstraint::PrimaryKey(
-                    self.parse_ident_list()?,
-                ));
-                if self.eat_comma() {
-                    continue;
+        let mut like = Vec::new();
+        // `PARTITION OF parent` takes the place of the column-definition list:
+        // a partition inherits its parent's columns and may only add qualifiers.
+        let partition_parent = if self.peek_ident_eq("partition")
+            && matches!(self.peek2(), Token::Ident(word) if word.eq_ignore_ascii_case("of"))
+        {
+            self.bump();
+            self.bump();
+            Some(self.qualified_relation_name()?)
+        } else {
+            None
+        };
+        let mut column_options = Vec::new();
+        if partition_parent.is_some() {
+            // `(a NOT NULL, b WITH OPTIONS DEFAULT 0, CHECK (…))` is optional.
+            if *self.peek() == Token::LParen {
+                self.bump();
+                loop {
+                    if self.starts_table_constraint() {
+                        constraints.push(self.table_constraint()?);
+                    } else {
+                        let column = self.expect_ident()?;
+                        if self.eat_keyword(Keyword::With) {
+                            self.expect_ident_eq("options")?;
+                        }
+                        column_options.push((column, self.column_constraints()?));
+                    }
+                    if self.eat_comma() {
+                        continue;
+                    }
+                    break;
                 }
-                break;
-            }
-            if self.eat_keyword(Keyword::Unique) {
-                constraints.push(crate::ast::TableConstraint::Unique(
-                    self.parse_ident_list()?,
-                ));
-                if self.eat_comma() {
-                    continue;
-                }
-                break;
-            }
-            if self.eat_ident_eq("check") {
-                self.expect(&Token::LParen)?;
-                let expr = self.expr(0)?;
                 self.expect(&Token::RParen)?;
-                constraints.push(crate::ast::TableConstraint::Check(expr));
-                if self.eat_comma() {
-                    continue;
+            }
+        } else {
+            self.expect(&Token::LParen)?;
+            // `CREATE TABLE t ()` is legal PostgreSQL — an element list may be empty.
+            if *self.peek() != Token::RParen {
+                loop {
+                    if self.eat_keyword(Keyword::Like) {
+                        like.push(self.like_clause()?);
+                    } else if self.starts_table_constraint() {
+                        constraints.push(self.table_constraint()?);
+                    } else {
+                        let col_name = self.expect_ident()?;
+                        let (ty, serial) = self.parse_column_type()?;
+                        let constraints = self.column_constraints()?;
+                        columns.push(ColumnDef {
+                            name: col_name,
+                            ty,
+                            serial,
+                            constraints,
+                        });
+                    }
+                    if self.eat_comma() {
+                        continue;
+                    }
+                    break;
                 }
-                break;
             }
-            let col_name = self.expect_ident()?;
-            let (ty, serial) = self.parse_column_type()?;
-            let constraints = self.column_constraints()?;
-            columns.push(ColumnDef {
-                name: col_name,
-                ty,
-                serial,
-                constraints,
-            });
-            if self.eat_comma() {
-                continue;
-            }
-            break;
+            self.expect(&Token::RParen)?;
         }
-        self.expect(&Token::RParen)?;
+        let partition_of = match partition_parent {
+            Some(parent) => Some(crate::ast::PartitionOf {
+                parent,
+                bound: self.partition_bound()?,
+                column_options,
+            }),
+            None => None,
+        };
+        let inherits = if self.eat_ident_eq("inherits") {
+            self.parse_ident_list()?
+        } else {
+            Vec::new()
+        };
+        let partition_by = self.opt_partition_by()?;
         let saw_sharded = self.eat_ident_eq("sharded");
         let sharding = if saw_sharded && self.eat_keyword(Keyword::By) {
             self.expect_ident_eq("hash")?;
@@ -1905,7 +5242,7 @@ impl Parser {
             let buckets = self.expect_hash_bucket_count()?;
             let co_location_group = if self.eat_ident_eq("colocated") {
                 self.expect_keyword_or_ident(Keyword::With, "with")?;
-                Some(self.expect_ident()?)
+                Some(self.expect_relation_name()?)
             } else {
                 None
             };
@@ -1923,23 +5260,15 @@ impl Parser {
         // `key [= value] [, ...]` shape and discard it. pgbench -i emits this
         // clause on every CREATE TABLE.
         if self.eat_keyword(Keyword::With) {
-            self.expect(&Token::LParen)?;
-            loop {
-                self.expect_ident()?;
-                if *self.peek() == Token::Dot {
-                    self.bump();
-                    self.expect_ident()?;
-                }
-                if *self.peek() == Token::Eq {
-                    self.bump();
-                    self.storage_parameter_value()?;
-                }
-                if self.eat_comma() {
-                    continue;
-                }
-                break;
-            }
-            self.expect(&Token::RParen)?;
+            self.storage_parameter_list()?;
+        } else if self.eat_ident_eq("without") {
+            self.expect_ident_eq("oids")?;
+        }
+        let on_commit = self.on_commit_action()?;
+        // `TABLESPACE name` is accepted and discarded: tablespaces are a
+        // documented non-goal of the chapter storage model.
+        if self.eat_ident_eq("tablespace") {
+            self.expect_ident()?;
         }
         Ok(Statement::CreateTable {
             name,
@@ -1947,7 +5276,519 @@ impl Parser {
             constraints,
             sharded,
             sharding,
+            if_not_exists,
+            temporary,
+            like,
+            inherits,
+            on_commit,
+            partition_by,
+            partition_of,
         })
+    }
+
+    /// `PARTITION BY <strategy> ( <key> [COLLATE c] [opclass], … )`, or `None`
+    /// when the next tokens do not start one.
+    ///
+    /// The strategy word is *not* validated here: `PARTITION BY MAGIC (a)` is
+    /// `PostgreSQL`'s 22023 from parse analysis, not a syntax error, so the word
+    /// is carried to the executor verbatim.
+    fn opt_partition_by(&mut self) -> Result<Option<crate::ast::PartitionBy>, ParseError> {
+        use crate::ast::{PartitionBy, PartitionKeyElem};
+        if !(self.peek_ident_eq("partition") && *self.peek2() == Token::Keyword(Keyword::By)) {
+            return Ok(None);
+        }
+        self.bump();
+        self.bump();
+        let strategy = self.expect_ident()?.to_ascii_lowercase();
+        self.expect(&Token::LParen)?;
+        let mut keys = Vec::new();
+        loop {
+            let start = self.peek_pos();
+            // A bare identifier followed by a key terminator, a `COLLATE`, or an
+            // operator-class name is a plain column reference; anything else is
+            // an expression key.
+            let column = if matches!(self.peek(), Token::Ident(_))
+                && matches!(self.peek2(), Token::Comma | Token::RParen | Token::Ident(_))
+            {
+                match self.bump() {
+                    Token::Ident(name) => Some(name),
+                    other => unreachable!("peeked an identifier, bumped {other:?}"),
+                }
+            } else {
+                self.expr(0)?;
+                None
+            };
+            let text = self.source[start..self.peek_pos()].trim().to_string();
+            let collation = if self.eat_ident_eq("collate") {
+                Some(self.expect_relation_name()?)
+            } else {
+                None
+            };
+            // An operator-class name is a bare identifier in the one position
+            // where nothing else can appear.
+            let opclass = if matches!(self.peek(), Token::Ident(_)) {
+                Some(self.expect_relation_name()?)
+            } else {
+                None
+            };
+            keys.push(PartitionKeyElem {
+                column,
+                text,
+                collation,
+                opclass,
+            });
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(Some(PartitionBy { strategy, keys }))
+    }
+
+    /// A partition's bound: `FOR VALUES {IN (…) | FROM (…) TO (…) | WITH (…)}`
+    /// or `DEFAULT`.
+    fn partition_bound(&mut self) -> Result<crate::ast::PartitionBound, ParseError> {
+        use crate::ast::PartitionBound;
+        if self.eat_ident_eq("default") {
+            return Ok(PartitionBound::Default);
+        }
+        self.expect(&Token::Keyword(Keyword::For))?;
+        self.expect(&Token::Keyword(Keyword::Values))?;
+        if self.eat_keyword(Keyword::In) {
+            self.expect(&Token::LParen)?;
+            let mut values = Vec::new();
+            loop {
+                values.push(self.expr(0)?);
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Token::RParen)?;
+            return Ok(PartitionBound::List(values));
+        }
+        if self.eat_keyword(Keyword::From) {
+            let from = self.partition_range_bound_list()?;
+            self.expect(&Token::Keyword(Keyword::To))?;
+            let to = self.partition_range_bound_list()?;
+            return Ok(PartitionBound::Range { from, to });
+        }
+        self.expect(&Token::Keyword(Keyword::With))?;
+        self.expect(&Token::LParen)?;
+        self.expect_ident_eq("modulus")?;
+        let modulus = self.expect_unsigned_integer_literal()?;
+        self.expect(&Token::Comma)?;
+        self.expect_ident_eq("remainder")?;
+        let remainder = self.expect_unsigned_integer_literal()?;
+        self.expect(&Token::RParen)?;
+        Ok(PartitionBound::Hash { modulus, remainder })
+    }
+
+    /// `( {MINVALUE | MAXVALUE | <expr>}, … )` — one side of a range bound.
+    fn partition_range_bound_list(
+        &mut self,
+    ) -> Result<Vec<crate::ast::RangeBoundValue>, ParseError> {
+        use crate::ast::RangeBoundValue;
+        self.expect(&Token::LParen)?;
+        let mut bounds = Vec::new();
+        loop {
+            if self.eat_ident_eq("minvalue") {
+                bounds.push(RangeBoundValue::MinValue);
+            } else if self.eat_ident_eq("maxvalue") {
+                bounds.push(RangeBoundValue::MaxValue);
+            } else {
+                bounds.push(RangeBoundValue::Value(self.expr(0)?));
+            }
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(bounds)
+    }
+
+    /// `PostgreSQL`'s `Iconst` — an unsigned integer literal. `MODULUS -1` is a
+    /// syntax error there because the grammar has no place for the sign, and it
+    /// is one here for the same reason.
+    fn expect_unsigned_integer_literal(&mut self) -> Result<i64, ParseError> {
+        let pos = self.peek_pos();
+        match self.bump() {
+            Token::IntLit(text) => text.parse::<i64>().map_err(|_| {
+                ParseError::new(format!("{text} is out of range for an integer"), pos)
+            }),
+            other => Err(ParseError::new(
+                format!("expected an integer, found {other:?}"),
+                pos,
+            )),
+        }
+    }
+
+    /// `CREATE SCHEMA [IF NOT EXISTS] {name [AUTHORIZATION role] |
+    /// AUTHORIZATION role} [<schema element> …]`.
+    fn create_schema(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect(&Token::Keyword(Keyword::Schema))?;
+        let if_not_exists = self.eat_if_not_exists();
+        let name = if self.peek_ident_eq("authorization") {
+            None
+        } else {
+            Some(self.expect_object_name()?)
+        };
+        let authorization = if self.eat_ident_eq("authorization") {
+            Some(self.expect_object_name()?)
+        } else {
+            None
+        };
+        if name.is_none() && authorization.is_none() {
+            return Err(ParseError::new(
+                "CREATE SCHEMA requires a schema name or AUTHORIZATION",
+                self.peek_pos(),
+            ));
+        }
+        // The element list is written without separators — PostgreSQL's
+        // `OptSchemaEltList` is a sequence of complete statements.
+        let mut elements = Vec::new();
+        while matches!(
+            self.peek(),
+            Token::Keyword(Keyword::Create) | Token::Ident(_)
+        ) && !matches!(self.peek(), Token::Ident(word) if !starts_schema_element(word))
+        {
+            elements.push(self.statement()?.statement);
+        }
+        Ok(crate::ast::Statement::CreateSchema {
+            name,
+            authorization,
+            if_not_exists,
+            elements,
+        })
+    }
+
+    /// `ALTER SCHEMA name {RENAME TO new | OWNER TO role}`.
+    fn alter_schema(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::AlterSchemaAction;
+        self.expect_ident_eq("alter")?;
+        self.expect(&Token::Keyword(Keyword::Schema))?;
+        let name = self.expect_object_name()?;
+        let pos = self.peek_pos();
+        let action = if self.eat_ident_eq("rename") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            AlterSchemaAction::RenameTo(self.expect_object_name()?)
+        } else if self.eat_ident_eq("owner") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            AlterSchemaAction::OwnerTo(self.expect_object_name()?)
+        } else {
+            return Err(ParseError::new(
+                format!("expected RENAME TO or OWNER TO, found {:?}", self.peek()),
+                pos,
+            ));
+        };
+        Ok(crate::ast::Statement::AlterSchema { name, action })
+    }
+
+    /// `DROP SCHEMA [IF EXISTS] name [, …] [CASCADE | RESTRICT]`.
+    fn drop_schema(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect(&Token::Keyword(Keyword::Schema))?;
+        let if_exists = self.eat_if_exists()?;
+        let mut names = Vec::new();
+        loop {
+            names.push(self.expect_object_name()?);
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        Ok(crate::ast::Statement::DropSchema {
+            names,
+            if_exists,
+            cascade: self.eat_drop_behavior(),
+        })
+    }
+
+    /// `ON COMMIT { PRESERVE ROWS | DELETE ROWS | DROP }`.
+    fn on_commit_action(&mut self) -> Result<Option<crate::ast::OnCommitAction>, ParseError> {
+        use crate::ast::OnCommitAction;
+        if !(matches!(self.peek(), Token::Keyword(Keyword::On))
+            && matches!(self.peek2(), Token::Keyword(Keyword::Commit)))
+        {
+            return Ok(None);
+        }
+        self.bump();
+        self.bump();
+        if self.eat_keyword(Keyword::Drop) {
+            return Ok(Some(OnCommitAction::Drop));
+        }
+        if self.eat_keyword(Keyword::Delete) {
+            self.expect_ident_eq("rows")?;
+            return Ok(Some(OnCommitAction::DeleteRows));
+        }
+        self.expect_ident_eq("preserve")?;
+        self.expect_ident_eq("rows")?;
+        Ok(Some(OnCommitAction::PreserveRows))
+    }
+
+    /// `(LIKE source [ {INCLUDING | EXCLUDING} <option> …])` — the `LIKE` itself
+    /// is already consumed.
+    fn like_clause(&mut self) -> Result<crate::ast::LikeClause, ParseError> {
+        use crate::ast::LikeOption;
+        let source = self.expect_ident()?;
+        let mut clause = crate::ast::LikeClause {
+            source,
+            including: Vec::new(),
+        };
+        loop {
+            let including = if self.eat_ident_eq("including") {
+                true
+            } else if self.eat_ident_eq("excluding") {
+                false
+            } else {
+                break;
+            };
+            let pos = self.peek_pos();
+            if self.eat_keyword(Keyword::All) {
+                for option in LikeOption::ALL {
+                    clause.set(*option, including);
+                }
+                continue;
+            }
+            let option = self.expect_ident()?;
+            match option.as_str() {
+                "defaults" => clause.set(LikeOption::Defaults, including),
+                "constraints" => clause.set(LikeOption::Constraints, including),
+                "indexes" => clause.set(LikeOption::Indexes, including),
+                "identity" => clause.set(LikeOption::Identity, including),
+                // The remaining PostgreSQL options (COMMENTS, GENERATED,
+                // STATISTICS, STORAGE, COMPRESSION) name properties Crabka does
+                // not carry on a column, so honoring them is a no-op either way.
+                "comments" | "generated" | "statistics" | "storage" | "compression" => {}
+                other => {
+                    return Err(ParseError::new(
+                        format!("unrecognized LIKE option \"{other}\""),
+                        pos,
+                    ));
+                }
+            }
+        }
+        Ok(clause)
+    }
+
+    /// True when the next tokens begin a table-level constraint rather than a
+    /// column definition. A leading `CONSTRAINT <name>` always does; the bare
+    /// keywords do only when the following token is not a type name, which the
+    /// constraint keywords' own follow sets settle: `PRIMARY`/`FOREIGN` are
+    /// followed by `KEY`, `UNIQUE`/`CHECK` by `(` or `NULLS`.
+    fn starts_table_constraint(&self) -> bool {
+        match self.peek() {
+            // `constraint` is a plain identifier, so `CONSTRAINT <name> <kind>`
+            // is only distinguishable from a column named `constraint` by the
+            // constraint keyword that must follow the label.
+            Token::Ident(s) if s.eq_ignore_ascii_case("constraint") => {
+                matches!(self.peek2(), Token::Ident(_)) && starts_constraint_kind(self.peek3())
+            }
+            Token::Ident(s) if s.eq_ignore_ascii_case("primary") => {
+                matches!(self.peek2(), Token::Ident(k) if k.eq_ignore_ascii_case("key"))
+            }
+            Token::Ident(s) if s.eq_ignore_ascii_case("check") => *self.peek2() == Token::LParen,
+            Token::Keyword(Keyword::Foreign) => {
+                matches!(self.peek2(), Token::Ident(k) if k.eq_ignore_ascii_case("key"))
+            }
+            Token::Keyword(Keyword::Unique) => {
+                *self.peek2() == Token::LParen
+                    || matches!(self.peek2(), Token::Ident(k) if k.eq_ignore_ascii_case("nulls"))
+            }
+            _ => false,
+        }
+    }
+
+    /// One table-level constraint, including its optional `CONSTRAINT <name>`
+    /// label and trailing deferrability clauses.
+    fn table_constraint(&mut self) -> Result<crate::ast::TableConstraint, ParseError> {
+        use crate::ast::{TableConstraint, TableConstraintKind};
+        let name = if self.eat_ident_eq("constraint") {
+            Some(self.expect_relation_name()?)
+        } else {
+            None
+        };
+        let pos = self.peek_pos();
+        let kind = if self.eat_ident_eq("primary") {
+            self.expect_ident_eq("key")?;
+            TableConstraintKind::PrimaryKey(self.parse_ident_list()?)
+        } else if self.eat_keyword(Keyword::Unique) {
+            let nulls_not_distinct = self.eat_nulls_not_distinct()?;
+            TableConstraintKind::Unique {
+                columns: self.parse_ident_list()?,
+                nulls_not_distinct,
+            }
+        } else if self.eat_ident_eq("check") {
+            TableConstraintKind::Check(self.check_predicate()?)
+        } else if self.eat_keyword(Keyword::Foreign) {
+            self.expect_ident_eq("key")?;
+            let columns = self.parse_ident_list()?;
+            TableConstraintKind::ForeignKey {
+                columns,
+                references: self.foreign_key_reference()?,
+            }
+        } else {
+            return Err(ParseError::new(
+                format!("expected a table constraint, found {:?}", self.peek()),
+                pos,
+            ));
+        };
+        let not_valid = self.eat_constraint_attributes(true)?;
+        Ok(TableConstraint {
+            name,
+            kind,
+            not_valid,
+        })
+    }
+
+    /// `( <predicate> )` for `CHECK`/`GENERATED ALWAYS AS`, capturing the exact
+    /// source text between the parentheses alongside the parsed expression.
+    fn check_predicate(&mut self) -> Result<crate::ast::CheckPredicate, ParseError> {
+        self.expect(&Token::LParen)?;
+        let start = self.peek_pos();
+        let expr = self.expr(0)?;
+        let end = self.peek_pos();
+        self.expect(&Token::RParen)?;
+        Ok(crate::ast::CheckPredicate {
+            expr,
+            text: self.source[start..end].trim().to_string(),
+        })
+    }
+
+    /// `NULLS NOT DISTINCT` / `NULLS DISTINCT` after `UNIQUE`.
+    fn eat_nulls_not_distinct(&mut self) -> Result<bool, ParseError> {
+        if !matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("nulls")) {
+            return Ok(false);
+        }
+        self.bump();
+        let not = self.eat_keyword(Keyword::Not);
+        self.expect(&Token::Keyword(Keyword::Distinct))?;
+        Ok(not)
+    }
+
+    /// `REFERENCES <table> [(col, …)] [MATCH …] [ON DELETE …] [ON UPDATE …]`.
+    fn foreign_key_reference(&mut self) -> Result<crate::ast::ForeignKeyRef, ParseError> {
+        self.expect_ident_eq("references")?;
+        let table = self.expect_relation_name()?;
+        let columns = if *self.peek() == Token::LParen {
+            self.parse_ident_list()?
+        } else {
+            Vec::new()
+        };
+        if self.eat_ident_eq("match") {
+            self.expect_ident()?;
+        }
+        while matches!(self.peek(), Token::Keyword(Keyword::On))
+            && matches!(
+                self.peek2(),
+                Token::Keyword(Keyword::Delete | Keyword::Update)
+            )
+        {
+            self.bump();
+            self.bump();
+            if self.eat_ident_eq("set") || self.eat_keyword(Keyword::Set) {
+                if !(self.eat_keyword(Keyword::Null) || self.eat_ident_eq("default")) {
+                    return Err(ParseError::new(
+                        "expected NULL or DEFAULT after SET in a referential action",
+                        self.peek_pos(),
+                    ));
+                }
+            } else if self.eat_ident_eq("cascade")
+                || self.eat_ident_eq("restrict")
+                || self.eat_ident_eq("no")
+            {
+                self.eat_ident_eq("action");
+            } else {
+                return Err(ParseError::new(
+                    format!("expected a referential action, found {:?}", self.peek()),
+                    self.peek_pos(),
+                ));
+            }
+        }
+        Ok(crate::ast::ForeignKeyRef { table, columns })
+    }
+
+    /// `[NOT] DEFERRABLE`, `INITIALLY {DEFERRED|IMMEDIATE}`, `NOT VALID`,
+    /// `NO INHERIT`, `ENFORCED`/`NOT ENFORCED`.
+    ///
+    /// Returns whether `NOT VALID` was written — the one attribute with
+    /// user-visible semantics (it skips back-validation of the rows already
+    /// stored). The rest are accepted and discarded.
+    ///
+    /// `NOT VALID` belongs to `PostgreSQL`'s *table* constraint grammar only, so
+    /// `allow_not_valid` is false for a column constraint and writing it there
+    /// is a syntax error rather than a silently accepted no-op.
+    fn eat_constraint_attributes(&mut self, allow_not_valid: bool) -> Result<bool, ParseError> {
+        let mut not_valid = false;
+        loop {
+            if self.eat_ident_eq("deferrable") || self.eat_ident_eq("enforced") {
+                continue;
+            }
+            if self.eat_ident_eq("initially") {
+                let _ = self.eat_ident_eq("deferred") || self.eat_ident_eq("immediate");
+                continue;
+            }
+            if matches!(self.peek(), Token::Keyword(Keyword::Not))
+                && matches!(self.peek2(), Token::Ident(s)
+                    if s.eq_ignore_ascii_case("deferrable")
+                        || s.eq_ignore_ascii_case("valid")
+                        || s.eq_ignore_ascii_case("enforced"))
+            {
+                let valid =
+                    matches!(self.peek2(), Token::Ident(s) if s.eq_ignore_ascii_case("valid"));
+                if valid && !allow_not_valid {
+                    self.bump();
+                    return Err(ParseError::new(
+                        "syntax error at or near \"VALID\"".to_string(),
+                        self.peek_pos(),
+                    ));
+                }
+                not_valid |= valid;
+                self.bump();
+                self.bump();
+                continue;
+            }
+            if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("no"))
+                && matches!(self.peek2(), Token::Ident(s) if s.eq_ignore_ascii_case("inherit"))
+            {
+                self.bump();
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        Ok(not_valid)
+    }
+
+    /// `( key [= value] [, …] )` — a storage-parameter list, accepted and
+    /// discarded.
+    fn storage_parameter_list(&mut self) -> Result<Vec<(String, Option<String>)>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut params = Vec::new();
+        loop {
+            let mut key = self.expect_ident()?;
+            if *self.peek() == Token::Dot {
+                self.bump();
+                key.push('.');
+                key.push_str(&self.expect_ident()?);
+            }
+            let value = if *self.peek() == Token::Eq {
+                self.bump();
+                Some(self.storage_parameter_value()?)
+            } else {
+                None
+            };
+            params.push((key, value));
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(params)
     }
 
     fn parse_column_type(
@@ -1956,11 +5797,11 @@ impl Parser {
         let type_pos = self.peek_pos();
         let type_name = self.expect_ident()?;
         match type_name.as_str() {
-            "serial" => Ok((
+            "serial" | "serial4" => Ok((
                 crabka_pgtypes::ColumnType::Int4,
                 Some(crate::ast::SerialKind::Serial),
             )),
-            "bigserial" => Ok((
+            "bigserial" | "serial8" => Ok((
                 crabka_pgtypes::ColumnType::Int8,
                 Some(crate::ast::SerialKind::BigSerial),
             )),
@@ -1977,37 +5818,91 @@ impl Parser {
     }
 
     fn column_constraints(&mut self) -> Result<Vec<crate::ast::ColumnConstraint>, ParseError> {
-        use crate::ast::ColumnConstraint;
+        use crate::ast::{ColumnConstraint, ColumnConstraintKind, IdentitySpec};
         let mut constraints = Vec::new();
         loop {
-            if self.eat_keyword(Keyword::Not) {
+            let name = if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("constraint"))
+                && matches!(self.peek2(), Token::Ident(_))
+                && starts_column_constraint_kind(self.peek3())
+            {
+                self.bump();
+                Some(self.expect_relation_name()?)
+            } else {
+                None
+            };
+            let kind = if self.eat_keyword(Keyword::Not) {
                 self.expect(&Token::Keyword(Keyword::Null))?;
-                constraints.push(ColumnConstraint::NotNull);
-                continue;
-            }
-            if self.eat_ident_eq("default") {
-                constraints.push(ColumnConstraint::Default(self.expr(0)?));
-                continue;
-            }
-            if self.eat_ident_eq("primary") {
+                ColumnConstraintKind::NotNull
+            } else if self.eat_keyword(Keyword::Null) {
+                ColumnConstraintKind::Null
+            } else if self.eat_ident_eq("default") {
+                ColumnConstraintKind::Default(self.expr(0)?)
+            } else if self.eat_ident_eq("primary") {
                 self.expect_ident_eq("key")?;
-                constraints.push(ColumnConstraint::PrimaryKey);
-                continue;
+                ColumnConstraintKind::PrimaryKey
+            } else if self.eat_keyword(Keyword::Unique) {
+                ColumnConstraintKind::Unique {
+                    nulls_not_distinct: self.eat_nulls_not_distinct()?,
+                }
+            } else if self.eat_ident_eq("check") {
+                ColumnConstraintKind::Check(self.check_predicate()?)
+            } else if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("references"))
+            {
+                ColumnConstraintKind::References(self.foreign_key_reference()?)
+            } else if self.eat_ident_eq("generated") {
+                self.generated_column_constraint()?
+            } else if name.is_some() {
+                return Err(ParseError::new(
+                    format!("expected a column constraint, found {:?}", self.peek()),
+                    self.peek_pos(),
+                ));
+            } else {
+                break;
+            };
+            let is_identity = matches!(kind, ColumnConstraintKind::Identity(IdentitySpec { .. }));
+            constraints.push(ColumnConstraint { name, kind });
+            if !is_identity {
+                self.eat_constraint_attributes(false)?;
             }
-            if self.eat_keyword(Keyword::Unique) {
-                constraints.push(ColumnConstraint::Unique);
-                continue;
-            }
-            if self.eat_ident_eq("check") {
-                self.expect(&Token::LParen)?;
-                let expr = self.expr(0)?;
-                self.expect(&Token::RParen)?;
-                constraints.push(ColumnConstraint::Check(expr));
-                continue;
-            }
-            break;
         }
         Ok(constraints)
+    }
+
+    /// `GENERATED { ALWAYS | BY DEFAULT } AS { IDENTITY [(opts)] | (expr) STORED }`
+    /// — the `GENERATED` keyword is already consumed.
+    fn generated_column_constraint(
+        &mut self,
+    ) -> Result<crate::ast::ColumnConstraintKind, ParseError> {
+        use crate::ast::{ColumnConstraintKind, IdentitySpec};
+        let always = if self.eat_ident_eq("always") {
+            true
+        } else if self.eat_keyword(Keyword::By) {
+            self.expect_ident_eq("default")?;
+            false
+        } else {
+            return Err(ParseError::new(
+                "expected ALWAYS or BY DEFAULT after GENERATED",
+                self.peek_pos(),
+            ));
+        };
+        self.expect(&Token::Keyword(Keyword::As))?;
+        if self.eat_ident_eq("identity") {
+            let options = if *self.peek() == Token::LParen {
+                self.bump();
+                let options = self.sequence_options(&Token::RParen)?;
+                self.expect(&Token::RParen)?;
+                options
+            } else {
+                crate::ast::SequenceOptions::default()
+            };
+            return Ok(ColumnConstraintKind::Identity(IdentitySpec {
+                always,
+                options,
+            }));
+        }
+        let predicate = self.check_predicate()?;
+        self.expect_ident_eq("stored")?;
+        Ok(ColumnConstraintKind::Generated(predicate))
     }
 
     fn create_index(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -2032,31 +5927,246 @@ impl Parser {
             break;
         }
         self.expect(&Token::Keyword(Keyword::Index))?;
-        let name = self.expect_ident()?;
+        let concurrently = self.eat_ident_eq("concurrently");
+        let if_not_exists = self.eat_if_not_exists();
+        // `CREATE INDEX ON t (…)` lets PostgreSQL choose the index name.
+        let name = if matches!(self.peek(), Token::Keyword(Keyword::On)) {
+            None
+        } else {
+            Some(self.expect_relation_name()?)
+        };
         self.expect(&Token::Keyword(Keyword::On))?;
-        let table = self.expect_ident()?;
-        let columns = self.parse_ident_list()?;
-        if columns.is_empty() {
-            return Err(ParseError::new(
-                "CREATE INDEX requires at least one column",
-                self.peek_pos(),
-            ));
+        // `ONLY` restricts the build to the named relation, which is what a
+        // non-partitioned table does anyway.
+        self.eat_ident_eq("only");
+        let table = self.expect_relation_name()?;
+        let method = if self.eat_keyword(Keyword::Using) {
+            Some(self.expect_ident()?.to_ascii_lowercase())
+        } else {
+            None
+        };
+        let keys = self.index_key_list()?;
+        let include = if self.eat_ident_eq("include") {
+            self.parse_ident_list()?
+        } else {
+            Vec::new()
+        };
+        if self.eat_ident_eq("nulls") {
+            let not = self.eat_keyword(Keyword::Not);
+            self.expect(&Token::Keyword(Keyword::Distinct))?;
+            let _ = not;
         }
+        if self.eat_keyword(Keyword::With) {
+            self.storage_parameter_list()?;
+        }
+        if self.eat_ident_eq("tablespace") {
+            self.expect_ident()?;
+        }
+        let predicate = if self.eat_keyword(Keyword::Where) {
+            let start = self.peek_pos();
+            self.expr(0)?;
+            let end = self.peek_pos();
+            Some(self.source[start..end].trim().to_string())
+        } else {
+            None
+        };
         Ok(Statement::CreateIndex {
             name,
             table,
-            columns,
+            keys,
             unique,
             placement,
+            if_not_exists,
+            concurrently,
+            method,
+            include,
+            predicate,
         })
+    }
+
+    /// `( key [COLLATE c] [opclass] [ASC|DESC] [NULLS {FIRST|LAST}] [, …] )`.
+    fn index_key_list(&mut self) -> Result<Vec<crate::ast::IndexKey>, ParseError> {
+        use crate::ast::IndexKey;
+        self.expect(&Token::LParen)?;
+        let mut keys = Vec::new();
+        loop {
+            let start = self.peek_pos();
+            // A bare identifier followed by a key terminator is a plain column
+            // reference; anything else is an expression key.
+            let column = if matches!(self.peek(), Token::Ident(_))
+                && matches!(
+                    self.peek2(),
+                    Token::Comma | Token::RParen | Token::Keyword(Keyword::Asc | Keyword::Desc)
+                ) {
+                match self.bump() {
+                    Token::Ident(name) => Some(name),
+                    other => unreachable!("peeked an identifier, bumped {other:?}"),
+                }
+            } else {
+                self.expr(0)?;
+                None
+            };
+            let text_end = self.peek_pos();
+            let mut text = self.source[start..text_end].trim().to_string();
+            if self.eat_ident_eq("collate") {
+                self.expect_ident()?;
+            }
+            // An operator-class name is a bare identifier in the one position
+            // where nothing else can appear.
+            if column.is_none()
+                && matches!(self.peek(), Token::Ident(_))
+                && !matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("nulls"))
+            {
+                self.bump();
+            }
+            let descending = if self.eat_keyword(Keyword::Desc) {
+                true
+            } else {
+                self.eat_keyword(Keyword::Asc);
+                false
+            };
+            let nulls_first = if self.eat_ident_eq("nulls") {
+                if self.eat_ident_eq("first") {
+                    Some(true)
+                } else {
+                    self.expect_ident_eq("last")?;
+                    Some(false)
+                }
+            } else {
+                None
+            };
+            if text.is_empty() {
+                text = column.clone().unwrap_or_default();
+            }
+            keys.push(IndexKey {
+                column,
+                text,
+                descending,
+                nulls_first,
+            });
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        if keys.is_empty() {
+            return Err(ParseError::new(
+                "CREATE INDEX requires at least one key",
+                self.peek_pos(),
+            ));
+        }
+        Ok(keys)
+    }
+
+    /// `COMMENT ON <kind> <name> IS { 'text' | NULL }`.
+    fn comment_on(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("comment")?;
+        self.expect(&Token::Keyword(Keyword::On))?;
+        let kind_pos = self.peek_pos();
+        let mut object_kind = match self.bump() {
+            Token::Ident(word) => word.to_ascii_lowercase(),
+            Token::Keyword(Keyword::Table) => "table".to_string(),
+            Token::Keyword(Keyword::View) => "view".to_string(),
+            Token::Keyword(Keyword::Index) => "index".to_string(),
+            Token::Keyword(Keyword::Schema) => "schema".to_string(),
+            Token::Keyword(Keyword::Server) => "server".to_string(),
+            other => {
+                return Err(ParseError::new(
+                    format!("expected a COMMENT ON object kind, found {other:?}"),
+                    kind_pos,
+                ));
+            }
+        };
+        // Multi-word object kinds: MATERIALIZED VIEW, FOREIGN TABLE, …
+        while !matches!(self.peek(), Token::Ident(_) | Token::Keyword(Keyword::On))
+            || matches!(self.peek(), Token::Keyword(_))
+        {
+            match self.peek() {
+                Token::Keyword(Keyword::View) => object_kind.push_str(" view"),
+                Token::Keyword(Keyword::Table) => object_kind.push_str(" table"),
+                Token::Keyword(Keyword::Index) => object_kind.push_str(" index"),
+                Token::Keyword(Keyword::Data) => object_kind.push_str(" data"),
+                Token::Keyword(Keyword::Wrapper) => object_kind.push_str(" wrapper"),
+                Token::Keyword(Keyword::Mapping) => object_kind.push_str(" mapping"),
+                _ => break,
+            }
+            self.bump();
+        }
+        let mut object_name = self.expect_object_name()?;
+        if *self.peek() == Token::Dot {
+            self.bump();
+            object_name.push('.');
+            object_name.push_str(&self.expect_ident()?);
+        }
+        // A routine signature: COMMENT ON FUNCTION f(int) IS …
+        if *self.peek() == Token::LParen {
+            let mut depth = 0usize;
+            loop {
+                match self.bump() {
+                    Token::LParen => depth += 1,
+                    Token::RParen => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    Token::Eof => {
+                        return Err(ParseError::new(
+                            "unterminated argument list in COMMENT ON",
+                            self.peek_pos(),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        self.expect(&Token::Keyword(Keyword::Is))?;
+        let pos = self.peek_pos();
+        let comment = match self.bump() {
+            Token::StringLit(text) => Some(text),
+            Token::Keyword(Keyword::Null) => None,
+            other => {
+                return Err(ParseError::new(
+                    format!("expected a comment string or NULL, found {other:?}"),
+                    pos,
+                ));
+            }
+        };
+        Ok(crate::ast::Statement::Comment {
+            object_kind,
+            object_name,
+            comment,
+        })
+    }
+
+    /// `CASCADE` / `RESTRICT`; returns true for `CASCADE`.
+    fn eat_drop_behavior(&mut self) -> bool {
+        if self.eat_ident_eq("cascade") {
+            return true;
+        }
+        self.eat_ident_eq("restrict");
+        false
     }
 
     fn create_view(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
 
         self.expect(&Token::Keyword(Keyword::Create))?;
+        let or_replace = if self.eat_keyword(Keyword::Or) {
+            self.expect_ident_eq("replace")?;
+            true
+        } else {
+            false
+        };
+        // The storage-class words are accepted and ignored: there is one storage
+        // class, and a view holds no rows of its own either way.
+        self.eat_ident_eq("temp");
+        self.eat_ident_eq("temporary");
         self.expect(&Token::Keyword(Keyword::View))?;
         let name = self.expect_object_name()?;
+        // `VIEW name (a, b, c)` renames the query's output columns positionally.
+        let columns = self.opt_column_aliases()?;
         self.expect(&Token::Keyword(Keyword::As))?;
         let definition_start = self.peek_pos();
         let query = self.query_expr()?;
@@ -2068,16 +6178,43 @@ impl Parser {
             name,
             definition,
             query,
+            or_replace,
+            columns,
         })
     }
 
     fn create_sequence(&mut self) -> Result<crate::ast::Statement, ParseError> {
-        use crate::ast::{SequenceOptions, Statement};
+        use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Create))?;
+        self.eat_ident_eq("temp");
+        self.eat_ident_eq("temporary");
         self.expect_ident_eq("sequence")?;
+        let if_not_exists = self.eat_if_not_exists();
         let name = self.expect_ident()?;
+        let options = self.sequence_options(&Token::Semicolon)?;
+        Ok(Statement::CreateIndex {
+            name: Some(name),
+            table: "__crabka_sequence__".into(),
+            keys: encode_sequence_options(&options),
+            unique: false,
+            placement: crate::ast::IndexPlacement::Local,
+            if_not_exists,
+            concurrently: false,
+            method: None,
+            include: Vec::new(),
+            predicate: None,
+        })
+    }
+
+    /// The shared `CREATE SEQUENCE` / identity-column option list, ending at
+    /// `terminator` (or end of statement).
+    fn sequence_options(
+        &mut self,
+        terminator: &Token,
+    ) -> Result<crate::ast::SequenceOptions, ParseError> {
+        use crate::ast::SequenceOptions;
         let mut options = SequenceOptions::default();
-        while !matches!(self.peek(), Token::Semicolon | Token::Eof) {
+        while !matches!(self.peek(), Token::Semicolon | Token::Eof) && self.peek() != terminator {
             if self.eat_ident_eq("start") || self.eat_keyword(Keyword::Start) {
                 self.eat_keyword(Keyword::With);
                 options.start = Some(self.expect_i64("START value")?);
@@ -2105,20 +6242,30 @@ impl Parser {
                 options.cache = Some(self.expect_i64("CACHE")?);
             } else if self.eat_ident_eq("cycle") {
                 options.cycle = Some(true);
+            } else if self.eat_ident_eq("as") || self.eat_keyword(Keyword::As) {
+                // `AS <integer type>` bounds the sequence range; the executor
+                // clamps to int8 either way.
+                self.parse_type_name()?;
+            } else if self.eat_ident_eq("owned") {
+                self.expect_ident_eq("by")?;
+                if !self.eat_ident_eq("none") {
+                    self.expect_ident()?;
+                    if *self.peek() == Token::Dot {
+                        self.bump();
+                        self.expect_ident()?;
+                    }
+                }
+            } else if self.eat_ident_eq("sequence") {
+                self.expect_ident_eq("name")?;
+                self.expect_ident()?;
             } else {
                 return Err(ParseError::new(
-                    format!("unexpected CREATE SEQUENCE option {:?}", self.peek()),
+                    format!("unexpected sequence option {:?}", self.peek()),
                     self.peek_pos(),
                 ));
             }
         }
-        Ok(Statement::CreateIndex {
-            name,
-            table: "__crabka_sequence__".into(),
-            columns: encode_sequence_options(&options),
-            unique: false,
-            placement: crate::ast::IndexPlacement::Local,
-        })
+        Ok(options)
     }
 
     fn drop_sequence(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -2130,7 +6277,371 @@ impl Parser {
             self.bump();
             names.push(format!("__crabka_sequence__:{}", self.expect_ident()?));
         }
-        Ok(crate::ast::Statement::DropTable { names, if_exists })
+        let cascade = self.eat_drop_behavior();
+        Ok(crate::ast::Statement::DropTable {
+            names,
+            if_exists,
+            cascade,
+        })
+    }
+
+    // ---------------------------------------------------------------------
+    // T5: user-defined types. `CREATE`/`ALTER`/`DROP` of `TYPE` and `DOMAIN`.
+    // `type` and `domain` are plain lowercased idents in this lexer, so
+    // neither becomes reserved by being recognised here.
+    // ---------------------------------------------------------------------
+
+    /// `CREATE TYPE name [ AS { (field type, …) | ENUM (…) | RANGE (…) } ]`.
+    fn create_type(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::CreateTypeDefinition;
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect_ident_eq("type")?;
+        let name = self.qualified_object_name()?;
+        if !self.eat_keyword(Keyword::As) {
+            // A bare `CREATE TYPE name` is a shell type.
+            return Ok(crate::ast::Statement::CreateType {
+                name,
+                definition: CreateTypeDefinition::Shell,
+            });
+        }
+        if self.eat_ident_eq("enum") {
+            return Ok(crate::ast::Statement::CreateType {
+                name,
+                definition: CreateTypeDefinition::Enum(self.enum_label_list()?),
+            });
+        }
+        if self.eat_ident_eq("range") {
+            // The option list is consumed so the statement is recognised whole
+            // and refused by the executor, never half-parsed.
+            self.skip_balanced_parens()?;
+            return Ok(crate::ast::Statement::CreateType {
+                name,
+                definition: CreateTypeDefinition::Range,
+            });
+        }
+        self.expect(&Token::LParen)?;
+        let mut fields = Vec::new();
+        if *self.peek() != Token::RParen {
+            loop {
+                let field_name = self.expect_ident()?;
+                let ty = self.parse_type_name()?;
+                let collation = if self.eat_ident_eq("collate") {
+                    Some(self.expect_collation_name()?)
+                } else {
+                    None
+                };
+                fields.push(crate::ast::CompositeFieldDef {
+                    name: field_name,
+                    ty,
+                    collation,
+                });
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(crate::ast::Statement::CreateType {
+            name,
+            definition: CreateTypeDefinition::Composite(fields),
+        })
+    }
+
+    /// `('a', 'b', …)` — an enum's labels, possibly empty.
+    fn enum_label_list(&mut self) -> Result<Vec<String>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut labels = Vec::new();
+        if *self.peek() != Token::RParen {
+            loop {
+                labels.push(self.expect_string_lit()?);
+                if !self.eat_comma() {
+                    break;
+                }
+            }
+        }
+        self.expect(&Token::RParen)?;
+        Ok(labels)
+    }
+
+    /// Consume a parenthesised group without interpreting it, for a production
+    /// that is recognised only so the executor can refuse it as a whole.
+    fn skip_balanced_parens(&mut self) -> Result<(), ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.bump() {
+                Token::LParen => depth += 1,
+                Token::RParen => depth -= 1,
+                Token::Eof => {
+                    return Err(ParseError::new(
+                        "unterminated parenthesised option list".to_string(),
+                        self.peek_pos(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// `ALTER TYPE name <action>`.
+    fn alter_type(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{AlterTypeAction, EnumValuePosition};
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("type")?;
+        let name = self.qualified_object_name()?;
+        let pos = self.peek_pos();
+        if self.eat_ident_eq("add") {
+            self.expect_ident_eq("value")?;
+            let if_not_exists = self.eat_if_not_exists();
+            let label = self.expect_string_lit()?;
+            let position = if self.eat_ident_eq("before") {
+                Some(EnumValuePosition::Before(self.expect_string_lit()?))
+            } else if self.eat_ident_eq("after") {
+                Some(EnumValuePosition::After(self.expect_string_lit()?))
+            } else {
+                None
+            };
+            return Ok(crate::ast::Statement::AlterType {
+                name,
+                action: AlterTypeAction::AddValue {
+                    label,
+                    if_not_exists,
+                    position,
+                },
+            });
+        }
+        if self.eat_ident_eq("rename") {
+            if self.eat_ident_eq("value") {
+                let from = self.expect_string_lit()?;
+                self.expect(&Token::Keyword(Keyword::To))?;
+                let to = self.expect_string_lit()?;
+                return Ok(crate::ast::Statement::AlterType {
+                    name,
+                    action: AlterTypeAction::RenameValue { from, to },
+                });
+            }
+            self.expect(&Token::Keyword(Keyword::To))?;
+            let new_name = self.expect_ident()?;
+            return Ok(crate::ast::Statement::AlterType {
+                name,
+                action: AlterTypeAction::RenameTo(new_name),
+            });
+        }
+        if self.eat_ident_eq("owner") {
+            self.expect(&Token::Keyword(Keyword::To))?;
+            let role = self.expect_ident()?;
+            return Ok(crate::ast::Statement::AlterType {
+                name,
+                action: AlterTypeAction::OwnerTo(role),
+            });
+        }
+        Err(ParseError::new_sqlstate(
+            "42601",
+            format!(
+                "unrecognized ALTER TYPE action at or near {:?}",
+                self.peek()
+            ),
+            pos,
+        ))
+    }
+
+    /// `DROP TYPE [IF EXISTS] name [, …] [CASCADE | RESTRICT]`.
+    fn drop_type(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("type")?;
+        let (names, if_exists, cascade) = self.drop_name_list()?;
+        Ok(crate::ast::Statement::DropType {
+            names,
+            if_exists,
+            cascade,
+        })
+    }
+
+    /// `DROP DOMAIN [IF EXISTS] name [, …] [CASCADE | RESTRICT]`.
+    fn drop_domain(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        self.expect_ident_eq("domain")?;
+        let (names, if_exists, cascade) = self.drop_name_list()?;
+        Ok(crate::ast::Statement::DropDomain {
+            names,
+            if_exists,
+            cascade,
+        })
+    }
+
+    /// The `[IF EXISTS] name [, …] [CASCADE | RESTRICT]` tail both type drops share.
+    fn drop_name_list(&mut self) -> Result<(Vec<String>, bool, bool), ParseError> {
+        let if_exists = self.eat_if_exists()?;
+        let mut names = vec![self.qualified_object_name()?];
+        while self.eat_comma() {
+            names.push(self.qualified_object_name()?);
+        }
+        let cascade = self.eat_drop_behavior();
+        Ok((names, if_exists, cascade))
+    }
+
+    /// `CREATE DOMAIN name [AS] base [DEFAULT e] [[NOT] NULL] [CHECK (…)] …`.
+    fn create_domain(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::DomainConstraint;
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        self.expect_ident_eq("domain")?;
+        let name = self.qualified_object_name()?;
+        // `AS` is optional in PostgreSQL's grammar.
+        let _ = self.eat_keyword(Keyword::As);
+        let base = self.parse_type_name()?;
+        // A domain may carry a `COLLATE` before its constraints.
+        if self.eat_ident_eq("collate") {
+            let _ = self.expect_collation_name()?;
+        }
+        let mut constraints = Vec::new();
+        loop {
+            if self.eat_ident_eq("default") {
+                constraints.push(DomainConstraint::Default(self.expression_source()?));
+                continue;
+            }
+            if self.eat_keyword(Keyword::Not) {
+                self.expect(&Token::Keyword(Keyword::Null))?;
+                constraints.push(DomainConstraint::NotNull);
+                continue;
+            }
+            if *self.peek() == Token::Keyword(Keyword::Null) {
+                self.bump();
+                constraints.push(DomainConstraint::Null);
+                continue;
+            }
+            let named = if self.eat_ident_eq("constraint") {
+                Some(self.expect_relation_name()?)
+            } else {
+                None
+            };
+            if self.eat_ident_eq("check") {
+                constraints.push(DomainConstraint::Check {
+                    name: named,
+                    text: self.check_predicate()?.text,
+                });
+                continue;
+            }
+            if let Some(constraint) = named {
+                return Err(ParseError::new_sqlstate(
+                    "42601",
+                    format!("expected CHECK after CONSTRAINT {constraint}"),
+                    self.peek_pos(),
+                ));
+            }
+            break;
+        }
+        Ok(crate::ast::Statement::CreateDomain {
+            name,
+            base,
+            constraints,
+        })
+    }
+
+    /// `ALTER DOMAIN name <action>`.
+    fn alter_domain(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::AlterDomainAction;
+        self.expect_ident_eq("alter")?;
+        self.expect_ident_eq("domain")?;
+        let name = self.qualified_object_name()?;
+        let pos = self.peek_pos();
+        let action = if self.eat_keyword(Keyword::Set) {
+            if self.eat_ident_eq("default") {
+                AlterDomainAction::SetDefault(self.expression_source()?)
+            } else {
+                self.expect(&Token::Keyword(Keyword::Not))?;
+                self.expect(&Token::Keyword(Keyword::Null))?;
+                AlterDomainAction::SetNotNull(true)
+            }
+        } else if self.eat_keyword(Keyword::Drop) {
+            if self.eat_ident_eq("default") {
+                AlterDomainAction::DropDefault
+            } else if self.eat_keyword(Keyword::Not) {
+                self.expect(&Token::Keyword(Keyword::Null))?;
+                AlterDomainAction::SetNotNull(false)
+            } else {
+                self.expect_ident_eq("constraint")?;
+                let if_exists = self.eat_if_exists()?;
+                let constraint = self.expect_ident()?;
+                let _ = self.eat_drop_behavior();
+                AlterDomainAction::DropConstraint {
+                    name: constraint,
+                    if_exists,
+                }
+            }
+        } else if self.eat_ident_eq("add") {
+            let named = if self.eat_ident_eq("constraint") {
+                Some(self.expect_relation_name()?)
+            } else {
+                None
+            };
+            self.expect_ident_eq("check")?;
+            let text = self.check_predicate()?.text;
+            let not_valid = self.eat_not_valid();
+            AlterDomainAction::AddConstraint {
+                name: named,
+                text,
+                not_valid,
+            }
+        } else if self.eat_ident_eq("validate") {
+            self.expect_ident_eq("constraint")?;
+            AlterDomainAction::ValidateConstraint(self.expect_ident()?)
+        } else if self.eat_ident_eq("rename") {
+            if self.eat_ident_eq("constraint") {
+                let from = self.expect_ident()?;
+                self.expect(&Token::Keyword(Keyword::To))?;
+                let to = self.expect_ident()?;
+                AlterDomainAction::RenameConstraint { from, to }
+            } else {
+                self.expect(&Token::Keyword(Keyword::To))?;
+                AlterDomainAction::RenameTo(self.expect_ident()?)
+            }
+        } else if self.eat_ident_eq("owner") {
+            self.expect(&Token::Keyword(Keyword::To))?;
+            AlterDomainAction::OwnerTo(self.expect_ident()?)
+        } else {
+            return Err(ParseError::new_sqlstate(
+                "42601",
+                format!(
+                    "unrecognized ALTER DOMAIN action at or near {:?}",
+                    self.peek()
+                ),
+                pos,
+            ));
+        };
+        Ok(crate::ast::Statement::AlterDomain { name, action })
+    }
+
+    /// `NOT VALID` after a domain or table constraint.
+    fn eat_not_valid(&mut self) -> bool {
+        if matches!(self.peek(), Token::Keyword(Keyword::Not))
+            && matches!(self.peek2(), Token::Ident(w) if w.eq_ignore_ascii_case("valid"))
+        {
+            self.bump();
+            self.bump();
+            return true;
+        }
+        false
+    }
+
+    /// Parse an expression and return its source text — what a domain default
+    /// stores, since the executor re-parses and evaluates it per use.
+    fn expression_source(&mut self) -> Result<String, ParseError> {
+        let start = self.peek_pos();
+        let _ = self.expr(0)?;
+        let end = self.peek_pos();
+        Ok(self.source[start..end].trim().to_string())
+    }
+
+    /// A possibly schema-qualified object name, reduced to its bare name: the
+    /// engine has one schema, and `public.t` names the same object as `t`.
+    fn qualified_object_name(&mut self) -> Result<String, ParseError> {
+        let first = self.expect_ident()?;
+        if *self.peek() == Token::Dot {
+            self.bump();
+            return self.expect_ident();
+        }
+        Ok(first)
     }
 
     fn expect_i64(&mut self, what: &str) -> Result<i64, ParseError> {
@@ -2267,7 +6778,7 @@ impl Parser {
     fn truncate(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("truncate")?;
         let _ = self.eat_keyword(Keyword::Table);
-        let mut names = vec![self.expect_ident()?];
+        let mut names = vec![self.expect_relation_name()?];
         while *self.peek() == Token::Comma {
             self.bump();
             names.push(self.expect_ident()?);
@@ -2293,12 +6804,12 @@ impl Parser {
     /// Consume one storage-parameter value (`WITH (key = value)`): a numeric
     /// literal (optionally negative), a string, or a bare word such as `on` /
     /// `off`. The value is validated for shape and discarded.
-    fn storage_parameter_value(&mut self) -> Result<(), ParseError> {
+    fn storage_parameter_value(&mut self) -> Result<String, ParseError> {
         if *self.peek() == Token::Minus {
             self.bump();
             let pos = self.peek_pos();
             return match self.bump() {
-                Token::IntLit(_) | Token::FloatLit(_) => Ok(()),
+                Token::IntLit(raw) | Token::FloatLit(raw) => Ok(format!("-{raw}")),
                 other => Err(ParseError::new(
                     format!("expected numeric storage parameter value, found {other:?}"),
                     pos,
@@ -2307,11 +6818,11 @@ impl Parser {
         }
         let pos = self.peek_pos();
         match self.bump() {
-            Token::IntLit(_)
-            | Token::FloatLit(_)
-            | Token::StringLit(_)
-            | Token::Ident(_)
-            | Token::Keyword(_) => Ok(()),
+            Token::IntLit(raw)
+            | Token::FloatLit(raw)
+            | Token::StringLit(raw)
+            | Token::Ident(raw) => Ok(raw),
+            Token::Keyword(keyword) => Ok(format!("{keyword:?}").to_ascii_lowercase()),
             other => Err(ParseError::new(
                 format!("expected storage parameter value, found {other:?}"),
                 pos,
@@ -2324,12 +6835,17 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Drop))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
         let if_exists = self.eat_if_exists()?;
-        let mut names = vec![self.expect_ident()?];
+        let mut names = vec![self.expect_relation_name()?];
         while *self.peek() == Token::Comma {
             self.bump();
             names.push(self.expect_ident()?);
         }
-        Ok(Statement::DropTable { names, if_exists })
+        let cascade = self.eat_drop_behavior();
+        Ok(Statement::DropTable {
+            names,
+            if_exists,
+            cascade,
+        })
     }
 
     fn drop_index(&mut self) -> Result<crate::ast::Statement, ParseError> {
@@ -2338,9 +6854,11 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Drop))?;
         self.expect(&Token::Keyword(Keyword::Index))?;
         let if_exists = self.eat_if_exists()?;
+        let name = self.expect_ident()?;
         Ok(Statement::DropIndex {
-            name: self.expect_ident()?,
+            name,
             if_exists,
+            cascade: self.eat_drop_behavior(),
         })
     }
 
@@ -2350,9 +6868,11 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Drop))?;
         self.expect(&Token::Keyword(Keyword::View))?;
         let if_exists = self.eat_if_exists()?;
+        let name = self.expect_object_name()?;
         Ok(Statement::DropView {
-            name: self.expect_object_name()?,
+            name,
             if_exists,
+            cascade: self.eat_drop_behavior(),
         })
     }
 
@@ -2360,49 +6880,90 @@ impl Parser {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Insert))?;
         self.expect(&Token::Keyword(Keyword::Into))?;
-        let table = self.expect_ident()?;
-        let columns = if *self.peek() == Token::LParen {
+        let table = self.expect_relation_name()?;
+        // `(` starts the target column list, unless it opens a parenthesised
+        // query — `INSERT INTO t (SELECT …)` inserts that query's rows.
+        let columns = if *self.peek() == Token::LParen && !self.paren_opens_query_expr() {
             self.bump();
-            let mut cols = Vec::new();
-            loop {
-                cols.push(self.expect_ident()?);
-                if self.eat_comma() {
-                    continue;
-                }
-                break;
+            // `insert_column_item` is `ColId opt_indirection`, so a word this
+            // lexer keywords but PostgreSQL classifies unreserved or col_name is
+            // an ordinary target column here.
+            let mut cols = vec![self.expect_col_id()?];
+            while self.eat_comma() {
+                cols.push(self.expect_col_id()?);
             }
             self.expect(&Token::RParen)?;
             Some(cols)
         } else {
             None
         };
-        self.expect(&Token::Keyword(Keyword::Values))?;
-        let mut rows = Vec::new();
-        loop {
-            self.expect(&Token::LParen)?;
-            let mut row = Vec::new();
+        let source = self.insert_source()?;
+        let on_conflict = self.on_conflict_clause()?;
+        Ok(Statement::Insert {
+            table,
+            columns,
+            source,
+            with: None,
+            on_conflict,
+            returning: self.returning_clause()?,
+        })
+    }
+
+    /// True when the `(` at the cursor opens a parenthesised query expression
+    /// rather than an identifier list.
+    fn paren_opens_query_expr(&self) -> bool {
+        let mut offset = 0usize;
+        while matches!(self.peek_n(offset), Token::LParen) {
+            offset += 1;
+        }
+        // `VALUES` is a `col_name_keyword`, so `INSERT INTO t (values) VALUES (1)`
+        // names a column rather than opening a `VALUES` list. What tells them
+        // apart is the row list a real `VALUES` must be followed by.
+        if matches!(self.peek_n(offset), Token::Keyword(Keyword::Values)) {
+            return matches!(self.peek_n(offset + 1), Token::LParen);
+        }
+        matches!(
+            self.peek_n(offset),
+            Token::Keyword(Keyword::Select | Keyword::With | Keyword::Table)
+        )
+    }
+
+    /// The rows an `INSERT` supplies: a `VALUES` list (which may contain
+    /// `DEFAULT`), `DEFAULT VALUES`, or any query expression.
+    fn insert_source(&mut self) -> Result<crate::ast::InsertSource, ParseError> {
+        use crate::ast::InsertSource;
+        if matches!(self.peek(), Token::Ident(s) if s == "default")
+            && *self.peek2() == Token::Keyword(Keyword::Values)
+        {
+            self.bump();
+            self.bump();
+            return Ok(InsertSource::DefaultValues);
+        }
+        // A bare `VALUES` list keeps the classic row path so `DEFAULT` stays legal
+        // in value position; every other spelling is a full query expression.
+        if *self.peek() == Token::Keyword(Keyword::Values) {
+            self.bump();
+            let mut rows = Vec::new();
             loop {
-                row.push(self.insert_value_expr()?);
+                self.expect(&Token::LParen)?;
+                let mut row = Vec::new();
+                loop {
+                    row.push(self.insert_value_expr()?);
+                    if self.eat_comma() {
+                        continue;
+                    }
+                    break;
+                }
+                self.expect(&Token::RParen)?;
+                rows.push(row);
                 if self.eat_comma() {
                     continue;
                 }
                 break;
             }
-            self.expect(&Token::RParen)?;
-            rows.push(row);
-            if self.eat_comma() {
-                continue;
-            }
-            break;
+            return Ok(InsertSource::Values(rows));
         }
-        let on_conflict = self.on_conflict_clause()?;
-        Ok(Statement::Insert {
-            table,
-            columns,
-            rows,
-            on_conflict,
-            returning: self.returning_clause()?,
-        })
+        Ok(InsertSource::Query(Box::new(self.query_expr()?)))
     }
 
     /// `ON CONFLICT [ ( col, … ) [WHERE pred] | ON CONSTRAINT name ]
@@ -2482,12 +7043,53 @@ impl Parser {
         Ok(Some(OnConflict { target, action }))
     }
 
-    fn returning_clause(&mut self) -> Result<Option<Vec<crate::ast::SelectItem>>, ParseError> {
+    /// `RETURNING [ WITH ( { OLD | NEW } AS alias [, …] ) ] <projection>`. The
+    /// `WITH` list is `PostgreSQL` 18's way of naming the pre- and post-image
+    /// rows when the default `old`/`new` spellings would collide.
+    fn returning_clause(&mut self) -> Result<Option<crate::ast::Returning>, ParseError> {
         if !self.eat_keyword(Keyword::Returning) {
             return Ok(None);
         }
-
-        Ok(Some(self.projection_list()?))
+        let mut old_alias = None;
+        let mut new_alias = None;
+        if self.eat_keyword(Keyword::With) {
+            self.expect(&Token::LParen)?;
+            loop {
+                let pos = self.peek_pos();
+                let which = self.expect_ident()?;
+                self.expect(&Token::Keyword(Keyword::As))?;
+                let alias = self.expect_ident()?;
+                let slot = match which.as_str() {
+                    "old" => &mut old_alias,
+                    "new" => &mut new_alias,
+                    _ => {
+                        return Err(ParseError::new_sqlstate(
+                            "42601",
+                            format!("syntax error at or near \"{which}\""),
+                            pos,
+                        ));
+                    }
+                };
+                if slot.is_some() {
+                    return Err(ParseError::new_sqlstate(
+                        "42601",
+                        format!("{} specified more than once", which.to_uppercase()),
+                        pos,
+                    ));
+                }
+                *slot = Some(alias);
+                if self.eat_comma() {
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Token::RParen)?;
+        }
+        Ok(Some(crate::ast::Returning {
+            old_alias,
+            new_alias,
+            items: self.projection_list()?,
+        }))
     }
 
     fn projection_list(&mut self) -> Result<Vec<crate::ast::SelectItem>, ParseError> {
@@ -2509,11 +7111,9 @@ impl Parser {
             } else {
                 let expr = self.expr(0)?;
                 let alias = if self.eat_keyword(Keyword::As) {
-                    Some(self.expect_ident()?)
-                } else if let Token::Ident(_) = self.peek() {
-                    Some(self.expect_ident()?)
+                    Some(self.expect_col_label()?)
                 } else {
-                    None
+                    self.opt_bare_col_label()
                 };
                 projection.push(SelectItem::Expr { expr, alias });
             }
@@ -2537,7 +7137,7 @@ impl Parser {
         use crate::ast::{CopyFormat, CopyStmt, Statement};
 
         self.expect(&Token::Keyword(Keyword::Copy))?;
-        let table = self.expect_ident()?;
+        let table = self.expect_relation_name()?;
         let columns = if *self.peek() == Token::LParen {
             Some(self.parse_parenthesized_ident_list()?)
         } else {
@@ -2650,7 +7250,10 @@ impl Parser {
         self.expect(&Token::LParen)?;
         let mut cols = Vec::new();
         loop {
-            cols.push(self.expect_ident()?);
+            // Every parenthesised column list in the grammar — an INSERT target
+            // list, a COPY column list, a multi-column UPDATE target — is a list
+            // of `ColId`.
+            cols.push(self.expect_col_id()?);
             if self.eat_comma() {
                 continue;
             }
@@ -2695,7 +7298,6 @@ impl Parser {
     /// Parse projection → HAVING. Leaves `order_by` / `limit` / `offset` / `locking` empty;
     /// the caller (single SELECT or set-op query) owns the tail.
     fn select_core(&mut self) -> Result<crate::ast::SelectStmt, ParseError> {
-        use crate::ast::SelectStmt;
         // Mode-1 depth guard: EVERY SELECT body funnels through `select_core` — a
         // top-level set-op branch (`set_primary → select_core`), a derived table,
         // or a scalar/IN/EXISTS subquery (`query_expr → set_primary → select_core`) — so
@@ -2703,13 +7305,32 @@ impl Parser {
         // chain `( SELECT … FROM ( SELECT … ) )`). Subqueries also pass through
         // `expr` first; guarding both is belt-and-braces.
         let _guard = DepthGuard::enter(&self.depth, self.peek_pos())?;
+        // Own a window-call frame for the whole body, so a window call written in
+        // any of this SELECT's clauses lands here and one written in a nested
+        // subquery lands on that subquery instead. Popped on every exit path.
+        self.window_calls.push(Vec::new());
+        // A subquery written inside a window specification is a separate query
+        // level: PostgreSQL's window-definition ban applies to the SELECT that
+        // owns the specification, not to any query nested inside it, so
+        // `count(*) OVER (ORDER BY (SELECT rank() OVER ()))` is legal. Enter this
+        // body with a fresh count and restore the enclosing one on the way out.
+        let enclosing_window_spec_depth = std::mem::take(&mut self.window_spec_depth);
+        let body = self.select_core_body();
+        self.window_spec_depth = enclosing_window_spec_depth;
+        let window_calls = self.window_calls.pop().unwrap_or_default();
+        let mut select = body?;
+        select.window_calls = window_calls;
+        Ok(select)
+    }
+
+    fn select_core_body(&mut self) -> Result<crate::ast::SelectStmt, ParseError> {
+        use crate::ast::SelectStmt;
         self.expect(&Token::Keyword(Keyword::Select))?;
-        // SP28: SELECT DISTINCT (ALL is the default modifier — accept and ignore).
-        let distinct = self.eat_keyword(Keyword::Distinct);
-        if !distinct {
-            self.eat_keyword(Keyword::All);
-        }
+        // SP28: SELECT DISTINCT / DISTINCT ON (…) (ALL is the default modifier —
+        // accept and ignore).
+        let distinct = self.distinct_clause()?;
         let projection = self.projection_list()?;
+        self.opt_select_into()?;
         let from = if self.eat_keyword(Keyword::From) {
             self.parse_from()?
         } else {
@@ -2721,34 +7342,225 @@ impl Parser {
             None
         };
         // SP27: GROUP BY <expr-list> then HAVING <expr>, between WHERE and ORDER BY.
-        let mut group_by = Vec::new();
-        if self.eat_keyword(Keyword::Group) {
-            self.expect(&Token::Keyword(Keyword::By))?;
-            loop {
-                group_by.push(self.expr(0)?);
-                if self.eat_comma() {
-                    continue;
-                }
-                break;
-            }
-        }
+        let (group_by, grouping) = self.parse_group_by()?;
         let having = if self.eat_keyword(Keyword::Having) {
             Some(self.expr(0)?)
         } else {
             None
         };
+        let windows = self.window_clause()?;
         Ok(SelectStmt {
             projection,
             from,
             filter,
             distinct,
             group_by,
+            grouping,
             having,
+            windows,
+            // Filled in by `select_core` from this SELECT's window-call frame.
+            window_calls: Vec::new(),
             order_by: Vec::new(),
             limit: None,
             offset: None,
+            with_ties: false,
             locking: None,
         })
+    }
+
+    /// `GROUP BY [ALL | DISTINCT] <group_by_item> [, …]`.
+    ///
+    /// Returns the flattened, deduplicated grouping expressions and — only when
+    /// the clause needs expanding into more than the one grouping set a plain
+    /// `GROUP BY` produces — the set structure over their indices.
+    fn parse_group_by(&mut self) -> Result<GroupByClause, ParseError> {
+        use crate::ast::GroupingClause;
+        if !self.eat_keyword(Keyword::Group) {
+            return Ok((Vec::new(), None));
+        }
+        self.expect(&Token::Keyword(Keyword::By))?;
+        // PG18 `GROUP BY ALL` / `GROUP BY DISTINCT`: ALL is the default and keeps
+        // duplicate grouping sets, DISTINCT collapses them.
+        let distinct = self.eat_keyword(Keyword::Distinct);
+        if !distinct {
+            self.eat_keyword(Keyword::All);
+        }
+        let mut exprs = Vec::new();
+        let mut items = Vec::new();
+        let mut structured = false;
+        loop {
+            items.push(self.group_by_item(&mut exprs, &mut structured)?);
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        if !structured && !distinct {
+            return Ok((exprs, None));
+        }
+        let clause = GroupingClause { distinct, items };
+        self.check_grouping_set_count(&clause)?;
+        Ok((exprs, Some(clause)))
+    }
+
+    /// One `group_by_item`: `()`, `ROLLUP (…)`, `CUBE (…)`, `GROUPING SETS (…)`,
+    /// or an ordinary expression. `structured` records whether anything that
+    /// expands to more than one grouping set has been seen.
+    fn group_by_item(
+        &mut self,
+        exprs: &mut Vec<crate::ast::Expr>,
+        structured: &mut bool,
+    ) -> Result<crate::ast::GroupItem, ParseError> {
+        use crate::ast::GroupItem;
+        // A `GROUPING SETS` list nests arbitrarily, so this recursion needs the
+        // same depth bound as the rest of the grammar.
+        let _guard = DepthGuard::enter(&self.depth, self.peek_pos())?;
+        if *self.peek() == Token::LParen && *self.peek2() == Token::RParen {
+            self.bump();
+            self.bump();
+            *structured = true;
+            return Ok(GroupItem::Empty);
+        }
+        if let Some(kind) = self.peek_grouping_keyword() {
+            *structured = true;
+            return self.grouping_set_item(kind, exprs, structured);
+        }
+        // A bare parenthesised tuple at the top of the list is not a row value:
+        // PostgreSQL flattens `GROUP BY (a, b)` to `GROUP BY a, b`.
+        self.group_element(exprs)
+    }
+
+    /// The `ROLLUP` / `CUBE` / `GROUPING SETS` construct at the cursor, if any.
+    /// All three are unreserved in `PostgreSQL` and lex as identifiers here, so
+    /// they are recognized by the token that must follow them — which keeps a
+    /// column named `rollup` usable as a grouping expression.
+    fn peek_grouping_keyword(&self) -> Option<GroupingKeyword> {
+        match self.peek() {
+            Token::Ident(w)
+                if w.eq_ignore_ascii_case("rollup") && *self.peek2() == Token::LParen =>
+            {
+                Some(GroupingKeyword::Rollup)
+            }
+            Token::Ident(w) if w.eq_ignore_ascii_case("cube") && *self.peek2() == Token::LParen => {
+                Some(GroupingKeyword::Cube)
+            }
+            Token::Ident(w)
+                if w.eq_ignore_ascii_case("grouping")
+                    && matches!(self.peek2(), Token::Ident(s) if s.eq_ignore_ascii_case("sets"))
+                    && *self.peek3() == Token::LParen =>
+            {
+                Some(GroupingKeyword::Sets)
+            }
+            _ => None,
+        }
+    }
+
+    fn grouping_set_item(
+        &mut self,
+        kind: GroupingKeyword,
+        exprs: &mut Vec<crate::ast::Expr>,
+        structured: &mut bool,
+    ) -> Result<crate::ast::GroupItem, ParseError> {
+        use crate::ast::GroupItem;
+        let pos = self.peek_pos();
+        self.bump(); // ROLLUP / CUBE / GROUPING
+        if kind == GroupingKeyword::Sets {
+            self.bump(); // SETS
+        }
+        self.expect(&Token::LParen)?;
+        let mut elements = Vec::new();
+        loop {
+            elements.push(match kind {
+                // Only GROUPING SETS nests the full item grammar; a ROLLUP/CUBE
+                // element is an expression or a parenthesised tuple.
+                GroupingKeyword::Sets => self.group_by_item(exprs, structured)?,
+                GroupingKeyword::Rollup | GroupingKeyword::Cube => self.group_element(exprs)?,
+            });
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        match kind {
+            GroupingKeyword::Rollup => Ok(GroupItem::Rollup(elements)),
+            GroupingKeyword::Cube => {
+                if elements.len() > MAX_CUBE_ELEMENTS {
+                    return Err(ParseError::new_sqlstate(
+                        "54011",
+                        "CUBE is limited to 12 elements",
+                        pos,
+                    ));
+                }
+                Ok(GroupItem::Cube(elements))
+            }
+            GroupingKeyword::Sets => Ok(GroupItem::GroupingSets(elements)),
+        }
+    }
+
+    /// One `ROLLUP`/`CUBE` element or plain `GROUP BY` entry: an expression, or a
+    /// parenthesised tuple whose members join and leave a grouping set together.
+    fn group_element(
+        &mut self,
+        exprs: &mut Vec<crate::ast::Expr>,
+    ) -> Result<crate::ast::GroupItem, ParseError> {
+        use crate::ast::{Expr, GroupItem};
+        if *self.peek() == Token::LParen && *self.peek2() == Token::RParen {
+            self.bump();
+            self.bump();
+            return Ok(GroupItem::Empty);
+        }
+        Ok(match self.expr(0)? {
+            Expr::Row(members) => GroupItem::Composite(
+                members
+                    .into_iter()
+                    .map(|member| intern_group_expr(exprs, member))
+                    .collect(),
+            ),
+            other => GroupItem::Expr(intern_group_expr(exprs, other)),
+        })
+    }
+
+    /// `PostgreSQL` caps a query at 4096 grouping sets. The item structure alone
+    /// determines the count, so the bound is checked here rather than after
+    /// expansion; with `GROUP BY DISTINCT` this counts sets before duplicates are
+    /// removed, so it is an upper bound on `PostgreSQL`'s own count.
+    fn check_grouping_set_count(
+        &self,
+        clause: &crate::ast::GroupingClause,
+    ) -> Result<(), ParseError> {
+        let mut total: usize = 1;
+        for item in &clause.items {
+            total = total.saturating_mul(grouping_set_count(item));
+            if total > MAX_GROUPING_SETS {
+                return Err(ParseError::new_sqlstate(
+                    "54001",
+                    "too many grouping sets present (maximum 4096)",
+                    self.peek_pos(),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// `DISTINCT`, `DISTINCT ON (expr, …)`, or the `ALL` default, positioned
+    /// just after `SELECT`.
+    fn distinct_clause(&mut self) -> Result<crate::ast::DistinctClause, ParseError> {
+        use crate::ast::DistinctClause;
+        if !self.eat_keyword(Keyword::Distinct) {
+            self.eat_keyword(Keyword::All);
+            return Ok(DistinctClause::All);
+        }
+        if !self.eat_keyword(Keyword::On) {
+            return Ok(DistinctClause::Distinct);
+        }
+        self.expect(&Token::LParen)?;
+        let mut on = vec![self.expr(0)?];
+        while self.eat_comma() {
+            on.push(self.expr(0)?);
+        }
+        self.expect(&Token::RParen)?;
+        Ok(DistinctClause::On(on))
     }
 
     fn values_stmt(&mut self) -> Result<crate::ast::ValuesStmt, ParseError> {
@@ -2779,71 +7591,313 @@ impl Parser {
     /// The tuple is the three result-level tail components (`order_by`, `limit`, `offset`);
     /// a named struct would not read more clearly than the positional triple.
     fn parse_set_tail(&mut self) -> Result<SetTail, ParseError> {
-        use crate::ast::OrderItem;
-        let mut order_by = Vec::new();
-        if self.eat_keyword(Keyword::Order) {
-            self.expect(&Token::Keyword(Keyword::By))?;
-            loop {
-                let expr = self.expr(0)?;
-                let asc = if self.eat_keyword(Keyword::Desc) {
-                    false
-                } else {
-                    self.eat_keyword(Keyword::Asc);
-                    true
-                };
-                order_by.push(OrderItem { expr, asc });
-                if self.eat_comma() {
-                    continue;
-                }
-                break;
-            }
+        let order_by = self.parse_order_by()?;
+        let mut tail = self.parse_limit_offset()?;
+        // PostgreSQL rejects WITH TIES without ORDER BY in the grammar itself
+        // (gram.y `insertSelectOptions`), so it is a 42601 syntax error.
+        if tail.with_ties && order_by.is_empty() {
+            return Err(ParseError::new_sqlstate(
+                "42601",
+                "WITH TIES cannot be specified without ORDER BY clause",
+                self.peek_pos(),
+            ));
         }
-        // SP28: LIMIT and OFFSET in either order (PostgreSQL accepts both).
-        let mut limit = None;
-        let mut offset = None;
-        loop {
-            if limit.is_none() && self.eat_keyword(Keyword::Limit) {
-                limit = Some(self.expect_int_count("LIMIT")?);
-            } else if offset.is_none() && self.eat_keyword(Keyword::Offset) {
-                offset = Some(self.expect_int_count("OFFSET")?);
-            } else {
-                break;
-            }
-        }
-        Ok((order_by, limit, offset))
+        tail.order_by = order_by;
+        Ok(tail)
     }
 
-    /// Parse an optional `FOR UPDATE` / `FOR SHARE` row-locking clause.
-    fn parse_locking(&mut self) -> Result<Option<crate::ast::RowLockStrength>, ParseError> {
-        if self.eat_keyword(Keyword::For) {
-            if self.eat_keyword(Keyword::Update) {
-                Ok(Some(crate::ast::RowLockStrength::ForUpdate))
-            } else if self.eat_keyword(Keyword::Share) {
-                Ok(Some(crate::ast::RowLockStrength::ForShare))
+    /// `ORDER BY expr [ASC|DESC|USING <op>] [NULLS FIRST|LAST] [, …]`.
+    ///
+    /// `NULLS` / `FIRST` / `LAST` are matched as soft identifiers so they remain
+    /// usable as column names, as they are in `PostgreSQL`.
+    fn parse_order_by(&mut self) -> Result<Vec<crate::ast::OrderItem>, ParseError> {
+        use crate::ast::OrderItem;
+        let mut order_by = Vec::new();
+        if !self.eat_keyword(Keyword::Order) {
+            return Ok(order_by);
+        }
+        self.expect(&Token::Keyword(Keyword::By))?;
+        loop {
+            let expr = self.expr(0)?;
+            let asc = if self.eat_keyword(Keyword::Using) {
+                self.order_using_ascending()?
+            } else if self.eat_keyword(Keyword::Desc) {
+                false
             } else {
-                Err(ParseError::new(
-                    "expected UPDATE or SHARE after FOR",
-                    self.peek_pos(),
+                self.eat_keyword(Keyword::Asc);
+                true
+            };
+            // PostgreSQL's defaults: NULLS LAST for ASC, NULLS FIRST for DESC.
+            let nulls_first = if self.peek_ident_eq("nulls") {
+                self.bump();
+                if self.eat_ident_eq("first") {
+                    true
+                } else {
+                    self.expect_ident_eq("last")?;
+                    false
+                }
+            } else {
+                !asc
+            };
+            order_by.push(OrderItem {
+                expr,
+                asc,
+                nulls_first,
+            });
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        Ok(order_by)
+    }
+
+    /// The direction an `ORDER BY … USING <op>` sorts in.
+    ///
+    /// `PostgreSQL` looks the operator up in the operand type's btree operator
+    /// family and takes its strategy: the family's "less than" member sorts
+    /// ascending and its "greater than" member descending. For every type crabka
+    /// has those are spelled `<` and `>`; any other operator is `42809`.
+    fn order_using_ascending(&mut self) -> Result<bool, ParseError> {
+        let position = self.peek_pos();
+        match self.peek() {
+            Token::Lt => {
+                self.bump();
+                Ok(true)
+            }
+            Token::Gt => {
+                self.bump();
+                Ok(false)
+            }
+            other => {
+                let Some(spelling) = operator_spelling(other) else {
+                    return Err(ParseError::new(
+                        "expected an ordering operator after USING",
+                        position,
+                    ));
+                };
+                self.bump();
+                Err(ParseError::new_sqlstate(
+                    "42809",
+                    format!("operator {spelling} is not a valid ordering operator"),
+                    position,
                 ))
             }
+        }
+    }
+
+    /// The row-count window: `LIMIT`/`OFFSET` in either order (`PostgreSQL`
+    /// accepts both), or the SQL-standard `OFFSET n ROWS FETCH FIRST n ROWS
+    /// ONLY` spelling. `FETCH` occupies the same slot as `LIMIT`.
+    fn parse_limit_offset(&mut self) -> Result<SetTail, ParseError> {
+        let mut tail = SetTail::default();
+        let mut has_limit = false;
+        loop {
+            if !has_limit && self.eat_keyword(Keyword::Limit) {
+                has_limit = true;
+                // `LIMIT ALL` is spelled differently from an absent LIMIT but
+                // means exactly the same thing, so both leave `limit` as None.
+                if !self.eat_keyword(Keyword::All) {
+                    tail.limit = Some(self.expr(0)?);
+                }
+            } else if !has_limit && self.peek_ident_eq("fetch") {
+                has_limit = true;
+                self.bump();
+                self.parse_fetch_first(&mut tail)?;
+            } else if tail.offset.is_none() && self.eat_keyword(Keyword::Offset) {
+                tail.offset = Some(self.expr(0)?);
+                // `OFFSET n ROW` / `ROWS` — a noise word in the standard form.
+                let _ = self.eat_ident_eq("row") || self.eat_ident_eq("rows");
+            } else {
+                break;
+            }
+        }
+        Ok(tail)
+    }
+
+    /// `FETCH {FIRST|NEXT} [count] {ROW|ROWS} {ONLY | WITH TIES}`, positioned
+    /// just after `FETCH`. The count defaults to 1 when omitted.
+    fn parse_fetch_first(&mut self, tail: &mut SetTail) -> Result<(), ParseError> {
+        if !self.eat_ident_eq("first") && !self.eat_ident_eq("next") {
+            return Err(ParseError::new(
+                "expected FIRST or NEXT after FETCH",
+                self.peek_pos(),
+            ));
+        }
+        // The count is optional: `FETCH FIRST ROW ONLY` means one row.
+        tail.limit = if self.peek_ident_eq("row") || self.peek_ident_eq("rows") {
+            Some(crate::ast::Expr::IntLiteral("1".into()))
         } else {
-            Ok(None)
+            Some(self.expr(0)?)
+        };
+        if !self.eat_ident_eq("row") && !self.eat_ident_eq("rows") {
+            return Err(ParseError::new(
+                "expected ROW or ROWS in FETCH clause",
+                self.peek_pos(),
+            ));
+        }
+        if self.eat_ident_eq("only") {
+            return Ok(());
+        }
+        self.expect(&Token::Keyword(Keyword::With))?;
+        self.expect_ident_eq("ties")?;
+        tail.with_ties = true;
+        Ok(())
+    }
+
+    /// Parse the optional row-locking clauses.
+    ///
+    /// `PostgreSQL` allows several (`FOR UPDATE OF a FOR SHARE OF b`); they fold
+    /// onto the strongest strength, the union of the named relations, and the
+    /// strictest wait policy, which is indistinguishable from `PostgreSQL` for
+    /// the single-base-table locking reads the executor supports.
+    fn parse_locking(&mut self) -> Result<Option<crate::ast::LockingClause>, ParseError> {
+        use crate::ast::{LockWaitPolicy, LockingClause, RowLockStrength};
+        let mut folded: Option<LockingClause> = None;
+        while *self.peek() == Token::Keyword(Keyword::For) {
+            self.bump();
+            // `FOR READ ONLY` is the SQL-standard spelling PostgreSQL accepts and
+            // ignores: it locks nothing, so it contributes no clause at all.
+            if self.eat_keyword(Keyword::Read) {
+                self.expect_ident_eq("only")?;
+                continue;
+            }
+            let strength = if self.eat_keyword(Keyword::Update) {
+                RowLockStrength::ForUpdate
+            } else if self.eat_ident_eq("no") {
+                self.expect_ident_eq("key")?;
+                self.expect(&Token::Keyword(Keyword::Update))?;
+                RowLockStrength::ForNoKeyUpdate
+            } else if self.eat_keyword(Keyword::Share) {
+                RowLockStrength::ForShare
+            } else if self.eat_ident_eq("key") {
+                self.expect(&Token::Keyword(Keyword::Share))?;
+                RowLockStrength::ForKeyShare
+            } else {
+                return Err(ParseError::new(
+                    "expected UPDATE, NO KEY UPDATE, SHARE or KEY SHARE after FOR",
+                    self.peek_pos(),
+                ));
+            };
+            let mut of = Vec::new();
+            if self.eat_ident_eq("of") {
+                loop {
+                    of.push(self.qualified_relation_name()?);
+                    if self.eat_comma() {
+                        continue;
+                    }
+                    break;
+                }
+            }
+            let wait = if self.eat_ident_eq("nowait") {
+                LockWaitPolicy::NoWait
+            } else if self.eat_ident_eq("skip") {
+                self.expect_ident_eq("locked")?;
+                LockWaitPolicy::SkipLocked
+            } else {
+                LockWaitPolicy::Wait
+            };
+            folded = Some(match folded {
+                None => LockingClause { strength, of, wait },
+                Some(mut prev) => {
+                    prev.strength = prev.strength.max(strength);
+                    prev.of.extend(of);
+                    if prev.wait == LockWaitPolicy::Wait {
+                        prev.wait = wait;
+                    }
+                    prev
+                }
+            });
+        }
+        Ok(folded)
+    }
+
+    /// A possibly schema-qualified relation name, kept as written (`s.t`).
+    fn qualified_relation_name(&mut self) -> Result<String, ParseError> {
+        let mut name = self.expect_ident()?;
+        if *self.peek() == Token::Dot {
+            self.bump();
+            let object = self.expect_ident()?;
+            name = format!("{name}.{object}");
+        }
+        Ok(name)
+    }
+
+    /// Is the current token the identifier `want` (case-insensitively)? The
+    /// non-consuming counterpart of [`Self::eat_ident_eq`].
+    fn peek_ident_eq(&self, want: &str) -> bool {
+        matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case(want))
+    }
+
+    fn dml_command_identity(&self) -> crate::command::CommandIdentity {
+        use crate::command::CommandIdentity;
+        match self.peek() {
+            Token::Keyword(Keyword::Insert) => CommandIdentity::Insert,
+            Token::Keyword(Keyword::Update) => CommandIdentity::Update,
+            Token::Keyword(Keyword::Delete) => CommandIdentity::Delete,
+            _ => CommandIdentity::Merge,
         }
     }
 
     fn query_statement(&mut self) -> Result<crate::ast::Statement, ParseError> {
-        Ok(crate::ast::Statement::Query(self.query_expr()?))
+        let query = self.query_expr()?;
+        Ok(self.finish_query_statement(query))
+    }
+
+    fn finish_query_statement(&mut self, query: crate::ast::QueryExpr) -> crate::ast::Statement {
+        match self.select_into.take() {
+            Some(name) => crate::ast::Statement::CreateTableAs {
+                name,
+                if_not_exists: false,
+                columns: None,
+                query: Box::new(query),
+                with_data: true,
+            },
+            None => crate::ast::Statement::Query(query),
+        }
+    }
+
+    /// `SELECT … INTO <table>` — record the target so [`Parser::query_statement`]
+    /// can hand back a `CREATE TABLE … AS`. `TEMP`/`TEMPORARY`/`UNLOGGED` are
+    /// accepted and ignored: there is one storage class here.
+    fn opt_select_into(&mut self) -> Result<(), ParseError> {
+        if !self.eat_keyword(Keyword::Into) {
+            return Ok(());
+        }
+        let _ = self.eat_ident_eq("temporary")
+            || self.eat_ident_eq("temp")
+            || self.eat_ident_eq("unlogged");
+        let name = self.expect_ident()?;
+        if self.select_into.replace(name).is_some() {
+            return Err(ParseError::new_sqlstate(
+                "42601",
+                "SELECT ... INTO specifies more than one target table",
+                self.peek_pos(),
+            ));
+        }
+        Ok(())
     }
 
     fn query_expr(&mut self) -> Result<crate::ast::QueryExpr, ParseError> {
         let with = self.parse_with_clause()?;
+        self.query_expr_after_with(with)
+    }
+
+    /// The rest of a query expression once its `WITH` list has been parsed. The
+    /// statement dispatcher needs the CTE list before it can tell a query body
+    /// from a data-modifying one, so it consumes the list itself and re-enters
+    /// here.
+    fn query_expr_after_with(
+        &mut self,
+        with: Option<crate::ast::WithClause>,
+    ) -> Result<crate::ast::QueryExpr, ParseError> {
         if *self.peek() == Token::LParen {
             let q = self.parenthesized_query_expr()?;
             if self.peek_is_set_op() {
                 let left = self.query_expr_as_set_branch(q)?;
                 let body = self.set_expr_rest(left, 0)?;
-                let (order_by, limit, offset, locking) = self.parse_query_tail_and_locking()?;
-                let mut q = self.finish_query_expr(body, order_by, limit, offset, locking)?;
+                let tail = self.parse_query_tail_and_locking()?;
+                let mut q = self.finish_query_expr(body, tail)?;
                 q.with = with;
                 return Ok(q);
             }
@@ -2853,22 +7907,74 @@ impl Parser {
                 return Ok(q);
             }
             let body = Self::query_expr_as_outer_primary(q);
-            let (order_by, limit, offset, locking) = self.parse_query_tail_and_locking()?;
-            let mut q = self.finish_query_expr(body, order_by, limit, offset, locking)?;
+            let tail = self.parse_query_tail_and_locking()?;
+            let mut q = self.finish_query_expr(body, tail)?;
             q.with = with;
             return Ok(q);
         }
-        let body = self.set_expr(0)?;
-        let (order_by, limit, offset, locking) = self.parse_query_tail_and_locking()?;
-        let mut q = self.finish_query_expr(body, order_by, limit, offset, locking)?;
+        let mut body = self.set_expr(0)?;
+        let tail = self.parse_query_tail_for_body(&mut body)?;
+        let mut q = self.finish_query_expr(body, tail)?;
         q.with = with;
         Ok(q)
     }
 
     fn parse_query_tail_and_locking(&mut self) -> Result<QueryTailAndLocking, ParseError> {
-        let (order_by, limit, offset) = self.parse_set_tail()?;
+        let mut tail = self.parse_set_tail()?;
         let locking = self.parse_locking()?;
-        Ok((order_by, limit, offset, locking))
+        // PostgreSQL's `select_no_parens` accepts the row-count window on either
+        // side of the locking clause (`… FOR UPDATE LIMIT 2` is legal), so pick up
+        // a window that follows it.
+        if tail.limit.is_none() && tail.offset.is_none() {
+            let trailing = self.parse_limit_offset()?;
+            if trailing.with_ties && tail.order_by.is_empty() {
+                return Err(ParseError::new_sqlstate(
+                    "42601",
+                    "WITH TIES cannot be specified without ORDER BY clause",
+                    self.peek_pos(),
+                ));
+            }
+            tail.limit = trailing.limit;
+            tail.offset = trailing.offset;
+            tail.with_ties = trailing.with_ties;
+        }
+        Ok(QueryTailAndLocking { tail, locking })
+    }
+
+    /// Parse the query tail with `body`'s window-call frame reinstated when the
+    /// body is a lone SELECT. `ORDER BY` sits outside `select_core` in this
+    /// grammar but belongs to that SELECT, so `ORDER BY rank() OVER (…)` has to
+    /// register against it (indices continue where the body left off).
+    fn parse_query_tail_for_body(
+        &mut self,
+        body: &mut crate::ast::SetExpr,
+    ) -> Result<QueryTailAndLocking, ParseError> {
+        use crate::ast::{QueryBody, SetExpr};
+        let SetExpr::Query(QueryBody::Select(select)) = body else {
+            return self.parse_query_tail_and_locking();
+        };
+        self.window_calls
+            .push(std::mem::take(&mut select.window_calls));
+        let tail = self.parse_query_tail_and_locking();
+        select.window_calls = self.window_calls.pop().unwrap_or_default();
+        tail
+    }
+
+    /// [`parse_query_tail_for_body`] for the row-count-only tail a parenthesized
+    /// set-op branch carries.
+    fn parse_set_tail_for_body(
+        &mut self,
+        body: &mut crate::ast::SetExpr,
+    ) -> Result<SetTail, ParseError> {
+        use crate::ast::{QueryBody, SetExpr};
+        let SetExpr::Query(QueryBody::Select(select)) = body else {
+            return self.parse_set_tail();
+        };
+        self.window_calls
+            .push(std::mem::take(&mut select.window_calls));
+        let tail = self.parse_set_tail();
+        select.window_calls = self.window_calls.pop().unwrap_or_default();
+        tail
     }
 
     fn query_expr_as_set_branch(
@@ -2884,9 +7990,10 @@ impl Parser {
         if !has_tail {
             return Ok(q.body);
         }
-        if q.locking.is_some() {
-            return Err(ParseError::new(
-                "FOR UPDATE/SHARE is not allowed with UNION/INTERSECT/EXCEPT",
+        if let Some(locking) = &q.locking {
+            return Err(Self::locking_not_allowed(
+                locking,
+                "UNION/INTERSECT/EXCEPT",
                 self.peek_pos(),
             ));
         }
@@ -2895,6 +8002,7 @@ impl Parser {
                 select.order_by = q.order_by;
                 select.limit = q.limit;
                 select.offset = q.offset;
+                select.with_ties = q.with_ties;
                 Ok(SetExpr::Query(QueryBody::Select(select)))
             }
             body => Ok(SetExpr::Query(QueryBody::Nested(Box::new(
@@ -2904,6 +8012,7 @@ impl Parser {
                     order_by: q.order_by,
                     limit: q.limit,
                     offset: q.offset,
+                    with_ties: q.with_ties,
                     locking: q.locking,
                 },
             )))),
@@ -2927,30 +8036,32 @@ impl Parser {
     fn finish_query_expr(
         &mut self,
         body: crate::ast::SetExpr,
-        order_by: Vec<crate::ast::OrderItem>,
-        limit: Option<i64>,
-        offset: Option<i64>,
-        locking: Option<crate::ast::RowLockStrength>,
+        tail: QueryTailAndLocking,
     ) -> Result<crate::ast::QueryExpr, ParseError> {
         use crate::ast::{QueryBody, QueryExpr, SetExpr};
-        if locking.is_some() {
+        let QueryTailAndLocking { tail, locking } = tail;
+        if let Some(clause) = &locking {
             match &body {
                 SetExpr::Query(QueryBody::Select(_)) => {}
                 SetExpr::Query(QueryBody::Values(_)) => {
-                    return Err(ParseError::new(
-                        "FOR UPDATE/SHARE is not allowed with VALUES",
+                    // PostgreSQL's `transformValuesClause` wording, verbatim.
+                    return Err(ParseError::new_sqlstate(
+                        "0A000",
+                        format!("{} cannot be applied to VALUES", clause.strength.as_sql()),
                         self.peek_pos(),
                     ));
                 }
                 SetExpr::Query(QueryBody::Nested(_)) => {
-                    return Err(ParseError::new(
-                        "FOR UPDATE/SHARE is not allowed with a nested query expression",
+                    return Err(Self::locking_not_allowed(
+                        clause,
+                        "a nested query expression",
                         self.peek_pos(),
                     ));
                 }
                 SetExpr::SetOp { .. } => {
-                    return Err(ParseError::new(
-                        "FOR UPDATE/SHARE is not allowed with UNION/INTERSECT/EXCEPT",
+                    return Err(Self::locking_not_allowed(
+                        clause,
+                        "UNION/INTERSECT/EXCEPT",
                         self.peek_pos(),
                     ));
                 }
@@ -2959,11 +8070,26 @@ impl Parser {
         Ok(QueryExpr {
             with: None,
             body,
-            order_by,
-            limit,
-            offset,
+            order_by: tail.order_by,
+            limit: tail.limit,
+            offset: tail.offset,
+            with_ties: tail.with_ties,
             locking,
         })
+    }
+
+    /// `PostgreSQL`'s `CheckSelectLocking` refusal: `0A000`, naming the strength
+    /// the query actually asked for and the clause it clashes with.
+    fn locking_not_allowed(
+        clause: &crate::ast::LockingClause,
+        what: &str,
+        position: usize,
+    ) -> ParseError {
+        ParseError::new_sqlstate(
+            "0A000",
+            format!("{} is not allowed with {what}", clause.strength.as_sql()),
+            position,
+        )
     }
 
     fn peek_is_set_op(&self) -> bool {
@@ -2977,7 +8103,7 @@ impl Parser {
         matches!(
             self.peek(),
             Token::Keyword(Keyword::Order | Keyword::Limit | Keyword::Offset | Keyword::For)
-        )
+        ) || self.peek_ident_eq("fetch")
     }
 
     fn parse_with_clause(&mut self) -> Result<Option<crate::ast::WithClause>, ParseError> {
@@ -3012,19 +8138,99 @@ impl Parser {
                 None
             };
             self.expect(&Token::Keyword(Keyword::As))?;
+            let materialized = if self.eat_ident_eq("materialized") {
+                Some(true)
+            } else if *self.peek() == Token::Keyword(Keyword::Not)
+                && matches!(self.peek2(), Token::Ident(s) if s == "materialized")
+            {
+                self.bump();
+                self.bump();
+                Some(false)
+            } else {
+                None
+            };
             self.expect(&Token::LParen)?;
-            let query = self.query_expr()?;
+            let body = if self.starts_dml_statement() {
+                crate::ast::CteBody::Dml(Box::new(self.dml_statement()?))
+            } else {
+                crate::ast::CteBody::Query(Box::new(self.query_expr()?))
+            };
             self.expect(&Token::RParen)?;
+            let search = self.parse_cte_search()?;
+            let cycle = self.parse_cte_cycle()?;
             ctes.push(Cte {
                 name,
                 columns,
-                query,
+                body,
+                materialized,
+                search,
+                cycle,
             });
             if !self.eat_comma() {
                 break;
             }
         }
         Ok(Some(WithClause { recursive, ctes }))
+    }
+
+    /// `SEARCH { BREADTH | DEPTH } FIRST BY col [, …] SET col`, the optional
+    /// traversal-order clause of a recursive `WITH` item. `SEARCH`, `BREADTH`,
+    /// `DEPTH`, and `FIRST` are unreserved in `PostgreSQL` and lex as identifiers.
+    fn parse_cte_search(&mut self) -> Result<Option<crate::ast::CteSearch>, ParseError> {
+        if !self.eat_ident_eq("search") {
+            return Ok(None);
+        }
+        let depth_first = if self.eat_ident_eq("depth") {
+            true
+        } else {
+            self.expect_ident_eq("breadth")?;
+            false
+        };
+        self.expect_ident_eq("first")?;
+        self.expect(&Token::Keyword(Keyword::By))?;
+        let by = self.ident_list()?;
+        self.expect(&Token::Keyword(Keyword::Set))?;
+        let set = self.expect_ident()?;
+        Ok(Some(crate::ast::CteSearch {
+            depth_first,
+            by,
+            set,
+        }))
+    }
+
+    /// `CYCLE col [, …] SET col [TO value DEFAULT value] USING col`, the optional
+    /// cycle-detection clause of a recursive `WITH` item.
+    fn parse_cte_cycle(&mut self) -> Result<Option<crate::ast::CteCycle>, ParseError> {
+        if !self.eat_ident_eq("cycle") {
+            return Ok(None);
+        }
+        let by = self.ident_list()?;
+        self.expect(&Token::Keyword(Keyword::Set))?;
+        let set = self.expect_ident()?;
+        let mark_values = if self.eat_keyword(Keyword::To) {
+            let marked = self.expr(0)?;
+            self.expect_ident_eq("default")?;
+            Some((marked, self.expr(0)?))
+        } else {
+            None
+        };
+        self.expect(&Token::Keyword(Keyword::Using))?;
+        let using = self.expect_ident()?;
+        Ok(Some(crate::ast::CteCycle {
+            by,
+            set,
+            mark_values,
+            using,
+        }))
+    }
+
+    /// A comma-separated list of at least one identifier.
+    fn ident_list(&mut self) -> Result<Vec<String>, ParseError> {
+        let mut out = vec![self.expect_ident()?];
+        while self.eat_comma() {
+            out.push(self.expect_ident()?);
+        }
+        Ok(out)
     }
 
     /// Precedence-climbing set-op tree. INTERSECT = 2, UNION/EXCEPT = 1; all
@@ -3089,10 +8295,13 @@ impl Parser {
 
     fn query_expr_after_open_paren(&mut self) -> Result<crate::ast::QueryExpr, ParseError> {
         let with = self.parse_with_clause()?;
-        let body = self.set_expr(0)?;
-        let (order_by, limit, offset, locking) = self.parse_query_tail_and_locking()?;
+        let mut body = self.set_expr(0)?;
+        // A parenthesized query owns its own tail, so its `ORDER BY rank() OVER
+        // (…)` belongs to the SELECT inside the parentheses just as a top-level
+        // one belongs to the top-level SELECT.
+        let tail = self.parse_query_tail_for_body(&mut body)?;
         self.expect(&Token::RParen)?;
-        let mut q = self.finish_query_expr(body, order_by, limit, offset, locking)?;
+        let mut q = self.finish_query_expr(body, tail)?;
         q.with = with;
         Ok(q)
     }
@@ -3111,6 +8320,10 @@ impl Parser {
             Ok(inner)
         } else if *self.peek() == Token::Keyword(Keyword::Values) {
             Ok(SetExpr::Query(QueryBody::Values(self.values_stmt()?)))
+        } else if *self.peek() == Token::Keyword(Keyword::Table) {
+            Ok(SetExpr::Query(QueryBody::Select(Box::new(
+                self.table_query_body()?,
+            ))))
         } else {
             Ok(SetExpr::Query(QueryBody::Select(Box::new(
                 self.select_core()?,
@@ -3128,29 +8341,29 @@ impl Parser {
         let has_tail = matches!(
             self.peek(),
             Token::Keyword(Keyword::Order | Keyword::Limit | Keyword::Offset)
-        );
+        ) || self.peek_ident_eq("fetch");
         if !has_tail {
             return Ok(inner);
         }
+        let mut inner = inner;
+        let tail = self.parse_set_tail_for_body(&mut inner)?;
         match inner {
             SetExpr::Query(QueryBody::Select(mut s)) => {
-                let (order_by, limit, offset) = self.parse_set_tail()?;
-                s.order_by = order_by;
-                s.limit = limit;
-                s.offset = offset;
+                s.order_by = tail.order_by;
+                s.limit = tail.limit;
+                s.offset = tail.offset;
+                s.with_ties = tail.with_ties;
                 Ok(SetExpr::Query(QueryBody::Select(s)))
             }
-            body => {
-                let (order_by, limit, offset) = self.parse_set_tail()?;
-                Ok(SetExpr::Query(QueryBody::Nested(Box::new(QueryExpr {
-                    with: None,
-                    body,
-                    order_by,
-                    limit,
-                    offset,
-                    locking: None,
-                }))))
-            }
+            body => Ok(SetExpr::Query(QueryBody::Nested(Box::new(QueryExpr {
+                with: None,
+                body,
+                order_by: tail.order_by,
+                limit: tail.limit,
+                offset: tail.offset,
+                with_ties: tail.with_ties,
+                locking: None,
+            })))),
         }
     }
 
@@ -3251,14 +8464,37 @@ impl Parser {
     fn starts_query_expr(&self) -> bool {
         matches!(
             self.peek(),
-            Token::Keyword(Keyword::Select | Keyword::Values | Keyword::With) | Token::LParen
+            Token::Keyword(Keyword::Select | Keyword::Values | Keyword::With | Keyword::Table)
+                | Token::LParen
         )
+    }
+
+    /// True when the cursor sits on a data-modifying statement — the four
+    /// spellings `PostgreSQL` allows inside a `WITH` list.
+    fn starts_dml_statement(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::Keyword(Keyword::Insert | Keyword::Update | Keyword::Delete)
+        ) || matches!(self.peek(), Token::Ident(s) if s == "merge")
+    }
+
+    fn dml_statement(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        match self.peek() {
+            Token::Keyword(Keyword::Insert) => self.insert(),
+            Token::Keyword(Keyword::Update) => self.update(),
+            Token::Keyword(Keyword::Delete) => self.delete(),
+            _ => self.merge(),
+        }
     }
 
     /// A table factor: a base table (`t` / `t alias` / `t AS alias`), a derived
     /// table (`( SELECT … ) alias`), or a parenthesized join (`( … )`).
     fn table_factor(&mut self) -> Result<crate::ast::TableExpr, ParseError> {
         use crate::ast::TableExpr;
+        // `LATERAL` marks the item that follows as correlated with the FROM
+        // items to its left. It is matched as a soft identifier so it stays
+        // usable as a column name.
+        let lateral = self.eat_ident_eq("lateral");
         if *self.peek() == Token::LParen {
             self.bump();
             if matches!(
@@ -3266,19 +8502,26 @@ impl Parser {
                 Token::Keyword(Keyword::Select | Keyword::Values | Keyword::With)
             ) {
                 let subquery = self.query_expr_after_open_paren()?;
-                let alias = self.opt_alias()?.ok_or_else(|| {
-                    ParseError::new("subquery in FROM must have an alias", self.peek_pos())
-                })?;
+                // The alias is optional, as it has been since PostgreSQL 16.
+                let alias = match self.opt_alias()? {
+                    Some(alias) => alias,
+                    None => self.unnamed_subquery_alias(),
+                };
                 let columns = self.opt_column_aliases()?;
                 return Ok(TableExpr::Derived {
                     subquery,
                     alias,
                     columns,
+                    lateral,
                 });
             }
             let inner = self.join_tree()?;
             self.expect(&Token::RParen)?;
             return Ok(inner);
+        }
+        // `ROWS FROM (f(…), g(…))` — several functions expanded in lockstep.
+        if self.peek_ident_eq("rows") && *self.peek2() == Token::Keyword(Keyword::From) {
+            return self.rows_from(lateral);
         }
         let mut name = self.expect_ident()?;
         if *self.peek() == Token::Dot {
@@ -3289,17 +8532,112 @@ impl Parser {
         // `ident (` in FROM position is a set-returning function call
         // (`unnest(tags) AS u(tag)`), never a table.
         if *self.peek() == Token::LParen {
-            return self.table_function(name);
+            return self.table_function(name, lateral);
+        }
+        if lateral {
+            return Err(ParseError::new(
+                "LATERAL may only precede a subquery or a function call",
+                self.peek_pos(),
+            ));
         }
         let alias = self.opt_alias()?;
-        Ok(TableExpr::Table { name, alias })
+        // A base-table alias may rename columns too (`t AS q(x, y)`), exactly
+        // like a derived table's.
+        let columns = if alias.is_some() {
+            self.opt_column_aliases()?
+        } else {
+            None
+        };
+        // PostgreSQL puts TABLESAMPLE *after* the alias, and allows it only on a
+        // base table (`gram.y`: `relation_expr opt_alias_clause tablesample_clause`).
+        let sample = self.opt_tablesample()?;
+        Ok(TableExpr::Table {
+            name,
+            alias,
+            columns,
+            sample,
+        })
+    }
+
+    /// `TABLESAMPLE <method> ( <percent> ) [ REPEATABLE ( <seed> ) ]`, or `None`
+    /// when the next token does not start one.
+    fn opt_tablesample(&mut self) -> Result<Option<crate::ast::TableSample>, ParseError> {
+        if !self.eat_ident_eq("tablesample") {
+            return Ok(None);
+        }
+        let method = self.expect_ident()?.to_ascii_lowercase();
+        self.expect(&Token::LParen)?;
+        let percent = self.expr(0)?;
+        self.expect(&Token::RParen)?;
+        let repeatable = if self.eat_keyword(Keyword::Repeatable) {
+            self.expect(&Token::LParen)?;
+            let seed = self.expr(0)?;
+            self.expect(&Token::RParen)?;
+            Some(seed)
+        } else {
+            None
+        };
+        Ok(Some(crate::ast::TableSample {
+            method,
+            percent,
+            repeatable,
+        }))
+    }
+
+    /// `ROWS FROM ( f(…) [AS (coldef…)] , … ) [WITH ORDINALITY] [alias]`,
+    /// positioned at the `ROWS` identifier.
+    fn rows_from(&mut self, lateral: bool) -> Result<crate::ast::TableExpr, ParseError> {
+        self.bump(); // ROWS
+        self.expect(&Token::Keyword(Keyword::From))?;
+        self.expect(&Token::LParen)?;
+        let mut functions = Vec::new();
+        loop {
+            let name = self.qualified_relation_name()?;
+            let args = self.table_function_args()?;
+            // Inside ROWS FROM the only per-function tail is a column-definition
+            // list, which is never an alias list.
+            let column_defs = if self.eat_keyword(Keyword::As) {
+                Some(self.column_definition_list()?)
+            } else {
+                None
+            };
+            functions.push(crate::ast::TableFuncCall {
+                name,
+                args,
+                column_defs,
+            });
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        self.finish_function_item(functions, true, lateral)
     }
 
     /// A function in FROM position, positioned at `(` after its name. Which
     /// function names are actually table-producing is the executor's decision;
     /// `LATERAL` is not part of the accepted grammar.
-    fn table_function(&mut self, name: String) -> Result<crate::ast::TableExpr, ParseError> {
-        use crate::ast::TableExpr;
+    fn table_function(
+        &mut self,
+        name: String,
+        lateral: bool,
+    ) -> Result<crate::ast::TableExpr, ParseError> {
+        let args = self.table_function_args()?;
+        self.finish_function_item(
+            vec![crate::ast::TableFuncCall {
+                name,
+                args,
+                column_defs: None,
+            }],
+            false,
+            lateral,
+        )
+    }
+
+    /// The parenthesized argument list of a FROM-position function call,
+    /// positioned at its `(`.
+    fn table_function_args(&mut self) -> Result<Vec<crate::ast::Expr>, ParseError> {
         self.expect(&Token::LParen)?;
         let mut args = Vec::new();
         if *self.peek() != Token::RParen {
@@ -3312,32 +8650,137 @@ impl Parser {
             }
         }
         self.expect(&Token::RParen)?;
-        let alias = self.opt_alias()?;
-        // Column aliases only follow a table alias (`f(x) AS t(c)`), matching
-        // PostgreSQL — without one, a following `(` starts something else.
-        let column_aliases = if alias.is_some() {
-            self.opt_column_aliases()?
+        Ok(args)
+    }
+
+    /// The shared tail of every FROM-position function item: `WITH ORDINALITY`,
+    /// then the alias clause — which for a bare call may be a column-*definition*
+    /// list (`AS t(a int)`) rather than a column-alias list (`AS t(a)`).
+    fn finish_function_item(
+        &mut self,
+        mut functions: Vec<crate::ast::TableFuncCall>,
+        rows_from: bool,
+        lateral: bool,
+    ) -> Result<crate::ast::TableExpr, ParseError> {
+        use crate::ast::TableExpr;
+        let with_ordinality = if self.eat_keyword(Keyword::With) {
+            self.expect_ident_eq("ordinality")?;
+            true
         } else {
-            None
+            false
         };
+        let mut alias = None;
+        let mut column_aliases = None;
+        if self.eat_keyword(Keyword::As) {
+            // `AS (a int, …)` — a column-definition list with no table alias.
+            if *self.peek() == Token::LParen {
+                let defs = self.column_definition_list()?;
+                Self::attach_column_defs(&mut functions, defs, rows_from, self.peek_pos())?;
+            } else {
+                alias = Some(self.expect_col_id()?);
+            }
+        } else if let Some(name) = self.peek_col_id() {
+            self.bump();
+            alias = Some(name);
+        }
+        if *self.peek() == Token::LParen {
+            match self.function_alias_or_column_defs()? {
+                FuncAliasColumns::Aliases(names) => column_aliases = Some(names),
+                FuncAliasColumns::Definitions(defs) => {
+                    Self::attach_column_defs(&mut functions, defs, rows_from, self.peek_pos())?;
+                }
+            }
+        }
         Ok(TableExpr::Function {
-            name,
-            args,
+            functions,
+            rows_from,
+            with_ordinality,
+            lateral,
             alias,
             column_aliases,
         })
     }
 
+    /// Hang a top-level column-definition list on the item's single function.
+    /// `ROWS FROM` gives each call its own list, so a trailing one there is a
+    /// syntax error exactly as in `PostgreSQL`.
+    fn attach_column_defs(
+        functions: &mut [crate::ast::TableFuncCall],
+        defs: Vec<crate::ast::TableFuncColumnDef>,
+        rows_from: bool,
+        position: usize,
+    ) -> Result<(), ParseError> {
+        let [function] = functions else {
+            return Err(ParseError::new(
+                "a column definition list is redundant for a function returning a row type",
+                position,
+            ));
+        };
+        if rows_from {
+            return Err(ParseError::new(
+                "a column definition list is redundant for a function returning a row type",
+                position,
+            ));
+        }
+        function.column_defs = Some(defs);
+        Ok(())
+    }
+
+    /// The parenthesized list after a function item's alias, which is either a
+    /// column-alias list (`(a, b)`) or a column-*definition* list (`(a int)`).
+    /// They are told apart by what follows the first name: a `,` or `)` ends an
+    /// alias, anything else begins a type.
+    fn function_alias_or_column_defs(&mut self) -> Result<FuncAliasColumns, ParseError> {
+        let alias_list = matches!(self.peek_n(2), Token::Comma | Token::RParen);
+        if alias_list {
+            let names = self
+                .opt_column_aliases()?
+                .expect("positioned at the opening paren of the list");
+            return Ok(FuncAliasColumns::Aliases(names));
+        }
+        Ok(FuncAliasColumns::Definitions(
+            self.column_definition_list()?,
+        ))
+    }
+
+    /// `( name type [, …] )`, positioned at the opening paren.
+    fn column_definition_list(
+        &mut self,
+    ) -> Result<Vec<crate::ast::TableFuncColumnDef>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut defs = Vec::new();
+        loop {
+            let name = self.expect_ident()?;
+            let ty = self.parse_type_name()?;
+            defs.push(crate::ast::TableFuncColumnDef { name, ty });
+            if self.eat_comma() {
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(defs)
+    }
+
     /// An optional table alias: `AS ident`, or a bare `ident` that is not a
     /// keyword (so `FROM t JOIN …` does not read `JOIN` as an alias).
+    ///
+    /// A handful of clause-introducing words reach the parser as identifiers
+    /// rather than keywords; they are `PostgreSQL`-reserved and so can never be
+    /// a bare alias, and treating them as one would swallow the clause.
     fn opt_alias(&mut self) -> Result<Option<String>, ParseError> {
+        // Both spellings take a `ColId`, not a `ColLabel`, so `FROM w AS window`
+        // is a syntax error in PostgreSQL exactly as `FROM w window` is. That is
+        // also what keeps the bare form from swallowing the next clause: every
+        // word that may follow a FROM item — `WHERE`, `JOIN`, `TABLESAMPLE`,
+        // `WINDOW`, `FETCH`, … — is reserved or a type/function-name keyword and
+        // so is not a `ColId`.
         if self.eat_keyword(Keyword::As) {
-            return Ok(Some(self.expect_ident()?));
+            return Ok(Some(self.expect_col_id()?));
         }
-        if let Token::Ident(_) = self.peek() {
-            return Ok(Some(self.expect_ident()?));
-        }
-        Ok(None)
+        Ok(self.peek_col_id().inspect(|_| {
+            self.bump();
+        }))
     }
 
     fn opt_column_aliases(&mut self) -> Result<Option<Vec<String>>, ParseError> {
@@ -3345,9 +8788,11 @@ impl Parser {
             return Ok(None);
         }
         self.bump();
-        let mut cols = vec![self.expect_ident()?];
+        // `alias_clause` renames columns with a `name_list`, and a `name` is a
+        // `ColId`, so `v(between)` is accepted and `v(is)` is not.
+        let mut cols = vec![self.expect_col_id()?];
         while self.eat_comma() {
-            cols.push(self.expect_ident()?);
+            cols.push(self.expect_col_id()?);
         }
         self.expect(&Token::RParen)?;
         Ok(Some(cols))
@@ -3365,6 +8810,16 @@ impl Parser {
                 format!("expected {what} count, found {other:?}"),
                 pos,
             )),
+        }
+    }
+
+    /// Consume `tok` if it is next.
+    fn eat_token(&mut self, tok: &Token) -> bool {
+        if self.peek() == tok {
+            self.bump();
+            true
+        } else {
+            false
         }
     }
 
@@ -3453,7 +8908,12 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Wrapper))?;
         let if_exists = self.eat_if_exists()?;
         let name = self.expect_ident()?;
-        Ok(Statement::DropFdw { name, if_exists })
+        let cascade = self.eat_drop_behavior();
+        Ok(Statement::DropFdw {
+            name,
+            if_exists,
+            cascade,
+        })
     }
 
     /// `CREATE SERVER <name> FOREIGN DATA WRAPPER <wrapper> OPTIONS (…)`
@@ -3492,7 +8952,12 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Server))?;
         let if_exists = self.eat_if_exists()?;
         let name = self.expect_ident()?;
-        Ok(Statement::DropServer { name, if_exists })
+        let cascade = self.eat_drop_behavior();
+        Ok(Statement::DropServer {
+            name,
+            if_exists,
+            cascade,
+        })
     }
 
     /// `CREATE USER MAPPING FOR <user> SERVER <server> OPTIONS (…)`
@@ -3540,10 +9005,12 @@ impl Parser {
         let user = self.parse_user_mapping_user()?;
         self.expect(&Token::Keyword(Keyword::Server))?;
         let server = self.expect_ident()?;
+        let cascade = self.eat_drop_behavior();
         Ok(Statement::DropUserMapping {
             user,
             server,
             if_exists,
+            cascade,
         })
     }
 
@@ -3590,7 +9057,12 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Table))?;
         let if_exists = self.eat_if_exists()?;
         let name = self.expect_ident()?;
-        Ok(Statement::DropForeignTable { name, if_exists })
+        let cascade = self.eat_drop_behavior();
+        Ok(Statement::DropForeignTable {
+            name,
+            if_exists,
+            cascade,
+        })
     }
 
     /// `IMPORT FOREIGN SCHEMA <remote_schema> [LIMIT TO | EXCEPT (<tables>)] FROM SERVER <server> [INTO <schema>]`
@@ -3640,7 +9112,7 @@ impl Parser {
     /// Parse `( ident, ident, … )` — used by `IMPORT FOREIGN SCHEMA`.
     fn parse_ident_list(&mut self) -> Result<Vec<String>, ParseError> {
         self.expect(&Token::LParen)?;
-        let mut names = vec![self.expect_ident()?];
+        let mut names = vec![self.expect_relation_name()?];
         while self.eat_comma() {
             names.push(self.expect_ident()?);
         }
@@ -3669,6 +9141,1000 @@ impl Parser {
         }
         Ok(false)
     }
+
+    // ---------------------------------------------------------------------
+    // P2: SQL routines. `CREATE`/`ALTER`/`DROP` of `FUNCTION`, `PROCEDURE`
+    // and `ROUTINE`, plus `CALL` and `DO`. Every word in this grammar
+    // (`function`, `returns`, `language`, `immutable`, …) is a plain
+    // lowercased ident in this lexer, so none of them becomes reserved.
+    // ---------------------------------------------------------------------
+
+    /// The routine object word at `offset`, or `None` when the token there is
+    /// not one of `FUNCTION`/`PROCEDURE`/`ROUTINE`.
+    fn routine_object_at(&self, offset: usize) -> Option<crate::ast::RoutineObject> {
+        use crate::ast::RoutineObject;
+        let Token::Ident(word) = self.peek_n(offset) else {
+            return None;
+        };
+        match word.as_str() {
+            "function" => Some(RoutineObject::Function),
+            "procedure" => Some(RoutineObject::Procedure),
+            "routine" => Some(RoutineObject::Routine),
+            _ => None,
+        }
+    }
+
+    /// The routine kind a `CREATE …` statement defines, looking past the
+    /// persistence modifiers and an `OR REPLACE`. `None` when the statement
+    /// creates something else; `CREATE ROUTINE` is not `PostgreSQL` syntax.
+    fn peeked_create_routine(&self) -> Option<crate::ast::RoutineObject> {
+        use crate::ast::RoutineObject;
+        let offset = self.create_object_keyword_offset();
+        let offset = if *self.peek_n(offset) == Token::Keyword(Keyword::Or) {
+            offset + 2
+        } else {
+            offset
+        };
+        match self.routine_object_at(offset) {
+            Some(object @ (RoutineObject::Function | RoutineObject::Procedure)) => Some(object),
+            _ => None,
+        }
+    }
+
+    /// Whether the `CREATE` at the cursor is a `CREATE VIEW`, looking past an
+    /// `OR REPLACE` and a `TEMP`/`TEMPORARY` storage-class word. Shaped like
+    /// [`Parser::peeked_create_routine`], which has the same job for routines.
+    fn peeked_create_view(&self) -> bool {
+        let mut offset = self.create_object_keyword_offset();
+        if *self.peek_n(offset) == Token::Keyword(Keyword::Or) {
+            offset += 2;
+        }
+        if matches!(self.peek_n(offset), Token::Ident(word)
+            if word.eq_ignore_ascii_case("temp") || word.eq_ignore_ascii_case("temporary"))
+        {
+            offset += 1;
+        }
+        *self.peek_n(offset) == Token::Keyword(Keyword::View)
+    }
+
+    /// The command identity of a `CREATE`/`ALTER`/`DROP` on `object`. `ROUTINE`
+    /// is its own PG18 command row, not a synonym for either kind.
+    fn routine_command_identity(
+        object: crate::ast::RoutineObject,
+        create: bool,
+        drop: bool,
+    ) -> crate::command::CommandIdentity {
+        use crate::{ast::RoutineObject, command::CommandIdentity as I};
+        match (object, create, drop) {
+            // `CREATE ROUTINE` is not PostgreSQL syntax, so the kind-agnostic
+            // spelling only ever reaches the ALTER/DROP rows.
+            (RoutineObject::Function | RoutineObject::Routine, true, _) => I::CreateFunction,
+            (RoutineObject::Procedure, true, _) => I::CreateProcedure,
+            (RoutineObject::Function, _, true) => I::DropFunction,
+            (RoutineObject::Procedure, _, true) => I::DropProcedure,
+            (RoutineObject::Routine, _, true) => I::DropRoutine,
+            (RoutineObject::Function, ..) => I::AlterFunction,
+            (RoutineObject::Procedure, ..) => I::AlterProcedure,
+            (RoutineObject::Routine, ..) => I::AlterRoutine,
+        }
+    }
+
+    /// A routine's name, with the `public.` qualifier `PostgreSQL` resolves to
+    /// the same schema stripped. Any other schema is `3F000`: Gres has exactly
+    /// the three schemas `pg_catalog`, `information_schema` and `public`, and
+    /// only `public` holds user routines.
+    fn routine_name(&mut self) -> Result<String, ParseError> {
+        let position = self.peek_pos();
+        let first = self.expect_object_name()?;
+        if *self.peek() != Token::Dot {
+            return Ok(first);
+        }
+        self.bump();
+        let object = self.expect_object_name()?;
+        if first == "public" {
+            return Ok(object);
+        }
+        Err(ParseError::new_sqlstate(
+            "3F000",
+            format!("schema \"{first}\" does not exist"),
+            position,
+        ))
+    }
+
+    /// A type written in a routine signature. Built-in names resolve through
+    /// [`Parser::parse_type_name`]; anything else is carried through by name so
+    /// the executor can resolve it against the catalog (a composite type named
+    /// by its relation) or report `42704`.
+    fn routine_type(&mut self) -> Result<crate::ast::RoutineType, ParseError> {
+        use crate::ast::RoutineType;
+        let start = self.pos;
+        if let Ok(ty) = self.parse_type_name() {
+            return Ok(RoutineType::builtin(ty, ty.name().to_string()));
+        }
+        self.pos = start;
+        let mut name = self.routine_name()?;
+        // `%TYPE` and array suffixes are accepted on an unresolved name so the
+        // signature still parses; the executor reports what it cannot resolve.
+        while *self.peek() == Token::LBracket {
+            self.bump();
+            if matches!(self.peek(), Token::IntLit(_)) {
+                self.bump();
+            }
+            self.expect(&Token::RBracket)?;
+            name.push_str("[]");
+        }
+        Ok(RoutineType::named(name))
+    }
+
+    /// Is the current token a word that ends a routine parameter?
+    fn at_routine_arg_end(&self) -> bool {
+        matches!(self.peek(), Token::Comma | Token::RParen | Token::Eq)
+            || self.peek_ident_eq("default")
+    }
+
+    /// `[ argmode ] [ argname ] argtype [ { DEFAULT | = } expr ]`.
+    ///
+    /// `PostgreSQL` resolves the `name type` / `type` ambiguity by trying the
+    /// bare type first; so does this, by parsing a type and keeping it only
+    /// when the parameter ends right after it.
+    fn routine_arg(&mut self) -> Result<crate::ast::RoutineArg, ParseError> {
+        use crate::ast::RoutineArg;
+
+        let mode = self.routine_arg_mode();
+        let start = self.pos;
+        let mut name = None;
+        let mut ty = self.routine_type()?;
+        if !self.at_routine_arg_end() {
+            // The first word was the parameter name, not its type.
+            self.pos = start;
+            name = Some(self.expect_object_name()?);
+            ty = self.routine_type()?;
+        }
+        let default = if self.eat_ident_eq("default") || *self.peek() == Token::Eq {
+            if *self.peek() == Token::Eq {
+                self.bump();
+            }
+            let start = self.peek_pos();
+            let _ = self.expr(0)?;
+            let end = self.peek_pos();
+            Some(self.source[start..end].trim().to_string())
+        } else {
+            None
+        };
+        Ok(RoutineArg {
+            name,
+            mode,
+            ty,
+            default,
+        })
+    }
+
+    /// An `IN`/`OUT`/`INOUT`/`VARIADIC` prefix, defaulting to `IN`. A mode word
+    /// that is the whole parameter (`f(out)`, a parameter of type `out`) is left
+    /// alone, matching `PostgreSQL`'s own resolution.
+    fn routine_arg_mode(&mut self) -> crate::ast::RoutineArgMode {
+        use crate::ast::RoutineArgMode;
+        if *self.peek() == Token::Keyword(Keyword::In) {
+            self.bump();
+            // `INOUT` is one word; `IN OUT` is not PostgreSQL syntax.
+            return RoutineArgMode::In;
+        }
+        let mode = match self.peek() {
+            Token::Ident(word) if word == "out" => RoutineArgMode::Out,
+            Token::Ident(word) if word == "inout" => RoutineArgMode::InOut,
+            Token::Ident(word) if word == "variadic" => RoutineArgMode::Variadic,
+            _ => return RoutineArgMode::In,
+        };
+        // Only a mode when something follows it inside the parameter.
+        if matches!(self.peek_n(1), Token::Comma | Token::RParen) {
+            return RoutineArgMode::In;
+        }
+        self.bump();
+        mode
+    }
+
+    /// `( [ arg [, …] ] )`.
+    fn routine_arg_list(&mut self) -> Result<Vec<crate::ast::RoutineArg>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut args = Vec::new();
+        if *self.peek() == Token::RParen {
+            self.bump();
+            return Ok(args);
+        }
+        loop {
+            args.push(self.routine_arg()?);
+            if *self.peek() == Token::Comma {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        self.expect(&Token::RParen)?;
+        Ok(args)
+    }
+
+    /// The clause after `RETURNS`.
+    fn routine_return(&mut self) -> Result<crate::ast::RoutineReturn, ParseError> {
+        use crate::ast::{RoutineReturn, RoutineTableColumn};
+
+        if *self.peek() == Token::Keyword(Keyword::Table) && matches!(self.peek2(), Token::LParen) {
+            self.bump();
+            self.bump();
+            let mut columns = Vec::new();
+            loop {
+                let name = self.expect_object_name()?;
+                let ty = self.routine_type()?;
+                columns.push(RoutineTableColumn { name, ty });
+                if *self.peek() == Token::Comma {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+            self.expect(&Token::RParen)?;
+            return Ok(RoutineReturn::Table(columns));
+        }
+        let setof = self.eat_ident_eq("setof");
+        let ty = self.routine_type()?;
+        Ok(RoutineReturn::Type { ty, setof })
+    }
+
+    /// The `SET name { TO | = } value | SET name FROM CURRENT | RESET name`
+    /// clause shared by `CREATE FUNCTION` and `ALTER FUNCTION`.
+    fn routine_set_option(&mut self, reset: bool) -> Result<crate::ast::RoutineOption, ParseError> {
+        use crate::ast::RoutineOption;
+        if reset {
+            let name = if self.eat_keyword(Keyword::All) {
+                "all".to_string()
+            } else {
+                self.expect_object_name()?
+            };
+            return Ok(RoutineOption::Set { name, value: None });
+        }
+        let name = self.expect_object_name()?;
+        if self.eat_keyword(Keyword::From) {
+            self.expect_ident_eq("current")?;
+            return Ok(RoutineOption::Set { name, value: None });
+        }
+        if *self.peek() == Token::Eq {
+            self.bump();
+        } else {
+            self.expect(&Token::Keyword(Keyword::To))?;
+        }
+        let mut parts = Vec::new();
+        loop {
+            parts.push(self.routine_set_value_token()?);
+            if *self.peek() == Token::Comma {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        Ok(RoutineOption::Set {
+            name,
+            value: Some(parts.join(", ")),
+        })
+    }
+
+    /// One `SET`-value token: an identifier, a literal, or `DEFAULT`.
+    fn routine_set_value_token(&mut self) -> Result<String, ParseError> {
+        let position = self.peek_pos();
+        match self.bump() {
+            Token::Ident(text)
+            | Token::StringLit(text)
+            | Token::IntLit(text)
+            | Token::FloatLit(text) => Ok(text),
+            Token::Keyword(Keyword::Public) => Ok("public".into()),
+            Token::Keyword(Keyword::CurrentUser) => Ok("current_user".into()),
+            Token::Keyword(Keyword::User) => Ok("user".into()),
+            Token::Minus => match self.bump() {
+                Token::IntLit(text) | Token::FloatLit(text) => Ok(format!("-{text}")),
+                other => Err(ParseError::new(
+                    format!("expected a number after `-`, found {other:?}"),
+                    position,
+                )),
+            },
+            other => Err(ParseError::new(
+                format!("expected a configuration value, found {other:?}"),
+                position,
+            )),
+        }
+    }
+
+    /// A signed numeric option value (`COST`/`ROWS`).
+    fn routine_number(&mut self, what: &str) -> Result<f64, ParseError> {
+        let position = self.peek_pos();
+        let negative = if *self.peek() == Token::Minus {
+            self.bump();
+            true
+        } else {
+            false
+        };
+        let text = match self.bump() {
+            Token::IntLit(text) | Token::FloatLit(text) => text,
+            other => {
+                return Err(ParseError::new(
+                    format!("expected a number for {what}, found {other:?}"),
+                    position,
+                ));
+            }
+        };
+        let value: f64 = text
+            .parse()
+            .map_err(|_| ParseError::new(format!("invalid number for {what}: {text}"), position))?;
+        Ok(if negative { -value } else { value })
+    }
+
+    /// One `CREATE FUNCTION` / `ALTER FUNCTION` definition option, or `None`
+    /// when the current token does not start one.
+    fn routine_option(&mut self) -> Result<Option<crate::ast::RoutineOption>, ParseError> {
+        use crate::ast::{RoutineOption, RoutineParallel, RoutineVolatility};
+
+        if self.eat_ident_eq("language") {
+            let language = match self.bump() {
+                Token::Ident(word) => word,
+                Token::StringLit(text) => text.to_ascii_lowercase(),
+                other => {
+                    return Err(ParseError::new(
+                        format!("expected a language name, found {other:?}"),
+                        self.peek_pos(),
+                    ));
+                }
+            };
+            return Ok(Some(RoutineOption::Language(language)));
+        }
+        if self.eat_ident_eq("immutable") {
+            return Ok(Some(RoutineOption::Volatility(
+                RoutineVolatility::Immutable,
+            )));
+        }
+        if self.eat_ident_eq("stable") {
+            return Ok(Some(RoutineOption::Volatility(RoutineVolatility::Stable)));
+        }
+        if self.eat_ident_eq("volatile") {
+            return Ok(Some(RoutineOption::Volatility(RoutineVolatility::Volatile)));
+        }
+        if self.eat_ident_eq("strict") {
+            return Ok(Some(RoutineOption::Strict(true)));
+        }
+        if self.eat_ident_eq("window") {
+            return Ok(Some(RoutineOption::Window));
+        }
+        if self.eat_ident_eq("leakproof") {
+            return Ok(Some(RoutineOption::Leakproof(true)));
+        }
+        if *self.peek() == Token::Keyword(Keyword::Not) && self.peek2_word_eq("leakproof") {
+            self.bump();
+            self.bump();
+            return Ok(Some(RoutineOption::Leakproof(false)));
+        }
+        if self.eat_ident_eq("called") {
+            self.expect(&Token::Keyword(Keyword::On))?;
+            self.expect(&Token::Keyword(Keyword::Null))?;
+            self.expect_ident_eq("input")?;
+            return Ok(Some(RoutineOption::Strict(false)));
+        }
+        if self.peek_ident_eq("returns") && self.peek2_is_null() {
+            self.bump();
+            self.bump();
+            self.expect(&Token::Keyword(Keyword::On))?;
+            self.expect(&Token::Keyword(Keyword::Null))?;
+            self.expect_ident_eq("input")?;
+            return Ok(Some(RoutineOption::Strict(true)));
+        }
+        if self.peek_ident_eq("external") && self.peek2_word_eq("security") {
+            self.bump();
+        }
+        if self.peek_ident_eq("security") {
+            self.bump();
+            if self.eat_ident_eq("definer") {
+                return Ok(Some(RoutineOption::SecurityDefiner(true)));
+            }
+            self.expect_ident_eq("invoker")?;
+            return Ok(Some(RoutineOption::SecurityDefiner(false)));
+        }
+        if self.eat_ident_eq("parallel") {
+            let parallel = if self.eat_ident_eq("safe") {
+                RoutineParallel::Safe
+            } else if self.eat_ident_eq("restricted") {
+                RoutineParallel::Restricted
+            } else {
+                self.expect_ident_eq("unsafe")?;
+                RoutineParallel::Unsafe
+            };
+            return Ok(Some(RoutineOption::Parallel(parallel)));
+        }
+        if self.eat_ident_eq("cost") {
+            return Ok(Some(RoutineOption::Cost(self.routine_number("COST")?)));
+        }
+        if self.eat_ident_eq("rows") {
+            return Ok(Some(RoutineOption::Rows(self.routine_number("ROWS")?)));
+        }
+        if self.eat_ident_eq("support") {
+            return Ok(Some(RoutineOption::Support(self.routine_name()?)));
+        }
+        if self.eat_ident_eq("transform") {
+            let mut types = Vec::new();
+            loop {
+                self.expect(&Token::Keyword(Keyword::For))?;
+                self.expect_ident_eq("type")?;
+                types.push(self.routine_type()?.name);
+                if *self.peek() == Token::Comma {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+            return Ok(Some(RoutineOption::Transform(types)));
+        }
+        if *self.peek() == Token::Keyword(Keyword::Set) && !self.peek2_is_schema() {
+            self.bump();
+            return Ok(Some(self.routine_set_option(false)?));
+        }
+        if self.peek_ident_eq("reset") {
+            self.bump();
+            return Ok(Some(self.routine_set_option(true)?));
+        }
+        if *self.peek() == Token::Keyword(Keyword::As) {
+            self.bump();
+            let body = self.expect_string_lit()?;
+            // `AS 'obj_file', 'link_symbol'` — the C-language spelling. The
+            // link symbol is parsed so the statement is accepted; Gres has no
+            // dynamic loader, so the routine is refused when it is defined.
+            if *self.peek() == Token::Comma {
+                self.bump();
+                let _ = self.expect_string_lit()?;
+            }
+            return Ok(Some(RoutineOption::Body(crate::ast::RoutineBody::Source(
+                body,
+            ))));
+        }
+        if *self.peek() == Token::Keyword(Keyword::Begin) && self.peek2_word_eq("atomic") {
+            return Ok(Some(RoutineOption::Body(self.routine_atomic_body()?)));
+        }
+        if self.peek_ident_eq("return") {
+            self.bump();
+            let start = self.peek_pos();
+            let expr = self.expr(0)?;
+            let end = self.peek_pos();
+            let text = self.source[start..end].trim().to_string();
+            return Ok(Some(RoutineOption::Body(crate::ast::RoutineBody::Return {
+                expr,
+                text,
+            })));
+        }
+        Ok(None)
+    }
+
+    /// Is the token after the current one `NULL`?
+    fn peek2_is_null(&self) -> bool {
+        *self.peek2() == Token::Keyword(Keyword::Null)
+    }
+
+    /// Is the token after the current one `SCHEMA`? Distinguishes
+    /// `ALTER FUNCTION f() SET SCHEMA s` from `ALTER FUNCTION f() SET x = 1`.
+    fn peek2_is_schema(&self) -> bool {
+        *self.peek2() == Token::Keyword(Keyword::Schema)
+    }
+
+    /// `PostgreSQL` 14's `BEGIN ATOMIC <stmt>; … END` SQL body.
+    fn routine_atomic_body(&mut self) -> Result<crate::ast::RoutineBody, ParseError> {
+        self.expect(&Token::Keyword(Keyword::Begin))?;
+        self.expect_ident_eq("atomic")?;
+        let start = self.peek_pos();
+        let mut statements = Vec::new();
+        let mut end = start;
+        loop {
+            if *self.peek() == Token::Keyword(Keyword::End) {
+                self.bump();
+                break;
+            }
+            if *self.peek() == Token::Eof {
+                return Err(ParseError::new(
+                    "unterminated BEGIN ATOMIC body: expected END",
+                    self.peek_pos(),
+                ));
+            }
+            statements.push(self.statement()?.statement);
+            end = self.peek_pos();
+            // `PostgreSQL` requires a semicolon after every statement in the
+            // body, including the last one.
+            self.expect(&Token::Semicolon)?;
+        }
+        let text = self.source[start..end].trim().to_string();
+        Ok(crate::ast::RoutineBody::Atomic { statements, text })
+    }
+
+    /// The run of definition options ending the statement.
+    fn routine_options(&mut self) -> Result<Vec<crate::ast::RoutineOption>, ParseError> {
+        let mut options = Vec::new();
+        while let Some(option) = self.routine_option()? {
+            options.push(option);
+        }
+        Ok(options)
+    }
+
+    /// `CREATE [OR REPLACE] { FUNCTION | PROCEDURE } name (args) …`.
+    fn create_routine(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{CreateRoutineStmt, RoutineObject, RoutineReturn, Statement};
+
+        self.expect(&Token::Keyword(Keyword::Create))?;
+        let or_replace = if self.eat_keyword(Keyword::Or) {
+            self.expect_ident_eq("replace")?;
+            true
+        } else {
+            false
+        };
+        let object = match self.routine_object_at(0) {
+            Some(object @ (RoutineObject::Function | RoutineObject::Procedure)) => {
+                self.bump();
+                object
+            }
+            _ => {
+                return Err(ParseError::new(
+                    format!("expected FUNCTION or PROCEDURE, found {:?}", self.peek()),
+                    self.peek_pos(),
+                ));
+            }
+        };
+        let name = self.routine_name()?;
+        let args = self.routine_arg_list()?;
+        let returns = if self.eat_ident_eq("returns") {
+            self.routine_return()?
+        } else {
+            RoutineReturn::Unspecified
+        };
+        let options = self.routine_options()?;
+        self.expect_statement_end("CREATE FUNCTION")?;
+        Ok(Statement::CreateRoutine(Box::new(CreateRoutineStmt {
+            name,
+            object,
+            or_replace,
+            args,
+            returns,
+            options,
+        })))
+    }
+
+    /// A routine named for `DROP`/`ALTER`: `name` or `name(argtypes)`.
+    fn routine_signature(&mut self) -> Result<crate::ast::RoutineSignature, ParseError> {
+        let name = self.routine_name()?;
+        let args = if *self.peek() == Token::LParen {
+            Some(self.routine_arg_list()?)
+        } else {
+            None
+        };
+        Ok(crate::ast::RoutineSignature { name, args })
+    }
+
+    /// `DROP { FUNCTION | PROCEDURE | ROUTINE } …`, tagged with the PG18
+    /// command row the spelling names.
+    fn drop_routine_statement(&mut self) -> Result<ParsedStatement, ParseError> {
+        let object = self
+            .routine_object_at(1)
+            .expect("the caller matched a routine object word");
+        emitted(
+            Self::routine_command_identity(object, false, true),
+            self.drop_routine(),
+        )
+    }
+
+    /// `ALTER { FUNCTION | PROCEDURE | ROUTINE } …`, tagged with the PG18
+    /// command row the spelling names.
+    fn alter_routine_statement(&mut self) -> Result<ParsedStatement, ParseError> {
+        let object = self
+            .routine_object_at(1)
+            .expect("the caller matched a routine object word");
+        emitted(
+            Self::routine_command_identity(object, false, false),
+            self.alter_routine(),
+        )
+    }
+
+    /// `DROP { FUNCTION | PROCEDURE | ROUTINE } [IF EXISTS] sig [, …]
+    /// [CASCADE | RESTRICT]`.
+    fn drop_routine(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::Statement;
+
+        self.expect(&Token::Keyword(Keyword::Drop))?;
+        let object = self
+            .routine_object_at(0)
+            .expect("drop_routine is only reached on a routine object word");
+        self.bump();
+        let if_exists = self.eat_if_exists()?;
+        let mut routines = Vec::new();
+        loop {
+            routines.push(self.routine_signature()?);
+            if *self.peek() == Token::Comma {
+                self.bump();
+                continue;
+            }
+            break;
+        }
+        let cascade = self.eat_ident_eq("cascade");
+        if !cascade {
+            let _ = self.eat_ident_eq("restrict");
+        }
+        Ok(Statement::DropRoutine {
+            object,
+            if_exists,
+            routines,
+            cascade,
+        })
+    }
+
+    /// `ALTER { FUNCTION | PROCEDURE | ROUTINE } sig <action>`.
+    fn alter_routine(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{AlterRoutineAction, Statement};
+
+        self.expect_ident_eq("alter")?;
+        let object = self
+            .routine_object_at(0)
+            .expect("alter_routine is only reached on a routine object word");
+        self.bump();
+        let routine = self.routine_signature()?;
+        let action = self.alter_routine_action()?;
+        let _ = self.eat_ident_eq("restrict");
+        Ok(Statement::AlterRoutine {
+            object,
+            routine,
+            action: match action {
+                Some(action) => action,
+                None => AlterRoutineAction::Options(Vec::new()),
+            },
+        })
+    }
+
+    /// The action of an `ALTER { FUNCTION | PROCEDURE | ROUTINE }`.
+    fn alter_routine_action(
+        &mut self,
+    ) -> Result<Option<crate::ast::AlterRoutineAction>, ParseError> {
+        use crate::ast::AlterRoutineAction;
+
+        if self.eat_ident_eq("rename") {
+            self.expect(&Token::Keyword(Keyword::To))?;
+            return Ok(Some(AlterRoutineAction::RenameTo(
+                self.expect_object_name()?,
+            )));
+        }
+        if self.eat_ident_eq("owner") {
+            self.expect(&Token::Keyword(Keyword::To))?;
+            return Ok(Some(AlterRoutineAction::OwnerTo(
+                self.expect_object_name()?,
+            )));
+        }
+        if *self.peek() == Token::Keyword(Keyword::Set) && self.peek2_is_schema() {
+            self.bump();
+            self.bump();
+            return Ok(Some(AlterRoutineAction::SetSchema(
+                self.expect_object_name()?,
+            )));
+        }
+        let no = self.peek_ident_eq("no") && self.peek2_word_eq("depends");
+        if no {
+            self.bump();
+        }
+        if self.eat_ident_eq("depends") {
+            self.expect(&Token::Keyword(Keyword::On))?;
+            self.expect_ident_eq("extension")?;
+            let name = self.expect_object_name()?;
+            return Ok(Some(AlterRoutineAction::DependsOnExtension { name, no }));
+        }
+        let options = self.routine_options()?;
+        if options.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(AlterRoutineAction::Options(options)))
+    }
+
+    /// `CALL name ( [arg, …] )`.
+    fn call_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("call")?;
+        let name = self.routine_name()?;
+        self.expect(&Token::LParen)?;
+        let mut args = Vec::new();
+        if *self.peek() != Token::RParen {
+            loop {
+                args.push(self.expr(0)?);
+                if *self.peek() == Token::Comma {
+                    self.bump();
+                    continue;
+                }
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        self.expect_statement_end("CALL")?;
+        Ok(crate::ast::Statement::Call { name, args })
+    }
+
+    /// `DO [ LANGUAGE lang ] <body> [ LANGUAGE lang ]`. `PostgreSQL` defaults
+    /// the language to `plpgsql`.
+    fn do_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        self.expect_ident_eq("do")?;
+        let mut language = None;
+        if self.eat_ident_eq("language") {
+            language = Some(self.do_language_name()?);
+        }
+        let body = self.expect_string_lit()?;
+        if self.eat_ident_eq("language") {
+            if language.is_some() {
+                return Err(ParseError::new_sqlstate(
+                    "42601",
+                    "conflicting or redundant options",
+                    self.peek_pos(),
+                ));
+            }
+            language = Some(self.do_language_name()?);
+        }
+        self.expect_statement_end("DO")?;
+        Ok(crate::ast::Statement::DoBlock {
+            language: language.unwrap_or_else(|| "plpgsql".to_string()),
+            body,
+        })
+    }
+
+    /// The language name of a `DO` block: an identifier or a string literal.
+    fn do_language_name(&mut self) -> Result<String, ParseError> {
+        let position = self.peek_pos();
+        match self.bump() {
+            Token::Ident(word) => Ok(word),
+            Token::StringLit(text) => Ok(text.to_ascii_lowercase()),
+            other => Err(ParseError::new(
+                format!("expected a language name, found {other:?}"),
+                position,
+            )),
+        }
+    }
+
+    /// Require that `command` has consumed everything up to the statement
+    /// separator, so a trailing clause is a syntax error rather than silently
+    /// dropped.
+    fn expect_statement_end(&mut self, command: &str) -> Result<(), ParseError> {
+        if matches!(self.peek(), Token::Semicolon | Token::Eof) {
+            return Ok(());
+        }
+        Err(ParseError::new_sqlstate(
+            "42601",
+            format!(
+                "syntax error at end of {command}: unexpected {:?}",
+                self.peek()
+            ),
+            self.peek_pos(),
+        ))
+    }
+}
+
+/// `PostgreSQL`'s 42601 for comparing two row constructors of different widths
+/// (`ROW(1,2) = ROW(1,2,3)`, `(1,2) IN ((1,2,3))`), reported at parse time as
+/// `PostgreSQL` does. A row compared against a non-row is left alone: that is a
+/// type error for the executor to describe.
+fn check_row_arity(left: &Expr, right: &Expr, position: usize) -> Result<(), ParseError> {
+    if let (Expr::Row(l), Expr::Row(r)) = (left, right)
+        && l.len() != r.len()
+    {
+        return Err(ParseError::new_sqlstate(
+            "42601",
+            "unequal number of entries in row expressions",
+            position,
+        ));
+    }
+    Ok(())
+}
+
+/// How an operator token is spelled, for error messages that quote the operator
+/// the query wrote. `None` for a token that is not an operator at all.
+fn operator_spelling(token: &Token) -> Option<&'static str> {
+    Some(match token {
+        Token::Lt => "<",
+        Token::Gt => ">",
+        Token::Le => "<=",
+        Token::Ge => ">=",
+        Token::Eq => "=",
+        Token::Ne => "<>",
+        Token::Plus => "+",
+        Token::Minus => "-",
+        Token::Star => "*",
+        Token::Slash => "/",
+        Token::Percent => "%",
+        Token::Caret => "^",
+        Token::Concat => "||",
+        Token::Tilde => "~",
+        Token::TildeCi => "~*",
+        Token::NotTilde => "!~",
+        Token::NotTildeCi => "!~*",
+        Token::Contains => "@>",
+        Token::ContainedBy => "<@",
+        Token::Overlaps => "&&",
+        Token::Amp => "&",
+        Token::Pipe => "|",
+        Token::Hash => "#",
+        Token::Shl => "<<",
+        Token::Shr => ">>",
+        _ => return None,
+    })
+}
+
+/// The words `PostgreSQL` 18 classifies `reserved_keyword` or
+/// `type_func_name_keyword` — exactly the two categories `ColId` excludes.
+/// Every other word (`unreserved_keyword`, `col_name_keyword`, and anything
+/// that is not a keyword at all) is a `ColId`, so it may be a table alias or a
+/// column-alias-list entry: `FROM w AS between` is accepted and `FROM w AS
+/// verbose` is not.
+///
+/// Transcribed from `SELECT word FROM pg_get_keywords() WHERE catcode IN
+/// ('R','T')` on `PostgreSQL` 18.4, and kept sorted for [`str::binary_search`].
+/// Some of these words reach this parser as [`Token::Keyword`] and the rest as
+/// [`Token::Ident`]; classifying by the word covers both.
+const NOT_COL_ID_WORDS: &[&str] = &[
+    "all",
+    "analyse",
+    "analyze",
+    "and",
+    "any",
+    "array",
+    "as",
+    "asc",
+    "asymmetric",
+    "authorization",
+    "binary",
+    "both",
+    "case",
+    "cast",
+    "check",
+    "collate",
+    "collation",
+    "column",
+    "concurrently",
+    "constraint",
+    "create",
+    "cross",
+    "current_catalog",
+    "current_date",
+    "current_role",
+    "current_schema",
+    "current_time",
+    "current_timestamp",
+    "current_user",
+    "default",
+    "deferrable",
+    "desc",
+    "distinct",
+    "do",
+    "else",
+    "end",
+    "except",
+    "false",
+    "fetch",
+    "for",
+    "foreign",
+    "freeze",
+    "from",
+    "full",
+    "grant",
+    "group",
+    "having",
+    "ilike",
+    "in",
+    "initially",
+    "inner",
+    "intersect",
+    "into",
+    "is",
+    "isnull",
+    "join",
+    "lateral",
+    "leading",
+    "left",
+    "like",
+    "limit",
+    "localtime",
+    "localtimestamp",
+    "natural",
+    "not",
+    "notnull",
+    "null",
+    "offset",
+    "on",
+    "only",
+    "or",
+    "order",
+    "outer",
+    "overlaps",
+    "placing",
+    "primary",
+    "references",
+    "returning",
+    "right",
+    "select",
+    "session_user",
+    "similar",
+    "some",
+    "symmetric",
+    "system_user",
+    "table",
+    "tablesample",
+    "then",
+    "to",
+    "trailing",
+    "true",
+    "union",
+    "unique",
+    "user",
+    "using",
+    "variadic",
+    "verbose",
+    "when",
+    "where",
+    "window",
+    "with",
+];
+
+/// The words `PostgreSQL` 18 marks `barelabel = false` — the ones that may NOT
+/// be a column alias written without `AS`, so `SELECT id over` is a syntax error
+/// while `SELECT id is` names the column `is`. Independent of the `ColId`
+/// categories: reserved words such as `in` and type/function-name words such as
+/// `like` are bare labels, and unreserved words such as `filter` and `year` are
+/// not.
+///
+/// Transcribed from `SELECT word FROM pg_get_keywords() WHERE NOT barelabel` on
+/// `PostgreSQL` 18.4, and kept sorted for [`str::binary_search`].
+const NOT_BARE_LABEL_WORDS: &[&str] = &[
+    "array",
+    "as",
+    "char",
+    "character",
+    "create",
+    "day",
+    "except",
+    "fetch",
+    "filter",
+    "for",
+    "from",
+    "grant",
+    "group",
+    "having",
+    "hour",
+    "intersect",
+    "into",
+    "isnull",
+    "limit",
+    "minute",
+    "month",
+    "notnull",
+    "offset",
+    "on",
+    "order",
+    "over",
+    "overlaps",
+    "precision",
+    "returning",
+    "second",
+    "to",
+    "union",
+    "varying",
+    "where",
+    "window",
+    "with",
+    "within",
+    "without",
+    "year",
+];
+
+/// May `word` be spelled as a `ColId` — a table alias, or a name in a column
+/// alias list?
+fn is_col_id_word(word: &str) -> bool {
+    NOT_COL_ID_WORDS
+        .binary_search(&word.to_ascii_lowercase().as_str())
+        .is_err()
+}
+
+/// May `word` be a column alias written without `AS` (`PostgreSQL`'s
+/// `BareColLabel`)?
+fn is_bare_label_word(word: &str) -> bool {
+    NOT_BARE_LABEL_WORDS
+        .binary_search(&word.to_ascii_lowercase().as_str())
+        .is_err()
 }
 
 /// Test-support entry: parse a bare expression. `pub` (not cfg(test)) so the
@@ -3704,6 +10170,25 @@ pub fn parse(sql: &str) -> Result<Vec<crate::ast::Statement>, ParseError> {
         .into_iter()
         .map(|(parsed, _)| parsed.statement)
         .collect())
+}
+
+/// Parse a standalone scalar expression — the stored source text of a `CHECK`
+/// predicate, a generated-column expression, or a partial-index predicate.
+///
+/// # Errors
+///
+/// Returns a parse error when the text cannot be tokenized, is not a single
+/// expression, or has trailing tokens.
+pub fn parse_expression(sql: &str) -> Result<crate::ast::Expr, ParseError> {
+    let mut parser = Parser::new(lex(sql)?, sql.to_string());
+    let expr = parser.expr(0)?;
+    match parser.peek() {
+        Token::Eof | Token::Semicolon => Ok(expr),
+        other => Err(ParseError::new(
+            format!("unexpected token after expression: {other:?}"),
+            parser.peek_pos(),
+        )),
+    }
 }
 
 /// Parse statements and return the parser-owned accepted command identity for
@@ -3813,7 +10298,37 @@ fn refusal_tokens_match(candidate: &[(Token, usize)], representative: &str) -> b
             })
 }
 
-fn encode_sequence_options(options: &crate::ast::SequenceOptions) -> Vec<String> {
+/// True when `token` begins a table-level constraint kind, which is what tells
+/// `CONSTRAINT <name> …` apart from a column named `constraint`.
+fn starts_constraint_kind(token: &Token) -> bool {
+    match token {
+        Token::Keyword(Keyword::Unique | Keyword::Foreign) => true,
+        Token::Ident(word) => {
+            word.eq_ignore_ascii_case("primary")
+                || word.eq_ignore_ascii_case("check")
+                || word.eq_ignore_ascii_case("exclude")
+        }
+        _ => false,
+    }
+}
+
+/// True when `token` begins a column-level constraint kind.
+fn starts_column_constraint_kind(token: &Token) -> bool {
+    if starts_constraint_kind(token) {
+        return true;
+    }
+    match token {
+        Token::Keyword(Keyword::Not | Keyword::Null) => true,
+        Token::Ident(word) => {
+            word.eq_ignore_ascii_case("default")
+                || word.eq_ignore_ascii_case("references")
+                || word.eq_ignore_ascii_case("generated")
+        }
+        _ => false,
+    }
+}
+
+fn encode_sequence_options(options: &crate::ast::SequenceOptions) -> Vec<crate::ast::IndexKey> {
     let mut encoded = Vec::new();
     if let Some(value) = options.start {
         encoded.push(format!("start={value}"));
@@ -3834,6 +10349,14 @@ fn encode_sequence_options(options: &crate::ast::SequenceOptions) -> Vec<String>
         encoded.push(format!("cycle={value}"));
     }
     encoded
+        .into_iter()
+        .map(|text| crate::ast::IndexKey {
+            column: None,
+            text,
+            descending: false,
+            nulls_first: None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -3842,8 +10365,9 @@ mod tests {
 
     use super::*;
     use crate::ast::{
-        BinaryOp, ColumnConstraint, ColumnDef, Expr, HashShardingSpec, IndexPlacement,
-        IsolationLevel, SelectItem, ShardingSpec, Statement, TableConstraint, UnaryOp,
+        AlterTableAction, BinaryOp, ColumnConstraintKind, ColumnDef, Expr, HashShardingSpec,
+        IndexPlacement, IsolationLevel, SelectItem, ShardingSpec, Statement, TableConstraint,
+        TableConstraintKind, UnaryOp,
     };
 
     fn one(sql: &str) -> Statement {
@@ -3871,6 +10395,7 @@ mod tests {
         select.order_by = q.order_by;
         select.limit = q.limit;
         select.offset = q.offset;
+        select.with_ties = q.with_ties;
         select.locking = q.locking;
         select
     }
@@ -3881,12 +10406,12 @@ mod tests {
 
         let q = only_query("SELECT 1 ORDER BY 1 LIMIT 1");
         assert_eq!(q.order_by.len(), 1);
-        assert_eq!(q.limit, Some(1));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("1".into())));
         assert!(matches!(q.body, SetExpr::Query(QueryBody::Select(_))));
 
         let q = only_query("VALUES (1), (2) ORDER BY 1 OFFSET 1");
         assert_eq!(q.order_by.len(), 1);
-        assert_eq!(q.offset, Some(1));
+        assert_eq!(q.offset, Some(Expr::IntLiteral("1".into())));
         assert!(matches!(q.body, SetExpr::Query(QueryBody::Values(_))));
 
         let q = only_query("SELECT 1 UNION ALL VALUES (2) ORDER BY 1");
@@ -3900,12 +10425,44 @@ mod tests {
             name,
             definition,
             query,
+            or_replace,
+            columns,
         } = one("CREATE VIEW \"Sales View\" AS SELECT id FROM orders WHERE id > 1")
         else {
             panic!("expected CREATE VIEW");
         };
         assert_eq!(name, "Sales View");
         assert_eq!(definition, "SELECT id FROM orders WHERE id > 1");
+        assert!(!or_replace);
+        assert_eq!(columns, None);
+
+        // `OR REPLACE`, the storage-class words, and the positional column alias
+        // list all reach the same statement.
+        for (sql, want_replace, want_columns) in [
+            ("CREATE OR REPLACE VIEW v AS SELECT 1", true, None),
+            ("CREATE TEMP VIEW v AS SELECT 1", false, None),
+            (
+                "CREATE OR REPLACE TEMPORARY VIEW v (x) AS SELECT 1",
+                true,
+                Some(vec!["x".to_string()]),
+            ),
+            (
+                "CREATE VIEW v (x, y) AS SELECT 1, 2",
+                false,
+                Some(vec!["x".to_string(), "y".to_string()]),
+            ),
+        ] {
+            let Statement::CreateView {
+                or_replace,
+                columns,
+                ..
+            } = one(sql)
+            else {
+                panic!("expected CREATE VIEW for {sql}");
+            };
+            assert_eq!(or_replace, want_replace, "{sql}");
+            assert_eq!(columns, want_columns, "{sql}");
+        }
         assert!(matches!(
             query.body,
             crate::ast::SetExpr::Query(crate::ast::QueryBody::Select(_))
@@ -3915,6 +10472,7 @@ mod tests {
             Statement::DropView {
                 name: "Sales View".into(),
                 if_exists: true,
+                cascade: false,
             }
         );
     }
@@ -3963,7 +10521,7 @@ mod tests {
             panic!("expected scalar query expression");
         };
         assert!(matches!(q.body, SetExpr::SetOp { .. }));
-        assert_eq!(q.limit, Some(1));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("1".into())));
     }
 
     #[test]
@@ -3982,7 +10540,7 @@ mod tests {
             SetExpr::Query(QueryBody::Values(_))
         ));
         assert_eq!(subquery.order_by.len(), 1);
-        assert_eq!(subquery.limit, Some(1));
+        assert_eq!(subquery.limit, Some(Expr::IntLiteral("1".into())));
 
         let q =
             only_query("SELECT s.x FROM (SELECT 2 AS x UNION SELECT 1 ORDER BY 1 LIMIT 1) AS s");
@@ -3994,7 +10552,7 @@ mod tests {
         };
         assert!(matches!(subquery.body, SetExpr::SetOp { .. }));
         assert_eq!(subquery.order_by.len(), 1);
-        assert_eq!(subquery.limit, Some(1));
+        assert_eq!(subquery.limit, Some(Expr::IntLiteral("1".into())));
     }
 
     #[test]
@@ -4005,8 +10563,8 @@ mod tests {
             panic!("expected quantified query expression");
         };
         assert_eq!(subquery.order_by.len(), 1);
-        assert_eq!(subquery.limit, Some(1));
-        assert_eq!(subquery.offset, Some(0));
+        assert_eq!(subquery.limit, Some(Expr::IntLiteral("1".into())));
+        assert_eq!(subquery.offset, Some(Expr::IntLiteral("0".into())));
     }
 
     #[test]
@@ -4023,7 +10581,10 @@ mod tests {
         let Expr::ScalarSubquery(subquery) = expr else {
             panic!("expected scalar subquery");
         };
-        assert_eq!(subquery.locking, Some(RowLockStrength::ForUpdate));
+        assert_eq!(
+            subquery.locking.as_ref().map(|clause| clause.strength),
+            Some(RowLockStrength::ForUpdate)
+        );
 
         assert!(crate::parse("SELECT (VALUES (1) FOR UPDATE)").is_err());
         assert!(crate::parse("SELECT (SELECT 1 UNION SELECT 2 FOR UPDATE)").is_err());
@@ -4036,12 +10597,12 @@ mod tests {
         let q = only_query("(VALUES (2), (1) ORDER BY 1 LIMIT 1)");
         assert!(matches!(q.body, SetExpr::Query(QueryBody::Values(_))));
         assert_eq!(q.order_by.len(), 1);
-        assert_eq!(q.limit, Some(1));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("1".into())));
 
         let q = only_query("(SELECT 2 UNION SELECT 1 ORDER BY 1 LIMIT 1)");
         assert!(matches!(q.body, SetExpr::SetOp { .. }));
         assert_eq!(q.order_by.len(), 1);
-        assert_eq!(q.limit, Some(1));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("1".into())));
     }
 
     #[test]
@@ -4049,7 +10610,7 @@ mod tests {
         use crate::ast::{QueryBody, SetExpr};
 
         let q = only_query("(VALUES (2), (1) ORDER BY 1) LIMIT 1");
-        assert_eq!(q.limit, Some(1));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("1".into())));
         assert!(q.order_by.is_empty());
         let SetExpr::Query(QueryBody::Nested(inner)) = q.body else {
             panic!("expected nested VALUES query body");
@@ -4059,7 +10620,7 @@ mod tests {
         assert!(matches!(inner.body, SetExpr::Query(QueryBody::Values(_))));
 
         let q = only_query("(SELECT 2 UNION SELECT 1 ORDER BY 1) LIMIT 1");
-        assert_eq!(q.limit, Some(1));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("1".into())));
         assert!(q.order_by.is_empty());
         let SetExpr::Query(QueryBody::Nested(inner)) = q.body else {
             panic!("expected nested set-op query body");
@@ -4084,7 +10645,7 @@ mod tests {
 
         let q = only_query("((VALUES (2), (1) ORDER BY 1) LIMIT 1)");
         assert!(q.order_by.is_empty());
-        assert_eq!(q.limit, Some(1));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("1".into())));
         let SetExpr::Query(QueryBody::Nested(inner)) = q.body else {
             panic!("expected nested VALUES query body");
         };
@@ -4103,7 +10664,7 @@ mod tests {
 
         let q = only_query("((SELECT 2 UNION SELECT 1 ORDER BY 1) LIMIT 1)");
         assert!(q.order_by.is_empty());
-        assert_eq!(q.limit, Some(1));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("1".into())));
         let SetExpr::Query(QueryBody::Nested(inner)) = q.body else {
             panic!("expected nested set-op query body");
         };
@@ -4118,7 +10679,7 @@ mod tests {
 
         let q = only_query("SELECT 1 ORDER BY 1 LIMIT 1");
         assert_eq!(q.order_by.len(), 1);
-        assert_eq!(q.limit, Some(1));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("1".into())));
         let SetExpr::Query(QueryBody::Select(select)) = q.body else {
             panic!("expected SELECT body");
         };
@@ -4171,30 +10732,60 @@ mod tests {
         assert_eq!(solo[0].1, "SELECT 1");
     }
 
+    /// A `CREATE TABLE` statement with every clause at its default, so a test
+    /// only has to state the part it exercises.
+    fn create_table_stmt(
+        name: &str,
+        columns: Vec<ColumnDef>,
+        constraints: Vec<TableConstraint>,
+    ) -> Statement {
+        sharded_create_table_stmt(name, columns, constraints, false, None)
+    }
+
+    fn sharded_create_table_stmt(
+        name: &str,
+        columns: Vec<ColumnDef>,
+        constraints: Vec<TableConstraint>,
+        sharded: bool,
+        sharding: Option<ShardingSpec>,
+    ) -> Statement {
+        Statement::CreateTable {
+            name: name.into(),
+            columns,
+            constraints,
+            sharded,
+            sharding,
+            if_not_exists: false,
+            temporary: false,
+            like: Vec::new(),
+            inherits: Vec::new(),
+            on_commit: None,
+            partition_by: None,
+            partition_of: None,
+        }
+    }
+
+    fn plain_column(name: &str, ty: ColumnType) -> ColumnDef {
+        ColumnDef {
+            name: name.into(),
+            ty,
+            serial: None,
+            constraints: Vec::new(),
+        }
+    }
+
     #[test]
     fn parses_create_table() {
         assert_eq!(
             one("CREATE TABLE t (id int4, name text)"),
-            Statement::CreateTable {
-                name: "t".into(),
-                sharded: false,
-                sharding: None,
-                constraints: Vec::new(),
-                columns: vec![
-                    ColumnDef {
-                        name: "id".into(),
-                        ty: ColumnType::Int4,
-                        serial: None,
-                        constraints: Vec::new(),
-                    },
-                    ColumnDef {
-                        name: "name".into(),
-                        ty: ColumnType::Text,
-                        serial: None,
-                        constraints: Vec::new(),
-                    },
+            create_table_stmt(
+                "t",
+                vec![
+                    plain_column("id", ColumnType::Int4),
+                    plain_column("name", ColumnType::Text),
                 ],
-            }
+                Vec::new(),
+            )
         );
     }
 
@@ -4211,23 +10802,29 @@ mod tests {
             panic!("expected create table");
         };
         assert!(matches!(
-            columns[0].constraints[0],
-            ColumnConstraint::PrimaryKey
+            columns[0].constraints[0].kind,
+            ColumnConstraintKind::PrimaryKey
         ));
         assert!(matches!(
-            columns[1].constraints[0],
-            ColumnConstraint::NotNull
+            columns[1].constraints[0].kind,
+            ColumnConstraintKind::NotNull
         ));
         assert!(matches!(
-            columns[1].constraints[1],
-            ColumnConstraint::Default(_)
+            columns[1].constraints[1].kind,
+            ColumnConstraintKind::Default(_)
         ));
-        assert!(matches!(constraints[0], TableConstraint::Check(_)));
-        assert!(matches!(constraints[1], TableConstraint::Unique(_)));
+        assert!(matches!(constraints[0].kind, TableConstraintKind::Check(_)));
+        assert!(matches!(
+            constraints[1].kind,
+            TableConstraintKind::Unique { .. }
+        ));
 
-        let Statement::Insert { rows, .. } = one("INSERT INTO t (id, name) VALUES (1, DEFAULT)")
+        let Statement::Insert { source, .. } = one("INSERT INTO t (id, name) VALUES (1, DEFAULT)")
         else {
             panic!("expected insert");
+        };
+        let crate::ast::InsertSource::Values(rows) = source else {
+            panic!("expected a VALUES source");
         };
         assert!(matches!(rows[0][1], Expr::Default));
     }
@@ -4236,18 +10833,13 @@ mod tests {
     fn parses_create_table_sharded_suffix() {
         assert_eq!(
             one("CREATE TABLE t (id int4) SHARDED"),
-            Statement::CreateTable {
-                name: "t".into(),
-                columns: vec![ColumnDef {
-                    name: "id".into(),
-                    ty: ColumnType::Int4,
-                    serial: None,
-                    constraints: Vec::new(),
-                }],
-                constraints: Vec::new(),
-                sharded: true,
-                sharding: None,
-            }
+            sharded_create_table_stmt(
+                "t",
+                vec![plain_column("id", ColumnType::Int4)],
+                Vec::new(),
+                true,
+                None,
+            )
         );
     }
 
@@ -4255,22 +10847,17 @@ mod tests {
     fn parses_create_table_hash_sharded_suffix() {
         assert_eq!(
             one("CREATE TABLE t (id int4) SHARDED BY HASH (id) BUCKETS 16"),
-            Statement::CreateTable {
-                name: "t".into(),
-                columns: vec![ColumnDef {
-                    name: "id".into(),
-                    ty: ColumnType::Int4,
-                    serial: None,
-                    constraints: Vec::new(),
-                }],
-                constraints: Vec::new(),
-                sharded: true,
-                sharding: Some(ShardingSpec::Hash(HashShardingSpec {
+            sharded_create_table_stmt(
+                "t",
+                vec![plain_column("id", ColumnType::Int4)],
+                Vec::new(),
+                true,
+                Some(ShardingSpec::Hash(HashShardingSpec {
                     columns: vec!["id".into()],
                     buckets: 16,
                     co_location_group: None,
                 })),
-            }
+            )
         );
     }
 
@@ -4279,21 +10866,31 @@ mod tests {
         assert_eq!(
             one("CREATE UNIQUE GLOBAL INDEX users_email_idx ON users (email, id)"),
             Statement::CreateIndex {
-                name: "users_email_idx".into(),
+                name: Some("users_email_idx".into()),
                 table: "users".into(),
-                columns: vec!["email".into(), "id".into()],
+                keys: vec![plain_index_key("email"), plain_index_key("id")],
                 unique: true,
                 placement: IndexPlacement::Global,
+                if_not_exists: false,
+                concurrently: false,
+                method: None,
+                include: Vec::new(),
+                predicate: None,
             }
         );
         assert_eq!(
             one("CREATE INDEX users_id_idx ON users (id)"),
             Statement::CreateIndex {
-                name: "users_id_idx".into(),
+                name: Some("users_id_idx".into()),
                 table: "users".into(),
-                columns: vec!["id".into()],
+                keys: vec![plain_index_key("id")],
                 unique: false,
                 placement: IndexPlacement::Local,
+                if_not_exists: false,
+                concurrently: false,
+                method: None,
+                include: Vec::new(),
+                predicate: None,
             }
         );
     }
@@ -4305,6 +10902,7 @@ mod tests {
             Statement::DropIndex {
                 name: "Users Name Idx".into(),
                 if_exists: true,
+                cascade: false,
             }
         );
     }
@@ -4340,9 +10938,12 @@ mod tests {
     }
 
     #[test]
+    /// An unrecognised type name is `42704 type "widget" does not exist`, the
+    /// same SQLSTATE and message `PostgreSQL` 18.4 gives — not a generic syntax
+    /// error. Verified against the oracle.
     fn unknown_column_type_is_error() {
         let e = parse("CREATE TABLE t (x widget)").expect_err("bad type");
-        assert_eq!(e.sqlstate(), "42601");
+        assert_eq!(e.sqlstate(), "42704");
     }
 
     #[test]
@@ -4449,6 +11050,7 @@ mod tests {
                     name: name.into(),
                     distinct: false,
                     args: FuncArgs::Exprs(vec![]),
+                    filter: None,
                 }),
                 "niladic `{name}`"
             );
@@ -4460,6 +11062,7 @@ mod tests {
                 name: "now".into(),
                 distinct: false,
                 args: FuncArgs::Exprs(vec![]),
+                filter: None,
             })
         );
         match expr("current_timestamp(0)") {
@@ -4503,6 +11106,7 @@ mod tests {
                 == Statement::DropTable {
                     names: vec!["t".into()],
                     if_exists: false,
+                    cascade: false,
                 }
         );
     }
@@ -4550,6 +11154,7 @@ mod tests {
                 == Statement::DropTable {
                     names: vec!["t".into()],
                     if_exists: true,
+                    cascade: false,
                 }
         );
     }
@@ -4569,6 +11174,7 @@ mod tests {
                     "pgbench_tellers".into(),
                 ],
                 if_exists: true,
+                cascade: false,
             }
         );
     }
@@ -4693,6 +11299,7 @@ mod tests {
                         "__crabka_sequence__:s2".into(),
                     ],
                     if_exists: true,
+                    cascade: false,
                 }
         );
     }
@@ -4703,9 +11310,10 @@ mod tests {
             Statement::Insert {
                 table,
                 columns,
-                rows,
+                source: crate::ast::InsertSource::Values(rows),
                 on_conflict,
                 returning,
+                with,
             } => {
                 assert_eq!(table, "t");
                 assert_eq!(columns, Some(vec!["a".into(), "b".into()]));
@@ -4713,6 +11321,7 @@ mod tests {
                 assert_eq!(rows[0].len(), 2);
                 assert_eq!(on_conflict, None);
                 assert_eq!(returning, None);
+                assert_eq!(with, None);
             }
             other => panic!("expected Insert, got {other:?}"),
         }
@@ -4727,13 +11336,13 @@ mod tests {
         );
         assert!(matches!(
             s.from.as_slice(),
-            [crate::ast::TableExpr::Table { name, alias: None }] if name == "t"
+            [crate::ast::TableExpr::Table { name, alias: None, .. }] if name == "t"
         ));
         assert!(s.filter.is_some());
         assert_eq!(s.order_by.len(), 2);
         assert!(!s.order_by[0].asc); // DESC
         assert!(s.order_by[1].asc); // default ASC
-        assert_eq!(s.limit, Some(10));
+        assert_eq!(s.limit, Some(Expr::IntLiteral("10".into())));
     }
 
     #[test]
@@ -4748,7 +11357,12 @@ mod tests {
         assert!(matches!(
             s.projection[1],
             SelectItem::Expr {
-                expr: Expr::Func(FuncCall { ref name, distinct: false, args: FuncArgs::Star }),
+                expr: Expr::Func(FuncCall {
+                    ref name,
+                    distinct: false,
+                    args: FuncArgs::Star,
+                    filter: None,
+                }),
                 ..
             } if name == "count"
         ));
@@ -4761,7 +11375,7 @@ mod tests {
         );
         assert!(s.having.is_some());
         assert_eq!(s.order_by.len(), 1);
-        assert_eq!(s.limit, Some(5));
+        assert_eq!(s.limit, Some(Expr::IntLiteral("5".into())));
     }
 
     #[test]
@@ -4775,6 +11389,7 @@ mod tests {
                         name,
                         distinct,
                         args,
+                        filter: None,
                     }),
                 ..
             } => {
@@ -4832,25 +11447,61 @@ mod tests {
         assert!(parse("SELECT 1 foo bar").is_err());
     }
 
+    /// `BEGIN`/`START TRANSACTION` and the whole `transaction_mode` list: the
+    /// isolation level, the access mode, and the deferrable flag, in any order,
+    /// with the commas optional. A mode the statement omits stays `None` so the
+    /// session can apply its own default.
     #[test]
     fn parses_begin_variants() {
-        assert_eq!(one("BEGIN"), Statement::Begin { isolation: None });
-        assert_eq!(
-            one("START TRANSACTION"),
-            Statement::Begin { isolation: None }
-        );
-        assert_eq!(
-            one("BEGIN ISOLATION LEVEL REPEATABLE READ"),
-            Statement::Begin {
-                isolation: Some(IsolationLevel::RepeatableRead)
-            }
-        );
-        assert_eq!(
-            one("BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED"),
-            Statement::Begin {
-                isolation: Some(IsolationLevel::ReadCommitted)
-            }
-        );
+        let begin = |isolation, read_only, deferrable| Statement::Begin {
+            isolation,
+            read_only,
+            deferrable,
+        };
+        let cases: &[(&str, Statement)] = &[
+            ("BEGIN", begin(None, None, None)),
+            ("START TRANSACTION", begin(None, None, None)),
+            (
+                "BEGIN ISOLATION LEVEL REPEATABLE READ",
+                begin(Some(IsolationLevel::RepeatableRead), None, None),
+            ),
+            (
+                "BEGIN TRANSACTION ISOLATION LEVEL READ COMMITTED",
+                begin(Some(IsolationLevel::ReadCommitted), None, None),
+            ),
+            // The access mode alone, either way round.
+            ("BEGIN READ ONLY", begin(None, Some(true), None)),
+            (
+                "START TRANSACTION READ WRITE",
+                begin(None, Some(false), None),
+            ),
+            // The deferrable flag, and its negation.
+            ("BEGIN DEFERRABLE", begin(None, None, Some(true))),
+            ("BEGIN NOT DEFERRABLE", begin(None, None, Some(false))),
+            // Several modes, comma-separated and not, in either order.
+            (
+                "BEGIN READ ONLY, DEFERRABLE",
+                begin(None, Some(true), Some(true)),
+            ),
+            (
+                "BEGIN READ ONLY NOT DEFERRABLE",
+                begin(None, Some(true), Some(false)),
+            ),
+            (
+                "START TRANSACTION ISOLATION LEVEL SERIALIZABLE, READ ONLY, DEFERRABLE",
+                begin(Some(IsolationLevel::Serializable), Some(true), Some(true)),
+            ),
+            (
+                "START TRANSACTION READ ONLY, ISOLATION LEVEL REPEATABLE READ",
+                begin(Some(IsolationLevel::RepeatableRead), Some(true), None),
+            ),
+        ];
+        for (sql, want) in cases {
+            assert_eq!(&one(sql), want, "{sql}");
+        }
+        // `READ` must be followed by one of the two access modes.
+        assert!(parse("BEGIN READ").is_err());
+        assert!(parse("BEGIN READ SIDEWAYS").is_err());
     }
 
     #[test]
@@ -4858,17 +11509,40 @@ mod tests {
         // START TRANSACTION is valid; bare START is not a statement.
         assert_eq!(
             one("START TRANSACTION"),
-            Statement::Begin { isolation: None }
+            Statement::Begin {
+                isolation: None,
+                read_only: None,
+                deferrable: None
+            }
         );
         assert!(parse("START").is_err());
     }
 
     #[test]
     fn parses_commit_rollback_aliases() {
-        assert_eq!(one("COMMIT"), Statement::Commit);
-        assert_eq!(one("END"), Statement::Commit);
-        assert_eq!(one("ROLLBACK"), Statement::Rollback);
-        assert_eq!(one("ABORT"), Statement::Rollback);
+        assert_eq!(one("COMMIT"), Statement::Commit { chain: false });
+        assert_eq!(one("END"), Statement::Commit { chain: false });
+        assert_eq!(one("ROLLBACK"), Statement::Rollback { chain: false });
+        assert_eq!(one("ABORT"), Statement::Rollback { chain: false });
+        // Only the bare `AND CHAIN` spelling chains; `AND NO CHAIN` is the
+        // explicit opt-out and must not be confused with it.
+        for (sql, chain) in [
+            ("COMMIT AND CHAIN", true),
+            ("COMMIT WORK AND CHAIN", true),
+            ("END AND CHAIN", true),
+            ("COMMIT AND NO CHAIN", false),
+            ("COMMIT TRANSACTION AND NO CHAIN", false),
+        ] {
+            assert_eq!(one(sql), Statement::Commit { chain }, "{sql}");
+        }
+        for (sql, chain) in [
+            ("ROLLBACK AND CHAIN", true),
+            ("ABORT AND CHAIN", true),
+            ("ROLLBACK AND NO CHAIN", false),
+            ("ABORT WORK AND NO CHAIN", false),
+        ] {
+            assert_eq!(one(sql), Statement::Rollback { chain }, "{sql}");
+        }
     }
 
     #[test]
@@ -4877,13 +11551,16 @@ mod tests {
             Statement::Update {
                 table,
                 assignments,
+                from,
                 filter,
                 returning,
+                ..
             } => {
                 assert_eq!(table, "t");
                 assert_eq!(assignments.len(), 2);
-                assert_eq!(assignments[0].0, "a");
-                assert_eq!(assignments[1].0, "b");
+                assert_eq!(assignments[0].targets, vec!["a".to_string()]);
+                assert_eq!(assignments[1].targets, vec!["b".to_string()]);
+                assert!(from.is_empty());
                 assert!(filter.is_some());
                 assert_eq!(returning, None);
             }
@@ -4894,15 +11571,16 @@ mod tests {
     #[test]
     fn parses_select_for_update_and_share() {
         use crate::ast::RowLockStrength;
+        let strength = |sql: &str| only_query(sql).locking.map(|clause| clause.strength);
         assert_eq!(
-            only_query("SELECT id FROM t FOR UPDATE").locking,
+            strength("SELECT id FROM t FOR UPDATE"),
             Some(RowLockStrength::ForUpdate)
         );
         assert_eq!(
-            only_query("SELECT id FROM t WHERE id > 1 FOR SHARE").locking,
+            strength("SELECT id FROM t WHERE id > 1 FOR SHARE"),
             Some(RowLockStrength::ForShare)
         );
-        assert_eq!(only_query("SELECT id FROM t").locking, None);
+        assert_eq!(strength("SELECT id FROM t"), None);
     }
 
     #[test]
@@ -4910,10 +11588,13 @@ mod tests {
         match one("DELETE FROM t WHERE id > 3") {
             Statement::Delete {
                 table,
+                using,
                 filter,
                 returning,
+                ..
             } => {
                 assert_eq!(table, "t");
+                assert!(using.is_empty());
                 assert!(filter.is_some());
                 assert_eq!(returning, None);
             }
@@ -4923,7 +11604,10 @@ mod tests {
             one("DELETE FROM t"),
             Statement::Delete {
                 table: "t".into(),
+                with: None,
+                alias: None,
                 filter: None,
+                using: Vec::new(),
                 returning: None,
             }
         );
@@ -4935,14 +11619,14 @@ mod tests {
         else {
             panic!("expected Insert");
         };
-        assert_eq!(returning, Some(vec![SelectItem::Wildcard]));
+        assert_eq!(returning.map(|r| r.items), Some(vec![SelectItem::Wildcard]));
 
         let Statement::Update { returning, .. } = one("UPDATE t SET a = 1 RETURNING a AS x, a + 1")
         else {
             panic!("expected Update");
         };
         assert!(matches!(
-            returning.as_deref(),
+            returning.as_ref().map(|r| r.items.as_slice()),
             Some([
                 SelectItem::Expr { alias: Some(alias), .. },
                 SelectItem::Expr { alias: None, .. }
@@ -4953,7 +11637,7 @@ mod tests {
             panic!("expected Delete");
         };
         assert_eq!(
-            returning,
+            returning.map(|r| r.items),
             Some(vec![SelectItem::QualifiedWildcard("t".into())])
         );
     }
@@ -5287,39 +11971,569 @@ mod tests {
     }
 
     #[test]
-    fn parses_like_ilike_all_combinations() {
-        assert!(matches!(
-            expr("a LIKE 'x%'"),
+    fn parses_like_ilike_similar_all_combinations() {
+        use crate::ast::MatchKind;
+        // (SQL, negated, kind) — every spelling of the three pattern operators.
+        let cases: &[(&str, bool, MatchKind)] = &[
+            ("a LIKE 'x%'", false, MatchKind::Like),
+            ("a NOT LIKE 'x%'", true, MatchKind::Like),
+            ("a ILIKE 'x%'", false, MatchKind::ILike),
+            ("a NOT ILIKE 'x%'", true, MatchKind::ILike),
+            ("a SIMILAR TO 'x%'", false, MatchKind::Similar),
+            ("a NOT SIMILAR TO 'x%'", true, MatchKind::Similar),
+        ];
+        for (sql, negated, kind) in cases {
+            let expected = Expr::Like {
+                expr: Box::new(Expr::Column {
+                    table: None,
+                    name: "a".into(),
+                }),
+                pattern: Box::new(Expr::StringLiteral("x%".into())),
+                negated: *negated,
+                kind: *kind,
+                escape: None,
+            };
+            assert2::assert!(expr(sql) == expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn pattern_operators_take_an_escape_clause() {
+        use crate::ast::MatchKind;
+        for sql in [
+            "a LIKE 'x%' ESCAPE '#'",
+            "a ILIKE 'x%' ESCAPE '#'",
+            "a SIMILAR TO 'x%' ESCAPE '#'",
+        ] {
+            let Expr::Like { escape, .. } = expr(sql) else {
+                panic!("{sql} is a pattern match");
+            };
+            assert2::assert!(
+                escape == Some(Box::new(Expr::StringLiteral("#".into()))),
+                "{sql}"
+            );
+        }
+        // The escape string binds to the pattern, not to a following conjunct.
+        let Expr::Binary { op, left, .. } = expr("a LIKE 'x' ESCAPE '#' AND b") else {
+            panic!("the AND is the outermost node");
+        };
+        assert2::assert!(op == BinaryOp::And);
+        assert2::assert!(matches!(
+            *left,
             Expr::Like {
-                negated: false,
-                case_insensitive: false,
+                kind: MatchKind::Like,
+                escape: Some(_),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn typed_literals_lower_onto_the_equivalent_cast() {
+        use crabka_pgtypes::ColumnType;
+        // PostgreSQL's `typename 'string'` is defined to mean `'string'::typename`,
+        // so every spelling must produce exactly that cast node.
+        let cases: &[(&str, &str, ColumnType)] = &[
+            ("bool 't'", "t", ColumnType::Bool),
+            ("int4 '0'", "0", ColumnType::Int4),
+            ("bigint '9'", "9", ColumnType::Int8),
+            ("numeric '1.5'", "1.5", ColumnType::Numeric(None)),
+            ("text 'x'", "x", ColumnType::Text),
+            ("date '2024-01-01'", "2024-01-01", ColumnType::Date),
+            ("interval '1 day'", "1 day", ColumnType::Interval),
+            ("double precision '1.5'", "1.5", ColumnType::Float8),
+            (
+                "timestamp with time zone '2024-01-01 00:00:00+00'",
+                "2024-01-01 00:00:00+00",
+                ColumnType::Timestamptz,
+            ),
+            ("pg_catalog.text 'x'", "x", ColumnType::Text),
+        ];
+        for (sql, string, ty) in cases {
+            let expected = Expr::Cast {
+                expr: Box::new(Expr::StringLiteral((*string).into())),
+                ty: *ty,
+            };
+            assert2::assert!(expr(sql) == expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn a_name_before_a_string_is_a_typed_literal_only_when_it_names_a_type() {
+        // A type name followed by `(` is still a function call, and a plain name
+        // with nothing after it is still a column.
+        assert2::assert!(matches!(expr("date('2024-01-01')"), Expr::Func(_)));
+        assert2::assert!(matches!(expr("text"), Expr::Column { .. }));
+        assert2::assert!(matches!(expr("interval + 1"), Expr::Binary { .. }));
+        // A name that is NOT a type, directly before a string, can only have been
+        // meant as this syntax — PostgreSQL's own 42704.
+        let error = parse_expr_for_test("widget 'x'").expect_err("not a type");
+        assert2::assert!(error.sqlstate() == "42704");
+        assert2::assert!(error.message == "type \"widget\" does not exist");
+    }
+
+    #[test]
+    fn interval_literals_take_a_field_qualifier_or_a_field_range() {
+        // `INTERVAL 'n' <field> [TO <field>]` gives an unadorned quantity its
+        // unit and truncates to the range's last field. Both are properties of
+        // the literal, so the qualified form is decoded here and lowered to the
+        // plain interval literal it denotes.
+        let interval = |text: &str| Expr::Cast {
+            expr: Box::new(Expr::StringLiteral(text.into())),
+            ty: crabka_pgtypes::ColumnType::Interval,
+        };
+        let cases: &[(&str, &str)] = &[
+            ("interval '1' day", "1 day"),
+            ("interval '1.5' day", "1 day"),
+            // SECOND keeps its fractional part, so it is not truncated.
+            ("interval '1.5' second", "00:00:01.5"),
+            ("interval '90' minute", "01:30:00"),
+            // A bare quantity takes the range's LAST field, and each quantity to
+            // its left takes the next coarser one.
+            ("interval '1' year to month", "1 mon"),
+            ("interval '1 2' day to hour", "1 day 02:00:00"),
+            ("interval '1-2' year to month", "1 year 2 mons"),
+            ("interval '2:03' hour to minute", "02:03:00"),
+        ];
+        for (sql, expected) in cases {
+            assert2::assert!(expr(sql) == interval(expected), "{sql}");
+        }
+        // An unqualified literal is passed through untouched.
+        assert2::assert!(expr("interval '1 day 2 hours'") == interval("1 day 2 hours"));
+        // A malformed literal keeps PostgreSQL's 22007.
+        let error = parse_expr_for_test("interval 'garbage' day").expect_err("refused");
+        assert2::assert!(error.sqlstate() == "22007");
+    }
+
+    #[test]
+    fn the_is_family_covers_null_the_boolean_tests_and_distinct_from() {
+        use crate::ast::UnaryOp;
+        let column = || {
+            Box::new(Expr::Column {
+                table: None,
+                name: "a".into(),
+            })
+        };
+        let tests: &[(&str, UnaryOp)] = &[
+            ("a IS TRUE", UnaryOp::IsTrue),
+            ("a IS NOT TRUE", UnaryOp::IsNotTrue),
+            ("a IS FALSE", UnaryOp::IsFalse),
+            ("a IS NOT FALSE", UnaryOp::IsNotFalse),
+            ("a IS UNKNOWN", UnaryOp::IsUnknown),
+            ("a IS NOT UNKNOWN", UnaryOp::IsNotUnknown),
+        ];
+        for (sql, op) in tests {
+            assert2::assert!(
+                expr(sql)
+                    == Expr::Unary {
+                        op: *op,
+                        expr: column()
+                    },
+                "{sql}"
+            );
+        }
+        for (sql, negated) in [("a IS NULL", false), ("a IS NOT NULL", true)] {
+            assert2::assert!(
+                expr(sql)
+                    == Expr::IsNull {
+                        expr: column(),
+                        negated
+                    },
+                "{sql}"
+            );
+        }
+        for (sql, op) in [
+            ("a IS DISTINCT FROM b", BinaryOp::IsDistinctFrom),
+            ("a IS NOT DISTINCT FROM b", BinaryOp::IsNotDistinctFrom),
+        ] {
+            assert2::assert!(
+                expr(sql)
+                    == Expr::Binary {
+                        op,
+                        left: column(),
+                        right: Box::new(Expr::Column {
+                            table: None,
+                            name: "b".into(),
+                        }),
+                    },
+                "{sql}"
+            );
+        }
+        // The right operand of DISTINCT FROM stays one comparand.
+        assert2::assert!(matches!(
+            expr("a IS DISTINCT FROM b AND c"),
+            Expr::Binary {
+                op: BinaryOp::And,
+                ..
+            }
+        ));
+        assert2::assert!(parse_expr_for_test("a IS 1").is_err());
+    }
+
+    #[test]
+    fn row_constructors_parse_in_both_spellings() {
+        let one = Expr::IntLiteral("1".into());
+        let two = Expr::IntLiteral("2".into());
+        assert2::assert!(expr("ROW(1, 2)") == Expr::Row(vec![one.clone(), two.clone()]));
+        assert2::assert!(expr("(1, 2)") == Expr::Row(vec![one.clone(), two.clone()]));
+        // ROW keeps a one-element or empty list; bare parentheses do not.
+        assert2::assert!(expr("ROW(1)") == Expr::Row(vec![one.clone()]));
+        assert2::assert!(expr("ROW()") == Expr::Row(vec![]));
+        assert2::assert!(expr("(1)") == one);
+        // A row compared with a row of a different width is PostgreSQL's 42601.
+        for sql in ["ROW(1,2) = ROW(1,2,3)", "(1,2) IN ((1,2,3))"] {
+            let error = parse_expr_for_test(sql).expect_err("unequal widths");
+            assert2::assert!(error.sqlstate() == "42601", "{sql}");
+            assert2::assert!(error.message == "unequal number of entries in row expressions");
+        }
+    }
+
+    #[test]
+    fn column_labels_accept_keywords() {
+        use crate::ast::SelectItem;
+        let label = |sql: &str| -> Option<String> {
+            match only_select(sql).projection.into_iter().next() {
+                Some(SelectItem::Expr { alias, .. }) => alias,
+                other => panic!("{sql} projects one expression, got {other:?}"),
+            }
+        };
+        // After AS, PostgreSQL's ColLabel admits ANY keyword — including the
+        // reserved ones that can never be a bare label.
+        for keyword in ["true", "select", "from", "order", "array", "as"] {
+            let sql = format!("SELECT 1 AS {keyword}");
+            assert2::assert!(label(&sql).as_deref() == Some(keyword), "{sql}");
+        }
+        // Case folds, like any unquoted identifier.
+        assert2::assert!(label("SELECT 1 AS TRUE").as_deref() == Some("true"));
+        // Without AS only the bare_label_keyword list applies.
+        for keyword in ["select", "values", "table", "distinct", "user"] {
+            let sql = format!("SELECT 1 {keyword}");
+            assert2::assert!(label(&sql).as_deref() == Some(keyword), "{sql}");
+        }
+        // …and the excluded words still start their own clause.
+        assert2::assert!(parse("SELECT 1 from").is_err());
+        assert2::assert!(parse("SELECT 1 order").is_err());
+        assert2::assert!(parse("SELECT 1 with").is_err());
+    }
+
+    #[test]
+    fn from_item_alias_takes_a_col_id() {
+        use assert2::assert;
+        let alias = |sql: &str| -> Option<String> {
+            match only_select(sql).from.into_iter().next() {
+                Some(crate::ast::TableExpr::Table { alias, .. }) => alias,
+                other => panic!("{sql} has one base-table item, got {other:?}"),
+            }
+        };
+        // `AS ColId` and the bare `ColId` accept every unreserved and col_name
+        // keyword, whichever spelling this lexer gives the word.
+        for word in [
+            "between", "exists", "values", "char", "row", "time", "copy", "set", "index", "delete",
+            "if", "level", "schema",
+        ] {
+            for sql in [
+                format!("SELECT * FROM w AS {word}"),
+                format!("SELECT * FROM w {word}"),
+            ] {
+                assert!(alias(&sql).as_deref() == Some(word), "{sql}");
+            }
+        }
+        // The reserved and type/function-name keywords are refused in BOTH
+        // spellings — which is also what stops the bare form from swallowing the
+        // clause each of them introduces.
+        for word in [
+            "authorization",
+            "collation",
+            "verbose",
+            "binary",
+            "freeze",
+            "is",
+            "like",
+            "tablesample",
+            "window",
+            "fetch",
+            "select",
+            "from",
+            "lateral",
+        ] {
+            for sql in [
+                format!("SELECT * FROM w AS {word}"),
+                format!("SELECT * FROM w {word}"),
+            ] {
+                assert!(parse(&sql).is_err(), "{sql}");
+            }
+        }
+        // Quoting strips the word of every keyword property.
+        assert!(alias("SELECT * FROM w AS \"window\"").as_deref() == Some("window"));
+        assert!(alias("SELECT * FROM w \"tablesample\"").as_deref() == Some("tablesample"));
+        // The refusal is PostgreSQL's own syntax error, not a bare "expected
+        // identifier".
+        let error = parse("SELECT * FROM w AS verbose").expect_err("type_func_name keyword");
+        assert!(error.sqlstate() == "42601");
+        assert!(error.message == "syntax error at or near \"verbose\"");
+    }
+
+    #[test]
+    fn column_alias_lists_take_col_ids() {
+        use assert2::assert;
+        let columns = |sql: &str| -> Option<Vec<String>> {
+            match only_select(sql).from.into_iter().next() {
+                Some(crate::ast::TableExpr::Derived { columns, .. }) => columns,
+                other => panic!("{sql} has one derived item, got {other:?}"),
+            }
+        };
+        assert!(
+            columns("SELECT * FROM (SELECT 1) v(between)") == Some(vec!["between".to_string()])
+        );
+        assert!(parse("SELECT * FROM (SELECT 1) v(is)").is_err());
+        assert!(parse("SELECT * FROM (SELECT 1) v(tablesample)").is_err());
+    }
+
+    #[test]
+    fn bare_column_labels_follow_the_barelabel_list() {
+        use assert2::assert;
+
+        use crate::ast::SelectItem;
+        let label = |sql: &str| -> Option<String> {
+            match only_select(sql).projection.into_iter().next() {
+                Some(SelectItem::Expr { alias, .. }) => alias,
+                other => panic!("{sql} projects one expression, got {other:?}"),
+            }
+        };
+        // `barelabel = true` even though several of these are reserved or
+        // type/function-name keywords, and several are also infix operators here.
+        for word in [
+            "is", "like", "ilike", "and", "or", "in", "between", "not", "null", "true", "similar",
+            "collate", "cross", "join", "natural",
+        ] {
+            let sql = format!("SELECT 1 {word}");
+            assert!(label(&sql).as_deref() == Some(word), "{sql}");
+        }
+        // `barelabel = false`, so each of these is a syntax error where a bare
+        // label would go — including the unreserved ones.
+        for word in [
+            "over",
+            "filter",
+            "window",
+            "fetch",
+            "grant",
+            "char",
+            "character",
+            "precision",
+            "day",
+            "hour",
+            "minute",
+            "month",
+            "second",
+            "year",
+            "varying",
+            "within",
+            "without",
+            "overlaps",
+        ] {
+            let sql = format!("SELECT 1 {word}");
+            assert!(parse(&sql).is_err(), "{sql}");
+        }
+        // Quoted, they are ordinary labels again.
+        assert!(label("SELECT 1 \"over\"").as_deref() == Some("over"));
+        assert!(label("SELECT 1 \"year\"").as_deref() == Some("year"));
+    }
+
+    #[test]
+    fn infix_operator_keywords_stay_operators_when_an_operand_follows() {
+        use assert2::assert;
+        // The lookahead that lets `SELECT 1 and` label a column must not disturb
+        // the operator reading when the operand is there.
+        assert!(matches!(
+            expr("a AND b"),
+            Expr::Binary {
+                op: BinaryOp::And,
                 ..
             }
         ));
         assert!(matches!(
-            expr("a NOT LIKE 'x%'"),
-            Expr::Like {
-                negated: true,
-                case_insensitive: false,
+            expr("a OR b"),
+            Expr::Binary {
+                op: BinaryOp::Or,
                 ..
             }
         ));
         assert!(matches!(
-            expr("a ILIKE 'x%'"),
-            Expr::Like {
-                negated: false,
-                case_insensitive: true,
-                ..
-            }
+            expr("a IS NULL"),
+            Expr::IsNull { negated: false, .. }
         ));
         assert!(matches!(
-            expr("a NOT ILIKE 'x%'"),
-            Expr::Like {
-                negated: true,
-                case_insensitive: true,
+            expr("a IS NOT NULL"),
+            Expr::IsNull { negated: true, .. }
+        ));
+        assert!(matches!(expr("a IN (1, 2)"), Expr::InList { .. }));
+        assert!(matches!(expr("a BETWEEN 1 AND 2"), Expr::Between { .. }));
+        assert!(matches!(expr("a LIKE 'x'"), Expr::Like { .. }));
+        // `ISNULL` / `NOTNULL` are PostgreSQL's postfix spellings; neither word
+        // can be a column name or a bare label there, so this reading is total.
+        assert!(matches!(
+            expr("a ISNULL"),
+            Expr::IsNull { negated: false, .. }
+        ));
+        assert!(matches!(
+            expr("a NOTNULL"),
+            Expr::IsNull { negated: true, .. }
+        ));
+    }
+
+    #[test]
+    fn default_outside_a_value_position_is_not_an_undefined_column() {
+        use assert2::assert;
+        // PostgreSQL's grammar admits DEFAULT in any `a_expr` and leaves parse
+        // analysis to refuse every context but an INSERT value / UPDATE
+        // assignment. Refusing it during analysis reports the same 42601 for the
+        // same contexts, and does so whether or not a row ever evaluates it.
+        for sql in [
+            "SELECT DEFAULT",
+            "SELECT id, DEFAULT FROM w",
+            "SELECT DEFAULT + 1",
+            "SELECT * FROM w WHERE id = DEFAULT",
+            "SELECT id FROM w ORDER BY DEFAULT",
+            "INSERT INTO w SELECT DEFAULT, 1",
+            "VALUES (DEFAULT)",
+        ] {
+            let error = parse(sql).expect_err("DEFAULT outside a value position");
+            assert!(error.sqlstate() == "42601", "{sql}");
+            assert!(
+                error.message == "DEFAULT is not allowed in this context",
+                "{sql}"
+            );
+        }
+        // The two positions PostgreSQL does allow are unaffected.
+        assert!(parse("INSERT INTO w VALUES (DEFAULT, 1)").is_ok());
+        assert!(parse("UPDATE w SET v = DEFAULT").is_ok());
+        // Quoted it is an ordinary column again.
+        assert!(matches!(
+            expr("\"default\""),
+            Expr::Column { table: None, .. }
+        ));
+    }
+
+    #[test]
+    fn qualified_update_set_target_is_an_undefined_column() {
+        use assert2::assert;
+        // `set_target` is `ColId opt_indirection`, so the whole qualification is
+        // indirection and PostgreSQL reports the FIRST component as the missing
+        // column — including when it is a word this lexer keywords.
+        for (sql, column) in [
+            ("UPDATE t SET t.a = 1", "t"),
+            ("UPDATE t SET public.t.a = 1", "public"),
+            ("UPDATE t SET \"public\".t.a = 1", "public"),
+            ("UPDATE t SET db.public.t.a = 1", "db"),
+        ] {
+            let error = parse(sql).expect_err("qualified SET target");
+            assert!(error.sqlstate() == "42703", "{sql}");
+            assert!(
+                error.message == format!("column \"{column}\" of relation \"t\" does not exist"),
+                "{sql}"
+            );
+        }
+        // A reserved word there is still a syntax error.
+        assert!(parse("UPDATE t SET from.a = 1").is_err());
+    }
+
+    #[test]
+    fn window_call_inside_a_window_specs_subquery_is_a_separate_query_level() {
+        use assert2::assert;
+        // The ban applies to the SELECT that owns the specification, not to a
+        // query nested inside it.
+        for sql in [
+            "SELECT count(*) OVER (ORDER BY (SELECT rank() OVER ())) FROM w",
+            "SELECT count(*) OVER (PARTITION BY (SELECT count(*) OVER () FROM w x LIMIT 1)) FROM w",
+            "SELECT count(*) OVER (ORDER BY (SELECT max(r) FROM (SELECT row_number() OVER () r FROM w y) s)) FROM w",
+        ] {
+            assert!(parse(sql).is_ok(), "{sql}");
+        }
+        // A window call written directly in the specification is still 42P20 —
+        // and the enclosing count is restored after the nested level.
+        for sql in [
+            "SELECT count(*) OVER (ORDER BY rank() OVER ()) FROM w",
+            "SELECT count(*) OVER (PARTITION BY row_number() OVER ()) FROM w",
+            "SELECT count(*) OVER (ORDER BY (SELECT 1), rank() OVER ()) FROM w",
+        ] {
+            let error = parse(sql).expect_err("window call in a window definition");
+            assert!(error.sqlstate() == "42P20", "{sql}");
+        }
+    }
+
+    #[test]
+    fn aggregate_order_by_is_refused_as_unsupported() {
+        use assert2::assert;
+        // PostgreSQL refuses the windowed spelling itself, with this SQLSTATE and
+        // this message.
+        for sql in [
+            "SELECT array_agg(v ORDER BY v) OVER (ORDER BY id) FROM w",
+            "SELECT array_agg(v ORDER BY v DESC NULLS LAST) OVER () FROM w",
+            "SELECT array_agg(v ORDER BY v) FILTER (WHERE v > 1) OVER () FROM w",
+        ] {
+            let error = parse(sql).expect_err("aggregate ORDER BY over a window");
+            assert!(error.sqlstate() == "0A000", "{sql}");
+            assert!(
+                error.message == "aggregate ORDER BY is not implemented for window functions",
+                "{sql}"
+            );
+        }
+        // The plain spelling PostgreSQL executes; this engine cannot order an
+        // aggregate's inputs, so it says so rather than ignoring the sort.
+        for sql in [
+            "SELECT string_agg(g, ',' ORDER BY g) FROM w",
+            "SELECT array_agg(DISTINCT v ORDER BY v) FROM w",
+        ] {
+            let error = parse(sql).expect_err("aggregate ORDER BY");
+            assert!(error.sqlstate() == "0A000", "{sql}");
+            assert!(
+                error.message == "aggregate ORDER BY is not supported",
+                "{sql}"
+            );
+        }
+        // An ordinary trailing ORDER BY is untouched.
+        assert!(parse("SELECT array_agg(v) FROM w ORDER BY 1").is_ok());
+    }
+
+    #[test]
+    fn collate_parses_as_a_postfix_operator() {
+        use assert2::assert;
+        assert!(
+            expr("a COLLATE \"C\"")
+                == Expr::Collate {
+                    expr: Box::new(Expr::Column {
+                        table: None,
+                        name: "a".into()
+                    }),
+                    collation: "C".into(),
+                }
+        );
+        // It binds as tightly as `::`, so the comparison sees the collated value.
+        assert!(matches!(
+            expr("a COLLATE \"C\" = b"),
+            Expr::Binary {
+                op: BinaryOp::Eq,
                 ..
             }
         ));
+        assert!(parse("SELECT c FROM w ORDER BY c COLLATE \"POSIX\"").is_ok());
+        assert!(parse("SELECT 'a' COLLATE pg_catalog.\"C\"").is_ok());
+        // This engine's pg_collation holds exactly `default`, `C` and `POSIX`;
+        // any other name is PostgreSQL's undefined-object error, and the name is
+        // case-sensitive as an identifier is.
+        for (sql, collation) in [
+            ("SELECT 'a' COLLATE \"en_US\"", "en_US"),
+            ("SELECT 'a' COLLATE c", "c"),
+            ("SELECT 'a' COLLATE \"nope\"", "nope"),
+        ] {
+            let error = parse(sql).expect_err("unknown collation");
+            assert!(error.sqlstate() == "42704", "{sql}");
+            assert!(
+                error.message
+                    == format!("collation \"{collation}\" for encoding \"UTF8\" does not exist"),
+                "{sql}"
+            );
+        }
     }
 
     #[test]
@@ -5357,8 +12571,418 @@ mod tests {
 
     #[test]
     fn parses_select_distinct() {
-        assert!(only_select("SELECT DISTINCT a FROM t").distinct);
-        assert!(!only_select("SELECT a FROM t").distinct);
+        use assert2::assert;
+
+        use crate::ast::DistinctClause;
+        assert!(only_select("SELECT DISTINCT a FROM t").distinct == DistinctClause::Distinct);
+        assert!(only_select("SELECT a FROM t").distinct == DistinctClause::All);
+        assert!(only_select("SELECT ALL a FROM t").distinct == DistinctClause::All);
+    }
+
+    #[test]
+    fn parses_distinct_on_expression_list() {
+        use assert2::assert;
+
+        use crate::ast::DistinctClause;
+        let cases: [(&str, DistinctClause); 3] = [
+            (
+                "SELECT DISTINCT ON (a) a FROM t",
+                DistinctClause::On(vec![col("a")]),
+            ),
+            (
+                "SELECT DISTINCT ON (a, b) a FROM t",
+                DistinctClause::On(vec![col("a"), col("b")]),
+            ),
+            (
+                "SELECT DISTINCT ON (t.a) a FROM t",
+                DistinctClause::On(vec![Expr::Column {
+                    table: Some("t".into()),
+                    name: "a".into(),
+                }]),
+            ),
+        ];
+        for (sql, want) in cases {
+            assert!(only_select(sql).distinct == want, "{sql}");
+        }
+    }
+
+    #[test]
+    fn distinct_on_requires_a_parenthesized_list() {
+        use assert2::assert;
+
+        assert!(parse("SELECT DISTINCT ON a FROM t").is_err());
+        assert!(parse("SELECT DISTINCT ON () a FROM t").is_err());
+    }
+
+    fn col(name: &str) -> Expr {
+        Expr::Column {
+            table: None,
+            name: name.into(),
+        }
+    }
+
+    /// The ORDER BY items of a parsed query, as (ascending, nulls-first) pairs.
+    fn order_directions(sql: &str) -> Vec<(bool, bool)> {
+        only_select(sql)
+            .order_by
+            .iter()
+            .map(|item| (item.asc, item.nulls_first))
+            .collect()
+    }
+
+    #[test]
+    fn order_by_resolves_null_placement_defaults_and_overrides() {
+        use assert2::assert;
+
+        let cases: [(&str, Vec<(bool, bool)>); 8] = [
+            ("SELECT a FROM t ORDER BY a", vec![(true, false)]),
+            ("SELECT a FROM t ORDER BY a ASC", vec![(true, false)]),
+            ("SELECT a FROM t ORDER BY a DESC", vec![(false, true)]),
+            ("SELECT a FROM t ORDER BY a NULLS FIRST", vec![(true, true)]),
+            ("SELECT a FROM t ORDER BY a NULLS LAST", vec![(true, false)]),
+            (
+                "SELECT a FROM t ORDER BY a DESC NULLS LAST",
+                vec![(false, false)],
+            ),
+            (
+                "SELECT a FROM t ORDER BY a ASC NULLS FIRST",
+                vec![(true, true)],
+            ),
+            (
+                "SELECT a FROM t ORDER BY a DESC, b NULLS FIRST, c",
+                vec![(false, true), (true, true), (true, false)],
+            ),
+        ];
+        for (sql, want) in cases {
+            assert!(order_directions(sql) == want, "{sql}");
+        }
+    }
+
+    #[test]
+    fn nulls_first_and_last_remain_usable_as_identifiers() {
+        use assert2::assert;
+
+        // PostgreSQL leaves NULLS/FIRST/LAST unreserved, so a column may be
+        // called `nulls` and a table alias `first`.
+        assert!(parse("SELECT nulls FROM t ORDER BY nulls").is_ok());
+        assert!(parse("SELECT * FROM t AS first").is_ok());
+        assert!(parse("SELECT * FROM t AS last").is_ok());
+    }
+
+    /// A parsed query's row-count window: `(limit, offset, with_ties)`.
+    type RowWindow = (Option<Expr>, Option<Expr>, bool);
+
+    /// The row-count window of a parsed query.
+    fn row_window(sql: &str) -> RowWindow {
+        let q = only_query(sql);
+        (q.limit, q.offset, q.with_ties)
+    }
+
+    #[test]
+    fn parses_every_row_count_spelling() {
+        use assert2::assert;
+
+        let one = || Some(Expr::IntLiteral("1".into()));
+        let two = || Some(Expr::IntLiteral("2".into()));
+        let cases: [(&str, RowWindow); 12] = [
+            ("SELECT a FROM t", (None, None, false)),
+            ("SELECT a FROM t LIMIT 2", (two(), None, false)),
+            ("SELECT a FROM t LIMIT ALL", (None, None, false)),
+            ("SELECT a FROM t OFFSET 1", (None, one(), false)),
+            ("SELECT a FROM t OFFSET 1 ROW", (None, one(), false)),
+            ("SELECT a FROM t OFFSET 1 ROWS", (None, one(), false)),
+            ("SELECT a FROM t LIMIT 2 OFFSET 1", (two(), one(), false)),
+            ("SELECT a FROM t OFFSET 1 LIMIT 2", (two(), one(), false)),
+            (
+                "SELECT a FROM t FETCH FIRST 2 ROWS ONLY",
+                (two(), None, false),
+            ),
+            (
+                "SELECT a FROM t FETCH NEXT 2 ROW ONLY",
+                (two(), None, false),
+            ),
+            ("SELECT a FROM t FETCH FIRST ROW ONLY", (one(), None, false)),
+            (
+                "SELECT a FROM t OFFSET 1 ROWS FETCH NEXT 2 ROWS ONLY",
+                (two(), one(), false),
+            ),
+        ];
+        for (sql, want) in cases {
+            assert!(row_window(sql) == want, "{sql}");
+        }
+    }
+
+    #[test]
+    fn limit_and_offset_take_arbitrary_expressions() {
+        use assert2::assert;
+
+        let (limit, offset, _) = row_window("SELECT a FROM t LIMIT 1 + 1 OFFSET $1");
+        assert!(matches!(limit, Some(Expr::Binary { .. })));
+        assert!(offset == Some(Expr::Param(1)));
+        let (limit, _, _) = row_window("SELECT a FROM t LIMIT (SELECT 2)");
+        assert!(matches!(limit, Some(Expr::ScalarSubquery(_))));
+    }
+
+    #[test]
+    fn fetch_with_ties_needs_order_by() {
+        use assert2::assert;
+
+        let (limit, _, with_ties) =
+            row_window("SELECT a FROM t ORDER BY a FETCH FIRST 2 ROWS WITH TIES");
+        assert!(limit == Some(Expr::IntLiteral("2".into())));
+        assert!(with_ties);
+        // PostgreSQL rejects this in the grammar with a 42601.
+        let error = parse("SELECT a FROM t FETCH FIRST 2 ROWS WITH TIES").expect_err("no ORDER BY");
+        assert!(error.sqlstate() == "42601");
+        assert!(error.to_string().contains("WITH TIES"));
+    }
+
+    #[test]
+    fn parses_every_locking_strength_and_wait_policy() {
+        use assert2::assert;
+
+        use crate::ast::{LockWaitPolicy, LockingClause, RowLockStrength};
+        let clause = |strength, of: &[&str], wait| {
+            Some(LockingClause {
+                strength,
+                of: of.iter().map(|s| (*s).to_string()).collect(),
+                wait,
+            })
+        };
+        let cases: [(&str, Option<LockingClause>); 9] = [
+            ("SELECT a FROM t", None),
+            (
+                "SELECT a FROM t FOR UPDATE",
+                clause(RowLockStrength::ForUpdate, &[], LockWaitPolicy::Wait),
+            ),
+            (
+                "SELECT a FROM t FOR NO KEY UPDATE",
+                clause(RowLockStrength::ForNoKeyUpdate, &[], LockWaitPolicy::Wait),
+            ),
+            (
+                "SELECT a FROM t FOR SHARE",
+                clause(RowLockStrength::ForShare, &[], LockWaitPolicy::Wait),
+            ),
+            (
+                "SELECT a FROM t FOR KEY SHARE",
+                clause(RowLockStrength::ForKeyShare, &[], LockWaitPolicy::Wait),
+            ),
+            (
+                "SELECT a FROM t FOR UPDATE NOWAIT",
+                clause(RowLockStrength::ForUpdate, &[], LockWaitPolicy::NoWait),
+            ),
+            (
+                "SELECT a FROM t FOR SHARE SKIP LOCKED",
+                clause(RowLockStrength::ForShare, &[], LockWaitPolicy::SkipLocked),
+            ),
+            (
+                "SELECT a FROM t FOR UPDATE OF t",
+                clause(RowLockStrength::ForUpdate, &["t"], LockWaitPolicy::Wait),
+            ),
+            (
+                "SELECT a FROM t, u FOR UPDATE OF t, u NOWAIT",
+                clause(
+                    RowLockStrength::ForUpdate,
+                    &["t", "u"],
+                    LockWaitPolicy::NoWait,
+                ),
+            ),
+        ];
+        for (sql, want) in cases {
+            assert!(only_query(sql).locking == want, "{sql}");
+        }
+    }
+
+    #[test]
+    fn repeated_locking_clauses_fold_onto_the_strongest() {
+        use assert2::assert;
+
+        use crate::ast::{LockWaitPolicy, LockingClause, RowLockStrength};
+        assert!(
+            only_query("SELECT a FROM t, u FOR SHARE OF t FOR UPDATE OF u NOWAIT").locking
+                == Some(LockingClause {
+                    strength: RowLockStrength::ForUpdate,
+                    of: vec!["t".into(), "u".into()],
+                    wait: LockWaitPolicy::NoWait,
+                })
+        );
+    }
+
+    #[test]
+    fn locking_refusals_carry_postgres_sqlstate_and_strength() {
+        use assert2::assert;
+
+        let cases: [(&str, &str, &str); 3] = [
+            (
+                "SELECT a FROM t UNION SELECT 1 FOR UPDATE",
+                "0A000",
+                "FOR UPDATE is not allowed with UNION/INTERSECT/EXCEPT",
+            ),
+            (
+                "VALUES (1) FOR SHARE",
+                "0A000",
+                "FOR SHARE cannot be applied to VALUES",
+            ),
+            (
+                "SELECT a FROM t INTERSECT SELECT 1 FOR KEY SHARE",
+                "0A000",
+                "FOR KEY SHARE is not allowed with UNION/INTERSECT/EXCEPT",
+            ),
+        ];
+        for (sql, sqlstate, message) in cases {
+            let error = parse(sql).expect_err(sql);
+            assert!(error.sqlstate() == sqlstate, "{sql}");
+            assert!(error.to_string() == message, "{sql}: {error}");
+        }
+    }
+
+    #[test]
+    fn parses_lateral_derived_tables_and_functions() {
+        use assert2::assert;
+
+        use crate::ast::TableExpr;
+        let from = |sql: &str| only_select(sql).from;
+        assert!(matches!(
+            from("SELECT * FROM t, LATERAL (SELECT 1) u").as_slice(),
+            [_, TableExpr::Derived { lateral: true, .. }]
+        ));
+        assert!(matches!(
+            from("SELECT * FROM t, (SELECT 1) u").as_slice(),
+            [_, TableExpr::Derived { lateral: false, .. }]
+        ));
+        assert!(matches!(
+            from("SELECT * FROM t, LATERAL unnest(t.a) u").as_slice(),
+            [_, TableExpr::Function { lateral: true, .. }]
+        ));
+        assert!(matches!(
+            from("SELECT * FROM t, unnest(t.a) u").as_slice(),
+            [_, TableExpr::Function { lateral: false, .. }]
+        ));
+        assert!(matches!(
+            from("SELECT * FROM t JOIN LATERAL (SELECT 1) u ON true").as_slice(),
+            [TableExpr::Join { .. }]
+        ));
+        // LATERAL is unreserved here, so it stays usable as a name.
+        assert!(parse("SELECT lateral FROM t").is_ok());
+        // …but it may not precede a plain table.
+        assert!(parse("SELECT * FROM LATERAL t").is_err());
+    }
+
+    #[test]
+    fn parses_function_items_with_ordinality_and_rows_from() {
+        use assert2::assert;
+
+        use crate::ast::TableExpr;
+        let function = |sql: &str| match only_select(sql).from.pop() {
+            Some(item @ TableExpr::Function { .. }) => item,
+            other => panic!("expected a function FROM item, got {other:?}"),
+        };
+        let TableExpr::Function {
+            functions,
+            rows_from,
+            with_ordinality,
+            alias,
+            column_aliases,
+            ..
+        } = function("SELECT * FROM generate_series(1, 2) WITH ORDINALITY AS g(v, n)")
+        else {
+            unreachable!("matched above")
+        };
+        assert!(functions.len() == 1);
+        assert!(functions[0].name == "generate_series");
+        assert!(!rows_from);
+        assert!(with_ordinality);
+        assert!(alias.as_deref() == Some("g"));
+        assert!(column_aliases == Some(vec!["v".into(), "n".into()]));
+
+        let TableExpr::Function {
+            functions,
+            rows_from,
+            with_ordinality,
+            ..
+        } = function("SELECT * FROM ROWS FROM (generate_series(1, 2), unnest(a)) WITH ORDINALITY")
+        else {
+            unreachable!("matched above")
+        };
+        assert!(rows_from);
+        assert!(with_ordinality);
+        assert!(
+            functions
+                .iter()
+                .map(|call| call.name.clone())
+                .collect::<Vec<_>>()
+                == vec!["generate_series".to_string(), "unnest".to_string()]
+        );
+        // `rows` is not reserved, so a table may still be called that.
+        assert!(parse("SELECT * FROM rows").is_ok());
+    }
+
+    #[test]
+    fn tells_column_alias_lists_apart_from_column_definition_lists() {
+        use assert2::assert;
+
+        use crate::ast::TableExpr;
+        let TableExpr::Function {
+            functions,
+            column_aliases,
+            ..
+        } = only_select("SELECT * FROM f(1) AS t(a int4, b text)")
+            .from
+            .pop()
+            .expect("one FROM item")
+        else {
+            panic!("expected a function FROM item");
+        };
+        assert!(column_aliases.is_none());
+        let defs = functions[0].column_defs.as_ref().expect("definition list");
+        assert!(defs.len() == 2);
+        assert!(defs[0].name == "a" && defs[0].ty == crabka_pgtypes::ColumnType::Int4);
+        assert!(defs[1].name == "b" && defs[1].ty == crabka_pgtypes::ColumnType::Text);
+
+        let TableExpr::Function {
+            functions,
+            column_aliases,
+            ..
+        } = only_select("SELECT * FROM f(1) AS t(a, b)")
+            .from
+            .pop()
+            .expect("one FROM item")
+        else {
+            panic!("expected a function FROM item");
+        };
+        assert!(functions[0].column_defs.is_none());
+        assert!(column_aliases == Some(vec!["a".into(), "b".into()]));
+    }
+
+    #[test]
+    fn parses_tablesample_after_the_alias() {
+        use assert2::assert;
+
+        use crate::ast::{TableExpr, TableSample};
+        let sample = |sql: &str| match only_select(sql).from.pop() {
+            Some(TableExpr::Table { sample, .. }) => sample,
+            other => panic!("expected a base table, got {other:?}"),
+        };
+        assert!(
+            sample("SELECT * FROM t TABLESAMPLE BERNOULLI (50)")
+                == Some(TableSample {
+                    method: "bernoulli".into(),
+                    percent: Expr::IntLiteral("50".into()),
+                    repeatable: None,
+                })
+        );
+        assert!(
+            sample("SELECT * FROM t AS x TABLESAMPLE SYSTEM (10) REPEATABLE (7)")
+                == Some(TableSample {
+                    method: "system".into(),
+                    percent: Expr::IntLiteral("10".into()),
+                    repeatable: Some(Expr::IntLiteral("7".into())),
+                })
+        );
+        assert!(sample("SELECT * FROM t").is_none());
+        // PostgreSQL only allows TABLESAMPLE on a base table.
+        assert!(parse("SELECT * FROM (SELECT 1) x TABLESAMPLE SYSTEM (1)").is_err());
+        assert!(parse("SELECT * FROM f(1) TABLESAMPLE SYSTEM (1)").is_err());
     }
 
     // ---- SP31: explicit casts ----
@@ -5673,10 +13297,8 @@ mod tests {
         );
         assert_eq!(
             one("DISCARD ALL"),
-            Statement::Set {
-                local: false,
-                name: "__discard_all".into(),
-                value: crate::ast::SetValue::Default
+            Statement::Discard {
+                target: crate::ast::DiscardTarget::All
             }
         );
         assert_eq!(
@@ -5744,10 +13366,18 @@ mod tests {
                 target: ResetTarget::All,
             }
         );
-        for unsupported in ["DISCARD PLANS", "DISCARD SEQUENCES", "DISCARD TEMP"] {
-            let error = crate::parser::parse(unsupported).expect_err("unsupported DISCARD");
-            assert!(error.to_string().contains("All"));
+        // Every DISCARD target parses to its own typed statement.
+        for (sql, target) in [
+            ("DISCARD ALL", crate::ast::DiscardTarget::All),
+            ("DISCARD PLANS", crate::ast::DiscardTarget::Plans),
+            ("DISCARD SEQUENCES", crate::ast::DiscardTarget::Sequences),
+            ("DISCARD TEMP", crate::ast::DiscardTarget::Temporary),
+            ("DISCARD TEMPORARY", crate::ast::DiscardTarget::Temporary),
+        ] {
+            assert_eq!(one(sql), Statement::Discard { target }, "{sql}");
         }
+        let error = crate::parser::parse("DISCARD NOTHING").expect_err("unknown DISCARD target");
+        assert!(error.to_string().contains("PLANS"));
     }
 
     #[test]
@@ -5796,8 +13426,8 @@ mod tests {
             "SELECT a FROM t ORDER BY a OFFSET 10 LIMIT 5",
         ] {
             let q = only_query(sql);
-            assert_eq!(q.limit, Some(5));
-            assert_eq!(q.offset, Some(10));
+            assert_eq!(q.limit, Some(Expr::IntLiteral("5".into())));
+            assert_eq!(q.offset, Some(Expr::IntLiteral("10".into())));
         }
     }
 
@@ -5840,7 +13470,7 @@ mod tests {
             }
             other => panic!("expected Join, got {other:?}"),
         }
-        assert!(matches!(&s.from[1], TableExpr::Table { name, alias: None } if name == "c"));
+        assert!(matches!(&s.from[1], TableExpr::Table { name, alias: None, .. } if name == "c"));
     }
 
     #[test]
@@ -5870,7 +13500,7 @@ mod tests {
 
         assert!(matches!(
             &s.from[..],
-            [crate::ast::TableExpr::Table { name, alias: None }] if name == "information_schema.tables"
+            [crate::ast::TableExpr::Table { name, alias: None, .. }] if name == "information_schema.tables"
         ));
     }
 
@@ -5881,9 +13511,34 @@ mod tests {
         assert_eq!(s.projection[0], SelectItem::QualifiedWildcard("a".into()));
     }
 
+    /// A derived table's alias is optional, as it has been since `PostgreSQL` 16.
+    /// Each subquery written without one gets its own synthesized name, so two in
+    /// the same FROM do not collide.
     #[test]
-    fn derived_table_requires_alias() {
-        assert!(parse("SELECT * FROM (SELECT 1)").is_err());
+    fn derived_table_alias_is_optional() {
+        use crate::ast::TableExpr;
+
+        let names = |sql| {
+            only_select(sql)
+                .from
+                .into_iter()
+                .map(|item| match item {
+                    TableExpr::Derived { alias, .. } => alias,
+                    other => panic!("expected a derived table, got {other:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(names("SELECT * FROM (SELECT 1)"), ["unnamed_subquery"]);
+        assert_eq!(names("SELECT * FROM (SELECT 1) q"), ["q"]);
+        assert_eq!(
+            names("SELECT * FROM (SELECT 1), (SELECT 2)"),
+            ["unnamed_subquery", "unnamed_subquery_1"]
+        );
+        // An alias in the middle does not consume a synthesized name.
+        assert_eq!(
+            names("SELECT * FROM (SELECT 1), (SELECT 2) q, (SELECT 3)"),
+            ["unnamed_subquery", "q", "unnamed_subquery_1"]
+        );
     }
 
     // ---- SP34: subquery expressions ----
@@ -6129,8 +13784,8 @@ mod tests {
         assert_eq!(body.rows[0].len(), 2);
         assert!(matches!(body.rows[0][0], Expr::IntLiteral(_)));
         assert_eq!(q.order_by.len(), 1);
-        assert_eq!(q.limit, Some(1));
-        assert_eq!(q.offset, Some(1));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("1".into())));
+        assert_eq!(q.offset, Some(Expr::IntLiteral("1".into())));
     }
 
     #[test]
@@ -6166,6 +13821,7 @@ mod tests {
             subquery,
             alias,
             columns,
+            ..
         } = &sel.from[0]
         else {
             panic!("expected derived table")
@@ -6189,6 +13845,7 @@ mod tests {
             subquery,
             alias,
             columns,
+            ..
         } = &sel.from[0]
         else {
             panic!("expected derived table")
@@ -6246,8 +13903,8 @@ mod tests {
     fn union_order_by_limit_bind_to_whole_query() {
         let q = only_query("SELECT 1 UNION SELECT 2 ORDER BY 1 LIMIT 5 OFFSET 1");
         assert_eq!(q.order_by.len(), 1);
-        assert_eq!(q.limit, Some(5));
-        assert_eq!(q.offset, Some(1));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("5".into())));
+        assert_eq!(q.offset, Some(Expr::IntLiteral("1".into())));
     }
 
     #[test]
@@ -6260,7 +13917,7 @@ mod tests {
         let SetExpr::Query(QueryBody::Select(b)) = left.as_ref() else {
             panic!("left branch is a SELECT leaf")
         };
-        assert_eq!(b.limit, Some(1));
+        assert_eq!(b.limit, Some(Expr::IntLiteral("1".into())));
         assert_eq!(b.order_by.len(), 1);
     }
 
@@ -6271,7 +13928,7 @@ mod tests {
             q.body,
             crate::ast::SetExpr::Query(crate::ast::QueryBody::Select(_))
         ));
-        assert_eq!(q.limit, Some(3));
+        assert_eq!(q.limit, Some(Expr::IntLiteral("3".into())));
         assert_eq!(q.order_by.len(), 1);
     }
 
@@ -6302,7 +13959,7 @@ mod tests {
             panic!("left branch preserves the tailed VALUES as a nested QueryExpr")
         };
         assert_eq!(inner.order_by.len(), 1);
-        assert_eq!(inner.limit, Some(1));
+        assert_eq!(inner.limit, Some(Expr::IntLiteral("1".into())));
         assert!(matches!(inner.body, SetExpr::Query(QueryBody::Values(_))));
     }
 
@@ -6334,17 +13991,21 @@ mod tests {
             Some(&["y".to_string()][..])
         );
         assert!(matches!(
-            with.ctes[0].query.body,
+            with.ctes[0].body.as_query().expect("query body").body,
             SetExpr::Query(QueryBody::Select(_))
         ));
         assert!(matches!(
-            with.ctes[1].query.body,
+            with.ctes[1].body.as_query().expect("query body").body,
             SetExpr::Query(QueryBody::Values(_))
         ));
 
         let q = only_query("WITH u AS (SELECT 1 UNION SELECT 2) SELECT * FROM u");
         assert!(matches!(
-            q.with.as_ref().expect("with").ctes[0].query.body,
+            q.with.as_ref().expect("with").ctes[0]
+                .body
+                .as_query()
+                .expect("query body")
+                .body,
             SetExpr::SetOp { .. }
         ));
     }
@@ -6460,6 +14121,7 @@ mod tests {
             Statement::DropFdw {
                 name: "kafka_fdw".into(),
                 if_exists: false,
+                cascade: false,
             }
         );
         assert_eq!(
@@ -6467,6 +14129,7 @@ mod tests {
             Statement::DropFdw {
                 name: "kafka_fdw".into(),
                 if_exists: true,
+                cascade: false,
             }
         );
     }
@@ -6478,6 +14141,7 @@ mod tests {
             Statement::DropServer {
                 name: "s".into(),
                 if_exists: false,
+                cascade: false,
             }
         );
         assert_eq!(
@@ -6485,6 +14149,7 @@ mod tests {
             Statement::DropServer {
                 name: "s".into(),
                 if_exists: true,
+                cascade: false,
             }
         );
     }
@@ -6540,6 +14205,7 @@ mod tests {
                 user: "public".into(),
                 server: "s".into(),
                 if_exists: false,
+                cascade: false,
             }
         );
         assert_eq!(
@@ -6548,6 +14214,7 @@ mod tests {
                 user: "public".into(),
                 server: "s".into(),
                 if_exists: true,
+                cascade: false,
             }
         );
     }
@@ -6559,6 +14226,7 @@ mod tests {
             Statement::DropForeignTable {
                 name: "orders".into(),
                 if_exists: false,
+                cascade: false,
             }
         );
         assert_eq!(
@@ -6566,6 +14234,7 @@ mod tests {
             Statement::DropForeignTable {
                 name: "orders".into(),
                 if_exists: true,
+                cascade: false,
             }
         );
     }
@@ -6649,6 +14318,7 @@ mod tests {
             Statement::DropServer {
                 name: "myserver".into(),
                 if_exists: false,
+                cascade: false,
             }
         );
         assert_eq!(
@@ -6656,6 +14326,7 @@ mod tests {
             Statement::DropServer {
                 name: "myserver".into(),
                 if_exists: true,
+                cascade: false,
             }
         );
     }
@@ -6669,6 +14340,7 @@ mod tests {
                 user: "public".into(),
                 server: "s".into(),
                 if_exists: true,
+                cascade: false,
             }
         );
     }
@@ -6682,6 +14354,7 @@ mod tests {
             Statement::DropForeignTable {
                 name: "mytable".into(),
                 if_exists: true,
+                cascade: false,
             }
         );
         // Also verify plain DROP FOREIGN TABLE (no IF EXISTS)
@@ -6690,6 +14363,7 @@ mod tests {
             Statement::DropForeignTable {
                 name: "mytable".into(),
                 if_exists: false,
+                cascade: false,
             }
         );
     }
@@ -6703,6 +14377,7 @@ mod tests {
             Statement::DropFdw {
                 name: "myfdw".into(),
                 if_exists: true,
+                cascade: false,
             }
         );
         assert_eq!(
@@ -6710,15 +14385,36 @@ mod tests {
             Statement::DropFdw {
                 name: "myfdw".into(),
                 if_exists: false,
+                cascade: false,
             }
         );
     }
 
-    #[test]
-    fn alter_non_server_is_error() {
-        // Kills: `s == "alter"` match guard replaced with true — verifies the guard
-        // is necessary (non-"alter" idents must not be routed here)
-        assert!(crate::parse("ALTER TABLE t ADD COLUMN x int4").is_err());
+    fn plain_index_key(column: &str) -> crate::ast::IndexKey {
+        crate::ast::IndexKey {
+            column: Some(column.into()),
+            text: column.into(),
+            descending: false,
+            nulls_first: None,
+        }
+    }
+
+    fn alter_table_stmt(table: &str, actions: Vec<AlterTableAction>) -> Statement {
+        Statement::AlterTable {
+            table: table.into(),
+            if_exists: false,
+            actions,
+        }
+    }
+
+    fn primary_key_action(name: Option<&str>, columns: &[&str]) -> AlterTableAction {
+        AlterTableAction::AddConstraint(TableConstraint {
+            name: name.map(Into::into),
+            kind: TableConstraintKind::PrimaryKey(
+                columns.iter().map(|column| (*column).to_string()).collect(),
+            ),
+            not_valid: false,
+        })
     }
 
     #[test]
@@ -6727,35 +14423,22 @@ mod tests {
         for (sql, expected) in [
             (
                 "ALTER TABLE pgbench_branches ADD PRIMARY KEY (bid)",
-                Statement::AlterTableAddPrimaryKey {
-                    table: "pgbench_branches".into(),
-                    constraint_name: None,
-                    columns: vec!["bid".into()],
-                },
+                alter_table_stmt("pgbench_branches", vec![primary_key_action(None, &["bid"])]),
             ),
             (
                 "alter table pgbench_accounts add primary key (aid)",
-                Statement::AlterTableAddPrimaryKey {
-                    table: "pgbench_accounts".into(),
-                    constraint_name: None,
-                    columns: vec!["aid".into()],
-                },
+                alter_table_stmt("pgbench_accounts", vec![primary_key_action(None, &["aid"])]),
             ),
             (
                 "ALTER TABLE t ADD PRIMARY KEY (a, b, c)",
-                Statement::AlterTableAddPrimaryKey {
-                    table: "t".into(),
-                    constraint_name: None,
-                    columns: vec!["a".into(), "b".into(), "c".into()],
-                },
+                alter_table_stmt("t", vec![primary_key_action(None, &["a", "b", "c"])]),
             ),
             (
                 "ALTER TABLE t ADD CONSTRAINT custom_pk PRIMARY KEY (a, b)",
-                Statement::AlterTableAddPrimaryKey {
-                    table: "t".into(),
-                    constraint_name: Some("custom_pk".into()),
-                    columns: vec!["a".into(), "b".into()],
-                },
+                alter_table_stmt(
+                    "t",
+                    vec![primary_key_action(Some("custom_pk"), &["a", "b"])],
+                ),
             ),
         ] {
             assert!(one(sql) == expected, "{sql}");
@@ -6766,18 +14449,164 @@ mod tests {
     fn alter_table_add_primary_key_rejects_malformed_tails() {
         use assert2::assert;
         for sql in [
-            "ALTER TABLE t ADD PRIMARY (id)",
             "ALTER TABLE t ADD PRIMARY KEY",
             "ALTER TABLE t ADD PRIMARY KEY ()",
             "ALTER TABLE t ADD PRIMARY KEY (id,)",
             "ALTER TABLE t ADD PRIMARY KEY id",
-            "ALTER TABLE t ADD PRIMARY KEY (id) CASCADE",
             "ALTER TABLE t ADD CONSTRAINT PRIMARY KEY (id)",
-            "ALTER TABLE t ADD UNIQUE (id)",
-            "ALTER TABLE t ADD FOREIGN KEY (id) REFERENCES u (id)",
         ] {
             assert!(crate::parse(sql).is_err(), "{sql}");
         }
+    }
+
+    /// Every `ALTER TABLE` subcommand family lands on its own typed action, and
+    /// the comma form keeps them in written order in one statement.
+    #[test]
+    fn alter_table_parses_every_subcommand_family() {
+        use assert2::assert;
+        let cases: &[(&str, Statement)] = &[
+            (
+                "ALTER TABLE t DROP COLUMN c CASCADE",
+                alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::DropColumn {
+                        column: "c".into(),
+                        if_exists: false,
+                        cascade: true,
+                    }],
+                ),
+            ),
+            (
+                "ALTER TABLE IF EXISTS t DROP IF EXISTS c",
+                Statement::AlterTable {
+                    table: "t".into(),
+                    if_exists: true,
+                    actions: vec![AlterTableAction::DropColumn {
+                        column: "c".into(),
+                        if_exists: true,
+                        cascade: false,
+                    }],
+                },
+            ),
+            (
+                "ALTER TABLE t ALTER COLUMN c SET NOT NULL",
+                alter_table_stmt("t", vec![AlterTableAction::SetNotNull("c".into())]),
+            ),
+            (
+                "ALTER TABLE t ALTER c DROP NOT NULL",
+                alter_table_stmt("t", vec![AlterTableAction::DropNotNull("c".into())]),
+            ),
+            (
+                "ALTER TABLE t ALTER COLUMN c DROP DEFAULT",
+                alter_table_stmt("t", vec![AlterTableAction::DropDefault("c".into())]),
+            ),
+            (
+                "ALTER TABLE t ALTER COLUMN c TYPE bigint",
+                alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::SetType {
+                        column: "c".into(),
+                        ty: ColumnType::Int8,
+                        using: None,
+                    }],
+                ),
+            ),
+            (
+                "ALTER TABLE t RENAME COLUMN a TO b",
+                alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::RenameColumn {
+                        column: "a".into(),
+                        new_name: "b".into(),
+                    }],
+                ),
+            ),
+            (
+                "ALTER TABLE t RENAME CONSTRAINT a TO b",
+                alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::RenameConstraint {
+                        name: "a".into(),
+                        new_name: "b".into(),
+                    }],
+                ),
+            ),
+            (
+                "ALTER TABLE t RENAME TO u",
+                alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::RenameTable {
+                        new_name: "u".into(),
+                    }],
+                ),
+            ),
+            (
+                "ALTER TABLE t VALIDATE CONSTRAINT ck",
+                alter_table_stmt("t", vec![AlterTableAction::ValidateConstraint("ck".into())]),
+            ),
+            (
+                "ALTER TABLE t OWNER TO bob",
+                alter_table_stmt("t", vec![AlterTableAction::OwnerTo("bob".into())]),
+            ),
+            (
+                "ALTER TABLE t SET (fillfactor = 70, autovacuum_enabled)",
+                alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::SetStorageParameters(vec![
+                        ("fillfactor".into(), Some("70".into())),
+                        ("autovacuum_enabled".into(), None),
+                    ])],
+                ),
+            ),
+            (
+                "ALTER TABLE t RESET (fillfactor)",
+                alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::ResetStorageParameters(vec![
+                        "fillfactor".into(),
+                    ])],
+                ),
+            ),
+            (
+                "ALTER TABLE t DROP CONSTRAINT IF EXISTS ck RESTRICT",
+                alter_table_stmt(
+                    "t",
+                    vec![AlterTableAction::DropConstraint {
+                        name: "ck".into(),
+                        if_exists: true,
+                        cascade: false,
+                    }],
+                ),
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert!(one(sql) == *expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn alter_table_comma_form_keeps_actions_in_written_order() {
+        use assert2::assert;
+        let Statement::AlterTable { actions, .. } =
+            one("ALTER TABLE t ADD COLUMN a int4, DROP COLUMN b, ALTER COLUMN c SET NOT NULL")
+        else {
+            panic!("expected ALTER TABLE");
+        };
+        assert!(matches!(actions[0], AlterTableAction::AddColumn { .. }));
+        assert!(matches!(actions[1], AlterTableAction::DropColumn { .. }));
+        assert!(matches!(actions[2], AlterTableAction::SetNotNull(_)));
+        assert!(actions.len() == 3);
+    }
+
+    /// `ALTER TABLE` subcommands with no counterpart in Crabka's storage model
+    /// still parse, carrying their source text so the executor can name them.
+    #[test]
+    fn alter_table_records_unsupported_subcommands_with_their_text() {
+        use assert2::assert;
+        let Statement::AlterTable { actions, .. } = one("ALTER TABLE t SET SCHEMA other") else {
+            panic!("expected ALTER TABLE");
+        };
+        assert!(actions == vec![AlterTableAction::Unsupported("SET SCHEMA other".into())]);
     }
 
     #[test]
@@ -6919,44 +14748,29 @@ fn dispatch_emits_exact_query_and_table_family_identities() {
             "ALTER TABLE t ADD PRIMARY KEY (id)",
             CommandIdentity::AlterTable,
         ),
+        ("CREATE TABLE t AS SELECT 1", CommandIdentity::CreateTableAs),
+        ("SELECT 1 AS a INTO t", CommandIdentity::SelectInto),
+        ("TABLE t", CommandIdentity::Table),
     ] {
         let parsed = parse_with_command_identities(sql).expect(sql);
         assert_eq!(parsed[0].1, expected, "{sql}");
     }
 
-    for (family, sql) in [
-        ("CREATE TABLE AS", "CREATE TABLE t AS SELECT 1"),
-        (
-            "CREATE TABLE INHERITS",
-            "CREATE TABLE t (id int4) INHERITS (parent)",
-        ),
-        (
-            "CREATE TABLE PARTITION BY",
-            "CREATE TABLE t (id int4) PARTITION BY HASH (id)",
-        ),
-        (
-            "CREATE TABLE PARTITION OF",
-            "CREATE TABLE t PARTITION OF parent DEFAULT",
-        ),
-        (
-            "ALTER TABLE ATTACH PARTITION",
-            "ALTER TABLE t ATTACH PARTITION p DEFAULT",
-        ),
-        (
-            "ALTER TABLE DETACH PARTITION",
-            "ALTER TABLE t DETACH PARTITION p",
-        ),
-        (
-            "ALTER TABLE ENABLE ROW LEVEL SECURITY",
-            "ALTER TABLE t ENABLE ROW LEVEL SECURITY",
-        ),
-        ("TABLE", "TABLE t"),
-    ] {
-        assert!(
-            parse_with_command_identities(sql).is_err(),
-            "unsupported {family} must reject instead of emitting its generic parent identity: {sql}"
-        );
-    }
+    // Families the parser itself still refuses: their syntax is not recognized,
+    // so they must not be swallowed by the generic parent's identity.
+    //
+    // `CREATE TABLE … INHERITS`, `ALTER TABLE … ATTACH/DETACH PARTITION` and
+    // `ALTER TABLE … ENABLE ROW LEVEL SECURITY` have deliberately moved off this
+    // list: the matrix's bounded-refusal rule prefers recognizing the stock
+    // PostgreSQL syntax and refusing it at the session boundary with a typed
+    // SQLSTATE, so they now parse and are rejected by the executor. That
+    // refusal is pinned by the session behavior probes the compatibility-matrix
+    // checker runs, not here.
+    //
+    // `CREATE TABLE … PARTITION BY` and `… PARTITION OF` have moved off it for
+    // the stronger reason that they are implemented: a partitioned parent takes
+    // hash and range partitions and routes inserted rows to the right leaf. They
+    // are covered by the partitioning tests, not by a parse-rejection assertion.
 }
 
 #[test]
@@ -6987,7 +14801,7 @@ fn shared_ast_fake_dispatch_cannot_exist_without_an_identity_argument() {
     use crate::{ast::Statement, command::CommandIdentity};
 
     fn fake_branch(identity: CommandIdentity) -> ParsedStatement {
-        emitted(identity, Ok(Statement::Commit)).expect("fake branch emits")
+        emitted(identity, Ok(Statement::Commit { chain: false })).expect("fake branch emits")
     }
 
     assert_eq!(
@@ -7117,8 +14931,9 @@ mod json_array_conflict_notify_tests {
 
     use crate::{
         ast::{
-            BinaryOp, ColumnDef, Expr, OnConflict, OnConflictAction, OnConflictTarget, SelectItem,
-            SelectStmt, Statement, TableExpr, UnlistenTarget,
+            ArraySubscript, BinaryOp, ColumnDef, Expr, OnConflict, OnConflictAction,
+            OnConflictTarget, SelectItem, SelectStmt, Statement, TableExpr, UnaryOp,
+            UnlistenTarget,
         },
         command::CommandIdentity,
         parse, parse_with_command_identities,
@@ -7168,6 +14983,157 @@ mod json_array_conflict_notify_tests {
 
     fn error(sql: &str) -> crate::ParseError {
         parse(sql).expect_err(sql)
+    }
+
+    #[test]
+    fn regex_bitwise_and_arithmetic_operators_parse_to_their_binary_ops() {
+        let cases: &[(&str, BinaryOp)] = &[
+            ("a ~ b", BinaryOp::Match),
+            ("a ~* b", BinaryOp::MatchCi),
+            ("a !~ b", BinaryOp::NotMatch),
+            ("a !~* b", BinaryOp::NotMatchCi),
+            ("a & b", BinaryOp::BitAnd),
+            ("a | b", BinaryOp::BitOr),
+            ("a # b", BinaryOp::BitXor),
+            ("a << b", BinaryOp::Shl),
+            ("a >> b", BinaryOp::Shr),
+            ("a ^ b", BinaryOp::Pow),
+            ("a % b", BinaryOp::Mod),
+            // `!=` is PostgreSQL's alternative spelling of `<>`.
+            ("a != b", BinaryOp::Ne),
+        ];
+        for (expression, op) in cases {
+            assert!(
+                projected(&format!("SELECT {expression}")) == binary(*op, column("a"), column("b")),
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn generic_prefix_operators_parse_to_their_unary_ops() {
+        let cases: &[(&str, UnaryOp)] = &[
+            ("~ a", UnaryOp::BitNot),
+            ("@ a", UnaryOp::Abs),
+            ("|/ a", UnaryOp::Sqrt),
+            ("||/ a", UnaryOp::Cbrt),
+        ];
+        for (expression, op) in cases {
+            assert!(
+                projected(&format!("SELECT {expression}"))
+                    == Expr::Unary {
+                        op: *op,
+                        expr: Box::new(column("a")),
+                    },
+                "{expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn new_operators_bind_at_postgres_precedence() {
+        // Every case here is a grouping PostgreSQL's precedence table fixes and
+        // that a naive binding-power choice gets wrong. The expected value is the
+        // whole tree, so a mis-grouping cannot hide behind a matching root node.
+        let int = |n: &str| Expr::IntLiteral(n.into());
+        let unary = |op, e| Expr::Unary {
+            op,
+            expr: Box::new(e),
+        };
+        let cases: &[(&str, Expr)] = &[
+            // The bitwise/regex family is ONE left-associative level.
+            (
+                "1 # 2 & 3",
+                binary(
+                    BinaryOp::BitAnd,
+                    binary(BinaryOp::BitXor, int("1"), int("2")),
+                    int("3"),
+                ),
+            ),
+            (
+                "1 | 2 # 3",
+                binary(
+                    BinaryOp::BitXor,
+                    binary(BinaryOp::BitOr, int("1"), int("2")),
+                    int("3"),
+                ),
+            ),
+            // ...and it binds LOOSER than `+ -`, so the shift takes `2 + 1`.
+            (
+                "1 << 2 + 1",
+                binary(
+                    BinaryOp::Shl,
+                    int("1"),
+                    binary(BinaryOp::Add, int("2"), int("1")),
+                ),
+            ),
+            // ...and TIGHTER than the comparisons.
+            (
+                "1 & 2 = 3",
+                binary(
+                    BinaryOp::Eq,
+                    binary(BinaryOp::BitAnd, int("1"), int("2")),
+                    int("3"),
+                ),
+            ),
+            // `^` is LEFT-associative in PostgreSQL: 2^3^2 is 64, not 512.
+            (
+                "2^3^2",
+                binary(
+                    BinaryOp::Pow,
+                    binary(BinaryOp::Pow, int("2"), int("3")),
+                    int("2"),
+                ),
+            ),
+            // `^` binds tighter than `*`...
+            (
+                "2 ^ 2 * 3",
+                binary(
+                    BinaryOp::Mul,
+                    binary(BinaryOp::Pow, int("2"), int("2")),
+                    int("3"),
+                ),
+            ),
+            // ...and LOOSER than unary minus, which is why `-2^2` is 4.
+            (
+                "-2^2",
+                binary(BinaryOp::Pow, unary(UnaryOp::Neg, int("2")), int("2")),
+            ),
+            // `%` sits with `*` and `/`.
+            (
+                "4 % 3 + 1",
+                binary(
+                    BinaryOp::Add,
+                    binary(BinaryOp::Mod, int("4"), int("3")),
+                    int("1"),
+                ),
+            ),
+            // A generic PREFIX operator binds loosely — unlike unary minus, its
+            // operand swallows the following `+`.
+            (
+                "~ 5 + 1",
+                unary(UnaryOp::BitNot, binary(BinaryOp::Add, int("5"), int("1"))),
+            ),
+            (
+                "@ 5 - 8",
+                unary(UnaryOp::Abs, binary(BinaryOp::Sub, int("5"), int("8"))),
+            ),
+            // ...but it stops at its own level, so `&` takes the completed `~5`.
+            (
+                "~ 5 & 3",
+                binary(BinaryOp::BitAnd, unary(UnaryOp::BitNot, int("5")), int("3")),
+            ),
+            (
+                "-5 * 2",
+                binary(BinaryOp::Mul, unary(UnaryOp::Neg, int("5")), int("2")),
+            ),
+        ];
+        for (expression, want) in cases {
+            assert!(
+                projected(&format!("SELECT {expression}")) == *want,
+                "{expression}"
+            );
+        }
     }
 
     #[test]
@@ -7272,13 +15238,63 @@ mod json_array_conflict_notify_tests {
             projected("SELECT ARRAY[a || b]")
                 == Expr::ArrayLiteral(vec![binary(BinaryOp::Concat, column("a"), column("b"))])
         );
+        // A braceless nested constructor is an element that is itself a
+        // constructor, so it parses identically to the spelled-out form.
+        let rows = Expr::ArrayLiteral(vec![
+            Expr::ArrayLiteral(vec![
+                Expr::IntLiteral("1".into()),
+                Expr::IntLiteral("2".into()),
+            ]),
+            Expr::ArrayLiteral(vec![
+                Expr::IntLiteral("3".into()),
+                Expr::IntLiteral("4".into()),
+            ]),
+        ]);
+        assert!(projected("SELECT ARRAY[[1,2],[3,4]]") == rows);
+        assert!(projected("SELECT ARRAY[ARRAY[1,2],ARRAY[3,4]]") == rows);
+    }
+
+    /// `PostgreSQL` has no nested array TYPE: every `[]` suffix spelling, and the
+    /// SQL-standard `ARRAY` spelling, resolve to the same one-array type.
+    #[test]
+    fn every_array_type_suffix_spelling_resolves_to_one_array_type() {
+        use crabka_pgtypes::ColumnType;
+
+        let int_array = ColumnType::array_of(ColumnType::Int4).expect("int4[]");
+        for sql in [
+            "SELECT $1::int4[]",
+            "SELECT $1::int4[][]",
+            "SELECT $1::int4[][][]",
+            "SELECT $1::int4[4]",
+            "SELECT $1::int4 ARRAY",
+            "SELECT $1::int4 ARRAY[4]",
+        ] {
+            let Expr::Cast { ty, .. } = projected(sql) else {
+                panic!("{sql} parses to a cast");
+            };
+            assert!(ty == int_array, "{sql}");
+        }
+        // The length-modified string types now have array types too.
+        let Expr::Cast { ty, .. } = projected("SELECT $1::varchar(5)[]") else {
+            panic!("varchar(5)[] parses to a cast");
+        };
+        assert!(ty == ColumnType::array_of(ColumnType::Varchar(Some(5))).expect("varchar(5)[]"));
     }
 
     #[test]
-    fn array_subquery_constructor_is_refused_by_name() {
-        let error = error("SELECT ARRAY(SELECT 1)");
-        assert!(error.sqlstate() == "0A000");
-        assert!(error.message.contains("ARRAY(subquery) is not supported"));
+    fn array_subquery_constructor_parses_to_its_own_node() {
+        let Expr::ArraySubquery(query) = projected("SELECT ARRAY(SELECT 1)") else {
+            panic!("ARRAY(subquery) parses to ArraySubquery");
+        };
+        assert!(matches!(
+            query.body,
+            crate::ast::SetExpr::Query(crate::ast::QueryBody::Select(_))
+        ));
+        // The subquery may carry its own tail, exactly as a scalar one may.
+        assert!(matches!(
+            projected("SELECT ARRAY(SELECT x FROM t ORDER BY x DESC LIMIT 3)"),
+            Expr::ArraySubquery(_)
+        ));
     }
 
     #[test]
@@ -7302,39 +15318,89 @@ mod json_array_conflict_notify_tests {
                     Expr::IntLiteral("2".into()),
                 )
         );
-        // A chain nests left, and the index is a full expression.
+        // A `[…][…]` chain is ONE array reference, not a subscript of a
+        // subscript: PostgreSQL reaches into a two-dimensional array, so
+        // `(ARRAY[[1,2],[3,4]])[2][1]` is 3 rather than an error. The index of
+        // each level is a full expression.
         assert!(
             projected("SELECT a[i + 1][2]")
-                == Expr::Subscript {
-                    base: Box::new(Expr::Subscript {
-                        base: Box::new(column("a")),
-                        index: Box::new(binary(
+                == Expr::ArrayRef {
+                    base: Box::new(column("a")),
+                    subscripts: vec![
+                        ArraySubscript::Index(binary(
                             BinaryOp::Add,
                             column("i"),
                             Expr::IntLiteral("1".into())
                         )),
-                    }),
-                    index: Box::new(Expr::IntLiteral("2".into())),
+                        ArraySubscript::Index(Expr::IntLiteral("2".into())),
+                    ],
                 }
         );
     }
 
     #[test]
-    fn every_array_slice_spelling_is_refused_by_name() {
-        for sql in [
-            "SELECT a[1:2]",
-            "SELECT a[:2]",
-            "SELECT a[1:]",
-            "SELECT a[1:2] FROM t",
-        ] {
-            let error = error(sql);
-            assert!(error.sqlstate() == "0A000", "{sql}");
+    fn every_slice_spelling_parses_into_one_array_reference() {
+        let int = |n: &str| Expr::IntLiteral(n.to_string());
+        let cases: &[(&str, Vec<ArraySubscript>)] = &[
+            (
+                "SELECT a[1:2]",
+                vec![ArraySubscript::Slice {
+                    lower: Some(int("1")),
+                    upper: Some(int("2")),
+                }],
+            ),
+            (
+                "SELECT a[:2]",
+                vec![ArraySubscript::Slice {
+                    lower: None,
+                    upper: Some(int("2")),
+                }],
+            ),
+            (
+                "SELECT a[1:]",
+                vec![ArraySubscript::Slice {
+                    lower: Some(int("1")),
+                    upper: None,
+                }],
+            ),
+            (
+                "SELECT a[:]",
+                vec![ArraySubscript::Slice {
+                    lower: None,
+                    upper: None,
+                }],
+            ),
+            (
+                "SELECT a[1][2]",
+                vec![
+                    ArraySubscript::Index(int("1")),
+                    ArraySubscript::Index(int("2")),
+                ],
+            ),
+            (
+                "SELECT a[1:2][3]",
+                vec![
+                    ArraySubscript::Slice {
+                        lower: Some(int("1")),
+                        upper: Some(int("2")),
+                    },
+                    ArraySubscript::Index(int("3")),
+                ],
+            ),
+        ];
+        for (sql, subscripts) in cases {
             assert!(
-                error.message.contains("array slices are not supported"),
-                "{sql}: {}",
-                error.message
+                projected(sql)
+                    == Expr::ArrayRef {
+                        base: Box::new(column("a")),
+                        subscripts: subscripts.clone(),
+                    },
+                "{sql}"
             );
         }
+        // More than PostgreSQL's six dimensions is 54000, not a parse failure.
+        let error = error("SELECT a[1][2][3][4][5][6][7]");
+        assert!(error.sqlstate() == "54000");
     }
 
     #[test]
@@ -7425,20 +15491,10 @@ mod json_array_conflict_notify_tests {
 
     #[test]
     fn unsupported_array_type_suffixes_are_refused_by_name() {
-        let cases: &[(&str, &str)] = &[
-            (
-                "CREATE TABLE t (a int4[][])",
-                "multidimensional arrays are not supported",
-            ),
-            (
-                "CREATE TABLE t (a varchar(10)[])",
-                "arrays of type \"varchar\" are not supported",
-            ),
-            (
-                "SELECT $1::regclass[]",
-                "arrays of type \"regclass\" are not supported",
-            ),
-        ];
+        let cases: &[(&str, &str)] = &[(
+            "SELECT $1::regclass[]",
+            "arrays of type \"regclass\" are not supported",
+        )];
         for (sql, message) in cases {
             let error = error(sql);
             assert!(error.sqlstate() == "0A000", "{sql}");
@@ -7448,11 +15504,18 @@ mod json_array_conflict_notify_tests {
 
     #[test]
     fn functions_in_from_position_parse_with_and_without_aliases() {
+        let call = |name: &str, args: Vec<Expr>| crate::ast::TableFuncCall {
+            name: name.into(),
+            args,
+            column_defs: None,
+        };
         assert!(
             select("SELECT tag FROM unnest(tags) AS u(tag)").from
                 == vec![TableExpr::Function {
-                    name: "unnest".into(),
-                    args: vec![column("tags")],
+                    functions: vec![call("unnest", vec![column("tags")])],
+                    rows_from: false,
+                    with_ordinality: false,
+                    lateral: false,
                     alias: Some("u".into()),
                     column_aliases: Some(vec!["tag".into()]),
                 }]
@@ -7460,11 +15523,16 @@ mod json_array_conflict_notify_tests {
         assert!(
             select("SELECT * FROM unnest(ARRAY[1, 2])").from
                 == vec![TableExpr::Function {
-                    name: "unnest".into(),
-                    args: vec![Expr::ArrayLiteral(vec![
-                        Expr::IntLiteral("1".into()),
-                        Expr::IntLiteral("2".into()),
-                    ])],
+                    functions: vec![call(
+                        "unnest",
+                        vec![Expr::ArrayLiteral(vec![
+                            Expr::IntLiteral("1".into()),
+                            Expr::IntLiteral("2".into()),
+                        ])]
+                    )],
+                    rows_from: false,
+                    with_ordinality: false,
+                    lateral: false,
                     alias: None,
                     column_aliases: None,
                 }]
@@ -7567,7 +15635,7 @@ mod json_array_conflict_notify_tests {
     #[test]
     fn on_conflict_composes_with_returning_and_multi_row_values() {
         let Statement::Insert {
-            rows,
+            source,
             on_conflict,
             returning,
             ..
@@ -7577,10 +15645,13 @@ mod json_array_conflict_notify_tests {
         else {
             panic!("expected INSERT");
         };
+        let crate::ast::InsertSource::Values(rows) = &source else {
+            panic!("expected a VALUES source");
+        };
         assert!(rows.len() == 2);
         assert!(on_conflict.is_some());
         assert!(
-            returning
+            returning.map(|r| r.items)
                 == Some(vec![SelectItem::Expr {
                     expr: column("id"),
                     alias: None,
@@ -7749,4 +15820,428 @@ mod json_array_conflict_notify_tests {
                 == vec!["notify", "unlisten"]
         );
     }
+}
+
+#[cfg(test)]
+mod q1_statement_completeness_tests {
+    use assert2::assert;
+
+    use crate::{
+        ast::{
+            ArraySubscript, Assignment, AssignmentValue, CteBody, Expr, InsertSource, MergeAction,
+            MergeMatchKind, MergeSource, SelectItem, Statement, TableExpr,
+        },
+        command::CommandIdentity,
+        parse, parse_with_command_identities,
+    };
+
+    fn one(sql: &str) -> Statement {
+        let mut parsed = parse(sql).unwrap_or_else(|error| panic!("{sql}: {error}"));
+        assert!(parsed.len() == 1, "{sql}");
+        parsed.pop().expect("one statement")
+    }
+
+    fn identity(sql: &str) -> CommandIdentity {
+        let parsed = parse_with_command_identities(sql).unwrap_or_else(|e| panic!("{sql}: {e}"));
+        assert!(parsed.len() == 1, "{sql}");
+        parsed[0].1
+    }
+
+    fn sqlstate(sql: &str) -> String {
+        parse(sql)
+            .err()
+            .unwrap_or_else(|| panic!("{sql} parsed unexpectedly"))
+            .sqlstate()
+            .to_string()
+    }
+
+    #[test]
+    fn command_identities_cover_the_new_statement_rows() {
+        let cases = [
+            ("INSERT INTO t SELECT 1", CommandIdentity::Insert),
+            (
+                "MERGE INTO t USING s ON true WHEN MATCHED THEN DELETE",
+                CommandIdentity::Merge,
+            ),
+            ("CREATE TABLE t AS SELECT 1", CommandIdentity::CreateTableAs),
+            ("SELECT 1 AS a INTO t", CommandIdentity::SelectInto),
+            ("TABLE t", CommandIdentity::Table),
+            (
+                "WITH c AS (SELECT 1) SELECT * FROM c",
+                CommandIdentity::Select,
+            ),
+            (
+                "WITH c AS (SELECT 1) UPDATE t SET a = 1",
+                CommandIdentity::Update,
+            ),
+            (
+                "WITH c AS (DELETE FROM t RETURNING a) INSERT INTO u SELECT a FROM c",
+                CommandIdentity::Insert,
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert!(identity(sql) == expected, "{sql}");
+        }
+    }
+
+    #[test]
+    fn insert_sources_cover_values_query_and_default_values() {
+        let Statement::Insert { source, .. } = one("INSERT INTO t VALUES (1, DEFAULT)") else {
+            panic!("expected INSERT");
+        };
+        assert!(
+            source == InsertSource::Values(vec![vec![Expr::IntLiteral("1".into()), Expr::Default]])
+        );
+
+        let Statement::Insert { source, .. } = one("INSERT INTO t DEFAULT VALUES") else {
+            panic!("expected INSERT");
+        };
+        assert!(source == InsertSource::DefaultValues);
+
+        for sql in [
+            "INSERT INTO t SELECT a FROM s",
+            "INSERT INTO t TABLE s",
+            "INSERT INTO t (SELECT a FROM s)",
+            "INSERT INTO t SELECT 1 UNION ALL SELECT 2",
+        ] {
+            let Statement::Insert { source, .. } = one(sql) else {
+                panic!("expected INSERT: {sql}");
+            };
+            assert!(matches!(source, InsertSource::Query(_)), "{sql}");
+        }
+
+        // A parenthesised list of names is still a column list.
+        let Statement::Insert { columns, .. } = one("INSERT INTO t (a, b) VALUES (1, 2)") else {
+            panic!("expected INSERT");
+        };
+        assert!(columns == Some(vec!["a".into(), "b".into()]));
+    }
+
+    #[test]
+    fn update_parses_alias_from_list_and_every_assignment_form() {
+        let Statement::Update {
+            table,
+            alias,
+            assignments,
+            from,
+            ..
+        } = one(
+            "UPDATE t AS x SET a = 1, (b, c) = ROW(2, 3), (d, e) = (SELECT 4, 5), (f) = (6) FROM s, u WHERE x.k = s.k",
+        )
+        else {
+            panic!("expected UPDATE");
+        };
+        assert!(table == "t");
+        assert!(alias == Some("x".into()));
+        assert!(from.len() == 2);
+        assert!(matches!(from[0], TableExpr::Table { .. }));
+        assert!(
+            assignments[0]
+                == Assignment {
+                    targets: vec!["a".into()],
+                    subscripts: Vec::new(),
+                    value: AssignmentValue::Expr(Expr::IntLiteral("1".into())),
+                }
+        );
+        assert!(
+            assignments[1]
+                == Assignment {
+                    targets: vec!["b".into(), "c".into()],
+                    subscripts: Vec::new(),
+                    value: AssignmentValue::Row(vec![
+                        Expr::IntLiteral("2".into()),
+                        Expr::IntLiteral("3".into()),
+                    ]),
+                }
+        );
+        assert!(matches!(
+            &assignments[2],
+            Assignment { targets, value: AssignmentValue::Subquery(_), .. } if targets.len() == 2
+        ));
+        assert!(
+            assignments[3]
+                == Assignment {
+                    targets: vec!["f".into()],
+                    subscripts: Vec::new(),
+                    value: AssignmentValue::Expr(Expr::IntLiteral("6".into())),
+                }
+        );
+    }
+
+    /// A subscripted `SET` target keeps the column name and records the
+    /// subscripts separately, so the executor can write into the column's
+    /// current value instead of replacing it.
+    #[test]
+    fn update_parses_subscripted_set_targets() {
+        let Statement::Update { assignments, .. } = one("UPDATE t SET j['a'][0] = '1', k = 2")
+        else {
+            panic!("expected UPDATE");
+        };
+        assert!(
+            assignments[0]
+                == Assignment {
+                    targets: vec!["j".into()],
+                    subscripts: vec![
+                        ArraySubscript::Index(Expr::StringLiteral("a".into())),
+                        ArraySubscript::Index(Expr::IntLiteral("0".into())),
+                    ],
+                    value: AssignmentValue::Expr(Expr::StringLiteral("1".into())),
+                }
+        );
+        assert!(assignments[1].subscripts.is_empty());
+    }
+
+    #[test]
+    fn delete_parses_alias_and_using_list() {
+        let Statement::Delete {
+            table,
+            alias,
+            using,
+            filter,
+            ..
+        } = one("DELETE FROM t AS x USING s WHERE x.k = s.k")
+        else {
+            panic!("expected DELETE");
+        };
+        assert!(table == "t");
+        assert!(alias == Some("x".into()));
+        assert!(using.len() == 1);
+        assert!(filter.is_some());
+    }
+
+    #[test]
+    fn returning_parses_the_pg18_old_new_alias_list() {
+        let Statement::Update { returning, .. } =
+            one("UPDATE t SET a = 1 RETURNING WITH (OLD AS o, NEW AS n) o.a, n.a")
+        else {
+            panic!("expected UPDATE");
+        };
+        let returning = returning.expect("RETURNING");
+        assert!(returning.old_alias == Some("o".into()));
+        assert!(returning.new_alias == Some("n".into()));
+        assert!(returning.items.len() == 2);
+
+        let Statement::Delete { returning, .. } = one("DELETE FROM t RETURNING *") else {
+            panic!("expected DELETE");
+        };
+        let returning = returning.expect("RETURNING");
+        assert!(returning.old_alias.is_none());
+        assert!(returning.new_alias.is_none());
+        assert!(returning.items == vec![SelectItem::Wildcard]);
+    }
+
+    #[test]
+    fn merge_parses_every_when_clause_shape() {
+        let Statement::Merge {
+            table,
+            alias,
+            source,
+            clauses,
+            returning,
+            ..
+        } = one("MERGE INTO t AS x USING (SELECT 1 AS k) AS s ON x.k = s.k \
+             WHEN MATCHED AND s.k > 0 THEN UPDATE SET a = 1 \
+             WHEN MATCHED THEN DELETE \
+             WHEN NOT MATCHED BY TARGET THEN INSERT (k) VALUES (s.k) \
+             WHEN NOT MATCHED BY SOURCE THEN DO NOTHING \
+             RETURNING merge_action(), x.k")
+        else {
+            panic!("expected MERGE");
+        };
+        assert!(table == "t");
+        assert!(alias == Some("x".into()));
+        assert!(matches!(source, MergeSource::Query { .. }));
+        assert!(returning.is_some());
+        let kinds: Vec<MergeMatchKind> = clauses.iter().map(|c| c.kind).collect();
+        assert!(
+            kinds
+                == vec![
+                    MergeMatchKind::Matched,
+                    MergeMatchKind::Matched,
+                    MergeMatchKind::NotMatchedByTarget,
+                    MergeMatchKind::NotMatchedBySource,
+                ]
+        );
+        assert!(clauses[0].condition.is_some());
+        assert!(matches!(clauses[0].action, MergeAction::Update(_)));
+        assert!(clauses[1].action == MergeAction::Delete);
+        assert!(matches!(
+            clauses[2].action,
+            MergeAction::Insert {
+                values: Some(_),
+                ..
+            }
+        ));
+        assert!(clauses[3].action == MergeAction::DoNothing);
+
+        // `WHEN NOT MATCHED` without a BY clause means BY TARGET.
+        let Statement::Merge { clauses, .. } =
+            one("MERGE INTO t USING s ON true WHEN NOT MATCHED THEN INSERT DEFAULT VALUES")
+        else {
+            panic!("expected MERGE");
+        };
+        assert!(clauses[0].kind == MergeMatchKind::NotMatchedByTarget);
+        assert!(
+            clauses[0].action
+                == MergeAction::Insert {
+                    columns: None,
+                    values: None
+                }
+        );
+    }
+
+    #[test]
+    fn create_table_as_and_select_into_share_one_statement() {
+        let Statement::CreateTableAs {
+            name,
+            if_not_exists,
+            columns,
+            with_data,
+            ..
+        } = one("CREATE TABLE IF NOT EXISTS t (a, b) AS SELECT 1, 2 WITH NO DATA")
+        else {
+            panic!("expected CREATE TABLE AS");
+        };
+        assert!(name == "t");
+        assert!(if_not_exists);
+        assert!(columns == Some(vec!["a".into(), "b".into()]));
+        assert!(!with_data);
+
+        let Statement::CreateTableAs {
+            name,
+            if_not_exists,
+            columns,
+            with_data,
+            ..
+        } = one("SELECT a INTO TEMP t FROM s")
+        else {
+            panic!("expected SELECT INTO");
+        };
+        assert!(name == "t");
+        assert!(!if_not_exists);
+        assert!(columns.is_none());
+        assert!(with_data);
+
+        // An ordinary CREATE TABLE still parses as one, `AS` inside a column
+        // default notwithstanding.
+        assert!(matches!(
+            one("CREATE TABLE t (a int4 DEFAULT CAST(1 AS int4))"),
+            Statement::CreateTable { .. }
+        ));
+    }
+
+    #[test]
+    fn table_statement_is_select_star_from_name() {
+        for sql in [
+            "TABLE t",
+            "TABLE ONLY t",
+            "TABLE t *",
+            "(TABLE t)",
+            "TABLE t ORDER BY a LIMIT 1",
+            "TABLE t UNION ALL TABLE u",
+            "WITH c AS (TABLE t) SELECT * FROM c",
+        ] {
+            assert!(matches!(one(sql), Statement::Query(_)), "{sql}");
+        }
+        let Statement::Query(query) = one("TABLE t") else {
+            panic!("expected a query");
+        };
+        let crate::ast::SetExpr::Query(crate::ast::QueryBody::Select(select)) = query.body else {
+            panic!("expected a SELECT body");
+        };
+        assert!(select.projection == vec![SelectItem::Wildcard]);
+        assert!(
+            select.from
+                == vec![TableExpr::Table {
+                    name: "t".into(),
+                    alias: None,
+                    columns: None,
+                    sample: None,
+                }]
+        );
+    }
+
+    #[test]
+    fn data_modifying_ctes_parse_as_dml_bodies() {
+        let Statement::Query(query) = one(
+            "WITH i AS (INSERT INTO t VALUES (1) RETURNING a), d AS (DELETE FROM u RETURNING b), q AS (SELECT 1) SELECT * FROM i",
+        ) else {
+            panic!("expected a query");
+        };
+        let with = query.with.expect("WITH");
+        assert!(with.has_data_modifying_cte());
+        assert!(matches!(with.ctes[0].body, CteBody::Dml(_)));
+        assert!(matches!(with.ctes[1].body, CteBody::Dml(_)));
+        assert!(matches!(with.ctes[2].body, CteBody::Query(_)));
+
+        let Statement::Insert { with, .. } =
+            one("WITH d AS (DELETE FROM t RETURNING a) INSERT INTO u SELECT a FROM d")
+        else {
+            panic!("expected INSERT");
+        };
+        let with = with.expect("WITH");
+        assert!(with.has_data_modifying_cte());
+
+        let Statement::Query(query) = one("WITH q AS (SELECT 1) SELECT * FROM q") else {
+            panic!("expected a query");
+        };
+        assert!(!query.with.expect("WITH").has_data_modifying_cte());
+    }
+
+    #[test]
+    fn rejected_shapes_carry_postgresql_sqlstates() {
+        let cases = [
+            // An action that cannot pair with its match condition.
+            (
+                "MERGE INTO t USING s ON true WHEN MATCHED THEN INSERT (a) VALUES (1)",
+                "42601",
+            ),
+            (
+                "MERGE INTO t USING s ON true WHEN NOT MATCHED THEN DELETE",
+                "42601",
+            ),
+            ("MERGE INTO t USING s ON true", "42601"),
+            // A multi-column SET needs a ROW() or a sub-SELECT.
+            ("UPDATE t SET (a, b) = 1", "42601"),
+            // Only OLD and NEW may be renamed.
+            ("UPDATE t SET a = 1 RETURNING WITH (BOTH AS b) a", "42601"),
+            (
+                "UPDATE t SET a = 1 RETURNING WITH (OLD AS o, OLD AS p) a",
+                "42601",
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert!(sqlstate(sql) == expected, "{sql}");
+        }
+    }
+}
+
+/// Which `ON` clause a [`crate::ast::JsonBehavior`] was written for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonOnClause {
+    Empty,
+    Error,
+}
+
+/// Box a SQL/JSON node into an [`Expr`].
+fn sql_json(expr: crate::ast::SqlJsonExpr) -> Expr {
+    Expr::SqlJson(Box::new(expr))
+}
+
+/// The lowercase spelling of the reserved keywords the SQL/JSON grammar also
+/// uses as ordinary option words. `None` for every other keyword, so a word
+/// match never accepts an unrelated reserved word.
+fn keyword_word(kw: Keyword) -> Option<&'static str> {
+    Some(match kw {
+        Keyword::Array => "array",
+        Keyword::With => "with",
+        Keyword::Unique => "unique",
+        Keyword::On => "on",
+        Keyword::Null => "null",
+        Keyword::True => "true",
+        Keyword::False => "false",
+        Keyword::Wrapper => "wrapper",
+        Keyword::Returning => "returning",
+        _ => return None,
+    })
 }

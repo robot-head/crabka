@@ -17,6 +17,16 @@ pub(crate) struct ColumnBinding {
     pub(crate) ty: ColumnType,
 }
 
+/// The qualifier of a positional column reference: `$pos.3` is "the column at
+/// index 3", whatever it is called.
+///
+/// `PostgreSQL` expands `*` into positional `Var` nodes, so `SELECT *` works
+/// over a relation whose column names repeat — `ROWS FROM (generate_series(1,3),
+/// generate_series(1,2))` has two columns named `generate_series` — while a bare
+/// reference to one of those names is still `42702`. A `$` cannot begin an
+/// unquoted identifier, so no user relation can collide with this qualifier.
+pub(crate) const POSITION_QUALIFIER: &str = "$pos";
+
 /// The ordered schema of a relation. Flat indices line up with the combined row.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Scope {
@@ -78,7 +88,18 @@ impl Scope {
     /// Resolve a column reference to its flat index. Unqualified: unique match by
     /// name (0 -> 42703, >1 -> 42702). Qualified `t.name`: `t` must be a qualifier in
     /// scope (else 42P01), then unique match by name under it (0 -> 42703, >1 -> 42702).
+    ///
+    /// [`POSITION_QUALIFIER`] is the one exception: it names a column by index
+    /// rather than by name, which is how a `*` expansion refers to a relation
+    /// whose column names repeat.
     pub fn resolve(&self, qualifier: Option<&str>, name: &str) -> Result<usize, ExecError> {
+        if qualifier == Some(POSITION_QUALIFIER) {
+            return name
+                .parse::<usize>()
+                .ok()
+                .filter(|index| *index < self.columns.len())
+                .ok_or_else(|| ExecError::UndefinedColumn(name.to_string()));
+        }
         if let Some(q) = qualifier
             && !self
                 .columns
@@ -116,6 +137,7 @@ mod tests {
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         }
     }
 

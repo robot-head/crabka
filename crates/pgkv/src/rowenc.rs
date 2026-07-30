@@ -28,6 +28,19 @@ mod tag {
     /// A one-dimensional array (`[14][elem code][u32 count][elements...]`), each
     /// element encoded by the same tagged-field format. Append-only.
     pub const ARRAY: u8 = 14;
+    /// `smallint` (`[15][i16 big-endian]`). Append-only.
+    pub const INT2: u8 = 15;
+    /// `real` (`[16][f32 big-endian]`). Append-only.
+    pub const FLOAT4: u8 = 16;
+    /// `time with time zone` (`[17][i64 µs of day][i32 seconds west of UTC]`).
+    /// Append-only.
+    pub const TIMETZ: u8 = 17;
+    /// A composite value (`[18][u32 type oid, 0 = anonymous][u32 field count]`
+    /// then per field a `[u32 len][name]`, then the field values in the same
+    /// tagged-field format). Append-only.
+    pub const RECORD: u8 = 18;
+    /// An enum value (`[19][u32 type oid][u32 len][label]`). Append-only.
+    pub const ENUM: u8 = 19;
 }
 
 /// Encode one row using the current storage format.
@@ -52,6 +65,10 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.push(tag::BOOL);
                 out.push(u8::from(*b));
             }
+            Datum::Int2(n) => {
+                out.push(tag::INT2);
+                out.extend_from_slice(&n.to_be_bytes());
+            }
             Datum::Int4(n) => {
                 out.push(tag::INT4);
                 out.extend_from_slice(&n.to_be_bytes());
@@ -65,6 +82,10 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 let len = u32::try_from(s.len()).expect("text column exceeds 4 GiB");
                 out.extend_from_slice(&len.to_be_bytes());
                 out.extend_from_slice(s.as_bytes());
+            }
+            Datum::Float4(f) => {
+                out.push(tag::FLOAT4);
+                out.extend_from_slice(&f.to_be_bytes());
             }
             Datum::Float8(f) => {
                 out.push(tag::FLOAT8);
@@ -84,6 +105,10 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             Datum::Time(t) => {
                 out.push(tag::TIME);
                 out.extend_from_slice(&crabka_pgtypes::datetime::time_to_binary(*t));
+            }
+            Datum::Timetz(t) => {
+                out.push(tag::TIMETZ);
+                out.extend_from_slice(&crabka_pgtypes::datetime::timetz_to_binary(*t));
             }
             Datum::Timestamp(ts) => {
                 out.push(tag::TIMESTAMP);
@@ -112,12 +137,37 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
             }
             Datum::Array(a) => {
                 out.push(tag::ARRAY);
-                out.push(a.elem.code());
+                a.elem.write_code(out);
+                let ndim = u8::try_from(a.dims.len()).expect("array dimensions exceed a byte");
+                out.push(ndim);
+                for dim in &a.dims {
+                    out.extend_from_slice(&dim.lower.to_be_bytes());
+                    out.extend_from_slice(&dim.len.to_be_bytes());
+                }
                 let count = u32::try_from(a.elems.len()).expect("array exceeds 4G elements");
                 out.extend_from_slice(&count.to_be_bytes());
                 // Elements reuse the same tagged-field encoding, so a `jsonb`
                 // inside an array (or a NULL element) needs no special case.
                 encode_fields(&a.elems, out);
+            }
+            Datum::Record(r) => {
+                out.push(tag::RECORD);
+                out.extend_from_slice(&r.ty.map_or(0, |ty| ty.oid).to_be_bytes());
+                let count = u32::try_from(r.values.len()).expect("record exceeds 4G fields");
+                out.extend_from_slice(&count.to_be_bytes());
+                for name in r.names.iter().take(r.values.len()) {
+                    let len = u32::try_from(name.len()).expect("field name exceeds 4 GiB");
+                    out.extend_from_slice(&len.to_be_bytes());
+                    out.extend_from_slice(name.as_bytes());
+                }
+                encode_fields(&r.values, out);
+            }
+            Datum::Enum(e) => {
+                out.push(tag::ENUM);
+                out.extend_from_slice(&e.ty.oid.to_be_bytes());
+                let len = u32::try_from(e.label.len()).expect("enum label exceeds 4 GiB");
+                out.extend_from_slice(&len.to_be_bytes());
+                out.extend_from_slice(e.label.as_bytes());
             }
         }
     }
@@ -155,6 +205,10 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
     Ok(match t {
         tag::NULL => Datum::Null,
         tag::BOOL => Datum::Bool(take_bool(cur)?),
+        tag::INT2 => {
+            let raw = take_n(cur, 2)?;
+            Datum::Int2(i16::from_be_bytes(raw.try_into().expect("2 bytes fit i16")))
+        }
         tag::INT4 => {
             let raw = take_n(cur, 4)?;
             Datum::Int4(i32::from_be_bytes(raw.try_into().expect("4 bytes fit i32")))
@@ -170,6 +224,10 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 String::from_utf8(raw.to_vec())
                     .map_err(|_| KvError::CorruptRow("text is not valid UTF-8".into()))?,
             )
+        }
+        tag::FLOAT4 => {
+            let raw = take_n(cur, 4)?;
+            Datum::Float4(f32::from_be_bytes(raw.try_into().expect("4 bytes fit f32")))
         }
         tag::FLOAT8 => {
             let raw = take_n(cur, 8)?;
@@ -197,6 +255,13 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
             Datum::Time(
                 crabka_pgtypes::datetime::time_from_binary(raw)
                     .map_err(|e| KvError::CorruptRow(format!("corrupt time: {e}")))?,
+            )
+        }
+        tag::TIMETZ => {
+            let raw = take_n(cur, 12)?;
+            Datum::Timetz(
+                crabka_pgtypes::datetime::timetz_from_binary(raw)
+                    .map_err(|e| KvError::CorruptRow(format!("corrupt timetz: {e}")))?,
             )
         }
         tag::TIMESTAMP => {
@@ -236,18 +301,60 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
             )
         }
         tag::ARRAY => {
-            let code = take_u8(cur)?;
-            let elem = crabka_pgtypes::ElemType::from_code(code)
-                .ok_or_else(|| KvError::CorruptRow(format!("unknown array element code {code}")))?;
+            let elem = crabka_pgtypes::ElemType::read_code(cur)
+                .ok_or_else(|| KvError::CorruptRow("unknown array element code".to_string()))?;
+            let ndim = take_u8(cur)?;
+            let mut dims = Vec::new();
+            for _ in 0..ndim {
+                let lower = take_i32(cur)?;
+                let len = take_i32(cur)?;
+                dims.push(crabka_pgtypes::ArrayDim::new(lower, len));
+            }
             let count = take_u32_len(cur)?;
             let mut elems = Vec::new();
             for _ in 0..count {
                 elems.push(decode_field(cur)?);
             }
-            Datum::Array(crabka_pgtypes::ArrayValue::new(elem, elems))
+            Datum::Array(crabka_pgtypes::ArrayValue::with_dims(elem, elems, dims))
+        }
+        tag::RECORD => {
+            let type_oid = take_u32_len(cur)?;
+            let count = take_u32_len(cur)?;
+            let mut names = Vec::with_capacity(count);
+            for _ in 0..count {
+                names.push(take_text(cur, "record field name")?);
+            }
+            let mut values = Vec::with_capacity(count);
+            for _ in 0..count {
+                values.push(decode_field(cur)?);
+            }
+            let ty = u32::try_from(type_oid)
+                .ok()
+                .filter(|oid| *oid != 0)
+                .and_then(|oid| crabka_pgtypes::usertype::lookup_oid(oid).map(|ty| ty.type_ref()));
+            Datum::Record(crabka_pgtypes::RecordValue::named(ty, names.into(), values))
+        }
+        tag::ENUM => {
+            let type_oid = u32::try_from(take_u32_len(cur)?)
+                .map_err(|_| KvError::CorruptRow("enum type oid out of range".into()))?;
+            let label = take_text(cur, "enum label")?;
+            let ty = crabka_pgtypes::usertype::lookup_oid(type_oid)
+                .ok_or_else(|| {
+                    KvError::CorruptRow(format!("enum type {type_oid} is no longer registered"))
+                })?
+                .type_ref();
+            Datum::Enum(crabka_pgtypes::EnumValue { ty, label })
         }
         other => return Err(KvError::CorruptRow(format!("unknown field tag {other}"))),
     })
+}
+
+/// A length-prefixed UTF-8 string, the shape every name and label field uses.
+fn take_text(cur: &mut &[u8], what: &str) -> Result<String, KvError> {
+    let len = take_u32_len(cur)?;
+    let raw = take_n(cur, len)?;
+    String::from_utf8(raw.to_vec())
+        .map_err(|_| KvError::CorruptRow(format!("{what} is not valid UTF-8")))
 }
 
 fn take_u8(cur: &mut &[u8]) -> Result<u8, KvError> {
@@ -264,6 +371,11 @@ fn take_bool(cur: &mut &[u8]) -> Result<bool, KvError> {
         1 => Ok(true),
         other => Err(KvError::CorruptRow(format!("invalid bool payload {other}"))),
     }
+}
+
+fn take_i32(cur: &mut &[u8]) -> Result<i32, KvError> {
+    let raw = take_n(cur, 4)?;
+    Ok(i32::from_be_bytes(raw.try_into().expect("4 bytes fit i32")))
 }
 
 fn take_u32_len(cur: &mut &[u8]) -> Result<usize, KvError> {
@@ -293,9 +405,14 @@ mod tests {
         let row = vec![
             Datum::Null,
             Datum::Bool(true),
+            Datum::Int2(i16::MIN),
+            Datum::Int2(i16::MAX),
             Datum::Int4(i32::MIN),
             Datum::Int8(i64::MIN),
             Datum::Text("héllo".into()),
+            Datum::Float4(-1.5),
+            Datum::Float4(f32::NAN),
+            Datum::Float4(-0.0),
             Datum::Float8(-1.5),
             Datum::Float8(f64::NAN),
             Datum::Float8(-0.0),
@@ -406,9 +523,15 @@ mod tests {
                 let _ = decode_row(&bytes);
             }
         }
+        // `i64::MAX` microseconds is the reserved `timestamptz 'infinity'`
+        // sentinel, so it decodes to that value rather than erroring; the
+        // largest *finite* count is one below it.
         let mut tstz_max = vec![ROW_VERSION, 10];
         tstz_max.extend_from_slice(&i64::MAX.to_be_bytes());
-        assert!(decode_row(&tstz_max).is_err());
+        assert!(decode_row(&tstz_max).is_ok());
+        let mut tstz_over = vec![ROW_VERSION, 10];
+        tstz_over.extend_from_slice(&(i64::MAX - 1).to_be_bytes());
+        assert!(decode_row(&tstz_over).is_err());
     }
 
     #[test]
@@ -420,9 +543,11 @@ mod tests {
         prop_oneof![
             Just(Datum::Null),
             any::<bool>().prop_map(Datum::Bool),
+            any::<i16>().prop_map(Datum::Int2),
             any::<i32>().prop_map(Datum::Int4),
             any::<i64>().prop_map(Datum::Int8),
             ".*".prop_map(Datum::Text),
+            any::<f32>().prop_map(Datum::Float4),
             any::<f64>().prop_map(Datum::Float8),
             (any::<i64>(), 0u32..6).prop_map(|(m, s)| {
                 Datum::Numeric(

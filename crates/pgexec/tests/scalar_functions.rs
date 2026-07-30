@@ -231,17 +231,23 @@ async fn error_sqlstates() {
         .batch_execute("CREATE TABLE t (n int4, s text)")
         .await
         .expect("create");
-    // unknown function / wrong arity / bad argument type -> 42883.
-    assert_eq!(err_code(&client, "SELECT frobnicate(1)").await, "42883");
-    assert_eq!(err_code(&client, "SELECT length('a', 'b')").await, "42883");
-    assert_eq!(err_code(&client, "SELECT upper(1)").await, "42883");
-    // `int || int` (neither operand text) -> 42883.
-    assert_eq!(err_code(&client, "SELECT 1 || 2").await, "42883");
-    // incompatible coalesce types -> 42804.
-    assert_eq!(err_code(&client, "SELECT coalesce(1, 'x')").await, "42804");
-    // DISTINCT on a scalar function -> 42809.
-    assert_eq!(
-        err_code(&client, "SELECT upper(DISTINCT s) FROM t").await,
-        "42809"
-    );
+    let cases = [
+        // unknown function / wrong arity / bad argument type -> 42883.
+        ("SELECT frobnicate(1)", "42883"),
+        ("SELECT length('a', 'b')", "42883"),
+        ("SELECT upper(1)", "42883"),
+        // `int || int` (neither operand text) -> 42883.
+        ("SELECT 1 || 2", "42883"),
+        // COALESCE resolves the common type ignoring `unknown` literals and
+        // then coerces each one to it, so a literal that will not parse as the
+        // resolved type is 22P02 — not a type-matching failure.
+        ("SELECT coalesce(1, 'x')", "22P02"),
+        // Two KNOWN types with no common type is 42804.
+        ("SELECT coalesce(1, 'x'::text)", "42804"),
+        // DISTINCT on a scalar function -> 42809.
+        ("SELECT upper(DISTINCT s) FROM t", "42809"),
+    ];
+    for (sql, expected) in cases {
+        assert2::assert!(err_code(&client, sql).await == expected, "{sql}");
+    }
 }

@@ -42,8 +42,10 @@ fn avro_to_column_type(schema: &AvroSchema) -> Option<ColumnType> {
         AvroSchema::Boolean => Some(ColumnType::Bool),
         AvroSchema::Int => Some(ColumnType::Int4),
         AvroSchema::Long => Some(ColumnType::Int8),
-        // Both `float` and `double` map to Float8 — there is no Float4 in this
-        // codebase (see mapping rules in Component D).
+        // Both `float` and `double` map to Float8 (see the mapping rules in
+        // Component D). `Float4` now exists as a scalar type, so narrowing the
+        // Avro `float` case onto it is a deliberate open question for the FDW
+        // mapping wave rather than an absent capability.
         AvroSchema::Float | AvroSchema::Double => Some(ColumnType::Float8),
         AvroSchema::Bytes => Some(ColumnType::Bytea),
         // Logical timestamp types — both millis and micros → Timestamptz.
@@ -337,9 +339,9 @@ fn avro_value_to_datum(value: &AvroValue, col_ty: ColumnType, decimal_scale: Opt
             let big_int: BigInt = BigInt::from(d.clone());
             let scale = i64::from(decimal_scale.unwrap_or(0));
             let bd = bigdecimal::BigDecimal::new(big_int, scale);
-            Datum::Numeric(bd)
+            Datum::Numeric(bd.into())
         }
-        AvroValue::BigDecimal(bd) => Datum::Numeric(bd.clone()),
+        AvroValue::BigDecimal(bd) => Datum::Numeric(bd.clone().into()),
 
         // Nested complex types (Record, Array, Map) → JSON-serialised text.
         AvroValue::Record(fields) => {

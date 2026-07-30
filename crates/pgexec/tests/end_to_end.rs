@@ -227,21 +227,35 @@ async fn alter_table_rename_moves_metadata_and_preserves_rows_and_indexes() {
         .await
         .expect_err("view is not a table");
     assert_eq!(sqlstate(&wrong_type), "42809");
+    // A view reads the table under its QUOTED spelling, whose source span the
+    // token-level rewrite cannot substitute, so the rename is refused rather
+    // than left silently pointing at a name that no longer exists.
     let dependency = client
         .batch_execute("ALTER TABLE \"New Orders\" RENAME TO blocked")
         .await
-        .expect_err("stored views block an unsafe rename");
+        .expect_err("a view reference the rewrite cannot prove must block the rename");
     assert_eq!(sqlstate(&dependency), "0A000");
-    let column = client
+
+    // Renaming a column no view reads is unaffected, in both spellings, and the
+    // view keeps returning its rows.
+    client
         .batch_execute("ALTER TABLE \"New Orders\" RENAME COLUMN customer TO buyer")
         .await
-        .expect_err("column rename must fail clear");
-    assert_eq!(sqlstate(&column), "0A000");
-    let optional_column = client
-        .batch_execute("ALTER TABLE \"New Orders\" RENAME customer TO buyer")
+        .expect("column rename");
+    client
+        .batch_execute("ALTER TABLE \"New Orders\" RENAME buyer TO client_name")
         .await
-        .expect_err("optional COLUMN spelling must reach unsupported column rename");
-    assert_eq!(sqlstate(&optional_column), "0A000");
+        .expect("optional COLUMN spelling");
+    let view_rows = client
+        .query("SELECT id FROM order_view ORDER BY id", &[])
+        .await
+        .expect("the view still reads");
+    assert_eq!(view_rows.len(), 2);
+    let renamed = client
+        .query("SELECT client_name FROM \"New Orders\" ORDER BY id", &[])
+        .await
+        .expect("the renamed column is readable");
+    assert_eq!(renamed[0].get::<_, String>(0), "Ada");
 }
 
 async fn connect(port: u16) -> tokio_postgres::Client {
@@ -993,7 +1007,10 @@ async fn column_defaults_and_not_null_are_enforced_on_insert_and_update() {
 async fn unsupported_create_table_constraints_fail_loudly() {
     let client = connect(spawn().await).await;
 
-    for sql in ["CREATE TABLE check_t (id int4 CHECK (id > 0))"] {
+    for sql in [
+        "CREATE TABLE fk_t (id int4 REFERENCES other_t (id))",
+        "CREATE TABLE fk_u (id int4, FOREIGN KEY (id) REFERENCES other_t (id))",
+    ] {
         let err = client
             .batch_execute(sql)
             .await
@@ -1497,6 +1514,10 @@ async fn extended_bind_supports_additional_text_and_binary_parameter_types() {
         assert_eq!(rows[0].get::<_, &str>(0), value);
     }
 
+    // An EXPLICIT cast to a length-constrained string type truncates rather than
+    // erroring, whether the value arrives as a literal or as a bound parameter —
+    // `EXECUTE p('abcd')` over `$1::varchar(3)` is `abc` on PostgreSQL too. The
+    // assignment direction (below) is the one that raises 22001.
     for (ty, sql) in [
         (Type::VARCHAR, "SELECT $1::varchar(3)::text"),
         (Type::BPCHAR, "SELECT $1::character(3)::text"),
@@ -1505,17 +1526,36 @@ async fn extended_bind_supports_additional_text_and_binary_parameter_types() {
             .prepare_typed(sql, &[ty])
             .await
             .expect("prepare length-constrained text-like parameter");
-        let rows = client
-            .query(&statement, &[&"abc"])
-            .await
-            .expect("bind text-like parameter within typmod");
-        assert_eq!(rows[0].get::<_, &str>(0), "abc");
+        for value in ["abc", "abcd"] {
+            let rows = client
+                .query(&statement, &[&value])
+                .await
+                .expect("bind text-like parameter");
+            assert_eq!(rows[0].get::<_, &str>(0), "abc", "{sql} with {value}");
+        }
+    }
 
-        let err = client
-            .query(&statement, &[&"abcd"])
+    // Storing an over-long value through a bound parameter is an assignment, so
+    // it is 22001 — the same split the scalar string types make everywhere.
+    client
+        .simple_query("CREATE TABLE bound_typmod (v varchar(3), c character(3))")
+        .await
+        .expect("create length-constrained table");
+    for (column, ty) in [("v", Type::VARCHAR), ("c", Type::BPCHAR)] {
+        let sql = format!("INSERT INTO bound_typmod ({column}) VALUES ($1)");
+        let statement = client
+            .prepare_typed(&sql, &[ty])
             .await
-            .expect_err("bind text-like parameter exceeding typmod must fail");
-        assert_eq!(sqlstate(&err), "22001");
+            .expect("prepare length-constrained insert");
+        client
+            .execute(&statement, &[&"abc"])
+            .await
+            .expect("value within typmod stores");
+        let err = client
+            .execute(&statement, &[&"abcd"])
+            .await
+            .expect_err("assigning over the typmod must fail");
+        assert_eq!(sqlstate(&err), "22001", "{sql}");
     }
 
     let numeric = client
@@ -2048,7 +2088,7 @@ async fn alter_table_add_primary_key_rejects_existing_duplicates_all_or_nothing(
 }
 
 #[tokio::test]
-async fn alter_table_add_primary_key_rejects_existing_nulls_before_duplicates() {
+async fn alter_table_add_primary_key_reports_duplicates_before_nulls() {
     use assert2::assert;
     let client = connect(spawn().await).await;
     client
@@ -2059,13 +2099,26 @@ async fn alter_table_add_primary_key_rejects_existing_nulls_before_duplicates() 
         .await
         .expect("seed NULLs and duplicates");
 
-    // PostgreSQL validates NOT NULL before building the index, so the NULL
-    // wins over the duplicate: 23502 with PG's ALTER TABLE message shape.
+    // PostgreSQL builds the unique index before attaching NOT NULL, so the
+    // duplicate wins over the NULL: 23505 naming the index build.
     let err = client
         .batch_execute("ALTER TABLE t ADD PRIMARY KEY (id)")
         .await
-        .expect_err("existing NULL must fail the ADD");
+        .expect_err("duplicate data must fail the ADD");
     let db = err.as_db_error().expect("db error");
+    assert!(db.code().code() == "23505");
+    assert!(db.message() == "could not create unique index \"t_pkey\"");
+
+    // With the duplicate gone the NULL check is reached, in PG's spelling.
+    client
+        .batch_execute("DELETE FROM t WHERE v = 'b'")
+        .await
+        .expect("remove the duplicate");
+    let nulls = client
+        .batch_execute("ALTER TABLE t ADD PRIMARY KEY (id)")
+        .await
+        .expect_err("existing NULL must fail the ADD");
+    let db = nulls.as_db_error().expect("db error");
     assert!(db.code().code() == "23502");
     assert!(db.message() == "column \"id\" of relation \"t\" contains null values");
 
