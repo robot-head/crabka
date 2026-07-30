@@ -53,6 +53,8 @@ pub struct DedupEngine {
     slots: Vec<TxnSlot>,
     store: Arc<DedupStore>,
     security: Option<crabka_client_core::security::ClientSecurity>,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
 }
 
 impl DedupEngine {
@@ -71,6 +73,32 @@ impl DedupEngine {
         store: Arc<DedupStore>,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Self {
+        Self::new_with_policy(
+            bootstrap,
+            client_id,
+            txn_id_prefix,
+            dedup_topic,
+            partitions,
+            store,
+            (security, &crate::config::GatewayRuntimeConfig::default()),
+        )
+    }
+
+    /// Construct with the deployment's client resource policy.
+    #[must_use]
+    pub fn new_with_policy(
+        bootstrap: &str,
+        client_id: &str,
+        txn_id_prefix: &str,
+        dedup_topic: String,
+        partitions: u32,
+        store: Arc<DedupStore>,
+        client_policy: (
+            Option<crabka_client_core::security::ClientSecurity>,
+            &crate::config::GatewayRuntimeConfig,
+        ),
+    ) -> Self {
+        let (security, policy) = client_policy;
         assert2::assert!(partitions > 0);
         assert2::assert!(i32::try_from(partitions).is_ok());
         let slots = (0..partitions).map(|_| Mutex::new(None)).collect();
@@ -83,6 +111,8 @@ impl DedupEngine {
             slots,
             store,
             security,
+            dispatch_queue_capacity: policy.client_dispatch_queue_capacity,
+            frame_max: policy.client_frame_max,
         }
     }
 
@@ -182,6 +212,8 @@ impl DedupEngine {
             let producer = Producer::builder()
                 .bootstrap(self.bootstrap.clone())
                 .client_id(format!("{}-dedup-{}", self.client_id, p))
+                .dispatch_queue_capacity(self.dispatch_queue_capacity.get())
+                .frame_max(self.frame_max.size())
                 .enable_idempotence(true)
                 .acks(Acks::All)
                 .transactional_id(txn_id)

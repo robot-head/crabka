@@ -108,6 +108,8 @@ pub struct AuthzSettings {
 /// Deployment policy shared by gateway runtime components.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GatewayRuntimeConfig {
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub internal_topic_replication_factor: i16,
     pub internal_topic_allow_replication_fallback: bool,
     pub internal_topic_create_timeout_ms: i32,
@@ -192,6 +194,9 @@ pub fn validate_dedup_window(value: Time) -> Result<(), String> {
 impl Default for GatewayRuntimeConfig {
     fn default() -> Self {
         Self {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             internal_topic_replication_factor: 3,
             internal_topic_allow_replication_fallback: true,
             internal_topic_create_timeout_ms: 10_000,
@@ -267,6 +272,9 @@ mod tests {
         assert!(
             GatewayRuntimeConfig::default()
                 == GatewayRuntimeConfig {
+                    client_dispatch_queue_capacity:
+                        crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+                    client_frame_max: crabka_client_core::ClientFrameMax::default(),
                     internal_topic_replication_factor: 3,
                     internal_topic_allow_replication_fallback: true,
                     internal_topic_create_timeout_ms: 10_000,

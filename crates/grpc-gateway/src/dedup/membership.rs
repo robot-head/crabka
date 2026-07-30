@@ -116,9 +116,38 @@ impl MembershipStore {
         shutdown: tokio_util::sync::CancellationToken,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<(), GatewayError> {
+        self.run_membership_with_policy(
+            bootstrap,
+            client_id,
+            membership_topic,
+            group,
+            shutdown,
+            (security, crate::config::GatewayRuntimeConfig::default()),
+        )
+        .await
+    }
+
+    /// Tail membership with the deployment's client resource policy.
+    /// # Errors
+    /// Returns an error when consuming fails.
+    pub async fn run_membership_with_policy(
+        self: Arc<Self>,
+        bootstrap: String,
+        client_id: String,
+        membership_topic: String,
+        group: String,
+        shutdown: tokio_util::sync::CancellationToken,
+        client_policy: (
+            Option<crabka_client_core::security::ClientSecurity>,
+            crate::config::GatewayRuntimeConfig,
+        ),
+    ) -> Result<(), GatewayError> {
+        let (security, policy) = client_policy;
         let mut consumer = Consumer::builder()
             .bootstrap(bootstrap)
             .client_id(client_id)
+            .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+            .frame_max(policy.client_frame_max.size())
             .group_id(group)
             .subscribe(vec![membership_topic])
             .isolation_level(IsolationLevel::ReadCommitted)
@@ -187,9 +216,35 @@ impl MembershipPublisher {
         membership_topic: String,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, GatewayError> {
+        Self::new_with_policy(
+            bootstrap,
+            client_id,
+            node_id,
+            advertised_addr,
+            membership_topic,
+            security,
+            &crate::config::GatewayRuntimeConfig::default(),
+        )
+        .await
+    }
+
+    /// Build the publisher with the deployment's client resource policy.
+    /// # Errors
+    /// Returns an error when client construction fails.
+    pub async fn new_with_policy(
+        bootstrap: &str,
+        client_id: &str,
+        node_id: String,
+        advertised_addr: String,
+        membership_topic: String,
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        policy: &crate::config::GatewayRuntimeConfig,
+    ) -> Result<Self, GatewayError> {
         let producer = Producer::builder()
             .bootstrap(bootstrap.to_string())
             .client_id(client_id.to_string())
+            .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+            .frame_max(policy.client_frame_max.size())
             .enable_idempotence(true)
             .acks(Acks::All)
             .maybe_security(security)

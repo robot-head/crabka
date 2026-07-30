@@ -43,9 +43,35 @@ impl ConsumeSession {
         security: Option<crabka_client_core::security::ClientSecurity>,
         codec: Arc<dyn RecordCodec>,
     ) -> Result<Self, GatewayError> {
+        Self::new_with_policy(
+            bootstrap,
+            group_id,
+            client_id,
+            topics,
+            security,
+            codec,
+            &crate::config::GatewayRuntimeConfig::default(),
+        )
+        .await
+    }
+
+    /// Build a consume session with the deployment's client resource policy.
+    /// # Errors
+    /// Returns an error when client construction fails.
+    pub async fn new_with_policy(
+        bootstrap: &str,
+        group_id: &str,
+        client_id: &str,
+        topics: Vec<String>,
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        codec: Arc<dyn RecordCodec>,
+        policy: &crate::config::GatewayRuntimeConfig,
+    ) -> Result<Self, GatewayError> {
         let consumer = Consumer::builder()
             .bootstrap(bootstrap.to_string())
             .client_id(client_id.to_string())
+            .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+            .frame_max(policy.client_frame_max.size())
             .group_id(group_id.to_string())
             .subscribe(topics)
             .isolation_level(IsolationLevel::ReadCommitted)

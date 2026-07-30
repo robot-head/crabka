@@ -66,7 +66,39 @@ pub async fn run_subscription(
     ),
     codec: Arc<dyn RecordCodec>,
 ) -> Result<(), GatewayError> {
-    let (security, poll_timeout) = consumer_policy;
+    run_subscription_with_policy(
+        sub,
+        bootstrap,
+        client_id,
+        producer,
+        shutdown,
+        (
+            consumer_policy.0,
+            consumer_policy.1,
+            crate::config::GatewayRuntimeConfig::default(),
+        ),
+        codec,
+    )
+    .await
+}
+
+/// Run a subscription with the deployment's client resource policy.
+/// # Errors
+/// Returns an error when consumer or delivery setup fails.
+pub async fn run_subscription_with_policy(
+    sub: CompiledSubscription,
+    bootstrap: String,
+    client_id: String,
+    producer: Arc<Producer>,
+    shutdown: CancellationToken,
+    consumer_policy: (
+        Option<crabka_client_core::security::ClientSecurity>,
+        Time,
+        crate::config::GatewayRuntimeConfig,
+    ),
+    codec: Arc<dyn RecordCodec>,
+) -> Result<(), GatewayError> {
+    let (security, poll_timeout, policy) = consumer_policy;
     let http = reqwest::Client::builder()
         .timeout(Duration::from_millis(sub.request_timeout_ms))
         .build()
@@ -75,6 +107,8 @@ pub async fn run_subscription(
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
+        .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+        .frame_max(policy.client_frame_max.size())
         .group_id(sub.group_id.clone())
         .subscribe(sub.source_topics.clone())
         .isolation_level(IsolationLevel::ReadCommitted)

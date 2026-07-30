@@ -7,6 +7,9 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use anyhow::Context as _;
 use clap::Parser;
+use crabka_client_core::{
+    ClientFrameMax, ConnectionDispatchQueueCapacity, DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+};
 use crabka_grpc_gateway::{
     codec::{RawCodec, RecordCodec},
     config::{
@@ -18,7 +21,10 @@ use crabka_grpc_gateway::{
         DedupEngine,
         membership::{MembershipPublisher, MembershipStore},
         store::DedupStore,
-        topic::{ensure_dedup_topic, ensure_membership_topic, internal_topic_policy},
+        topic::{
+            ensure_dedup_topic_with_policy, ensure_membership_topic_with_policy,
+            internal_topic_policy,
+        },
     },
     forward::{self, Forwarder},
     health::{self, Readiness},
@@ -42,6 +48,20 @@ struct Args {
     /// `host:port,host:port,...` bootstrap brokers.
     #[arg(long, env = "CRABKA_BOOTSTRAP_SERVERS")]
     bootstrap_servers: String,
+    #[arg(
+        long,
+        env = "CRABKA_GRPC_GATEWAY_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    #[arg(
+        long,
+        env = "CRABKA_GRPC_GATEWAY_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
 
     /// Bind address for the Connect-RPC + health server.
     #[arg(
@@ -482,7 +502,15 @@ impl Args {
     }
 
     fn runtime_config(&self) -> GatewayRuntimeConfig {
-        let mut runtime = GatewayRuntimeConfig::default();
+        let mut runtime = GatewayRuntimeConfig {
+            client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity::new(
+                self.client_dispatch_queue_capacity,
+            )
+            .expect("validated by clap"),
+            client_frame_max: ClientFrameMax::try_from(self.client_frame_max)
+                .expect("validated by clap"),
+            ..GatewayRuntimeConfig::default()
+        };
         if let Some(value) = self.internal_topic_replication_factor {
             runtime.internal_topic_replication_factor = value.into_value();
         }
@@ -532,26 +560,38 @@ impl Args {
     }
 }
 
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    ConnectionDispatchQueueCapacity::new(value).map(ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ClientFrameMax::try_from(value).map(ClientFrameMax::size)
+}
+
 async fn run(
     config: GatewayConfig,
     bearer: Option<crabka_grpc_gateway::authz::auth_layer::BearerValidator>,
 ) -> anyhow::Result<()> {
     // Ensure internal topics exist before opening any producer/consumer.
     let topic_policy = internal_topic_policy(&config.runtime);
-    ensure_dedup_topic(
+    ensure_dedup_topic_with_policy(
         &config.bootstrap,
         &config.dedup_topic,
         config.dedup_partitions,
         config.dedup_window,
         &topic_policy,
         config.broker_security.clone(),
+        &config.runtime,
     )
     .await?;
-    ensure_membership_topic(
+    ensure_membership_topic_with_policy(
         &config.bootstrap,
         &config.membership_topic,
         &topic_policy,
         config.broker_security.clone(),
+        &config.runtime,
     )
     .await?;
 
@@ -568,13 +608,14 @@ async fn run(
     let membership = Arc::new(MembershipStore::new_with_policy(&config.runtime));
     spawn_membership_reader(&config, &membership, &node_id, &shutdown);
     let publisher = Arc::new(
-        MembershipPublisher::new(
+        MembershipPublisher::new_with_policy(
             &config.bootstrap,
             &format!("{}-membership-pub", config.client_id),
             node_id.clone(),
             config.advertised_addr.clone(),
             config.membership_topic.clone(),
             config.broker_security.clone(),
+            &config.runtime,
         )
         .await?,
     );
@@ -587,14 +628,14 @@ async fn run(
         config.runtime.readiness_poll_interval,
     );
 
-    let engine = Arc::new(DedupEngine::new(
+    let engine = Arc::new(DedupEngine::new_with_policy(
         &config.bootstrap,
         &config.client_id,
         &config.dedup_txn_id_prefix,
         config.dedup_topic.clone(),
         config.dedup_partitions,
         store,
-        config.broker_security.clone(),
+        (config.broker_security.clone(), &config.runtime),
     ));
 
     // Step 4: build the forwarder — mTLS https when TLS is configured, plaintext http otherwise.
@@ -623,11 +664,12 @@ async fn run(
     // subscriptions can de-frame Confluent-framed values to JSON).
     spawn_outbound_subscriptions(&config, &shutdown, codec.clone()).await?;
 
-    let produce = ProduceCore::new(
+    let produce = ProduceCore::new_with_policy(
         &config.bootstrap,
         &config.client_id,
         codec.clone(),
         config.broker_security.clone(),
+        &config.runtime,
     )
     .await?
     .with_dedup(engine)
@@ -710,11 +752,12 @@ fn build_gateway_authz(
     };
     let gateway_authz = Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(authorizer));
     if let Some(a) = config.authz.as_ref() {
-        tokio::spawn(gateway_authz.clone().run_acl_refresh(
+        tokio::spawn(gateway_authz.clone().run_acl_refresh_with_policy(
             config.bootstrap.clone(),
             a.acl_refresh,
             shutdown.clone(),
             broker_security,
+            config.runtime.clone(),
         ));
     }
     gateway_authz
@@ -733,9 +776,17 @@ fn spawn_membership_reader(
     let group = format!("__crabka_grpc_gateway_membership_reader-{node_id}");
     let shutdown = shutdown.clone();
     let security = config.broker_security.clone();
+    let policy = config.runtime.clone();
     tokio::spawn(async move {
         if let Err(e) = membership
-            .run_membership(bootstrap, client_id, topic, group, shutdown, security)
+            .run_membership_with_policy(
+                bootstrap,
+                client_id,
+                topic,
+                group,
+                shutdown,
+                (security, policy),
+            )
             .await
         {
             tracing::error!(error = %e, "membership reader exited with error");
@@ -752,15 +803,16 @@ fn spawn_ownership_consumer(
     let (bootstrap, client_id, dedup_topic, ownership_group) = ownership_consumer_inputs(config);
     let shutdown = shutdown.clone();
     let security = config.broker_security.clone();
+    let policy = config.runtime.clone();
     tokio::spawn(async move {
         if let Err(e) = store
-            .run_ownership(
+            .run_ownership_with_policy(
                 bootstrap,
                 client_id,
                 dedup_topic,
                 ownership_group,
                 shutdown,
-                security,
+                (security, policy),
             )
             .await
         {
@@ -804,6 +856,8 @@ async fn spawn_outbound_subscriptions(
         crabka_client_producer::Producer::builder()
             .bootstrap(config.bootstrap.clone())
             .client_id(format!("{}-outbound-dlq", config.client_id))
+            .dispatch_queue_capacity(config.runtime.client_dispatch_queue_capacity.get())
+            .frame_max(config.runtime.client_frame_max.size())
             .enable_idempotence(true)
             .acks(crabka_client_producer::Acks::All)
             .maybe_security(config.broker_security.clone())
@@ -830,14 +884,15 @@ fn spawn_outbound_delivery(
     let shutdown = shutdown.clone();
     let security = config.broker_security.clone();
     let poll_timeout = config.runtime.consumer_poll_timeout;
+    let policy = config.runtime.clone();
     tokio::spawn(async move {
-        if let Err(e) = crabka_grpc_gateway::outbound::run_subscription(
+        if let Err(e) = crabka_grpc_gateway::outbound::run_subscription_with_policy(
             sub,
             bootstrap,
             client_id,
             dlq_producer,
             shutdown,
-            (security, poll_timeout),
+            (security, poll_timeout, policy),
             codec,
         )
         .await
@@ -860,6 +915,87 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn client_resource_policy_parses_defaults_and_overrides() {
+        let defaults = Args::try_parse_from([
+            "crabka-grpc-gateway",
+            "--bootstrap-servers=localhost:9092",
+            "--advertised-addr=localhost:9500",
+        ])
+        .unwrap();
+        assert!(defaults.client_dispatch_queue_capacity == 64);
+        assert!(defaults.client_frame_max == mebibytes(100));
+
+        let custom = Args::try_parse_from([
+            "crabka-grpc-gateway",
+            "--bootstrap-servers=localhost:9092",
+            "--advertised-addr=localhost:9500",
+            "--client-dispatch-queue-capacity=7",
+            "--client-frame-max=32KiB",
+        ])
+        .unwrap();
+        assert!(custom.client_dispatch_queue_capacity == 7);
+        assert!(custom.client_frame_max == kibibytes(32));
+        assert!(custom.runtime_config().client_dispatch_queue_capacity.get() == 7);
+        assert!(custom.runtime_config().client_frame_max.size() == kibibytes(32));
+
+        for invalid in [
+            "--client-dispatch-queue-capacity=0",
+            "--client-frame-max=101MiB",
+        ] {
+            assert!(
+                Args::try_parse_from([
+                    "crabka-grpc-gateway",
+                    "--bootstrap-servers=localhost:9092",
+                    "--advertised-addr=localhost:9500",
+                    invalid,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn client_resource_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_GRPC_GATEWAY_CLIENT_RESOURCE_POLICY_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::client_resource_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_GRPC_GATEWAY_CLIENT_DISPATCH_QUEUE_CAPACITY", "7")
+                    .env("CRABKA_GRPC_GATEWAY_CLIENT_FRAME_MAX", "32KiB")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Args::try_parse_from([
+            "crabka-grpc-gateway",
+            "--bootstrap-servers=localhost:9092",
+            "--advertised-addr=localhost:9500",
+        ])
+        .unwrap();
+        assert!(from_env.client_dispatch_queue_capacity == 7);
+        assert!(from_env.client_frame_max == kibibytes(32));
+
+        let from_cli = Args::try_parse_from([
+            "crabka-grpc-gateway",
+            "--bootstrap-servers=localhost:9092",
+            "--advertised-addr=localhost:9500",
+            "--client-dispatch-queue-capacity=9",
+            "--client-frame-max=64KiB",
+        ])
+        .unwrap();
+        assert!(from_cli.client_dispatch_queue_capacity == 9);
+        assert!(from_cli.client_frame_max == kibibytes(64));
+    }
 
     #[test]
     fn build_broker_security_some_with_cert_and_key_and_sni() {
@@ -959,6 +1095,8 @@ mod tests {
         assert!(
             explicit.runtime_config()
                 == GatewayRuntimeConfig {
+                    client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity::default(),
+                    client_frame_max: ClientFrameMax::default(),
                     internal_topic_replication_factor: 2,
                     internal_topic_allow_replication_fallback: false,
                     internal_topic_create_timeout: millis(10_001),

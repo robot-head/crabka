@@ -123,9 +123,40 @@ impl DedupStore {
         shutdown: tokio_util::sync::CancellationToken,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<(), GatewayError> {
+        self.run_ownership_with_policy(
+            bootstrap,
+            client_id,
+            dedup_topic,
+            group,
+            shutdown,
+            (security, crate::config::GatewayRuntimeConfig::default()),
+        )
+        .await
+    }
+
+    /// Run ownership with the deployment's client resource policy.
+    /// # Errors
+    /// Returns an error when consuming fails.
+    /// # Panics
+    /// Panics if synchronized ownership state is poisoned.
+    pub async fn run_ownership_with_policy(
+        self: Arc<Self>,
+        bootstrap: String,
+        client_id: String,
+        dedup_topic: String,
+        group: String,
+        shutdown: tokio_util::sync::CancellationToken,
+        client_policy: (
+            Option<crabka_client_core::security::ClientSecurity>,
+            crate::config::GatewayRuntimeConfig,
+        ),
+    ) -> Result<(), GatewayError> {
+        let (security, policy) = client_policy;
         let mut consumer = Consumer::builder()
             .bootstrap(bootstrap)
             .client_id(client_id)
+            .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+            .frame_max(policy.client_frame_max.size())
             .group_id(group)
             .subscribe(vec![dedup_topic.clone()])
             .isolation_level(IsolationLevel::ReadCommitted)

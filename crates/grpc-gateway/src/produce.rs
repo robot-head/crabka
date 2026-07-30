@@ -41,9 +41,31 @@ impl ProduceCore {
         codec: Arc<dyn RecordCodec>,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, GatewayError> {
+        Self::new_with_policy(
+            bootstrap,
+            client_id,
+            codec,
+            security,
+            &crate::config::GatewayRuntimeConfig::default(),
+        )
+        .await
+    }
+
+    /// Build a plain producer with the deployment's client resource policy.
+    /// # Errors
+    /// Returns an error when client construction fails.
+    pub async fn new_with_policy(
+        bootstrap: &str,
+        client_id: &str,
+        codec: Arc<dyn RecordCodec>,
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        policy: &crate::config::GatewayRuntimeConfig,
+    ) -> Result<Self, GatewayError> {
         let producer = Producer::builder()
             .bootstrap(bootstrap.to_string())
             .client_id(client_id.to_string())
+            .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+            .frame_max(policy.client_frame_max.size())
             .enable_idempotence(true)
             .acks(Acks::All)
             .maybe_security(security)

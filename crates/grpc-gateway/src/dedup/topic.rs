@@ -50,8 +50,32 @@ pub async fn ensure_dedup_topic(
     policy: &InternalTopicPolicy,
     security: Option<crabka_client_core::security::ClientSecurity>,
 ) -> Result<(), GatewayError> {
+    ensure_dedup_topic_with_policy(
+        bootstrap,
+        name,
+        partitions,
+        window,
+        policy,
+        security,
+        &GatewayRuntimeConfig::default(),
+    )
+    .await
+}
+
+/// Ensure the dedup topic with the deployment's client resource policy.
+/// # Errors
+/// Returns an error when admin operations fail.
+pub async fn ensure_dedup_topic_with_policy(
+    bootstrap: &str,
+    name: &str,
+    partitions: u32,
+    window: Time,
+    policy: &InternalTopicPolicy,
+    security: Option<crabka_client_core::security::ClientSecurity>,
+    runtime: &GatewayRuntimeConfig,
+) -> Result<(), GatewayError> {
     let addrs: Vec<String> = bootstrap.split(',').map(|s| s.trim().to_string()).collect();
-    let mut admin = AdminClient::connect_secured(&addrs, security)
+    let mut admin = AdminClient::connect_with_options(&addrs, admin_options(security, runtime))
         .await
         .map_err(|e| GatewayError::Other(format!("admin connect: {e}")))?;
 
@@ -79,8 +103,28 @@ pub async fn ensure_membership_topic(
     policy: &InternalTopicPolicy,
     security: Option<crabka_client_core::security::ClientSecurity>,
 ) -> Result<(), GatewayError> {
+    ensure_membership_topic_with_policy(
+        bootstrap,
+        name,
+        policy,
+        security,
+        &GatewayRuntimeConfig::default(),
+    )
+    .await
+}
+
+/// Ensure the membership topic with the deployment's client resource policy.
+/// # Errors
+/// Returns an error when admin operations fail.
+pub async fn ensure_membership_topic_with_policy(
+    bootstrap: &str,
+    name: &str,
+    policy: &InternalTopicPolicy,
+    security: Option<crabka_client_core::security::ClientSecurity>,
+    runtime: &GatewayRuntimeConfig,
+) -> Result<(), GatewayError> {
     let addrs: Vec<String> = bootstrap.split(',').map(|s| s.trim().to_string()).collect();
-    let mut admin = AdminClient::connect_secured(&addrs, security)
+    let mut admin = AdminClient::connect_with_options(&addrs, admin_options(security, runtime))
         .await
         .map_err(|e| GatewayError::Other(format!("admin connect: {e}")))?;
 
@@ -93,6 +137,21 @@ pub async fn ensure_membership_topic(
     configs.insert("segment.ms".to_string(), policy.segment_ms.to_string());
 
     create_with_rf(&mut admin, name, 1, policy, &configs).await
+}
+
+fn admin_options(
+    security: Option<crabka_client_core::security::ClientSecurity>,
+    runtime: &GatewayRuntimeConfig,
+) -> crabka_client_core::ConnectionOptions {
+    crabka_client_core::ConnectionOptions {
+        dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+        connect_timeout: secs(5),
+        request_timeout: secs(30),
+        client_id: "crabka-operator".to_owned(),
+        dispatch_queue_capacity: runtime.client_dispatch_queue_capacity,
+        frame_max: runtime.client_frame_max,
+        security: security.map(Box::new),
+    }
 }
 
 async fn create_with_rf(
