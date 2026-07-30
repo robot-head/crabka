@@ -26,6 +26,7 @@ datafusion = { workspace = true }
 object = { workspace = true }
 prost = { workspace = true }
 regex = { workspace = true }
+refined_type = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde-wincode = { workspace = true }

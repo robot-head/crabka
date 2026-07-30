@@ -47,8 +47,9 @@ pub use symbol_db::{
     FunctionRec, LineRec, LocationRec, MappingRec, MappingSymbolization, RawLocation, SymbolDb,
 };
 pub use symbolizer::{
-    ChainedResolver, DebuginfodResolver, FileSystemResolver, LazySymbolizer, NativeResolver,
-    NativeSymbol, ObjectSymbolResolver, SymbolizeRequest,
+    ChainedResolver, DEFAULT_DEBUGINFOD_CONNECT_TIMEOUT, DEFAULT_DEBUGINFOD_MAX_ARTIFACT_SIZE,
+    DEFAULT_DEBUGINFOD_REQUEST_TIMEOUT, DebuginfodConfig, DebuginfodResolver, FileSystemResolver,
+    LazySymbolizer, NativeResolver, NativeSymbol, ObjectSymbolResolver, SymbolizeRequest,
 };
 pub use tree::{FlameGraph, FlameGraphDiff, Level, Tree};
 pub use union_store::UnionProfileStore;

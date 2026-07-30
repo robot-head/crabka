@@ -3537,6 +3537,7 @@ dependencies = [
  "prost 0.14.4",
  "prost-build 0.14.4",
  "protox",
+ "refined_type",
  "regex",
  "reqwest 0.13.4",
  "serde",
