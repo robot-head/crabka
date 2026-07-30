@@ -3202,6 +3202,7 @@ dependencies = [
  "crabka-broker",
  "crabka-client-admin",
  "crabka-client-consumer",
+ "crabka-client-core",
  "crabka-client-producer",
  "crabka-ids",
  "crabka-telemetry",

@@ -29,6 +29,7 @@ bytes = { workspace = true }
 clap = { workspace = true, features = ["env"] }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
 crabka-client-consumer = { path = "../client-consumer", version = "0.3.9" }
+crabka-client-core = { path = "../client-core", version = "0.3.9" }
 crabka-client-producer = { path = "../client-producer", version = "0.3.9" }
 crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-telemetry = { path = "../telemetry", version = "0.3.8" }
