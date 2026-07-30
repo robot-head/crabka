@@ -258,7 +258,7 @@ impl StreamsMembership {
         let client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
-            .dns_timeout(broker_dns_timeout.duration())
+            .dns_timeout(broker_dns_timeout.time())
             .maybe_security(security.clone())
             .build()
             .await?;
@@ -307,7 +307,7 @@ impl StreamsMembership {
         let coordinator_client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
-            .dns_timeout(broker_dns_timeout.duration())
+            .dns_timeout(broker_dns_timeout.time())
             .maybe_security(security.clone())
             .build()
             .await?;

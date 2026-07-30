@@ -35,6 +35,7 @@ assert2 = { workspace = true }
 crabka-voters = { version = "0.3.8", path = "../voters" }
 crabka-verified = { version = "0.3.8", path = "../verified" }
 bytes = { workspace = true }
+refined_type = { workspace = true }
 uuid = { workspace = true, features = ["js"] }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"], optional = true }

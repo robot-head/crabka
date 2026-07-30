@@ -706,6 +706,7 @@ mod tests {
             50,
             std::sync::Arc::new(crate::kraft::NullPeerSender),
             0,
+            crabka_kraft_core::snapshot_fetch::MetadataSnapshotFetchMax::default(),
         )
         .expect("open engine");
         (ctrl, dir)

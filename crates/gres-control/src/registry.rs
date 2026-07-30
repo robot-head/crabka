@@ -224,7 +224,7 @@ impl RegistryPolicy {
     #[must_use = "the validated policy must be used"]
     pub fn with_producer_dns_timeout(mut self, timeout: Time) -> Result<Self, String> {
         self.producer_dns_timeout =
-            ClientDnsTimeout::new(whole_millis_i64("producer_dns_timeout", timeout)?.to_std())?;
+            ClientDnsTimeout::new(whole_millis_i64("producer_dns_timeout", timeout)?)?;
         Ok(self)
     }
 
@@ -242,7 +242,7 @@ impl RegistryPolicy {
     #[must_use = "the validated policy must be used"]
     pub fn with_reader_admin_dns_timeout(mut self, timeout: Time) -> Result<Self, String> {
         self.reader_admin_dns_timeout =
-            ClientDnsTimeout::new(whole_millis_i64("reader_admin_dns_timeout", timeout)?.to_std())?;
+            ClientDnsTimeout::new(whole_millis_i64("reader_admin_dns_timeout", timeout)?)?;
         Ok(self)
     }
 }
@@ -757,7 +757,7 @@ impl Registry {
         let producer = Producer::builder()
             .bootstrap(bootstrap.to_string())
             .client_id("crabka-gres-control-writer")
-            .dns_timeout(policy.producer_dns_timeout().duration())
+            .dns_timeout(policy.producer_dns_timeout().time())
             .enable_idempotence(true)
             .acks(Acks::All)
             .transactional_id(REGISTRY_TRANSACTIONAL_ID)
@@ -1837,7 +1837,7 @@ async fn resolve_bootstrap_addr(
         .filter(|entry| !entry.is_empty())
     {
         let Ok(Ok(mut addrs)) =
-            tokio::time::timeout(dns_timeout.duration(), tokio::net::lookup_host(entry)).await
+            tokio::time::timeout(dns_timeout.time().to_std(), tokio::net::lookup_host(entry)).await
         else {
             continue;
         };
@@ -2028,7 +2028,7 @@ mod tests {
 
     #[tokio::test]
     async fn registry_bootstrap_resolver_accepts_typed_deadline() {
-        let timeout = ClientDnsTimeout::new(Duration::from_millis(37)).expect("positive timeout");
+        let timeout = ClientDnsTimeout::new(millis(37)).expect("positive timeout");
         let addr = resolve_bootstrap_addr("127.0.0.1:9092", timeout)
             .await
             .expect("literal address");

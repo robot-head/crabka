@@ -12,7 +12,6 @@ use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
-    time::Duration,
 };
 
 use clap::{Parser, ValueEnum};
@@ -29,54 +28,114 @@ use crabka_promql::{
     EngineOpts, PrometheusApiState, QueryFrontendOptions, RulerShard, WalHead, prometheus_router,
 };
 use crabka_telemetry::OtlpConfig;
+use crabka_units::{parse, prelude::*};
 use object_store::ObjectStore;
-
-const DEFAULT_WAL_HEAD_RETENTION_MS: i64 = 5 * 60 * 1_000;
 
 #[derive(Debug, Parser)]
 struct Cli {
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_METRICS_SERVICE_TARGET")]
     target: Target,
-    #[arg(long, default_value = "127.0.0.1:4041")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_SERVICE_LISTEN",
+        default_value = "127.0.0.1:4041"
+    )]
     listen: SocketAddr,
-    #[arg(long, default_value = "file://./.crabka-metrics-blocks")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_OBJECT_STORE_URL",
+        default_value = "file://./.crabka-metrics-blocks"
+    )]
     object_store_url: String,
-    #[arg(long, default_value = "metrics")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_MANIFEST_PREFIX",
+        default_value = "metrics"
+    )]
     manifest_prefix: String,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_METRICS_RUNTIME_OVERRIDES")]
     runtime_overrides: Option<PathBuf>,
-    #[arg(long, default_value_t = 60_000)]
-    query_frontend_split_ms: i64,
-    #[arg(long, default_value_t = 1)]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_QUERY_FRONTEND_SPLIT",
+        default_value = "60s",
+        value_parser = parse::positive_time
+    )]
+    query_frontend_split: Time,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_QUERY_FRONTEND_SHARDS",
+        default_value_t = 1
+    )]
     query_frontend_shards: usize,
-    #[arg(long, default_value_t = 2)]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_MAX_CONCURRENT_QUERIES",
+        default_value_t = 2
+    )]
     max_concurrent_queries: usize,
-    #[arg(long, default_value = "metrics-query-cache")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_QUERY_FRONTEND_CACHE_PREFIX",
+        default_value = "metrics-query-cache"
+    )]
     query_frontend_cache_prefix: String,
-    #[arg(long, default_value = "anonymous")]
+    #[arg(long, env = "CRABKA_METRICS_RULER_TENANT", default_value = "anonymous")]
     ruler_tenant: String,
-    #[arg(long, default_value_t = 60_000)]
-    ruler_eval_interval_ms: u64,
-    #[arg(long, default_value_t = 1)]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_RULER_EVAL_INTERVAL",
+        default_value = "60s",
+        value_parser = parse::positive_time
+    )]
+    ruler_eval_interval: Time,
+    #[arg(long, env = "CRABKA_METRICS_RULER_SHARD_INDEX", default_value_t = 1)]
     ruler_shard_index: usize,
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, env = "CRABKA_METRICS_RULER_SHARD_TOTAL", default_value_t = 1)]
     ruler_shard_total: usize,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_METRICS_RULER_ALERTMANAGER_URL")]
     ruler_alertmanager_url: Option<String>,
-    #[arg(long, default_value = RULER_STATE_TOPIC)]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_RULER_STATE_TOPIC",
+        default_value = RULER_STATE_TOPIC
+    )]
     ruler_state_topic: String,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_METRICS_WAL_BOOTSTRAP")]
     wal_bootstrap: Option<String>,
-    #[arg(long, default_value = "crabka-metrics-querier")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_WAL_GROUP_ID",
+        default_value = "crabka-metrics-querier"
+    )]
     wal_group_id: String,
-    #[arg(long, default_value = "crabka-metrics-querier")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_WAL_CLIENT_ID",
+        default_value = "crabka-metrics-querier"
+    )]
     wal_client_id: String,
-    #[arg(long, default_value = WAL_TOPIC)]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_WAL_TOPIC",
+        default_value = WAL_TOPIC
+    )]
     wal_topic: String,
-    #[arg(long, default_value_t = 500)]
-    wal_poll_ms: u64,
-    #[arg(long, default_value_t = DEFAULT_WAL_HEAD_RETENTION_MS)]
-    wal_head_retention_ms: i64,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_WAL_POLL_TIMEOUT",
+        default_value = "500ms",
+        value_parser = parse::positive_time
+    )]
+    wal_poll_timeout: Time,
+    /// How far back the in-memory WAL head keeps samples.
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_QUERIER_WAL_HEAD_RETENTION",
+        default_value = "5m",
+        value_parser = parse::positive_time
+    )]
+    wal_head_retention: Time,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -142,7 +201,7 @@ async fn run_query_frontend(
         .with_metrics(metrics)
         .with_query_frontend_cache(
             QueryFrontendOptions {
-                split_interval_ms: cli.query_frontend_split_ms,
+                split_interval: cli.query_frontend_split,
                 shard_count: cli.query_frontend_shards,
             },
             Arc::new(crabka_promql::ObjectStoreQueryFrontendCache::new(
@@ -216,11 +275,11 @@ async fn run_ruler(
         KafkaRulerStateSink::new(producer, cli.ruler_state_topic.clone()),
     );
     let tenant = cli.ruler_tenant.clone();
-    let interval = Duration::from_millis(cli.ruler_eval_interval_ms);
+    let interval = cli.ruler_eval_interval;
     let alertmanager_url = cli.ruler_alertmanager_url.clone();
     let state_for_replay = Arc::clone(&state);
     let state_topic = cli.ruler_state_topic.clone();
-    let poll_timeout = Duration::from_millis(cli.wal_poll_ms);
+    let poll_timeout = cli.wal_poll_timeout;
 
     let shutdown = Shutdown::new();
     spawn_ctrl_c_listener(shutdown.clone());
@@ -291,13 +350,13 @@ async fn run_querier(
     let object_store_url = url::Url::parse(&cli.object_store_url)?;
     let (store, _prefix) = object_store::parse_url_opts(&object_store_url, std::env::vars())?;
     let store: Arc<dyn ObjectStore> = Arc::from(store);
-    let head = WalHead::with_retention_ms(cli.wal_head_retention_ms);
+    let head = WalHead::with_retention(cli.wal_head_retention);
     let shutdown = Shutdown::new();
     spawn_ctrl_c_listener(shutdown.clone());
     if let Some(bootstrap) = cli.wal_bootstrap.clone() {
         let wal_head = head.clone();
         let wal_topic = cli.wal_topic.clone();
-        let poll_timeout = Duration::from_millis(cli.wal_poll_ms);
+        let poll_timeout = cli.wal_poll_timeout;
         let group_id = cli.wal_group_id.clone();
         let client_id = cli.wal_client_id.clone();
         let subscribe_topic = cli.wal_topic.clone();
@@ -345,7 +404,7 @@ fn spawn_wal_head_consumer_task<C, Build, BuildFuture>(
     build_consumer: Build,
     wal_head: WalHead,
     wal_topic: String,
-    poll_timeout: Duration,
+    poll_timeout: Time,
     shutdown: Shutdown,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -440,10 +499,13 @@ fn load_runtime_overrides(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
 
     use clap::Parser;
 
     use super::*;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn parses_querier_target() {
@@ -458,8 +520,8 @@ mod tests {
             "crabka-metrics-service",
             "--target",
             "query-frontend",
-            "--query-frontend-split-ms",
-            "30000",
+            "--query-frontend-split",
+            "30s",
             "--query-frontend-shards",
             "4",
             "--query-frontend-cache-prefix",
@@ -468,7 +530,7 @@ mod tests {
         .unwrap();
 
         assert2::assert!(matches!(cli.target, Target::QueryFrontend));
-        assert2::assert!(cli.query_frontend_split_ms == 30_000);
+        assert2::assert!(cli.query_frontend_split == secs(30));
         assert2::assert!(cli.query_frontend_shards == 4);
         assert2::assert!(cli.query_frontend_cache_prefix.as_str() == "tenant-a-query-cache");
     }
@@ -481,8 +543,8 @@ mod tests {
             "ruler",
             "--ruler-tenant",
             "tenant-a",
-            "--ruler-eval-interval-ms",
-            "15000",
+            "--ruler-eval-interval",
+            "15s",
             "--ruler-shard-index",
             "2",
             "--ruler-shard-total",
@@ -496,7 +558,7 @@ mod tests {
 
         assert2::assert!(matches!(cli.target, Target::Ruler));
         assert2::assert!(cli.ruler_tenant.as_str() == "tenant-a");
-        assert2::assert!(cli.ruler_eval_interval_ms == 15_000);
+        assert2::assert!(cli.ruler_eval_interval == secs(15));
         assert2::assert!(cli.ruler_shard_index == 2);
         assert2::assert!(cli.ruler_shard_total == 4);
         assert2::assert!(
@@ -567,8 +629,8 @@ mod tests {
             "querier-a",
             "--wal-topic",
             "__crabka_metrics_wal",
-            "--wal-head-retention-ms",
-            "600000",
+            "--wal-head-retention",
+            "10m",
         ])
         .unwrap();
 
@@ -576,14 +638,29 @@ mod tests {
         assert2::assert!(cli.wal_group_id.as_str() == "metrics-querier");
         assert2::assert!(cli.wal_client_id.as_str() == "querier-a");
         assert2::assert!(cli.wal_topic.as_str() == "__crabka_metrics_wal");
-        assert2::assert!(cli.wal_head_retention_ms == 600_000);
+        assert2::assert!(cli.wal_head_retention == minutes(10));
     }
 
     #[test]
-    fn querier_wal_head_retention_default_is_bounded_for_demo_load() {
-        let cli = Cli::try_parse_from(["crabka-metrics-service", "--target", "querier"]).unwrap();
+    fn runtime_options_read_unit_bearing_environment_values() {
+        let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().expect("environment lock");
 
-        assert2::assert!(cli.wal_head_retention_ms == 300_000);
+        temp_env::with_vars(
+            [
+                ("CRABKA_METRICS_SERVICE_TARGET", Some("querier")),
+                ("CRABKA_METRICS_WAL_POLL_TIMEOUT", Some("250ms")),
+                ("CRABKA_METRICS_QUERIER_WAL_HEAD_RETENTION", Some("10m")),
+            ],
+            || {
+                let cli =
+                    Cli::try_parse_from(["crabka-metrics-service"]).expect("parse environment");
+                assert2::assert!(matches!(cli.target, Target::Querier));
+                assert2::assert!(
+                    (cli.wal_poll_timeout, cli.wal_head_retention) == (millis(250), minutes(10))
+                );
+            },
+        );
     }
 
     #[test]
@@ -640,12 +717,11 @@ mod tests {
             },
             crabka_promql::WalHead::new(),
             "__crabka_metrics_wal".to_string(),
-            std::time::Duration::from_millis(1),
+            millis(1),
             shutdown.clone(),
         );
 
-        let signalled =
-            tokio::time::timeout(std::time::Duration::from_millis(25), shutdown.signalled()).await;
+        let signalled = tokio::time::timeout(millis(25).to_std(), shutdown.signalled()).await;
         task.abort();
 
         assert2::assert!(signalled.is_err());
@@ -657,7 +733,7 @@ mod tests {
     impl crabka_metrics_service::WalHeadConsumerPoll for PendingWalHeadConsumer {
         async fn poll(
             &mut self,
-            _timeout: std::time::Duration,
+            _timeout: Time,
         ) -> Result<
             Vec<crabka_client_consumer::ConsumerRecord>,
             crabka_metrics_service::WalHeadConsumerError,

@@ -213,11 +213,10 @@ fn metrics_compactor_bounds_cold_block_retention_for_demo() {
     let compose = docker_compose();
     let block = compose_service_block(&compose, "metrics-compactor");
     assert2::assert!(
-        block
-            .contains("--compactor-retention-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_MS:-3600000}")
+        block.contains("--compactor-retention=${CRABKA_METRICS_COMPACTOR_RETENTION:-1h}")
     );
     assert2::assert!(block.contains(
-        "--compactor-retention-sweep-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_MS:-30000}"
+        "--compactor-retention-sweep-interval=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_INTERVAL:-30s}"
     ));
 }
 

@@ -466,6 +466,9 @@ pub struct RuntimeFileConfig {
     #[schemars(with = "Option<String>")]
     pub metadata_max_snapshot_interval: Option<Time>,
     pub metadata_snapshot_interval_records: Option<u64>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub metadata_snapshot_fetch_max: Option<ByteSize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub txn_abort_cleanup_interval: Option<Time>,
@@ -1759,6 +1762,13 @@ fn whole_bytes_u64(name: &str, value: ByteSize) -> Result<ByteSize, FileConfigEr
     }
 }
 
+fn metadata_snapshot_fetch_max(name: &str, value: ByteSize) -> Result<ByteSize, FileConfigError> {
+    let value = whole_bytes_u64(name, value)?;
+    crabka_kraft_core::snapshot_fetch::MetadataSnapshotFetchMax::new(value)
+        .map(|_| value)
+        .map_err(|error| invalid_runtime_value(name, error))
+}
+
 fn whole_bytes_i32(name: &str, value: ByteSize) -> Result<ByteSize, FileConfigError> {
     let value = whole_bytes_u64(name, value)?;
     if value.bytes_u64() <= u64::try_from(i32::MAX).expect("i32::MAX fits u64") {
@@ -2477,6 +2487,12 @@ impl RuntimeFileConfig {
             runtime,
             metadata_snapshot_interval_records,
             cfg.metadata_snapshot_interval_records
+        );
+        set_runtime_size_bytes!(
+            runtime,
+            metadata_snapshot_fetch_max,
+            cfg.metadata_snapshot_fetch_max,
+            metadata_snapshot_fetch_max
         );
         // Zero disables the reaper, so it bypasses the positive-only macro.
         if let Some(value) = runtime.txn_abort_cleanup_interval {
@@ -5012,6 +5028,7 @@ record_decompression_output_ceiling = "512MiB"
             "record_decompression_output_ceiling",
             "future_log_move_read_chunk",
             "metadata_max_between_snapshots",
+            "metadata_snapshot_fetch_max",
         ] {
             let source = format!("[runtime]\n{field} = \"0B\"\n");
             let file: FileConfig = toml::from_str(&source).expect("parse runtime config");
@@ -5048,6 +5065,8 @@ record_decompression_output_ceiling = "512MiB"
             ("record_decompression_output_floor", "1.5B"),
             ("record_decompression_output_ceiling", "1073741825B"),
             ("metadata_max_between_snapshots", "18446744073709551616B"),
+            ("metadata_snapshot_fetch_max", "1.5B"),
+            ("metadata_snapshot_fetch_max", "1073741825B"),
         ] {
             let source = format!("[runtime]\n{field} = \"{value}\"\n");
             let file: FileConfig = toml::from_str(&source).expect("parse runtime config");

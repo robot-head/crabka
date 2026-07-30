@@ -663,6 +663,14 @@ struct Args {
     )]
     metadata_snapshot_interval_records: Option<u64>,
 
+    /// Maximum metadata snapshot size a follower will fetch.
+    #[arg(
+        long,
+        env = "CRABKA_METADATA_SNAPSHOT_FETCH_MAX",
+        value_parser = crabka_units::parse::positive_byte_size
+    )]
+    metadata_snapshot_fetch_max: Option<ByteSize>,
+
     /// Idle-transaction abort cleanup interval; `0s` disables the reaper.
     #[arg(long, env = "CRABKA_TXN_ABORT_CLEANUP_INTERVAL", value_parser = crabka_units::parse::non_negative_time)]
     txn_abort_cleanup_interval: Option<Time>,
@@ -803,6 +811,7 @@ impl Args {
             metadata_max_between_snapshots,
             metadata_max_snapshot_interval,
             metadata_snapshot_interval_records,
+            metadata_snapshot_fetch_max,
             txn_abort_cleanup_interval,
             leader_imbalance_check_interval,
             leader_imbalance_per_broker,
@@ -1256,6 +1265,14 @@ mod tests {
             (vec!["crabka-broker", "--replication-fetch-min=0B"], false),
             (vec!["crabka-broker", "--replication-fetch-min=1B"], true),
             (
+                vec!["crabka-broker", "--metadata-snapshot-fetch-max=0B"],
+                false,
+            ),
+            (
+                vec!["crabka-broker", "--metadata-snapshot-fetch-max=512MiB"],
+                true,
+            ),
+            (
                 vec!["crabka-broker", "--record-decompression-max-ratio=0"],
                 false,
             ),
@@ -1300,6 +1317,14 @@ mod tests {
             args.apply_runtime_to(&mut BrokerConfig::default(), None)
                 .is_ok()
         );
+
+        let args =
+            Args::try_parse_from(["crabka-broker", "--metadata-snapshot-fetch-max=1073741825B"])
+                .expect("parse dimensioned over-ceiling size");
+        assert!(
+            args.apply_runtime_to(&mut BrokerConfig::default(), None)
+                .is_err()
+        );
     }
 
     #[test]
@@ -1312,6 +1337,7 @@ mod tests {
                 ("CRABKA_CLEANER_INTERVAL", Some("17ms")),
                 ("CRABKA_SOCKET_REQUEST_MAX", Some("100MiB")),
                 ("CRABKA_LEADER_IMBALANCE_PER_BROKER", Some("10%")),
+                ("CRABKA_METADATA_SNAPSHOT_FETCH_MAX", Some("512MiB")),
                 ("CRABKA_RECORD_DECOMPRESSION_MAX_RATIO", Some("50")),
                 ("CRABKA_RECORD_DECOMPRESSION_OUTPUT_FLOOR", Some("8MiB")),
                 ("CRABKA_RECORD_DECOMPRESSION_OUTPUT_CEILING", Some("512MiB")),
@@ -1321,6 +1347,7 @@ mod tests {
                 assert!(args.runtime.cleaner_interval == Some(Time::from_millis(17)));
                 assert!(args.runtime.socket_request_max == Some(crabka_units::mebibytes(100)));
                 assert!(args.leader_imbalance_per_broker == Some(crabka_units::fraction(0.1)));
+                assert!(args.metadata_snapshot_fetch_max == Some(crabka_units::mebibytes(512)));
                 assert!(
                     args.runtime.record_decompression_max_ratio
                         == Some(crabka_units::fraction(50.0))
@@ -1328,6 +1355,7 @@ mod tests {
                 let mut config = BrokerConfig::default();
                 args.apply_runtime_to(&mut config, None)
                     .expect("apply environment runtime");
+                assert!(config.metadata_snapshot_fetch_max == crabka_units::mebibytes(512));
                 assert!(
                     config.record_decompression_policy().unwrap().output_floor()
                         == crabka_units::mebibytes(8)

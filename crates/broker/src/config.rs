@@ -391,6 +391,10 @@ pub struct BrokerConfig {
     /// many records past the last snapshot, then prune below it.
     pub metadata_snapshot_interval_records: u64,
 
+    /// Maximum metadata snapshot size a follower will fetch. The core enforces
+    /// an immutable 1 GiB security ceiling.
+    pub metadata_snapshot_fetch_max: ByteSize,
+
     /// How this broker participates in cluster formation. See
     /// [`crabka_raft::BootstrapMode`] for the trade-offs. The first broker
     /// of a fresh multi-broker cluster uses `Bootstrap`; subsequent brokers
@@ -857,6 +861,9 @@ pub const DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL: Time = hours(1);
 /// KIP-630: default committed-record gap between metadata-log snapshots.
 pub const DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS: u64 = 10_000;
 
+/// Default follower metadata snapshot fetch limit: the 1 GiB core ceiling.
+pub const DEFAULT_METADATA_SNAPSHOT_FETCH_MAX: ByteSize = gibibytes(1);
+
 /// KIP-853: default maximum log-entry lag at which an observer is still
 /// promotable to a quorum voter.
 pub const DEFAULT_OBSERVER_LAG_BOUND: u64 = 100;
@@ -1049,6 +1056,7 @@ impl BrokerConfig {
             metadata_max_bytes_between_snapshots: DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS,
             metadata_max_snapshot_interval: DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL,
             metadata_snapshot_interval_records: DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS,
+            metadata_snapshot_fetch_max: DEFAULT_METADATA_SNAPSHOT_FETCH_MAX,
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
             rack: None,
@@ -1610,6 +1618,14 @@ impl BrokerConfig {
                 "metadata_snapshot_interval_records must be positive".into(),
             ));
         }
+        crabka_kraft_core::snapshot_fetch::MetadataSnapshotFetchMax::new(
+            self.metadata_snapshot_fetch_max,
+        )
+        .map_err(|error| {
+            BrokerError::InvalidRuntimeConfig(format!(
+                "metadata_snapshot_fetch_max is invalid: {error}"
+            ))
+        })?;
         Ok(())
     }
 
@@ -1909,6 +1925,7 @@ impl Default for BrokerConfig {
             metadata_max_bytes_between_snapshots: DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS,
             metadata_max_snapshot_interval: DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL,
             metadata_snapshot_interval_records: DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS,
+            metadata_snapshot_fetch_max: DEFAULT_METADATA_SNAPSHOT_FETCH_MAX,
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
             rack: None,
@@ -2775,6 +2792,18 @@ mod tests {
     fn default_metadata_snapshot_interval() {
         let cfg = BrokerConfig::default();
         assert!(cfg.metadata_snapshot_interval_records == 10_000);
+        assert!(cfg.metadata_snapshot_fetch_max == gibibytes(1));
+    }
+
+    #[test]
+    fn metadata_snapshot_fetch_max_cannot_raise_the_core_security_ceiling() {
+        let cfg = BrokerConfig {
+            metadata_snapshot_fetch_max: gibibytes(2),
+            ..BrokerConfig::default()
+        };
+
+        let error = cfg.validate().expect_err("over-ceiling limit must fail");
+        assert!(error.to_string().contains("metadata_snapshot_fetch_max"));
     }
 
     #[test]

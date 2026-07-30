@@ -254,7 +254,7 @@ services:
 
   metrics-compactor:
     <<: [*crabka-image, *compactor-res]
-    command: ["crabka-metrics", "--target=compactor", "--object-store-url=s3://crabka-metrics", "--bootstrap=broker:9092", "--compactor-retention-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_MS:-3600000}", "--compactor-retention-sweep-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_MS:-30000}"]
+    command: ["crabka-metrics", "--target=compactor", "--object-store-url=s3://crabka-metrics", "--bootstrap=broker:9092", "--compactor-retention=${CRABKA_METRICS_COMPACTOR_RETENTION:-1h}", "--compactor-retention-sweep-interval=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_INTERVAL:-30s}"]
     environment:
       <<: [*s3-env, *otlp-env]
       OTEL_SERVICE_NAME: metrics-compactor
@@ -265,7 +265,7 @@ services:
   metrics-querier:
     # crabka-metrics-service uses --wal-bootstrap (its own flag name).
     <<: [*crabka-image, *querier-res]
-    command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-metrics", "--manifest-prefix=metrics", "--wal-bootstrap=broker:9092", "--wal-head-retention-ms=${CRABKA_METRICS_QUERIER_WAL_HEAD_RETENTION_MS:-300000}"]
+    command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-metrics", "--manifest-prefix=metrics", "--wal-bootstrap=broker:9092", "--wal-head-retention=${CRABKA_METRICS_QUERIER_WAL_HEAD_RETENTION:-5m}"]
     environment:
       <<: [*s3-env, *otlp-env]
       OTEL_SERVICE_NAME: metrics-querier

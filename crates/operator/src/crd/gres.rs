@@ -556,10 +556,7 @@ impl GresComputeSpec {
             durable_inspection_fold_max_size,
             fdw_broker_dns_timeout: crabka_client_core::ClientDnsTimeout::new(
                 self.fdw_broker_dns_timeout
-                    .unwrap_or_else(|| {
-                        Time::from_std(crabka_client_core::ClientDnsTimeout::default().duration())
-                    })
-                    .to_std(),
+                    .unwrap_or_else(|| crabka_client_core::ClientDnsTimeout::default().time()),
             )
             .map_err(|error| format!("spec.compute.fdwBrokerDnsTimeout: {error}"))?,
             schema_fetch_retry_policy,
@@ -612,10 +609,7 @@ impl GresComputeSpec {
             .map_err(|error| format!("spec.compute.walProducerFlushTimeout: {error}"))?,
             wal_producer_dns_timeout: crabka_client_core::ClientDnsTimeout::new(
                 self.wal_producer_dns_timeout
-                    .unwrap_or_else(|| {
-                        Time::from_std(crabka_client_core::ClientDnsTimeout::default().duration())
-                    })
-                    .to_std(),
+                    .unwrap_or_else(|| crabka_client_core::ClientDnsTimeout::default().time()),
             )
             .map_err(|error| format!("spec.compute.walProducerDnsTimeout: {error}"))?,
             wal_producer_retry_policy: self.effective_wal_producer_retry_policy()?,

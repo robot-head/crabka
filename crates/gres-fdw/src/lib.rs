@@ -350,9 +350,8 @@ mod tests {
 
     #[test]
     fn fdw_carries_typed_broker_dns_timeout() {
-        let timeout =
-            crabka_client_core::ClientDnsTimeout::new(std::time::Duration::from_millis(37))
-                .expect("positive timeout");
+        let timeout = crabka_client_core::ClientDnsTimeout::new(crabka_units::millis(37))
+            .expect("positive timeout");
         let fdw =
             KafkaFdw::with_defaults(Some("broker:9092".into())).with_broker_dns_timeout(timeout);
 

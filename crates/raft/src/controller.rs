@@ -655,6 +655,12 @@ impl Controller {
         config: ControllerConfig,
         prebound: Option<tokio::net::TcpListener>,
     ) -> Result<ControllerHandle, RaftError> {
+        let metadata_snapshot_fetch_max =
+            crabka_kraft_core::snapshot_fetch::MetadataSnapshotFetchMax::new(
+                config.metadata_snapshot_fetch_max,
+            )
+            .map_err(RaftError::Startup)?;
+
         // The static voter set for this node. Bootstrap/Join nodes carry it in
         // `initial_voters`; a Rejoin node recovers the quorum-state file but the
         // voter set is reconstructed from config (static voters).
@@ -716,6 +722,7 @@ impl Controller {
             election_ms,
             peers,
             config.snapshot_interval_records,
+            metadata_snapshot_fetch_max,
         )?;
 
         // Controller listener.

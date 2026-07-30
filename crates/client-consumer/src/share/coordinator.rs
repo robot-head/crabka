@@ -11,7 +11,7 @@
 //! re-sends `subscribed_topic_names`; the broker hands back a fresh epoch and
 //! assignment on the next ok.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use crabka_client_core::Client;
 use crabka_protocol::{
@@ -21,6 +21,7 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use crabka_units::{Time, convert::TimeExt as _};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -45,8 +46,8 @@ pub(crate) struct ShareCoordinatorState {
     pub assignment: Arc<Mutex<Vec<(WireUuid, String, i32)>>>,
     pub topic_names: Arc<Mutex<HashMap<WireUuid, String>>>,
     pub subscribe: Vec<String>,
-    pub heartbeat_interval: Duration,
-    pub leave_heartbeat_timeout: Duration,
+    pub heartbeat_interval: Time,
+    pub leave_heartbeat_timeout: Time,
 }
 
 /// Outcome of a single `ShareGroupHeartbeat` RPC.
@@ -107,7 +108,7 @@ fn is_rejoin_error(error_code: i16) -> bool {
 /// Drive the heartbeat loop until `shutdown` fires.
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: long-running I/O event loop, exercised by integration tests
 pub(crate) async fn run(state: ShareCoordinatorState, shutdown: CancellationToken) {
-    let mut ticker = tokio::time::interval(state.heartbeat_interval);
+    let mut ticker = tokio::time::interval(state.heartbeat_interval.to_std());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     // After a fence/unknown-member we must re-send `subscribed_topic_names` on
     // the next heartbeat (the broker treats epoch 0 + subscription as a join).
@@ -147,7 +148,7 @@ async fn leave_group(state: &ShareCoordinatorState) {
         state.group_id.clone(),
         state.member_id.clone(),
     ));
-    let _ = tokio::time::timeout(state.leave_heartbeat_timeout, leave).await;
+    let _ = tokio::time::timeout(state.leave_heartbeat_timeout.to_std(), leave).await;
 }
 
 /// Send one `ShareGroupHeartbeat` and translate the response into a directive.
@@ -241,9 +242,12 @@ fn hex_topic_id(id: WireUuid) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     use bytes::BytesMut;
@@ -323,8 +327,8 @@ mod tests {
             assignment: Arc::new(Mutex::new(Vec::new())),
             topic_names: Arc::new(Mutex::new(HashMap::new())),
             subscribe: vec!["topic-a".into()],
-            heartbeat_interval: Duration::from_secs(1),
-            leave_heartbeat_timeout: Duration::from_millis(37),
+            heartbeat_interval: crabka_units::secs(1),
+            leave_heartbeat_timeout: crabka_units::millis(37),
         };
 
         tokio::time::timeout(Duration::from_secs(1), leave_group(&state))
@@ -351,8 +355,8 @@ mod tests {
             assignment: Arc::new(Mutex::new(Vec::new())),
             topic_names: Arc::new(Mutex::new(names)),
             subscribe: vec!["topic-a".into()],
-            heartbeat_interval: Duration::from_secs(1),
-            leave_heartbeat_timeout: Duration::from_secs(5),
+            heartbeat_interval: crabka_units::secs(1),
+            leave_heartbeat_timeout: crabka_units::secs(5),
         }
     }
 

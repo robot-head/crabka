@@ -72,6 +72,11 @@ use crabka_logql::{
     parse_metric_query, parse_metric_scalar_arithmetic_query, parse_metric_scalar_comparison_query,
     parse_query, plan_stream_query,
 };
+use crabka_units::{
+    ByteRate, ByteSize, Time,
+    convert::{ByteRateExt as _, ByteSizeExt, StdDurationExt as _, TimeExt},
+    days, hours, millis, minutes, secs,
+};
 use datafusion::{
     arrow::{
         array::{
@@ -122,8 +127,12 @@ use url::Url;
 
 use crate::metrics::ServiceMetrics;
 
-const LOKI_REJECT_OLD_SAMPLES_MAX_AGE: Duration = Duration::from_hours(168);
-const LOKI_CREATION_GRACE_PERIOD: Duration = Duration::from_mins(10);
+/// Loki's `reject_old_samples_max_age` default: samples older than this are
+/// refused on ingest.
+const LOKI_REJECT_OLD_SAMPLES_MAX_AGE: Time = days(7);
+/// Loki's `creation_grace_period` default: how far into the future a sample
+/// timestamp may sit before it is refused.
+const LOKI_CREATION_GRACE_PERIOD: Time = minutes(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Role {
@@ -139,62 +148,110 @@ pub enum QuerierIndexSource {
     TenantObjectStoreShards,
 }
 
-#[derive(Clone, Debug, Eq, Parser, PartialEq)]
+/// Operator-facing service configuration.
+///
+/// Not `Eq`: the quantity-typed limits store `f64`, and nothing in the workspace
+/// compares two configs for total equality.
+#[derive(Clone, Debug, Parser, PartialEq)]
 #[command(name = "crabka-observability")]
 pub struct ServiceConfig {
-    #[arg(long, value_enum)]
+    #[arg(long, env = "CRABKA_OBSERVABILITY_TARGET", value_enum)]
     pub target: Role,
 
-    #[arg(long, default_value = "127.0.0.1:3100")]
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_LISTEN_ADDR",
+        default_value = "127.0.0.1:3100"
+    )]
     pub listen_addr: SocketAddr,
 
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_OBSERVABILITY_OBJECT_STORE_URL")]
     pub object_store_url: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_OBSERVABILITY_WAL_BOOTSTRAP_SERVER")]
     pub wal_bootstrap_server: Option<String>,
 
-    #[arg(long, default_value = "__crabka_observability_logs_wal")]
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_WAL_TOPIC",
+        default_value = "__crabka_observability_logs_wal"
+    )]
     pub wal_topic: String,
 
-    #[arg(long, default_value = "crabka-observability-compactor")]
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_WAL_GROUP_ID",
+        default_value = "crabka-observability-compactor"
+    )]
     pub wal_group_id: String,
 
-    #[arg(long, default_value = ".")]
+    #[arg(long, env = "CRABKA_OBSERVABILITY_DATA_ROOT", default_value = ".")]
     pub data_root: PathBuf,
 
-    #[arg(long, value_enum, default_value = "local-manifest")]
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_QUERIER_INDEX_SOURCE",
+        value_enum,
+        default_value = "local-manifest"
+    )]
     pub querier_index_source: QuerierIndexSource,
 
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_OBSERVABILITY_TENANT")]
     pub tenant: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_OBSERVABILITY_INDEX_PREFIX")]
     pub index_prefix: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_OBSERVABILITY_QUERY_START_NS")]
     pub query_start_ns: Option<i64>,
 
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_OBSERVABILITY_QUERY_END_NS")]
     pub query_end_ns: Option<i64>,
 
-    #[arg(long)]
-    pub max_query_range_ns: Option<i64>,
+    /// Widest `[start, end]` window a query may span, as `1h` / `30s`.
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_MAX_QUERY_RANGE",
+        value_parser = crabka_units::parse::non_negative_time
+    )]
+    pub max_query_range: Option<Time>,
 
-    #[arg(long)]
+    /// Ceiling on the number of series a query may match. A count, not a volume.
+    #[arg(long, env = "CRABKA_OBSERVABILITY_MAX_QUERY_SERIES")]
     pub max_query_series: Option<usize>,
 
-    #[arg(long)]
-    pub max_query_bytes: Option<u64>,
+    /// Ceiling on the summed size of the blocks a query plans to read, as
+    /// `512MiB`.
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_MAX_QUERY_READ",
+        value_parser = crabka_units::parse::non_negative_byte_size
+    )]
+    pub max_query_read: Option<ByteSize>,
 
-    #[arg(long)]
-    pub max_query_length: Option<usize>,
+    /// Ceiling on the length of the `LogQL` query string, as `4KiB`.
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_MAX_QUERY_LENGTH",
+        value_parser = crabka_units::parse::non_negative_byte_size
+    )]
+    pub max_query_length: Option<ByteSize>,
 
-    #[arg(long)]
-    pub max_ingest_body_bytes: Option<usize>,
+    /// Largest accepted ingest request body, as `4MiB`.
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_MAX_INGEST_BODY",
+        value_parser = crabka_units::parse::non_negative_byte_size
+    )]
+    pub max_ingest_body: Option<ByteSize>,
 
-    #[arg(long)]
-    pub wal_append_timeout_ms: Option<u64>,
+    /// How long a WAL append may take before the push is failed, as `250ms`.
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_WAL_APPEND_TIMEOUT",
+        value_parser = crabka_units::parse::non_negative_time
+    )]
+    pub wal_append_timeout: Option<Time>,
 }
 
 #[derive(Debug, Error)]
@@ -447,26 +504,26 @@ pub fn run(config: ServiceConfig) -> Result<ServiceStatus, Infallible> {
         index_prefix: _index_prefix,
         query_start_ns: _query_start_ns,
         query_end_ns: _query_end_ns,
-        max_query_range_ns: _max_query_range_ns,
+        max_query_range: _max_query_range,
         max_query_series: _max_query_series,
-        max_query_bytes: _max_query_bytes,
+        max_query_read: _max_query_read,
         max_query_length: _max_query_length,
-        max_ingest_body_bytes: _max_ingest_body_bytes,
-        wal_append_timeout_ms: _wal_append_timeout_ms,
+        max_ingest_body: _max_ingest_body,
+        wal_append_timeout: _wal_append_timeout,
     } = config;
 
     Ok(ServiceStatus { role: target })
 }
 
-const WAL_CONNECT_STARTUP_DEADLINE: Duration = Duration::from_mins(2);
-const WAL_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
-const COMPACTION_FRONTIER_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
-const DYNAMIC_INDEX_CACHE_TTL: Duration = Duration::from_secs(5);
-const DYNAMIC_INDEX_SHARD_CACHE_TTL: Duration = Duration::from_mins(5);
+const WAL_CONNECT_STARTUP_DEADLINE: Time = minutes(2);
+const WAL_CONNECT_ATTEMPT_TIMEOUT: Time = secs(15);
+const COMPACTION_FRONTIER_REFRESH_INTERVAL: Time = secs(5);
+const DYNAMIC_INDEX_CACHE_TTL: Time = secs(5);
+const DYNAMIC_INDEX_SHARD_CACHE_TTL: Time = minutes(5);
 const DYNAMIC_INDEX_SHARD_FETCH_CONCURRENCY: usize = 32;
 const OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY: usize = 8;
-const LOG_COMPACTION_ACCUMULATION_WINDOW: Duration = Duration::from_secs(2);
-const LOG_COMPACTION_ACCUMULATION_POLL_TIMEOUT: Duration = Duration::from_millis(250);
+const LOG_COMPACTION_ACCUMULATION_WINDOW: Time = secs(2);
+const LOG_COMPACTION_ACCUMULATION_POLL_TIMEOUT: Time = millis(250);
 const LOG_COMPACTION_MAX_RECORDS_PER_BATCH: usize = 4096;
 
 fn build_compactor_configured_object_store(
@@ -498,7 +555,7 @@ fn compactor_object_store<'a>(
 #[cfg_attr(test, mutants::skip)]
 async fn connect_with_startup_retry<T, E, F, Fut>(
     what: &str,
-    deadline: Duration,
+    deadline: Time,
     mut make: F,
 ) -> Result<T, E>
 where
@@ -512,13 +569,13 @@ where
     // which could itself hang forever.  Instead we track the last `Err` value
     // and return it on deadline expiry so we never call make() without a timer.
     let start = tokio::time::Instant::now();
-    let mut backoff = Duration::from_millis(200);
+    let mut backoff = millis(200);
     let mut last_err: Option<E> = None;
     loop {
-        match tokio::time::timeout(WAL_CONNECT_ATTEMPT_TIMEOUT, make()).await {
+        match tokio::time::timeout(WAL_CONNECT_ATTEMPT_TIMEOUT.to_std(), make()).await {
             Ok(Ok(v)) => return Ok(v),
             Ok(Err(error)) => {
-                if start.elapsed() >= deadline {
+                if start.elapsed().as_time() >= deadline {
                     return Err(error);
                 }
                 eprintln!(
@@ -527,7 +584,7 @@ where
                 last_err = Some(error);
             }
             Err(_elapsed) => {
-                if start.elapsed() >= deadline {
+                if start.elapsed().as_time() >= deadline {
                     if let Some(e) = last_err {
                         // Return the last real error we saw rather than an un-timed attempt.
                         return Err(e);
@@ -535,7 +592,7 @@ where
                     // All attempts so far only timed out (no Err variant captured).
                     // Do one final timed attempt; whatever it returns is the answer.
                     return if let Ok(result) =
-                        tokio::time::timeout(WAL_CONNECT_ATTEMPT_TIMEOUT, make()).await
+                        tokio::time::timeout(WAL_CONNECT_ATTEMPT_TIMEOUT.to_std(), make()).await
                     {
                         result
                     } else {
@@ -546,7 +603,7 @@ where
                         eprintln!(
                             "[crabka-observability] WAL dependency {what} connect timed out repeatedly; giving up"
                         );
-                        sleep(Duration::from_millis(200)).await;
+                        sleep(millis(200).to_std()).await;
                         continue;
                     };
                 }
@@ -555,8 +612,10 @@ where
                 );
             }
         }
-        sleep(backoff).await;
-        backoff = std::cmp::min(backoff * 2, Duration::from_secs(2));
+        sleep(backoff.to_std()).await;
+        // `Time` is `PartialOrd` but not `Ord`, so `Time::min` rather than
+        // `std::cmp::min`.
+        backoff = (backoff * 2.0).min(secs(2));
     }
 }
 
@@ -659,7 +718,7 @@ pub async fn run_compactor_once(
         store,
         &prefix,
         consumer.as_mut(),
-        Duration::from_millis(500),
+        millis(500),
         &delete_requests,
         &mut tenant_indexes,
     )
@@ -706,7 +765,7 @@ pub async fn run_compactor_until_idle(
             store,
             &prefix,
             consumer.as_mut(),
-            Duration::from_millis(500),
+            millis(500),
             &delete_requests,
             &mut tenant_indexes,
         )
@@ -759,7 +818,7 @@ pub async fn run_compactor_until_shutdown(
         .ok_or(ServiceConfigError::MissingWalConsumer)?;
     let mut consumer = consumer.lock().await;
     let mut descriptors = Vec::new();
-    let mut object_store_retry_backoff = Duration::from_millis(10);
+    let mut object_store_retry_backoff = millis(10);
     let mut tenant_indexes = TenantCompactionIndexCache::new();
     let mut pending_compaction_records: Option<Vec<KafkaWalRecord>> = None;
     // Shared RED-metrics bundle for the `:9404` exporter; `None` in tests that
@@ -771,7 +830,7 @@ pub async fn run_compactor_until_shutdown(
         tokio::select! {
             biased;
             () = &mut shutdown => return Ok(descriptors),
-            () = sleep(Duration::ZERO) => {}
+            () = sleep(<Time as TimeExt>::ZERO.to_std()) => {}
         }
 
         let batch_result = match materialize_log_deletes_before_compaction(
@@ -788,7 +847,7 @@ pub async fn run_compactor_until_shutdown(
                     None => {
                         match poll_accumulated_log_compaction_records(
                             consumer.as_mut(),
-                            Duration::from_millis(500),
+                            millis(500),
                         )
                         .await
                         {
@@ -823,14 +882,14 @@ pub async fn run_compactor_until_shutdown(
         };
         let batch_descriptors = match batch_result {
             Ok(batch_descriptors) => {
-                object_store_retry_backoff = Duration::from_millis(10);
+                object_store_retry_backoff = millis(10);
                 batch_descriptors
             }
             Err(error) if compactor_run_error_is_object_store(&error) => {
                 tenant_indexes.clear();
                 tokio::select! {
                     () = &mut shutdown => return Ok(descriptors),
-                    () = sleep(object_store_retry_backoff) => {}
+                    () = sleep(object_store_retry_backoff.to_std()) => {}
                 }
                 object_store_retry_backoff =
                     next_compactor_object_store_backoff(object_store_retry_backoff);
@@ -841,7 +900,7 @@ pub async fn run_compactor_until_shutdown(
         if batch_descriptors.is_empty() {
             tokio::select! {
                 () = &mut shutdown => return Ok(descriptors),
-                () = sleep(Duration::from_millis(10)) => {}
+                () = sleep(millis(10).to_std()) => {}
             }
         } else {
             for descriptor in batch_descriptors {
@@ -855,7 +914,7 @@ pub async fn run_compactor_until_shutdown(
                     .await
                     {
                         Ok(()) => {
-                            object_store_retry_backoff = Duration::from_millis(10);
+                            object_store_retry_backoff = millis(10);
                             // One durable log block persisted to object storage.
                             if let Some(metrics) = &metrics {
                                 metrics.record_block_written();
@@ -865,7 +924,7 @@ pub async fn run_compactor_until_shutdown(
                         Err(error) if compactor_run_error_is_object_store(&error) => {
                             tokio::select! {
                                 () = &mut shutdown => return Err(error.into()),
-                                () = sleep(object_store_retry_backoff) => {}
+                                () = sleep(object_store_retry_backoff.to_std()) => {}
                             }
                             object_store_retry_backoff =
                                 next_compactor_object_store_backoff(object_store_retry_backoff);
@@ -879,8 +938,12 @@ pub async fn run_compactor_until_shutdown(
     }
 }
 
-fn next_compactor_object_store_backoff(current: Duration) -> Duration {
-    std::cmp::min(current * 2, Duration::from_millis(500))
+/// Double the object-store retry backoff, capped.
+///
+/// `Time` is `PartialOrd` but not `Ord`, so this is `Time::min` rather than
+/// `std::cmp::min`.
+fn next_compactor_object_store_backoff(current: Time) -> Time {
+    (current * 2.0).min(millis(500))
 }
 
 fn compactor_run_error_is_object_store(error: &CompactorRunError) -> bool {
@@ -971,7 +1034,7 @@ fn spawn_compaction_frontier_refresher(
         loop {
             tokio::select! {
                 () = token.cancelled() => return,
-                () = sleep(COMPACTION_FRONTIER_REFRESH_INTERVAL) => {}
+                () = sleep(COMPACTION_FRONTIER_REFRESH_INTERVAL.to_std()) => {}
             }
 
             if let Err(error) =
@@ -1002,7 +1065,7 @@ async fn materialize_deletes_then_compact_next_kafka_wal_batch(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
     consumer: &mut (impl LogWalConsumer + ?Sized),
-    poll_timeout: Duration,
+    poll_timeout: Time,
     delete_requests: &SharedLogDeleteRequests,
     tenant_indexes: &mut TenantCompactionIndexCache,
 ) -> Result<Vec<BlockDescriptor>, CompactorRunError> {
@@ -1023,7 +1086,7 @@ async fn compact_next_kafka_wal_batch_to_object_store_from_existing_manifest(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
     consumer: &mut (impl LogWalConsumer + ?Sized),
-    poll_timeout: Duration,
+    poll_timeout: Time,
     delete_requests: &SharedLogDeleteRequests,
     tenant_indexes: &mut TenantCompactionIndexCache,
 ) -> Result<Vec<BlockDescriptor>, CompactorRunError> {
@@ -1159,21 +1222,23 @@ async fn compact_polled_kafka_wal_records_inner(
 
 async fn poll_accumulated_log_compaction_records(
     consumer: &mut (impl LogWalConsumer + ?Sized),
-    initial_timeout: Duration,
+    initial_timeout: Time,
 ) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
     let mut records = consumer.poll(initial_timeout).await?;
     if records.is_empty() || records.len() >= LOG_COMPACTION_MAX_RECORDS_PER_BATCH {
         return Ok(records);
     }
 
-    let deadline = Instant::now() + LOG_COMPACTION_ACCUMULATION_WINDOW;
+    let deadline = Instant::now() + LOG_COMPACTION_ACCUMULATION_WINDOW.to_std();
     while records.len() < LOG_COMPACTION_MAX_RECORDS_PER_BATCH {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_time();
+        if remaining <= <Time as TimeExt>::ZERO {
             break;
         }
 
-        let poll_timeout = std::cmp::min(remaining, LOG_COMPACTION_ACCUMULATION_POLL_TIMEOUT);
+        // `Time` is `PartialOrd` but not `Ord`, so `Time::min` rather than
+        // `std::cmp::min`.
+        let poll_timeout = remaining.min(LOG_COMPACTION_ACCUMULATION_POLL_TIMEOUT);
         let next = consumer.poll(poll_timeout).await?;
         if next.is_empty() {
             break;
@@ -1679,7 +1744,7 @@ pub async fn compact_next_kafka_wal_batch_to_object_store(
     label_index: &mut LabelIndex,
     block_index: &mut BlockIndex,
     consumer: &mut (impl LogWalConsumer + ?Sized),
-    poll_timeout: Duration,
+    poll_timeout: Time,
 ) -> Result<Option<BlockDescriptor>, CompactorRunError> {
     let records = consumer.poll(poll_timeout).await?;
     if records.is_empty() {
@@ -2202,7 +2267,7 @@ pub trait LogHotTail: Send + Sync + 'static {
 
 #[async_trait]
 pub trait LogWalConsumer: Send + 'static {
-    async fn poll(&mut self, timeout: Duration) -> Result<Vec<KafkaWalRecord>, WalConsumerError>;
+    async fn poll(&mut self, timeout: Time) -> Result<Vec<KafkaWalRecord>, WalConsumerError>;
 
     async fn commit_compacted(&mut self, position: WalPosition) -> Result<(), WalConsumerError>;
 }
@@ -2367,15 +2432,16 @@ impl LogIngestLimiter for BrokerBackedIngestLimiter {
         };
         check_tenant_wal_write_acl(tenant, &self.wal_topic, &acls)?;
 
-        let Some(rate) = quota.get(PRODUCER_BYTE_RATE_QUOTA_KEY).copied() else {
+        let Some(raw_rate) = quota.get(PRODUCER_BYTE_RATE_QUOTA_KEY).copied() else {
             return Ok(());
         };
-        if !rate.is_finite() || rate <= 0.0 {
+        if !raw_rate.is_finite() || raw_rate <= 0.0 {
             return Ok(());
         }
+        let rate = ByteRate::from_bytes_per_sec_f64(raw_rate);
 
-        let bytes = ingest_quota_bytes(records);
-        if bytes == 0 {
+        let batch = ingest_quota_bytes(records);
+        if batch == <ByteSize as ByteSizeExt>::ZERO {
             return Ok(());
         }
 
@@ -2384,10 +2450,11 @@ impl LogIngestLimiter for BrokerBackedIngestLimiter {
             .entry(tenant.to_string())
             .or_insert_with(|| IngestQuotaBucket::new(rate));
         bucket.update_rate(rate);
-        if bucket.consume(bytes.to_f64().unwrap_or(f64::MAX)) {
+        if bucket.consume(batch) {
             return Ok(());
         }
 
+        let (rate, bytes) = (rate.bytes_per_sec_f64(), batch.bytes_usize());
         Err(IngestLimitError::RateLimited {
             tenant: tenant.to_string(),
             reason: format!(
@@ -2490,84 +2557,99 @@ fn matches_acl_topic_pattern(acl: &AclEntry, wal_topic: &str) -> bool {
     }
 }
 
+/// How much throughput the bucket may bank, expressed as a window over the
+/// configured rate: one second's worth, matching Kafka's own quota burst.
+const INGEST_QUOTA_BURST_WINDOW: Time = secs(1);
+
+/// Per-tenant byte token bucket for the `producer_byte_rate` ingest quota.
+///
+/// `updated_at` stays an [`Instant`] because it is a coordinate, not an extent;
+/// the extent measured from it multiplies the rate into a byte allowance.
 #[derive(Debug)]
 struct IngestQuotaBucket {
-    rate_per_second: f64,
-    available: f64,
+    rate: ByteRate,
+    available: ByteSize,
     updated_at: Instant,
 }
 
 impl IngestQuotaBucket {
-    fn new(rate_per_second: f64) -> Self {
+    fn new(rate: ByteRate) -> Self {
         Self {
-            rate_per_second,
-            available: rate_per_second,
+            rate,
+            available: Self::burst_capacity(rate),
             updated_at: Instant::now(),
         }
     }
 
-    fn update_rate(&mut self, rate_per_second: f64) {
+    fn update_rate(&mut self, rate: ByteRate) {
         self.refill();
-        self.rate_per_second = rate_per_second;
+        self.rate = rate;
         if self.available > self.capacity() {
             self.available = self.capacity();
         }
     }
 
-    fn consume(&mut self, bytes: f64) -> bool {
+    fn consume(&mut self, size: ByteSize) -> bool {
         self.refill();
-        if bytes > self.available {
+        if size > self.available {
             return false;
         }
-        self.available -= bytes;
+        self.available -= size;
         true
     }
 
     fn refill(&mut self) {
         let now = Instant::now();
-        let elapsed = now.duration_since(self.updated_at);
+        let elapsed = now.duration_since(self.updated_at).as_time();
         self.updated_at = now;
-        self.available =
-            (self.available + elapsed.as_secs_f64() * self.rate_per_second).min(self.capacity());
+        // `ByteRate * Time` is a `ByteSize`, checked by the compiler.
+        let refilled: ByteSize = (self.rate * elapsed).into();
+        self.available = (self.available + refilled).min(self.capacity());
     }
 
-    fn capacity(&self) -> f64 {
-        self.rate_per_second
+    fn capacity(&self) -> ByteSize {
+        Self::burst_capacity(self.rate)
+    }
+
+    fn burst_capacity(rate: ByteRate) -> ByteSize {
+        (rate * INGEST_QUOTA_BURST_WINDOW).into()
     }
 }
 
-fn ingest_quota_bytes(records: &[WalLogRecord]) -> usize {
-    records
-        .iter()
-        .map(|record| {
-            record.tenant.len()
-                + record.line.len()
-                + std::mem::size_of_val(&record.timestamp_ns)
-                + record
-                    .labels
-                    .iter()
-                    .map(|(name, value)| name.len() + value.len())
-                    .sum::<usize>()
-                + record
-                    .structured_metadata
-                    .iter()
-                    .map(|(name, value)| name.len() + value.len())
-                    .sum::<usize>()
-        })
-        .sum()
+fn ingest_quota_bytes(records: &[WalLogRecord]) -> ByteSize {
+    measured_size(
+        records
+            .iter()
+            .map(|record| {
+                record.tenant.len()
+                    + record.line.len()
+                    + std::mem::size_of_val(&record.timestamp_ns)
+                    + record
+                        .labels
+                        .iter()
+                        .map(|(name, value)| name.len() + value.len())
+                        .sum::<usize>()
+                    + record
+                        .structured_metadata
+                        .iter()
+                        .map(|(name, value)| name.len() + value.len())
+                        .sum::<usize>()
+            })
+            .sum(),
+    )
 }
 
-/// Width of a hot-tail time bucket, in nanoseconds (one minute).
+/// Width of a hot-tail time bucket.
 ///
 /// Coarse enough that a wide retention window holds few buckets, fine enough that
 /// a typical query window (minutes to hours) only touches the buckets it overlaps.
-const HOT_TAIL_BUCKET_NS: i64 = 60_000_000_000;
+const HOT_TAIL_BUCKET: Time = minutes(1);
 
 /// Map a record timestamp to its bucket key. Uses [`i64::div_euclid`] so negative
 /// timestamps (pre-epoch) still bucket monotonically and the bucket containing a
 /// given timestamp is unambiguous.
 fn hot_tail_bucket_key(timestamp_ns: i64) -> i64 {
-    timestamp_ns.div_euclid(HOT_TAIL_BUCKET_NS)
+    timestamp_ns.div_euclid(HOT_TAIL_BUCKET.nanos_i64())
 }
 
 /// Buffer holding polled hot-tail records.
@@ -2796,7 +2878,7 @@ impl KafkaLogWalConsumer {
 #[async_trait]
 impl LogWalConsumer for KafkaLogWalConsumer {
     #[cfg_attr(test, mutants::skip)]
-    async fn poll(&mut self, timeout: Duration) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
+    async fn poll(&mut self, timeout: Time) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
         self.consumer
             .poll(timeout)
             .await?
@@ -2903,7 +2985,7 @@ pub fn decode_kafka_wal_record_envelope(
 pub async fn poll_log_hot_tail_once(
     consumer: &mut (impl LogWalConsumer + ?Sized),
     hot_tail: &BufferedLogHotTail,
-    timeout: Duration,
+    timeout: Time,
 ) -> Result<usize, HotTailPollError> {
     poll_log_hot_tail_once_with_frontier(consumer, hot_tail, timeout, None).await
 }
@@ -2911,7 +2993,7 @@ pub async fn poll_log_hot_tail_once(
 async fn poll_log_hot_tail_once_with_frontier(
     consumer: &mut (impl LogWalConsumer + ?Sized),
     hot_tail: &BufferedLogHotTail,
-    timeout: Duration,
+    timeout: Time,
     frontier: Option<&SharedCompactionFrontier>,
 ) -> Result<usize, HotTailPollError> {
     let batch = consumer.poll(timeout).await?;
@@ -2940,7 +3022,7 @@ fn spawn_log_hot_tail_poller(
                 poll_log_hot_tail_once_with_frontier(
                     consumer.as_mut(),
                     &hot_tail,
-                    Duration::from_millis(50),
+                    millis(50),
                     frontier.as_ref(),
                 )
                 .await
@@ -2950,7 +3032,7 @@ fn spawn_log_hot_tail_poller(
                 Err(_) => true,
             };
             if should_back_off {
-                sleep(Duration::from_millis(50)).await;
+                sleep(millis(50).to_std()).await;
             }
         }
     });
@@ -2984,7 +3066,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
                             );
                             tokio::select! {
                                 () = token.cancelled() => return,
-                                () = sleep(Duration::from_millis(500)) => {}
+                                () = sleep(millis(500).to_std()) => {}
                             }
                         }
                     }
@@ -2994,7 +3076,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
         loop {
             let result = tokio::select! {
                 () = token.cancelled() => break,
-                result = poll_log_hot_tail_once_with_frontier(&mut consumer, &hot_tail, Duration::from_millis(50), frontier.as_ref()) => result,
+                result = poll_log_hot_tail_once_with_frontier(&mut consumer, &hot_tail, millis(50), frontier.as_ref()) => result,
             };
             let should_back_off = match result {
                 Ok(decoded) => decoded == 0,
@@ -3003,7 +3085,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
             if should_back_off {
                 tokio::select! {
                     () = token.cancelled() => break,
-                    () = sleep(Duration::from_millis(50)) => {}
+                    () = sleep(millis(50).to_std()) => {}
                 }
             }
         }
@@ -3027,7 +3109,7 @@ fn spawn_query_authorizer_connect(
                     eprintln!(
                         "[crabka-observability] querier authorizer connect failed; retrying: {error}"
                     );
-                    sleep(Duration::from_millis(500)).await;
+                    sleep(millis(500).to_std()).await;
                 }
             }
         };
@@ -3276,10 +3358,10 @@ pub struct DistributorState {
     sink: Arc<dyn LogWalSink>,
     ingest_limiter: Arc<dyn LogIngestLimiter>,
     prepare_shutdown: Arc<AtomicBool>,
-    max_ingest_body_bytes: Option<usize>,
-    wal_append_timeout: Option<Duration>,
-    reject_old_samples_max_age: Option<Duration>,
-    creation_grace_period: Option<Duration>,
+    max_ingest_body: Option<ByteSize>,
+    wal_append_timeout: Option<Time>,
+    reject_old_samples_max_age: Option<Time>,
+    creation_grace_period: Option<Time>,
     metrics: ServiceMetrics,
 }
 
@@ -3342,10 +3424,10 @@ where
 fn distributor_router_with_sink(
     sink: Arc<dyn LogWalSink>,
     ingest_limiter: Arc<dyn LogIngestLimiter>,
-    max_ingest_body_bytes: Option<usize>,
-    wal_append_timeout: Option<Duration>,
-    reject_old_samples_max_age: Option<Duration>,
-    creation_grace_period: Option<Duration>,
+    max_ingest_body: Option<ByteSize>,
+    wal_append_timeout: Option<Time>,
+    reject_old_samples_max_age: Option<Time>,
+    creation_grace_period: Option<Time>,
     metrics: ServiceMetrics,
 ) -> Router {
     let grpc_logs_service = OtlpGrpcLogsService {
@@ -3383,7 +3465,7 @@ fn distributor_router_with_sink(
             sink,
             ingest_limiter,
             prepare_shutdown: Arc::new(AtomicBool::new(false)),
-            max_ingest_body_bytes,
+            max_ingest_body,
             wal_append_timeout,
             reject_old_samples_max_age,
             creation_grace_period,
@@ -3395,7 +3477,7 @@ fn distributor_router_with_sink(
 pub struct OtlpGrpcLogsService {
     sink: Arc<dyn LogWalSink>,
     ingest_limiter: Arc<dyn LogIngestLimiter>,
-    wal_append_timeout: Option<Duration>,
+    wal_append_timeout: Option<Time>,
     metrics: ServiceMetrics,
 }
 
@@ -3430,7 +3512,7 @@ impl LogsService for OtlpGrpcLogsService {
             sink: Arc::clone(&self.sink),
             ingest_limiter: Arc::clone(&self.ingest_limiter),
             prepare_shutdown: Arc::new(AtomicBool::new(false)),
-            max_ingest_body_bytes: None,
+            max_ingest_body: None,
             wal_append_timeout: self.wal_append_timeout,
             reject_old_samples_max_age: None,
             creation_grace_period: None,
@@ -3604,7 +3686,7 @@ async fn push_logs(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let bytes = body.len() as u64;
+    let body_size = measured_size(body.len());
     let tenant = ingest_tenant(&headers);
     // ONE server span per push request (not per log line): wraps the whole
     // ingest body so the produce-side WAL append (which injects `traceparent`)
@@ -3617,12 +3699,12 @@ async fn push_logs(
         messaging.destination.name = "__crabka_observability_logs_wal",
         crabka.tenant = %tenant,
         crabka.ingest.lines = tracing::field::Empty,
-        crabka.ingest.bytes = bytes,
+        crabka.ingest.bytes = body_size.bytes_u64(),
     );
     async move {
         let start = Instant::now();
-        if let Err(error) = validate_ingest_body_limit(&state, body.len()) {
-            return record_ingest_response(&state, error.into_response(), bytes, 0, start);
+        if let Err(error) = validate_ingest_body_limit(&state, body_size) {
+            return record_ingest_response(&state, error.into_response(), body_size, 0, start);
         }
         let resp = match normalize_loki_http_push(
             &headers,
@@ -3638,11 +3720,11 @@ async fn push_logs(
                     Ok(()) => StatusCode::NO_CONTENT.into_response(),
                     Err(error) => error.into_response(),
                 };
-                return record_ingest_response(&state, resp, bytes, items, start);
+                return record_ingest_response(&state, resp, body_size, items, start);
             }
             Err(error) => error.into_response(),
         };
-        record_ingest_response(&state, resp, bytes, 0, start)
+        record_ingest_response(&state, resp, body_size, 0, start)
     }
     .instrument(span)
     .await
@@ -3653,7 +3735,7 @@ async fn push_otlp_logs(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let bytes = body.len() as u64;
+    let body_size = measured_size(body.len());
     let tenant = ingest_tenant(&headers);
     // ONE server span per OTLP push request, mirroring the Loki push handler:
     // the OTLP emit path feeds the same log WAL, so instrumenting it keeps the
@@ -3665,12 +3747,12 @@ async fn push_otlp_logs(
         messaging.destination.name = "__crabka_observability_logs_wal",
         crabka.tenant = %tenant,
         crabka.ingest.lines = tracing::field::Empty,
-        crabka.ingest.bytes = bytes,
+        crabka.ingest.bytes = body_size.bytes_u64(),
     );
     async move {
         let start = Instant::now();
-        if let Err(error) = validate_ingest_body_limit(&state, body.len()) {
-            return record_ingest_response(&state, error.into_response(), bytes, 0, start);
+        if let Err(error) = validate_ingest_body_limit(&state, body_size) {
+            return record_ingest_response(&state, error.into_response(), body_size, 0, start);
         }
         let resp = match normalize_otlp_http_logs(
             &headers,
@@ -3691,7 +3773,7 @@ async fn push_otlp_logs(
                         error.into_response()
                     }
                 };
-                return record_ingest_response(&state, resp, bytes, items, start);
+                return record_ingest_response(&state, resp, body_size, items, start);
             }
             Err(error) => {
                 // Surface why an OTLP log push was rejected at decode/normalize
@@ -3700,13 +3782,13 @@ async fn push_otlp_logs(
                     error = %error,
                     content_type = ?headers.get(CONTENT_TYPE).and_then(|v| v.to_str().ok()),
                     content_encoding = ?headers.get(CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
-                    bytes,
+                    bytes = body_size.bytes_u64(),
                     "OTLP logs: decode/normalize rejected the request"
                 );
                 otlp_http_error_response(error)
             }
         };
-        record_ingest_response(&state, resp, bytes, 0, start)
+        record_ingest_response(&state, resp, body_size, 0, start)
     }
     .instrument(span)
     .await
@@ -3719,15 +3801,20 @@ async fn push_otlp_logs(
 fn record_ingest_response(
     state: &DistributorState,
     resp: Response,
-    bytes: u64,
+    body: ByteSize,
     items: u64,
     start: Instant,
 ) -> Response {
     let ok = resp.status().is_success();
     state
         .metrics
-        .record_ingest(ok, bytes, items, start.elapsed().as_secs_f64());
+        .record_ingest(ok, body, items, start.elapsed().as_time());
     resp
+}
+
+/// A measured length, as a byte quantity.
+fn measured_size(len: usize) -> ByteSize {
+    ByteSize::from_bytes(u64::try_from(len).unwrap_or(u64::MAX))
 }
 
 fn otlp_http_error_response(error: DistributorError) -> Response {
@@ -3764,15 +3851,17 @@ fn encode_varint(mut value: u64, body: &mut Vec<u8>) {
 
 fn validate_ingest_body_limit(
     state: &DistributorState,
-    body_bytes: usize,
+    body: ByteSize,
 ) -> Result<(), DistributorError> {
-    let Some(max_bytes) = state.max_ingest_body_bytes else {
+    let Some(max) = state.max_ingest_body else {
         return Ok(());
     };
-    if body_bytes > max_bytes {
+    if body > max {
+        // The error carries plain integers so its rendered message is fixed by
+        // the `#[error]` format string alone.
         return Err(DistributorError::IngestBodyTooLarge {
-            body_bytes,
-            max_bytes,
+            body_bytes: body.bytes_usize(),
+            max_bytes: max.bytes_usize(),
         });
     }
     Ok(())
@@ -3796,7 +3885,11 @@ async fn append_distributor_wal_records(
     // failure, so it must not bump the WAL failure counter.
     check_ingest_quota(state.ingest_limiter.as_ref(), &records).await?;
     let result = if let Some(timeout) = state.wal_append_timeout {
-        match tokio::time::timeout(timeout, append_wal_records(state.sink.as_ref(), records)).await
+        match tokio::time::timeout(
+            timeout.to_std(),
+            append_wal_records(state.sink.as_ref(), records),
+        )
+        .await
         {
             Ok(inner) => inner.map_err(DistributorError::from),
             Err(_) => Err(DistributorError::WalAppendTimeout),
@@ -3831,8 +3924,8 @@ async fn check_ingest_quota(
 fn normalize_loki_http_push(
     headers: &HeaderMap,
     body: &[u8],
-    reject_old_samples_max_age: Option<Duration>,
-    creation_grace_period: Option<Duration>,
+    reject_old_samples_max_age: Option<Time>,
+    creation_grace_period: Option<Time>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
     let body = decode_loki_http_body(headers, body)?;
     if is_loki_json_content_type(headers)? {
@@ -4142,8 +4235,8 @@ fn decode_loki_http_body(headers: &HeaderMap, body: &[u8]) -> Result<Vec<u8>, Di
 fn normalize_otlp_http_logs(
     headers: &HeaderMap,
     body: &[u8],
-    reject_old_samples_max_age: Option<Duration>,
-    creation_grace_period: Option<Duration>,
+    reject_old_samples_max_age: Option<Time>,
+    creation_grace_period: Option<Time>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
     // OTLP/HTTP clients (e.g. the OpenTelemetry SDK's otlphttp exporter, which
     // defaults to gzip) honour Content-Encoding just like the Loki push path, so
@@ -4230,8 +4323,8 @@ fn is_loki_json_content_type(headers: &HeaderMap) -> Result<bool, DistributorErr
 fn normalize_loki_push(
     headers: &HeaderMap,
     payload: LokiTypedPushRequest,
-    reject_old_samples_max_age: Option<Duration>,
-    creation_grace_period: Option<Duration>,
+    reject_old_samples_max_age: Option<Time>,
+    creation_grace_period: Option<Time>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
     let tenant = tenant(headers)?.to_string();
     let mut records = Vec::new();
@@ -4310,13 +4403,12 @@ fn normalize_loki_push(
 
 fn validate_loki_empty_json_value_timestamp_window(
     stream_labels: &Labels,
-    max_age: Option<Duration>,
+    max_age: Option<Time>,
 ) -> Result<(), DistributorError> {
     let Some(max_age) = max_age else {
         return Ok(());
     };
-    let oldest_acceptable_timestamp_ns = current_unix_time_ns()
-        .saturating_sub(i64::try_from(max_age.as_nanos()).unwrap_or(i64::MAX));
+    let oldest_acceptable_timestamp_ns = current_unix_time_ns().saturating_sub(max_age.nanos_i64());
     Err(DistributorError::TimestampTooOldString {
         stream: loki_stale_sample_label_set(stream_labels),
         timestamp: "0001-01-01T00:00:00Z",
@@ -4327,8 +4419,8 @@ fn validate_loki_empty_json_value_timestamp_window(
 fn normalize_loki_proto_push(
     headers: &HeaderMap,
     payload: LokiProtoPushRequest,
-    reject_old_samples_max_age: Option<Duration>,
-    creation_grace_period: Option<Duration>,
+    reject_old_samples_max_age: Option<Time>,
+    creation_grace_period: Option<Time>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
     let tenant = tenant(headers)?.to_string();
     let mut records = Vec::new();
@@ -4381,8 +4473,8 @@ fn loki_push_entry_labels(stream_labels: &Labels, line: &str) -> Labels {
 fn normalize_otlp_logs(
     headers: &HeaderMap,
     payload: OtlpLogsRequest,
-    reject_old_samples_max_age: Option<Duration>,
-    creation_grace_period: Option<Duration>,
+    reject_old_samples_max_age: Option<Time>,
+    creation_grace_period: Option<Time>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
     let tenant = tenant(headers)?.to_string();
     let mut records = Vec::new();
@@ -4658,11 +4750,10 @@ fn loki_proto_timestamp_ns(
 
 fn loki_missing_proto_timestamp_error(
     stream_labels: &Labels,
-    max_age: Option<Duration>,
+    max_age: Option<Time>,
 ) -> DistributorError {
     let max_age = max_age.unwrap_or(LOKI_REJECT_OLD_SAMPLES_MAX_AGE);
-    let oldest_acceptable_timestamp_ns = current_unix_time_ns()
-        .saturating_sub(i64::try_from(max_age.as_nanos()).unwrap_or(i64::MAX));
+    let oldest_acceptable_timestamp_ns = current_unix_time_ns().saturating_sub(max_age.nanos_i64());
     DistributorError::TimestampTooOldString {
         stream: loki_stale_sample_label_set(stream_labels),
         timestamp: "0001-01-01T00:00:00Z",
@@ -4681,8 +4772,8 @@ fn loki_proto_label_pairs_to_labels(labels: &[LokiProtoLabelPair]) -> Labels {
 fn normalize_otlp_proto_logs(
     headers: &HeaderMap,
     payload: ProtoExportLogsServiceRequest,
-    reject_old_samples_max_age: Option<Duration>,
-    creation_grace_period: Option<Duration>,
+    reject_old_samples_max_age: Option<Time>,
+    creation_grace_period: Option<Time>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
     let tenant = tenant(headers)?;
     normalize_otlp_proto_logs_for_tenant(
@@ -4696,8 +4787,8 @@ fn normalize_otlp_proto_logs(
 fn normalize_otlp_proto_logs_for_tenant(
     tenant: &str,
     payload: ProtoExportLogsServiceRequest,
-    reject_old_samples_max_age: Option<Duration>,
-    creation_grace_period: Option<Duration>,
+    reject_old_samples_max_age: Option<Time>,
+    creation_grace_period: Option<Time>,
 ) -> Result<Vec<WalLogRecord>, DistributorError> {
     let tenant = tenant.to_string();
     let mut records = Vec::new();
@@ -4989,13 +5080,12 @@ fn validate_ingest_timestamp_ns(timestamp_ns: i64) -> Result<i64, DistributorErr
 fn validate_loki_timestamp_window(
     timestamp_ns: i64,
     stream_labels: &Labels,
-    max_age: Option<Duration>,
-    creation_grace_period: Option<Duration>,
+    max_age: Option<Time>,
+    creation_grace_period: Option<Time>,
 ) -> Result<(), DistributorError> {
     let now_ns = current_unix_time_ns();
     if let Some(max_age) = max_age {
-        let oldest_acceptable_timestamp_ns =
-            now_ns.saturating_sub(i64::try_from(max_age.as_nanos()).unwrap_or(i64::MAX));
+        let oldest_acceptable_timestamp_ns = now_ns.saturating_sub(max_age.nanos_i64());
         if timestamp_ns < oldest_acceptable_timestamp_ns {
             return Err(DistributorError::TimestampTooOld {
                 stream: loki_stale_sample_label_set(stream_labels),
@@ -5005,8 +5095,8 @@ fn validate_loki_timestamp_window(
         }
     }
     if let Some(creation_grace_period) = creation_grace_period {
-        let newest_acceptable_timestamp_ns = now_ns
-            .saturating_add(i64::try_from(creation_grace_period.as_nanos()).unwrap_or(i64::MAX));
+        let newest_acceptable_timestamp_ns =
+            now_ns.saturating_add(creation_grace_period.nanos_i64());
         if timestamp_ns > newest_acceptable_timestamp_ns {
             return Err(DistributorError::TimestampTooNew {
                 stream: loki_stale_sample_label_set(stream_labels),
@@ -5235,10 +5325,11 @@ pub struct QuerierState {
     rules: SharedLokiRules,
     alert_states: SharedPrometheusAlertStates,
     query_authorizer: Arc<dyn LogQueryAuthorizer>,
-    max_query_range_ns: Option<i64>,
+    max_query_range: Option<Time>,
+    /// A count of series, not a data volume, so it stays a plain integer.
     max_query_series: Option<usize>,
-    max_query_bytes: Option<u64>,
-    max_query_length: Option<usize>,
+    max_query_read: Option<ByteSize>,
+    max_query_length: Option<ByteSize>,
     /// Shared RED-metrics bundle. `None` for test routers that don't wire
     /// metrics; the binary threads a shared bundle in via [`QuerierState::with_metrics`].
     metrics: Option<ServiceMetrics>,
@@ -5330,7 +5421,7 @@ impl DynamicIndexCache {
             .lock()
             .expect("dynamic index cache lock poisoned");
         let entry = entries.get(key)?;
-        if entry.loaded_at.elapsed() > DYNAMIC_INDEX_CACHE_TTL {
+        if entry.loaded_at.elapsed().as_time() > DYNAMIC_INDEX_CACHE_TTL {
             entries.remove(key);
             return None;
         }
@@ -5361,7 +5452,7 @@ impl DynamicIndexCache {
             .lock()
             .expect("dynamic index shard range cache lock poisoned");
         let entry = ranges.get(key)?;
-        if entry.loaded_at.elapsed() > DYNAMIC_INDEX_CACHE_TTL
+        if entry.loaded_at.elapsed().as_time() > DYNAMIC_INDEX_CACHE_TTL
             || entry.listed_from_ns > required_from_ns
         {
             ranges.remove(key);
@@ -5395,7 +5486,7 @@ impl DynamicIndexCache {
             .lock()
             .expect("dynamic index shard cache lock poisoned");
         let entry = entries.get(key)?;
-        if entry.loaded_at.elapsed() > DYNAMIC_INDEX_SHARD_CACHE_TTL {
+        if entry.loaded_at.elapsed().as_time() > DYNAMIC_INDEX_SHARD_CACHE_TTL {
             entries.remove(key);
             return None;
         }
@@ -5507,9 +5598,9 @@ impl QuerierState {
             rules: SharedLokiRules::default(),
             alert_states: SharedPrometheusAlertStates::default(),
             query_authorizer: Arc::new(AllowAllQueryAuthorizer),
-            max_query_range_ns: None,
+            max_query_range: None,
             max_query_series: None,
-            max_query_bytes: None,
+            max_query_read: None,
             max_query_length: None,
             metrics: None,
         }
@@ -5528,13 +5619,13 @@ impl QuerierState {
     /// shared bundle. No-op when metrics are not wired (test routers).
     fn record_query(&self, route: &str, ok: bool, start: Instant) {
         if let Some(metrics) = &self.metrics {
-            metrics.record_query(route, ok, start.elapsed().as_secs_f64());
+            metrics.record_query(route, ok, start.elapsed().as_time());
         }
     }
 
     #[must_use]
-    pub fn with_max_query_range_ns(mut self, max_query_range_ns: i64) -> Self {
-        self.max_query_range_ns = Some(max_query_range_ns);
+    pub fn with_max_query_range(mut self, max_query_range: Time) -> Self {
+        self.max_query_range = Some(max_query_range);
         self
     }
 
@@ -5545,13 +5636,13 @@ impl QuerierState {
     }
 
     #[must_use]
-    pub fn with_max_query_bytes(mut self, max_query_bytes: u64) -> Self {
-        self.max_query_bytes = Some(max_query_bytes);
+    pub fn with_max_query_read(mut self, max_query_read: ByteSize) -> Self {
+        self.max_query_read = Some(max_query_read);
         self
     }
 
     #[must_use]
-    pub fn with_max_query_length(mut self, max_query_length: usize) -> Self {
+    pub fn with_max_query_length(mut self, max_query_length: ByteSize) -> Self {
         self.max_query_length = Some(max_query_length);
         self
     }
@@ -5922,8 +6013,8 @@ async fn build_querier_state_with_object_store_prefix(
         }
     };
 
-    let state = if let Some(max_query_range_ns) = config.max_query_range_ns {
-        state.with_max_query_range_ns(max_query_range_ns)
+    let state = if let Some(max_query_range) = config.max_query_range {
+        state.with_max_query_range(max_query_range)
     } else {
         state
     };
@@ -5934,8 +6025,8 @@ async fn build_querier_state_with_object_store_prefix(
         state
     };
 
-    let state = if let Some(max_query_bytes) = config.max_query_bytes {
-        state.with_max_query_bytes(max_query_bytes)
+    let state = if let Some(max_query_read) = config.max_query_read {
+        state.with_max_query_read(max_query_read)
     } else {
         state
     };
@@ -6081,8 +6172,8 @@ async fn build_service_router_with_shutdown(
                 distributor_router_with_sink(
                     sink,
                     ingest_limiter,
-                    config.max_ingest_body_bytes,
-                    config.wal_append_timeout_ms.map(Duration::from_millis),
+                    config.max_ingest_body,
+                    config.wal_append_timeout,
                     Some(LOKI_REJECT_OLD_SAMPLES_MAX_AGE),
                     Some(LOKI_CREATION_GRACE_PERIOD),
                     metrics,
@@ -10615,34 +10706,41 @@ fn validate_query_range_limit(
     state: &QuerierState,
     time_range: TimeRange,
 ) -> Result<(), HttpQueryError> {
-    let Some(max_query_range_ns) = state.max_query_range_ns else {
+    let Some(max_query_range) = state.max_query_range else {
         return Ok(());
     };
-    let query_range_ns = time_range.end_ns.checked_sub(time_range.start_ns).ok_or(
-        HttpQueryError::QueryRangeTooLarge {
+    // `start_ns` and `end_ns` are instants; only their difference is an extent.
+    // The error carries plain nanoseconds so its rendered message is fixed by
+    // the `#[error]` format string alone.
+    let max_range_ns = max_query_range.nanos_i64();
+    let query_range = time_range
+        .end_ns
+        .checked_sub(time_range.start_ns)
+        .map(Time::from_nanos)
+        .ok_or(HttpQueryError::QueryRangeTooLarge {
             range_ns: i64::MAX,
-            max_range_ns: max_query_range_ns,
-        },
-    )?;
-    if query_range_ns > max_query_range_ns {
+            max_range_ns,
+        })?;
+    if query_range > max_query_range {
         return Err(HttpQueryError::QueryRangeTooLarge {
-            range_ns: query_range_ns,
-            max_range_ns: max_query_range_ns,
+            range_ns: query_range.nanos_i64(),
+            max_range_ns,
         });
     }
     Ok(())
 }
 
 fn validate_loki_volume_query_range_limit(time_range: TimeRange) -> Result<(), HttpQueryError> {
-    let query_range_ns = time_range
+    let query_range = time_range
         .end_ns
         .checked_sub(time_range.start_ns)
+        .map(Time::from_nanos)
         .ok_or_else(|| HttpQueryError::LokiQueryRangeTooLarge {
-            query_length: format_loki_query_length(i64::MAX),
+            query_length: format_loki_query_length(Time::from_nanos(i64::MAX)),
         })?;
-    if query_range_ns > LOKI_VOLUME_MAX_QUERY_RANGE_NS {
+    if query_range > LOKI_VOLUME_MAX_QUERY_RANGE {
         return Err(HttpQueryError::LokiQueryRangeTooLarge {
-            query_length: format_loki_query_length(query_range_ns),
+            query_length: format_loki_query_length(query_range),
         });
     }
     Ok(())
@@ -10672,18 +10770,26 @@ fn validate_loki_query_range_resolution(
     if step_ns <= 0 {
         return Err(HttpQueryError::InvalidStep);
     }
-    let query_range_ns = time_range
+    let query_range = time_range
         .end_ns
         .checked_sub(time_range.start_ns)
+        .map(Time::from_nanos)
         .ok_or(HttpQueryError::QueryResolutionTooHigh)?;
-    if query_range_ns / step_ns > LOKI_MAX_QUERY_RANGE_RESOLUTION_POINTS {
+    // Loki truncates the point count, so the division stays over whole
+    // nanoseconds rather than fractional seconds.
+    if query_range.nanos_i64() / step_ns > LOKI_MAX_QUERY_RANGE_RESOLUTION_POINTS {
         return Err(HttpQueryError::QueryResolutionTooHigh);
     }
     Ok(())
 }
 
-fn format_loki_query_length(range_ns: i64) -> String {
-    let total_seconds = range_ns.max(0) / 1_000_000_000;
+/// Render an extent the way Loki spells a query length in its own error text.
+///
+/// Whole seconds are taken from the nanosecond count by integer division, not
+/// [`TimeExt::secs_i64`], which rounds to nearest and would report a second more
+/// than Loki does for the same window.
+fn format_loki_query_length(range: Time) -> String {
+    let total_seconds = range.nanos_i64().max(0) / 1_000_000_000;
     let hours = total_seconds / 3_600;
     let minutes = total_seconds % 3_600 / 60;
     let seconds = total_seconds % 60;
@@ -10692,7 +10798,7 @@ fn format_loki_query_length(range_ns: i64) -> String {
 }
 
 fn validate_query_length_limit(state: &QuerierState, query: &str) -> Result<(), HttpQueryError> {
-    let Some(max_query_length) = state.max_query_length else {
+    let Some(max_query_length) = state.max_query_length.map(ByteSizeExt::bytes_usize) else {
         return Ok(());
     };
     let query_length = query.len();
@@ -12719,12 +12825,7 @@ async fn execute_index_stats_query(
     validate_query_series_limit(&state, &plan)?;
     validate_query_bytes_limit(&state, &plan)?;
     let entries = count_index_stats_entries(&state, &plan).await?;
-    let bytes = plan
-        .blocks
-        .iter()
-        .map(|block| block.size_bytes)
-        .try_fold(0_u64, u64::checked_add)
-        .unwrap_or(u64::MAX);
+    let bytes = planned_block_bytes(&plan).bytes_u64();
     let streams = plan
         .blocks
         .iter()
@@ -13510,7 +13611,7 @@ fn index_volume_samples(
             for metric in volume_metrics_for_labels(labels, params) {
                 let samples = volumes.entry(metric).or_default();
                 let sample = samples.entry(sample_time).or_default();
-                *sample = sample.saturating_add(block.size_bytes);
+                *sample = sample.saturating_add(block.size.bytes_u64());
             }
         }
     }
@@ -15229,7 +15330,7 @@ fn format_field_filter(filter: &FieldFilter) -> String {
         match &filter.value {
             FieldValue::Number(value) => value.to_string(),
             FieldValue::Duration(value) => format!("{value}ns"),
-            FieldValue::Bytes(value) => format!("{value}B"),
+            FieldValue::Bytes(value) => format!("{}B", value.bytes_f64()),
             FieldValue::String(value) => quote_logql_string(value),
             FieldValue::Ip(value) => format!("ip({})", quote_logql_string(value.pattern())),
         }
@@ -15281,19 +15382,16 @@ fn validate_query_bytes_limit(
     state: &QuerierState,
     plan: &StreamPlan,
 ) -> Result<(), HttpQueryError> {
-    let Some(max_query_bytes) = state.max_query_bytes else {
+    let Some(max_query_read) = state.max_query_read else {
         return Ok(());
     };
-    let planned_bytes = plan
-        .blocks
-        .iter()
-        .map(|block| block.size_bytes)
-        .try_fold(0_u64, u64::checked_add)
-        .unwrap_or(u64::MAX);
-    if planned_bytes > max_query_bytes {
+    let planned = planned_block_bytes(plan);
+    if planned > max_query_read {
+        // The error carries plain integers so its rendered message is fixed by
+        // the `#[error]` format string alone.
         return Err(HttpQueryError::QueryBytesTooLarge {
-            planned_bytes,
-            max_bytes: max_query_bytes,
+            planned_bytes: planned.bytes_u64(),
+            max_bytes: max_query_read.bytes_u64(),
         });
     }
     Ok(())
@@ -15565,7 +15663,7 @@ fn metadata_index_range(params: &SeriesParams) -> Result<TimeRange, HttpQueryErr
     let Some(time_range) = metadata_time_range(params)? else {
         let end_ns = current_unix_time_ns();
         return TimeRange::new(
-            end_ns.saturating_sub(LOKI_METADATA_DEFAULT_INDEX_RANGE_NS),
+            end_ns.saturating_sub(LOKI_METADATA_DEFAULT_INDEX_RANGE.nanos_i64()),
             end_ns,
         )
         .map_err(HttpQueryError::from);
@@ -15918,7 +16016,7 @@ fn parse_volume_params(raw_query: Option<&str>) -> Result<VolumeParams, HttpQuer
     }
 
     let end = end.unwrap_or_else(current_unix_time_ns);
-    let start = start.unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE_NS));
+    let start = start.unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE.nanos_i64()));
 
     Ok(VolumeParams {
         query: query.ok_or(HttpQueryError::MissingQueryParameter("query"))?,
@@ -15994,7 +16092,7 @@ fn parse_detected_fields_params(
     }
     let end = end.unwrap_or_else(current_unix_time_ns);
     let start = start_or_since(start, since, Some(end))?
-        .unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE_NS));
+        .unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE.nanos_i64()));
 
     Ok(DetectedFieldsParams {
         query: query.ok_or(HttpQueryError::MissingQueryParameter("query"))?,
@@ -16059,7 +16157,7 @@ fn parse_detected_labels_params(
 
     let end = end.unwrap_or_else(current_unix_time_ns);
     let start = start_or_since(start, since, Some(end))?
-        .unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE_NS));
+        .unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE.nanos_i64()));
 
     Ok(DetectedLabelsParams {
         query,
@@ -16173,7 +16271,7 @@ fn parse_loki_tail_delay_for_query_param(value: &str) -> Result<i64, HttpQueryEr
 }
 
 fn validate_loki_tail_delay_for(delay_for: i64) -> Result<(), HttpQueryError> {
-    if !(0..=LOKI_MAX_TAIL_DELAY_NS).contains(&delay_for) {
+    if !(0..=LOKI_MAX_TAIL_DELAY.nanos_i64()).contains(&delay_for) {
         return Err(HttpQueryError::TailDelayForTooLarge);
     }
 
@@ -16402,18 +16500,23 @@ fn time_range(params: &QueryParams, kind: QueryKind) -> Result<TimeRange, HttpQu
         QueryKind::Range => {
             let end = params.end.unwrap_or_else(current_unix_time_ns);
             let start = start_or_since(params.start, params.since, Some(end))?
-                .unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE_NS));
+                .unwrap_or_else(|| end.saturating_sub(LOKI_DEFAULT_QUERY_RANGE.nanos_i64()));
             TimeRange::new(start, end).map_err(HttpQueryError::from)
         }
     }
 }
 
-const LOKI_DEFAULT_QUERY_RANGE_NS: i64 = 3_600_000_000_000;
-const LOKI_METADATA_DEFAULT_INDEX_RANGE_NS: i64 = 6 * 60 * 60 * 1_000_000_000;
+/// Window a query covers when it names neither `start` nor `since`.
+const LOKI_DEFAULT_QUERY_RANGE: Time = hours(1);
+/// Window the metadata endpoints index over when the request names no range.
+const LOKI_METADATA_DEFAULT_INDEX_RANGE: Time = hours(6);
 const LOKI_DEFAULT_TAIL_LIMIT: usize = 100;
 const LOKI_MAX_QUERY_RANGE_RESOLUTION_POINTS: i64 = 11_000;
-const LOKI_MAX_TAIL_DELAY_NS: i64 = 5_000_000_000;
-const LOKI_VOLUME_MAX_QUERY_RANGE_NS: i64 = 2_595_600_000_000_000;
+/// Longest `delay_for` a tail request may ask the querier to hold back.
+const LOKI_MAX_TAIL_DELAY: Time = secs(5);
+/// Widest window `/loki/api/v1/index/volume` and the range endpoints accept
+/// (Loki's 30d 1h default, to the nanosecond).
+const LOKI_VOLUME_MAX_QUERY_RANGE: Time = secs(2_595_600);
 
 fn current_unix_time_ns() -> i64 {
     SystemTime::now()
@@ -19485,11 +19588,14 @@ fn add_loki_query_stats_for_metric_plan_with_hot_tail(
 
 fn populate_loki_query_scan_stats(
     stats: &mut Value,
-    bytes: u64,
+    scanned: ByteSize,
     store_lines: u64,
     ingester_lines: u64,
     chunks: u64,
 ) {
+    // Loki's stats block reports whole bytes, so the quantity is lowered once
+    // here, at the JSON boundary.
+    let bytes = scanned.bytes_u64();
     if ingester_lines > 0 {
         stats["ingester"]["decompressedLines"] = json!(ingester_lines);
         stats["ingester"]["totalLinesSent"] = json!(ingester_lines);
@@ -19505,16 +19611,12 @@ fn populate_loki_query_scan_stats(
     stats["summary"]["totalLinesProcessed"] = json!(store_lines.saturating_add(ingester_lines));
 }
 
-fn planned_block_bytes(plan: &StreamPlan) -> u64 {
+fn planned_block_bytes(plan: &StreamPlan) -> ByteSize {
     planned_block_bytes_for_blocks(&plan.blocks)
 }
 
-fn planned_block_bytes_for_blocks(blocks: &[BlockDescriptor]) -> u64 {
-    blocks
-        .iter()
-        .map(|block| block.size_bytes)
-        .try_fold(0_u64, u64::checked_add)
-        .unwrap_or(u64::MAX)
+fn planned_block_bytes_for_blocks(blocks: &[BlockDescriptor]) -> ByteSize {
+    blocks.iter().map(|block| block.size).sum()
 }
 
 fn count_loki_stream_result_lines(value: &Value) -> u64 {
@@ -20296,6 +20398,7 @@ impl IntoResponse for HttpQueryError {
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use crabka_units::{bytes, bytes_per_sec};
 
     use super::*;
 
@@ -20626,25 +20729,25 @@ mod tests {
     /// scanning the whole retained buffer.
     #[tokio::test]
     async fn hot_tail_records_in_range_matches_full_scan_under_out_of_order_inserts() {
-        const BUCKET: i64 = HOT_TAIL_BUCKET_NS;
+        let bucket = HOT_TAIL_BUCKET.nanos_i64();
 
         let hot_tail = BufferedLogHotTail::default();
 
         // Timestamps deliberately out of order and spread across many one-minute buckets,
         // with duplicates at the same instant and records straddling bucket boundaries.
         let timestamps = [
-            5 * BUCKET + 10,
-            BUCKET - 1, // last ns of bucket 0
-            3 * BUCKET,
-            BUCKET,          // first ns of bucket 1
-            5 * BUCKET + 10, // duplicate timestamp
+            5 * bucket + 10,
+            bucket - 1, // last ns of bucket 0
+            3 * bucket,
+            bucket,          // first ns of bucket 1
+            5 * bucket + 10, // duplicate timestamp
             0,
-            7 * BUCKET + 42,
-            2 * BUCKET + 999,
-            3 * BUCKET, // duplicate timestamp in a different append position
-            4 * BUCKET - 1,
-            -BUCKET + 5, // a pre-epoch (negative) timestamp
-            6 * BUCKET,
+            7 * bucket + 42,
+            2 * bucket + 999,
+            3 * bucket, // duplicate timestamp in a different append position
+            4 * bucket - 1,
+            -bucket + 5, // a pre-epoch (negative) timestamp
+            6 * bucket,
         ];
         let apps = ["api", "web", "db"];
         let records: Vec<WalLogRecord> = timestamps
@@ -20669,10 +20772,10 @@ mod tests {
         let mut probes: Vec<(i64, i64)> = Vec::new();
         // Walk window starts at a coarse quarter-bucket stride from below the earliest
         // record to above the latest, pairing each with several spans.
-        let stride = BUCKET / 4;
-        let mut start = min_ts - 2 * BUCKET;
-        while start <= max_ts + 2 * BUCKET {
-            for span in [0_i64, 1, BUCKET - 1, BUCKET, BUCKET + 1, 3 * BUCKET] {
+        let stride = bucket / 4;
+        let mut start = min_ts - 2 * bucket;
+        while start <= max_ts + 2 * bucket {
+            for span in [0_i64, 1, bucket - 1, bucket, bucket + 1, 3 * bucket] {
                 probes.push((start, start + span));
             }
             start += stride;
@@ -20711,7 +20814,7 @@ mod tests {
 
         // The trait-object path the querier actually uses must agree with the inherent method.
         let dyn_tail: Arc<dyn LogHotTail> = Arc::new(hot_tail.clone());
-        let window = (2 * BUCKET, 6 * BUCKET);
+        let window = (2 * bucket, 6 * bucket);
         assert_eq!(
             dyn_tail.records_in_range(window.0, window.1),
             hot_tail.records_in_range(window.0, window.1),
@@ -20734,21 +20837,21 @@ mod tests {
 
     #[test]
     fn hot_tail_prune_compacted_rebuilds_records_and_time_index() {
-        const BUCKET: i64 = HOT_TAIL_BUCKET_NS;
+        let bucket = HOT_TAIL_BUCKET.nanos_i64();
 
         let hot_tail = BufferedLogHotTail::default();
-        let mut compacted_by_offset = hot_tail_test_record(4 * BUCKET, "offset-old");
+        let mut compacted_by_offset = hot_tail_test_record(4 * bucket, "offset-old");
         compacted_by_offset.position = Some(WalPosition {
             partition: PartitionIndex(0),
             offset: Offset(7),
         });
-        let mut kept_by_offset = hot_tail_test_record(3 * BUCKET, "offset-new");
+        let mut kept_by_offset = hot_tail_test_record(3 * bucket, "offset-new");
         kept_by_offset.position = Some(WalPosition {
             partition: PartitionIndex(0),
             offset: Offset(8),
         });
-        let compacted_by_time = hot_tail_test_record(2 * BUCKET, "time-old");
-        let kept_by_time = hot_tail_test_record(5 * BUCKET, "time-new");
+        let compacted_by_time = hot_tail_test_record(2 * bucket, "time-old");
+        let kept_by_time = hot_tail_test_record(5 * bucket, "time-new");
         let expected = vec![kept_by_offset.clone(), kept_by_time.clone()];
 
         hot_tail.append_records(vec![
@@ -20759,13 +20862,13 @@ mod tests {
         ]);
 
         let frontier =
-            CompactionFrontier::new(2 * BUCKET).with_partition_offset(PartitionIndex(0), Offset(7));
+            CompactionFrontier::new(2 * bucket).with_partition_offset(PartitionIndex(0), Offset(7));
 
         assert_eq!(hot_tail.prune_compacted(&frontier), 2);
         assert_eq!(hot_tail.records(), expected);
-        assert_eq!(hot_tail.records_in_range(0, 6 * BUCKET), expected);
-        assert!(hot_tail.records_in_range(2 * BUCKET, 2 * BUCKET).is_empty());
-        assert!(hot_tail.records_in_range(4 * BUCKET, 4 * BUCKET).is_empty());
+        assert2::assert!(hot_tail.records_in_range(0, 6 * bucket) == expected);
+        assert!(hot_tail.records_in_range(2 * bucket, 2 * bucket).is_empty());
+        assert!(hot_tail.records_in_range(4 * bucket, 4 * bucket).is_empty());
     }
 
     #[tokio::test]
@@ -21342,10 +21445,7 @@ mod tests {
     #[tokio::test]
     async fn connect_with_startup_retry_succeeds_on_first_try() {
         let result: Result<u32, String> =
-            connect_with_startup_retry("test", Duration::from_secs(5), || async {
-                Ok::<u32, String>(42)
-            })
-            .await;
+            connect_with_startup_retry("test", secs(5), || async { Ok::<u32, String>(42) }).await;
 
         assert_eq!(result.unwrap(), 42);
     }
@@ -21357,19 +21457,18 @@ mod tests {
         let counter = Arc::new(AtomicU32::new(0));
         let counter2 = counter.clone();
 
-        let result: Result<u32, String> =
-            connect_with_startup_retry("test", Duration::from_secs(10), move || {
-                let c = counter2.clone();
-                async move {
-                    let n = c.fetch_add(1, AO::SeqCst);
-                    if n < 2 {
-                        Err(format!("not ready yet (attempt {n})"))
-                    } else {
-                        Ok(99u32)
-                    }
+        let result: Result<u32, String> = connect_with_startup_retry("test", secs(10), move || {
+            let c = counter2.clone();
+            async move {
+                let n = c.fetch_add(1, AO::SeqCst);
+                if n < 2 {
+                    Err(format!("not ready yet (attempt {n})"))
+                } else {
+                    Ok(99u32)
                 }
-            })
-            .await;
+            }
+        })
+        .await;
 
         assert_eq!(result.unwrap(), 99);
         assert!(counter.load(std::sync::atomic::Ordering::SeqCst) >= 3);
@@ -21380,7 +21479,7 @@ mod tests {
     async fn connect_with_startup_retry_gives_up_after_deadline() {
         let result: Result<u32, String> = connect_with_startup_retry(
             "test",
-            Duration::from_millis(50), // very short deadline
+            millis(50), // very short deadline
             || async { Err::<u32, String>("always fails".to_string()) },
         )
         .await;
@@ -21410,8 +21509,8 @@ mod tests {
 
     #[test]
     fn service_duration_constants_are_exact() {
-        assert_eq!(LOKI_REJECT_OLD_SAMPLES_MAX_AGE, Duration::from_hours(168));
-        assert_eq!(LOKI_CREATION_GRACE_PERIOD, Duration::from_mins(10));
+        check!(LOKI_REJECT_OLD_SAMPLES_MAX_AGE == hours(168));
+        check!(LOKI_CREATION_GRACE_PERIOD == secs(600));
     }
 
     #[test]
@@ -21476,18 +21575,13 @@ mod tests {
 
     #[test]
     fn retry_backoff_doubles_and_caps() {
-        assert_eq!(
-            next_compactor_object_store_backoff(Duration::from_millis(10)),
-            Duration::from_millis(20)
-        );
-        assert_eq!(
-            next_compactor_object_store_backoff(Duration::from_millis(300)),
-            Duration::from_millis(500)
-        );
-        assert_eq!(
-            next_compactor_object_store_backoff(Duration::from_millis(500)),
-            Duration::from_millis(500)
-        );
+        for (current, want) in [
+            (millis(10), millis(20)),
+            (millis(300), millis(500)),
+            (millis(500), millis(500)),
+        ] {
+            check!(next_compactor_object_store_backoff(current) == want);
+        }
     }
 
     #[test]
@@ -21616,28 +21710,28 @@ mod tests {
             + "prod".len()
             + "trace_id".len()
             + "abc".len();
-        assert_eq!(ingest_quota_bytes(&[record]), expected_bytes);
+        check!(ingest_quota_bytes(&[record]) == measured_size(expected_bytes));
 
-        let mut bucket = IngestQuotaBucket::new(10.0);
-        check!((bucket.capacity() - 10.0).abs() < f64::EPSILON);
-        check!(bucket.consume(10.0));
-        check!(!bucket.consume(0.1));
-        bucket.update_rate(5.0);
-        assert!(bucket.available <= 5.0);
-        bucket.available = 4.0;
-        bucket.update_rate(20.0);
-        assert!(bucket.available >= 4.0);
-        assert!(bucket.consume(4.0));
+        let mut bucket = IngestQuotaBucket::new(bytes_per_sec(10));
+        check!(bucket.capacity() == bytes(10));
+        check!(bucket.consume(bytes(10)));
+        check!(!bucket.consume(ByteSize::from_bytes_f64(0.1)));
+        bucket.update_rate(bytes_per_sec(5));
+        check!(bucket.available <= bytes(5));
+        bucket.available = bytes(4);
+        bucket.update_rate(bytes_per_sec(20));
+        check!(bucket.available >= bytes(4));
+        check!(bucket.consume(bytes(4)));
     }
 
     #[test]
     fn hot_tail_bucket_key_uses_euclidean_minutes() {
         assert_eq!(hot_tail_bucket_key(0), 0);
-        assert_eq!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS - 1), 0);
-        assert_eq!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS), 1);
+        check!(hot_tail_bucket_key(HOT_TAIL_BUCKET.nanos_i64() - 1) == 0);
+        check!(hot_tail_bucket_key(HOT_TAIL_BUCKET.nanos_i64()) == 1);
         assert_eq!(hot_tail_bucket_key(-1), -1);
-        assert_eq!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS), -1);
-        assert_eq!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS - 1), -2);
+        check!(hot_tail_bucket_key(-HOT_TAIL_BUCKET.nanos_i64()) == -1);
+        check!(hot_tail_bucket_key(-HOT_TAIL_BUCKET.nanos_i64() - 1) == -2);
     }
 
     #[test]
@@ -21671,13 +21765,13 @@ mod tests {
             ingest_limiter: Arc::new(AllowAllIngestLimiter),
             prepare_shutdown: Arc::new(AtomicBool::new(false)),
             metrics: ServiceMetrics::new(),
-            max_ingest_body_bytes: Some(5),
+            max_ingest_body: Some(bytes(5)),
             wal_append_timeout: None,
             reject_old_samples_max_age: None,
             creation_grace_period: None,
         };
-        assert!(validate_ingest_body_limit(&state, 5).is_ok());
-        assert!(validate_ingest_body_limit(&state, 6).is_err());
+        assert!(validate_ingest_body_limit(&state, bytes(5)).is_ok());
+        assert!(validate_ingest_body_limit(&state, bytes(6)).is_err());
     }
 
     fn loki_content_type(value: &str) -> HeaderMap {

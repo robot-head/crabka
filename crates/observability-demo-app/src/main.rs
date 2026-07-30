@@ -219,7 +219,7 @@ fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsT
     cli.streams_broker_dns_timeout.map_or_else(
         || Ok(ClientDnsTimeout::default()),
         |timeout| {
-            ClientDnsTimeout::new(timeout.to_std())
+            ClientDnsTimeout::new(timeout)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )

@@ -712,7 +712,7 @@ where
     F: std::future::Future<Output = std::io::Result<I>>,
     I: Iterator<Item = std::net::SocketAddr>,
 {
-    let mut addrs = tokio::time::timeout(dns_timeout.duration(), lookup)
+    let mut addrs = tokio::time::timeout(dns_timeout.time().to_std(), lookup)
         .await
         .map_err(|_| {
             StreamsClientError::Runtime(format!(
@@ -755,7 +755,7 @@ pub(crate) async fn build(
     let metadata_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
-        .dns_timeout(broker_dns_timeout.duration())
+        .dns_timeout(broker_dns_timeout.time())
         .build()
         .await?;
 
@@ -779,7 +779,7 @@ pub(crate) async fn build(
         .client_id(format!("{client_id}-producer"))
         .enable_idempotence(true)
         .acks(Acks::All)
-        .dns_timeout(broker_dns_timeout.duration())
+        .dns_timeout(broker_dns_timeout.time())
         .build()
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
@@ -790,7 +790,7 @@ pub(crate) async fn build(
     let offset_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-offsets"))
-        .dns_timeout(broker_dns_timeout.duration())
+        .dns_timeout(broker_dns_timeout.time())
         .build()
         .await?;
 
@@ -836,7 +836,7 @@ pub(crate) async fn build_eos(
     let metadata_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
-        .dns_timeout(broker_dns_timeout.duration())
+        .dns_timeout(broker_dns_timeout.time())
         .build()
         .await?;
 
@@ -861,7 +861,7 @@ pub(crate) async fn build_eos(
         .enable_idempotence(true)
         .acks(Acks::All)
         .transactional_id(transactional_id.to_string())
-        .dns_timeout(broker_dns_timeout.duration())
+        .dns_timeout(broker_dns_timeout.time())
         .build()
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
@@ -872,7 +872,7 @@ pub(crate) async fn build_eos(
     let offset_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-offsets"))
-        .dns_timeout(broker_dns_timeout.duration())
+        .dns_timeout(broker_dns_timeout.time())
         .build()
         .await?;
 
@@ -904,6 +904,7 @@ mod tests {
     use crabka_client_core::{Client, ClientDnsTimeout};
     use crabka_client_producer::Producer;
     use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+    use crabka_units::millis;
     use tokio::sync::Mutex;
 
     use super::{
@@ -948,7 +949,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn raw_lookup_stops_at_the_configured_deadline() {
-        let timeout = ClientDnsTimeout::new(Duration::from_millis(37)).expect("positive timeout");
+        let timeout = ClientDnsTimeout::new(millis(37)).expect("positive timeout");
         let started = tokio::time::Instant::now();
         let error = lookup_first(
             "broker.example:9092",
@@ -997,7 +998,7 @@ mod tests {
 
     #[test]
     fn fetch_connection_options_carry_the_typed_dns_timeout() {
-        let timeout = ClientDnsTimeout::new(Duration::from_millis(41)).expect("positive timeout");
+        let timeout = ClientDnsTimeout::new(millis(41)).expect("positive timeout");
         let options = fetch_connection_options("streams-fetch", timeout);
 
         assert2::assert!(options.client_id == "streams-fetch");

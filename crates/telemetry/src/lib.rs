@@ -40,9 +40,7 @@
 pub mod profiling;
 pub mod propagation;
 
-use std::time::Duration;
-
-use crabka_units::prelude::TimeExt as _;
+use crabka_units::prelude::{Time, TimeExt, secs};
 use opentelemetry::{
     Context, KeyValue,
     trace::{
@@ -114,8 +112,8 @@ pub struct OtlpConfig {
     pub service_name: String,
     pub service_version: String,
     pub service_instance_id: String,
-    pub timeout: Duration,
-    pub heartbeat_interval: Option<Duration>,
+    pub timeout: Time,
+    pub heartbeat_interval: Option<Time>,
 }
 
 /// Truthy parse for `*_ENABLED` / `*_DISABLED` style env values.
@@ -126,17 +124,20 @@ fn env_truthy(v: &str) -> bool {
     )
 }
 
-fn parse_duration(name: &'static str, value: &str) -> Result<Duration, TelemetryError> {
+fn parse_time(name: &'static str, value: &str) -> Result<Time, TelemetryError> {
     let time = crabka_units::parse::non_negative_time(value).map_err(|error| {
         TelemetryError::InvalidConfig {
             name,
             message: error.to_string(),
         }
     })?;
-    Duration::try_from_secs_f64(time.secs_f64()).map_err(|error| TelemetryError::InvalidConfig {
-        name,
-        message: error.to_string(),
-    })
+    std::time::Duration::try_from_secs_f64(time.secs_f64()).map_err(|error| {
+        TelemetryError::InvalidConfig {
+            name,
+            message: error.to_string(),
+        }
+    })?;
+    Ok(time)
 }
 
 impl OtlpConfig {
@@ -194,16 +195,19 @@ impl OtlpConfig {
             .unwrap_or_else(|| default_service_name.to_owned());
 
         let timeout = match get("CRABKA_OTLP_TIMEOUT") {
-            Some(value) => parse_duration("CRABKA_OTLP_TIMEOUT", &value)?,
+            Some(value) => parse_time("CRABKA_OTLP_TIMEOUT", &value)?,
             None => get("OTEL_EXPORTER_OTLP_TIMEOUT_SECS")
                 .and_then(|s| s.trim().parse::<u64>().ok())
-                .map_or(Duration::from_secs(10), Duration::from_secs),
+                .map_or_else(
+                    || secs(10),
+                    |seconds| Time::from_std(std::time::Duration::from_secs(seconds)),
+                ),
         };
 
         let heartbeat_interval = get("CRABKA_OTLP_HEARTBEAT_INTERVAL")
-            .map(|value| parse_duration("CRABKA_OTLP_HEARTBEAT_INTERVAL", &value))
+            .map(|value| parse_time("CRABKA_OTLP_HEARTBEAT_INTERVAL", &value))
             .transpose()?
-            .filter(|interval| !interval.is_zero());
+            .filter(|interval| *interval > Time::ZERO);
 
         Ok(Some(Self {
             endpoint,
@@ -223,13 +227,13 @@ impl OtlpConfig {
             OtlpProtocol::Grpc => builder
                 .with_tonic()
                 .with_endpoint(self.endpoint.clone())
-                .with_timeout(self.timeout)
+                .with_timeout(self.timeout.to_std())
                 .build()?,
             OtlpProtocol::HttpProtobuf => builder
                 .with_http()
                 .with_protocol(Protocol::HttpBinary)
                 .with_endpoint(self.endpoint.clone())
-                .with_timeout(self.timeout)
+                .with_timeout(self.timeout.to_std())
                 .build()?,
         };
         Ok(exporter)
@@ -244,13 +248,13 @@ impl OtlpConfig {
             OtlpProtocol::Grpc => builder
                 .with_tonic()
                 .with_endpoint(self.endpoint.clone())
-                .with_timeout(self.timeout)
+                .with_timeout(self.timeout.to_std())
                 .build()?,
             OtlpProtocol::HttpProtobuf => builder
                 .with_http()
                 .with_protocol(Protocol::HttpBinary)
                 .with_endpoint(self.endpoint.clone())
-                .with_timeout(self.timeout)
+                .with_timeout(self.timeout.to_std())
                 .build()?,
         };
         Ok(exporter)
@@ -393,7 +397,7 @@ pub fn init(
         endpoint = %cfg.endpoint,
         protocol = ?cfg.protocol,
         sample_ratio = cfg.sample_ratio,
-        heartbeat_interval_secs = cfg.heartbeat_interval.map(|d| d.as_secs()),
+        heartbeat_interval_secs = cfg.heartbeat_interval.map(TimeExt::secs_f64),
         "OTLP distributed tracing + logs enabled"
     );
 
@@ -408,7 +412,7 @@ fn spawn_heartbeat_task(
     provider: SdkTracerProvider,
     service_name: String,
     service_instance_id: String,
-    interval: Duration,
+    interval: Time,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let tracer = provider.tracer("crabka-telemetry-heartbeat");
@@ -416,7 +420,7 @@ fn spawn_heartbeat_task(
         loop {
             emit_heartbeat_span(&tracer, &service_name, &service_instance_id, sequence);
             sequence = sequence.saturating_add(1);
-            tokio::time::sleep(interval).await;
+            tokio::time::sleep(interval.to_std()).await;
         }
     })
 }
@@ -465,6 +469,7 @@ mod tests {
     };
 
     use assert2::check;
+    use crabka_units::prelude::secs;
     use opentelemetry_sdk::error::OTelSdkResult;
 
     use super::*;
@@ -734,7 +739,7 @@ mod tests {
         )
         .expect("valid config")
         .expect("enabled");
-        assert2::assert!(cfg.heartbeat_interval == Some(Duration::from_secs(15)));
+        assert2::assert!(cfg.heartbeat_interval == Some(secs(15)));
     }
 
     #[test]
@@ -814,7 +819,7 @@ mod tests {
         .expect("valid config")
         .expect("enabled");
         assert2::assert!(cfg.service_name.as_str() == "my-kafka");
-        assert2::assert!(cfg.timeout == Duration::from_secs(3));
+        assert2::assert!(cfg.timeout == secs(3));
     }
 
     #[test]
@@ -831,7 +836,7 @@ mod tests {
             )
             .expect("standard OTLP timeout remains non-failing")
             .expect("enabled");
-            assert2::assert!(cfg.timeout == Duration::from_secs(expected));
+            assert2::assert!(cfg.timeout == secs(expected));
         }
     }
 
@@ -849,7 +854,7 @@ mod tests {
         )
         .expect("valid config")
         .expect("enabled");
-        assert2::assert!(cfg.timeout == Duration::from_secs(10));
+        assert2::assert!(cfg.timeout == secs(10));
         assert2::assert!(cfg.heartbeat_interval.is_none());
     }
 

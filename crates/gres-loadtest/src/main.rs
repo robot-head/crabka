@@ -144,12 +144,12 @@ impl RegistryOptions {
         .expect("validated registry options")
         .with_producer_dns_timeout(
             self.producer_dns_timeout
-                .unwrap_or_else(|| Time::from_std(defaults.producer_dns_timeout().duration())),
+                .unwrap_or_else(|| defaults.producer_dns_timeout().time()),
         )
         .expect("validated registry producer DNS timeout")
         .with_reader_admin_dns_timeout(
             self.reader_admin_dns_timeout
-                .unwrap_or_else(|| Time::from_std(defaults.reader_admin_dns_timeout().duration())),
+                .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
         )
         .expect("validated registry reader/admin DNS timeout")
     }

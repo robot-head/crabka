@@ -93,8 +93,7 @@ async fn share_consumer_joins_and_closes() {
         .group_id("share-group-1")
         .subscribe(["share-topic".to_string()])
         .ack_mode(ShareAckMode::Implicit)
-        .session_timeout(Duration::from_secs(30))
-        .heartbeat_interval(Duration::from_secs(1))
+        .heartbeat_interval(crabka_units::secs(1))
         .build()
         .await
         .expect("ShareConsumer build");
@@ -344,7 +343,7 @@ async fn poll_acquires_and_implicit_accept_advances() {
         .group_id("g1")
         .subscribe(vec!["t".to_string()])
         .ack_mode(ShareAckMode::Implicit)
-        .heartbeat_interval(Duration::from_millis(300))
+        .heartbeat_interval(crabka_units::millis(300))
         .build()
         .await
         .unwrap();
@@ -434,7 +433,7 @@ async fn explicit_release_redelivers() {
         .group_id("relg")
         .subscribe(vec!["rel".to_string()])
         .ack_mode(ShareAckMode::Explicit)
-        .heartbeat_interval(Duration::from_millis(300))
+        .heartbeat_interval(crabka_units::millis(300))
         .build()
         .await
         .unwrap();
@@ -496,7 +495,7 @@ async fn explicit_reject_not_redelivered() {
         .group_id("rejg")
         .subscribe(vec!["rej".to_string()])
         .ack_mode(ShareAckMode::Explicit)
-        .heartbeat_interval(Duration::from_millis(300))
+        .heartbeat_interval(crabka_units::millis(300))
         .build()
         .await
         .unwrap();
@@ -559,7 +558,7 @@ async fn two_consumers_share_topic() {
         .group_id("shareg")
         .subscribe(vec!["shared".to_string()])
         .ack_mode(ShareAckMode::Implicit)
-        .heartbeat_interval(Duration::from_millis(200))
+        .heartbeat_interval(crabka_units::millis(200))
         .build()
         .await
         .unwrap();
@@ -569,7 +568,7 @@ async fn two_consumers_share_topic() {
         .group_id("shareg")
         .subscribe(vec!["shared".to_string()])
         .ack_mode(ShareAckMode::Implicit)
-        .heartbeat_interval(Duration::from_millis(200))
+        .heartbeat_interval(crabka_units::millis(200))
         .build()
         .await
         .unwrap();
@@ -643,7 +642,7 @@ async fn close_leaves_group() {
         .group_id("leaveg")
         .subscribe(vec!["leave".to_string()])
         .ack_mode(ShareAckMode::Implicit)
-        .heartbeat_interval(Duration::from_millis(300))
+        .heartbeat_interval(crabka_units::millis(300))
         .build()
         .await
         .unwrap();
@@ -713,7 +712,7 @@ async fn explicit_renew_prevents_redelivery() {
         .group_id("rng")
         .subscribe(vec!["rn".to_string()])
         .ack_mode(ShareAckMode::Explicit)
-        .heartbeat_interval(Duration::from_millis(200))
+        .heartbeat_interval(crabka_units::millis(200))
         .build()
         .await
         .unwrap();
@@ -809,7 +808,7 @@ async fn renew_errors_in_implicit_mode() {
         .group_id("impg")
         .subscribe(vec!["imp".to_string()])
         .ack_mode(ShareAckMode::Implicit)
-        .heartbeat_interval(Duration::from_millis(200))
+        .heartbeat_interval(crabka_units::millis(200))
         .build()
         .await
         .unwrap();

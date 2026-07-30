@@ -5,7 +5,7 @@ use crabka_gres_activator::{
     ActivatorConfig, ControlRegistryWakeRegistry, NonEmptyValue, WakeCoordinator, serve_conn,
 };
 use crabka_gres_control::{Registry, RegistryPolicy, RegistryReplicationFactor};
-use crabka_units::{ByteSize, Time, convert::TimeExt as _};
+use crabka_units::{ByteSize, Time};
 use tokio::net::TcpListener;
 
 #[derive(Debug, Parser)]
@@ -103,12 +103,12 @@ impl RegistryOptions {
         .expect("validated registry options")
         .with_producer_dns_timeout(
             self.producer_dns_timeout
-                .unwrap_or_else(|| Time::from_std(defaults.producer_dns_timeout().duration())),
+                .unwrap_or_else(|| defaults.producer_dns_timeout().time()),
         )
         .expect("validated registry producer DNS timeout")
         .with_reader_admin_dns_timeout(
             self.reader_admin_dns_timeout
-                .unwrap_or_else(|| Time::from_std(defaults.reader_admin_dns_timeout().duration())),
+                .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
         )
         .expect("validated registry reader/admin DNS timeout")
     }

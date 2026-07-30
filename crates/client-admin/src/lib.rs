@@ -11,9 +11,8 @@
 //! modules cover topic CRUD, partition expansion, config changes, SCRAM user
 //! credentials, ACLs, quotas, delegation tokens, and log-dir inspection.
 
-use std::time::Duration;
-
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
+use crabka_units::{Time, convert::TimeExt as _, secs};
 use thiserror::Error;
 
 pub mod configs;
@@ -51,22 +50,22 @@ pub trait AdminClientLike: Send {
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError>;
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteTopicOutcome>, AdminError>;
     async fn create_partitions(
         &mut self,
         ops: &[CreatePartitionsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreatePartitionsOutcome>, AdminError>;
     async fn delete_records(
         &mut self,
         ops: &[DeleteRecordsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteRecordsOutcome>, AdminError>;
     async fn describe_configs(
         &mut self,
@@ -121,7 +120,7 @@ pub trait AdminClientLike: Send {
         &mut self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<crabka_metadata::DelegationToken, AdminError>;
     async fn renew_delegation_token(
         &mut self,
@@ -142,30 +141,30 @@ impl AdminClientLike for AdminClient {
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError> {
-        AdminClient::create_topics(self, specs, timeout_ms).await
+        AdminClient::create_topics(self, specs, timeout).await
     }
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteTopicOutcome>, AdminError> {
-        AdminClient::delete_topics(self, names, timeout_ms).await
+        AdminClient::delete_topics(self, names, timeout).await
     }
     async fn create_partitions(
         &mut self,
         ops: &[CreatePartitionsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreatePartitionsOutcome>, AdminError> {
-        AdminClient::create_partitions(self, ops, timeout_ms).await
+        AdminClient::create_partitions(self, ops, timeout).await
     }
     async fn delete_records(
         &mut self,
         ops: &[DeleteRecordsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteRecordsOutcome>, AdminError> {
-        AdminClient::delete_records(self, ops, timeout_ms).await
+        AdminClient::delete_records(self, ops, timeout).await
     }
     async fn describe_configs(
         &mut self,
@@ -238,7 +237,7 @@ impl AdminClientLike for AdminClient {
         &mut self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<crabka_metadata::DelegationToken, AdminError> {
         // The create-response carries every field the image type needs
         // *except* the renewer list (the broker does not echo it back),
@@ -249,7 +248,7 @@ impl AdminClientLike for AdminClient {
             self,
             owner_principal_name,
             renewers,
-            max_lifetime_ms,
+            max_lifetime,
         )
         .await?;
         let renewers_image = renewers
@@ -400,7 +399,7 @@ where
     F: std::future::Future<Output = std::io::Result<I>>,
     I: Iterator<Item = std::net::SocketAddr>,
 {
-    let mut addrs = tokio::time::timeout(dns_timeout.duration(), lookup)
+    let mut addrs = tokio::time::timeout(dns_timeout.time().to_std(), lookup)
         .await
         .map_err(|_| {
             AdminError::Protocol(format!(
@@ -430,8 +429,8 @@ impl AdminClient {
     fn opts(security: Option<crabka_client_core::security::ClientSecurity>) -> ConnectionOptions {
         ConnectionOptions {
             dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
-            connect_timeout: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(30),
+            connect_timeout: secs(5),
+            request_timeout: secs(30),
             client_id: "crabka-operator".to_string(),
             security: security.map(Box::new),
         }
@@ -610,9 +609,12 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
     };
 
     use bytes::{BufMut, BytesMut};
@@ -784,8 +786,8 @@ mod tests {
         ConnectionOptions {
             dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
             client_id: "custom-admin".into(),
-            connect_timeout: Duration::from_millis(100),
-            request_timeout: Duration::from_millis(25),
+            connect_timeout: crabka_units::millis(100),
+            request_timeout: crabka_units::millis(25),
             security: Some(Box::new(ClientSecurity {
                 protocol: ListenerProtocol::SaslPlaintext,
                 tls: None,
@@ -806,7 +808,7 @@ mod tests {
     }
 
     fn assert_custom_connect_timeout_is_stored(admin: &AdminClient) {
-        assert2::assert!(admin.options.connect_timeout == Duration::from_millis(100));
+        assert2::assert!(admin.options.connect_timeout == crabka_units::millis(100));
     }
 
     #[test]
@@ -890,7 +892,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn dns_lookup_stops_at_connection_option_deadline() {
-        let timeout = crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(37))
+        let timeout = crabka_client_core::ClientDnsTimeout::new(Time::from_millis(37))
             .expect("positive timeout");
         let started = tokio::time::Instant::now();
         let pending =
@@ -930,7 +932,7 @@ mod tests {
     #[tokio::test]
     async fn connect_with_dns_timeout_preserves_admin_defaults() {
         let live = ObservedAdminBroker::start(Duration::ZERO).await;
-        let timeout = crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(37))
+        let timeout = crabka_client_core::ClientDnsTimeout::new(Time::from_millis(37))
             .expect("positive timeout");
         let admin = AdminClient::connect_with_dns_timeout(&[live.addr.to_string()], timeout)
             .await
@@ -938,15 +940,15 @@ mod tests {
 
         assert2::assert!(admin.options.dns_timeout == timeout);
         assert2::assert!(admin.options.client_id == "crabka-operator");
-        assert2::assert!(admin.options.connect_timeout == Duration::from_secs(5));
-        assert2::assert!(admin.options.request_timeout == Duration::from_secs(30));
+        assert2::assert!(admin.options.connect_timeout == secs(5));
+        assert2::assert!(admin.options.request_timeout == secs(30));
         live.stop();
     }
 
     #[tokio::test]
     async fn secured_dns_timeout_preserves_security_and_admin_defaults() {
         let live = ObservedAdminBroker::start(Duration::ZERO).await;
-        let timeout = crabka_client_core::ClientDnsTimeout::new(Duration::from_millis(37))
+        let timeout = crabka_client_core::ClientDnsTimeout::new(Time::from_millis(37))
             .expect("positive timeout");
         let security = ClientSecurity {
             protocol: ListenerProtocol::SaslPlaintext,
@@ -968,8 +970,8 @@ mod tests {
         assert2::assert!(admin.options.dns_timeout == timeout);
         assert2::assert!(admin.options.security.is_some());
         assert2::assert!(admin.options.client_id == "crabka-operator");
-        assert2::assert!(admin.options.connect_timeout == Duration::from_secs(5));
-        assert2::assert!(admin.options.request_timeout == Duration::from_secs(30));
+        assert2::assert!(admin.options.connect_timeout == secs(5));
+        assert2::assert!(admin.options.request_timeout == secs(30));
         live.stop();
     }
 
@@ -1033,8 +1035,8 @@ mod tests {
         let options = AdminClient::opts(None);
 
         assert2::assert!(options.client_id == "crabka-operator");
-        assert2::assert!(options.connect_timeout == Duration::from_secs(5));
-        assert2::assert!(options.request_timeout == Duration::from_secs(30));
+        assert2::assert!(options.connect_timeout == secs(5));
+        assert2::assert!(options.request_timeout == secs(30));
         assert2::assert!(options.security.is_none());
     }
 }

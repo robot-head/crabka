@@ -200,14 +200,13 @@ impl GresRegistrySpec {
         let policy = policy
             .with_producer_dns_timeout(
                 self.producer_dns_timeout
-                    .unwrap_or_else(|| Time::from_std(defaults.producer_dns_timeout().duration())),
+                    .unwrap_or_else(|| defaults.producer_dns_timeout().time()),
             )
             .map_err(|error| format!("spec.gresRegistry.producerDnsTimeout: {error}"))?;
         policy
             .with_reader_admin_dns_timeout(
-                self.reader_admin_dns_timeout.unwrap_or_else(|| {
-                    Time::from_std(defaults.reader_admin_dns_timeout().duration())
-                }),
+                self.reader_admin_dns_timeout
+                    .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
             )
             .map_err(|error| format!("spec.gresRegistry.readerAdminDnsTimeout: {error}"))
     }
@@ -363,6 +362,12 @@ macro_rules! validate_tuning_field {
     (size_u64, $owner:ident, $field:ident, $rule:ty) => {
         if let Some(value) = $owner.$field {
             validate_tuning_size(stringify!($field), value, u64::MAX)?;
+        }
+    };
+    (size_snapshot_fetch, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            crabka_kraft_core::snapshot_fetch::MetadataSnapshotFetchMax::new(value)
+                .map_err(|error| BrokerTuning::invalid(stringify!($field), error))?;
         }
     };
     (ratio_positive, $owner:ident, $field:ident, $rule:ty) => {
@@ -555,6 +560,7 @@ define_broker_tuning! {
     size_u64 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] metadata_max_between_snapshots: ByteSize => ();
     time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] metadata_max_snapshot_interval: Time => ();
     refined #[schemars(range(min = 1))] metadata_snapshot_interval_records: u64 => refined_type::rule::GreaterU64<0>;
+    size_snapshot_fetch #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] metadata_snapshot_fetch_max: ByteSize => ();
     time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] txn_abort_cleanup_interval: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] leader_imbalance_check_interval: Time => ();
     ratio_unit #[serde(with = "crabka_units::serde_units::human::option_ratio")] #[schemars(with = "Option<String>")] leader_imbalance_per_broker: Ratio => ();
@@ -1664,6 +1670,7 @@ mod tests {
             "recordDecompressionOutputCeiling",
             "futureLogMoveReadChunk",
             "metadataMaxBetweenSnapshots",
+            "metadataSnapshotFetchMax",
         ] {
             let tuning: BrokerTuning =
                 serde_json::from_value(serde_json::json!({field: "0B"})).expect("deserialize size");
@@ -1681,6 +1688,32 @@ mod tests {
             let error = tuning.validate().expect_err("invalid ratio must fail");
             assert!(error.contains(field), "{error}");
         }
+    }
+
+    #[test]
+    fn broker_tuning_renders_bounded_metadata_snapshot_fetch_max() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "metadataSnapshotFetchMax": "512MiB"
+        }))
+        .expect("deserialize snapshot fetch maximum");
+        tuning.validate().expect("lower limit is valid");
+        let rendered = tuning.render_runtime_toml();
+        assert!(rendered.contains("metadata_snapshot_fetch_max = \"512MiB\""));
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&rendered).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        assert!(broker.metadata_snapshot_fetch_max == crabka_units::mebibytes(512));
+
+        let over_ceiling: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "metadataSnapshotFetchMax": "1073741825B"
+        }))
+        .expect("deserialize over-ceiling maximum");
+        let error = over_ceiling
+            .validate()
+            .expect_err("operator must reject values above the core ceiling");
+        assert!(error.contains("metadataSnapshotFetchMax"), "{error}");
     }
 
     #[test]

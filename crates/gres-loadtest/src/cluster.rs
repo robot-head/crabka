@@ -877,13 +877,9 @@ fn registry_policy_args(policy: &RegistryPolicy) -> [String; 14] {
         "--registry-fetch-partition-max".to_owned(),
         policy.fetch_partition_max().human().to_string(),
         "--registry-producer-dns-timeout".to_owned(),
-        Time::from_std(policy.producer_dns_timeout().duration())
-            .human()
-            .to_string(),
+        policy.producer_dns_timeout().time().human().to_string(),
         "--registry-reader-admin-dns-timeout".to_owned(),
-        Time::from_std(policy.reader_admin_dns_timeout().duration())
-            .human()
-            .to_string(),
+        policy.reader_admin_dns_timeout().time().human().to_string(),
     ]
 }
 

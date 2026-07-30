@@ -43,10 +43,7 @@ fn zero_schema_fetch_retry_bounds_are_rejected() {
 fn environment_schema_fetch_retry_range_is_validated_before_external_io() {
     let output = demo()
         .args(["--role", "produce"])
-        .env(
-            "CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF",
-            "91ms",
-        )
+        .env("CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF", "91ms")
         .env("CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF", "37ms")
         .output()
         .expect("run demo");
@@ -67,10 +64,7 @@ fn cli_schema_fetch_retry_value_overrides_environment() {
             "--schema-fetch-retry-initial-backoff",
             "97ms",
         ])
-        .env(
-            "CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF",
-            "37ms",
-        )
+        .env("CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF", "37ms")
         .env("CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF", "91ms")
         .output()
         .expect("run demo");

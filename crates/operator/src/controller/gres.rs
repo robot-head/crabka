@@ -925,8 +925,8 @@ fn render_activator_deployment(
                             "--registry-reader-retry-backoff", registry_policy.reader_retry_backoff().human().to_string(),
                             "--registry-fetch-max-wait", registry_policy.fetch_max_wait().human().to_string(),
                             "--registry-fetch-partition-max", registry_policy.fetch_partition_max().human().to_string(),
-                            "--registry-producer-dns-timeout", Time::from_std(registry_policy.producer_dns_timeout().duration()).human().to_string(),
-                            "--registry-reader-admin-dns-timeout", Time::from_std(registry_policy.reader_admin_dns_timeout().duration()).human().to_string(),
+                            "--registry-producer-dns-timeout", registry_policy.producer_dns_timeout().time().human().to_string(),
+                            "--registry-reader-admin-dns-timeout", registry_policy.reader_admin_dns_timeout().time().human().to_string(),
                             "--backend-endpoint-template", format!("{{tenant}}-gres.{namespace}.svc:{COMPUTE_PORT}", namespace = obj.namespace().unwrap_or_else(|| "default".into()))
                         ],
                         "ports": [{ "name": "postgres", "containerPort": ACTIVATOR_PORT, "protocol": "TCP" }],

@@ -24,7 +24,7 @@ use crabka_gres_control::{
     render_users_toml, tenant_config_topic,
 };
 use crabka_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
-use crabka_units::{ByteSize, Time, convert::TimeExt as _};
+use crabka_units::{ByteSize, Time};
 use serde::Serialize;
 
 const EXIT_OK: i32 = 0;
@@ -103,12 +103,12 @@ impl RegistryOptions {
         .expect("validated registry options")
         .with_producer_dns_timeout(
             self.producer_dns_timeout
-                .unwrap_or_else(|| Time::from_std(defaults.producer_dns_timeout().duration())),
+                .unwrap_or_else(|| defaults.producer_dns_timeout().time()),
         )
         .expect("validated registry producer DNS timeout")
         .with_reader_admin_dns_timeout(
             self.reader_admin_dns_timeout
-                .unwrap_or_else(|| Time::from_std(defaults.reader_admin_dns_timeout().duration())),
+                .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
         )
         .expect("validated registry reader/admin DNS timeout")
     }
@@ -1318,6 +1318,7 @@ fn parse_pgdog_pooler_mode(value: &str) -> Result<PgdogPoolerMode, String> {
 mod tests {
     use assert2::{assert, check};
     use clap::Parser as _;
+    use crabka_units::convert::TimeExt as _;
 
     use super::*;
 

@@ -338,6 +338,7 @@ async fn start_metadata_source(
             max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
             max_snapshot_interval: config.metadata_max_snapshot_interval,
             snapshot_interval_records: config.metadata_snapshot_interval_records,
+            metadata_snapshot_fetch_max: config.metadata_snapshot_fetch_max,
         };
         let controller = Arc::new(
             crabka_raft::Controller::start_with_listener(controller_config, controller_listener)

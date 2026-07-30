@@ -447,7 +447,7 @@ impl Producer {
         #[builder(default = Acks::One)] acks: Acks,
         #[builder(default = DEFAULT_PRODUCER_LINGER)] linger: Duration,
         #[builder(default = DEFAULT_PRODUCER_BATCH_BYTES)] batch_size: usize,
-        #[builder(default = DEFAULT_CLIENT_DNS_TIMEOUT)] dns_timeout: Duration,
+        #[builder(default = DEFAULT_CLIENT_DNS_TIMEOUT)] dns_timeout: Time,
         #[builder(default = DEFAULT_PRODUCER_REQUEST_TIMEOUT)] request_timeout: Duration,
         #[builder(default = DEFAULT_PRODUCER_FLUSH_TIMEOUT)] flush_timeout: Duration,
         #[builder(default = DEFAULT_PRODUCER_RETRIES)] retries: i32,
@@ -501,7 +501,7 @@ impl Producer {
         let client = Client::builder()
             .bootstrap(bootstrap)
             .client_id(client_id.clone())
-            .dns_timeout(dns_timeout.duration())
+            .dns_timeout(dns_timeout.time())
             .connect_timeout(request_timeout)
             .request_timeout(request_timeout)
             .maybe_security(security.clone())
@@ -638,6 +638,7 @@ mod security_arg_tests {
         },
     };
     use crabka_security::ListenerProtocol;
+    use crabka_units::{micros, millis};
 
     use super::*;
 
@@ -1223,7 +1224,7 @@ mod security_arg_tests {
 
     #[tokio::test]
     async fn producer_builder_rejects_invalid_dns_timeout_before_connection_io() {
-        for timeout in [Duration::ZERO, Duration::from_nanos(1), Duration::MAX] {
+        for timeout in [Time::ZERO, micros(1), Time::from_secs_f64(f64::INFINITY)] {
             let error = Producer::builder()
                 .bootstrap("127.0.0.1:1")
                 .dns_timeout(timeout)
@@ -1242,7 +1243,7 @@ mod security_arg_tests {
     async fn producer_builder_accepts_a_distinct_dns_timeout() {
         let producer = Producer::builder()
             .bootstrap("127.0.0.1:1")
-            .dns_timeout(Duration::from_millis(37))
+            .dns_timeout(millis(37))
             .enable_idempotence(false)
             .build()
             .await

@@ -269,13 +269,14 @@ mod tests {
     };
 
     use assert2::{assert, check};
+    use crabka_units::millis;
 
     use super::*;
     use crate::connection::ClientDnsTimeout;
 
     #[test]
     fn pool_carries_the_configured_dns_timeout() {
-        let timeout = ClientDnsTimeout::new(Duration::from_millis(41)).expect("positive timeout");
+        let timeout = ClientDnsTimeout::new(millis(41)).expect("positive timeout");
         let pool = BrokerPool::new(
             vec![],
             ConnectionOptions {
@@ -288,7 +289,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn advertised_broker_lookup_stops_at_the_configured_deadline() {
-        let timeout = ClientDnsTimeout::new(Duration::from_millis(41)).expect("positive timeout");
+        let timeout = ClientDnsTimeout::new(millis(41)).expect("positive timeout");
         let started = tokio::time::Instant::now();
         let addr = first_resolved_addr(
             timeout,

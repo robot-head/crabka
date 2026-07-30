@@ -2064,13 +2064,9 @@ fn registry_policy_args(policy: &crabka_gres_control::RegistryPolicy) -> [String
         "--registry-fetch-partition-max".to_owned(),
         policy.fetch_partition_max().human().to_string(),
         "--registry-producer-dns-timeout".to_owned(),
-        Time::from_std(policy.producer_dns_timeout().duration())
-            .human()
-            .to_string(),
+        policy.producer_dns_timeout().time().human().to_string(),
         "--registry-reader-admin-dns-timeout".to_owned(),
-        Time::from_std(policy.reader_admin_dns_timeout().duration())
-            .human()
-            .to_string(),
+        policy.reader_admin_dns_timeout().time().human().to_string(),
     ]
 }
 
@@ -2081,9 +2077,7 @@ fn human_millis(value: i64) -> String {
 fn wal_consumer_admin_args(policy: &EffectiveGresComputePolicy) -> [String; 28] {
     [
         "--fdw-broker-dns-timeout".to_owned(),
-        Time::from_std(policy.fdw_broker_dns_timeout.duration())
-            .human()
-            .to_string(),
+        policy.fdw_broker_dns_timeout.time().human().to_string(),
         "--schema-fetch-retry-initial-backoff".to_owned(),
         policy
             .schema_fetch_retry_policy
@@ -2345,7 +2339,7 @@ fn wal_producer_flush_args(policy: crabka_client_producer::ProducerFlushTimeout)
 fn wal_producer_dns_args(timeout: crabka_client_core::ClientDnsTimeout) -> [String; 2] {
     [
         "--wal-producer-dns-timeout".to_owned(),
-        Time::from_std(timeout.duration()).human().to_string(),
+        timeout.time().human().to_string(),
     ]
 }
 

@@ -8,7 +8,7 @@ use std::{
         Arc,
         atomic::{AtomicBool, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{Json, Router, http::StatusCode, response::IntoResponse, routing::get};
@@ -25,48 +25,106 @@ use crabka_metrics::{
     run_compactor_consumer_loop,
 };
 use crabka_telemetry::OtlpConfig;
+use crabka_units::{parse, prelude::*};
 use object_store::ObjectStore;
 use serde_json::json;
 use tokio::net::TcpListener;
 
 #[derive(Debug, Parser)]
 struct Cli {
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_METRICS_TARGET")]
     target: Target,
-    #[arg(long, default_value = "127.0.0.1:4041")]
+    #[arg(long, env = "CRABKA_METRICS_LISTEN", default_value = "127.0.0.1:4041")]
     listen: SocketAddr,
     #[arg(long, env = "CRABKA_ADMIN_LISTEN_ADDR", default_value = "0.0.0.0:9404")]
     admin_listen_addr: SocketAddr,
-    #[arg(long, default_value = "127.0.0.1:9092")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_BOOTSTRAP",
+        default_value = "127.0.0.1:9092"
+    )]
     bootstrap: String,
-    #[arg(long, default_value = "file://./.crabka-metrics-blocks")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_OBJECT_STORE_URL",
+        default_value = "file://./.crabka-metrics-blocks"
+    )]
     object_store_url: String,
-    #[arg(long, default_value = "crabka-metrics-compactor")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_COMPACTOR_GROUP_ID",
+        default_value = "crabka-metrics-compactor"
+    )]
     compactor_group_id: String,
-    #[arg(long, default_value = "crabka-metrics-compactor")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_COMPACTOR_CLIENT_ID",
+        default_value = "crabka-metrics-compactor"
+    )]
     compactor_client_id: String,
-    #[arg(long, default_value_t = 1000)]
-    compactor_poll_timeout_ms: u64,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_COMPACTOR_POLL_TIMEOUT",
+        default_value = "1s",
+        value_parser = parse::positive_time
+    )]
+    compactor_poll_timeout: Time,
     /// Flush the accumulated compaction buffer once this many WAL records are buffered.
-    #[arg(long, default_value_t = crabka_metrics::DEFAULT_FLUSH_MAX_ROWS)]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_COMPACTOR_FLUSH_MAX_ROWS",
+        default_value_t = crabka_metrics::DEFAULT_FLUSH_MAX_ROWS
+    )]
     compactor_flush_max_rows: usize,
     /// Flush the accumulated compaction buffer once its oldest record reaches this age.
-    #[arg(long, default_value_t = crabka_metrics::DEFAULT_FLUSH_MAX_AGE.as_millis() as u64)]
-    compactor_flush_max_age_ms: u64,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_COMPACTOR_FLUSH_MAX_AGE",
+        default_value = "1m",
+        value_parser = parse::positive_time
+    )]
+    compactor_flush_max_age: Time,
     /// Delete compacted metric blocks older than this window. Zero disables retention.
-    #[arg(long, default_value_t = 0)]
-    compactor_retention_ms: u64,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_COMPACTOR_RETENTION",
+        default_value = "0s",
+        value_parser = parse::non_negative_time
+    )]
+    compactor_retention: Time,
     /// How often the compactor sweeps object-store blocks/indexes for retention.
-    #[arg(long, default_value_t = 60_000)]
-    compactor_retention_sweep_ms: u64,
-    #[arg(long, default_value = HA_TRACKER_TOPIC)]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_INTERVAL",
+        default_value = "1m",
+        value_parser = parse::positive_time
+    )]
+    compactor_retention_sweep_interval: Time,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_HA_TRACKER_TOPIC",
+        default_value = HA_TRACKER_TOPIC
+    )]
     ha_tracker_topic: String,
-    #[arg(long, default_value = "crabka-metrics-ha-tracker")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_HA_TRACKER_GROUP_ID",
+        default_value = "crabka-metrics-ha-tracker"
+    )]
     ha_tracker_group_id: String,
-    #[arg(long, default_value = "crabka-metrics-ha-tracker")]
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_HA_TRACKER_CLIENT_ID",
+        default_value = "crabka-metrics-ha-tracker"
+    )]
     ha_tracker_client_id: String,
-    #[arg(long, default_value_t = 500)]
-    ha_tracker_poll_timeout_ms: u64,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_HA_TRACKER_POLL_TIMEOUT",
+        default_value = "500ms",
+        value_parser = parse::positive_time
+    )]
+    ha_tracker_poll_timeout: Time,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -286,7 +344,7 @@ async fn run_distributor(
     );
     let ha_state = Arc::clone(&state);
     let ha_topic = cli.ha_tracker_topic.clone();
-    let ha_poll_timeout = Duration::from_millis(cli.ha_tracker_poll_timeout_ms);
+    let ha_poll_timeout = cli.ha_tracker_poll_timeout;
     tokio::spawn(async move {
         let result = run_ha_election_consumer_loop(
             &mut ha_consumer,
@@ -316,22 +374,19 @@ async fn run_compactor(
     metrics: ServiceMetrics,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let store = build_object_store(&cli.object_store_url)?;
+    let retention = cli.compactor_retention;
+    let sweep_interval = cli.compactor_retention_sweep_interval;
     let mut config = MetricsCompactorConfig::new(cli.bootstrap);
     config.group_id = cli.compactor_group_id;
     config.client_id = cli.compactor_client_id;
-    config.poll_timeout = Duration::from_millis(cli.compactor_poll_timeout_ms);
+    config.poll_timeout = cli.compactor_poll_timeout;
     config.flush_max_rows = cli.compactor_flush_max_rows;
-    config.flush_max_age = Duration::from_millis(cli.compactor_flush_max_age_ms);
+    config.flush_max_age = cli.compactor_flush_max_age;
     let runtime = config.build_runtime(store.clone())?;
     let mut consumer = config.build_consumer().await?;
     let stopping = Arc::new(AtomicBool::new(false));
-    if cli.compactor_retention_ms > 0 {
-        spawn_retention_sweeper(
-            store,
-            Duration::from_millis(cli.compactor_retention_ms),
-            Duration::from_millis(cli.compactor_retention_sweep_ms.max(1)),
-            Arc::clone(&stopping),
-        );
+    if retention > Time::ZERO {
+        spawn_retention_sweeper(store, retention, sweep_interval, Arc::clone(&stopping));
     }
     let signal = Arc::clone(&stopping);
     tokio::spawn(async move {
@@ -362,8 +417,8 @@ async fn run_compactor(
 #[cfg_attr(test, mutants::skip)]
 fn spawn_retention_sweeper(
     store: Arc<dyn ObjectStore>,
-    retention: Duration,
-    sweep_interval: Duration,
+    retention: Time,
+    sweep_interval: Time,
     stopping: Arc<AtomicBool>,
 ) {
     tokio::spawn(async move {
@@ -392,7 +447,7 @@ fn spawn_retention_sweeper(
             if stopping.load(Ordering::SeqCst) {
                 break;
             }
-            tokio::time::sleep(sweep_interval).await;
+            tokio::time::sleep(sweep_interval.to_std()).await;
             if stopping.load(Ordering::SeqCst) {
                 break;
             }
@@ -412,12 +467,16 @@ fn unix_time_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex, OnceLock};
+
     use assert2::{assert, check};
     use axum::{body::Body, http::Request};
     use clap::Parser;
     use tower::ServiceExt;
 
     use super::*;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn parses_distributor_target() {
@@ -438,15 +497,15 @@ mod tests {
             "metrics-ha",
             "--ha-tracker-client-id",
             "metrics-ha-1",
-            "--ha-tracker-poll-timeout-ms",
-            "250",
+            "--ha-tracker-poll-timeout",
+            "250ms",
         ])
         .unwrap();
 
         check!(cli.ha_tracker_topic == "__tenant_a_ha");
         check!(cli.ha_tracker_group_id == "metrics-ha");
         check!(cli.ha_tracker_client_id == "metrics-ha-1");
-        check!(cli.ha_tracker_poll_timeout_ms == 250);
+        check!(cli.ha_tracker_poll_timeout == millis(250));
     }
 
     #[test]
@@ -565,21 +624,52 @@ mod tests {
             "broker:9092",
             "--compactor-group-id",
             "metrics-c",
-            "--compactor-poll-timeout-ms",
-            "250",
-            "--compactor-retention-ms",
-            "3600000",
-            "--compactor-retention-sweep-ms",
-            "30000",
+            "--compactor-poll-timeout",
+            "250ms",
+            "--compactor-retention",
+            "1h",
+            "--compactor-retention-sweep-interval",
+            "30s",
         ])
         .unwrap();
 
         assert!(matches!(cli.target, Target::Compactor));
         check!(cli.bootstrap == "broker:9092");
         check!(cli.compactor_group_id == "metrics-c");
-        check!(cli.compactor_poll_timeout_ms == 250);
-        check!(cli.compactor_retention_ms == 3_600_000);
-        check!(cli.compactor_retention_sweep_ms == 30_000);
+        check!(cli.compactor_poll_timeout == millis(250));
+        check!(cli.compactor_retention == hours(1));
+        check!(cli.compactor_retention_sweep_interval == secs(30));
+    }
+
+    #[test]
+    fn runtime_options_read_unit_bearing_environment_values() {
+        let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().expect("environment lock");
+
+        temp_env::with_vars(
+            [
+                ("CRABKA_METRICS_TARGET", Some("compactor")),
+                ("CRABKA_METRICS_COMPACTOR_POLL_TIMEOUT", Some("250ms")),
+                ("CRABKA_METRICS_COMPACTOR_FLUSH_MAX_AGE", Some("2m")),
+                ("CRABKA_METRICS_COMPACTOR_RETENTION", Some("1h")),
+                (
+                    "CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_INTERVAL",
+                    Some("30s"),
+                ),
+            ],
+            || {
+                let cli = Cli::try_parse_from(["crabka-metrics"]).expect("parse environment");
+                assert!(matches!(cli.target, Target::Compactor));
+                assert!(
+                    (
+                        cli.compactor_poll_timeout,
+                        cli.compactor_flush_max_age,
+                        cli.compactor_retention,
+                        cli.compactor_retention_sweep_interval,
+                    ) == (millis(250), minutes(2), hours(1), secs(30))
+                );
+            },
+        );
     }
 
     #[test]

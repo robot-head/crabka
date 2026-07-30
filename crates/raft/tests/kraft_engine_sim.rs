@@ -25,6 +25,7 @@ use crabka_raft::{
     RaftError,
     kraft::{
         KraftConfig, KraftController, KraftLog, NodeId, PeerSender, QuorumState,
+        snapshot_fetch::MetadataSnapshotFetchMax,
         transport::{Inbound, api_key},
     },
 };
@@ -145,6 +146,7 @@ fn build_engine_with_snapshot_interval(
             election_timeout_ms,
             peers: Arc::new(net.clone()),
             snapshot_interval_records,
+            metadata_snapshot_fetch_max: MetadataSnapshotFetchMax::default(),
         },
         log,
         dir.path().to_path_buf(),
@@ -450,6 +452,7 @@ async fn restart_recovers_image() {
         timeouts[usize::try_from(victim.0 - 1).unwrap()],
         Arc::new(net.clone()),
         0,
+        MetadataSnapshotFetchMax::default(),
     )
     .expect("reopen");
     // The recovered image must contain the committed topic.

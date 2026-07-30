@@ -3,6 +3,8 @@
 
 use std::{future::Future, net::SocketAddr};
 
+use crabka_units::convert::TimeExt as _;
+
 use crate::{connection::ClientDnsTimeout, error::ClientError};
 
 pub(crate) async fn bounded_lookup<F>(
@@ -12,7 +14,7 @@ pub(crate) async fn bounded_lookup<F>(
 where
     F: Future,
 {
-    tokio::time::timeout(timeout.duration(), lookup).await
+    tokio::time::timeout(timeout.time().to_std(), lookup).await
 }
 
 /// Parse a comma-separated `host:port` list and resolve each entry via
@@ -50,6 +52,7 @@ mod tests {
     use std::time::Duration;
 
     use assert2::assert;
+    use crabka_units::millis;
 
     use super::*;
     use crate::connection::ClientDnsTimeout;
@@ -79,7 +82,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn bounded_lookup_stops_at_the_configured_deadline() {
-        let timeout = ClientDnsTimeout::new(Duration::from_millis(37)).expect("positive timeout");
+        let timeout = ClientDnsTimeout::new(millis(37)).expect("positive timeout");
         let started = tokio::time::Instant::now();
         let result = bounded_lookup(timeout, std::future::pending::<()>()).await;
         assert!(result.is_err());

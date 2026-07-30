@@ -787,21 +787,12 @@ fn effective_wal_admin_policy(
             crabka_gres_substrate::DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
             PositiveI32::into_value,
         ),
-        whole_millis_i32(
-            "wal topic ensure timeout",
-            args.wal_topic_ensure_timeout
-                .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT),
-        )?,
-        whole_millis_u64(
-            "WAL admin connect timeout",
-            args.wal_admin_connect_timeout
-                .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT),
-        )?,
-        whole_millis_u64(
-            "WAL admin request timeout",
-            args.wal_admin_request_timeout
-                .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT),
-        )?,
+        args.wal_topic_ensure_timeout
+            .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT),
+        args.wal_admin_connect_timeout
+            .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT),
+        args.wal_admin_request_timeout
+            .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT),
     )
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
@@ -825,7 +816,7 @@ fn effective_wal_producer_dns_timeout(
     args.wal_producer_dns_timeout.map_or_else(
         || Ok(crabka_client_core::ClientDnsTimeout::default()),
         |timeout| {
-            crabka_client_core::ClientDnsTimeout::new(timeout.to_std())
+            crabka_client_core::ClientDnsTimeout::new(timeout)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
@@ -837,7 +828,7 @@ fn effective_fdw_broker_dns_timeout(
     args.fdw_broker_dns_timeout.map_or_else(
         || Ok(crabka_client_core::ClientDnsTimeout::default()),
         |timeout| {
-            crabka_client_core::ClientDnsTimeout::new(timeout.to_std())
+            crabka_client_core::ClientDnsTimeout::new(timeout)
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
         },
     )
@@ -940,15 +931,6 @@ fn whole_bytes_u64(name: &str, value: ByteSize) -> std::io::Result<u64> {
             "{name} must be a finite, positive whole number of bytes"
         ))
     }
-}
-
-fn whole_bytes_i32(name: &str, value: ByteSize) -> std::io::Result<i32> {
-    i32::try_from(whole_bytes_u64(name, value)?).map_err(|_| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            format!("{name} exceeds i32::MAX bytes"),
-        )
-    })
 }
 
 fn whole_bytes_usize(name: &str, value: ByteSize) -> std::io::Result<usize> {
@@ -1073,12 +1055,12 @@ impl RegistryOptions {
         .expect("validated registry options")
         .with_producer_dns_timeout(
             self.producer_dns_timeout
-                .unwrap_or_else(|| Time::from_std(defaults.producer_dns_timeout().duration())),
+                .unwrap_or_else(|| defaults.producer_dns_timeout().time()),
         )
         .expect("validated registry producer DNS timeout")
         .with_reader_admin_dns_timeout(
             self.reader_admin_dns_timeout
-                .unwrap_or_else(|| Time::from_std(defaults.reader_admin_dns_timeout().duration())),
+                .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
         )
         .expect("validated registry reader/admin DNS timeout")
     }
@@ -1333,48 +1315,30 @@ impl SubstrateRuntimeConfig {
                 max_size: durable_inspection_fold_max_size,
             },
             recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::new(
-                whole_millis_i32(
-                    "WAL recovery fetch maximum wait",
-                    args.wal_recovery_fetch_max_wait
-                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT),
-                )?,
-                whole_bytes_i32(
-                    "WAL recovery fetch partition maximum",
-                    args.wal_recovery_fetch_partition_max
-                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX),
-                )?,
-                whole_bytes_i32(
-                    "WAL recovery fetch response maximum",
-                    args.wal_recovery_fetch_response_max
-                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX),
-                )?,
+                args.wal_recovery_fetch_max_wait
+                    .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT),
+                args.wal_recovery_fetch_partition_max
+                    .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX),
+                args.wal_recovery_fetch_response_max
+                    .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX),
                 args.wal_recovery_empty_fetch_retries.map_or(
                     crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
                     PositiveUsize::into_value,
                 ),
             )
             .and_then(|policy| {
-                whole_millis_u64(
-                    "WAL recovery DNS timeout",
+                policy.with_dns_timeout(
                     args.wal_recovery_dns_timeout
                         .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT),
                 )
-                .map_err(|error| error.to_string())
-                .and_then(|timeout| policy.with_dns_timeout(timeout))
             })
             .and_then(|policy| {
-                let connect_timeout = whole_millis_u64(
-                    "WAL recovery connect timeout",
-                    args.wal_recovery_connect_timeout
-                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT),
-                )
-                .map_err(|error| error.to_string())?;
-                let request_timeout = whole_millis_u64(
-                    "WAL recovery request timeout",
-                    args.wal_recovery_request_timeout
-                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT),
-                )
-                .map_err(|error| error.to_string())?;
+                let connect_timeout = args
+                    .wal_recovery_connect_timeout
+                    .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT);
+                let request_timeout = args
+                    .wal_recovery_request_timeout
+                    .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT);
                 policy.with_timeouts(connect_timeout, request_timeout)
             })
             .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?,
@@ -10241,12 +10205,17 @@ mod tests {
 
     #[test]
     fn wal_recovery_read_policy_reaches_shared_recovery_config_helper() {
-        let policy = crabka_gres_substrate::RecoveryReadPolicy::new(31, 32, 33, 34)
-            .expect("distinctive policy")
-            .with_dns_timeout(37)
-            .expect("distinctive DNS timeout")
-            .with_timeouts(35, 36)
-            .expect("distinctive timeouts");
+        let policy = crabka_gres_substrate::RecoveryReadPolicy::new(
+            crabka_units::millis(31),
+            crabka_units::bytes(32),
+            crabka_units::bytes(33),
+            34,
+        )
+        .expect("distinctive policy")
+        .with_dns_timeout(crabka_units::millis(37))
+        .expect("distinctive DNS timeout")
+        .with_timeouts(crabka_units::millis(35), crabka_units::millis(36))
+        .expect("distinctive timeouts");
         let mut config = SubstrateRuntimeConfig::from_args(&substrate_args())
             .expect("config")
             .expect("substrate config");
@@ -10257,8 +10226,13 @@ mod tests {
             config.live_recovery_config(tenant.clone(), crabka_gres_ranges::RangeId::new(7));
 
         assert_eq!(recovery.read_policy(), policy);
-        let admin =
-            crabka_gres_substrate::WalAdminPolicy::new(41, 42, 43, 44).expect("distinctive policy");
+        let admin = crabka_gres_substrate::WalAdminPolicy::new(
+            41,
+            crabka_units::millis(42),
+            crabka_units::millis(43),
+            crabka_units::millis(44),
+        )
+        .expect("distinctive policy");
         config.wal_admin_policy = admin;
         let recovery = config.live_recovery_config(tenant, crabka_gres_ranges::RangeId::new(7));
         assert_eq!(recovery.wal_admin_policy(), admin);

@@ -52,7 +52,7 @@ use crate::{
         event::{Event, LogEnd},
         log::KraftLog,
         role::Role,
-        snapshot_fetch::{SnapshotFetchState, SnapshotFetchStep},
+        snapshot_fetch::{MetadataSnapshotFetchMax, SnapshotFetchState, SnapshotFetchStep},
         transport::{
             Command, Inbound, MetadataFetchSlice, PeerSender, QuorumStateSnapshot, TimerTick,
             api_key, wire,
@@ -131,6 +131,7 @@ struct Engine {
     /// Snapshot every this many committed records past the last snapshot, then
     /// prune the log below that point. `0` disables snapshotting (KIP-630).
     snapshot_interval_records: u64,
+    metadata_snapshot_fetch_max: MetadataSnapshotFetchMax,
     /// HWM at which the last checkpoint was written (and the log pruned to).
     /// Seeded from the recovered checkpoint on `open`.
     last_snapshot_end_offset: Offset,
@@ -177,6 +178,8 @@ pub struct KraftConfig {
     /// Snapshot once committed offset advances this many records past the
     /// last snapshot, then prune the log below it. `0` disables snapshotting.
     pub snapshot_interval_records: u64,
+    /// Validated maximum metadata snapshot size this follower will fetch.
+    pub metadata_snapshot_fetch_max: MetadataSnapshotFetchMax,
 }
 
 fn initial_election_at(
@@ -431,6 +434,7 @@ impl KraftController {
             election_timeout_ms,
             peers,
             snapshot_interval_records,
+            metadata_snapshot_fetch_max,
         } = config;
 
         let core = QuorumStateMachine::new(me, initial_state, election_timeout_ms);
@@ -495,6 +499,7 @@ impl KraftController {
             was_leader: initial_was_leader,
             held_epoch: initial_epoch,
             snapshot_interval_records,
+            metadata_snapshot_fetch_max,
             last_snapshot_end_offset,
             snapshot_fetch: None,
             installed_snapshot_epoch: None,
@@ -525,6 +530,10 @@ impl KraftController {
         fields(node = me.0, %cluster_id, election_timeout_ms),
         err
     )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "recovery inputs are independent and explicit at this low-level boundary"
+    )]
     pub fn open(
         data_dir: PathBuf,
         me: NodeId,
@@ -533,6 +542,7 @@ impl KraftController {
         election_timeout_ms: u64,
         peers: Arc<dyn PeerSender>,
         snapshot_interval_records: u64,
+        metadata_snapshot_fetch_max: MetadataSnapshotFetchMax,
     ) -> Result<Self, RaftError> {
         std::fs::create_dir_all(&data_dir).map_err(crabka_log::LogError::Io)?;
         let mut log = KraftLog::open(&data_dir)?;
@@ -571,6 +581,7 @@ impl KraftController {
                 election_timeout_ms,
                 peers,
                 snapshot_interval_records,
+                metadata_snapshot_fetch_max,
             },
             log,
             data_dir,
@@ -1809,7 +1820,11 @@ impl Engine {
         if let Some(id) = snapshot_id {
             let active_id = self.snapshot_fetch.as_ref().map(|s| s.snapshot_id);
             if should_start_snapshot_fetch(id, self.log.log_end_offset(), active_id) {
-                self.snapshot_fetch = Some(SnapshotFetchState::new(id, leader_id));
+                self.snapshot_fetch = Some(SnapshotFetchState::with_max(
+                    id,
+                    leader_id,
+                    self.metadata_snapshot_fetch_max,
+                ));
                 self.send_fetch_snapshot(leader_id, id, 0);
             }
             self.on_event(Event::ReceiveFetchResponse {
@@ -2406,6 +2421,7 @@ mod tests {
                 election_timeout_ms: timeout_ms,
                 peers: Arc::new(NullPeerSender),
                 snapshot_interval_records,
+                metadata_snapshot_fetch_max: MetadataSnapshotFetchMax::default(),
             },
             log,
             dir.path().to_path_buf(),
@@ -2459,6 +2475,7 @@ mod tests {
                 was_leader,
                 held_epoch,
                 snapshot_interval_records: 0,
+                metadata_snapshot_fetch_max: MetadataSnapshotFetchMax::default(),
                 last_snapshot_end_offset: Offset(0),
                 snapshot_fetch: None,
                 installed_snapshot_epoch: None,
@@ -3845,6 +3862,7 @@ mod tests {
                     election_timeout_ms: 1000,
                     peers: Arc::new(NullPeerSender),
                     snapshot_interval_records: 0,
+                    metadata_snapshot_fetch_max: MetadataSnapshotFetchMax::default(),
                 },
                 log,
                 data_dir.clone(),
@@ -3870,6 +3888,7 @@ mod tests {
             1000,
             Arc::new(NullPeerSender),
             0,
+            MetadataSnapshotFetchMax::default(),
         )
         .expect("reopen");
         assert2::assert!(ctrl2.current_image().topic("recovered").is_some());

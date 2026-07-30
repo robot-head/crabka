@@ -306,8 +306,7 @@ mod tests {
         );
 
         let timeout =
-            crabka_client_core::ClientDnsTimeout::new(std::time::Duration::from_millis(43))
-                .expect("positive timeout");
+            crabka_client_core::ClientDnsTimeout::new(millis(43)).expect("positive timeout");
         let overridden = StreamsApp::builder()
             .bootstrap("127.0.0.1:9092")
             .application_id("override")
