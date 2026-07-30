@@ -164,6 +164,20 @@ fn docker_log_tailing_is_scoped_to_the_demo_compose_project() {
 }
 
 #[test]
+fn demo_roles_expose_schema_fetch_retry_defaults() {
+    let compose = docker_compose();
+    for service in ["demo-produce", "demo-stream", "demo-consume"] {
+        let block = compose_service_block(&compose, service);
+        for setting in [
+            "CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF: \"${CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF:-10ms}\"",
+            "CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF: \"${CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF:-1s}\"",
+        ] {
+            assert_eq!(block.matches(setting).count(), 1, "{service}: {setting}");
+        }
+    }
+}
+
+#[test]
 fn crabka_worker_targets_also_collect_memory_profiles() {
     let config = alloy_config();
     let scrape = scrape_block(&config, "crabka_workers");

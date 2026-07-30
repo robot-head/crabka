@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crabka_units::prelude::*;
+use crabka_units::{fmt::Human as _, prelude::*};
 
 use crate::{
     error::SchemaSerdeError,
@@ -62,9 +62,11 @@ impl SchemaFetchRetryPolicy {
         let initial = validated_duration("initial schema fetch retry backoff", initial_backoff)?;
         let max = validated_duration("maximum schema fetch retry backoff", max_backoff)?;
         if initial > max {
-            return Err(
-                "initial schema fetch retry backoff must not exceed the maximum".to_string(),
-            );
+            return Err(format!(
+                "initial schema fetch retry backoff ({}) must not exceed the maximum ({})",
+                initial_backoff.human(),
+                max_backoff.human(),
+            ));
         }
         Ok(Self {
             initial_backoff,

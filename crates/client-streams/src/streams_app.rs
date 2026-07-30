@@ -222,6 +222,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cache_config_carries_schema_fetch_retry_policy() {
+        let policy = crabka_schema_serde::SchemaFetchRetryPolicy::new(
+            crabka_units::millis(37),
+            crabka_units::millis(91),
+        )
+        .unwrap();
+        let app = StreamsApp::builder()
+            .bootstrap("127.0.0.1:9092")
+            .application_id("schema-retry")
+            .schema_registry("http://127.0.0.1:8081")
+            .cache_config(crabka_schema_serde::CacheConfig {
+                fetch_retry_policy: policy,
+                ..Default::default()
+            })
+            .build();
+
+        check!(app.cache.fetch_retry_policy() == policy);
+    }
+
+    #[test]
     fn state_store_cache_budget_preserves_raw_builder_default_and_override() {
         let defaults = StreamsApp::builder()
             .bootstrap("127.0.0.1:9092")

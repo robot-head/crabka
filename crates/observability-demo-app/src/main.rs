@@ -30,7 +30,8 @@ use crabka_client_streams::{
     processor::serde::SerdeRole,
 };
 use crabka_schema_serde::{
-    CacheConfig, RegistryClient, SchemaCache, format::protobuf::ProtobufSerde, set_default_registry,
+    CacheConfig, RegistryClient, SchemaCache, SchemaFetchRetryPolicy,
+    format::protobuf::ProtobufSerde, set_default_registry,
 };
 use crabka_units::{fmt::Human as _, parse, prelude::*};
 use observability_demo_app::{
@@ -67,6 +68,20 @@ struct Cli {
         default_value = "http://127.0.0.1:8081"
     )]
     registry: String,
+    /// Initial delay before retrying a transient Schema Registry fetch failure.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF",
+        value_parser = parse::positive_time
+    )]
+    schema_fetch_retry_initial_backoff: Option<Time>,
+    /// Maximum delay between transient Schema Registry fetch retries.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF",
+        value_parser = parse::positive_time
+    )]
+    schema_fetch_retry_max_backoff: Option<Time>,
     #[arg(long, default_value = "orders")]
     input_topic: String,
     #[arg(long, default_value = "order-counts")]
@@ -367,9 +382,21 @@ fn effective_streams_state_store_cache_max_bytes(
     )
 }
 
+fn schema_fetch_retry_policy(cli: &Cli) -> std::io::Result<SchemaFetchRetryPolicy> {
+    let defaults = SchemaFetchRetryPolicy::default();
+    SchemaFetchRetryPolicy::new(
+        cli.schema_fetch_retry_initial_backoff
+            .unwrap_or_else(|| defaults.initial_backoff()),
+        cli.schema_fetch_retry_max_backoff
+            .unwrap_or_else(|| defaults.max_backoff()),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+}
+
 #[tokio::main]
 async fn main() -> Result<(), BoxError> {
     let cli = Cli::parse();
+    let schema_fetch_retry_policy = schema_fetch_retry_policy(&cli)?;
     let consumer_leave_group_timeout = effective_consumer_leave_group_timeout(&cli)?;
     let consumer_subscription_metadata_refresh_interval =
         effective_consumer_subscription_metadata_refresh_interval(&cli)?;
@@ -403,10 +430,11 @@ async fn main() -> Result<(), BoxError> {
     .await?;
 
     match cli.role {
-        Role::Produce => run_produce(&cli, &metrics).await?,
+        Role::Produce => run_produce(&cli, &metrics, schema_fetch_retry_policy).await?,
         Role::Stream => {
             run_stream(
                 &cli,
+                schema_fetch_retry_policy,
                 streams_broker_dns_timeout,
                 streams_poll_interval,
                 streams_commit_interval,
@@ -422,6 +450,7 @@ async fn main() -> Result<(), BoxError> {
             run_consume(
                 &cli,
                 &metrics,
+                schema_fetch_retry_policy,
                 consumer_leave_group_timeout,
                 consumer_subscription_metadata_refresh_interval,
             )
@@ -434,10 +463,17 @@ async fn main() -> Result<(), BoxError> {
 
 /// Build the protobuf `Order` value serde and warm the registry subject for
 /// `topic`. Shared by the producer and the traced consumer.
-async fn order_serde(cli: &Cli, topic: &str) -> Result<OrderSerde, BoxError> {
+async fn order_serde(
+    cli: &Cli,
+    topic: &str,
+    fetch_retry_policy: SchemaFetchRetryPolicy,
+) -> Result<OrderSerde, BoxError> {
     let cache = SchemaCache::new(
         RegistryClient::new(cli.registry.clone()),
-        CacheConfig::default(),
+        CacheConfig {
+            fetch_retry_policy,
+            ..CacheConfig::default()
+        },
     );
     set_default_registry(Arc::clone(&cache));
     let serde: OrderSerde = SchemaSerde::new(ProtobufSerde::<Order>::value(&cache));
@@ -449,8 +485,12 @@ async fn order_serde(cli: &Cli, topic: &str) -> Result<OrderSerde, BoxError> {
 // NOT `#[tracing::instrument]`: each `produce_order` span below must be a trace
 // ROOT (one distributed trace per order) rather than a child of a single
 // process-lifetime span.
-async fn run_produce(cli: &Cli, metrics: &DemoMetrics) -> Result<(), BoxError> {
-    let serde = order_serde(cli, &cli.input_topic).await?;
+async fn run_produce(
+    cli: &Cli,
+    metrics: &DemoMetrics,
+    schema_fetch_retry_policy: SchemaFetchRetryPolicy,
+) -> Result<(), BoxError> {
+    let serde = order_serde(cli, &cli.input_topic, schema_fetch_retry_policy).await?;
 
     let producer = Arc::new(
         Producer::builder()
@@ -556,6 +596,7 @@ async fn run_produce(cli: &Cli, metrics: &DemoMetrics) -> Result<(), BoxError> {
 #[allow(clippy::too_many_arguments)]
 async fn run_stream(
     cli: &Cli,
+    schema_fetch_retry_policy: SchemaFetchRetryPolicy,
     broker_dns_timeout: ClientDnsTimeout,
     streams_poll_interval: StreamsPollInterval,
     streams_commit_interval: StreamsCommitInterval,
@@ -569,6 +610,10 @@ async fn run_stream(
         .bootstrap(cli.bootstrap.clone())
         .application_id("orders-analytics")
         .schema_registry(cli.registry.clone())
+        .cache_config(CacheConfig {
+            fetch_retry_policy: schema_fetch_retry_policy,
+            ..CacheConfig::default()
+        })
         .broker_dns_timeout(broker_dns_timeout)
         .poll_interval(streams_poll_interval)
         .commit_interval(streams_commit_interval)
@@ -600,10 +645,11 @@ async fn run_stream(
 async fn run_consume(
     cli: &Cli,
     metrics: &DemoMetrics,
+    schema_fetch_retry_policy: SchemaFetchRetryPolicy,
     consumer_leave_group_timeout: ConsumerLeaveGroupTimeout,
     consumer_subscription_metadata_refresh_interval: ConsumerSubscriptionMetadataRefreshInterval,
 ) -> Result<(), BoxError> {
-    let serde = order_serde(cli, &cli.input_topic).await?;
+    let serde = order_serde(cli, &cli.input_topic, schema_fetch_retry_policy).await?;
 
     let mut consumer = Consumer::builder()
         .bootstrap(cli.bootstrap.clone())
@@ -749,6 +795,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn schema_fetch_retry_policy_uses_defaults_and_valid_explicit_bounds() {
+        let defaults = Cli::try_parse_from(["observability-demo-app", "--role", "produce"])
+            .expect("default CLI");
+        let defaults = schema_fetch_retry_policy(&defaults).expect("default policy");
+        assert_eq!(defaults.initial_backoff(), millis(10));
+        assert_eq!(defaults.max_backoff(), secs(1));
+
+        let explicit = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "consume",
+            "--schema-fetch-retry-initial-backoff",
+            "37ms",
+            "--schema-fetch-retry-max-backoff",
+            "91ms",
+        ])
+        .expect("explicit CLI");
+        let explicit = schema_fetch_retry_policy(&explicit).expect("explicit policy");
+        assert_eq!(explicit.initial_backoff(), millis(37));
+        assert_eq!(explicit.max_backoff(), millis(91));
+    }
+
+    #[test]
+    fn schema_fetch_retry_policy_accepts_equal_bounds() {
+        let cli = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "stream",
+            "--schema-fetch-retry-initial-backoff",
+            "37ms",
+            "--schema-fetch-retry-max-backoff",
+            "37ms",
+        ])
+        .expect("equal CLI bounds");
+
+        let policy = schema_fetch_retry_policy(&cli).expect("equal retry bounds are valid");
+        assert_eq!(policy.initial_backoff(), policy.max_backoff());
+    }
+
+    #[test]
     fn consumer_subscription_metadata_refresh_uses_default_and_override() {
         let defaults = Cli::try_parse_from(["observability-demo-app", "--role", "consume"])
             .expect("default CLI");
@@ -781,6 +867,8 @@ mod tests {
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
             registry: "http://127.0.0.1:8081".to_owned(),
+            schema_fetch_retry_initial_backoff: None,
+            schema_fetch_retry_max_backoff: None,
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
@@ -844,6 +932,8 @@ mod tests {
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
             registry: "http://127.0.0.1:8081".to_owned(),
+            schema_fetch_retry_initial_backoff: None,
+            schema_fetch_retry_max_backoff: None,
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
@@ -916,6 +1006,8 @@ mod tests {
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
             registry: "http://127.0.0.1:8081".to_owned(),
+            schema_fetch_retry_initial_backoff: None,
+            schema_fetch_retry_max_backoff: None,
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
@@ -991,6 +1083,8 @@ mod tests {
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
             registry: "http://127.0.0.1:8081".to_owned(),
+            schema_fetch_retry_initial_backoff: None,
+            schema_fetch_retry_max_backoff: None,
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
@@ -1028,6 +1122,8 @@ mod tests {
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
             registry: "http://127.0.0.1:8081".to_owned(),
+            schema_fetch_retry_initial_backoff: None,
+            schema_fetch_retry_max_backoff: None,
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
             orders_per_sec: 50,
