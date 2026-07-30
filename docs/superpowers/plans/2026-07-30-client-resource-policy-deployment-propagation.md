@@ -252,18 +252,18 @@ feat(traces): expose client resource policy
 
 ### Task 10: Audit Deployment Ownership and Verify
 
-- [ ] Re-run:
+- [x] Re-run:
 
 ```bash
 rg -n 'Client::builder\(|Producer::builder\(|ConnectionOptions \{|IsolatedFetch \{' \
   crates --glob '*.rs'
 ```
 
-- [ ] Every production hit must now be:
+- [x] Every production hit must now be:
   - fed by a deployed process's typed policy;
   - a CRD rendering path deferred to the final plan; or
   - fixed protocol/test behavior documented in the audit.
-- [ ] Update `docs/configuration-audit.md` with exact CLI/environment names and
+- [x] Update `docs/configuration-audit.md` with exact CLI/environment names and
   remaining CRD-only work.
 - [ ] Run:
 

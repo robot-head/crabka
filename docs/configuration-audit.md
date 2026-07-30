@@ -5845,3 +5845,69 @@ The exact scanner remains at 21 rows. The all-target gates passed 120 `pprof`
 tests and 244 runnable `profiles` tests; four Docker-only differential tests
 remain explicitly ignored. Strict workspace all-target Clippy, nightly
 formatting, and diff hygiene pass.
+
+## Kafka Client Queue and Frame Deployment Policy
+
+Every deployed process that owns a Kafka client now exposes one shared
+dispatch-queue capacity and frame maximum. The unchanged defaults are `64`
+requests and `100MiB`. Queue capacity is validated as positive, and frame
+maximum is a positive whole-byte UOM value no greater than the fixed `100MiB`
+client-core security ceiling. The ceiling itself is not configurable.
+
+The exact standalone surfaces are:
+
+| Process | CLI flags | Environment |
+|---|---|---|
+| bench-driver | `--client-dispatch-queue-capacity`, `--client-frame-max` | `BENCH_CLIENT_DISPATCH_QUEUE_CAPACITY`, `BENCH_CLIENT_FRAME_MAX` |
+| broker | `--client-dispatch-queue-capacity`, `--client-frame-max` | `CRABKA_BROKER_CLIENT_DISPATCH_QUEUE_CAPACITY`, `CRABKA_BROKER_CLIENT_FRAME_MAX` |
+| gres and gres-loadtest | `--client-dispatch-queue-capacity`, `--client-frame-max` | `CRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY`, `CRABKA_GRES_CLIENT_FRAME_MAX` |
+| grpc-gateway | `--client-dispatch-queue-capacity`, `--client-frame-max` | `CRABKA_GRPC_GATEWAY_CLIENT_DISPATCH_QUEUE_CAPACITY`, `CRABKA_GRPC_GATEWAY_CLIENT_FRAME_MAX` |
+| metrics | `--client-dispatch-queue-capacity`, `--client-frame-max` | `CRABKA_METRICS_CLIENT_DISPATCH_QUEUE_CAPACITY`, `CRABKA_METRICS_CLIENT_FRAME_MAX` |
+| metrics-service | `--client-dispatch-queue-capacity`, `--client-frame-max` | `CRABKA_METRICS_SERVICE_CLIENT_DISPATCH_QUEUE_CAPACITY`, `CRABKA_METRICS_SERVICE_CLIENT_FRAME_MAX` |
+| observability | `--client-dispatch-queue-capacity`, `--client-frame-max` | `CRABKA_OBSERVABILITY_CLIENT_DISPATCH_QUEUE_CAPACITY`, `CRABKA_OBSERVABILITY_CLIENT_FRAME_MAX` |
+| observability-demo-app | `--client-dispatch-queue-capacity`, `--client-frame-max` | `CRABKA_DEMO_CLIENT_DISPATCH_QUEUE_CAPACITY`, `CRABKA_DEMO_CLIENT_FRAME_MAX` |
+| operator | `--client-dispatch-queue-capacity`, `--client-frame-max` | `OPERATOR_CLIENT_DISPATCH_QUEUE_CAPACITY`, `OPERATOR_CLIENT_FRAME_MAX` |
+| profiles | `--client-dispatch-queue-capacity`, `--client-frame-max` | `CRABKA_PROFILES_CLIENT_DISPATCH_QUEUE_CAPACITY`, `CRABKA_PROFILES_CLIENT_FRAME_MAX` |
+| rebalancer | `--client-dispatch-queue-capacity`, `--client-frame-max` | `CRABKA_REBALANCER_CLIENT_DISPATCH_QUEUE_CAPACITY`, `CRABKA_REBALANCER_CLIENT_FRAME_MAX` |
+| replicator | `--client-dispatch-queue-capacity`, `--client-frame-max` | `CRABKA_REPLICATOR_CLIENT_DISPATCH_QUEUE_CAPACITY`, `CRABKA_REPLICATOR_CLIENT_FRAME_MAX` |
+| schema-registry | `--client-dispatch-queue-capacity`, `--client-frame-max` | `SCHEMA_REGISTRY_CLIENT_DISPATCH_QUEUE_CAPACITY`, `SCHEMA_REGISTRY_CLIENT_FRAME_MAX` |
+| traces | `--client-dispatch-queue-capacity`, `--client-frame-max` | `CRABKA_TRACES_CLIENT_DISPATCH_QUEUE_CAPACITY`, `CRABKA_TRACES_CLIENT_FRAME_MAX` |
+
+The approved isolated-fetch minima are also whole-byte UOM values. Gres owns
+`--fdw-fetch-min` / `CRABKA_GRES_FDW_FETCH_MIN`,
+`--wal-recovery-fetch-min` / `CRABKA_GRES_WAL_RECOVERY_FETCH_MIN`, and
+`--registry-reader-fetch-min` /
+`CRABKA_GRES_REGISTRY_READER_FETCH_MIN`. The demo stream role owns
+`--streams-fetch-min` / `CRABKA_DEMO_STREAMS_FETCH_MIN`. Their unchanged
+default is `1B`, and role-specific inputs are rejected where the selected role
+cannot consume them.
+
+One validated process policy reaches private producer, consumer, admin,
+coordinator, reconnect, retry, recovery, and WAL-tail clients. Public library
+constructors retain default-backed compatibility entry points. The remaining
+policy-free constructor hits are fixed test inputs, examples, test-only
+helpers, or the client libraries' own default builders; none is a deployed
+owner.
+
+### Remaining CRD Work
+
+The standalone inputs are complete, but operator-rendered workloads do not yet
+have equivalent CRD fields. A later CRD propagation slice must add typed,
+optional queue/frame fields and exact argument rendering to the existing
+owners:
+
+- `KafkaNodePool` for broker pods;
+- `Kafka.spec.gresRegistry` for the Gres registry process;
+- `Gres.spec.compute` for Gres compute processes, including the three
+  role-specific fetch minima;
+- `KafkaGrpcGateway` for gateway pods; and
+- `SchemaRegistry` for registry pods.
+
+Bench-driver, metrics, metrics-service, observability,
+observability-demo-app, profiles, rebalancer, replicator, and traces have no
+owning CRD in this operator. Operator's own cached admin clients intentionally
+use process configuration because one operator instance serves many clusters;
+a per-cluster policy would conflict inside that shared process.
+
+This closes deployment-process propagation only. The repository-wide
+hardcoded operational-value audit remains active.
