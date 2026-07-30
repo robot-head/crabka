@@ -18,7 +18,10 @@ use std::{
 use anyhow::{Context, Result};
 use chrono::Utc;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
-use crabka_client_core::security::{ClientSecurity, TlsConnectorConfig};
+use crabka_client_core::{
+    ClientFrameMax, ConnectionDispatchQueueCapacity,
+    security::{ClientSecurity, TlsConnectorConfig},
+};
 use crabka_client_producer::{Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_security::ListenerProtocol;
 use crabka_units::prelude::*;
@@ -251,6 +254,8 @@ impl Grid {
 /// *where* it's running.
 pub struct DriverConfig {
     pub bootstrap: String,
+    pub client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    pub client_frame_max: ClientFrameMax,
     pub topic: String,
     pub stack: Stack,
     pub namespace: String,
@@ -362,6 +367,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             grid,
             request_timeout: cfg.producer_request_timeout,
             final_drain_timeout: cfg.producer_final_drain_timeout,
+            dispatch_queue_capacity: cfg.client_dispatch_queue_capacity,
+            frame_max: cfg.client_frame_max,
         }));
     }
 
@@ -386,6 +393,8 @@ pub async fn run(scenario: Scenario, cfg: DriverConfig) -> Result<RunOutput> {
             build_retry_policy: cfg.consumer_build_retry_policy,
             poll_timeout: cfg.consumer_poll_timeout,
             poll_error_backoff: cfg.consumer_poll_error_backoff,
+            dispatch_queue_capacity: cfg.client_dispatch_queue_capacity,
+            frame_max: cfg.client_frame_max,
         }));
     }
 
@@ -701,6 +710,8 @@ fn spawn_failover(
     let namespace = cfg.namespace.clone();
     let bootstrap = cfg.bootstrap.clone();
     let topic = cfg.topic.clone();
+    let dispatch_queue_capacity = cfg.client_dispatch_queue_capacity;
+    let frame_max = cfg.client_frame_max;
     tokio::spawn(async move {
         tokio::time::sleep_until(started_at + spec.kill_after.to_std()).await;
         kill_at.store(
@@ -715,8 +726,14 @@ fn spawn_failover(
             }
         };
         let leader_id = if spec.target == "partition0_leader" {
-            match crate::failover::partition0_leader_from_metadata(&bootstrap, &topic, security)
-                .await
+            match crate::failover::partition0_leader_from_metadata(
+                &bootstrap,
+                &topic,
+                security,
+                dispatch_queue_capacity,
+                frame_max,
+            )
+            .await
             {
                 Ok(id) => Some(id),
                 Err(error) => {
@@ -806,6 +823,8 @@ struct ProducerTask {
     grid: Grid,
     request_timeout: Time,
     final_drain_timeout: Time,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
 }
 
 async fn run_producer(task: ProducerTask) -> ProducerOut {
@@ -821,12 +840,16 @@ async fn run_producer(task: ProducerTask) -> ProducerOut {
         grid,
         request_timeout,
         final_drain_timeout,
+        dispatch_queue_capacity,
+        frame_max,
     } = task;
     // Idempotence forces acks=All; turn it off whenever the scenario
     // requested something weaker.
     let enable_idempotence = matches!(scenario.acks, crate::scenario::Acks::All);
     let producer = match Producer::builder()
         .bootstrap(bootstrap.clone())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .client_id(format!("bench-producer-{idx}"))
         .acks(scenario.acks.into_producer())
         .compression(scenario.compression.into_producer())
@@ -1054,6 +1077,8 @@ struct ConsumerTask {
     build_retry_policy: ConsumerBuildRetryPolicy,
     poll_timeout: Time,
     poll_error_backoff: Time,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
 }
 
 async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
@@ -1070,6 +1095,8 @@ async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
         build_retry_policy,
         poll_timeout,
         poll_error_backoff,
+        dispatch_queue_capacity,
+        frame_max,
     } = task;
     let group_id = format!("crabka-bench-{}", scenario.name);
     let mut consumer = match build_consumer_with_retry(
@@ -1078,8 +1105,12 @@ async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
         group_id,
         &topic,
         security,
-        request_timeout,
-        build_retry_policy,
+        ConsumerBuildPolicy {
+            request_timeout,
+            retry: build_retry_policy,
+            dispatch_queue_capacity,
+            frame_max,
+        },
     )
     .await
     {
@@ -1156,29 +1187,38 @@ async fn run_consumer(task: ConsumerTask) -> ConsumerOut {
     }
 }
 
+#[derive(Clone, Copy)]
+struct ConsumerBuildPolicy {
+    request_timeout: Time,
+    retry: ConsumerBuildRetryPolicy,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
+}
+
 async fn build_consumer_with_retry(
     idx: usize,
     bootstrap: &str,
     group_id: String,
     topic: &str,
     security: Option<ClientSecurity>,
-    request_timeout: Time,
-    retry_policy: ConsumerBuildRetryPolicy,
+    policy: ConsumerBuildPolicy,
 ) -> Result<Consumer> {
     let backoff = exponential_backoff::Backoff::new(
-        retry_policy.attempts(),
-        retry_policy.initial_backoff().to_std(),
-        Some(retry_policy.max_backoff().to_std()),
+        policy.retry.attempts(),
+        policy.retry.initial_backoff().to_std(),
+        Some(policy.retry.max_backoff().to_std()),
     );
     for (attempt_idx, delay) in backoff.into_iter().enumerate() {
         let attempt = attempt_idx + 1;
         let result = Consumer::builder()
             .bootstrap(bootstrap.to_string())
+            .dispatch_queue_capacity(policy.dispatch_queue_capacity.get())
+            .frame_max(policy.frame_max.size())
             .client_id(format!("bench-consumer-{idx}"))
             .group_id(group_id.clone())
             .subscribe(vec![topic.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
-            .request_timeout(request_timeout)
+            .request_timeout(policy.request_timeout)
             // `None` → plaintext (default). `Some` → all fetch traffic for this
             // task goes over the broker's TLS listener (kTLS sendfile on crabka).
             .maybe_security(security.clone())
@@ -1219,6 +1259,8 @@ mod tests {
     fn cfg(broker_count: u32) -> DriverConfig {
         DriverConfig {
             bootstrap: "broker:9092".into(),
+            client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: ClientFrameMax::default(),
             topic: "t".into(),
             stack: Stack::Crabka,
             namespace: "default".into(),

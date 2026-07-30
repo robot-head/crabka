@@ -38,7 +38,7 @@ settings.
 
 | Process | Queue/frame environment prefix | Extra fetch minimum |
 |---|---|---|
-| bench-driver | `CRABKA_BENCH_DRIVER_` | none |
+| bench-driver | `BENCH_` | none |
 | broker | `CRABKA_BROKER_` | none |
 | gres | `CRABKA_GRES_` | `FDW_FETCH_MIN`, `WAL_RECOVERY_FETCH_MIN`, `REGISTRY_READER_FETCH_MIN` |
 | grpc-gateway | `CRABKA_GRPC_GATEWAY_` | none |
