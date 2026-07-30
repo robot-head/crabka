@@ -432,8 +432,8 @@ impl AdminClient {
             connect_timeout: secs(5),
             request_timeout: secs(30),
             client_id: "crabka-operator".to_string(),
-            dispatch_queue_capacity: Default::default(),
-            frame_max: Default::default(),
+            dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            frame_max: crabka_client_core::ClientFrameMax::default(),
             security: security.map(Box::new),
         }
     }
@@ -790,8 +790,8 @@ mod tests {
             client_id: "custom-admin".into(),
             connect_timeout: crabka_units::millis(100),
             request_timeout: crabka_units::millis(25),
-            dispatch_queue_capacity: Default::default(),
-            frame_max: Default::default(),
+            dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            frame_max: crabka_client_core::ClientFrameMax::default(),
             security: Some(Box::new(ClientSecurity {
                 protocol: ListenerProtocol::SaslPlaintext,
                 tls: None,

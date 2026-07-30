@@ -54,8 +54,7 @@ impl Client {
         let dns_timeout = ClientDnsTimeout::new(dns_timeout).map_err(ClientError::InvalidConfig)?;
         let dispatch_queue_capacity = ConnectionDispatchQueueCapacity::new(dispatch_queue_capacity)
             .map_err(ClientError::InvalidConfig)?;
-        let frame_max =
-            ClientFrameMax::try_from(frame_max).map_err(ClientError::InvalidConfig)?;
+        let frame_max = ClientFrameMax::try_from(frame_max).map_err(ClientError::InvalidConfig)?;
         let options = ConnectionOptions {
             client_id,
             dns_timeout,

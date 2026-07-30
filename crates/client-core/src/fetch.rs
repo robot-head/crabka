@@ -68,9 +68,7 @@ impl TryFrom<ByteSize> for FetchMinBytes {
             || bytes.fract() != 0.0
             || !(1.0..=f64::from(i32::MAX)).contains(&bytes)
         {
-            return Err(
-                "fetch min must be a positive whole-byte value that fits i32".to_owned(),
-            );
+            return Err("fetch min must be a positive whole-byte value that fits i32".to_owned());
         }
         Self::new(value.bytes_i32())
     }
@@ -422,10 +420,7 @@ mod tests {
         },
         records::{Attributes, Record, RecordBatch, RecordsPayload},
     };
-    use crabka_units::{
-        ByteSize, bytes, kibibytes, millis,
-        convert::ByteSizeExt as _,
-    };
+    use crabka_units::{ByteSize, bytes, convert::ByteSizeExt as _, kibibytes, millis};
 
     use super::*;
 

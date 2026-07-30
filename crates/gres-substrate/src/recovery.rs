@@ -934,8 +934,8 @@ fn wal_admin_connection_options(config: &LiveRecoveryConfig) -> ConnectionOption
         client_id: config.client_id(),
         connect_timeout: config.wal_admin_policy.connect_timeout(),
         request_timeout: config.wal_admin_policy.request_timeout(),
-        dispatch_queue_capacity: Default::default(),
-        frame_max: Default::default(),
+        dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        frame_max: crabka_client_core::ClientFrameMax::default(),
         security: config.security.clone().map(Box::new),
     }
 }
@@ -1041,8 +1041,8 @@ fn wal_connection_options(
         client_id: client_id.to_string(),
         connect_timeout: read_policy.connect_timeout(),
         request_timeout: read_policy.request_timeout(),
-        dispatch_queue_capacity: Default::default(),
-        frame_max: Default::default(),
+        dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        frame_max: crabka_client_core::ClientFrameMax::default(),
         security: security.map(Box::new),
     }
 }

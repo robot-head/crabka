@@ -35,6 +35,12 @@ use crate::ClientFrameMax;
 const API_KEY_SASL_HANDSHAKE: i16 = 17;
 const API_KEY_SASL_AUTHENTICATE: i16 = 36;
 
+#[derive(Clone, Copy)]
+struct SaslPolicy<'a> {
+    client_id: &'a str,
+    frame_max: ClientFrameMax,
+}
+
 /// Maximum receive size advertised in the client's RFC 4752 security-layer
 /// choice. Auth-only QOP means no data is wrapped post-handshake, so the value
 /// only needs to be a sane non-zero buffer; mirror the server's offer size.
@@ -108,50 +114,28 @@ pub async fn outbound_sasl<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
 {
+    let policy = SaslPolicy {
+        client_id,
+        frame_max,
+    };
     // Step 1: ApiVersions. The JVM client always sends this first; we
     //         skip it for simplicity. The broker's pre-auth allowlist
     //         tolerates skipping ApiVersions.
     // Step 2: SaslHandshake with the chosen mechanism — establishes
     //         which SASL flow the broker will run.
     let mut corr_id: i32 = 1;
-    send_sasl_handshake(
-        stream,
-        creds.mechanism(),
-        &mut corr_id,
-        client_id,
-        frame_max,
-    )
-    .await?;
+    send_sasl_handshake(stream, creds.mechanism(), &mut corr_id, policy).await?;
     // Step 3: SaslAuthenticate (one round for PLAIN, two for SCRAM, three
     //         for GSSAPI).
     match creds {
         SaslCredentials::Plain { username, password } => {
-            send_plain_authenticate(
-                stream,
-                username,
-                password,
-                &mut corr_id,
-                client_id,
-                frame_max,
-            )
-            .await
+            send_plain_authenticate(stream, username, password, &mut corr_id, policy).await
         }
         SaslCredentials::Scram {
             mechanism,
             username,
             password,
-        } => {
-            run_scram_client(
-                stream,
-                username,
-                password,
-                *mechanism,
-                &mut corr_id,
-                client_id,
-                frame_max,
-            )
-            .await
-        }
+        } => run_scram_client(stream, username, password, *mechanism, &mut corr_id, policy).await,
         SaslCredentials::Gssapi {
             keytab_path,
             client_principal,
@@ -162,12 +146,10 @@ where
                 stream,
                 keytab_path,
                 client_principal,
-                service_name,
-                server_name,
+                (service_name, server_name),
                 kdc_url,
                 &mut corr_id,
-                client_id,
-                frame_max,
+                policy,
             )
             .await
         }
@@ -184,8 +166,7 @@ async fn send_sasl_handshake<S>(
     stream: &mut S,
     mechanism: SaslMechanism,
     corr_id: &mut i32,
-    client_id: &str,
-    frame_max: ClientFrameMax,
+    policy: SaslPolicy<'_>,
 ) -> Result<(), OutboundSaslError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
@@ -204,8 +185,7 @@ where
         *corr_id,
         false,
         &body,
-        client_id,
-        frame_max,
+        policy,
     )
     .await?;
     *corr_id += 1;
@@ -229,8 +209,7 @@ async fn send_plain_authenticate<S>(
     user: &str,
     pass: &str,
     corr_id: &mut i32,
-    client_id: &str,
-    frame_max: ClientFrameMax,
+    policy: SaslPolicy<'_>,
 ) -> Result<(), OutboundSaslError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
@@ -241,8 +220,7 @@ where
     payload.push(0);
     payload.extend_from_slice(pass.as_bytes());
 
-    let resp =
-        send_sasl_authenticate(stream, payload, corr_id, client_id, frame_max).await?;
+    let resp = send_sasl_authenticate(stream, payload, corr_id, policy).await?;
     if resp.error_code != 0 {
         return Err(OutboundSaslError::Sasl(format!(
             "SaslAuthenticate(PLAIN) error_code={} error_message={:?}",
@@ -262,8 +240,7 @@ async fn run_scram_client<S>(
     pass: &str,
     mechanism: SaslMechanism,
     corr_id: &mut i32,
-    client_id: &str,
-    frame_max: ClientFrameMax,
+    policy: SaslPolicy<'_>,
 ) -> Result<(), OutboundSaslError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
@@ -274,8 +251,7 @@ where
     let (client_first, exch) = exch
         .client_first()
         .map_err(|e| OutboundSaslError::Sasl(format!("scram client_first: {e:?}")))?;
-    let resp1 =
-        send_sasl_authenticate(stream, client_first, corr_id, client_id, frame_max).await?;
+    let resp1 = send_sasl_authenticate(stream, client_first, corr_id, policy).await?;
     if resp1.error_code != 0 {
         return Err(OutboundSaslError::Sasl(format!(
             "SaslAuthenticate(SCRAM round 1) error_code={} error_message={:?}",
@@ -288,8 +264,7 @@ where
     let (client_final, exch) = exch
         .step(&server_first)
         .map_err(|e| OutboundSaslError::Sasl(format!("scram client step: {e:?}")))?;
-    let resp2 =
-        send_sasl_authenticate(stream, client_final, corr_id, client_id, frame_max).await?;
+    let resp2 = send_sasl_authenticate(stream, client_final, corr_id, policy).await?;
     if resp2.error_code != 0 {
         return Err(OutboundSaslError::Sasl(format!(
             "SaslAuthenticate(SCRAM round 2) error_code={} error_message={:?}",
@@ -323,12 +298,10 @@ async fn run_gssapi_client<S>(
     stream: &mut S,
     keytab_path: &std::path::Path,
     client_principal: &str,
-    service_name: &str,
-    server_name: &str,
+    service_and_server_name: (&str, &str),
     kdc_url: &str,
     corr_id: &mut i32,
-    client_id: &str,
-    frame_max: ClientFrameMax,
+    policy: SaslPolicy<'_>,
 ) -> Result<(), OutboundSaslError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
@@ -338,6 +311,7 @@ where
         provider::SspiInitiator,
     };
 
+    let (service_name, server_name) = service_and_server_name;
     let target_spn = format!("{service_name}/{server_name}");
     let keytab = keytab_path.to_string_lossy();
     let initiator = SspiInitiator::new(&keytab, client_principal, &target_spn, kdc_url)
@@ -351,8 +325,7 @@ where
     loop {
         match step {
             ClientStep::Token(token, next) => {
-                let resp =
-                    send_sasl_authenticate(stream, token, corr_id, client_id, frame_max).await?;
+                let resp = send_sasl_authenticate(stream, token, corr_id, policy).await?;
                 if resp.error_code != 0 {
                     return Err(OutboundSaslError::Sasl(format!(
                         "SaslAuthenticate(GSSAPI) error_code={} error_message={:?}",
@@ -364,8 +337,7 @@ where
                     .map_err(|e| OutboundSaslError::Sasl(format!("GSSAPI step failed: {e}")))?;
             }
             ClientStep::Final(token) => {
-                let resp =
-                    send_sasl_authenticate(stream, token, corr_id, client_id, frame_max).await?;
+                let resp = send_sasl_authenticate(stream, token, corr_id, policy).await?;
                 if resp.error_code != 0 {
                     return Err(OutboundSaslError::Sasl(format!(
                         "SaslAuthenticate(GSSAPI) error_code={} error_message={:?}",
@@ -384,8 +356,7 @@ async fn send_sasl_authenticate<S>(
     stream: &mut S,
     auth_bytes: Vec<u8>,
     corr_id: &mut i32,
-    client_id: &str,
-    frame_max: ClientFrameMax,
+    policy: SaslPolicy<'_>,
 ) -> Result<SaslAuthenticateResponse, OutboundSaslError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
@@ -404,8 +375,7 @@ where
         *corr_id,
         true,
         &body,
-        client_id,
-        frame_max,
+        policy,
     )
     .await?;
     *corr_id += 1;
@@ -432,12 +402,15 @@ async fn round_trip<S>(
     corr_id: i32,
     flexible: bool,
     body: &[u8],
-    client_id: &str,
-    frame_max: ClientFrameMax,
+    policy: SaslPolicy<'_>,
 ) -> Result<Vec<u8>, OutboundSaslError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + ?Sized,
 {
+    let SaslPolicy {
+        client_id,
+        frame_max,
+    } = policy;
     let mut frame = BytesMut::with_capacity(16 + body.len());
     // RequestHeader: api_key + version + corr_id + client_id (i16 NULLABLE_STRING).
     frame.put_i16(api_key.0);
@@ -611,8 +584,8 @@ mod tests {
             TEST_CLIENT_ID,
             ClientFrameMax::default(),
         )
-            .await
-            .expect("PLAIN outbound handshake completes");
+        .await
+        .expect("PLAIN outbound handshake completes");
         timeout(Duration::from_secs(1), server_task)
             .await
             .expect("server observed both SASL client frames")
@@ -644,8 +617,10 @@ mod tests {
             &mut client,
             b"first".to_vec(),
             &mut corr_id,
-            TEST_CLIENT_ID,
-            ClientFrameMax::default(),
+            SaslPolicy {
+                client_id: TEST_CLIENT_ID,
+                frame_max: ClientFrameMax::default(),
+            },
         )
         .await
         .unwrap();
@@ -654,8 +629,10 @@ mod tests {
             &mut client,
             b"second".to_vec(),
             &mut corr_id,
-            TEST_CLIENT_ID,
-            ClientFrameMax::default(),
+            SaslPolicy {
+                client_id: TEST_CLIENT_ID,
+                frame_max: ClientFrameMax::default(),
+            },
         )
         .await
         .unwrap();
@@ -713,8 +690,8 @@ mod tests {
             TEST_CLIENT_ID,
             ClientFrameMax::default(),
         )
-            .await
-            .unwrap_err();
+        .await
+        .unwrap_err();
         assert!(matches!(err, OutboundSaslError::Sasl(msg) if msg.contains("round 1")));
         timeout(Duration::from_secs(1), server_task)
             .await
@@ -788,8 +765,8 @@ mod tests {
             TEST_CLIENT_ID,
             ClientFrameMax::default(),
         )
-            .await
-            .unwrap_err();
+        .await
+        .unwrap_err();
         assert!(matches!(err, OutboundSaslError::Sasl(msg) if msg.contains("round 2")));
         timeout(Duration::from_secs(1), server_task)
             .await
@@ -816,8 +793,10 @@ mod tests {
             99,
             false,
             &[],
-            TEST_CLIENT_ID,
-            ClientFrameMax::default(),
+            SaslPolicy {
+                client_id: TEST_CLIENT_ID,
+                frame_max: ClientFrameMax::default(),
+            },
         )
         .await
         .unwrap_err();
@@ -844,8 +823,10 @@ mod tests {
             99,
             true,
             &[],
-            TEST_CLIENT_ID,
-            ClientFrameMax::default(),
+            SaslPolicy {
+                client_id: TEST_CLIENT_ID,
+                frame_max: ClientFrameMax::default(),
+            },
         )
         .await
         .unwrap_err();
@@ -871,8 +852,10 @@ mod tests {
             99,
             false,
             &[],
-            TEST_CLIENT_ID,
-            crate::ClientFrameMax::default(),
+            SaslPolicy {
+                client_id: TEST_CLIENT_ID,
+                frame_max: crate::ClientFrameMax::default(),
+            },
         )
         .await
         .unwrap();
@@ -889,8 +872,10 @@ mod tests {
             99,
             false,
             &[0],
-            "",
-            crate::ClientFrameMax::try_from(crabka_units::bytes(10)).unwrap(),
+            SaslPolicy {
+                client_id: "",
+                frame_max: crate::ClientFrameMax::try_from(crabka_units::bytes(10)).unwrap(),
+            },
         )
         .await
         .unwrap_err();
@@ -917,8 +902,10 @@ mod tests {
             99,
             false,
             &[],
-            "",
-            crate::ClientFrameMax::try_from(crabka_units::bytes(16)).unwrap(),
+            SaslPolicy {
+                client_id: "",
+                frame_max: crate::ClientFrameMax::try_from(crabka_units::bytes(16)).unwrap(),
+            },
         )
         .await
         .unwrap_err();

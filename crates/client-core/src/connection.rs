@@ -339,8 +339,8 @@ impl Connection {
                 &options.client_id,
                 options.frame_max,
             )
-                .await
-                .map_err(|e| ClientError::Io(std::io::Error::other(e.to_string())))?;
+            .await
+            .map_err(|e| ClientError::Io(std::io::Error::other(e.to_string())))?;
         }
 
         Self::from_stream(stream, options).await
@@ -368,14 +368,13 @@ impl Connection {
         let shutdown = CancellationToken::new();
         let pending: Pending = Arc::new(DashMap::new());
 
-        let (reader_handle, writer_handle) =
-            spawn_io_tasks(
-                stream,
-                writer_rx,
-                shutdown.clone(),
-                Arc::clone(&pending),
-                options.frame_max,
-            );
+        let (reader_handle, writer_handle) = spawn_io_tasks(
+            stream,
+            writer_rx,
+            shutdown.clone(),
+            Arc::clone(&pending),
+            options.frame_max,
+        );
 
         let mut conn = Self {
             inner: Arc::new(ConnectionInner {
@@ -592,8 +591,7 @@ fn spawn_io_tasks(
     use tokio_util::codec::{FramedRead, FramedWrite};
 
     let (read_half, write_half) = tokio::io::split(stream);
-    let mut framed_read =
-        FramedRead::new(read_half, crate::transport::codec_with_max(frame_max));
+    let mut framed_read = FramedRead::new(read_half, crate::transport::codec_with_max(frame_max));
     let mut framed_write =
         FramedWrite::new(write_half, crate::transport::codec_with_max(frame_max));
 
@@ -751,8 +749,7 @@ async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, Client
 mod tests {
     use assert2::assert;
     use crabka_units::{
-        ByteSize, bytes, kibibytes, mebibytes, micros, millis,
-        convert::ByteSizeExt as _,
+        ByteSize, bytes, convert::ByteSizeExt as _, kibibytes, mebibytes, micros, millis,
     };
 
     use super::*;
