@@ -3248,6 +3248,7 @@ dependencies = [
  "clap",
  "crabka-blockstore",
  "crabka-client-consumer",
+ "crabka-client-core",
  "crabka-client-producer",
  "crabka-ids",
  "crabka-metrics",
