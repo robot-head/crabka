@@ -11,7 +11,9 @@ use std::{
 };
 
 use crabka_client_consumer::ConsumerGroupMetadata;
-use crabka_client_core::{Client, security::ClientSecurity};
+use crabka_client_core::{
+    Client, ClientFrameMax, ConnectionDispatchQueueCapacity, security::ClientSecurity,
+};
 use crabka_protocol::owned::{
     add_offsets_to_txn_request::AddOffsetsToTxnRequest,
     add_partitions_to_txn_request::{AddPartitionsToTxnRequest, AddPartitionsToTxnTransaction},
@@ -105,6 +107,8 @@ pub struct Producer {
     /// connections would be plaintext/unauthenticated and a secured listener
     /// drops them, failing the transactional flow with `Client(Disconnected)`.
     pub(crate) security: Option<ClientSecurity>,
+    pub(crate) dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    pub(crate) frame_max: ClientFrameMax,
     pub(crate) identity: ProducerIdentity,
     // The following config knobs are also copied into `SenderConfig` at
     // construction time. They live on `Producer` for diagnostic
@@ -468,6 +472,8 @@ impl Producer {
             .bootstrap(coord_addr)
             .client_id(self.client_id.clone())
             .maybe_security(self.security.clone())
+            .dispatch_queue_capacity(self.dispatch_queue_capacity.get())
+            .frame_max(self.frame_max.size())
             .request_timeout(self.request_timeout)
             .build()
             .await?;
@@ -617,6 +623,8 @@ impl Producer {
             .bootstrap(group_addr)
             .client_id(self.client_id.clone())
             .maybe_security(self.security.clone())
+            .dispatch_queue_capacity(self.dispatch_queue_capacity.get())
+            .frame_max(self.frame_max.size())
             .build()
             .await?;
 

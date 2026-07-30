@@ -9,10 +9,18 @@ use std::{
     time::Duration,
 };
 
-use crabka_client_core::{Client, ClientDnsTimeout, ClientError, DEFAULT_CLIENT_DNS_TIMEOUT};
+use crabka_client_core::{
+    Client, ClientDnsTimeout, ClientError, ClientFrameMax, ConnectionDispatchQueueCapacity,
+    DEFAULT_CLIENT_DNS_TIMEOUT, DEFAULT_CLIENT_FRAME_MAX,
+    DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+};
 use crabka_protocol::owned::{
     init_producer_id_request::InitProducerIdRequest,
     init_producer_id_response::InitProducerIdResponse,
+};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{StdDurationExt as _, TimeExt as _},
 };
 use dashmap::DashMap;
 use refined_type::rule::{GreaterI32, GreaterUsize, MinMaxU128, MinMaxUsize};
@@ -382,16 +390,16 @@ fn producer_identity_from_init(init: &InitProducerIdResponse) -> Result<(i64, i1
 pub(crate) async fn init_producer_id_with_retry(
     client: &Client,
     request: InitProducerIdRequest,
-    retry_timeout: Duration,
-    initial_backoff: Duration,
-    max_backoff: Duration,
+    retry_timeout: Time,
+    initial_backoff: Time,
+    max_backoff: Time,
 ) -> Result<InitProducerIdResponse, ProducerError> {
     let deadline = tokio::time::Instant::now()
-        .checked_add(retry_timeout)
+        .checked_add(retry_timeout.to_std())
         .ok_or_else(|| {
             ProducerError::InvalidConfig("producer-ID retry timeout is too large".to_owned())
         })?;
-    let mut backoff = initial_backoff;
+    let mut backoff = initial_backoff.to_std();
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         let response = tokio::time::timeout(remaining, client.send(request.clone()))
@@ -412,7 +420,7 @@ pub(crate) async fn init_producer_id_with_retry(
         if tokio::time::Instant::now() >= deadline {
             return last_outcome.map_err(ProducerError::Client);
         }
-        backoff = next_backoff(backoff, max_backoff);
+        backoff = next_backoff(backoff, max_backoff.to_std());
     }
 }
 
@@ -448,6 +456,9 @@ impl Producer {
         #[builder(default = DEFAULT_PRODUCER_LINGER)] linger: Duration,
         #[builder(default = DEFAULT_PRODUCER_BATCH_BYTES)] batch_size: usize,
         #[builder(default = DEFAULT_CLIENT_DNS_TIMEOUT)] dns_timeout: Time,
+        #[builder(default = DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY)]
+        dispatch_queue_capacity: usize,
+        #[builder(default = DEFAULT_CLIENT_FRAME_MAX)] frame_max: ByteSize,
         #[builder(default = DEFAULT_PRODUCER_REQUEST_TIMEOUT)] request_timeout: Duration,
         #[builder(default = DEFAULT_PRODUCER_FLUSH_TIMEOUT)] flush_timeout: Duration,
         #[builder(default = DEFAULT_PRODUCER_RETRIES)] retries: i32,
@@ -462,6 +473,10 @@ impl Producer {
     ) -> Result<Self, ProducerError> {
         let dns_timeout =
             ClientDnsTimeout::new(dns_timeout).map_err(ProducerError::InvalidConfig)?;
+        let dispatch_queue_capacity = ConnectionDispatchQueueCapacity::new(dispatch_queue_capacity)
+            .map_err(ProducerError::InvalidConfig)?;
+        let frame_max =
+            ClientFrameMax::try_from(frame_max).map_err(ProducerError::InvalidConfig)?;
         let throughput_policy = ProducerThroughputPolicy::new(
             compression,
             linger,
@@ -470,7 +485,7 @@ impl Producer {
         )
         .map_err(ProducerError::InvalidConfig)?;
         let compression = throughput_policy.compression();
-        let linger = throughput_policy.linger();
+        let linger = throughput_policy.linger().as_time();
         let batch_size = throughput_policy.batch_bytes();
         let max_in_flight_per_connection = throughput_policy.max_in_flight();
 
@@ -484,7 +499,9 @@ impl Producer {
             transaction_timeout,
         )
         .map_err(ProducerError::InvalidConfig)?;
-        let request_timeout = retry_policy.request_timeout();
+        // The validated retry policy derives `Eq`, so it holds `Duration`s;
+        // the domain past this point holds quantities.
+        let request_timeout = retry_policy.request_timeout().as_time();
         let retries = retry_policy.retries();
         let retry_backoff = retry_policy.retry_backoff();
         let routing_retry_budget = retry_policy.routing_retry_budget();
@@ -502,6 +519,8 @@ impl Producer {
             .bootstrap(bootstrap)
             .client_id(client_id.clone())
             .dns_timeout(dns_timeout.time())
+            .dispatch_queue_capacity(dispatch_queue_capacity.get())
+            .frame_max(frame_max.size())
             .connect_timeout(request_timeout)
             .request_timeout(request_timeout)
             .maybe_security(security.clone())
@@ -522,9 +541,9 @@ impl Producer {
             let init = init_producer_id_with_retry(
                 &client,
                 build_init_producer_id_request(),
-                retry_policy.init_retry_timeout(),
-                retry_backoff,
-                retry_policy.init_max_backoff(),
+                retry_policy.init_retry_timeout().as_time(),
+                retry_backoff.as_time(),
+                retry_policy.init_max_backoff().as_time(),
             )
             .await?;
             producer_identity_from_init(&init)?
@@ -558,8 +577,8 @@ impl Producer {
             linger,
             request_timeout_ms: retry_policy.request_timeout_ms(),
             retries,
-            retry_backoff,
-            routing_retry_budget,
+            retry_backoff: retry_backoff.as_time(),
+            routing_retry_budget: routing_retry_budget.as_time(),
             max_in_flight: max_in_flight_per_connection,
             metadata_cache: Arc::clone(&metadata_cache),
             partition_leaders: Arc::clone(&partition_leaders),
@@ -582,6 +601,8 @@ impl Producer {
             client,
             client_id,
             security,
+            dispatch_queue_capacity,
+            frame_max,
             identity: ProducerIdentity {
                 id: producer_id,
                 epoch: producer_epoch,
@@ -606,9 +627,9 @@ impl Producer {
             sender_handle: Some(sender_handle),
             transactional_id,
             transaction_timeout_ms: retry_policy.transaction_timeout_ms(),
-            init_retry_timeout: retry_policy.init_retry_timeout(),
-            init_retry_backoff: retry_policy.retry_backoff(),
-            init_max_backoff: retry_policy.init_max_backoff(),
+            init_retry_timeout: retry_policy.init_retry_timeout().as_time(),
+            init_retry_backoff: retry_policy.retry_backoff().as_time(),
+            init_max_backoff: retry_policy.init_max_backoff().as_time(),
             txn_state,
             txn_recovery_required,
             txn_recovery_generation,
@@ -1101,7 +1122,7 @@ mod security_arg_tests {
         assert2::assert!(matches!(
             err,
             ProducerError::Client(ClientError::Timeout(d))
-                if d == Duration::from_millis(100)
+                if d == crabka_units::millis(100)
         ));
     }
 
@@ -1168,7 +1189,7 @@ mod security_arg_tests {
         assert2::assert!(matches!(
             error,
             ProducerError::Client(ClientError::Timeout(timeout))
-                if timeout == Duration::from_millis(10)
+                if timeout == crabka_units::millis(10)
         ));
     }
 
@@ -1248,6 +1269,22 @@ mod security_arg_tests {
             .build()
             .await
             .expect("valid DNS timeout");
+        producer.close().await.expect("close producer");
+    }
+
+    #[tokio::test]
+    async fn producer_builder_carries_client_resource_policy() {
+        let producer = Producer::builder()
+            .bootstrap("127.0.0.1:1")
+            .dispatch_queue_capacity(7)
+            .frame_max(crabka_units::kibibytes(32))
+            .enable_idempotence(false)
+            .build()
+            .await
+            .expect("valid client resource policy");
+
+        assert2::assert!(producer.dispatch_queue_capacity.get() == 7);
+        assert2::assert!(producer.frame_max.size() == crabka_units::kibibytes(32));
         producer.close().await.expect("close producer");
     }
 
