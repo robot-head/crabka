@@ -3808,6 +3808,26 @@ async fn rlmm_bootstrap_backoff(
 /// bounded backoff until success or shutdown; the broker stays on the
 /// fail-closed [`crabka_remote_storage_topic::NotReadyRlmm`] placeholder
 /// while retrying.
+fn metadata_log_config(
+    config: &crate::config::KafkaRlmmConfig,
+    topic: String,
+    client_id: String,
+) -> crabka_remote_storage_topic::KafkaMetadataLogConfig {
+    crabka_remote_storage_topic::KafkaMetadataLogConfig {
+        bootstrap: config.bootstrap.clone(),
+        topic,
+        num_partitions: config.num_partitions,
+        replication: config.replication,
+        client_id,
+        security: config.security.as_deref().cloned(),
+        topic_create_timeout: config.topic_create_timeout,
+        fetch_max_wait: config.fetch_max_wait,
+        fetch_max_bytes: config.fetch_max_bytes,
+        fetch_retry_backoff: config.fetch_retry_backoff,
+        event_queue_capacity: config.event_queue_capacity,
+    }
+}
+
 async fn bootstrap_topic_rlmm(
     swap: Arc<crabka_remote_storage_topic::SwappableRlmm>,
     cfg: KafkaSwapKickoff,
@@ -3817,15 +3837,11 @@ async fn bootstrap_topic_rlmm(
     mut image_rx: tokio::sync::watch::Receiver<Arc<crabka_metadata::MetadataImage>>,
     shutdown: CancellationToken,
 ) {
-    let log_cfg = crabka_remote_storage_topic::KafkaMetadataLogConfig {
-        bootstrap: cfg.cfg.bootstrap,
-        topic: crabka_remote_storage_topic::METADATA_TOPIC.to_string(),
-        num_partitions: cfg.cfg.num_partitions,
-        replication: cfg.cfg.replication,
-        client_id: format!("crabka-rlmm-broker-{}", cfg.broker_id),
-        security: cfg.cfg.security.map(|b| *b),
-        ..crabka_remote_storage_topic::KafkaMetadataLogConfig::new("")
-    };
+    let log_cfg = metadata_log_config(
+        &cfg.cfg,
+        crabka_remote_storage_topic::METADATA_TOPIC.to_owned(),
+        format!("crabka-rlmm-broker-{}", cfg.broker_id),
+    );
 
     // Retry the topic-backed bootstrap with bounded backoff until it succeeds
     // or the broker shuts down. Until then the SwappableRlmm stays on the
@@ -3912,15 +3928,11 @@ async fn bootstrap_diskless_index_log(
     config: KafkaSwapKickoff,
     shutdown: CancellationToken,
 ) {
-    let log_config = crabka_remote_storage_topic::KafkaMetadataLogConfig {
-        bootstrap: config.cfg.bootstrap,
-        topic: crate::diskless::index_log::DISKLESS_WAL_INDEX_TOPIC.to_owned(),
-        num_partitions: config.cfg.num_partitions,
-        replication: config.cfg.replication,
-        client_id: format!("crabka-diskless-index-broker-{}", config.broker_id),
-        security: config.cfg.security.map(|security| *security),
-        ..crabka_remote_storage_topic::KafkaMetadataLogConfig::new("")
-    };
+    let log_config = metadata_log_config(
+        &config.cfg,
+        crate::diskless::index_log::DISKLESS_WAL_INDEX_TOPIC.to_owned(),
+        format!("crabka-diskless-index-broker-{}", config.broker_id),
+    );
     let mut backoff = config.bootstrap_backoff_initial;
     loop {
         let started = tokio::select! {
@@ -6509,6 +6521,48 @@ protocol = "Plaintext"
                 "current {current:?}"
             );
         }
+    }
+
+    #[test]
+    fn metadata_log_config_copies_shared_transport_policy() {
+        let policy = crate::config::KafkaRlmmConfig {
+            bootstrap: "broker-0:9094".into(),
+            num_partitions: 8,
+            replication: 2,
+            topic_create_timeout: secs(45),
+            fetch_max_wait: millis(750),
+            fetch_max_bytes: mebibytes(2),
+            fetch_retry_backoff: millis(300),
+            event_queue_capacity:
+                crabka_remote_storage_topic::MetadataEventQueueCapacity::new(2048).unwrap(),
+            ..crate::config::KafkaRlmmConfig::default()
+        };
+
+        let rlmm = metadata_log_config(
+            &policy,
+            crabka_remote_storage_topic::METADATA_TOPIC.to_owned(),
+            "rlmm-client".to_owned(),
+        );
+        let diskless = metadata_log_config(
+            &policy,
+            crate::diskless::index_log::DISKLESS_WAL_INDEX_TOPIC.to_owned(),
+            "diskless-client".to_owned(),
+        );
+
+        for config in [&rlmm, &diskless] {
+            check!(config.bootstrap == "broker-0:9094");
+            check!(config.num_partitions == 8);
+            check!(config.replication == 2);
+            check!(config.topic_create_timeout == secs(45));
+            check!(config.fetch_max_wait == millis(750));
+            check!(config.fetch_max_bytes == mebibytes(2));
+            check!(config.fetch_retry_backoff == millis(300));
+            check!(config.event_queue_capacity.capacity() == 2048);
+        }
+        check!(rlmm.topic == crabka_remote_storage_topic::METADATA_TOPIC);
+        check!(rlmm.client_id == "rlmm-client");
+        check!(diskless.topic == crate::diskless::index_log::DISKLESS_WAL_INDEX_TOPIC);
+        check!(diskless.client_id == "diskless-client");
     }
 
     #[tokio::test]
