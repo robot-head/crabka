@@ -4704,26 +4704,35 @@ The current scanner reports exactly 25 `client-core` rows. Eleven are test
 inputs. Four named defaults are existing configuration: DNS, connect, request,
 and fetch-response limits. Six production rows are fixed: four Kafka API or
 bootstrap sentinels, the auth-only GSSAPI receive offer, and one exact
-preallocation hint. Four operational rows still need an approved configuration
-design:
+preallocation hint. The four remaining operational rows are now closed at the
+generic client boundary:
 
-- the per-connection dispatch queue capacity of 64;
-- the single-partition fetch minimum of one byte;
-- the 100 MiB accepted-frame cap; and
-- the SASL header's fixed client id, which should reuse the existing configured
-  client id rather than add another setting.
+- `ConnectionDispatchQueueCapacity` is a positive `refined_type` newtype with
+  the existing default of `64`, stored in `ConnectionOptions` and applied to
+  each connection's Tokio dispatch channel;
+- `FetchMinBytes` is a positive whole-byte UOM newtype fitting Kafka's signed
+  `i32`, with the existing `1B` default stored by `IsolatedFetch` and copied
+  into `FetchRequest.min_bytes`;
+- `ClientFrameMax` is a positive whole-byte UOM newtype with the existing
+  `100MiB` default and a fixed, non-configurable `100MiB` security ceiling; it
+  bounds normal framed reads/writes and SASL request/response frames, with SASL
+  response lengths rejected before payload allocation; and
+- outbound SASL headers now reuse `ConnectionOptions.client_id`, including
+  broker inter-broker connections, so no independent SASL-client-id setting
+  exists.
 
-The proposed minimal surface is to add the queue and frame limits to
-`ConnectionOptions`, add the fetch minimum to `IsolatedFetch`, and thread the
-existing client id through SASL. Defaults preserve current behavior. Deployment
-owners would expose the actual runtime values through their existing
-CLI/environment or CRD paths; no independent SASL-client-id knob is warranted.
+Existing direct `ConnectionOptions` and `IsolatedFetch` constructors select the
+typed defaults, preserving wire behavior while preventing invalid state inside
+client-core. Library propagation, deployment CLI/environment surfaces, and
+Kafka/Gres CRD fields remain open as separate ownership phases; those surfaces
+must forward these types without reinterpreting them.
 
-The fresh UOM closure gates passed:
+The generic resource-policy gates passed:
 
+- all targets for `crabka-client-core`, `crabka-client-streams`,
+  `crabka-gres-control`, `crabka-gres-fdw`, `crabka-gres-substrate`, and
+  `crabka-gres`, including their live broker and crash/recovery suites;
 - `cargo check --workspace --all-targets --locked`;
-- all targets for `crabka-client-core`, `crabka-client-producer`,
-  `crabka-client-admin`, and `crabka-client-streams`;
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`;
 - `cargo +nightly fmt --all`; and
 - `git diff --check`.
