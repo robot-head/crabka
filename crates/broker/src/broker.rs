@@ -328,7 +328,12 @@ async fn start_metadata_source(
             controller_listen_addr: config.controller_listen_addr,
             log_dir: config.log_dir.join("__cluster_metadata"),
             election_timeout: config.controller_election_timeout,
-            heartbeat_interval: config.controller_heartbeat_interval,
+            heartbeat_interval: config
+                .controller_heartbeat_interval_explicit
+                .then_some(config.controller_heartbeat_interval),
+            controller_fetch_miss_limit: config.controller_fetch_miss_limit,
+            metadata_raft_command_queue_capacity: config.metadata_raft_command_queue_capacity,
+            metadata_raft_fetch_max: config.metadata_raft_fetch_max,
             client_id: format!("crabka-broker-{}-controller", config.broker_id),
             bootstrap_mode: config.bootstrap_mode,
             cluster_id: config.cluster_id,

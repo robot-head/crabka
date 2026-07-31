@@ -652,6 +652,30 @@ struct Args {
     )]
     controller_heartbeat_interval: Option<Time>,
 
+    /// Consecutive controller fetch misses tolerated before election.
+    #[arg(
+        long,
+        env = "CRABKA_CONTROLLER_FETCH_MISS_LIMIT",
+        value_parser = clap::value_parser!(u32).range(1..)
+    )]
+    controller_fetch_miss_limit: Option<u32>,
+
+    /// Capacity of the metadata Raft command queue.
+    #[arg(
+        long,
+        env = "CRABKA_METADATA_RAFT_COMMAND_QUEUE_CAPACITY",
+        value_parser = parse_metadata_raft_command_queue_capacity
+    )]
+    metadata_raft_command_queue_capacity: Option<usize>,
+
+    /// Per-read and per-snapshot-request metadata Raft byte budget.
+    #[arg(
+        long,
+        env = "CRABKA_METADATA_RAFT_FETCH_MAX",
+        value_parser = crabka_units::parse::positive_byte_size
+    )]
+    metadata_raft_fetch_max: Option<ByteSize>,
+
     /// Controlled-shutdown leadership drain timeout in milliseconds.
     #[arg(
         long,
@@ -838,6 +862,9 @@ impl Args {
             replica_lag_time_max,
             controller_election_timeout,
             controller_heartbeat_interval,
+            controller_fetch_miss_limit,
+            metadata_raft_command_queue_capacity,
+            metadata_raft_fetch_max,
             controlled_shutdown_drain_timeout,
             delegation_token_max_lifetime,
             delegation_token_expiry_check_interval,
@@ -932,6 +959,12 @@ impl Args {
 fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
     let value = value.parse::<usize>().map_err(|error| error.to_string())?;
     ConnectionDispatchQueueCapacity::new(value).map(ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_metadata_raft_command_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    crabka_raft::MetadataRaftCommandQueueCapacity::new(value)
+        .map(crabka_raft::MetadataRaftCommandQueueCapacity::get)
 }
 
 fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
@@ -1384,6 +1417,10 @@ mod tests {
                 ("CRABKA_SOCKET_REQUEST_MAX", Some("100MiB")),
                 ("CRABKA_LEADER_IMBALANCE_PER_BROKER", Some("10%")),
                 ("CRABKA_METADATA_SNAPSHOT_FETCH_MAX", Some("512MiB")),
+                ("CRABKA_CONTROLLER_HEARTBEAT_INTERVAL", Some("500ms")),
+                ("CRABKA_CONTROLLER_FETCH_MISS_LIMIT", Some("7")),
+                ("CRABKA_METADATA_RAFT_COMMAND_QUEUE_CAPACITY", Some("512")),
+                ("CRABKA_METADATA_RAFT_FETCH_MAX", Some("4MiB")),
                 ("CRABKA_RECORD_DECOMPRESSION_MAX_RATIO", Some("50")),
                 ("CRABKA_RECORD_DECOMPRESSION_OUTPUT_FLOOR", Some("8MiB")),
                 ("CRABKA_RECORD_DECOMPRESSION_OUTPUT_CEILING", Some("512MiB")),
@@ -1396,6 +1433,9 @@ mod tests {
                 assert!(args.runtime.socket_request_max == Some(crabka_units::mebibytes(100)));
                 assert!(args.leader_imbalance_per_broker == Some(crabka_units::fraction(0.1)));
                 assert!(args.metadata_snapshot_fetch_max == Some(crabka_units::mebibytes(512)));
+                assert!(args.controller_fetch_miss_limit == Some(7));
+                assert!(args.metadata_raft_command_queue_capacity == Some(512));
+                assert!(args.metadata_raft_fetch_max == Some(crabka_units::mebibytes(4)));
                 assert!(
                     args.runtime.record_decompression_max_ratio
                         == Some(crabka_units::fraction(50.0))
@@ -1404,6 +1444,11 @@ mod tests {
                 args.apply_runtime_to(&mut config, None)
                     .expect("apply environment runtime");
                 assert!(config.metadata_snapshot_fetch_max == crabka_units::mebibytes(512));
+                assert!(config.controller_heartbeat_interval_explicit);
+                assert!(config.controller_heartbeat_interval == crabka_units::millis(500));
+                assert!(config.controller_fetch_miss_limit.get() == 7);
+                assert!(config.metadata_raft_command_queue_capacity.get() == 512);
+                assert!(config.metadata_raft_fetch_max.bytes() == 4 * 1024 * 1024);
                 assert!(
                     config.record_decompression_policy().unwrap().output_floor()
                         == crabka_units::mebibytes(8)

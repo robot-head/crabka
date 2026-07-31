@@ -456,6 +456,11 @@ pub struct RuntimeFileConfig {
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub controller_heartbeat_interval: Option<Time>,
+    pub controller_fetch_miss_limit: Option<u32>,
+    pub metadata_raft_command_queue_capacity: Option<usize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub metadata_raft_fetch_max: Option<ByteSize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub controlled_shutdown_drain_timeout: Option<Time>,
@@ -2468,6 +2473,22 @@ impl RuntimeFileConfig {
             controller_heartbeat_interval,
             cfg.controller_heartbeat_interval
         );
+        if runtime.controller_heartbeat_interval.is_some() {
+            cfg.controller_heartbeat_interval_explicit = true;
+        }
+        if let Some(value) = runtime.controller_fetch_miss_limit {
+            cfg.controller_fetch_miss_limit = crabka_raft::ControllerFetchMissLimit::new(value)
+                .map_err(FileConfigError::InvalidConfig)?;
+        }
+        if let Some(value) = runtime.metadata_raft_command_queue_capacity {
+            cfg.metadata_raft_command_queue_capacity =
+                crabka_raft::MetadataRaftCommandQueueCapacity::new(value)
+                    .map_err(FileConfigError::InvalidConfig)?;
+        }
+        if let Some(value) = runtime.metadata_raft_fetch_max {
+            cfg.metadata_raft_fetch_max = crabka_raft::MetadataRaftFetchMax::try_from(value)
+                .map_err(FileConfigError::InvalidConfig)?;
+        }
         if let Some(value) = runtime.controlled_shutdown_drain_timeout {
             positive_time("controlled_shutdown_drain_timeout", value)?;
         }
@@ -2759,6 +2780,7 @@ impl FileConfig {
         {
             cfg.controller_heartbeat_interval =
                 positive_time("controller_heartbeat_interval", value)?;
+            cfg.controller_heartbeat_interval_explicit = true;
         }
         if let Some(ld) = self.log_dir
             && cfg.log_dir == defaults.log_dir
@@ -4748,6 +4770,10 @@ opa_http_timeout = "2500ms"
 replication_fetch_max = "2MiB"
 replication_fetch_max_wait = "750ms"
 replication_fetch_min = "2B"
+controller_heartbeat_interval = "500ms"
+controller_fetch_miss_limit = 7
+metadata_raft_command_queue_capacity = 512
+metadata_raft_fetch_max = "4MiB"
 "#,
         )
         .expect("parse runtime config");
@@ -4772,6 +4798,11 @@ replication_fetch_min = "2B"
                 bytes(2)
             )
         );
+        assert!(cfg.controller_heartbeat_interval_explicit);
+        assert!(cfg.controller_heartbeat_interval == millis(500));
+        assert!(cfg.controller_fetch_miss_limit.get() == 7);
+        assert!(cfg.metadata_raft_command_queue_capacity.get() == 512);
+        assert!(cfg.metadata_raft_fetch_max.bytes() == 4 * 1024 * 1024);
     }
 
     /// Every time and byte-size runtime key must survive the round trip

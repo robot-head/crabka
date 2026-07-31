@@ -6,7 +6,9 @@ use std::{collections::HashMap, net::SocketAddr, path::PathBuf, time::Duration};
 use crabka_compression::RecordDecompressionPolicy;
 use crabka_log::LogConfig;
 pub use crabka_raft::BootstrapMode;
-use crabka_raft::NodeId;
+use crabka_raft::{
+    ControllerFetchMissLimit, MetadataRaftCommandQueueCapacity, MetadataRaftFetchMax, NodeId,
+};
 use crabka_security::{ListenerProtocol, SaslMechanism, TlsConfig};
 use crabka_units::{
     ByteSize, Ratio, Time, bytes,
@@ -386,6 +388,15 @@ pub struct BrokerConfig {
     /// Openraft heartbeat interval. Default 500ms. Should be ≤
     /// `controller_election_timeout / 3` per raft consensus norms.
     pub controller_heartbeat_interval: Time,
+    /// Whether the heartbeat interval was explicitly configured. Omitted
+    /// values preserve the Raft engine's election-timeout-derived cadence.
+    pub controller_heartbeat_interval_explicit: bool,
+    /// Consecutive follower fetch misses tolerated before a new election.
+    pub controller_fetch_miss_limit: ControllerFetchMissLimit,
+    /// Capacity of the metadata Raft engine command queue.
+    pub metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity,
+    /// Per-read and per-snapshot-request metadata Raft byte budget.
+    pub metadata_raft_fetch_max: MetadataRaftFetchMax,
 
     /// `metadata.log.max.record.bytes.between.snapshots` (default 20 MiB).
     pub metadata_max_bytes_between_snapshots: ByteSize,
@@ -1070,6 +1081,10 @@ impl BrokerConfig {
             // pass within its 5s assertion window.
             controller_election_timeout: millis(500),
             controller_heartbeat_interval: millis(100),
+            controller_heartbeat_interval_explicit: false,
+            controller_fetch_miss_limit: ControllerFetchMissLimit::default(),
+            metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity::default(),
+            metadata_raft_fetch_max: MetadataRaftFetchMax::default(),
             metadata_max_bytes_between_snapshots: DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS,
             metadata_max_snapshot_interval: DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL,
             metadata_snapshot_interval_records: DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS,
@@ -1942,6 +1957,10 @@ impl Default for BrokerConfig {
             replica_lag_time_max: DEFAULT_REPLICA_LAG_TIME_MAX,
             controller_election_timeout: DEFAULT_CONTROLLER_ELECTION_TIMEOUT,
             controller_heartbeat_interval: DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL,
+            controller_heartbeat_interval_explicit: false,
+            controller_fetch_miss_limit: ControllerFetchMissLimit::default(),
+            metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity::default(),
+            metadata_raft_fetch_max: MetadataRaftFetchMax::default(),
             metadata_max_bytes_between_snapshots: DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS,
             metadata_max_snapshot_interval: DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL,
             metadata_snapshot_interval_records: DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS,
