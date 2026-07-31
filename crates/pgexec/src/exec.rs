@@ -534,36 +534,10 @@ pub(crate) fn execute_ddl(
                         Err(error) => return Err(error.into()),
                     }
                 } else {
-                    match crabka_pgcatalog::drop_table_ops(kv, name) {
-                        Ok(table_ops) => {
-                            let dependents = dependent_view_names(kv, name, None)?;
-                            if !dependents.is_empty() {
-                                if !*cascade {
-                                    return Err(ExecError::DependentObjectsStillExist(format!(
-                                        "cannot drop table {name} because other objects \
-                                         depend on it"
-                                    )));
-                                }
-                                for view in &dependents {
-                                    ops.extend(crabka_pgcatalog::drop_view_ops(kv, view)?);
-                                }
-                            }
-                            ops.extend(drop_blocking_foreign_keys(
-                                kv,
-                                &crabka_pgcatalog::get_table(kv, name)?,
-                                &dropping,
-                                *cascade,
-                            )?);
-                            // A partition has no independent existence: dropping
-                            // the parent drops it too, without CASCADE, exactly
-                            // as PostgreSQL does.
-                            for descendant in crate::partition::descendants(kv, name)? {
-                                ops.extend(crabka_pgcatalog::drop_table_ops(kv, &descendant)?);
-                                ops.extend(crate::partition::drop_metadata_ops(kv, &descendant)?);
-                            }
-                            ops.extend(crate::partition::drop_metadata_ops(kv, name)?);
-                            ops.extend(table_ops);
-                        }
+                    match crabka_pgcatalog::get_table(kv, name) {
+                        Ok(table) => ops.extend(drop_table_and_dependents_ops(
+                            kv, &table, &dropping, *cascade,
+                        )?),
                         Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => {}
                         Err(crabka_pgcatalog::CatalogError::UndefinedTable(missing)) => {
                             return Err(ExecError::UndefinedRelationOfKind {
@@ -4587,7 +4561,12 @@ fn ensure_schema_ops(kv: &dyn Kv, schema: &str) -> Result<Vec<crabka_pgkv::Write
     Ok(vec![crabka_pgcatalog::create_temp_schema_op(schema)])
 }
 
-/// The batch that removes every relation `schema` holds, whatever kind each is.
+/// The batch that removes every relation `schema` holds, whatever kind each is,
+/// together with everything outside the schema that depends on one of them:
+/// dropping a table here is [the same drop](drop_table_and_dependents_ops) a
+/// `DROP TABLE … CASCADE` performs, so a foreign key or view in another schema
+/// goes with its referent rather than outliving it, and a partition stored
+/// elsewhere goes with its parent.
 ///
 /// `DROP SCHEMA … CASCADE` is one caller; the others are the three points a
 /// temporary namespace is emptied — `DISCARD TEMP`, the end of a session, and
@@ -4601,17 +4580,93 @@ pub(crate) fn drop_schema_contents_ops(
     kv: &dyn Kv,
     schema: &str,
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
-    let mut ops = Vec::new();
-    for relation in crabka_pgcatalog::schema_contents(kv, schema)? {
-        if crabka_pgcatalog::get_view(kv, &relation).is_ok() {
-            ops.extend(crabka_pgcatalog::drop_view_ops(kv, &relation)?);
-        } else if crabka_pgcatalog::get_table(kv, &relation).is_ok() {
-            ops.extend(crate::partition::drop_metadata_ops(kv, &relation)?);
-            ops.extend(crabka_pgcatalog::drop_table_ops(kv, &relation)?);
-        } else {
-            ops.extend(crabka_pgcatalog::drop_sequence_ops(kv, &relation)?);
+    let contents = crabka_pgcatalog::schema_contents(kv, schema)?;
+    // The partitions of a table in `schema` go with their parent even when they
+    // live outside it, so they are part of the batch and have to be known before
+    // any of it is emitted: a foreign key whose child is in that set neither
+    // blocks the drop nor needs an op of its own.
+    let mut partitions = HashSet::new();
+    for relation in &contents {
+        if crabka_pgcatalog::get_table(kv, relation).is_ok() {
+            partitions.extend(crate::partition::descendants(kv, relation)?);
         }
     }
+    let dropping: HashSet<_> = contents.iter().chain(partitions.iter()).cloned().collect();
+    let mut ops = Vec::new();
+    let mut handled: HashSet<crabka_pgcatalog::RelationName> = HashSet::new();
+    // Parents first, striking off each partition they carry. Whatever still
+    // stands afterwards is emitted on its own account — a partition whose parent
+    // is in another schema, or a cycle in the partition metadata that leaves the
+    // batch rootless — so no relation in the schema is left behind.
+    for parents_first in [true, false] {
+        for relation in &contents {
+            if handled.contains(relation) || (parents_first && partitions.contains(relation)) {
+                continue;
+            }
+            handled.insert(relation.clone());
+            if crabka_pgcatalog::get_view(kv, relation).is_ok() {
+                ops.extend(crabka_pgcatalog::drop_view_ops(kv, relation)?);
+            } else if let Ok(table) = crabka_pgcatalog::get_table(kv, relation) {
+                handled.extend(crate::partition::descendants(kv, relation)?);
+                ops.extend(drop_table_and_dependents_ops(kv, &table, &dropping, true)?);
+            } else {
+                ops.extend(crabka_pgcatalog::drop_sequence_ops(kv, relation)?);
+            }
+        }
+    }
+    Ok(ops)
+}
+
+/// The batch that drops one table with everything that depends on it: the stored
+/// views over it, the foreign keys that reference it, and the partitions hanging
+/// off it — wherever those live, because a dependency in another schema is still
+/// a dependency.
+///
+/// `dropping` names the relations the same statement already removes. A
+/// dependency inside that set neither blocks the drop nor needs an op of its own,
+/// since it goes away with its own relation; that is what lets `DROP TABLE p, c`,
+/// a mutually referencing pair, and `DROP SCHEMA … CASCADE` succeed.
+///
+/// Without `cascade` a dependency outside that set is a 2BP01 refusal. With it,
+/// `PostgreSQL` splits the two kinds: a referencing *constraint* is dropped and
+/// its child table survives, while a dependent view is dropped outright. A
+/// partition is neither — it has no independent existence, so it goes with its
+/// parent whether or not `CASCADE` was written.
+///
+/// # Errors
+///
+/// Returns undefined-relation, dependent-object, and storage/corruption errors
+/// from the catalog KV seam.
+fn drop_table_and_dependents_ops(
+    kv: &dyn Kv,
+    table: &Table,
+    dropping: &HashSet<crabka_pgcatalog::RelationName>,
+    cascade: bool,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let name = &table.name;
+    let table_ops = crabka_pgcatalog::drop_table_ops(kv, name)?;
+    let mut ops = Vec::new();
+    let dependents: Vec<_> = dependent_view_names(kv, name, None)?
+        .into_iter()
+        .filter(|view| !dropping.contains(view))
+        .collect();
+    if !dependents.is_empty() {
+        if !cascade {
+            return Err(ExecError::DependentObjectsStillExist(format!(
+                "cannot drop table {name} because other objects depend on it"
+            )));
+        }
+        for view in &dependents {
+            ops.extend(crabka_pgcatalog::drop_view_ops(kv, view)?);
+        }
+    }
+    ops.extend(drop_blocking_foreign_keys(kv, table, dropping, cascade)?);
+    for descendant in crate::partition::descendants(kv, name)? {
+        ops.extend(crabka_pgcatalog::drop_table_ops(kv, &descendant)?);
+        ops.extend(crate::partition::drop_metadata_ops(kv, &descendant)?);
+    }
+    ops.extend(crate::partition::drop_metadata_ops(kv, name)?);
+    ops.extend(table_ops);
     Ok(ops)
 }
 
@@ -14860,12 +14915,29 @@ fn dependent_view_names(
 ) -> Result<Vec<crabka_pgcatalog::RelationName>, ExecError> {
     Ok(crabka_pgcatalog::list_views(kv)?
         .into_iter()
+        .filter(|view| view_can_reach_schema(&view.name, &view.definition, &table.schema))
         .filter(|view| match column {
             Some(column) => view_reads_column(kv, &view.definition, table, column),
             None => view_reads_relation(kv, &view.definition, table),
         })
         .map(|view| view.name)
         .collect())
+}
+
+/// Whether a stored view could read anything in `schema` at all.
+///
+/// A definition is matched by its identifiers, not by resolved dependencies, so
+/// an unqualified `FROM orders` matches every `orders` in the database. That is
+/// harmless within one schema and wrong across schemas: a session's temporary
+/// `orders` would otherwise carry off a permanent view over a different table of
+/// the same name when the namespace is emptied. A view outside `schema` reaches
+/// into it only by naming it, so requiring the qualifier confines the match.
+fn view_can_reach_schema(
+    view: &crabka_pgcatalog::RelationName,
+    definition: &str,
+    schema: &str,
+) -> bool {
+    view.schema == schema || definition_mentions_identifier(definition, schema)
 }
 
 /// How a stored view's `FROM` list binds the relation being renamed: the

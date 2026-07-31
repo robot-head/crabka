@@ -5,6 +5,10 @@
 //! together key the record. [`resolve_relation`] is the only crossing of that
 //! boundary, and the catalog offers no lookup that takes a bare string, so an
 //! operation cannot accidentally skip the search path: it would not compile.
+//!
+//! [`parse_written_relation`] is the step *before* that, for the names that
+//! arrive as a runtime string rather than through the grammar — a `regclass`
+//! input and the `nextval`/`setval` argument, which is the same thing.
 
 use std::sync::LazyLock;
 
@@ -291,6 +295,173 @@ pub fn resolve_relations(
         .collect()
 }
 
+// ------------------------------------------------- reading a written name
+
+/// A relation name that arrived as a runtime string, parsed into its parts.
+///
+/// Produced by [`parse_written_relation`], which is the only reader of such a
+/// string; the parts then resolve through [`resolve_relation`] like any name
+/// the grammar produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WrittenRelation {
+    /// The schema and relation the parts denote, each already unquoted and
+    /// case-folded — the same shape the lexer hands the grammar.
+    pub reference: RelationRef,
+    /// Every parsed part joined by dots and left unquoted, which is
+    /// `PostgreSQL`'s `NameListToString` and what its diagnostics from this
+    /// path name: `'"A b".c'::regclass` is `relation "A b.c" does not exist`.
+    /// It keeps the catalog part a three-part name wrote, which
+    /// [`WrittenRelation::reference`] drops.
+    pub dotted: String,
+}
+
+impl WrittenRelation {
+    /// The `42P01` for a name nothing answers to, naming it as
+    /// `NameListToString` renders it.
+    #[must_use]
+    pub fn undefined_table(&self) -> ExecError {
+        CatalogError::UndefinedTable(self.dotted.clone()).into()
+    }
+}
+
+/// Read a `regclass` input the way `PostgreSQL`'s `regclassin` reads one.
+///
+/// The text is *not* one identifier. `stringToQualifiedNameList` splits it on
+/// the dots that fall outside double quotes, downcases each unquoted part,
+/// unwraps each quoted one — where `""` is one literal quote and a dot is an
+/// ordinary character — and tolerates whitespace around every part.
+/// `makeRangeVarFromNameList` then reads one part as a relation, two as
+/// `schema.relation` and three as `catalog.schema.relation`.
+///
+/// This is the input half of the `regclass` round trip whose output half is
+/// `crate::catalog_fn::relation_name_by_oid`, so every spelling that one quotes
+/// has to read back here.
+///
+/// Verified against `postgres:18.4`:
+///
+/// ```text
+/// '"a.b"'::regclass           relation named a.b, not schema "a / relation b"
+/// '"MyTbl"'::regclass         relation named MyTbl
+/// 'MYTABLE'::regclass         relation named mytable
+/// ' public . t '::regclass    relation public.t
+/// 'postgres.public.t'         relation public.t — the catalog part is this db
+/// 'otherdb.public.t'          0A000 cross-database references are not implem…
+/// 'a.b.c.d'                   42601 improper relation name (too many dotted …
+/// ''  '   '  '.t'  't.'  'a..b'  '"abc'  '"a"b'  'x y'
+///                             42602 invalid name syntax
+/// '""'                        42P01 relation "" does not exist
+/// ```
+///
+/// One `PostgreSQL` step is deliberately absent: `truncate_identifier` clips
+/// each part to `NAMEDATALEN - 1` bytes. crabka does not truncate an identifier
+/// anywhere — not in the lexer, not at `CREATE` — so truncating only here would
+/// make an over-long name unreadable back out of the catalog that stored it.
+///
+/// # Errors
+///
+/// 42602 `invalid name syntax` for text that is not a qualified name, 42601 for
+/// more than three parts, and 0A000 for a catalog part naming another database.
+pub fn parse_written_relation(text: &str) -> Result<WrittenRelation, ExecError> {
+    let parts = split_identifier_string(text).ok_or_else(invalid_name_syntax)?;
+    let dotted = parts.join(".");
+    let reference = match parts.as_slice() {
+        // An empty list is the empty (or all-whitespace) input, which
+        // `stringToQualifiedNameList` refuses after `SplitIdentifierString`
+        // accepts it.
+        [] => return Err(invalid_name_syntax()),
+        [name] => RelationRef::bare(name),
+        [schema, name] => RelationRef::qualified(schema, name),
+        [catalog, schema, name] => {
+            if catalog != crate::exec::CURRENT_DATABASE {
+                return Err(ExecError::Unsupported(format!(
+                    "cross-database references are not implemented: \"{dotted}\""
+                )));
+            }
+            RelationRef::qualified(schema, name)
+        }
+        _ => {
+            return Err(ExecError::FunctionError {
+                sqlstate: "42601",
+                message: format!("improper relation name (too many dotted names): {dotted}"),
+            });
+        }
+    };
+    Ok(WrittenRelation { reference, dotted })
+}
+
+fn invalid_name_syntax() -> ExecError {
+    ExecError::FunctionError {
+        sqlstate: "42602",
+        message: "invalid name syntax".into(),
+    }
+}
+
+/// `PostgreSQL`'s `SplitIdentifierString(text, '.')`: the parts of a written
+/// name, or `None` for the text it rejects. An empty result is the empty input,
+/// which that function accepts and its one caller here does not.
+fn split_identifier_string(text: &str) -> Option<Vec<String>> {
+    let mut rest = text.trim_start_matches(is_scanner_space);
+    if rest.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut parts = Vec::new();
+    loop {
+        let part = if let Some(body) = rest.strip_prefix('"') {
+            let (name, tail) = quoted_identifier(body)?;
+            rest = tail;
+            name
+        } else {
+            // An unquoted part runs to the next dot or whitespace, and is
+            // downcased exactly as the lexer downcases one: ASCII `A`-`Z` only,
+            // because crabka is UTF-8 and `downcase_identifier` leaves a
+            // multibyte encoding's high bytes alone.
+            let end = rest
+                .find(|c: char| c == '.' || is_scanner_space(c))
+                .unwrap_or(rest.len());
+            let (name, tail) = rest.split_at(end);
+            if name.is_empty() {
+                return None;
+            }
+            rest = tail;
+            name.to_ascii_lowercase()
+        };
+        parts.push(part);
+        rest = rest.trim_start_matches(is_scanner_space);
+        match rest.strip_prefix('.') {
+            Some(tail) => rest = tail.trim_start_matches(is_scanner_space),
+            // Anything but a separator after a part — `"a"b`, `x y` — is not a
+            // qualified name at all.
+            None if rest.is_empty() => return Some(parts),
+            None => return None,
+        }
+    }
+}
+
+/// The body of a double-quoted part and the text after its closing quote, with
+/// each doubled quote collapsed to one. `None` when the quote is never closed.
+fn quoted_identifier(body: &str) -> Option<(String, &str)> {
+    let mut name = String::new();
+    let mut rest = body;
+    loop {
+        let close = rest.find('"')?;
+        name.push_str(&rest[..close]);
+        rest = &rest[close + 1..];
+        match rest.strip_prefix('"') {
+            Some(tail) => {
+                name.push('"');
+                rest = tail;
+            }
+            None => return Some((name, rest)),
+        }
+    }
+}
+
+/// Whitespace as `PostgreSQL`'s scanner counts it — the `{space}` class in
+/// `scan.l` that `scanner_isspace` mirrors, vertical tab included.
+fn is_scanner_space(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n' | '\r' | '\u{b}' | '\u{c}')
+}
+
 /// True when `error` is the missing-schema report an `IF EXISTS` form skips.
 ///
 /// `DROP TABLE IF EXISTS nope.t` is a skipped no-op on `PostgreSQL`, not a
@@ -307,8 +478,136 @@ mod tests {
     use crabka_pgkv::{Kv as _, MemKv};
     use crabka_pgparser::ast::RelationRef;
 
-    use super::{ResolutionScope, SchemaDisposition, is_missing_schema, resolve_relation};
+    use super::{
+        ResolutionScope, SchemaDisposition, WrittenRelation, is_missing_schema,
+        parse_written_relation, resolve_relation,
+    };
     use crate::search_path::SearchPath;
+
+    fn written(reference: RelationRef, dotted: &str) -> WrittenRelation {
+        WrittenRelation {
+            reference,
+            dotted: dotted.to_string(),
+        }
+    }
+
+    /// Every shape `postgres:18.4` accepts, with the parts it reads out of it.
+    /// A quoted part keeps its case and may hold a dot; an unquoted one
+    /// downcases and ends at the first dot or whitespace; `""` inside quotes is
+    /// one literal quote; and whitespace may sit anywhere around a part.
+    #[test]
+    fn a_written_name_is_read_the_way_regclassin_reads_one() {
+        let cases = [
+            ("t", written(RelationRef::bare("t"), "t")),
+            ("MYTABLE", written(RelationRef::bare("mytable"), "mytable")),
+            ("\"MyTbl\"", written(RelationRef::bare("MyTbl"), "MyTbl")),
+            // A dot inside quotes is part of the name, not a qualifier.
+            ("\"a.b\"", written(RelationRef::bare("a.b"), "a.b")),
+            ("\"a\"\"b\"", written(RelationRef::bare("a\"b"), "a\"b")),
+            ("\"\"", written(RelationRef::bare(""), "")),
+            // A quote inside an *unquoted* part is an ordinary character.
+            ("a\"b", written(RelationRef::bare("a\"b"), "a\"b")),
+            ("S1.T", written(RelationRef::qualified("s1", "t"), "s1.t")),
+            (
+                " s1 . t ",
+                written(RelationRef::qualified("s1", "t"), "s1.t"),
+            ),
+            (
+                "\t\n\u{b}\u{c}\rs1\r.\u{c}t\u{b}",
+                written(RelationRef::qualified("s1", "t"), "s1.t"),
+            ),
+            (
+                "\"A b\" . \"c.d\"",
+                written(RelationRef::qualified("A b", "c.d"), "A b.c.d"),
+            ),
+            // Three parts name a catalog, which only this one database answers
+            // to; the reference drops it and the rendering keeps it.
+            (
+                "postgres.s1.t",
+                written(RelationRef::qualified("s1", "t"), "postgres.s1.t"),
+            ),
+        ];
+        for (input, expected) in cases {
+            assert!(
+                parse_written_relation(input).expect("parses") == expected,
+                "{input:?}"
+            );
+        }
+    }
+
+    /// Every refusal, with the SQLSTATE and message `postgres:18.4` raises.
+    #[test]
+    fn a_name_that_is_not_a_qualified_name_is_refused_as_postgres_refuses_it() {
+        let syntax = ("42602", "invalid name syntax".to_string());
+        let cases = [
+            ("", syntax.clone()),
+            ("   ", syntax.clone()),
+            (".", syntax.clone()),
+            (".t", syntax.clone()),
+            ("t.", syntax.clone()),
+            ("\"t\" . ", syntax.clone()),
+            ("a..b", syntax.clone()),
+            // A quote that never closes, and text after one that does.
+            ("\"abc", syntax.clone()),
+            ("\"a\"b", syntax.clone()),
+            // Whitespace inside an unquoted part ends it, and what follows is
+            // neither a separator nor the end.
+            ("x y", syntax.clone()),
+            (
+                "a.b.c.d",
+                (
+                    "42601",
+                    "improper relation name (too many dotted names): a.b.c.d".to_string(),
+                ),
+            ),
+            (
+                "\"a b\".\"c\".d.e",
+                (
+                    "42601",
+                    "improper relation name (too many dotted names): a b.c.d.e".to_string(),
+                ),
+            ),
+            (
+                "OtherDB.Public.T",
+                (
+                    "0A000",
+                    "cross-database references are not implemented: \"otherdb.public.t\""
+                        .to_string(),
+                ),
+            ),
+        ];
+        for (input, (code, message)) in cases {
+            let error = parse_written_relation(input)
+                .expect_err("refused")
+                .into_pg();
+            assert!(
+                (error.code.as_str(), error.message) == (code, message),
+                "{input:?}"
+            );
+        }
+    }
+
+    /// The `42P01` a name nothing answers to raises spells the *parsed* parts,
+    /// joined by dots and unquoted — `PostgreSQL`'s `NameListToString`, not the
+    /// text as typed.
+    #[test]
+    fn a_missing_relation_is_named_by_its_parsed_parts() {
+        for (input, named) in [
+            (" NoSuch . T ", "nosuch.t"),
+            ("\"A b\".c", "A b.c"),
+            ("postgres.nosuchschema.t", "postgres.nosuchschema.t"),
+        ] {
+            let error = parse_written_relation(input)
+                .expect("parses")
+                .undefined_table()
+                .into_pg();
+            assert!(error.code == "42P01", "{input:?}");
+            assert!(
+                error.message == format!("relation \"{named}\" does not exist"),
+                "{input:?}"
+            );
+        }
+    }
 
     fn scope_over(entries: &[&str]) -> ResolutionScope {
         ResolutionScope {

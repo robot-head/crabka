@@ -235,11 +235,14 @@ fn eval_depth(
             // to be resolved *back* to the name `regclassout` prints, because
             // the value layer that renders it has no catalog handle. This is the
             // point where one is in scope, so the name is attached here and
-            // travels with the value. Without a catalog — a planning context or
-            // a unit test — the pure cast below yields the bare-oid rendering.
+            // travels with the value — and it is also where the session's search
+            // path is in scope, which is what decides the schema a bare name
+            // lands in. Without a catalog — a planning context or a unit test —
+            // the pure cast below yields the bare-oid rendering.
             if *ty == crabka_pgtypes::ColumnType::Regclass
                 && let Some(catalog) = ctx.catalog()
-                && let Some(resolved) = crate::exec::regclass_cast(catalog, &v)?
+                && let Some(resolved) =
+                    crate::catalog_fn::regclass_cast(catalog, ctx.resolution(), &v)?
             {
                 return Ok(resolved);
             }

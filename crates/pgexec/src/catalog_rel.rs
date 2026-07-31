@@ -20,7 +20,8 @@
 use std::collections::BTreeMap;
 
 use crabka_pgcatalog::{
-    Column, CommentObject, IndexConstraint, MatchType, ReferentialAction, RelationName, Table,
+    Column, CommentObject, ForeignKeyId, IndexConstraint, MatchType, ReferentialAction,
+    RelationName, Table,
 };
 use crabka_pgkv::Kv;
 use crabka_pgtypes::{ColumnType, Datum, ElemType};
@@ -251,6 +252,38 @@ impl BandKey for RelationName {
     }
 }
 
+/// What a `pg_constraint` oid is keyed by: the relation the constraint belongs
+/// to, and the constraint's own name — the column's name, for the `NOT NULL`
+/// constraints `PostgreSQL` 18 records per column.
+///
+/// Structural rather than a flattened `<table>.<name>` string, for the same
+/// reason [`BandKey for RelationName`](BandKey) spells the schema out. A
+/// constraint name is unique per relation rather than per catalog, so the key
+/// has to carry the relation; and a dot inside a quoted identifier — `"s.t"` in
+/// `public` against `t` in schema `s` — would let two distinct constraints
+/// flatten to one key. [`banded_oids`] deduplicates, so that is not a near miss
+/// in the band: the pair becomes one entry and reports one oid twice.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct ConstraintKey {
+    table: RelationName,
+    name: String,
+}
+
+impl ConstraintKey {
+    pub(crate) fn new(table: &RelationName, name: &str) -> Self {
+        Self {
+            table: table.clone(),
+            name: name.to_string(),
+        }
+    }
+}
+
+impl BandKey for ConstraintKey {
+    fn band_text(&self) -> String {
+        format!("{}.{}", self.table.band_text(), self.name)
+    }
+}
+
 /// Assign every name in `names` a distinct oid inside the band starting at
 /// `base`. The slot is a hash of the name, so an object keeps its oid when
 /// unrelated objects are created or dropped; a collision probes forward, which
@@ -335,23 +368,29 @@ pub(crate) fn role_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError>
     Ok(oids)
 }
 
-/// `pg_constraint` oids of every `CHECK` constraint, keyed `<table>.<name>`.
-pub(crate) fn check_constraint_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError> {
+/// `pg_constraint` oids of every `CHECK` constraint, keyed by its relation and
+/// name.
+pub(crate) fn check_constraint_oids(
+    kv: &dyn Kv,
+) -> Result<BTreeMap<ConstraintKey, i32>, ExecError> {
     let keys = crabka_pgcatalog::list_tables(kv)?
         .into_iter()
         .flat_map(|table| {
             table
                 .checks
                 .iter()
-                .map(|check| format!("{}.{}", table.name, check.name))
+                .map(|check| ConstraintKey::new(&table.name, &check.name))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
     Ok(banded_oids(CHECK_OID_BASE, &keys))
 }
 
-/// `pg_constraint` oids of every `NOT NULL` constraint, keyed `<table>.<column>`.
-pub(crate) fn not_null_constraint_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError> {
+/// `pg_constraint` oids of every `NOT NULL` constraint, keyed by its relation
+/// and the column it constrains.
+pub(crate) fn not_null_constraint_oids(
+    kv: &dyn Kv,
+) -> Result<BTreeMap<ConstraintKey, i32>, ExecError> {
     let keys = crabka_pgcatalog::list_tables(kv)?
         .into_iter()
         .flat_map(|table| {
@@ -359,39 +398,72 @@ pub(crate) fn not_null_constraint_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i
                 .columns
                 .iter()
                 .filter(|column| column.not_null)
-                .map(|column| format!("{}.{}", table.name, column.name))
+                .map(|column| ConstraintKey::new(&table.name, &column.name))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
     Ok(banded_oids(NOT_NULL_OID_BASE, &keys))
 }
 
-/// `pg_constraint` oids of every `FOREIGN KEY` constraint, keyed
-/// `<child table>.<name>`. Constraint names are unique per relation rather than
-/// per catalog, so the child's name has to be part of the key.
+/// Every `FOREIGN KEY` constraint's oid, indexed by the `<child table>.<name>`
+/// text `pg_get_constraintdef` reverses an oid through.
+///
+/// The oid itself comes from [`foreign_key_oid`]; this map is a lookup index
+/// over it, not the definition of it.
 pub(crate) fn foreign_key_constraint_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError> {
-    let keys = crabka_pgcatalog::list_foreign_keys(kv)?
+    crabka_pgcatalog::list_foreign_keys(kv)?
         .into_iter()
-        .map(|foreign_key| format!("{}.{}", foreign_key.table, foreign_key.name))
-        .collect::<Vec<_>>();
-    Ok(banded_oids(FOREIGN_KEY_OID_BASE, &keys))
+        .map(|foreign_key| {
+            Ok((
+                format!("{}.{}", foreign_key.table, foreign_key.name),
+                foreign_key_oid(foreign_key.id)?,
+            ))
+        })
+        .collect()
+}
+
+/// The `pg_constraint` oid of a foreign key: its stored [`ForeignKeyId`] placed
+/// in the foreign-key band, exactly as [`index_constraint_oid`] places an index
+/// id in its own.
+///
+/// The id is monotonic, drawn from the catalog's foreign-key counter, and
+/// survives a rename, so the oid it yields is stable for the constraint's
+/// lifetime and orders by creation — both properties a real `pg_constraint.oid`
+/// has and a slot hashed from the constraint's *name* does not.
+pub(crate) fn foreign_key_oid(id: ForeignKeyId) -> Result<i32, ExecError> {
+    i32::try_from(id)
+        .ok()
+        .filter(|id| *id < OID_BAND_WIDTH)
+        .and_then(|id| FOREIGN_KEY_OID_BASE.checked_add(id))
+        .ok_or_else(|| ExecError::Unsupported("foreign key oid leaves its band".into()))
 }
 
 /// The `pg_constraint` oid of the constraint an index backs.
+///
+/// Bounded to the band like [`foreign_key_oid`]: the bases sit
+/// [`OID_BAND_WIDTH`] apart, so an unbounded add would walk an index id past
+/// `CONSTRAINT_OID_BASE + OID_BAND_WIDTH` into the `CHECK` band and hand two
+/// distinct constraints one oid. Refusing is the lesser failure — a wrong oid
+/// is silent, and `pg_constraint` is what a client joins on.
 pub(crate) fn index_constraint_oid(index_id: u32) -> Result<i32, ExecError> {
     i32::try_from(index_id)
         .ok()
+        .filter(|id| *id < OID_BAND_WIDTH)
         .and_then(|id| CONSTRAINT_OID_BASE.checked_add(id))
-        .ok_or_else(|| ExecError::Unsupported("constraint oid exceeds int4 range".into()))
+        .ok_or_else(|| ExecError::Unsupported("constraint oid leaves its band".into()))
 }
 
 /// The `pg_class` oid of an index, mirroring `exec::catalog_index_oid` so both
 /// sides of a `pg_index`/`pg_class` join agree.
+///
+/// Bounded for the same reason as [`index_constraint_oid`]; the neighbour it
+/// would spill into is the view band.
 pub(crate) fn index_relation_oid(index_id: u32) -> Result<i32, ExecError> {
     i32::try_from(index_id)
         .ok()
+        .filter(|id| *id < OID_BAND_WIDTH)
         .and_then(|id| INDEX_OID_BASE.checked_add(id))
-        .ok_or_else(|| ExecError::Unsupported("index oid exceeds int4 range".into()))
+        .ok_or_else(|| ExecError::Unsupported("index oid leaves its band".into()))
 }
 
 /// The `pg_class` oid of a table, which is its catalog id.
@@ -1204,7 +1276,6 @@ fn pg_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// them, paired positionally — not sorted, and not permuted into the referenced
 /// index's column order.
 fn foreign_key_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let oids = foreign_key_constraint_oids(kv)?;
     let mut rows = Vec::new();
     for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
         let child = crabka_pgcatalog::get_table(kv, &foreign_key.table)?;
@@ -1217,9 +1288,8 @@ fn foreign_key_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError
         } else {
             Some(attnums(&child, &foreign_key.set_columns)?)
         };
-        let key = format!("{}.{}", foreign_key.table, foreign_key.name);
         rows.push(constraint_row(ConstraintRow {
-            oid: oids.get(&key).copied().unwrap_or(0),
+            oid: foreign_key_oid(foreign_key.id)?,
             name: &foreign_key.name,
             schema: &foreign_key.table.schema,
             contype: "f",
@@ -1294,7 +1364,7 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     for table in crabka_pgcatalog::list_tables(kv)? {
         let relid = table_relation_oid(table.id)?;
         for check in &table.checks {
-            let key = format!("{}.{}", table.name, check.name);
+            let key = ConstraintKey::new(&table.name, &check.name);
             rows.push(constraint_row(ConstraintRow {
                 oid: check_oids.get(&key).copied().unwrap_or(0),
                 name: &check.name,
@@ -1314,7 +1384,7 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             if !column.not_null {
                 continue;
             }
-            let key = format!("{}.{}", table.name, column.name);
+            let key = ConstraintKey::new(&table.name, &column.name);
             let attnum = i16::try_from(idx + 1)
                 .map_err(|_| ExecError::Unsupported("attnum exceeds int2 range".into()))?;
             rows.push(constraint_row(ConstraintRow {
@@ -2199,10 +2269,12 @@ mod tests {
     }
 
     /// `cc(a) REFERENCES pp(id)` with every option at its default — the shape
-    /// each case below varies one or two fields of.
-    fn base_foreign_key(schema: &Schema, name: &str) -> ForeignKey {
+    /// each case below varies one or two fields of. `id` is the creation-order
+    /// id DDL would have allocated, and is what the constraint's oid derives
+    /// from, so every constraint in one fixture needs its own.
+    fn base_foreign_key(schema: &Schema, id: ForeignKeyId, name: &str) -> ForeignKey {
         ForeignKey {
-            id: 1,
+            id,
             name: name.to_string(),
             table: RelationName::public("cc"),
             table_id: schema.child,
@@ -2226,7 +2298,7 @@ mod tests {
     /// values for.
     fn oracle_foreign_keys(schema: &Schema) -> Vec<ForeignKey> {
         vec![
-            base_foreign_key(schema, "cc_a_fkey"),
+            base_foreign_key(schema, 1, "cc_a_fkey"),
             ForeignKey {
                 columns: vec!["c".to_string()],
                 referenced_columns: vec!["k".to_string()],
@@ -2235,19 +2307,19 @@ mod tests {
                 on_delete: ReferentialAction::SetDefault,
                 deferrable: true,
                 initially_deferred: true,
-                ..base_foreign_key(schema, "cc_def")
+                ..base_foreign_key(schema, 2, "cc_def")
             },
             ForeignKey {
                 columns: vec!["b".to_string()],
                 match_type: MatchType::Full,
                 on_update: ReferentialAction::Cascade,
                 on_delete: ReferentialAction::SetNull,
-                ..base_foreign_key(schema, "cc_full")
+                ..base_foreign_key(schema, 3, "cc_full")
             },
             ForeignKey {
                 on_delete: ReferentialAction::Restrict,
                 validated: false,
-                ..base_foreign_key(schema, "cc_nv")
+                ..base_foreign_key(schema, 4, "cc_nv")
             },
         ]
     }
@@ -2507,15 +2579,17 @@ mod tests {
         let matches = [(MatchType::Simple, "s"), (MatchType::Full, "f")];
         let kv = MemKv::default();
         let schema = oracle_schema(&kv);
-        for (action, code) in actions {
-            for (match_type, match_code) in matches {
+        for (row, (action, code)) in actions.into_iter().enumerate() {
+            for (column, (match_type, match_code)) in matches.into_iter().enumerate() {
+                let id = ForeignKeyId::try_from(row * matches.len() + column + 1)
+                    .expect("foreign key id");
                 add_foreign_key(
                     &kv,
                     &ForeignKey {
                         on_update: action,
                         on_delete: action,
                         match_type,
-                        ..base_foreign_key(&schema, &format!("fk_{code}_{match_code}"))
+                        ..base_foreign_key(&schema, id, &format!("fk_{code}_{match_code}"))
                     },
                 );
             }
@@ -2567,7 +2641,7 @@ mod tests {
             referenced_index: "pp_id_k_key".to_string(),
             referenced_index_id: schema.composite,
             on_delete: ReferentialAction::SetNull,
-            ..base_foreign_key(&schema, "cc_setcols")
+            ..base_foreign_key(&schema, 1, "cc_setcols")
         };
         add_foreign_key(
             &kv,
@@ -2579,6 +2653,7 @@ mod tests {
         add_foreign_key(
             &kv,
             &ForeignKey {
+                id: 2,
                 name: "cc_no_setcols".to_string(),
                 ..composite
             },
@@ -2608,6 +2683,188 @@ mod tests {
         }
         let distinct = oids.values().collect::<std::collections::BTreeSet<_>>();
         assert!(distinct.len() == oids.len());
+    }
+
+    /// A foreign key's oid is its stored id placed in the foreign-key band, so
+    /// the band has to be disjoint from the ones the other constraint kinds
+    /// report in — and an id that would leave it is refused rather than
+    /// answered inside a neighbour's.
+    #[test]
+    fn a_foreign_key_oid_stays_inside_the_foreign_key_band() {
+        let band = FOREIGN_KEY_OID_BASE..FOREIGN_KEY_OID_BASE + OID_BAND_WIDTH;
+        for neighbour in [CHECK_OID_BASE, NOT_NULL_OID_BASE, CONSTRAINT_OID_BASE] {
+            assert!(!band.contains(&neighbour));
+            assert!(!(neighbour..neighbour + OID_BAND_WIDTH).contains(&FOREIGN_KEY_OID_BASE));
+        }
+
+        let last = OID_BAND_WIDTH.unsigned_abs() - 1;
+        assert!(foreign_key_oid(1).expect("first id") == FOREIGN_KEY_OID_BASE + 1);
+        assert!(
+            foreign_key_oid(last).expect("last id") == FOREIGN_KEY_OID_BASE + OID_BAND_WIDTH - 1
+        );
+        assert!(foreign_key_oid(last + 1).is_err());
+    }
+
+    /// An index id is placed in its band the same way, and the bands are
+    /// adjacent — `INDEX_OID_BASE` borders the view band and
+    /// `CONSTRAINT_OID_BASE` borders the `CHECK` band. Past roughly ten
+    /// thousand indexes an unbounded add would answer inside a neighbour's
+    /// band, so two distinct objects would report one `pg_class` or
+    /// `pg_constraint` oid with nothing raised.
+    #[test]
+    fn an_index_oid_stays_inside_its_band() {
+        let last = OID_BAND_WIDTH.unsigned_abs() - 1;
+
+        struct Case {
+            what: &'static str,
+            oid: fn(u32) -> Result<i32, ExecError>,
+            base: i32,
+            neighbour: i32,
+        }
+        let cases = [
+            Case {
+                what: "index relation",
+                oid: index_relation_oid,
+                base: INDEX_OID_BASE,
+                neighbour: VIEW_OID_BASE,
+            },
+            Case {
+                what: "index constraint",
+                oid: index_constraint_oid,
+                base: CONSTRAINT_OID_BASE,
+                neighbour: CHECK_OID_BASE,
+            },
+        ];
+
+        for case in cases {
+            assert!(
+                (case.oid)(0).expect("first id") == case.base,
+                "{} first id",
+                case.what
+            );
+            let highest = (case.oid)(last).expect("last id");
+            assert!(
+                highest == case.base + OID_BAND_WIDTH - 1,
+                "{} last id",
+                case.what
+            );
+            // The bases sit further apart than the band is wide, so the bound
+            // refuses before an id could reach the neighbour rather than at the
+            // exact point of collision. Assert the separation rather than
+            // adjacency: the band must not reach the neighbour's base, and an
+            // id past the band must be refused even though the first few would
+            // still land in the slack between them.
+            assert!(
+                !(case.base..case.base + OID_BAND_WIDTH).contains(&case.neighbour),
+                "{} band reaches its neighbour",
+                case.what
+            );
+            assert!(highest < case.neighbour, "{} overlaps", case.what);
+            assert!((case.oid)(last + 1).is_err(), "{} past the band", case.what);
+        }
+    }
+
+    /// A one-column `c` table, `NOT NULL` and carrying a `CHECK` named `ck`.
+    fn add_checked_table(kv: &MemKv, name: &RelationName) -> TableId {
+        let column = Column {
+            not_null: true,
+            ..int4("c")
+        };
+        let (id, ops) = crabka_pgcatalog::create_table_with_options_ops(
+            kv,
+            name,
+            vec![column],
+            crabka_pgcatalog::TableOptions::default(),
+            vec![crabka_pgcatalog::CheckConstraint {
+                name: "ck".to_string(),
+                expr: "c > 0".to_string(),
+                validated: true,
+            }],
+            crabka_pgcatalog::TableIdSource::Counter,
+        )
+        .expect("table ops");
+        kv.write_batch(&ops).expect("write table");
+        id
+    }
+
+    /// Two relations whose schema and name flatten to the same dotted text:
+    /// `"s.t"` created in `public`, and `t` created in schema `s`. Each carries
+    /// a `CHECK` named `ck`, a `NOT NULL` on `c` and a foreign key named `fk`
+    /// into `public.p`.
+    fn dotted_name_catalog() -> MemKv {
+        let kv = MemKv::default();
+        let ops = crabka_pgcatalog::create_schema_ops(&kv, "s", "postgres").expect("schema ops");
+        kv.write_batch(&ops).expect("write schema");
+        let referent = RelationName::public("p");
+        let parent = crabka_pgcatalog::create_table(&kv, &referent, vec![int4("id")]).expect("p");
+        let unique = add_index(
+            &kv,
+            &referent,
+            "p_id_key",
+            &["id"],
+            Some(IndexConstraint::Unique),
+        );
+        for (id, table) in [
+            (1, RelationName::public("s.t")),
+            (2, RelationName::new("s", "t")),
+        ] {
+            let table_id = add_checked_table(&kv, &table);
+            add_foreign_key(
+                &kv,
+                &ForeignKey {
+                    id,
+                    name: "fk".to_string(),
+                    table,
+                    table_id,
+                    columns: vec!["c".to_string()],
+                    referenced_table: referent.clone(),
+                    referenced_table_id: parent,
+                    referenced_columns: vec!["id".to_string()],
+                    referenced_index: "p_id_key".to_string(),
+                    referenced_index_id: unique,
+                    match_type: MatchType::Simple,
+                    on_delete: ReferentialAction::NoAction,
+                    on_update: ReferentialAction::NoAction,
+                    set_columns: Vec::new(),
+                    deferrable: false,
+                    initially_deferred: false,
+                    validated: true,
+                },
+            );
+        }
+        kv
+    }
+
+    /// A dot only reaches an identifier through quoting, and that is where a
+    /// flattened `<table>.<constraint>` key stops being injective: `"s.t"` in
+    /// `public` and `t` in schema `s` are two relations, so a same-named
+    /// constraint on each is two constraints. [`banded_oids`] deduplicates its
+    /// input, so one flattened key would collapse the pair into a single entry
+    /// and report one oid for both `pg_constraint` rows — which is what any
+    /// join on that oid then mis-associates.
+    #[test]
+    fn constraint_oids_separate_a_dotted_relation_from_a_qualified_one() {
+        let kv = dotted_name_catalog();
+
+        let checks = check_constraint_oids(&kv).expect("check oids");
+        let not_nulls = not_null_constraint_oids(&kv).expect("not null oids");
+        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+
+        assert!(checks.len() == 2, "a CHECK constraint lost its own key");
+        assert!(
+            not_nulls.len() == 2,
+            "a NOT NULL constraint lost its own key"
+        );
+        // Covers the foreign keys too, whose oids come from their stored ids.
+        let oids = all
+            .iter()
+            .map(|row| match field("pg_constraint", row, "oid") {
+                Datum::Int4(oid) => oid,
+                other => panic!("pg_constraint.oid is {other:?}"),
+            })
+            .collect::<Vec<_>>();
+        let distinct = oids.iter().collect::<std::collections::BTreeSet<_>>();
+        assert!(distinct.len() == oids.len(), "two constraints share an oid");
     }
 
     /// `match_option` uses the SQL standard's `NONE` for MATCH SIMPLE, and the
@@ -2657,7 +2914,7 @@ mod tests {
                 referenced_columns: vec!["m".to_string()],
                 referenced_index: "pp_m_idx".to_string(),
                 referenced_index_id: schema.bare,
-                ..base_foreign_key(&schema, "cc_bare")
+                ..base_foreign_key(&schema, 1, "cc_bare")
             },
         );
 

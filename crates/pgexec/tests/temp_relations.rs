@@ -393,6 +393,108 @@ async fn on_commit_is_refused_on_a_permanent_table() {
     );
 }
 
+/// A relation that is gone by the end of the transaction has no rows to empty
+/// and nothing to drop, so its `ON COMMIT` disposition has nothing left to do.
+/// 18.4 accepts every statement in each of these sequences, including the
+/// `DROP SCHEMA`-shaped `DISCARD TEMP` and the `TRUNCATE` that leaves the
+/// relation standing.
+///
+/// The trailing `SELECT 1` is the half that matters most: the disposition is
+/// discharged at the end of *every* transaction, so a disposition that cannot
+/// be discharged is not one bad `COMMIT` — it is a session that answers every
+/// later statement with the same error.
+#[tokio::test]
+async fn a_relation_that_does_not_survive_its_transaction_discharges_its_disposition() {
+    let cases: &[(&str, &[&str])] = &[
+        (
+            "delete rows, dropped inside the block",
+            &[
+                "BEGIN",
+                "CREATE TEMP TABLE ocd (x int) ON COMMIT DELETE ROWS",
+                "INSERT INTO ocd VALUES (1)",
+                "DROP TABLE ocd",
+                "COMMIT",
+            ],
+        ),
+        (
+            "drop, dropped inside the block",
+            &[
+                "BEGIN",
+                "CREATE TEMP TABLE ocp (x int) ON COMMIT DROP",
+                "DROP TABLE ocp",
+                "COMMIT",
+            ],
+        ),
+        (
+            "delete rows, dropped by a later autocommit statement",
+            &[
+                "CREATE TEMP TABLE oca (f1 int, f2 text) ON COMMIT DELETE ROWS",
+                "INSERT INTO oca VALUES (1, 'foo'), (2, 'bar')",
+                "DROP TABLE oca",
+            ],
+        ),
+        (
+            "delete rows, emptied by DISCARD TEMP inside the block",
+            &[
+                "BEGIN",
+                "CREATE TEMP TABLE ocs (x int) ON COMMIT DELETE ROWS",
+                "DISCARD TEMP",
+                "COMMIT",
+            ],
+        ),
+        (
+            "delete rows, truncated inside the block",
+            &[
+                "BEGIN",
+                "CREATE TEMP TABLE oct (x int) ON COMMIT DELETE ROWS",
+                "INSERT INTO oct VALUES (1), (2)",
+                "TRUNCATE oct",
+                "COMMIT",
+            ],
+        ),
+    ];
+
+    for (label, statements) in cases {
+        let engine = SqlEngine::new();
+        let mut client = Client::new(&engine);
+        let mut outcomes = Vec::new();
+        for sql in statements.iter().chain(std::iter::once(&"SELECT 1")) {
+            outcomes.push((*sql, client.outcome(sql).await));
+        }
+
+        let accepted: Vec<_> = statements
+            .iter()
+            .chain(std::iter::once(&"SELECT 1"))
+            .map(|sql| (*sql, Ok(())))
+            .collect();
+        assert!(outcomes == accepted, "{label}");
+    }
+}
+
+/// `ON COMMIT` is keyed to the relation, not to the name it happens to hold.
+/// After a same-transaction `DROP TABLE` frees the name and a second
+/// `CREATE TEMP TABLE` takes it with `ON COMMIT PRESERVE ROWS`, 18.4 leaves the
+/// new table's two rows standing at the `COMMIT` — the dropped table's
+/// `DELETE ROWS` does not follow its name onto the relation that replaced it.
+#[tokio::test]
+async fn on_commit_follows_the_relation_and_not_the_name_it_held() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client.run("BEGIN").await;
+    client
+        .run("CREATE TEMP TABLE reuse (x int) ON COMMIT DELETE ROWS")
+        .await;
+    client.run("INSERT INTO reuse VALUES (1)").await;
+    client.run("DROP TABLE reuse").await;
+    client
+        .run("CREATE TEMP TABLE reuse (x int) ON COMMIT PRESERVE ROWS")
+        .await;
+    client.run("INSERT INTO reuse VALUES (7), (8)").await;
+    client.run("COMMIT").await;
+
+    assert!(client.rows("SELECT x FROM reuse ORDER BY x").await == vec![row(&["7"]), row(&["8"])]);
+}
+
 /// `DISCARD` drops every temporary relation but leaves the namespace standing:
 /// in 18.4 the following `SELECT` is `42P01` while `current_schemas(true)` still
 /// reports `pg_temp_<n>` first. `DISCARD ALL` does the same, its `RESET ALL`

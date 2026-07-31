@@ -15,13 +15,14 @@ use crabka_pgcatalog::{
     CommentObject, ForeignKey, Index, MatchType, ReferentialAction, RelationName, Table, View,
 };
 use crabka_pgkv::Kv;
-use crabka_pgparser::ast::{Expr, FuncCall, RelationRef};
+use crabka_pgparser::ast::{Expr, FuncCall};
 use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType};
 
 use crate::{
     clock::EvalCtx,
     error::ExecError,
     func::{int_arg, require_arity, undefined_function},
+    relname::{ResolutionScope, parse_written_relation},
     scope::Scope,
 };
 
@@ -272,21 +273,25 @@ fn eval_catalog_reading(f: CatalogFunc, vals: &[Datum], ctx: &EvalCtx) -> Result
         SerialSequence, ShobjDescription, UserById, ViewDef,
     };
     let kv = ctx.catalog().ok_or_else(catalog_unavailable)?;
+    // Every function here that takes a relation *name* resolves it the way the
+    // session resolves one, so `pg_get_viewdef('v')` sees what `SELECT … FROM v`
+    // sees.
+    let scope = ctx.resolution();
     match f {
-        ViewDef => view_def(kv, vals),
-        IndexDef => index_def(kv, &vals[0]),
+        ViewDef => view_def(kv, scope, vals),
+        IndexDef => index_def(kv, scope, &vals[0]),
         ConstraintDef => constraint_def(kv, &vals[0]),
         // crabka stores a default/`CHECK` predicate as source text, so
         // "decompiling" it is the identity on the stored text.
         ExprDef => Ok(vals[0].clone()),
         UserById => user_by_id(kv, &vals[0]),
-        SerialSequence => serial_sequence(kv, vals),
-        RelationSize => relation_size(kv, &vals[0]),
-        ObjDescription => description(kv, &vals[0], 0),
+        SerialSequence => serial_sequence(kv, scope, vals),
+        RelationSize => relation_size(kv, scope, &vals[0]),
+        ObjDescription => description(kv, scope, &vals[0], 0),
         ColDescription => {
             let subid = i32::try_from(int_arg(&vals[1])?)
                 .map_err(|_| ExecError::Unsupported("column number out of range".into()))?;
-            description(kv, &vals[0], subid)
+            description(kv, scope, &vals[0], subid)
         }
         // `shobj_description` covers shared objects (roles, databases,
         // tablespaces); crabka carries no comments on those.
@@ -460,7 +465,7 @@ fn has_privilege(name: &str, vals: &[Datum], ctx: &EvalCtx) -> Result<Datum, Exe
     if (name == "has_table_privilege" || name == "has_any_column_privilege")
         && let (Some(object), Some(kv)) = (vals.get(vals.len() - 2), ctx.catalog())
     {
-        resolve_relation_oid(kv, object)?;
+        resolve_relation_oid(kv, ctx.resolution(), object)?;
     }
     Ok(Datum::Bool(true))
 }
@@ -492,11 +497,11 @@ fn recognized_privilege(privilege: &str) -> bool {
 /// crabka has no physical storage accounting: every relation reports zero
 /// bytes rather than a fabricated page count. The functions still resolve their
 /// relation argument, so a missing relation is 42P01 as in PostgreSQL.
-fn relation_size(kv: &dyn Kv, object: &Datum) -> Result<Datum, ExecError> {
+fn relation_size(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<Datum, ExecError> {
     if matches!(object, Datum::Null) {
         return Ok(Datum::Null);
     }
-    resolve_relation_oid(kv, object)?;
+    resolve_relation_oid(kv, scope, object)?;
     Ok(Datum::Int8(0))
 }
 
@@ -511,46 +516,84 @@ fn cluster_size(object: &Datum) -> Datum {
 
 /// Resolve a `regclass`-shaped argument — an oid, or a relation name — to its
 /// `pg_class` oid.
-fn resolve_relation_oid(kv: &dyn Kv, object: &Datum) -> Result<i32, ExecError> {
+fn resolve_relation_oid(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    object: &Datum,
+) -> Result<i32, ExecError> {
     match object {
-        Datum::Text(name) => resolve_relation_by_name(kv, name),
+        Datum::Text(name) => resolve_relation_in_scope(kv, scope, name),
         other => i32::try_from(int_arg(other)?)
             .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into())),
     }
 }
 
-/// Resolve a relation name across every relation kind, not just base tables.
-///
-/// The text is a `regclass` spelling — `t` or `s.t` — so it is read as a name
-/// *as written* and resolved the way the search path resolves one: a written
-/// qualifier names the schema outright, and a bare name is looked for in each
-/// visible schema in path order. Nothing reaching here carries a session (a
-/// `regclass` cast reaches it from the value layer), so the default scope stands
-/// in, exactly as it does for any other sessionless resolution.
+/// [`resolve_relation_in_scope`] for the one caller that reaches a `regclass`
+/// resolution before a session's scope is in hand: the extended protocol binds
+/// a `regclass` *parameter* in [`crate::session`], through
+/// [`crate::exec::regclass_from_text`], where there is no [`EvalCtx`] yet. It
+/// resolves against `PostgreSQL`'s default path; threading
+/// `Session::resolution_scope` into `exec::regclass_from_text` is what removes
+/// the last sessionless spelling of this.
 pub(crate) fn resolve_relation_by_name(kv: &dyn Kv, name: &str) -> Result<i32, ExecError> {
-    let reference = relation_reference(name.trim());
-    let schemas = match &reference.schema {
+    resolve_relation_in_scope(kv, ResolutionScope::default_scope(), name)
+}
+
+/// Resolve a written relation name across every relation kind, not just base
+/// tables.
+///
+/// The text is a `regclass` input, read by [`parse_written_relation`] — so a
+/// quoted part keeps its case and may hold a dot, and an unquoted one downcases
+/// — and then resolved the way `scope` resolves any written name: a qualifier
+/// names the schema outright, and a bare name is looked for in each visible
+/// schema in path order.
+pub(crate) fn resolve_relation_in_scope(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    name: &str,
+) -> Result<i32, ExecError> {
+    let written = parse_written_relation(name)?;
+    let schemas = match &written.reference.schema {
         Some(schema) => vec![schema.clone()],
-        None => crate::relname::ResolutionScope::default_scope().visible_schemas(kv)?,
+        None => scope.visible_schemas(kv)?,
     };
     for schema in schemas {
-        let candidate = RelationName::new(schema, reference.name.clone());
+        let candidate = RelationName::new(schema, written.reference.name.clone());
         if let Some(oid) = relation_oid(kv, &candidate)? {
             return Ok(oid);
         }
     }
-    Err(ExecError::Catalog(
-        crabka_pgcatalog::CatalogError::UndefinedTable(reference.to_string()),
-    ))
+    Err(written.undefined_table())
 }
 
-/// Read a written relation name as the reference the resolver takes. The first
-/// dot separates the qualifier, which is how `regclassin` reads one.
-fn relation_reference(name: &str) -> RelationRef {
-    match name.split_once('.') {
-        Some((schema, relation)) => RelationRef::qualified(schema, relation),
-        None => RelationRef::bare(name),
-    }
+/// The catalog-aware half of a `… :: regclass` cast whose operand spells a
+/// relation *name*, which is the only shape a search path applies to: `t` under
+/// `search_path = s1` is `s1.t`, exactly as `SELECT … FROM t` reads it. Every
+/// other operand — an oid in any of its spellings, `-`, a `regclass` already —
+/// names its relation outright and takes [`crate::exec::regclass_cast`].
+pub(crate) fn regclass_cast(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    value: &Datum,
+) -> Result<Option<Datum>, ExecError> {
+    let Some(name) = relation_name_operand(value) else {
+        return crate::exec::regclass_cast(kv, value);
+    };
+    let oid = resolve_relation_in_scope(kv, scope, name)?;
+    crate::exec::regclass_by_oid(kv, oid)
+        .map(Datum::Regclass)
+        .map(Some)
+}
+
+/// The operand text that spells a relation name rather than an oid —
+/// `regclassin`'s own test, which takes `-` and an all-digit string as oids
+/// before it reads anything as a name.
+fn relation_name_operand(value: &Datum) -> Option<&str> {
+    let Datum::Text(text) = value else {
+        return None;
+    };
+    let trimmed = text.trim();
+    (trimmed != "-" && trimmed.parse::<i32>().is_err()).then_some(text.as_str())
 }
 
 /// The `pg_class` oid of the relation stored under exactly this catalog name —
@@ -559,7 +602,7 @@ fn relation_reference(name: &str) -> RelationRef {
 ///
 /// [`crate::relname::resolve_relation`] resolves the three kinds the catalog
 /// keys by name; `regclass` also accepts an index and a virtual catalog
-/// relation, so the search-path walk lives in [`resolve_relation_by_name`] and
+/// relation, so the search-path walk lives in [`resolve_relation_in_scope`] and
 /// this is the per-schema probe it repeats.
 fn relation_oid(kv: &dyn Kv, name: &RelationName) -> Result<Option<i32>, ExecError> {
     match crate::exec::resolve_base_relation(kv, name) {
@@ -596,22 +639,29 @@ fn virtual_relation_name(spelled: &str) -> RelationName {
 /// The catalog name a written relation reference denotes, resolved through the
 /// one resolver. Used where the answer is a *name* rather than an oid, and where
 /// only the catalog-keyed relation kinds can be meant.
-fn resolve_relation_name(kv: &dyn Kv, name: &str) -> Result<RelationName, ExecError> {
+fn resolve_relation_name(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    name: &str,
+) -> Result<RelationName, ExecError> {
     crate::relname::resolve_relation(
         kv,
-        crate::relname::ResolutionScope::default_scope(),
-        &relation_reference(name.trim()),
+        scope,
+        &parse_written_relation(name)?.reference,
         crate::relname::SchemaDisposition::Reference,
     )
 }
 
-/// The inverse of [`resolve_relation_by_name`]: the name `regclassout` prints
+/// The inverse of [`resolve_relation_in_scope`]: the name `regclassout` prints
 /// for a `pg_class` oid, or `None` when no relation has that oid.
 ///
 /// The name is spelled as PostgreSQL spells it — each identifier quoted only
 /// when `quote_ident` would, and schema-qualified only when the schema is
 /// outside the search path (`public` and `pg_catalog` print bare, so a catalog
-/// name carrying no schema prefix already has the right shape).
+/// name carrying no schema prefix already has the right shape). Every spelling
+/// this produces has to read back through
+/// [`crate::relname::parse_written_relation`] as the same relation, which is
+/// the round trip `regclass_input.rs` pins.
 pub(crate) fn relation_name_by_oid(kv: &dyn Kv, oid: i32) -> Result<Option<String>, ExecError> {
     for virtual_table in crate::exec::virtual_table_names() {
         if crate::exec::virtual_relation_oid(virtual_table) == oid {
@@ -682,11 +732,15 @@ fn user_by_id(kv: &dyn Kv, oid: &Datum) -> Result<Datum, ExecError> {
 
 /// `pg_get_serial_sequence(table, column)` — the sequence a serial/identity
 /// column draws from, schema-qualified, or NULL when the column has none.
-fn serial_sequence(kv: &dyn Kv, vals: &[Datum]) -> Result<Datum, ExecError> {
+fn serial_sequence(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    vals: &[Datum],
+) -> Result<Datum, ExecError> {
     let (Datum::Text(relation), Datum::Text(column)) = (&vals[0], &vals[1]) else {
         return Ok(Datum::Null);
     };
-    let table = crabka_pgcatalog::get_table(kv, &resolve_relation_name(kv, relation)?)?;
+    let table = crabka_pgcatalog::get_table(kv, &resolve_relation_name(kv, scope, relation)?)?;
     let found = table
         .columns
         .iter()
@@ -729,11 +783,16 @@ fn qualified_sequence_name(
 
 /// `obj_description`/`col_description` — the comment on an object, or on one of
 /// its columns when `subid` is non-zero.
-fn description(kv: &dyn Kv, object: &Datum, subid: i32) -> Result<Datum, ExecError> {
+fn description(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    object: &Datum,
+    subid: i32,
+) -> Result<Datum, ExecError> {
     if matches!(object, Datum::Null) {
         return Ok(Datum::Null);
     }
-    let oid = resolve_relation_oid(kv, object)?;
+    let oid = resolve_relation_oid(kv, scope, object)?;
     for table in crabka_pgcatalog::list_tables(kv)? {
         if i64::from(oid) != i64::from(table.id) {
             continue;
@@ -768,7 +827,7 @@ fn comment_datum(kv: &dyn Kv, kind: &str, object: CommentObject<'_>) -> Result<D
 /// `pg_get_viewdef` in each of its overloads. The second argument is either the
 /// pretty-print flag or a wrap column; a wrap column implies pretty-printing,
 /// exactly as PostgreSQL's `pg_get_viewdef(oid, integer)` does.
-fn view_def(kv: &dyn Kv, vals: &[Datum]) -> Result<Datum, ExecError> {
+fn view_def(kv: &dyn Kv, scope: &ResolutionScope, vals: &[Datum]) -> Result<Datum, ExecError> {
     let (pretty, wrap) = match vals.get(1) {
         None => (false, None),
         Some(Datum::Bool(flag)) => (*flag, None),
@@ -780,7 +839,7 @@ fn view_def(kv: &dyn Kv, vals: &[Datum]) -> Result<Datum, ExecError> {
             (true, usize::try_from(column).ok().filter(|n| *n > 0))
         }
     };
-    let Some(view) = lookup_view(kv, &vals[0])? else {
+    let Some(view) = lookup_view(kv, scope, &vals[0])? else {
         return Ok(Datum::Text("Not a view".into()));
     };
     Ok(Datum::Text(view_definition(&view, pretty, wrap)))
@@ -789,13 +848,17 @@ fn view_def(kv: &dyn Kv, vals: &[Datum]) -> Result<Datum, ExecError> {
 /// Find the view an oid or a name refers to, or `None` when the argument names
 /// something that is not a view (PostgreSQL answers the literal `Not a view`).
 ///
-/// A name is resolved through the search path exactly as a `regclass` cast
-/// resolves one, so a view outside `public` is found under its own schema; a
-/// name no relation answers to is not a view either.
-fn lookup_view(kv: &dyn Kv, object: &Datum) -> Result<Option<View>, ExecError> {
+/// A name is resolved through the session's search path exactly as a `regclass`
+/// cast resolves one, so a view the path reaches is found under its own schema;
+/// a name no relation answers to is not a view either.
+fn lookup_view(
+    kv: &dyn Kv,
+    scope: &ResolutionScope,
+    object: &Datum,
+) -> Result<Option<View>, ExecError> {
     let wanted = match object {
         Datum::Null => return Ok(None),
-        Datum::Text(name) => match resolve_relation_by_name(kv, name) {
+        Datum::Text(name) => match resolve_relation_in_scope(kv, scope, name) {
             Ok(oid) => oid,
             Err(_) => return Ok(None),
         },
@@ -869,11 +932,11 @@ fn view_definition(view: &View, pretty: bool, wrap: Option<usize>) -> String {
 }
 
 /// `pg_get_indexdef(oid)` — the `CREATE INDEX` statement that rebuilds an index.
-fn index_def(kv: &dyn Kv, object: &Datum) -> Result<Datum, ExecError> {
+fn index_def(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<Datum, ExecError> {
     if matches!(object, Datum::Null) {
         return Ok(Datum::Null);
     }
-    let oid = resolve_relation_oid(kv, object)?;
+    let oid = resolve_relation_oid(kv, scope, object)?;
     for index in crabka_pgcatalog::list_indexes(kv)? {
         if crate::catalog_rel::index_relation_oid(index.id)? != oid {
             continue;
@@ -1024,14 +1087,14 @@ fn check_constraint_def(kv: &dyn Kv, wanted: i32) -> Result<Datum, ExecError> {
     let not_null_oids = crate::catalog_rel::not_null_constraint_oids(kv)?;
     for table in crabka_pgcatalog::list_tables(kv)? {
         for check in &table.checks {
-            let key = format!("{}.{}", table.name, check.name);
+            let key = crate::catalog_rel::ConstraintKey::new(&table.name, &check.name);
             if check_oids.get(&key) == Some(&wanted) {
                 let suffix = if check.validated { "" } else { " NOT VALID" };
                 return Ok(Datum::Text(format!("CHECK (({})){suffix}", check.expr)));
             }
         }
         for column in &table.columns {
-            let key = format!("{}.{}", table.name, column.name);
+            let key = crate::catalog_rel::ConstraintKey::new(&table.name, &column.name);
             if column.not_null && not_null_oids.get(&key) == Some(&wanted) {
                 return Ok(Datum::Text(format!(
                     "NOT NULL {}",

@@ -3,7 +3,7 @@
 use std::{
     collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc, LazyLock, Mutex,
         atomic::{AtomicBool, AtomicI32, AtomicU64, AtomicUsize, Ordering},
     },
     time::{SystemTime, UNIX_EPOCH},
@@ -27,19 +27,53 @@ use crate::{
     session::{self, SessionConfig},
 };
 
-static NEXT_PID: AtomicI32 = AtomicI32::new(1);
+/// How many low bits of a backend id the per-session counter occupies. The
+/// remaining bits of the positive `int4` range carry [`PROCESS_TOKEN`].
+const BACKEND_COUNTER_BITS: u32 = 15;
+
+/// The counter half of a backend id, so the composed value always fits the
+/// positive `int4` range a client may send back in a `CancelRequest`.
+const BACKEND_COUNTER_MASK: i32 = (1 << BACKEND_COUNTER_BITS) - 1;
+
+static NEXT_PID: AtomicI32 = AtomicI32::new(0);
+
+/// The high half every backend id this process announces carries.
+///
+/// Drawn once per process, never zero, so the composed id is positive and two
+/// processes serving one cluster do not hand out the same id. This is the same
+/// device the range layer already uses to tell one node's notification records
+/// from another's: `--range-listen` is a bind specification rather than a
+/// resolved address, so there is no stable node number to fold in and a random
+/// per-process draw is what distinguishes processes.
+static PROCESS_TOKEN: LazyLock<i32> =
+    LazyLock::new(|| rand::rng().random_range(1..=(i32::MAX >> BACKEND_COUNTER_BITS)));
 
 /// Allocate the backend process id that identifies one session.
 ///
 /// `PostgreSQL` forks a backend per connection and the pid it announces in
 /// `BackendKeyData` is the one `pg_backend_pid()` reports, so a client can
 /// correlate a cancel request with the session it opened. crabka serves every
-/// session from one OS process, so this counter — not the process id — is what
+/// session from one OS process, so a counter — not the process id — is what
 /// distinguishes them, and one counter serves the whole process so an engine
 /// opening a session with no client behind it (`Engine::connect`) draws an id
 /// that cannot collide with a connected session's.
+///
+/// The id is **not** only a session label: `pg_temp_<backend id>` names this
+/// session's temporary namespace in a catalog every gateway of a cluster
+/// shares, so a bare per-process counter would have two gateways name one
+/// namespace. Folding [`PROCESS_TOKEN`] into the high bits keeps the id inside
+/// `int4` — the width `BackendKeyData` and `CancelRequest` fix — while making
+/// it a cluster-wide name rather than a process-local one.
+///
+/// The split costs id space in both directions: 32768 sessions per process
+/// before the counter wraps and repeats an id, and one chance in 65535 that
+/// two processes draw the same token. Neither can destroy data on its own —
+/// a temporary namespace is only ever emptied by a session that holds the sole
+/// claim on it — so what remains is that two sessions could share a namespace,
+/// not that either could lose one.
 pub fn next_backend_pid() -> i32 {
-    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+    let counter = NEXT_PID.fetch_add(1, Ordering::Relaxed) & BACKEND_COUNTER_MASK;
+    (*PROCESS_TOKEN << BACKEND_COUNTER_BITS) | counter
 }
 
 /// Shared connection/activity accounting for lifecycle decisions outside pgwire.

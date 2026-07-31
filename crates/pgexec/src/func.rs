@@ -1084,7 +1084,7 @@ fn eval_eager(
             })?;
             let value = runtime
                 .manager
-                .nextval(&*runtime.kv, ctx.resolution(), &name)?;
+                .nextval_written(&*runtime.kv, ctx.resolution(), &name)?;
             runtime
                 .currvals
                 .lock()
@@ -1119,10 +1119,13 @@ fn eval_eager(
             let runtime = ctx.sequence.as_ref().ok_or_else(|| {
                 ExecError::Unsupported("sequence functions require a SQL session".into())
             })?;
-            let value =
-                runtime
-                    .manager
-                    .setval(&*runtime.kv, ctx.resolution(), &name, value, is_called)?;
+            let value = runtime.manager.setval_written(
+                &*runtime.kv,
+                ctx.resolution(),
+                &name,
+                value,
+                is_called,
+            )?;
             runtime
                 .currvals
                 .lock()

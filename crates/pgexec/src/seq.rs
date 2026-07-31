@@ -116,18 +116,43 @@ impl SequenceManager {
         self.inner.lock().expect("seqmgr").clear();
     }
 
+    /// `nextval` over the sequence a stored column default names.
+    ///
+    /// The stored text is the catalog's own rendering of a
+    /// [`crabka_pgcatalog::RelationName`] — bare in `public`, `schema.name`
+    /// elsewhere, never quoted — not a `regclass` literal, so it is read back
+    /// the way it was written rather than through
+    /// [`crate::relname::parse_written_relation`]. `nextval('…')` as SQL calls
+    /// it is [`SequenceManager::nextval_written`].
     pub fn nextval(
+        &self,
+        kv: &dyn Kv,
+        scope: &crate::relname::ResolutionScope,
+        stored: &str,
+    ) -> Result<i64, ExecError> {
+        self.advance(kv, &stored_sequence_name(kv, scope, stored)?)
+    }
+
+    /// `nextval(regclass)` as SQL calls it, over a name the user wrote.
+    pub fn nextval_written(
         &self,
         kv: &dyn Kv,
         scope: &crate::relname::ResolutionScope,
         written: &str,
     ) -> Result<i64, ExecError> {
-        let name = sequence_name(kv, scope, written)?;
-        let mut sequence = crabka_pgcatalog::get_sequence(kv, &name)?;
-        let value = next_sequence_value(&name, &sequence)?;
+        self.advance(kv, &written_sequence_name(kv, scope, written)?)
+    }
+
+    fn advance(
+        &self,
+        kv: &dyn Kv,
+        name: &crabka_pgcatalog::RelationName,
+    ) -> Result<i64, ExecError> {
+        let mut sequence = crabka_pgcatalog::get_sequence(kv, name)?;
+        let value = next_sequence_value(name, &sequence)?;
         sequence.last_value = value;
         sequence.is_called = true;
-        let op = crabka_pgcatalog::put_sequence_op(&name, sequence);
+        let op = crabka_pgcatalog::put_sequence_op(name, sequence);
         match self.mode {
             PersistMode::Durable => kv.write_batch(&[op])?,
             PersistMode::Replicated => {
@@ -139,7 +164,9 @@ impl SequenceManager {
         Ok(value)
     }
 
-    pub fn setval(
+    /// `setval(regclass, …)` as SQL calls it. There is no stored-default
+    /// counterpart: only `nextval` appears in a column default.
+    pub fn setval_written(
         &self,
         kv: &dyn Kv,
         scope: &crate::relname::ResolutionScope,
@@ -147,7 +174,7 @@ impl SequenceManager {
         value: i64,
         is_called: bool,
     ) -> Result<i64, ExecError> {
-        let name = sequence_name(kv, scope, written)?;
+        let name = written_sequence_name(kv, scope, written)?;
         let mut sequence = crabka_pgcatalog::get_sequence(kv, &name)?;
         if value < sequence.min || value > sequence.max {
             return Err(ExecError::SequenceLimit(format!(
@@ -172,26 +199,50 @@ impl SequenceManager {
 
 /// The sequence a `nextval('…')` / `setval('…')` argument names.
 ///
-/// The argument is a `regclass` input: `PostgreSQL` parses the *text* as a
-/// written, possibly qualified name (`stringToQualifiedNameList`) rather than as
-/// one identifier, so a dot in it separates the schema from the sequence. An
-/// unqualified name then resolves through the session's search path like any
+/// The argument is a `regclass` input, so it is read by the one parser that
+/// reads those — [`crate::relname::parse_written_relation`] — and not split on
+/// a dot: `nextval('"My Seq"')` names one sequence with a space in it, and
+/// `nextval('MY SEQ')` is `42602 invalid name syntax`, both on `postgres:18.4`.
+/// An unqualified name then resolves through the session's search path like any
 /// other written name, which is why this takes a scope rather than assuming
 /// `public`.
 ///
 /// `regclassin` reports a missing schema as a missing *relation* —
 /// `nextval('nosuch.s')` is `42P01 relation "nosuch.s" does not exist` on
 /// `postgres:18.4`, not `3F000` — so the disposition is
-/// [`SchemaDisposition::Reference`].
-fn sequence_name(
+/// [`SchemaDisposition::Reference`](crate::relname::SchemaDisposition::Reference).
+fn written_sequence_name(
     kv: &dyn Kv,
     scope: &crate::relname::ResolutionScope,
     written: &str,
 ) -> Result<crabka_pgcatalog::RelationName, ExecError> {
-    let reference = match written.split_once('.') {
+    resolve_sequence(
+        kv,
+        scope,
+        crate::relname::parse_written_relation(written)?.reference,
+    )
+}
+
+/// The sequence a stored `nextval` column default names, whose text is a
+/// [`crabka_pgcatalog::RelationName`]'s own rendering rather than a `regclass`
+/// literal: unquoted throughout, and dotted only outside `public`.
+fn stored_sequence_name(
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    stored: &str,
+) -> Result<crabka_pgcatalog::RelationName, ExecError> {
+    let reference = match stored.split_once('.') {
         Some((schema, name)) => crabka_pgparser::ast::RelationRef::qualified(schema, name),
-        None => crabka_pgparser::ast::RelationRef::bare(written),
+        None => crabka_pgparser::ast::RelationRef::bare(stored),
     };
+    resolve_sequence(kv, scope, reference)
+}
+
+fn resolve_sequence(
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    reference: crabka_pgparser::ast::RelationRef,
+) -> Result<crabka_pgcatalog::RelationName, ExecError> {
     crate::relname::resolve_relation(
         kv,
         scope,
@@ -251,8 +302,9 @@ mod tests {
     }
 
     /// A `regclass` argument is written text, not one identifier: a dot in it
-    /// separates the schema, and an unqualified name resolves through the
-    /// session's search path rather than landing in `public`.
+    /// separates the schema, a quoted part keeps its case, and an unqualified
+    /// name resolves through the session's search path rather than landing in
+    /// `public`.
     #[test]
     fn a_written_sequence_name_resolves_through_the_search_path() {
         let kv = MemKv::new();
@@ -275,9 +327,14 @@ mod tests {
         let cases = [
             ("s", crabka_pgcatalog::RelationName::new("sch", "s")),
             ("other.s", crabka_pgcatalog::RelationName::new("other", "s")),
+            ("S", crabka_pgcatalog::RelationName::new("sch", "s")),
+            (
+                " OTHER . \"s\" ",
+                crabka_pgcatalog::RelationName::new("other", "s"),
+            ),
         ];
         for (written, expected) in cases {
-            assert!(sequence_name(&kv, &scope, written).expect("resolves") == expected);
+            assert!(written_sequence_name(&kv, &scope, written).expect("resolves") == expected);
         }
     }
 

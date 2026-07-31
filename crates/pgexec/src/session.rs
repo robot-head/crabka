@@ -10,8 +10,8 @@
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::{Arc, Mutex},
+    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
+    sync::{Arc, LazyLock, Mutex},
 };
 
 use crabka_pgkv::{Kv, WriteOp};
@@ -2259,6 +2259,22 @@ pub(crate) fn notify_queue_error(error: notify::NotifyError) -> ExecError {
     ExecError::Remote(PgError::error(error.sqlstate(), error.to_string()))
 }
 
+/// What the end of a transaction owes one temporary relation.
+///
+/// The relation is identified by its catalog id as well as its name, because
+/// the name is not stable for as long as the disposition is: a transaction may
+/// drop the relation and give the name to another one, and the disposition
+/// belongs to the relation it was written on rather than to the name that
+/// relation held.
+struct OnCommitEntry {
+    relation: crabka_pgcatalog::RelationName,
+    /// The relation the disposition was armed for. An entry whose name now
+    /// holds a different id — or no relation at all — has nothing left to
+    /// dispose of.
+    table: crabka_pgcatalog::TableId,
+    action: crabka_pgparser::ast::OnCommitAction,
+}
+
 /// One connection's view of the engine. Holds shared handles to the KV store,
 /// the ProcArray, the SequenceManager, the RowLockManager, and the DDL catalog
 /// lock, plus this connection's transaction state. Not shared between
@@ -2288,16 +2304,17 @@ pub struct SqlSession {
     /// namespace, which happens on the first statement that creates a temporary
     /// relation and never again.
     temp_schema_ready: bool,
+    /// This session's entry in [`TEMP_NAMESPACE_CLAIMS`], taken alongside
+    /// [`Self::temp_schema_ready`] and released when the session is dropped.
+    /// `None` until the session first needs a temporary namespace.
+    temp_namespace_claim: Option<TempNamespaceClaim>,
     /// The temporary relations whose contents or existence a `COMMIT` disposes
     /// of, in creation order.
     ///
     /// `ON COMMIT` is session-scoped by definition — the relation cannot outlive
     /// the session that created it — so the disposition lives beside the session
     /// rather than in the shared catalog.
-    on_commit: Vec<(
-        crabka_pgcatalog::RelationName,
-        crabka_pgparser::ast::OnCommitAction,
-    )>,
+    on_commit: Vec<OnCommitEntry>,
     table_write_gate: Arc<tokio::sync::RwLock<()>>,
     writer_fence: Arc<crate::WriterFence>,
     /// Retains the registry entry while this session can hold a writer lease.
@@ -2501,6 +2518,72 @@ pub(crate) struct SqlSessionConfig {
     pub backend_pid: i32,
 }
 
+/// Every temporary namespace a live session of this process is using, and how
+/// many of them are using it.
+///
+/// A temporary namespace is `pg_temp_<backend id>` in a catalog every gateway
+/// of a cluster shares, and the only way relations left behind by a backend
+/// that never tore itself down stop leaking is that a later session of the same
+/// id empties the namespace before using it. Emptying it by name alone is what
+/// turns a repeated backend id into lost data, so every purge is gated on this
+/// registry: a session may empty a namespace only while no other live session
+/// is using it.
+///
+/// The scope is the process rather than the engine because that is the scope
+/// the hazard has. A cluster's DDL all executes on the node hosting range 0 —
+/// locally for the gateway that hosts it, on a session that node opens under
+/// the originating backend id for every other gateway — so two connections
+/// whose backend ids collide meet there as two sessions of one process.
+/// Entries are keyed by catalog store as well as by name so that two engines
+/// in one process, which is every test that opens more than one, do not see
+/// each other's namespaces.
+static TEMP_NAMESPACE_CLAIMS: LazyLock<Mutex<HashMap<(usize, String), usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// One live session's use of a temporary namespace, released on drop.
+struct TempNamespaceClaim {
+    store: usize,
+    schema: String,
+}
+
+impl TempNamespaceClaim {
+    /// Claim `schema` in `store`, answering with the claim and whether this
+    /// session is its only holder — the condition for emptying the namespace.
+    fn acquire(store: usize, schema: &str) -> (Self, bool) {
+        let claim = Self {
+            store,
+            schema: schema.to_owned(),
+        };
+        let mut claims = TEMP_NAMESPACE_CLAIMS.lock().expect("temp namespace claims");
+        let holders = claims.entry((store, schema.to_owned())).or_insert(0);
+        *holders += 1;
+        let unshared = *holders == 1;
+        (claim, unshared)
+    }
+}
+
+impl Drop for TempNamespaceClaim {
+    fn drop(&mut self) {
+        let mut claims = TEMP_NAMESPACE_CLAIMS.lock().expect("temp namespace claims");
+        if let Entry::Occupied(mut entry) = claims.entry((self.store, self.schema.clone())) {
+            *entry.get_mut() -= 1;
+            if *entry.get() == 0 {
+                entry.remove();
+            }
+        }
+    }
+}
+
+/// How many live sessions of this process are using `schema` in `store`.
+fn temp_namespace_holders(store: usize, schema: &str) -> usize {
+    TEMP_NAMESPACE_CLAIMS
+        .lock()
+        .expect("temp namespace claims")
+        .get(&(store, schema.to_owned()))
+        .copied()
+        .unwrap_or(0)
+}
+
 #[derive(Clone)]
 struct SqlPrepared {
     statement: Option<Statement>,
@@ -2509,6 +2592,56 @@ struct SqlPrepared {
     /// `None` for one prepared over the extended protocol, which is what
     /// `pg_prepared_statements.from_sql` reports.
     sql_source: Option<String>,
+    /// The parameter type oids the client asked for, kept so a later
+    /// re-description is the same computation with the same inputs rather than
+    /// one that only resembles it. `0` is "infer it", as on the wire.
+    param_type_hints: Vec<u32>,
+    /// The scope [`Self::description`] was taken under. A `Bind` or `EXECUTE`
+    /// finding a different one re-describes the statement, because an
+    /// unqualified name in it may now resolve to a different relation.
+    described_scope: crate::relname::ResolutionScope,
+    /// Whether [`Self::description`]'s columns are what this statement's result
+    /// really is, and so may be compared with a later re-description.
+    ///
+    /// `PostgreSQL` calls this a plan's `fixed_result`. It is false only where
+    /// SQL `PREPARE` accepted a statement it could not describe, which leaves
+    /// no shape to hold a later execution to.
+    fixed_result: bool,
+}
+
+/// The part of a result descriptor that *is* a statement's result type: the
+/// column names, their types and their type modifiers.
+///
+/// Deliberately not the whole [`FieldDescription`]. Where a column came from —
+/// its table oid and attribute number — is not part of the type, and comparing
+/// it would refuse a statement that resolved to a same-shaped relation in
+/// another schema, which `postgres:18.4` accepts. The format code is not part
+/// of it either: it belongs to the portal, not the statement.
+fn result_type(fields: &[FieldDescription]) -> Vec<(&str, u32, i32)> {
+    fields
+        .iter()
+        .map(|field| (field.name.as_str(), field.type_oid, field.type_modifier))
+        .collect()
+}
+
+/// Verified against `postgres:18.4`, for both a protocol-level `Parse` and a
+/// SQL-level `PREPARE`, in both directions (a wider result and a narrower one)
+/// and for a same-width result whose column names or types changed.
+fn cached_plan_result_type_changed() -> PgError {
+    PgError::error(
+        sqlstate::FEATURE_NOT_SUPPORTED,
+        "cached plan must not change result type",
+    )
+}
+
+/// What a statement describes as under one resolution scope.
+struct PreparedShape {
+    parameter_types: Vec<u32>,
+    /// The result columns, or why they could not be described — SQL `PREPARE`
+    /// records a statement it could not describe and Parse refuses one.
+    fields: Result<Vec<FieldDescription>, PgError>,
+    /// The scope the description was taken under.
+    scope: crate::relname::ResolutionScope,
 }
 
 struct SqlPortal {
@@ -2516,6 +2649,10 @@ struct SqlPortal {
     description: PortalDescription,
     formats: Vec<i16>,
     execution: SqlPortalExecution,
+    /// Carried from the prepared statement this portal was bound from: whether
+    /// the result columns it announced may be held against what `Execute`
+    /// actually produces.
+    fixed_result: bool,
 }
 
 enum SqlPortalExecution {
@@ -2599,6 +2736,7 @@ impl SqlSession {
             table_id_lock,
             reserved_table_ids: Mutex::new(Vec::new()),
             temp_schema_ready: false,
+            temp_namespace_claim: None,
             on_commit: Vec::new(),
             table_write_gate,
             writer_fence,
@@ -3541,6 +3679,90 @@ impl SqlSession {
 
     // ---- S2: SQL-level PREPARE/EXECUTE/DEALLOCATE -----------------------
 
+    /// What `statement` describes as under this session's current resolution
+    /// scope: the parameter types it infers, and the result columns it would
+    /// announce.
+    ///
+    /// One function serves `PREPARE`, `Parse`, and the re-description a later
+    /// `EXECUTE` or `Bind` compares against, so "the same statement under the
+    /// same scope" is one computation rather than several that happen to agree.
+    fn describe_prepared_shape(
+        &self,
+        statement: &Statement,
+        param_type_hints: &[u32],
+    ) -> Result<PreparedShape, PgError> {
+        let parameter_count = max_statement_param(statement).max(param_type_hints.len());
+        let params = (0..parameter_count)
+            .map(|index| BoundParam {
+                type_oid: match param_type_hints.get(index).copied().unwrap_or(0) {
+                    0 => None,
+                    type_oid => Some(type_oid),
+                },
+                format: 0,
+                value: None,
+            })
+            .collect::<Vec<_>>();
+        let timezone_name = self.guc.effective("timezone").map_err(ExecError::into_pg)?;
+        let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
+            jiff::tz::TimeZone::UTC
+        } else {
+            jiff::tz::TimeZone::get(&timezone_name).map_err(|_| {
+                PgError::error(
+                    "22023",
+                    format!("invalid value for parameter: \"{timezone_name}\""),
+                )
+            })?
+        };
+        let scope = self.resolution_scope();
+        let binder = ParamBinder {
+            catalog_kv: &*self.catalog_kv,
+            resolution: &scope,
+            params: &params,
+            time_zone: &time_zone,
+            inferred_param_types: RefCell::new(vec![None; parameter_count]),
+        };
+        let mut inferred = statement.clone();
+        binder.bind_statement_params(&mut inferred)?;
+        let fields = crate::exec::describe_statement(&*self.catalog_kv, &scope, &inferred)
+            .map_err(ExecError::into_pg);
+        Ok(PreparedShape {
+            parameter_types: binder.resolved_param_types()?,
+            fields,
+            scope,
+        })
+    }
+
+    /// Refuse to run a cached statement whose result columns are no longer the
+    /// ones already described to the client.
+    ///
+    /// A statement is re-analysed under the scope in force when it runs, not
+    /// the one it was prepared under — `SET search_path` between `PREPARE` and
+    /// `EXECUTE` can therefore point an unqualified name at a different
+    /// relation, and `PostgreSQL` does the same. What `PostgreSQL` will not do
+    /// is hand back a result of a shape it has already announced a different
+    /// one for, and neither will this: the descriptor the client holds fixes
+    /// the field count and type oids its decoder is using, so a wider relation
+    /// would be truncated to the announced count and a narrower one would put
+    /// fewer fields on the wire than the `RowDescription` promised.
+    ///
+    /// The re-description is skipped while the scope is unchanged, which is the
+    /// gate `PostgreSQL` uses too (`SearchPathMatchesCurrentEnvironment`), so a
+    /// hot prepared statement costs nothing extra.
+    fn check_cached_result_type(&self, prepared: &SqlPrepared) -> Result<(), PgError> {
+        let Some(statement) = &prepared.statement else {
+            return Ok(());
+        };
+        if !prepared.fixed_result || self.resolution_scope() == prepared.described_scope {
+            return Ok(());
+        }
+        let shape = self.describe_prepared_shape(statement, &prepared.param_type_hints)?;
+        let fields = shape.fields?;
+        if result_type(&fields) == result_type(&prepared.description.fields) {
+            return Ok(());
+        }
+        Err(cached_plan_result_type_changed())
+    }
+
     /// `PREPARE <name> [(types)] AS <statement>`.
     fn prepare_sql(
         &mut self,
@@ -3555,45 +3777,23 @@ impl SqlSession {
         // A declared type list fixes those parameters; the rest are inferred
         // from the statement, exactly as `PREPARE name AS SELECT $1::int4 + 1`
         // is typed in PostgreSQL.
-        let parameter_count = max_statement_param(statement).max(param_types.len());
-        let params = (0..parameter_count)
-            .map(|index| BoundParam {
-                type_oid: param_types.get(index).map(|ty| ty.oid()),
-                format: 0,
-                value: None,
-            })
-            .collect::<Vec<_>>();
-        let timezone_name = self.guc.effective("timezone")?;
-        let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
-            jiff::tz::TimeZone::UTC
-        } else {
-            jiff::tz::TimeZone::get(&timezone_name)
-                .map_err(|_| ExecError::InvalidParameterValue(timezone_name.clone()))?
-        };
-        let binder = ParamBinder {
-            catalog_kv: &*self.catalog_kv,
-            resolution: &self.resolution_scope(),
-            params: &params,
-            time_zone: &time_zone,
-            inferred_param_types: RefCell::new(vec![None; parameter_count]),
-        };
-        let mut inferred = statement.clone();
-        binder
-            .bind_statement_params(&mut inferred)
+        let param_type_hints = param_types.iter().map(|ty| ty.oid()).collect::<Vec<_>>();
+        let shape = self
+            .describe_prepared_shape(statement, &param_type_hints)
             .map_err(ExecError::Remote)?;
-        let fields =
-            crate::exec::describe_statement(&*self.catalog_kv, &self.resolution_scope(), &inferred)
-                .unwrap_or_else(|_| Vec::new());
-        let parameter_types = binder.resolved_param_types().map_err(ExecError::Remote)?;
+        let fixed_result = shape.fields.is_ok();
         self.prepared.insert(
             name.to_string(),
             SqlPrepared {
                 statement: Some(statement.clone()),
                 description: PreparedDescription {
-                    parameter_types,
-                    fields,
+                    parameter_types: shape.parameter_types,
+                    fields: shape.fields.unwrap_or_default(),
                 },
                 sql_source: Some(source.to_string()),
+                param_type_hints,
+                described_scope: shape.scope,
+                fixed_result,
             },
         );
         Ok(QueryResult::Command {
@@ -3615,6 +3815,8 @@ impl SqlSession {
                 "wrong number of parameters for prepared statement \"{name}\""
             )));
         }
+        self.check_cached_result_type(&prepared)
+            .map_err(ExecError::Remote)?;
         let Some(mut statement) = prepared.statement.clone() else {
             return Ok(QueryResult::Empty);
         };
@@ -3623,7 +3825,17 @@ impl SqlSession {
             self.bind_extended_statement_params(&mut statement, &params)
                 .map_err(ExecError::Remote)?;
         }
-        Box::pin(self.run_one(&statement)).await
+        let result = Box::pin(self.run_one(&statement)).await?;
+        // The scope check above is `PostgreSQL`'s gate, and it does not see a
+        // relation altered under a statement whose scope never moved. What the
+        // run actually produced does, and comparing it costs nothing.
+        if let QueryResult::Rows { fields, .. } = &result
+            && prepared.fixed_result
+            && result_type(fields) != result_type(&prepared.description.fields)
+        {
+            return Err(ExecError::Remote(cached_plan_result_type_changed()));
+        }
+        Ok(result)
     }
 
     /// `CALL <procedure>(args)` — run the procedure's body statements in order.
@@ -5378,6 +5590,16 @@ impl SqlSession {
         crabka_pgcatalog::temp_schema_name(self.backend_pid)
     }
 
+    /// The catalog store this session reads and writes, as a value a claim on a
+    /// temporary namespace can be keyed by.
+    ///
+    /// Address identity is enough because a claim outlives neither the session
+    /// holding it nor, therefore, the `Arc` that keeps the store alive: while
+    /// an entry exists the address cannot have been reused by another store.
+    fn catalog_store_id(&self) -> usize {
+        std::ptr::from_ref(&*self.catalog_kv).cast::<()>().addr()
+    }
+
     /// Apply a catalog batch through whichever seam this session's stores make
     /// authoritative — the commit seam when catalog and data share a store, the
     /// catalog store's own batch when they do not.
@@ -5401,14 +5623,32 @@ impl SqlSession {
     /// create a temporary relation clears the namespace before anything is
     /// created in it: one extra catalog batch per session that uses temporary
     /// relations at all, and none for a session that does not.
+    ///
+    /// Clearing it is gated on the claim, because "the previous holder of this
+    /// id is gone" is an assumption and this is where it would cost data if it
+    /// were wrong. A session that finds the namespace already claimed leaves
+    /// its contents alone and only makes sure the namespace record exists: two
+    /// sessions sharing one temporary namespace answer each other's queries,
+    /// which is wrong, but silently destroying the other's relations is worse.
     async fn ensure_temp_schema(&mut self, stmt: &Statement) -> Result<(), ExecError> {
         if self.temp_schema_ready || !self.statement_may_create_temp(stmt) {
             return Ok(());
         }
         let schema = self.temp_schema();
-        let mut ops = crate::exec::drop_schema_contents_ops(&*self.catalog_kv, &schema)?;
+        let (claim, unshared) = TempNamespaceClaim::acquire(self.catalog_store_id(), &schema);
+        let mut ops = if unshared {
+            crate::exec::drop_schema_contents_ops(&*self.catalog_kv, &schema)?
+        } else {
+            tracing::warn!(
+                schema,
+                "temporary namespace is already in use by another session; \
+                 leaving its relations in place"
+            );
+            Vec::new()
+        };
         ops.push(crabka_pgcatalog::create_temp_schema_op(&schema));
         self.commit_catalog(ops).await?;
+        self.temp_namespace_claim = Some(claim);
         self.temp_schema_ready = true;
         Ok(())
     }
@@ -5436,11 +5676,42 @@ impl SqlSession {
     /// namespace itself in place — which is what `PostgreSQL` does, where
     /// `current_schemas(true)` still reports `pg_temp_<n>` after a
     /// `DISCARD TEMP`.
+    ///
+    /// Emptying by name is gated on the claim exactly as
+    /// [`Self::ensure_temp_schema`] is, and for the same reason: `DISCARD TEMP`
+    /// and session teardown reach
+    /// this on a session that may never have created a temporary relation at
+    /// all, so without the gate a connection could empty a namespace it had
+    /// nothing to do with merely by disconnecting.
     async fn drop_temp_relations(&mut self) -> Result<(), ExecError> {
         self.on_commit.clear();
         let schema = self.temp_schema();
-        let ops = crate::exec::drop_schema_contents_ops(&*self.catalog_kv, &schema)?;
-        self.commit_catalog(ops).await
+        // A session that already holds the claim counts itself; one that does
+        // not takes a claim for the duration, so the answer cannot go stale
+        // between the question and the batch it decides.
+        let (borrowed, unshared) = match &self.temp_namespace_claim {
+            Some(_) => (
+                None,
+                temp_namespace_holders(self.catalog_store_id(), &schema) == 1,
+            ),
+            None => {
+                let (claim, unshared) =
+                    TempNamespaceClaim::acquire(self.catalog_store_id(), &schema);
+                (Some(claim), unshared)
+            }
+        };
+        let result = if unshared {
+            let ops = crate::exec::drop_schema_contents_ops(&*self.catalog_kv, &schema)?;
+            self.commit_catalog(ops).await
+        } else {
+            tracing::warn!(
+                schema,
+                "temporary namespace is in use by another session; leaving its relations in place"
+            );
+            Ok(())
+        };
+        drop(borrowed);
+        result
     }
 
     /// Remember what a `COMMIT` owes a temporary relation this statement just
@@ -5474,8 +5745,32 @@ impl SqlSession {
             name,
             disposition,
         )?;
-        self.on_commit.push((resolved, *action));
+        // Read back the id the creation just assigned: the disposition is the
+        // relation's, and only the id says which relation that is once the name
+        // has been given away.
+        let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &resolved)?.id;
+        self.on_commit.push(OnCommitEntry {
+            relation: resolved,
+            table,
+            action: *action,
+        });
         Ok(())
+    }
+
+    /// Whether the relation an entry was armed for is still the one standing
+    /// under its name.
+    ///
+    /// A relation dropped since — by `DROP TABLE`, by the `DROP SCHEMA` a
+    /// `DISCARD TEMP` amounts to, or by anything else that empties the
+    /// namespace — has no rows to delete and nothing to drop, and a name since
+    /// re-used by a different relation carries that relation's own disposition
+    /// rather than this one.
+    fn on_commit_relation_is_live(&self, entry: &OnCommitEntry) -> Result<bool, ExecError> {
+        match crabka_pgcatalog::get_table(&*self.catalog_kv, &entry.relation) {
+            Ok(table) => Ok(table.id == entry.table),
+            Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
 
     /// Discharge every `ON COMMIT` disposition at the end of a transaction —
@@ -5490,44 +5785,71 @@ impl SqlSession {
     /// lands *after* the data commit rather than as part of it. A process death
     /// between the two leaves the relation, which the next session of the same
     /// backend id purges before it uses the namespace.
+    ///
+    /// The queue is taken rather than borrowed, and only an entry this drain
+    /// actually discharged goes back. The drain runs after the transaction's
+    /// commit has landed, so there is no transaction left for a failure here to
+    /// abort; an entry put back after failing to discharge would be re-attempted
+    /// by the next statement, and by every statement after that, turning one
+    /// fault into a session that answers everything with the same error.
     async fn apply_on_commit(&mut self) -> Result<(), ExecError> {
         if self.on_commit.is_empty() {
             return Ok(());
         }
-        let mut empty = Vec::new();
+        let queued = std::mem::take(&mut self.on_commit);
+        let mut still_owed = Vec::new();
         let mut drop = Vec::new();
-        self.on_commit.retain(|(relation, action)| {
-            let reference =
-                crabka_pgparser::ast::RelationRef::qualified(&relation.schema, &relation.name);
-            match action {
-                crabka_pgparser::ast::OnCommitAction::PreserveRows => false,
-                crabka_pgparser::ast::OnCommitAction::DeleteRows => {
-                    empty.push(reference);
-                    true
-                }
-                crabka_pgparser::ast::OnCommitAction::Drop => {
-                    drop.push(reference);
-                    false
+        let mut failure = None;
+        for entry in queued {
+            let reference = crabka_pgparser::ast::RelationRef::qualified(
+                &entry.relation.schema,
+                &entry.relation.name,
+            );
+            match self.on_commit_relation_is_live(&entry) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    failure = failure.or(Some(error));
+                    continue;
                 }
             }
-        });
-        if !empty.is_empty() {
-            self.run_write(&Statement::Truncate {
-                names: empty,
-                restart_identity: false,
-                cascade: false,
-            })
-            .await?;
+            match entry.action {
+                crabka_pgparser::ast::OnCommitAction::PreserveRows => {}
+                crabka_pgparser::ast::OnCommitAction::Drop => drop.push(reference),
+                crabka_pgparser::ast::OnCommitAction::DeleteRows => {
+                    // One statement per relation, so an entry that cannot be
+                    // emptied costs only its own disposition rather than every
+                    // other relation's.
+                    let emptied = self
+                        .run_write(&Statement::Truncate {
+                            names: vec![reference],
+                            restart_identity: false,
+                            cascade: false,
+                        })
+                        .await;
+                    match emptied {
+                        Ok(_) => still_owed.push(entry),
+                        Err(error) => failure = failure.or(Some(error)),
+                    }
+                }
+            }
         }
-        if !drop.is_empty() {
-            self.run_ddl(&Statement::DropTable {
-                names: drop,
-                if_exists: true,
-                cascade: true,
-            })
-            .await?;
+        self.on_commit = still_owed;
+        if !drop.is_empty()
+            && let Err(error) = self
+                .run_ddl(&Statement::DropTable {
+                    names: drop,
+                    if_exists: true,
+                    cascade: true,
+                })
+                .await
+        {
+            failure = failure.or(Some(error));
         }
-        Ok(())
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
     }
 
     /// DDL is non-transactional and writes through immediately. Every statement
@@ -8602,6 +8924,9 @@ impl Session for SqlSession {
                         statement: None,
                         description: description.clone(),
                         sql_source: None,
+                        param_type_hints: param_types.to_vec(),
+                        described_scope: self.resolution_scope(),
+                        fixed_result: true,
                     },
                 );
                 return Ok(description);
@@ -8610,56 +8935,23 @@ impl Session for SqlSession {
                 .map_err(ExecError::into_pg)?;
             let result = (|| {
                 let statement = parse_single_extended_statement(sql)?;
-                let mut inferred_statement = statement.clone();
-                let parameter_count = max_statement_param(&statement).max(param_types.len());
-                let params = (0..parameter_count)
-                    .map(|index| BoundParam {
-                        type_oid: match param_types.get(index).copied().unwrap_or(0) {
-                            0 => None,
-                            type_oid => Some(type_oid),
-                        },
-                        format: 0,
-                        value: None,
-                    })
-                    .collect::<Vec<_>>();
-                let timezone_name = self.guc.effective("timezone").map_err(ExecError::into_pg)?;
-                let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
-                    jiff::tz::TimeZone::UTC
-                } else {
-                    jiff::tz::TimeZone::get(&timezone_name).map_err(|_| {
-                        PgError::error(
-                            "22023",
-                            format!("invalid value for parameter: \"{timezone_name}\""),
-                        )
-                    })?
-                };
-                let binder = ParamBinder {
-                    catalog_kv: &*self.catalog_kv,
-                    resolution: &self.resolution_scope(),
-                    params: &params,
-                    time_zone: &time_zone,
-                    inferred_param_types: RefCell::new(vec![None; params.len()]),
-                };
-                binder.bind_statement_params(&mut inferred_statement)?;
-                let fields = crate::exec::describe_statement(
-                    &*self.catalog_kv,
-                    &self.resolution_scope(),
-                    &inferred_statement,
-                )
-                .map_err(ExecError::into_pg)?;
+                let shape = self.describe_prepared_shape(&statement, param_types)?;
                 let description = PreparedDescription {
-                    fields,
-                    parameter_types: binder.resolved_param_types()?,
+                    fields: shape.fields?,
+                    parameter_types: shape.parameter_types,
                 };
-                Ok((statement, description))
+                Ok((statement, description, shape.scope))
             })();
-            let (statement, description) = result?;
+            let (statement, description, scope) = result?;
             self.prepared.insert(
                 name.to_owned(),
                 SqlPrepared {
                     statement: Some(statement),
                     description: description.clone(),
                     sql_source: None,
+                    param_type_hints: param_types.to_vec(),
+                    described_scope: scope,
+                    fixed_result: true,
                 },
             );
             Ok(description)
@@ -8701,6 +8993,7 @@ impl Session for SqlSession {
                     prepared.description.parameter_types.len()
                 )));
             }
+            self.check_cached_result_type(&prepared)?;
             let formats =
                 resolve_result_formats(result_formats, prepared.description.fields.len())?;
             let mut bound = prepared.statement;
@@ -8734,6 +9027,7 @@ impl Session for SqlSession {
                     description: description.clone(),
                     formats,
                     execution: SqlPortalExecution::NotStarted,
+                    fixed_result: prepared.fixed_result,
                 },
             );
             Ok(description)
@@ -8794,11 +9088,31 @@ impl Session for SqlSession {
             let execution = match statement {
                 None => SqlPortalExecution::Empty,
                 Some(stmt) => match self.run_one(&stmt).await.map_err(ExecError::into_pg)? {
-                    QueryResult::Rows { rows, tag, .. } => SqlPortalExecution::Rows {
-                        rows,
-                        tag,
-                        position: 0,
-                    },
+                    QueryResult::Rows { fields, rows, tag } => {
+                        // `Bind` re-describes only when the resolution scope
+                        // moved, which is `PostgreSQL`'s gate; what the run
+                        // actually produced catches the rest — a relation
+                        // altered under a statement whose scope never did —
+                        // and it is already in hand, so it costs nothing. Rows
+                        // are zipped against the formats `Bind` froze at the
+                        // announced field count, so without this a wider
+                        // result would be silently truncated and a narrower
+                        // one would under-fill its own `RowDescription`.
+                        let announced = self
+                            .portals
+                            .get(portal)
+                            .expect("portal exists throughout execute");
+                        if announced.fixed_result
+                            && result_type(&fields) != result_type(&announced.description.fields)
+                        {
+                            return Err(cached_plan_result_type_changed());
+                        }
+                        SqlPortalExecution::Rows {
+                            rows,
+                            tag,
+                            position: 0,
+                        }
+                    }
                     QueryResult::Command { tag } => SqlPortalExecution::Command { tag },
                     QueryResult::Empty => SqlPortalExecution::Empty,
                 },
@@ -9074,6 +9388,40 @@ mod tests {
             Arc::new(crate::commit::LocalCommitter {
                 kv: Arc::clone(&kv),
             });
+        SqlEngine::replicated(
+            Arc::clone(&kv),
+            kv,
+            committer,
+            Arc::new(crate::read_gate::LocalLinearizer),
+        )
+        .expect("replicated engine")
+    }
+
+    /// A committer that refuses every batch from the moment the test arms it,
+    /// so a commit-path failure can be made to persist rather than clear itself
+    /// on the next attempt.
+    struct ArmedFailCommitter {
+        kv: Arc<dyn Kv>,
+        armed: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::commit::Committer for ArmedFailCommitter {
+        async fn commit(&self, ops: Vec<crabka_pgkv::WriteOp>) -> Result<(), ExecError> {
+            if self.armed.load(Ordering::SeqCst) {
+                return Err(ExecError::Unsupported("injected commit failure".into()));
+            }
+            self.kv.write_batch(&ops)?;
+            Ok(())
+        }
+    }
+
+    fn replicated_engine_failing_once_armed(armed: &Arc<AtomicBool>) -> SqlEngine {
+        let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+        let committer: Arc<dyn crate::commit::Committer> = Arc::new(ArmedFailCommitter {
+            kv: Arc::clone(&kv),
+            armed: Arc::clone(armed),
+        });
         SqlEngine::replicated(
             Arc::clone(&kv),
             kv,
@@ -10019,6 +10367,41 @@ mod tests {
         assert_eq!(unresolved_timestamp_intents(&engine, "t"), 0);
         assert_eq!(visible_global_index_names(&engine, index_id, "alpha"), 0);
         assert_eq!(sequence_next_rowid(&engine, "t"), Some(1));
+    }
+
+    /// An `ON COMMIT` disposition that cannot be discharged is reported once
+    /// and then let go.
+    ///
+    /// The drain runs at the end of *every* transaction, so an entry kept after
+    /// failing is re-attempted by the next statement and by every statement
+    /// after it — one fault becomes the answer to everything the session is
+    /// asked. `PostgreSQL` leaves a session usable after a failed `COMMIT`, and
+    /// the second statement here is what pins that.
+    #[tokio::test]
+    async fn an_undischargeable_on_commit_disposition_is_reported_once_and_let_go() {
+        use assert2::assert;
+
+        let armed = Arc::new(AtomicBool::new(false));
+        let engine = replicated_engine_failing_once_armed(&armed);
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TEMP TABLE wedge (x int) ON COMMIT DELETE ROWS")
+            .await
+            .expect("create temp table");
+
+        armed.store(true, Ordering::SeqCst);
+        let error = session
+            .simple_query("SELECT 1")
+            .await
+            .expect_err("the disposition's TRUNCATE cannot commit");
+        assert!(error.message.contains("injected commit failure"));
+
+        // Still armed. The entry that could not be discharged is gone, so this
+        // statement has nothing of its own to commit and answers normally.
+        session
+            .simple_query("SELECT 1")
+            .await
+            .expect("the session is still usable");
     }
 
     #[tokio::test]
