@@ -932,3 +932,24 @@ fn consumer_fetch_policy_is_configurable_only_on_the_consume_role() {
         );
     }
 }
+
+#[test]
+fn consumer_timing_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    for setting in [
+        "CRABKA_DEMO_CONSUMER_SESSION_TIMEOUT: \"${CRABKA_DEMO_CONSUMER_SESSION_TIMEOUT:-45s}\"",
+        "CRABKA_DEMO_CONSUMER_REBALANCE_TIMEOUT: \"${CRABKA_DEMO_CONSUMER_REBALANCE_TIMEOUT:-1m}\"",
+        "CRABKA_DEMO_CONSUMER_HEARTBEAT_INTERVAL: \"${CRABKA_DEMO_CONSUMER_HEARTBEAT_INTERVAL:-3s}\"",
+        "CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT: \"${CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT:-30s}\"",
+    ] {
+        assert2::assert!(consume.contains(setting));
+    }
+    for service in ["demo-produce", "demo-stream"] {
+        let service = compose_service_block(&compose, service);
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_SESSION_TIMEOUT"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_REBALANCE_TIMEOUT"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_HEARTBEAT_INTERVAL"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT"));
+    }
+}

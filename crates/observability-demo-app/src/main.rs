@@ -192,6 +192,34 @@ struct Cli {
         value_parser = parse::positive_byte_size
     )]
     consumer_fetch_partition_max: Option<ByteSize>,
+    /// Classic Consumer group session timeout.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_SESSION_TIMEOUT",
+        value_parser = parse::positive_time
+    )]
+    consumer_session_timeout: Option<Time>,
+    /// Classic Consumer group rebalance timeout.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_REBALANCE_TIMEOUT",
+        value_parser = parse::positive_time
+    )]
+    consumer_rebalance_timeout: Option<Time>,
+    /// Classic Consumer group heartbeat interval.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_HEARTBEAT_INTERVAL",
+        value_parser = parse::positive_time
+    )]
+    consumer_heartbeat_interval: Option<Time>,
+    /// Classic Consumer request and connection timeout.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT",
+        value_parser = parse::positive_time
+    )]
+    consumer_request_timeout: Option<Time>,
     /// Kafka Streams broker DNS timeout.
     #[arg(
         long,
@@ -451,6 +479,40 @@ fn effective_consumer_fetch_policy(cli: &Cli) -> std::io::Result<(ByteSize, Byte
     Ok((min, max, partition_max))
 }
 
+fn effective_consumer_timing(cli: &Cli) -> std::io::Result<(Time, Time, Time, Time)> {
+    let configured = [
+        ("--consumer-session-timeout", cli.consumer_session_timeout),
+        (
+            "--consumer-rebalance-timeout",
+            cli.consumer_rebalance_timeout,
+        ),
+        (
+            "--consumer-heartbeat-interval",
+            cli.consumer_heartbeat_interval,
+        ),
+        ("--consumer-request-timeout", cli.consumer_request_timeout),
+    ];
+    if cli.role != Role::Consume
+        && let Some((name, value)) = configured
+            .into_iter()
+            .find_map(|(name, value)| value.map(|value| (name, value)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{name} ({}) is only valid with --role consume",
+                value.human()
+            ),
+        ));
+    }
+    Ok((
+        cli.consumer_session_timeout.unwrap_or_else(|| secs(45)),
+        cli.consumer_rebalance_timeout.unwrap_or_else(|| minutes(1)),
+        cli.consumer_heartbeat_interval.unwrap_or_else(|| secs(3)),
+        cli.consumer_request_timeout.unwrap_or_else(|| secs(30)),
+    ))
+}
+
 fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
     if cli.role != Role::Stream
         && let Some(timeout) = cli.streams_broker_dns_timeout
@@ -653,6 +715,12 @@ async fn main() -> Result<(), BoxError> {
     let consumer_retry_policy = effective_consumer_retry_policy(&cli)?;
     let (consumer_fetch_min, consumer_fetch_max, consumer_fetch_partition_max) =
         effective_consumer_fetch_policy(&cli)?;
+    let (
+        consumer_session_timeout,
+        consumer_rebalance_timeout,
+        consumer_heartbeat_interval,
+        consumer_request_timeout,
+    ) = effective_consumer_timing(&cli)?;
     let streams_broker_dns_timeout = effective_streams_broker_dns_timeout(&cli)?;
     let (streams_poll_interval, streams_commit_interval) = effective_streams_runtime_cadence(&cli)?;
     let streams_rebalance_timeout = effective_streams_rebalance_timeout(&cli)?;
@@ -722,6 +790,10 @@ async fn main() -> Result<(), BoxError> {
                 consumer_fetch_min,
                 consumer_fetch_max,
                 consumer_fetch_partition_max,
+                consumer_session_timeout,
+                consumer_rebalance_timeout,
+                consumer_heartbeat_interval,
+                consumer_request_timeout,
                 client_dispatch_queue_capacity,
                 client_frame_max,
             ))
@@ -934,6 +1006,10 @@ async fn run_consume(
     consumer_fetch_min: ByteSize,
     consumer_fetch_max: ByteSize,
     consumer_fetch_partition_max: ByteSize,
+    consumer_session_timeout: Time,
+    consumer_rebalance_timeout: Time,
+    consumer_heartbeat_interval: Time,
+    consumer_request_timeout: Time,
     client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
     client_frame_max: ClientFrameMax,
 ) -> Result<(), BoxError> {
@@ -955,6 +1031,10 @@ async fn run_consume(
         .fetch_min(consumer_fetch_min)
         .fetch_max(consumer_fetch_max)
         .fetch_partition_max(consumer_fetch_partition_max)
+        .session_timeout(consumer_session_timeout)
+        .rebalance_timeout(consumer_rebalance_timeout)
+        .heartbeat_interval(consumer_heartbeat_interval)
+        .request_timeout(consumer_request_timeout)
         .build()
         .await?;
     tracing::info!(topic = %cli.input_topic, "order processor starting");
@@ -1087,6 +1167,35 @@ async fn futures_idle() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consumer_timing_uses_defaults_and_independent_overrides() {
+        let defaults = Cli::try_parse_from(["observability-demo-app", "--role", "consume"])
+            .expect("default CLI");
+        assert_eq!(
+            effective_consumer_timing(&defaults).expect("default timing"),
+            (secs(45), minutes(1), secs(3), secs(30))
+        );
+
+        let custom = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "consume",
+            "--consumer-session-timeout",
+            "46s",
+            "--consumer-rebalance-timeout",
+            "61s",
+            "--consumer-heartbeat-interval",
+            "4s",
+            "--consumer-request-timeout",
+            "31s",
+        ])
+        .expect("custom CLI");
+        assert_eq!(
+            effective_consumer_timing(&custom).expect("custom timing"),
+            (secs(46), secs(61), secs(4), secs(31))
+        );
+    }
 
     #[test]
     fn consumer_fetch_policy_uses_defaults_and_validates_overrides() {
@@ -1246,6 +1355,10 @@ mod tests {
             consumer_fetch_min: None,
             consumer_fetch_max: None,
             consumer_fetch_partition_max: None,
+            consumer_session_timeout: None,
+            consumer_rebalance_timeout: None,
+            consumer_heartbeat_interval: None,
+            consumer_request_timeout: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1324,6 +1437,10 @@ mod tests {
             consumer_fetch_min: None,
             consumer_fetch_max: None,
             consumer_fetch_partition_max: None,
+            consumer_session_timeout: None,
+            consumer_rebalance_timeout: None,
+            consumer_heartbeat_interval: None,
+            consumer_request_timeout: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1411,6 +1528,10 @@ mod tests {
             consumer_fetch_min: None,
             consumer_fetch_max: None,
             consumer_fetch_partition_max: None,
+            consumer_session_timeout: None,
+            consumer_rebalance_timeout: None,
+            consumer_heartbeat_interval: None,
+            consumer_request_timeout: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1501,6 +1622,10 @@ mod tests {
             consumer_fetch_min: None,
             consumer_fetch_max: None,
             consumer_fetch_partition_max: None,
+            consumer_session_timeout: None,
+            consumer_rebalance_timeout: None,
+            consumer_heartbeat_interval: None,
+            consumer_request_timeout: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1553,6 +1678,10 @@ mod tests {
             consumer_fetch_min: None,
             consumer_fetch_max: None,
             consumer_fetch_partition_max: None,
+            consumer_session_timeout: None,
+            consumer_rebalance_timeout: None,
+            consumer_heartbeat_interval: None,
+            consumer_request_timeout: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
