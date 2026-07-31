@@ -528,17 +528,6 @@ fn resolve_relation_oid(
     }
 }
 
-/// [`resolve_relation_in_scope`] for the one caller that reaches a `regclass`
-/// resolution before a session's scope is in hand: the extended protocol binds
-/// a `regclass` *parameter* in [`crate::session`], through
-/// [`crate::exec::regclass_from_text`], where there is no [`EvalCtx`] yet. It
-/// resolves against `PostgreSQL`'s default path; threading
-/// `Session::resolution_scope` into `exec::regclass_from_text` is what removes
-/// the last sessionless spelling of this.
-pub(crate) fn resolve_relation_by_name(kv: &dyn Kv, name: &str) -> Result<i32, ExecError> {
-    resolve_relation_in_scope(kv, ResolutionScope::default_scope(), name)
-}
-
 /// Resolve a written relation name across every relation kind, not just base
 /// tables.
 ///
@@ -577,7 +566,7 @@ pub(crate) fn regclass_cast(
     value: &Datum,
 ) -> Result<Option<Datum>, ExecError> {
     let Some(name) = relation_name_operand(value) else {
-        return crate::exec::regclass_cast(kv, value);
+        return crate::exec::regclass_cast(kv, scope, value);
     };
     let oid = resolve_relation_in_scope(kv, scope, name)?;
     crate::exec::regclass_by_oid(kv, oid)

@@ -10451,8 +10451,12 @@ fn virtual_relation_namespace_oid(name: &str) -> i32 {
 ///
 /// Propagates the catalog's undefined-table error (42P01) for an unknown
 /// relation name, matching PostgreSQL's `relation "..." does not exist`.
-pub(crate) fn resolve_regclass(catalog_kv: &dyn Kv, name: &str) -> Result<i32, ExecError> {
-    crate::catalog_fn::resolve_relation_by_name(catalog_kv, name)
+pub(crate) fn resolve_regclass(
+    catalog_kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    name: &str,
+) -> Result<i32, ExecError> {
+    crate::catalog_fn::resolve_relation_in_scope(catalog_kv, scope, name)
 }
 
 /// The `regclass` value for a relation oid: the oid paired with the name
@@ -10474,14 +10478,18 @@ pub(crate) fn regclass_by_oid(
 /// PostgreSQL's `regclassin`: an all-digit string is an oid, `-` is
 /// `InvalidOid`, and anything else is a relation name the catalog resolves
 /// (42P01 when it has none).
-pub(crate) fn regclass_from_text(catalog_kv: &dyn Kv, text: &str) -> Result<Datum, ExecError> {
+pub(crate) fn regclass_from_text(
+    catalog_kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    text: &str,
+) -> Result<Datum, ExecError> {
     let trimmed = text.trim();
     let oid = if trimmed == "-" {
         0
     } else {
         match trimmed.parse::<i32>() {
             Ok(oid) => oid,
-            Err(_) => resolve_regclass(catalog_kv, text)?,
+            Err(_) => resolve_regclass(catalog_kv, scope, text)?,
         }
     };
     regclass_by_oid(catalog_kv, oid).map(Datum::Regclass)
@@ -10492,10 +10500,11 @@ pub(crate) fn regclass_from_text(catalog_kv: &dyn Kv, text: &str) -> Result<Datu
 /// pure cast in [`crabka_pgtypes::cast`] and its error reporting.
 pub(crate) fn regclass_cast(
     catalog_kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
     value: &Datum,
 ) -> Result<Option<Datum>, ExecError> {
     let oid = match value {
-        Datum::Text(text) => return regclass_from_text(catalog_kv, text).map(Some),
+        Datum::Text(text) => return regclass_from_text(catalog_kv, scope, text).map(Some),
         Datum::Int4(oid) => *oid,
         Datum::Int8(oid) => match i32::try_from(*oid) {
             Ok(oid) => oid,

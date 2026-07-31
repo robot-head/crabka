@@ -7380,7 +7380,7 @@ impl ParamBinder<'_> {
         let resolved = match param.format {
             0 => {
                 let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
-                crate::exec::regclass_from_text(self.catalog_kv, text)
+                crate::exec::regclass_from_text(self.catalog_kv, self.resolution, text)
                     .map_err(ExecError::into_pg)?
             }
             1 => {
