@@ -62,6 +62,12 @@ pub struct EvalCtx {
     pub(crate) backend_pid: i32,
     pub clock: Arc<dyn Clock>,
     pub(crate) sequence: Option<Arc<SequenceRuntime>>,
+    /// The catalog KV on its own, for a context that can read the catalog but
+    /// has no sequence machinery — a DDL statement, which must resolve the
+    /// relation a `'name'::regclass` default names while `nextval()` stays the
+    /// 0A000 it is outside a session. A session leaves this `None` and reads
+    /// through `sequence`, which carries the same handle.
+    pub(crate) catalog: Option<Arc<dyn crabka_pgkv::Kv>>,
     /// The session's name-resolution scope — its `search_path`, the user
     /// `"$user"` expands to, and its backend id. `None` outside a SQL session
     /// (a planning context or a unit test), where
@@ -104,7 +110,9 @@ impl EvalCtx {
     /// SQL session (a planning context or a unit test), where those functions
     /// report 0A000 rather than inventing an answer.
     pub(crate) fn catalog(&self) -> Option<&dyn crabka_pgkv::Kv> {
-        self.sequence.as_ref().map(|runtime| runtime.kv.as_ref())
+        self.catalog
+            .as_deref()
+            .or_else(|| self.sequence.as_ref().map(|runtime| runtime.kv.as_ref()))
     }
 
     /// The scope an unqualified relation name resolves against.
@@ -120,10 +128,18 @@ impl EvalCtx {
     /// what a DDL statement evaluates its `DEFAULT`s and partition bounds in.
     /// It has no clock of its own because a DDL statement has no row to stamp;
     /// it does need the search path, because the relation it names has to land
-    /// in the right schema.
-    pub(crate) fn for_ddl(scope: &crate::relname::ResolutionScope) -> Self {
+    /// in the right schema, and it needs the catalog, because a `DEFAULT
+    /// 'name'::regclass` has a relation name to resolve.
+    ///
+    /// `catalog` is `None` where no session supplied one (a planning context),
+    /// leaving the catalog-reading functions their 0A000.
+    pub(crate) fn for_ddl(
+        scope: &crate::relname::ResolutionScope,
+        catalog: Option<&Arc<dyn crabka_pgkv::Kv>>,
+    ) -> Self {
         Self {
             resolution: Some(Arc::new(scope.clone())),
+            catalog: catalog.map(Arc::clone),
             ..Self::test_default()
         }
     }
@@ -143,6 +159,7 @@ impl EvalCtx {
             backend_pid: 0,
             clock: Arc::new(SystemClock),
             sequence: None,
+            catalog: None,
             resolution: None,
             notify: None,
         }

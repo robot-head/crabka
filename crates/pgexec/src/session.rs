@@ -2846,6 +2846,9 @@ impl SqlSession {
             session_user: self.session_user.clone(),
             backend_pid: self.backend_pid,
             clock: Arc::clone(&self.clock),
+            // A session reads the catalog through `sequence`, which carries
+            // the same handle.
+            catalog: None,
             sequence: Some(Arc::new(crate::clock::SequenceRuntime {
                 kv: Arc::clone(&self.catalog_kv),
                 manager: Arc::clone(&self.seq),
@@ -5156,6 +5159,8 @@ impl SqlSession {
             scanner: self.foreign_scanner.as_ref(),
             current_user: &self.current_role,
             resolution: ctx.resolution(),
+            // A read path evaluates no DDL expression, so it needs no catalog.
+            catalog: None,
             // A read path creates no relation, so it needs no id.
             reserved_table_ids: None,
             own_xid: match &self.state {
@@ -5919,6 +5924,7 @@ impl SqlSession {
             scanner: self.foreign_scanner.as_ref(),
             current_user: &self.current_role,
             resolution: &resolution,
+            catalog: Some(&self.catalog_kv),
             reserved_table_ids: Some(&self.reserved_table_ids),
             own_xid: match &self.state {
                 TxnState::InTransaction(ctx) => ctx.xid,

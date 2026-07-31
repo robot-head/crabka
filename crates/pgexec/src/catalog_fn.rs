@@ -1097,12 +1097,21 @@ fn check_constraint_def(kv: &dyn Kv, wanted: i32) -> Result<Datum, ExecError> {
 
 /// The source text of a stored column default, as `pg_attrdef.adbin` holds it.
 pub(crate) fn default_source_text(
+    kv: &dyn Kv,
     default: &crabka_pgcatalog::ColumnDefault,
     ty: ColumnType,
 ) -> String {
     match default {
         crabka_pgcatalog::ColumnDefault::NextVal(sequence) => {
             format!("nextval('{}'::regclass)", sequence.replace('\'', "''"))
+        }
+        // A `regclass` default stores only the oid, so the name it deparses to
+        // is read from the catalog now: a `RENAME` of the relation changes what
+        // `\d` and `pg_get_expr` print, as it does in PostgreSQL.
+        crabka_pgcatalog::ColumnDefault::Value(Datum::Regclass(value)) => {
+            let resolved = crate::exec::regclass_by_oid(kv, value.oid)
+                .unwrap_or_else(|_| crabka_pgtypes::RegclassValue::unresolved(value.oid));
+            crate::viewdef::const_text(&Datum::Regclass(resolved), ty)
         }
         crabka_pgcatalog::ColumnDefault::Value(value) => crate::viewdef::const_text(value, ty),
     }

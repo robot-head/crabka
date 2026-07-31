@@ -438,3 +438,140 @@ async fn a_serial_default_still_draws_from_its_sequence() {
         assert!(client.scalar(query).await == Some("1-2".into()), "{query}");
     }
 }
+
+// ------------------------------------------------ a DDL-time regclass default
+
+// A column `DEFAULT` is a DDL-time expression, and `'pg_class'::regclass` in one
+// has to resolve against the catalog exactly as it does in a query. PostgreSQL
+// folds the cast to the relation's oid while the `CREATE TABLE` is analysed, so
+// the default is usable immediately and an unknown relation is a DDL error.
+#[tokio::test]
+async fn a_regclass_column_default_resolves_at_ddl_time() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client.run("CREATE TABLE target (a int)").await;
+
+    for ddl in [
+        "CREATE TABLE d1 (c regclass DEFAULT 'target'::regclass)",
+        "CREATE TABLE d2 (c regclass DEFAULT 'pg_class'::regclass)",
+    ] {
+        client.run(ddl).await;
+    }
+    for (table, expected) in [("d1", "target"), ("d2", "pg_class")] {
+        client
+            .run(&format!("INSERT INTO {table} DEFAULT VALUES"))
+            .await;
+        assert!(
+            client.scalar(&format!("SELECT c FROM {table}")).await == Some(expected.into()),
+            "{table}"
+        );
+    }
+}
+
+// `ALTER TABLE … ADD COLUMN` and `ALTER COLUMN … SET DEFAULT` evaluate their
+// default in the same DDL context a `CREATE TABLE` does, so all three resolve a
+// `regclass` the same way. An added column's default is also materialized into
+// the rows that already exist.
+#[tokio::test]
+async fn altered_regclass_defaults_resolve_at_ddl_time() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for ddl in [
+        "CREATE TABLE target (a int)",
+        "CREATE TABLE t (x int)",
+        "INSERT INTO t VALUES (1)",
+        "ALTER TABLE t ADD COLUMN c regclass DEFAULT 'target'::regclass",
+        "CREATE TABLE u (x int, c regclass)",
+        "ALTER TABLE u ALTER COLUMN c SET DEFAULT 'target'::regclass",
+        "INSERT INTO u (x) VALUES (1)",
+    ] {
+        client.run(ddl).await;
+    }
+
+    // The existing row was backfilled with the resolved default.
+    assert!(client.scalar("SELECT c FROM t").await == Some("target".into()));
+    assert!(client.scalar("SELECT c FROM u").await == Some("target".into()));
+}
+
+// The stored default deparses back to its source spelling for `\d` (which reads
+// `pg_get_expr(pg_attrdef.adbin, …)`) and for `information_schema.columns`.
+// PostgreSQL 18.4 prints `'pg_class'::regclass` in both.
+#[tokio::test]
+async fn a_regclass_default_deparses_as_a_regclass_literal() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    client
+        .run("CREATE TABLE d (c regclass DEFAULT 'pg_class'::regclass)")
+        .await;
+
+    for query in [
+        "SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d WHERE d.adrelid = 'd'::regclass",
+        "SELECT column_default FROM information_schema.columns WHERE table_name = 'd'",
+    ] {
+        assert!(
+            client.scalar(query).await == Some("'pg_class'::regclass".into()),
+            "{query}"
+        );
+    }
+}
+
+// The default stores the oid, so renaming the relation it names changes what the
+// default deparses to — the same read-time resolution a stored `regclass` value
+// gets. PostgreSQL behaves this way because the folded constant holds the oid.
+#[tokio::test]
+async fn a_regclass_default_follows_a_rename_of_its_relation() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for ddl in [
+        "CREATE TABLE target (a int)",
+        "CREATE TABLE d (c regclass DEFAULT 'target'::regclass)",
+    ] {
+        client.run(ddl).await;
+    }
+    let deparse =
+        "SELECT pg_get_expr(d.adbin, d.adrelid) FROM pg_attrdef d WHERE d.adrelid = 'd'::regclass";
+    assert!(client.scalar(deparse).await == Some("'target'::regclass".into()));
+
+    client.run("ALTER TABLE target RENAME TO target2").await;
+    assert!(client.scalar(deparse).await == Some("'target2'::regclass".into()));
+    // A row inserted after the rename takes the same oid, so it prints the new
+    // name too.
+    client.run("INSERT INTO d DEFAULT VALUES").await;
+    assert!(client.scalar("SELECT c FROM d").await == Some("target2".into()));
+}
+
+// A default naming a relation that does not exist is refused when the DDL runs,
+// not when a row is inserted — PostgreSQL reports 42P01 from the `CREATE TABLE`.
+#[tokio::test]
+async fn a_regclass_default_naming_no_relation_is_refused_at_ddl_time() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+
+    let (code, message) = client
+        .fails("CREATE TABLE d (c regclass DEFAULT 'no_such_rel'::regclass)")
+        .await;
+    assert!(code == "42P01", "{code}: {message}");
+    assert!(message.contains("no_such_rel"), "{message}");
+}
+
+// `INSERT … RETURNING` renders the default without the value ever passing
+// through a scan, so the resolved name has to be on the value the default
+// itself produced.
+#[tokio::test]
+async fn a_regclass_default_prints_its_name_through_returning() {
+    let engine = SqlEngine::new();
+    let mut client = Client::new(&engine);
+    for ddl in [
+        "CREATE TABLE target (a int)",
+        "CREATE TABLE d (c regclass DEFAULT 'target'::regclass)",
+    ] {
+        client.run(ddl).await;
+    }
+
+    assert!(
+        client
+            .scalar("INSERT INTO d DEFAULT VALUES RETURNING c")
+            .await
+            == Some("target".into())
+    );
+}

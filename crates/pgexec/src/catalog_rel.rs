@@ -1010,7 +1010,9 @@ fn pg_attrdef_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 int(oids.get(&key).copied().unwrap_or(0)),
                 int(relid),
                 small(attnum),
-                text(&crate::catalog_fn::default_source_text(default, column.ty)),
+                text(&crate::catalog_fn::default_source_text(
+                    kv, default, column.ty,
+                )),
             ]);
         }
     }

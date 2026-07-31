@@ -83,6 +83,13 @@ mod datum_tag {
     /// `real` — stored as the IEEE-754 bit pattern, like [`FLOAT8`].
     /// Append-only — no version bump.
     pub const FLOAT4: u8 = 10;
+    /// `regclass` — followed by the relation's four-byte oid, and only the oid.
+    /// The name `regclassout` prints is derived from the catalog when the
+    /// default is read, never stored, so a default follows a `RENAME` of the
+    /// relation it names and falls back to the bare oid once that relation is
+    /// dropped — what `PostgreSQL` does with the oid its folded `Const` holds.
+    /// Append-only — no version bump.
+    pub const REGCLASS: u8 = 11;
 }
 
 mod type_tag {
@@ -379,6 +386,11 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(array.elem.code());
             write_bytes(out, &crabka_pgkv::rowenc::encode_row(&array.elems));
         }
+        // Only the oid: the relation name is re-derived on read.
+        Datum::Regclass(value) => {
+            out.push(datum_tag::REGCLASS);
+            out.extend_from_slice(&value.oid.to_be_bytes());
+        }
         Datum::Date(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
@@ -387,7 +399,6 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
         | Datum::Interval(_)
         | Datum::Record(_)
         | Datum::Enum(_)
-        | Datum::Regclass(_)
         | Datum::Bytea(_) => {
             unreachable!("unsupported defaults are rejected before catalog write")
         }
@@ -454,6 +465,11 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
             let elems = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
             Datum::Array(crabka_pgtypes::ArrayValue::new(elem, elems))
         }
+        // Only the oid was stored, so the value comes back unresolved: the
+        // catalog-aware layer above re-derives the name it prints.
+        datum_tag::REGCLASS => Datum::Regclass(crabka_pgtypes::RegclassValue::unresolved(
+            i32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4")),
+        )),
         tag => {
             return Err(KvError::CorruptRow(format!(
                 "unknown default datum tag {tag}"

@@ -1786,6 +1786,9 @@ impl SqlEngine {
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             })),
+            // The catalog is reachable through `sequence`, which holds the same
+            // handle.
+            catalog: None,
             // Nor is there a session `search_path` to resolve against, so an
             // unqualified name in a scattered write takes PostgreSQL's default
             // path — the same one a fresh session starts with.

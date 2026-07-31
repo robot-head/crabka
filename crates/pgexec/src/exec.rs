@@ -53,6 +53,10 @@ pub(crate) struct ForeignCtx<'a> {
     /// The session's name-resolution scope, so every DDL statement resolves an
     /// unqualified name against the same `search_path` a `SELECT` does.
     pub resolution: &'a crate::relname::ResolutionScope,
+    /// The session's catalog handle, so a DDL-time expression can read the
+    /// catalog — a `DEFAULT 'name'::regclass` has a relation to resolve. `None`
+    /// outside a session, where such an expression keeps its 0A000.
+    pub catalog: Option<&'a Arc<dyn Kv>>,
     /// Table ids the session claimed from the shared counter, drained from the
     /// back as this statement creates relations.
     ///
@@ -81,6 +85,7 @@ impl ForeignCtx<'_> {
             scanner: None,
             current_user: "public",
             resolution: crate::relname::ResolutionScope::default_scope(),
+            catalog: None,
             reserved_table_ids: None,
             own_xid: None,
         }
@@ -372,7 +377,7 @@ pub(crate) fn execute_ddl(
             if *if_not_exists && crabka_pgcatalog::get_table(kv, name).is_ok() {
                 return Ok((command("CREATE TABLE"), Vec::new()));
             }
-            let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution);
+            let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, fctx.catalog);
             // A partition declares no columns of its own: it inherits the
             // parent's list, along with the parent's CHECK constraints, and may
             // only add qualifiers to what it inherits.
@@ -631,7 +636,15 @@ pub(crate) fn execute_ddl(
             if_exists,
             actions,
         } => match resolve_relation(kv, resolution, table, SchemaDisposition::Utility) {
-            Ok(name) => alter_table_ops(kv, resolution, &name, *if_exists, actions, fctx.own_xid),
+            Ok(name) => alter_table_ops(
+                kv,
+                resolution,
+                &name,
+                *if_exists,
+                actions,
+                fctx.own_xid,
+                fctx.catalog,
+            ),
             // `ALTER TABLE IF EXISTS nope.t` skips rather than reporting the
             // schema, as PostgreSQL does.
             Err(error) if *if_exists && is_missing_schema(&error) => {
@@ -1546,6 +1559,8 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
             | Datum::Float8(_)
             | Datum::Numeric(_)
             | Datum::Jsonb(_)
+            // Stored as its bare oid, with the relation name re-derived on read.
+            | Datum::Regclass(_)
             // An array carries its elements in the row encoding, so an element
             // of a type that cannot be a *column* default (a date, say) still
             // persists inside one.
@@ -1557,9 +1572,9 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
     // (`crabka_pgcatalog::serde::write_default`), so they are refused at DDL
     // time rather than written and lost.
     Err(ExecError::Unsupported(
-        "defaults for date/time, interval, bytea, composite, enum and regclass columns are not \
-         persisted yet"
-            .into(),
+        "defaults for date/time, interval, bytea, composite and enum columns are not persisted \
+         yet"
+        .into(),
     ))
 }
 
@@ -1840,6 +1855,14 @@ fn default_value(column: &Column, ctx: &crate::clock::EvalCtx) -> Result<Datum, 
         return Ok(Datum::Null);
     };
     match default {
+        // A stored `regclass` default holds only the oid, so the name it prints
+        // is derived here — the same output-time resolution a scanned value
+        // gets, which is what lets `RETURNING` print the relation's current
+        // name rather than the bare number.
+        ColumnDefault::Value(Datum::Regclass(value)) => match ctx.catalog() {
+            Some(catalog) => regclass_by_oid(catalog, value.oid).map(Datum::Regclass),
+            None => Ok(Datum::Regclass(value.clone())),
+        },
         ColumnDefault::Value(value) => Ok(value.clone()),
         ColumnDefault::NextVal(sequence) => {
             let runtime = ctx.sequence.as_ref().ok_or_else(|| {
@@ -7857,7 +7880,8 @@ fn build_table_expr(
                 // results are identical whether or not the scan honors `bounds`.
                 let default_bounds = ScanBounds::default();
                 let scan_bounds = bounds.unwrap_or(&default_bounds);
-                let rows = scanner.scan(&t, &server, mapping.as_ref(), scan_bounds, ctx)?;
+                let mut rows = scanner.scan(&t, &server, mapping.as_ref(), scan_bounds, ctx)?;
+                resolve_scanned_regclass(catalog_kv, &t, &mut rows)?;
                 let scope = Scope::single(&t, qualifier);
                 return Ok(Relation { scope, rows });
             }
@@ -7865,7 +7889,9 @@ fn build_table_expr(
             let default_scan_plan = crate::plan_dist::DistributedScanPlan::default();
             let distributed_plan = scan_plan.unwrap_or(&default_scan_plan);
             if let Some(rows) = try_scan_with_local_index(read_ctx, &t, distributed_plan)? {
-                let rows = rows.into_iter().map(|scanned| scanned.row).collect();
+                let mut rows: Vec<Vec<Datum>> =
+                    rows.into_iter().map(|scanned| scanned.row).collect();
+                resolve_scanned_regclass(catalog_kv, &t, &mut rows)?;
                 return Ok(Relation { scope, rows });
             }
             let scan_request = ScanRequest {
@@ -7915,6 +7941,8 @@ fn build_table_expr(
             .into_iter()
             .map(|scanned| scanned.row)
             .collect();
+            let mut rows: Vec<Vec<Datum>> = rows;
+            resolve_scanned_regclass(catalog_kv, &t, &mut rows)?;
             Ok(Relation { scope, rows })
         }
         TableExpr::Join {
@@ -8267,6 +8295,15 @@ fn try_distributed_inner_equi_join(
                 .map_err(ExecError::from)
         })
         .collect::<Result<Vec<_>, _>>()?;
+    // The join result is the left table's columns followed by the right's, so
+    // the right table's `regclass` columns sit past the left's width.
+    let mut rows = rows;
+    let mut regclass_columns = regclass_column_indexes(&left_table, 0);
+    regclass_columns.extend(regclass_column_indexes(
+        &right_table,
+        left_table.columns.len(),
+    ));
+    resolve_regclass_at(read_ctx.catalog_kv, &regclass_columns, &mut rows)?;
     let mut scope = Scope::single(&left_table, left_qualifier);
     scope
         .columns
@@ -10019,24 +10056,31 @@ fn information_schema_columns_rows(
                     ty => ty.name(),
                 }),
                 text(if column.not_null { "NO" } else { "YES" }),
-                column_default_datum(column),
+                column_default_datum(catalog_kv, column),
             ]);
         }
     }
     Ok(rows)
 }
 
-fn column_default_datum(column: &Column) -> Datum {
+fn column_default_datum(catalog_kv: &dyn Kv, column: &Column) -> Datum {
     let Some(default) = &column.default else {
         return Datum::Null;
     };
-    text(&format_column_default(default, column.ty))
+    text(&format_column_default(catalog_kv, default, column.ty))
 }
 
-fn format_column_default(default: &ColumnDefault, ty: ColumnType) -> String {
+fn format_column_default(catalog_kv: &dyn Kv, default: &ColumnDefault, ty: ColumnType) -> String {
     match default {
         ColumnDefault::NextVal(sequence) => {
             format!("nextval('{}'::regclass)", escape_sql_string(sequence))
+        }
+        // Only the oid is stored, so the name is read from the catalog now —
+        // the same output-time resolution `pg_get_expr` performs.
+        ColumnDefault::Value(Datum::Regclass(value)) => {
+            let resolved = regclass_by_oid(catalog_kv, value.oid)
+                .unwrap_or_else(|_| crabka_pgtypes::RegclassValue::unresolved(value.oid));
+            format!("'{}'::{}", escape_sql_string(&resolved.name), ty.name())
         }
         ColumnDefault::Value(value) => format_default_value(value, ty),
     }
@@ -10081,6 +10125,8 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         | Datum::Interval(_)
         | Datum::Record(_)
         | Datum::Enum(_)
+        // A `regclass` default is rendered by `format_column_default`, which has
+        // the catalog handle its name needs.
         | Datum::Regclass(_)
         | Datum::Bytea(_) => "<unsupported>".to_string(),
     }
@@ -10473,6 +10519,86 @@ pub(crate) fn regclass_by_oid(
             |name| crabka_pgtypes::RegclassValue::resolved(oid, &name),
         ),
     )
+}
+
+/// Whether a column of this type holds a `regclass` value — the type itself, or
+/// a domain over it, whose values *are* the base type's values.
+fn holds_regclass(ty: ColumnType) -> bool {
+    match ty {
+        ColumnType::Regclass => true,
+        ColumnType::Domain(domain) => holds_regclass(*domain.base),
+        _ => false,
+    }
+}
+
+/// Re-attach the relation name to every `regclass` a scan just decoded.
+///
+/// The row encoding stores a `regclass` as its bare oid — all PostgreSQL keeps
+/// on disk too — so a decoded value arrives as a `Datum::Int4`. PostgreSQL
+/// consults the catalog in `regclassout`; crabka cannot, because the text
+/// encoder and the `→ text` cast both live in a crate with no catalog handle.
+/// The scan is the last point where the catalog *is* in scope, so the name is
+/// attached here and travels with the value, exactly as the `::regclass` cast
+/// arranges for a value that never touched storage.
+///
+/// Resolving from the catalog on the way out rather than storing the name is
+/// what makes an already-stored value follow a `RENAME` and fall back to the
+/// bare oid once its relation is dropped, which is what PostgreSQL does.
+///
+/// [`crate::catalog_fn::relation_name_by_oid`] walks the whole catalog, so the
+/// lookup is memoized across the scan: a column holding one repeated oid costs
+/// one lookup, not one per row. A table with no `regclass` column returns before
+/// touching a row.
+fn resolve_scanned_regclass(
+    catalog_kv: &dyn Kv,
+    table: &crabka_pgcatalog::Table,
+    rows: &mut [Vec<Datum>],
+) -> Result<(), ExecError> {
+    resolve_regclass_at(catalog_kv, &regclass_column_indexes(table, 0), rows)
+}
+
+/// The positions of `table`'s `regclass`-valued columns within a scanned row
+/// whose first column sits at `offset` — non-zero for a join result, which
+/// concatenates one table's columns after another's.
+fn regclass_column_indexes(table: &crabka_pgcatalog::Table, offset: usize) -> Vec<usize> {
+    table
+        .columns
+        .iter()
+        .enumerate()
+        .filter(|(_, column)| holds_regclass(column.ty))
+        .map(|(index, _)| index + offset)
+        .collect()
+}
+
+/// The shared body of [`resolve_scanned_regclass`], over already-located
+/// columns.
+fn resolve_regclass_at(
+    catalog_kv: &dyn Kv,
+    columns: &[usize],
+    rows: &mut [Vec<Datum>],
+) -> Result<(), ExecError> {
+    if columns.is_empty() {
+        return Ok(());
+    }
+    let mut resolved: HashMap<i32, crabka_pgtypes::RegclassValue> = HashMap::new();
+    for row in rows {
+        for &index in columns {
+            // A projection that dropped the column, or a NULL, leaves nothing to
+            // resolve; a value already carrying its name is left alone.
+            let Some(Datum::Int4(oid)) = row.get(index) else {
+                continue;
+            };
+            let oid = *oid;
+            let value = match resolved.entry(oid) {
+                std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(regclass_by_oid(catalog_kv, oid)?).clone()
+                }
+            };
+            row[index] = Datum::Regclass(value);
+        }
+    }
+    Ok(())
 }
 
 /// PostgreSQL's `regclassin`: an all-digit string is an oid, `-` is
@@ -11075,6 +11201,7 @@ pub(crate) async fn execute_read_locking(
         kept.push(cur_row);
     }
 
+    resolve_scanned_regclass(read_ctx.catalog_kv, &t, &mut kept)?;
     project_order_limit(s, &scope, kept, ctx)
 }
 
@@ -13254,6 +13381,7 @@ fn alter_table_ops(
     if_exists: bool,
     actions: &[crabka_pgparser::ast::AlterTableAction],
     own_xid: Option<u64>,
+    catalog: Option<&Arc<dyn Kv>>,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     use crabka_pgparser::ast::AlterTableAction as Action;
 
@@ -13306,7 +13434,7 @@ fn alter_table_ops(
         foreign_key_ids: crabka_pgcatalog::ForeignKeyIds::default(),
     };
     for action in actions {
-        alter_table_action_ops(kv, resolution, &mut state, action, own_xid)?;
+        alter_table_action_ops(kv, resolution, &mut state, action, own_xid, catalog)?;
     }
 
     // The schema record is written once, after every action has folded into the
@@ -13368,10 +13496,11 @@ fn alter_table_action_ops(
     state: &mut AlterTableState,
     action: &crabka_pgparser::ast::AlterTableAction,
     own_xid: Option<u64>,
+    catalog: Option<&Arc<dyn Kv>>,
 ) -> Result<(), ExecError> {
     use crabka_pgparser::ast::AlterTableAction as Action;
 
-    let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution);
+    let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution, catalog);
     let table_name = state.table.name.clone();
     match action {
         Action::AddColumn {

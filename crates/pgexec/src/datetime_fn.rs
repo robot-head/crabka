@@ -1159,6 +1159,7 @@ mod tests {
             backend_pid: 0,
             clock: Arc::new(FixedClock(now)),
             sequence: None,
+            catalog: None,
             resolution: None,
             notify: None,
         }
@@ -1273,6 +1274,7 @@ mod tests {
             backend_pid: 0,
             clock: Arc::new(FixedClock(ny)),
             sequence: None,
+            catalog: None,
             resolution: None,
             notify: None,
         };
@@ -1355,6 +1357,7 @@ mod tests {
             backend_pid: 0,
             clock: Arc::new(FixedClock(ts)),
             sequence: None,
+            catalog: None,
             resolution: None,
             notify: None,
         };

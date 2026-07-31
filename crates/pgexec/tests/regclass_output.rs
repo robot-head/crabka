@@ -282,3 +282,135 @@ async fn an_extended_protocol_regclass_parameter_prints_the_relation_name() {
         assert!(text == Some("pgbench_accounts".into()), "format {format}");
     }
 }
+
+// All text cells of a result, row-major — for the multi-row reads below.
+fn all_rows_text(result: &QueryResult) -> Vec<Vec<Option<String>>> {
+    (0..rows(result).len())
+        .map(|index| row_text(result, index))
+        .collect()
+}
+
+// A `regclass` read back out of row storage prints the relation name, exactly as
+// one produced by a cast does. The row encoding keeps only the oid — what
+// PostgreSQL stores too — so the name has to be re-attached on the way out, and
+// it has to happen for every shape of read, not just a bare scan: a projection,
+// a `::text` cast, a join, a locking read, a derived table, a CTE, a set
+// operation and a scalar subquery all reach the stored value by a different
+// path. PostgreSQL prints `pg_class` for all of them.
+#[tokio::test]
+async fn a_stored_regclass_prints_the_relation_name_through_every_read_shape() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for setup in [
+        "CREATE TABLE rc (id int, c regclass)",
+        "INSERT INTO rc VALUES (1, 'pg_class'::regclass)",
+        "CREATE TABLE other (id int, tag text)",
+        "INSERT INTO other VALUES (1, 'a')",
+    ] {
+        session.simple_query(setup).await.expect(setup);
+    }
+
+    for read in [
+        "SELECT c FROM rc",
+        "SELECT c::text FROM rc",
+        "SELECT c FROM rc WHERE c = 'pg_class'::regclass",
+        "SELECT c FROM rc FOR UPDATE",
+        "SELECT * FROM (SELECT c FROM rc) s",
+        "WITH q AS (SELECT c FROM rc) SELECT * FROM q",
+        "SELECT c FROM rc UNION SELECT 'pg_class'::regclass",
+        "SELECT (SELECT c FROM rc)",
+        "SELECT max(c::text) FROM rc",
+    ] {
+        assert!(
+            scalar(&mut session, read).await == Some("pg_class".into()),
+            "{read}"
+        );
+    }
+
+    // A join reaches the stored column through a different relation build than a
+    // bare scan does, so it gets its own whole-row expectation.
+    let joined = query(
+        &mut session,
+        "SELECT r.c, o.tag FROM rc r JOIN other o ON o.id = r.id",
+    )
+    .await;
+    assert!(all_rows_text(&joined) == vec![vec![Some("pg_class".into()), Some("a".into())]]);
+}
+
+// The name is derived from the catalog when the value is *read*, not when it is
+// written: renaming the relation changes what an already-stored `regclass`
+// prints, and dropping it leaves the bare oid — `regclassout`'s fallback — with
+// no error. PostgreSQL 18.4 behaves exactly this way.
+#[tokio::test]
+async fn a_stored_regclass_follows_a_rename_and_survives_a_drop() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for setup in [
+        "CREATE TABLE target (a int)",
+        "CREATE TABLE rc (c regclass)",
+        "INSERT INTO rc VALUES ('target'::regclass)",
+    ] {
+        session.simple_query(setup).await.expect(setup);
+    }
+    let oid = scalar(&mut session, "SELECT c::int FROM rc")
+        .await
+        .expect("oid");
+
+    assert!(scalar(&mut session, "SELECT c FROM rc").await == Some("target".into()));
+
+    session
+        .simple_query("ALTER TABLE target RENAME TO target2")
+        .await
+        .expect("rename");
+    assert!(scalar(&mut session, "SELECT c FROM rc").await == Some("target2".into()));
+
+    session
+        .simple_query("DROP TABLE target2")
+        .await
+        .expect("drop");
+    // Both the value and its `→ text` cast fall back to the bare oid.
+    assert!(scalar(&mut session, "SELECT c FROM rc").await == Some(oid.clone()));
+    assert!(scalar(&mut session, "SELECT c::text FROM rc").await == Some(oid));
+}
+
+// A domain over `regclass` stores the base type's value, so it needs the same
+// re-attachment a bare `regclass` column does.
+#[tokio::test]
+async fn a_stored_domain_over_regclass_prints_the_relation_name() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for setup in [
+        "CREATE DOMAIN relref AS regclass",
+        "CREATE TABLE dm (c relref)",
+        "INSERT INTO dm VALUES ('pg_class'::regclass)",
+    ] {
+        session.simple_query(setup).await.expect(setup);
+    }
+
+    assert!(scalar(&mut session, "SELECT c FROM dm").await == Some("pg_class".into()));
+}
+
+// The stored value keeps the oid as its identity: the binary wire form is the
+// 4-byte oid and the `→ int` cast is that same number, so re-attaching the name
+// changes only the text rendering.
+#[tokio::test]
+async fn a_stored_regclass_keeps_the_oid_as_its_identity() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    for setup in [
+        "CREATE TABLE rc (c regclass)",
+        "INSERT INTO rc VALUES ('pg_class'::regclass)",
+    ] {
+        session.simple_query(setup).await.expect(setup);
+    }
+
+    let result = query(&mut session, "SELECT c, c::int FROM rc").await;
+    assert!(field_type_oids(&result) == vec![2205, 23]);
+    let oid = scalar(&mut session, "SELECT c::int FROM rc")
+        .await
+        .expect("oid");
+    assert!(row_text(&result, 0) == vec![Some("pg_class".into()), Some(oid)]);
+
+    let binary = rows(&result)[0][0].as_ref().expect("a cell").binary.clone();
+    assert!(binary.len() == 4);
+}
