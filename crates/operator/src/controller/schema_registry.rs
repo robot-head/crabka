@@ -351,6 +351,16 @@ fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
             .map_err(|error| format!("spec.clientId: {error}"))?;
     }
     if let Some(runtime) = &spec.runtime {
+        runtime
+            .client_dispatch_queue_capacity
+            .map(crabka_client_core::ConnectionDispatchQueueCapacity::new)
+            .transpose()
+            .map_err(|error| format!("spec.runtime.clientDispatchQueueCapacity: {error}"))?;
+        runtime
+            .client_frame_max
+            .map(crabka_client_core::ClientFrameMax::try_from)
+            .transpose()
+            .map_err(|error| format!("spec.runtime.clientFrameMax: {error}"))?;
         validate_protocol_millis_i32(
             runtime.store_reader_fetch_max_wait,
             "spec.runtime.storeReaderFetchMaxWait",
@@ -693,6 +703,12 @@ fn build_args_and_mounts(
         push_runtime!(quantity forward_max_body);
         push_runtime!(default_compatibility_level);
         push_runtime!(default_mode);
+        if let Some(value) = runtime.client_dispatch_queue_capacity {
+            a.push(format!("--client-dispatch-queue-capacity={value}"));
+        }
+        if let Some(value) = runtime.client_frame_max {
+            a.push(format!("--client-frame-max={}B", value.bytes_u64()));
+        }
     }
     if let Some(client_id) = &s.client_id {
         a.push(format!("--client-id={client_id}"));
@@ -934,6 +950,88 @@ async fn set_status(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_client_policy_renders_once() {
+        let mut registry = SchemaRegistry::new(
+            "registry",
+            SchemaRegistrySpec {
+                replicas: 1,
+                image: None,
+                bootstrap_servers: None,
+                schemas_topic: None,
+                schemas_topic_replication_factor: None,
+                group_id: None,
+                runtime: None,
+                client_id: None,
+                health_checks: None,
+                kafka_client: None,
+                tls: None,
+                authentication: None,
+                authorization: None,
+                resources: None,
+            },
+        );
+        registry.spec.runtime = Some(crate::crd::SchemaRegistryRuntime {
+            client_dispatch_queue_capacity: Some(7),
+            client_frame_max: Some(crabka_units::kibibytes(32)),
+            ..crate::crd::SchemaRegistryRuntime::default()
+        });
+
+        let (args, _, _, _) = build_args_and_mounts(&registry, "boot:9092", None);
+        assert_eq!(
+            args.iter()
+                .filter(|arg| *arg == "--client-dispatch-queue-capacity=7")
+                .count(),
+            1
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| *arg == "--client-frame-max=32768B")
+                .count(),
+            1
+        );
+
+        registry.spec.runtime = None;
+        let (omitted, _, _, _) = build_args_and_mounts(&registry, "boot:9092", None);
+        assert!(
+            omitted.iter().all(|arg| {
+                !arg.starts_with("--client-dispatch-queue-capacity=")
+                    && !arg.starts_with("--client-frame-max=")
+            }),
+            "got: {omitted:?}"
+        );
+    }
+
+    #[test]
+    fn client_policy_validation_rejects_invalid_boundaries() {
+        for (runtime, path) in [
+            (
+                serde_json::json!({"clientDispatchQueueCapacity": 0}),
+                "spec.runtime.clientDispatchQueueCapacity",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "0B"}),
+                "spec.runtime.clientFrameMax",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "1.5B"}),
+                "spec.runtime.clientFrameMax",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "101MiB"}),
+                "spec.runtime.clientFrameMax",
+            ),
+        ] {
+            let spec: SchemaRegistrySpec = serde_json::from_value(serde_json::json!({
+                "replicas": 1,
+                "runtime": runtime,
+            }))
+            .unwrap();
+            let error = validate_config(&spec).expect_err("reject invalid policy");
+            assert!(error.contains(path), "got: {error}");
+        }
+    }
 
     #[test]
     fn protocol_runtime_validation_rejects_lossy_lowering() {

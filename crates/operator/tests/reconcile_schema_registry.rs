@@ -102,6 +102,8 @@ fn schema_registry_apply_rules() -> Vec<MockRule> {
 
 fn valid_runtime() -> SchemaRegistryRuntime {
     SchemaRegistryRuntime {
+        client_dispatch_queue_capacity: None,
+        client_frame_max: None,
         election_session_timeout: Some(secs(12)),
         election_rebalance_timeout: Some(secs(40)),
         election_heartbeat_interval: Some(secs(2)),

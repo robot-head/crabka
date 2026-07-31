@@ -89,6 +89,18 @@ pub struct SchemaRegistrySpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SchemaRegistryRuntime {
+    /// Kafka client request-dispatch queue capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub client_dispatch_queue_capacity: Option<usize>,
+    /// Maximum accepted Kafka client frame size.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub client_frame_max: Option<ByteSize>,
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -354,4 +366,31 @@ pub struct SchemaRegistryStatus {
     /// In-cluster REST URL clients use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::{assert, check};
+    use kube::CustomResourceExt as _;
+
+    use super::*;
+
+    #[test]
+    fn client_policy_round_trips_and_has_schema() {
+        let runtime = SchemaRegistryRuntime {
+            client_dispatch_queue_capacity: Some(7),
+            client_frame_max: Some(crabka_units::kibibytes(32)),
+            ..SchemaRegistryRuntime::default()
+        };
+        let json = serde_json::to_value(&runtime).unwrap();
+        check!(json["clientDispatchQueueCapacity"] == 7);
+        check!(json["clientFrameMax"] == "32KiB");
+        assert!(serde_json::from_value::<SchemaRegistryRuntime>(json).unwrap() == runtime);
+
+        let crd = serde_json::to_value(SchemaRegistry::crd()).unwrap();
+        let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["runtime"]["properties"];
+        check!(properties["clientDispatchQueueCapacity"]["minimum"].as_f64() == Some(1.0));
+        check!(properties["clientFrameMax"]["type"] == "string");
+    }
 }
