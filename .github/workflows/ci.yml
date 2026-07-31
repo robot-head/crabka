@@ -1146,7 +1146,7 @@ jobs:
             --oracle-url "host=127.0.0.1 port=54320 user=postgres dbname=oracle2" \
             --subject-url "host=127.0.0.1 port=54334 user=crab dbname=crab" \
             --corpus crates/gres-conformance/corpus \
-            --baseline crates/gres-conformance/baseline.json \
+            --baseline crates/gres-conformance/substrate-baseline.json \
             --extended-corpus crates/gres-conformance/corpus-extended \
             --extended-baseline crates/gres-conformance/corpus-extended/baseline.json \
             --extended-out extended-parity-substrate.json \
