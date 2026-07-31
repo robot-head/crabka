@@ -12,7 +12,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use crabka_client_core::Client;
+use crabka_client_core::{Client, FetchMinBytes};
 use crabka_protocol::{
     owned::{
         join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
@@ -89,6 +89,7 @@ pub struct Consumer {
     pub(crate) coordinator_handle: Option<JoinHandle<()>>,
     /// Controls which records are returned by `poll`.
     pub(crate) isolation_level: IsolationLevel,
+    pub(crate) fetch_min: ByteSize,
     pub(crate) fetch_max: ByteSize,
     pub(crate) fetch_partition_max: ByteSize,
     /// What `poll` does on a missing offset / detected truncation. `None`
@@ -111,6 +112,7 @@ struct StartConfig {
     auto_offset_reset: AutoOffsetReset,
     isolation_level: IsolationLevel,
     assignor: Assignor,
+    fetch_min: ByteSize,
     fetch_max: ByteSize,
     fetch_partition_max: ByteSize,
     request_timeout: Time,
@@ -678,6 +680,7 @@ impl Consumer {
         #[builder(default = AutoOffsetReset::Latest)] auto_offset_reset: AutoOffsetReset,
         #[builder(default = IsolationLevel::ReadUncommitted)] isolation_level: IsolationLevel,
         #[builder(default = Assignor::Range)] assignor: Assignor,
+        #[builder(default = crabka_client_core::DEFAULT_FETCH_MIN)] fetch_min: ByteSize,
         #[builder(default = crate::poll::DEFAULT_FETCH_MAX)] fetch_max: ByteSize,
         #[builder(default = crate::poll::DEFAULT_FETCH_PARTITION_MAX)]
         fetch_partition_max: ByteSize,
@@ -702,9 +705,17 @@ impl Consumer {
                 "group_instance_id must not be empty".into(),
             ));
         }
+        let fetch_min = FetchMinBytes::try_from(fetch_min)
+            .map_err(ConsumerError::RebalanceFailed)?
+            .size();
         let fetch_max = ConsumerFetchMaxBytes::try_from(fetch_max)
             .map_err(ConsumerError::RebalanceFailed)?
             .size();
+        if fetch_min.bytes_i32() > fetch_max.bytes_i32() {
+            return Err(ConsumerError::RebalanceFailed(
+                "consumer fetch min must not exceed consumer fetch max".to_owned(),
+            ));
+        }
         let fetch_partition_max = ConsumerFetchPartitionMaxBytes::try_from(fetch_partition_max)
             .map_err(ConsumerError::RebalanceFailed)?
             .size();
@@ -740,6 +751,7 @@ impl Consumer {
             auto_offset_reset,
             isolation_level,
             assignor,
+            fetch_min,
             fetch_max,
             fetch_partition_max,
             request_timeout,
@@ -1211,6 +1223,7 @@ async fn spawn_consumer(
         auto_offset_reset,
         isolation_level,
         assignor,
+        fetch_min,
         fetch_max,
         fetch_partition_max,
         request_timeout,
@@ -1318,6 +1331,7 @@ async fn spawn_consumer(
         coordinator_shutdown: shutdown,
         coordinator_handle: Some(coord_handle),
         isolation_level,
+        fetch_min,
         fetch_max,
         fetch_partition_max,
         auto_offset_reset,
@@ -2022,6 +2036,15 @@ mod security_arg_tests {
 
     #[tokio::test]
     async fn consumer_builder_rejects_non_positive_fetch_budgets_before_network_io() {
+        let min = Consumer::builder()
+            .bootstrap("127.0.0.1:1")
+            .group_id("timeout-group")
+            .subscribe(vec!["orders".to_string()])
+            .fetch_min(crabka_units::bytes(0))
+            .build()
+            .await;
+        assert2::assert!(matches!(min, Err(ConsumerError::RebalanceFailed(_))));
+
         let max = Consumer::builder()
             .bootstrap("127.0.0.1:1")
             .group_id("timeout-group")
@@ -2041,6 +2064,20 @@ mod security_arg_tests {
         assert2::assert!(matches!(
             partition_max,
             Err(ConsumerError::RebalanceFailed(_))
+        ));
+
+        let inverted = Consumer::builder()
+            .bootstrap("127.0.0.1:1")
+            .group_id("timeout-group")
+            .subscribe(vec!["orders".to_string()])
+            .fetch_min(crabka_units::bytes(2))
+            .fetch_max(crabka_units::bytes(1))
+            .build()
+            .await;
+        assert2::assert!(matches!(
+            inverted,
+            Err(ConsumerError::RebalanceFailed(message))
+                if message == "consumer fetch min must not exceed consumer fetch max"
         ));
     }
 
@@ -2096,6 +2133,7 @@ mod security_arg_tests {
             coordinator_shutdown: CancellationToken::new(),
             coordinator_handle: None,
             isolation_level: IsolationLevel::ReadUncommitted,
+            fetch_min: crabka_client_core::DEFAULT_FETCH_MIN,
             fetch_max: crate::poll::DEFAULT_FETCH_MAX,
             fetch_partition_max: crate::poll::DEFAULT_FETCH_PARTITION_MAX,
             auto_offset_reset: AutoOffsetReset::Latest,

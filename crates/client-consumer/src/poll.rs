@@ -1,12 +1,17 @@
 //! `Consumer::poll` — issues one `Fetch` covering every assigned partition,
 //! advances next-offsets, and returns the decoded records.
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use crabka_ids::LeaderEpoch;
 use crabka_protocol::owned::{
     fetch_request::{FetchPartition, FetchRequest, FetchTopic},
     list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
+};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes,
 };
 
 use crate::{
@@ -21,8 +26,8 @@ use crate::{
 const BOOTSTRAP_LEADER: i32 = -1;
 const UNKNOWN_FETCH_OFFSET: i64 = -1;
 const UNKNOWN_LEADER_ID: i32 = -1;
-pub(crate) const DEFAULT_FETCH_PARTITION_MAX_BYTES: i32 = 1 << 20;
-pub(crate) const DEFAULT_FETCH_MAX_BYTES: i32 = 50 * 1024 * 1024;
+pub(crate) const DEFAULT_FETCH_PARTITION_MAX: ByteSize = mebibytes(1);
+pub(crate) const DEFAULT_FETCH_MAX: ByteSize = mebibytes(50);
 
 /// One fetchable partition's request fields:
 /// `(partition, fetch_offset, current_leader_epoch, last_fetched_epoch)`.
@@ -89,7 +94,7 @@ fn build_fetch_topic(
     name: String,
     topic_id: crabka_protocol::primitives::uuid::Uuid,
     partitions: Vec<FetchSpec>,
-    partition_max_bytes: i32,
+    partition_max: ByteSize,
 ) -> FetchTopic {
     FetchTopic {
         topic: name,
@@ -104,7 +109,7 @@ fn build_fetch_topic(
                     // FetchRequest encode boundary.
                     current_leader_epoch: leader_epoch.get(),
                     last_fetched_epoch: last_fetched_epoch.get(),
-                    partition_max_bytes,
+                    partition_max_bytes: partition_max.bytes_i32(),
                     ..Default::default()
                 },
             )
@@ -116,13 +121,14 @@ fn build_fetch_topic(
 fn build_fetch_request(
     timeout_ms: i32,
     isolation_level: IsolationLevel,
-    max_bytes: i32,
+    min: ByteSize,
+    max: ByteSize,
     topics: Vec<FetchTopic>,
 ) -> FetchRequest {
     FetchRequest {
         max_wait_ms: timeout_ms,
-        min_bytes: 1,
-        max_bytes,
+        min_bytes: min.bytes_i32(),
+        max_bytes: max.bytes_i32(),
         isolation_level: isolation_level.wire(),
         topics,
         ..Default::default()
@@ -167,7 +173,7 @@ impl Consumer {
         skip_all,
         fields(
             group_id = %self.group_id,
-            timeout_ms = timeout.as_millis(),
+            timeout_ms = timeout.millis_i64_trunc(),
             assigned_partitions = tracing::field::Empty,
             leaders = tracing::field::Empty,
             records = tracing::field::Empty,
@@ -176,7 +182,7 @@ impl Consumer {
     )]
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
-    pub async fn poll(&mut self, timeout: Duration) -> Result<Vec<ConsumerRecord>, ConsumerError> {
+    pub async fn poll(&mut self, timeout: Time) -> Result<Vec<ConsumerRecord>, ConsumerError> {
         if !self.prepare_poll().await? {
             return Ok(Vec::new());
         }
@@ -185,7 +191,7 @@ impl Consumer {
         let assigned = self.assigned.lock().await.clone();
         tracing::Span::current().record("assigned_partitions", assigned.len());
         if assigned.is_empty() {
-            tokio::time::sleep(timeout).await;
+            tokio::time::sleep(timeout.to_std()).await;
             return Ok(Vec::new());
         }
 
@@ -352,11 +358,15 @@ impl Consumer {
 
     async fn send_fetches(
         &self,
-        timeout: Duration,
+        timeout: Time,
         by_leader: FetchByLeader,
         topic_ids: &HashMap<String, crabka_protocol::primitives::uuid::Uuid>,
     ) -> Result<Vec<crabka_protocol::owned::fetch_response::FetchResponse>, ConsumerError> {
-        let timeout_ms = i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX);
+        // Truncate rather than round: `max_wait_ms` is a wire field, and a
+        // fractional millisecond rounded up would ask the broker to hold the
+        // Fetch open past the caller's budget. A negative budget — a deadline
+        // already passed — means "do not wait", as `Duration` did before.
+        let timeout_ms = i32::try_from(timeout.millis_i64_trunc().max(0)).unwrap_or(i32::MAX);
 
         // Issue one Fetch per leader. All guards are released; we collect every
         // response before re-locking to process them. Sent sequentially so a
@@ -368,13 +378,14 @@ impl Consumer {
                 .into_iter()
                 .map(|(name, plist)| {
                     let topic_id = topic_ids.get(&name).copied().unwrap_or_default();
-                    build_fetch_topic(name, topic_id, plist, self.fetch_partition_max_bytes)
+                    build_fetch_topic(name, topic_id, plist, self.fetch_partition_max)
                 })
                 .collect();
             let req = build_fetch_request(
                 timeout_ms,
                 self.isolation_level,
-                self.fetch_max_bytes,
+                self.fetch_min,
+                self.fetch_max,
                 topics,
             );
             let resp = if should_use_bootstrap_leader(leader) {
@@ -710,6 +721,7 @@ mod offset_advance_tests {
         records::{RecordBatch, RecordsPayload},
         tagged_fields::UnknownTaggedFields,
     };
+    use crabka_units::kibibytes;
 
     use super::*;
 
@@ -784,7 +796,7 @@ mod offset_advance_tests {
 
     #[test]
     fn transient_transport_error_classification_is_narrow() {
-        use std::{io, time::Duration};
+        use std::io;
 
         use crabka_client_core::ClientError;
 
@@ -792,7 +804,7 @@ mod offset_advance_tests {
             ("disconnected", ClientError::Disconnected, true),
             (
                 "timeout",
-                ClientError::Timeout(Duration::from_millis(10)),
+                ClientError::Timeout(crabka_units::millis(10)),
                 true,
             ),
             (
@@ -849,7 +861,7 @@ mod offset_advance_tests {
             "topic-a".into(),
             id(7),
             vec![(2, 42, LeaderEpoch(5), LeaderEpoch(4))],
-            128 * 1024,
+            kibibytes(128),
         );
         assert2::assert!(
             topic
@@ -874,14 +886,15 @@ mod offset_advance_tests {
         let req = build_fetch_request(
             123,
             IsolationLevel::ReadCommitted,
-            2 * 1024 * 1024,
+            crabka_units::bytes(7),
+            mebibytes(2),
             vec![topic.clone()],
         );
         assert2::assert!(
             req == FetchRequest {
                 replica_id: -1,
                 max_wait_ms: 123,
-                min_bytes: 1,
+                min_bytes: 7,
                 max_bytes: 2 * 1024 * 1024,
                 isolation_level: 1, // read_committed wire value
                 session_id: 0,
