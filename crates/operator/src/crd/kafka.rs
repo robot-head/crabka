@@ -177,6 +177,11 @@ pub struct GresRegistrySpec {
     #[serde(with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
     pub reader_admin_dns_timeout: Option<Time>,
+    /// Minimum response size for registry reader fetches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub reader_fetch_min: Option<ByteSize>,
 }
 
 impl GresRegistrySpec {
@@ -203,12 +208,22 @@ impl GresRegistrySpec {
                     .unwrap_or_else(|| defaults.producer_dns_timeout().time()),
             )
             .map_err(|error| format!("spec.gresRegistry.producerDnsTimeout: {error}"))?;
-        policy
+        let policy = policy
             .with_reader_admin_dns_timeout(
                 self.reader_admin_dns_timeout
                     .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
             )
-            .map_err(|error| format!("spec.gresRegistry.readerAdminDnsTimeout: {error}"))
+            .map_err(|error| format!("spec.gresRegistry.readerAdminDnsTimeout: {error}"))?;
+        let reader_fetch_min = crabka_client_core::FetchMinBytes::try_from(
+            self.reader_fetch_min
+                .unwrap_or_else(|| defaults.reader_fetch_min().size()),
+        )
+        .map_err(|error| format!("spec.gresRegistry.readerFetchMin: {error}"))?;
+        Ok(policy.with_client_resource_policy(
+            defaults.dispatch_queue_capacity(),
+            defaults.frame_max(),
+            reader_fetch_min,
+        ))
     }
 }
 
@@ -1765,7 +1780,8 @@ mod tests {
                     "fetchMaxWait":"501ms",
                     "fetchPartitionMax":"1048577B",
                     "producerDnsTimeout":"37ms",
-                    "readerAdminDnsTimeout":"37ms"
+                    "readerAdminDnsTimeout":"37ms",
+                    "readerFetchMin":"3B"
                 }
             }"#,
         )
@@ -1781,7 +1797,13 @@ mod tests {
         .with_producer_dns_timeout(crabka_units::millis(37))
         .expect("DNS timeout")
         .with_reader_admin_dns_timeout(crabka_units::millis(37))
-        .expect("reader/admin DNS timeout");
+        .expect("reader/admin DNS timeout")
+        .with_client_resource_policy(
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            crabka_client_core::ClientFrameMax::default(),
+            crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(3))
+                .expect("fetch minimum"),
+        );
         assert!(
             custom
                 .gres_registry
@@ -1817,6 +1839,7 @@ mod tests {
             ["properties"]["gresRegistry"];
         assert!(registry["properties"]["replicationFactor"]["minimum"].as_f64() == Some(1.0));
         assert!(registry["properties"]["fetchPartitionMax"]["type"] == "string");
+        assert!(registry["properties"]["readerFetchMin"]["type"] == "string");
         for field in [
             "topicCreateTimeout",
             "readerRetryBackoff",
@@ -1864,6 +1887,14 @@ mod tests {
                 reader_admin_dns_timeout: Some(Time::ZERO),
                 ..Default::default()
             },
+            GresRegistrySpec {
+                reader_fetch_min: Some(ByteSize::ZERO),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                reader_fetch_min: Some(ByteSize::from_bytes_f64(1.5)),
+                ..Default::default()
+            },
         ];
 
         for spec in cases {
@@ -1885,6 +1916,14 @@ mod tests {
         .policy()
         .expect_err("zero reader/admin DNS timeout");
         assert!(error.starts_with("spec.gresRegistry.readerAdminDnsTimeout:"));
+
+        let error = GresRegistrySpec {
+            reader_fetch_min: Some(ByteSize::ZERO),
+            ..Default::default()
+        }
+        .policy()
+        .expect_err("zero reader fetch minimum");
+        assert!(error.starts_with("spec.gresRegistry.readerFetchMin:"));
     }
 
     #[test]

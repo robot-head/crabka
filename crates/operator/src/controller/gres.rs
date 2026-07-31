@@ -1373,6 +1373,8 @@ mod tests {
             registry_poll: Some(crabka_units::millis(600)),
             cold_start_timeout: Some(crabka_units::secs(40)),
             readiness_probe_period_seconds: Some(9),
+            client_dispatch_queue_capacity: None,
+            client_frame_max: None,
         });
 
         let policy = crabka_gres_control::RegistryPolicy::new(

@@ -164,6 +164,44 @@ pub struct GresActivatorSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub readiness_probe_period_seconds: Option<i32>,
+
+    /// Kafka client request-dispatch queue capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub client_dispatch_queue_capacity: Option<usize>,
+
+    /// Maximum accepted Kafka client frame size.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub client_frame_max: Option<ByteSize>,
+}
+
+impl GresActivatorSpec {
+    pub(crate) fn client_resource_policy(
+        &self,
+    ) -> Result<
+        (
+            Option<crabka_client_core::ConnectionDispatchQueueCapacity>,
+            Option<crabka_client_core::ClientFrameMax>,
+        ),
+        String,
+    > {
+        let queue = self
+            .client_dispatch_queue_capacity
+            .map(crabka_client_core::ConnectionDispatchQueueCapacity::new)
+            .transpose()
+            .map_err(|error| format!("spec.activator.clientDispatchQueueCapacity: {error}"))?;
+        let frame = self
+            .client_frame_max
+            .map(crabka_client_core::ClientFrameMax::try_from)
+            .transpose()
+            .map_err(|error| format!("spec.activator.clientFrameMax: {error}"))?;
+        Ok((queue, frame))
+    }
 }
 
 /// Compression codec for the Gres WAL producer.
@@ -197,6 +235,38 @@ pub struct GresComputeSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub readiness_probe_period_seconds: Option<i32>,
+
+    /// Kafka client request-dispatch queue capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub client_dispatch_queue_capacity: Option<usize>,
+
+    /// Maximum accepted Kafka client frame size.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub client_frame_max: Option<ByteSize>,
+
+    /// Minimum response size for FDW Kafka fetches.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub fdw_fetch_min: Option<ByteSize>,
+
+    /// Minimum response size for committed-WAL recovery fetches.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub wal_recovery_fetch_min: Option<ByteSize>,
 
     /// Maximum checkpoint object part size.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -423,6 +493,11 @@ pub struct GresComputeSpec {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) readiness_probe_period_seconds: i32,
+    pub(crate) client_dispatch_queue_capacity:
+        Option<crabka_client_core::ConnectionDispatchQueueCapacity>,
+    pub(crate) client_frame_max: Option<crabka_client_core::ClientFrameMax>,
+    pub(crate) fdw_fetch_min: Option<crabka_client_core::FetchMinBytes>,
+    pub(crate) wal_recovery_fetch_min: Option<crabka_client_core::FetchMinBytes>,
     pub(crate) checkpoint_part_size: CheckpointPartBytes,
     pub(crate) checkpoint_retain: PositiveUsize,
     pub(crate) checkpoint_delete_records_timeout_ms: PositiveI32,
@@ -507,6 +582,26 @@ impl GresComputeSpec {
 
         Ok(EffectiveGresComputePolicy {
             readiness_probe_period_seconds: self.effective_readiness_probe_period_seconds()?,
+            client_dispatch_queue_capacity: self
+                .client_dispatch_queue_capacity
+                .map(crabka_client_core::ConnectionDispatchQueueCapacity::new)
+                .transpose()
+                .map_err(|error| format!("spec.compute.clientDispatchQueueCapacity: {error}"))?,
+            client_frame_max: self
+                .client_frame_max
+                .map(crabka_client_core::ClientFrameMax::try_from)
+                .transpose()
+                .map_err(|error| format!("spec.compute.clientFrameMax: {error}"))?,
+            fdw_fetch_min: self
+                .fdw_fetch_min
+                .map(crabka_client_core::FetchMinBytes::try_from)
+                .transpose()
+                .map_err(|error| format!("spec.compute.fdwFetchMin: {error}"))?,
+            wal_recovery_fetch_min: self
+                .wal_recovery_fetch_min
+                .map(crabka_client_core::FetchMinBytes::try_from)
+                .transpose()
+                .map_err(|error| format!("spec.compute.walRecoveryFetchMin: {error}"))?,
             checkpoint_part_size: CheckpointPartBytes::new(whole_bytes_usize(
                 "spec.compute.checkpointPartSize",
                 self.checkpoint_part_size.unwrap_or(DEFAULT_PART_MAX_SIZE),
@@ -1209,6 +1304,8 @@ mod tests {
                 registry_poll: Some(crabka_units::millis(500)),
                 cold_start_timeout: Some(crabka_units::secs(45)),
                 readiness_probe_period_seconds: Some(7),
+                client_dispatch_queue_capacity: None,
+                client_frame_max: None,
             }),
             compute: Some(GresComputeSpec {
                 readiness_probe_period_seconds: Some(11),
@@ -1273,6 +1370,64 @@ mod tests {
     }
 
     #[test]
+    fn activator_client_policy_round_trips_and_validates() {
+        let policy = GresActivatorSpec {
+            client_dispatch_queue_capacity: Some(7),
+            client_frame_max: Some(crabka_units::kibibytes(32)),
+            ..GresActivatorSpec::default()
+        };
+        let json = serde_json::to_string(&policy).expect("serialize activator policy");
+        assert!(serde_json::from_str::<GresActivatorSpec>(&json).unwrap() == policy);
+        let (queue, frame) = policy
+            .client_resource_policy()
+            .expect("valid activator client policy");
+        assert!(queue.expect("queue").get() == 7);
+        assert!(frame.expect("frame").size() == crabka_units::kibibytes(32));
+
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let activator = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["activator"]["properties"];
+        assert!(activator["clientDispatchQueueCapacity"]["minimum"].as_f64() == Some(1.0));
+        assert!(activator["clientFrameMax"]["type"] == "string");
+
+        for (policy, path) in [
+            (
+                GresActivatorSpec {
+                    client_dispatch_queue_capacity: Some(0),
+                    ..GresActivatorSpec::default()
+                },
+                "spec.activator.clientDispatchQueueCapacity",
+            ),
+            (
+                GresActivatorSpec {
+                    client_frame_max: Some(ByteSize::ZERO),
+                    ..GresActivatorSpec::default()
+                },
+                "spec.activator.clientFrameMax",
+            ),
+            (
+                GresActivatorSpec {
+                    client_frame_max: Some(ByteSize::from_bytes_f64(1.5)),
+                    ..GresActivatorSpec::default()
+                },
+                "spec.activator.clientFrameMax",
+            ),
+            (
+                GresActivatorSpec {
+                    client_frame_max: Some(crabka_units::mebibytes(101)),
+                    ..GresActivatorSpec::default()
+                },
+                "spec.activator.clientFrameMax",
+            ),
+        ] {
+            let error = policy
+                .client_resource_policy()
+                .expect_err("invalid client policy");
+            assert!(error.contains(path), "got: {error}");
+        }
+    }
+
+    #[test]
     fn compute_readiness_policy_round_trips_and_requires_positive_values() {
         let policy = GresComputeSpec {
             readiness_probe_period_seconds: Some(7),
@@ -1291,6 +1446,83 @@ mod tests {
         assert!(
             compute["properties"]["readinessProbePeriodSeconds"]["minimum"].as_f64() == Some(1.0)
         );
+    }
+
+    #[test]
+    fn compute_client_policy_round_trips_and_validates() {
+        let policy = GresComputeSpec {
+            client_dispatch_queue_capacity: Some(7),
+            client_frame_max: Some(crabka_units::kibibytes(32)),
+            fdw_fetch_min: Some(crabka_units::bytes(2)),
+            wal_recovery_fetch_min: Some(crabka_units::bytes(3)),
+            ..GresComputeSpec::default()
+        };
+        let json = serde_json::to_string(&policy).expect("serialize compute client policy");
+        assert!(serde_json::from_str::<GresComputeSpec>(&json).unwrap() == policy);
+        let effective = policy.effective_policy().expect("valid compute policy");
+        assert!(
+            effective
+                .client_dispatch_queue_capacity
+                .expect("queue")
+                .get()
+                == 7
+        );
+        assert!(effective.client_frame_max.expect("frame").size() == crabka_units::kibibytes(32));
+        assert!(effective.fdw_fetch_min.expect("FDW fetch").size() == crabka_units::bytes(2));
+        assert!(
+            effective
+                .wal_recovery_fetch_min
+                .expect("WAL recovery fetch")
+                .size()
+                == crabka_units::bytes(3)
+        );
+
+        let crd = serde_json::to_value(Gres::crd()).expect("serialize Gres CRD");
+        let compute = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"];
+        assert!(compute["clientDispatchQueueCapacity"]["minimum"].as_f64() == Some(1.0));
+        for field in ["clientFrameMax", "fdwFetchMin", "walRecoveryFetchMin"] {
+            assert!(
+                compute[field]["type"] == "string",
+                "wrong schema for {field}"
+            );
+        }
+
+        for (policy, path) in [
+            (
+                GresComputeSpec {
+                    client_dispatch_queue_capacity: Some(0),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.clientDispatchQueueCapacity",
+            ),
+            (
+                GresComputeSpec {
+                    client_frame_max: Some(crabka_units::mebibytes(101)),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.clientFrameMax",
+            ),
+            (
+                GresComputeSpec {
+                    fdw_fetch_min: Some(ByteSize::ZERO),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.fdwFetchMin",
+            ),
+            (
+                GresComputeSpec {
+                    wal_recovery_fetch_min: Some(ByteSize::from_bytes_f64(1.5)),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.walRecoveryFetchMin",
+            ),
+        ] {
+            let error = policy
+                .effective_policy()
+                .expect_err("invalid client policy");
+            assert!(error.contains(path), "got: {error}");
+        }
     }
 
     #[test]
