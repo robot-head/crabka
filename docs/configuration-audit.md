@@ -5932,3 +5932,48 @@ Affected all-target tests pass before and after final formatting. Workspace
 all-target check and strict Clippy, nightly formatting, and diff hygiene pass.
 This closes deployment-process propagation only. The repository-wide
 hardcoded operational-value audit remains active.
+
+## Classic Consumer Retry Policy
+
+Classic Consumer startup and coordinator retry timing now flows through one
+validated `ConsumerRetryPolicy`. Its unchanged defaults are:
+
+| Setting | Default |
+|---|---:|
+| startup attempt timeout | `90s` |
+| startup wall-clock deadline | `5m` |
+| startup initial backoff | `500ms` |
+| startup maximum backoff | `5s` |
+| coordinator retry timeout | `30s` |
+| coordinator initial backoff | `100ms` |
+| coordinator maximum backoff | `1s` |
+
+Each value is a positive, finite, whole-millisecond UOM `Time` backed by a
+private `refined_type` newtype. Startup attempt timeout cannot exceed the
+startup deadline, and neither initial backoff can exceed its matching maximum.
+The policy reaches startup attempts, coordinator discovery and rediscovery,
+group join and sync, heartbeats, and synchronous and asynchronous commits.
+The former startup and coordinator retry constants are gone; remaining
+matching duration literals are test inputs or unrelated request behavior.
+
+The standalone observability demo Consume role owns these exact CLI and
+environment pairs:
+
+| CLI | Environment |
+|---|---|
+| `--consumer-startup-attempt-timeout` | `CRABKA_DEMO_CONSUMER_STARTUP_ATTEMPT_TIMEOUT` |
+| `--consumer-startup-deadline` | `CRABKA_DEMO_CONSUMER_STARTUP_DEADLINE` |
+| `--consumer-startup-initial-backoff` | `CRABKA_DEMO_CONSUMER_STARTUP_INITIAL_BACKOFF` |
+| `--consumer-startup-max-backoff` | `CRABKA_DEMO_CONSUMER_STARTUP_MAX_BACKOFF` |
+| `--consumer-coordinator-retry-timeout` | `CRABKA_DEMO_CONSUMER_COORDINATOR_RETRY_TIMEOUT` |
+| `--consumer-coordinator-initial-backoff` | `CRABKA_DEMO_CONSUMER_COORDINATOR_INITIAL_BACKOFF` |
+| `--consumer-coordinator-max-backoff` | `CRABKA_DEMO_CONSUMER_COORDINATOR_MAX_BACKOFF` |
+
+Explicit values on Produce or Stream roles fail before telemetry or external
+I/O. Compose exposes the variables only on `demo-consume`, with unit-bearing
+defaults matching the library policy. No CRD owns this standalone demo.
+
+All 162 Consumer library tests and 77 demo all-target tests pass after final
+formatting. Workspace all-target check and strict Clippy, nightly formatting,
+and diff hygiene pass. This closes the Consumer retry slice only; the
+repository-wide hardcoded operational-value audit remains active.

@@ -57,7 +57,7 @@ Docker Compose, Cargo.
 - Produces:
   `Consumer::builder().retry_policy(ConsumerRetryPolicy::new(...).unwrap())`
 
-- [ ] **Step 1: Write policy validation and startup-behavior tests**
+- [x] **Step 1: Write policy validation and startup-behavior tests**
 
 In `consumer.rs` tests, add a default/override test that checks:
 
@@ -78,7 +78,7 @@ initial backoff above maximum. Extend the paused-time startup retry test so a
 non-default policy proves the attempt timeout, total deadline, and startup
 backoff come from the builder value.
 
-- [ ] **Step 2: Run the focused tests and confirm failure**
+- [x] **Step 2: Run the focused tests and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -89,7 +89,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: `ConsumerRetryPolicy` and the builder input do not exist.
 
-- [ ] **Step 3: Add the minimal validated types**
+- [x] **Step 3: Add the minimal validated types**
 
 Add a private `RetryTime(Duration)` that validates through
 `refined_type::rule::MinMaxU128<1, { u64::MAX as u128 }>` and rejects values
@@ -98,7 +98,7 @@ seven private `RetryTime` fields, the constructor above, named `Time` getters,
 and the exact defaults from Global Constraints. Re-export
 `ConsumerRetryPolicy` from `lib.rs`.
 
-- [ ] **Step 4: Replace startup constants with policy getters**
+- [x] **Step 4: Replace startup constants with policy getters**
 
 Add
 
@@ -112,7 +112,7 @@ to `Consumer::start`, carry it in `StartConfig`, and replace
 `500ms`, and maximum `5s` with the four startup getters. Delete the two startup
 constants.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -143,7 +143,7 @@ git commit -m "feat(consumer): expose retry policy"
 - Produces coordinator helpers that receive `CoordinatorRetryPolicy` instead
   of reading constants
 
-- [ ] **Step 1: Write failing coordinator propagation tests**
+- [x] **Step 1: Write failing coordinator propagation tests**
 
 Extend the existing retry-helper paused-time tests with a non-default typed
 policy:
@@ -161,7 +161,7 @@ after the `35ms` timeout. Add focused tests proving `find_coordinator`,
 coordinator re-find, and offset commit receive the configured values rather
 than the old `30s`, `100ms`, and `1s` constants.
 
-- [ ] **Step 2: Run focused tests and confirm failure**
+- [x] **Step 2: Run focused tests and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -170,7 +170,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: `CoordinatorRetryPolicy` or the new helper parameters are absent.
 
-- [ ] **Step 3: Thread one internal coordinator policy**
+- [x] **Step 3: Thread one internal coordinator policy**
 
 Define the private copyable `CoordinatorRetryPolicy` in `coordinator.rs`.
 Construct it from the three validated `ConsumerRetryPolicy` getters while
@@ -180,7 +180,7 @@ Update `commit.rs` to use the policy supplied by its consumer/coordinator
 caller. Delete `COORDINATOR_RETRY_TIMEOUT` and both local `MAX_BACKOFF`
 constants; initialize and cap backoff from the policy.
 
-- [ ] **Step 4: Audit all coordinator call sites**
+- [x] **Step 4: Audit all coordinator call sites**
 
 ```bash
 rg -n 'COORDINATOR_RETRY_TIMEOUT|MAX_BACKOFF|with_coordinator_retry\\(|with_coordinator_refind\\(|find_coordinator\\(' \
@@ -190,7 +190,7 @@ rg -n 'COORDINATOR_RETRY_TIMEOUT|MAX_BACKOFF|with_coordinator_retry\\(|with_coor
 Every production retry call must receive the typed policy. Remaining time
 literals must be test inputs or unrelated poll/request behavior.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -220,7 +220,7 @@ git commit -m "fix(consumer): propagate coordinator retry policy"
 - Produces:
   `effective_consumer_retry_policy(&Cli) -> Result<ConsumerRetryPolicy, String>`
 
-- [ ] **Step 1: Write failing parser, role, and Compose tests**
+- [x] **Step 1: Write failing parser, role, and Compose tests**
 
 Add hermetic subprocess tests covering:
 
@@ -239,7 +239,7 @@ zero/fractional/ordering rejection, and rejection on Produce and Stream roles.
 Extend the Compose test to require all seven variables only under
 `demo-consume`, with unit-bearing defaults matching Global Constraints.
 
-- [ ] **Step 2: Run focused tests and confirm failure**
+- [x] **Step 2: Run focused tests and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -248,7 +248,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: the CLI fields, environment bindings, or resolver are absent.
 
-- [ ] **Step 3: Add the seven direct Clap fields**
+- [x] **Step 3: Add the seven direct Clap fields**
 
 Use `ByteSize`-style direct UOM parsing already established in this binary,
 but with `Time`:
@@ -267,7 +267,7 @@ through `ConsumerRetryPolicy::new`, reject explicit values for non-Consume
 roles before telemetry initialization, and pass the policy to
 `Consumer::builder().retry_policy(...)`.
 
-- [ ] **Step 4: Add Compose ownership**
+- [x] **Step 4: Add Compose ownership**
 
 Under `demo-consume` only, add:
 
@@ -281,7 +281,7 @@ CRABKA_DEMO_CONSUMER_COORDINATOR_INITIAL_BACKOFF: "${CRABKA_DEMO_CONSUMER_COORDI
 CRABKA_DEMO_CONSUMER_COORDINATOR_MAX_BACKOFF: "${CRABKA_DEMO_CONSUMER_COORDINATOR_MAX_BACKOFF:-1s}"
 ```
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -309,7 +309,7 @@ git commit -m "feat(demo): expose consumer retry policy"
 - Proves every old production constant is replaced by the typed policy and
   records that the broader repository audit remains active
 
-- [ ] **Step 1: Run the focused ownership audit**
+- [x] **Step 1: Run the focused ownership audit**
 
 ```bash
 rg -n 'CONSUMER_START_ATTEMPT_TIMEOUT|CONSUMER_START_DEADLINE|COORDINATOR_RETRY_TIMEOUT|MAX_BACKOFF|ConsumerRetryPolicy|consumer-(startup|coordinator)-|CRABKA_DEMO_CONSUMER_(STARTUP|COORDINATOR)_' \
@@ -319,14 +319,14 @@ rg -n 'CONSUMER_START_ATTEMPT_TIMEOUT|CONSUMER_START_DEADLINE|COORDINATOR_RETRY_
 Classify every production hit as a policy definition, validation, propagation,
 or deployment input. There must be no unresolved old constant.
 
-- [ ] **Step 2: Run affected all-target tests**
+- [x] **Step 2: Run affected all-target tests**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p crabka-client-consumer -p observability-demo-app --all-targets --locked
 ```
 
-- [ ] **Step 3: Run workspace gates**
+- [x] **Step 3: Run workspace gates**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -338,14 +338,14 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 git diff --check
 ```
 
-- [ ] **Step 4: Re-run affected tests after formatting**
+- [x] **Step 4: Re-run affected tests after formatting**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p crabka-client-consumer -p observability-demo-app --all-targets --locked
 ```
 
-- [ ] **Step 5: Update the audit and commit**
+- [x] **Step 5: Update the audit and commit**
 
 Append exact defaults, CLI/environment names, validation rules, live data
 flow, test counts, and the focused audit classification. Check every completed
