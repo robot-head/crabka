@@ -25,7 +25,7 @@
 //! - on a role transition the now-irrelevant timer is cancelled (a follower has
 //!   no election timer; a leader has no fetch timer and runs the heartbeat);
 //! - a fetch-timer expiry while the leader is still reachable RE-POLLS
-//!   (`SendFetch`), it does not elect; only `FETCH_MISS_LIMIT` consecutive
+//!   (`SendFetch`), it does not elect; only the configured consecutive
 //!   misses feed `Event::FetchTimeout` to start an election;
 //! - the leader re-broadcasts `BeginQuorumEpoch` to voters each heartbeat tick.
 
@@ -897,7 +897,7 @@ impl Engine {
             TimerTick::Fetch => {
                 // A fetch-timer expiry while we still believe in a reachable
                 // leader RE-POLLS rather than electing; only a sustained loss
-                // (FETCH_MISS_LIMIT consecutive misses) feeds FetchTimeout.
+                // (the configured consecutive-miss limit) feeds FetchTimeout.
                 let leader = self.following_leader();
                 if let Some(leader_id) = leader {
                     self.fetch_misses += 1;
@@ -2522,6 +2522,29 @@ mod tests {
         election_timeout: Time,
         snapshot_interval_records: u64,
     ) -> (KraftController, tempfile::TempDir) {
+        build_full_with_policy(
+            me,
+            ids,
+            election_timeout,
+            snapshot_interval_records,
+            None,
+            ControllerFetchMissLimit::default(),
+            MetadataRaftCommandQueueCapacity::default(),
+            MetadataRaftFetchMax::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_full_with_policy(
+        me: NodeId,
+        ids: &[NodeId],
+        election_timeout: Time,
+        snapshot_interval_records: u64,
+        heartbeat_interval: Option<Time>,
+        controller_fetch_miss_limit: ControllerFetchMissLimit,
+        metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity,
+        metadata_raft_fetch_max: MetadataRaftFetchMax,
+    ) -> (KraftController, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let log = KraftLog::open(dir.path()).expect("open log");
         let state = QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(ids));
@@ -2531,10 +2554,10 @@ mod tests {
                 cluster_id: uuid::Uuid::nil(),
                 initial_state: state,
                 election_timeout,
-                heartbeat_interval: None,
-                controller_fetch_miss_limit: ControllerFetchMissLimit::default(),
-                metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity::default(),
-                metadata_raft_fetch_max: MetadataRaftFetchMax::default(),
+                heartbeat_interval,
+                controller_fetch_miss_limit,
+                metadata_raft_command_queue_capacity,
+                metadata_raft_fetch_max,
                 peers: Arc::new(NullPeerSender),
                 snapshot_interval_records,
                 metadata_snapshot_fetch_max: MetadataSnapshotFetchMax::default(),
@@ -2546,6 +2569,20 @@ mod tests {
     }
 
     fn build_engine_only(me: NodeId, ids: &[NodeId]) -> (Engine, tempfile::TempDir) {
+        build_engine_only_with_policy(
+            me,
+            ids,
+            ControllerFetchMissLimit::default(),
+            MetadataRaftFetchMax::default(),
+        )
+    }
+
+    fn build_engine_only_with_policy(
+        me: NodeId,
+        ids: &[NodeId],
+        controller_fetch_miss_limit: ControllerFetchMissLimit,
+        metadata_raft_fetch_max: MetadataRaftFetchMax,
+    ) -> (Engine, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let log = KraftLog::open(dir.path()).expect("open log");
         let core = QuorumStateMachine::new(
@@ -2585,8 +2622,8 @@ mod tests {
                 clock_base,
                 election_timeout: TEST_ELECTION_TIMEOUT,
                 heartbeat_interval: None,
-                controller_fetch_miss_limit: ControllerFetchMissLimit::default(),
-                metadata_raft_fetch_max: MetadataRaftFetchMax::default(),
+                controller_fetch_miss_limit,
+                metadata_raft_fetch_max,
                 election_at: None,
                 fetch_at: None,
                 fetch_misses: 0,
@@ -2778,6 +2815,36 @@ mod tests {
     #[test]
     fn configured_heartbeat_overrides_derived_period() {
         assert2::assert!(heartbeat_period(secs(5), Some(millis(500))) == millis(500));
+    }
+
+    #[test]
+    fn engine_uses_configured_miss_limit_and_fetch_max() {
+        let (engine, _dir) = build_engine_only_with_policy(
+            NodeId(1),
+            &[NodeId(1)],
+            ControllerFetchMissLimit::new(5).expect("positive miss limit"),
+            MetadataRaftFetchMax::try_from(crabka_units::bytes(512))
+                .expect("positive fetch maximum"),
+        );
+
+        check!(engine.controller_fetch_miss_limit.get() == 5);
+        check!(engine.metadata_raft_fetch_max.bytes() == 512);
+    }
+
+    #[tokio::test]
+    async fn spawned_controller_uses_configured_command_queue_capacity() {
+        let (controller, _dir) = build_full_with_policy(
+            NodeId(1),
+            &[NodeId(1)],
+            TEST_ELECTION_TIMEOUT,
+            0,
+            None,
+            ControllerFetchMissLimit::default(),
+            MetadataRaftCommandQueueCapacity::new(7).expect("positive queue capacity"),
+            MetadataRaftFetchMax::default(),
+        );
+
+        check!(controller.cmd_tx.capacity() == 7);
     }
 
     #[test]
@@ -3267,6 +3334,55 @@ mod tests {
     }
 
     #[test]
+    fn tiny_fetch_budget_does_not_skip_apply_or_replay_records() {
+        let tiny = MetadataRaftFetchMax::try_from(crabka_units::bytes(1))
+            .expect("one byte still makes progress");
+        let (mut engine, _dir) = build_engine_only_with_policy(
+            NodeId(1),
+            &[NodeId(1)],
+            ControllerFetchMissLimit::default(),
+            tiny,
+        );
+
+        let mut scratch = engine.image.clone();
+        for (name, id) in [("first", 1), ("second", 2)] {
+            let records = topic_record_named(name, id);
+            let mut blobs = Vec::new();
+            for record in &records {
+                blobs.extend(to_kraft_values(record, &scratch).expect("encode metadata"));
+                scratch.apply(record);
+            }
+            let mut batch = metadata_record_batch(1, &blobs);
+            engine.log.append(&mut batch).expect("append metadata");
+        }
+        check!(
+            engine
+                .log
+                .read_decoded(Offset(0), tiny.size())
+                .expect("read first bounded batch")[0]
+                .base_offset
+                == 0
+        );
+        check!(
+            engine
+                .log
+                .read_decoded(Offset(2), tiny.size())
+                .expect("read second bounded batch")[0]
+                .base_offset
+                == 2
+        );
+        engine.advance_and_apply(engine.log.log_end_offset());
+
+        assert2::assert!(engine.image.topic("first").is_some());
+        assert2::assert!(engine.image.topic("second").is_some());
+
+        let mut recovered = MetadataImage::new(uuid::Uuid::nil());
+        replay_committed(&engine.log, &mut recovered, Offset(0), tiny);
+        assert2::assert!(recovered.topic("first").is_some());
+        assert2::assert!(recovered.topic("second").is_some());
+    }
+
+    #[test]
     fn try_resolve_waiters_resolves_at_exact_hwm_and_keeps_future_waiter() {
         let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
         for offset in 0..5 {
@@ -3488,12 +3604,20 @@ mod tests {
 
     #[test]
     fn serve_fetch_records_returns_batches_only_for_offsets_inside_log() {
-        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
+        let (mut engine, _dir) = build_engine_only_with_policy(
+            NodeId(1),
+            &[NodeId(1)],
+            ControllerFetchMissLimit::default(),
+            MetadataRaftFetchMax::try_from(crabka_units::bytes(1))
+                .expect("one byte still serves the first batch"),
+        );
         let mut batch = one_offset_batch(0, 1, b"a");
+        engine.log.append(&mut batch).expect("append");
+        let mut batch = one_offset_batch(1, 1, b"b");
         engine.log.append(&mut batch).expect("append");
 
         assert2::assert!(engine.serve_fetch_records(Offset(-1)).is_empty());
-        assert2::assert!(engine.serve_fetch_records(Offset(1)).is_empty());
+        assert2::assert!(engine.serve_fetch_records(Offset(2)).is_empty());
         let records = engine.serve_fetch_records(Offset(0));
         let decoded = decode_batches(&records).expect("decode served records");
         assert2::assert!(
@@ -3507,7 +3631,13 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_response_snapshot_hint_starts_once_and_ignores_stale_hint() {
-        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2)]);
+        let (mut engine, _dir) = build_engine_only_with_policy(
+            NodeId(1),
+            &[NodeId(1), NodeId(2)],
+            ControllerFetchMissLimit::default(),
+            MetadataRaftFetchMax::try_from(crabka_units::bytes(512))
+                .expect("positive fetch maximum"),
+        );
         let fetch_snapshot_response = wire::PeerResponse::FetchSnapshot {
             snapshot_id: (11, 3),
             size: 0,
@@ -3533,10 +3663,12 @@ mod tests {
             Some(wire::PeerRequest::FetchSnapshot {
                 snapshot_id,
                 position,
+                max_bytes,
                 ..
             }) => {
                 assert2::assert!(snapshot_id == (11, 3));
                 assert2::assert!(position == 0);
+                assert2::assert!(max_bytes == 512);
             }
             other => panic!("unexpected fetch snapshot request: {other:?}"),
         }
@@ -3812,7 +3944,7 @@ mod tests {
         await_leader(&ctrl, Some(NodeId(2))).await;
 
         // Keep re-announcing leader 2 faster than the fetch watchdog would
-        // accumulate FETCH_MISS_LIMIT misses; the leader must remain 2.
+        // accumulate the configured number of misses; the leader must remain 2.
         for _ in 0..6 {
             tokio::time::sleep(StdDuration::from_millis(40)).await;
             ctrl.inject_event(Event::ReceiveBeginQuorumEpoch {

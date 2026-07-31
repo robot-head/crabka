@@ -459,6 +459,11 @@ mod tests {
                 .bytes()
                 == 4 * 1024 * 1024
         );
+        check!(MetadataRaftFetchMax::try_from(ByteSize::from_bytes_f64(1.5)).is_err());
+        check!(
+            MetadataRaftFetchMax::try_from(ByteSize::from_bytes_i64(i64::from(i32::MAX) + 1))
+                .is_err()
+        );
     }
 
     #[test]
