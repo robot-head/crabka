@@ -4903,7 +4903,7 @@ non-Docker integration test; three Docker-only compatibility tests were
 explicitly ignored. Workspace all-target checking, strict warnings-as-errors
 Clippy, nightly formatting, and diff hygiene also passed.
 
-## Observability UOM Closure and Remaining Policy
+## Observability UOM and Runtime Policy Closure
 
 Every existing `ServiceConfig` option is now backed by a
 `CRABKA_OBSERVABILITY_*` environment variable. The `max_query_length` byte
@@ -4924,7 +4924,7 @@ limit, 11,000-point resolution ceiling, five-second `delay_for` ceiling, and
 request values, and changing these server constants would make the compatible
 API diverge rather than tune deployment resources.
 
-The remaining deployment policies are:
+The former remaining deployment policies are now configured:
 
 - distributor ingest age, future-timestamp grace, and quota burst window;
 - distributor WAL dependency startup deadline, per-attempt timeout, and
@@ -4937,7 +4937,7 @@ The remaining deployment policies are:
   concurrency, hot-tail bucket width, hot-tail poll/delivery interval, and
   dependency reconnect interval.
 
-The proposed minimal surface adds these values directly to the existing
+The implemented surface adds these values directly to the existing
 role-selectable `ServiceConfig`, preserving every current value as its
 default. Times remain `Time`; byte extents remain `ByteSize`; positive
 concurrency and batch counts use `NonZeroUsize`. The two equal 50-ms hot-tail
@@ -4947,10 +4947,12 @@ numbers remain separate. Each field gets a `CRABKA_OBSERVABILITY_*`
 environment variable and is supplied only to its owning demo role. No CRD
 currently owns this standalone service.
 
-This design is pending explicit approval and has not been implemented. The
-completed UOM/env slice passed all 50 library tests, 10 CLI tests, the
-environment test, 35 compactor tests, 480 HTTP tests, 69 querier tests, and
-strict all-target Clippy.
+All time settings use positive UOM parsing, so zero and negative values fail at
+the CLI/environment boundary. Related startup, accumulation, and retry bounds
+also fail before their owning runtime starts. The completed slice passed 57
+library tests, 2 binary tests, 10 CLI tests, the environment test, 35 compactor
+tests, 480 HTTP tests, and 69 querier tests. Workspace all-target checking,
+strict warnings-as-errors Clippy, nightly formatting, and diff hygiene passed.
 
 ## Kafka Record Decompression Policy
 

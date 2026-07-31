@@ -35,8 +35,8 @@ newtype, tokio tests.
 
 ### Task 4: Closure
 
-- [ ] Run `cargo test -p crabka-observability --all-targets --locked`.
-- [ ] Run workspace all-target check and strict warnings-as-errors Clippy.
-- [ ] Run nightly formatting and `git diff --check`.
-- [ ] Update `docs/configuration-audit.md` with the implemented surface and evidence.
-- [ ] Commit the closure documents; leave the broader repository goal active.
+- [x] Run `cargo test -p crabka-observability --all-targets --locked`.
+- [x] Run workspace all-target check and strict warnings-as-errors Clippy.
+- [x] Run nightly formatting and `git diff --check`.
+- [x] Update `docs/configuration-audit.md` with the implemented surface and evidence.
+- [x] Commit the closure documents; leave the broader repository goal active.
