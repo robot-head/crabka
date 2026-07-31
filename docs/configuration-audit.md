@@ -6026,3 +6026,33 @@ all-target tests pass after final formatting. Workspace all-target check,
 strict Clippy, nightly formatting, and diff hygiene pass. This closes only the
 classic Consumer fetch byte policy; the repository-wide hardcoded
 operational-value audit remains active.
+
+## Observability Demo Consumer Timing
+
+The standalone observability demo Consume role now exposes the classic
+Consumer's existing timing controls with their unchanged defaults:
+
+| Setting | Default | CLI | Environment |
+|---|---:|---|---|
+| session timeout | `45s` | `--consumer-session-timeout` | `CRABKA_DEMO_CONSUMER_SESSION_TIMEOUT` |
+| rebalance timeout | `1m` | `--consumer-rebalance-timeout` | `CRABKA_DEMO_CONSUMER_REBALANCE_TIMEOUT` |
+| heartbeat interval | `3s` | `--consumer-heartbeat-interval` | `CRABKA_DEMO_CONSUMER_HEARTBEAT_INTERVAL` |
+| request timeout | `30s` | `--consumer-request-timeout` | `CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT` |
+
+Values parse as positive UOM `Time` quantities. Explicit values on Produce or
+Stream roles fail before telemetry or external I/O. The settings flow directly
+from `Cli` through the timing resolver and `run_consume` into the existing
+Consumer builder session-timeout, rebalance-timeout, heartbeat-interval, and
+request-timeout setters. This standalone demo needs no new shared type,
+cross-field rule, or CRD. Compose exposes the variables only on
+`demo-consume`.
+
+Adding the preceding fetch-minimum setting made the unboxed Consumer startup
+attempt future cross strict Clippy's downstream future-size threshold. Boxing
+that attempt once inside `Consumer::start` restored all downstream callers
+without changing cancellation, timeout, or retry behavior.
+
+All 85 demo all-target tests pass after final formatting. Workspace all-target
+check and strict Clippy, nightly formatting, and diff hygiene pass. This closes
+only the observability demo Consumer timing slice; the repository-wide
+hardcoded operational-value audit remains active.

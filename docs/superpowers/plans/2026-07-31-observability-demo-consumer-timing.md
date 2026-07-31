@@ -52,7 +52,7 @@ Add no library type, wrapper, dependency, or CRD.
   `effective_consumer_timing(&Cli) ->
   std::io::Result<(Time, Time, Time, Time)>`
 
-- [ ] **Step 1: Write failing resolver tests**
+- [x] **Step 1: Write failing resolver tests**
 
 Add a unit test that parses the Consume role without explicit inputs and
 asserts:
@@ -75,7 +75,7 @@ Parse independent overrides:
 
 Assert the resolver returns `(secs(46), secs(61), secs(4), secs(31))`.
 
-- [ ] **Step 2: Write failing subprocess and Compose tests**
+- [x] **Step 2: Write failing subprocess and Compose tests**
 
 Create a hermetic subprocess test using `env_clear()`. Set
 `CRABKA_DEMO_CONSUMER_SESSION_TIMEOUT=47s` on Produce and require:
@@ -97,7 +97,7 @@ CRABKA_DEMO_CONSUMER_HEARTBEAT_INTERVAL: "${CRABKA_DEMO_CONSUMER_HEARTBEAT_INTER
 CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT: "${CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT:-30s}"
 ```
 
-- [ ] **Step 3: Run focused tests and confirm failure**
+- [x] **Step 3: Run focused tests and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -106,7 +106,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: the CLI fields, resolver, and Compose values are absent.
 
-- [ ] **Step 4: Implement the four direct inputs**
+- [x] **Step 4: Implement the four direct inputs**
 
 Add optional fields:
 
@@ -147,7 +147,7 @@ Consumer::builder()
 
 Add the four Compose variables only to `demo-consume`.
 
-- [ ] **Step 5: Verify and commit**
+- [x] **Step 5: Verify and commit**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -176,7 +176,7 @@ git commit -m "feat(demo): expose consumer timing"
 - Records the direct demo-to-builder timing flow and preserves the broader
   repository audit as active
 
-- [ ] **Step 1: Audit ownership**
+- [x] **Step 1: Audit ownership**
 
 ```bash
 rg -n \
@@ -187,7 +187,7 @@ rg -n \
 Every production hit must be a CLI/environment declaration, resolver,
 forwarding call, or Compose input. Remaining hits must be tests.
 
-- [ ] **Step 2: Run workspace gates**
+- [x] **Step 2: Run workspace gates**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -200,14 +200,14 @@ cargo +nightly fmt --all -- --check
 git diff --check
 ```
 
-- [ ] **Step 3: Re-run demo tests after formatting**
+- [x] **Step 3: Re-run demo tests after formatting**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p observability-demo-app --all-targets --locked
 ```
 
-- [ ] **Step 4: Document and commit**
+- [x] **Step 4: Document and commit**
 
 Append exact defaults, names, validation, runtime flow, test count, and audit
 classification to `docs/configuration-audit.md`. Check every completed plan
