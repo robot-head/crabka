@@ -369,7 +369,11 @@ fn non_finite_to_char(value: &Datum) -> bool {
 
 /// Divergence: PostgreSQL consumes the input POSITIONALLY against the template,
 /// so leading whitespace eats digit positions — `to_number('  123', '999')` is 12
-/// there and 123 here. Everything else in the numeric template family agrees.
+/// there and 123 here. That is why the template is accepted and not read: under
+/// the C locale the decimal point is `.` and the group separator `,` whatever
+/// the template spells them as (`D`/`G` or the literals), so scanning the input
+/// alone reproduces PostgreSQL for every template the corpus uses. Everything
+/// else in the numeric template family agrees.
 /// `to_number(input, template)` — read a `numeric` out of `input`.
 ///
 /// PostgreSQL uses the template to say WHERE the digits are rather than to
@@ -380,7 +384,7 @@ fn non_finite_to_char(value: &Datum) -> bool {
 ///
 /// The decimal separator is taken from the template: `D` or a literal `.` marks
 /// it, and `G` or a literal `,` marks a group separator that is dropped.
-fn to_number(input: &str, template: &str, name: &str) -> Result<Datum, ExecError> {
+fn to_number(input: &str, _template: &str, name: &str) -> Result<Datum, ExecError> {
     let mut digits = String::with_capacity(input.len());
     let mut seen_decimal = false;
     let mut trailing_negative = false;

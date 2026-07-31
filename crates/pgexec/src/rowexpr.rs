@@ -35,19 +35,6 @@ pub(crate) fn eval_row(
 }
 
 /// `PostgreSQL`'s `record_out`, over already-evaluated field values.
-pub(crate) fn render(values: &[Datum], style: crabka_pgtypes::encoding::OutputStyle<'_>) -> String {
-    let rendered: Vec<Option<String>> = values
-        .iter()
-        .map(|value| {
-            (!value.is_null()).then(|| {
-                String::from_utf8(crabka_pgtypes::encoding::encode_text_in(value, style))
-                    .expect("a Datum's text encoding is always valid UTF-8")
-            })
-        })
-        .collect();
-    crabka_pgtypes::composite::record_out(&rendered)
-}
-
 /// Row-wise comparison: fields are compared left to right and the first pair
 /// that differs decides the whole row. A NULL pair reached before any decision
 /// makes the comparison NULL — which is why `(1,NULL) < (2,2)` is true (the
@@ -193,27 +180,26 @@ mod tests {
         Datum::Int4(n)
     }
 
+    /// `record_out`'s quoting, which is what a composite value's text form goes
+    /// through on the wire: a field is quoted only when leaving it bare would be
+    /// ambiguous, a NULL field is empty, and `"`/`\\` are doubled/escaped.
     #[test]
     fn text_output_quotes_the_fields_postgres_quotes() {
-        let tz = jiff::tz::TimeZone::UTC;
-        let cases: &[(&[Datum], &str)] = &[
-            (&[int(1), int(2)], "(1,2)"),
-            (&[int(1), Datum::Null, Datum::Bool(true)], "(1,,t)"),
-            (&[Datum::Text("a b".into())], "(\"a b\")"),
-            (&[Datum::Text("a,b".into())], "(\"a,b\")"),
-            (&[Datum::Text("c\"d".into())], "(\"c\"\"d\")"),
-            (&[Datum::Text("a\\b".into())], "(\"a\\\\b\")"),
-            (&[Datum::Text("a(b".into())], "(\"a(b\")"),
-            (&[Datum::Text(String::new())], "(\"\")"),
+        let f = |s: &str| Some(s.to_string());
+        let cases: &[(&[Option<String>], &str)] = &[
+            (&[f("1"), f("2")], "(1,2)"),
+            (&[f("1"), None, f("t")], "(1,,t)"),
+            (&[f("a b")], "(\"a b\")"),
+            (&[f("a,b")], "(\"a,b\")"),
+            (&[f("c\"d")], "(\"c\"\"d\")"),
+            (&[f("a\\b")], "(\"a\\\\b\")"),
+            (&[f("a(b")], "(\"a(b\")"),
+            (&[f("")], "(\"\")"),
             (&[], "()"),
         ];
         for (values, expected) in cases {
-            assert!(
-                render(
-                    values,
-                    crabka_pgtypes::encoding::OutputStyle::with_zone(&tz)
-                ) == *expected
-            );
+            let got = crabka_pgtypes::composite::record_out(values);
+            assert!(got == *expected, "{values:?}: {got} != {expected}");
         }
     }
 
