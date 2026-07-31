@@ -30,6 +30,7 @@ use crabka_observability::{
     run_compactor_until_idle, run_compactor_until_shutdown, serve_service_listener,
 };
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+use crabka_units::{convert::ByteSizeExt as _, millis};
 use futures_util::StreamExt;
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -158,12 +159,13 @@ fn service_config(role: Role, bootstrap: &str, topic: &str, data_root: &TempDir)
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
+        ..ServiceConfig::default()
     }
 }
 
@@ -209,7 +211,7 @@ async fn observability_kafka_wal_sink_feeds_live_consumer_hot_tail() {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut decoded = 0;
     while decoded == 0 && Instant::now() < deadline {
-        decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, Duration::from_millis(250))
+        decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, millis(250))
             .await
             .expect("poll live wal");
     }
@@ -391,7 +393,7 @@ async fn config_built_distributor_enforces_broker_user_producer_byte_rate_quota_
             .await
             .expect("wal consumer");
     let hot_tail = BufferedLogHotTail::default();
-    let decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, Duration::from_millis(250))
+    let decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, millis(250))
         .await
         .expect("poll live wal");
     assert2::assert!(decoded == 0);
@@ -471,7 +473,7 @@ async fn config_built_distributor_enforces_tenant_write_acl_before_wal_append() 
             .await
             .expect("wal consumer");
     let hot_tail = BufferedLogHotTail::default();
-    let decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, Duration::from_millis(250))
+    let decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, millis(250))
         .await
         .expect("poll live wal");
     assert2::assert!(decoded == 0);
@@ -895,7 +897,7 @@ async fn config_built_distributor_compactor_querier_loop_serves_compacted_logs()
                         ]
                     }
                 ],
-                "stats": expected_loki_stats_with(descriptors[0].size_bytes, 1, 1)
+                "stats": expected_loki_stats_with(descriptors[0].size.bytes_u64(), 1, 1)
             }
         })
     );
@@ -1323,7 +1325,7 @@ async fn poll_until_decoded(
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut decoded = 0;
     while decoded == 0 && Instant::now() < deadline {
-        decoded = poll_log_hot_tail_once(consumer, hot_tail, Duration::from_millis(250))
+        decoded = poll_log_hot_tail_once(consumer, hot_tail, millis(250))
             .await
             .expect("poll live wal");
     }
