@@ -19,7 +19,7 @@ use crabka_client_core::{
 };
 use crabka_client_producer::Producer;
 use crabka_metrics::{
-    MetricsCompactorConfig,
+    DEFAULT_MAX_RATE_BUCKETS, MetricsCompactorConfig,
     distributor::{
         DistributorState, HA_TRACKER_TOPIC, KafkaHaElectionSink, KafkaSink,
         run_ha_election_consumer_loop, serve,
@@ -142,6 +142,65 @@ struct Cli {
         value_parser = parse::positive_time
     )]
     ha_tracker_poll_timeout: Time,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_HA_FAILOVER_TIMEOUT",
+        default_value = "30s",
+        value_parser = parse::time,
+        allow_hyphen_values = true
+    )]
+    ha_failover_timeout: Time,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_INGEST_RATE_BUCKET_CAP",
+        default_value_t = DEFAULT_MAX_RATE_BUCKETS,
+        value_parser = parse_ingest_rate_bucket_cap
+    )]
+    ingest_rate_bucket_cap: usize,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_DISTRIBUTOR_MAX_DECOMPRESSED",
+        default_value = "32MiB",
+        value_parser = parse_distributor_max_decompressed
+    )]
+    distributor_max_decompressed: ByteSize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct IngestRateBucketCap(usize);
+
+impl IngestRateBucketCap {
+    fn new(value: usize) -> Result<Self, String> {
+        refined_type::rule::GreaterUsize::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("ingest rate bucket cap: {error}"))
+    }
+
+    #[must_use]
+    const fn get(self) -> usize {
+        self.0
+    }
+}
+
+fn parse_ingest_rate_bucket_cap(value: &str) -> Result<usize, String> {
+    value
+        .parse::<usize>()
+        .map_err(|error| error.to_string())
+        .and_then(IngestRateBucketCap::new)
+        .map(IngestRateBucketCap::get)
+}
+
+fn parse_distributor_max_decompressed(value: &str) -> Result<ByteSize, String> {
+    let size = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    let bytes = size.bytes_f64();
+    if bytes.fract() != 0.0 || bytes > 9_007_199_254_740_992.0 {
+        return Err(
+            "size must be a positive whole-byte value exactly representable by UOM".to_owned(),
+        );
+    }
+    usize::try_from(size.bytes_u64())
+        .map_err(|_| "size must fit the platform request boundary".to_owned())?;
+    Ok(size)
 }
 
 fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
@@ -367,6 +426,9 @@ async fn run_distributor(
         .await?;
     let state = Arc::new(
         DistributorState::new(Arc::new(KafkaSink::new(Arc::clone(&producer))))
+            .with_ha_failover_timeout(cli.ha_failover_timeout)
+            .with_max_rate_buckets(cli.ingest_rate_bucket_cap)
+            .with_max_decompressed(cli.distributor_max_decompressed)
             .with_ha_election_sink(Arc::new(KafkaHaElectionSink::new(
                 Arc::clone(&producer),
                 cli.ha_tracker_topic.clone(),
@@ -596,6 +658,94 @@ mod tests {
         let cli = Cli::try_parse_from(["crabka-metrics", "--target", "distributor"]).unwrap();
 
         assert!(matches!(cli.target, Target::Distributor));
+    }
+
+    #[test]
+    fn distributor_policy_parses_defaults_overrides_and_boundaries() {
+        let defaults = Cli::try_parse_from(["crabka-metrics", "--target", "distributor"]).unwrap();
+        check!(
+            defaults.ha_failover_timeout
+                == crabka_metrics::distributor::DEFAULT_HA_FAILOVER_TIMEOUT
+        );
+        check!(defaults.ingest_rate_bucket_cap == DEFAULT_MAX_RATE_BUCKETS);
+        check!(
+            defaults.distributor_max_decompressed
+                == crabka_metrics::distributor::DEFAULT_DISTRIBUTOR_MAX_DECOMPRESSED
+        );
+
+        let configured = Cli::try_parse_from([
+            "crabka-metrics",
+            "--target",
+            "distributor",
+            "--ha-failover-timeout",
+            "-1s",
+            "--ingest-rate-bucket-cap",
+            "7",
+            "--distributor-max-decompressed",
+            "64KiB",
+        ])
+        .unwrap();
+        check!(configured.ha_failover_timeout == Time::from_millis(-1_000));
+        check!(configured.ingest_rate_bucket_cap == 7);
+        check!(configured.distributor_max_decompressed == kibibytes(64));
+
+        for args in [
+            ["--ingest-rate-bucket-cap", "0"],
+            ["--distributor-max-decompressed", "0B"],
+            ["--distributor-max-decompressed", "1.5B"],
+        ] {
+            let input = [
+                "crabka-metrics",
+                "--target",
+                "distributor",
+                args[0],
+                args[1],
+            ];
+            assert!(Cli::try_parse_from(input).is_err());
+        }
+    }
+
+    #[test]
+    fn distributor_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_METRICS_DISTRIBUTOR_POLICY_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::distributor_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_METRICS_HA_FAILOVER_TIMEOUT", "-1s")
+                    .env("CRABKA_METRICS_INGEST_RATE_BUCKET_CAP", "7")
+                    .env("CRABKA_METRICS_DISTRIBUTOR_MAX_DECOMPRESSED", "64KiB")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-metrics", "--target", "distributor"]).unwrap();
+        check!(from_env.ha_failover_timeout == Time::from_millis(-1_000));
+        check!(from_env.ingest_rate_bucket_cap == 7);
+        check!(from_env.distributor_max_decompressed == kibibytes(64));
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-metrics",
+            "--target",
+            "distributor",
+            "--ha-failover-timeout",
+            "5s",
+            "--ingest-rate-bucket-cap",
+            "9",
+            "--distributor-max-decompressed",
+            "128KiB",
+        ])
+        .unwrap();
+        check!(from_cli.ha_failover_timeout == secs(5));
+        check!(from_cli.ingest_rate_bucket_cap == 9);
+        check!(from_cli.distributor_max_decompressed == kibibytes(128));
     }
 
     #[test]
