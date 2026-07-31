@@ -32,7 +32,7 @@
 - Produces: `FromStr<Err = String>` for `AutoOffsetReset`, `IsolationLevel`, and `Assignor`.
 - Accepted values: `latest`, `earliest`, `none`, `read-uncommitted`, `read-committed`, `range`, and `cooperative-sticky`.
 
-- [ ] **Step 1: Write failing parsing tests**
+- [x] **Step 1: Write failing parsing tests**
 
 Add table-driven tests beside each owning enum:
 
@@ -84,7 +84,7 @@ fn assignor_values_parse_exact_spellings() {
 }
 ```
 
-- [ ] **Step 2: Run focused tests and verify the red state**
+- [x] **Step 2: Run focused tests and verify the red state**
 
 Run:
 
@@ -96,7 +96,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 Expected: compilation fails because the three enums do not implement
 `FromStr`.
 
-- [ ] **Step 3: Implement the minimum shared parsers**
+- [x] **Step 3: Implement the minimum shared parsers**
 
 Implement direct matches on each enum:
 
@@ -139,7 +139,7 @@ impl std::str::FromStr for Assignor {
 }
 ```
 
-- [ ] **Step 4: Verify and commit shared parsing**
+- [x] **Step 4: Verify and commit shared parsing**
 
 Run:
 
@@ -172,7 +172,7 @@ git commit -m "feat(consumer): parse behavior choices"
 - Produces: `effective_consumer_behavior(&Cli) -> io::Result<(AutoOffsetReset, IsolationLevel, Assignor)>`.
 - Propagates: resolved values into the matching existing Consumer builder setters.
 
-- [ ] **Step 1: Write failing resolver and subprocess tests**
+- [x] **Step 1: Write failing resolver and subprocess tests**
 
 Add optional typed CLI fields with the exact long names and environment names
 from the design, then write resolver tests asserting unchanged defaults,
@@ -193,7 +193,7 @@ command.args(["--consumer-assignor", "range"]);
 // reaching telemetry or broker I/O.
 ```
 
-- [ ] **Step 2: Write failing Compose ownership test**
+- [x] **Step 2: Write failing Compose ownership test**
 
 Extend `consumer_behavior_is_configurable_only_on_the_consume_role` in
 `observability_demo_config.rs` to assert the three variables occur exactly
@@ -205,7 +205,7 @@ CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL: ${CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL:-re
 CRABKA_DEMO_CONSUMER_ASSIGNOR: ${CRABKA_DEMO_CONSUMER_ASSIGNOR:-range}
 ```
 
-- [ ] **Step 3: Run focused tests and verify the red state**
+- [x] **Step 3: Run focused tests and verify the red state**
 
 Run:
 
@@ -217,7 +217,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 Expected: failure because the resolver, CLI fields, and Compose variables are
 not implemented.
 
-- [ ] **Step 4: Implement direct demo propagation**
+- [x] **Step 4: Implement direct demo propagation**
 
 Import the existing enums, define the three optional CLI/env fields, and add:
 
@@ -256,7 +256,7 @@ Resolve it before telemetry initialization, pass the tuple through
 `main -> run_consume`, call the three existing builder setters, and add only
 the three `demo-consume` Compose entries.
 
-- [ ] **Step 5: Verify and commit the demo surface**
+- [x] **Step 5: Verify and commit the demo surface**
 
 Run:
 
@@ -289,13 +289,13 @@ git commit -m "feat(demo): expose consumer behavior"
 - Consumes: verified implementation and exact test counts from Tasks 1 and 2.
 - Produces: a completed plan and permanent audit record.
 
-- [ ] **Step 1: Audit ownership and defaults**
+- [x] **Step 1: Audit ownership and defaults**
 
 Use `rg` to confirm each CLI/env name appears only in its declaration,
 resolver/tests, and `demo-consume`; confirm the three builder defaults remain
 unchanged and no demo mirror enum or new dependency was added.
 
-- [ ] **Step 2: Run workspace gates**
+- [x] **Step 2: Run workspace gates**
 
 Run:
 
@@ -308,7 +308,7 @@ cargo +nightly fmt --all -- --check
 git diff --check
 ```
 
-- [ ] **Step 3: Re-run demo tests after formatting**
+- [x] **Step 3: Re-run demo tests after formatting**
 
 Run:
 
@@ -317,7 +317,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p observability-demo-app --all-targets --locked
 ```
 
-- [ ] **Step 4: Document and commit**
+- [x] **Step 4: Document and commit**
 
 Record defaults, exact CLI/env pairs, accepted spellings, precedence, early
 role rejection, direct builder propagation, Compose ownership, exclusions,

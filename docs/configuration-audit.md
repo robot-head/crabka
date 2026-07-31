@@ -6056,3 +6056,40 @@ All 85 demo all-target tests pass after final formatting. Workspace all-target
 check and strict Clippy, nightly formatting, and diff hygiene pass. This closes
 only the observability demo Consumer timing slice; the repository-wide
 hardcoded operational-value audit remains active.
+
+## Observability Demo Consumer Behavior
+
+The standalone observability demo Consume role now exposes the classic
+Consumer's existing behavior choices with unchanged defaults:
+
+| Setting | Default | Accepted values |
+|---|---|---|
+| auto offset reset | `latest` | `latest`, `earliest`, `none` |
+| isolation level | `read-uncommitted` | `read-uncommitted`, `read-committed` |
+| partition assignor | `range` | `range`, `cooperative-sticky` |
+
+The exact CLI and environment pairs are:
+
+| CLI | Environment |
+|---|---|
+| `--consumer-auto-offset-reset` | `CRABKA_DEMO_CONSUMER_AUTO_OFFSET_RESET` |
+| `--consumer-isolation-level` | `CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL` |
+| `--consumer-assignor` | `CRABKA_DEMO_CONSUMER_ASSIGNOR` |
+
+The three existing client-consumer enums own exact `FromStr` parsing. Clap
+provides environment parsing and CLI precedence without coupling the Consumer
+crate to Clap. Explicit values on Produce or Stream roles fail before
+telemetry or external I/O. Values flow directly from `Cli` through
+`effective_consumer_behavior` and `run_consume` into the existing
+`auto_offset_reset`, `isolation_level`, and `assignor` builder setters.
+Compose exposes the variables only on `demo-consume`.
+
+This standalone demo needs no CRD, UOM quantity, `refined_type`, mirror enum,
+or new dependency. Group instance ID and client rack remain workload identity
+and topology rather than hardcoded tuning defaults.
+
+All 168 Consumer all-target tests and all 88 demo all-target tests pass after
+final formatting. Workspace all-target check and strict Clippy, nightly
+formatting, and diff hygiene pass. This closes only the observability demo
+Consumer behavior slice; the repository-wide hardcoded operational-value
+audit remains active.
