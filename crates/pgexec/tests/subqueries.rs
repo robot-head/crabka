@@ -172,3 +172,29 @@ async fn error_surface() {
         "42601"
     );
 }
+
+/// A subquery in FROM may omit its alias, as it has since `PostgreSQL` 16. Several
+/// unnamed subqueries can appear in one FROM without colliding, and the columns
+/// they expose are usable unqualified.
+#[tokio::test]
+async fn a_from_subquery_may_omit_its_alias() {
+    use assert2::assert;
+
+    let client = connect(spawn().await).await;
+    assert!(col0(&client, "SELECT * FROM (SELECT 1 AS x)").await == vec![Some("1".to_string())]);
+    assert!(col0(&client, "SELECT count(*) FROM (SELECT 1)").await == vec![Some("1".to_string())]);
+    // The exposed column is in scope unqualified.
+    assert!(
+        col0(&client, "SELECT x FROM (SELECT 1 AS x) WHERE x = 1").await
+            == vec![Some("1".to_string())]
+    );
+    // Two of them in one FROM each get their own name rather than clashing.
+    assert!(
+        col0(&client, "SELECT x FROM (SELECT 1 AS x), (SELECT 2 AS y)").await
+            == vec![Some("1".to_string())]
+    );
+    // An alias, when given, still wins.
+    assert!(
+        col0(&client, "SELECT q.x FROM (SELECT 1 AS x) q").await == vec![Some("1".to_string())]
+    );
+}

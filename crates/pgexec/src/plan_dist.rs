@@ -455,7 +455,10 @@ pub(crate) fn partial_aggregate_for_call(
     table: &Table,
     call: &FuncCall,
 ) -> Option<PartialAggregateSpec> {
-    if call.distinct {
+    // A FILTER predicate is evaluated per row against the full scope, which the
+    // scan-level partial aggregate cannot do — pushing the call down without it
+    // would aggregate every row and silently ignore the filter.
+    if call.distinct || call.filter.is_some() {
         return None;
     }
     let column = match &call.args {

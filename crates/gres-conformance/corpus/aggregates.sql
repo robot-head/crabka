@@ -26,3 +26,29 @@ SELECT v, count(*) FROM agg_empty GROUP BY v ORDER BY v;
 -- error parity (same SQLSTATE on both sides)
 SELECT region, amount FROM agg_sales GROUP BY region;
 SELECT frobnicate(amount) FROM agg_sales;
+
+-- `agg(...) FILTER (WHERE predicate)` on a plain (non-window) aggregate. The
+-- predicate is applied per source row BEFORE the argument is evaluated, so a
+-- rejected row does not count for count(*) and never enters the DISTINCT buffer;
+-- a NULL predicate rejects the row, as a WHERE clause would.
+CREATE TABLE ft (g int, v int);
+INSERT INTO ft VALUES (1,1),(1,2),(1,3),(2,1),(2,3),(2,NULL);
+SELECT count(*) FILTER (WHERE v > 1) FROM ft;
+SELECT count(v) FILTER (WHERE v > 1) FROM ft;
+SELECT sum(v) FILTER (WHERE v > 1), avg(v) FILTER (WHERE v > 1) FROM ft;
+SELECT min(v) FILTER (WHERE v > 1), max(v) FILTER (WHERE v > 1) FROM ft;
+SELECT g, count(*) FILTER (WHERE v > 1) FROM ft GROUP BY g ORDER BY g;
+SELECT g, count(*) FILTER (WHERE v > 100) FROM ft GROUP BY g ORDER BY g;
+SELECT g, sum(v) FILTER (WHERE v > 100) FROM ft GROUP BY g ORDER BY g;
+SELECT g, array_agg(v) FILTER (WHERE v > 1) FROM ft GROUP BY g ORDER BY g;
+SELECT g, count(DISTINCT v) FILTER (WHERE v <> 2) FROM ft GROUP BY g ORDER BY g;
+SELECT g, array_agg(DISTINCT v) FILTER (WHERE v <> 2) FROM ft GROUP BY g ORDER BY g;
+SELECT g, sum(DISTINCT v) FILTER (WHERE v <> 2) FROM ft GROUP BY g ORDER BY g;
+SELECT count(*) FILTER (WHERE v IS NULL) FROM ft;
+SELECT count(*) FILTER (WHERE NULL) FROM ft;
+SELECT g FROM ft GROUP BY g HAVING count(*) FILTER (WHERE v > 1) > 1 ORDER BY g;
+SELECT g, count(*) FILTER (WHERE v > 1), count(*) FROM ft GROUP BY g ORDER BY g;
+SELECT string_agg(v::text, ',') FILTER (WHERE v > 1) FROM ft;
+SELECT count(*) FILTER (WHERE 1) FROM ft;
+SELECT count(*) FILTER (WHERE count(*) > 0) FROM ft;
+DROP TABLE ft;

@@ -182,6 +182,9 @@ arc-swap = "1"
 pbkdf2 = { version = "=0.13.0", default-features = false, features = ["kdf", "hmac"] }
 hmac = "0.13"
 sha2 = "0.11"
+# PostgreSQL's `md5()` SQL function. Kept in lock-step with `sha2` so both
+# hashes come from the same RustCrypto `digest` generation.
+md-5 = "0.11"
 ring = "0.17"
 subtle = "2"
 base64 = "0.23"
@@ -244,3 +247,6 @@ num-bigint = "0.5"
 pg_query = "6"
 rand = "0.10"
 sqlx = { version = "0.9.0", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls-ring-webpki"] }
+# PostgreSQL's `normalize(text, form)` / `is_normalized(text, form)` need the
+# Unicode NFC/NFD/NFKC/NFKD algorithms; this is the ecosystem's UAX #15 crate.
+unicode-normalization = "0.1"

@@ -44,6 +44,14 @@ pub struct EvalCtx {
     pub now: Timestamp,
     pub stmt_now: Timestamp,
     pub time_zone: TimeZone,
+    /// The `DateStyle` field order, which decides how an otherwise-ambiguous
+    /// all-numeric date literal (`01/02/03`) is read.
+    pub date_order: crabka_pgtypes::datetime::DateOrder,
+    /// The `DateStyle` output format, which decides how a `date`, `timestamp`
+    /// or `timestamptz` is spelled on the wire.
+    pub date_style: crabka_pgtypes::datetime::DateStyle,
+    /// The `IntervalStyle` GUC, which decides how an `interval` is spelled.
+    pub interval_style: crabka_pgtypes::datetime::IntervalStyle,
     pub current_user: String,
     pub session_user: String,
     pub clock: Arc<dyn Clock>,
@@ -57,9 +65,34 @@ pub struct EvalCtx {
 }
 
 pub(crate) struct SequenceRuntime {
+    /// The session's catalog KV. `nextval` reads sequence records through it,
+    /// and it is the same handle the catalog-introspection functions read
+    /// relations, views and comments through — a session has exactly one.
     pub(crate) kv: Arc<dyn crabka_pgkv::Kv>,
     pub(crate) manager: Arc<crate::seq::SequenceManager>,
     pub(crate) currvals: Arc<Mutex<HashMap<String, i64>>>,
+}
+
+impl EvalCtx {
+    /// The session's text-output settings, in the shape the value layer's text
+    /// encoder takes them.
+    pub fn output_style(&self) -> crabka_pgtypes::encoding::OutputStyle<'_> {
+        crabka_pgtypes::encoding::OutputStyle {
+            time_zone: &self.time_zone,
+            date_style: self.date_style,
+            date_order: self.date_order,
+            interval_style: self.interval_style,
+        }
+    }
+}
+
+impl EvalCtx {
+    /// The catalog KV backing the `pg_catalog` functions, or `None` outside a
+    /// SQL session (a planning context or a unit test), where those functions
+    /// report 0A000 rather than inventing an answer.
+    pub(crate) fn catalog(&self) -> Option<&dyn crabka_pgkv::Kv> {
+        self.sequence.as_ref().map(|runtime| runtime.kv.as_ref())
+    }
 }
 
 impl EvalCtx {
@@ -70,6 +103,9 @@ impl EvalCtx {
             now: epoch,
             stmt_now: epoch,
             time_zone: TimeZone::UTC,
+            date_order: crabka_pgtypes::datetime::DateOrder::default(),
+            date_style: crabka_pgtypes::datetime::DateStyle::default(),
+            interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             current_user: "public".into(),
             session_user: "public".into(),
             clock: Arc::new(SystemClock),

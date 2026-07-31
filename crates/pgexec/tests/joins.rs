@@ -351,3 +351,38 @@ async fn unknown_qualifier_is_42p01() {
         .expect_err("unknown qualifier");
     assert_eq!(err_code(&err), "42P01");
 }
+
+/// A large equi-join must not degrade to a full inner scan per outer row.
+/// `pg_regress`'s `join` corpus self-joins a 10k-row table on an equality —
+/// 100 million predicate evaluations, each copying a 500-byte text column, when
+/// the join folds as a nested loop — and never answers. The wall clock is the
+/// only thing that distinguishes the two shapes end-to-end, so the bound is
+/// deliberately far above what the indexed probe needs (well under a second)
+/// and far below what the nested loop needs (minutes).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn large_equi_self_join_answers_without_scanning_every_pair() {
+    let client = connect(spawn().await).await;
+    client
+        .simple_query("CREATE TABLE tt3 (f1 int, f2 text)")
+        .await
+        .expect("create");
+    client
+        .simple_query(
+            "INSERT INTO tt3 SELECT x, repeat('xyzzy', 100) FROM generate_series(1, 10000) x",
+        )
+        .await
+        .expect("seed");
+
+    let rows = tokio::time::timeout(
+        std::time::Duration::from_mins(1),
+        client.query(
+            "SELECT count(*) FROM tt3 b LEFT JOIN tt3 c ON (b.f1 = c.f1)",
+            &[],
+        ),
+    )
+    .await
+    .expect("equi-join scanned every pair instead of probing its key")
+    .expect("query");
+
+    assert2::assert!(rows[0].get::<_, i64>(0) == 10_000);
+}

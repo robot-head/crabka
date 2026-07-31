@@ -717,8 +717,10 @@ async fn error_surface() {
         "42846"
     );
 
-    // Bad time literal → 22007 (invalid datetime format).
-    assert_eq!(err_code(&client, "SELECT TIME '25:00:00'").await, "22007");
+    // A clock field out of its range → 22008; only text that is not a literal
+    // shape at all is 22007.
+    assert2::assert!(err_code(&client, "SELECT TIME '25:00:00'").await == "22008");
+    assert2::assert!(err_code(&client, "SELECT TIME 'not-a-time'").await == "22007");
 
     // Bad timestamp literal → 22007.
     assert_eq!(

@@ -1,0 +1,64 @@
+===== \dt
+           List of tables
+ Schema |  Name   | Type  |  Owner   
+--------+---------+-------+----------
+ public | smoke_t | table | postgres
+(1 row)
+
+===== \di
+                    List of indexes
+ Schema |       Name       | Type  |  Owner   |  Table  
+--------+------------------+-------+----------+---------
+ public | smoke_t_code_idx | index | postgres | smoke_t
+ public | smoke_t_pkey     | index | postgres | smoke_t
+(2 rows)
+
+===== \dv
+           List of views
+ Schema |  Name   | Type |  Owner   
+--------+---------+------+----------
+ public | smoke_v | view | postgres
+(1 row)
+
+===== \ds
+           List of sequences
+ Schema |  Name   |   Type   |  Owner   
+--------+---------+----------+----------
+ public | smoke_s | sequence | postgres
+(1 row)
+
+===== \d
+           List of relations
+ Schema |  Name   |   Type   |  Owner   
+--------+---------+----------+----------
+ public | smoke_s | sequence | postgres
+ public | smoke_t | table    | postgres
+ public | smoke_v | view     | postgres
+(3 rows)
+
+===== \dn
+  List of schemas
+  Name  |  Owner   
+--------+----------
+ public | postgres
+(1 row)
+
+===== \du
+     List of roles
+ Role name | Attributes 
+-----------+------------
+ public    | 
+
+===== \l
+                                              List of databases
+   Name   |  Owner   | Encoding | Locale Provider | Collate | Ctype | Locale | ICU Rules | Access privileges 
+----------+----------+----------+-----------------+---------+-------+--------+-----------+-------------------
+ postgres | postgres | UTF8     | libc            | C       | C     |        |           | 
+(1 row)
+
+===== \df
+                       List of functions
+ Schema | Name | Result data type | Argument data types | Type 
+--------+------+------------------+---------------------+------
+(0 rows)
+

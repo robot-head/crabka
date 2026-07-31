@@ -2,30 +2,56 @@
 
 use crate::TypeError;
 
+/// Which coercion produced this length check.
+///
+/// `PostgreSQL` threads the same distinction through the `isExplicit` argument of
+/// its `varchar(varchar, int4, bool)` and `bpchar(...)` cast functions, and the
+/// SQL standard requires both halves: an explicit cast truncates, an assignment
+/// raises `string_data_right_truncation`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Coercion {
+    /// A cast the query wrote out (`v::varchar(3)`, `CAST(v AS char(2))`), which
+    /// truncates an over-long value silently.
+    Explicit,
+    /// An implicit or assignment coercion — storing into a column, or feeding a
+    /// parameter — which rejects an over-long value unless the characters it
+    /// would discard are all spaces.
+    Assignment,
+}
+
 /// Apply a `varchar(n)` modifier to a text value.
 ///
 /// # Errors
 ///
-/// Returns an error when a value exceeds the limit and the excess characters
-/// are not all spaces.
-pub fn apply_varchar_typmod(value: &str, limit: Option<u16>) -> Result<String, TypeError> {
-    apply_string_typmod(value, limit, false)
+/// Under [`Coercion::Assignment`], returns an error when a value exceeds the
+/// limit and the excess characters are not all spaces.
+pub fn apply_varchar_typmod(
+    value: &str,
+    limit: Option<u16>,
+    how: Coercion,
+) -> Result<String, TypeError> {
+    apply_string_typmod(value, limit, false, how)
 }
 
 /// Apply a `char(n)`/`character(n)` modifier to a text value.
 ///
 /// # Errors
 ///
-/// Returns an error when a value exceeds the limit and the excess characters
-/// are not all spaces.
-pub fn apply_char_typmod(value: &str, limit: Option<u16>) -> Result<String, TypeError> {
-    apply_string_typmod(value, limit, true)
+/// Under [`Coercion::Assignment`], returns an error when a value exceeds the
+/// limit and the excess characters are not all spaces.
+pub fn apply_char_typmod(
+    value: &str,
+    limit: Option<u16>,
+    how: Coercion,
+) -> Result<String, TypeError> {
+    apply_string_typmod(value, limit, true, how)
 }
 
 fn apply_string_typmod(
     value: &str,
     limit: Option<u16>,
     pad_to_limit: bool,
+    how: Coercion,
 ) -> Result<String, TypeError> {
     let Some(limit) = limit else {
         return Ok(value.to_string());
@@ -33,7 +59,7 @@ fn apply_string_typmod(
     let limit = usize::from(limit);
     let char_count = value.chars().count();
     if char_count > limit {
-        return truncate_if_only_trailing_spaces(value, limit);
+        return truncate(value, limit, how);
     }
     if !pad_to_limit || char_count == limit {
         return Ok(value.to_string());
@@ -45,7 +71,10 @@ fn apply_string_typmod(
     Ok(out)
 }
 
-fn truncate_if_only_trailing_spaces(value: &str, limit: usize) -> Result<String, TypeError> {
+/// Cut `value` to `limit` characters, and decide whether losing the rest is
+/// allowed. Trailing spaces are always discardable: they carry no information
+/// for a bounded string type, so even an assignment accepts them.
+fn truncate(value: &str, limit: usize, how: Coercion) -> Result<String, TypeError> {
     let mut out = String::new();
     let mut chars = value.chars();
     for _ in 0..limit {
@@ -54,7 +83,7 @@ fn truncate_if_only_trailing_spaces(value: &str, limit: usize) -> Result<String,
         };
         out.push(ch);
     }
-    if chars.all(|ch| ch == ' ') {
+    if how == Coercion::Explicit || chars.all(|ch| ch == ' ') {
         Ok(out)
     } else {
         Err(TypeError::StringDataRightTruncation)
@@ -63,30 +92,55 @@ fn truncate_if_only_trailing_spaces(value: &str, limit: usize) -> Result<String,
 
 #[cfg(test)]
 mod tests {
+    use Coercion::{Assignment, Explicit};
+
     use super::*;
 
     #[test]
     fn varchar_typmod_enforces_character_length() {
-        assert_eq!(apply_varchar_typmod("abc", Some(3)).expect("ok"), "abc");
-        assert_eq!(apply_varchar_typmod("éx", Some(2)).expect("ok"), "éx");
-        assert_eq!(apply_varchar_typmod("abc  ", Some(3)).expect("ok"), "abc");
+        let ok = |v, n| apply_varchar_typmod(v, n, Assignment).expect("ok");
+        assert_eq!(ok("abc", Some(3)), "abc");
+        assert_eq!(ok("éx", Some(2)), "éx");
+        assert_eq!(ok("abc  ", Some(3)), "abc");
         assert!(matches!(
-            apply_varchar_typmod("abcd", Some(3)),
+            apply_varchar_typmod("abcd", Some(3), Assignment),
             Err(TypeError::StringDataRightTruncation)
         ));
     }
 
     #[test]
     fn char_typmod_pads_and_truncates_spaces_only() {
-        assert_eq!(apply_char_typmod("a", Some(3)).expect("ok"), "a  ");
-        assert_eq!(apply_char_typmod("abc  ", Some(3)).expect("ok"), "abc");
-        assert_eq!(
-            apply_char_typmod("unconstrained", None).expect("ok"),
-            "unconstrained"
-        );
+        let ok = |v, n| apply_char_typmod(v, n, Assignment).expect("ok");
+        assert_eq!(ok("a", Some(3)), "a  ");
+        assert_eq!(ok("abc  ", Some(3)), "abc");
+        assert_eq!(ok("unconstrained", None), "unconstrained");
         assert!(matches!(
-            apply_char_typmod("abcd", Some(3)),
+            apply_char_typmod("abcd", Some(3), Assignment),
             Err(TypeError::StringDataRightTruncation)
         ));
+    }
+
+    /// An explicit cast truncates instead of erroring — the SQL standard requires
+    /// it, and `PostgreSQL` implements it with the `isExplicit` cast argument.
+    #[test]
+    fn an_explicit_cast_truncates_where_an_assignment_would_reject() {
+        assert_eq!(
+            apply_varchar_typmod("abcd", Some(3), Explicit).expect("truncates"),
+            "abc"
+        );
+        assert_eq!(
+            apply_char_typmod("abcd", Some(2), Explicit).expect("truncates"),
+            "ab"
+        );
+        // Truncation counts characters, not bytes.
+        assert_eq!(
+            apply_varchar_typmod("héllo", Some(2), Explicit).expect("truncates"),
+            "hé"
+        );
+        // Padding still applies when the value is short of an explicit char(n).
+        assert_eq!(
+            apply_char_typmod("a", Some(3), Explicit).expect("pads"),
+            "a  "
+        );
     }
 }

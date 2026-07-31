@@ -49,6 +49,41 @@ pub enum Token {
     KeyExistsAll,
     /// The array `&&` overlap operator.
     Overlaps,
+    /// `~` — POSIX regex match when infix, bitwise NOT when prefix. One token for
+    /// both: `PostgreSQL` spells them identically and only position tells them
+    /// apart, so the parser (not the lexer) picks the reading.
+    Tilde,
+    /// `~*` — case-insensitive POSIX regex match.
+    TildeCi,
+    /// `!~` — negated POSIX regex match.
+    NotTilde,
+    /// `!~*` — negated case-insensitive POSIX regex match.
+    NotTildeCi,
+    /// `&` — bitwise AND on integers.
+    Amp,
+    /// `|` — bitwise OR on integers.
+    Pipe,
+    /// `#` — bitwise XOR on integers (NOT exponentiation; `PostgreSQL` spells
+    /// XOR `#` and exponentiation `^`).
+    Hash,
+    /// `<<` — bitwise left shift.
+    Shl,
+    /// `>>` — bitwise right shift.
+    Shr,
+    /// `^` — exponentiation (`2^3` is 8). Left-associative in `PostgreSQL`.
+    Caret,
+    /// `%` — modulo (integer/numeric remainder).
+    Percent,
+    /// `@` — prefix absolute value.
+    At,
+    /// `@?` — does the jsonpath on the right find any item in the jsonb on the left?
+    JsonPathExists,
+    /// `@@` — the jsonpath predicate on the right, checked against the jsonb on the left.
+    JsonPathMatch,
+    /// `|/` — prefix square root (`float8`).
+    SquareRoot,
+    /// `||/` — prefix cube root (`float8`).
+    CubeRoot,
     /// SP33: the `.` qualified-name separator (`a.col`). Only lexed when it does
     /// NOT begin a number lexeme — `.5` / `2.` stay a single `FloatLit`.
     Dot,

@@ -1,9 +1,8 @@
-//! One-dimensional SQL arrays end to end: literals and construction, text
-//! output quoting, subscripting, `= ANY(...)` / `<> ALL(...)` (including the
+//! SQL arrays end to end: literals and construction, text output quoting,
+//! subscripting and slicing, `= ANY(...)` / `<> ALL(...)` (including the
 //! three-valued logic), `unnest` in FROM, `array_agg`, the operator and
 //! function surface, storage round-trips, array parameters in both wire
-//! formats, and the clear refusals for the deferred multidimensional/slice
-//! features.
+//! formats, multiple dimensions, and bounded string element types.
 
 use std::sync::Arc;
 
@@ -784,25 +783,116 @@ async fn array_column_defaults_persist_apply_and_render() {
 }
 
 // ---------------------------------------------------------------------------
-// Deferred features fail clear
+// Slices, dimensions, and bounded element types
 // ---------------------------------------------------------------------------
 
-/// The deferrals stated in the design must be *clear* refusals (0A000), not
-/// panics or silent wrong answers.
+/// `array_get_slice`: a range clips to the array rather than erroring, an
+/// inverted or wholly-out-of-range range gives the empty array, an omitted bound
+/// takes the array's own, and a NULL bound makes the whole slice NULL.
 #[tokio::test]
-async fn deferred_array_features_refuse_with_0a000() {
+async fn array_slices_clip_to_the_array_instead_of_erroring() {
     let (_engine, mut s) = engine_with(&[]).await;
-    for sql in [
-        // Slices.
-        "SELECT (ARRAY[1,2,3])[1:2]",
-        // Multidimensional arrays, both spellings.
-        "SELECT '{{1,2}}'::int4[]",
-        "SELECT ARRAY[ARRAY[1]]",
-        // Arrays of unsupported element types.
-        "CREATE TABLE d (v varchar(3)[])",
+    for (expr, expected) in [
+        ("(ARRAY[1,2,3])[1:2]", Some("{1,2}")),
+        // Below the lower bound and past the upper bound both clip.
+        ("(ARRAY[1,2,3])[0:2]", Some("{1,2}")),
+        ("(ARRAY[1,2,3])[2:9]", Some("{2,3}")),
+        // Entirely outside, and inverted, are empty — not an error.
+        ("(ARRAY[1,2,3])[5:9]", Some("{}")),
+        ("(ARRAY[1,2,3])[3:1]", Some("{}")),
+        // An omitted bound takes the array's own.
+        ("(ARRAY[1,2,3])[:2]", Some("{1,2}")),
+        ("(ARRAY[1,2,3])[2:]", Some("{2,3}")),
+        ("(ARRAY[1,2,3])[:]", Some("{1,2,3}")),
+        ("(ARRAY[1,2,3])[NULL:2]", None),
     ] {
-        assert!(err_code(&mut s, sql).await == "0A000", "{sql}");
+        assert!(
+            scalar(&mut s, &format!("SELECT {expr}")).await == expected.map(str::to_string),
+            "{expr}"
+        );
     }
+}
+
+/// Multidimensional arrays in both spellings, their dimension accessors, and the
+/// two ways of building a ragged one — which `PostgreSQL` rejects with distinct
+/// SQLSTATEs depending on whether the raggedness is in a literal or a
+/// constructor.
+#[tokio::test]
+async fn multidimensional_arrays_carry_their_dimensions() {
+    let (_engine, mut s) = engine_with(&[]).await;
+    let two_by_two = "'{{1,2},{3,4}}'::int4[]";
+    for (expr, expected) in [
+        ("'{{1,2}}'::int4[]", "{{1,2}}"),
+        ("ARRAY[ARRAY[1]]", "{{1}}"),
+        (&format!("array_dims({two_by_two})"), "[1:2][1:2]"),
+        (&format!("array_ndims({two_by_two})"), "2"),
+        (&format!("array_length({two_by_two}, 2)"), "2"),
+        (&format!("array_upper({two_by_two}, 1)"), "2"),
+        (&format!("cardinality({two_by_two})"), "4"),
+        // A full subscript chain reads an element; a chain of slices keeps the
+        // dimension count.
+        (&format!("({two_by_two})[2][1]"), "3"),
+        (&format!("({two_by_two})[1:1][1:2]"), "{{1,2}}"),
+        // Concatenation joins the outermost dimension; equality and `= ANY` see
+        // through every dimension.
+        (
+            "array_cat('{{1,2}}'::int4[], '{{3,4}}'::int4[])",
+            "{{1,2},{3,4}}",
+        ),
+        ("'{{1,2}}'::int4[] = '{{1,2}}'::int4[]", "t"),
+        (&format!("3 = ANY({two_by_two})"), "t"),
+    ] {
+        assert!(
+            scalar(&mut s, &format!("SELECT {expr}")).await == Some(expected.to_string()),
+            "{expr}"
+        );
+    }
+
+    // A chain shorter than the dimension count reads NULL rather than a row.
+    assert!(scalar(&mut s, &format!("SELECT ({two_by_two})[2]")).await == None);
+    // `unnest` flattens every dimension.
+    assert!(
+        query(&mut s, &format!("SELECT unnest({two_by_two})")).await
+            == vec![row(&["1"]), row(&["2"]), row(&["3"]), row(&["4"])]
+    );
+
+    for (sql, code) in [
+        ("SELECT '{{1,2},{3}}'::int4[]", "22P02"),
+        ("SELECT ARRAY[ARRAY[1],ARRAY[2,3]]", "2202E"),
+        // `array_append`/`array_prepend` stay one-dimensional.
+        ("SELECT array_append('{{1,2}}'::int4[], 5)", "22000"),
+    ] {
+        assert!(err_code(&mut s, sql).await == code, "{sql}");
+    }
+}
+
+/// An array of a bounded string carries the modifier on its element type, so the
+/// bound is enforced per element — and survives the catalog round trip, which a
+/// bare element-code byte would have dropped, turning `varchar(3)[]` into an
+/// unbounded `varchar[]` that accepted anything.
+#[tokio::test]
+async fn an_array_of_a_bounded_string_enforces_the_bound_on_every_element() {
+    let (_engine, mut s) = engine_with(&["CREATE TABLE d (v varchar(3)[], c char(2)[])"]).await;
+    run(
+        &mut s,
+        "INSERT INTO d VALUES (ARRAY['ab','cd'], ARRAY['x'])",
+    )
+    .await;
+    assert!(query(&mut s, "SELECT v, c FROM d").await == vec![row(&["{ab,cd}", "{\"x \"}"])]);
+
+    // Storing an over-long element is 22001, whichever spelling delivers it —
+    // an `ARRAY[...]` constructor or an array literal.
+    for sql in [
+        "INSERT INTO d (v) VALUES (ARRAY['abcd'])",
+        "INSERT INTO d (v) VALUES ('{abcd}')",
+    ] {
+        assert!(err_code(&mut s, sql).await == "22001", "{sql}");
+    }
+
+    // An explicit cast truncates instead, the same split the scalar types make.
+    assert!(
+        scalar(&mut s, "SELECT ARRAY['abcd']::varchar(3)[]").await == Some("{abc}".to_string())
+    );
 }
 
 /// Arrays live in hash-sharded tables; asking to shard *on* an array column is

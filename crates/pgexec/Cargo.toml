@@ -31,6 +31,14 @@ async-trait = { workspace = true }
 zerocopy = { workspace = true }
 bigdecimal = { workspace = true }
 jiff = { workspace = true }
+# The POSIX-ARE-compatible pattern engine behind `~`/`~*`/`!~`/`!~*` and the
+# `regexp_*` functions.
+regex = { workspace = true }
+sha2 = { workspace = true }
+md-5 = { workspace = true }
+base64 = { workspace = true }
+hex = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [dev-dependencies]
 assert2 = { workspace = true }

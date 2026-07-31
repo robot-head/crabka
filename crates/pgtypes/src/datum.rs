@@ -5,17 +5,22 @@
     reason = "vendored PostgreSQL-compatible datum API kept structurally close to donor"
 )]
 
-use bigdecimal::BigDecimal;
-
-use crate::numeric::Typmod;
+use crate::{
+    numeric::{NumericValue, Typmod},
+    usertype::{DomainRef, UserTypeRef},
+};
 
 /// PostgreSQL type OIDs (from pg_type.dat) for the slice's types.
 pub mod oids {
     pub const BOOL: u32 = 16;
+    /// PostgreSQL `record` — the anonymous composite type a bare `ROW(…)` has.
+    pub const RECORD: u32 = 2249;
+    /// `record[]`.
+    pub const RECORDARRAY: u32 = 2287;
     /// SP40: `bytea` — variable-length binary string.
     pub const BYTEA: u32 = 17;
     pub const INT8: u32 = 20;
-    /// PostgreSQL `smallint`; Bind parameters widen into the existing `Int4` datum.
+    /// PostgreSQL `smallint` — a 2-byte signed integer.
     pub const INT2: u32 = 21;
     pub const INT4: u32 = 23;
     pub const TEXT: u32 = 25;
@@ -30,7 +35,7 @@ pub mod oids {
     pub const REGCLASS: u32 = 2205;
     pub const BPCHAR: u32 = 1042;
     pub const VARCHAR: u32 = 1043;
-    /// PostgreSQL `real`; Bind parameters widen into the existing `Float8` datum.
+    /// PostgreSQL `real` — single-precision IEEE-754 (`f32`).
     pub const FLOAT4: u32 = 700;
     /// SP30: `double precision` (IEEE-754 f64).
     pub const FLOAT8: u32 = 701;
@@ -40,6 +45,8 @@ pub mod oids {
     pub const DATE: u32 = 1082;
     /// SP37: `time without time zone` — microseconds since midnight, stored as i64.
     pub const TIME: u32 = 1083;
+    /// `time with time zone` — microseconds since midnight plus a UTC offset.
+    pub const TIMETZ: u32 = 1266;
     /// SP37: `timestamp without time zone` — microseconds since 2000-01-01 00:00:00.
     pub const TIMESTAMP: u32 = 1114;
     /// SP37: `timestamp with time zone` — microseconds since Unix epoch (UTC), stored as i64.
@@ -61,8 +68,12 @@ pub mod oids {
     pub const BOOLARRAY: u32 = 1000;
     /// `bytea[]`.
     pub const BYTEAARRAY: u32 = 1001;
+    /// `smallint[]`.
+    pub const INT2ARRAY: u32 = 1005;
     /// `bigint[]`.
     pub const INT8ARRAY: u32 = 1016;
+    /// `real[]`.
+    pub const FLOAT4ARRAY: u32 = 1021;
     /// `integer[]`.
     pub const INT4ARRAY: u32 = 1007;
     /// `text[]`.
@@ -83,15 +94,20 @@ pub mod oids {
     pub const INTERVALARRAY: u32 = 1187;
     /// `uuid[]`.
     pub const UUIDARRAY: u32 = 2951;
+    /// `character(n)[]`.
+    pub const BPCHARARRAY: u32 = 1014;
+    /// `character varying(n)[]`.
+    pub const VARCHARARRAY: u32 = 1015;
 }
 
-/// The element type of a one-dimensional SQL array.
+/// The element type of a SQL array.
 ///
 /// A separate `Copy` enum rather than a boxed [`ColumnType`] because
 /// `ColumnType` is passed by value throughout the executor; it is deliberately
-/// smaller than `ColumnType` — the types with a modifier (`varchar(n)`,
-/// `char(n)`), `regclass`, and arrays themselves have no array form here and are
-/// refused with 0A000 by [`ElemType::from_column_type`].
+/// smaller than `ColumnType` — `regclass` and arrays themselves have no array
+/// form here and are refused with 0A000 by [`ElemType::from_column_type`].
+/// `PostgreSQL` has no nested array type: `int[][]` *is* `int[]` (`_int4`), and
+/// the extra dimensions live in the value, not the type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ElemType {
     Bool,
@@ -108,11 +124,20 @@ pub enum ElemType {
     Bytea,
     Uuid,
     Jsonb,
+    Int2,
+    Float4,
+    /// `character varying(n)[]` — the length modifier is applied to each element
+    /// on assignment, exactly as `PostgreSQL` applies it to a scalar `varchar(n)`.
+    Varchar(Option<u16>),
+    /// `character(n)[]` — each element is blank-padded to `n` on assignment.
+    Char(Option<u16>),
 }
 
 impl ElemType {
-    /// Every supported array element type, in `code()` order.
-    pub const ALL: [ElemType; 14] = [
+    /// Every supported array element type, in `code()` order. The two
+    /// length-modified entries stand for their whole family — `from_code`
+    /// reconstructs the modifier, and neither the OID nor the name depends on it.
+    pub const ALL: [ElemType; 18] = [
         ElemType::Bool,
         ElemType::Int4,
         ElemType::Int8,
@@ -127,6 +152,10 @@ impl ElemType {
         ElemType::Bytea,
         ElemType::Uuid,
         ElemType::Jsonb,
+        ElemType::Int2,
+        ElemType::Float4,
+        ElemType::Varchar(None),
+        ElemType::Char(None),
     ];
 
     /// The element type as a column type (`numeric` is unconstrained — an array
@@ -147,11 +176,16 @@ impl ElemType {
             ElemType::Bytea => ColumnType::Bytea,
             ElemType::Uuid => ColumnType::Uuid,
             ElemType::Jsonb => ColumnType::Jsonb,
+            ElemType::Int2 => ColumnType::Int2,
+            ElemType::Float4 => ColumnType::Float4,
+            ElemType::Varchar(n) => ColumnType::Varchar(n),
+            ElemType::Char(n) => ColumnType::Char(n),
         }
     }
 
     /// The element type for `elem`, or `None` when crabka has no array type for
-    /// it (`varchar(n)`, `char(n)`, `regclass`, and nested arrays).
+    /// it (`regclass`, and the array types themselves — `PostgreSQL` has no
+    /// nested array type, so `int[][]` resolves to `int[]` at the type level).
     pub fn from_column_type(elem: ColumnType) -> Option<Self> {
         Some(match elem {
             ColumnType::Bool => ElemType::Bool,
@@ -162,16 +196,26 @@ impl ElemType {
             ColumnType::Numeric(_) => ElemType::Numeric,
             ColumnType::Date => ElemType::Date,
             ColumnType::Time => ElemType::Time,
+            // `timetz` has no array type in crabka yet.
+            ColumnType::Timetz => return None,
             ColumnType::Timestamp => ElemType::Timestamp,
             ColumnType::Timestamptz => ElemType::Timestamptz,
             ColumnType::Interval => ElemType::Interval,
             ColumnType::Bytea => ElemType::Bytea,
             ColumnType::Uuid => ElemType::Uuid,
             ColumnType::Jsonb => ElemType::Jsonb,
-            ColumnType::Varchar(_)
-            | ColumnType::Char(_)
-            | ColumnType::Regclass
-            | ColumnType::Array(_) => return None,
+            ColumnType::Int2 => ElemType::Int2,
+            ColumnType::Float4 => ElemType::Float4,
+            ColumnType::Varchar(n) => ElemType::Varchar(n),
+            ColumnType::Char(n) => ElemType::Char(n),
+            // Composite, enum and domain element types are not supported: an
+            // array of them would need an element oid the array encoder cannot
+            // name, so callers report 0A000 rather than mis-encoding.
+            ColumnType::Regclass
+            | ColumnType::Array(_)
+            | ColumnType::Record(_)
+            | ColumnType::Enum(_)
+            | ColumnType::Domain(_) => return None,
         })
     }
 
@@ -197,6 +241,10 @@ impl ElemType {
             ElemType::Bytea => oids::BYTEAARRAY,
             ElemType::Uuid => oids::UUIDARRAY,
             ElemType::Jsonb => oids::JSONBARRAY,
+            ElemType::Int2 => oids::INT2ARRAY,
+            ElemType::Float4 => oids::FLOAT4ARRAY,
+            ElemType::Varchar(_) => oids::VARCHARARRAY,
+            ElemType::Char(_) => oids::BPCHARARRAY,
         }
     }
 
@@ -222,11 +270,25 @@ impl ElemType {
             ElemType::Bytea => "bytea[]",
             ElemType::Uuid => "uuid[]",
             ElemType::Jsonb => "jsonb[]",
+            ElemType::Int2 => "smallint[]",
+            ElemType::Float4 => "real[]",
+            ElemType::Varchar(_) => "character varying[]",
+            ElemType::Char(_) => "character[]",
+        }
+    }
+
+    /// The length modifier this element type carries, when it has one.
+    pub fn typmod(self) -> Option<u16> {
+        match self {
+            ElemType::Varchar(n) | ElemType::Char(n) => n,
+            _ => None,
         }
     }
 
     /// A stable, **append-only** wire/storage code. Persisted by the row encoder
     /// and the catalog's schema serializer, so existing values must never change.
+    /// It does **not** carry the length modifier of `varchar(n)`/`char(n)` — use
+    /// [`ElemType::write_code`] / [`ElemType::read_code`] for a lossless round trip.
     pub fn code(self) -> u8 {
         match self {
             ElemType::Bool => 0,
@@ -243,12 +305,58 @@ impl ElemType {
             ElemType::Bytea => 11,
             ElemType::Uuid => 12,
             ElemType::Jsonb => 13,
+            ElemType::Int2 => 14,
+            ElemType::Float4 => 15,
+            ElemType::Varchar(_) => 16,
+            ElemType::Char(_) => 17,
         }
     }
 
-    /// The inverse of [`ElemType::code`] (`None` for an unknown code).
+    /// The inverse of [`ElemType::code`] (`None` for an unknown code). The
+    /// length-modified families come back unconstrained.
     pub fn from_code(code: u8) -> Option<Self> {
         ElemType::ALL.into_iter().find(|e| e.code() == code)
+    }
+
+    /// Append the lossless storage encoding: the [`ElemType::code`] byte, plus a
+    /// present-flag and a big-endian `u16` for the length-modified families.
+    pub fn write_code(self, out: &mut Vec<u8>) {
+        out.push(self.code());
+        if matches!(self, ElemType::Varchar(_) | ElemType::Char(_)) {
+            match self.typmod() {
+                None => out.push(0),
+                Some(n) => {
+                    out.push(1);
+                    out.extend_from_slice(&n.to_be_bytes());
+                }
+            }
+        }
+    }
+
+    /// The inverse of [`ElemType::write_code`], advancing `cursor` past the
+    /// bytes it consumed. `None` means the bytes are not a valid encoding.
+    pub fn read_code(cursor: &mut &[u8]) -> Option<Self> {
+        let (code, rest) = cursor.split_first()?;
+        *cursor = rest;
+        let base = ElemType::from_code(*code)?;
+        if !matches!(base, ElemType::Varchar(_) | ElemType::Char(_)) {
+            return Some(base);
+        }
+        let (present, rest) = cursor.split_first()?;
+        *cursor = rest;
+        let limit = match present {
+            0 => None,
+            1 => {
+                let (bytes, rest) = cursor.split_at_checked(2)?;
+                *cursor = rest;
+                Some(u16::from_be_bytes([bytes[0], bytes[1]]))
+            }
+            _ => return None,
+        };
+        Some(match base {
+            ElemType::Char(_) => ElemType::Char(limit),
+            _ => ElemType::Varchar(limit),
+        })
     }
 
     /// The element type of an array OID (`pg_type.typelem`), for parameter
@@ -267,11 +375,15 @@ impl ElemType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnType {
     Bool,
+    /// PostgreSQL `smallint` (OID 21) — a 2-byte signed integer.
+    Int2,
     Int4,
     Int8,
     Text,
     Varchar(Option<u16>),
     Char(Option<u16>),
+    /// PostgreSQL `real` (OID 700) — an IEEE-754 `f32`.
+    Float4,
     /// SP30: PostgreSQL `double precision` (an IEEE-754 `f64`).
     Float8,
     /// SP32: PostgreSQL `numeric`/`decimal`. The `Typmod` (precision, scale) is
@@ -281,6 +393,9 @@ pub enum ColumnType {
     Date,
     /// SP37: PostgreSQL `time without time zone` (OID 1083).
     Time,
+    /// PostgreSQL `time with time zone` (OID 1266) — a clock reading plus the
+    /// UTC offset it was read at.
+    Timetz,
     /// SP37: PostgreSQL `timestamp without time zone` (OID 1114).
     Timestamp,
     /// SP37: PostgreSQL `timestamp with time zone` (OID 1184) — stored as UTC.
@@ -302,6 +417,15 @@ pub enum ColumnType {
     Jsonb,
     /// A one-dimensional PostgreSQL array (OID = the element type's `typarray`).
     Array(ElemType),
+    /// A composite type: the anonymous `record` (OID 2249) that a bare `ROW(…)`
+    /// has, or a named composite created by `CREATE TYPE … AS (…)`.
+    Record(Option<UserTypeRef>),
+    /// `CREATE TYPE … AS ENUM (…)`.
+    Enum(UserTypeRef),
+    /// `CREATE DOMAIN … AS base` — a base type plus constraints. Values are the
+    /// base type's values; what the domain adds is the constraint check on
+    /// assignment and cast, and the type it reports.
+    Domain(DomainRef),
 }
 
 impl ColumnType {
@@ -309,6 +433,7 @@ impl ColumnType {
     /// the unconstrained form; the parser layers the `(p, s)` modifier on top.
     pub fn from_sql_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
+            "int2" | "smallint" => Some(ColumnType::Int2),
             "int4" | "integer" | "int" => Some(ColumnType::Int4),
             "int8" | "bigint" => Some(ColumnType::Int8),
             // `oid` (object identifier, OID 26) is a pragmatic alias for `int4`:
@@ -317,19 +442,30 @@ impl ColumnType {
             // `CAST(x AS oid)` resolve consistently with them. RowDescription
             // consequently reports int4 (23), not oid (26), for such expressions.
             "oid" => Some(ColumnType::Int4),
-            "text" => Some(ColumnType::Text),
+            // `name` (OID 19) is a pragmatic alias for `text`, the same shape of
+            // divergence as `oid` → `int4` above: the catalog's name-valued
+            // columns are already Text, so `'x'::name` and a `name[]` column
+            // resolve consistently with them. RowDescription therefore reports
+            // text (25), not name (19), and the 63-byte truncation is not applied.
+            "text" | "name" => Some(ColumnType::Text),
             "varchar" | "character varying" => Some(ColumnType::Varchar(None)),
+            // `bpchar` is PostgreSQL's own internal name for the blank-padded
+            // character type, and it is accepted as a type name: `'ab'::bpchar`
+            // works. Unlike `char`/`character` it carries no implicit (1).
             "char" | "character" => Some(ColumnType::Char(Some(1))),
+            "bpchar" => Some(ColumnType::Char(None)),
             "bool" | "boolean" => Some(ColumnType::Bool),
             // SP30: `float` (no precision) is `double precision` in PostgreSQL; the
             // two-word `double precision` is normalized to this single string by the
-            // parser before it reaches here. `real`/`float4` is a deferred non-goal.
+            // parser before it reaches here.
             "float8" | "float" | "double precision" => Some(ColumnType::Float8),
+            "float4" | "real" => Some(ColumnType::Float4),
             // SP32: `numeric`/`decimal` (unconstrained here; typmod added by parser).
             "numeric" | "decimal" => Some(ColumnType::Numeric(None)),
             // SP37: date/time types. `timetz`/`time with time zone` is unsupported (None).
             "date" => Some(ColumnType::Date),
             "time" | "time without time zone" => Some(ColumnType::Time),
+            "timetz" | "time with time zone" => Some(ColumnType::Timetz),
             "timestamp" | "timestamp without time zone" => Some(ColumnType::Timestamp),
             "timestamptz" | "timestamp with time zone" => Some(ColumnType::Timestamptz),
             "interval" => Some(ColumnType::Interval),
@@ -340,8 +476,37 @@ impl ColumnType {
             // `json` is an input alias for `jsonb`: values are stored decomposed
             // and always report OID 3802 (a documented divergence).
             "jsonb" | "json" => Some(ColumnType::Jsonb),
+            // The anonymous composite type. `SELECT ROW(1,2)` has it, and it is
+            // the declared parameter type of `json_populate_record(record, …)`.
+            "record" => Some(ColumnType::Record(None)),
+            // A name that is not built in may be a user-defined type; the
+            // registry the DDL writes into is what makes `x::my_type` resolve.
+            other => crate::usertype::column_type_for_name(other),
+        }
+    }
+
+    /// The named composite this type is, if any.
+    #[must_use]
+    pub fn composite(self) -> Option<UserTypeRef> {
+        match self {
+            ColumnType::Record(named) => named,
             _ => None,
         }
+    }
+
+    /// The type a value of this type is actually stored and encoded as: a
+    /// domain's base type (transitively), or the type itself.
+    #[must_use]
+    pub fn storage_type(self) -> ColumnType {
+        let mut ty = self;
+        // A domain over a domain is legal; `PostgreSQL` flattens to the base.
+        for _ in 0..MAX_DOMAIN_DEPTH {
+            match ty {
+                ColumnType::Domain(domain) => ty = *domain.base,
+                other => return other,
+            }
+        }
+        ty
     }
 
     /// The one-dimensional array type over `elem`, or `None` when crabka has no
@@ -362,15 +527,18 @@ impl ColumnType {
     pub fn oid(self) -> u32 {
         match self {
             ColumnType::Bool => oids::BOOL,
+            ColumnType::Int2 => oids::INT2,
             ColumnType::Int8 => oids::INT8,
             ColumnType::Int4 => oids::INT4,
             ColumnType::Text => oids::TEXT,
             ColumnType::Varchar(_) => oids::VARCHAR,
             ColumnType::Char(_) => oids::BPCHAR,
+            ColumnType::Float4 => oids::FLOAT4,
             ColumnType::Float8 => oids::FLOAT8,
             ColumnType::Numeric(_) => oids::NUMERIC,
             ColumnType::Date => oids::DATE,
             ColumnType::Time => oids::TIME,
+            ColumnType::Timetz => oids::TIMETZ,
             ColumnType::Timestamp => oids::TIMESTAMP,
             ColumnType::Timestamptz => oids::TIMESTAMPTZ,
             ColumnType::Interval => oids::INTERVAL,
@@ -379,6 +547,9 @@ impl ColumnType {
             ColumnType::Regclass => oids::REGCLASS,
             ColumnType::Jsonb => oids::JSONB,
             ColumnType::Array(elem) => elem.array_oid(),
+            ColumnType::Record(None) => oids::RECORD,
+            ColumnType::Record(Some(named)) | ColumnType::Enum(named) => named.oid,
+            ColumnType::Domain(domain) => domain.oid,
         }
     }
 
@@ -386,15 +557,18 @@ impl ColumnType {
     pub fn name(self) -> &'static str {
         match self {
             ColumnType::Bool => "boolean",
+            ColumnType::Int2 => "smallint",
             ColumnType::Int8 => "bigint",
             ColumnType::Int4 => "integer",
             ColumnType::Text => "text",
             ColumnType::Varchar(_) => "character varying",
             ColumnType::Char(_) => "character",
+            ColumnType::Float4 => "real",
             ColumnType::Float8 => "double precision",
             ColumnType::Numeric(_) => "numeric",
             ColumnType::Date => "date",
             ColumnType::Time => "time without time zone",
+            ColumnType::Timetz => "time with time zone",
             ColumnType::Timestamp => "timestamp without time zone",
             ColumnType::Timestamptz => "timestamp with time zone",
             ColumnType::Interval => "interval",
@@ -403,6 +577,9 @@ impl ColumnType {
             ColumnType::Regclass => "regclass",
             ColumnType::Jsonb => "jsonb",
             ColumnType::Array(elem) => elem.array_name(),
+            ColumnType::Record(None) => "record",
+            ColumnType::Record(Some(named)) | ColumnType::Enum(named) => named.name,
+            ColumnType::Domain(domain) => domain.name,
         }
     }
 
@@ -410,21 +587,28 @@ impl ColumnType {
     pub fn type_size(self) -> i16 {
         match self {
             ColumnType::Bool => 1,
+            ColumnType::Int2 => 2,
             ColumnType::Int8 => 8,
             ColumnType::Int4 => 4,
             ColumnType::Text | ColumnType::Varchar(_) | ColumnType::Char(_) => -1,
+            ColumnType::Float4 => 4,
             ColumnType::Float8 => 8,
             ColumnType::Numeric(_) => -1,
             ColumnType::Date => 4,
             ColumnType::Time => 8,
+            ColumnType::Timetz => 12,
             ColumnType::Timestamp => 8,
             ColumnType::Timestamptz => 8,
             ColumnType::Interval => 16,
             ColumnType::Bytea => -1,
             ColumnType::Uuid => 16,
             ColumnType::Regclass => 4,
-            // jsonb and arrays are variable-length.
-            ColumnType::Jsonb | ColumnType::Array(_) => -1,
+            // jsonb, arrays and composites are variable-length.
+            ColumnType::Jsonb | ColumnType::Array(_) | ColumnType::Record(_) => -1,
+            // `pg_type.typlen` of an enum is 4 (the oid of its pg_enum row).
+            ColumnType::Enum(_) => 4,
+            // A domain has its base type's storage.
+            ColumnType::Domain(domain) => domain.base.type_size(),
         }
     }
 
@@ -444,10 +628,17 @@ impl ColumnType {
     pub fn typmod(self) -> i32 {
         match self {
             ColumnType::Varchar(Some(n)) | ColumnType::Char(Some(n)) => i32::from(n) + 4,
+            // A domain inherits its base type's length modifier.
+            ColumnType::Domain(domain) => domain.base.typmod(),
             _ => -1,
         }
     }
 }
+
+/// How many times a domain may be defined over another domain before the
+/// engine stops unwrapping. `PostgreSQL` has no fixed limit but does refuse
+/// cycles; this bound makes [`ColumnType::storage_type`] total.
+pub const MAX_DOMAIN_DEPTH: usize = 32;
 
 /// A runtime value.
 ///
@@ -465,17 +656,25 @@ impl ColumnType {
 pub enum Datum {
     Null,
     Bool(bool),
+    /// PostgreSQL `smallint`.
+    Int2(i16),
     Int4(i32),
     Int8(i64),
     Text(String),
+    /// PostgreSQL `real` — single-precision float. Grouping equality and hashing
+    /// follow the same rules as [`Datum::Float8`] (one NaN, `-0.0 == +0.0`).
+    Float4(f32),
     /// SP30: PostgreSQL `double precision`.
     Float8(f64),
-    /// SP32: PostgreSQL `numeric` — arbitrary-precision exact decimal.
-    Numeric(BigDecimal),
+    /// SP32: PostgreSQL `numeric` — an arbitrary-precision exact decimal, or one
+    /// of the `NaN` / `±Infinity` specials.
+    Numeric(NumericValue),
     /// SP37: PostgreSQL `date` — a calendar date (no time-of-day, no timezone).
     Date(jiff::civil::Date),
     /// SP37: PostgreSQL `time without time zone` — time-of-day only.
     Time(jiff::civil::Time),
+    /// PostgreSQL `time with time zone` — a clock reading and its UTC offset.
+    Timetz(crate::datetime::TimeTz),
     /// SP37: PostgreSQL `timestamp without time zone` — date + time-of-day, no timezone.
     Timestamp(jiff::civil::DateTime),
     /// SP37: PostgreSQL `timestamp with time zone` — an instant in UTC.
@@ -488,36 +687,249 @@ pub enum Datum {
     Jsonb(crate::jsonb::JsonbValue),
     /// A one-dimensional PostgreSQL array.
     Array(ArrayValue),
+    /// A composite value — the anonymous `record` a `ROW(…)` produces, or a row
+    /// of a type created by `CREATE TYPE … AS (…)`.
+    Record(RecordValue),
+    /// A value of a `CREATE TYPE … AS ENUM` type.
+    Enum(EnumValue),
 }
 
-/// A one-dimensional array value.
+/// A composite (row) value.
+///
+/// The field names travel with the value because the functions that consume a
+/// record — `row_to_json`, `to_jsonb`, `record_out` for a named composite — need
+/// them, and the record may be several joins away from the relation that named
+/// its columns. They are shared rather than cloned per row: one relation scan
+/// producing a record per row shares a single name vector.
+#[derive(Debug, Clone)]
+pub struct RecordValue {
+    /// The named composite type, or `None` for the anonymous `record` that a
+    /// bare `ROW(…)` has.
+    pub ty: Option<UserTypeRef>,
+    /// The field names, positionally aligned with `values`. `PostgreSQL` names
+    /// an anonymous record's fields `f1`…`fn`.
+    pub names: std::sync::Arc<[String]>,
+    /// The field values.
+    pub values: Vec<Datum>,
+}
+
+impl RecordValue {
+    /// An anonymous `record` whose fields are named `f1`…`fn`, the names
+    /// `PostgreSQL` gives a bare `ROW(…)`.
+    #[must_use]
+    pub fn anonymous(values: Vec<Datum>) -> Self {
+        let names = (1..=values.len()).map(|i| format!("f{i}")).collect();
+        RecordValue {
+            ty: None,
+            names,
+            values,
+        }
+    }
+
+    /// A record with explicit field names.
+    #[must_use]
+    pub fn named(
+        ty: Option<UserTypeRef>,
+        names: std::sync::Arc<[String]>,
+        values: Vec<Datum>,
+    ) -> Self {
+        RecordValue { ty, names, values }
+    }
+
+    /// This value's column type.
+    #[must_use]
+    pub fn column_type(&self) -> ColumnType {
+        ColumnType::Record(self.ty)
+    }
+
+    /// The value of the field called `name`, matched exactly (the lexer has
+    /// already case-folded an unquoted reference).
+    #[must_use]
+    pub fn field(&self, name: &str) -> Option<&Datum> {
+        let index = self.names.iter().position(|field| field == name)?;
+        self.values.get(index)
+    }
+}
+
+/// `PostgreSQL`'s `record_eq`: positional over the field values. Field *names*
+/// are not part of the value — `ROW(1,2) = ROW(1,2)` holds whatever the two
+/// rows' columns were called — and neither is the composite type, so a
+/// `t_rec` row equals the anonymous row with the same fields, exactly as
+/// `PostgreSQL`'s record comparison does after its implicit coercion.
+impl PartialEq for RecordValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.values == other.values
+    }
+}
+
+impl Eq for RecordValue {}
+
+impl std::hash::Hash for RecordValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.values.hash(state);
+    }
+}
+
+/// A value of a `CREATE TYPE … AS ENUM` type: the type it belongs to and the
+/// label. The *ordering* is not stored — it is the label's position in the
+/// type's current label list, which is what `PostgreSQL` reads out of
+/// `pg_enum.enumsortorder` at comparison time, so `ALTER TYPE … ADD VALUE
+/// BEFORE` re-orders existing values just as it does there.
+#[derive(Debug, Clone, Eq)]
+pub struct EnumValue {
+    /// The enum type.
+    pub ty: UserTypeRef,
+    /// The label, exactly as declared.
+    pub label: String,
+}
+
+impl EnumValue {
+    /// This value's column type.
+    #[must_use]
+    pub fn column_type(&self) -> ColumnType {
+        ColumnType::Enum(self.ty)
+    }
+
+    /// The label's position in its type's declared order, or `None` when the
+    /// label is no longer part of the type (the type was dropped or the label
+    /// renamed out from under a value already in flight).
+    #[must_use]
+    pub fn sort_order(&self) -> Option<usize> {
+        crate::usertype::lookup_oid(self.ty.oid)?
+            .labels()?
+            .iter()
+            .position(|label| *label == self.label)
+    }
+}
+
+impl PartialEq for EnumValue {
+    fn eq(&self, other: &Self) -> bool {
+        self.ty == other.ty && self.label == other.label
+    }
+}
+
+impl std::hash::Hash for EnumValue {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.ty.hash(state);
+        self.label.hash(state);
+    }
+}
+
+/// The extent of one array dimension: its lower subscript bound and its length.
+///
+/// `PostgreSQL` stores these as the parallel `lbound[]`/`dims[]` header arrays.
+/// The upper bound is `lower + len - 1`, and a dimension is never negative in
+/// length — `'[1:0]={}'` is rejected at input, not stored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ArrayDim {
+    /// The subscript of this dimension's first slot.
+    pub lower: i32,
+    /// How many slots this dimension has.
+    pub len: i32,
+}
+
+impl ArrayDim {
+    /// A dimension of `len` slots starting at `lower`.
+    pub fn new(lower: i32, len: i32) -> Self {
+        ArrayDim { lower, len }
+    }
+
+    /// A dimension of `len` slots at `PostgreSQL`'s default lower bound of 1.
+    pub fn from_len(len: usize) -> Self {
+        ArrayDim {
+            lower: 1,
+            len: i32::try_from(len).unwrap_or(i32::MAX),
+        }
+    }
+
+    /// The subscript of this dimension's last slot (`lower + len - 1`).
+    pub fn upper(self) -> i32 {
+        self.lower.saturating_add(self.len).saturating_sub(1)
+    }
+}
+
+/// The maximum number of array dimensions, `PostgreSQL`'s `MAXDIM`.
+pub const MAX_ARRAY_DIM: usize = 6;
+
+/// An array value: a flat row-major element vector plus its dimension header.
 ///
 /// The element type is carried alongside the elements so an empty array is still
 /// typed (`'{}'::int[]` knows it is `integer[]`) and so the binary wire encoding,
-/// which must emit the element OID, is context-free.
+/// which must emit the element OID, is context-free. `dims` is empty for the
+/// zero-dimensional empty array — the only array `PostgreSQL` renders as `{}`
+/// and the only one whose `array_ndims` is NULL.
 #[derive(Debug, Clone)]
 pub struct ArrayValue {
     /// The array's element type.
     pub elem: ElemType,
-    /// The elements, in order; `Datum::Null` is a NULL element.
+    /// The elements in row-major order; `Datum::Null` is a NULL element.
     pub elems: Vec<Datum>,
+    /// One entry per dimension, outermost first; empty for an empty array.
+    pub dims: Vec<ArrayDim>,
 }
 
 impl ArrayValue {
-    /// An array of `elems` with element type `elem`.
+    /// A one-dimensional array of `elems` with `PostgreSQL`'s default lower
+    /// bound of 1 — empty input yields the zero-dimensional empty array.
     pub fn new(elem: ElemType, elems: Vec<Datum>) -> Self {
-        ArrayValue { elem, elems }
+        let dims = if elems.is_empty() {
+            Vec::new()
+        } else {
+            vec![ArrayDim::from_len(elems.len())]
+        };
+        ArrayValue { elem, elems, dims }
+    }
+
+    /// An array with an explicit dimension header.
+    ///
+    /// The caller is responsible for `dims` matching `elems`; [`ArrayValue::new`]
+    /// covers the one-dimensional case and the array input/slice code builds the
+    /// header itself. A header whose lengths do not multiply out to `elems.len()`
+    /// is normalized back to one dimension rather than left inconsistent.
+    pub fn with_dims(elem: ElemType, elems: Vec<Datum>, dims: Vec<ArrayDim>) -> Self {
+        let product: usize = dims
+            .iter()
+            .map(|d| usize::try_from(d.len).unwrap_or(0))
+            .product();
+        if dims.is_empty() || product != elems.len() {
+            return ArrayValue::new(elem, elems);
+        }
+        ArrayValue { elem, elems, dims }
     }
 
     /// The array's column type.
     pub fn column_type(&self) -> ColumnType {
         ColumnType::Array(self.elem)
     }
+
+    /// How many dimensions the array has (0 for the empty array).
+    pub fn ndims(&self) -> usize {
+        self.dims.len()
+    }
+
+    /// Does any dimension start somewhere other than 1? Controls whether
+    /// `array_out` emits the `[l:u]=` header.
+    pub fn has_explicit_bounds(&self) -> bool {
+        self.dims.iter().any(|d| d.lower != 1)
+    }
+
+    /// The strides of each dimension in the flat element vector, outermost first.
+    pub fn strides(&self) -> Vec<usize> {
+        let mut strides = vec![1usize; self.dims.len()];
+        for i in (0..self.dims.len().saturating_sub(1)).rev() {
+            let len = usize::try_from(self.dims[i + 1].len).unwrap_or(0);
+            strides[i] = strides[i + 1].saturating_mul(len);
+        }
+        strides
+    }
 }
 
 impl PartialEq for ArrayValue {
+    /// `PostgreSQL`'s `array_eq`: the dimension header — lengths **and** lower
+    /// bounds — must match before the elements are compared, so
+    /// `'[2:4]={1,2,3}' = '{1,2,3}'` is false.
     fn eq(&self, other: &Self) -> bool {
-        self.elem == other.elem && self.elems == other.elems
+        self.elem == other.elem && self.dims == other.dims && self.elems == other.elems
     }
 }
 
@@ -526,6 +938,7 @@ impl Eq for ArrayValue {}
 impl std::hash::Hash for ArrayValue {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.elem.hash(state);
+        self.dims.hash(state);
         self.elems.hash(state);
     }
 }
@@ -535,14 +948,17 @@ impl PartialEq for Datum {
         match (self, other) {
             (Datum::Null, Datum::Null) => true,
             (Datum::Bool(a), Datum::Bool(b)) => a == b,
+            (Datum::Int2(a), Datum::Int2(b)) => a == b,
             (Datum::Int4(a), Datum::Int4(b)) => a == b,
             (Datum::Int8(a), Datum::Int8(b)) => a == b,
             (Datum::Text(a), Datum::Text(b)) => a == b,
             // Grouping equality: `NaN == NaN` (Rust's `==` says false, hence the
             // explicit NaN arm) and `-0.0 == +0.0` (Rust's `==` already says true).
+            (Datum::Float4(a), Datum::Float4(b)) => a == b || (a.is_nan() && b.is_nan()),
             (Datum::Float8(a), Datum::Float8(b)) => a == b || (a.is_nan() && b.is_nan()),
             // SP32: numeric grouping equality is by VALUE, ignoring scale, so
-            // `1.0` and `1.00` group together (`bigdecimal`'s `==` already does this).
+            // `1.0` and `1.00` group together (`bigdecimal`'s `==` already does
+            // this), and — as in PostgreSQL's `numeric_eq` — `NaN` equals `NaN`.
             (Datum::Numeric(a), Datum::Numeric(b)) => a == b,
             // SP37: jiff civil types implement PartialEq by calendar/clock value.
             (Datum::Date(a), Datum::Date(b)) => a == b,
@@ -550,6 +966,7 @@ impl PartialEq for Datum {
             (Datum::Timestamp(a), Datum::Timestamp(b)) => a == b,
             // timestamptz equality is by absolute instant (jiff Timestamp).
             (Datum::Timestamptz(a), Datum::Timestamptz(b)) => a == b,
+            (Datum::Timetz(a), Datum::Timetz(b)) => a == b,
             // interval uses its canonical-estimate Eq (Task 2).
             (Datum::Interval(a), Datum::Interval(b)) => a == b,
             // SP40: bytea equality is byte-for-byte (matches PostgreSQL's `byteaeq`).
@@ -559,6 +976,9 @@ impl PartialEq for Datum {
             (Datum::Jsonb(a), Datum::Jsonb(b)) => a == b,
             // Arrays are equal when their element type and every element are.
             (Datum::Array(a), Datum::Array(b)) => a == b,
+            // Composites compare field by field; enums by type and label.
+            (Datum::Record(a), Datum::Record(b)) => a == b,
+            (Datum::Enum(a), Datum::Enum(b)) => a == b,
             _ => false,
         }
     }
@@ -575,9 +995,21 @@ impl std::hash::Hash for Datum {
         match self {
             Datum::Null => {}
             Datum::Bool(b) => b.hash(state),
+            Datum::Int2(n) => n.hash(state),
             Datum::Int4(n) => n.hash(state),
             Datum::Int8(n) => n.hash(state),
             Datum::Text(s) => s.hash(state),
+            // Canonicalized exactly like `Float8` below, one width down.
+            Datum::Float4(f) => {
+                let bits = if f.is_nan() {
+                    0x7fc0_0000u32 // canonical quiet NaN
+                } else if *f == 0.0 {
+                    0u32 // both -0.0 and +0.0 map here
+                } else {
+                    f.to_bits()
+                };
+                bits.hash(state);
+            }
             // Canonicalize so equal floats hash equally (the Hash/Eq contract): every
             // NaN → one bit pattern; `-0.0` → `+0.0` (whose bits are all zero).
             Datum::Float8(f) => {
@@ -590,9 +1022,9 @@ impl std::hash::Hash for Datum {
                 };
                 bits.hash(state);
             }
-            // SP32: hash the scale-normalized form so values that compare equal
-            // (`1.0` and `1.00`) hash equally (the Hash/Eq contract).
-            Datum::Numeric(d) => d.normalized().to_string().hash(state),
+            // SP32: `NumericValue` hashes the scale-normalized form so values
+            // that compare equal (`1.0` and `1.00`) hash equally.
+            Datum::Numeric(d) => d.hash(state),
             // SP37: jiff types all implement Hash by value. `Interval` hashes its
             // `canonical_micros` — the same quantity its `PartialEq` compares — so
             // `1 mon` and `30 days` hash alike (the Hash/Eq contract).
@@ -600,12 +1032,15 @@ impl std::hash::Hash for Datum {
             Datum::Time(t) => t.hash(state),
             Datum::Timestamp(dt) => dt.hash(state),
             Datum::Timestamptz(ts) => ts.hash(state),
+            Datum::Timetz(t) => t.hash(state),
             Datum::Interval(i) => i.hash(state),
             // SP40: bytea hashes its bytes.
             Datum::Bytea(b) => b.hash(state),
             // Both hash scale-normalized numbers internally, matching `Eq`.
             Datum::Jsonb(j) => j.hash(state),
             Datum::Array(a) => a.hash(state),
+            Datum::Record(r) => r.hash(state),
+            Datum::Enum(e) => e.hash(state),
         }
     }
 }
@@ -616,9 +1051,11 @@ impl Datum {
         match self {
             Datum::Null => None,
             Datum::Bool(_) => Some(ColumnType::Bool),
+            Datum::Int2(_) => Some(ColumnType::Int2),
             Datum::Int4(_) => Some(ColumnType::Int4),
             Datum::Int8(_) => Some(ColumnType::Int8),
             Datum::Text(_) => Some(ColumnType::Text),
+            Datum::Float4(_) => Some(ColumnType::Float4),
             Datum::Float8(_) => Some(ColumnType::Float8),
             // The runtime value carries no typmod — it is unconstrained `numeric`.
             Datum::Numeric(_) => Some(ColumnType::Numeric(None)),
@@ -626,10 +1063,13 @@ impl Datum {
             Datum::Time(_) => Some(ColumnType::Time),
             Datum::Timestamp(_) => Some(ColumnType::Timestamp),
             Datum::Timestamptz(_) => Some(ColumnType::Timestamptz),
+            Datum::Timetz(_) => Some(ColumnType::Timetz),
             Datum::Interval(_) => Some(ColumnType::Interval),
             Datum::Bytea(_) => Some(ColumnType::Bytea),
             Datum::Jsonb(_) => Some(ColumnType::Jsonb),
             Datum::Array(a) => Some(a.column_type()),
+            Datum::Record(r) => Some(r.column_type()),
+            Datum::Enum(e) => Some(e.column_type()),
         }
     }
 
@@ -656,18 +1096,22 @@ impl Datum {
 pub fn canonicalize_for_key(value: &Datum) -> std::borrow::Cow<'_, Datum> {
     use std::borrow::Cow;
     match value {
-        Datum::Numeric(d) => {
+        // A special has one spelling already, so only a finite value can differ
+        // by display scale.
+        Datum::Numeric(NumericValue::Finite(d)) => {
             let normalized = crate::numeric::canonical(d.normalized());
             if normalized.fractional_digit_count() == d.fractional_digit_count() {
                 Cow::Borrowed(value)
             } else {
-                Cow::Owned(Datum::Numeric(normalized))
+                Cow::Owned(Datum::Numeric(NumericValue::Finite(normalized)))
             }
         }
         // `-0.0 == 0.0` and every NaN is one value under `Datum`'s grouping
         // equality, but their bit patterns differ.
         Datum::Float8(f) if f.is_nan() => Cow::Owned(Datum::Float8(f64::NAN)),
         Datum::Float8(f) if *f == 0.0 && f.is_sign_negative() => Cow::Owned(Datum::Float8(0.0)),
+        Datum::Float4(f) if f.is_nan() => Cow::Owned(Datum::Float4(f32::NAN)),
+        Datum::Float4(f) if *f == 0.0 && f.is_sign_negative() => Cow::Owned(Datum::Float4(0.0)),
         // `interval` equality (and `Hash`, and `Ord`) is PostgreSQL's canonical
         // estimate — a 30-day month and a 24-hour day — so `1 mon`, `30 days`
         // and `720 hours` are ONE value with three field spellings, while the
@@ -695,6 +1139,32 @@ pub fn canonicalize_for_key(value: &Datum) -> std::borrow::Cow<'_, Datum> {
             Some(normalized) => Cow::Owned(Datum::Jsonb(normalized)),
             None => Cow::Borrowed(value),
         },
+        // A composite's fields need the same canonicalization as an array's
+        // elements: an index over a composite column must not distinguish
+        // `ROW(1.0)` from `ROW(1.00)` when `=` does not.
+        Datum::Record(r) => {
+            let mut changed = false;
+            let values = r
+                .values
+                .iter()
+                .map(|v| match canonicalize_for_key(v) {
+                    Cow::Owned(v) => {
+                        changed = true;
+                        v
+                    }
+                    Cow::Borrowed(v) => v.clone(),
+                })
+                .collect();
+            if changed {
+                Cow::Owned(Datum::Record(RecordValue {
+                    ty: r.ty,
+                    names: std::sync::Arc::clone(&r.names),
+                    values,
+                }))
+            } else {
+                Cow::Borrowed(value)
+            }
+        }
         Datum::Array(a) => {
             let mut changed = false;
             let elems = a
@@ -709,7 +1179,11 @@ pub fn canonicalize_for_key(value: &Datum) -> std::borrow::Cow<'_, Datum> {
                 })
                 .collect();
             if changed {
-                Cow::Owned(Datum::Array(ArrayValue::new(a.elem, elems)))
+                Cow::Owned(Datum::Array(ArrayValue::with_dims(
+                    a.elem,
+                    elems,
+                    a.dims.clone(),
+                )))
             } else {
                 Cow::Borrowed(value)
             }
@@ -772,8 +1246,6 @@ mod tests {
             ColumnType::from_sql_name("DOUBLE PRECISION"),
             Some(ColumnType::Float8)
         );
-        // `real`/`float4` is a deferred non-goal — unknown for now.
-        assert_eq!(ColumnType::from_sql_name("real"), None);
         assert_eq!(ColumnType::from_sql_name("widget"), None);
         assert_eq!(ColumnType::from_sql_name("uuid"), Some(ColumnType::Uuid));
     }
@@ -838,6 +1310,83 @@ mod tests {
         assert_eq!(ColumnType::Text.oid(), 25);
         assert_eq!(ColumnType::Varchar(Some(12)).oid(), 1043);
         assert_eq!(ColumnType::Char(Some(2)).oid(), 1042);
+    }
+
+    /// `pg_type` metadata for the two new scalars, and the spellings the parser
+    /// resolves. Values are `SELECT typname, typlen FROM pg_type WHERE oid IN
+    /// (21, 700)` on PostgreSQL 18.4.
+    #[test]
+    fn int2_and_float4_report_postgres_oid_name_and_typlen() {
+        use assert2::assert;
+        let expected: &[(ColumnType, u32, &str, i16, &[&str])] = &[
+            (
+                ColumnType::Int2,
+                21,
+                "smallint",
+                2,
+                &["int2", "smallint", "SMALLINT"],
+            ),
+            (
+                ColumnType::Float4,
+                700,
+                "real",
+                4,
+                &["float4", "real", "REAL"],
+            ),
+        ];
+        for (ty, oid, name, typlen, spellings) in expected {
+            assert!(ty.oid() == *oid, "{ty:?} oid");
+            assert!(ty.name() == *name, "{ty:?} name");
+            assert!(ty.type_size() == *typlen, "{ty:?} typlen");
+            // Neither type carries a modifier, so RowDescription reports -1.
+            assert!(ty.typmod() == -1, "{ty:?} typmod");
+            for spelling in *spellings {
+                assert!(
+                    ColumnType::from_sql_name(spelling) == Some(*ty),
+                    "{spelling} resolves"
+                );
+            }
+        }
+        assert!(Datum::Int2(1).column_type() == Some(ColumnType::Int2));
+        assert!(Datum::Float4(1.5).column_type() == Some(ColumnType::Float4));
+        assert!(ColumnType::array_of(ColumnType::Int2) == Some(ColumnType::Array(ElemType::Int2)));
+        assert!(
+            ColumnType::array_of(ColumnType::Float4) == Some(ColumnType::Array(ElemType::Float4))
+        );
+    }
+
+    /// `float4` grouping equality is `float8`'s, one width down: every NaN is
+    /// one value, `-0.0` and `+0.0` are one value, and equal values hash equally
+    /// (the `Hash`/`Eq` contract the `GROUP BY` map depends on).
+    #[test]
+    fn float4_grouping_equality_and_hash_match_float8() {
+        use assert2::assert;
+        let nan = Datum::Float4(f32::NAN);
+        let other_nan = Datum::Float4(f32::from_bits(0x7fc0_0001));
+        assert!(nan == other_nan);
+        assert!(hash_of(&nan) == hash_of(&other_nan));
+        assert!(Datum::Float4(-0.0) == Datum::Float4(0.0));
+        assert!(hash_of(&Datum::Float4(-0.0)) == hash_of(&Datum::Float4(0.0)));
+        assert!(Datum::Float4(1.5) != Datum::Float4(2.5));
+        // A NaN never equals a finite value, in either operand position.
+        assert!(nan != Datum::Float4(1.0));
+        assert!(Datum::Float4(1.0) != nan);
+        // Distinct variants never collide, even at the same numeric value.
+        assert!(Datum::Float4(1.0) != Datum::Float8(1.0));
+        assert!(Datum::Int2(1) != Datum::Int4(1));
+        assert!(Datum::Int2(1) == Datum::Int2(1));
+        // Both float widths canonicalize to one index-key form.
+        for (left, right) in [
+            (Datum::Float4(-0.0), Datum::Float4(0.0)),
+            (nan.clone(), other_nan),
+        ] {
+            let (a, b) = (canonicalize_for_key(&left), canonicalize_for_key(&right));
+            assert!(*a == *b, "canonical form of {left:?}");
+            assert!(
+                crate::encoding::encode_text(&a, &jiff::tz::TimeZone::UTC)
+                    == crate::encoding::encode_text(&b, &jiff::tz::TimeZone::UTC)
+            );
+        }
     }
 
     #[test]
@@ -943,7 +1492,7 @@ mod tests {
     }
 
     #[test]
-    fn datetime_type_names_resolve_and_timetz_is_unsupported() {
+    fn datetime_type_names_resolve_including_timetz() {
         assert_eq!(ColumnType::from_sql_name("date"), Some(ColumnType::Date));
         assert_eq!(ColumnType::from_sql_name("time"), Some(ColumnType::Time));
         assert_eq!(
@@ -970,8 +1519,13 @@ mod tests {
             ColumnType::from_sql_name("interval"),
             Some(ColumnType::Interval)
         );
-        assert_eq!(ColumnType::from_sql_name("timetz"), None);
-        assert_eq!(ColumnType::from_sql_name("time with time zone"), None);
+        assert2::assert!(ColumnType::from_sql_name("timetz") == Some(ColumnType::Timetz));
+        assert2::assert!(
+            ColumnType::from_sql_name("time with time zone") == Some(ColumnType::Timetz)
+        );
+        assert2::assert!(ColumnType::Timetz.oid() == 1266);
+        assert2::assert!(ColumnType::Timetz.name() == "time with time zone");
+        assert2::assert!(ColumnType::Timetz.type_size() == 12);
     }
 
     /// SP37 mutation-killer: the `(Timestamptz, Timestamptz)` arm of `Datum`'s
@@ -1099,6 +1653,10 @@ mod tests {
             (ElemType::Interval, 1186, 1187, "interval[]"),
             (ElemType::Uuid, 2950, 2951, "uuid[]"),
             (ElemType::Jsonb, 3802, 3807, "jsonb[]"),
+            (ElemType::Int2, 21, 1005, "smallint[]"),
+            (ElemType::Float4, 700, 1021, "real[]"),
+            (ElemType::Varchar(None), 1043, 1015, "character varying[]"),
+            (ElemType::Char(None), 1042, 1014, "character[]"),
         ];
         assert!(expected.len() == ElemType::ALL.len());
         for (elem, elem_oid, array_oid, name) in expected {
@@ -1130,6 +1688,96 @@ mod tests {
         assert!(ElemType::from_code(200) == None);
     }
 
+    /// The lossless storage codec must carry the length modifier the bare
+    /// `code()` byte drops, for every element type.
+    #[test]
+    fn element_type_storage_codes_round_trip_with_their_modifier() {
+        use assert2::assert;
+        let mut every: Vec<ElemType> = ElemType::ALL.to_vec();
+        every.extend([
+            ElemType::Varchar(Some(5)),
+            ElemType::Varchar(Some(u16::MAX)),
+            ElemType::Char(Some(1)),
+        ]);
+        for elem in every {
+            let mut bytes = Vec::new();
+            elem.write_code(&mut bytes);
+            let mut cursor = bytes.as_slice();
+            assert!(ElemType::read_code(&mut cursor) == Some(elem), "{elem:?}");
+            assert!(cursor.is_empty(), "{elem:?}");
+        }
+        assert!(ElemType::read_code(&mut [].as_slice()) == None);
+        assert!(ElemType::read_code(&mut [200u8].as_slice()) == None);
+        // A truncated varchar payload is rejected rather than defaulted.
+        assert!(ElemType::read_code(&mut [16u8].as_slice()) == None);
+        assert!(ElemType::read_code(&mut [16u8, 1, 0].as_slice()) == None);
+    }
+
+    /// `PostgreSQL`'s `array_eq` compares the whole dimension header — lengths
+    /// AND lower bounds — before it looks at any element.
+    #[test]
+    fn array_equality_and_hashing_include_the_dimension_header() {
+        use std::collections::HashSet;
+
+        use assert2::assert;
+
+        let ints = |values: &[i32]| values.iter().copied().map(Datum::Int4).collect::<Vec<_>>();
+        let flat = ArrayValue::new(ElemType::Int4, ints(&[1, 2, 3]));
+        let shifted =
+            ArrayValue::with_dims(ElemType::Int4, ints(&[1, 2, 3]), vec![ArrayDim::new(2, 3)]);
+        let square = ArrayValue::with_dims(
+            ElemType::Int4,
+            ints(&[1, 2, 3, 4]),
+            vec![ArrayDim::new(1, 2), ArrayDim::new(1, 2)],
+        );
+        assert!(flat != shifted);
+        assert!(flat == ArrayValue::new(ElemType::Int4, ints(&[1, 2, 3])));
+        assert!(square != ArrayValue::new(ElemType::Int4, ints(&[1, 2, 3, 4])));
+        let mut set = HashSet::new();
+        for value in [&flat, &shifted, &square] {
+            set.insert(Datum::Array(value.clone()));
+        }
+        assert!(set.len() == 3);
+        assert!(set.contains(&Datum::Array(ArrayValue::new(
+            ElemType::Int4,
+            ints(&[1, 2, 3])
+        ))));
+    }
+
+    /// The dimension accessors, including the empty array's zero dimensions.
+    #[test]
+    fn array_dimension_accessors_describe_the_header() {
+        use assert2::assert;
+        let empty = ArrayValue::new(ElemType::Int4, Vec::new());
+        assert!(empty.ndims() == 0);
+        assert!(empty.dims.is_empty());
+        assert!(!empty.has_explicit_bounds());
+
+        let cube = ArrayValue::with_dims(
+            ElemType::Int4,
+            (1..=12).map(Datum::Int4).collect(),
+            vec![
+                ArrayDim::new(0, 2),
+                ArrayDim::new(1, 2),
+                ArrayDim::new(1, 3),
+            ],
+        );
+        assert!(cube.ndims() == 3);
+        assert!(cube.has_explicit_bounds());
+        assert!(cube.strides() == vec![6, 3, 1]);
+        assert!(cube.dims[0].upper() == 1);
+        assert!(cube.dims[2].upper() == 3);
+
+        // A header that does not multiply out to the element count is
+        // normalized back to one dimension rather than left inconsistent.
+        let wrong = ArrayValue::with_dims(
+            ElemType::Int4,
+            (1..=3).map(Datum::Int4).collect(),
+            vec![ArrayDim::new(1, 2), ArrayDim::new(1, 2)],
+        );
+        assert!(wrong.dims == vec![ArrayDim::new(1, 3)]);
+    }
+
     #[test]
     fn array_of_refuses_element_types_without_an_array_type() {
         use assert2::assert;
@@ -1141,13 +1789,19 @@ mod tests {
             }))) == Some(ColumnType::Array(ElemType::Numeric)),
             "an array element carries no typmod"
         );
-        for unsupported in [
-            ColumnType::Varchar(Some(8)),
-            ColumnType::Varchar(None),
-            ColumnType::Char(Some(2)),
-            ColumnType::Regclass,
-            ColumnType::Array(ElemType::Int4),
-        ] {
+        // The length-modified string types DO have array types, and the
+        // modifier rides along on the element type.
+        assert!(
+            ColumnType::array_of(ColumnType::Varchar(Some(8)))
+                == Some(ColumnType::Array(ElemType::Varchar(Some(8))))
+        );
+        assert!(
+            ColumnType::array_of(ColumnType::Char(Some(2)))
+                == Some(ColumnType::Array(ElemType::Char(Some(2))))
+        );
+        // `regclass` has none, and PostgreSQL has no nested array TYPE — an
+        // array of an array is refused, the extra dimensions living in values.
+        for unsupported in [ColumnType::Regclass, ColumnType::Array(ElemType::Int4)] {
             assert!(
                 ColumnType::array_of(unsupported) == None,
                 "{unsupported:?} has no array type"
@@ -1327,10 +1981,16 @@ mod tests {
         // (Numeric, Numeric) equality compares by value, ignoring scale (kills the
         // deleted arm, which would fall to `_ => false` and make equal values
         // UNequal).
-        let a = Datum::Numeric(BigDecimal::from_str("1.0").expect("1.0"));
-        let b = Datum::Numeric(BigDecimal::from_str("1.00").expect("1.00"));
+        let a = Datum::Numeric(NumericValue::from(
+            BigDecimal::from_str("1.0").expect("1.0"),
+        ));
+        let b = Datum::Numeric(NumericValue::from(
+            BigDecimal::from_str("1.00").expect("1.00"),
+        ));
         assert_eq!(a, b, "numeric equality is by value, ignoring scale");
-        let c = Datum::Numeric(BigDecimal::from_str("2.0").expect("2.0"));
+        let c = Datum::Numeric(NumericValue::from(
+            BigDecimal::from_str("2.0").expect("2.0"),
+        ));
         assert_ne!(a, c);
     }
 }

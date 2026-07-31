@@ -9,9 +9,7 @@
 
 use std::cmp::Ordering;
 
-use bigdecimal::BigDecimal;
-
-use crate::{Datum, TypeError};
+use crate::{Datum, TypeError, numeric::NumericValue};
 
 /// Type an integer literal: narrowest of int4, then int8; overflow -> 22003.
 pub fn int_literal(s: &str) -> Result<Datum, TypeError> {
@@ -38,9 +36,21 @@ pub fn float_literal(s: &str) -> Result<Datum, TypeError> {
     }
 }
 
+/// Promote an integer Datum to i32. `Some` only for the two widths PostgreSQL's
+/// `int4` operators accept after the implicit `int2 → int4` cast, so an `int8`
+/// operand falls through to the i64 rung.
+fn as_i32(d: &Datum) -> Option<i32> {
+    match d {
+        Datum::Int2(n) => Some(i32::from(*n)),
+        Datum::Int4(n) => Some(*n),
+        _ => None,
+    }
+}
+
 /// Promote an integer Datum to i64 for mixed-width arithmetic.
 fn as_i64(d: &Datum) -> Option<i64> {
     match d {
+        Datum::Int2(n) => Some(i64::from(*n)),
         Datum::Int4(n) => Some(i64::from(*n)),
         Datum::Int8(n) => Some(*n),
         _ => None,
@@ -52,27 +62,32 @@ fn as_i64(d: &Datum) -> Option<i64> {
 /// `float8`, since `float8` is the preferred type — `numeric ⊕ float8 → float8`.)
 fn as_f64(d: &Datum) -> Option<f64> {
     match d {
+        Datum::Int2(n) => Some(f64::from(*n)),
         Datum::Int4(n) => Some(f64::from(*n)),
         Datum::Int8(n) => Some(*n as f64),
+        // `float4 → float8` is exact, so widening here never changes an ordering
+        // or a sum that PostgreSQL would compute the same way.
+        Datum::Float4(f) => Some(f64::from(*f)),
         Datum::Float8(f) => Some(*f),
         Datum::Numeric(d) => Some(crate::numeric::to_f64(d)),
         _ => None,
     }
 }
 
-/// SP32: promote an int/`numeric` Datum to `BigDecimal` (used when an operand is
-/// `numeric` but neither is `float8`).
-fn as_numeric(d: &Datum) -> Option<BigDecimal> {
+/// SP32: promote an int/`numeric` Datum to a [`NumericValue`] (used when an
+/// operand is `numeric` but neither is `float8`).
+fn as_numeric(d: &Datum) -> Option<NumericValue> {
     match d {
-        Datum::Int4(n) => Some(BigDecimal::from(*n)),
-        Datum::Int8(n) => Some(BigDecimal::from(*n)),
+        Datum::Int2(n) => Some(NumericValue::from(*n)),
+        Datum::Int4(n) => Some(NumericValue::from(*n)),
+        Datum::Int8(n) => Some(NumericValue::from(*n)),
         Datum::Numeric(d) => Some(d.clone()),
         _ => None,
     }
 }
 
 fn is_float(d: &Datum) -> bool {
-    matches!(d, Datum::Float8(_))
+    matches!(d, Datum::Float4(_) | Datum::Float8(_))
 }
 
 fn is_numeric(d: &Datum) -> bool {
@@ -110,22 +125,48 @@ fn float_arith(x: f64, y: f64, op: fn(f64, f64) -> f64) -> Result<Datum, TypeErr
     Ok(Datum::Float8(r))
 }
 
-fn arith(
-    a: &Datum,
-    b: &Datum,
-    op_i4: fn(i32, i32) -> Option<i32>,
-    op_i8: fn(i64, i64) -> Option<i64>,
-    op_f8: fn(f64, f64) -> f64,
-    op_num: fn(&BigDecimal, &BigDecimal) -> BigDecimal,
-) -> Result<Datum, TypeError> {
+/// [`float_arith`] one width down. `float4 ⊕ float4` is computed in `f32`, not
+/// in `f64` and rounded, because that is what `float4pl` and friends do.
+fn float4_arith(x: f32, y: f32, op: fn(f32, f32) -> f32) -> Result<Datum, TypeError> {
+    let r = op(x, y);
+    if r.is_infinite() && x.is_finite() && y.is_finite() {
+        return Err(TypeError::float_overflow());
+    }
+    Ok(Datum::Float4(r))
+}
+
+/// One arithmetic operator, spelled once per numeric width.
+///
+/// PostgreSQL has a separate function per type (`int2pl`, `int4pl`, `int8pl`,
+/// `float4pl`, `float8pl`, `numeric_add`) and the *result type follows the
+/// operand widths*, so the dispatcher needs every width's version at once
+/// rather than one widened implementation.
+#[derive(Clone, Copy)]
+struct NumericOp {
+    i2: fn(i16, i16) -> Option<i16>,
+    i4: fn(i32, i32) -> Option<i32>,
+    i8: fn(i64, i64) -> Option<i64>,
+    f4: fn(f32, f32) -> f32,
+    f8: fn(f64, f64) -> f64,
+    num: fn(&NumericValue, &NumericValue) -> NumericValue,
+}
+
+/// PostgreSQL's numeric promotion ladder, most specific rung first:
+/// `float4 ⊕ float4 → float4`, any other float pairing → `float8` (there is no
+/// `float4 ⊕ int` operator, so both sides implicitly widen to the preferred
+/// type), then `numeric`, then `int2`/`int4`/`int8` by operand width.
+fn arith(a: &Datum, b: &Datum, op: NumericOp) -> Result<Datum, TypeError> {
     if a.is_null() || b.is_null() {
         return Ok(Datum::Null);
+    }
+    if let (Datum::Float4(x), Datum::Float4(y)) = (a, b) {
+        return float4_arith(*x, *y, op.f4);
     }
     // SP30: if either operand is float, promote both to f64 (float8 is the
     // preferred numeric type, so it wins over numeric and int).
     if is_float(a) || is_float(b) {
         return match (as_f64(a), as_f64(b)) {
-            (Some(x), Some(y)) => float_arith(x, y, op_f8),
+            (Some(x), Some(y)) => float_arith(x, y, op.f8),
             _ => Err(TypeError::TypeMismatch {
                 message: "operator requires numeric operands".into(),
             }),
@@ -134,21 +175,24 @@ fn arith(
     // SP32: else if either operand is numeric, promote both to numeric.
     if is_numeric(a) || is_numeric(b) {
         return match (as_numeric(a), as_numeric(b)) {
-            (Some(x), Some(y)) => Ok(Datum::Numeric(op_num(&x, &y))),
+            (Some(x), Some(y)) => Ok(Datum::Numeric((op.num)(&x, &y))),
             _ => Err(TypeError::TypeMismatch {
                 message: "operator requires numeric operands".into(),
             }),
         };
     }
     match (a, b) {
-        (Datum::Int4(x), Datum::Int4(y)) => {
-            op_i4(*x, *y).map(Datum::Int4).ok_or(TypeError::Overflow)
-        }
-        _ => match (as_i64(a), as_i64(b)) {
-            (Some(x), Some(y)) => op_i8(x, y).map(Datum::Int8).ok_or(TypeError::Overflow),
-            _ => Err(TypeError::TypeMismatch {
-                message: "operator requires integer operands".into(),
-            }),
+        (Datum::Int2(x), Datum::Int2(y)) => (op.i2)(*x, *y)
+            .map(Datum::Int2)
+            .ok_or_else(|| TypeError::out_of_range_for("smallint")),
+        _ => match (as_i32(a), as_i32(b)) {
+            (Some(x), Some(y)) => (op.i4)(x, y).map(Datum::Int4).ok_or(TypeError::Overflow),
+            _ => match (as_i64(a), as_i64(b)) {
+                (Some(x), Some(y)) => (op.i8)(x, y).map(Datum::Int8).ok_or(TypeError::Overflow),
+                _ => Err(TypeError::TypeMismatch {
+                    message: "operator requires integer operands".into(),
+                }),
+            },
         },
     }
 }
@@ -156,6 +200,32 @@ fn arith(
 // ---------------------------------------------------------------------------
 // Temporal arithmetic dispatch helpers
 // ---------------------------------------------------------------------------
+
+/// Which side of `time ± interval` a rejected infinite interval was on, so the
+/// message names the operation the way PostgreSQL's does.
+#[derive(Clone, Copy)]
+enum TimeShift {
+    Add,
+    Subtract,
+}
+
+/// `time` and `timetz` have no representation for infinity, and shifting them by
+/// an infinite interval would silently wrap the clock instead, so PostgreSQL
+/// refuses with 22008 rather than answering.
+fn reject_infinite_interval_on_time(
+    iv: crate::datetime::Interval,
+    shift: TimeShift,
+) -> Result<(), TypeError> {
+    if !iv.is_infinite() {
+        return Ok(());
+    }
+    Err(TypeError::DatetimeOutOfRange {
+        message: match shift {
+            TimeShift::Add => "cannot add infinite interval to time".into(),
+            TimeShift::Subtract => "cannot subtract infinite interval from time".into(),
+        },
+    })
+}
 
 /// `add` for temporal operand pairs. Called when at least one operand is
 /// temporal. `Timestamptz` operands fall through to `TypeMismatch` (deferred;
@@ -183,8 +253,19 @@ fn temporal_add(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
         // time + interval / interval + time → time (uses ONLY the interval micros,
         // wrapping mod 24 h; the interval's days/months are ignored — a Time has no
         // date).
-        (Datum::Time(t), Datum::Interval(iv)) => Ok(Datum::Time(time_plus_interval(*t, *iv))),
-        (Datum::Interval(iv), Datum::Time(t)) => Ok(Datum::Time(time_plus_interval(*t, *iv))),
+        (Datum::Time(t), Datum::Interval(iv)) | (Datum::Interval(iv), Datum::Time(t)) => {
+            reject_infinite_interval_on_time(*iv, TimeShift::Add)?;
+            Ok(Datum::Time(time_plus_interval(*t, *iv)))
+        }
+        // `timetz + interval` shifts the clock and keeps the offset, so the
+        // result names the same zone the operand did.
+        (Datum::Timetz(t), Datum::Interval(iv)) | (Datum::Interval(iv), Datum::Timetz(t)) => {
+            reject_infinite_interval_on_time(*iv, TimeShift::Add)?;
+            Ok(Datum::Timetz(crate::datetime::TimeTz {
+                time: time_plus_interval(t.time, *iv),
+                offset: t.offset,
+            }))
+        }
         // timestamp + interval → timestamp
         (Datum::Timestamp(ts), Datum::Interval(iv)) => {
             timestamp_plus_interval(*ts, *iv).map(Datum::Timestamp)
@@ -219,7 +300,7 @@ fn temporal_sub(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
             date_plus_days(*d, n.checked_neg().ok_or(TypeError::Overflow)?).map(Datum::Date)
         }
         // date - date → int4 (number of days)
-        (Datum::Date(a), Datum::Date(b)) => Ok(Datum::Int4(date_diff_days(*a, *b))),
+        (Datum::Date(a), Datum::Date(b)) => date_diff_days(*a, *b).map(Datum::Int4),
         // date - interval → timestamp (negate interval, then add)
         (Datum::Date(d), Datum::Interval(iv)) => {
             let neg = neg_interval(*iv)?;
@@ -228,8 +309,17 @@ fn temporal_sub(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
         // time - interval → time (negate the interval, then add — only the micros
         // matter; the result wraps mod 24 h).
         (Datum::Time(t), Datum::Interval(iv)) => {
+            reject_infinite_interval_on_time(*iv, TimeShift::Subtract)?;
             let neg = neg_interval(*iv)?;
             Ok(Datum::Time(crate::datetime::time_plus_interval(*t, neg)))
+        }
+        (Datum::Timetz(t), Datum::Interval(iv)) => {
+            reject_infinite_interval_on_time(*iv, TimeShift::Subtract)?;
+            let neg = neg_interval(*iv)?;
+            Ok(Datum::Timetz(crate::datetime::TimeTz {
+                time: crate::datetime::time_plus_interval(t.time, neg),
+                offset: t.offset,
+            }))
         }
         // timestamp - interval → timestamp
         (Datum::Timestamp(ts), Datum::Interval(iv)) => {
@@ -237,7 +327,7 @@ fn temporal_sub(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
             timestamp_plus_interval(*ts, neg).map(Datum::Timestamp)
         }
         // timestamp - timestamp → interval
-        (Datum::Timestamp(a), Datum::Timestamp(b)) => Ok(Datum::Interval(timestamp_diff(*a, *b))),
+        (Datum::Timestamp(a), Datum::Timestamp(b)) => timestamp_diff(*a, *b).map(Datum::Interval),
         // interval - interval → interval
         (Datum::Interval(x), Datum::Interval(y)) => sub_interval(*x, *y).map(Datum::Interval),
         // Everything else (including Timestamptz, which is tz-aware and handled in
@@ -287,21 +377,35 @@ fn temporal_div(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     }
 }
 
+/// `int2` widens to `int4` before the temporal matrix is consulted: PostgreSQL
+/// resolves `date + int2` through the implicit `int2 → int4` cast, so the
+/// matrix itself only carries `int4`/`int8` arms.
+fn temporal_operand(d: &Datum) -> std::borrow::Cow<'_, Datum> {
+    match d {
+        Datum::Int2(n) => std::borrow::Cow::Owned(Datum::Int4(i32::from(*n))),
+        _ => std::borrow::Cow::Borrowed(d),
+    }
+}
+
 pub fn add(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     if a.is_null() || b.is_null() {
         return Ok(Datum::Null);
     }
     // Temporal dispatch — handled before the numeric fast-paths.
     if is_temporal(a) || is_temporal(b) {
-        return temporal_add(a, b);
+        return temporal_add(&temporal_operand(a), &temporal_operand(b));
     }
     arith(
         a,
         b,
-        i32::checked_add,
-        i64::checked_add,
-        |x, y| x + y,
-        crate::numeric::add,
+        NumericOp {
+            i2: i16::checked_add,
+            i4: i32::checked_add,
+            i8: i64::checked_add,
+            f4: |x, y| x + y,
+            f8: |x, y| x + y,
+            num: crate::numeric::add,
+        },
     )
 }
 pub fn sub(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
@@ -310,15 +414,19 @@ pub fn sub(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     }
     // Temporal dispatch — handled before the numeric fast-paths.
     if is_temporal(a) || is_temporal(b) {
-        return temporal_sub(a, b);
+        return temporal_sub(&temporal_operand(a), &temporal_operand(b));
     }
     arith(
         a,
         b,
-        i32::checked_sub,
-        i64::checked_sub,
-        |x, y| x - y,
-        crate::numeric::sub,
+        NumericOp {
+            i2: i16::checked_sub,
+            i4: i32::checked_sub,
+            i8: i64::checked_sub,
+            f4: |x, y| x - y,
+            f8: |x, y| x - y,
+            num: crate::numeric::sub,
+        },
     )
 }
 pub fn mul(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
@@ -327,15 +435,19 @@ pub fn mul(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     }
     // Temporal dispatch: interval * number or number * interval.
     if is_temporal(a) || is_temporal(b) {
-        return temporal_mul(a, b);
+        return temporal_mul(&temporal_operand(a), &temporal_operand(b));
     }
     arith(
         a,
         b,
-        i32::checked_mul,
-        i64::checked_mul,
-        |x, y| x * y,
-        crate::numeric::mul,
+        NumericOp {
+            i2: i16::checked_mul,
+            i4: i32::checked_mul,
+            i8: i64::checked_mul,
+            f4: |x, y| x * y,
+            f8: |x, y| x * y,
+            num: crate::numeric::mul,
+        },
     )
 }
 pub fn div(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
@@ -344,7 +456,15 @@ pub fn div(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
     }
     // Temporal dispatch: interval / number.
     if is_temporal(a) || is_temporal(b) {
-        return temporal_div(a, b);
+        return temporal_div(&temporal_operand(a), &temporal_operand(b));
+    }
+    // `float4 / float4` stays single-precision; a zero divisor is 22012 here
+    // exactly as it is one rung down.
+    if let (Datum::Float4(x), Datum::Float4(y)) = (a, b) {
+        if *y == 0.0 {
+            return Err(TypeError::DivisionByZero);
+        }
+        return float4_arith(*x, *y, |x, y| x / y);
     }
     // SP30: float division — a zero divisor (incl. `-0.0`) is 22012, like PG.
     if is_float(a) || is_float(b) {
@@ -368,18 +488,22 @@ pub fn div(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
         };
         return crate::numeric::div(&x, &y).map(Datum::Numeric);
     }
-    if matches!(b, Datum::Int4(0) | Datum::Int8(0)) {
+    if matches!(b, Datum::Int2(0) | Datum::Int4(0) | Datum::Int8(0)) {
         return Err(TypeError::DivisionByZero);
     }
     // Only integer operands reach here (float/numeric returned above), so the
-    // float/numeric `op` arguments to `arith` are never exercised on this path.
+    // float/numeric `op` members of `NumericOp` are never exercised on this path.
     arith(
         a,
         b,
-        i32::checked_div,
-        i64::checked_div,
-        |x, y| x / y,
-        |_, _| unreachable!("numeric division is handled before arith"),
+        NumericOp {
+            i2: i16::checked_div,
+            i4: i32::checked_div,
+            i8: i64::checked_div,
+            f4: |x, y| x / y,
+            f8: |x, y| x / y,
+            num: |_, _| unreachable!("numeric division is handled before arith"),
+        },
     )
 }
 
@@ -401,16 +525,19 @@ pub fn rem(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
         };
         return crate::numeric::rem(&x, &y).map(Datum::Numeric);
     }
-    if matches!(b, Datum::Int4(0) | Datum::Int8(0)) {
+    if matches!(b, Datum::Int2(0) | Datum::Int4(0) | Datum::Int8(0)) {
         return Err(TypeError::DivisionByZero);
     }
     match (a, b) {
-        (Datum::Int4(x), Datum::Int4(y)) => Ok(Datum::Int4(x.wrapping_rem(*y))),
-        _ => match (as_i64(a), as_i64(b)) {
-            (Some(x), Some(y)) => Ok(Datum::Int8(x.wrapping_rem(y))),
-            _ => Err(TypeError::TypeMismatch {
-                message: "mod requires integer operands".into(),
-            }),
+        (Datum::Int2(x), Datum::Int2(y)) => Ok(Datum::Int2(x.wrapping_rem(*y))),
+        _ => match (as_i32(a), as_i32(b)) {
+            (Some(x), Some(y)) => Ok(Datum::Int4(x.wrapping_rem(y))),
+            _ => match (as_i64(a), as_i64(b)) {
+                (Some(x), Some(y)) => Ok(Datum::Int8(x.wrapping_rem(y))),
+                _ => Err(TypeError::TypeMismatch {
+                    message: "mod requires integer operands".into(),
+                }),
+            },
         },
     }
 }
@@ -422,21 +549,34 @@ pub fn rem(a: &Datum, b: &Datum) -> Result<Datum, TypeError> {
 /// static (plan-time) concern enforced by the executor's `infer_type`; this
 /// value-level op is permissive so a `||` reached at runtime always has a result.
 ///
-/// `tz` is forwarded to `encode_text` for `Timestamptz` rendering; all other
-/// types ignore it.
-pub fn concat(a: &Datum, b: &Datum, tz: &jiff::tz::TimeZone) -> Result<Datum, TypeError> {
+/// `style` carries the session zone plus the `DateStyle`/`IntervalStyle` GUCs
+/// the temporal output functions read; every other type ignores it.
+pub fn concat(
+    a: &Datum,
+    b: &Datum,
+    style: crate::encoding::OutputStyle<'_>,
+) -> Result<Datum, TypeError> {
     if a.is_null() || b.is_null() {
         return Ok(Datum::Null);
     }
-    let mut s = text_of(a, tz);
-    s.push_str(&text_of(b, tz));
+    let mut s = text_of(a, style);
+    s.push_str(&text_of(b, style));
     Ok(Datum::Text(s))
 }
 
-/// The canonical text rendering of a non-NULL Datum, reusing the wire text
-/// encoder so `||` and the DataRow encoding never disagree.
-fn text_of(d: &Datum, tz: &jiff::tz::TimeZone) -> String {
-    String::from_utf8(crate::encoding::encode_text(d, tz))
+/// The text `||` renders a non-NULL Datum as, reusing the wire text encoder so
+/// the operator and the DataRow encoding never disagree.
+///
+/// `boolean` is the one exception, and it is PostgreSQL's own: `||` resolves
+/// through the `text` cast (`booltext`, which spells `true`/`false`) rather than
+/// the output function (`boolout`, which spells `t`/`f`), so `'flag=' || true`
+/// is `flag=true` even though `SELECT true` prints `t`. `concat()` keeps the
+/// output function and therefore keeps `t`.
+fn text_of(d: &Datum, style: crate::encoding::OutputStyle<'_>) -> String {
+    if let Datum::Bool(b) = d {
+        return if *b { "true".into() } else { "false".into() };
+    }
+    String::from_utf8(crate::encoding::encode_text_in(d, style))
         .expect("a Datum's text encoding is always valid UTF-8")
 }
 
@@ -457,6 +597,9 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         // Temporal comparisons (same-type + date↔timestamp promotion).
         (Datum::Date(x), Datum::Date(y)) => x.cmp(y),
         (Datum::Time(x), Datum::Time(y)) => x.cmp(y),
+        // `timetz` orders by the UTC-equivalent instant, not the printed clock,
+        // so `12:00-05` sorts after `16:00+00`.
+        (Datum::Timetz(x), Datum::Timetz(y)) => x.cmp(y),
         (Datum::Timestamp(x), Datum::Timestamp(y)) => x.cmp(y),
         // SP37: timestamptz comparison — absolute instant order (UTC µs).
         (Datum::Timestamptz(x), Datum::Timestamptz(y)) => x.cmp(y),
@@ -470,6 +613,11 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         (Datum::Jsonb(x), Datum::Jsonb(y)) => x.cmp(y),
         // SQL arrays compare element-wise, shorter first on a common prefix.
         (Datum::Array(x), Datum::Array(y)) => compare_arrays(x, y)?,
+        // `record_cmp`: field by field, left to right.
+        (Datum::Record(x), Datum::Record(y)) => compare_records(x, y)?,
+        // An enum orders by its labels' declared positions, which is what
+        // `pg_enum.enumsortorder` records.
+        (Datum::Enum(x), Datum::Enum(y)) => compare_enums(x, y)?,
         // SP30: any numeric pair with a float promotes to float comparison (NaN is
         // the largest value and equals itself; `-0.0 == +0.0` — PG's float ordering).
         _ if is_float(a) || is_float(b) => match (as_f64(a), as_f64(b)) {
@@ -490,8 +638,9 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
 }
 
 /// PostgreSQL's array btree order (`array_cmp`): element-wise over the common
-/// prefix, then the shorter array first. A NULL element sorts greater than any
-/// non-NULL one (PostgreSQL's `btarraycmp` treats NULLs as largest), and two
+/// prefix, then the shorter array first, then fewer dimensions first, then the
+/// dimension lengths, then the lower bounds. A NULL element sorts greater than
+/// any non-NULL one (PostgreSQL's `btarraycmp` treats NULLs as largest), and two
 /// NULLs are equal — the *comparison* is never NULL, unlike a scalar `=`.
 fn compare_arrays(
     a: &crate::datum::ArrayValue,
@@ -508,7 +657,80 @@ fn compare_arrays(
             return Ok(ord);
         }
     }
-    Ok(a.elems.len().cmp(&b.elems.len()))
+    let by_shape = a
+        .elems
+        .len()
+        .cmp(&b.elems.len())
+        .then_with(|| a.dims.len().cmp(&b.dims.len()))
+        .then_with(|| {
+            a.dims
+                .iter()
+                .map(|d| d.len)
+                .cmp(b.dims.iter().map(|d| d.len))
+        })
+        .then_with(|| {
+            a.dims
+                .iter()
+                .map(|d| d.lower)
+                .cmp(b.dims.iter().map(|d| d.lower))
+        });
+    Ok(by_shape)
+}
+
+/// PostgreSQL's `record_cmp`: field by field, left to right, with a NULL field
+/// sorting after every non-NULL one and two NULLs equal. Unlike the *row
+/// comparison operator* (`ROW(1,NULL) < ROW(1,2)`, which is NULL), comparing two
+/// composite **values** never yields NULL — `ROW(1,NULL)::t < ROW(1,'a')::t` is
+/// `false` on PostgreSQL 18.4, and `ORDER BY` over a composite column puts the
+/// NULL-field row last. A record with fewer fields sorts first on a common
+/// prefix.
+fn compare_records(
+    a: &crate::datum::RecordValue,
+    b: &crate::datum::RecordValue,
+) -> Result<Ordering, TypeError> {
+    for (x, y) in a.values.iter().zip(b.values.iter()) {
+        let ord = match (x.is_null(), y.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => compare(x, y)?.expect("non-NULL operands compare"),
+        };
+        if ord != Ordering::Equal {
+            return Ok(ord);
+        }
+    }
+    Ok(a.values.len().cmp(&b.values.len()))
+}
+
+/// Enum ordering: the labels' positions in the type's declared label list,
+/// which is what `pg_enum.enumsortorder` holds. Two values of *different* enum
+/// types have no comparison operator, matching PostgreSQL's 42883.
+fn compare_enums(
+    a: &crate::datum::EnumValue,
+    b: &crate::datum::EnumValue,
+) -> Result<Ordering, TypeError> {
+    if a.ty != b.ty {
+        return Err(TypeError::TypeMismatch {
+            message: format!("operator does not exist: {} = {}", a.ty.name, b.ty.name),
+        });
+    }
+    match (a.sort_order(), b.sort_order()) {
+        (Some(x), Some(y)) => Ok(x.cmp(&y)),
+        // A label that is no longer in the type has no sort order; comparing it
+        // would invent an answer, so refuse instead.
+        _ => Err(TypeError::Coded {
+            sqlstate: "22P02",
+            message: format!(
+                "invalid input value for enum {}: \"{}\"",
+                a.ty.name,
+                if a.sort_order().is_none() {
+                    &a.label
+                } else {
+                    &b.label
+                }
+            ),
+        }),
+    }
 }
 
 /// PostgreSQL's `float8` total order: NaN sorts greater than every non-NaN and is
@@ -581,6 +803,67 @@ pub fn cmp_to_bool(op_holds: bool, ord: Option<Ordering>) -> Datum {
 
 #[cfg(test)]
 mod tests {
+    /// `time` and `timetz` have no infinity, so PostgreSQL refuses to shift one
+    /// by an infinite interval (22008) rather than wrapping the clock by the
+    /// sentinel's microseconds — which is what silently produced a wrong
+    /// time-of-day before.
+    #[test]
+    fn shifting_a_time_by_an_infinite_interval_is_22008() {
+        use assert2::assert;
+
+        use super::{Datum, add, sub};
+
+        let time = Datum::Time(crate::datetime::parse_time("11:27:42").expect("time"));
+        let timetz = Datum::Timetz(crate::datetime::TimeTz {
+            time: crate::datetime::parse_time("11:27:42").expect("time"),
+            offset: jiff::tz::Offset::UTC,
+        });
+        let inf = Datum::Interval(crate::datetime::Interval::INFINITY);
+        let neg_inf = Datum::Interval(crate::datetime::Interval::NEG_INFINITY);
+        let cases: [(&Datum, &Datum, bool, &str); 6] = [
+            (&time, &inf, true, "cannot add infinite interval to time"),
+            (
+                &time,
+                &neg_inf,
+                true,
+                "cannot add infinite interval to time",
+            ),
+            (&inf, &time, true, "cannot add infinite interval to time"),
+            (
+                &time,
+                &inf,
+                false,
+                "cannot subtract infinite interval from time",
+            ),
+            (&timetz, &inf, true, "cannot add infinite interval to time"),
+            (
+                &timetz,
+                &neg_inf,
+                false,
+                "cannot subtract infinite interval from time",
+            ),
+        ];
+        for (left, right, adding, message) in cases {
+            let error = if adding {
+                add(left, right).expect_err("refused")
+            } else {
+                sub(left, right).expect_err("refused")
+            };
+            assert!(error.sqlstate() == "22008", "{message}");
+            assert!(error.to_string() == message);
+        }
+        // A finite interval still shifts the clock.
+        let hour = Datum::Interval(crate::datetime::Interval {
+            months: 0,
+            days: 0,
+            micros: 3_600_000_000,
+        });
+        assert!(
+            add(&time, &hour).expect("finite shift")
+                == Datum::Time(crate::datetime::parse_time("12:27:42").expect("time"))
+        );
+    }
+
     /// `ORDER BY`, `min`/`max` and `DISTINCT` over a bytea column all route
     /// through `compare`; without a bytea arm they raise 42804. PostgreSQL's
     /// `byteacmp` is bytewise over the common prefix, then length.
@@ -828,29 +1111,62 @@ mod tests {
     fn concat_renders_each_operand_and_propagates_null() {
         let tz = jiff::tz::TimeZone::UTC;
         assert_eq!(
-            concat(&Datum::Text("ab".into()), &Datum::Text("cd".into()), &tz).expect("ok"),
+            concat(
+                &Datum::Text("ab".into()),
+                &Datum::Text("cd".into()),
+                crate::encoding::OutputStyle::with_zone(&tz)
+            )
+            .expect("ok"),
             Datum::Text("abcd".into())
         );
         // Non-text operands render via their canonical text encoding.
         assert_eq!(
-            concat(&Datum::Text("id=".into()), &Datum::Int4(5), &tz).expect("ok"),
+            concat(
+                &Datum::Text("id=".into()),
+                &Datum::Int4(5),
+                crate::encoding::OutputStyle::with_zone(&tz)
+            )
+            .expect("ok"),
             Datum::Text("id=5".into())
         );
         assert_eq!(
-            concat(&Datum::Int8(9_000_000_000), &Datum::Text("!".into()), &tz).expect("ok"),
+            concat(
+                &Datum::Int8(9_000_000_000),
+                &Datum::Text("!".into()),
+                crate::encoding::OutputStyle::with_zone(&tz)
+            )
+            .expect("ok"),
             Datum::Text("9000000000!".into())
         );
+        // `||` coerces a bool through its *cast* to text (`true`/`false`), not
+        // through its output function (`t`/`f`) — `SELECT true || 'x'` is
+        // `truex` on the oracle.
         assert_eq!(
-            concat(&Datum::Bool(true), &Datum::Text("x".into()), &tz).expect("ok"),
-            Datum::Text("tx".into())
+            concat(
+                &Datum::Bool(true),
+                &Datum::Text("x".into()),
+                crate::encoding::OutputStyle::with_zone(&tz)
+            )
+            .expect("ok"),
+            Datum::Text("truex".into())
         );
         // Either NULL operand yields NULL.
         assert_eq!(
-            concat(&Datum::Null, &Datum::Text("x".into()), &tz).expect("ok"),
+            concat(
+                &Datum::Null,
+                &Datum::Text("x".into()),
+                crate::encoding::OutputStyle::with_zone(&tz)
+            )
+            .expect("ok"),
             Datum::Null
         );
         assert_eq!(
-            concat(&Datum::Text("x".into()), &Datum::Null, &tz).expect("ok"),
+            concat(
+                &Datum::Text("x".into()),
+                &Datum::Null,
+                crate::encoding::OutputStyle::with_zone(&tz)
+            )
+            .expect("ok"),
             Datum::Null
         );
     }
@@ -899,6 +1215,219 @@ mod tests {
             mul(&Datum::Float8(f64::INFINITY), &Datum::Float8(2.0)).expect("ok"),
             Datum::Float8(f64::INFINITY)
         );
+    }
+
+    /// PostgreSQL's result-type ladder for the four arithmetic operators, with
+    /// the values it computes. Each row was checked with `pg_typeof` on
+    /// PostgreSQL 18.4: `int2 ⊕ int2 → int2`, `int2 ⊕ int4 → int4`,
+    /// `float4 ⊕ float4 → float4`, and `float4 ⊕ anything-else → float8`
+    /// (there is no `float4 ⊕ int` operator, so both sides widen to the
+    /// preferred type).
+    #[test]
+    fn int2_and_float4_arithmetic_promotion_matches_postgres() {
+        use assert2::assert;
+        type Case = (Datum, Datum, Datum, Datum, Datum, Datum);
+        // (a, b, a+b, a-b, a*b, a/b)
+        let cases: &[Case] = &[
+            (
+                Datum::Int2(7),
+                Datum::Int2(2),
+                Datum::Int2(9),
+                Datum::Int2(5),
+                Datum::Int2(14),
+                Datum::Int2(3),
+            ),
+            (
+                Datum::Int2(7),
+                Datum::Int4(2),
+                Datum::Int4(9),
+                Datum::Int4(5),
+                Datum::Int4(14),
+                Datum::Int4(3),
+            ),
+            (
+                Datum::Int4(7),
+                Datum::Int2(2),
+                Datum::Int4(9),
+                Datum::Int4(5),
+                Datum::Int4(14),
+                Datum::Int4(3),
+            ),
+            (
+                Datum::Int2(7),
+                Datum::Int8(2),
+                Datum::Int8(9),
+                Datum::Int8(5),
+                Datum::Int8(14),
+                Datum::Int8(3),
+            ),
+            (
+                Datum::Float4(3.0),
+                Datum::Float4(2.0),
+                Datum::Float4(5.0),
+                Datum::Float4(1.0),
+                Datum::Float4(6.0),
+                Datum::Float4(1.5),
+            ),
+            (
+                Datum::Float4(3.0),
+                Datum::Int4(2),
+                Datum::Float8(5.0),
+                Datum::Float8(1.0),
+                Datum::Float8(6.0),
+                Datum::Float8(1.5),
+            ),
+            (
+                Datum::Float4(3.0),
+                Datum::Int2(2),
+                Datum::Float8(5.0),
+                Datum::Float8(1.0),
+                Datum::Float8(6.0),
+                Datum::Float8(1.5),
+            ),
+            (
+                Datum::Float4(3.0),
+                Datum::Float8(2.0),
+                Datum::Float8(5.0),
+                Datum::Float8(1.0),
+                Datum::Float8(6.0),
+                Datum::Float8(1.5),
+            ),
+            (
+                Datum::Int2(7),
+                num("2"),
+                num("9"),
+                num("5"),
+                num("14"),
+                num("3.5000000000000000000"),
+            ),
+        ];
+        for (a, b, sum, difference, product, quotient) in cases {
+            assert!(add(a, b).expect("add") == *sum, "{a:?} + {b:?}");
+            assert!(sub(a, b).expect("sub") == *difference, "{a:?} - {b:?}");
+            assert!(mul(a, b).expect("mul") == *product, "{a:?} * {b:?}");
+            assert!(div(a, b).expect("div") == *quotient, "{a:?} / {b:?}");
+        }
+        // `float4 ⊕ numeric → float8`; the numeric side promotes past its own rung.
+        assert!(add(&Datum::Float4(1.5), &num("2")).expect("f4+num") == Datum::Float8(3.5));
+        // `float4` arithmetic is computed in f32, not f64-and-rounded: 1/3 keeps
+        // exactly the single-precision digits PostgreSQL prints.
+        assert!(
+            crate::encoding::encode_text(
+                &div(&Datum::Float4(1.0), &Datum::Float4(3.0)).expect("f4/f4"),
+                &jiff::tz::TimeZone::UTC,
+            ) == b"0.33333334"
+        );
+        // `mod` follows the same width ladder.
+        assert!(rem(&Datum::Int2(7), &Datum::Int2(2)).expect("i2%i2") == Datum::Int2(1));
+        assert!(rem(&Datum::Int2(7), &Datum::Int4(2)).expect("i2%i4") == Datum::Int4(1));
+        assert!(rem(&Datum::Int2(-7), &Datum::Int2(2)).expect("sign") == Datum::Int2(-1));
+    }
+
+    /// The 22003 / 22012 boundaries, each with PostgreSQL's exact message.
+    #[test]
+    fn int2_and_float4_arithmetic_errors_match_postgres() {
+        use assert2::assert;
+        type BinOp = fn(&Datum, &Datum) -> Result<Datum, TypeError>;
+        let smallint_overflow: &[(Datum, Datum, BinOp)] = &[
+            (Datum::Int2(i16::MAX), Datum::Int2(1), add),
+            (Datum::Int2(i16::MIN), Datum::Int2(1), sub),
+            (Datum::Int2(i16::MIN), Datum::Int2(-1), mul),
+            // `-32768 / -1` is +32768, one past the top of the range.
+            (Datum::Int2(i16::MIN), Datum::Int2(-1), div),
+        ];
+        for (a, b, op) in smallint_overflow {
+            let err = op(a, b).expect_err("smallint overflow");
+            assert!(err.sqlstate() == "22003");
+            assert!(err.to_string() == "smallint out of range", "{a:?} {b:?}");
+        }
+        // A widened operand lifts the ceiling: -32768::int2 * -1::int4 is int4.
+        assert!(
+            mul(&Datum::Int2(i16::MIN), &Datum::Int4(-1)).expect("i2*i4") == Datum::Int4(32_768)
+        );
+        // finite × finite overflowing f32 is 22003; an infinite operand propagates.
+        let err = mul(&Datum::Float4(3.4e38), &Datum::Float4(2.0)).expect_err("f4 overflow");
+        assert!(err.sqlstate() == "22003");
+        assert!(err.to_string() == "value out of range: overflow");
+        assert!(
+            mul(&Datum::Float4(f32::INFINITY), &Datum::Float4(2.0)).expect("inf")
+                == Datum::Float4(f32::INFINITY)
+        );
+        // Zero divisors are 22012 at both float widths and at int2.
+        for (a, b) in [
+            (Datum::Int2(1), Datum::Int2(0)),
+            (Datum::Float4(1.0), Datum::Float4(0.0)),
+            (Datum::Float4(1.0), Datum::Float4(-0.0)),
+        ] {
+            assert!(
+                matches!(div(&a, &b), Err(TypeError::DivisionByZero)),
+                "{a:?}"
+            );
+        }
+        // NULL still short-circuits ahead of both.
+        assert!(div(&Datum::Null, &Datum::Int2(0)).expect("null") == Datum::Null);
+        assert!(add(&Datum::Null, &Datum::Float4(1.0)).expect("null") == Datum::Null);
+    }
+
+    /// Comparison across the widths: exact integer order, NaN largest, and
+    /// `float4 → float8` widening (which is why `1.1::float4 <> 1.1::float8`).
+    #[test]
+    fn int2_and_float4_comparison_matches_postgres() {
+        use assert2::assert;
+        let cases: &[(Datum, Datum, Ordering)] = &[
+            (Datum::Int2(1), Datum::Int2(2), Ordering::Less),
+            (Datum::Int2(1), Datum::Int4(1), Ordering::Equal),
+            (Datum::Int2(1), Datum::Int8(1), Ordering::Equal),
+            (Datum::Int2(-32_768), Datum::Int8(0), Ordering::Less),
+            (Datum::Int2(2), num("2.5"), Ordering::Less),
+            (Datum::Int2(2), Datum::Float4(2.5), Ordering::Less),
+            (Datum::Float4(1.5), Datum::Float4(1.5), Ordering::Equal),
+            (Datum::Float4(-0.0), Datum::Float4(0.0), Ordering::Equal),
+            (
+                Datum::Float4(f32::NAN),
+                Datum::Float4(f32::NAN),
+                Ordering::Equal,
+            ),
+            (
+                Datum::Float4(f32::NAN),
+                Datum::Float4(f32::INFINITY),
+                Ordering::Greater,
+            ),
+            (
+                Datum::Float4(f32::NAN),
+                Datum::Float8(1e308),
+                Ordering::Greater,
+            ),
+            (
+                Datum::Float4(f32::NAN),
+                Datum::Int8(i64::MAX),
+                Ordering::Greater,
+            ),
+            // f32 1.1 is strictly greater than f64 1.1 once widened exactly.
+            (Datum::Float4(1.1), Datum::Float8(1.1), Ordering::Greater),
+            (Datum::Float4(0.5), Datum::Float8(0.5), Ordering::Equal),
+        ];
+        for (a, b, expected) in cases {
+            assert!(
+                compare(a, b).expect("cmp") == Some(*expected),
+                "{a:?} vs {b:?}"
+            );
+            assert!(
+                compare(b, a).expect("cmp") == Some(expected.reverse()),
+                "{b:?} vs {a:?}"
+            );
+        }
+        assert!(compare(&Datum::Int2(1), &Datum::Null).expect("null") == None);
+    }
+
+    /// `date ± int2` resolves through PostgreSQL's implicit `int2 → int4` cast.
+    #[test]
+    fn date_arithmetic_accepts_an_int2_operand() {
+        use assert2::assert;
+        assert!(add(&date("2024-01-01"), &Datum::Int2(31)).expect("d+i2") == date("2024-02-01"));
+        assert!(add(&Datum::Int2(31), &date("2024-01-01")).expect("i2+d") == date("2024-02-01"));
+        assert!(sub(&date("2024-02-01"), &Datum::Int2(31)).expect("d-i2") == date("2024-01-01"));
+        assert!(mul(&ivl(1, 2, 0), &Datum::Int2(3)).expect("iv*i2") == ivl(3, 6, 0));
     }
 
     #[test]
@@ -1172,8 +1701,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn num(s: &str) -> Datum {
-        use std::str::FromStr;
-        Datum::Numeric(BigDecimal::from_str(s).expect("numeric literal"))
+        Datum::Numeric(crate::numeric::parse(s).expect("numeric literal"))
     }
 
     #[test]

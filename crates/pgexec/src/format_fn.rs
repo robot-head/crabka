@@ -28,6 +28,7 @@ use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
 enum FmtFunc {
     /// `to_char(value, template)` — temporal OR numeric value → formatted text.
     ToChar,
+    ToNumber,
     /// `to_timestamp(epoch_seconds)` (1-arg) or `to_timestamp(text, template)`
     /// (2-arg) → `timestamptz`.
     ToTimestamp,
@@ -56,6 +57,7 @@ enum FmtFunc {
 fn format_func(name: &str) -> Option<FmtFunc> {
     Some(match name {
         "to_char" => FmtFunc::ToChar,
+        "to_number" => FmtFunc::ToNumber,
         "to_timestamp" => FmtFunc::ToTimestamp,
         "to_date" => FmtFunc::ToDate,
         "make_date" => FmtFunc::MakeDate,
@@ -95,8 +97,10 @@ pub(crate) fn format_func_result_type(
             if !is_formattable(v) {
                 return Err(undefined_function(&fc.name));
             }
+            // `varchar`/`char` are binary-coercible to `text`, so a format
+            // string held in one resolves through that implicit cast.
             let t = crate::eval::infer_type(&args[1], scope)?;
-            if !matches!(t, ColumnType::Text) {
+            if !t.is_string() {
                 return Err(undefined_function(&fc.name));
             }
             ColumnType::Text
@@ -113,6 +117,13 @@ pub(crate) fn format_func_result_type(
                 require_text_args(fc, args, scope)?;
             }
             ColumnType::Timestamptz
+        }
+        // `to_number(text, text)` reads a number out of `input` using `template`
+        // to say where the digits are; the result is `numeric`.
+        FmtFunc::ToNumber => {
+            require_arity(fc, n == 2)?;
+            require_text_args(fc, args, scope)?;
+            ColumnType::Numeric(None)
         }
         FmtFunc::ToDate => {
             require_arity(fc, n == 2)?;
@@ -155,8 +166,10 @@ fn is_formattable(t: ColumnType) -> bool {
             | ColumnType::Timestamp
             | ColumnType::Timestamptz
             | ColumnType::Interval
+            | ColumnType::Int2
             | ColumnType::Int4
             | ColumnType::Int8
+            | ColumnType::Float4
             | ColumnType::Float8
             | ColumnType::Numeric(_)
     )
@@ -166,14 +179,20 @@ fn is_formattable(t: ColumnType) -> bool {
 fn is_numeric_like(t: ColumnType) -> bool {
     matches!(
         t,
-        ColumnType::Int4 | ColumnType::Int8 | ColumnType::Float8 | ColumnType::Numeric(_)
+        ColumnType::Int2
+            | ColumnType::Int4
+            | ColumnType::Int8
+            | ColumnType::Float4
+            | ColumnType::Float8
+            | ColumnType::Numeric(_)
     )
 }
 
-/// Both args of a (text, text) call must be text (plan-time 42883 otherwise).
+/// Both args of a (text, text) call must be a string type (plan-time 42883
+/// otherwise) — `varchar`/`char` included, as they coerce to `text`.
 fn require_text_args(fc: &FuncCall, args: &[Expr], scope: &Scope) -> Result<(), ExecError> {
     for a in args {
-        if !matches!(crate::eval::infer_type(a, scope)?, ColumnType::Text) {
+        if !crate::eval::infer_type(a, scope)?.is_string() {
             return Err(undefined_function(&fc.name));
         }
     }
@@ -219,6 +238,12 @@ pub(crate) fn eval_format(
                 let template = text_value(&vals[1], &fc.name)?;
                 to_timestamp_template(template, input, ctx)
             }
+        }
+        FmtFunc::ToNumber => {
+            require_arity(fc, vals.len() == 2)?;
+            let input = text_value(&vals[0], &fc.name)?;
+            let template = text_value(&vals[1], &fc.name)?;
+            to_number(input, template, &fc.name)
         }
         FmtFunc::ToDate => {
             require_arity(fc, vals.len() == 2)?;
@@ -329,7 +354,81 @@ pub(crate) fn eval_format(
 /// `to_char(value, template)`: dispatch on the value type. Temporal values render
 /// through `format_datetime`/`format_interval`; numeric/int/float through
 /// `format_numeric`. A non-formattable type is 42883.
+/// `to_char` of a non-finite date/time or interval is NULL in PostgreSQL — not
+/// the empty string and not an error — because there is no calendar field to
+/// render. Every template behaves the same way, so the check is on the value.
+fn non_finite_to_char(value: &Datum) -> bool {
+    match value {
+        Datum::Date(d) => datetime::date_is_infinite(*d),
+        Datum::Timestamp(ts) => datetime::timestamp_is_infinite(*ts),
+        Datum::Timestamptz(ts) => datetime::timestamptz_is_infinite(*ts),
+        Datum::Interval(iv) => iv.infinite_sign() != 0,
+        _ => false,
+    }
+}
+
+/// Divergence: PostgreSQL consumes the input POSITIONALLY against the template,
+/// so leading whitespace eats digit positions — `to_number('  123', '999')` is 12
+/// there and 123 here. That is why the template is accepted and not read: under
+/// the C locale the decimal point is `.` and the group separator `,` whatever
+/// the template spells them as (`D`/`G` or the literals), so scanning the input
+/// alone reproduces PostgreSQL for every template the corpus uses. Everything
+/// else in the numeric template family agrees.
+/// `to_number(input, template)` — read a `numeric` out of `input`.
+///
+/// PostgreSQL uses the template to say WHERE the digits are rather than to
+/// validate the input strictly: the decoration a `to_char` template would have
+/// emitted (group separators, currency, sign markers, literal text) is skipped,
+/// and what is left is read as a number. So `to_number('-34,338,492',
+/// '99G999G999')` is -34338492 and `to_number('0.01', 'FM9.99')` is 0.01.
+///
+/// The decimal separator is taken from the template: `D` or a literal `.` marks
+/// it, and `G` or a literal `,` marks a group separator that is dropped.
+fn to_number(input: &str, _template: &str, name: &str) -> Result<Datum, ExecError> {
+    let mut digits = String::with_capacity(input.len());
+    let mut seen_decimal = false;
+    let mut trailing_negative = false;
+    for ch in input.chars() {
+        match ch {
+            '0'..='9' => digits.push(ch),
+            // A leading sign belongs to the number. A sign AFTER the digits is the
+            // trailing-sign form the `S`/`MI`/`PL` template markers accept, so it
+            // negates rather than being read as part of the value.
+            '-' if digits.is_empty() => digits.push('-'),
+            '+' if digits.is_empty() => {}
+            '-' => trailing_negative = true,
+            // `D` and `.` both mark the decimal point, which under the C locale is
+            // `.` in the input either way; `G` and `,` mark a group separator,
+            // which carries no value. Only the first `.` can be the decimal point.
+            '.' if !seen_decimal => {
+                seen_decimal = true;
+                digits.push('.');
+            }
+            // Anything else is decoration the template accounted for.
+            _ => {}
+        }
+    }
+    if trailing_negative && !digits.starts_with('-') {
+        digits.insert(0, '-');
+    }
+    if digits.is_empty() || digits == "-" || digits == "." || digits == "-." {
+        return Err(ExecError::FunctionError {
+            sqlstate: "22P02",
+            message: format!("invalid input syntax for type numeric: \"{input}\""),
+        });
+    }
+    crabka_pgtypes::numeric::parse(&digits)
+        .map(Datum::Numeric)
+        .ok_or_else(|| ExecError::FunctionError {
+            sqlstate: "22P02",
+            message: format!("invalid input syntax for type numeric: \"{input}\" ({name})"),
+        })
+}
+
 fn to_char(value: &Datum, template: &str, ctx: &EvalCtx, name: &str) -> Result<Datum, ExecError> {
+    if non_finite_to_char(value) {
+        return Ok(Datum::Null);
+    }
     let text = match value {
         Datum::Date(d) => {
             let fields = datetime::DateTimeFields::from_civil(datetime::date_to_midnight(*d), None);
@@ -353,14 +452,24 @@ fn to_char(value: &Datum, template: &str, ctx: &EvalCtx, name: &str) -> Result<D
             datetime::format_datetime(template, &fields).map_err(map_type)?
         }
         Datum::Interval(iv) => datetime::format_interval(*iv, template).map_err(map_type)?,
+        // PostgreSQL has no `to_char(smallint, text)`; the call resolves through
+        // the implicit `int2 → int4` cast to the int4 overload.
+        Datum::Int2(n) => numeric::format_numeric(template, &numeric::from_i64(i64::from(*n)))
+            .map_err(map_type)?,
         Datum::Int4(n) => numeric::format_numeric(template, &numeric::from_i64(i64::from(*n)))
             .map_err(map_type)?,
         Datum::Int8(n) => {
             numeric::format_numeric(template, &numeric::from_i64(*n)).map_err(map_type)?
         }
         Datum::Numeric(d) => numeric::format_numeric(template, d).map_err(map_type)?,
+        // `float4_to_char` works at the type's own `FLT_DIG` precision, which is
+        // what `from_f32` reproduces.
+        Datum::Float4(f) => {
+            let bd = numeric::from_f32(*f);
+            numeric::format_numeric(template, &bd).map_err(map_type)?
+        }
         Datum::Float8(f) => {
-            let bd = numeric::from_f64(*f).map_err(map_type)?;
+            let bd = numeric::from_f64(*f);
             numeric::format_numeric(template, &bd).map_err(map_type)?
         }
         _ => return Err(undefined_function(name)),
@@ -463,7 +572,7 @@ fn require_arity(fc: &FuncCall, ok: bool) -> Result<(), ExecError> {
 /// with the wrong number of args still reports 42883).
 fn check_arity(f: FmtFunc, fc: &FuncCall, n: usize) -> Result<(), ExecError> {
     let ok = match f {
-        FmtFunc::ToChar | FmtFunc::ToDate => n == 2,
+        FmtFunc::ToChar | FmtFunc::ToDate | FmtFunc::ToNumber => n == 2,
         FmtFunc::ToTimestamp => n == 1 || n == 2,
         FmtFunc::MakeDate | FmtFunc::MakeTime => n == 3,
         FmtFunc::MakeTimestamp => n == 6,
@@ -498,6 +607,7 @@ fn text_value<'a>(d: &'a Datum, name: &str) -> Result<&'a str, ExecError> {
 /// An integer argument at runtime, narrowed to i32 (the `make_*` field width).
 fn int_arg(d: &Datum, name: &str) -> Result<i32, ExecError> {
     match d {
+        Datum::Int2(n) => Ok(i32::from(*n)),
         Datum::Int4(n) => Ok(*n),
         Datum::Int8(n) => i32::try_from(*n).map_err(|_| {
             ExecError::Type(TypeError::DatetimeFieldOverflow {
@@ -511,8 +621,10 @@ fn int_arg(d: &Datum, name: &str) -> Result<i32, ExecError> {
 /// A floating argument at runtime, promoted to f64 (int/float/numeric).
 fn f64_arg(d: &Datum, name: &str) -> Result<f64, ExecError> {
     Ok(match d {
+        Datum::Int2(n) => f64::from(*n),
         Datum::Int4(n) => f64::from(*n),
         Datum::Int8(n) => *n as f64,
+        Datum::Float4(x) => f64::from(*x),
         Datum::Float8(x) => *x,
         Datum::Numeric(d) => numeric::to_f64(d),
         _ => return Err(type_error(name, d)),
@@ -544,6 +656,7 @@ fn zone_arg(d: &Datum, name: &str) -> Result<jiff::tz::TimeZone, ExecError> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     use crabka_pgtypes::{ColumnType, Datum};
 
     use crate::{clock::EvalCtx, scope::Scope};
@@ -576,6 +689,43 @@ mod tests {
         .expect_err("err")
         .into_pg()
         .code
+    }
+
+    /// `to_number` reads the digits out of a decorated string, dropping the
+    /// decoration a `to_char` template would have emitted. Every expectation is
+    /// PostgreSQL 18.4's.
+    #[test]
+    fn to_number_reads_digits_through_the_template_decoration() {
+        for (expr, expected) in [
+            ("to_number('-34,338,492', '99G999G999')", "-34338492"),
+            (
+                "to_number('-34,338,492.654,878', '99G999G999D999G999')",
+                "-34338492.654878",
+            ),
+            ("to_number('0.01', 'FM9.99')", "0.01"),
+            ("to_number('.0', 'FM9.99')", "0.0"),
+            ("to_number('123', '999')", "123"),
+            ("to_number('$1,234.56', 'L9G999D99')", "1234.56"),
+            // A sign AFTER the digits negates, which is the `S`/`MI` form.
+            ("to_number('5.01-', 'FM9.99S')", "-5.01"),
+            ("to_number('12,454.8-', '99G999D9S')", "-12454.8"),
+            ("to_number('-1234.56', 'S9999.99')", "-1234.56"),
+        ] {
+            let got = ev(expr);
+            let want = crabka_pgtypes::numeric::parse(expected).expect("expected parses");
+            assert!(got == Datum::Numeric(want), "{expr}: {got:?}");
+        }
+        // Nothing numeric in the input at all is 22P02, not a zero.
+        let ctx = EvalCtx::test_default();
+        let error = crate::eval::eval(
+            &crabka_pgparser::parser::parse_expr_for_test("to_number('abc', '999')")
+                .expect("parse"),
+            &Scope::empty(),
+            &[],
+            &ctx,
+        )
+        .expect_err("no digits at all");
+        assert!(error.into_pg().code == "22P02");
     }
 
     #[test]

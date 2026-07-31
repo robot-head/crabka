@@ -1,10 +1,18 @@
-//! SP33: nested-loop joins over `Relation`s. A `Relation` is a `Scope` (ordered
-//! schema) plus its materialized rows; base tables, joins, and derived subqueries
-//! all produce one. This module is pure relational algebra over already-fetched
-//! rows — no kv/catalog access — so it is unit-testable with hand-built relations.
+//! SP33: joins over `Relation`s. A `Relation` is a `Scope` (ordered schema) plus
+//! its materialized rows; base tables, joins, and derived subqueries all produce
+//! one. This module is pure relational algebra over already-fetched rows — no
+//! kv/catalog access — so it is unit-testable with hand-built relations.
 //! (See the SP33 design doc for why this single-range pure fold warrants no model.)
+//!
+//! An equality-constrained join (`USING`/`NATURAL`, or an `ON` whose top-level
+//! conjuncts include `left.col = right.col`) probes a hash index over the right
+//! relation instead of walking it per left row, so a 10k-row self-join costs
+//! 10k predicate evaluations rather than 100M. Everything else — and any key
+//! whose values are not exactly hash-comparable — still folds as a nested loop.
 
-use crabka_pgparser::ast::{Expr, JoinConstraint, JoinKind};
+use std::collections::HashMap;
+
+use crabka_pgparser::ast::{BinaryOp, Expr, JoinConstraint, JoinKind};
 use crabka_pgtypes::Datum;
 
 use crate::{
@@ -97,12 +105,30 @@ pub(crate) fn join_relations(
         }
     };
 
+    // The equality columns the ON predicate (or USING/NATURAL) requires, used to
+    // skip right rows that cannot match. `matches` still decides every candidate,
+    // so extra conjuncts and the NULL rules are unaffected.
+    let equi_keys = if pairs.is_empty() {
+        on_pred.map_or_else(Vec::new, |e| equi_key_columns(e, &combined_scope, lw))
+    } else {
+        pairs.clone()
+    };
+    let index = EquiIndex::build(&left, &right, &equi_keys);
+    // Every right row, for the rows the index cannot narrow.
+    let all_right: Vec<usize> = if index.is_some() {
+        Vec::new()
+    } else {
+        (0..right.rows.len()).collect()
+    };
+    let mut key_buf: Vec<Datum> = Vec::with_capacity(equi_keys.len());
+
     let mut rows = Vec::new();
     let mut result_bytes = 0usize;
     match kind {
         JoinKind::Inner | JoinKind::Cross => {
             for l in &left.rows {
-                for r in &right.rows {
+                for &ri in candidate_rows(index.as_ref(), &all_right, l, &mut key_buf) {
+                    let r = &right.rows[ri];
                     if matches(l, r)? {
                         let mut row = l.clone();
                         row.extend(r.iter().cloned());
@@ -118,7 +144,8 @@ pub(crate) fn join_relations(
             let mut right_matched = vec![false; right.rows.len()];
             for l in &left.rows {
                 let mut any = false;
-                for (ri, r) in right.rows.iter().enumerate() {
+                for &ri in candidate_rows(index.as_ref(), &all_right, l, &mut key_buf) {
+                    let r = &right.rows[ri];
                     if matches(l, r)? {
                         any = true;
                         right_matched[ri] = true;
@@ -161,6 +188,206 @@ pub(crate) fn join_relations(
             rows,
         ))
     }
+}
+
+/// The right rows a left row could possibly join with: the index's bucket for
+/// its key, or — with no usable index — every right row.
+fn candidate_rows<'a>(
+    index: Option<&'a EquiIndex>,
+    all_right: &'a [usize],
+    lrow: &[Datum],
+    key_buf: &mut Vec<Datum>,
+) -> &'a [usize] {
+    match index {
+        Some(index) => index.candidates(lrow, key_buf),
+        None => all_right,
+    }
+}
+
+/// Right-relation row indices grouped by their equality key, ascending within
+/// each bucket so a probe visits candidates in the order the nested loop would.
+///
+/// `Datum`'s hash equality agrees with `ops::compare` only for values of the
+/// SAME variant — `Int2(1)` and `Int4(1)` compare Equal but hash apart, and so
+/// do `Int4(1)` and `Numeric(1)` — so the index exists only when every non-NULL
+/// value of a key column, on BOTH sides, carries one variant. Anything else
+/// leaves the join folding as a nested loop, which is always correct.
+struct EquiIndex {
+    /// Key columns, as indices into a left row.
+    left_key: Vec<usize>,
+    buckets: HashMap<Vec<Datum>, Vec<usize>>,
+}
+
+/// What a key column's values look like on one side of the join.
+enum KeyVariant<'a> {
+    /// Every non-NULL value carries the variant of this sample.
+    Uniform(&'a Datum),
+    /// No non-NULL value at all — nothing can match through this column, which
+    /// the index represents faithfully (a NULL key is never bucketed).
+    AllNull,
+    /// Values of differing variants, whose hash equality would not agree with
+    /// `ops::compare`.
+    Mixed,
+}
+
+impl EquiIndex {
+    /// Below this many left×right pairs the nested loop is already cheap enough
+    /// that building buckets would cost more than probing them saves.
+    const MIN_PAIRS: usize = 4096;
+
+    /// `keys` are `(left_column, right_column)` pairs the predicate requires to
+    /// compare Equal. Returns `None` when no index applies.
+    fn build(left: &Relation, right: &Relation, keys: &[(usize, usize)]) -> Option<Self> {
+        if keys.is_empty() || left.rows.len().saturating_mul(right.rows.len()) < Self::MIN_PAIRS {
+            return None;
+        }
+        for (li, ri) in keys {
+            match (key_variant(&left.rows, *li), key_variant(&right.rows, *ri)) {
+                (KeyVariant::Mixed, _) | (_, KeyVariant::Mixed) => return None,
+                (KeyVariant::Uniform(l), KeyVariant::Uniform(r))
+                    if std::mem::discriminant(l) != std::mem::discriminant(r)
+                        || !hashes_like_it_compares(l) =>
+                {
+                    return None;
+                }
+                (KeyVariant::Uniform(_), KeyVariant::Uniform(_)) => {}
+                // With no non-NULL value on one side, no probe can hit a bucket
+                // whatever the other side holds — which is the right answer.
+                _ => {}
+            }
+        }
+        let mut buckets: HashMap<Vec<Datum>, Vec<usize>> = HashMap::new();
+        for (ri, row) in right.rows.iter().enumerate() {
+            // A NULL in the key never compares Equal, so the row is not indexed
+            // and simply falls out as unmatched.
+            if keys.iter().any(|(_, rc)| row[*rc].is_null()) {
+                continue;
+            }
+            let key: Vec<Datum> = keys.iter().map(|(_, rc)| row[*rc].clone()).collect();
+            buckets.entry(key).or_default().push(ri);
+        }
+        Some(Self {
+            left_key: keys.iter().map(|(lc, _)| *lc).collect(),
+            buckets,
+        })
+    }
+
+    fn candidates<'a>(&'a self, lrow: &[Datum], key_buf: &mut Vec<Datum>) -> &'a [usize] {
+        key_buf.clear();
+        for &lc in &self.left_key {
+            if lrow[lc].is_null() {
+                return &[];
+            }
+            key_buf.push(lrow[lc].clone());
+        }
+        match self.buckets.get(key_buf.as_slice()) {
+            Some(rows) => rows,
+            None => &[],
+        }
+    }
+}
+
+fn key_variant(rows: &[Vec<Datum>], column: usize) -> KeyVariant<'_> {
+    let mut seen: Option<&Datum> = None;
+    for row in rows {
+        let value = &row[column];
+        if value.is_null() {
+            continue;
+        }
+        match seen {
+            None => seen = Some(value),
+            Some(sample) if std::mem::discriminant(sample) == std::mem::discriminant(value) => {}
+            Some(_) => return KeyVariant::Mixed,
+        }
+    }
+    seen.map_or(KeyVariant::AllNull, KeyVariant::Uniform)
+}
+
+/// Whether `Datum`'s `Eq`/`Hash` decide this variant exactly as `ops::compare`
+/// does, which is what lets a hash bucket stand in for the comparison.
+///
+/// The scalar types agree by construction (`Eq` and `Hash` both canonicalize
+/// NaN, signed zero, and numeric scale the way `compare` orders them). The
+/// composite types do not: `array_cmp` ignores the element type, so `int4[]`
+/// `{1}` and `int8[]` `{1}` compare Equal while `Eq` calls them different — and
+/// `interval` compares by a canonical estimate. Those keys keep the nested loop.
+fn hashes_like_it_compares(sample: &Datum) -> bool {
+    matches!(
+        sample,
+        Datum::Bool(_)
+            | Datum::Int2(_)
+            | Datum::Int4(_)
+            | Datum::Int8(_)
+            | Datum::Float4(_)
+            | Datum::Float8(_)
+            | Datum::Numeric(_)
+            | Datum::Text(_)
+            | Datum::Bytea(_)
+            | Datum::Date(_)
+            | Datum::Time(_)
+            | Datum::Timestamp(_)
+            | Datum::Timestamptz(_)
+    )
+}
+
+/// The `(left_column, right_column)` pairs an `ON` predicate requires to compare
+/// Equal: its top-level `AND` conjuncts of the form `l.col = r.col`, with one
+/// side resolving into the left relation and the other into the right.
+///
+/// These are necessary conditions for the predicate to hold, which is what makes
+/// them safe as a pre-filter — the full predicate still decides every candidate.
+/// Conjuncts of any other shape (including `OR`, which is not a necessary
+/// condition) contribute no key.
+fn equi_key_columns(pred: &Expr, combined: &Scope, lw: usize) -> Vec<(usize, usize)> {
+    let mut keys = Vec::new();
+    collect_equi_key_columns(pred, combined, lw, &mut keys);
+    keys
+}
+
+fn collect_equi_key_columns(
+    pred: &Expr,
+    combined: &Scope,
+    lw: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
+    match pred {
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            collect_equi_key_columns(left, combined, lw, out);
+            collect_equi_key_columns(right, combined, lw, out);
+        }
+        Expr::Binary {
+            op: BinaryOp::Eq,
+            left,
+            right,
+        } => {
+            let (Some(a), Some(b)) = (
+                combined_column_index(left, combined),
+                combined_column_index(right, combined),
+            ) else {
+                return;
+            };
+            match (a < lw, b < lw) {
+                (true, false) => out.push((a, b - lw)),
+                (false, true) => out.push((b, a - lw)),
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The combined-scope position of a bare column reference, or `None` for any
+/// other expression (including one that does not resolve, or resolves
+/// ambiguously — `matches` reports that error when it evaluates the predicate).
+fn combined_column_index(expr: &Expr, combined: &Scope) -> Option<usize> {
+    let Expr::Column { table, name } = expr else {
+        return None;
+    };
+    combined.resolve(table.as_deref(), name).ok()
 }
 
 fn push_bounded_join_row(
@@ -455,5 +682,131 @@ mod tests {
                 .contains(&vec![Datum::Int4(2), Datum::Int4(20), Datum::Int4(200)])
         );
         assert_eq!(j.rows.len(), 2);
+    }
+
+    /// A relation whose single key column holds `keys`, with `None` for NULL.
+    fn keyed(qualifier: &str, keys: &[Option<i32>]) -> Relation {
+        Relation {
+            scope: Scope {
+                columns: vec![crate::scope::ColumnBinding {
+                    qualifier: Some(qualifier.into()),
+                    name: "k".into(),
+                    ty: ColumnType::Int4,
+                }],
+            },
+            rows: keys
+                .iter()
+                .map(|k| vec![k.map_or(Datum::Null, Datum::Int4)])
+                .collect(),
+        }
+    }
+
+    /// An independent double loop over the same inputs: the answer the indexed
+    /// probe has to reproduce exactly, rows and order alike.
+    fn reference_join(left: &Relation, right: &Relation, kind: JoinKind) -> Vec<Vec<Datum>> {
+        let matches = |l: &Datum, r: &Datum| !l.is_null() && !r.is_null() && l == r;
+        let mut rows: Vec<Vec<Datum>> = Vec::new();
+        let mut right_matched = vec![false; right.rows.len()];
+        for l in &left.rows {
+            let mut any = false;
+            for (ri, r) in right.rows.iter().enumerate() {
+                if matches(&l[0], &r[0]) {
+                    any = true;
+                    right_matched[ri] = true;
+                    rows.push(vec![l[0].clone(), r[0].clone()]);
+                }
+            }
+            if !any && matches!(kind, JoinKind::Left | JoinKind::Full) {
+                rows.push(vec![l[0].clone(), Datum::Null]);
+            }
+        }
+        if matches!(kind, JoinKind::Right | JoinKind::Full) {
+            for (ri, r) in right.rows.iter().enumerate() {
+                if !right_matched[ri] {
+                    rows.push(vec![Datum::Null, r[0].clone()]);
+                }
+            }
+        }
+        rows
+    }
+
+    /// The indexed probe is an optimization, not a semantic change: over a
+    /// relation pair big enough to take it (duplicate keys, NULLs, and
+    /// unmatched rows on both sides) every join kind returns exactly what the
+    /// double loop returns, in the same order.
+    #[test]
+    fn indexed_equi_join_agrees_with_the_nested_loop() {
+        let left_keys: Vec<Option<i32>> =
+            (0..120i32).map(|i| (i % 7 != 0).then_some(i % 5)).collect();
+        let right_keys: Vec<Option<i32>> = (0..120i32)
+            .map(|i| (i % 11 != 0).then_some(i % 6))
+            .collect();
+        // Big enough that `EquiIndex::build` engages rather than declining.
+        assert2::assert!(left_keys.len() * right_keys.len() >= EquiIndex::MIN_PAIRS);
+
+        for kind in [
+            JoinKind::Inner,
+            JoinKind::Left,
+            JoinKind::Right,
+            JoinKind::Full,
+        ] {
+            let left = keyed("a", &left_keys);
+            let right = keyed("b", &right_keys);
+            let expected = reference_join(&left, &right, kind);
+            let actual = join_relations(left, right, kind, &on_eq("a", "k", "b", "k"), &tctx())
+                .expect("join")
+                .rows;
+            assert2::assert!(actual == expected, "{kind:?}");
+        }
+    }
+
+    /// Key columns of different `Datum` variants must NOT be indexed: `Int4(1)`
+    /// and `Int8(1)` compare Equal but hash apart, so bucketing them would lose
+    /// matches. The nested loop still finds them.
+    #[test]
+    fn mixed_key_variants_still_join_through_the_nested_loop() {
+        let left = keyed("a", &(0..80i32).map(Some).collect::<Vec<_>>());
+        let right = Relation {
+            scope: Scope {
+                columns: vec![crate::scope::ColumnBinding {
+                    qualifier: Some("b".into()),
+                    name: "k".into(),
+                    ty: ColumnType::Int8,
+                }],
+            },
+            rows: (0..80i64).map(|i| vec![Datum::Int8(i)]).collect(),
+        };
+        assert2::assert!(EquiIndex::build(&left, &right, &[(0, 0)]).is_none());
+
+        let joined = join_relations(
+            left,
+            right,
+            JoinKind::Inner,
+            &on_eq("a", "k", "b", "k"),
+            &tctx(),
+        )
+        .expect("join")
+        .rows;
+        assert2::assert!(joined.len() == 80);
+    }
+
+    /// The point of the index: an equi-join on a unique key visits ONE right row
+    /// per left row instead of the whole right relation. Without it a 10k-row
+    /// self-join — `pg_regress`'s `join` corpus does exactly this — evaluates the
+    /// ON predicate 100 million times and never answers.
+    #[test]
+    fn indexed_equi_join_visits_one_candidate_per_left_row() {
+        let keys: Vec<Option<i32>> = (0..10_000i32).map(Some).collect();
+        let left = keyed("a", &keys);
+        let right = keyed("b", &keys);
+        let index = EquiIndex::build(&left, &right, &[(0, 0)]).expect("unique int4 key is indexed");
+
+        let mut key_buf = Vec::new();
+        let visited: usize = left
+            .rows
+            .iter()
+            .map(|row| index.candidates(row, &mut key_buf).len())
+            .sum();
+        assert2::assert!(visited == left.rows.len());
     }
 }

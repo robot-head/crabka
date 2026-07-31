@@ -36,6 +36,34 @@ enum ArrayFunc {
     ToString,
     /// `string_to_array(text, delimiter [, null_string])`.
     StringTo,
+    /// `array_ndims(anyarray)` — NULL for the empty array.
+    Ndims,
+    /// `array_dims(anyarray)` — the `[l:u][l:u]` text, NULL for the empty array.
+    Dims,
+    /// `array_lower(anyarray, int)`.
+    Lower,
+    /// `array_upper(anyarray, int)`.
+    Upper,
+    /// `array_fill(anyelement, int[] [, int[]])`.
+    Fill,
+    /// `array_position(anyarray, anyelement [, int])`.
+    Position,
+    /// `array_positions(anyarray, anyelement)`.
+    Positions,
+    /// `array_remove(anyarray, anyelement)`.
+    Remove,
+    /// `array_replace(anyarray, anyelement, anyelement)`.
+    Replace,
+    /// `trim_array(anyarray, int)`.
+    Trim,
+    /// `array_sample(anyarray, int)`.
+    Sample,
+    /// `array_shuffle(anyarray)`.
+    Shuffle,
+    /// `array_sort(anyarray [, descending [, nulls_first]])` (`PostgreSQL` 18).
+    Sort,
+    /// `array_reverse(anyarray)` (`PostgreSQL` 18).
+    Reverse,
 }
 
 /// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
@@ -49,6 +77,20 @@ fn array_func(name: &str) -> Option<ArrayFunc> {
         "array_cat" => ArrayFunc::Cat,
         "array_to_string" => ArrayFunc::ToString,
         "string_to_array" => ArrayFunc::StringTo,
+        "array_ndims" => ArrayFunc::Ndims,
+        "array_dims" => ArrayFunc::Dims,
+        "array_lower" => ArrayFunc::Lower,
+        "array_upper" => ArrayFunc::Upper,
+        "array_fill" => ArrayFunc::Fill,
+        "array_position" => ArrayFunc::Position,
+        "array_positions" => ArrayFunc::Positions,
+        "array_remove" => ArrayFunc::Remove,
+        "array_replace" => ArrayFunc::Replace,
+        "trim_array" => ArrayFunc::Trim,
+        "array_sample" => ArrayFunc::Sample,
+        "array_shuffle" => ArrayFunc::Shuffle,
+        "array_sort" => ArrayFunc::Sort,
+        "array_reverse" => ArrayFunc::Reverse,
         _ => return None,
     })
 }
@@ -105,6 +147,53 @@ fn param_types(f: ArrayFunc, given: &[ArgType]) -> Result<Vec<Option<ColumnType>
             let elem = pair_element(at(0), at(1));
             let array = Some(ColumnType::Array(elem));
             vec![array, array]
+        }
+        ArrayFunc::Ndims | ArrayFunc::Dims => {
+            require_resolvable(at(0))?;
+            vec![None]
+        }
+        ArrayFunc::Lower | ArrayFunc::Upper => {
+            require_resolvable(at(0))?;
+            vec![None, Some(ColumnType::Int4)]
+        }
+        // `array_fill` types its result from its *element* argument, so the
+        // element is what an unknown literal there cannot be resolved from.
+        ArrayFunc::Fill => {
+            require_resolvable(at(0))?;
+            let ints = Some(ColumnType::Array(ElemType::Int4));
+            vec![None, ints, ints]
+        }
+        ArrayFunc::Position => {
+            let elem = pair_element(at(0), at(1));
+            vec![
+                Some(ColumnType::Array(elem)),
+                Some(elem.column_type()),
+                Some(ColumnType::Int4),
+            ]
+        }
+        ArrayFunc::Positions | ArrayFunc::Remove => {
+            let elem = pair_element(at(0), at(1));
+            vec![Some(ColumnType::Array(elem)), Some(elem.column_type())]
+        }
+        ArrayFunc::Replace => {
+            let elem = pair_element(at(0), at(1));
+            vec![
+                Some(ColumnType::Array(elem)),
+                Some(elem.column_type()),
+                Some(elem.column_type()),
+            ]
+        }
+        ArrayFunc::Trim | ArrayFunc::Sample => {
+            require_resolvable(at(0))?;
+            vec![None, Some(ColumnType::Int4)]
+        }
+        ArrayFunc::Shuffle | ArrayFunc::Reverse => {
+            require_resolvable(at(0))?;
+            vec![None]
+        }
+        ArrayFunc::Sort => {
+            require_resolvable(at(0))?;
+            vec![None, Some(ColumnType::Bool), Some(ColumnType::Bool)]
         }
     })
 }
@@ -222,6 +311,57 @@ pub(crate) fn array_func_result_type(
             require_arity(fc, n == 2 || n == 3)?;
             ColumnType::Array(ElemType::Text)
         }
+        ArrayFunc::Ndims => {
+            require_arity(fc, n == 1)?;
+            require_array_type(fc, types[0])?;
+            ColumnType::Int4
+        }
+        ArrayFunc::Dims => {
+            require_arity(fc, n == 1)?;
+            require_array_type(fc, types[0])?;
+            ColumnType::Text
+        }
+        ArrayFunc::Lower | ArrayFunc::Upper => {
+            require_arity(fc, n == 2)?;
+            require_array_type(fc, types[0])?;
+            ColumnType::Int4
+        }
+        ArrayFunc::Fill => {
+            require_arity(fc, n == 2 || n == 3)?;
+            ColumnType::Array(
+                ElemType::from_column_type(types[0]).ok_or_else(|| undefined_function(&fc.name))?,
+            )
+        }
+        ArrayFunc::Position => {
+            require_arity(fc, n == 2 || n == 3)?;
+            require_array_type(fc, types[0])?;
+            ColumnType::Int4
+        }
+        ArrayFunc::Positions => {
+            require_arity(fc, n == 2)?;
+            require_array_type(fc, types[0])?;
+            ColumnType::Array(ElemType::Int4)
+        }
+        ArrayFunc::Remove => {
+            require_arity(fc, n == 2)?;
+            ColumnType::Array(require_array_type(fc, types[0])?)
+        }
+        ArrayFunc::Replace => {
+            require_arity(fc, n == 3)?;
+            ColumnType::Array(require_array_type(fc, types[0])?)
+        }
+        ArrayFunc::Trim | ArrayFunc::Sample => {
+            require_arity(fc, n == 2)?;
+            ColumnType::Array(require_array_type(fc, types[0])?)
+        }
+        ArrayFunc::Shuffle | ArrayFunc::Reverse => {
+            require_arity(fc, n == 1)?;
+            ColumnType::Array(require_array_type(fc, types[0])?)
+        }
+        ArrayFunc::Sort => {
+            require_arity(fc, (1..=3).contains(&n))?;
+            ColumnType::Array(require_array_type(fc, types[0])?)
+        }
     })
 }
 
@@ -262,11 +402,7 @@ pub(crate) fn eval_array(
             }
             let array = array_value(&vals[0], &fc.name)?;
             let dim = int_arg(&vals[1], &fc.name)?;
-            // Only one dimension exists, and an empty array has none at all.
-            if dim != 1 || array.elems.is_empty() {
-                return Ok(Datum::Null);
-            }
-            Ok(Datum::Int4(element_count(array)?))
+            Ok(dimension(array, dim).map_or(Datum::Null, |d| Datum::Int4(d.len)))
         }
         ArrayFunc::Cardinality => {
             require_arity(fc, n == 1)?;
@@ -317,6 +453,93 @@ pub(crate) fn eval_array(
                 Some(d) => Some(text_arg(d, &fc.name)?),
             };
             Ok(string_to_array(input, sep, null_text))
+        }
+        ArrayFunc::Ndims => {
+            require_arity(fc, n == 1)?;
+            if vals[0].is_null() {
+                return Ok(Datum::Null);
+            }
+            let array = array_value(&vals[0], &fc.name)?;
+            Ok(match i32::try_from(array.ndims()) {
+                Ok(0) => Datum::Null,
+                Ok(ndims) => Datum::Int4(ndims),
+                Err(_) => return Err(ExecError::Type(TypeError::Overflow)),
+            })
+        }
+        ArrayFunc::Dims => {
+            require_arity(fc, n == 1)?;
+            if vals[0].is_null() {
+                return Ok(Datum::Null);
+            }
+            let array = array_value(&vals[0], &fc.name)?;
+            if array.dims.is_empty() {
+                return Ok(Datum::Null);
+            }
+            let mut text = String::new();
+            for dim in &array.dims {
+                text.push('[');
+                text.push_str(&dim.lower.to_string());
+                text.push(':');
+                text.push_str(&dim.upper().to_string());
+                text.push(']');
+            }
+            Ok(Datum::Text(text))
+        }
+        ArrayFunc::Lower | ArrayFunc::Upper => {
+            require_arity(fc, n == 2)?;
+            if vals[0].is_null() || vals[1].is_null() {
+                return Ok(Datum::Null);
+            }
+            let array = array_value(&vals[0], &fc.name)?;
+            let dim = int_arg(&vals[1], &fc.name)?;
+            Ok(dimension(array, dim).map_or(Datum::Null, |d| {
+                Datum::Int4(if f == ArrayFunc::Lower {
+                    d.lower
+                } else {
+                    d.upper()
+                })
+            }))
+        }
+        ArrayFunc::Fill => {
+            require_arity(fc, n == 2 || n == 3)?;
+            let elem = resolved_fill_element(&vals[0], &params);
+            array_fill(&vals[0], &vals[1], vals.get(2), elem)
+        }
+        ArrayFunc::Position => {
+            require_arity(fc, n == 2 || n == 3)?;
+            array_position(&vals[0], &vals[1], vals.get(2), &fc.name)
+        }
+        ArrayFunc::Positions => {
+            require_arity(fc, n == 2)?;
+            array_positions(&vals[0], &vals[1], &fc.name)
+        }
+        ArrayFunc::Remove => {
+            require_arity(fc, n == 2)?;
+            array_remove(&vals[0], &vals[1], &fc.name)
+        }
+        ArrayFunc::Replace => {
+            require_arity(fc, n == 3)?;
+            array_replace(&vals[0], &vals[1], &vals[2], &fc.name)
+        }
+        ArrayFunc::Trim => {
+            require_arity(fc, n == 2)?;
+            trim_array(&vals[0], &vals[1], &fc.name)
+        }
+        ArrayFunc::Sample => {
+            require_arity(fc, n == 2)?;
+            array_sample(&vals[0], &vals[1], &fc.name)
+        }
+        ArrayFunc::Shuffle => {
+            require_arity(fc, n == 1)?;
+            array_shuffle(&vals[0], &fc.name)
+        }
+        ArrayFunc::Sort => {
+            require_arity(fc, (1..=3).contains(&n))?;
+            array_sort(&vals[0], vals.get(1), vals.get(2), &fc.name)
+        }
+        ArrayFunc::Reverse => {
+            require_arity(fc, n == 1)?;
+            array_reverse(&vals[0], &fc.name)
         }
     }
 }
@@ -397,13 +620,34 @@ pub(crate) fn array_append(
 ) -> Result<Datum, ExecError> {
     match array {
         Datum::Array(a) => {
+            require_flat(a)?;
             let mut elems = a.elems.clone();
             elems.push(coerce_element(elem, a.elem, ctx)?);
-            Ok(Datum::Array(ArrayValue::new(a.elem, elems)))
+            let lower = a.dims.first().map_or(1, |d| d.lower);
+            Ok(Datum::Array(ArrayValue::with_dims(
+                a.elem,
+                elems.clone(),
+                vec![crabka_pgtypes::ArrayDim::new(
+                    lower,
+                    i32::try_from(elems.len()).unwrap_or(i32::MAX),
+                )],
+            )))
         }
         Datum::Null => Ok(singleton_from_element(elem, into)),
         other => Err(not_an_array(other)),
     }
+}
+
+/// `array_append`/`array_prepend` and the element `||` forms only accept an
+/// empty or one-dimensional array — 22000, exactly as PostgreSQL reports it.
+fn require_flat(a: &ArrayValue) -> Result<(), ExecError> {
+    if a.ndims() > 1 {
+        return Err(ExecError::Type(TypeError::Coded {
+            sqlstate: "22000",
+            message: "argument must be empty or one-dimensional array".into(),
+        }));
+    }
+    Ok(())
 }
 
 /// `array_prepend(anyelement, anyarray)` — the mirror of [`array_append`].
@@ -415,10 +659,19 @@ pub(crate) fn array_prepend(
 ) -> Result<Datum, ExecError> {
     match array {
         Datum::Array(a) => {
+            require_flat(a)?;
             let mut elems = Vec::with_capacity(a.elems.len() + 1);
             elems.push(coerce_element(elem, a.elem, ctx)?);
             elems.extend(a.elems.iter().cloned());
-            Ok(Datum::Array(ArrayValue::new(a.elem, elems)))
+            // Prepending keeps the array's own lower bound and grows upward,
+            // exactly as PostgreSQL's `array_cat` of a one-element array does.
+            let lower = a.dims.first().map_or(1, |d| d.lower);
+            let len = i32::try_from(elems.len()).unwrap_or(i32::MAX);
+            Ok(Datum::Array(ArrayValue::with_dims(
+                a.elem,
+                elems,
+                vec![crabka_pgtypes::ArrayDim::new(lower, len)],
+            )))
         }
         Datum::Null => Ok(singleton_from_element(elem, into)),
         other => Err(not_an_array(other)),
@@ -438,12 +691,54 @@ pub(crate) fn array_cat(left: &Datum, right: &Datum) -> Result<Datum, ExecError>
             if a.elem != b.elem {
                 return Err(operator_undefined("||", left, right));
             }
+            if a.dims.is_empty() {
+                return Ok(right.clone());
+            }
+            if b.dims.is_empty() {
+                return Ok(left.clone());
+            }
             let mut elems = a.elems.clone();
             elems.extend(b.elems.iter().cloned());
-            Ok(Datum::Array(ArrayValue::new(a.elem, elems)))
+            // PostgreSQL joins along the OUTERMOST dimension. Equal
+            // dimensionality sums the outer extents; one fewer dimension on
+            // either side makes that side a single extra outer slice.
+            let dims = match (a.ndims(), b.ndims()) {
+                (x, y) if x == y => {
+                    if a.dims[1..] != b.dims[1..] {
+                        return Err(incompatible_arrays());
+                    }
+                    let mut dims = a.dims.clone();
+                    dims[0].len = a.dims[0].len.saturating_add(b.dims[0].len);
+                    dims
+                }
+                (x, y) if x + 1 == y => {
+                    if a.dims[..] != b.dims[1..] {
+                        return Err(incompatible_arrays());
+                    }
+                    let mut dims = b.dims.clone();
+                    dims[0].len = dims[0].len.saturating_add(1);
+                    dims
+                }
+                (x, y) if x == y + 1 => {
+                    if a.dims[1..] != b.dims[..] {
+                        return Err(incompatible_arrays());
+                    }
+                    let mut dims = a.dims.clone();
+                    dims[0].len = dims[0].len.saturating_add(1);
+                    dims
+                }
+                _ => return Err(incompatible_arrays()),
+            };
+            Ok(Datum::Array(ArrayValue::with_dims(a.elem, elems, dims)))
         }
         _ => Err(operator_undefined("||", left, right)),
     }
+}
+
+fn incompatible_arrays() -> ExecError {
+    ExecError::Type(TypeError::array_subscript(
+        "cannot concatenate incompatible arrays",
+    ))
 }
 
 /// Which of PostgreSQL's three `||` array operators a call resolves to.
@@ -570,11 +865,508 @@ pub(crate) fn array_subscript(base: &Datum, index: &Datum) -> Result<Datum, Exec
             )));
         }
     };
-    if i < 1 {
+    // A single subscript reaches an element only of a one-dimensional array;
+    // PostgreSQL returns NULL when the subscript count is not the dimension
+    // count, so `('{{1,2},{3,4}}'::int[])[1]` is NULL rather than a row.
+    let [dim] = array.dims[..] else {
+        return Ok(Datum::Null);
+    };
+    let offset = i - i64::from(dim.lower);
+    if offset < 0 || offset >= i64::from(dim.len) {
         return Ok(Datum::Null);
     }
-    let idx = usize::try_from(i - 1).map_err(|_| ExecError::Type(TypeError::Overflow))?;
+    let idx = usize::try_from(offset).map_err(|_| ExecError::Type(TypeError::Overflow))?;
     Ok(array.elems.get(idx).cloned().unwrap_or(Datum::Null))
+}
+
+/// `ARRAY[…]` — assemble one constructor level from its already-evaluated
+/// items, where an item that is itself an array came from a nested constructor.
+///
+/// Mixing arrays and scalars, or sub-arrays of differing shape, is
+/// `PostgreSQL`'s 2202E "multidimensional arrays must have array expressions
+/// with matching dimensions".
+pub(crate) fn build_constructor(elem: ElemType, items: Vec<Datum>) -> Result<Datum, ExecError> {
+    let arrays = items
+        .iter()
+        .filter(|i| matches!(i, Datum::Array(_)))
+        .count();
+    if arrays == 0 {
+        return Ok(Datum::Array(ArrayValue::new(elem, items)));
+    }
+    if arrays != items.len() {
+        return Err(mismatched_constructor_dims());
+    }
+    let mut inner: Option<Vec<crabka_pgtypes::ArrayDim>> = None;
+    let mut elems = Vec::new();
+    for item in &items {
+        let Datum::Array(a) = item else {
+            unreachable!("every item is an array here")
+        };
+        match &inner {
+            None => inner = Some(a.dims.clone()),
+            Some(seen) if *seen == a.dims => {}
+            Some(_) => return Err(mismatched_constructor_dims()),
+        }
+        elems.extend(a.elems.iter().cloned());
+    }
+    let mut dims = vec![crabka_pgtypes::ArrayDim::from_len(items.len())];
+    dims.extend(inner.unwrap_or_default());
+    if dims.len() > crabka_pgtypes::MAX_ARRAY_DIM {
+        return Err(ExecError::Type(TypeError::Coded {
+            sqlstate: "54000",
+            message: format!(
+                "number of array dimensions ({}) exceeds the maximum allowed ({})",
+                dims.len(),
+                crabka_pgtypes::MAX_ARRAY_DIM
+            ),
+        }));
+    }
+    if elems.is_empty() {
+        return Ok(Datum::Array(ArrayValue::new(elem, elems)));
+    }
+    Ok(Datum::Array(ArrayValue::with_dims(elem, elems, dims)))
+}
+
+fn mismatched_constructor_dims() -> ExecError {
+    ExecError::Type(TypeError::array_subscript(
+        "multidimensional arrays must have array expressions with matching dimensions",
+    ))
+}
+
+/// `ARRAY(subquery)` — one array over the subquery's single column, in the order
+/// the subquery produced its rows.
+pub(crate) fn array_from_rows(elem: ElemType, rows: Vec<Datum>) -> Datum {
+    Datum::Array(ArrayValue::new(elem, rows))
+}
+
+// ---- multi-subscript references and slices ----
+
+/// One evaluated entry of a subscript chain — [`crabka_pgparser::ast::ArraySubscript`]
+/// with its bound expressions already reduced to values.
+#[derive(Debug, Clone)]
+pub(crate) enum SubscriptArg {
+    /// `a[i]`.
+    Index(Datum),
+    /// `a[lo:hi]`; an omitted bound takes the array's own bound for that
+    /// dimension.
+    Slice {
+        lower: Option<Datum>,
+        upper: Option<Datum>,
+    },
+}
+
+impl SubscriptArg {
+    fn is_slice(&self) -> bool {
+        matches!(self, SubscriptArg::Slice { .. })
+    }
+}
+
+/// `base[s1][s2]…` — `PostgreSQL`'s array reference over a whole subscript chain.
+///
+/// A chain with no slice selects one element: it yields NULL unless the chain is
+/// exactly as long as the array has dimensions and every subscript is in range.
+/// A chain with at least one slice yields an **array**: unsupplied trailing
+/// dimensions are whole slices, a plain index in a slice chain means `[i:i]`,
+/// every range is clipped to the array's own bounds, and the result is
+/// renumbered from lower bound 1 — exactly as `array_get_slice` does.
+pub(crate) fn array_ref(base: &Datum, subscripts: &[SubscriptArg]) -> Result<Datum, ExecError> {
+    let array = match base {
+        Datum::Null => return Ok(Datum::Null),
+        Datum::Array(a) => a,
+        other => {
+            return Err(ExecError::TypeMismatch(format!(
+                "cannot subscript type {} because it does not support subscripting",
+                type_name(other)
+            )));
+        }
+    };
+    if subscripts.iter().any(SubscriptArg::is_slice) {
+        return array_ref_slice(array, subscripts);
+    }
+    if subscripts.len() != array.ndims() {
+        return Ok(Datum::Null);
+    }
+    let mut offset = 0usize;
+    for (sub, (dim, stride)) in subscripts
+        .iter()
+        .zip(array.dims.iter().zip(array.strides()))
+    {
+        let SubscriptArg::Index(value) = sub else {
+            unreachable!("the slice case returned above")
+        };
+        let Some(i) = subscript_int(value)? else {
+            return Ok(Datum::Null);
+        };
+        let within = i - i64::from(dim.lower);
+        if within < 0 || within >= i64::from(dim.len) {
+            return Ok(Datum::Null);
+        }
+        let within = usize::try_from(within).map_err(|_| ExecError::Type(TypeError::Overflow))?;
+        offset += within * stride;
+    }
+    Ok(array.elems.get(offset).cloned().unwrap_or(Datum::Null))
+}
+
+/// The slice half of [`array_ref`].
+fn array_ref_slice(array: &ArrayValue, subscripts: &[SubscriptArg]) -> Result<Datum, ExecError> {
+    if array.dims.is_empty() {
+        return Ok(Datum::Array(ArrayValue::new(array.elem, Vec::new())));
+    }
+    // Ranges are half-open in the flat vector; `ranges[d]` is the selected
+    // `[start, end)` offset inside dimension `d`.
+    let mut ranges: Vec<(usize, usize)> = Vec::with_capacity(array.dims.len());
+    for (i, dim) in array.dims.iter().enumerate() {
+        let (lower, upper) = match subscripts.get(i) {
+            // Dimensions past the end of the chain are whole slices.
+            None => (dim.lower, dim.upper()),
+            // In a chain that contains a slice, a plain subscript `i` means
+            // `1:i` — PostgreSQL treats EVERY subscript of such a chain as a
+            // slice, taking the missing lower bound as 1 rather than as `i`.
+            Some(SubscriptArg::Index(value)) => {
+                let Some(i) = subscript_int(value)? else {
+                    return Ok(Datum::Null);
+                };
+                (1, clamp_i32(i))
+            }
+            Some(SubscriptArg::Slice { lower, upper }) => {
+                let lower = match lower {
+                    None => dim.lower,
+                    Some(value) => match subscript_int(value)? {
+                        None => return Ok(Datum::Null),
+                        Some(i) => clamp_i32(i),
+                    },
+                };
+                let upper = match upper {
+                    None => dim.upper(),
+                    Some(value) => match subscript_int(value)? {
+                        None => return Ok(Datum::Null),
+                        Some(i) => clamp_i32(i),
+                    },
+                };
+                (lower, upper)
+            }
+        };
+        // An empty range anywhere makes the whole slice the empty array.
+        if lower > upper || upper < dim.lower || lower > dim.upper() {
+            return Ok(Datum::Array(ArrayValue::new(array.elem, Vec::new())));
+        }
+        let start = lower.max(dim.lower) - dim.lower;
+        let end = upper.min(dim.upper()) - dim.lower + 1;
+        let start = usize::try_from(start).map_err(|_| ExecError::Type(TypeError::Overflow))?;
+        let end = usize::try_from(end).map_err(|_| ExecError::Type(TypeError::Overflow))?;
+        ranges.push((start, end));
+    }
+    let strides = array.strides();
+    let dims: Vec<crabka_pgtypes::ArrayDim> = ranges
+        .iter()
+        .map(|(start, end)| crabka_pgtypes::ArrayDim::from_len(end - start))
+        .collect();
+    let mut elems = Vec::new();
+    collect_slice(array, &ranges, &strides, 0, 0, &mut elems);
+    Ok(Datum::Array(ArrayValue::with_dims(array.elem, elems, dims)))
+}
+
+/// Walk the selected sub-box in row-major order, appending its elements.
+fn collect_slice(
+    array: &ArrayValue,
+    ranges: &[(usize, usize)],
+    strides: &[usize],
+    depth: usize,
+    base: usize,
+    out: &mut Vec<Datum>,
+) {
+    let (start, end) = ranges[depth];
+    for i in start..end {
+        let offset = base + i * strides[depth];
+        if depth + 1 == ranges.len() {
+            out.push(array.elems.get(offset).cloned().unwrap_or(Datum::Null));
+        } else {
+            collect_slice(array, ranges, strides, depth + 1, offset, out);
+        }
+    }
+}
+
+/// One subscript value as an integer; `None` is a NULL subscript.
+fn subscript_int(value: &Datum) -> Result<Option<i64>, ExecError> {
+    Ok(match value {
+        Datum::Null => None,
+        Datum::Int2(n) => Some(i64::from(*n)),
+        Datum::Int4(n) => Some(i64::from(*n)),
+        Datum::Int8(n) => Some(*n),
+        other => {
+            return Err(ExecError::TypeMismatch(format!(
+                "array subscript must be type integer, not type {}",
+                type_name(other)
+            )));
+        }
+    })
+}
+
+/// Saturate a subscript into `i32`, the width `PostgreSQL` stores bounds at.
+fn clamp_i32(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or(if value < 0 { i32::MIN } else { i32::MAX })
+}
+
+/// The `PostgreSQL` dimension `n` of `array` (1-based), or `None` when the array
+/// has no such dimension — which is what makes `array_length('{}', 1)` NULL.
+fn dimension(array: &ArrayValue, n: i32) -> Option<crabka_pgtypes::ArrayDim> {
+    usize::try_from(n)
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .and_then(|i| array.dims.get(i))
+        .copied()
+}
+
+// ---- subscripted assignment ----
+
+/// `SET a[i] = v` / `SET a[lo:hi] = v` — `PostgreSQL`'s `array_set_element` and
+/// `array_set_slice` over the column's current value.
+///
+/// A NULL target starts from the empty array of `into`. A one-dimensional array
+/// **extends** to cover a subscript past either end, filling the gap with NULLs;
+/// a multidimensional one does not, and reports 2202E instead.
+pub(crate) fn array_assign(
+    current: &Datum,
+    subscripts: &[SubscriptArg],
+    value: &Datum,
+    into: ElemType,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    let array = match current {
+        Datum::Null => ArrayValue::new(into, Vec::new()),
+        Datum::Array(a) => a.clone(),
+        other => return Err(not_an_array(other)),
+    };
+    let bounds = resolved_bounds(subscripts, &array)?;
+    if subscripts.iter().any(SubscriptArg::is_slice) {
+        assign_slice(array, &bounds, value, ctx)
+    } else {
+        assign_element(array, &bounds, value, ctx)
+    }
+}
+
+/// Each subscript's `[lower, upper]` after NULL rejection and slice defaulting.
+fn resolved_bounds(
+    subscripts: &[SubscriptArg],
+    array: &ArrayValue,
+) -> Result<Vec<(i32, i32)>, ExecError> {
+    let mut out = Vec::with_capacity(subscripts.len());
+    for (i, sub) in subscripts.iter().enumerate() {
+        let dim = array.dims.get(i).copied();
+        let pair = match sub {
+            SubscriptArg::Index(value) => {
+                let i = clamp_i32(assignment_subscript(value)?);
+                (i, i)
+            }
+            SubscriptArg::Slice { lower, upper } => {
+                let lower = match lower {
+                    None => dim.map_or(1, |d| d.lower),
+                    Some(value) => clamp_i32(assignment_subscript(value)?),
+                };
+                let upper = match upper {
+                    None => dim.map_or(1, crabka_pgtypes::ArrayDim::upper),
+                    Some(value) => clamp_i32(assignment_subscript(value)?),
+                };
+                (lower, upper)
+            }
+        };
+        out.push(pair);
+    }
+    Ok(out)
+}
+
+/// A subscript in an assignment may not be NULL — 22004, unlike a read.
+fn assignment_subscript(value: &Datum) -> Result<i64, ExecError> {
+    subscript_int(value)?.ok_or_else(|| {
+        ExecError::Type(TypeError::Coded {
+            sqlstate: "22004",
+            message: "array subscript in assignment must not be null".into(),
+        })
+    })
+}
+
+/// `array_set_element`: write one element, extending a one-dimensional array.
+fn assign_element(
+    mut array: ArrayValue,
+    bounds: &[(i32, i32)],
+    value: &Datum,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    let elem = coerce_element(value, array.elem, ctx)?;
+    if array.dims.is_empty() {
+        // A fresh array takes exactly the shape the subscripts describe.
+        let dims = bounds
+            .iter()
+            .map(|(lower, _)| crabka_pgtypes::ArrayDim::new(*lower, 1))
+            .collect();
+        return Ok(Datum::Array(ArrayValue::with_dims(
+            array.elem,
+            vec![elem],
+            dims,
+        )));
+    }
+    if bounds.len() != array.dims.len() {
+        return Err(wrong_number_of_subscripts());
+    }
+    let index = bounds[0].0;
+    if array.dims.len() == 1 {
+        extend_to_cover(&mut array, index, index)?;
+    }
+    let mut offset = 0usize;
+    for ((lower, _), (dim, stride)) in bounds.iter().zip(array.dims.iter().zip(array.strides())) {
+        let within = i64::from(*lower) - i64::from(dim.lower);
+        if within < 0 || within >= i64::from(dim.len) {
+            return Err(subscript_out_of_range());
+        }
+        let within = usize::try_from(within).map_err(|_| ExecError::Type(TypeError::Overflow))?;
+        offset += within * stride;
+    }
+    array.elems[offset] = elem;
+    Ok(Datum::Array(array))
+}
+
+/// `array_set_slice`: write a whole sub-box, extending a one-dimensional array.
+fn assign_slice(
+    mut array: ArrayValue,
+    bounds: &[(i32, i32)],
+    value: &Datum,
+    ctx: &EvalCtx,
+) -> Result<Datum, ExecError> {
+    let source = match value {
+        // Assigning NULL to a slice leaves the array untouched, as PostgreSQL's
+        // `array_set_slice` does for a null source.
+        Datum::Null => return Ok(Datum::Array(array)),
+        Datum::Array(a) => a.clone(),
+        // `SET a[1:2] = '{1,2}'` — a bare literal on the value side is
+        // `unknown`, and the target column's array type resolves it.
+        Datum::Text(_) => match cast::cast(value, ColumnType::Array(array.elem), &ctx.time_zone)? {
+            Datum::Array(a) => a,
+            other => return Err(not_an_array(&other)),
+        },
+        other => return Err(not_an_array(other)),
+    };
+    if array.dims.is_empty() {
+        let dims = bounds
+            .iter()
+            .map(|(lower, upper)| {
+                crabka_pgtypes::ArrayDim::new(*lower, upper.saturating_sub(*lower) + 1)
+            })
+            .collect();
+        let slots = slot_count(bounds)?;
+        check_array_size(slots)?;
+        array = ArrayValue::with_dims(array.elem, vec![Datum::Null; slots], dims);
+    } else if bounds.len() != array.dims.len() {
+        return Err(wrong_number_of_subscripts());
+    } else if array.dims.len() == 1 {
+        extend_to_cover(&mut array, bounds[0].0, bounds[0].1)?;
+    }
+    if slot_count(bounds)? > source.elems.len() {
+        return Err(ExecError::Type(TypeError::array_subscript(
+            "source array too small",
+        )));
+    }
+    let strides = array.strides();
+    let mut ranges = Vec::with_capacity(bounds.len());
+    for ((lower, upper), dim) in bounds.iter().zip(&array.dims) {
+        let start = i64::from(*lower) - i64::from(dim.lower);
+        let end = i64::from(*upper) - i64::from(dim.lower) + 1;
+        if start < 0 || end > i64::from(dim.len) {
+            return Err(subscript_out_of_range());
+        }
+        let start = usize::try_from(start).map_err(|_| ExecError::Type(TypeError::Overflow))?;
+        let end = usize::try_from(end).map_err(|_| ExecError::Type(TypeError::Overflow))?;
+        ranges.push((start, end));
+    }
+    let mut offsets = Vec::new();
+    slice_offsets(&ranges, &strides, 0, 0, &mut offsets);
+    for (offset, replacement) in offsets.into_iter().zip(&source.elems) {
+        array.elems[offset] = coerce_element(replacement, array.elem, ctx)?;
+    }
+    Ok(Datum::Array(array))
+}
+
+/// The flat offsets the slice `ranges` covers, in row-major order.
+fn slice_offsets(
+    ranges: &[(usize, usize)],
+    strides: &[usize],
+    depth: usize,
+    base: usize,
+    out: &mut Vec<usize>,
+) {
+    let (start, end) = ranges[depth];
+    for i in start..end {
+        let offset = base + i * strides[depth];
+        if depth + 1 == ranges.len() {
+            out.push(offset);
+        } else {
+            slice_offsets(ranges, strides, depth + 1, offset, out);
+        }
+    }
+}
+
+/// How many slots a subscript box covers.
+fn slot_count(bounds: &[(i32, i32)]) -> Result<usize, ExecError> {
+    let mut total = 1usize;
+    for (lower, upper) in bounds {
+        let len = i64::from(*upper) - i64::from(*lower) + 1;
+        let len = usize::try_from(len).map_err(|_| subscript_out_of_range())?;
+        total = total
+            .checked_mul(len)
+            .ok_or(ExecError::Type(TypeError::Overflow))?;
+    }
+    Ok(total)
+}
+
+/// `PostgreSQL`'s `MaxArraySize` — `MaxAllocSize / sizeof(Datum)`. An array
+/// larger than this is 54000 rather than an out-of-memory failure.
+const MAX_ARRAY_SIZE: usize = 134_217_727;
+
+/// Reject an element count `PostgreSQL` would refuse to allocate.
+fn check_array_size(elements: usize) -> Result<(), ExecError> {
+    if elements > MAX_ARRAY_SIZE {
+        return Err(ExecError::Type(TypeError::Coded {
+            sqlstate: "54000",
+            message: format!("array size exceeds the maximum allowed ({MAX_ARRAY_SIZE})"),
+        }));
+    }
+    Ok(())
+}
+
+/// Grow a one-dimensional array so `[lower, upper]` is inside it, filling the
+/// new slots with NULL and moving the lower bound down when the write is below
+/// the array's start (`UPDATE t SET a[0] = …`).
+fn extend_to_cover(array: &mut ArrayValue, lower: i32, upper: i32) -> Result<(), ExecError> {
+    let Some(dim) = array.dims.first().copied() else {
+        return Ok(());
+    };
+    let below = usize::try_from(i64::from(dim.lower) - i64::from(lower)).unwrap_or(0);
+    let above = usize::try_from(i64::from(upper) - i64::from(dim.upper())).unwrap_or(0);
+    if below == 0 && above == 0 {
+        return Ok(());
+    }
+    check_array_size(
+        below
+            .saturating_add(array.elems.len())
+            .saturating_add(above),
+    )?;
+    let mut elems = vec![Datum::Null; below];
+    elems.extend(array.elems.iter().cloned());
+    elems.extend(std::iter::repeat_n(Datum::Null, above));
+    let new_lower = dim.lower.min(lower);
+    let len = i32::try_from(elems.len()).unwrap_or(i32::MAX);
+    array.dims = vec![crabka_pgtypes::ArrayDim::new(new_lower, len)];
+    array.elems = elems;
+    Ok(())
+}
+
+fn wrong_number_of_subscripts() -> ExecError {
+    ExecError::Type(TypeError::array_subscript(
+        "wrong number of array subscripts",
+    ))
+}
+
+fn subscript_out_of_range() -> ExecError {
+    ExecError::Type(TypeError::array_subscript("array subscript out of range"))
 }
 
 /// The `ANY`/`SOME` and `ALL` quantifiers over an array.
@@ -744,6 +1536,11 @@ fn coerce_element(elem: &Datum, to: ElemType, ctx: &EvalCtx) -> Result<Datum, Ex
     if elem.is_null() || elem.column_type() == Some(to.column_type()) {
         return Ok(elem.clone());
     }
+    // A string element goes through the target type's INPUT function, so a
+    // malformed one keeps that function's 22P02 rather than becoming 42804.
+    if matches!(elem, Datum::Text(_)) {
+        return cast::cast(elem, to.column_type(), &ctx.time_zone).map_err(ExecError::Type);
+    }
     cast::cast(elem, to.column_type(), &ctx.time_zone).map_err(|_| {
         ExecError::TypeMismatch(format!(
             "cannot store a value of type {} in an array of {}",
@@ -751,6 +1548,438 @@ fn coerce_element(elem: &Datum, to: ElemType, ctx: &EvalCtx) -> Result<Datum, Ex
             to.name()
         ))
     })
+}
+
+// ---- the remaining array functions ----
+
+/// The verbs PostgreSQL names in its one-dimensional-only refusals.
+const SEARCH_ACTION: &str = "searching for elements in";
+const REMOVE_ACTION: &str = "removing elements from";
+
+/// The element type `array_fill` builds with: the value's own type when it has
+/// one, else what its `anyelement` parameter resolved to.
+fn resolved_fill_element(value: &Datum, params: &[Option<ColumnType>]) -> ElemType {
+    value
+        .column_type()
+        .and_then(ElemType::from_column_type)
+        .or_else(|| {
+            params
+                .first()
+                .copied()
+                .flatten()
+                .and_then(ElemType::from_column_type)
+        })
+        .unwrap_or(ElemType::Text)
+}
+
+/// `array_fill(value, dims [, lower_bounds])` — an array of `value` repeated
+/// over the given shape. Both shape arguments must be non-NULL `int[]`s of the
+/// same length; a zero-length dimension yields the empty array.
+fn array_fill(
+    value: &Datum,
+    dims: &Datum,
+    lower_bounds: Option<&Datum>,
+    elem: ElemType,
+) -> Result<Datum, ExecError> {
+    let null_shape = ExecError::Type(TypeError::Coded {
+        sqlstate: "22004",
+        message: "dimension array or low bound array cannot be null".into(),
+    });
+    let lengths = int_array_arg(dims).ok_or(null_shape)?;
+    let lowers = match lower_bounds {
+        None | Some(Datum::Null) if lower_bounds.is_some() => {
+            return Err(ExecError::Type(TypeError::Coded {
+                sqlstate: "22004",
+                message: "dimension array or low bound array cannot be null".into(),
+            }));
+        }
+        None => vec![1; lengths.len()],
+        Some(d) => {
+            let lowers = int_array_arg(d).ok_or_else(|| {
+                ExecError::Type(TypeError::Coded {
+                    sqlstate: "22004",
+                    message: "dimension array or low bound array cannot be null".into(),
+                })
+            })?;
+            if lowers.len() != lengths.len() {
+                return Err(wrong_number_of_subscripts());
+            }
+            lowers
+        }
+    };
+    if lengths.len() > crabka_pgtypes::MAX_ARRAY_DIM {
+        return Err(ExecError::Type(TypeError::Coded {
+            sqlstate: "54000",
+            message: format!(
+                "number of array dimensions ({}) exceeds the maximum allowed ({})",
+                lengths.len(),
+                crabka_pgtypes::MAX_ARRAY_DIM
+            ),
+        }));
+    }
+    let mut total = 1usize;
+    let mut shape = Vec::with_capacity(lengths.len());
+    for (len, lower) in lengths.iter().zip(&lowers) {
+        if *len < 0 {
+            return Err(subscript_out_of_range());
+        }
+        total = total
+            .checked_mul(usize::try_from(*len).unwrap_or(0))
+            .ok_or(ExecError::Type(TypeError::Overflow))?;
+        shape.push(crabka_pgtypes::ArrayDim::new(*lower, *len));
+    }
+    if total == 0 {
+        return Ok(Datum::Array(ArrayValue::new(elem, Vec::new())));
+    }
+    check_array_size(total)?;
+    Ok(Datum::Array(ArrayValue::with_dims(
+        elem,
+        vec![value.clone(); total],
+        shape,
+    )))
+}
+
+/// The `int[]` shape arguments of `array_fill`; `None` for a NULL argument or a
+/// NULL element (both of which PostgreSQL rejects the same way).
+fn int_array_arg(d: &Datum) -> Option<Vec<i32>> {
+    let Datum::Array(a) = d else {
+        return None;
+    };
+    a.elems
+        .iter()
+        .map(|e| match e {
+            Datum::Int2(n) => Some(i32::from(*n)),
+            Datum::Int4(n) => Some(*n),
+            Datum::Int8(n) => i32::try_from(*n).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// `array_position(array, value [, start])` — the 1-based offset of the first
+/// occurrence at or after `start`, or NULL when there is none.
+fn array_position(
+    array: &Datum,
+    needle: &Datum,
+    start: Option<&Datum>,
+    name: &str,
+) -> Result<Datum, ExecError> {
+    if array.is_null() {
+        return Ok(Datum::Null);
+    }
+    let a = require_at_most_one_dimension(array_value(array, name)?, SEARCH_ACTION)?;
+    let from = match start {
+        None => 1,
+        Some(Datum::Null) => return Ok(Datum::Null),
+        Some(d) => int_arg(d, name)?,
+    };
+    let skip = usize::try_from(from.max(1)).unwrap_or(1).saturating_sub(1);
+    for (i, e) in a.elems.iter().enumerate().skip(skip) {
+        if element_matches(e, needle) {
+            return Ok(Datum::Int4(i32::try_from(i + 1).unwrap_or(i32::MAX)));
+        }
+    }
+    Ok(Datum::Null)
+}
+
+/// `array_positions(array, value)` — every 1-based offset, as an `int[]`.
+fn array_positions(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, ExecError> {
+    if array.is_null() {
+        return Ok(Datum::Null);
+    }
+    let a = require_at_most_one_dimension(array_value(array, name)?, SEARCH_ACTION)?;
+    let found: Vec<Datum> = a
+        .elems
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| element_matches(e, needle))
+        .map(|(i, _)| Datum::Int4(i32::try_from(i + 1).unwrap_or(i32::MAX)))
+        .collect();
+    Ok(Datum::Array(ArrayValue::new(ElemType::Int4, found)))
+}
+
+/// `array_remove(array, value)` — every matching element dropped. A NULL
+/// `value` removes the NULL elements, matching PostgreSQL's `IS NOT DISTINCT
+/// FROM` treatment here.
+fn array_remove(array: &Datum, needle: &Datum, name: &str) -> Result<Datum, ExecError> {
+    if array.is_null() {
+        return Ok(Datum::Null);
+    }
+    let a = require_at_most_one_dimension(array_value(array, name)?, REMOVE_ACTION)?;
+    let kept: Vec<Datum> = a
+        .elems
+        .iter()
+        .filter(|e| !element_matches(e, needle))
+        .cloned()
+        .collect();
+    Ok(Datum::Array(ArrayValue::new(a.elem, kept)))
+}
+
+/// `array_replace(array, from, to)` — every matching element replaced, over any
+/// number of dimensions (unlike `array_remove`, the shape does not change).
+fn array_replace(array: &Datum, from: &Datum, to: &Datum, name: &str) -> Result<Datum, ExecError> {
+    if array.is_null() {
+        return Ok(Datum::Null);
+    }
+    let a = array_value(array, name)?;
+    let elems = a
+        .elems
+        .iter()
+        .map(|e| {
+            if element_matches(e, from) {
+                to.clone()
+            } else {
+                e.clone()
+            }
+        })
+        .collect();
+    Ok(Datum::Array(ArrayValue::with_dims(
+        a.elem,
+        elems,
+        a.dims.clone(),
+    )))
+}
+
+/// `trim_array(array, n)` — the array without its last `n` elements. `n` outside
+/// `0..=cardinality` is 2202E.
+fn trim_array(array: &Datum, count: &Datum, name: &str) -> Result<Datum, ExecError> {
+    if array.is_null() || count.is_null() {
+        return Ok(Datum::Null);
+    }
+    let a = array_value(array, name)?;
+    let n = int_arg(count, name)?;
+    let total = i32::try_from(a.elems.len()).unwrap_or(i32::MAX);
+    if n < 0 || n > total {
+        return Err(ExecError::Type(TypeError::array_subscript(format!(
+            "number of elements to trim must be between 0 and {total}"
+        ))));
+    }
+    let keep = usize::try_from(total - n).unwrap_or(0);
+    Ok(Datum::Array(ArrayValue::new(
+        a.elem,
+        a.elems[..keep].to_vec(),
+    )))
+}
+
+/// `array_sample(array, n)` — `n` of the outermost slices, chosen at random.
+fn array_sample(array: &Datum, count: &Datum, name: &str) -> Result<Datum, ExecError> {
+    if array.is_null() || count.is_null() {
+        return Ok(Datum::Null);
+    }
+    let a = array_value(array, name)?;
+    let n = int_arg(count, name)?;
+    let slices = outer_slices(a);
+    let total = i32::try_from(slices.len()).unwrap_or(i32::MAX);
+    if n < 0 || n > total {
+        return Err(ExecError::Type(TypeError::Coded {
+            sqlstate: "22023",
+            message: format!("sample size must be between 0 and {total}"),
+        }));
+    }
+    let mut order: Vec<usize> = (0..slices.len()).collect();
+    shuffle_in_place(&mut order);
+    order.truncate(usize::try_from(n).unwrap_or(0));
+    Ok(rebuild_from_slices(a, &order, &slices))
+}
+
+/// `array_shuffle(array)` — the outermost slices in a random order.
+fn array_shuffle(array: &Datum, name: &str) -> Result<Datum, ExecError> {
+    if array.is_null() {
+        return Ok(Datum::Null);
+    }
+    let a = array_value(array, name)?;
+    let slices = outer_slices(a);
+    let mut order: Vec<usize> = (0..slices.len()).collect();
+    shuffle_in_place(&mut order);
+    Ok(rebuild_from_slices(a, &order, &slices))
+}
+
+/// `array_reverse(array)` — the outermost slices in the opposite order.
+fn array_reverse(array: &Datum, name: &str) -> Result<Datum, ExecError> {
+    if array.is_null() {
+        return Ok(Datum::Null);
+    }
+    let a = array_value(array, name)?;
+    let slices = outer_slices(a);
+    let order: Vec<usize> = (0..slices.len()).rev().collect();
+    Ok(rebuild_from_slices(a, &order, &slices))
+}
+
+/// `array_sort(array [, descending [, nulls_first]])` — the outermost slices in
+/// btree order. `nulls_first` defaults to `descending`, as `PostgreSQL` 18 does.
+fn array_sort(
+    array: &Datum,
+    descending: Option<&Datum>,
+    nulls_first: Option<&Datum>,
+    name: &str,
+) -> Result<Datum, ExecError> {
+    if array.is_null() {
+        return Ok(Datum::Null);
+    }
+    let desc = match descending {
+        None => false,
+        Some(Datum::Null) => return Ok(Datum::Null),
+        Some(Datum::Bool(b)) => *b,
+        Some(_) => return Err(undefined_function(name)),
+    };
+    let nulls_first = match nulls_first {
+        None => desc,
+        Some(Datum::Null) => return Ok(Datum::Null),
+        Some(Datum::Bool(b)) => *b,
+        Some(_) => return Err(undefined_function(name)),
+    };
+    let a = array_value(array, name)?;
+    let slices = outer_slices(a);
+    let mut order: Vec<usize> = (0..slices.len()).collect();
+    let mut failure = None;
+    order.sort_by(|x, y| {
+        compare_slices(&slices[*x], &slices[*y], nulls_first, &mut failure).then_with(|| x.cmp(y))
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    if desc {
+        order.reverse();
+    }
+    Ok(rebuild_from_slices(a, &order, &slices))
+}
+
+/// The outermost slices of an array as flat element runs — one per index of
+/// dimension 1, each holding the whole sub-box beneath it. A one-dimensional
+/// array therefore yields one single-element run per element.
+fn outer_slices(array: &ArrayValue) -> Vec<Vec<Datum>> {
+    let Some(first) = array.dims.first() else {
+        return Vec::new();
+    };
+    let stride = array.strides().first().copied().unwrap_or(1).max(1);
+    let count = usize::try_from(first.len).unwrap_or(0);
+    (0..count)
+        .map(|i| {
+            let start = i * stride;
+            let end = (start + stride).min(array.elems.len());
+            array.elems.get(start..end).unwrap_or(&[]).to_vec()
+        })
+        .collect()
+}
+
+/// Reassemble an array from a permutation (or subset) of its outermost slices,
+/// keeping every inner dimension and lower bound.
+fn rebuild_from_slices(array: &ArrayValue, order: &[usize], slices: &[Vec<Datum>]) -> Datum {
+    let mut elems = Vec::new();
+    for i in order {
+        if let Some(slice) = slices.get(*i) {
+            elems.extend(slice.iter().cloned());
+        }
+    }
+    if elems.is_empty() {
+        return Datum::Array(ArrayValue::new(array.elem, Vec::new()));
+    }
+    let mut dims = array.dims.clone();
+    if let Some(first) = dims.first_mut() {
+        first.len = i32::try_from(order.len()).unwrap_or(i32::MAX);
+    }
+    Datum::Array(ArrayValue::with_dims(array.elem, elems, dims))
+}
+
+/// Compare two outermost slices element-wise, recording the first comparison
+/// failure rather than propagating it out of the sort comparator.
+fn compare_slices(
+    left: &[Datum],
+    right: &[Datum],
+    nulls_first: bool,
+    failure: &mut Option<ExecError>,
+) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+
+    for (x, y) in left.iter().zip(right) {
+        let ord = match (x.is_null(), y.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) | (false, true) => {
+                let null_side = if x.is_null() {
+                    Ordering::Less
+                } else {
+                    Ordering::Greater
+                };
+                if nulls_first {
+                    null_side
+                } else {
+                    null_side.reverse()
+                }
+            }
+            (false, false) => match crabka_pgtypes::ops::compare(x, y) {
+                Ok(Some(ord)) => ord,
+                Ok(None) => Ordering::Equal,
+                Err(e) => {
+                    failure.get_or_insert(ExecError::Type(e));
+                    Ordering::Equal
+                }
+            },
+        };
+        if ord != Ordering::Equal {
+            return ord;
+        }
+    }
+    left.len().cmp(&right.len())
+}
+
+/// A deterministic-per-process Fisher-Yates shuffle. `array_shuffle` and
+/// `array_sample` are volatile in PostgreSQL, so only the *set* of elements is
+/// observable; nothing in the corpus depends on a particular permutation.
+fn shuffle_in_place(order: &mut [usize]) {
+    use std::{
+        cell::Cell,
+        hash::{BuildHasher, Hasher, RandomState},
+    };
+
+    thread_local! {
+        static SEED: Cell<u64> = const { Cell::new(0) };
+    }
+    let mut state = SEED.with(|seed| {
+        let current = seed.get();
+        if current == 0 {
+            let mut hasher = RandomState::new().build_hasher();
+            hasher.write_u64(0x9E37_79B9_7F4A_7C15);
+            let fresh = hasher.finish() | 1;
+            seed.set(fresh);
+            fresh
+        } else {
+            current
+        }
+    });
+    for i in (1..order.len()).rev() {
+        // xorshift64* — enough mixing for a shuffle nothing asserts on.
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        let j = usize::try_from(state % (i as u64 + 1)).unwrap_or(0);
+        order.swap(i, j);
+    }
+    SEED.with(|seed| seed.set(state | 1));
+}
+
+/// `array_position`/`array_positions`/`array_remove` are one-dimensional only;
+/// `PostgreSQL` reports 0A000 with the verb the caller is performing.
+fn require_at_most_one_dimension<'a>(
+    a: &'a ArrayValue,
+    action: &str,
+) -> Result<&'a ArrayValue, ExecError> {
+    if a.ndims() > 1 {
+        return Err(ExecError::Type(TypeError::Coded {
+            sqlstate: "0A000",
+            message: format!("{action} multidimensional arrays is not supported"),
+        }));
+    }
+    Ok(a)
+}
+
+/// Element identity for the search functions: `IS NOT DISTINCT FROM`, so a NULL
+/// needle finds the NULL elements.
+fn element_matches(element: &Datum, needle: &Datum) -> bool {
+    match (element.is_null(), needle.is_null()) {
+        (true, true) => true,
+        (true, false) | (false, true) => false,
+        (false, false) => element == needle,
+    }
 }
 
 /// A non-NULL datum's PostgreSQL text output.
@@ -806,6 +2035,7 @@ mod tests {
             name: name.to_string(),
             distinct: false,
             args: FuncArgs::Exprs(args),
+            filter: None,
         }
     }
 
@@ -1437,5 +2667,433 @@ mod tests {
                 .expect_err("mixed")
             ) == "42883"
         );
+    }
+    /// A `Datum` array built from a literal, so the dimension tests state their
+    /// input the way `PostgreSQL` spells it.
+    fn arr(literal: &str, elem: ElemType) -> Datum {
+        crate::eval::eval(&array_expr(literal, elem), &Scope::empty(), &[], &ctx())
+            .expect("array literal")
+    }
+
+    fn int_arr(literal: &str) -> Datum {
+        arr(literal, ElemType::Int4)
+    }
+
+    fn idx(i: i32) -> SubscriptArg {
+        SubscriptArg::Index(Datum::Int4(i))
+    }
+
+    fn slice(lower: Option<i32>, upper: Option<i32>) -> SubscriptArg {
+        SubscriptArg::Slice {
+            lower: lower.map(Datum::Int4),
+            upper: upper.map(Datum::Int4),
+        }
+    }
+
+    /// Every row is the value `PostgreSQL` 18.4 returns for the same reference.
+    #[test]
+    fn array_references_match_postgres_over_dimensions_and_bounds() {
+        let cases: &[(&str, Vec<SubscriptArg>, &str)] = &[
+            // A chain of plain subscripts reaches an element only when it is as
+            // long as the array has dimensions.
+            ("{1,2,3}", vec![idx(2)], "2"),
+            ("{1,2,3}", vec![idx(0)], "NULL"),
+            ("{1,2,3}", vec![idx(4)], "NULL"),
+            ("{{1,2,3},{4,5,6}}", vec![idx(2)], "NULL"),
+            ("{{1,2,3},{4,5,6}}", vec![idx(2), idx(3)], "6"),
+            ("{{1,2,3},{4,5,6}}", vec![idx(1), idx(1), idx(1)], "NULL"),
+            ("[2:4]={1,2,3}", vec![idx(1)], "NULL"),
+            ("[2:4]={1,2,3}", vec![idx(2)], "1"),
+            ("[2:4]={1,2,3}", vec![idx(4)], "3"),
+            // Slices clip to the array, renumber from 1, and never error.
+            ("{1,2,3,4,5}", vec![slice(Some(2), Some(4))], "{2,3,4}"),
+            ("{1,2,3,4,5}", vec![slice(None, Some(2))], "{1,2}"),
+            ("{1,2,3,4,5}", vec![slice(Some(3), None)], "{3,4,5}"),
+            ("{1,2,3,4,5}", vec![slice(None, None)], "{1,2,3,4,5}"),
+            ("{1,2,3,4,5}", vec![slice(Some(0), Some(2))], "{1,2}"),
+            ("{1,2,3,4,5}", vec![slice(Some(4), Some(2))], "{}"),
+            ("{1,2,3}", vec![slice(Some(10), Some(12))], "{}"),
+            (
+                "[5:9]={1,2,3,4,5}",
+                vec![slice(Some(6), Some(8))],
+                "{2,3,4}",
+            ),
+            // Missing trailing dimensions of a slice chain are whole slices.
+            (
+                "{{1,2,3},{4,5,6}}",
+                vec![slice(Some(2), Some(2))],
+                "{{4,5,6}}",
+            ),
+            (
+                "{{1,2,3},{4,5,6},{7,8,9}}",
+                vec![slice(Some(2), Some(3)), slice(Some(1), Some(2))],
+                "{{4,5},{7,8}}",
+            ),
+            // A plain subscript inside a slice chain means `1:i`.
+            (
+                "{{1,2,3},{4,5,6}}",
+                vec![slice(Some(1), Some(2)), idx(2)],
+                "{{1,2},{4,5}}",
+            ),
+        ];
+        for (literal, subscripts, expected) in cases {
+            let got = array_ref(&int_arr(literal), subscripts).expect("reference");
+            let text = match &got {
+                Datum::Null => "NULL".to_string(),
+                other => String::from_utf8(crabka_pgtypes::encoding::encode_text(
+                    other,
+                    &ctx().time_zone,
+                ))
+                .expect("utf8"),
+            };
+            assert!(text == *expected, "{literal} {subscripts:?}");
+        }
+    }
+
+    #[test]
+    fn a_null_subscript_reads_as_null_and_a_non_array_base_is_rejected() {
+        let null_index = vec![SubscriptArg::Index(Datum::Null), idx(1)];
+        assert!(array_ref(&int_arr("{{1,2}}"), &null_index).expect("null") == Datum::Null);
+        assert!(array_ref(&Datum::Null, &[idx(1), idx(2)]).expect("null base") == Datum::Null);
+        assert!(
+            sqlstate(array_ref(&Datum::Int4(1), &[idx(1), idx(2)]).expect_err("not an array"))
+                == "42804"
+        );
+    }
+
+    /// `PostgreSQL` 18.4 values for `UPDATE t SET a[…] = v` over each starting
+    /// array, including the extension and NULL-filling rules.
+    #[test]
+    fn subscripted_assignment_matches_postgres() {
+        let cases: &[(Option<&str>, Vec<SubscriptArg>, Datum, &str)] = &[
+            (Some("{1,2,3}"), vec![idx(2)], Datum::Int4(99), "{1,99,3}"),
+            (
+                Some("{1,2,3}"),
+                vec![idx(6)],
+                Datum::Int4(7),
+                "{1,2,3,NULL,NULL,7}",
+            ),
+            (
+                Some("{1,2,3}"),
+                vec![idx(0)],
+                Datum::Int4(-1),
+                "[0:3]={-1,1,2,3}",
+            ),
+            (None, vec![idx(3)], Datum::Int4(5), "[3:3]={5}"),
+            (None, vec![idx(2)], Datum::Null, "[2:2]={NULL}"),
+            (
+                Some("{1,2,3}"),
+                vec![slice(Some(2), Some(3))],
+                int_arr("{50,60}"),
+                "{1,50,60}",
+            ),
+            (
+                None,
+                vec![slice(Some(2), Some(3))],
+                int_arr("{1,2}"),
+                "[2:3]={1,2}",
+            ),
+            (
+                Some("{{1,2},{3,4}}"),
+                vec![idx(1), idx(2)],
+                Datum::Int4(9),
+                "{{1,9},{3,4}}",
+            ),
+            (
+                Some("{{1,2},{3,4}}"),
+                vec![slice(Some(1), Some(2)), slice(Some(1), Some(1))],
+                int_arr("{{7},{8}}"),
+                "{{7,2},{8,4}}",
+            ),
+        ];
+        for (start, subscripts, value, expected) in cases {
+            let current = start.map_or(Datum::Null, int_arr);
+            let got = array_assign(&current, subscripts, value, ElemType::Int4, &ctx())
+                .expect("assignment");
+            let text = String::from_utf8(crabka_pgtypes::encoding::encode_text(
+                &got,
+                &ctx().time_zone,
+            ))
+            .expect("utf8");
+            assert!(text == *expected, "{start:?} {subscripts:?}");
+        }
+    }
+
+    #[test]
+    fn assignment_reports_postgres_sqlstates_for_every_refusal() {
+        let cases: &[(Option<&str>, Vec<SubscriptArg>, Datum, &str)] = &[
+            // A NULL subscript is an error in an assignment, unlike in a read.
+            (
+                Some("{1,2,3}"),
+                vec![SubscriptArg::Index(Datum::Null)],
+                Datum::Int4(1),
+                "22004",
+            ),
+            // A multidimensional target neither extends nor accepts the wrong
+            // number of subscripts.
+            (
+                Some("{{1,2},{3,4}}"),
+                vec![idx(3), idx(1)],
+                Datum::Int4(9),
+                "2202E",
+            ),
+            (Some("{{1,2},{3,4}}"), vec![idx(2)], Datum::Int4(5), "2202E"),
+            // A slice source shorter than the slice.
+            (
+                Some("{1,2,3}"),
+                vec![slice(Some(2), Some(3))],
+                int_arr("{1}"),
+                "2202E",
+            ),
+            // An array larger than PostgreSQL will allocate.
+            (
+                Some("{1,2,3}"),
+                vec![idx(2_147_483_647)],
+                Datum::Int4(42),
+                "54000",
+            ),
+        ];
+        for (start, subscripts, value, code) in cases {
+            let current = start.map_or(Datum::Null, int_arr);
+            let error = array_assign(&current, subscripts, value, ElemType::Int4, &ctx())
+                .expect_err("refused");
+            assert!(sqlstate(error) == *code, "{start:?} {subscripts:?}");
+        }
+    }
+
+    /// The dimension-reporting functions over the shapes that distinguish them.
+    #[test]
+    fn dimension_functions_match_postgres() {
+        let cases: &[(&str, Vec<Expr>, Datum)] = &[
+            (
+                "array_ndims",
+                vec![array_expr("{1,2}", ElemType::Int4)],
+                Datum::Int4(1),
+            ),
+            (
+                "array_ndims",
+                vec![array_expr("{{1,2},{3,4}}", ElemType::Int4)],
+                Datum::Int4(2),
+            ),
+            (
+                "array_ndims",
+                vec![array_expr("{}", ElemType::Int4)],
+                Datum::Null,
+            ),
+            (
+                "array_dims",
+                vec![array_expr("{{1,2},{3,4}}", ElemType::Int4)],
+                Datum::Text("[1:2][1:2]".into()),
+            ),
+            (
+                "array_dims",
+                vec![array_expr("[2:4]={1,2,3}", ElemType::Int4)],
+                Datum::Text("[2:4]".into()),
+            ),
+            (
+                "array_dims",
+                vec![array_expr("{}", ElemType::Int4)],
+                Datum::Null,
+            ),
+            (
+                "array_length",
+                vec![array_expr("{{1,2,3},{4,5,6}}", ElemType::Int4), int_expr(2)],
+                Datum::Int4(3),
+            ),
+            (
+                "array_length",
+                vec![array_expr("{{1,2,3},{4,5,6}}", ElemType::Int4), int_expr(3)],
+                Datum::Null,
+            ),
+            (
+                "array_length",
+                vec![array_expr("{1,2}", ElemType::Int4), int_expr(0)],
+                Datum::Null,
+            ),
+            (
+                "array_lower",
+                vec![array_expr("[2:4]={1,2,3}", ElemType::Int4), int_expr(1)],
+                Datum::Int4(2),
+            ),
+            (
+                "array_upper",
+                vec![array_expr("[2:4]={1,2,3}", ElemType::Int4), int_expr(1)],
+                Datum::Int4(4),
+            ),
+            (
+                "cardinality",
+                vec![array_expr("{{1,2},{3,4}}", ElemType::Int4)],
+                Datum::Int4(4),
+            ),
+        ];
+        for (name, args, expected) in cases {
+            assert!(
+                call(name, args.clone()).expect(name) == *expected,
+                "{name} {args:?}"
+            );
+        }
+    }
+
+    /// The search, reshaping and generating functions. Values are `PostgreSQL`
+    /// 18.4's.
+    #[test]
+    fn the_remaining_array_functions_match_postgres() {
+        let ints = |literal: &str| array_expr(literal, ElemType::Int4);
+        let cases: &[(&str, Vec<Expr>, &str)] = &[
+            (
+                "array_fill",
+                vec![int_expr(7), ints("{2,2}")],
+                "{{7,7},{7,7}}",
+            ),
+            (
+                "array_fill",
+                vec![int_expr(7), ints("{3}"), ints("{2}")],
+                "[2:4]={7,7,7}",
+            ),
+            ("array_fill", vec![int_expr(1), ints("{0}")], "{}"),
+            (
+                "array_position",
+                vec![ints("{1,2,3,4,5}"), int_expr(4)],
+                "4",
+            ),
+            ("array_position", vec![ints("{1,2,3}"), int_expr(9)], "NULL"),
+            (
+                "array_position",
+                vec![ints("{1,2,3,2}"), int_expr(2), int_expr(3)],
+                "4",
+            ),
+            (
+                "array_positions",
+                vec![ints("{1,2,3,2}"), int_expr(2)],
+                "{2,4}",
+            ),
+            ("array_positions", vec![ints("{1,2}"), int_expr(9)], "{}"),
+            (
+                "array_remove",
+                vec![ints("{1,2,2,3}"), int_expr(2)],
+                "{1,3}",
+            ),
+            (
+                "array_replace",
+                vec![ints("{1,2,5,4}"), int_expr(5), int_expr(3)],
+                "{1,2,3,4}",
+            ),
+            (
+                "array_replace",
+                vec![ints("{{1,2},{2,3}}"), int_expr(2), int_expr(9)],
+                "{{1,9},{9,3}}",
+            ),
+            ("trim_array", vec![ints("{1,2,3}"), int_expr(2)], "{1}"),
+            ("trim_array", vec![ints("{1,2,3}"), int_expr(0)], "{1,2,3}"),
+            ("trim_array", vec![ints("{1,2,3}"), int_expr(3)], "{}"),
+            ("array_sort", vec![ints("{3,1,2}")], "{1,2,3}"),
+            ("array_sort", vec![ints("{{3,4},{1,2}}")], "{{1,2},{3,4}}"),
+            ("array_reverse", vec![ints("{1,2,3}")], "{3,2,1}"),
+            (
+                "array_reverse",
+                vec![ints("{{1,2},{3,4}}")],
+                "{{3,4},{1,2}}",
+            ),
+        ];
+        for (name, args, expected) in cases {
+            let got = call(name, args.clone()).expect(name);
+            let text = match &got {
+                Datum::Null => "NULL".to_string(),
+                other => String::from_utf8(crabka_pgtypes::encoding::encode_text(
+                    other,
+                    &ctx().time_zone,
+                ))
+                .expect("utf8"),
+            };
+            assert!(text == *expected, "{name} {args:?}");
+        }
+    }
+
+    #[test]
+    fn the_remaining_array_functions_report_postgres_sqlstates() {
+        let ints = |literal: &str| array_expr(literal, ElemType::Int4);
+        let cases: &[(&str, Vec<Expr>, &str)] = &[
+            (
+                "array_fill",
+                vec![int_expr(1), null_array_expr(ElemType::Int4)],
+                "22004",
+            ),
+            (
+                "array_fill",
+                vec![int_expr(1), ints("{2,2}"), ints("{1}")],
+                "2202E",
+            ),
+            ("trim_array", vec![ints("{1,2,3}"), int_expr(-1)], "2202E"),
+            ("trim_array", vec![ints("{1,2,3}"), int_expr(4)], "2202E"),
+            ("array_sample", vec![ints("{1,2,3}"), int_expr(-1)], "22023"),
+            ("array_sample", vec![ints("{1,2,3}"), int_expr(5)], "22023"),
+            (
+                "array_position",
+                vec![ints("{{1,2},{3,4}}"), int_expr(3)],
+                "0A000",
+            ),
+            (
+                "array_remove",
+                vec![ints("{{1,2},{3,4}}"), int_expr(3)],
+                "0A000",
+            ),
+            (
+                "array_append",
+                vec![ints("{{1,2},{3,4}}"), int_expr(5)],
+                "22000",
+            ),
+            ("array_prepend", vec![int_expr(1), ints("{{2,3}}")], "22000"),
+        ];
+        for (name, args, code) in cases {
+            let error = call(name, args.clone()).expect_err(name);
+            assert!(sqlstate(error) == *code, "{name} {args:?}");
+        }
+    }
+
+    /// `array_cat` and `||` join along the OUTERMOST dimension, so the operand
+    /// dimensionalities may differ by one.
+    #[test]
+    fn concatenation_joins_the_outermost_dimension() {
+        let cases: &[(&str, &str, &str)] = &[
+            ("{{1,2},{3,4}}", "{{5,6}}", "{{1,2},{3,4},{5,6}}"),
+            ("{1,2}", "{{5,6}}", "{{1,2},{5,6}}"),
+            ("{{5,6}}", "{1,2}", "{{5,6},{1,2}}"),
+            ("{}", "{1}", "{1}"),
+            ("{1}", "{}", "{1}"),
+        ];
+        for (left, right, expected) in cases {
+            let got = array_cat(&int_arr(left), &int_arr(right)).expect("cat");
+            let text = String::from_utf8(crabka_pgtypes::encoding::encode_text(
+                &got,
+                &ctx().time_zone,
+            ))
+            .expect("utf8");
+            assert!(text == *expected, "{left} || {right}");
+        }
+        // Inner dimensions (bounds included) must agree.
+        assert!(
+            sqlstate(
+                array_cat(&int_arr("{{1,2}}"), &int_arr("{{1,2,3}}")).expect_err("incompatible")
+            ) == "2202E"
+        );
+    }
+
+    /// `ARRAY[…]` with nested constructors adds a dimension; a ragged or mixed
+    /// list is PostgreSQL's 2202E.
+    #[test]
+    fn the_array_constructor_stacks_sub_arrays() {
+        let built = build_constructor(ElemType::Int4, vec![int_arr("{1,2}"), int_arr("{3,4}")])
+            .expect("constructor");
+        assert!(built == int_arr("{{1,2},{3,4}}"));
+        let flat = build_constructor(ElemType::Int4, vec![Datum::Int4(1), Datum::Int4(2)])
+            .expect("constructor");
+        assert!(flat == int_arr("{1,2}"));
+        for items in [
+            vec![int_arr("{1,2}"), int_arr("{3}")],
+            vec![int_arr("{1,2}"), Datum::Int4(3)],
+        ] {
+            let error = build_constructor(ElemType::Int4, items).expect_err("ragged");
+            assert!(sqlstate(error) == "2202E");
+        }
     }
 }

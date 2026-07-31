@@ -268,6 +268,80 @@ async fn unique_index_backfill_waits_for_inflight_dml() {
     assert!(err_code(&mut s, "INSERT INTO t VALUES (1, 'dup')").await == "23505");
 }
 
+/// (e2) The gate excludes OTHER sessions' writes, never the DDL's own. A
+/// transaction that has already written holds the gate SHARED; running unique
+/// DDL from that same transaction must release that hold before taking the
+/// exclusive one, or the statement waits on a lock only it could ever free.
+///
+/// `pg_regress`'s `join` corpus is exactly this shape — `BEGIN; CREATE TABLE
+/// fkest …; INSERT INTO fkest SELECT … generate_series(1,1000); CREATE UNIQUE
+/// INDEX ON fkest(…)` — and it must answer, not hang.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unique_ddl_inside_its_own_writing_transaction_does_not_self_deadlock() {
+    let engine = Arc::new(SqlEngine::new());
+    let mut t1 = engine.connect();
+    run(&mut t1, "BEGIN").await;
+    run(&mut t1, "CREATE TABLE fkest (x integer, x10 integer)").await;
+    // Takes the gate SHARED for the rest of the transaction.
+    run(
+        &mut t1,
+        "INSERT INTO fkest SELECT x, x / 10 FROM generate_series(1, 1000) x",
+    )
+    .await;
+
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        run(&mut t1, "CREATE UNIQUE INDEX ON fkest (x, x10)"),
+    )
+    .await
+    .expect("unique DDL deadlocked against its own transaction's shared hold");
+
+    // The backfill saw this transaction's own uncommitted rows, so the finished
+    // index enforces against them, and a further write re-takes the released
+    // shared hold rather than running ungated.
+    assert!(err_code(&mut t1, "INSERT INTO fkest VALUES (1, 0)").await == "23505");
+    run(&mut t1, "ROLLBACK").await;
+}
+
+/// (e3) Waiting for the gate must not also stall unrelated DDL. The exclusive
+/// hold is taken BEFORE the catalog lock, so a backfill parked behind another
+/// session's open write leaves `CREATE TABLE` on an unrelated relation — which
+/// wants the catalog lock and nothing else — free to run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_blocked_backfill_does_not_stall_unrelated_ddl() {
+    let engine = Arc::new(SqlEngine::new());
+    {
+        let mut s = engine.connect();
+        run(&mut s, "CREATE TABLE t (id bigint, v text)").await;
+    }
+
+    let mut t1 = engine.connect();
+    run(&mut t1, "BEGIN").await;
+    run(&mut t1, "INSERT INTO t VALUES (1, 'a')").await;
+
+    let e2 = Arc::clone(&engine);
+    let ddl = tokio::spawn(async move {
+        let mut s = e2.connect();
+        run(&mut s, "CREATE UNIQUE INDEX t_id_idx ON t (id)").await;
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!ddl.is_finished());
+
+    let mut other = engine.connect();
+    tokio::time::timeout(
+        Duration::from_secs(30),
+        run(&mut other, "CREATE TABLE unrelated (a int)"),
+    )
+    .await
+    .expect("unrelated DDL blocked behind a waiting unique backfill");
+
+    run(&mut t1, "COMMIT").await;
+    tokio::time::timeout(Duration::from_secs(30), ddl)
+        .await
+        .expect("backfill did not hang")
+        .expect("ddl join");
+}
+
 /// (f) An UPDATE that leaves every unique-indexed column unchanged takes NO
 /// key lock: while such an update's transaction is open (holding only its row
 /// lock), a PK-preserving update of another row commits concurrently, and an

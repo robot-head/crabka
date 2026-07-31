@@ -1087,6 +1087,7 @@ mod tests {
                 },
             )),
             foreign: None,
+            checks: Vec::new(),
         };
         let left = table(1, "left", "pair");
         let right = table(2, "right", "pair");

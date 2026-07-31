@@ -17,7 +17,7 @@ use std::{
 };
 
 use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall, SelectItem, SelectStmt};
-use crabka_pgtypes::{ArrayValue, ColumnType, Datum, ElemType, TypeError, ops};
+use crabka_pgtypes::{ColumnType, Datum, ElemType, TypeError, numeric::NumericValue, ops};
 use crabka_pgwire::engine::QueryResult;
 
 use crate::{clock::EvalCtx, error::ExecError, scope::Scope};
@@ -44,6 +44,68 @@ enum AggFunc {
     JsonbAgg,
     /// `jsonb_object_agg(key, value)` — the inputs as a JSON object.
     JsonbObjectAgg,
+    /// `string_agg(value, delimiter)` — the values joined by the delimiter.
+    StringAgg,
+    /// `bool_and(b)` / `every(b)` — true when no input is false.
+    BoolAnd,
+    /// `bool_or(b)` — true when some input is true.
+    BoolOr,
+    /// `bit_and`/`bit_or`/`bit_xor` — the integer inputs folded bitwise.
+    BitAnd,
+    BitOr,
+    BitXor,
+    /// The single-variable statistical family. `variance` is `var_samp` and
+    /// `stddev` is `stddev_samp`, exactly as PostgreSQL aliases them.
+    VarPop,
+    VarSamp,
+    StddevPop,
+    StddevSamp,
+    /// The two-variable statistical family, all `float8`-in / `float8`-out and
+    /// all written `f(Y, X)`.
+    Corr,
+    CovarPop,
+    CovarSamp,
+    RegrCount,
+    RegrSxx,
+    RegrSyy,
+    RegrSxy,
+    RegrAvgx,
+    RegrAvgy,
+    RegrSlope,
+    RegrIntercept,
+    RegrR2,
+}
+
+impl AggFunc {
+    /// Does this aggregate take `(Y, X)` rather than a single value?
+    fn is_two_variable(self) -> bool {
+        matches!(
+            self,
+            AggFunc::Corr
+                | AggFunc::CovarPop
+                | AggFunc::CovarSamp
+                | AggFunc::RegrCount
+                | AggFunc::RegrSxx
+                | AggFunc::RegrSyy
+                | AggFunc::RegrSxy
+                | AggFunc::RegrAvgx
+                | AggFunc::RegrAvgy
+                | AggFunc::RegrSlope
+                | AggFunc::RegrIntercept
+                | AggFunc::RegrR2
+        )
+    }
+
+    /// The single-variable statistical members, as `(sample, take the root)`.
+    fn variance_shape(self) -> Option<(bool, bool)> {
+        Some(match self {
+            AggFunc::VarPop => (false, false),
+            AggFunc::VarSamp => (true, false),
+            AggFunc::StddevPop => (false, true),
+            AggFunc::StddevSamp => (true, true),
+            _ => return None,
+        })
+    }
 }
 
 impl AggFunc {
@@ -56,6 +118,14 @@ impl AggFunc {
             AggFunc::ArrayAgg | AggFunc::JsonbAgg | AggFunc::JsonbObjectAgg
         )
     }
+}
+
+/// Is `name` one of the aggregates this engine implements? An `OVER` clause on
+/// a call is legal for a window function or an aggregate and nothing else, so the
+/// window planner asks this to tell `PostgreSQL`'s 42809 (a real function used
+/// with `OVER`) from its 42883 (no such function).
+pub(crate) fn is_aggregate_name(name: &str) -> bool {
+    aggregate_func(name).is_some()
 }
 
 /// Classify a (lowercased — the lexer lowercases unquoted idents) function name.
@@ -71,6 +141,30 @@ fn aggregate_func(name: &str) -> Option<AggFunc> {
         "array_agg" => Some(AggFunc::ArrayAgg),
         "jsonb_agg" => Some(AggFunc::JsonbAgg),
         "jsonb_object_agg" => Some(AggFunc::JsonbObjectAgg),
+        "string_agg" => Some(AggFunc::StringAgg),
+        // `every` is SQL's spelling of `bool_and`; `variance`/`stddev` are
+        // PostgreSQL's historical aliases for the SAMPLE forms.
+        "bool_and" | "every" => Some(AggFunc::BoolAnd),
+        "bool_or" => Some(AggFunc::BoolOr),
+        "bit_and" => Some(AggFunc::BitAnd),
+        "bit_or" => Some(AggFunc::BitOr),
+        "bit_xor" => Some(AggFunc::BitXor),
+        "var_pop" => Some(AggFunc::VarPop),
+        "var_samp" | "variance" => Some(AggFunc::VarSamp),
+        "stddev_pop" => Some(AggFunc::StddevPop),
+        "stddev_samp" | "stddev" => Some(AggFunc::StddevSamp),
+        "corr" => Some(AggFunc::Corr),
+        "covar_pop" => Some(AggFunc::CovarPop),
+        "covar_samp" => Some(AggFunc::CovarSamp),
+        "regr_count" => Some(AggFunc::RegrCount),
+        "regr_sxx" => Some(AggFunc::RegrSxx),
+        "regr_syy" => Some(AggFunc::RegrSyy),
+        "regr_sxy" => Some(AggFunc::RegrSxy),
+        "regr_avgx" => Some(AggFunc::RegrAvgx),
+        "regr_avgy" => Some(AggFunc::RegrAvgy),
+        "regr_slope" => Some(AggFunc::RegrSlope),
+        "regr_intercept" => Some(AggFunc::RegrIntercept),
+        "regr_r2" => Some(AggFunc::RegrR2),
         _ => None,
     }
 }
@@ -111,7 +205,7 @@ pub(crate) fn contains_aggregate(e: &Expr) -> bool {
         Expr::Cast { expr, .. } => contains_aggregate(expr),
         // The array expression forms are aggregates iff a child is
         // (`ARRAY[count(*)]`, `arr[max(i)]`, `x = ANY(array_agg(y))`).
-        Expr::ArrayLiteral(items) => items.iter().any(contains_aggregate),
+        Expr::ArrayLiteral(items) | Expr::Row(items) => items.iter().any(contains_aggregate),
         Expr::Subscript { base, index } => contains_aggregate(base) || contains_aggregate(index),
         Expr::QuantifiedArray { expr, array, .. } => {
             contains_aggregate(expr) || contains_aggregate(array)
@@ -162,10 +256,12 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
             let arg = single_value_arg(fc)?;
             let t = crate::eval::infer_type(arg, scope)?;
             match t {
-                // sum(int4)/sum(int8) -> bigint (PG: int8 sums to numeric — a
-                // remaining documented deviation). sum(float8) -> float8;
-                // SP32: sum(numeric) -> numeric.
-                ColumnType::Int4 | ColumnType::Int8 => Ok(ColumnType::Int8),
+                // sum(int2)/sum(int4)/sum(int8) -> bigint (PG: int8 sums to
+                // numeric — a remaining documented deviation). sum(float4) ->
+                // real and sum(float8) -> float8, each accumulating at its own
+                // width; SP32: sum(numeric) -> numeric.
+                ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8 => Ok(ColumnType::Int8),
+                ColumnType::Float4 => Ok(ColumnType::Float4),
                 ColumnType::Float8 => Ok(ColumnType::Float8),
                 _ if t.is_numeric() => Ok(ColumnType::Numeric(None)),
                 other => Err(undefined_for_arg("sum", other)),
@@ -177,8 +273,12 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
             let arg = single_value_arg(fc)?;
             let t = crate::eval::infer_type(arg, scope)?;
             match t {
-                ColumnType::Float8 => Ok(ColumnType::Float8),
-                ColumnType::Int4 | ColumnType::Int8 => Ok(ColumnType::Numeric(None)),
+                // `avg(float4)` is `float8` in PostgreSQL — unlike `sum(float4)`,
+                // which stays `real`.
+                ColumnType::Float4 | ColumnType::Float8 => Ok(ColumnType::Float8),
+                ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8 => {
+                    Ok(ColumnType::Numeric(None))
+                }
                 _ if t.is_numeric() => Ok(ColumnType::Numeric(None)),
                 other => Err(undefined_for_arg("avg", other)),
             }
@@ -189,10 +289,16 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
             crate::eval::infer_type(arg, scope)
         }
         // array_agg(x) -> x[]; an element type crabka has no array type for is 0A000.
+        // `array_agg(anyarray)` stacks its inputs as the outer dimension of one
+        // array of the SAME type, so an array argument keeps its own type.
         AggFunc::ArrayAgg => {
             let arg = single_value_arg(fc)?;
             let t = crate::eval::infer_type(arg, scope)?;
-            array_of(t)
+            if t.array_element().is_some() {
+                Ok(t)
+            } else {
+                array_of(t)
+            }
         }
         AggFunc::JsonbAgg => {
             single_value_arg(fc)?;
@@ -203,6 +309,77 @@ pub(crate) fn func_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnTyp
             crate::eval::infer_type(key, scope)?;
             Ok(ColumnType::Jsonb)
         }
+        // `string_agg(text, text)` and `string_agg(bytea, bytea)`; the value
+        // argument picks the overload and is also the result type.
+        AggFunc::StringAgg => {
+            let (value, _) = two_value_args(fc)?;
+            match crate::eval::infer_type(value, scope)? {
+                ColumnType::Bytea => Ok(ColumnType::Bytea),
+                ColumnType::Text => Ok(ColumnType::Text),
+                other => Err(undefined_for_arg("string_agg", other)),
+            }
+        }
+        AggFunc::BoolAnd | AggFunc::BoolOr => {
+            let arg = single_value_arg(fc)?;
+            match crate::eval::infer_type(arg, scope)? {
+                ColumnType::Bool => Ok(ColumnType::Bool),
+                other => Err(undefined_for_arg(&fc.name, other)),
+            }
+        }
+        // The bitwise aggregates keep the integer width they were given.
+        AggFunc::BitAnd | AggFunc::BitOr | AggFunc::BitXor => {
+            let arg = single_value_arg(fc)?;
+            match crate::eval::infer_type(arg, scope)? {
+                t @ (ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8) => Ok(t),
+                other => Err(undefined_for_arg(&fc.name, other)),
+            }
+        }
+        // var_pop/var_samp/stddev_pop/stddev_samp: float8 in, float8 out; every
+        // other numeric width accumulates exactly and yields numeric.
+        AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp => {
+            let arg = single_value_arg(fc)?;
+            let t = crate::eval::infer_type(arg, scope)?;
+            match t {
+                ColumnType::Float4 | ColumnType::Float8 => Ok(ColumnType::Float8),
+                ColumnType::Int2 | ColumnType::Int4 | ColumnType::Int8 => {
+                    Ok(ColumnType::Numeric(None))
+                }
+                _ if t.is_numeric() => Ok(ColumnType::Numeric(None)),
+                other => Err(undefined_for_arg(&fc.name, other)),
+            }
+        }
+        // The two-variable family is float8-only; `regr_count` alone returns int8.
+        AggFunc::RegrCount => {
+            let (y, x) = two_value_args(fc)?;
+            require_float_arg(&fc.name, y, scope)?;
+            require_float_arg(&fc.name, x, scope)?;
+            Ok(ColumnType::Int8)
+        }
+        _ => {
+            let (y, x) = two_value_args(fc)?;
+            require_float_arg(&fc.name, y, scope)?;
+            require_float_arg(&fc.name, x, scope)?;
+            Ok(ColumnType::Float8)
+        }
+    }
+}
+
+/// The two-variable statistical aggregates take `float8` parameters; every
+/// numeric width reaches them through PostgreSQL's implicit widening cast.
+fn require_float_arg(name: &str, arg: &Expr, scope: &Scope) -> Result<(), ExecError> {
+    let t = crate::eval::infer_type(arg, scope)?;
+    if matches!(
+        t,
+        ColumnType::Int2
+            | ColumnType::Int4
+            | ColumnType::Int8
+            | ColumnType::Float4
+            | ColumnType::Float8
+    ) || t.is_numeric()
+    {
+        Ok(())
+    } else {
+        Err(undefined_for_arg(name, t))
     }
 }
 
@@ -214,7 +391,9 @@ fn array_of(elem: ColumnType) -> Result<ColumnType, ExecError> {
 }
 
 fn undefined_function(name: &str) -> ExecError {
-    ExecError::UndefinedFunction(format!("function {name}(...) does not exist"))
+    // Shared with the scalar surface so `merge_action()` outside a MERGE
+    // RETURNING list reports PostgreSQL's misuse error from every dispatch path.
+    crate::func::undefined_function(name)
 }
 
 fn undefined_for_arg(name: &str, t: ColumnType) -> ExecError {
@@ -261,12 +440,40 @@ struct AggSpec {
     value_arg: Option<Expr>,
     arg_type: Option<ColumnType>,
     distinct: bool,
+    /// `agg(...) FILTER (WHERE predicate)` — evaluated per source row before the
+    /// argument is even looked at, so a row the predicate rejects never reaches
+    /// the accumulator and never joins the `DISTINCT` buffer.
+    filter: Option<Expr>,
 }
 
 /// Build the spec for one aggregate call, validating arity, argument type, and
 /// the no-nested-aggregate rule.
 fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
     let func = aggregate_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
+    // A FILTER predicate resolves in the same scope as the arguments: it must be
+    // boolean, and — like an argument — it may not contain an aggregate itself.
+    if let Some(predicate) = &fc.filter {
+        if contains_aggregate(predicate) {
+            return Err(ExecError::FunctionError {
+                sqlstate: "42803",
+                message: "aggregate functions are not allowed in FILTER".into(),
+            });
+        }
+        // A bare NULL is `unknown`, which PostgreSQL coerces to boolean — the
+        // predicate is then never true, so every row is rejected.
+        if !matches!(predicate.as_ref(), Expr::NullLiteral) {
+            let ty = crate::eval::infer_type(predicate, scope)?;
+            if ty != ColumnType::Bool {
+                return Err(ExecError::FunctionError {
+                    sqlstate: "42804",
+                    message: format!(
+                        "argument of FILTER must be type boolean, not type {}",
+                        ty.name()
+                    ),
+                });
+            }
+        }
+    }
     match func {
         AggFunc::Count => match &fc.args {
             FuncArgs::Star => Ok(AggSpec {
@@ -275,6 +482,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 value_arg: None,
                 arg_type: None,
                 distinct: fc.distinct,
+                filter: fc.filter.as_deref().cloned(),
             }),
             FuncArgs::Exprs(args) if args.len() == 1 => {
                 reject_nested_aggregate(&args[0])?;
@@ -285,6 +493,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                     value_arg: None,
                     arg_type: Some(arg_type),
                     distinct: fc.distinct,
+                    filter: fc.filter.as_deref().cloned(),
                 })
             }
             _ => Err(undefined_function("count")),
@@ -295,7 +504,9 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
             let arg = single_value_arg(fc)?;
             reject_nested_aggregate(arg)?;
             let arg_type = crate::eval::infer_type(arg, scope)?;
-            if func == AggFunc::ArrayAgg {
+            // An array argument aggregates into one more dimension of the SAME
+            // array type, so it needs no array type of its own.
+            if func == AggFunc::ArrayAgg && arg_type.array_element().is_none() {
                 array_of(arg_type)?;
             }
             Ok(AggSpec {
@@ -304,6 +515,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 value_arg: None,
                 arg_type: Some(arg_type),
                 distinct: fc.distinct,
+                filter: fc.filter.as_deref().cloned(),
             })
         }
         AggFunc::JsonbObjectAgg => {
@@ -324,6 +536,7 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 value_arg: Some(value.clone()),
                 arg_type: Some(key_type),
                 distinct: fc.distinct,
+                filter: fc.filter.as_deref().cloned(),
             })
         }
         AggFunc::Sum | AggFunc::Avg | AggFunc::Min | AggFunc::Max => {
@@ -335,7 +548,11 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
             if matches!(func, AggFunc::Sum | AggFunc::Avg)
                 && !matches!(
                     arg_type,
-                    ColumnType::Int4 | ColumnType::Int8 | ColumnType::Float8
+                    ColumnType::Int2
+                        | ColumnType::Int4
+                        | ColumnType::Int8
+                        | ColumnType::Float4
+                        | ColumnType::Float8
                 )
                 && !arg_type.is_numeric()
             {
@@ -347,6 +564,61 @@ fn spec_of(fc: &FuncCall, scope: &Scope) -> Result<AggSpec, ExecError> {
                 value_arg: None,
                 arg_type: Some(arg_type),
                 distinct: fc.distinct,
+                filter: fc.filter.as_deref().cloned(),
+            })
+        }
+        // `string_agg(value, delimiter)` and the two-variable statistical
+        // family all take a second argument, which the spec carries in the same
+        // `value_arg` slot `jsonb_object_agg` uses.
+        AggFunc::StringAgg => {
+            let (value, delimiter) = two_value_args(fc)?;
+            reject_nested_aggregate(value)?;
+            reject_nested_aggregate(delimiter)?;
+            let arg_type = crate::eval::infer_type(value, scope)?;
+            if !matches!(arg_type, ColumnType::Text | ColumnType::Bytea) {
+                return Err(undefined_for_arg("string_agg", arg_type));
+            }
+            crate::eval::infer_type(delimiter, scope)?;
+            Ok(AggSpec {
+                func,
+                arg: Some(value.clone()),
+                value_arg: Some(delimiter.clone()),
+                arg_type: Some(arg_type),
+                distinct: fc.distinct,
+                filter: fc.filter.as_deref().cloned(),
+            })
+        }
+        _ if func.is_two_variable() => {
+            let (y, x) = two_value_args(fc)?;
+            reject_nested_aggregate(y)?;
+            reject_nested_aggregate(x)?;
+            require_float_arg(&fc.name, y, scope)?;
+            require_float_arg(&fc.name, x, scope)?;
+            Ok(AggSpec {
+                func,
+                arg: Some(y.clone()),
+                value_arg: Some(x.clone()),
+                arg_type: Some(ColumnType::Float8),
+                distinct: fc.distinct,
+                filter: fc.filter.as_deref().cloned(),
+            })
+        }
+        // The remaining single-argument aggregates: the boolean pair, the
+        // bitwise trio, and the single-variable statistical family.
+        _ => {
+            let arg = single_value_arg(fc)?;
+            reject_nested_aggregate(arg)?;
+            let arg_type = crate::eval::infer_type(arg, scope)?;
+            // `func_result_type` owns the accept/reject rule for each family;
+            // running it here keeps plan-time typing and folding in step.
+            func_result_type(fc, scope)?;
+            Ok(AggSpec {
+                func,
+                arg: Some(arg.clone()),
+                value_arg: None,
+                arg_type: Some(arg_type),
+                distinct: fc.distinct,
+                filter: fc.filter.as_deref().cloned(),
             })
         }
     }
@@ -451,7 +723,7 @@ fn collect_specs(e: &Expr, scope: &Scope, specs: &mut Vec<AggSpec>) -> Result<()
         // SP31: gather aggregates from a cast's operand (`avg(x)::int8`).
         Expr::Cast { expr, .. } => collect_specs(expr, scope, specs)?,
         // The array expression forms: gather from every child.
-        Expr::ArrayLiteral(items) => {
+        Expr::ArrayLiteral(items) | Expr::Row(items) => {
             for item in items {
                 collect_specs(item, scope, specs)?;
             }
@@ -491,8 +763,14 @@ fn is_wrapping_scalar_func(name: &str) -> bool {
 /// the pushdown spec, and a non-column argument fails spec construction later.
 pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncCall>) -> bool {
     match e {
+        // A SQL/JSON expression is not streamable: its operands may contain
+        // aggregates, which the streaming path does not rebuild.
+        Expr::SqlJson(_) => false,
         Expr::Func(fc) if aggregate_func(&fc.name).is_some() => {
-            if fc.distinct {
+            // A FILTER predicate has to be evaluated per source row, which the
+            // streaming path does not do — it would silently aggregate every row.
+            // Fall back to the general path, which applies the predicate.
+            if fc.distinct || fc.filter.is_some() {
                 return false;
             }
             if !calls.contains(fc) {
@@ -512,9 +790,13 @@ pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncC
         | Expr::BoolLiteral(_)
         | Expr::NullLiteral
         | Expr::Const { .. } => true,
-        Expr::Unary { expr, .. } | Expr::IsNull { expr, .. } | Expr::Cast { expr, .. } => {
-            collect_streamable_aggregate_calls(expr, calls)
+        Expr::FieldSelect { base, .. } | Expr::FieldSelectAll(base) => {
+            collect_streamable_aggregate_calls(base, calls)
         }
+        Expr::Unary { expr, .. }
+        | Expr::IsNull { expr, .. }
+        | Expr::Cast { expr, .. }
+        | Expr::Collate { expr, .. } => collect_streamable_aggregate_calls(expr, calls),
         Expr::Binary { left, right, .. } => {
             collect_streamable_aggregate_calls(left, calls)
                 && collect_streamable_aggregate_calls(right, calls)
@@ -552,10 +834,11 @@ pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncC
                     .as_deref()
                     .is_none_or(|e| collect_streamable_aggregate_calls(e, calls))
         }
-        // The array expression forms are deliberately NOT streamable: they need
-        // the scope-aware evaluator (element-type unification, subscripting),
-        // which the streamed fold does not have. The materializing scan handles
-        // them — and its errors — unchanged.
+        // The array and row expression forms are deliberately NOT streamable:
+        // they need the scope-aware evaluator (element-type unification,
+        // subscripting, the session zone for a row's text form), which the
+        // streamed fold does not have. The materializing scan handles them —
+        // and its errors — unchanged.
         Expr::Column { .. }
         | Expr::Param(_)
         | Expr::Default
@@ -566,7 +849,10 @@ pub(crate) fn collect_streamable_aggregate_calls(e: &Expr, calls: &mut Vec<FuncC
         | Expr::Quantified { .. }
         | Expr::QuantifiedArray { .. }
         | Expr::ArrayLiteral(_)
-        | Expr::Subscript { .. } => false,
+        | Expr::ArraySubquery(_)
+        | Expr::Row(_)
+        | Expr::Subscript { .. }
+        | Expr::ArrayRef { .. } => false,
     }
 }
 
@@ -594,6 +880,10 @@ pub(crate) fn eval_over_aggregate_values(
 /// Data-independent validation: every projection / `HAVING` / `ORDER BY`
 /// expression must be built from aggregate calls, `GROUP BY` expressions, and
 /// constants. A bare ungrouped column → 42803 (even on an empty table).
+///
+/// Both `e` and `group_by` have had their column references canonicalized
+/// against the input scope by [`aggregate_rows`], so the structural comparison
+/// below matches `t.a` against a bare `a` naming the same column.
 fn validate_grouped(e: &Expr, group_by: &[Expr]) -> Result<(), ExecError> {
     if let Expr::Func(fc) = e
         && aggregate_func(&fc.name).is_some()
@@ -604,7 +894,7 @@ fn validate_grouped(e: &Expr, group_by: &[Expr]) -> Result<(), ExecError> {
         return Ok(()); // matches a grouping expression structurally
     }
     match e {
-        Expr::Column { name, .. } => Err(ungrouped_column(name)),
+        Expr::Column { table, name } => Err(ungrouped_column(table.as_deref(), name)),
         Expr::Unary { expr, .. } => validate_grouped(expr, group_by),
         Expr::Binary { left, right, .. } => {
             validate_grouped(left, group_by)?;
@@ -663,7 +953,7 @@ fn validate_grouped(e: &Expr, group_by: &[Expr]) -> Result<(), ExecError> {
         // expression matching a GROUP BY key was already accepted above).
         Expr::Cast { expr, .. } => validate_grouped(expr, group_by),
         // The array expression forms are grouped-valid iff every child is.
-        Expr::ArrayLiteral(items) => {
+        Expr::ArrayLiteral(items) | Expr::Row(items) => {
             for item in items {
                 validate_grouped(item, group_by)?;
             }
@@ -681,9 +971,13 @@ fn validate_grouped(e: &Expr, group_by: &[Expr]) -> Result<(), ExecError> {
     }
 }
 
-fn ungrouped_column(name: &str) -> ExecError {
+/// `PostgreSQL` names the offending column by its range-table alias — `gs.b`,
+/// never a bare `b` — so the qualifier the canonicalized reference carries is
+/// part of the message.
+fn ungrouped_column(qualifier: Option<&str>, name: &str) -> ExecError {
+    let column = qualifier.map_or_else(|| name.to_string(), |table| format!("{table}.{name}"));
     ExecError::Grouping(format!(
-        "column \"{name}\" must appear in the GROUP BY clause or be used in an aggregate function"
+        "column \"{column}\" must appear in the GROUP BY clause or be used in an aggregate function"
     ))
 }
 
@@ -758,6 +1052,9 @@ fn eval_grouped_depth(
         return Ok(key[i].clone());
     }
     match e {
+        Expr::SqlJson(json) => {
+            crate::json_fn::eval_sql_json(json, ctx, |child| eval_grouped_depth(child, grouped, d))
+        }
         Expr::IntLiteral(s) => Ok(ops::int_literal(s)?),
         Expr::NumericLiteral(s) => crabka_pgtypes::numeric::parse(s)
             .map(Datum::Numeric)
@@ -773,22 +1070,49 @@ fn eval_grouped_depth(
         Expr::Param(_) => Err(ExecError::Unsupported(
             "query parameters ($n) are not supported".into(),
         )),
-        Expr::Default => Err(ExecError::Unsupported(
-            "DEFAULT is only supported in INSERT target values".into(),
+        Expr::Default => Err(ExecError::Syntax(
+            "DEFAULT is not allowed in this context".into(),
         )),
-        Expr::Column { name, .. } => Err(ungrouped_column(name)),
+        Expr::Collate { expr, .. } => {
+            let value = eval_grouped_depth(expr, grouped, d)?;
+            if let Some(ty) = value.column_type() {
+                crate::eval::require_collatable(ty)?;
+            }
+            Ok(value)
+        }
+        Expr::Column { table, name } => Err(ungrouped_column(table.as_deref(), name)),
         Expr::Unary { op, expr } => {
             let v = eval_grouped_depth(expr, grouped, d)?;
             crate::eval::apply_unary(*op, &v, ctx)
         }
         Expr::Binary { op, left, right } => {
+            if let Some(result) = crate::rowexpr::eval_binary(*op, left, right, |e| {
+                eval_grouped_depth(e, grouped, d)
+            })? {
+                return Ok(result);
+            }
             let l = eval_grouped_depth(left, grouped, d)?;
             let r = eval_grouped_depth(right, grouped, d)?;
             crate::eval::apply_binary_of(*op, left, right, &l, &r, scope, ctx)
         }
+        // A row constructor renders to PostgreSQL's composite text form once the
+        // row-wise operations above have had their chance at its fields.
+        Expr::Row(items) => crate::rowexpr::eval_row(items, |e| eval_grouped_depth(e, grouped, d)),
+        Expr::FieldSelect { base, field } => {
+            let value = eval_grouped_depth(base, grouped, d)?;
+            crate::eval::select_field(&value, field)
+        }
+        Expr::FieldSelectAll(_) => Err(ExecError::Unsupported(
+            "(row).* is only supported in a SELECT output list".into(),
+        )),
         // SP28: predicate + conditional expressions in a grouped context — same
         // combinators as scalar `eval`, recursing through `eval_grouped_depth`.
         Expr::IsNull { expr, negated } => {
+            if let Some(result) =
+                crate::rowexpr::eval_is_null(expr, *negated, |e| eval_grouped_depth(e, grouped, d))?
+            {
+                return Ok(result);
+            }
             let v = eval_grouped_depth(expr, grouped, d)?;
             Ok(Datum::Bool(v.is_null() ^ *negated))
         }
@@ -797,6 +1121,11 @@ fn eval_grouped_depth(
             list,
             negated,
         } => {
+            if let Some(result) = crate::rowexpr::eval_in_list(expr, list, *negated, |e| {
+                eval_grouped_depth(e, grouped, d)
+            })? {
+                return Ok(result);
+            }
             let x = eval_grouped_depth(expr, grouped, d)?;
             crate::eval::eval_in_list(&x, list, *negated, |e| eval_grouped_depth(e, grouped, d))
         }
@@ -815,11 +1144,16 @@ fn eval_grouped_depth(
             expr,
             pattern,
             negated,
-            case_insensitive,
+            kind,
+            escape,
         } => {
             let s = eval_grouped_depth(expr, grouped, d)?;
             let p = eval_grouped_depth(pattern, grouped, d)?;
-            crate::eval::eval_like(&s, &p, *negated, *case_insensitive)
+            let e = escape
+                .as_deref()
+                .map(|e| eval_grouped_depth(e, grouped, d))
+                .transpose()?;
+            crate::eval::eval_like(&s, &p, *negated, *kind, e.as_ref())
         }
         Expr::Case {
             operand,
@@ -866,17 +1200,46 @@ fn eval_grouped_depth(
         Expr::ArrayLiteral(items) => {
             let elem = crate::eval::array_literal_elem_type(items, scope)?;
             let target = elem.column_type();
-            let mut elems = Vec::with_capacity(items.len());
+            let mut parts = Vec::with_capacity(items.len());
             for item in items {
                 let v = eval_grouped_depth(item, grouped, d)?;
-                elems.push(crabka_pgtypes::cast::cast(&v, target, &ctx.time_zone)?);
+                parts.push(match item {
+                    Expr::ArrayLiteral(_) => v,
+                    _ => crabka_pgtypes::cast::cast(&v, target, &ctx.time_zone)?,
+                });
             }
-            Ok(Datum::Array(ArrayValue::new(elem, elems)))
+            crate::array_fn::build_constructor(elem, parts)
         }
+        Expr::ArraySubquery(_) => Err(ExecError::Unsupported(
+            "ARRAY(subquery) is only supported in a query context".into(),
+        )),
         Expr::Subscript { base, index } => {
             let b = eval_grouped_depth(base, grouped, d)?;
             let i = eval_grouped_depth(index, grouped, d)?;
             crate::array_fn::array_subscript(&b, &i)
+        }
+        Expr::ArrayRef { base, subscripts } => {
+            let b = eval_grouped_depth(base, grouped, d)?;
+            let args = subscripts
+                .iter()
+                .map(|s| match s {
+                    crabka_pgparser::ast::ArraySubscript::Index(e) => Ok(
+                        crate::array_fn::SubscriptArg::Index(eval_grouped_depth(e, grouped, d)?),
+                    ),
+                    crabka_pgparser::ast::ArraySubscript::Slice { lower, upper } => {
+                        let bound = |e: &Option<Expr>| {
+                            e.as_ref()
+                                .map(|e| eval_grouped_depth(e, grouped, d))
+                                .transpose()
+                        };
+                        Ok(crate::array_fn::SubscriptArg::Slice {
+                            lower: bound(lower)?,
+                            upper: bound(upper)?,
+                        })
+                    }
+                })
+                .collect::<Result<Vec<_>, ExecError>>()?;
+            crate::array_fn::array_ref(&b, &args)
         }
         Expr::QuantifiedArray {
             expr,
@@ -931,6 +1294,12 @@ enum AccState {
         acc: f64,
         any: bool,
     },
+    /// `sum(float4)` — accumulated in `f32` and returned as `real`, because
+    /// PostgreSQL's `sum(real)` transition function is `float4pl`.
+    SumF4 {
+        acc: f32,
+        any: bool,
+    },
     /// SP32: numeric sum (exact, no overflow) — accumulated as a numeric `Datum`.
     SumN {
         acc: Option<Datum>,
@@ -963,6 +1332,54 @@ enum AccState {
     JsonbObjectAgg {
         pairs: Vec<(Datum, Datum)>,
     },
+    /// `string_agg` — the joined value so far. The delimiter comes from each
+    /// row, as PostgreSQL's transition function reads it, and is written before
+    /// every value but the first.
+    StringAgg {
+        acc: Option<StringAggAcc>,
+    },
+    /// `bool_and`/`bool_or`/`every` — whether any input was true and whether
+    /// any was false. No rows at all is SQL NULL.
+    BoolAgg {
+        any_true: bool,
+        any_false: bool,
+        seen: bool,
+    },
+    /// `bit_and`/`bit_or`/`bit_xor` — the running fold, keeping the input width.
+    BitAgg {
+        acc: Option<Datum>,
+    },
+    /// The `float8` single-variable statistical state: PostgreSQL's
+    /// Youngs–Cramer `(N, Sx, Sxx)`, where `Sxx` is the running sum of squared
+    /// deviations rather than the sum of squares.
+    VarFloat {
+        n: f64,
+        sx: f64,
+        sxx: f64,
+    },
+    /// The exact `numeric` statistical state: `(N, Σx, Σx²)`, finalized by
+    /// `numeric::stddev_internal`.
+    VarNumeric {
+        n: i64,
+        sum: NumericValue,
+        sum2: NumericValue,
+    },
+    /// The two-variable Youngs–Cramer state shared by `corr`, `covar_*` and the
+    /// whole `regr_*` family.
+    Regr {
+        n: f64,
+        sx: f64,
+        sxx: f64,
+        sy: f64,
+        syy: f64,
+        sxy: f64,
+    },
+}
+
+/// `string_agg`'s running value, in whichever of its two overloads is in play.
+enum StringAggAcc {
+    Text(String),
+    Bytea(Vec<u8>),
 }
 
 impl Acc {
@@ -982,6 +1399,16 @@ impl Acc {
         row: &[Datum],
         ctx: &EvalCtx,
     ) -> Result<(), ExecError> {
+        // FILTER comes first: PostgreSQL decides whether the row participates at
+        // all before evaluating the argument, so a rejected row does not count for
+        // `count(*)` and never enters the DISTINCT buffer. A predicate that is
+        // NULL rejects the row, exactly as a WHERE clause would.
+        if let Some(predicate) = &spec.filter {
+            let keep = crate::eval::eval(predicate, scope, row, ctx)?;
+            if keep != Datum::Bool(true) {
+                return Ok(());
+            }
+        }
         // count(*) counts every row, ignoring NULL/DISTINCT.
         if let (AggFunc::Count, None) = (spec.func, &spec.arg) {
             if let AccState::Count { n } = &mut self.state {
@@ -990,9 +1417,11 @@ impl Acc {
             return Ok(());
         }
         let args = spec.eval_args(scope, row, ctx)?;
-        // count(x)/sum/avg/min/max ignore NULL arguments; the collecting
-        // aggregates keep them (NULL array element / JSON `null` value).
-        if args[0].is_null() && !spec.func.keeps_nulls() {
+        // count(x)/sum/avg/min/max and the statistical family ignore rows with
+        // a NULL argument — for the two-variable aggregates, a NULL in EITHER
+        // position drops the pair. The collecting aggregates keep NULLs (a NULL
+        // array element / JSON `null` value).
+        if !spec.func.keeps_nulls() && args.iter().any(Datum::is_null) {
             return Ok(());
         }
         match &mut self.distinct {
@@ -1012,7 +1441,7 @@ impl Acc {
                 self.state.fold_args(spec, &args, ctx)?;
             }
         }
-        self.state.finish(ctx)
+        self.state.finish(spec, ctx)
     }
 }
 
@@ -1069,6 +1498,10 @@ impl AccState {
         match spec.func {
             AggFunc::Count => AccState::Count { n: 0 },
             AggFunc::Sum => match spec.arg_type {
+                Some(ColumnType::Float4) => AccState::SumF4 {
+                    acc: 0.0,
+                    any: false,
+                },
                 Some(ColumnType::Float8) => AccState::SumF {
                     acc: 0.0,
                     any: false,
@@ -1076,9 +1509,10 @@ impl AccState {
                 Some(t) if t.is_numeric() => AccState::SumN { acc: None },
                 _ => AccState::SumI { acc: None },
             },
-            // float8 avg stays in f64; int/numeric avg accumulates exactly.
+            // Both float widths average in f64 (`avg(real)` is `float8` in
+            // PostgreSQL); int/numeric avg accumulates exactly.
             AggFunc::Avg => {
-                if spec.arg_type == Some(ColumnType::Float8) {
+                if matches!(spec.arg_type, Some(ColumnType::Float4 | ColumnType::Float8)) {
                     AccState::Avg { sum: 0.0, n: 0 }
                 } else {
                     AccState::AvgN { sum: None, n: 0 }
@@ -1090,12 +1524,42 @@ impl AccState {
             AggFunc::ArrayAgg => AccState::ArrayAgg {
                 elem: spec
                     .arg_type
-                    .and_then(ElemType::from_column_type)
+                    .and_then(|t| t.array_element().or_else(|| ElemType::from_column_type(t)))
                     .unwrap_or(ElemType::Text),
                 elems: Vec::new(),
             },
             AggFunc::JsonbAgg => AccState::JsonbAgg { items: Vec::new() },
             AggFunc::JsonbObjectAgg => AccState::JsonbObjectAgg { pairs: Vec::new() },
+            AggFunc::StringAgg => AccState::StringAgg { acc: None },
+            AggFunc::BoolAnd | AggFunc::BoolOr => AccState::BoolAgg {
+                any_true: false,
+                any_false: false,
+                seen: false,
+            },
+            AggFunc::BitAnd | AggFunc::BitOr | AggFunc::BitXor => AccState::BitAgg { acc: None },
+            AggFunc::VarPop | AggFunc::VarSamp | AggFunc::StddevPop | AggFunc::StddevSamp => {
+                if matches!(spec.arg_type, Some(ColumnType::Float4 | ColumnType::Float8)) {
+                    AccState::VarFloat {
+                        n: 0.0,
+                        sx: 0.0,
+                        sxx: 0.0,
+                    }
+                } else {
+                    AccState::VarNumeric {
+                        n: 0,
+                        sum: NumericValue::from(0i64),
+                        sum2: NumericValue::from(0i64),
+                    }
+                }
+            }
+            _ => AccState::Regr {
+                n: 0.0,
+                sx: 0.0,
+                sxx: 0.0,
+                sy: 0.0,
+                syy: 0.0,
+                sxy: 0.0,
+            },
         }
     }
 
@@ -1129,6 +1593,21 @@ impl AccState {
                 *acc += as_f64(&v).ok_or_else(|| {
                     undefined_for_arg("sum", v.column_type().unwrap_or(ColumnType::Text))
                 })?;
+                *any = true;
+            }
+            AccState::SumF4 { acc, any } => {
+                let Datum::Float4(add) = v else {
+                    return Err(undefined_for_arg(
+                        "sum",
+                        v.column_type().unwrap_or(ColumnType::Text),
+                    ));
+                };
+                // `float4pl` raises 22003 when two finite operands overflow.
+                let next = *acc + add;
+                if next.is_infinite() && acc.is_finite() && add.is_finite() {
+                    return Err(ExecError::Type(TypeError::float_overflow()));
+                }
+                *acc = next;
                 *any = true;
             }
             // SP32: numeric sum/avg accumulate exactly via the numeric ops (sum's
@@ -1173,11 +1652,13 @@ impl AccState {
             // array stays homogeneous (`array_agg(int4_col)` over an int8-typed
             // expression cannot arise, but a `numeric` scale can vary).
             AccState::ArrayAgg { elem, elems } => {
-                elems.push(crabka_pgtypes::cast::cast(
-                    &v,
-                    elem.column_type(),
-                    &ctx.time_zone,
-                )?);
+                // An array input is stacked WHOLE — it becomes one outer slice
+                // of the result — so it is not coerced to the element type.
+                elems.push(if matches!(v, Datum::Array(_)) {
+                    v
+                } else {
+                    crabka_pgtypes::cast::cast(&v, elem.column_type(), &ctx.time_zone)?
+                });
             }
             AccState::JsonbAgg { items } => items.push(v),
             AccState::JsonbObjectAgg { pairs } => {
@@ -1187,11 +1668,146 @@ impl AccState {
                     .expect("jsonb_object_agg has a value argument");
                 pairs.push((v, value));
             }
+            AccState::StringAgg { acc } => {
+                let delimiter = args.get(1).cloned().unwrap_or(Datum::Null);
+                append_string_agg(acc, &v, &delimiter)?;
+            }
+            AccState::BoolAgg {
+                any_true,
+                any_false,
+                seen,
+            } => {
+                let b = match v {
+                    Datum::Bool(b) => b,
+                    other => {
+                        return Err(undefined_for_arg(
+                            "bool_and",
+                            other.column_type().unwrap_or(ColumnType::Text),
+                        ));
+                    }
+                };
+                *seen = true;
+                *any_true |= b;
+                *any_false |= !b;
+            }
+            AccState::BitAgg { acc } => {
+                *acc = Some(match acc.take() {
+                    None => v,
+                    Some(cur) => bit_fold(spec.func, &cur, &v)?,
+                });
+            }
+            // Youngs–Cramer: `Sxx` accumulates squared deviations, which is why
+            // the first row contributes nothing to it.
+            AccState::VarFloat { n, sx, sxx } => {
+                let x = as_f64(&v).ok_or_else(|| {
+                    undefined_for_arg("var_pop", v.column_type().unwrap_or(ColumnType::Text))
+                })?;
+                let previous = *n;
+                let previous_sx = *sx;
+                *n += 1.0;
+                *sx += x;
+                if previous > 0.0 {
+                    let tmp = x * *n - *sx;
+                    *sxx += tmp * tmp / (*n * previous);
+                    // `Sxx` must never go infinite: an infinite input has to
+                    // reach the finalizer as NaN, and two finite operands whose
+                    // combination overflows are the 22003 case instead.
+                    if sx.is_infinite() || sxx.is_infinite() {
+                        if previous_sx.is_finite() && x.is_finite() {
+                            return Err(ExecError::Type(TypeError::float_overflow()));
+                        }
+                        *sxx = f64::NAN;
+                    }
+                } else if !x.is_finite() {
+                    // A lone NaN/±Infinity leaves `Sxx` at its zero start, which
+                    // would report variance zero; poison it so the whole family
+                    // finalizes to NaN the way PostgreSQL's does.
+                    *sxx = f64::NAN;
+                }
+            }
+            AccState::VarNumeric { n, sum, sum2 } => {
+                let x = crabka_pgtypes::cast::cast(&v, ColumnType::Numeric(None), &ctx.time_zone)?;
+                let Datum::Numeric(x) = x else {
+                    return Err(undefined_for_arg(
+                        "var_pop",
+                        v.column_type().unwrap_or(ColumnType::Text),
+                    ));
+                };
+                *n += 1;
+                *sum = crabka_pgtypes::numeric::add(sum, &x);
+                *sum2 = crabka_pgtypes::numeric::add(sum2, &crabka_pgtypes::numeric::mul(&x, &x));
+            }
+            AccState::Regr {
+                n,
+                sx,
+                sxx,
+                sy,
+                syy,
+                sxy,
+            } => {
+                // PostgreSQL writes these `f(Y, X)`, so the FIRST argument is y.
+                let y = as_f64(&v).ok_or_else(|| {
+                    undefined_for_arg("regr", v.column_type().unwrap_or(ColumnType::Text))
+                })?;
+                let x = args
+                    .get(1)
+                    .and_then(as_f64)
+                    .ok_or_else(|| undefined_for_arg("regr", ColumnType::Text))?;
+                let seen_before = *n;
+                let (x_sum_before, y_sum_before) = (*sx, *sy);
+                *n += 1.0;
+                *sx += x;
+                *sy += y;
+                if seen_before > 0.0 {
+                    let tmp_x = x * *n - *sx;
+                    let tmp_y = y * *n - *sy;
+                    let scale = 1.0 / (*n * seen_before);
+                    *sxx += tmp_x * tmp_x * scale;
+                    *syy += tmp_y * tmp_y * scale;
+                    *sxy += tmp_x * tmp_y * scale;
+                    // As for the one-variable state: an infinite sum of squared
+                    // deviations is either 22003 (all the inputs feeding it were
+                    // finite) or the NaN an infinite input has to become.
+                    if sx.is_infinite()
+                        || sxx.is_infinite()
+                        || sy.is_infinite()
+                        || syy.is_infinite()
+                        || sxy.is_infinite()
+                    {
+                        let x_finite = x_sum_before.is_finite() && x.is_finite();
+                        let y_finite = y_sum_before.is_finite() && y.is_finite();
+                        if ((sx.is_infinite() || sxx.is_infinite()) && x_finite)
+                            || ((sy.is_infinite() || syy.is_infinite()) && y_finite)
+                            || (sxy.is_infinite() && x_finite && y_finite)
+                        {
+                            return Err(ExecError::Type(TypeError::float_overflow()));
+                        }
+                        if sxx.is_infinite() {
+                            *sxx = f64::NAN;
+                        }
+                        if syy.is_infinite() {
+                            *syy = f64::NAN;
+                        }
+                        if sxy.is_infinite() {
+                            *sxy = f64::NAN;
+                        }
+                    }
+                } else {
+                    if !x.is_finite() {
+                        *sxx = f64::NAN;
+                        *sxy = f64::NAN;
+                    }
+                    if !y.is_finite() {
+                        *syy = f64::NAN;
+                        *sxy = f64::NAN;
+                    }
+                }
+            }
         }
         Ok(())
     }
 
-    fn finish(&self, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    fn finish(&self, spec: &AggSpec, ctx: &EvalCtx) -> Result<Datum, ExecError> {
         Ok(match self {
             AccState::Count { n } => Datum::Int8(*n),
             AccState::SumI { acc } => acc.map(Datum::Int8).unwrap_or(Datum::Null),
@@ -1199,6 +1815,13 @@ impl AccState {
             AccState::SumF { acc, any } => {
                 if *any {
                     Datum::Float8(*acc)
+                } else {
+                    Datum::Null
+                }
+            }
+            AccState::SumF4 { acc, any } => {
+                if *any {
+                    Datum::Float4(*acc)
                 } else {
                     Datum::Null
                 }
@@ -1224,7 +1847,7 @@ impl AccState {
                 if elems.is_empty() {
                     Datum::Null
                 } else {
-                    Datum::Array(ArrayValue::new(*elem, elems.clone()))
+                    crate::array_fn::build_constructor(*elem, elems.clone())?
                 }
             }
             AccState::JsonbAgg { items } => {
@@ -1246,7 +1869,178 @@ impl AccState {
                     build_jsonb("jsonb_build_object", flat, ctx)?
                 }
             }
+            // string_agg over zero non-NULL rows is NULL, not an empty string.
+            AccState::StringAgg { acc } => match acc {
+                None => Datum::Null,
+                Some(StringAggAcc::Text(s)) => Datum::Text(s.clone()),
+                Some(StringAggAcc::Bytea(b)) => Datum::Bytea(b.clone()),
+            },
+            AccState::BoolAgg {
+                any_true,
+                any_false,
+                seen,
+            } => {
+                if !*seen {
+                    Datum::Null
+                } else if spec.func == AggFunc::BoolAnd {
+                    Datum::Bool(!*any_false)
+                } else {
+                    Datum::Bool(*any_true)
+                }
+            }
+            AccState::BitAgg { acc } => acc.clone().unwrap_or(Datum::Null),
+            AccState::VarFloat { n, sxx, .. } => {
+                let (sample, sqrt) = spec
+                    .func
+                    .variance_shape()
+                    .expect("a VarFloat accumulator belongs to the variance family");
+                // PostgreSQL clamps a numerator driven negative by roundoff.
+                let sxx = clamp_non_negative(*sxx);
+                if *n <= if sample { 1.0 } else { 0.0 } {
+                    Datum::Null
+                } else {
+                    let variance = if sample { sxx / (*n - 1.0) } else { sxx / *n };
+                    Datum::Float8(if sqrt { variance.sqrt() } else { variance })
+                }
+            }
+            AccState::VarNumeric { n, sum, sum2 } => {
+                let (sample, sqrt) = spec
+                    .func
+                    .variance_shape()
+                    .expect("a VarNumeric accumulator belongs to the variance family");
+                crabka_pgtypes::numeric::stddev_internal(*n, sum, sum2, sample, sqrt)
+                    .map_or(Datum::Null, Datum::Numeric)
+            }
+            AccState::Regr {
+                n,
+                sx,
+                sxx,
+                sy,
+                syy,
+                sxy,
+            } => finish_regr(spec.func, *n, *sx, *sxx, *sy, *syy, *sxy),
         })
+    }
+}
+
+/// Append one row to a `string_agg` accumulator, writing the delimiter before
+/// every value but the first.
+fn append_string_agg(
+    acc: &mut Option<StringAggAcc>,
+    value: &Datum,
+    delimiter: &Datum,
+) -> Result<(), ExecError> {
+    match value {
+        Datum::Text(s) => {
+            let separator = match delimiter {
+                Datum::Null => "",
+                Datum::Text(d) => d.as_str(),
+                other => {
+                    return Err(undefined_for_arg(
+                        "string_agg",
+                        other.column_type().unwrap_or(ColumnType::Text),
+                    ));
+                }
+            };
+            match acc {
+                Some(StringAggAcc::Text(current)) => {
+                    current.push_str(separator);
+                    current.push_str(s);
+                }
+                _ => *acc = Some(StringAggAcc::Text(s.clone())),
+            }
+            Ok(())
+        }
+        Datum::Bytea(b) => {
+            let separator: &[u8] = match delimiter {
+                Datum::Null => &[],
+                Datum::Bytea(d) => d,
+                other => {
+                    return Err(undefined_for_arg(
+                        "string_agg",
+                        other.column_type().unwrap_or(ColumnType::Text),
+                    ));
+                }
+            };
+            match acc {
+                Some(StringAggAcc::Bytea(current)) => {
+                    current.extend_from_slice(separator);
+                    current.extend_from_slice(b);
+                }
+                _ => *acc = Some(StringAggAcc::Bytea(b.clone())),
+            }
+            Ok(())
+        }
+        other => Err(undefined_for_arg(
+            "string_agg",
+            other.column_type().unwrap_or(ColumnType::Text),
+        )),
+    }
+}
+
+/// One step of `bit_and`/`bit_or`/`bit_xor`, preserving the integer width.
+fn bit_fold(func: AggFunc, a: &Datum, b: &Datum) -> Result<Datum, ExecError> {
+    let apply = |x: i64, y: i64| match func {
+        AggFunc::BitAnd => x & y,
+        AggFunc::BitOr => x | y,
+        _ => x ^ y,
+    };
+    Ok(match (a, b) {
+        (Datum::Int2(x), Datum::Int2(y)) => Datum::Int2(apply(i64::from(*x), i64::from(*y)) as i16),
+        (Datum::Int4(x), Datum::Int4(y)) => Datum::Int4(apply(i64::from(*x), i64::from(*y)) as i32),
+        _ => {
+            let (x, y) = (as_i64(a), as_i64(b));
+            match (x, y) {
+                (Some(x), Some(y)) => Datum::Int8(apply(x, y)),
+                _ => {
+                    return Err(undefined_for_arg(
+                        "bit_and",
+                        b.column_type().unwrap_or(ColumnType::Text),
+                    ));
+                }
+            }
+        }
+    })
+}
+
+/// PostgreSQL's `if (Sxx < 0.0) Sxx = 0.0` roundoff clamp on a sum of squared
+/// deviations. `f64::max` is the wrong tool: it *drops* a NaN operand in favour
+/// of the other one, which would turn the NaN a non-finite input poisoned the
+/// accumulator with back into a variance of zero.
+fn clamp_non_negative(value: f64) -> f64 {
+    if value < 0.0 { 0.0 } else { value }
+}
+
+/// Finalize the two-variable Youngs–Cramer state into whichever member of the
+/// family asked for it. Every undefined case (too few rows, a zero spread) is
+/// SQL NULL, exactly as PostgreSQL's finalizers return it.
+fn finish_regr(func: AggFunc, n: f64, sx: f64, sxx: f64, sy: f64, syy: f64, sxy: f64) -> Datum {
+    if n < 1.0 && func != AggFunc::RegrCount {
+        return Datum::Null;
+    }
+    // Roundoff can drive either sum of squared deviations slightly negative.
+    let sxx = clamp_non_negative(sxx);
+    let syy = clamp_non_negative(syy);
+    match func {
+        AggFunc::RegrCount => Datum::Int8(n as i64),
+        AggFunc::RegrSxx => Datum::Float8(sxx),
+        AggFunc::RegrSyy => Datum::Float8(syy),
+        AggFunc::RegrSxy => Datum::Float8(sxy),
+        AggFunc::RegrAvgx => Datum::Float8(sx / n),
+        AggFunc::RegrAvgy => Datum::Float8(sy / n),
+        AggFunc::CovarPop => Datum::Float8(sxy / n),
+        AggFunc::CovarSamp if n < 2.0 => Datum::Null,
+        AggFunc::CovarSamp => Datum::Float8(sxy / (n - 1.0)),
+        AggFunc::Corr if sxx == 0.0 || syy == 0.0 => Datum::Null,
+        AggFunc::Corr => Datum::Float8(sxy / (sxx * syy).sqrt()),
+        AggFunc::RegrSlope | AggFunc::RegrIntercept | AggFunc::RegrR2 if n < 2.0 || sxx == 0.0 => {
+            Datum::Null
+        }
+        AggFunc::RegrSlope => Datum::Float8(sxy / sxx),
+        AggFunc::RegrIntercept => Datum::Float8((sy - sx * sxy / sxx) / n),
+        AggFunc::RegrR2 if syy == 0.0 => Datum::Float8(1.0),
+        AggFunc::RegrR2 => Datum::Float8((sxy * sxy) / (sxx * syy)),
+        _ => Datum::Null,
     }
 }
 
@@ -1268,6 +2062,7 @@ fn build_jsonb(builder: &str, args: Vec<Datum>, ctx: &EvalCtx) -> Result<Datum, 
                 })
                 .collect(),
         ),
+        filter: None,
     };
     crate::json_fn::eval_json(&call, ctx, |e| match e {
         Expr::Const { value, .. } => Ok(value.clone()),
@@ -1279,6 +2074,7 @@ fn build_jsonb(builder: &str, args: Vec<Datum>, ctx: &EvalCtx) -> Result<Datum, 
 
 fn as_i64(d: &Datum) -> Option<i64> {
     match d {
+        Datum::Int2(n) => Some(i64::from(*n)),
         Datum::Int4(n) => Some(i64::from(*n)),
         Datum::Int8(n) => Some(*n),
         _ => None,
@@ -1287,8 +2083,10 @@ fn as_i64(d: &Datum) -> Option<i64> {
 
 fn as_f64(d: &Datum) -> Option<f64> {
     match d {
+        Datum::Int2(n) => Some(f64::from(*n)),
         Datum::Int4(n) => Some(f64::from(*n)),
         Datum::Int8(n) => Some(*n as f64),
+        Datum::Float4(f) => Some(f64::from(*f)),
         Datum::Float8(f) => Some(*f),
         _ => None,
     }
@@ -1308,7 +2106,11 @@ pub(crate) fn execute_aggregate(
 ) -> Result<QueryResult, ExecError> {
     let (fields, _exprs, _tys) = crate::exec::resolve_projection(&s.projection, scope)?;
     let out_rows = aggregate_rows(s, scope, rows, ctx)?;
-    Ok(crate::exec::rows_result(fields, &out_rows, &ctx.time_zone))
+    Ok(crate::exec::rows_result(
+        fields,
+        &out_rows,
+        ctx.output_style(),
+    ))
 }
 
 /// Fold an aggregate query over the already-`WHERE`-filtered `rows`, returning the
@@ -1324,16 +2126,56 @@ pub(crate) fn aggregate_rows(
     // Output columns: the expressions that produce each column via the shared
     // projection resolver (infer_type now understands aggregate result types).
     let (fields, out_exprs, _tys) = crate::exec::resolve_projection(&s.projection, scope)?;
+    // Only plain DISTINCT restricts ORDER BY to the select-list output; DISTINCT
+    // ON sorts before projecting, so its ORDER BY may name source expressions.
+    let require_output = matches!(s.distinct, crabka_pgparser::ast::DistinctClause::Distinct);
     let order_keys = crate::exec::resolve_select_order_keys(
         &s.order_by,
         scope,
         &fields,
         &out_exprs,
-        s.distinct,
+        require_output,
     )?;
 
+    // `DISTINCT ON` runs over the GROUPED output — the same plan the row path
+    // uses, evaluated per group instead of per row: `plan.sort` decides which
+    // group of each `plan.group` run survives, and the query's own ORDER BY then
+    // sorts the survivors. It is resolved from the expressions as WRITTEN, before
+    // the canonicalization below, because its own compatibility rule compares the
+    // `ON` list against the select list and the ORDER BY as the query spells them.
+    let distinct_on = crate::exec::distinct_on_plan(s, scope, &fields, &out_exprs, &order_keys)?;
+
+    // Every clause evaluated above the grouping is matched against the GROUP BY
+    // list by the column each reference resolves to, not by how it was spelled,
+    // so all of them are canonicalized once here (PostgreSQL compares the
+    // underlying variables, which is why `SELECT t.a … GROUP BY a` is valid).
+    let canonical = |e: &Expr| crate::grouping::canonicalize_columns(e, scope);
+    let group_by: Vec<Expr> = s.group_by.iter().map(&canonical).collect();
+    let out_exprs: Vec<Expr> = out_exprs.iter().map(&canonical).collect();
+    let having = s.having.as_ref().map(&canonical);
+    let order_keys: Vec<crate::exec::SelectOrderKey> = order_keys
+        .into_iter()
+        .map(|key| match key {
+            crate::exec::SelectOrderKey::SourceExpr(expr) => {
+                crate::exec::SelectOrderKey::SourceExpr(canonical(&expr))
+            }
+            output => output,
+        })
+        .collect();
+    let distinct_on = distinct_on.map(|plan| crate::exec::DistinctOnPlan {
+        group: plan.group.iter().map(&canonical).collect(),
+        sort: plan
+            .sort
+            .into_iter()
+            .map(|item| crabka_pgparser::ast::OrderItem {
+                expr: canonical(&item.expr),
+                ..item
+            })
+            .collect(),
+    });
+
     // GROUP BY expressions may not themselves be aggregates.
-    for g in &s.group_by {
+    for g in &group_by {
         if contains_aggregate(g) {
             return Err(ExecError::Grouping(
                 "aggregate functions are not allowed in GROUP BY".into(),
@@ -1342,30 +2184,35 @@ pub(crate) fn aggregate_rows(
     }
 
     // Collect (deduped) the aggregates to compute, then validate every output /
-    // HAVING / ORDER BY expression is grouped-valid (data-independent).
+    // HAVING / ORDER BY / DISTINCT ON expression is grouped-valid
+    // (data-independent).
     let mut specs: Vec<AggSpec> = Vec::new();
     let source_order_exprs = order_keys.iter().filter_map(|key| match key {
         crate::exec::SelectOrderKey::Output(_) => None,
         crate::exec::SelectOrderKey::SourceExpr(expr) => Some(expr),
     });
+    let distinct_on_exprs = distinct_on
+        .iter()
+        .flat_map(|plan| plan.group.iter().chain(plan.sort.iter().map(|i| &i.expr)));
     for e in out_exprs
         .iter()
-        .chain(s.having.iter())
+        .chain(having.iter())
+        .chain(distinct_on_exprs)
         .chain(source_order_exprs)
     {
         collect_specs(e, scope, &mut specs)?;
-        validate_grouped(e, &s.group_by)?;
+        validate_grouped(e, &group_by)?;
     }
 
     // Fold rows into groups, preserving first-appearance order.
-    let has_group_by = !s.group_by.is_empty();
+    let has_group_by = !group_by.is_empty();
     let mut keys: Vec<Vec<Datum>> = Vec::new();
     let mut accs: Vec<Vec<Acc>> = Vec::new();
     let mut index: HashMap<Vec<Datum>, usize> = HashMap::new();
     let mut group_bytes = 0usize;
     for row in &rows {
-        let mut key = Vec::with_capacity(s.group_by.len());
-        for g in &s.group_by {
+        let mut key = Vec::with_capacity(group_by.len());
+        for g in &group_by {
             key.push(crate::eval::eval(g, scope, row, ctx)?);
         }
         let gi = match index.get(&key) {
@@ -1396,15 +2243,16 @@ pub(crate) fn aggregate_rows(
     }
 
     // Finalize each group: HAVING filter, ORDER BY keys, projected output Datums.
-    let mut out: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::with_capacity(keys.len());
+    let mut out: Vec<GroupOutput> = Vec::with_capacity(keys.len());
     for (key, group_accs) in keys.iter().zip(accs.iter_mut()) {
         let results: Vec<Datum> = group_accs
             .iter_mut()
             .zip(&specs)
             .map(|(acc, spec)| acc.finish(spec, ctx))
             .collect::<Result<_, ExecError>>()?;
-        if let Some(h) = &s.having {
-            match eval_grouped(h, scope, &s.group_by, key, &specs, &results, ctx)? {
+        let grouped = |e: &Expr| eval_grouped(e, scope, &group_by, key, &specs, &results, ctx);
+        if let Some(h) = &having {
+            match grouped(h)? {
                 Datum::Bool(true) => {}
                 Datum::Bool(false) | Datum::Null => continue,
                 _ => {
@@ -1416,40 +2264,83 @@ pub(crate) fn aggregate_rows(
         }
         let mut projected = Vec::with_capacity(out_exprs.len());
         for e in &out_exprs {
-            projected.push(eval_grouped(
-                e,
-                scope,
-                &s.group_by,
-                key,
-                &specs,
-                &results,
-                ctx,
-            )?);
+            projected.push(grouped(e)?);
         }
         let mut sort_keys = Vec::with_capacity(order_keys.len());
         for order_key in &order_keys {
             sort_keys.push(match order_key {
                 crate::exec::SelectOrderKey::Output(i) => projected[*i].clone(),
-                crate::exec::SelectOrderKey::SourceExpr(expr) => {
-                    eval_grouped(expr, scope, &s.group_by, key, &specs, &results, ctx)?
-                }
+                crate::exec::SelectOrderKey::SourceExpr(expr) => grouped(expr)?,
             });
         }
-        out.push((sort_keys, projected));
+        let (mut dedup_keys, mut on_keys) = (Vec::new(), Vec::new());
+        if let Some(plan) = &distinct_on {
+            for item in &plan.sort {
+                dedup_keys.push(grouped(&item.expr)?);
+            }
+            for expr in &plan.group {
+                on_keys.push(grouped(expr)?);
+            }
+        }
+        out.push(GroupOutput {
+            sort_keys,
+            dedup_keys,
+            on_keys,
+            projected,
+        });
     }
 
-    // SP28: SELECT DISTINCT dedups identical projected rows (first appearance).
-    if s.distinct {
-        let mut seen: HashSet<Vec<Datum>> = HashSet::new();
-        out.retain(|(_, proj)| seen.insert(proj.clone()));
+    // `DISTINCT ON` dedups a stream sorted by its own plan, which is not always
+    // the query's ORDER BY: that sort decides which group survives, ORDER BY only
+    // decides how the survivors come out. The final sort is stable, so it is a
+    // no-op when the dedup ordering already satisfies it.
+    if let Some(plan) = &distinct_on {
+        out.sort_by(|a, b| crate::exec::order_cmp(&a.dedup_keys, &b.dedup_keys, &plan.sort));
+        let mut previous: Option<Vec<Datum>> = None;
+        out.retain(|group| {
+            let first = previous.as_ref() != Some(&group.on_keys);
+            previous = Some(group.on_keys.clone());
+            first
+        });
     }
     if !s.order_by.is_empty() {
-        out.sort_by(|a, b| crate::exec::order_cmp(&a.0, &b.0, &s.order_by));
+        out.sort_by(|a, b| crate::exec::order_cmp(&a.sort_keys, &b.sort_keys, &s.order_by));
     }
+    // SP28: SELECT DISTINCT dedups identical projected rows (first appearance).
+    if distinct_on.is_none() && s.distinct.dedups() {
+        let mut seen: HashSet<Vec<Datum>> = HashSet::new();
+        out.retain(|group| seen.insert(group.projected.clone()));
+    }
+    let out: Vec<(Vec<Datum>, Vec<Datum>)> = out
+        .into_iter()
+        .map(|group| (group.sort_keys, group.projected))
+        .collect();
     // SP28: OFFSET then LIMIT.
-    crate::exec::apply_offset_limit(&mut out, s.offset, s.limit);
+    let window = crate::exec::RowWindow {
+        offset: crate::exec::eval_row_count(
+            s.offset.as_ref(),
+            crate::exec::RowCountClause::Offset,
+            ctx,
+        )?,
+        limit: crate::exec::eval_row_count(
+            s.limit.as_ref(),
+            crate::exec::RowCountClause::Limit,
+            ctx,
+        )?,
+        with_ties: s.with_ties,
+    };
 
-    Ok(out.into_iter().map(|(_, proj)| proj).collect())
+    Ok(crate::exec::apply_row_window(out, window, &s.order_by))
+}
+
+/// One finalized group on its way out of [`aggregate_rows`]: the ORDER BY sort
+/// vector, the `DISTINCT ON` dedup-sort and grouping vectors (both empty without
+/// that clause), and the projected output row.
+struct GroupOutput {
+    sort_keys: Vec<Datum>,
+    dedup_keys: Vec<Datum>,
+    on_keys: Vec<Datum>,
+    projected: Vec<Datum>,
 }
 
 #[cfg(test)]
@@ -1471,6 +2362,7 @@ mod tests {
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         }
     }
 
@@ -1494,6 +2386,7 @@ mod tests {
                     s.order_by = q.order_by;
                     s.limit = q.limit;
                     s.offset = q.offset;
+                    s.with_ties = q.with_ties;
                     s.locking = q.locking;
                     s
                 }
@@ -1573,6 +2466,133 @@ mod tests {
 
     fn int(n: i64) -> Datum {
         Datum::Int8(n)
+    }
+
+    /// `sum`/`avg`/`min`/`max` over the two new scalar types, in both the type
+    /// PostgreSQL reports and the text it prints. Every expectation is a
+    /// PostgreSQL 18.4 `pg_typeof` + value pair: `sum(int2)` is `bigint` (so it
+    /// outgrows `int2` rather than overflowing), `avg(int2)` is scale-padded
+    /// `numeric`, `sum(real)` stays `real` while `avg(real)` widens to `double
+    /// precision`, and `min`/`max` keep the argument type.
+    #[test]
+    fn int2_and_float4_aggregate_result_types_match_postgres() {
+        use assert2::assert;
+        let typed = |ty: ColumnType| {
+            let mut t = table();
+            t.columns[1].ty = ty;
+            t
+        };
+        // sum over the two int2 extremes cannot fit int2 — proving it is int8.
+        let int2_table = typed(ColumnType::Int2);
+        let int2_rows = vec![
+            r(&[Datum::Int4(1), Datum::Int2(32_767)]),
+            r(&[Datum::Int4(1), Datum::Int2(32_767)]),
+            r(&[Datum::Int4(1), Datum::Null]),
+        ];
+        assert!(
+            agg_text(
+                "SELECT sum(v), avg(v), min(v), max(v), count(v) FROM t",
+                Some(&int2_table),
+                int2_rows,
+            )
+            .expect("int2 agg")
+                == vec![vec![
+                    Some("65534".to_string()),
+                    Some("32767.000000000000".to_string()),
+                    Some("32767".to_string()),
+                    Some("32767".to_string()),
+                    Some("2".to_string()),
+                ]]
+        );
+        // `sum(real)` accumulates in f32 and prints through float4out (the
+        // scientific branch here); `avg(real)` is float8, so 1/3 keeps its
+        // double-precision digits.
+        let float4_table = typed(ColumnType::Float4);
+        let float4_rows = vec![
+            r(&[Datum::Int4(1), Datum::Float4(1_000_000.0)]),
+            r(&[Datum::Int4(1), Datum::Float4(1.5)]),
+        ];
+        assert!(
+            agg_text(
+                "SELECT sum(v), min(v), max(v) FROM t",
+                Some(&float4_table),
+                float4_rows.clone(),
+            )
+            .expect("float4 agg")
+                == vec![vec![
+                    Some("1.0000015e+06".to_string()),
+                    Some("1.5".to_string()),
+                    Some("1e+06".to_string()),
+                ]]
+        );
+        assert!(
+            agg_text(
+                "SELECT avg(v) FROM t",
+                Some(&float4_table),
+                vec![
+                    r(&[Datum::Int4(1), Datum::Float4(1.0)]),
+                    r(&[Datum::Int4(1), Datum::Float4(1.0)]),
+                    r(&[Datum::Int4(1), Datum::Float4(1.0)]),
+                    r(&[Datum::Int4(1), Datum::Float4(0.0)]),
+                ],
+            )
+            .expect("float4 avg")
+                == vec![vec![Some("0.75".to_string())]]
+        );
+        // Zero non-NULL rows is NULL at both widths, not zero.
+        for (ty, value) in [
+            (ColumnType::Int2, Datum::Null),
+            (ColumnType::Float4, Datum::Null),
+        ] {
+            let t = typed(ty);
+            assert!(
+                agg_text(
+                    "SELECT sum(v), avg(v), min(v), max(v) FROM t",
+                    Some(&t),
+                    vec![r(&[Datum::Int4(1), value])],
+                )
+                .expect("empty agg")
+                    == vec![vec![None, None, None, None]],
+                "{ty:?}"
+            );
+        }
+        // And the RowDescription types the wire reports.
+        let expected: &[(ColumnType, [ColumnType; 4])] = &[
+            (
+                ColumnType::Int2,
+                [
+                    ColumnType::Int8,
+                    ColumnType::Numeric(None),
+                    ColumnType::Int2,
+                    ColumnType::Int2,
+                ],
+            ),
+            (
+                ColumnType::Float4,
+                [
+                    ColumnType::Float4,
+                    ColumnType::Float8,
+                    ColumnType::Float4,
+                    ColumnType::Float4,
+                ],
+            ),
+        ];
+        for (arg, [sum, avg, min, max]) in expected {
+            let t = typed(*arg);
+            let scope = scope_of(Some(&t));
+            for (sql, want) in [("sum", sum), ("avg", avg), ("min", min), ("max", max)] {
+                let call = match crabka_pgparser::parser::parse_expr_for_test(&format!("{sql}(v)"))
+                    .expect("parse")
+                {
+                    Expr::Func(fc) => fc,
+                    other => panic!("expected a function call, got {other:?}"),
+                };
+                assert!(
+                    func_result_type(&call, &scope).expect("result type") == *want,
+                    "{sql}({arg:?})"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2125,6 +3145,7 @@ mod tests {
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         }
     }
 
@@ -2191,6 +3212,7 @@ mod tests {
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         }
     }
 
@@ -2443,6 +3465,398 @@ mod tests {
             assert2::assert!(
                 agg_text(sql, Some(&t), Vec::new()).expect(sql) == vec![vec![None]],
                 "{sql}"
+            );
+        }
+    }
+
+    /// One statistical-aggregate case: the SQL, the input rows, and the text of
+    /// each expected output column.
+    type StatCase<'a> = (&'a str, Vec<Vec<Datum>>, &'a [&'a str]);
+
+    /// A table shaped for the aggregate families added alongside the scalar
+    /// breadth work: a text value, a boolean, an integer, a numeric, and the
+    /// `(y, x)` pair the two-variable statistics take.
+    fn stats_table() -> Table {
+        Table {
+            id: 2,
+            name: "t".into(),
+            columns: vec![
+                Column::new("s", ColumnType::Text),
+                Column::new("b", ColumnType::Bool),
+                Column::new("i", ColumnType::Int4),
+                Column::new("q", ColumnType::Numeric(None)),
+                Column::new("y", ColumnType::Float8),
+                Column::new("x", ColumnType::Float8),
+            ],
+            sharded: false,
+            sharding: None,
+            foreign: None,
+            checks: Vec::new(),
+        }
+    }
+
+    /// The rows every statistical expectation below was measured against on a
+    /// PostgreSQL 18.4 oracle. Row 3 has a NULL text/bool/int and row 4 a NULL
+    /// `y`, so each family's NULL rule is exercised.
+    fn stats_rows() -> Vec<Vec<Datum>> {
+        let num = |n: i64| Datum::Numeric(crabka_pgtypes::numeric::from_i64(n));
+        vec![
+            vec![
+                Datum::Text("a".into()),
+                Datum::Bool(true),
+                Datum::Int4(3),
+                num(1),
+                Datum::Float8(1.0),
+                Datum::Float8(1.0),
+            ],
+            vec![
+                Datum::Text("b".into()),
+                Datum::Bool(false),
+                Datum::Int4(5),
+                num(2),
+                Datum::Float8(2.0),
+                Datum::Float8(2.0),
+            ],
+            vec![
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                num(3),
+                Datum::Float8(3.0),
+                Datum::Float8(4.0),
+            ],
+            vec![
+                Datum::Text("c".into()),
+                Datum::Bool(true),
+                Datum::Int4(6),
+                num(4),
+                Datum::Null,
+                Datum::Float8(5.0),
+            ],
+        ]
+    }
+
+    /// One row of text-format cells for a query over [`stats_rows`].
+    fn stats_row(sql: &str) -> Vec<Option<String>> {
+        let t = stats_table();
+        let mut rows = agg_text(sql, Some(&t), stats_rows()).expect(sql);
+        assert2::assert!(rows.len() == 1, "{sql}");
+        rows.pop().expect("one row")
+    }
+
+    fn cells(values: &[&str]) -> Vec<Option<String>> {
+        values
+            .iter()
+            .map(|v| {
+                if *v == "<null>" {
+                    None
+                } else {
+                    Some((*v).to_string())
+                }
+            })
+            .collect()
+    }
+
+    /// Every expectation here is a PostgreSQL 18.4 value: `string_agg` skips
+    /// NULLs, the boolean pair returns NULL only when no non-NULL row arrived,
+    /// and the bitwise trio folds in the argument's own width.
+    #[test]
+    fn collecting_boolean_and_bitwise_aggregates_match_postgres() {
+        use assert2::assert;
+        let cases: [(&str, &[&str]); 6] = [
+            ("SELECT string_agg(s, ',') FROM t", &["a,b,c"]),
+            ("SELECT string_agg(s, '') FROM t", &["abc"]),
+            (
+                "SELECT bool_and(b), bool_or(b), every(b) FROM t",
+                &["f", "t", "f"],
+            ),
+            (
+                "SELECT bit_and(i), bit_or(i), bit_xor(i) FROM t",
+                &["0", "7", "0"],
+            ),
+            ("SELECT string_agg(DISTINCT s, ',') FROM t", &["a,b,c"]),
+            ("SELECT upper(string_agg(s, ',')) FROM t", &["A,B,C"]),
+        ];
+        for (sql, expected) in cases {
+            assert!(stats_row(sql) == cells(expected), "{sql}");
+        }
+    }
+
+    /// Zero qualifying rows is SQL NULL for every one of these — not an empty
+    /// string, not zero, and not an error.
+    #[test]
+    fn the_new_aggregates_are_null_over_zero_rows() {
+        use assert2::assert;
+        let t = stats_table();
+        let sqls = [
+            "SELECT string_agg(s, ',') FROM t",
+            "SELECT bool_and(b) FROM t",
+            "SELECT bool_or(b) FROM t",
+            "SELECT bit_and(i) FROM t",
+            "SELECT var_pop(i) FROM t",
+            "SELECT stddev(i) FROM t",
+            "SELECT corr(y, x) FROM t",
+        ];
+        for sql in sqls {
+            assert!(
+                agg_text(sql, Some(&t), Vec::new()).expect(sql) == vec![vec![None]],
+                "{sql}"
+            );
+        }
+        // regr_count is the exception: it counts, so zero rows is zero.
+        assert!(
+            agg_text("SELECT regr_count(y, x) FROM t", Some(&t), Vec::new()).expect("regr_count")
+                == vec![vec![Some("0".to_string())]]
+        );
+    }
+
+    /// The `numeric` variance/stddev display scale comes from PostgreSQL's
+    /// `select_div_scale`, and the `float8` one from its Youngs-Cramer
+    /// transition — so the printed digits, not just the value, are the test.
+    #[test]
+    fn statistical_aggregates_match_postgres_digit_for_digit() {
+        use assert2::assert;
+        let cases: [(&str, &[&str]); 6] = [
+            (
+                "SELECT var_pop(i), var_samp(i), stddev_pop(i), stddev_samp(i) FROM t",
+                &[
+                    "1.5555555555555556",
+                    "2.3333333333333333",
+                    "1.2472191289246471",
+                    "1.5275252316519467",
+                ],
+            ),
+            (
+                "SELECT var_pop(q), stddev_pop(q) FROM t",
+                &["1.2500000000000000", "1.1180339887498948"],
+            ),
+            (
+                "SELECT var_pop(y), var_samp(y), stddev_pop(y), stddev_samp(y) FROM t",
+                &["0.6666666666666666", "1", "0.816496580927726", "1"],
+            ),
+            (
+                "SELECT corr(y, x), covar_pop(y, x), covar_samp(y, x) FROM t",
+                &["0.9819805060619659", "1", "1.5"],
+            ),
+            (
+                "SELECT regr_count(y, x), regr_sxx(y, x), regr_syy(y, x), regr_sxy(y, x) FROM t",
+                &["3", "4.666666666666666", "2", "3"],
+            ),
+            (
+                "SELECT regr_avgx(y, x), regr_avgy(y, x), regr_slope(y, x), \
+                 regr_intercept(y, x), regr_r2(y, x) FROM t",
+                &[
+                    "2.3333333333333335",
+                    "2",
+                    "0.6428571428571429",
+                    "0.4999999999999997",
+                    "0.9642857142857144",
+                ],
+            ),
+        ];
+        for (sql, expected) in cases {
+            assert!(stats_row(sql) == cells(expected), "{sql}");
+        }
+    }
+
+    /// `variance`/`stddev` are PostgreSQL's aliases for the SAMPLE forms, and
+    /// `every` for `bool_and` — so each pair must agree exactly.
+    #[test]
+    fn the_aggregate_aliases_agree_with_what_they_alias() {
+        use assert2::assert;
+        let pairs = [
+            ("variance(i)", "var_samp(i)"),
+            ("stddev(i)", "stddev_samp(i)"),
+            ("variance(y)", "var_samp(y)"),
+            ("stddev(y)", "stddev_samp(y)"),
+            ("every(b)", "bool_and(b)"),
+        ];
+        for (alias, canonical) in pairs {
+            let sql = format!("SELECT {alias}, {canonical} FROM t");
+            let row = stats_row(&sql);
+            assert!(row[0] == row[1], "{sql}");
+        }
+    }
+
+    /// The sample forms need two rows and the population forms one, so a
+    /// single-row group is NULL for `var_samp` but zero for `var_pop`.
+    #[test]
+    fn the_sample_forms_need_two_rows() {
+        use assert2::assert;
+        let t = stats_table();
+        let one = vec![stats_rows()[0].clone()];
+        let row = agg_text(
+            "SELECT var_pop(i), var_samp(i), stddev_pop(i), stddev_samp(i) FROM t",
+            Some(&t),
+            one.clone(),
+        )
+        .expect("one row");
+        assert!(row == vec![cells(&["0", "<null>", "0", "<null>"])]);
+        let row = agg_text(
+            "SELECT covar_pop(y, x), covar_samp(y, x), corr(y, x) FROM t",
+            Some(&t),
+            one,
+        )
+        .expect("one row");
+        assert!(row == vec![cells(&["0", "<null>", "<null>"])]);
+    }
+
+    /// One `(y, x)` row of the statistical table, with every other column NULL
+    /// so only the float pair reaches the accumulator.
+    fn yx(y: f64, x: f64) -> Vec<Datum> {
+        vec![
+            Datum::Null,
+            Datum::Null,
+            Datum::Null,
+            Datum::Null,
+            Datum::Float8(y),
+            Datum::Float8(x),
+        ]
+    }
+
+    /// A NaN or ±Infinity anywhere in the input poisons PostgreSQL's
+    /// Youngs–Cramer sums of squared deviations, so the whole variance and
+    /// regression family answers NaN. Reporting a variance of zero instead —
+    /// which is what an accumulator that quietly drops the non-finite value
+    /// does — is a wrong answer with nothing to signal it.
+    #[test]
+    fn non_finite_inputs_propagate_through_the_statistical_family() {
+        use assert2::assert;
+        let t = stats_table();
+        let inf = f64::INFINITY;
+        let nan = f64::NAN;
+        let cases: Vec<StatCase<'_>> = vec![
+            (
+                "SELECT var_pop(y), var_samp(y), stddev_pop(y), stddev_samp(y) FROM t",
+                vec![yx(inf, 0.0)],
+                &["NaN", "<null>", "NaN", "<null>"],
+            ),
+            (
+                "SELECT var_pop(y), var_samp(y), stddev_pop(y), stddev_samp(y) FROM t",
+                vec![yx(nan, 0.0)],
+                &["NaN", "<null>", "NaN", "<null>"],
+            ),
+            // A finite row first still has to end up NaN, which is the branch a
+            // first-row-only guard would miss.
+            (
+                "SELECT sum(y), avg(y), var_pop(y) FROM t",
+                vec![yx(1.0, 0.0), yx(inf, 0.0)],
+                &["Infinity", "Infinity", "NaN"],
+            ),
+            (
+                "SELECT sum(y), avg(y), var_pop(y) FROM t",
+                vec![yx(inf, 0.0), yx(1.0, 0.0)],
+                &["Infinity", "Infinity", "NaN"],
+            ),
+            (
+                "SELECT sum(y), avg(y), var_pop(y) FROM t",
+                vec![yx(-inf, 0.0), yx(inf, 0.0)],
+                &["NaN", "NaN", "NaN"],
+            ),
+            (
+                "SELECT covar_pop(y, x), covar_samp(y, x) FROM t",
+                vec![yx(1.0, inf)],
+                &["NaN", "<null>"],
+            ),
+            // Only the sums the non-finite argument feeds are poisoned: an
+            // infinite x leaves regr_syy finite, and vice versa.
+            (
+                "SELECT corr(y, x), covar_pop(y, x), regr_sxx(y, x), regr_syy(y, x), \
+                 regr_sxy(y, x), regr_avgx(y, x), regr_avgy(y, x), regr_count(y, x) FROM t",
+                vec![yx(1.0, inf), yx(2.0, 3.0)],
+                &["NaN", "NaN", "NaN", "0.5", "NaN", "Infinity", "1.5", "2"],
+            ),
+            (
+                "SELECT corr(y, x), covar_pop(y, x), regr_sxx(y, x), regr_syy(y, x), \
+                 regr_sxy(y, x) FROM t",
+                vec![yx(nan, 1.0), yx(2.0, 3.0)],
+                &["NaN", "NaN", "2", "NaN", "NaN"],
+            ),
+            // The finite path is unchanged: a zero spread is still zero, not NaN.
+            (
+                "SELECT var_pop(y), var_samp(y) FROM t",
+                vec![yx(2.0, 0.0), yx(2.0, 0.0)],
+                &["0", "0"],
+            ),
+        ];
+        for (sql, rows, expected) in cases {
+            assert!(
+                agg_text(sql, Some(&t), rows).expect(sql) == vec![cells(expected)],
+                "{sql}"
+            );
+        }
+    }
+
+    /// The same accumulator guard is 22003 rather than NaN when every input was
+    /// finite and it is the running sum that overflowed — PostgreSQL reports the
+    /// overflow only in that case.
+    #[test]
+    fn finite_inputs_that_overflow_the_variance_sums_are_22003() {
+        use assert2::assert;
+        let t = stats_table();
+        let big = 1.0e308;
+        let sqls = [
+            "SELECT var_pop(y) FROM t",
+            "SELECT stddev_samp(y) FROM t",
+            "SELECT regr_sxx(y, x) FROM t",
+            "SELECT corr(y, x) FROM t",
+        ];
+        for sql in sqls {
+            let err = agg_text(
+                sql,
+                Some(&t),
+                vec![yx(big, big), yx(-big, -big), yx(big, big)],
+            )
+            .expect_err(sql);
+            assert!(err.into_pg().code == "22003", "{sql}");
+        }
+    }
+
+    /// The argument types each family accepts, and what it reports back —
+    /// `variance(int4)` is numeric while `variance(float8)` stays float8, and
+    /// `bit_and` keeps the integer width it was handed.
+    #[test]
+    fn new_aggregate_result_types_match_postgres() {
+        use assert2::assert;
+        let t = stats_table();
+        let scope = scope_of(Some(&t));
+        let cases = [
+            ("string_agg(s, ',')", ColumnType::Text),
+            ("bool_and(b)", ColumnType::Bool),
+            ("every(b)", ColumnType::Bool),
+            ("bit_and(i)", ColumnType::Int4),
+            ("var_pop(i)", ColumnType::Numeric(None)),
+            ("variance(q)", ColumnType::Numeric(None)),
+            ("stddev(y)", ColumnType::Float8),
+            ("var_samp(y)", ColumnType::Float8),
+            ("corr(y, x)", ColumnType::Float8),
+            ("regr_count(y, x)", ColumnType::Int8),
+            ("regr_slope(y, x)", ColumnType::Float8),
+        ];
+        for (call, expected) in cases {
+            let expr = crabka_pgparser::parser::parse_expr_for_test(call).expect("parse");
+            let Expr::Func(fc) = &expr else {
+                panic!("{call} is not a function call")
+            };
+            assert!(
+                func_result_type(fc, &scope).expect(call) == expected,
+                "{call}"
+            );
+        }
+        // A type outside the family is 42883 rather than a silent coercion.
+        for call in [
+            "bool_and(i)",
+            "bit_and(s)",
+            "var_pop(s)",
+            "string_agg(i, s)",
+        ] {
+            let expr = crabka_pgparser::parser::parse_expr_for_test(call).expect("parse");
+            let Expr::Func(fc) = &expr else {
+                panic!("{call} is not a function call")
+            };
+            assert!(
+                func_result_type(fc, &scope).expect_err(call).into_pg().code == "42883",
+                "{call}"
             );
         }
     }

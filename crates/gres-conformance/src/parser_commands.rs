@@ -65,6 +65,10 @@ struct CommandProbe {
     command: &'static str,
     sql: &'static str,
     expected_statement: &'static str,
+    /// The `(sqlstate, message fragment)` a command refuses with when the
+    /// refusal is the executor's rather than a parser-level
+    /// [`crabka_pgparser::ast::RefusalCommand`].
+    refusal: Option<(&'static str, &'static str)>,
 }
 
 const COMMAND_PROBES: &[CommandProbe] = &[
@@ -72,286 +76,629 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         command: "ALTER DATABASE",
         sql: "ALTER DATABASE postgres RENAME TO other",
         expected_statement: "CompatibilityRefusal",
+        refusal: None,
     },
     CommandProbe {
         command: "CREATE DATABASE",
         sql: "CREATE DATABASE other",
         expected_statement: "CompatibilityRefusal",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP DATABASE",
         sql: "DROP DATABASE other",
         expected_statement: "CompatibilityRefusal",
+        refusal: None,
     },
     CommandProbe {
         command: "ALTER EXTENSION",
         sql: "ALTER EXTENSION plpgsql UPDATE",
         expected_statement: "CompatibilityRefusal",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP EXTENSION",
         sql: "DROP EXTENSION plpgsql",
         expected_statement: "CompatibilityRefusal",
+        refusal: None,
     },
     CommandProbe {
         command: "PREPARE TRANSACTION",
         sql: "PREPARE TRANSACTION 'xid-1'",
         expected_statement: "CompatibilityRefusal",
+        refusal: None,
     },
     CommandProbe {
         command: "COMMIT PREPARED",
         sql: "COMMIT PREPARED 'xid-1'",
         expected_statement: "CompatibilityRefusal",
+        refusal: None,
     },
     CommandProbe {
         command: "ROLLBACK PREPARED",
         sql: "ROLLBACK PREPARED 'xid-1'",
         expected_statement: "CompatibilityRefusal",
+        refusal: None,
     },
     CommandProbe {
         command: "CREATE TABLE",
         sql: "CREATE TABLE parser_commands_probe (id int4)",
         expected_statement: "CreateTable",
+        refusal: None,
     },
     CommandProbe {
         command: "CREATE VIEW",
         sql: "CREATE VIEW parser_commands_view AS SELECT 1",
         expected_statement: "CreateView",
+        refusal: None,
     },
     CommandProbe {
         command: "CREATE INDEX",
         sql: "CREATE INDEX parser_commands_probe_index ON parser_commands_probe (id)",
         expected_statement: "CreateIndex",
+        refusal: None,
     },
     CommandProbe {
         command: "CREATE SEQUENCE",
         sql: "CREATE SEQUENCE parser_commands_probe_sequence",
         expected_statement: "CreateSequence",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP TABLE",
         sql: "DROP TABLE parser_commands_probe",
         expected_statement: "DropTable",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP VIEW",
         sql: "DROP VIEW parser_commands_view",
         expected_statement: "DropView",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP INDEX",
         sql: "DROP INDEX IF EXISTS parser_commands_probe_index",
         expected_statement: "DropIndex",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP SEQUENCE",
         sql: "DROP SEQUENCE parser_commands_probe_sequence",
         expected_statement: "DropSequence",
+        refusal: None,
     },
     CommandProbe {
         command: "ALTER TABLE",
         sql: "ALTER TABLE parser_commands_probe RENAME TO parser_commands_renamed_probe",
-        expected_statement: "AlterTableRename",
+        expected_statement: "AlterTable",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "COMMENT",
+        sql: "COMMENT ON TABLE parser_commands_probe IS 'probe comment'",
+        expected_statement: "Comment",
+        refusal: None,
     },
     CommandProbe {
         command: "INSERT",
         sql: "INSERT INTO parser_commands_probe VALUES (1)",
         expected_statement: "Insert",
+        refusal: None,
     },
     CommandProbe {
         command: "TRUNCATE",
         sql: "TRUNCATE parser_commands_probe",
         expected_statement: "Truncate",
+        refusal: None,
     },
     CommandProbe {
         command: "LISTEN",
         sql: "LISTEN parser_commands_channel",
         expected_statement: "Listen",
+        refusal: None,
     },
     CommandProbe {
         command: "NOTIFY",
         sql: "NOTIFY parser_commands_channel, 'parser commands payload'",
         expected_statement: "Notify",
+        refusal: None,
     },
     CommandProbe {
         command: "UNLISTEN",
         sql: "UNLISTEN parser_commands_channel",
         expected_statement: "Unlisten",
+        refusal: None,
     },
     CommandProbe {
         command: "VACUUM",
         sql: "VACUUM ANALYZE parser_commands_probe",
         expected_statement: "Vacuum",
+        refusal: None,
     },
     CommandProbe {
         command: "SELECT",
         sql: "SELECT 1",
         expected_statement: "Query",
+        refusal: None,
     },
     CommandProbe {
         command: "VALUES",
         sql: "VALUES (1)",
         expected_statement: "Query",
+        refusal: None,
     },
     CommandProbe {
         command: "BEGIN",
         sql: "BEGIN",
         expected_statement: "Begin",
+        refusal: None,
     },
     CommandProbe {
         command: "START TRANSACTION",
         sql: "START TRANSACTION",
         expected_statement: "Begin",
+        refusal: None,
     },
     CommandProbe {
         command: "COMMIT",
         sql: "COMMIT",
         expected_statement: "Commit",
+        refusal: None,
     },
     CommandProbe {
         command: "END",
         sql: "END",
         expected_statement: "Commit",
+        refusal: None,
     },
     CommandProbe {
         command: "ROLLBACK",
         sql: "ROLLBACK",
         expected_statement: "Rollback",
+        refusal: None,
     },
     CommandProbe {
         command: "ABORT",
         sql: "ABORT",
         expected_statement: "Rollback",
+        refusal: None,
     },
     CommandProbe {
         command: "UPDATE",
         sql: "UPDATE parser_commands_probe SET id = 1",
         expected_statement: "Update",
+        refusal: None,
     },
     CommandProbe {
         command: "DELETE",
         sql: "DELETE FROM parser_commands_probe",
         expected_statement: "Delete",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "MERGE",
+        sql: "MERGE INTO parser_commands_probe AS t USING parser_commands_probe AS s ON t.id = s.id WHEN MATCHED THEN DO NOTHING",
+        expected_statement: "Merge",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE TABLE AS",
+        sql: "CREATE TABLE parser_commands_ctas_probe AS SELECT id FROM parser_commands_probe",
+        expected_statement: "CreateTableAs",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "SELECT INTO",
+        sql: "SELECT id INTO parser_commands_into_probe FROM parser_commands_probe",
+        expected_statement: "CreateTableAs",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "TABLE",
+        sql: "TABLE parser_commands_probe",
+        expected_statement: "Query",
+        refusal: None,
     },
     CommandProbe {
         command: "SET",
         sql: "SET extra_float_digits TO 2",
         expected_statement: "Set",
+        refusal: None,
     },
     CommandProbe {
         command: "SET TRANSACTION",
         sql: "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
         expected_statement: "SetTransaction",
+        refusal: None,
     },
     CommandProbe {
         command: "SHOW",
         sql: "SHOW extra_float_digits",
         expected_statement: "Show",
+        refusal: None,
     },
     CommandProbe {
         command: "RESET",
         sql: "RESET extra_float_digits",
         expected_statement: "Reset",
+        refusal: None,
     },
     CommandProbe {
         command: "DISCARD",
         sql: "DISCARD ALL",
-        expected_statement: "DiscardAll",
+        expected_statement: "Discard",
+        refusal: None,
     },
     CommandProbe {
         command: "COPY",
         sql: "COPY parser_commands_probe FROM STDIN",
         expected_statement: "CopyFromStdin",
+        refusal: None,
     },
     CommandProbe {
         command: "CREATE FOREIGN DATA WRAPPER",
         sql: "CREATE FOREIGN DATA WRAPPER parser_commands_wrapper",
         expected_statement: "CreateFdw",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP FOREIGN DATA WRAPPER",
         sql: "DROP FOREIGN DATA WRAPPER parser_commands_wrapper",
         expected_statement: "DropFdw",
+        refusal: None,
     },
     CommandProbe {
         command: "CREATE SERVER",
         sql: "CREATE SERVER parser_commands_server FOREIGN DATA WRAPPER parser_commands_wrapper",
         expected_statement: "CreateServer",
+        refusal: None,
     },
     CommandProbe {
         command: "ALTER SERVER",
         sql: "ALTER SERVER parser_commands_server OPTIONS (host 'localhost')",
         expected_statement: "AlterServer",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP SERVER",
         sql: "DROP SERVER parser_commands_server",
         expected_statement: "DropServer",
+        refusal: None,
     },
     CommandProbe {
         command: "CREATE USER MAPPING",
         sql: "CREATE USER MAPPING FOR PUBLIC SERVER parser_commands_server",
         expected_statement: "CreateUserMapping",
+        refusal: None,
     },
     CommandProbe {
         command: "ALTER USER MAPPING",
         sql: "ALTER USER MAPPING FOR PUBLIC SERVER parser_commands_server OPTIONS (username 'crab')",
         expected_statement: "AlterUserMapping",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP USER MAPPING",
         sql: "DROP USER MAPPING FOR PUBLIC SERVER parser_commands_server",
         expected_statement: "DropUserMapping",
+        refusal: None,
     },
     CommandProbe {
         command: "CREATE FOREIGN TABLE",
         sql: "CREATE FOREIGN TABLE parser_commands_foreign (id int4) SERVER parser_commands_server",
         expected_statement: "CreateForeignTable",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP FOREIGN TABLE",
         sql: "DROP FOREIGN TABLE parser_commands_foreign",
         expected_statement: "DropForeignTable",
+        refusal: None,
     },
     CommandProbe {
         command: "IMPORT FOREIGN SCHEMA",
         sql: "IMPORT FOREIGN SCHEMA parser_commands_schema FROM SERVER parser_commands_server",
         expected_statement: "ImportForeignSchema",
+        refusal: None,
     },
     CommandProbe {
         command: "CREATE ROLE",
         sql: "CREATE ROLE parser_commands_role",
         expected_statement: "CreateRole",
+        refusal: None,
     },
     CommandProbe {
         command: "CREATE USER",
         sql: "CREATE USER parser_commands_user",
         expected_statement: "CreateRole",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP ROLE",
         sql: "DROP ROLE parser_commands_role",
         expected_statement: "DropRole",
+        refusal: None,
     },
     CommandProbe {
         command: "DROP USER",
         sql: "DROP USER parser_commands_user",
         expected_statement: "DropRole",
+        refusal: None,
     },
     CommandProbe {
         command: "GRANT",
         sql: "GRANT SELECT ON TABLE parser_commands_probe TO parser_commands_role",
         expected_statement: "GrantTablePrivileges",
+        refusal: None,
     },
     CommandProbe {
         command: "REVOKE",
         sql: "REVOKE SELECT ON TABLE parser_commands_probe FROM parser_commands_role",
         expected_statement: "RevokeTablePrivileges",
+        refusal: None,
     },
     CommandProbe {
         command: "SET ROLE",
         sql: "SET ROLE parser_commands_role",
         expected_statement: "SetRole",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "SAVEPOINT",
+        sql: "SAVEPOINT parser_commands_savepoint",
+        expected_statement: "Savepoint",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ROLLBACK TO SAVEPOINT",
+        sql: "ROLLBACK TO SAVEPOINT parser_commands_savepoint",
+        expected_statement: "RollbackToSavepoint",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "RELEASE SAVEPOINT",
+        sql: "RELEASE SAVEPOINT parser_commands_savepoint",
+        expected_statement: "ReleaseSavepoint",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DECLARE",
+        sql: "DECLARE parser_commands_cursor CURSOR FOR SELECT id FROM parser_commands_probe",
+        expected_statement: "DeclareCursor",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "FETCH",
+        sql: "FETCH ALL FROM parser_commands_cursor",
+        expected_statement: "FetchCursor",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "MOVE",
+        sql: "MOVE ALL IN parser_commands_cursor",
+        expected_statement: "FetchCursor",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CLOSE",
+        sql: "CLOSE parser_commands_cursor",
+        expected_statement: "CloseCursor",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "PREPARE",
+        sql: "PREPARE parser_commands_prepared AS SELECT 1",
+        expected_statement: "PrepareStatement",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "EXECUTE",
+        sql: "EXECUTE parser_commands_prepared",
+        expected_statement: "ExecuteStatement",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DEALLOCATE",
+        sql: "DEALLOCATE parser_commands_prepared",
+        expected_statement: "Deallocate",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "LOCK",
+        sql: "LOCK TABLE parser_commands_probe IN ACCESS SHARE MODE",
+        expected_statement: "LockTable",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "EXPLAIN",
+        sql: "EXPLAIN (COSTS OFF) SELECT 1",
+        expected_statement: "Explain",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ANALYZE",
+        sql: "ANALYZE parser_commands_probe",
+        expected_statement: "Analyze",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CLUSTER",
+        sql: "CLUSTER",
+        expected_statement: "Cluster",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "REINDEX",
+        sql: "REINDEX TABLE parser_commands_probe",
+        expected_statement: "Reindex",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CHECKPOINT",
+        sql: "CHECKPOINT",
+        expected_statement: "Checkpoint",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER SYSTEM",
+        sql: "ALTER SYSTEM RESET work_mem",
+        expected_statement: "AlterSystem",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE STATISTICS",
+        sql: "CREATE STATISTICS parser_commands_stats ON id FROM parser_commands_probe",
+        expected_statement: "CompatibilityRefusal",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER STATISTICS",
+        sql: "ALTER STATISTICS parser_commands_stats SET STATISTICS 100",
+        expected_statement: "CompatibilityRefusal",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP STATISTICS",
+        sql: "DROP STATISTICS parser_commands_stats",
+        expected_statement: "CompatibilityRefusal",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "SET CONSTRAINTS",
+        sql: "SET CONSTRAINTS ALL IMMEDIATE",
+        expected_statement: "SetConstraints",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "SET SESSION AUTHORIZATION",
+        sql: "SET SESSION AUTHORIZATION DEFAULT",
+        expected_statement: "SetSessionAuthorization",
+        refusal: None,
+    },
+    // D7: schemas. A schema is recorded but not yet usable as a namespace —
+    // see the CREATE SCHEMA matrix row for that divergence.
+    CommandProbe {
+        command: "CREATE SCHEMA",
+        sql: "CREATE SCHEMA parser_commands_schema",
+        expected_statement: "CreateSchema",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER SCHEMA",
+        sql: "ALTER SCHEMA parser_commands_schema RENAME TO parser_commands_schema2",
+        expected_statement: "AlterSchema",
+        refusal: Some(("0A000", "is not supported")),
+    },
+    CommandProbe {
+        command: "DROP SCHEMA",
+        sql: "DROP SCHEMA parser_commands_schema",
+        expected_statement: "DropSchema",
+        refusal: None,
+    },
+    // T5: user-defined types.
+    CommandProbe {
+        command: "CREATE TYPE",
+        sql: "CREATE TYPE parser_commands_enum AS ENUM ('a', 'b')",
+        expected_statement: "CreateType",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER TYPE",
+        sql: "ALTER TYPE parser_commands_enum ADD VALUE 'c'",
+        expected_statement: "AlterType",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP TYPE",
+        sql: "DROP TYPE parser_commands_enum",
+        expected_statement: "DropType",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE DOMAIN",
+        sql: "CREATE DOMAIN parser_commands_domain AS int4 CHECK (VALUE > 0)",
+        expected_statement: "CreateDomain",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER DOMAIN",
+        sql: "ALTER DOMAIN parser_commands_domain SET DEFAULT 1",
+        expected_statement: "AlterDomain",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP DOMAIN",
+        sql: "DROP DOMAIN parser_commands_domain",
+        expected_statement: "DropDomain",
+        refusal: None,
+    },
+    // P2: SQL routines.
+    CommandProbe {
+        command: "CREATE FUNCTION",
+        sql: "CREATE FUNCTION parser_commands_fn(a int) RETURNS int AS 'SELECT $1' LANGUAGE sql",
+        expected_statement: "CreateRoutine",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE PROCEDURE",
+        sql: "CREATE PROCEDURE parser_commands_proc(a int) LANGUAGE sql AS 'SELECT $1'",
+        expected_statement: "CreateRoutine",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER FUNCTION",
+        sql: "ALTER FUNCTION parser_commands_fn(int) IMMUTABLE",
+        expected_statement: "AlterRoutine",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER PROCEDURE",
+        sql: "ALTER PROCEDURE parser_commands_proc(int) SECURITY DEFINER",
+        expected_statement: "AlterRoutine",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER ROUTINE",
+        sql: "ALTER ROUTINE parser_commands_fn(int) RENAME TO parser_commands_fn2",
+        expected_statement: "AlterRoutine",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP FUNCTION",
+        sql: "DROP FUNCTION parser_commands_fn(int)",
+        expected_statement: "DropRoutine",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP PROCEDURE",
+        sql: "DROP PROCEDURE parser_commands_proc(int)",
+        expected_statement: "DropRoutine",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP ROUTINE",
+        sql: "DROP ROUTINE parser_commands_fn(int)",
+        expected_statement: "DropRoutine",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CALL",
+        sql: "CALL parser_commands_proc(1)",
+        expected_statement: "Call",
+        refusal: None,
+    },
+    // `DO` has no inline handler for any language Gres knows: PostgreSQL itself
+    // refuses `LANGUAGE sql` with this exact 0A000, and Gres has no PL/pgSQL
+    // interpreter to run the default language with.
+    CommandProbe {
+        command: "DO",
+        sql: "DO $$ SELECT 1 $$ LANGUAGE sql",
+        expected_statement: "DoBlock",
+        refusal: Some((
+            "0A000",
+            "language \"sql\" does not support inline code execution",
+        )),
     },
 ];
 
@@ -382,6 +729,7 @@ pub fn parser_command_report() -> Result<ParserCommandReport, ParserCommandError
             command: spec.command.command_name(),
             sql: spec.representative_sql,
             expected_statement: "CompatibilityRefusal",
+            refusal: None,
         };
         validate_probe(&probe)?;
         probes.push(behavior_probe(&probe)?);
@@ -411,6 +759,8 @@ fn behavior_probe(probe: &CommandProbe) -> Result<BehaviorProbe, ParserCommandEr
     let (behavior, sqlstate, message_fragment) =
         if let Some(command) = statement.compatibility_refusal() {
             ("refuse", Some(command.sqlstate()), Some(command.message()))
+        } else if let Some((sqlstate, fragment)) = probe.refusal {
+            ("refuse", Some(sqlstate), Some(fragment))
         } else {
             ("session-execute", None, None)
         };
@@ -462,6 +812,11 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::CompatibilityRefusal(_) => "CompatibilityRefusal",
         Statement::CreateTable { .. } => "CreateTable",
         Statement::CreateView { .. } => "CreateView",
+        Statement::CreateRoutine(_) => "CreateRoutine",
+        Statement::DropRoutine { .. } => "DropRoutine",
+        Statement::AlterRoutine { .. } => "AlterRoutine",
+        Statement::Call { .. } => "Call",
+        Statement::DoBlock { .. } => "DoBlock",
         Statement::CreateIndex { table, .. } if table == "__crabka_sequence__" => "CreateSequence",
         Statement::CreateIndex { .. } => "CreateIndex",
         Statement::DropIndex { .. } => "DropIndex",
@@ -474,9 +829,20 @@ fn statement_shape(statement: &Statement) -> &'static str {
         }
         Statement::DropTable { .. } => "DropTable",
         Statement::DropView { .. } => "DropView",
-        Statement::AlterTableRename { .. } => "AlterTableRename",
-        Statement::AlterTableAddPrimaryKey { .. } => "AlterTableAddPrimaryKey",
+        Statement::CreateSchema { .. } => "CreateSchema",
+        Statement::AlterSchema { .. } => "AlterSchema",
+        Statement::DropSchema { .. } => "DropSchema",
+        Statement::CreateType { .. } => "CreateType",
+        Statement::AlterType { .. } => "AlterType",
+        Statement::DropType { .. } => "DropType",
+        Statement::CreateDomain { .. } => "CreateDomain",
+        Statement::AlterDomain { .. } => "AlterDomain",
+        Statement::DropDomain { .. } => "DropDomain",
+        Statement::AlterTable { .. } => "AlterTable",
+        Statement::Comment { .. } => "Comment",
         Statement::Insert { .. } => "Insert",
+        Statement::Merge { .. } => "Merge",
+        Statement::CreateTableAs { .. } => "CreateTableAs",
         Statement::Truncate { .. } => "Truncate",
         Statement::Vacuum => "Vacuum",
         Statement::Listen { .. } => "Listen",
@@ -484,14 +850,36 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::Unlisten { .. } => "Unlisten",
         Statement::Query(_) => "Query",
         Statement::Begin { .. } => "Begin",
-        Statement::Commit => "Commit",
-        Statement::Rollback => "Rollback",
+        Statement::Commit { .. } => "Commit",
+        Statement::Rollback { .. } => "Rollback",
         Statement::Update { .. } => "Update",
         Statement::Delete { .. } => "Delete",
         Statement::Set { name, .. } if name == crabka_pgparser::ast::COPY_FROM_STDIN_SENTINEL => {
             "CopyFromStdin"
         }
-        Statement::Set { name, .. } if name == "__discard_all" => "DiscardAll",
+        Statement::Discard { .. } => "Discard",
+        Statement::Savepoint { .. } => "Savepoint",
+        Statement::RollbackToSavepoint { .. } => "RollbackToSavepoint",
+        Statement::ReleaseSavepoint { .. } => "ReleaseSavepoint",
+        Statement::DeclareCursor { .. } => "DeclareCursor",
+        Statement::FetchCursor { .. } => "FetchCursor",
+        Statement::CloseCursor { .. } => "CloseCursor",
+        Statement::PrepareStatement { .. } => "PrepareStatement",
+        Statement::ExecuteStatement { .. } => "ExecuteStatement",
+        Statement::Deallocate { .. } => "Deallocate",
+        Statement::LockTable { .. } => "LockTable",
+        Statement::Explain { .. } => "Explain",
+        Statement::Utility(utility) => match utility {
+            crabka_pgparser::ast::UtilityStatement::Analyze => "Analyze",
+            crabka_pgparser::ast::UtilityStatement::Cluster => "Cluster",
+            crabka_pgparser::ast::UtilityStatement::Reindex => "Reindex",
+            crabka_pgparser::ast::UtilityStatement::Checkpoint => "Checkpoint",
+            crabka_pgparser::ast::UtilityStatement::AlterSystem { .. } => "AlterSystem",
+            crabka_pgparser::ast::UtilityStatement::SetConstraints => "SetConstraints",
+            crabka_pgparser::ast::UtilityStatement::SetSessionAuthorization { .. } => {
+                "SetSessionAuthorization"
+            }
+        },
         Statement::Set {
             local: false,
             name,
@@ -531,7 +919,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 97,
+            report.commands.len() == 143,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -569,7 +957,7 @@ mod tests {
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(97));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(143));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")

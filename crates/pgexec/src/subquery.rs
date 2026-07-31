@@ -13,7 +13,7 @@
 use crabka_pgparser::ast::{
     BinaryOp, Expr, FuncArgs, FuncCall, OrderItem, QueryExpr, SelectItem, SelectStmt, ValuesStmt,
 };
-use crabka_pgtypes::{ColumnType, Datum};
+use crabka_pgtypes::{ColumnType, Datum, ElemType};
 
 use crate::error::ExecError;
 
@@ -65,8 +65,14 @@ impl<'a> SubCtx<'a> {
 pub(crate) fn resolve_in_select(ctx: &SubCtx, s: &SelectStmt) -> Result<SelectStmt, ExecError> {
     let mut out = s.clone();
     for item in &mut out.projection {
-        if let SelectItem::Expr { expr, .. } = item {
+        if let SelectItem::Expr { expr, alias } = item {
+            // P2: an unaliased routine call keeps the function's name as its
+            // output label even though inlining replaces the call node.
+            let label = crate::routine::call_label(expr);
             *expr = resolve_expr(ctx, expr)?;
+            if alias.is_none() && !matches!(expr, Expr::Func(_)) {
+                *alias = label;
+            }
         }
     }
     if let Some(f) = &mut out.filter {
@@ -81,7 +87,57 @@ pub(crate) fn resolve_in_select(ctx: &SubCtx, s: &SelectStmt) -> Result<SelectSt
     for o in &mut out.order_by {
         o.expr = resolve_expr(ctx, &o.expr)?;
     }
+    if let crabka_pgparser::ast::DistinctClause::On(on) = &mut out.distinct {
+        for expr in on {
+            *expr = resolve_expr(ctx, expr)?;
+        }
+    }
+    // LIMIT/OFFSET take arbitrary expressions, including a scalar subquery, and
+    // are evaluated once against no input row.
+    for expr in out.limit.iter_mut().chain(out.offset.iter_mut()) {
+        *expr = resolve_expr(ctx, expr)?;
+    }
+    // A window call's arguments, FILTER and window specification live beside the
+    // expression tree rather than in it, so they need resolving too.
+    for call in &mut out.window_calls {
+        if let crabka_pgparser::ast::FuncArgs::Exprs(args) = &mut call.args {
+            for arg in args {
+                *arg = resolve_expr(ctx, arg)?;
+            }
+        }
+        if let Some(filter) = &mut call.filter {
+            *filter = resolve_expr(ctx, filter)?;
+        }
+        if let crabka_pgparser::ast::WindowRef::Spec(spec) = &mut call.over {
+            for expr in &mut spec.partition_by {
+                *expr = resolve_expr(ctx, expr)?;
+            }
+            for item in &mut spec.order_by {
+                item.expr = resolve_expr(ctx, &item.expr)?;
+            }
+        }
+    }
+    for window in &mut out.windows {
+        for expr in &mut window.spec.partition_by {
+            *expr = resolve_expr(ctx, expr)?;
+        }
+        for item in &mut window.spec.order_by {
+            item.expr = resolve_expr(ctx, &item.expr)?;
+        }
+    }
     Ok(out)
+}
+
+/// Rewrite subqueries in a query expression's `LIMIT`/`OFFSET` expressions,
+/// which the non-SELECT bodies apply outside `resolve_in_select`.
+pub(crate) fn resolve_row_counts(
+    ctx: &SubCtx,
+    q: &QueryExpr,
+) -> Result<(Option<Expr>, Option<Expr>), ExecError> {
+    let resolve = |expr: &Option<Expr>| -> Result<Option<Expr>, ExecError> {
+        expr.as_ref().map(|e| resolve_expr(ctx, e)).transpose()
+    };
+    Ok((resolve(&q.limit)?, resolve(&q.offset)?))
 }
 
 /// Rewrite subqueries in query-expression ORDER BY tail items. Non-SELECT query
@@ -97,6 +153,7 @@ pub(crate) fn resolve_order_items(
             Ok(OrderItem {
                 expr: resolve_expr(ctx, &item.expr)?,
                 asc: item.asc,
+                nulls_first: item.nulls_first,
             })
         })
         .collect()
@@ -112,8 +169,27 @@ pub(crate) fn resolve_in_values(ctx: &SubCtx, v: &ValuesStmt) -> Result<ValuesSt
     })
 }
 
+/// [`resolve_expr`] over one subscript-chain entry's bound expressions.
+fn resolve_subscript(
+    ctx: &SubCtx,
+    subscript: &crabka_pgparser::ast::ArraySubscript,
+) -> Result<crabka_pgparser::ast::ArraySubscript, ExecError> {
+    use crabka_pgparser::ast::ArraySubscript;
+
+    Ok(match subscript {
+        ArraySubscript::Index(index) => ArraySubscript::Index(resolve_expr(ctx, index)?),
+        ArraySubscript::Slice { lower, upper } => {
+            let bound = |e: &Option<Expr>| e.as_ref().map(|e| resolve_expr(ctx, e)).transpose();
+            ArraySubscript::Slice {
+                lower: bound(lower)?,
+                upper: bound(upper)?,
+            }
+        }
+    })
+}
+
 /// Recursively rewrite subquery nodes in `e`, bottom-up.
-fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
+pub(crate) fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
     Ok(match e {
         Expr::IntLiteral(_)
         | Expr::NumericLiteral(_)
@@ -124,27 +200,55 @@ fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
         | Expr::Param(_)
         | Expr::Default
         | Expr::Const { .. } => e.clone(),
+        Expr::FieldSelect { base, field } => Expr::FieldSelect {
+            base: Box::new(resolve_expr(ctx, base)?),
+            field: field.clone(),
+        },
+        Expr::FieldSelectAll(base) => Expr::FieldSelectAll(Box::new(resolve_expr(ctx, base)?)),
         Expr::Unary { op, expr } => Expr::Unary {
             op: *op,
             expr: Box::new(resolve_expr(ctx, expr)?),
+        },
+        Expr::Collate { expr, collation } => Expr::Collate {
+            expr: Box::new(resolve_expr(ctx, expr)?),
+            collation: collation.clone(),
         },
         Expr::Binary { op, left, right } => Expr::Binary {
             op: *op,
             left: Box::new(resolve_expr(ctx, left)?),
             right: Box::new(resolve_expr(ctx, right)?),
         },
-        Expr::Func(fc) => Expr::Func(FuncCall {
-            name: fc.name.clone(),
-            distinct: fc.distinct,
-            args: match &fc.args {
-                FuncArgs::Star => FuncArgs::Star,
-                FuncArgs::Exprs(args) => FuncArgs::Exprs(
-                    args.iter()
-                        .map(|a| resolve_expr(ctx, a))
-                        .collect::<Result<_, _>>()?,
-                ),
-            },
-        }),
+        Expr::Func(fc) => {
+            let call = FuncCall {
+                name: fc.name.clone(),
+                distinct: fc.distinct,
+                args: match &fc.args {
+                    FuncArgs::Star => FuncArgs::Star,
+                    FuncArgs::Exprs(args) => FuncArgs::Exprs(
+                        args.iter()
+                            .map(|a| resolve_expr(ctx, a))
+                            .collect::<Result<_, _>>()?,
+                    ),
+                },
+                // The FILTER predicate resolves like an argument; dropping it here
+                // would silently turn a filtered aggregate into an unfiltered one.
+                filter: match &fc.filter {
+                    Some(predicate) => Some(Box::new(resolve_expr(ctx, predicate)?)),
+                    None => None,
+                },
+            };
+            // P2: a call of a user-defined SQL function is inlined here, the one
+            // point in the rewrite where the routine catalog is reachable.
+            match crate::routine::inline_scalar(ctx.catalog_kv, &call)? {
+                // The inlined body may itself call a routine, and may have
+                // become a scalar subquery, so it goes back through this pass.
+                Some(inlined) => {
+                    let _guard = crate::routine::enter_inline()?;
+                    resolve_expr(ctx, &inlined)?
+                }
+                None => Expr::Func(call),
+            }
+        }
         Expr::IsNull { expr, negated } => Expr::IsNull {
             expr: Box::new(resolve_expr(ctx, expr)?),
             negated: *negated,
@@ -176,12 +280,17 @@ fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             expr,
             pattern,
             negated,
-            case_insensitive,
+            kind,
+            escape,
         } => Expr::Like {
             expr: Box::new(resolve_expr(ctx, expr)?),
             pattern: Box::new(resolve_expr(ctx, pattern)?),
             negated: *negated,
-            case_insensitive: *case_insensitive,
+            kind: *kind,
+            escape: match escape {
+                Some(e) => Some(Box::new(resolve_expr(ctx, e)?)),
+                None => None,
+            },
         },
         Expr::Case {
             operand,
@@ -205,6 +314,9 @@ fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
             expr: Box::new(resolve_expr(ctx, expr)?),
             ty: *ty,
         },
+        Expr::SqlJson(json) => Expr::SqlJson(Box::new(
+            json.map_children(|child| resolve_expr(ctx, child))?,
+        )),
         // The array expression forms carry ordinary child expressions, any of
         // which may contain a subquery (`ARRAY[(SELECT …)]`, `arr[(SELECT …)]`,
         // `x = ANY((SELECT …))`), so they recurse like every other node — the
@@ -215,9 +327,22 @@ fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
                 .map(|item| resolve_expr(ctx, item))
                 .collect::<Result<_, _>>()?,
         ),
+        Expr::Row(items) => Expr::Row(
+            items
+                .iter()
+                .map(|item| resolve_expr(ctx, item))
+                .collect::<Result<_, _>>()?,
+        ),
         Expr::Subscript { base, index } => Expr::Subscript {
             base: Box::new(resolve_expr(ctx, base)?),
             index: Box::new(resolve_expr(ctx, index)?),
+        },
+        Expr::ArrayRef { base, subscripts } => Expr::ArrayRef {
+            base: Box::new(resolve_expr(ctx, base)?),
+            subscripts: subscripts
+                .iter()
+                .map(|s| resolve_subscript(ctx, s))
+                .collect::<Result<_, _>>()?,
         },
         Expr::QuantifiedArray {
             expr,
@@ -234,6 +359,18 @@ fn resolve_expr(ctx: &SubCtx, e: &Expr) -> Result<Expr, ExecError> {
         Expr::ScalarSubquery(s) => {
             let (value, ty) = run_scalar(ctx, s)?;
             Expr::Const { value, ty }
+        }
+        // `ARRAY(subquery)` folds to the array of the subquery's one column, in
+        // the order the subquery produced its rows.
+        Expr::ArraySubquery(s) => {
+            let (ty, values) = run_single_column(ctx, s)?;
+            let elem = ElemType::from_column_type(ty).ok_or_else(|| {
+                ExecError::Unsupported(format!("arrays of {} are not supported", ty.name()))
+            })?;
+            Expr::Const {
+                value: crate::array_fn::array_from_rows(elem, values),
+                ty: ColumnType::Array(elem),
+            }
         }
         Expr::Exists(s) => {
             let rows = run_rows(ctx, s)?;
@@ -370,10 +507,19 @@ pub(crate) fn resolve_types_in_projection_with_ctes(
     items
         .iter()
         .map(|it| match it {
-            SelectItem::Expr { expr, alias } => Ok(SelectItem::Expr {
-                expr: resolve_types_in_expr(catalog_kv, expr, ctes)?,
-                alias: alias.clone(),
-            }),
+            SelectItem::Expr { expr, alias } => {
+                let label = crate::routine::call_label(expr);
+                let resolved = resolve_types_in_expr(catalog_kv, expr, ctes)?;
+                let alias = match (alias, matches!(resolved, Expr::Func(_))) {
+                    (Some(alias), _) => Some(alias.clone()),
+                    (None, false) => label,
+                    (None, true) => None,
+                };
+                Ok(SelectItem::Expr {
+                    expr: resolved,
+                    alias,
+                })
+            }
             other => Ok(other.clone()),
         })
         .collect()
@@ -421,6 +567,36 @@ fn resolve_types_in_expr(
             expr: Box::new(resolve_types_in_expr(catalog_kv, expr, ctes)?),
             ty: *ty,
         },
+        // P2: the describe path inlines a user-defined SQL function's body the
+        // same way execution does, so a `Describe` reports the type the rows
+        // will carry.
+        Expr::Func(fc) => {
+            let call = FuncCall {
+                name: fc.name.clone(),
+                distinct: fc.distinct,
+                args: match &fc.args {
+                    FuncArgs::Star => FuncArgs::Star,
+                    FuncArgs::Exprs(args) => FuncArgs::Exprs(
+                        args.iter()
+                            .map(|a| resolve_types_in_expr(catalog_kv, a, ctes))
+                            .collect::<Result<_, _>>()?,
+                    ),
+                },
+                filter: match &fc.filter {
+                    Some(predicate) => Some(Box::new(resolve_types_in_expr(
+                        catalog_kv, predicate, ctes,
+                    )?)),
+                    None => None,
+                },
+            };
+            match crate::routine::inline_scalar(catalog_kv, &call)? {
+                Some(inlined) => {
+                    let _guard = crate::routine::enter_inline()?;
+                    resolve_types_in_expr(catalog_kv, &inlined, ctes)?
+                }
+                None => Expr::Func(call),
+            }
+        }
         // Everything else (incl. EXISTS / IN / quantified, which infer as bool) is
         // typed directly by `infer_type` without substitution.
         other => other.clone(),

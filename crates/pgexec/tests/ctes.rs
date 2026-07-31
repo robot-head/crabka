@@ -140,19 +140,30 @@ async fn cte_shadows_base_table_and_can_be_reused() {
 }
 
 #[tokio::test]
-async fn cte_column_aliases_and_recursive_error() {
+async fn cte_column_alias_lists_follow_postgres() {
     let c = connect_new().await;
     assert_eq!(
         rows(&c, "WITH c(y) AS (SELECT 7 AS x) SELECT y FROM c").await,
         vec![vec![Some("7".into())]]
     );
+    // More aliases than the query has columns is 42P10; FEWER is legal, and the
+    // unnamed trailing columns keep the names the query gave them.
     assert_eq!(
         err_code(&c, "WITH c(y, z) AS (SELECT 7 AS x) SELECT * FROM c").await,
-        "42601"
+        "42P10"
     );
     assert_eq!(
-        err_code(&c, "WITH RECURSIVE r AS (SELECT 1 AS x) SELECT * FROM r").await,
-        "0A000"
+        rows(
+            &c,
+            "WITH c(y) AS (SELECT 7 AS x, 8 AS z) SELECT y, z FROM c"
+        )
+        .await,
+        vec![vec![Some("7".into()), Some("8".into())]]
+    );
+    // A `WITH RECURSIVE` item that does not refer to itself is an ordinary CTE.
+    assert_eq!(
+        rows(&c, "WITH RECURSIVE r AS (SELECT 1 AS x) SELECT * FROM r").await,
+        vec![vec![Some("1".into())]]
     );
 }
 

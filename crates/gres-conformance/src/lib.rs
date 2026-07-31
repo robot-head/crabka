@@ -34,6 +34,42 @@ pub struct QueryOutcome {
     pub rows: Vec<Vec<Option<String>>>,
     /// SQLSTATE if the statement errored.
     pub error_code: Option<String>,
+    /// The server's primary error message, when the statement errored. Parity is
+    /// judged on SQLSTATE and rows alone — the message is carried only so the
+    /// report can group mismatches by the engine gap that produced them.
+    pub error_message: Option<String>,
+}
+
+impl QueryOutcome {
+    /// A successful outcome carrying `rows`.
+    #[must_use]
+    pub fn success(rows: Vec<Vec<Option<String>>>) -> Self {
+        Self {
+            rows,
+            error_code: None,
+            error_message: None,
+        }
+    }
+
+    /// A failed outcome whose message the harness could not observe.
+    #[must_use]
+    pub fn failure(error_code: String) -> Self {
+        Self {
+            rows: Vec::new(),
+            error_code: Some(error_code),
+            error_message: None,
+        }
+    }
+
+    /// A failed outcome carrying the server's primary message.
+    #[must_use]
+    pub fn failure_with_message(error_code: String, error_message: String) -> Self {
+        Self {
+            rows: Vec::new(),
+            error_code: Some(error_code),
+            error_message: Some(error_message),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -48,6 +84,72 @@ pub struct CaseResult {
     pub sql: String,
     pub matched: bool,
     pub detail: String,
+    /// The subject's SQLSTATE for a mismatching statement, for root-cause grouping.
+    pub subject_error_code: Option<String>,
+    /// The subject's error message for a mismatching statement, for root-cause grouping.
+    pub subject_error_message: Option<String>,
+}
+
+impl CaseResult {
+    /// Record one diffed statement. A matching statement carries no subject
+    /// diagnostics — only mismatches feed the root-cause ranking.
+    #[must_use]
+    pub fn new(file: String, sql: String, diff: DiffResult, subject: &QueryOutcome) -> Self {
+        let (subject_error_code, subject_error_message) = if diff.matched {
+            (None, None)
+        } else {
+            (subject.error_code.clone(), subject.error_message.clone())
+        };
+        Self {
+            file,
+            sql,
+            matched: diff.matched,
+            detail: diff.detail,
+            subject_error_code,
+            subject_error_message,
+        }
+    }
+}
+
+/// One statement from a corpus file, with the inline payload it owns.
+///
+/// Only `COPY … FROM STDIN` carries a payload: in a `pg_regress` file its data
+/// follows the statement as raw lines terminated by `\.`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorpusStatement {
+    pub sql: String,
+    /// The `COPY … FROM STDIN` data block, newline-terminated, without its `\.`.
+    pub stdin_data: Option<String>,
+}
+
+impl CorpusStatement {
+    /// A statement with no inline payload.
+    #[must_use]
+    pub fn plain(sql: impl Into<String>) -> Self {
+        Self {
+            sql: sql.into(),
+            stdin_data: None,
+        }
+    }
+}
+
+/// One root-cause bucket of the mismatching statements in a [`Report`].
+///
+/// Statements are grouped by the *shape* of the subject's failure rather than
+/// its exact text, so "unknown type `int2`" and "unknown type `xml`" land in
+/// separate buckets while two occurrences of the same gap land in one. A bucket
+/// with no SQLSTATE is a wrong-answer mismatch: the subject executed the
+/// statement and produced different rows.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RootCause {
+    /// A stable, normalized signature for the failure shape.
+    pub signature: String,
+    /// The subject's SQLSTATE, when it errored.
+    pub sqlstate: Option<String>,
+    /// How many mismatching statements share this signature.
+    pub count: usize,
+    /// One representative statement, for triage.
+    pub example: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -125,10 +227,41 @@ pub fn subject_sharded_statement(sql: &str) -> Result<String, SubjectDdlTransfor
         }
         Err(_) => return Ok(sql.to_string()),
     };
+    // A TEMP table has no sharded form either — it is session-local, so both legs
+    // create an ordinary table — and appending `SHARDED BY` after a trailing
+    // clause like `ON COMMIT PRESERVE ROWS` would not even parse.
+    if matches!(
+        statements.as_slice(),
+        [crabka_pgparser::ast::Statement::CreateTable {
+            temporary: true,
+            ..
+        }]
+    ) {
+        return Ok(sql.to_string());
+    }
     if !matches!(
         statements.as_slice(),
         [crabka_pgparser::ast::Statement::CreateTable { .. }]
     ) {
+        // `CREATE TABLE … AS` has no `SHARDED BY` spelling, so an ordinary table
+        // is the only thing either leg can create; passing it through is the
+        // faithful transform, not a silent escape.
+        if matches!(
+            statements.as_slice(),
+            [crabka_pgparser::ast::Statement::CreateTableAs { .. }]
+        ) {
+            return Ok(sql.to_string());
+        }
+        // A statement that *looks* like table DDL but did not parse into a shape
+        // this transform knows must not slip through unsharded, or the sharded
+        // leg would silently measure an ordinary table and report parity for it.
+        if is_create_table_candidate(sql) {
+            return Err(SubjectDdlTransformError {
+                sql: sql.to_string(),
+                message: "table DDL shape is not the plain CREATE TABLE this transform rewrites"
+                    .into(),
+            });
+        }
         return Ok(sql.to_string());
     }
     let [crabka_pgparser::ast::Statement::CreateTable { sharded, .. }] = statements.as_slice()
@@ -315,12 +448,61 @@ impl Report {
         }
     }
 
+    /// Rank the mismatching statements by the engine gap that produced them.
+    ///
+    /// The ranking is the conformance work queue: the first bucket is the single
+    /// change that would convert the most statements to matches.
+    #[must_use]
+    pub fn root_causes(&self) -> Vec<RootCause> {
+        let mut buckets: BTreeMap<String, RootCause> = BTreeMap::new();
+        for case in self.cases.iter().filter(|case| !case.matched) {
+            let signature = root_cause_signature(case);
+            buckets
+                .entry(signature.clone())
+                .and_modify(|bucket| bucket.count += 1)
+                .or_insert_with(|| RootCause {
+                    signature,
+                    sqlstate: case.subject_error_code.clone(),
+                    count: 1,
+                    example: case.sql.clone(),
+                });
+        }
+        let mut ranked: Vec<RootCause> = buckets.into_values().collect();
+        // Descending by count, then by signature so the order is deterministic.
+        ranked.sort_by(|a, b| {
+            b.count
+                .cmp(&a.count)
+                .then_with(|| a.signature.cmp(&b.signature))
+        });
+        ranked
+    }
+
     #[must_use]
     pub fn markdown_summary(&self) -> String {
         let mut md = format!(
             "# crabka-gres conformance report\n\n**Parity: {:.1}%** ({} / {} statements match the oracle)\n\n",
             self.parity_percent, self.matched, self.total
         );
+        let ranked = self.root_causes();
+        if !ranked.is_empty() {
+            md.push_str("## Mismatches by root cause\n\n");
+            md.push_str("| statements | sqlstate | signature | example |\n|---|---|---|---|\n");
+            for cause in &ranked {
+                let example = cause.example.replace('|', "\\|").replace('\n', " ");
+                let signature = cause.signature.replace('|', "\\|").replace('\n', " ");
+                writeln!(
+                    md,
+                    "| {} | {} | {} | `{}` |",
+                    cause.count,
+                    cause.sqlstate.as_deref().unwrap_or("-"),
+                    signature,
+                    truncate_for_report(&example)
+                )
+                .expect("writing to a String cannot fail");
+            }
+            md.push('\n');
+            md.push_str("## Every statement\n\n");
+        }
         md.push_str("| file | statement | result |\n|---|---|---|\n");
         for c in &self.cases {
             let sql = c.sql.replace('|', "\\|").replace('\n', " ");
@@ -543,6 +725,44 @@ fn parity_percent(matched: usize, total: usize) -> f64 {
     matched as f64 * 100.0 / total as f64
 }
 
+/// Collapse one mismatch into the failure shape that caused it.
+///
+/// Positions and bare integers vary between otherwise identical failures, so
+/// they are normalized away; quoted names are kept because each one is usually
+/// a distinct piece of missing work.
+fn root_cause_signature(case: &CaseResult) -> String {
+    let Some(message) = case.subject_error_message.as_deref() else {
+        return case.subject_error_code.as_ref().map_or_else(
+            || "wrong rows (subject executed the statement)".to_string(),
+            |code| format!("subject error {code} (no message captured)"),
+        );
+    };
+    let mut normalized = String::with_capacity(message.len());
+    let mut digits = false;
+    for ch in message.chars() {
+        if ch.is_ascii_digit() {
+            if !digits {
+                normalized.push('N');
+                digits = true;
+            }
+            continue;
+        }
+        digits = false;
+        normalized.push(ch);
+    }
+    truncate_for_report(normalized.trim())
+}
+
+/// Keep report cells readable; the full text stays in the JSON report.
+fn truncate_for_report(text: &str) -> String {
+    const LIMIT: usize = 120;
+    if text.chars().count() <= LIMIT {
+        return text.to_string();
+    }
+    let kept: String = text.chars().take(LIMIT).collect();
+    format!("{kept}…")
+}
+
 #[must_use]
 pub fn diff(oracle: &QueryOutcome, subject: &QueryOutcome) -> DiffResult {
     if oracle.error_code != subject.error_code {
@@ -583,19 +803,84 @@ pub async fn run_one(client: &tokio_postgres::Client, sql: &str) -> QueryOutcome
                     rows.push(values);
                 }
             }
-            QueryOutcome {
-                rows,
-                error_code: None,
-            }
+            QueryOutcome::success(rows)
         }
-        Err(e) => QueryOutcome {
-            rows: vec![],
-            error_code: Some(
-                e.as_db_error()
-                    .map_or_else(|| "XXIO".to_string(), |db| db.code().code().to_string()),
-            ),
-        },
+        Err(e) => outcome_from_error(&e),
     }
+}
+
+/// Execute one corpus statement, routing `COPY` through its wire subprotocol.
+///
+/// A `COPY` statement sent down the simple query path leaves the connection in
+/// copy mode and poisons every later statement in the file, so both directions
+/// are handled explicitly here.
+pub async fn run_corpus_statement(
+    client: &tokio_postgres::Client,
+    statement: &CorpusStatement,
+) -> QueryOutcome {
+    match copy_payload(&statement.sql) {
+        Some(CopyPayload::Stdin) => {
+            run_copy_in(client, &statement.sql, statement.stdin_data.as_deref()).await
+        }
+        Some(CopyPayload::Stdout) => run_copy_out(client, &statement.sql).await,
+        None => run_one(client, &statement.sql).await,
+    }
+}
+
+/// Feed a `COPY … FROM STDIN` data block over the copy-in subprotocol.
+async fn run_copy_in(
+    client: &tokio_postgres::Client,
+    sql: &str,
+    data: Option<&str>,
+) -> QueryOutcome {
+    use futures_util::SinkExt as _;
+
+    let sink = match client.copy_in::<_, bytes::Bytes>(sql).await {
+        Ok(sink) => sink,
+        Err(error) => return outcome_from_error(&error),
+    };
+    futures_util::pin_mut!(sink);
+    let payload = bytes::Bytes::copy_from_slice(data.unwrap_or_default().as_bytes());
+    // A failed send means the server already rejected the COPY, so there is no
+    // completion to await — `finish` would block forever on a reply that is
+    // never coming. Abandoning the sink leaves the connection in copy mode; the
+    // caller's reconnect-on-`XXIO` path is what restores it.
+    if let Err(error) = sink.send(payload).await {
+        return outcome_from_error(&error);
+    }
+    match sink.finish().await {
+        Ok(_rows) => QueryOutcome::success(Vec::new()),
+        Err(error) => outcome_from_error(&error),
+    }
+}
+
+/// Collect a `COPY … TO STDOUT` stream as one text column per output line.
+async fn run_copy_out(client: &tokio_postgres::Client, sql: &str) -> QueryOutcome {
+    use futures_util::StreamExt as _;
+
+    let stream = match client.copy_out(sql).await {
+        Ok(stream) => stream,
+        Err(error) => return outcome_from_error(&error),
+    };
+    futures_util::pin_mut!(stream);
+    let mut payload = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(bytes) => payload.extend_from_slice(&bytes),
+            Err(error) => return outcome_from_error(&error),
+        }
+    }
+    let Ok(text) = String::from_utf8(payload) else {
+        return QueryOutcome::failure_with_message(
+            "XXIO".into(),
+            "COPY TO STDOUT payload is not valid UTF-8".into(),
+        );
+    };
+    let rows = text
+        .lines()
+        .map(|line| vec![Some(line.to_string())])
+        .collect();
+    QueryOutcome::success(rows)
 }
 
 pub async fn run_extended_one(
@@ -610,19 +895,13 @@ pub async fn run_extended_one(
 
     let mut outcome = match execute_case_statements(&transaction, &case.setup).await {
         Ok(()) => query_extended(&transaction, &case).await,
-        Err(error_code) => QueryOutcome {
-            rows: Vec::new(),
-            error_code: Some(error_code),
-        },
+        Err(error_code) => QueryOutcome::failure(error_code),
     };
     let mut cleanup_after_rollback = outcome.error_code.is_some();
     if !cleanup_after_rollback
         && let Err(error_code) = execute_case_statements(&transaction, &case.teardown).await
     {
-        outcome = QueryOutcome {
-            rows: Vec::new(),
-            error_code: Some(error_code),
-        };
+        outcome = QueryOutcome::failure(error_code);
         cleanup_after_rollback = true;
     }
 
@@ -635,10 +914,7 @@ pub async fn run_extended_one(
         && let Err(error_code) = cleanup_case(client, &case.teardown).await
         && outcome.error_code.is_none()
     {
-        outcome = QueryOutcome {
-            rows: Vec::new(),
-            error_code: Some(error_code),
-        }
+        outcome = QueryOutcome::failure(error_code);
     }
     outcome
 }
@@ -711,10 +987,7 @@ async fn query_extended(
     let params = match owned_params(&case.params) {
         Ok(params) => params,
         Err(error) => {
-            return QueryOutcome {
-                rows: Vec::new(),
-                error_code: Some(error),
-            };
+            return QueryOutcome::failure(error);
         }
     };
     let param_refs = param_refs(&params);
@@ -844,19 +1117,13 @@ fn rows_to_outcome(rows: &[tokio_postgres::Row]) -> QueryOutcome {
             match cell_to_text(row, column_index) {
                 Ok(value) => normalized_values.push(value),
                 Err(error_code) => {
-                    return QueryOutcome {
-                        rows: Vec::new(),
-                        error_code: Some(error_code),
-                    };
+                    return QueryOutcome::failure(error_code);
                 }
             }
         }
         normalized_rows.push(normalized_values);
     }
-    QueryOutcome {
-        rows: normalized_rows,
-        error_code: None,
-    }
+    QueryOutcome::success(normalized_rows)
 }
 
 fn cell_to_text(row: &tokio_postgres::Row, column_index: usize) -> Result<Option<String>, String> {
@@ -880,9 +1147,12 @@ fn cell_to_text(row: &tokio_postgres::Row, column_index: usize) -> Result<Option
 }
 
 fn outcome_from_error(error: &tokio_postgres::Error) -> QueryOutcome {
-    QueryOutcome {
-        rows: Vec::new(),
-        error_code: Some(error_code_from_error(error)),
+    match error.as_db_error() {
+        Some(db) => QueryOutcome::failure_with_message(
+            db.code().code().to_string(),
+            db.message().to_string(),
+        ),
+        None => QueryOutcome::failure(error_code_from_error(error)),
     }
 }
 
@@ -895,44 +1165,44 @@ fn error_code_from_error(error: &tokio_postgres::Error) -> String {
 /// Statement splitter: semicolons outside single/double quotes, line comments,
 /// and dollar-quoted strings. Doubled quotes ('') net-cancel under the toggle
 /// approach, keeping ; inside strings protected.
+///
+/// A `COPY … FROM STDIN` statement additionally absorbs the inline data block
+/// that follows it in a `pg_regress` file, up to the `\.` terminator line. Those
+/// lines are not SQL: leaving them in the statement stream both mis-measures
+/// them as bogus statements and leaves the connection stuck in copy mode.
 #[must_use]
-pub fn split_statements(sql: &str) -> Vec<String> {
-    let bytes = sql.as_bytes();
+pub fn split_statements(sql: &str) -> Vec<CorpusStatement> {
     let mut statements = Vec::new();
     let mut current = String::new();
     let mut i = 0;
     let mut in_single = false;
     let mut in_double = false;
 
-    while i < bytes.len() {
-        let c = bytes[i];
+    while i < sql.len() {
+        let c = char_at(sql, i);
         // Line comment (outside strings).
-        if !in_single && !in_double && c == b'-' && bytes.get(i + 1) == Some(&b'-') {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
+        if !in_single && !in_double && c == '-' && sql[i..].starts_with("--") {
+            i = line_end(sql, i);
             continue;
         }
         // psql meta-command lines in pg_regress files are harness controls, not
         // SQL. Skip them so the following SQL statement is still exercised.
-        if !in_single && !in_double && c == b'\\' && current.trim().is_empty() {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
+        if !in_single && !in_double && c == '\\' && current.trim().is_empty() {
+            i = line_end(sql, i);
             continue;
         }
         // Dollar-quoted string (outside other strings).
         if !in_single
             && !in_double
-            && c == b'$'
-            && let Some(tag_len) = dollar_tag_len(&bytes[i..])
+            && c == '$'
+            && let Some(tag_len) = dollar_tag_len(&sql.as_bytes()[i..])
         {
             let tag = &sql[i..i + tag_len];
             current.push_str(tag);
             i += tag_len;
             // Consume until the matching closing tag.
             loop {
-                if i >= bytes.len() {
+                if i >= sql.len() {
                     break; // unterminated; emit what we have
                 }
                 if sql[i..].starts_with(tag) {
@@ -940,33 +1210,127 @@ pub fn split_statements(sql: &str) -> Vec<String> {
                     i += tag_len;
                     break;
                 }
-                current.push(bytes[i] as char);
-                i += 1;
+                let ch = char_at(sql, i);
+                current.push(ch);
+                i += ch.len_utf8();
             }
             continue;
         }
         match c {
-            b'\'' if !in_double => in_single = !in_single,
-            b'"' if !in_single => in_double = !in_double,
-            b';' if !in_single && !in_double => {
-                let stmt = current.trim().to_string();
-                if !stmt.is_empty() {
-                    statements.push(stmt);
-                }
+            '\'' if !in_double => in_single = !in_single,
+            '"' if !in_single => in_double = !in_double,
+            ';' if !in_single && !in_double => {
+                let statement = current.trim().to_string();
                 current.clear();
                 i += 1;
+                if !statement.is_empty() {
+                    let stdin_data = if copy_payload(&statement) == Some(CopyPayload::Stdin) {
+                        let (data, resume) = take_copy_data_block(sql, i);
+                        i = resume;
+                        Some(data)
+                    } else {
+                        None
+                    };
+                    statements.push(CorpusStatement {
+                        sql: statement,
+                        stdin_data,
+                    });
+                }
                 continue;
             }
             _ => {}
         }
-        current.push(c as char);
-        i += 1;
+        current.push(c);
+        i += c.len_utf8();
     }
-    let stmt = current.trim().to_string();
-    if !stmt.is_empty() {
-        statements.push(stmt);
+    let statement = current.trim().to_string();
+    if !statement.is_empty() {
+        statements.push(CorpusStatement {
+            sql: statement,
+            stdin_data: None,
+        });
     }
     statements
+}
+
+/// The character starting at byte offset `i`, which is always a boundary here.
+fn char_at(sql: &str, i: usize) -> char {
+    sql[i..]
+        .chars()
+        .next()
+        .expect("split_statements only indexes inside the input")
+}
+
+/// The offset of the newline ending the line containing `i`, or the input end.
+fn line_end(sql: &str, i: usize) -> usize {
+    sql[i..]
+        .find('\n')
+        .map_or_else(|| sql.len(), |offset| i + offset)
+}
+
+/// Consume a `COPY … FROM STDIN` data block starting after the statement's `;`.
+///
+/// Returns the data (each line newline-terminated, as the wire format requires)
+/// and the offset just past the `\.` terminator line.
+fn take_copy_data_block(sql: &str, after_semicolon: usize) -> (String, usize) {
+    // The rest of the statement's own line is not data.
+    let mut cursor = line_end(sql, after_semicolon);
+    if cursor < sql.len() {
+        cursor += 1;
+    }
+    let mut data = String::new();
+    while cursor < sql.len() {
+        let end = line_end(sql, cursor);
+        let line = &sql[cursor..end];
+        let next = if end < sql.len() { end + 1 } else { end };
+        if line.trim_end_matches('\r') == "\\." {
+            return (data, next);
+        }
+        data.push_str(line.trim_end_matches('\r'));
+        data.push('\n');
+        cursor = next;
+    }
+    (data, cursor)
+}
+
+/// Which end of a `COPY` statement the client is responsible for, if any.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyPayload {
+    /// `COPY … FROM STDIN` — the client sends the data.
+    Stdin,
+    /// `COPY … TO STDOUT` — the client receives the data.
+    Stdout,
+}
+
+/// Classify a statement as a client-side `COPY`, ignoring case and layout.
+///
+/// Both forms take over the connection with a subprotocol the ordinary simple
+/// query path cannot speak, so they must be routed before execution rather than
+/// discovered by failing.
+fn copy_payload(sql: &str) -> Option<CopyPayload> {
+    // Punctuation is a token boundary in PostgreSQL's grammar but not in
+    // `split_whitespace`, and `COPY t FROM stdin(on_error ignore)` is written
+    // without a space. Missing that spelling routes a `COPY` down the ordinary
+    // query path, which wedges the connection in copy mode.
+    let normalized: String = sql
+        .to_ascii_uppercase()
+        .chars()
+        .map(|ch| if "(),;".contains(ch) { ' ' } else { ch })
+        .collect();
+    let mut words = normalized.split_whitespace();
+    if words.next() != Some("COPY") {
+        return None;
+    }
+    let words: Vec<&str> = words.collect();
+    // PostgreSQL's grammar accepts STDIN and STDOUT interchangeably: both mean
+    // "the client end", and the direction comes from FROM/TO alone. So
+    // `COPY t FROM STDOUT` really is a copy-in, and treating it as anything else
+    // wedges the connection — `insert.sql` in the regression corpus relies on it.
+    words.windows(2).find_map(|pair| match pair {
+        ["FROM", "STDIN" | "STDOUT"] => Some(CopyPayload::Stdin),
+        ["TO", "STDIN" | "STDOUT"] => Some(CopyPayload::Stdout),
+        _ => None,
+    })
 }
 
 /// If `s` begins with a dollar-quote opening tag (`$$` or `$tag$`), return its
@@ -1008,31 +1372,26 @@ mod tests {
     #[test]
     fn splits_statements_on_semicolons_respecting_quotes_and_comments() {
         let sql = "SELECT 1;\n-- a comment; with a semicolon\nSELECT 'a;b';\nSELECT 2";
-        assert_eq!(
-            split_statements(sql),
-            vec!["SELECT 1", "SELECT 'a;b'", "SELECT 2"]
+        assert!(
+            split_statements(sql)
+                == vec![
+                    CorpusStatement::plain("SELECT 1"),
+                    CorpusStatement::plain("SELECT 'a;b'"),
+                    CorpusStatement::plain("SELECT 2"),
+                ]
         );
     }
 
     #[test]
     fn identical_outcomes_match() {
-        let a = QueryOutcome {
-            rows: vec![vec![Some("1".into())]],
-            error_code: None,
-        };
+        let a = QueryOutcome::success(vec![vec![Some("1".into())]]);
         assert!(diff(&a, &a.clone()).matched);
     }
 
     #[test]
     fn differing_rows_mismatch_with_detail() {
-        let oracle = QueryOutcome {
-            rows: vec![vec![Some("1".into())]],
-            error_code: None,
-        };
-        let subject = QueryOutcome {
-            rows: vec![vec![Some("2".into())]],
-            error_code: None,
-        };
+        let oracle = QueryOutcome::success(vec![vec![Some("1".into())]]);
+        let subject = QueryOutcome::success(vec![vec![Some("2".into())]]);
         let d = diff(&oracle, &subject);
         assert!(!d.matched);
         assert!(d.detail.contains("rows"));
@@ -1041,15 +1400,9 @@ mod tests {
     #[test]
     fn matching_error_codes_match() {
         // Same SQLSTATE on both sides counts as parity (e.g. both reject).
-        let a = QueryOutcome {
-            rows: vec![],
-            error_code: Some("42601".into()),
-        };
+        let a = QueryOutcome::failure("42601".into());
         assert!(diff(&a, &a.clone()).matched);
-        let b = QueryOutcome {
-            rows: vec![],
-            error_code: Some("0A000".into()),
-        };
+        let b = QueryOutcome::failure("0A000".into());
         assert!(!diff(&a, &b).matched);
     }
 
@@ -1058,34 +1411,50 @@ mod tests {
         // SQL escapes a quote by doubling it; the toggle approach keeps the
         // in-string state net-unchanged across '' so the ; stays protected.
         let sql = "SELECT 'it''s;bad';SELECT 2";
-        assert_eq!(
-            split_statements(sql),
-            vec!["SELECT 'it''s;bad'", "SELECT 2"]
+        assert!(
+            split_statements(sql)
+                == vec![
+                    CorpusStatement::plain("SELECT 'it''s;bad'"),
+                    CorpusStatement::plain("SELECT 2"),
+                ]
         );
     }
 
     #[test]
     fn dollar_quoted_body_is_not_split_on_inner_semicolons() {
         let sql = "SELECT 1;\nDO $$ BEGIN x; y; END $$;\nSELECT 2";
-        assert_eq!(
-            split_statements(sql),
-            vec!["SELECT 1", "DO $$ BEGIN x; y; END $$", "SELECT 2"]
+        assert!(
+            split_statements(sql)
+                == vec![
+                    CorpusStatement::plain("SELECT 1"),
+                    CorpusStatement::plain("DO $$ BEGIN x; y; END $$"),
+                    CorpusStatement::plain("SELECT 2"),
+                ]
         );
     }
 
     #[test]
     fn tagged_dollar_quote_is_matched_by_tag() {
         let sql = "SELECT $tag$a;b$tag$ ; SELECT 2";
-        assert_eq!(
-            split_statements(sql),
-            vec!["SELECT $tag$a;b$tag$", "SELECT 2"]
+        assert!(
+            split_statements(sql)
+                == vec![
+                    CorpusStatement::plain("SELECT $tag$a;b$tag$"),
+                    CorpusStatement::plain("SELECT 2"),
+                ]
         );
     }
 
     #[test]
     fn psql_meta_commands_are_not_sql_statements() {
         let sql = "SELECT true;\n\\pset null '(null)'\nSELECT NULL;";
-        assert_eq!(split_statements(sql), vec!["SELECT true", "SELECT NULL"]);
+        assert!(
+            split_statements(sql)
+                == vec![
+                    CorpusStatement::plain("SELECT true"),
+                    CorpusStatement::plain("SELECT NULL"),
+                ]
+        );
     }
 
     #[test]
@@ -1229,12 +1598,15 @@ mod tests {
         .expect("write extended case file");
 
         let files = load_extended_case_files(&root).expect("load extended case files");
-        let report = Report::new(vec![CaseResult {
-            file: files[0].file.clone(),
-            sql: files[0].cases[0].sql.clone(),
-            matched: true,
-            detail: String::new(),
-        }]);
+        let report = Report::new(vec![CaseResult::new(
+            files[0].file.clone(),
+            files[0].cases[0].sql.clone(),
+            DiffResult {
+                matched: true,
+                detail: String::new(),
+            },
+            &QueryOutcome::success(Vec::new()),
+        )]);
 
         assert_eq!(files[0].file, "parameters.json");
         assert_eq!(files[0].cases[0].name, "select_text_parameter");
@@ -1384,14 +1756,31 @@ mod tests {
         );
     }
 
+    /// The two table-DDL shapes that have no `SHARDED BY` spelling at all pass
+    /// through: both legs can only ever create an ordinary table, so rewriting is
+    /// not merely unsupported but meaningless. Failing closed on these aborted the
+    /// whole sharded run at the corpus's first `CREATE TABLE … AS`.
+    #[test]
+    fn sharded_subject_transform_passes_through_table_ddl_with_no_sharded_form() {
+        for sql in [
+            "CREATE TABLE copied AS SELECT 1",
+            "CREATE TEMP TABLE tt (a int4) ON COMMIT PRESERVE ROWS",
+            "CREATE TEMPORARY TABLE tt2 (a int4)",
+        ] {
+            assert_eq!(
+                subject_sharded_statement(sql).expect("passes through"),
+                sql,
+                "{sql}"
+            );
+        }
+    }
+
     #[test]
     fn sharded_subject_transform_fails_closed_for_malformed_create_table() {
         let error = subject_sharded_statement("CREATE TABLE broken (id int4")
             .expect_err("malformed table DDL must not pass through");
         assert!(error.to_string().contains("CREATE TABLE"));
 
-        subject_sharded_statement("CREATE TABLE copied AS SELECT 1")
-            .expect_err("unsupported table DDL must not pass through unchanged");
         subject_sharded_statement("CREATE TABLE lexical (label text DEFAULT 'unterminated)")
             .expect_err("lexer-level malformed table DDL must not pass through unchanged");
         subject_sharded_statement(
@@ -1488,6 +1877,139 @@ mod tests {
         assert!(!<JsonbParam as ToSql>::accepts(&Type::TEXT));
     }
 
+    #[test]
+    fn copy_from_stdin_absorbs_its_inline_data_block() {
+        let sql = "CREATE TABLE t (a int);\nCOPY t (a) FROM stdin;\n1\n2\n\\.\nSELECT * FROM t;";
+
+        let statements = split_statements(sql);
+
+        assert!(
+            statements
+                == vec![
+                    CorpusStatement::plain("CREATE TABLE t (a int)"),
+                    CorpusStatement {
+                        sql: "COPY t (a) FROM stdin".into(),
+                        stdin_data: Some("1\n2\n".into()),
+                    },
+                    CorpusStatement::plain("SELECT * FROM t"),
+                ]
+        );
+    }
+
+    #[test]
+    fn copy_from_stdin_is_recognized_with_options_glued_to_the_keyword() {
+        let sql = "copy t from stdin(on_error ignore);\nx\n\\.\nSELECT 1;";
+
+        let statements = split_statements(sql);
+
+        assert!(
+            statements
+                == vec![
+                    CorpusStatement {
+                        sql: "copy t from stdin(on_error ignore)".into(),
+                        stdin_data: Some("x\n".into()),
+                    },
+                    CorpusStatement::plain("SELECT 1"),
+                ]
+        );
+    }
+
+    #[test]
+    fn copy_to_stdout_takes_no_inline_data_block() {
+        let statements = split_statements("COPY t TO STDOUT;\nSELECT 1;");
+
+        assert!(
+            statements
+                == vec![
+                    CorpusStatement::plain("COPY t TO STDOUT"),
+                    CorpusStatement::plain("SELECT 1"),
+                ]
+        );
+    }
+
+    #[test]
+    fn multibyte_text_survives_splitting() {
+        let statements = split_statements("SELECT 'héllo — ✓';");
+
+        assert!(statements == vec![CorpusStatement::plain("SELECT 'héllo — ✓'")]);
+    }
+
+    /// One mismatching case whose subject failed with `code`/`message`.
+    fn failing_case(sql: &str, code: &str, message: &str) -> CaseResult {
+        CaseResult::new(
+            "t.sql".into(),
+            sql.into(),
+            DiffResult {
+                matched: false,
+                detail: "error code".into(),
+            },
+            &QueryOutcome::failure_with_message(code.into(), message.into()),
+        )
+    }
+
+    #[test]
+    fn root_causes_rank_shared_failure_shapes_first() {
+        let report = Report::new(vec![
+            failing_case(
+                "SELECT row_number() OVER ()",
+                "42601",
+                "syntax error at position 25: expected ; or end of input, found LParen",
+            ),
+            failing_case(
+                "SELECT sum(1) OVER ()",
+                "42601",
+                "syntax error at position 19: expected ; or end of input, found LParen",
+            ),
+            failing_case(
+                "SELECT 1::int2",
+                "42601",
+                "syntax error: unknown type \"int2\"",
+            ),
+            case("t.sql", true),
+        ]);
+
+        let ranked = report.root_causes();
+
+        assert!(
+            ranked
+                == vec![
+                    RootCause {
+                        signature:
+                            "syntax error at position N: expected ; or end of input, found LParen"
+                                .into(),
+                        sqlstate: Some("42601".into()),
+                        count: 2,
+                        example: "SELECT row_number() OVER ()".into(),
+                    },
+                    RootCause {
+                        signature: "syntax error: unknown type \"intN\"".into(),
+                        sqlstate: Some("42601".into()),
+                        count: 1,
+                        example: "SELECT 1::int2".into(),
+                    },
+                ]
+        );
+    }
+
+    #[test]
+    fn root_causes_separate_wrong_rows_from_errors() {
+        let wrong_rows = CaseResult::new(
+            "t.sql".into(),
+            "SELECT 1".into(),
+            DiffResult {
+                matched: false,
+                detail: "rows".into(),
+            },
+            &QueryOutcome::success(vec![vec![Some("2".into())]]),
+        );
+
+        let ranked = Report::new(vec![wrong_rows]).root_causes();
+
+        assert!(ranked.len() == 1);
+        assert!(ranked[0].sqlstate.is_none());
+        assert!(ranked[0].signature == "wrong rows (subject executed the statement)");
+    }
+
     /// Report with the given counts and no per-case detail.
     fn report_with(total: usize, matched: usize) -> Report {
         Report {
@@ -1499,12 +2021,15 @@ mod tests {
     }
 
     fn case(file: &str, matched: bool) -> CaseResult {
-        CaseResult {
-            file: file.into(),
-            sql: "SELECT 1".into(),
-            matched,
-            detail: String::new(),
-        }
+        CaseResult::new(
+            file.into(),
+            "SELECT 1".into(),
+            DiffResult {
+                matched,
+                detail: String::new(),
+            },
+            &QueryOutcome::success(Vec::new()),
+        )
     }
 
     fn temp_corpus_dir() -> PathBuf {

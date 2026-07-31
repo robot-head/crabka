@@ -151,6 +151,7 @@ mod tests {
                 server: "s".into(),
                 options: vec![("topic".into(), "events".into())],
             }),
+            checks: Vec::new(),
         }
     }
 

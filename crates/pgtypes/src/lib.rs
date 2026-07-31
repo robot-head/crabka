@@ -5,6 +5,7 @@
 
 pub mod array;
 pub mod cast;
+pub mod composite;
 pub mod datetime;
 pub mod datum;
 pub mod encoding;
@@ -13,10 +14,12 @@ pub mod jsonb;
 pub mod numeric;
 pub mod ops;
 pub mod string;
+pub mod usertype;
 pub mod uuid;
 
 pub use datum::{
-    ArrayValue, ColumnType, Datum, ElemType, canonicalize_for_key, canonicalize_row_for_key, oids,
+    ArrayDim, ArrayValue, ColumnType, Datum, ElemType, EnumValue, MAX_ARRAY_DIM, RecordValue,
+    canonicalize_for_key, canonicalize_row_for_key, oids,
 };
 pub use error::TypeError;
 pub use jsonb::JsonbValue;
