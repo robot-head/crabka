@@ -578,6 +578,9 @@ define_broker_tuning! {
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replica_lag_time_max: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controller_election_timeout: Time => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controller_heartbeat_interval: Time => ();
+    refined #[schemars(range(min = 1))] controller_fetch_miss_limit: u32 => refined_type::rule::GreaterU32<0>;
+    refined #[schemars(range(min = 1))] metadata_raft_command_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
+    size_i32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] metadata_raft_fetch_max: ByteSize => ();
     time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controlled_shutdown_drain_timeout: Time => ();
     size_u64 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] metadata_max_between_snapshots: ByteSize => ();
     time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] metadata_max_snapshot_interval: Time => ();
@@ -1693,6 +1696,7 @@ mod tests {
             "futureLogMoveReadChunk",
             "metadataMaxBetweenSnapshots",
             "metadataSnapshotFetchMax",
+            "metadataRaftFetchMax",
         ] {
             let tuning: BrokerTuning =
                 serde_json::from_value(serde_json::json!({field: "0B"})).expect("deserialize size");
@@ -1736,6 +1740,31 @@ mod tests {
             .validate()
             .expect_err("operator must reject values above the core ceiling");
         assert!(error.contains("metadataSnapshotFetchMax"), "{error}");
+    }
+
+    #[test]
+    fn broker_tuning_renders_raft_runtime_policy() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "controllerFetchMissLimit": 7,
+            "metadataRaftCommandQueueCapacity": 512,
+            "metadataRaftFetchMax": "4MiB"
+        }))
+        .expect("deserialize Raft runtime policy");
+        tuning.validate().expect("Raft runtime policy is valid");
+
+        let rendered = tuning.render_runtime_toml();
+        assert!(rendered.contains("controller_fetch_miss_limit = 7"));
+        assert!(rendered.contains("metadata_raft_command_queue_capacity = 512"));
+        assert!(rendered.contains("metadata_raft_fetch_max = \"4MiB\""));
+
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&rendered).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        assert!(broker.controller_fetch_miss_limit.get() == 7);
+        assert!(broker.metadata_raft_command_queue_capacity.get() == 512);
+        assert!(broker.metadata_raft_fetch_max.bytes() == 4 * 1024 * 1024);
     }
 
     #[test]

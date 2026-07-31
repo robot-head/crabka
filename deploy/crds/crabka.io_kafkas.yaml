@@ -161,6 +161,11 @@ spec:
                   controllerElectionTimeout:
                     nullable: true
                     type: string
+                  controllerFetchMissLimit:
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   controllerHeartbeatInterval:
                     nullable: true
                     type: string
@@ -244,6 +249,14 @@ spec:
                     nullable: true
                     type: string
                   metadataMaxSnapshotInterval:
+                    nullable: true
+                    type: string
+                  metadataRaftCommandQueueCapacity:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  metadataRaftFetchMax:
                     nullable: true
                     type: string
                   metadataSnapshotFetchMax:
