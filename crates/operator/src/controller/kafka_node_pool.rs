@@ -13,6 +13,7 @@
 
 use std::{
     collections::{BTreeMap, HashSet},
+    fmt::Write as _,
     sync::Arc,
 };
 
@@ -223,22 +224,48 @@ exec /usr/bin/crabka-broker \\\n  --config-file=/run/crabka/broker.toml \\\n  --
 /// The enabled variant is a separate string literal (no `format!`) so a
 /// test failure shows the full expected text inline rather than a
 /// templated fragment.
-fn build_main_script(metrics_enabled: bool) -> String {
-    if !metrics_enabled {
+fn build_main_script(
+    metrics_enabled: bool,
+    client_dispatch_queue_capacity: Option<crabka_client_core::ConnectionDispatchQueueCapacity>,
+    client_frame_max: Option<crabka_client_core::ClientFrameMax>,
+) -> String {
+    if !metrics_enabled && client_dispatch_queue_capacity.is_none() && client_frame_max.is_none() {
         return MAIN_SCRIPT.to_string();
     }
     // NB: the enabled-variant body intentionally duplicates the disabled
     // one. See the `build_main_script_disabled_matches_constant`
     // test — keeping the literals separate is the upgrade-stability
     // contract. Don't refactor to a `format!`.
-    "set -eu\n\
+    let mut script = if metrics_enabled {
+        "set -eu\n\
      NODE_ID=\"$(cat /var/lib/crabka/data/.node-id)\"\n\
      cp /etc/crabka/config/broker-${NODE_ID}.toml /run/crabka/broker.toml\n\
      exec /usr/bin/crabka-broker \\\n  \
        --config-file=/run/crabka/broker.toml \\\n  \
        --broker-id=\"${NODE_ID}\" \\\n  \
        --metrics-listen-addr=0.0.0.0:9404\n"
-        .to_string()
+            .to_string()
+    } else {
+        MAIN_SCRIPT.to_string()
+    };
+    if client_dispatch_queue_capacity.is_none() && client_frame_max.is_none() {
+        return script;
+    }
+    script.pop();
+    if let Some(value) = client_dispatch_queue_capacity {
+        write!(
+            &mut script,
+            " \\\n  --client-dispatch-queue-capacity={}",
+            value.get()
+        )
+        .expect("writing to String cannot fail");
+    }
+    if let Some(value) = client_frame_max {
+        write!(&mut script, " \\\n  --client-frame-max={}B", value.bytes())
+            .expect("writing to String cannot fail");
+    }
+    script.push('\n');
+    script
 }
 
 fn render_init_container(
@@ -279,9 +306,14 @@ struct BrokerContainerSpec<'a> {
     delegation_token: Option<&'a crate::crd::kafka::DelegationTokenConfig>,
     tiered_storage: Option<&'a crate::crd::kafka::TieredStorage>,
     tracing: Option<&'a crate::crd::kafka::Tracing>,
+    client_resource_policy: (
+        Option<crabka_client_core::ConnectionDispatchQueueCapacity>,
+        Option<crabka_client_core::ClientFrameMax>,
+    ),
 }
 
 // linear: per-feature env / mount segments are independent
+#[allow(clippy::too_many_lines)]
 fn render_broker_container(spec: BrokerContainerSpec<'_>) -> serde_json::Value {
     use crate::crd::kafka::TieredStorageType;
     let BrokerContainerSpec {
@@ -296,6 +328,7 @@ fn render_broker_container(spec: BrokerContainerSpec<'_>) -> serde_json::Value {
         delegation_token,
         tiered_storage,
         tracing,
+        client_resource_policy,
     } = spec;
     let (metrics_enabled, logging_enabled, gssapi_keytab, krb5_conf) = features;
     // Local pulls a writable emptyDir mount; S3 pulls credential env vars.
@@ -416,7 +449,11 @@ fn render_broker_container(spec: BrokerContainerSpec<'_>) -> serde_json::Value {
             }));
         }
     }
-    let main_script = build_main_script(metrics_enabled);
+    let main_script = build_main_script(
+        metrics_enabled,
+        client_resource_policy.0,
+        client_resource_policy.1,
+    );
     let mut volume_mounts = vec![
         json!({ "name": "data", "mountPath": "/var/lib/crabka/data" }),
         json!({ "name": "broker-config", "mountPath": "/etc/crabka/config", "readOnly": true }),
@@ -885,6 +922,10 @@ pub(crate) fn render_statefulset(
     let parent_name = parent.meta().name.clone().unwrap_or_default();
     let pool_name = pool.meta().name.clone().unwrap_or_default();
     let namespace = pool.meta().namespace.clone().unwrap_or_default();
+    let client_resource_policy = pool
+        .spec
+        .client_resource_policy()
+        .map_err(ReconcileError::Malformed)?;
 
     let labels = common_labels(&parent_name, &parent.spec.kafka_version, Some(&pool_name));
     // Pod selector must NOT include the version label (it would force
@@ -1010,6 +1051,7 @@ pub(crate) fn render_statefulset(
         delegation_token: parent.spec.delegation_token.as_ref(),
         tiered_storage,
         tracing: parent.spec.tracing.as_ref(),
+        client_resource_policy,
     });
 
     // Merge user-provided pod metadata under operator-owned labels.
@@ -1683,6 +1725,8 @@ mod tests {
                 node_id_start: 0,
                 image: None,
                 resources: None,
+                client_dispatch_queue_capacity: None,
+                client_frame_max: None,
                 template: None,
                 storage: None,
             },
@@ -2625,18 +2669,68 @@ mod tests {
     fn build_main_script_disabled_matches_constant() {
         // Upgrade-stability contract: clusters with metrics_config=None
         // must get a byte-identical pod template.
-        assert!(build_main_script(false) == MAIN_SCRIPT);
+        assert!(build_main_script(false, None, None) == MAIN_SCRIPT);
     }
 
     #[test]
     fn build_main_script_enabled_appends_metrics_flag() {
-        let s = build_main_script(true);
+        let s = build_main_script(true, None, None);
         check!(
             s.contains("--metrics-listen-addr=0.0.0.0:9404"),
             "got: {s:?}"
         );
         check!(s.contains("--config-file=/run/crabka/broker.toml"));
         check!(s.ends_with('\n'));
+    }
+
+    #[test]
+    fn build_main_script_appends_configured_client_policy_once() {
+        let queue = crabka_client_core::ConnectionDispatchQueueCapacity::new(7).unwrap();
+        let frame =
+            crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap();
+        let s = build_main_script(false, Some(queue), Some(frame));
+        check!(s.matches("--client-dispatch-queue-capacity=7").count() == 1);
+        check!(s.matches("--client-frame-max=32768B").count() == 1);
+        check!(!s.contains("--metrics-listen-addr"));
+
+        let metrics = build_main_script(true, Some(queue), Some(frame));
+        check!(
+            metrics
+                .matches("--client-dispatch-queue-capacity=7")
+                .count()
+                == 1
+        );
+        check!(metrics.matches("--client-frame-max=32768B").count() == 1);
+        check!(
+            metrics
+                .matches("--metrics-listen-addr=0.0.0.0:9404")
+                .count()
+                == 1
+        );
+    }
+
+    #[test]
+    fn render_statefulset_propagates_validated_client_policy() {
+        let parent = parent_fixture("demo");
+        let mut pool = pool_fixture("brokers", "demo", 1);
+        pool.spec.client_dispatch_queue_capacity = Some(7);
+        pool.spec.client_frame_max = Some(crabka_units::kibibytes(32));
+
+        let sts = render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect("render");
+        let pod_spec = sts.spec.unwrap().template.spec.unwrap();
+        let script = &pod_spec.containers[0].args.as_ref().expect("broker args")[0];
+        check!(script.matches("--client-dispatch-queue-capacity=7").count() == 1);
+        check!(script.matches("--client-frame-max=32768B").count() == 1);
+
+        pool.spec.client_dispatch_queue_capacity = Some(0);
+        let error =
+            render_statefulset(&parent, &pool, DEFAULT_BROKER_IMAGE).expect_err("reject invalid");
+        assert!(
+            error
+                .to_string()
+                .contains("spec.clientDispatchQueueCapacity"),
+            "got: {error}"
+        );
     }
 
     #[test]

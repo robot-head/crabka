@@ -222,6 +222,8 @@ fn pool_cr_labeled(
             node_id_start: 0,
             image: None,
             resources: None,
+            client_dispatch_queue_capacity: None,
+            client_frame_max: None,
             template: None,
             storage: None,
         },
