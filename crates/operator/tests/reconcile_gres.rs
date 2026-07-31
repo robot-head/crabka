@@ -506,6 +506,8 @@ async fn custom_activator_policy_renders_workload_and_pgdog_timeout_budget() {
         registry_poll: Some(crabka_units::millis(600)),
         cold_start_timeout: Some(crabka_units::secs(40)),
         readiness_probe_period_seconds: Some(9),
+        client_dispatch_queue_capacity: None,
+        client_frame_max: None,
     });
     obj.spec.pgdog.pooler_mode = Some(PgdogPoolerModeSpec::Session);
     obj.spec.pgdog.connect_attempts = Some(4);

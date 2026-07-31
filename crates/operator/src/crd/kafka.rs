@@ -185,6 +185,15 @@ pub struct GresRegistrySpec {
 }
 
 impl GresRegistrySpec {
+    pub(crate) fn configured_reader_fetch_min(
+        &self,
+    ) -> Result<Option<crabka_client_core::FetchMinBytes>, String> {
+        self.reader_fetch_min
+            .map(crabka_client_core::FetchMinBytes::try_from)
+            .transpose()
+            .map_err(|error| format!("spec.gresRegistry.readerFetchMin: {error}"))
+    }
+
     /// Convert the CRD values to the validated runtime policy.
     ///
     /// # Errors
@@ -214,11 +223,9 @@ impl GresRegistrySpec {
                     .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
             )
             .map_err(|error| format!("spec.gresRegistry.readerAdminDnsTimeout: {error}"))?;
-        let reader_fetch_min = crabka_client_core::FetchMinBytes::try_from(
-            self.reader_fetch_min
-                .unwrap_or_else(|| defaults.reader_fetch_min().size()),
-        )
-        .map_err(|error| format!("spec.gresRegistry.readerFetchMin: {error}"))?;
+        let reader_fetch_min = self
+            .configured_reader_fetch_min()?
+            .unwrap_or_else(|| defaults.reader_fetch_min());
         Ok(policy.with_client_resource_policy(
             defaults.dispatch_queue_capacity(),
             defaults.frame_max(),

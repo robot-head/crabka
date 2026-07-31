@@ -129,6 +129,14 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
             crate::crd::GresRegistrySpec::policy,
         )
         .map_err(ReconcileError::Malformed)?;
+    let registry_reader_fetch_min = kafka
+        .spec
+        .gres_registry
+        .as_ref()
+        .map(crate::crd::GresRegistrySpec::configured_reader_fetch_min)
+        .transpose()
+        .map_err(ReconcileError::Malformed)?
+        .flatten();
     let bootstrap = internal_listener_bootstrap(&kafka)
         .unwrap_or_else(|| format!("{}-plain-bootstrap.{ns}.svc:9092", obj.spec.kafka_cluster));
     let gres_api: Api<Gres> = Api::namespaced(ctx.client.clone(), &ns);
@@ -225,7 +233,13 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
     apply_object(
         &deployment_api,
         &activator_deployment_name(&name),
-        &render_activator_deployment(&obj, &bootstrap, &activator_image, &registry_policy)?,
+        &render_activator_deployment(
+            &obj,
+            &bootstrap,
+            &activator_image,
+            &registry_policy,
+            registry_reader_fetch_min,
+        )?,
     )
     .await?;
     apply_object(
@@ -887,6 +901,7 @@ fn render_activator_deployment(
     bootstrap: &str,
     image: &str,
     registry_policy: &crabka_gres_control::RegistryPolicy,
+    registry_reader_fetch_min: Option<crabka_client_core::FetchMinBytes>,
 ) -> Result<Deployment, ReconcileError> {
     let selector = activator_selector_labels(obj);
     let name = obj.name_any();
@@ -903,6 +918,71 @@ fn render_activator_deployment(
     let readiness_period_seconds = activator
         .and_then(|activator| activator.readiness_probe_period_seconds)
         .unwrap_or(DEFAULT_ACTIVATOR_READINESS_PERIOD_SECONDS);
+    let (client_dispatch_queue_capacity, client_frame_max) = activator
+        .map_or(
+            Ok((None, None)),
+            crate::crd::GresActivatorSpec::client_resource_policy,
+        )
+        .map_err(ReconcileError::Malformed)?;
+    let mut args = vec![
+        "--listen".to_owned(),
+        format!("0.0.0.0:{ACTIVATOR_PORT}"),
+        "--bootstrap".to_owned(),
+        bootstrap.to_owned(),
+        "--registry-poll".to_owned(),
+        registry_poll.human().to_string(),
+        "--cold-start-timeout".to_owned(),
+        cold_start_timeout.human().to_string(),
+    ];
+    if let Some(value) = client_dispatch_queue_capacity {
+        args.extend([
+            "--client-dispatch-queue-capacity".to_owned(),
+            value.get().to_string(),
+        ]);
+    }
+    if let Some(value) = client_frame_max {
+        args.extend([
+            "--client-frame-max".to_owned(),
+            format!("{}B", value.bytes()),
+        ]);
+    }
+    args.extend([
+        "--registry-replication-factor".to_owned(),
+        registry_policy.replication_factor().to_string(),
+        "--registry-topic-create-timeout".to_owned(),
+        registry_policy.topic_create_timeout().human().to_string(),
+        "--registry-reader-retry-backoff".to_owned(),
+        registry_policy.reader_retry_backoff().human().to_string(),
+        "--registry-fetch-max-wait".to_owned(),
+        registry_policy.fetch_max_wait().human().to_string(),
+        "--registry-fetch-partition-max".to_owned(),
+        registry_policy.fetch_partition_max().human().to_string(),
+        "--registry-producer-dns-timeout".to_owned(),
+        registry_policy
+            .producer_dns_timeout()
+            .time()
+            .human()
+            .to_string(),
+        "--registry-reader-admin-dns-timeout".to_owned(),
+        registry_policy
+            .reader_admin_dns_timeout()
+            .time()
+            .human()
+            .to_string(),
+    ]);
+    if let Some(value) = registry_reader_fetch_min {
+        args.extend([
+            "--registry-reader-fetch-min".to_owned(),
+            format!("{}B", value.bytes()),
+        ]);
+    }
+    args.extend([
+        "--backend-endpoint-template".to_owned(),
+        format!(
+            "{{tenant}}-gres.{namespace}.svc:{COMPUTE_PORT}",
+            namespace = obj.namespace().unwrap_or_else(|| "default".into())
+        ),
+    ]);
     Ok(serde_json::from_value(json!({
         "metadata": { "name": activator_deployment_name(&name), "namespace": obj.namespace(), "labels": activator_meta_labels(obj), "ownerReferences": [owner_ref::<Gres>(obj)?] },
         "spec": {
@@ -915,20 +995,7 @@ fn render_activator_deployment(
                     "containers": [{
                         "name": "gres-activator",
                         "image": image,
-                        "args": [
-                            "--listen", format!("0.0.0.0:{ACTIVATOR_PORT}"),
-                            "--bootstrap", bootstrap,
-                            "--registry-poll", registry_poll.human().to_string(),
-                            "--cold-start-timeout", cold_start_timeout.human().to_string(),
-                            "--registry-replication-factor", registry_policy.replication_factor().to_string(),
-                            "--registry-topic-create-timeout", registry_policy.topic_create_timeout().human().to_string(),
-                            "--registry-reader-retry-backoff", registry_policy.reader_retry_backoff().human().to_string(),
-                            "--registry-fetch-max-wait", registry_policy.fetch_max_wait().human().to_string(),
-                            "--registry-fetch-partition-max", registry_policy.fetch_partition_max().human().to_string(),
-                            "--registry-producer-dns-timeout", registry_policy.producer_dns_timeout().time().human().to_string(),
-                            "--registry-reader-admin-dns-timeout", registry_policy.reader_admin_dns_timeout().time().human().to_string(),
-                            "--backend-endpoint-template", format!("{{tenant}}-gres.{namespace}.svc:{COMPUTE_PORT}", namespace = obj.namespace().unwrap_or_else(|| "default".into()))
-                        ],
+                        "args": args,
                         "ports": [{ "name": "postgres", "containerPort": ACTIVATOR_PORT, "protocol": "TCP" }],
                         "readinessProbe": { "tcpSocket": { "port": ACTIVATOR_PORT }, "periodSeconds": readiness_period_seconds }
                     }]
@@ -1320,6 +1387,7 @@ mod tests {
             "registry.demo.svc:9092",
             "crabka-gres-activator:e2e",
             &crabka_gres_control::RegistryPolicy::default(),
+            None,
         )
         .expect("render activator deployment");
         let args = deployment
@@ -1373,8 +1441,8 @@ mod tests {
             registry_poll: Some(crabka_units::millis(600)),
             cold_start_timeout: Some(crabka_units::secs(40)),
             readiness_probe_period_seconds: Some(9),
-            client_dispatch_queue_capacity: None,
-            client_frame_max: None,
+            client_dispatch_queue_capacity: Some(7),
+            client_frame_max: Some(crabka_units::kibibytes(32)),
         });
 
         let policy = crabka_gres_control::RegistryPolicy::new(
@@ -1388,10 +1456,24 @@ mod tests {
         .with_producer_dns_timeout(crabka_units::millis(37))
         .expect("DNS timeout")
         .with_reader_admin_dns_timeout(crabka_units::millis(37))
-        .expect("reader/admin DNS timeout");
-        let deployment =
-            render_activator_deployment(&obj, "registry.demo.svc:9092", "activator:test", &policy)
-                .expect("render activator deployment");
+        .expect("reader/admin DNS timeout")
+        .with_client_resource_policy(
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            crabka_client_core::ClientFrameMax::default(),
+            crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(4))
+                .expect("reader fetch minimum"),
+        );
+        let deployment = render_activator_deployment(
+            &obj,
+            "registry.demo.svc:9092",
+            "activator:test",
+            &policy,
+            Some(
+                crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(4))
+                    .expect("reader fetch minimum"),
+            ),
+        )
+        .expect("render activator deployment");
         let spec = deployment.spec.expect("deployment spec");
         let container = &spec.template.spec.expect("pod spec").containers[0];
 
@@ -1407,6 +1489,10 @@ mod tests {
                     "600ms",
                     "--cold-start-timeout",
                     "40s",
+                    "--client-dispatch-queue-capacity",
+                    "7",
+                    "--client-frame-max",
+                    "32768B",
                     "--registry-replication-factor",
                     "2",
                     "--registry-topic-create-timeout",
@@ -1421,6 +1507,8 @@ mod tests {
                     "37ms",
                     "--registry-reader-admin-dns-timeout",
                     "37ms",
+                    "--registry-reader-fetch-min",
+                    "4B",
                     "--backend-endpoint-template",
                     "{tenant}-gres.ns.svc:5432",
                 ]

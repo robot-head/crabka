@@ -496,6 +496,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) client_dispatch_queue_capacity:
         Option<crabka_client_core::ConnectionDispatchQueueCapacity>,
     pub(crate) client_frame_max: Option<crabka_client_core::ClientFrameMax>,
+    pub(crate) registry_reader_fetch_min: Option<crabka_client_core::FetchMinBytes>,
     pub(crate) fdw_fetch_min: Option<crabka_client_core::FetchMinBytes>,
     pub(crate) wal_recovery_fetch_min: Option<crabka_client_core::FetchMinBytes>,
     pub(crate) checkpoint_part_size: CheckpointPartBytes,
@@ -536,6 +537,7 @@ impl GresComputeSpec {
             .map(refined_type::Refined::into_value)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn effective_policy(&self) -> Result<EffectiveGresComputePolicy, String> {
         let range0_follower_rebuild_backoff_floor_ms = PositiveMillis::new(whole_millis(
             "spec.compute.range0FollowerRebuildBackoffFloor",
@@ -592,6 +594,7 @@ impl GresComputeSpec {
                 .map(crabka_client_core::ClientFrameMax::try_from)
                 .transpose()
                 .map_err(|error| format!("spec.compute.clientFrameMax: {error}"))?,
+            registry_reader_fetch_min: None,
             fdw_fetch_min: self
                 .fdw_fetch_min
                 .map(crabka_client_core::FetchMinBytes::try_from)

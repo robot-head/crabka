@@ -210,7 +210,7 @@ async fn prepare_tenant(
         .pgdog
         .effective_policy()
         .map_err(ReconcileError::Malformed)?;
-    let compute_policy = gres
+    let mut compute_policy = gres
         .spec
         .compute
         .as_ref()
@@ -243,6 +243,14 @@ async fn prepare_tenant(
             crate::crd::GresRegistrySpec::policy,
         )
         .map_err(ReconcileError::Malformed)?;
+    compute_policy.registry_reader_fetch_min = kafka
+        .spec
+        .gres_registry
+        .as_ref()
+        .map(crate::crd::GresRegistrySpec::configured_reader_fetch_min)
+        .transpose()
+        .map_err(ReconcileError::Malformed)?
+        .flatten();
     if obj.meta().deletion_timestamp.is_some() {
         cleanup_tenant(
             ctx,
@@ -2145,6 +2153,7 @@ fn wal_consumer_admin_args(policy: &EffectiveGresComputePolicy) -> [String; 28] 
     ]
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_deployment(
     obj: &GresTenant,
     range: &GresTenantRangeSpec,
@@ -2164,6 +2173,33 @@ fn render_deployment(
         name.clone(),
     ];
     args.extend(registry_policy_args(config.policy));
+    if let Some(value) = compute_policy.client_dispatch_queue_capacity {
+        args.extend([
+            "--client-dispatch-queue-capacity".to_owned(),
+            value.get().to_string(),
+        ]);
+    }
+    if let Some(value) = compute_policy.client_frame_max {
+        args.extend([
+            "--client-frame-max".to_owned(),
+            format!("{}B", value.bytes()),
+        ]);
+    }
+    if let Some(value) = compute_policy.registry_reader_fetch_min {
+        args.extend([
+            "--registry-reader-fetch-min".to_owned(),
+            format!("{}B", value.bytes()),
+        ]);
+    }
+    if let Some(value) = compute_policy.fdw_fetch_min {
+        args.extend(["--fdw-fetch-min".to_owned(), format!("{}B", value.bytes())]);
+    }
+    if let Some(value) = compute_policy.wal_recovery_fetch_min {
+        args.extend([
+            "--wal-recovery-fetch-min".to_owned(),
+            format!("{}B", value.bytes()),
+        ]);
+    }
     args.extend(wal_consumer_admin_args(&compute_policy));
     args.extend(wal_producer_args(&compute_policy));
     if config.range_control_enabled {
@@ -3111,6 +3147,114 @@ mod tests {
                     "got: {args:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn compute_client_policy_args_are_exact_in_single_and_multi_range_modes() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let registry_policy = crabka_gres_control::RegistryPolicy::default()
+            .with_client_resource_policy(
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+                crabka_client_core::ClientFrameMax::default(),
+                crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(4))
+                    .expect("registry fetch minimum"),
+            );
+        let mut configured = crate::crd::gres::GresComputeSpec {
+            client_dispatch_queue_capacity: Some(7),
+            client_frame_max: Some(crabka_units::kibibytes(32)),
+            fdw_fetch_min: Some(crabka_units::bytes(2)),
+            wal_recovery_fetch_min: Some(crabka_units::bytes(3)),
+            ..crate::crd::gres::GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("compute policy");
+        configured.registry_reader_fetch_min = Some(
+            crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(4))
+                .expect("registry fetch minimum"),
+        );
+
+        for range_control_enabled in [false, true] {
+            let deployment = render_deployment(
+                &obj,
+                &ranges[0],
+                &DeploymentRenderConfig {
+                    all_ranges: &ranges,
+                    image: "image",
+                    readiness_probe_period_seconds: 5,
+                    bootstrap: "k:9092",
+                    wal_topic: "__gres_wal.tenant-a.r0",
+                    config_topic: "__gres_cfg.tenant-a",
+                    policy: &registry_policy,
+                    compute_policy: configured,
+                    replicas: 1,
+                    operator_config: &operator_config,
+                    kafka_sasl: false,
+                    range_control_enabled,
+                    range_tls_hash: None,
+                },
+            )
+            .expect("render deployment");
+            let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                .args
+                .clone()
+                .unwrap();
+            for pair in [
+                ["--client-dispatch-queue-capacity", "7"],
+                ["--client-frame-max", "32768B"],
+                ["--registry-reader-fetch-min", "4B"],
+                ["--fdw-fetch-min", "2B"],
+                ["--wal-recovery-fetch-min", "3B"],
+            ] {
+                assert!(
+                    args.windows(2).filter(|window| *window == pair).count() == 1,
+                    "expected {pair:?} exactly once, got: {args:?}"
+                );
+            }
+        }
+
+        let defaults = crate::crd::gres::GresComputeSpec::default()
+            .effective_policy()
+            .expect("default compute policy");
+        let deployment = render_deployment(
+            &obj,
+            &ranges[0],
+            &DeploymentRenderConfig {
+                all_ranges: &ranges,
+                image: "image",
+                readiness_probe_period_seconds: 5,
+                bootstrap: "k:9092",
+                wal_topic: "__gres_wal.tenant-a.r0",
+                config_topic: "__gres_cfg.tenant-a",
+                policy: &crabka_gres_control::RegistryPolicy::default(),
+                compute_policy: defaults,
+                replicas: 1,
+                operator_config: &operator_config,
+                kafka_sasl: false,
+                range_control_enabled: false,
+                range_tls_hash: None,
+            },
+        )
+        .expect("render defaults");
+        let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+            .args
+            .clone()
+            .unwrap();
+        for absent in [
+            "--client-dispatch-queue-capacity",
+            "--client-frame-max",
+            "--registry-reader-fetch-min",
+            "--fdw-fetch-min",
+            "--wal-recovery-fetch-min",
+        ] {
+            assert!(!args.iter().any(|arg| arg == absent), "got: {args:?}");
         }
     }
 
