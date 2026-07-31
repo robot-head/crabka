@@ -5977,3 +5977,52 @@ All 162 Consumer library tests and 77 demo all-target tests pass after final
 formatting. Workspace all-target check and strict Clippy, nightly formatting,
 and diff hygiene pass. This closes the Consumer retry slice only; the
 repository-wide hardcoded operational-value audit remains active.
+
+## Classic Consumer Fetch Byte Policy
+
+Classic Consumer Fetch requests now carry one complete validated byte policy:
+
+| Setting | Default |
+|---|---:|
+| minimum response bytes | `1B` |
+| total response maximum | `50MiB` |
+| per-partition response maximum | `1MiB` |
+
+`FetchMinBytes`, `ConsumerFetchMaxBytes`, and
+`ConsumerFetchPartitionMaxBytes` validate positive, finite, whole-byte UOM
+values fitting Kafka's signed `i32` fields. The minimum cannot exceed the total
+maximum. The per-partition maximum remains independent because Kafka permits
+the first oversized record batch to exceed the aggregate response budget.
+
+The exact live library flow is:
+
+```text
+Consumer::builder
+  -> validation before startup retry or network I/O
+  -> StartConfig
+  -> Consumer
+  -> build_fetch_request
+  -> FetchRequest.min_bytes / max_bytes / partition_max_bytes
+```
+
+The former production `min_bytes: 1` literal is gone. Remaining matching
+numeric values are request assertions in tests. Fetch versions, poll timeout,
+isolation level, and oversized-first-batch behavior are unchanged.
+
+The observability demo Consume role exposes:
+
+| CLI | Environment |
+|---|---|
+| `--consumer-fetch-min` | `CRABKA_DEMO_CONSUMER_FETCH_MIN` |
+| `--consumer-fetch-max` | `CRABKA_DEMO_CONSUMER_FETCH_MAX` |
+| `--consumer-fetch-partition-max` | `CRABKA_DEMO_CONSUMER_FETCH_PARTITION_MAX` |
+
+Explicit values on Produce or Stream fail before telemetry or external I/O.
+Compose exposes the three variables only on `demo-consume`, with unit-bearing
+defaults matching the library. No CRD owns this standalone demo.
+
+All 162 Consumer library tests, its integration targets, and all 81 demo
+all-target tests pass after final formatting. Workspace all-target check,
+strict Clippy, nightly formatting, and diff hygiene pass. This closes only the
+classic Consumer fetch byte policy; the repository-wide hardcoded
+operational-value audit remains active.

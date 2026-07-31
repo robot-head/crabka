@@ -51,7 +51,7 @@ Compose, Cargo.
   `build_fetch_request(timeout_ms: i32, isolation_level: IsolationLevel,
   min: ByteSize, max: ByteSize, topics: Vec<FetchTopic>) -> FetchRequest`
 
-- [ ] **Step 1: Write failing propagation and validation tests**
+- [x] **Step 1: Write failing propagation and validation tests**
 
 Extend the existing consumer builder validation test with:
 
@@ -80,7 +80,7 @@ fails before connection creation with:
 consumer fetch min must not exceed consumer fetch max
 ```
 
-- [ ] **Step 2: Run focused tests and confirm failure**
+- [x] **Step 2: Run focused tests and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -90,7 +90,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 Expected: the classic Consumer builder has no `fetch_min` input or the request
 still contains `1`.
 
-- [ ] **Step 3: Implement the minimum path**
+- [x] **Step 3: Implement the minimum path**
 
 Add to `Consumer::start`:
 
@@ -116,7 +116,7 @@ FetchRequest {
 
 Delete the production `min_bytes: 1` literal.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -148,7 +148,7 @@ git commit -m "feat(consumer): expose fetch minimum"
   `effective_consumer_fetch_policy(&Cli) ->
   std::io::Result<(ByteSize, ByteSize, ByteSize)>`
 
-- [ ] **Step 1: Write failing CLI, role, and Compose tests**
+- [x] **Step 1: Write failing CLI, role, and Compose tests**
 
 Add a unit test that resolves defaults and:
 
@@ -171,7 +171,7 @@ CRABKA_DEMO_CONSUMER_FETCH_MAX: "${CRABKA_DEMO_CONSUMER_FETCH_MAX:-50MiB}"
 CRABKA_DEMO_CONSUMER_FETCH_PARTITION_MAX: "${CRABKA_DEMO_CONSUMER_FETCH_PARTITION_MAX:-1MiB}"
 ```
 
-- [ ] **Step 2: Run focused tests and confirm failure**
+- [x] **Step 2: Run focused tests and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -180,7 +180,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: the CLI fields, resolver, and Compose values are absent.
 
-- [ ] **Step 3: Implement the demo policy**
+- [x] **Step 3: Implement the demo policy**
 
 Add three optional Clap `ByteSize` fields using `parse::positive_byte_size`,
 the exact CLI/environment names in the approved design, and no Clap defaults.
@@ -199,7 +199,7 @@ Consumer::builder()
 
 Add the three Compose variables only to `demo-consume`.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -228,7 +228,7 @@ git commit -m "feat(demo): expose consumer fetch policy"
 - Proves the classic fetch minimum is no longer hardcoded and records that the
   repository-wide audit remains active
 
-- [ ] **Step 1: Audit ownership**
+- [x] **Step 1: Audit ownership**
 
 ```bash
 rg -n \
@@ -240,7 +240,7 @@ Every production hit must be a default, validation, propagation, request
 lowering, CLI/environment input, or deployment input. Remaining numeric hits
 must be tests.
 
-- [ ] **Step 2: Run affected and workspace gates**
+- [x] **Step 2: Run affected and workspace gates**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -254,7 +254,7 @@ cargo +nightly fmt --all -- --check
 git diff --check
 ```
 
-- [ ] **Step 3: Re-run affected tests after formatting**
+- [x] **Step 3: Re-run affected tests after formatting**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -262,7 +262,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   --all-targets --locked
 ```
 
-- [ ] **Step 4: Document and commit**
+- [x] **Step 4: Document and commit**
 
 Append exact defaults, CLI/environment names, validation, request flow, test
 counts, and audit classification to `docs/configuration-audit.md`. Check every
