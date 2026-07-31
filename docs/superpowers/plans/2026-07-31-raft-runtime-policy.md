@@ -40,7 +40,7 @@
 - `ControllerConfig` and `KraftConfig` carry all three validated policy types.
 - `heartbeat_period(election_timeout: Time, configured: Option<Time>) -> Time`.
 
-- [ ] **Step 1: Write failing policy-type and heartbeat tests**
+- [x] **Step 1: Write failing policy-type and heartbeat tests**
 
 In `config.rs`, add tests proving defaults and invalid boundaries:
 
@@ -73,7 +73,7 @@ fn configured_heartbeat_overrides_derived_period() {
 }
 ```
 
-- [ ] **Step 2: Run the focused tests and verify the red state**
+- [x] **Step 2: Run the focused tests and verify the red state**
 
 Run:
 
@@ -85,7 +85,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 Expected: compilation fails because the three types and optional-heartbeat
 interface do not exist.
 
-- [ ] **Step 3: Implement the three validated policy types**
+- [x] **Step 3: Implement the three validated policy types**
 
 Add `refined_type = { workspace = true }` to `crates/raft/Cargo.toml`. In
 `config.rs`, define:
@@ -199,7 +199,7 @@ impl std::str::FromStr for ControllerFetchMissLimit {
 }
 ```
 
-- [ ] **Step 4: Write failing propagation and bounded-read tests**
+- [x] **Step 4: Write failing propagation and bounded-read tests**
 
 Rename the existing `build_engine_only` body to
 `build_engine_only_with_policy`; add fetch-miss and fetch-maximum parameters
@@ -291,7 +291,7 @@ Each fixture must contain at least three batches so application and restart
 replay require more than one bounded read. The expected image is constructed
 from literal metadata records, not from the replay helper.
 
-- [ ] **Step 5: Implement engine propagation and progress-safe loops**
+- [x] **Step 5: Implement engine propagation and progress-safe loops**
 
 Change `ControllerConfig::heartbeat_interval` to `Option<Time>` and add the
 three policy fields. Thread them through `Controller::start_with_listener`,
@@ -374,7 +374,7 @@ while cursor < target {
 Keep replication serving and each snapshot request to one bounded chunk.
 Remove `FETCH_MISS_LIMIT` and `MAX_APPLY`; keep `HEARTBEAT_DIVISOR`.
 
-- [ ] **Step 6: Verify and commit the Raft engine**
+- [x] **Step 6: Verify and commit the Raft engine**
 
 Run:
 
@@ -409,7 +409,7 @@ git commit -m "feat(raft): expose runtime policy"
 - Produces: four broker runtime keys and exact explicit-heartbeat tracking.
 - `BrokerConfig::controller_heartbeat_interval_explicit: bool` distinguishes omission from an explicit default-valued input.
 
-- [ ] **Step 1: Write failing broker default and file-overlay tests**
+- [x] **Step 1: Write failing broker default and file-overlay tests**
 
 Add assertions to broker config tests:
 
@@ -435,7 +435,7 @@ Assert the overlay sets explicit heartbeat to `true` and produces typed values
 `500ms`, `5`, `7`, and `512KiB`. Add table-driven rejection cases for zero
 counts, `0B`, `1.5B`, and `2147483648B`.
 
-- [ ] **Step 2: Run focused broker tests and verify the red state**
+- [x] **Step 2: Run focused broker tests and verify the red state**
 
 Run:
 
@@ -447,7 +447,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 Expected: compilation fails because the new broker fields and runtime keys do
 not exist.
 
-- [ ] **Step 3: Implement BrokerConfig and runtime TOML merging**
+- [x] **Step 3: Implement BrokerConfig and runtime TOML merging**
 
 Add these `BrokerConfig` fields:
 
@@ -497,7 +497,7 @@ if let Some(value) = self.metadata_raft_fetch_max {
 
 Keep the existing heartbeat/election cross-field validation.
 
-- [ ] **Step 4: Write failing CLI/environment precedence tests**
+- [x] **Step 4: Write failing CLI/environment precedence tests**
 
 Extend broker binary tests to assert:
 
@@ -527,7 +527,7 @@ CRABKA_METADATA_RAFT_FETCH_MAX=512KiB
 Assert CLI values override environment values and zero/fractional/overflow
 inputs fail before startup.
 
-- [ ] **Step 5: Implement CLI/env fields and ControllerConfig propagation**
+- [x] **Step 5: Implement CLI/env fields and ControllerConfig propagation**
 
 Add exact CLI fields:
 
@@ -570,7 +570,7 @@ metadata_raft_fetch_max: config.metadata_raft_fetch_max,
 Update explicit `BrokerConfig` and `ControllerConfig` fixtures with default
 values; do not change their behavioral inputs.
 
-- [ ] **Step 6: Verify and commit broker ownership**
+- [x] **Step 6: Verify and commit broker ownership**
 
 Run:
 
@@ -602,7 +602,7 @@ git commit -m "feat(broker): expose raft runtime policy"
 - Consumes: broker runtime TOML keys from Task 2.
 - Produces: optional `Kafka.spec.brokerTuning` fields `controllerFetchMissLimit`, `metadataRaftCommandQueueCapacity`, and `metadataRaftFetchMax`.
 
-- [ ] **Step 1: Write failing CRD rendering and validation tests**
+- [x] **Step 1: Write failing CRD rendering and validation tests**
 
 Construct `BrokerTuning` with:
 
@@ -624,7 +624,7 @@ Add validation cases rejecting zero counts, `0B`, `1.5B`, and
 `2147483648B`. Add an omission test asserting a default `BrokerTuning` renders
 none of the three keys.
 
-- [ ] **Step 2: Run focused operator tests and verify the red state**
+- [x] **Step 2: Run focused operator tests and verify the red state**
 
 Run:
 
@@ -635,7 +635,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: compilation fails because the three CRD fields do not exist.
 
-- [ ] **Step 3: Add the three fields to the existing broker-tuning macro**
+- [x] **Step 3: Add the three fields to the existing broker-tuning macro**
 
 Add:
 
@@ -653,7 +653,7 @@ metadata_raft_fetch_max: ByteSize => ();
 Reuse the macro's existing validation and runtime-TOML rendering. Do not add a
 second heartbeat field.
 
-- [ ] **Step 4: Regenerate and verify the Kafka CRD**
+- [x] **Step 4: Regenerate and verify the Kafka CRD**
 
 Run:
 
@@ -670,7 +670,7 @@ minimum `1` for both counts and a string schema for
 `metadataRaftFetchMax`. The checksum check proves the second generation is
 byte-identical to the first.
 
-- [ ] **Step 5: Verify and commit CRD propagation**
+- [x] **Step 5: Verify and commit CRD propagation**
 
 Run:
 
@@ -700,7 +700,7 @@ git commit -m "feat(operator): expose raft runtime policy"
 - Consumes: verified implementation and exact test counts from Tasks 1-3.
 - Produces: completed plan and permanent audit record.
 
-- [ ] **Step 1: Audit ownership and removed constants**
+- [x] **Step 1: Audit ownership and removed constants**
 
 Use `rg` to prove:
 
@@ -711,7 +711,7 @@ Use `rg` to prove:
   fields;
 - snapshot total-size policy remains separate from request chunk size.
 
-- [ ] **Step 2: Run workspace gates**
+- [x] **Step 2: Run workspace gates**
 
 Run:
 
@@ -724,7 +724,7 @@ cargo +nightly fmt --all -- --check
 git diff --check
 ```
 
-- [ ] **Step 3: Re-run focused all-target tests after formatting**
+- [x] **Step 3: Re-run focused all-target tests after formatting**
 
 Run:
 
@@ -734,7 +734,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   --all-targets --locked
 ```
 
-- [ ] **Step 4: Document and commit**
+- [x] **Step 4: Document and commit**
 
 Record exact defaults, names, validation, omission semantics, CRD ownership,
 bounded-read progress behavior, removed constants, generated schema, test

@@ -4794,38 +4794,42 @@ Closure gates passed:
 
 ## Raft Runtime Policy Audit
 
-The Raft scanner rows are predominantly tests, protocol identifiers and
-versions, serialized layout sizes, sentinels, exact preallocation, and fixed
-progress invariants. In particular, the one-byte observer fetch floor prevents
-a zero-byte request from permanently stalling, and should not be configurable.
+The four approved runtime policies now flow through broker CLI/environment,
+`[runtime]` TOML, `ControllerConfig`, `KraftConfig`, and the Raft engine.
+`Kafka.spec.brokerTuning` owns the three new CRD fields and renders the same
+TOML keys:
 
-Four runtime-policy findings remain:
+| Policy | Default | CLI/environment | CRD |
+|---|---:|---|---|
+| heartbeat cadence | election timeout / `3` when omitted | `--controller-heartbeat-interval` / `CRABKA_CONTROLLER_HEARTBEAT_INTERVAL` | existing `controllerHeartbeatInterval` |
+| fetch-miss limit | `3` | `--controller-fetch-miss-limit` / `CRABKA_CONTROLLER_FETCH_MISS_LIMIT` | `controllerFetchMissLimit` |
+| command queue capacity | `256` | `--metadata-raft-command-queue-capacity` / `CRABKA_METADATA_RAFT_COMMAND_QUEUE_CAPACITY` | `metadataRaftCommandQueueCapacity` |
+| bounded read and request chunk | `8MiB` | `--metadata-raft-fetch-max` / `CRABKA_METADATA_RAFT_FETCH_MAX` | `metadataRaftFetchMax` |
 
-- `controller_heartbeat_interval` is already exposed through broker
-  CLI/environment/file configuration and the Kafka CRD, but is dropped before
-  the KRaft engine. The engine instead derives its cadence as one third of the
-  election timeout. Honoring the documented 500-ms default would change the
-  current effective default from roughly 1.667 seconds, so this behavior
-  correction needs explicit approval.
-- Three consecutive fetch misses are tolerated before election. This is a
-  distinct failure-detection policy layered on the election timeout.
-- The controller actor mailbox has a fixed capacity of 256.
-- One eight-MiB value currently couples replication response size, snapshot
-  request chunk size, committed-record application, and restart replay.
+The two counts are positive `refined_type` newtypes. The byte budget is a UOM
+`ByteSize` constrained to positive whole bytes fitting signed `i32`. Broker
+configuration retains heartbeat explicitness: omission preserves the derived
+cadence, while an explicit value—including `500ms`—reaches the engine exactly.
 
-The proposed minimal design is to thread the existing heartbeat setting into
-the engine; add validated positive `controller_fetch_miss_limit` and
-`metadata_raft_command_queue_capacity` values; and replace the coupled
-eight-MiB value with a UOM `metadata_raft_fetch_max` policy. Application and
-replay would iterate over bounded reads until their target offset so lowering
-the byte budget cannot silently skip committed metadata. The byte setting
-would flow through broker CLI/environment/file configuration and the Kafka CRD
-as `CRABKA_METADATA_RAFT_FETCH_MAX`; the two counts would use
-`CRABKA_CONTROLLER_FETCH_MISS_LIMIT` and
-`CRABKA_METADATA_RAFT_COMMAND_QUEUE_CAPACITY`. Existing effective values remain
-the defaults except for the heartbeat discrepancy described above.
+The fixed `FETCH_MISS_LIMIT`, `MAX_APPLY`, and `mpsc::channel(256)` production
+sites are gone. `HEARTBEAT_DIVISOR`, the one-byte observer progress floor,
+protocol identifiers, and timer mechanics remain fixed because configuring
+them would not describe useful deployment policy. The existing
+`metadataSnapshotFetchMax` remains the separate total snapshot security cap.
 
-This design is pending explicit approval and has not been implemented.
+`metadataRaftFetchMax` bounds replication responses and each snapshot request
+chunk. Application and restart replay page until their committed target.
+Decoded reads guarantee at least one requested batch even when the configured
+budget is smaller than a batch or a sparse-index floor, preventing a valid
+small budget from skipping or stalling committed metadata.
+
+The generated Kafka CRD is deterministic across consecutive regeneration.
+All 156 Raft library tests (one Docker-only test ignored), 28 Raft integration
+tests, 1,851 broker library tests, 17 broker CLI tests, 763 operator library
+tests, and the remaining broker/operator all-target suites pass. Workspace
+all-target check, strict Clippy, nightly format check, and diff hygiene pass.
+This closes only the Raft runtime-policy slice; the repository-wide hardcoded
+operational-value audit remains active.
 
 ## Log
 
