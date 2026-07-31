@@ -94,7 +94,7 @@ pub use assignor::Assignor;
 pub use builder::{AutoOffsetReset, IsolationLevel};
 pub use consumer::{
     Consumer, ConsumerFetchMaxBytes, ConsumerFetchPartitionMaxBytes, ConsumerLeaveGroupTimeout,
-    ConsumerRecord, ConsumerSubscriptionMetadataRefreshInterval,
+    ConsumerRecord, ConsumerRetryPolicy, ConsumerSubscriptionMetadataRefreshInterval,
     DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT, DEFAULT_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL,
     Header,
 };

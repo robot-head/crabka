@@ -25,9 +25,9 @@ use crabka_protocol::{
 use crabka_units::{
     ByteSize, Time,
     convert::{ByteSizeExt as _, StdDurationExt as _, TimeExt as _},
-    minutes, secs,
+    millis, minutes, secs,
 };
-use refined_type::rule::{GreaterI32, MinMaxU128};
+use refined_type::rule::{GreaterI32, GreaterI64, MinMaxU128};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
@@ -118,6 +118,162 @@ struct StartConfig {
     leave_group_timeout: Time,
     client_rack: Option<String>,
     security: Option<crabka_client_core::security::ClientSecurity>,
+    retry_policy: ConsumerRetryPolicy,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct RetryTime(Duration);
+
+impl RetryTime {
+    fn new(name: &str, value: Time) -> Result<Self, String> {
+        let milliseconds = GreaterI64::<0>::new(value.millis_i64())
+            .map_err(|error| format!("{name}: {error}"))?
+            .into_value();
+        if !value.secs_f64().is_finite() || Time::from_millis(milliseconds) != value {
+            return Err(format!("{name} must be a whole number of milliseconds"));
+        }
+        Ok(Self(Duration::from_millis(
+            u64::try_from(milliseconds).expect("validated retry time is positive"),
+        )))
+    }
+
+    fn time(self) -> Time {
+        Time::from_std(self.0)
+    }
+}
+
+/// Validated classic Consumer startup and coordinator retry timing.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConsumerRetryPolicy {
+    startup_attempt_timeout: RetryTime,
+    startup_deadline: RetryTime,
+    startup_initial_backoff: RetryTime,
+    startup_max_backoff: RetryTime,
+    coordinator_retry_timeout: RetryTime,
+    coordinator_initial_backoff: RetryTime,
+    coordinator_max_backoff: RetryTime,
+}
+
+impl ConsumerRetryPolicy {
+    /// Construct a validated retry policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-positive, non-finite, fractional-millisecond,
+    /// or inconsistently ordered values.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        startup_attempt_timeout: Time,
+        startup_deadline: Time,
+        startup_initial_backoff: Time,
+        startup_max_backoff: Time,
+        coordinator_retry_timeout: Time,
+        coordinator_initial_backoff: Time,
+        coordinator_max_backoff: Time,
+    ) -> Result<Self, String> {
+        let policy = Self {
+            startup_attempt_timeout: RetryTime::new(
+                "consumer startup attempt timeout",
+                startup_attempt_timeout,
+            )?,
+            startup_deadline: RetryTime::new("consumer startup deadline", startup_deadline)?,
+            startup_initial_backoff: RetryTime::new(
+                "consumer startup initial backoff",
+                startup_initial_backoff,
+            )?,
+            startup_max_backoff: RetryTime::new(
+                "consumer startup maximum backoff",
+                startup_max_backoff,
+            )?,
+            coordinator_retry_timeout: RetryTime::new(
+                "consumer coordinator retry timeout",
+                coordinator_retry_timeout,
+            )?,
+            coordinator_initial_backoff: RetryTime::new(
+                "consumer coordinator initial backoff",
+                coordinator_initial_backoff,
+            )?,
+            coordinator_max_backoff: RetryTime::new(
+                "consumer coordinator maximum backoff",
+                coordinator_max_backoff,
+            )?,
+        };
+        if policy.startup_attempt_timeout > policy.startup_deadline {
+            return Err(
+                "consumer startup attempt timeout must not exceed startup deadline".to_owned(),
+            );
+        }
+        if policy.startup_initial_backoff > policy.startup_max_backoff {
+            return Err(
+                "consumer startup initial backoff must not exceed startup maximum backoff"
+                    .to_owned(),
+            );
+        }
+        if policy.coordinator_initial_backoff > policy.coordinator_max_backoff {
+            return Err(
+                "consumer coordinator initial backoff must not exceed coordinator maximum backoff"
+                    .to_owned(),
+            );
+        }
+        Ok(policy)
+    }
+
+    /// Per-attempt startup timeout.
+    #[must_use]
+    pub fn startup_attempt_timeout(self) -> Time {
+        self.startup_attempt_timeout.time()
+    }
+
+    /// Wall-clock startup deadline.
+    #[must_use]
+    pub fn startup_deadline(self) -> Time {
+        self.startup_deadline.time()
+    }
+
+    /// Initial startup retry backoff.
+    #[must_use]
+    pub fn startup_initial_backoff(self) -> Time {
+        self.startup_initial_backoff.time()
+    }
+
+    /// Maximum startup retry backoff.
+    #[must_use]
+    pub fn startup_max_backoff(self) -> Time {
+        self.startup_max_backoff.time()
+    }
+
+    /// Coordinator operation retry timeout.
+    #[must_use]
+    pub fn coordinator_retry_timeout(self) -> Time {
+        self.coordinator_retry_timeout.time()
+    }
+
+    /// Initial coordinator retry backoff.
+    #[must_use]
+    pub fn coordinator_initial_backoff(self) -> Time {
+        self.coordinator_initial_backoff.time()
+    }
+
+    /// Maximum coordinator retry backoff.
+    #[must_use]
+    pub fn coordinator_max_backoff(self) -> Time {
+        self.coordinator_max_backoff.time()
+    }
+}
+
+impl Default for ConsumerRetryPolicy {
+    fn default() -> Self {
+        Self::new(
+            secs(90),
+            minutes(5),
+            millis(500),
+            secs(5),
+            secs(30),
+            millis(100),
+            secs(1),
+        )
+        .expect("default consumer retry policy is valid")
+    }
 }
 
 /// Default deadline for classic Consumer best-effort group departure.
@@ -487,14 +643,6 @@ pub(crate) fn protocol_millis_i32(value: Time) -> i32 {
     i32::try_from(value.millis_i64_trunc()).unwrap_or(i32::MAX)
 }
 
-/// Per-attempt timeout for `Consumer::start`.  Must exceed the default
-/// `rebalance_timeout` (60 s) so a legitimately slow group-join isn't
-/// cut short, while still bounding a true cold-boot hang.
-const CONSUMER_START_ATTEMPT_TIMEOUT: Time = secs(90);
-
-/// Wall-clock deadline across all retry attempts in `Consumer::start`.
-const CONSUMER_START_DEADLINE: Time = minutes(5);
-
 #[bon::bon]
 impl Consumer {
     /// Build a [`Consumer`] subscribed to the given topics.
@@ -539,6 +687,7 @@ impl Consumer {
         #[builder(default = DEFAULT_CONSUMER_LEAVE_GROUP_TIMEOUT)] leave_group_timeout: Time,
         #[builder(into)] client_rack: Option<String>,
         security: Option<crabka_client_core::security::ClientSecurity>,
+        #[builder(default = ConsumerRetryPolicy::default())] retry_policy: ConsumerRetryPolicy,
     ) -> Result<Self, ConsumerError> {
         // Fail fast on misconfig — before any retry loop.
         if subscribe.is_empty() {
@@ -598,20 +747,21 @@ impl Consumer {
             leave_group_timeout: Time::from_std(leave_group_timeout.duration()),
             client_rack,
             security,
+            retry_policy,
         };
 
         let started = tokio::time::Instant::now();
-        let mut backoff = Duration::from_millis(500);
+        let mut backoff = config.retry_policy.startup_initial_backoff().to_std();
         loop {
             match tokio::time::timeout(
-                CONSUMER_START_ATTEMPT_TIMEOUT.to_std(),
+                config.retry_policy.startup_attempt_timeout().to_std(),
                 Self::start_once(config.clone()),
             )
             .await
             {
                 Ok(Ok(consumer)) => return Ok(consumer),
                 Ok(Err(error)) => {
-                    if started.elapsed().as_time() < CONSUMER_START_DEADLINE
+                    if started.elapsed().as_time() < config.retry_policy.startup_deadline()
                         && is_retriable_consumer_start_error(&error)
                     {
                         tracing::warn!(
@@ -624,16 +774,16 @@ impl Consumer {
                     }
                 }
                 Err(_elapsed) => {
-                    if started.elapsed().as_time() >= CONSUMER_START_DEADLINE {
+                    if started.elapsed().as_time() >= config.retry_policy.startup_deadline() {
                         return Err(ConsumerError::Client(
                             crabka_client_core::ClientError::Timeout(
-                                CONSUMER_START_ATTEMPT_TIMEOUT,
+                                config.retry_policy.startup_attempt_timeout(),
                             ),
                         ));
                     }
                     tracing::warn!(
                         group = %config.group_id,
-                        timeout = ?CONSUMER_START_ATTEMPT_TIMEOUT,
+                        timeout = ?config.retry_policy.startup_attempt_timeout(),
                         "consumer startup exceeded attempt timeout \
                          (likely a cold-boot group-join stall); \
                          retrying with a fresh connection"
@@ -641,7 +791,10 @@ impl Consumer {
                 }
             }
             tokio::time::sleep(backoff).await;
-            backoff = std::cmp::min(backoff * 2, Duration::from_secs(5));
+            backoff = std::cmp::min(
+                backoff * 2,
+                config.retry_policy.startup_max_backoff().to_std(),
+            );
         }
     }
 
@@ -1061,6 +1214,7 @@ async fn spawn_consumer(
         leave_group_timeout,
         client_rack,
         security,
+        retry_policy: _,
     } = config;
     let StartupState {
         generation_id,
@@ -1310,6 +1464,87 @@ mod protocol_millis_tests {
     #[test]
     fn protocol_millis_saturates_at_i32_max() {
         check!(protocol_millis_i32(Time::from_secs(10_000_000_000)) == i32::MAX);
+    }
+}
+
+#[cfg(test)]
+mod consumer_retry_policy_tests {
+    use assert2::{assert, check};
+    use crabka_units::{Time, convert::TimeExt as _, millis, minutes, secs};
+
+    use super::ConsumerRetryPolicy;
+
+    #[test]
+    fn consumer_retry_policy_defaults_and_overrides() {
+        let defaults = ConsumerRetryPolicy::default();
+        check!(defaults.startup_attempt_timeout() == secs(90));
+        check!(defaults.startup_deadline() == minutes(5));
+        check!(defaults.startup_initial_backoff() == millis(500));
+        check!(defaults.startup_max_backoff() == secs(5));
+        check!(defaults.coordinator_retry_timeout() == secs(30));
+        check!(defaults.coordinator_initial_backoff() == millis(100));
+        check!(defaults.coordinator_max_backoff() == secs(1));
+
+        let configured = ConsumerRetryPolicy::new(
+            secs(11),
+            secs(12),
+            millis(13),
+            millis(14),
+            secs(15),
+            millis(16),
+            millis(17),
+        )
+        .expect("valid retry policy");
+        check!(configured.startup_attempt_timeout() == secs(11));
+        check!(configured.startup_deadline() == secs(12));
+        check!(configured.startup_initial_backoff() == millis(13));
+        check!(configured.startup_max_backoff() == millis(14));
+        check!(configured.coordinator_retry_timeout() == secs(15));
+        check!(configured.coordinator_initial_backoff() == millis(16));
+        check!(configured.coordinator_max_backoff() == millis(17));
+    }
+
+    #[test]
+    fn consumer_retry_policy_rejects_invalid_values() {
+        let valid = [
+            secs(90),
+            minutes(5),
+            millis(500),
+            secs(5),
+            secs(30),
+            millis(100),
+            secs(1),
+        ];
+        for (index, invalid) in [
+            Time::ZERO,
+            Time::from_secs_f64(0.0005),
+            Time::from_secs_f64(f64::INFINITY),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut values = valid;
+            values[index] = invalid;
+            assert!(
+                ConsumerRetryPolicy::new(
+                    values[0], values[1], values[2], values[3], values[4], values[5], values[6],
+                )
+                .is_err()
+            );
+        }
+
+        for values in [
+            [secs(13), secs(12), millis(1), millis(2), secs(3), millis(1), millis(2)],
+            [secs(1), secs(2), millis(3), millis(2), secs(3), millis(1), millis(2)],
+            [secs(1), secs(2), millis(1), millis(2), secs(3), millis(3), millis(2)],
+        ] {
+            assert!(
+                ConsumerRetryPolicy::new(
+                    values[0], values[1], values[2], values[3], values[4], values[5], values[6],
+                )
+                .is_err()
+            );
+        }
     }
 }
 
