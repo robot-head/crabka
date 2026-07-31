@@ -11,6 +11,7 @@ use std::{
     future::{Future, IntoFuture, pending},
     io::{ErrorKind, Read as _},
     net::SocketAddr,
+    num::NonZeroUsize,
     path::{Path as FsPath, PathBuf},
     sync::{
         Arc, Mutex,
@@ -269,6 +270,31 @@ pub struct ServiceConfig {
 
     #[arg(long, env = "CRABKA_OBSERVABILITY_WAL_CONNECT_MAX_BACKOFF", default_value = "2s", value_parser = crabka_units::parse::positive_time)]
     pub wal_connect_max_backoff: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_COMPACTOR_WAL_POLL_TIMEOUT", default_value = "500ms", value_parser = crabka_units::parse::positive_time)]
+    pub compactor_wal_poll_timeout: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_COMPACTOR_ACCUMULATION_WINDOW", default_value = "2s", value_parser = crabka_units::parse::positive_time)]
+    pub compactor_accumulation_window: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_COMPACTOR_ACCUMULATION_POLL_TIMEOUT", default_value = "250ms", value_parser = crabka_units::parse::positive_time)]
+    pub compactor_accumulation_poll_timeout: Time,
+
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_COMPACTOR_MAX_RECORDS_PER_BATCH",
+        default_value = "4096"
+    )]
+    pub compactor_max_records_per_batch: NonZeroUsize,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_COMPACTOR_IDLE_INTERVAL", default_value = "10ms", value_parser = crabka_units::parse::positive_time)]
+    pub compactor_idle_interval: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_COMPACTOR_OBJECT_STORE_INITIAL_BACKOFF", default_value = "10ms", value_parser = crabka_units::parse::positive_time)]
+    pub compactor_object_store_initial_backoff: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_COMPACTOR_OBJECT_STORE_MAX_BACKOFF", default_value = "500ms", value_parser = crabka_units::parse::positive_time)]
+    pub compactor_object_store_max_backoff: Time,
 }
 
 impl Default for ServiceConfig {
@@ -301,6 +327,14 @@ impl Default for ServiceConfig {
             wal_connect_attempt_timeout: secs(15),
             wal_connect_initial_backoff: millis(200),
             wal_connect_max_backoff: secs(2),
+            compactor_wal_poll_timeout: millis(500),
+            compactor_accumulation_window: secs(2),
+            compactor_accumulation_poll_timeout: millis(250),
+            compactor_max_records_per_batch: NonZeroUsize::new(4096)
+                .expect("default compactor batch size is nonzero"),
+            compactor_idle_interval: millis(10),
+            compactor_object_store_initial_backoff: millis(10),
+            compactor_object_store_max_backoff: millis(500),
         }
     }
 }
@@ -311,6 +345,10 @@ pub enum ServiceConfigError {
     WalConnectAttemptExceedsDeadline,
     #[error("WAL connect initial backoff must not exceed maximum backoff")]
     WalConnectInitialBackoffExceedsMaximum,
+    #[error("compactor accumulation poll timeout must not exceed accumulation window")]
+    CompactorAccumulationPollExceedsWindow,
+    #[error("compactor object-store initial backoff must not exceed maximum backoff")]
+    CompactorObjectStoreInitialBackoffExceedsMaximum,
     #[error("WAL sink is required for distributor service startup")]
     MissingWalSink,
     #[error("WAL consumer is required for compactor service startup")]
@@ -582,6 +620,13 @@ pub fn run(config: ServiceConfig) -> Result<ServiceStatus, Infallible> {
         wal_connect_attempt_timeout: _wal_connect_attempt_timeout,
         wal_connect_initial_backoff: _wal_connect_initial_backoff,
         wal_connect_max_backoff: _wal_connect_max_backoff,
+        compactor_wal_poll_timeout: _compactor_wal_poll_timeout,
+        compactor_accumulation_window: _compactor_accumulation_window,
+        compactor_accumulation_poll_timeout: _compactor_accumulation_poll_timeout,
+        compactor_max_records_per_batch: _compactor_max_records_per_batch,
+        compactor_idle_interval: _compactor_idle_interval,
+        compactor_object_store_initial_backoff: _compactor_object_store_initial_backoff,
+        compactor_object_store_max_backoff: _compactor_object_store_max_backoff,
     } = config;
 
     Ok(ServiceStatus { role: target })
@@ -592,10 +637,6 @@ const DYNAMIC_INDEX_CACHE_TTL: Time = secs(5);
 const DYNAMIC_INDEX_SHARD_CACHE_TTL: Time = minutes(5);
 const DYNAMIC_INDEX_SHARD_FETCH_CONCURRENCY: usize = 32;
 const OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY: usize = 8;
-const LOG_COMPACTION_ACCUMULATION_WINDOW: Time = secs(2);
-const LOG_COMPACTION_ACCUMULATION_POLL_TIMEOUT: Time = millis(250);
-const LOG_COMPACTION_MAX_RECORDS_PER_BATCH: usize = 4096;
-
 fn build_compactor_configured_object_store(
     config: &ServiceConfig,
     object_store: Option<&dyn ObjectStore>,
@@ -698,6 +739,16 @@ fn validate_distributor_policy(config: &ServiceConfig) -> Result<(), ServiceConf
     }
     if config.wal_connect_initial_backoff > config.wal_connect_max_backoff {
         return Err(ServiceConfigError::WalConnectInitialBackoffExceedsMaximum);
+    }
+    Ok(())
+}
+
+fn validate_compactor_policy(config: &ServiceConfig) -> Result<(), ServiceConfigError> {
+    if config.compactor_accumulation_poll_timeout > config.compactor_accumulation_window {
+        return Err(ServiceConfigError::CompactorAccumulationPollExceedsWindow);
+    }
+    if config.compactor_object_store_initial_backoff > config.compactor_object_store_max_backoff {
+        return Err(ServiceConfigError::CompactorObjectStoreInitialBackoffExceedsMaximum);
     }
     Ok(())
 }
@@ -823,6 +874,7 @@ pub async fn run_compactor_once(
     dependencies: ServiceDependencies,
     object_store: Option<&dyn ObjectStore>,
 ) -> Result<Option<BlockDescriptor>, ServiceRuntimeError> {
+    validate_compactor_policy(config)?;
     let configured_store = build_compactor_configured_object_store(config, object_store)?;
     let (store, object_store_prefix) =
         compactor_object_store(object_store, configured_store.as_ref())?;
@@ -849,7 +901,7 @@ pub async fn run_compactor_once(
         store,
         &prefix,
         consumer.as_mut(),
-        millis(500),
+        config.compactor_wal_poll_timeout,
         &delete_requests,
         &mut tenant_indexes,
     )
@@ -868,6 +920,7 @@ pub async fn run_compactor_until_idle(
     dependencies: ServiceDependencies,
     object_store: Option<&dyn ObjectStore>,
 ) -> Result<Vec<BlockDescriptor>, ServiceRuntimeError> {
+    validate_compactor_policy(config)?;
     let configured_store = build_compactor_configured_object_store(config, object_store)?;
     let (store, object_store_prefix) =
         compactor_object_store(object_store, configured_store.as_ref())?;
@@ -896,7 +949,7 @@ pub async fn run_compactor_until_idle(
             store,
             &prefix,
             consumer.as_mut(),
-            millis(500),
+            config.compactor_wal_poll_timeout,
             &delete_requests,
             &mut tenant_indexes,
         )
@@ -928,6 +981,7 @@ pub async fn run_compactor_until_shutdown(
     object_store: Option<&dyn ObjectStore>,
     shutdown: impl Future<Output = ()>,
 ) -> Result<Vec<BlockDescriptor>, ServiceRuntimeError> {
+    validate_compactor_policy(config)?;
     let configured_store = build_compactor_configured_object_store(config, object_store)?;
     let (store, object_store_prefix) =
         compactor_object_store(object_store, configured_store.as_ref())?;
@@ -949,7 +1003,7 @@ pub async fn run_compactor_until_shutdown(
         .ok_or(ServiceConfigError::MissingWalConsumer)?;
     let mut consumer = consumer.lock().await;
     let mut descriptors = Vec::new();
-    let mut object_store_retry_backoff = millis(10);
+    let mut object_store_retry_backoff = config.compactor_object_store_initial_backoff;
     let mut tenant_indexes = TenantCompactionIndexCache::new();
     let mut pending_compaction_records: Option<Vec<KafkaWalRecord>> = None;
     // Shared RED-metrics bundle for the `:9404` exporter; `None` in tests that
@@ -978,7 +1032,10 @@ pub async fn run_compactor_until_shutdown(
                     None => {
                         match poll_accumulated_log_compaction_records(
                             consumer.as_mut(),
-                            millis(500),
+                            config.compactor_wal_poll_timeout,
+                            config.compactor_accumulation_window,
+                            config.compactor_accumulation_poll_timeout,
+                            config.compactor_max_records_per_batch,
                         )
                         .await
                         {
@@ -1013,7 +1070,7 @@ pub async fn run_compactor_until_shutdown(
         };
         let batch_descriptors = match batch_result {
             Ok(batch_descriptors) => {
-                object_store_retry_backoff = millis(10);
+                object_store_retry_backoff = config.compactor_object_store_initial_backoff;
                 batch_descriptors
             }
             Err(error) if compactor_run_error_is_object_store(&error) => {
@@ -1022,8 +1079,10 @@ pub async fn run_compactor_until_shutdown(
                     () = &mut shutdown => return Ok(descriptors),
                     () = sleep(object_store_retry_backoff.to_std()) => {}
                 }
-                object_store_retry_backoff =
-                    next_compactor_object_store_backoff(object_store_retry_backoff);
+                object_store_retry_backoff = next_compactor_object_store_backoff(
+                    object_store_retry_backoff,
+                    config.compactor_object_store_max_backoff,
+                );
                 continue;
             }
             Err(error) => return Err(error.into()),
@@ -1031,7 +1090,7 @@ pub async fn run_compactor_until_shutdown(
         if batch_descriptors.is_empty() {
             tokio::select! {
                 () = &mut shutdown => return Ok(descriptors),
-                () = sleep(millis(10).to_std()) => {}
+                () = sleep(config.compactor_idle_interval.to_std()) => {}
             }
         } else {
             for descriptor in batch_descriptors {
@@ -1045,7 +1104,8 @@ pub async fn run_compactor_until_shutdown(
                     .await
                     {
                         Ok(()) => {
-                            object_store_retry_backoff = millis(10);
+                            object_store_retry_backoff =
+                                config.compactor_object_store_initial_backoff;
                             // One durable log block persisted to object storage.
                             if let Some(metrics) = &metrics {
                                 metrics.record_block_written();
@@ -1057,8 +1117,10 @@ pub async fn run_compactor_until_shutdown(
                                 () = &mut shutdown => return Err(error.into()),
                                 () = sleep(object_store_retry_backoff.to_std()) => {}
                             }
-                            object_store_retry_backoff =
-                                next_compactor_object_store_backoff(object_store_retry_backoff);
+                            object_store_retry_backoff = next_compactor_object_store_backoff(
+                                object_store_retry_backoff,
+                                config.compactor_object_store_max_backoff,
+                            );
                         }
                         Err(error) => return Err(error.into()),
                     }
@@ -1073,8 +1135,8 @@ pub async fn run_compactor_until_shutdown(
 ///
 /// `Time` is `PartialOrd` but not `Ord`, so this is `Time::min` rather than
 /// `std::cmp::min`.
-fn next_compactor_object_store_backoff(current: Time) -> Time {
-    (current * 2.0).min(millis(500))
+fn next_compactor_object_store_backoff(current: Time, max_backoff: Time) -> Time {
+    (current * 2.0).min(max_backoff)
 }
 
 fn compactor_run_error_is_object_store(error: &CompactorRunError) -> bool {
@@ -1354,14 +1416,17 @@ async fn compact_polled_kafka_wal_records_inner(
 async fn poll_accumulated_log_compaction_records(
     consumer: &mut (impl LogWalConsumer + ?Sized),
     initial_timeout: Time,
+    accumulation_window: Time,
+    accumulation_poll_timeout: Time,
+    max_records_per_batch: NonZeroUsize,
 ) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
     let mut records = consumer.poll(initial_timeout).await?;
-    if records.is_empty() || records.len() >= LOG_COMPACTION_MAX_RECORDS_PER_BATCH {
+    if records.is_empty() || records.len() >= max_records_per_batch.get() {
         return Ok(records);
     }
 
-    let deadline = Instant::now() + LOG_COMPACTION_ACCUMULATION_WINDOW.to_std();
-    while records.len() < LOG_COMPACTION_MAX_RECORDS_PER_BATCH {
+    let deadline = Instant::now() + accumulation_window.to_std();
+    while records.len() < max_records_per_batch.get() {
         let remaining = deadline.saturating_duration_since(Instant::now()).as_time();
         if remaining <= <Time as TimeExt>::ZERO {
             break;
@@ -1369,7 +1434,7 @@ async fn poll_accumulated_log_compaction_records(
 
         // `Time` is `PartialOrd` but not `Ord`, so `Time::min` rather than
         // `std::cmp::min`.
-        let poll_timeout = remaining.min(LOG_COMPACTION_ACCUMULATION_POLL_TIMEOUT);
+        let poll_timeout = remaining.min(accumulation_poll_timeout);
         let next = consumer.poll(poll_timeout).await?;
         if next.is_empty() {
             break;
@@ -21836,6 +21901,77 @@ mod tests {
     }
 
     #[test]
+    fn compactor_policy_uses_defaults_and_cli_overrides() {
+        let defaults = ServiceConfig::default();
+        check!(defaults.compactor_wal_poll_timeout == millis(500));
+        check!(defaults.compactor_accumulation_window == secs(2));
+        check!(defaults.compactor_accumulation_poll_timeout == millis(250));
+        check!(defaults.compactor_max_records_per_batch.get() == 4096);
+        check!(defaults.compactor_idle_interval == millis(10));
+        check!(defaults.compactor_object_store_initial_backoff == millis(10));
+        check!(defaults.compactor_object_store_max_backoff == millis(500));
+
+        let configured = ServiceConfig::try_parse_from([
+            "crabka-observability",
+            "--target=compactor",
+            "--compactor-wal-poll-timeout=600ms",
+            "--compactor-accumulation-window=3s",
+            "--compactor-accumulation-poll-timeout=300ms",
+            "--compactor-max-records-per-batch=5000",
+            "--compactor-idle-interval=20ms",
+            "--compactor-object-store-initial-backoff=20ms",
+            "--compactor-object-store-max-backoff=600ms",
+        ])
+        .expect("valid compactor policy");
+        check!(configured.compactor_wal_poll_timeout == millis(600));
+        check!(configured.compactor_accumulation_window == secs(3));
+        check!(configured.compactor_accumulation_poll_timeout == millis(300));
+        check!(configured.compactor_max_records_per_batch.get() == 5000);
+        check!(configured.compactor_idle_interval == millis(20));
+        check!(configured.compactor_object_store_initial_backoff == millis(20));
+        check!(configured.compactor_object_store_max_backoff == millis(600));
+    }
+
+    #[test]
+    fn compactor_policy_rejects_zero_and_invalid_bounds() {
+        for argument in [
+            "--compactor-wal-poll-timeout=0s",
+            "--compactor-accumulation-window=0s",
+            "--compactor-accumulation-poll-timeout=0s",
+            "--compactor-max-records-per-batch=0",
+            "--compactor-idle-interval=0s",
+            "--compactor-object-store-initial-backoff=0s",
+            "--compactor-object-store-max-backoff=0s",
+        ] {
+            check!(
+                ServiceConfig::try_parse_from([
+                    "crabka-observability",
+                    "--target=compactor",
+                    argument,
+                ])
+                .is_err(),
+                "accepted {argument}"
+            );
+        }
+
+        let poll_above_window = ServiceConfig::parse_from([
+            "crabka-observability",
+            "--target=compactor",
+            "--compactor-accumulation-window=1s",
+            "--compactor-accumulation-poll-timeout=2s",
+        ]);
+        check!(validate_compactor_policy(&poll_above_window).is_err());
+
+        let initial_above_max = ServiceConfig::parse_from([
+            "crabka-observability",
+            "--target=compactor",
+            "--compactor-object-store-initial-backoff=2s",
+            "--compactor-object-store-max-backoff=1s",
+        ]);
+        check!(validate_compactor_policy(&initial_above_max).is_err());
+    }
+
+    #[test]
     fn service_dependencies_builder_methods_preserve_existing_fields() {
         #[derive(Clone)]
         struct TestLimiter;
@@ -21916,8 +22052,9 @@ mod tests {
             (millis(300), millis(500)),
             (millis(500), millis(500)),
         ] {
-            check!(next_compactor_object_store_backoff(current) == want);
+            check!(next_compactor_object_store_backoff(current, millis(500)) == want);
         }
+        check!(next_compactor_object_store_backoff(millis(300), millis(400)) == millis(400));
     }
 
     #[test]

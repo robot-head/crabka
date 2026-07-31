@@ -21,10 +21,10 @@ newtype, tokio tests.
 
 ### Task 2: Compactor policy
 
-- [ ] Add failing tests for WAL poll timeout, accumulation window/poll timeout, maximum records, idle interval, and initial/maximum object-store retry backoff.
-- [ ] Add the typed CLI/environment fields and cross-field validation.
-- [ ] Replace the existing literals in all compactor entry points and retry paths.
-- [ ] Run focused compactor and CLI/environment tests; commit the compactor slice.
+- [x] Add failing tests for WAL poll timeout, accumulation window/poll timeout, maximum records, idle interval, and initial/maximum object-store retry backoff.
+- [x] Add the typed CLI/environment fields and cross-field validation.
+- [x] Replace the existing literals in all compactor entry points and retry paths.
+- [x] Run focused compactor and CLI/environment tests; commit the compactor slice.
 
 ### Task 3: Querier policy
 

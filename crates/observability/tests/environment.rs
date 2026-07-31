@@ -1,3 +1,5 @@
+use std::num::NonZeroUsize;
+
 use clap::Parser;
 use crabka_observability::{QuerierIndexSource, Role, ServiceConfig};
 use crabka_units::{bytes, days, kibibytes, millis, minutes, nanos, secs};
@@ -58,6 +60,31 @@ fn service_config_reads_environment() {
                 Some("300ms"),
             ),
             ("CRABKA_OBSERVABILITY_WAL_CONNECT_MAX_BACKOFF", Some("3s")),
+            (
+                "CRABKA_OBSERVABILITY_COMPACTOR_WAL_POLL_TIMEOUT",
+                Some("600ms"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_COMPACTOR_ACCUMULATION_WINDOW",
+                Some("3s"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_COMPACTOR_ACCUMULATION_POLL_TIMEOUT",
+                Some("300ms"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_COMPACTOR_MAX_RECORDS_PER_BATCH",
+                Some("5000"),
+            ),
+            ("CRABKA_OBSERVABILITY_COMPACTOR_IDLE_INTERVAL", Some("20ms")),
+            (
+                "CRABKA_OBSERVABILITY_COMPACTOR_OBJECT_STORE_INITIAL_BACKOFF",
+                Some("20ms"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_COMPACTOR_OBJECT_STORE_MAX_BACKOFF",
+                Some("600ms"),
+            ),
         ],
         || {
             let config =
@@ -91,6 +118,13 @@ fn service_config_reads_environment() {
                     wal_connect_attempt_timeout: secs(16),
                     wal_connect_initial_backoff: millis(300),
                     wal_connect_max_backoff: secs(3),
+                    compactor_wal_poll_timeout: millis(600),
+                    compactor_accumulation_window: secs(3),
+                    compactor_accumulation_poll_timeout: millis(300),
+                    compactor_max_records_per_batch: NonZeroUsize::new(5000).unwrap(),
+                    compactor_idle_interval: millis(20),
+                    compactor_object_store_initial_backoff: millis(20),
+                    compactor_object_store_max_backoff: millis(600),
                 }
             );
         },
