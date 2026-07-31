@@ -74,12 +74,13 @@ using the existing resolved heartbeat value. The Raft boundary receives
 The fetch-miss limit replaces the fixed consecutive-miss comparison. The
 queue capacity replaces the fixed Tokio command-channel capacity.
 
-The metadata Raft fetch maximum replaces the coupled `8MiB` decoded-log read
-constant for replication serving, committed-image application, and restart
-replay. Replication serving performs one bounded read per response.
-Committed-image application and restart replay repeat bounded reads until
-their target offset, so lowering the budget cannot skip committed metadata.
-Snapshot fetch keeps its separate existing maximum.
+The metadata Raft fetch maximum replaces the coupled `8MiB` constant for
+replication serving, committed-image application, restart replay, and each
+snapshot-fetch request chunk. Replication serving performs one bounded read
+per response. Committed-image application and restart replay repeat bounded
+reads until their target offset, so lowering the budget cannot skip committed
+metadata. The existing metadata snapshot fetch maximum remains the separate
+total snapshot-size security cap.
 
 ## Errors
 
@@ -98,6 +99,7 @@ Tests cover:
 - derived cadence for omission and exact cadence for explicit heartbeat;
 - fetch-miss threshold and command queue capacity propagation;
 - bounded replication responses;
+- bounded snapshot-fetch request chunks;
 - multi-chunk committed application and restart replay without skipped
   records;
 - omitted CRD fields rendering no new configuration;
