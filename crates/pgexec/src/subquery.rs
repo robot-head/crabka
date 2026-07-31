@@ -586,7 +586,8 @@ fn resolve_types_in_expr(
                     ),
                 },
                 filter: match &fc.filter {
-                    Some(predicate) => Some(Box::new(resolve_types_in_expr(catalog_kv, resolution, predicate, ctes,
+                    Some(predicate) => Some(Box::new(resolve_types_in_expr(
+                        catalog_kv, resolution, predicate, ctes,
                     )?)),
                     None => None,
                 },

@@ -91,7 +91,8 @@ fn describe_query_expr_inner(
             "FOR UPDATE/SHARE with CTEs is not supported".into(),
         ));
     }
-    let query_ctes = crate::cte::describe_with_clause(catalog_kv, resolution, q.with.as_ref(), ctes)?;
+    let query_ctes =
+        crate::cte::describe_with_clause(catalog_kv, resolution, q.with.as_ref(), ctes)?;
     match &q.body {
         SetExpr::Query(QueryBody::Select(s)) => {
             if !allow_locking {
@@ -101,7 +102,13 @@ fn describe_query_expr_inner(
                 crate::exec::reject_from_less_wildcard(&s.projection)?;
                 Scope::empty()
             } else {
-                crate::exec::build_from_schema_with_ctes(catalog_kv, resolution, &s.from, &query_ctes)?.scope
+                crate::exec::build_from_schema_with_ctes(
+                    catalog_kv,
+                    resolution,
+                    &s.from,
+                    &query_ctes,
+                )?
+                .scope
             };
             let projection = crate::subquery::resolve_types_in_projection_with_ctes(
                 catalog_kv,
@@ -117,8 +124,12 @@ fn describe_query_expr_inner(
             Ok(fields)
         }
         SetExpr::Query(QueryBody::Values(v)) => {
-            let rel =
-                crate::values::values_schema_relation_with_ctes(catalog_kv, resolution, v, &query_ctes)?;
+            let rel = crate::values::values_schema_relation_with_ctes(
+                catalog_kv,
+                resolution,
+                v,
+                &query_ctes,
+            )?;
             Ok(rel
                 .scope
                 .columns

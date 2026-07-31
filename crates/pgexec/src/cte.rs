@@ -439,7 +439,8 @@ fn check_recursive_term_types(
             &cte.name,
         ),
     );
-    let produced = crate::setops::set_expr_columns(ctx.catalog_kv, ctx.fctx.resolution, recursive, &scoped)?;
+    let produced =
+        crate::setops::set_expr_columns(ctx.catalog_kv, ctx.fctx.resolution, recursive, &scoped)?;
     if produced.len() != seed.width() {
         return Err(ExecError::SetOpColumnCount {
             op: SetOp::Union,

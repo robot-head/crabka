@@ -40,7 +40,8 @@ pub(crate) fn values_schema_relation_with_ctes(
     v: &ValuesStmt,
     ctes: &crate::cte::CteContext,
 ) -> Result<crate::join::Relation, ExecError> {
-    let resolved = crate::subquery::resolve_types_in_values_with_ctes(catalog_kv, resolution, v, ctes)?;
+    let resolved =
+        crate::subquery::resolve_types_in_values_with_ctes(catalog_kv, resolution, v, ctes)?;
     let schema = describe_values(&resolved)?;
     Ok(crate::join::Relation {
         scope: scope_from_schema(&schema, None),

@@ -91,7 +91,8 @@ fn resolve_set_columns(
             let scope = if s.from.is_empty() {
                 Scope::empty()
             } else {
-                crate::exec::build_from_schema_with_ctes(catalog_kv, resolution, &s.from, ctes)?.scope
+                crate::exec::build_from_schema_with_ctes(catalog_kv, resolution, &s.from, ctes)?
+                    .scope
             };
             // Run the SP34 scalar-subquery type pass (so a subquery column's OID is
             // known without executing), then resolve names + types + unknown-ness.
@@ -117,7 +118,8 @@ fn resolve_set_columns(
                 .collect())
         }
         SetExpr::Query(QueryBody::Values(v)) => {
-            let rel = crate::values::values_schema_relation_with_ctes(catalog_kv, resolution, v, ctes)?;
+            let rel =
+                crate::values::values_schema_relation_with_ctes(catalog_kv, resolution, v, ctes)?;
             Ok(rel
                 .scope
                 .columns
