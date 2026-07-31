@@ -935,12 +935,20 @@ impl ArrayValue {
     /// covers the one-dimensional case and the array input/slice code builds the
     /// header itself. A header whose lengths do not multiply out to `elems.len()`
     /// is normalized back to one dimension rather than left inconsistent.
+    ///
+    /// A header carrying **no elements** is likewise collapsed to zero
+    /// dimensions. `PostgreSQL` has no zero-length dimension — `array_recv`,
+    /// `construct_md_array` and the slice code all funnel an empty result into
+    /// `construct_empty_array` — so `'{{},{}}'`, an out-of-order slice like
+    /// `(ARRAY[1, 2, 3])[3:1]`, and the `ndim = 1, len = 0` header every libpq
+    /// driver sends for an empty array are one and the same value, the one whose
+    /// `array_ndims` is NULL.
     pub fn with_dims(elem: ElemType, elems: Vec<Datum>, dims: Vec<ArrayDim>) -> Self {
         let product: usize = dims
             .iter()
             .map(|d| usize::try_from(d.len).unwrap_or(0))
             .product();
-        if dims.is_empty() || product != elems.len() {
+        if dims.is_empty() || elems.is_empty() || product != elems.len() {
             return ArrayValue::new(elem, elems);
         }
         ArrayValue { elem, elems, dims }
@@ -1830,6 +1838,25 @@ mod tests {
             vec![ArrayDim::new(1, 2), ArrayDim::new(1, 2)],
         );
         assert!(wrong.dims == vec![ArrayDim::new(1, 3)]);
+    }
+
+    /// `PostgreSQL` has no zero-length dimension: an array with no elements is
+    /// the zero-dimensional empty array, whatever header its producer declared.
+    /// `array_recv` collapses the `ndim = 1, len = 0` form drivers send, and an
+    /// out-of-order slice like `(ARRAY[1, 2, 3])[3:1]` collapses the same way.
+    #[test]
+    fn a_header_with_no_elements_collapses_to_zero_dimensions() {
+        use assert2::assert;
+        let empty = ArrayValue::new(ElemType::Int4, Vec::new());
+        for header in [
+            vec![ArrayDim::new(1, 0)],
+            vec![ArrayDim::new(3, 0)],
+            vec![ArrayDim::new(1, 2), ArrayDim::new(1, 0)],
+        ] {
+            let collapsed = ArrayValue::with_dims(ElemType::Int4, Vec::new(), header.clone());
+            assert!(collapsed == empty, "{header:?}");
+            assert!(collapsed.ndims() == 0, "{header:?}");
+        }
     }
 
     #[test]

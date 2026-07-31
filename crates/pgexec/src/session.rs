@@ -8271,10 +8271,13 @@ fn decode_jsonb_binary(value: &[u8]) -> Result<Datum, PgError> {
 /// `array_recv` for a one-dimensional array — the layout
 /// `crabka_pgtypes::encoding` writes, read back exactly.
 ///
-/// The 12-byte `ndim = 0` header (no dimension block, no elements) is the empty
-/// array libpq and `tokio-postgres` emit, so it must round-trip. Higher
-/// dimensions and lower bounds other than 1 are crabka's documented deferrals
-/// rather than malformed input, so they report 0A000.
+/// Both spellings of the empty array must land on the zero-dimensional value:
+/// the 12-byte `ndim = 0` header (no dimension block, no elements), and the
+/// `ndim = 1, len = 0` header libpq drivers actually send, since `postgres-types`
+/// always writes exactly one dimension. `ArrayValue::with_dims` collapses the
+/// latter the way `array_recv` does. Higher dimensions and lower bounds other
+/// than 1 are crabka's documented deferrals rather than malformed input, so they
+/// report 0A000.
 fn decode_array_binary(
     value: &[u8],
     elem: ElemType,
@@ -12332,7 +12335,7 @@ mod notify_and_binary_parameter_tests {
     fn array_binary_parameters_round_trip_the_encoder() {
         let cases = [
             ArrayValue::new(ElemType::Int4, vec![Datum::Int4(1), Datum::Int4(-2)]),
-            // The empty array is the 12-byte `ndim = 0` form tokio-postgres emits.
+            // The empty array is the 12-byte `ndim = 0` form crabka encodes.
             ArrayValue::new(ElemType::Int4, vec![]),
             ArrayValue::new(
                 ElemType::Text,
@@ -12380,6 +12383,51 @@ mod notify_and_binary_parameter_tests {
             ColumnType::Array(ElemType::Text),
         );
         assert!(decoded.expect("decode") == empty);
+    }
+
+    /// `array_recv`: a header that yields no elements is the zero-dimensional
+    /// empty array, whichever form the driver wrote. crabka's own encoder emits
+    /// the 12-byte `ndim = 0` header, but `postgres-types` always writes exactly
+    /// one dimension — an empty slice arrives as `ndim = 1, len = 0` — and
+    /// PostgreSQL has no zero-length dimension to keep, so `array_ndims` of the
+    /// result is NULL either way.
+    #[test]
+    fn a_binary_array_with_no_elements_decodes_to_zero_dimensions() {
+        let empty = Datum::Array(ArrayValue::new(ElemType::Int4, vec![]));
+        let single = Datum::Array(ArrayValue::new(ElemType::Int4, vec![Datum::Int4(7)]));
+        let mut one_element = array_header(1, 0, oids::INT4, Some((1, 1)));
+        one_element.extend_from_slice(&int4_element(7));
+
+        let cases = [
+            ("ndim = 0", array_header(0, 0, oids::INT4, None), &empty, 0),
+            (
+                "ndim = 1, len = 0",
+                array_header(1, 0, oids::INT4, Some((0, 1))),
+                &empty,
+                0,
+            ),
+            (
+                "ndim = 1, len = 0, lower bound 3",
+                array_header(1, 0, oids::INT4, Some((0, 3))),
+                &empty,
+                0,
+            ),
+            ("ndim = 1, len = 1", one_element, &single, 1),
+        ];
+
+        for (name, bytes, expected, ndims) in cases {
+            let decoded = decode(
+                &param(oids::INT4ARRAY, 1, &bytes),
+                ColumnType::Array(ElemType::Int4),
+            )
+            .expect("decode");
+            assert!(&decoded == expected, "{name}");
+            let decoded_ndims = match &decoded {
+                Datum::Array(array) => Some(array.ndims()),
+                _ => None,
+            };
+            assert!(decoded_ndims == Some(ndims), "{name}");
+        }
     }
 
     #[test]
