@@ -953,3 +953,22 @@ fn consumer_timing_is_configurable_only_on_the_consume_role() {
         assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT"));
     }
 }
+
+#[test]
+fn consumer_behavior_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    for setting in [
+        "CRABKA_DEMO_CONSUMER_AUTO_OFFSET_RESET: \"${CRABKA_DEMO_CONSUMER_AUTO_OFFSET_RESET:-latest}\"",
+        "CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL: \"${CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL:-read-uncommitted}\"",
+        "CRABKA_DEMO_CONSUMER_ASSIGNOR: \"${CRABKA_DEMO_CONSUMER_ASSIGNOR:-range}\"",
+    ] {
+        assert2::assert!(consume.contains(setting));
+    }
+    for service in ["demo-produce", "demo-stream"] {
+        let service = compose_service_block(&compose, service);
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_AUTO_OFFSET_RESET"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_ASSIGNOR"));
+    }
+}

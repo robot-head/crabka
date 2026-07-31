@@ -19,8 +19,9 @@ use std::{
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use crabka_client_consumer::{
-    Consumer, ConsumerFetchMaxBytes, ConsumerFetchPartitionMaxBytes, ConsumerLeaveGroupTimeout,
-    ConsumerRecord, ConsumerRetryPolicy, ConsumerSubscriptionMetadataRefreshInterval,
+    Assignor, AutoOffsetReset, Consumer, ConsumerFetchMaxBytes, ConsumerFetchPartitionMaxBytes,
+    ConsumerLeaveGroupTimeout, ConsumerRecord, ConsumerRetryPolicy,
+    ConsumerSubscriptionMetadataRefreshInterval, IsolationLevel,
 };
 use crabka_client_core::{
     ClientFrameMax, ConnectionDispatchQueueCapacity, DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
@@ -220,6 +221,15 @@ struct Cli {
         value_parser = parse::positive_time
     )]
     consumer_request_timeout: Option<Time>,
+    /// Offset-reset behavior when the classic Consumer has no valid offset.
+    #[arg(long, env = "CRABKA_DEMO_CONSUMER_AUTO_OFFSET_RESET")]
+    consumer_auto_offset_reset: Option<AutoOffsetReset>,
+    /// Transaction visibility for classic Consumer fetches.
+    #[arg(long, env = "CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL")]
+    consumer_isolation_level: Option<IsolationLevel>,
+    /// Partition assignment strategy for the classic Consumer group.
+    #[arg(long, env = "CRABKA_DEMO_CONSUMER_ASSIGNOR")]
+    consumer_assignor: Option<Assignor>,
     /// Kafka Streams broker DNS timeout.
     #[arg(
         long,
@@ -513,6 +523,37 @@ fn effective_consumer_timing(cli: &Cli) -> std::io::Result<(Time, Time, Time, Ti
     ))
 }
 
+fn effective_consumer_behavior(
+    cli: &Cli,
+) -> std::io::Result<(AutoOffsetReset, IsolationLevel, Assignor)> {
+    let configured = [
+        (
+            "--consumer-auto-offset-reset",
+            cli.consumer_auto_offset_reset.is_some(),
+        ),
+        (
+            "--consumer-isolation-level",
+            cli.consumer_isolation_level.is_some(),
+        ),
+        ("--consumer-assignor", cli.consumer_assignor.is_some()),
+    ];
+    if cli.role != Role::Consume
+        && let Some((name, _)) = configured.into_iter().find(|(_, set)| *set)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{name} is only valid with --role consume"),
+        ));
+    }
+    Ok((
+        cli.consumer_auto_offset_reset
+            .unwrap_or(AutoOffsetReset::Latest),
+        cli.consumer_isolation_level
+            .unwrap_or(IsolationLevel::ReadUncommitted),
+        cli.consumer_assignor.unwrap_or(Assignor::Range),
+    ))
+}
+
 fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
     if cli.role != Role::Stream
         && let Some(timeout) = cli.streams_broker_dns_timeout
@@ -721,6 +762,8 @@ async fn main() -> Result<(), BoxError> {
         consumer_heartbeat_interval,
         consumer_request_timeout,
     ) = effective_consumer_timing(&cli)?;
+    let (consumer_auto_offset_reset, consumer_isolation_level, consumer_assignor) =
+        effective_consumer_behavior(&cli)?;
     let streams_broker_dns_timeout = effective_streams_broker_dns_timeout(&cli)?;
     let (streams_poll_interval, streams_commit_interval) = effective_streams_runtime_cadence(&cli)?;
     let streams_rebalance_timeout = effective_streams_rebalance_timeout(&cli)?;
@@ -794,6 +837,9 @@ async fn main() -> Result<(), BoxError> {
                 consumer_rebalance_timeout,
                 consumer_heartbeat_interval,
                 consumer_request_timeout,
+                consumer_auto_offset_reset,
+                consumer_isolation_level,
+                consumer_assignor,
                 client_dispatch_queue_capacity,
                 client_frame_max,
             ))
@@ -1010,6 +1056,9 @@ async fn run_consume(
     consumer_rebalance_timeout: Time,
     consumer_heartbeat_interval: Time,
     consumer_request_timeout: Time,
+    consumer_auto_offset_reset: AutoOffsetReset,
+    consumer_isolation_level: IsolationLevel,
+    consumer_assignor: Assignor,
     client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
     client_frame_max: ClientFrameMax,
 ) -> Result<(), BoxError> {
@@ -1035,6 +1084,9 @@ async fn run_consume(
         .rebalance_timeout(consumer_rebalance_timeout)
         .heartbeat_interval(consumer_heartbeat_interval)
         .request_timeout(consumer_request_timeout)
+        .auto_offset_reset(consumer_auto_offset_reset)
+        .isolation_level(consumer_isolation_level)
+        .assignor(consumer_assignor)
         .build()
         .await?;
     tracing::info!(topic = %cli.input_topic, "order processor starting");
@@ -1167,6 +1219,35 @@ async fn futures_idle() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn consumer_behavior_uses_defaults_and_independent_overrides() {
+        let defaults = Cli::try_parse_from(["observability-demo-app", "--role", "consume"])
+            .expect("default CLI");
+        let (offset_reset, isolation, assignor) =
+            effective_consumer_behavior(&defaults).expect("default behavior");
+        assert2::assert!(matches!(offset_reset, AutoOffsetReset::Latest));
+        assert2::assert!(isolation == IsolationLevel::ReadUncommitted);
+        assert2::assert!(assignor == Assignor::Range);
+
+        let custom = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "consume",
+            "--consumer-auto-offset-reset",
+            "earliest",
+            "--consumer-isolation-level",
+            "read-committed",
+            "--consumer-assignor",
+            "cooperative-sticky",
+        ])
+        .expect("custom CLI");
+        let (offset_reset, isolation, assignor) =
+            effective_consumer_behavior(&custom).expect("custom behavior");
+        assert2::assert!(matches!(offset_reset, AutoOffsetReset::Earliest));
+        assert2::assert!(isolation == IsolationLevel::ReadCommitted);
+        assert2::assert!(assignor == Assignor::CooperativeSticky);
+    }
 
     #[test]
     fn consumer_timing_uses_defaults_and_independent_overrides() {
@@ -1359,6 +1440,9 @@ mod tests {
             consumer_rebalance_timeout: None,
             consumer_heartbeat_interval: None,
             consumer_request_timeout: None,
+            consumer_auto_offset_reset: None,
+            consumer_isolation_level: None,
+            consumer_assignor: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1441,6 +1525,9 @@ mod tests {
             consumer_rebalance_timeout: None,
             consumer_heartbeat_interval: None,
             consumer_request_timeout: None,
+            consumer_auto_offset_reset: None,
+            consumer_isolation_level: None,
+            consumer_assignor: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1532,6 +1619,9 @@ mod tests {
             consumer_rebalance_timeout: None,
             consumer_heartbeat_interval: None,
             consumer_request_timeout: None,
+            consumer_auto_offset_reset: None,
+            consumer_isolation_level: None,
+            consumer_assignor: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1626,6 +1716,9 @@ mod tests {
             consumer_rebalance_timeout: None,
             consumer_heartbeat_interval: None,
             consumer_request_timeout: None,
+            consumer_auto_offset_reset: None,
+            consumer_isolation_level: None,
+            consumer_assignor: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1682,6 +1775,9 @@ mod tests {
             consumer_rebalance_timeout: None,
             consumer_heartbeat_interval: None,
             consumer_request_timeout: None,
+            consumer_auto_offset_reset: None,
+            consumer_isolation_level: None,
+            consumer_assignor: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
