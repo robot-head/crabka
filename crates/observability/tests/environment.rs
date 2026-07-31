@@ -85,6 +85,38 @@ fn service_config_reads_environment() {
                 "CRABKA_OBSERVABILITY_COMPACTOR_OBJECT_STORE_MAX_BACKOFF",
                 Some("600ms"),
             ),
+            (
+                "CRABKA_OBSERVABILITY_QUERIER_FRONTIER_REFRESH_INTERVAL",
+                Some("6s"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_QUERIER_DYNAMIC_INDEX_CACHE_TTL",
+                Some("7s"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_QUERIER_SHARD_INDEX_CACHE_TTL",
+                Some("6m"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_QUERIER_SHARD_FETCH_CONCURRENCY",
+                Some("33"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_QUERIER_COLD_BLOCK_FETCH_CONCURRENCY",
+                Some("9"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_QUERIER_HOT_TAIL_BUCKET_WIDTH",
+                Some("2m"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_QUERIER_HOT_TAIL_INTERVAL",
+                Some("60ms"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_QUERIER_DEPENDENCY_RECONNECT_INTERVAL",
+                Some("600ms"),
+            ),
         ],
         || {
             let config =
@@ -125,6 +157,14 @@ fn service_config_reads_environment() {
                     compactor_idle_interval: millis(20),
                     compactor_object_store_initial_backoff: millis(20),
                     compactor_object_store_max_backoff: millis(600),
+                    querier_frontier_refresh_interval: secs(6),
+                    querier_dynamic_index_cache_ttl: secs(7),
+                    querier_shard_index_cache_ttl: minutes(6),
+                    querier_shard_fetch_concurrency: NonZeroUsize::new(33).unwrap(),
+                    querier_cold_block_fetch_concurrency: NonZeroUsize::new(9).unwrap(),
+                    querier_hot_tail_bucket_width: minutes(2),
+                    querier_hot_tail_interval: millis(60),
+                    querier_dependency_reconnect_interval: millis(600),
                 }
             );
         },

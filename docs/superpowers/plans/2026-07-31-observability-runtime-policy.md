@@ -28,10 +28,10 @@ newtype, tokio tests.
 
 ### Task 3: Querier policy
 
-- [ ] Add failing tests for frontier refresh, both index-cache TTLs, shard and cold-block fetch concurrency, hot-tail bucket/cadence, and dependency reconnect interval.
-- [ ] Add the typed CLI/environment fields.
-- [ ] Route each value through the existing querier construction and background loops.
-- [ ] Run focused querier, HTTP, and CLI/environment tests; commit the querier slice.
+- [x] Add failing tests for frontier refresh, both index-cache TTLs, shard and cold-block fetch concurrency, hot-tail bucket/cadence, and dependency reconnect interval.
+- [x] Add the typed CLI/environment fields.
+- [x] Route each value through the existing querier construction and background loops.
+- [x] Run focused querier, HTTP, and CLI/environment tests; commit the querier slice.
 
 ### Task 4: Closure
 

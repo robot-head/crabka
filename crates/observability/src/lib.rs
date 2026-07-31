@@ -295,6 +295,38 @@ pub struct ServiceConfig {
 
     #[arg(long, env = "CRABKA_OBSERVABILITY_COMPACTOR_OBJECT_STORE_MAX_BACKOFF", default_value = "500ms", value_parser = crabka_units::parse::positive_time)]
     pub compactor_object_store_max_backoff: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_QUERIER_FRONTIER_REFRESH_INTERVAL", default_value = "5s", value_parser = crabka_units::parse::positive_time)]
+    pub querier_frontier_refresh_interval: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_QUERIER_DYNAMIC_INDEX_CACHE_TTL", default_value = "5s", value_parser = crabka_units::parse::positive_time)]
+    pub querier_dynamic_index_cache_ttl: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_QUERIER_SHARD_INDEX_CACHE_TTL", default_value = "5m", value_parser = crabka_units::parse::positive_time)]
+    pub querier_shard_index_cache_ttl: Time,
+
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_QUERIER_SHARD_FETCH_CONCURRENCY",
+        default_value = "32"
+    )]
+    pub querier_shard_fetch_concurrency: NonZeroUsize,
+
+    #[arg(
+        long,
+        env = "CRABKA_OBSERVABILITY_QUERIER_COLD_BLOCK_FETCH_CONCURRENCY",
+        default_value = "8"
+    )]
+    pub querier_cold_block_fetch_concurrency: NonZeroUsize,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_QUERIER_HOT_TAIL_BUCKET_WIDTH", default_value = "1m", value_parser = crabka_units::parse::positive_time)]
+    pub querier_hot_tail_bucket_width: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_QUERIER_HOT_TAIL_INTERVAL", default_value = "50ms", value_parser = crabka_units::parse::positive_time)]
+    pub querier_hot_tail_interval: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_QUERIER_DEPENDENCY_RECONNECT_INTERVAL", default_value = "500ms", value_parser = crabka_units::parse::positive_time)]
+    pub querier_dependency_reconnect_interval: Time,
 }
 
 impl Default for ServiceConfig {
@@ -335,6 +367,16 @@ impl Default for ServiceConfig {
             compactor_idle_interval: millis(10),
             compactor_object_store_initial_backoff: millis(10),
             compactor_object_store_max_backoff: millis(500),
+            querier_frontier_refresh_interval: secs(5),
+            querier_dynamic_index_cache_ttl: secs(5),
+            querier_shard_index_cache_ttl: minutes(5),
+            querier_shard_fetch_concurrency: NonZeroUsize::new(32)
+                .expect("default querier shard fetch concurrency is nonzero"),
+            querier_cold_block_fetch_concurrency: NonZeroUsize::new(8)
+                .expect("default querier cold-block fetch concurrency is nonzero"),
+            querier_hot_tail_bucket_width: minutes(1),
+            querier_hot_tail_interval: millis(50),
+            querier_dependency_reconnect_interval: millis(500),
         }
     }
 }
@@ -627,16 +669,19 @@ pub fn run(config: ServiceConfig) -> Result<ServiceStatus, Infallible> {
         compactor_idle_interval: _compactor_idle_interval,
         compactor_object_store_initial_backoff: _compactor_object_store_initial_backoff,
         compactor_object_store_max_backoff: _compactor_object_store_max_backoff,
+        querier_frontier_refresh_interval: _querier_frontier_refresh_interval,
+        querier_dynamic_index_cache_ttl: _querier_dynamic_index_cache_ttl,
+        querier_shard_index_cache_ttl: _querier_shard_index_cache_ttl,
+        querier_shard_fetch_concurrency: _querier_shard_fetch_concurrency,
+        querier_cold_block_fetch_concurrency: _querier_cold_block_fetch_concurrency,
+        querier_hot_tail_bucket_width: _querier_hot_tail_bucket_width,
+        querier_hot_tail_interval: _querier_hot_tail_interval,
+        querier_dependency_reconnect_interval: _querier_dependency_reconnect_interval,
     } = config;
 
     Ok(ServiceStatus { role: target })
 }
 
-const COMPACTION_FRONTIER_REFRESH_INTERVAL: Time = secs(5);
-const DYNAMIC_INDEX_CACHE_TTL: Time = secs(5);
-const DYNAMIC_INDEX_SHARD_CACHE_TTL: Time = minutes(5);
-const DYNAMIC_INDEX_SHARD_FETCH_CONCURRENCY: usize = 32;
-const OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY: usize = 8;
 fn build_compactor_configured_object_store(
     config: &ServiceConfig,
     object_store: Option<&dyn ObjectStore>,
@@ -1222,12 +1267,13 @@ fn spawn_compaction_frontier_refresher(
     frontier: SharedCompactionFrontier,
     hot_tail: BufferedLogHotTail,
     token: CancellationToken,
+    refresh_interval: Time,
 ) {
     tokio::spawn(async move {
         loop {
             tokio::select! {
                 () = token.cancelled() => return,
-                () = sleep(COMPACTION_FRONTIER_REFRESH_INTERVAL.to_std()) => {}
+                () = sleep(refresh_interval.to_std()) => {}
             }
 
             if let Err(error) =
@@ -2866,13 +2912,11 @@ fn ingest_quota_bytes(records: &[WalLogRecord]) -> ByteSize {
 ///
 /// Coarse enough that a wide retention window holds few buckets, fine enough that
 /// a typical query window (minutes to hours) only touches the buckets it overlaps.
-const HOT_TAIL_BUCKET: Time = minutes(1);
-
 /// Map a record timestamp to its bucket key. Uses [`i64::div_euclid`] so negative
 /// timestamps (pre-epoch) still bucket monotonically and the bucket containing a
 /// given timestamp is unambiguous.
-fn hot_tail_bucket_key(timestamp_ns: i64) -> i64 {
-    timestamp_ns.div_euclid(HOT_TAIL_BUCKET.nanos_i64())
+fn hot_tail_bucket_key(timestamp_ns: i64, bucket_width: Time) -> i64 {
+    timestamp_ns.div_euclid(bucket_width.nanos_i64())
 }
 
 /// Buffer holding polled hot-tail records.
@@ -2890,8 +2934,9 @@ fn hot_tail_bucket_key(timestamp_ns: i64) -> i64 {
 /// [`records_in_range`](Self::records_in_range) walks only the buckets overlapping the
 /// query window, so a 30-minute query over a buffer holding hours of logs touches only
 /// the window's records instead of scanning the entire buffer.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct HotTailBuffer {
+    bucket_width: Time,
     records: Vec<WalLogRecord>,
     buckets: BTreeMap<i64, Vec<usize>>,
 }
@@ -2899,7 +2944,7 @@ struct HotTailBuffer {
 impl HotTailBuffer {
     fn push(&mut self, record: WalLogRecord) {
         let index = self.records.len();
-        let bucket = hot_tail_bucket_key(record.timestamp_ns);
+        let bucket = hot_tail_bucket_key(record.timestamp_ns, self.bucket_width);
         self.records.push(record);
         self.buckets.entry(bucket).or_default().push(index);
     }
@@ -2927,7 +2972,7 @@ impl HotTailBuffer {
         self.buckets.clear();
         for (index, record) in self.records.iter().enumerate() {
             self.buckets
-                .entry(hot_tail_bucket_key(record.timestamp_ns))
+                .entry(hot_tail_bucket_key(record.timestamp_ns, self.bucket_width))
                 .or_default()
                 .push(index);
         }
@@ -2940,8 +2985,8 @@ impl HotTailBuffer {
         if start_ns > end_ns {
             return Vec::new();
         }
-        let start_bucket = hot_tail_bucket_key(start_ns);
-        let end_bucket = hot_tail_bucket_key(end_ns);
+        let start_bucket = hot_tail_bucket_key(start_ns, self.bucket_width);
+        let end_bucket = hot_tail_bucket_key(end_ns, self.bucket_width);
         let mut matches: Vec<usize> = Vec::new();
         for (_bucket, indices) in self.buckets.range(start_bucket..=end_bucket) {
             for &index in indices {
@@ -2963,12 +3008,30 @@ impl HotTailBuffer {
     }
 }
 
+impl Default for HotTailBuffer {
+    fn default() -> Self {
+        Self {
+            bucket_width: minutes(1),
+            records: Vec::new(),
+            buckets: BTreeMap::new(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BufferedLogHotTail {
     buffer: Arc<Mutex<HotTailBuffer>>,
 }
 
 impl BufferedLogHotTail {
+    fn with_bucket_width(bucket_width: Time) -> Self {
+        Self {
+            buffer: Arc::new(Mutex::new(HotTailBuffer {
+                bucket_width,
+                ..HotTailBuffer::default()
+            })),
+        }
+    }
     #[must_use]
     /// # Panics
     /// Panics if synchronized telemetry state is poisoned or validated columnar data is missing a required field.
@@ -3273,6 +3336,7 @@ fn spawn_log_hot_tail_poller(
     consumer: Arc<tokio::sync::Mutex<Box<dyn LogWalConsumer>>>,
     hot_tail: BufferedLogHotTail,
     frontier: Option<SharedCompactionFrontier>,
+    poll_interval: Time,
 ) {
     tokio::spawn(async move {
         loop {
@@ -3281,7 +3345,7 @@ fn spawn_log_hot_tail_poller(
                 poll_log_hot_tail_once_with_frontier(
                     consumer.as_mut(),
                     &hot_tail,
-                    millis(50),
+                    poll_interval,
                     frontier.as_ref(),
                 )
                 .await
@@ -3291,7 +3355,7 @@ fn spawn_log_hot_tail_poller(
                 Err(_) => true,
             };
             if should_back_off {
-                sleep(millis(50).to_std()).await;
+                sleep(poll_interval.to_std()).await;
             }
         }
     });
@@ -3305,23 +3369,22 @@ fn spawn_log_hot_tail_poller(
 /// `LeaveGroup`, removing the consumer from the broker's group immediately on graceful shutdown.
 #[cfg_attr(test, mutants::skip)]
 fn spawn_wal_hot_tail_connect_and_poll(
-    bootstrap: String,
-    group_id: String,
-    topic: String,
+    deferred: DeferredWalConsumerConnect,
     hot_tail: BufferedLogHotTail,
     frontier: Option<SharedCompactionFrontier>,
     token: CancellationToken,
-    client_resource_policy: ClientResourcePolicy,
+    poll_interval: Time,
+    reconnect_interval: Time,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut consumer = loop {
             tokio::select! {
                 () = token.cancelled() => return,
                 result = KafkaLogWalConsumer::connect_with_client_resource_policy(
-                    &bootstrap,
-                    group_id.clone(),
-                    topic.clone(),
-                    client_resource_policy,
+                    &deferred.bootstrap,
+                    deferred.group_id.clone(),
+                    deferred.topic.clone(),
+                    deferred.client_resource_policy,
                 ) => {
                     match result {
                         Ok(c) => break c,
@@ -3331,7 +3394,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
                             );
                             tokio::select! {
                                 () = token.cancelled() => return,
-                                () = sleep(millis(500).to_std()) => {}
+                                () = sleep(reconnect_interval.to_std()) => {}
                             }
                         }
                     }
@@ -3341,7 +3404,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
         loop {
             let result = tokio::select! {
                 () = token.cancelled() => break,
-                result = poll_log_hot_tail_once_with_frontier(&mut consumer, &hot_tail, millis(50), frontier.as_ref()) => result,
+                result = poll_log_hot_tail_once_with_frontier(&mut consumer, &hot_tail, poll_interval, frontier.as_ref()) => result,
             };
             let should_back_off = match result {
                 Ok(decoded) => decoded == 0,
@@ -3350,7 +3413,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
             if should_back_off {
                 tokio::select! {
                     () = token.cancelled() => break,
-                    () = sleep(millis(50).to_std()) => {}
+                    () = sleep(poll_interval.to_std()) => {}
                 }
             }
         }
@@ -3366,6 +3429,7 @@ fn spawn_query_authorizer_connect(
     topic: String,
     slot: Arc<tokio::sync::RwLock<Arc<dyn LogQueryAuthorizer>>>,
     client_resource_policy: ClientResourcePolicy,
+    reconnect_interval: Time,
 ) {
     tokio::spawn(async move {
         let authorizer = loop {
@@ -3381,7 +3445,7 @@ fn spawn_query_authorizer_connect(
                     eprintln!(
                         "[crabka-observability] querier authorizer connect failed; retrying: {error}"
                     );
-                    sleep(millis(500).to_std()).await;
+                    sleep(reconnect_interval.to_std()).await;
                 }
             }
         };
@@ -5592,6 +5656,7 @@ pub struct QuerierState {
     cold_store: Option<ColdObjectStoreState>,
     dynamic_index: Option<DynamicIndexSource>,
     dynamic_index_cache: DynamicIndexCache,
+    cold_block_fetch_concurrency: NonZeroUsize,
     hot_tail: Option<HotTailState>,
     delete_requests: Option<SharedLogDeleteRequests>,
     rules: SharedLokiRules,
@@ -5664,8 +5729,11 @@ enum DynamicIndexSource {
     },
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct DynamicIndexCache {
+    cache_ttl: Time,
+    shard_cache_ttl: Time,
+    shard_fetch_concurrency: NonZeroUsize,
     entries: Arc<Mutex<BTreeMap<DynamicIndexCacheKey, CachedDynamicIndex>>>,
     shard_ranges: Arc<Mutex<BTreeMap<DynamicShardRangesCacheKey, CachedShardRanges>>>,
     shard_indexes: Arc<Mutex<BTreeMap<DynamicShardIndexCacheKey, CachedDynamicIndex>>>,
@@ -5693,7 +5761,7 @@ impl DynamicIndexCache {
             .lock()
             .expect("dynamic index cache lock poisoned");
         let entry = entries.get(key)?;
-        if entry.loaded_at.elapsed().as_time() > DYNAMIC_INDEX_CACHE_TTL {
+        if entry.loaded_at.elapsed().as_time() > self.cache_ttl {
             entries.remove(key);
             return None;
         }
@@ -5724,7 +5792,7 @@ impl DynamicIndexCache {
             .lock()
             .expect("dynamic index shard range cache lock poisoned");
         let entry = ranges.get(key)?;
-        if entry.loaded_at.elapsed().as_time() > DYNAMIC_INDEX_CACHE_TTL
+        if entry.loaded_at.elapsed().as_time() > self.cache_ttl
             || entry.listed_from_ns > required_from_ns
         {
             ranges.remove(key);
@@ -5758,7 +5826,7 @@ impl DynamicIndexCache {
             .lock()
             .expect("dynamic index shard cache lock poisoned");
         let entry = entries.get(key)?;
-        if entry.loaded_at.elapsed().as_time() > DYNAMIC_INDEX_SHARD_CACHE_TTL {
+        if entry.loaded_at.elapsed().as_time() > self.shard_cache_ttl {
             entries.remove(key);
             return None;
         }
@@ -5782,6 +5850,20 @@ impl DynamicIndexCache {
                     block_index,
                 },
             );
+    }
+}
+
+impl Default for DynamicIndexCache {
+    fn default() -> Self {
+        Self {
+            cache_ttl: secs(5),
+            shard_cache_ttl: minutes(5),
+            shard_fetch_concurrency: NonZeroUsize::new(32)
+                .expect("default shard fetch concurrency is nonzero"),
+            entries: Arc::default(),
+            shard_ranges: Arc::default(),
+            shard_indexes: Arc::default(),
+        }
     }
 }
 
@@ -5865,6 +5947,7 @@ impl QuerierState {
             cold_store: None,
             dynamic_index: None,
             dynamic_index_cache: DynamicIndexCache::default(),
+            cold_block_fetch_concurrency: NonZeroUsize::new(8).unwrap_or(NonZeroUsize::MIN),
             hot_tail: None,
             delete_requests: None,
             rules: SharedLokiRules::default(),
@@ -5981,6 +6064,14 @@ impl QuerierState {
         prefix: ObjectPath,
     ) -> Self {
         self.cold_store = Some(ColdObjectStoreState { store, prefix });
+        self
+    }
+
+    fn with_runtime_policy(mut self, config: &ServiceConfig) -> Self {
+        self.dynamic_index_cache.cache_ttl = config.querier_dynamic_index_cache_ttl;
+        self.dynamic_index_cache.shard_cache_ttl = config.querier_shard_index_cache_ttl;
+        self.dynamic_index_cache.shard_fetch_concurrency = config.querier_shard_fetch_concurrency;
+        self.cold_block_fetch_concurrency = config.querier_cold_block_fetch_concurrency;
         self
     }
 
@@ -6166,7 +6257,7 @@ impl QuerierState {
                 .await?;
                 Ok::<_, BlockStoreError>((shard_range, label_index, block_index))
             })
-            .buffer_unordered(DYNAMIC_INDEX_SHARD_FETCH_CONCURRENCY)
+            .buffer_unordered(self.dynamic_index_cache.shard_fetch_concurrency.get())
             .try_collect::<Vec<_>>()
             .await?;
 
@@ -6283,7 +6374,8 @@ async fn build_querier_state_with_object_store_prefix(
             )
             .await?
         }
-    };
+    }
+    .with_runtime_policy(config);
 
     let state = if let Some(max_query_range) = config.max_query_range {
         state.with_max_query_range(max_query_range)
@@ -6485,7 +6577,8 @@ async fn build_service_router_with_shutdown(
                 state = state.with_hot_tail_source(hot_tail.source, hot_tail.frontier);
             } else if let Some(wal_consumer) = dependencies.wal_consumer {
                 // Pre-connected consumer supplied directly (e.g. by tests).
-                let hot_tail = BufferedLogHotTail::default();
+                let hot_tail =
+                    BufferedLogHotTail::with_bucket_width(config.querier_hot_tail_bucket_width);
                 let (frontier, refresh_source) = load_querier_shared_compaction_frontier(
                     config,
                     configured_store.as_ref(),
@@ -6500,9 +6593,15 @@ async fn build_service_router_with_shutdown(
                         frontier,
                         hot_tail.clone(),
                         token.clone(),
+                        config.querier_frontier_refresh_interval,
                     );
                 }
-                spawn_log_hot_tail_poller(wal_consumer, hot_tail.clone(), frontier.clone());
+                spawn_log_hot_tail_poller(
+                    wal_consumer,
+                    hot_tail.clone(),
+                    frontier.clone(),
+                    config.querier_hot_tail_interval,
+                );
                 if let Some(frontier) = frontier {
                     state = state.with_hot_tail_shared_frontier(hot_tail, frontier);
                 } else {
@@ -6511,7 +6610,8 @@ async fn build_service_router_with_shutdown(
             } else if let Some(deferred) = dependencies.deferred_wal_consumer_connect {
                 // Deferred connect: the consumer and authorizer connect asynchronously so the
                 // querier's HTTP port binds without waiting for the broker to be ready (FIX B2).
-                let hot_tail = BufferedLogHotTail::default();
+                let hot_tail =
+                    BufferedLogHotTail::with_bucket_width(config.querier_hot_tail_bucket_width);
                 let (frontier, refresh_source) = load_querier_shared_compaction_frontier(
                     config,
                     configured_store.as_ref(),
@@ -6526,18 +6626,18 @@ async fn build_service_router_with_shutdown(
                         frontier,
                         hot_tail.clone(),
                         token.clone(),
+                        config.querier_frontier_refresh_interval,
                     );
                 }
 
                 // Spawn the consumer connect + poll loop in a background task.
                 wal_handle = Some(spawn_wal_hot_tail_connect_and_poll(
-                    deferred.bootstrap.clone(),
-                    deferred.group_id,
-                    deferred.topic.clone(),
+                    deferred.clone(),
                     hot_tail.clone(),
                     frontier.clone(),
                     token,
-                    deferred.client_resource_policy,
+                    config.querier_hot_tail_interval,
+                    config.querier_dependency_reconnect_interval,
                 ));
 
                 // Install a swappable authorizer that starts as AllowAll and gets promoted
@@ -6548,6 +6648,7 @@ async fn build_service_router_with_shutdown(
                     deferred.topic,
                     slot,
                     deferred.client_resource_policy,
+                    config.querier_dependency_reconnect_interval,
                 );
                 state = state.with_query_authorizer(swappable);
 
@@ -13019,7 +13120,8 @@ async fn execute_http_stream_query(
                 frontier: &frontier,
                 delete_filters: &delete_filters,
             },
-            StreamScanOptions::from_stream_options(direction, limit, interval, end_exclusive),
+            StreamScanOptions::from_stream_options(direction, limit, interval, end_exclusive)
+                .with_block_fetch_concurrency(state.cold_block_fetch_concurrency),
         )
         .await
         .map_err(HttpQueryError::from)?;
@@ -16992,6 +17094,7 @@ struct StreamScanOptions {
     limit: Option<usize>,
     end_exclusive: Option<i64>,
     allow_limit_short_circuit: bool,
+    block_fetch_concurrency: NonZeroUsize,
 }
 
 impl StreamScanOptions {
@@ -17001,6 +17104,8 @@ impl StreamScanOptions {
             limit: None,
             end_exclusive: None,
             allow_limit_short_circuit: false,
+            block_fetch_concurrency: NonZeroUsize::new(8)
+                .expect("default block fetch concurrency is nonzero"),
         }
     }
 
@@ -17015,7 +17120,14 @@ impl StreamScanOptions {
             limit,
             end_exclusive,
             allow_limit_short_circuit: limit.is_some() && interval.is_none(),
+            block_fetch_concurrency: NonZeroUsize::new(8)
+                .expect("default block fetch concurrency is nonzero"),
         }
+    }
+
+    fn with_block_fetch_concurrency(mut self, concurrency: NonZeroUsize) -> Self {
+        self.block_fetch_concurrency = concurrency;
+        self
     }
 
     fn reached_limit(self, streams: &BTreeMap<Labels, Vec<[String; 2]>>) -> bool {
@@ -17027,11 +17139,11 @@ impl StreamScanOptions {
 
     fn block_fetch_concurrency(self) -> usize {
         if !self.allow_limit_short_circuit {
-            return OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY;
+            return self.block_fetch_concurrency.get();
         }
         self.limit
-            .map_or(OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY, |limit| {
-                OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY.min(limit.max(1))
+            .map_or(self.block_fetch_concurrency.get(), |limit| {
+                self.block_fetch_concurrency.get().min(limit.max(1))
             })
     }
 }
@@ -21007,7 +21119,7 @@ mod tests {
     /// scanning the whole retained buffer.
     #[tokio::test]
     async fn hot_tail_records_in_range_matches_full_scan_under_out_of_order_inserts() {
-        let bucket = HOT_TAIL_BUCKET.nanos_i64();
+        let bucket = minutes(1).nanos_i64();
 
         let hot_tail = BufferedLogHotTail::default();
 
@@ -21115,7 +21227,7 @@ mod tests {
 
     #[test]
     fn hot_tail_prune_compacted_rebuilds_records_and_time_index() {
-        let bucket = HOT_TAIL_BUCKET.nanos_i64();
+        let bucket = minutes(1).nanos_i64();
 
         let hot_tail = BufferedLogHotTail::default();
         let mut compacted_by_offset = hot_tail_test_record(4 * bucket, "offset-old");
@@ -21972,6 +22084,78 @@ mod tests {
     }
 
     #[test]
+    fn querier_policy_uses_defaults_and_cli_overrides() {
+        let defaults = ServiceConfig::default();
+        check!(defaults.querier_frontier_refresh_interval == secs(5));
+        check!(defaults.querier_dynamic_index_cache_ttl == secs(5));
+        check!(defaults.querier_shard_index_cache_ttl == minutes(5));
+        check!(defaults.querier_shard_fetch_concurrency.get() == 32);
+        check!(defaults.querier_cold_block_fetch_concurrency.get() == 8);
+        check!(defaults.querier_hot_tail_bucket_width == minutes(1));
+        check!(defaults.querier_hot_tail_interval == millis(50));
+        check!(defaults.querier_dependency_reconnect_interval == millis(500));
+
+        let configured = ServiceConfig::try_parse_from([
+            "crabka-observability",
+            "--target=querier",
+            "--querier-frontier-refresh-interval=6s",
+            "--querier-dynamic-index-cache-ttl=7s",
+            "--querier-shard-index-cache-ttl=6m",
+            "--querier-shard-fetch-concurrency=33",
+            "--querier-cold-block-fetch-concurrency=9",
+            "--querier-hot-tail-bucket-width=2m",
+            "--querier-hot-tail-interval=60ms",
+            "--querier-dependency-reconnect-interval=600ms",
+        ])
+        .expect("valid querier policy");
+        check!(configured.querier_frontier_refresh_interval == secs(6));
+        check!(configured.querier_dynamic_index_cache_ttl == secs(7));
+        check!(configured.querier_shard_index_cache_ttl == minutes(6));
+        check!(configured.querier_shard_fetch_concurrency.get() == 33);
+        check!(configured.querier_cold_block_fetch_concurrency.get() == 9);
+        check!(configured.querier_hot_tail_bucket_width == minutes(2));
+        check!(configured.querier_hot_tail_interval == millis(60));
+        check!(configured.querier_dependency_reconnect_interval == millis(600));
+
+        let state = QuerierState::new(".", LabelIndex::default(), BlockIndex::default())
+            .with_runtime_policy(&configured);
+        check!(state.dynamic_index_cache.cache_ttl == secs(7));
+        check!(state.dynamic_index_cache.shard_cache_ttl == minutes(6));
+        check!(state.dynamic_index_cache.shard_fetch_concurrency.get() == 33);
+        check!(state.cold_block_fetch_concurrency.get() == 9);
+        check!(
+            StreamScanOptions::exhaustive()
+                .with_block_fetch_concurrency(state.cold_block_fetch_concurrency)
+                .block_fetch_concurrency()
+                == 9
+        );
+    }
+
+    #[test]
+    fn querier_policy_rejects_zero() {
+        for argument in [
+            "--querier-frontier-refresh-interval=0s",
+            "--querier-dynamic-index-cache-ttl=0s",
+            "--querier-shard-index-cache-ttl=0s",
+            "--querier-shard-fetch-concurrency=0",
+            "--querier-cold-block-fetch-concurrency=0",
+            "--querier-hot-tail-bucket-width=0s",
+            "--querier-hot-tail-interval=0s",
+            "--querier-dependency-reconnect-interval=0s",
+        ] {
+            check!(
+                ServiceConfig::try_parse_from([
+                    "crabka-observability",
+                    "--target=querier",
+                    argument,
+                ])
+                .is_err(),
+                "accepted {argument}"
+            );
+        }
+    }
+
+    #[test]
     fn service_dependencies_builder_methods_preserve_existing_fields() {
         #[derive(Clone)]
         struct TestLimiter;
@@ -22202,12 +22386,14 @@ mod tests {
 
     #[test]
     fn hot_tail_bucket_key_uses_euclidean_minutes() {
-        assert_eq!(hot_tail_bucket_key(0), 0);
-        check!(hot_tail_bucket_key(HOT_TAIL_BUCKET.nanos_i64() - 1) == 0);
-        check!(hot_tail_bucket_key(HOT_TAIL_BUCKET.nanos_i64()) == 1);
-        assert_eq!(hot_tail_bucket_key(-1), -1);
-        check!(hot_tail_bucket_key(-HOT_TAIL_BUCKET.nanos_i64()) == -1);
-        check!(hot_tail_bucket_key(-HOT_TAIL_BUCKET.nanos_i64() - 1) == -2);
+        let bucket_width = minutes(1);
+        assert_eq!(hot_tail_bucket_key(0, bucket_width), 0);
+        check!(hot_tail_bucket_key(bucket_width.nanos_i64() - 1, bucket_width) == 0);
+        check!(hot_tail_bucket_key(bucket_width.nanos_i64(), bucket_width) == 1);
+        assert_eq!(hot_tail_bucket_key(-1, bucket_width), -1);
+        check!(hot_tail_bucket_key(-bucket_width.nanos_i64(), bucket_width) == -1);
+        check!(hot_tail_bucket_key(-bucket_width.nanos_i64() - 1, bucket_width) == -2);
+        check!(hot_tail_bucket_key(minutes(2).nanos_i64(), minutes(2)) == 1);
     }
 
     #[test]
