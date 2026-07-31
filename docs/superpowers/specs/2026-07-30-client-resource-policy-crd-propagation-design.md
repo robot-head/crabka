@@ -121,8 +121,7 @@ Each owner requires focused tests proving:
   minima are rejected before rendering;
 - each configured value appears exactly once in the rendered container;
 - Gres role restrictions and both single- and multi-range paths are correct;
-  activator defaults, environment parsing, and CLI precedence are covered;
-  and
+- activator defaults, environment parsing, and CLI precedence are covered; and
 - generated CRDs are deterministic and match `deploy/crds`.
 
 After focused package tests, run workspace all-target check and strict Clippy,
