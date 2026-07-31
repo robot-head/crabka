@@ -6,12 +6,14 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crabka_units::prelude::*;
+
 use crate::wire::DecodedSeries;
 
 /// The compacted HA-tracker topic: `(tenant, cluster) -> elected __replica__`.
 pub const HA_TRACKER_TOPIC: &str = "__crabka_metrics_ha";
 /// Default elected-replica lease timeout before another replica may take over.
-pub const DEFAULT_HA_FAILOVER_TIMEOUT_MS: i64 = 30_000;
+pub const DEFAULT_HA_FAILOVER_TIMEOUT: Time = secs(30);
 
 /// In-memory elected replica view, rebuilt from the compacted HA-tracker topic
 /// and extended with in-process first-seen election for unseen pairs.
@@ -126,7 +128,18 @@ impl HaTracker {
     /// Atomically decide-and-commit the HA election for `series` using the
     /// current wall clock and the default failover timeout. See [`Self::elect`].
     pub fn elect_now(&self, tenant: &str, series: &[DecodedSeries]) -> HaElection {
-        self.elect(tenant, series, now_ms(), DEFAULT_HA_FAILOVER_TIMEOUT_MS)
+        self.elect(tenant, series, now_ms(), DEFAULT_HA_FAILOVER_TIMEOUT)
+    }
+
+    /// Atomically decide-and-commit the HA election using the current wall
+    /// clock and the supplied failover timeout.
+    pub fn elect_now_with_timeout(
+        &self,
+        tenant: &str,
+        series: &[DecodedSeries],
+        failover_timeout: Time,
+    ) -> HaElection {
+        self.elect(tenant, series, now_ms(), failover_timeout)
     }
 
     /// Atomically decide the HA election for `series` and, when the decision is
@@ -141,7 +154,7 @@ impl HaTracker {
         tenant: &str,
         series: &[DecodedSeries],
         lease_timestamp_ms: i64,
-        failover_timeout_ms: i64,
+        failover_timeout: Time,
     ) -> HaElection {
         let mut elected = self.elected.lock().expect("HaTracker mutex poisoned");
         let decision = decide_election(
@@ -149,7 +162,7 @@ impl HaTracker {
             tenant,
             series,
             lease_timestamp_ms,
-            failover_timeout_ms,
+            failover_timeout,
         );
         if let HaElection::Elect(record) | HaElection::Update(record) = &decision {
             elected.insert(
@@ -198,7 +211,7 @@ pub fn ha_election_at(
         tenant,
         series,
         lease_timestamp_ms,
-        DEFAULT_HA_FAILOVER_TIMEOUT_MS,
+        DEFAULT_HA_FAILOVER_TIMEOUT,
     )
 }
 
@@ -211,7 +224,7 @@ pub fn ha_election_at_with_timeout(
     tenant: &str,
     series: &[DecodedSeries],
     lease_timestamp_ms: i64,
-    failover_timeout_ms: i64,
+    failover_timeout: Time,
 ) -> HaElection {
     let elected = tracker.elected.lock().expect("HaTracker mutex poisoned");
     decide_election(
@@ -219,7 +232,7 @@ pub fn ha_election_at_with_timeout(
         tenant,
         series,
         lease_timestamp_ms,
-        failover_timeout_ms,
+        failover_timeout,
     )
 }
 
@@ -231,7 +244,7 @@ fn decide_election(
     tenant: &str,
     series: &[DecodedSeries],
     lease_timestamp_ms: i64,
-    failover_timeout_ms: i64,
+    failover_timeout: Time,
 ) -> HaElection {
     let Some(first) = series.first() else {
         return HaElection::Accept;
@@ -249,9 +262,10 @@ fn decide_election(
             lease_timestamp_ms,
         }),
         Some(elected)
-            if failover_timeout_ms >= 0
-                && lease_timestamp_ms.saturating_sub(elected.lease_timestamp_ms)
-                    > failover_timeout_ms =>
+            if failover_timeout >= Time::ZERO
+                && Time::from_millis(
+                    lease_timestamp_ms.saturating_sub(elected.lease_timestamp_ms),
+                ) > failover_timeout =>
         {
             HaElection::Elect(HaElectionRecord {
                 tenant: tenant.to_string(),
@@ -383,12 +397,69 @@ mod tests {
         let replacement = [series_with("c1", "r2")];
 
         assert!(
-            ha_election_at_with_timeout(&tracker, "tenant", &replacement, 45_001, 30_000)
+            ha_election_at_with_timeout(&tracker, "tenant", &replacement, 45_001, secs(30))
                 == HaElection::Elect(HaElectionRecord {
                     tenant: "tenant".to_string(),
                     cluster: "c1".to_string(),
                     replica: "r2".to_string(),
                     lease_timestamp_ms: 45_001,
+                })
+        );
+    }
+
+    #[test]
+    fn negative_failover_timeout_disables_takeover() {
+        // A negative extent is the "never fail over" sentinel: however stale the
+        // lease, the incumbent keeps it and the challenger is dropped.
+        let tracker = HaTracker::default();
+        tracker.persist_elected(&HaElectionRecord {
+            tenant: "tenant".to_string(),
+            cluster: "c1".to_string(),
+            replica: "r1".to_string(),
+            lease_timestamp_ms: 10_000,
+        });
+        let replacement = [series_with("c1", "r2")];
+
+        assert!(
+            ha_election_at_with_timeout(
+                &tracker,
+                "tenant",
+                &replacement,
+                i64::MAX,
+                Time::from_millis(-1),
+            ) == HaElection::Drop
+        );
+    }
+
+    #[test]
+    fn configured_failover_timeout_controls_takeover() {
+        let tracker = || {
+            let tracker = HaTracker::default();
+            tracker.persist_elected(&HaElectionRecord {
+                tenant: "tenant".to_owned(),
+                cluster: "c1".to_owned(),
+                replica: "r1".to_owned(),
+                lease_timestamp_ms: 1_000,
+            });
+            tracker
+        };
+        let replacement = [series_with("c1", "r2")];
+
+        check!(
+            tracker().elect("tenant", &replacement, i64::MAX, Time::from_millis(-1_000),)
+                == HaElection::Drop
+        );
+        check!(matches!(
+            tracker().elect("tenant", &replacement, 1_001, Time::ZERO),
+            HaElection::Elect(_)
+        ));
+        check!(
+            tracker().elect("tenant", &replacement, 2_000, millis(999))
+                == HaElection::Elect(HaElectionRecord {
+                    tenant: "tenant".to_owned(),
+                    cluster: "c1".to_owned(),
+                    replica: "r2".to_owned(),
+                    lease_timestamp_ms: 2_000,
                 })
         );
     }
@@ -426,14 +497,14 @@ mod tests {
         let r2 = [series_with("c1", "r2")];
 
         assert!(matches!(
-            tracker.elect("tenant", &r1, 1_000, DEFAULT_HA_FAILOVER_TIMEOUT_MS),
+            tracker.elect("tenant", &r1, 1_000, DEFAULT_HA_FAILOVER_TIMEOUT),
             HaElection::Elect(_)
         ));
         // The first elect already committed the winner under the lock, so a
         // competing replica observes it and is dropped without a separate
         // persist step.
         assert!(
-            tracker.elect("tenant", &r2, 1_001, DEFAULT_HA_FAILOVER_TIMEOUT_MS) == HaElection::Drop
+            tracker.elect("tenant", &r2, 1_001, DEFAULT_HA_FAILOVER_TIMEOUT) == HaElection::Drop
         );
         assert!(tracker.elected_replica("tenant", "c1") == Some("r1".to_string()));
     }
@@ -454,7 +525,7 @@ mod tests {
             thread::spawn(move || {
                 let series = [series_with("c1", replica)];
                 barrier.wait();
-                tracker.elect("tenant", &series, 1_000, DEFAULT_HA_FAILOVER_TIMEOUT_MS)
+                tracker.elect("tenant", &series, 1_000, DEFAULT_HA_FAILOVER_TIMEOUT)
             })
         });
 

@@ -15,7 +15,7 @@ use super::{LimitError, Limits};
 /// unbounded set of tenant strings (e.g. from a misbehaving or hostile client)
 /// would grow memory without limit; once this many tenants are tracked, the
 /// least-recently-touched bucket is evicted to make room.
-const DEFAULT_MAX_RATE_BUCKETS: usize = 100_000;
+pub const DEFAULT_MAX_RATE_BUCKETS: usize = 100_000;
 
 /// Per-tenant ingestion-rate token bucket with a monotonic last-touch stamp
 /// used for least-recently-used eviction once `max_rate_buckets` is reached.
@@ -58,6 +58,11 @@ impl IngestEnforcer {
             max_rate_buckets: max_rate_buckets.max(1),
             ..Self::default()
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn max_rate_buckets(&self) -> usize {
+        self.max_rate_buckets
     }
 
     /// Next value of the monotonic logical clock used to stamp bucket touches.
@@ -394,6 +399,11 @@ mod tests {
             assert!(e.sample_rate_buckets.len() <= cap);
         }
         assert!(e.sample_rate_buckets.len() <= cap);
+    }
+
+    #[test]
+    fn default_rate_bucket_cap_is_preserved() {
+        check!(DEFAULT_MAX_RATE_BUCKETS == 100_000);
     }
 
     #[test]

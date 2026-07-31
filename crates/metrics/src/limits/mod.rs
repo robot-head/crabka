@@ -5,7 +5,7 @@ use thiserror::Error;
 
 mod enforce;
 mod overrides;
-pub use enforce::{IngestEnforcer, QueryEnforcer};
+pub use enforce::{DEFAULT_MAX_RATE_BUCKETS, IngestEnforcer, QueryEnforcer};
 pub use overrides::{OverridesError, OverridesProvider};
 
 /// Mimir-style per-tenant limits used by metrics ingest and query paths.
