@@ -202,6 +202,7 @@ pub(crate) fn evaluate_with_clause(
 
 pub(crate) fn describe_with_clause(
     catalog_kv: &dyn crabka_pgkv::Kv,
+    resolution: &crate::relname::ResolutionScope,
     with: Option<&WithClause>,
     parent: &CteContext,
 ) -> Result<CteContext, ExecError> {
@@ -211,7 +212,7 @@ pub(crate) fn describe_with_clause(
     let mut out = parent.child();
     for index in evaluation_order(with)? {
         let cte = &with.ctes[index];
-        let rel = describe_cte_relation(catalog_kv, cte, with.recursive, &out)?;
+        let rel = describe_cte_relation(catalog_kv, resolution, cte, with.recursive, &out)?;
         out.insert(cte.name.clone(), rel);
     }
     Ok(out)
@@ -223,13 +224,14 @@ pub(crate) fn describe_with_clause(
 /// where `PostgreSQL` also takes the CTE's column names and types from.
 pub(crate) fn describe_cte_relation(
     catalog_kv: &dyn crabka_pgkv::Kv,
+    resolution: &crate::relname::ResolutionScope,
     cte: &Cte,
     recursive: bool,
     ctes: &CteContext,
 ) -> Result<Relation, ExecError> {
     let Some(query) = cte.body.as_query() else {
         // A data-modifying item contributes the columns its RETURNING projects.
-        let fields = crate::exec::describe_statement(catalog_kv, dml_body(cte))?;
+        let fields = crate::exec::describe_statement(catalog_kv, resolution, dml_body(cte))?;
         let columns = fields
             .iter()
             .map(|f| {
@@ -250,7 +252,7 @@ pub(crate) fn describe_cte_relation(
         );
     };
     let describe = |q: &QueryExpr| -> Result<Relation, ExecError> {
-        let fields = crate::query::describe_query_expr_with_ctes(catalog_kv, q, ctes)?;
+        let fields = crate::query::describe_query_expr_with_ctes(catalog_kv, resolution, q, ctes)?;
         let columns = fields
             .iter()
             .map(|f| {
@@ -437,7 +439,8 @@ fn check_recursive_term_types(
             &cte.name,
         ),
     );
-    let produced = crate::setops::set_expr_columns(ctx.catalog_kv, recursive, &scoped)?;
+    let produced =
+        crate::setops::set_expr_columns(ctx.catalog_kv, ctx.fctx.resolution, recursive, &scoped)?;
     if produced.len() != seed.width() {
         return Err(ExecError::SetOpColumnCount {
             op: SetOp::Union,
@@ -623,9 +626,11 @@ fn scan_table_expr(
     refs: &mut SelfRefs,
 ) {
     match item {
+        // A recursive CTE's self-reference is always unqualified: `s.t` names a
+        // stored relation, never the term being defined.
         TableExpr::Table {
             name: table_name, ..
-        } if table_name == name => {
+        } if table_name.schema.is_none() && table_name.name == *name => {
             if nullable {
                 refs.outer_join += 1;
             } else {

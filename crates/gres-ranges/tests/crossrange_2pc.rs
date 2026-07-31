@@ -761,14 +761,20 @@ async fn restart_durably_aborts_matching_global_index_intents_without_touching_o
     let coordinator = SqlEngine::open(data_dir.path().join("r0")).expect("open coordinator");
     let mut participant = SqlEngine::open(data_dir.path().join("r1")).expect("open participant");
     participant.set_catalog_kv(coordinator.kv_handle());
-    let table =
-        crabka_pgcatalog::get_table(coordinator.kv_handle().as_ref(), "t50").expect("table");
-    let index_id = crabka_pgcatalog::list_table_indexes(coordinator.kv_handle().as_ref(), "t50")
-        .expect("indexes")
-        .into_iter()
-        .find(|index| index.name == "t50_id_idx")
-        .expect("global index")
-        .id;
+    let table = crabka_pgcatalog::get_table(
+        coordinator.kv_handle().as_ref(),
+        &crabka_pgcatalog::RelationName::public("t50"),
+    )
+    .expect("table");
+    let index_id = crabka_pgcatalog::list_table_indexes(
+        coordinator.kv_handle().as_ref(),
+        &crabka_pgcatalog::RelationName::public("t50"),
+    )
+    .expect("indexes")
+    .into_iter()
+    .find(|index| index.name == "t50_id_idx")
+    .expect("global index")
+    .id;
     let start_ts = TimestampTransactionId::new(10).expect("start timestamp");
     let identity = crabka_pgexec::TimestampTxnIdentity {
         start_ts,

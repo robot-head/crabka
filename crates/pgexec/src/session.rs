@@ -4,12 +4,14 @@
 //! `satisfies_mvcc` + own xid), commit/rollback record the outcome in the clog,
 //! row-level conflicts serialize through the `RowLockManager` (held until
 //! COMMIT/ROLLBACK and freed by `release_all`), and DDL serializes among DDLs
-//! behind a small `catalog_lock`.
+//! behind a small `catalog_lock`, whose hold spans the commit because the
+//! duplicate-name check reads the keyspace. The table-id counter has its own
+//! lock: a session claims a block of ids under it and hands them out locally.
 
 use std::{
     cell::RefCell,
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::{Arc, Mutex},
+    collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
+    sync::{Arc, LazyLock, Mutex},
 };
 
 use crabka_pgkv::{Kv, WriteOp};
@@ -278,6 +280,13 @@ impl UnitConversion {
 }
 
 /// The memory units of a parameter counted in kB (`work_mem`).
+/// How many table ids a session claims from the shared counter at a time.
+///
+/// A constant rather than a GUC: eight is enough that a request-scoped
+/// temporary table almost never refills the block, and a session that exits
+/// with a partly used block wastes at most eight ids out of a `u32`.
+const TABLE_ID_BLOCK: usize = 8;
+
 const KILOBYTE_UNITS: &[UnitConversion] = &[
     UnitConversion {
         unit: "TB",
@@ -825,6 +834,13 @@ struct GucDefinition {
     /// The declared range of an `integer`/`real` parameter; `None` for the
     /// types that have none (`bool`, `string`, `enum`).
     range: Option<GucRange>,
+    /// `PostgreSQL`'s `GUC_LIST_QUOTE`: the value is a comma-separated list of
+    /// identifiers, so each item written by a `SET` is re-quoted on the way in
+    /// and `SHOW` reports the quoted form. `SET search_path = "MySchema",
+    /// public` reports back as `"MySchema", public`, where a plain join would
+    /// lose the quoting — and an item holding a comma would lose its
+    /// boundaries entirely.
+    list_quote: bool,
 }
 
 impl GucDefinition {
@@ -845,6 +861,25 @@ impl GucDefinition {
     const fn aliases(mut self, aliases: &'static [&'static str]) -> Self {
         self.aliases = aliases;
         self
+    }
+
+    /// Declare the parameter a quoted identifier list (`GUC_LIST_QUOTE`).
+    const fn list_quote(mut self) -> Self {
+        self.list_quote = true;
+        self
+    }
+
+    /// Flatten a written `SET` value into the string this parameter stores —
+    /// the form `SHOW` reports. A list parameter re-quotes each item the way
+    /// `PostgreSQL`'s `quote_identifier` does; every other parameter joins the
+    /// items back with `", "` untouched.
+    fn flatten(&self, value: &crabka_pgparser::ast::SetValue) -> String {
+        match value {
+            crabka_pgparser::ast::SetValue::Value(items) if self.list_quote => {
+                crate::search_path::SearchPath::from_items(items).render()
+            }
+            other => other.plain(),
+        }
     }
 
     /// Declare `PostgreSQL`'s compiled-in default where it differs from the
@@ -883,6 +918,7 @@ const fn guc_string(name: &'static str, boot_default: &'static str) -> GucDefini
         boot_val: None,
         unit: None,
         range: None,
+        list_quote: false,
     }
 }
 
@@ -904,6 +940,7 @@ const fn guc(
         boot_val: None,
         unit: None,
         range: None,
+        list_quote: false,
     }
 }
 
@@ -925,6 +962,7 @@ const fn guc_enum(
         boot_val: None,
         unit: None,
         range: None,
+        list_quote: false,
     }
 }
 
@@ -982,8 +1020,13 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
     .ranged(None, -15.0, 3.0),
     guc("intervalstyle", "string", "postgres", parse_interval_style).aliases(&["IntervalStyle"]),
     guc("search_path", "string", "\"$user\", public", |value, _| {
+        // Nothing is validated. `SET search_path = '"unbalanced'` succeeds on
+        // PostgreSQL 18.4, and a schema that does not exist is silently
+        // skipped rather than refused — inventing a 22023 here would
+        // manufacture a divergence.
         Ok(GucValue::Text(value.to_string()))
-    }),
+    })
+    .list_quote(),
     guc("standard_conforming_strings", "bool", "on", parse_bool),
     guc("statement_timeout", "integer", "0", parse_duration_guc).ranged(
         Some("ms"),
@@ -2216,6 +2259,22 @@ pub(crate) fn notify_queue_error(error: notify::NotifyError) -> ExecError {
     ExecError::Remote(PgError::error(error.sqlstate(), error.to_string()))
 }
 
+/// What the end of a transaction owes one temporary relation.
+///
+/// The relation is identified by its catalog id as well as its name, because
+/// the name is not stable for as long as the disposition is: a transaction may
+/// drop the relation and give the name to another one, and the disposition
+/// belongs to the relation it was written on rather than to the name that
+/// relation held.
+struct OnCommitEntry {
+    relation: crabka_pgcatalog::RelationName,
+    /// The relation the disposition was armed for. An entry whose name now
+    /// holds a different id — or no relation at all — has nothing left to
+    /// dispose of.
+    table: crabka_pgcatalog::TableId,
+    action: crabka_pgparser::ast::OnCommitAction,
+}
+
 /// One connection's view of the engine. Holds shared handles to the KV store,
 /// the ProcArray, the SequenceManager, the RowLockManager, and the DDL catalog
 /// lock, plus this connection's transaction state. Not shared between
@@ -2229,6 +2288,33 @@ pub struct SqlSession {
     seq: Arc<SequenceManager>,
     lockmgr: Arc<RowLockManager>,
     catalog_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Covers the shared next-table-id counter and nothing else. See
+    /// [`crate::SqlEngine::table_id_lock`].
+    table_id_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Table ids this session has already claimed from the shared counter and
+    /// not yet handed out, drained from the back.
+    ///
+    /// Behind a lock rather than a plain field because
+    /// [`crate::exec::ForeignCtx`] borrows it while `execute_ddl` runs, and one
+    /// statement may create more than one relation. The lock is uncontended —
+    /// a session executes one statement at a time — but the session is held
+    /// across `.await` points and so has to be `Sync`.
+    reserved_table_ids: Mutex<Vec<crabka_pgcatalog::TableId>>,
+    /// Set once this session has purged and re-created its own temporary
+    /// namespace, which happens on the first statement that creates a temporary
+    /// relation and never again.
+    temp_schema_ready: bool,
+    /// This session's entry in [`TEMP_NAMESPACE_CLAIMS`], taken alongside
+    /// [`Self::temp_schema_ready`] and released when the session is dropped.
+    /// `None` until the session first needs a temporary namespace.
+    temp_namespace_claim: Option<TempNamespaceClaim>,
+    /// The temporary relations whose contents or existence a `COMMIT` disposes
+    /// of, in creation order.
+    ///
+    /// `ON COMMIT` is session-scoped by definition — the relation cannot outlive
+    /// the session that created it — so the disposition lives beside the session
+    /// rather than in the shared catalog.
+    on_commit: Vec<OnCommitEntry>,
     table_write_gate: Arc<tokio::sync::RwLock<()>>,
     writer_fence: Arc<crate::WriterFence>,
     /// Retains the registry entry while this session can hold a writer lease.
@@ -2301,6 +2387,17 @@ pub struct SqlSession {
     ts_gc: Arc<crate::ts_gc::TsVersionGc>,
     timestamp_own_start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
     sequence_currvals: Arc<Mutex<HashMap<String, i64>>>,
+    /// Sequence advances this session made that are not durable yet. A
+    /// `Replicated` engine cannot write a `nextval` through the store from
+    /// inside synchronous expression evaluation, so the advance is staged here
+    /// and folded into the next batch this session commits.
+    ///
+    /// Every statement that can advance a sequence commits before it returns —
+    /// a write statement through its own batch, a read-only `SELECT
+    /// nextval('s')` through [`SqlSession::flush_pending_sequences`] — so a
+    /// value never reaches the client before the op recording it is durable.
+    /// That is what makes re-seeding safe for the next writer.
+    pending_sequences: Arc<Mutex<crate::seq::PendingSequences>>,
     /// This connection's registration on the engine's `LISTEN`/`NOTIFY` bus.
     /// `None` until an owner calls [`SqlSession::register_notify`] or
     /// [`SqlSession::adopt_notify`]; `LISTEN`/`NOTIFY`/`pg_notify` then report a
@@ -2317,11 +2414,22 @@ pub struct SqlSession {
     /// durable, waiting for the statement epilogue to send them. See
     /// [`SqlSession::reserve_autocommit_notifications`].
     notify_reserved: Mutex<Option<ReservedNotifications>>,
+    /// The open transaction's deferred referential checks and its
+    /// `SET CONSTRAINTS` overrides. Shaped like [`SqlSession::notify_pending`]
+    /// and paired with the same teardown: it accumulates while the block runs,
+    /// is drained as part of `COMMIT`, and is discarded by every abort. Shared
+    /// (not owned) because the per-statement `WriteContext` reaches it from
+    /// `&self` while the write path holds it.
+    deferred_fk: Arc<Mutex<crate::fk::DeferredConstraints>>,
     /// Cross-node notification replication (shared from the engine): the origin
     /// stamp and record sequence of the WAL records a committing transaction
     /// appends for its notifications. Inert — and the commit batch unchanged —
     /// until an owner calls `SqlEngine::set_notify_origin`.
     notify_replication: Arc<crate::NotifyReplication>,
+    /// This connection's backend process id: the value the wire layer announced
+    /// in `BackendKeyData` and stamps on the notifications this session
+    /// publishes, and the one `pg_backend_pid()` answers with.
+    backend_pid: i32,
     session_user: String,
     current_role: String,
     state: TxnState,
@@ -2374,6 +2482,12 @@ struct SavepointFrame {
     name: String,
     /// The session configuration as of `SAVEPOINT`, restored by `ROLLBACK TO`.
     guc: GucState,
+    /// The `SET CONSTRAINTS` overrides as of `SAVEPOINT`, restored by
+    /// `ROLLBACK TO` exactly as [`SavepointFrame::guc`] is. The pending checks
+    /// themselves are not captured and cannot need to be: every statement that
+    /// queues one modifies rows, and a `ROLLBACK TO` across a row-modifying
+    /// sub-transaction is refused outright.
+    deferral: crate::fk::DeferralModes,
     /// [`SqlSession::mutating_statements`] as of `SAVEPOINT`.
     mutating_statements: u64,
     /// Whether the transaction block was already aborted when the savepoint was
@@ -2388,6 +2502,7 @@ pub(crate) struct SqlSessionConfig {
     pub seq: Arc<SequenceManager>,
     pub lockmgr: Arc<RowLockManager>,
     pub catalog_lock: Arc<tokio::sync::Mutex<()>>,
+    pub table_id_lock: Arc<tokio::sync::Mutex<()>>,
     pub table_write_gate: Arc<tokio::sync::RwLock<()>>,
     pub writer_fence: Arc<crate::WriterFence>,
     pub coordination: Arc<crate::EngineCoordination>,
@@ -2409,6 +2524,75 @@ pub(crate) struct SqlSessionConfig {
     pub ts_gc: Arc<crate::ts_gc::TsVersionGc>,
     pub notify_replication: Arc<crate::NotifyReplication>,
     pub session_locks: Arc<SessionLocks>,
+    /// The backend process id this connection is identified by, allocated by
+    /// [`crabka_pgwire::server::next_backend_pid`].
+    pub backend_pid: i32,
+}
+
+/// Every temporary namespace a live session of this process is using, and how
+/// many of them are using it.
+///
+/// A temporary namespace is `pg_temp_<backend id>` in a catalog every gateway
+/// of a cluster shares, and the only way relations left behind by a backend
+/// that never tore itself down stop leaking is that a later session of the same
+/// id empties the namespace before using it. Emptying it by name alone is what
+/// turns a repeated backend id into lost data, so every purge is gated on this
+/// registry: a session may empty a namespace only while no other live session
+/// is using it.
+///
+/// The scope is the process rather than the engine because that is the scope
+/// the hazard has. A cluster's DDL all executes on the node hosting range 0 —
+/// locally for the gateway that hosts it, on a session that node opens under
+/// the originating backend id for every other gateway — so two connections
+/// whose backend ids collide meet there as two sessions of one process.
+/// Entries are keyed by catalog store as well as by name so that two engines
+/// in one process, which is every test that opens more than one, do not see
+/// each other's namespaces.
+static TEMP_NAMESPACE_CLAIMS: LazyLock<Mutex<HashMap<(usize, String), usize>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// One live session's use of a temporary namespace, released on drop.
+struct TempNamespaceClaim {
+    store: usize,
+    schema: String,
+}
+
+impl TempNamespaceClaim {
+    /// Claim `schema` in `store`, answering with the claim and whether this
+    /// session is its only holder — the condition for emptying the namespace.
+    fn acquire(store: usize, schema: &str) -> (Self, bool) {
+        let claim = Self {
+            store,
+            schema: schema.to_owned(),
+        };
+        let mut claims = TEMP_NAMESPACE_CLAIMS.lock().expect("temp namespace claims");
+        let holders = claims.entry((store, schema.to_owned())).or_insert(0);
+        *holders += 1;
+        let unshared = *holders == 1;
+        (claim, unshared)
+    }
+}
+
+impl Drop for TempNamespaceClaim {
+    fn drop(&mut self) {
+        let mut claims = TEMP_NAMESPACE_CLAIMS.lock().expect("temp namespace claims");
+        if let Entry::Occupied(mut entry) = claims.entry((self.store, self.schema.clone())) {
+            *entry.get_mut() -= 1;
+            if *entry.get() == 0 {
+                entry.remove();
+            }
+        }
+    }
+}
+
+/// How many live sessions of this process are using `schema` in `store`.
+fn temp_namespace_holders(store: usize, schema: &str) -> usize {
+    TEMP_NAMESPACE_CLAIMS
+        .lock()
+        .expect("temp namespace claims")
+        .get(&(store, schema.to_owned()))
+        .copied()
+        .unwrap_or(0)
 }
 
 #[derive(Clone)]
@@ -2419,6 +2603,56 @@ struct SqlPrepared {
     /// `None` for one prepared over the extended protocol, which is what
     /// `pg_prepared_statements.from_sql` reports.
     sql_source: Option<String>,
+    /// The parameter type oids the client asked for, kept so a later
+    /// re-description is the same computation with the same inputs rather than
+    /// one that only resembles it. `0` is "infer it", as on the wire.
+    param_type_hints: Vec<u32>,
+    /// The scope [`Self::description`] was taken under. A `Bind` or `EXECUTE`
+    /// finding a different one re-describes the statement, because an
+    /// unqualified name in it may now resolve to a different relation.
+    described_scope: crate::relname::ResolutionScope,
+    /// Whether [`Self::description`]'s columns are what this statement's result
+    /// really is, and so may be compared with a later re-description.
+    ///
+    /// `PostgreSQL` calls this a plan's `fixed_result`. It is false only where
+    /// SQL `PREPARE` accepted a statement it could not describe, which leaves
+    /// no shape to hold a later execution to.
+    fixed_result: bool,
+}
+
+/// The part of a result descriptor that *is* a statement's result type: the
+/// column names, their types and their type modifiers.
+///
+/// Deliberately not the whole [`FieldDescription`]. Where a column came from —
+/// its table oid and attribute number — is not part of the type, and comparing
+/// it would refuse a statement that resolved to a same-shaped relation in
+/// another schema, which `postgres:18.4` accepts. The format code is not part
+/// of it either: it belongs to the portal, not the statement.
+fn result_type(fields: &[FieldDescription]) -> Vec<(&str, u32, i32)> {
+    fields
+        .iter()
+        .map(|field| (field.name.as_str(), field.type_oid, field.type_modifier))
+        .collect()
+}
+
+/// Verified against `postgres:18.4`, for both a protocol-level `Parse` and a
+/// SQL-level `PREPARE`, in both directions (a wider result and a narrower one)
+/// and for a same-width result whose column names or types changed.
+fn cached_plan_result_type_changed() -> PgError {
+    PgError::error(
+        sqlstate::FEATURE_NOT_SUPPORTED,
+        "cached plan must not change result type",
+    )
+}
+
+/// What a statement describes as under one resolution scope.
+struct PreparedShape {
+    parameter_types: Vec<u32>,
+    /// The result columns, or why they could not be described — SQL `PREPARE`
+    /// records a statement it could not describe and Parse refuses one.
+    fields: Result<Vec<FieldDescription>, PgError>,
+    /// The scope the description was taken under.
+    scope: crate::relname::ResolutionScope,
 }
 
 struct SqlPortal {
@@ -2426,6 +2660,10 @@ struct SqlPortal {
     description: PortalDescription,
     formats: Vec<i16>,
     execution: SqlPortalExecution,
+    /// Carried from the prepared statement this portal was bound from: whether
+    /// the result columns it announced may be held against what `Execute`
+    /// actually produces.
+    fixed_result: bool,
 }
 
 enum SqlPortalExecution {
@@ -2464,6 +2702,7 @@ impl SqlSession {
             seq,
             lockmgr,
             catalog_lock,
+            table_id_lock,
             table_write_gate,
             writer_fence,
             coordination,
@@ -2485,6 +2724,7 @@ impl SqlSession {
             ts_gc,
             notify_replication,
             session_locks,
+            backend_pid,
         } = config;
         let session_lock_id = session_locks.next_session_id();
         // The parser resolves a user-defined type *name* through a process-wide
@@ -2504,6 +2744,11 @@ impl SqlSession {
             seq,
             lockmgr,
             catalog_lock,
+            table_id_lock,
+            reserved_table_ids: Mutex::new(Vec::new()),
+            temp_schema_ready: false,
+            temp_namespace_claim: None,
+            on_commit: Vec::new(),
             table_write_gate,
             writer_fence,
             _coordination: coordination,
@@ -2528,11 +2773,14 @@ impl SqlSession {
             ts_gc,
             timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
+            pending_sequences: Arc::new(Mutex::new(crate::seq::PendingSequences::default())),
             notify: None,
             notify_rx: None,
             notify_pending: Arc::new(Mutex::new(NotifyPending::default())),
             notify_reserved: Mutex::new(None),
+            deferred_fk: Arc::new(Mutex::new(crate::fk::DeferredConstraints::default())),
             notify_replication,
+            backend_pid,
             session_user: "public".into(),
             current_role: "public".into(),
             state: TxnState::Idle,
@@ -2544,6 +2792,22 @@ impl SqlSession {
             savepoints: Vec::new(),
             authenticated_user: "public".into(),
             mutating_statements: 0,
+        }
+    }
+
+    /// The scope an unqualified relation name resolves against: the session's
+    /// `search_path`, the role `"$user"` expands to, and its backend id.
+    ///
+    /// It is rebuilt per statement rather than cached because `SET
+    /// search_path` and `SET ROLE` both change it mid-session and there is no
+    /// catalog cache anywhere for an invalidation to hang off.
+    fn resolution_scope(&self) -> crate::relname::ResolutionScope {
+        crate::relname::ResolutionScope {
+            search_path: crate::search_path::SearchPath::parse(
+                &self.guc.effective("search_path").unwrap_or_default(),
+            ),
+            user: self.current_role.clone(),
+            backend_id: self.backend_pid,
         }
     }
 
@@ -2592,12 +2856,18 @@ impl SqlSession {
             interval_style,
             current_user: self.current_role.clone(),
             session_user: self.session_user.clone(),
+            backend_pid: self.backend_pid,
             clock: Arc::clone(&self.clock),
+            // A session reads the catalog through `sequence`, which carries
+            // the same handle.
+            catalog: None,
             sequence: Some(Arc::new(crate::clock::SequenceRuntime {
                 kv: Arc::clone(&self.catalog_kv),
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::clone(&self.sequence_currvals),
+                pending: Arc::clone(&self.pending_sequences),
             })),
+            resolution: Some(Arc::new(self.resolution_scope())),
             notify: Some(Arc::clone(&self.notify_pending)),
         }
     }
@@ -2623,6 +2893,14 @@ impl SqlSession {
             fctx: crate::exec::ForeignCtx::none(),
             range_scanner: self.range_scanner.as_ref(),
             ctes: statement.ctes,
+            // Only an open block has a later statement that could repair a
+            // deferred violation, so only an open block promotes checks out of
+            // the statement queue. An autocommit statement is its own
+            // transaction: its end-of-statement drain runs every check,
+            // `INITIALLY DEFERRED` included, which is observationally identical
+            // to draining them at the implicit commit a moment later.
+            deferred_fk: matches!(self.state, TxnState::InTransaction(_))
+                .then(|| &*self.deferred_fk),
         }
     }
 
@@ -2707,6 +2985,47 @@ impl SqlSession {
 
     fn pending_notify(&self) -> std::sync::MutexGuard<'_, NotifyPending> {
         self.notify_pending.lock().expect("notify pending mutex")
+    }
+
+    fn deferred_constraints(&self) -> std::sync::MutexGuard<'_, crate::fk::DeferredConstraints> {
+        self.deferred_fk.lock().expect("deferred constraints mutex")
+    }
+
+    /// Remove the sequence advances staged during this statement, as write ops
+    /// to fold into the batch about to be committed.
+    ///
+    /// Taking them unconditionally — on the abort path as much as the commit
+    /// path — is what gives `PostgreSQL`'s non-transactional `nextval`: a
+    /// rolled-back transaction leaves the gap it burned, verified against
+    /// `postgres:18.4`, where advancing, rolling back and advancing again
+    /// yields 1 then 3.
+    fn take_pending_sequence_ops(&self) -> Vec<crabka_pgkv::WriteOp> {
+        self.pending_sequences
+            .lock()
+            .expect("pending sequences mutex")
+            .take_ops()
+    }
+
+    /// Commit the staged sequence advances on their own.
+    ///
+    /// Only a statement with no batch of its own needs this — `SELECT
+    /// nextval('s')` reaches the committer nowhere else, and its value must be
+    /// durable before it is returned, or a writer that died here would let its
+    /// successor hand the same value out again.
+    async fn flush_pending_sequences(&self) -> Result<(), ExecError> {
+        let ops = self.take_pending_sequence_ops();
+        if ops.is_empty() {
+            return Ok(());
+        }
+        self.committer.commit(ops).await
+    }
+
+    /// Drop the transaction's deferred checks and its `SET CONSTRAINTS`
+    /// overrides. Both are transaction-scoped, so every path that ends a
+    /// transaction — commit, abort, and the autocommit statement epilogue —
+    /// runs this, exactly as it runs [`Self::discard_pending_notifications`].
+    fn discard_deferred_constraints(&self) {
+        self.deferred_constraints().clear();
     }
 
     /// This session's bus registration, or the error `LISTEN`/`NOTIFY` reports
@@ -2953,10 +3272,11 @@ impl SqlSession {
         name: &str,
         value: &crabka_pgparser::ast::SetValue,
     ) -> Result<QueryResult, ExecError> {
-        let zone = match value {
-            crabka_pgparser::ast::SetValue::Default => String::new(),
-            crabka_pgparser::ast::SetValue::Value(v) => v.clone(),
-        };
+        // A list parameter re-quotes each written item; every other one takes
+        // the items joined back. Which of the two applies is the parameter's
+        // own property, so the flattening happens here rather than in the
+        // parser, which does not know the name it is setting.
+        let zone = guc_definition(name).map_or_else(|| value.plain(), |gd| gd.flatten(value));
         // Apply with the right transactional scope.
         let in_txn = matches!(self.state, TxnState::InTransaction(_));
         if in_txn {
@@ -3080,7 +3400,7 @@ impl SqlSession {
         value: &crabka_pgparser::ast::SetValue,
     ) -> Result<QueryResult, ExecError> {
         let isolation = match value {
-            crabka_pgparser::ast::SetValue::Value(v) => IsolationLevel::parse(v),
+            crabka_pgparser::ast::SetValue::Value(_) => IsolationLevel::parse(&value.plain()),
             crabka_pgparser::ast::SetValue::Default => None,
         };
         let Some(level) = isolation else {
@@ -3133,15 +3453,17 @@ impl SqlSession {
     ) -> Result<QueryResult, ExecError> {
         let level = match value {
             crabka_pgparser::ast::SetValue::Default => self.default_transaction_isolation()?,
-            crabka_pgparser::ast::SetValue::Value(spelling) => IsolationLevel::parse(spelling)
-                .ok_or_else(|| ExecError::InvalidGucValue {
+            crabka_pgparser::ast::SetValue::Value(_) => {
+                let spelling = value.plain();
+                IsolationLevel::parse(&spelling).ok_or(ExecError::InvalidGucValue {
                     name: "transaction_isolation".into(),
-                    value: spelling.clone(),
-                })?,
+                    value: spelling,
+                })?
+            }
         };
-        self.set_transaction(&crabka_pgparser::ast::SetValue::Value(
-            level.render().into(),
-        ))
+        self.set_transaction(&crabka_pgparser::ast::SetValue::Value(vec![
+            level.render().to_string(),
+        ]))
         .await
     }
 
@@ -3205,9 +3527,11 @@ impl SqlSession {
     /// hides the older one until it is released or rolled back to.
     fn savepoint(&mut self, name: &str) -> Result<QueryResult, ExecError> {
         self.require_transaction_block("SAVEPOINT")?;
+        let deferral = self.deferred_constraints().modes().clone();
         self.savepoints.push(SavepointFrame {
             name: name.to_string(),
             guc: self.guc.clone(),
+            deferral,
             mutating_statements: self.mutating_statements,
             failed: matches!(self.state, TxnState::Failed(_)),
         });
@@ -3245,6 +3569,10 @@ impl SqlSession {
         self.savepoints.truncate(index + 1);
         let frame = &self.savepoints[index];
         self.guc = frame.guc.clone();
+        // `SET CONSTRAINTS` is a utility statement, so unlike the checks it
+        // governs it *is* rollback-able.
+        self.deferred_constraints()
+            .restore_modes(frame.deferral.clone());
         let restore_failed = frame.failed;
         // Every cursor declared inside the sub-transaction being unwound dies
         // with it, `WITH HOLD` included; one declared outside survives with its
@@ -3396,6 +3724,90 @@ impl SqlSession {
 
     // ---- S2: SQL-level PREPARE/EXECUTE/DEALLOCATE -----------------------
 
+    /// What `statement` describes as under this session's current resolution
+    /// scope: the parameter types it infers, and the result columns it would
+    /// announce.
+    ///
+    /// One function serves `PREPARE`, `Parse`, and the re-description a later
+    /// `EXECUTE` or `Bind` compares against, so "the same statement under the
+    /// same scope" is one computation rather than several that happen to agree.
+    fn describe_prepared_shape(
+        &self,
+        statement: &Statement,
+        param_type_hints: &[u32],
+    ) -> Result<PreparedShape, PgError> {
+        let parameter_count = max_statement_param(statement).max(param_type_hints.len());
+        let params = (0..parameter_count)
+            .map(|index| BoundParam {
+                type_oid: match param_type_hints.get(index).copied().unwrap_or(0) {
+                    0 => None,
+                    type_oid => Some(type_oid),
+                },
+                format: 0,
+                value: None,
+            })
+            .collect::<Vec<_>>();
+        let timezone_name = self.guc.effective("timezone").map_err(ExecError::into_pg)?;
+        let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
+            jiff::tz::TimeZone::UTC
+        } else {
+            jiff::tz::TimeZone::get(&timezone_name).map_err(|_| {
+                PgError::error(
+                    "22023",
+                    format!("invalid value for parameter: \"{timezone_name}\""),
+                )
+            })?
+        };
+        let scope = self.resolution_scope();
+        let binder = ParamBinder {
+            catalog_kv: &*self.catalog_kv,
+            resolution: &scope,
+            params: &params,
+            time_zone: &time_zone,
+            inferred_param_types: RefCell::new(vec![None; parameter_count]),
+        };
+        let mut inferred = statement.clone();
+        binder.bind_statement_params(&mut inferred)?;
+        let fields = crate::exec::describe_statement(&*self.catalog_kv, &scope, &inferred)
+            .map_err(ExecError::into_pg);
+        Ok(PreparedShape {
+            parameter_types: binder.resolved_param_types()?,
+            fields,
+            scope,
+        })
+    }
+
+    /// Refuse to run a cached statement whose result columns are no longer the
+    /// ones already described to the client.
+    ///
+    /// A statement is re-analysed under the scope in force when it runs, not
+    /// the one it was prepared under — `SET search_path` between `PREPARE` and
+    /// `EXECUTE` can therefore point an unqualified name at a different
+    /// relation, and `PostgreSQL` does the same. What `PostgreSQL` will not do
+    /// is hand back a result of a shape it has already announced a different
+    /// one for, and neither will this: the descriptor the client holds fixes
+    /// the field count and type oids its decoder is using, so a wider relation
+    /// would be truncated to the announced count and a narrower one would put
+    /// fewer fields on the wire than the `RowDescription` promised.
+    ///
+    /// The re-description is skipped while the scope is unchanged, which is the
+    /// gate `PostgreSQL` uses too (`SearchPathMatchesCurrentEnvironment`), so a
+    /// hot prepared statement costs nothing extra.
+    fn check_cached_result_type(&self, prepared: &SqlPrepared) -> Result<(), PgError> {
+        let Some(statement) = &prepared.statement else {
+            return Ok(());
+        };
+        if !prepared.fixed_result || self.resolution_scope() == prepared.described_scope {
+            return Ok(());
+        }
+        let shape = self.describe_prepared_shape(statement, &prepared.param_type_hints)?;
+        let fields = shape.fields?;
+        if result_type(&fields) == result_type(&prepared.description.fields) {
+            return Ok(());
+        }
+        Err(cached_plan_result_type_changed())
+    }
+
     /// `PREPARE <name> [(types)] AS <statement>`.
     fn prepare_sql(
         &mut self,
@@ -3410,43 +3822,23 @@ impl SqlSession {
         // A declared type list fixes those parameters; the rest are inferred
         // from the statement, exactly as `PREPARE name AS SELECT $1::int4 + 1`
         // is typed in PostgreSQL.
-        let parameter_count = max_statement_param(statement).max(param_types.len());
-        let params = (0..parameter_count)
-            .map(|index| BoundParam {
-                type_oid: param_types.get(index).map(|ty| ty.oid()),
-                format: 0,
-                value: None,
-            })
-            .collect::<Vec<_>>();
-        let timezone_name = self.guc.effective("timezone")?;
-        let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
-            jiff::tz::TimeZone::UTC
-        } else {
-            jiff::tz::TimeZone::get(&timezone_name)
-                .map_err(|_| ExecError::InvalidParameterValue(timezone_name.clone()))?
-        };
-        let binder = ParamBinder {
-            catalog_kv: &*self.catalog_kv,
-            params: &params,
-            time_zone: &time_zone,
-            inferred_param_types: RefCell::new(vec![None; parameter_count]),
-        };
-        let mut inferred = statement.clone();
-        binder
-            .bind_statement_params(&mut inferred)
+        let param_type_hints = param_types.iter().map(|ty| ty.oid()).collect::<Vec<_>>();
+        let shape = self
+            .describe_prepared_shape(statement, &param_type_hints)
             .map_err(ExecError::Remote)?;
-        let fields = crate::exec::describe_statement(&*self.catalog_kv, &inferred)
-            .unwrap_or_else(|_| Vec::new());
-        let parameter_types = binder.resolved_param_types().map_err(ExecError::Remote)?;
+        let fixed_result = shape.fields.is_ok();
         self.prepared.insert(
             name.to_string(),
             SqlPrepared {
                 statement: Some(statement.clone()),
                 description: PreparedDescription {
-                    parameter_types,
-                    fields,
+                    parameter_types: shape.parameter_types,
+                    fields: shape.fields.unwrap_or_default(),
                 },
                 sql_source: Some(source.to_string()),
+                param_type_hints,
+                described_scope: shape.scope,
+                fixed_result,
             },
         );
         Ok(QueryResult::Command {
@@ -3468,6 +3860,8 @@ impl SqlSession {
                 "wrong number of parameters for prepared statement \"{name}\""
             )));
         }
+        self.check_cached_result_type(&prepared)
+            .map_err(ExecError::Remote)?;
         let Some(mut statement) = prepared.statement.clone() else {
             return Ok(QueryResult::Empty);
         };
@@ -3476,7 +3870,17 @@ impl SqlSession {
             self.bind_extended_statement_params(&mut statement, &params)
                 .map_err(ExecError::Remote)?;
         }
-        Box::pin(self.run_one(&statement)).await
+        let result = Box::pin(self.run_one(&statement)).await?;
+        // The scope check above is `PostgreSQL`'s gate, and it does not see a
+        // relation altered under a statement whose scope never moved. What the
+        // run actually produced does, and comparing it costs nothing.
+        if let QueryResult::Rows { fields, .. } = &result
+            && prepared.fixed_result
+            && result_type(fields) != result_type(&prepared.description.fields)
+        {
+            return Err(ExecError::Remote(cached_plan_result_type_changed()));
+        }
+        Ok(result)
     }
 
     /// `CALL <procedure>(args)` — run the procedure's body statements in order.
@@ -3589,16 +3993,21 @@ impl SqlSession {
     /// written. Within one session every mode is granted, matching `PostgreSQL`.
     fn lock_table(
         &mut self,
-        tables: &[String],
+        tables: &[crabka_pgparser::ast::RelationRef],
         mode: TableLockMode,
         nowait: bool,
     ) -> Result<QueryResult, ExecError> {
         self.require_transaction_block("LOCK TABLE")?;
         // PostgreSQL resolves every relation before taking any lock.
         let mut ids = Vec::with_capacity(tables.len());
-        for name in tables {
-            let table = crabka_pgcatalog::get_table(&*self.catalog_kv, name)?;
-            ids.push((name.clone(), table.id));
+        for name in crate::relname::resolve_relations(
+            &*self.catalog_kv,
+            &self.resolution_scope(),
+            tables,
+            crate::relname::SchemaDisposition::Utility,
+        )? {
+            let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &name)?;
+            ids.push((name, table.id));
         }
         for (name, id) in ids {
             self.session_locks
@@ -3629,7 +4038,7 @@ impl SqlSession {
         // (42P01 / 42703) rather than a plan for a query that cannot run. The
         // plan renderer is purely syntactic and would otherwise happily describe
         // a scan of a table that does not exist.
-        crate::exec::describe_statement(&*self.catalog_kv, statement)?;
+        crate::exec::describe_statement(&*self.catalog_kv, &self.resolution_scope(), statement)?;
         let mut actual_rows = 0;
         if options.analyze {
             // ANALYZE runs the statement for real, inside the caller's
@@ -3669,7 +4078,7 @@ impl SqlSession {
 
     // ---- F-1/P5: DISCARD and the utility bucket -------------------------
 
-    fn discard(&mut self, target: DiscardTarget) -> Result<QueryResult, ExecError> {
+    async fn discard(&mut self, target: DiscardTarget) -> Result<QueryResult, ExecError> {
         let tag = match target {
             DiscardTarget::All => "DISCARD ALL",
             DiscardTarget::Plans => "DISCARD PLANS",
@@ -3691,6 +4100,7 @@ impl SqlSession {
                 self.portals.clear();
                 self.cursors.clear();
                 self.sequence_currvals.lock().expect("currvals").clear();
+                self.drop_temp_relations().await?;
             }
             // Gres compiles a plan per execution, so there is no plan cache to
             // drop; `PostgreSQL` reports success either way.
@@ -3698,15 +4108,18 @@ impl SqlSession {
             DiscardTarget::Sequences => {
                 self.sequence_currvals.lock().expect("currvals").clear();
             }
-            // Temporary tables are not implemented, so there is nothing to drop.
-            DiscardTarget::Temporary => {}
+            // The primitive a connection pooler issues on reset: every
+            // temporary relation goes, the namespace itself stays — after a
+            // `DISCARD TEMP` `PostgreSQL` still reports `pg_temp_<n>` in
+            // `current_schemas(true)`.
+            DiscardTarget::Temporary => self.drop_temp_relations().await?,
         }
         self.sync_transaction_isolation();
         Ok(QueryResult::Command { tag: tag.into() })
     }
 
     /// The P5/D6/D8 utility bucket: documented mappings and documented refusals.
-    fn utility(&mut self, utility: &UtilityStatement) -> Result<QueryResult, ExecError> {
+    async fn utility(&mut self, utility: &UtilityStatement) -> Result<QueryResult, ExecError> {
         match utility {
             // Reclamation and index maintenance are autonomous here, and there
             // are no planner statistics to collect, so these are accepted hints.
@@ -3734,10 +4147,9 @@ impl SqlSession {
                     tag: "ALTER SYSTEM".into(),
                 })
             }
-            // No constraint is deferrable yet, so both settings are already true.
-            UtilityStatement::SetConstraints => Ok(QueryResult::Command {
-                tag: "SET CONSTRAINTS".into(),
-            }),
+            UtilityStatement::SetConstraints { names, deferred } => {
+                self.set_constraints(names.as_deref(), *deferred).await
+            }
             UtilityStatement::SetSessionAuthorization { role, reset } => {
                 let next = role
                     .clone()
@@ -3752,6 +4164,152 @@ impl SqlSession {
                 })
             }
         }
+    }
+
+    // ---- D6: SET CONSTRAINTS -------------------------------------------
+
+    /// `SET CONSTRAINTS { ALL | name [, …] } { DEFERRED | IMMEDIATE }`.
+    ///
+    /// `ALL` resets every per-constraint setting, as `PostgreSQL` does.
+    /// `IMMEDIATE` then drains whatever stopped being deferred — every pending
+    /// check under `ALL`, and only the named constraint's under a name — so the
+    /// violation is reported *here*, mid-transaction, rather than at `COMMIT`.
+    ///
+    /// A named constraint is resolved by scanning the foreign-key catalog.
+    /// `PostgreSQL` resolves the name through the search path; this engine has
+    /// one namespace, so the name can only mean the constraints that carry it.
+    ///
+    /// Divergence: outside a transaction block `PostgreSQL` emits
+    /// `WARNING: 25P01 SET CONSTRAINTS can only be used in transaction blocks`
+    /// and still validates the names. The wire layer here has no
+    /// `NoticeResponse`/`WarningResponse` path, so that warning is not emitted.
+    /// The validation still runs, and the settings still die with the statement
+    /// — an autocommit statement is its own transaction — so the only
+    /// observable difference is the missing warning.
+    async fn set_constraints(
+        &mut self,
+        names: Option<&[String]>,
+        deferred: bool,
+    ) -> Result<QueryResult, ExecError> {
+        match names {
+            None => self.deferred_constraints().modes_mut().set_all(deferred),
+            Some(names) => {
+                let resolved = self.resolve_constraint_names(names)?;
+                let mut store = self.deferred_constraints();
+                for fk in &resolved {
+                    store.modes_mut().set_one(fk.table_id, &fk.name, deferred);
+                }
+            }
+        }
+        if !deferred {
+            let checks = self.deferred_constraints().take_immediate();
+            self.drain_deferred_checks_now(checks).await?;
+        }
+        Ok(QueryResult::Command {
+            tag: "SET CONSTRAINTS".into(),
+        })
+    }
+
+    /// The foreign keys each `SET CONSTRAINTS` name refers to.
+    ///
+    /// # Errors
+    ///
+    /// 42704 when no constraint carries the name, and 42809 when one does but
+    /// is not `DEFERRABLE` — `SET CONSTRAINTS` cannot change a constraint whose
+    /// triggers were never created deferrable.
+    fn resolve_constraint_names(
+        &self,
+        names: &[String],
+    ) -> Result<Vec<crabka_pgcatalog::ForeignKey>, ExecError> {
+        let catalog = crabka_pgcatalog::list_foreign_keys(self.catalog_kv.as_ref())?;
+        let mut resolved = Vec::new();
+        for name in names {
+            let before = resolved.len();
+            for fk in catalog.iter().filter(|fk| fk.name == *name) {
+                if !fk.deferrable {
+                    return Err(ExecError::WrongObjectType(format!(
+                        "constraint \"{name}\" is not deferrable"
+                    )));
+                }
+                resolved.push(fk.clone());
+            }
+            if resolved.len() == before {
+                return Err(ExecError::UndefinedObject(format!(
+                    "constraint \"{name}\" does not exist"
+                )));
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// Run checks that stopped being deferred mid-transaction, committing
+    /// whatever their referential actions wrote as its own batch.
+    ///
+    /// The `COMMIT` drain folds its ops into the commit batch instead; here the
+    /// transaction continues, so the ops reach the KV under its xid exactly as
+    /// an ordinary statement's would.
+    async fn drain_deferred_checks_now(
+        &self,
+        checks: Vec<crate::fk::PendingCheck>,
+    ) -> Result<(), ExecError> {
+        if checks.is_empty() {
+            return Ok(());
+        }
+        let TxnState::InTransaction(txn) = &self.state else {
+            // Only an open block ever promotes a check out of the statement
+            // queue, so there is nothing pending anywhere else.
+            return Ok(());
+        };
+        let xid = txn
+            .xid
+            .expect("a statement that deferred a check modified rows, which allocates the xid");
+        let mut ops = self.deferred_check_ops(txn, xid, checks).await?;
+        if ops.is_empty() {
+            return Ok(());
+        }
+        if self.persist_mode == crate::PersistMode::Replicated {
+            ops.push(self.procarray.next_xid_op());
+        }
+        self.committer.commit(ops).await?;
+        Ok(())
+    }
+
+    /// The write ops a deferred drain produces.
+    ///
+    /// Every statement of the transaction has already committed its batch, so
+    /// the drain reads storage directly: a parent re-supplied after the delete
+    /// that orphaned it is found, which is the whole point of deferring.
+    async fn deferred_check_ops(
+        &self,
+        txn: &TxnCtx,
+        xid: u64,
+        checks: Vec<crate::fk::PendingCheck>,
+    ) -> Result<Vec<WriteOp>, ExecError> {
+        let stored = if txn.repeatable_read {
+            txn.global_snapshot.as_ref()
+        } else {
+            None
+        };
+        let global_snapshot = self.global_read_snapshot(stored)?;
+        let mut eval_ctx = self.eval_ctx();
+        // At COMMIT the block is already unwired from `self.state`, so the
+        // transaction-stable `now()` a cascaded `SET DEFAULT` might read comes
+        // from the context rather than from the state `eval_ctx` inspects.
+        eval_ctx.now = txn.txn_now;
+        let ctes = crate::cte::CteContext::empty();
+        let write_ctx = self.write_context(&WriteStatementContext {
+            global_snapshot: &global_snapshot,
+            snapshot: &txn.snapshot,
+            xid,
+            repeatable_read: txn.repeatable_read,
+            eval_ctx: &eval_ctx,
+            // A cascaded write re-reads its row's chain under the row lock like
+            // any other, but this transaction is ending; leave the pruning to
+            // whatever touches the row next.
+            prune_horizon: None,
+            ctes: &ctes,
+        });
+        crate::exec::drain_deferred_fk_checks(&write_ctx, checks).await
     }
 
     /// Parse a simple-query string, aborting an open transaction block when the
@@ -3817,6 +4375,7 @@ impl SqlSession {
         };
         let bind_result = ParamBinder {
             catalog_kv: &*self.catalog_kv,
+            resolution: &self.resolution_scope(),
             params,
             time_zone: &time_zone,
             inferred_param_types: RefCell::new(vec![None; params.len()]),
@@ -3980,7 +4539,7 @@ impl SqlSession {
             {
                 self.set_transaction_isolation_guc(value).await
             }
-            Statement::Discard { target } => self.discard(*target),
+            Statement::Discard { target } => self.discard(*target).await,
             Statement::Set { local, name, value } => self.set_guc(*local, name, value),
             Statement::Reset { target } => self.reset_guc(target),
             Statement::SetRole { role, reset } => self.set_role(role.as_deref(), *reset),
@@ -4031,7 +4590,7 @@ impl SqlSession {
                 nowait,
             } => self.lock_table(tables, *mode, *nowait),
             Statement::Explain { options, statement } => self.explain(options, statement).await,
-            Statement::Utility(utility) => self.utility(utility),
+            Statement::Utility(utility) => self.utility(utility).await,
         };
         self.finish_statement(stmt, result).await
     }
@@ -4057,18 +4616,41 @@ impl SqlSession {
         {
             ctx.activity_started = true;
         }
+        // A statement that advanced a sequence must leave that advance durable
+        // before it returns, whether or not it committed anything else and
+        // whether or not it succeeded — that is what stops a successor writer
+        // re-issuing a value this one already handed to a client. A write
+        // statement folded its advances into its own batch and leaves nothing
+        // here; `SELECT nextval('s')`, which reaches the committer nowhere else,
+        // is what this exists for. A flush failure must not mask the statement's
+        // own error.
+        if let Err(error) = self.flush_pending_sequences().await
+            && result.is_ok()
+        {
+            return Err(error);
+        }
         if !matches!(self.state, TxnState::Idle) {
             // Inside a block the queue lives until COMMIT (which flushes it) or
             // ROLLBACK/abort (which drops it).
             return result;
         }
+        // An autocommit statement is its own transaction, so a `SET CONSTRAINTS`
+        // it ran ends with it — as it does in `PostgreSQL`, which warns that the
+        // setting can only be used in a block. Nothing is ever pending here: an
+        // autocommit statement's drain runs every check it queued.
+        self.discard_deferred_constraints();
         // An autocommit statement is its own transaction, so its `_xact`
         // advisory locks are released the moment it ends.
         self.session_locks
             .advisory
             .release_transaction(self.session_lock_id);
         match result {
-            Ok(result) => self.flush_autocommit_notifications().await.map(|()| result),
+            Ok(result) => {
+                // An autocommit statement is its own transaction, so what a
+                // `COMMIT` owes a temporary relation comes due here too.
+                self.apply_on_commit().await?;
+                self.flush_autocommit_notifications().await.map(|()| result)
+            }
             Err(e) => {
                 self.discard_pending_notifications();
                 Err(e)
@@ -4079,17 +4661,21 @@ impl SqlSession {
     /// Record an aborted transaction's outcome (clog Aborted + deregister) and
     /// release its row locks. Shared by ROLLBACK and COMMIT-of-failed.
     async fn abort_ctx(&self, ctx: TxnCtx) -> Result<(), ExecError> {
-        // Queued notifications and queued LISTEN/UNLISTEN die with the
-        // transaction that wrote them.
+        // Queued notifications, queued LISTEN/UNLISTEN and deferred referential
+        // checks all die with the transaction that queued them.
         self.discard_pending_notifications();
+        self.discard_deferred_constraints();
         if let Some(xid) = ctx.xid {
             // Best-effort abort record; the versions are already invisible
             // (in-progress in no future snapshot once deregistered), so even if
             // this write is lost the rows never become visible.
-            let r = self
-                .committer
-                .commit(vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)])
-                .await;
+            // Any sequence advance still staged rides the abort record.
+            // `PostgreSQL` does not roll `nextval` back — advancing, rolling
+            // back and advancing again yields 1 then 3 on `postgres:18.4` — so
+            // the gap the aborted transaction burned has to survive it.
+            let mut ops = vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)];
+            ops.extend(self.take_pending_sequence_ops());
+            let r = self.committer.commit(ops).await;
             // Deregister even if the abort record failed to write: restart
             // re-seeds the ProcArray empty and the rows stay invisible (no clog
             // Committed), so a phantom running xid must not be stranded here.
@@ -4239,6 +4825,13 @@ impl SqlSession {
     async fn commit_cmd(&mut self, chain: bool) -> Result<QueryResult, ExecError> {
         let chained = self.chained_isolation("COMMIT AND CHAIN", chain)?;
         let result = self.end_block_commit().await;
+        // A plain `COMMIT` returns the session to idle, where the ordinary
+        // end-of-statement drain discharges what the block's temporary
+        // relations owe. `AND CHAIN` opens the next block before that point, so
+        // this is the only place the drain can happen for it.
+        if chained.is_some() && result.is_ok() {
+            self.apply_on_commit().await?;
+        }
         self.open_chained_block(chained, result).await
     }
 
@@ -4306,10 +4899,24 @@ impl SqlSession {
             }
         };
         let outcome = self.commit_reserved_block(ctx, &mut reserved).await;
+        // The deferred queue belongs to the block either way: a successful
+        // commit drained it, a failed one abandoned it.
+        self.discard_deferred_constraints();
         if outcome.is_err() {
             self.undo_reserved_notifications(std::mem::take(&mut reserved));
         }
         outcome
+    }
+
+    /// The ops the transaction's deferred checks produce at `COMMIT`, for the
+    /// commit batch to carry.
+    async fn commit_deferred_check_ops(
+        &self,
+        ctx: &TxnCtx,
+        xid: u64,
+    ) -> Result<Vec<WriteOp>, ExecError> {
+        let checks = self.deferred_constraints().take_all();
+        self.deferred_check_ops(ctx, xid, checks).await
     }
 
     async fn commit_reserved_block(
@@ -4321,7 +4928,29 @@ impl SqlSession {
         // batch this commit was already sending wherever there is one.
         let notify_ops = std::mem::take(&mut reserved.wal_ops);
         if let Some(xid) = ctx.xid {
+            // The deferred referential checks run before anything records the
+            // commit, so a violation is an ordinary failed COMMIT and needs no
+            // path of its own: the transaction's rows are already durable but
+            // stay invisible, because the clog never says they committed, and
+            // the abort below is what keeps them that way. The client sees the
+            // 23503 and then an idle ready-for-query, as `PostgreSQL` does.
+            let fk_ops = match self.commit_deferred_check_ops(&ctx, xid).await {
+                Ok(ops) => ops,
+                Err(error) => {
+                    let _ = self.abort_current_global().await;
+                    let _ = self.abort_ctx(ctx).await;
+                    self.guc.rollback();
+                    return Err(error);
+                }
+            };
             if let Some(g) = self.global_xid.take() {
+                // A foreign key on a sharded relation is refused at DDL, and a
+                // sharded write inside a block is refused outright, so a
+                // cross-range transaction has nothing referential to fold in.
+                debug_assert!(
+                    fk_ops.is_empty(),
+                    "a cross-range transaction cannot defer a referential check"
+                );
                 let status = self.commit_global_decision(g, XidStatus::Committed).await?;
                 self.procarray.finish(xid);
                 self.lockmgr.release_all(xid);
@@ -4345,7 +4974,11 @@ impl SqlSession {
             }
             // Record the commit. Deregister xid BEFORE propagating any
             // write error so the xid never stays stuck in the running set.
-            let mut ops = vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Committed)];
+            // Whatever the deferred drain's referential actions wrote leads the
+            // batch, so those rows are durable before the entry that makes the
+            // transaction visible.
+            let mut ops = fk_ops;
+            ops.push(crabka_pgmvcc::clog::put_op(xid, XidStatus::Committed));
             // In Replicated mode, fold the next_xid advance into the
             // committed batch (the state machine max-merges it). A txn
             // that allocated its xid only via a locking SELECT (FOR
@@ -4362,6 +4995,7 @@ impl SqlSession {
             // The notify records ride the commit record itself: durable iff the
             // transaction committed, in the transaction's own WAL entry.
             ops.extend(notify_ops);
+            ops.extend(self.take_pending_sequence_ops());
             let r = self.committer.commit(ops).await;
             self.procarray.finish(xid);
             // Free every row this transaction locked, waking waiters.
@@ -4370,7 +5004,13 @@ impl SqlSession {
         } else {
             // A block that wrote nothing (`BEGIN; NOTIFY a; COMMIT;`) never
             // allocated an xid and so commits no batch today. The records are
-            // then the whole batch — the transaction's only durable act.
+            // then the whole batch — the transaction's only durable act. Only a
+            // row-modifying statement can defer a check, and one of those would
+            // have allocated the xid, so there is nothing to drain here either.
+            debug_assert!(
+                self.deferred_constraints().is_empty(),
+                "a transaction that allocated no xid cannot have deferred a check"
+            );
             self.append_notify_records(notify_ops).await;
         }
         // SP37: a real COMMIT of an open block promotes any staged session
@@ -4454,7 +5094,15 @@ impl SqlSession {
             | Statement::Merge { table, .. } => table,
             _ => return Ok(false),
         };
-        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), table)?;
+        let table = crabka_pgcatalog::get_table(
+            self.catalog_kv.as_ref(),
+            &crate::relname::resolve_relation(
+                self.catalog_kv.as_ref(),
+                &self.resolution_scope(),
+                table,
+                crate::relname::SchemaDisposition::Reference,
+            )?,
+        )?;
         Ok(crate::exec::table_uses_global_visibility(&table))
     }
 
@@ -4475,7 +5123,15 @@ impl SqlSession {
         let [TableExpr::Table { name, .. }] = s.from.as_slice() else {
             return Ok(false);
         };
-        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name)?;
+        let table = crabka_pgcatalog::get_table(
+            self.catalog_kv.as_ref(),
+            &crate::relname::resolve_relation(
+                self.catalog_kv.as_ref(),
+                &self.resolution_scope(),
+                name,
+                crate::relname::SchemaDisposition::Reference,
+            )?,
+        )?;
         Ok(crate::exec::table_uses_global_visibility(&table))
     }
 
@@ -4561,6 +5217,11 @@ impl SqlSession {
         let fctx = crate::exec::ForeignCtx {
             scanner: self.foreign_scanner.as_ref(),
             current_user: &self.current_role,
+            resolution: ctx.resolution(),
+            // A read path evaluates no DDL expression, so it needs no catalog.
+            catalog: None,
+            // A read path creates no relation, so it needs no id.
+            reserved_table_ids: None,
             own_xid: match &self.state {
                 TxnState::InTransaction(ctx) => ctx.xid,
                 _ => None,
@@ -4810,12 +5471,6 @@ impl SqlSession {
         }
     }
 
-    /// DDL is non-transactional and writes through immediately. All DDL funnels
-    /// through the leader's catalog_lock held ACROSS the Raft commit, so DDL is
-    /// globally serialized (next_table_id read+bump+commit is atomic; low
-    /// throughput, fine for D1 — concurrent-DDL optimization is a later slice).
-    /// The tokio Mutex is intentionally held across .await (allowed: it is an
-    /// async mutex).
     /// `CREATE TABLE … AS <query>` and its `SELECT … INTO` spelling.
     ///
     /// The output schema comes from analyzing the query, so `WITH NO DATA` never
@@ -4833,14 +5488,31 @@ impl SqlSession {
         else {
             return Err(ExecError::Unsupported("not a CREATE TABLE AS".into()));
         };
+        // The target is resolved once, here, and every statement this synthesizes
+        // names it schema-qualified. A `CREATE` lands in the first search-path
+        // entry rather than wherever the name already exists, and pinning the
+        // resolved name means the `INSERT` and the undo `DROP` cannot land on a
+        // different relation of the same name earlier on the path.
+        //
         // `IF NOT EXISTS` over an existing relation skips the query entirely,
         // reporting the bare command tag.
+        let name = &crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            name,
+            crate::relname::SchemaDisposition::Creation,
+        )?;
+        let target = crabka_pgparser::ast::RelationRef::qualified(&name.schema, &name.name);
         if *if_not_exists && crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name).is_ok() {
             return Ok(QueryResult::Command {
                 tag: "CREATE TABLE AS".into(),
             });
         }
-        let fields = crate::query::describe_query_expr(self.catalog_kv.as_ref(), query)?;
+        let fields = crate::query::describe_query_expr(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            query,
+        )?;
         if let Some(names) = columns
             && names.len() > fields.len()
         {
@@ -4877,7 +5549,7 @@ impl SqlSession {
             }
         }
         let create = Statement::CreateTable {
-            name: name.clone(),
+            name: target.clone(),
             columns: column_defs,
             constraints: Vec::new(),
             sharded: false,
@@ -4897,7 +5569,7 @@ impl SqlSession {
             });
         }
         let insert = Statement::Insert {
-            table: name.clone(),
+            table: target.clone(),
             columns: None,
             source: crabka_pgparser::ast::InsertSource::Query(query.clone()),
             on_conflict: None,
@@ -4913,7 +5585,7 @@ impl SqlSession {
                 // is not transactional, so the CREATE is undone explicitly. The
                 // original failure is what the client sees either way.
                 let drop = Statement::DropTable {
-                    names: vec![name.clone()],
+                    names: vec![target.clone()],
                     if_exists: true,
                     cascade: false,
                 };
@@ -4934,7 +5606,344 @@ impl SqlSession {
         })
     }
 
+    /// Claim table ids from the shared counter until this session holds at least
+    /// `wanted` of them.
+    ///
+    /// The counter's read-bump-commit is only atomic while `table_id_lock` is
+    /// held, and that hold is the whole cost: a block is claimed once and drained
+    /// locally, so the amortized coordination is one bump per
+    /// [`TABLE_ID_BLOCK`] relations rather than one per `CREATE TABLE`. Nothing
+    /// is claimed until a statement actually creates a relation, so a session
+    /// that creates none reserves none.
+    ///
+    /// The cost, and it is a real one: table ids are no longer densely allocated
+    /// in creation order.
+    async fn reserve_table_ids(&self, wanted: usize) -> Result<(), ExecError> {
+        if self.reserved_table_ids.lock().expect("table ids").len() >= wanted {
+            return Ok(());
+        }
+        let _guard = self.table_id_lock.lock().await;
+        let first = crabka_pgcatalog::read_next_table_id(&*self.catalog_kv)?;
+        let count = crabka_pgcatalog::TableId::try_from(wanted.max(TABLE_ID_BLOCK))
+            .unwrap_or(crabka_pgcatalog::TableId::MAX);
+        // Row keys, lock identities and foreign-key referents all key on the
+        // table id, so running out of them is a real limit rather than a wrap.
+        let end = first
+            .checked_add(count)
+            .ok_or_else(|| ExecError::Unsupported("the table id space is exhausted".into()))?;
+        let ops = vec![crabka_pgcatalog::set_next_table_id_op(end)];
+        if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
+            self.committer.commit(ops).await?;
+        } else {
+            self.catalog_kv.write_batch(&ops)?;
+        }
+        // Pushed high-to-low so draining from the back hands ids out in
+        // ascending order, which keeps the common single-statement case reading
+        // the way it used to. Appended rather than replacing: a partly spent
+        // block that was too small for this statement still holds ids nothing
+        // else will ever allocate, and dropping them would leak them.
+        self.reserved_table_ids
+            .lock()
+            .expect("table ids")
+            .extend((first..end).rev());
+        Ok(())
+    }
+
+    /// This session's temporary namespace, whether or not it exists yet.
+    fn temp_schema(&self) -> String {
+        crabka_pgcatalog::temp_schema_name(self.backend_pid)
+    }
+
+    /// The catalog store this session reads and writes, as a value a claim on a
+    /// temporary namespace can be keyed by.
+    ///
+    /// Address identity is enough because a claim outlives neither the session
+    /// holding it nor, therefore, the `Arc` that keeps the store alive: while
+    /// an entry exists the address cannot have been reused by another store.
+    fn catalog_store_id(&self) -> usize {
+        std::ptr::from_ref(&*self.catalog_kv).cast::<()>().addr()
+    }
+
+    /// Apply a catalog batch through whichever seam this session's stores make
+    /// authoritative — the commit seam when catalog and data share a store, the
+    /// catalog store's own batch when they do not.
+    async fn commit_catalog(&self, ops: Vec<crabka_pgkv::WriteOp>) -> Result<(), ExecError> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
+            self.committer.commit(ops).await?;
+        } else {
+            self.catalog_kv.write_batch(&ops)?;
+        }
+        Ok(())
+    }
+
+    /// Make this session's temporary namespace exist and be its own, once.
+    ///
+    /// Backend ids are reused, and a backend that died without dropping its
+    /// temporary relations leaves them in the shared catalog under the name a
+    /// later session of the same id will use. So the first statement that could
+    /// create a temporary relation clears the namespace before anything is
+    /// created in it: one extra catalog batch per session that uses temporary
+    /// relations at all, and none for a session that does not.
+    ///
+    /// Clearing it is gated on the claim, because "the previous holder of this
+    /// id is gone" is an assumption and this is where it would cost data if it
+    /// were wrong. A session that finds the namespace already claimed leaves
+    /// its contents alone and only makes sure the namespace record exists: two
+    /// sessions sharing one temporary namespace answer each other's queries,
+    /// which is wrong, but silently destroying the other's relations is worse.
+    async fn ensure_temp_schema(&mut self, stmt: &Statement) -> Result<(), ExecError> {
+        if self.temp_schema_ready || !self.statement_may_create_temp(stmt) {
+            return Ok(());
+        }
+        let schema = self.temp_schema();
+        let (claim, unshared) = TempNamespaceClaim::acquire(self.catalog_store_id(), &schema);
+        let mut ops = if unshared {
+            crate::exec::drop_schema_contents_ops(&*self.catalog_kv, &schema)?
+        } else {
+            tracing::warn!(
+                schema,
+                "temporary namespace is already in use by another session; \
+                 leaving its relations in place"
+            );
+            Vec::new()
+        };
+        ops.push(crabka_pgcatalog::create_temp_schema_op(&schema));
+        self.commit_catalog(ops).await?;
+        self.temp_namespace_claim = Some(claim);
+        self.temp_schema_ready = true;
+        Ok(())
+    }
+
+    /// True when `stmt` could put a relation in this session's temporary
+    /// namespace: it says `TEMPORARY`, it writes a temporary qualifier, or the
+    /// session's `search_path` puts one in the creation slot.
+    fn statement_may_create_temp(&self, stmt: &Statement) -> bool {
+        crate::exec::ddl_requests_temporary(stmt)
+            || crate::exec::ddl_created_qualifier(stmt).is_some_and(|schema| {
+                schema == crabka_pgcatalog::PG_TEMP_ALIAS || schema == self.temp_schema()
+            })
+            || (matches!(
+                crate::exec::ddl_table_id_demand(stmt),
+                crate::exec::TableIdDemand::Fixed(_)
+            ) && self
+                .resolution_scope()
+                .creation_schema(&*self.catalog_kv)
+                .is_ok_and(|schema| {
+                    schema.is_some_and(|name| crabka_pgcatalog::is_temp_schema(&name))
+                }))
+    }
+
+    /// Drop every relation in this session's temporary namespace, leaving the
+    /// namespace itself in place — which is what `PostgreSQL` does, where
+    /// `current_schemas(true)` still reports `pg_temp_<n>` after a
+    /// `DISCARD TEMP`.
+    ///
+    /// Emptying by name is gated on the claim exactly as
+    /// [`Self::ensure_temp_schema`] is, and for the same reason: `DISCARD TEMP`
+    /// and session teardown reach
+    /// this on a session that may never have created a temporary relation at
+    /// all, so without the gate a connection could empty a namespace it had
+    /// nothing to do with merely by disconnecting.
+    async fn drop_temp_relations(&mut self) -> Result<(), ExecError> {
+        self.on_commit.clear();
+        let schema = self.temp_schema();
+        // A session that already holds the claim counts itself; one that does
+        // not takes a claim for the duration, so the answer cannot go stale
+        // between the question and the batch it decides.
+        let (borrowed, unshared) = match &self.temp_namespace_claim {
+            Some(_) => (
+                None,
+                temp_namespace_holders(self.catalog_store_id(), &schema) == 1,
+            ),
+            None => {
+                let (claim, unshared) =
+                    TempNamespaceClaim::acquire(self.catalog_store_id(), &schema);
+                (Some(claim), unshared)
+            }
+        };
+        let result = if unshared {
+            let ops = crate::exec::drop_schema_contents_ops(&*self.catalog_kv, &schema)?;
+            self.commit_catalog(ops).await
+        } else {
+            tracing::warn!(
+                schema,
+                "temporary namespace is in use by another session; leaving its relations in place"
+            );
+            Ok(())
+        };
+        drop(borrowed);
+        result
+    }
+
+    /// Remember what a `COMMIT` owes a temporary relation this statement just
+    /// created.
+    ///
+    /// The disposition lives here rather than on the stored table because it is
+    /// session-scoped by definition: the relation it governs cannot outlive the
+    /// session that created it, so a value that outlived the session could only
+    /// ever be wrong.
+    fn record_on_commit(&mut self, stmt: &Statement) -> Result<(), ExecError> {
+        let Statement::CreateTable {
+            name,
+            temporary,
+            on_commit: Some(action),
+            ..
+        } = stmt
+        else {
+            return Ok(());
+        };
+        if *action == crabka_pgparser::ast::OnCommitAction::PreserveRows {
+            return Ok(());
+        }
+        let disposition = if *temporary {
+            crate::relname::SchemaDisposition::TemporaryCreation
+        } else {
+            crate::relname::SchemaDisposition::Creation
+        };
+        let resolved = crate::relname::resolve_relation(
+            &*self.catalog_kv,
+            &self.resolution_scope(),
+            name,
+            disposition,
+        )?;
+        // Read back the id the creation just assigned: the disposition is the
+        // relation's, and only the id says which relation that is once the name
+        // has been given away.
+        let table = crabka_pgcatalog::get_table(&*self.catalog_kv, &resolved)?.id;
+        self.on_commit.push(OnCommitEntry {
+            relation: resolved,
+            table,
+            action: *action,
+        });
+        Ok(())
+    }
+
+    /// Whether the relation an entry was armed for is still the one standing
+    /// under its name.
+    ///
+    /// A relation dropped since — by `DROP TABLE`, by the `DROP SCHEMA` a
+    /// `DISCARD TEMP` amounts to, or by anything else that empties the
+    /// namespace — has no rows to delete and nothing to drop, and a name since
+    /// re-used by a different relation carries that relation's own disposition
+    /// rather than this one.
+    fn on_commit_relation_is_live(&self, entry: &OnCommitEntry) -> Result<bool, ExecError> {
+        match crabka_pgcatalog::get_table(&*self.catalog_kv, &entry.relation) {
+            Ok(table) => Ok(table.id == entry.table),
+            Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+
+    /// Discharge every `ON COMMIT` disposition at the end of a transaction —
+    /// the explicit one a `COMMIT` closes, and the implicit one an autocommit
+    /// statement is.
+    ///
+    /// Both forms are `PostgreSQL`'s: outside a block, `CREATE TEMP TABLE t
+    /// (…) ON COMMIT DROP` leaves nothing behind, because the statement that
+    /// created it was its own transaction.
+    ///
+    /// DDL here is non-transactional and commits its own batch, so a `DROP`
+    /// lands *after* the data commit rather than as part of it. A process death
+    /// between the two leaves the relation, which the next session of the same
+    /// backend id purges before it uses the namespace.
+    ///
+    /// The queue is taken rather than borrowed, and only an entry this drain
+    /// actually discharged goes back. The drain runs after the transaction's
+    /// commit has landed, so there is no transaction left for a failure here to
+    /// abort; an entry put back after failing to discharge would be re-attempted
+    /// by the next statement, and by every statement after that, turning one
+    /// fault into a session that answers everything with the same error.
+    async fn apply_on_commit(&mut self) -> Result<(), ExecError> {
+        if self.on_commit.is_empty() {
+            return Ok(());
+        }
+        let queued = std::mem::take(&mut self.on_commit);
+        let mut still_owed = Vec::new();
+        let mut drop = Vec::new();
+        let mut failure = None;
+        for entry in queued {
+            let reference = crabka_pgparser::ast::RelationRef::qualified(
+                &entry.relation.schema,
+                &entry.relation.name,
+            );
+            match self.on_commit_relation_is_live(&entry) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    failure = failure.or(Some(error));
+                    continue;
+                }
+            }
+            match entry.action {
+                crabka_pgparser::ast::OnCommitAction::PreserveRows => {}
+                crabka_pgparser::ast::OnCommitAction::Drop => drop.push(reference),
+                crabka_pgparser::ast::OnCommitAction::DeleteRows => {
+                    // One statement per relation, so an entry that cannot be
+                    // emptied costs only its own disposition rather than every
+                    // other relation's.
+                    let emptied = self
+                        .run_write(&Statement::Truncate {
+                            names: vec![reference],
+                            restart_identity: false,
+                            cascade: false,
+                        })
+                        .await;
+                    match emptied {
+                        Ok(_) => still_owed.push(entry),
+                        Err(error) => failure = failure.or(Some(error)),
+                    }
+                }
+            }
+        }
+        self.on_commit = still_owed;
+        if !drop.is_empty()
+            && let Err(error) = self
+                .run_ddl(&Statement::DropTable {
+                    names: drop,
+                    if_exists: true,
+                    cascade: true,
+                })
+                .await
+        {
+            failure = failure.or(Some(error));
+        }
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    /// DDL is non-transactional and writes through immediately. Every statement
+    /// funnels through the leader's `catalog_lock`, which is held ACROSS the
+    /// commit: the duplicate-name check reads the catalog keyspace, so releasing
+    /// the lock before the batch lands would let two concurrent
+    /// `CREATE TABLE t` both see an empty slot and both win. Holding a `tokio`
+    /// mutex across an `.await` is deliberate and sound — it is an async mutex.
+    ///
+    /// The table-id counter is NOT covered by that lock. It has its own, taken
+    /// and released before this one, so a `CREATE TABLE` that draws on an
+    /// already-claimed block never touches it at all.
     async fn run_ddl(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        // Taken before `catalog_lock` on the one path that needs both, which
+        // fixes the order for every path that could.
+        let _id_guard = match crate::exec::ddl_table_id_demand(stmt) {
+            crate::exec::TableIdDemand::None => None,
+            crate::exec::TableIdDemand::Fixed(wanted) => {
+                self.reserve_table_ids(wanted).await?;
+                None
+            }
+            // `IMPORT FOREIGN SCHEMA` creates one relation per table the scanner
+            // discovers, a count no caller knows before the scan. It allocates
+            // straight from the counter instead, holding the counter's lock for
+            // the statement.
+            crate::exec::TableIdDemand::Unbounded => {
+                Some(Arc::clone(&self.table_id_lock).lock_owned().await)
+            }
+        };
+        self.ensure_temp_schema(stmt).await?;
         // An explicit writer retains its writer-fence lease, but releases its
         // shared physical gate before waiting for the catalog lock. Conversion
         // waits for that lease before it can acquire the physical gate.
@@ -4967,11 +5976,15 @@ impl SqlSession {
             None
         };
         let _g = self.catalog_lock.lock().await;
+        let resolution = self.resolution_scope();
         // SP40: IMPORT FOREIGN SCHEMA needs the registered scanner + current user
         // to discover foreign tables; the rest of DDL ignores the ForeignCtx.
         let fctx = crate::exec::ForeignCtx {
             scanner: self.foreign_scanner.as_ref(),
             current_user: &self.current_role,
+            resolution: &resolution,
+            catalog: Some(&self.catalog_kv),
+            reserved_table_ids: Some(&self.reserved_table_ids),
             own_xid: match &self.state {
                 TxnState::InTransaction(ctx) => ctx.xid,
                 _ => None,
@@ -4983,11 +5996,21 @@ impl SqlSession {
         // would create metadata that is neither authoritative nor visible to
         // subsequent catalog lookups. The single-store path retains the commit
         // seam; a distinct catalog store owns its own atomic catalog batch.
+        // A sequence this batch creates or drops invalidates whatever the
+        // replicated cache remembers under that name: `DROP SEQUENCE s; CREATE
+        // SEQUENCE s;` is a new sequence that starts over, and a surviving entry
+        // would go on advancing the old one.
+        self.seq.forget_sequences(&ops);
         if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
             self.committer.commit(ops).await?;
         } else {
             self.catalog_kv.write_batch(&ops)?;
         }
+        // Both guards borrow `self`, and the bookkeeping below needs it back.
+        // The batch has landed, so neither has anything left to protect.
+        drop(_g);
+        drop(_id_guard);
+        self.record_on_commit(stmt)?;
         Ok(result)
     }
 
@@ -5042,6 +6065,7 @@ impl SqlSession {
                 self.ensure_write_xid()?;
                 let unique_serialization = crate::exec::write_requires_unique_local_serialization(
                     self.catalog_kv.as_ref(),
+                    &self.resolution_scope(),
                     stmt,
                 )?;
                 self.ensure_unique_index_guard(unique_serialization).await;
@@ -5139,6 +6163,7 @@ impl SqlSession {
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
+                ops.extend(self.take_pending_sequence_ops());
                 self.committer.commit(ops).await?;
                 if self.global_xid.is_some() {
                     self.procarray.finish(xid); // deregister-at-prepare
@@ -5159,6 +6184,7 @@ impl SqlSession {
                 }
                 let _unique_guard = match crate::exec::write_requires_unique_local_serialization(
                     self.catalog_kv.as_ref(),
+                    &self.resolution_scope(),
                     stmt,
                 )? {
                     UniqueLocalSerialization::None => None,
@@ -5212,10 +6238,13 @@ impl SqlSession {
                         }
                         // Autocommit error: abort and stay Idle. Record the abort
                         // (best-effort), deregister, and free this xid's row locks.
-                        let _ = self
-                            .committer
-                            .commit(vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)])
-                            .await;
+                        // The failed statement's sequence advances ride the abort
+                        // record: `PostgreSQL` keeps them, so a rejected row still
+                        // burns its identity value.
+                        let mut abort_ops =
+                            vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)];
+                        abort_ops.extend(self.take_pending_sequence_ops());
+                        let _ = self.committer.commit(abort_ops).await;
                         self.procarray.finish(xid);
                         self.lockmgr.release_all(xid);
                         return Err(e);
@@ -5232,6 +6261,7 @@ impl SqlSession {
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
+                ops.extend(self.take_pending_sequence_ops());
                 // Deregister xid and free its row locks BEFORE propagating any
                 // write error so neither the running set nor the lock table is
                 // left holding a finished xid on a commit-batch failure.
@@ -5278,7 +6308,12 @@ impl SqlSession {
                 self.ensure_table_write_guard().await;
                 if crate::exec::table_uses_global_visibility(&crabka_pgcatalog::get_table(
                     self.catalog_kv.as_ref(),
-                    &copy.table,
+                    &crate::relname::resolve_relation(
+                        self.catalog_kv.as_ref(),
+                        &self.resolution_scope(),
+                        &copy.table,
+                        crate::relname::SchemaDisposition::Utility,
+                    )?,
                 )?) {
                     return Err(ExecError::Unsupported(
                         "COPY into sharded tables is not supported".into(),
@@ -5286,6 +6321,7 @@ impl SqlSession {
                 }
                 let unique_serialization = crate::exec::copy_requires_unique_local_serialization(
                     self.catalog_kv.as_ref(),
+                    &self.resolution_scope(),
                     copy,
                 )?;
                 self.ensure_unique_index_guard(unique_serialization).await;
@@ -5313,14 +6349,22 @@ impl SqlSession {
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
+                ops.extend(self.take_pending_sequence_ops());
                 self.committer.commit(ops).await?;
                 Ok(result)
             }
             TxnState::Idle => {
                 let _writer_fence_guard = Arc::clone(&self.writer_fence).writer().await;
                 let _table_write_guard = Arc::clone(&self.table_write_gate).read_owned().await;
-                let copy_table =
-                    crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &copy.table)?;
+                let copy_table = crabka_pgcatalog::get_table(
+                    self.catalog_kv.as_ref(),
+                    &crate::relname::resolve_relation(
+                        self.catalog_kv.as_ref(),
+                        &self.resolution_scope(),
+                        &copy.table,
+                        crate::relname::SchemaDisposition::Utility,
+                    )?,
+                )?;
                 if crate::exec::table_uses_global_visibility(&copy_table) {
                     let ctx = self.eval_ctx();
                     let plan = crate::exec::execute_timestamp_copy_write(
@@ -5347,6 +6391,7 @@ impl SqlSession {
                 }
                 let _unique_guard = match crate::exec::copy_requires_unique_local_serialization(
                     self.catalog_kv.as_ref(),
+                    &self.resolution_scope(),
                     copy,
                 )? {
                     UniqueLocalSerialization::None => None,
@@ -5379,10 +6424,10 @@ impl SqlSession {
                 let (result, mut ops) = match outcome {
                     Ok(value) => value,
                     Err(error) => {
-                        let _ = self
-                            .committer
-                            .commit(vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)])
-                            .await;
+                        let mut abort_ops =
+                            vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)];
+                        abort_ops.extend(self.take_pending_sequence_ops());
+                        let _ = self.committer.commit(abort_ops).await;
                         self.procarray.finish(xid);
                         // Free the unique-key locks the failed COPY acquired.
                         self.lockmgr.release_all(xid);
@@ -5393,6 +6438,7 @@ impl SqlSession {
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
+                ops.extend(self.take_pending_sequence_ops());
                 let commit = self.committer.commit(ops).await;
                 self.procarray.finish(xid);
                 // Free the unique-key locks this COPY acquired, waking waiters.
@@ -5792,6 +6838,7 @@ impl SqlSession {
             self.procarray.finish(xid);
             self.lockmgr.release_all(xid);
         }
+        self.discard_deferred_constraints();
         self.finish_transaction_scoped_state(keep_holdable);
         self.global_xid = None;
         self.state = TxnState::Idle;
@@ -5864,7 +6911,16 @@ fn copy_sentinel_stmt(stmt: &Statement) -> Result<Option<CopyStmt>, PgError> {
 }
 
 fn decode_copy_stmt(value: &crabka_pgparser::ast::SetValue) -> Result<CopyStmt, PgError> {
-    let crabka_pgparser::ast::SetValue::Value(encoded) = value else {
+    // The parser encodes the whole statement into a single item, so anything
+    // else reaching here is a hand-written `SET` wearing the sentinel's name
+    // rather than a real `COPY … FROM STDIN`.
+    let crabka_pgparser::ast::SetValue::Value(items) = value else {
+        return Err(PgError::error(
+            sqlstate::SYNTAX_ERROR,
+            "invalid COPY statement",
+        ));
+    };
+    let [encoded] = items.as_slice() else {
         return Err(PgError::error(
             sqlstate::SYNTAX_ERROR,
             "invalid COPY statement",
@@ -5896,6 +6952,11 @@ fn decode_copy_stmt(value: &crabka_pgparser::ast::SetValue) -> Result<CopyStmt, 
                 .collect::<Result<Vec<_>, _>>()
         })
         .transpose()?;
+    let schema = parts
+        .next()
+        .filter(|schema| !schema.is_empty())
+        .map(decode_copy_part)
+        .transpose()?;
     if parts.next().is_some() {
         return Err(PgError::error(
             sqlstate::SYNTAX_ERROR,
@@ -5903,7 +6964,10 @@ fn decode_copy_stmt(value: &crabka_pgparser::ast::SetValue) -> Result<CopyStmt, 
         ));
     }
     Ok(CopyStmt {
-        table,
+        table: crabka_pgparser::ast::RelationRef {
+            schema,
+            name: table,
+        },
         columns,
         format,
     })
@@ -5935,6 +6999,7 @@ fn decode_copy_part(value: &str) -> Result<String, PgError> {
 
 struct ParamBinder<'a> {
     catalog_kv: &'a dyn Kv,
+    resolution: &'a crate::relname::ResolutionScope,
     params: &'a [BoundParam],
     time_zone: &'a jiff::tz::TimeZone,
     inferred_param_types: RefCell<Vec<Option<ColumnType>>>,
@@ -5959,8 +7024,15 @@ impl ParamBinder<'_> {
                 returning,
                 ..
             } => {
+                let name = crate::relname::resolve_relation(
+                    self.catalog_kv,
+                    self.resolution,
+                    table,
+                    crate::relname::SchemaDisposition::Reference,
+                )
+                .map_err(ExecError::into_pg)?;
                 if let crabka_pgparser::ast::InsertSource::Values(rows) = source {
-                    let target_types = self.insert_target_types(table, columns.as_ref())?;
+                    let target_types = self.insert_target_types(&name, columns.as_ref())?;
                     for row in rows {
                         for (idx, expr) in row.iter_mut().enumerate() {
                             self.bind_expr(expr, target_types.get(idx).copied())?;
@@ -5970,14 +7042,14 @@ impl ParamBinder<'_> {
                     self.bind_query_expr(query)?;
                 }
                 if on_conflict.is_some() || returning.is_some() {
-                    let table = crabka_pgcatalog::get_table(self.catalog_kv, table)
+                    let table = crabka_pgcatalog::get_table(self.catalog_kv, &name)
                         .map_err(ExecError::from)
                         .map_err(ExecError::into_pg)?;
                     if let Some(on_conflict) = on_conflict {
                         self.bind_on_conflict(on_conflict, &table)?;
                     }
                     if let Some(returning) = returning {
-                        let scope = crate::scope::Scope::single(&table, &table.name);
+                        let scope = crate::scope::Scope::single(&table, &table.name.name);
                         self.bind_returning(&mut returning.items, &scope)?;
                     }
                 }
@@ -5992,10 +7064,17 @@ impl ParamBinder<'_> {
                 returning,
                 ..
             } => {
-                let table = crabka_pgcatalog::get_table(self.catalog_kv, table)
+                let name = crate::relname::resolve_relation(
+                    self.catalog_kv,
+                    self.resolution,
+                    table,
+                    crate::relname::SchemaDisposition::Reference,
+                )
+                .map_err(ExecError::into_pg)?;
+                let table = crabka_pgcatalog::get_table(self.catalog_kv, &name)
                     .map_err(ExecError::from)
                     .map_err(ExecError::into_pg)?;
-                let qualifier = alias.clone().unwrap_or_else(|| table.name.clone());
+                let qualifier = alias.clone().unwrap_or_else(|| table.name.name.clone());
                 let scope = crate::scope::Scope::single(&table, &qualifier);
                 for assignment in assignments {
                     self.bind_assignment(assignment, &table, &scope)?;
@@ -6014,10 +7093,17 @@ impl ParamBinder<'_> {
                 returning,
                 ..
             } => {
-                let table = crabka_pgcatalog::get_table(self.catalog_kv, table)
+                let name = crate::relname::resolve_relation(
+                    self.catalog_kv,
+                    self.resolution,
+                    table,
+                    crate::relname::SchemaDisposition::Reference,
+                )
+                .map_err(ExecError::into_pg)?;
+                let table = crabka_pgcatalog::get_table(self.catalog_kv, &name)
                     .map_err(ExecError::from)
                     .map_err(ExecError::into_pg)?;
-                let qualifier = alias.clone().unwrap_or_else(|| table.name.clone());
+                let qualifier = alias.clone().unwrap_or_else(|| table.name.name.clone());
                 let scope = crate::scope::Scope::single(&table, &qualifier);
                 if let Some(expr) = filter {
                     self.bind_expr_with_scope(expr, Some(ColumnType::Bool), &scope)?;
@@ -6113,7 +7199,7 @@ impl ParamBinder<'_> {
         } = &mut on_conflict.target
         {
             // An inference predicate names only the target relation's columns.
-            let scope = crate::scope::Scope::single(table, &table.name);
+            let scope = crate::scope::Scope::single(table, &table.name.name);
             self.bind_expr_with_scope(predicate, Some(ColumnType::Bool), &scope)?;
         }
         let OnConflictAction::DoUpdate {
@@ -6138,7 +7224,7 @@ impl ParamBinder<'_> {
 
     fn insert_target_types(
         &self,
-        table: &str,
+        table: &crabka_pgcatalog::RelationName,
         columns: Option<&Vec<String>>,
     ) -> Result<Vec<ColumnType>, PgError> {
         let table = crabka_pgcatalog::get_table(self.catalog_kv, table)
@@ -6201,18 +7287,28 @@ impl ParamBinder<'_> {
             // its parameter types are resolved before it is described.
             let self_referential = crate::cte::is_recursive_item(cte, recursive);
             if self_referential {
-                let relation =
-                    crate::cte::describe_cte_relation(self.catalog_kv, cte, recursive, &ctes)
-                        .map_err(ExecError::into_pg)?;
+                let relation = crate::cte::describe_cte_relation(
+                    self.catalog_kv,
+                    self.resolution,
+                    cte,
+                    recursive,
+                    &ctes,
+                )
+                .map_err(ExecError::into_pg)?;
                 ctes.insert(cte.name.clone(), relation);
             }
             if let crabka_pgparser::ast::CteBody::Query(query) = &mut cte.body {
                 self.bind_query_expr_with_ctes(query, &ctes)?;
             }
             if !self_referential {
-                let relation =
-                    crate::cte::describe_cte_relation(self.catalog_kv, cte, recursive, &ctes)
-                        .map_err(ExecError::into_pg)?;
+                let relation = crate::cte::describe_cte_relation(
+                    self.catalog_kv,
+                    self.resolution,
+                    cte,
+                    recursive,
+                    &ctes,
+                )
+                .map_err(ExecError::into_pg)?;
                 ctes.insert(cte.name.clone(), relation);
             }
         }
@@ -6237,9 +7333,14 @@ impl ParamBinder<'_> {
                 let scope = if select.from.is_empty() {
                     crate::scope::Scope::empty()
                 } else {
-                    crate::exec::build_from_schema_with_ctes(self.catalog_kv, &select.from, ctes)
-                        .map_err(ExecError::into_pg)?
-                        .scope
+                    crate::exec::build_from_schema_with_ctes(
+                        self.catalog_kv,
+                        self.resolution,
+                        &select.from,
+                        ctes,
+                    )
+                    .map_err(ExecError::into_pg)?
+                    .scope
                 };
                 for item in &mut select.projection {
                     if let SelectItem::Expr { expr, .. } = item {
@@ -6334,9 +7435,11 @@ impl ParamBinder<'_> {
         )
     }
 
-    /// A `regclass` parameter whose text value is a relation name resolves via
-    /// the catalog at bind time (PostgreSQL's `regclassin`); numeric, binary,
-    /// and NULL values return `None` and take the ordinary decode path.
+    /// A `regclass` parameter resolves against the catalog at bind time: a text
+    /// value is `regclassin` (a relation name, or an oid), a binary one is the
+    /// 4-byte oid, and either way the relation name `regclassout` prints comes
+    /// back with it. A NULL value returns `None` and takes the ordinary decode
+    /// path.
     fn regclass_param_expr(
         &self,
         param: &BoundParam,
@@ -6345,20 +7448,28 @@ impl ParamBinder<'_> {
         let ty = param_column_type(param)?
             .or(expected)
             .unwrap_or(ColumnType::Text);
-        if ty != ColumnType::Regclass || param.format != 0 {
+        if ty != ColumnType::Regclass {
             return Ok(None);
         }
         let Some(value) = &param.value else {
             return Ok(None);
         };
-        let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
-        if text.trim().parse::<i32>().is_ok() {
-            return Ok(None);
-        }
-        let oid =
-            crate::exec::resolve_regclass(self.catalog_kv, text).map_err(ExecError::into_pg)?;
+        let resolved = match param.format {
+            0 => {
+                let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+                crate::exec::regclass_from_text(self.catalog_kv, self.resolution, text)
+                    .map_err(ExecError::into_pg)?
+            }
+            1 => {
+                let oid = i32::from_be_bytes(binary_array(value)?);
+                crate::exec::regclass_by_oid(self.catalog_kv, oid)
+                    .map(Datum::Regclass)
+                    .map_err(ExecError::into_pg)?
+            }
+            _ => return Ok(None),
+        };
         Ok(Some(Expr::Const {
-            value: Datum::Int4(oid),
+            value: resolved,
             ty: ColumnType::Regclass,
         }))
     }
@@ -7237,10 +8348,13 @@ fn decode_jsonb_binary(value: &[u8]) -> Result<Datum, PgError> {
 /// `array_recv` for a one-dimensional array — the layout
 /// `crabka_pgtypes::encoding` writes, read back exactly.
 ///
-/// The 12-byte `ndim = 0` header (no dimension block, no elements) is the empty
-/// array libpq and `tokio-postgres` emit, so it must round-trip. Higher
-/// dimensions and lower bounds other than 1 are crabka's documented deferrals
-/// rather than malformed input, so they report 0A000.
+/// Both spellings of the empty array must land on the zero-dimensional value:
+/// the 12-byte `ndim = 0` header (no dimension block, no elements), and the
+/// `ndim = 1, len = 0` header libpq drivers actually send, since `postgres-types`
+/// always writes exactly one dimension. `ArrayValue::with_dims` collapses the
+/// latter the way `array_recv` does. Higher dimensions and lower bounds other
+/// than 1 are crabka's documented deferrals rather than malformed input, so they
+/// report 0A000.
 fn decode_array_binary(
     value: &[u8],
     elem: ElemType,
@@ -7471,7 +8585,14 @@ impl SqlSession {
         if matches!(copy.format, CopyFormat::Csv) {
             return Err(ExecError::Unsupported("COPY CSV is not supported".into()).into_pg());
         }
-        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &copy.table)
+        let name = crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            &copy.table,
+            crate::relname::SchemaDisposition::Utility,
+        )
+        .map_err(ExecError::into_pg)?;
+        let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name)
             .map_err(ExecError::from)
             .map_err(ExecError::into_pg)?;
         let target_count = match &copy.columns {
@@ -7579,7 +8700,16 @@ impl SqlSession {
         {
             return None;
         }
-        let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name) {
+        let name = match crate::relname::resolve_relation(
+            self.catalog_kv.as_ref(),
+            &self.resolution_scope(),
+            name,
+            crate::relname::SchemaDisposition::Reference,
+        ) {
+            Ok(name) => name,
+            Err(error) => return Some(Err(error)),
+        };
+        let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name) {
             Ok(table) if table.foreign.is_none() => table,
             Ok(_) => return None,
             Err(error) => return Some(Err(error.into())),
@@ -7611,7 +8741,7 @@ impl SqlSession {
                     Arc::clone(&self.range_scanner),
                     read_ts,
                 );
-                let qualifier = alias.as_deref().unwrap_or(&table.name);
+                let qualifier = alias.as_deref().unwrap_or(&table.name.name);
                 let scope = crate::scope::Scope::single(&table, qualifier);
                 let (fields, expressions, _) =
                     crate::exec::resolve_projection(&select.projection, &scope)?;
@@ -7749,6 +8879,18 @@ fn invalid_parameter_encoding(_: std::str::Utf8Error) -> PgError {
 }
 
 impl Session for SqlSession {
+    /// A session's temporary relations die with it.
+    ///
+    /// A failure here is not the client's to hear — the connection is already
+    /// over — and it is not fatal either: the next session to draw this backend
+    /// id purges the namespace before it uses it, which is the same remedy that
+    /// covers a backend that died without reaching this point at all.
+    async fn terminate(&mut self) {
+        if let Err(error) = self.drop_temp_relations().await {
+            tracing::warn!(?error, "could not drop this session's temporary relations");
+        }
+    }
+
     async fn simple_query(&mut self, sql: &str) -> Result<Vec<QueryResult>, PgError> {
         if sql.trim().is_empty() {
             return Ok(vec![QueryResult::Empty]);
@@ -7862,6 +9004,9 @@ impl Session for SqlSession {
                         statement: None,
                         description: description.clone(),
                         sql_source: None,
+                        param_type_hints: param_types.to_vec(),
+                        described_scope: self.resolution_scope(),
+                        fixed_result: true,
                     },
                 );
                 return Ok(description);
@@ -7870,52 +9015,23 @@ impl Session for SqlSession {
                 .map_err(ExecError::into_pg)?;
             let result = (|| {
                 let statement = parse_single_extended_statement(sql)?;
-                let mut inferred_statement = statement.clone();
-                let parameter_count = max_statement_param(&statement).max(param_types.len());
-                let params = (0..parameter_count)
-                    .map(|index| BoundParam {
-                        type_oid: match param_types.get(index).copied().unwrap_or(0) {
-                            0 => None,
-                            type_oid => Some(type_oid),
-                        },
-                        format: 0,
-                        value: None,
-                    })
-                    .collect::<Vec<_>>();
-                let timezone_name = self.guc.effective("timezone").map_err(ExecError::into_pg)?;
-                let time_zone = if timezone_name.eq_ignore_ascii_case("UTC") {
-                    jiff::tz::TimeZone::UTC
-                } else {
-                    jiff::tz::TimeZone::get(&timezone_name).map_err(|_| {
-                        PgError::error(
-                            "22023",
-                            format!("invalid value for parameter: \"{timezone_name}\""),
-                        )
-                    })?
-                };
-                let binder = ParamBinder {
-                    catalog_kv: &*self.catalog_kv,
-                    params: &params,
-                    time_zone: &time_zone,
-                    inferred_param_types: RefCell::new(vec![None; params.len()]),
-                };
-                binder.bind_statement_params(&mut inferred_statement)?;
-                let fields =
-                    crate::exec::describe_statement(&*self.catalog_kv, &inferred_statement)
-                        .map_err(ExecError::into_pg)?;
+                let shape = self.describe_prepared_shape(&statement, param_types)?;
                 let description = PreparedDescription {
-                    fields,
-                    parameter_types: binder.resolved_param_types()?,
+                    fields: shape.fields?,
+                    parameter_types: shape.parameter_types,
                 };
-                Ok((statement, description))
+                Ok((statement, description, shape.scope))
             })();
-            let (statement, description) = result?;
+            let (statement, description, scope) = result?;
             self.prepared.insert(
                 name.to_owned(),
                 SqlPrepared {
                     statement: Some(statement),
                     description: description.clone(),
                     sql_source: None,
+                    param_type_hints: param_types.to_vec(),
+                    described_scope: scope,
+                    fixed_result: true,
                 },
             );
             Ok(description)
@@ -7957,6 +9073,7 @@ impl Session for SqlSession {
                     prepared.description.parameter_types.len()
                 )));
             }
+            self.check_cached_result_type(&prepared)?;
             let formats =
                 resolve_result_formats(result_formats, prepared.description.fields.len())?;
             let mut bound = prepared.statement;
@@ -7990,6 +9107,7 @@ impl Session for SqlSession {
                     description: description.clone(),
                     formats,
                     execution: SqlPortalExecution::NotStarted,
+                    fixed_result: prepared.fixed_result,
                 },
             );
             Ok(description)
@@ -8050,11 +9168,31 @@ impl Session for SqlSession {
             let execution = match statement {
                 None => SqlPortalExecution::Empty,
                 Some(stmt) => match self.run_one(&stmt).await.map_err(ExecError::into_pg)? {
-                    QueryResult::Rows { rows, tag, .. } => SqlPortalExecution::Rows {
-                        rows,
-                        tag,
-                        position: 0,
-                    },
+                    QueryResult::Rows { fields, rows, tag } => {
+                        // `Bind` re-describes only when the resolution scope
+                        // moved, which is `PostgreSQL`'s gate; what the run
+                        // actually produced catches the rest — a relation
+                        // altered under a statement whose scope never did —
+                        // and it is already in hand, so it costs nothing. Rows
+                        // are zipped against the formats `Bind` froze at the
+                        // announced field count, so without this a wider
+                        // result would be silently truncated and a narrower
+                        // one would under-fill its own `RowDescription`.
+                        let announced = self
+                            .portals
+                            .get(portal)
+                            .expect("portal exists throughout execute");
+                        if announced.fixed_result
+                            && result_type(&fields) != result_type(&announced.description.fields)
+                        {
+                            return Err(cached_plan_result_type_changed());
+                        }
+                        SqlPortalExecution::Rows {
+                            rows,
+                            tag,
+                            position: 0,
+                        }
+                    }
                     QueryResult::Command { tag } => SqlPortalExecution::Command { tag },
                     QueryResult::Empty => SqlPortalExecution::Empty,
                 },
@@ -8339,6 +9477,40 @@ mod tests {
         .expect("replicated engine")
     }
 
+    /// A committer that refuses every batch from the moment the test arms it,
+    /// so a commit-path failure can be made to persist rather than clear itself
+    /// on the next attempt.
+    struct ArmedFailCommitter {
+        kv: Arc<dyn Kv>,
+        armed: Arc<AtomicBool>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::commit::Committer for ArmedFailCommitter {
+        async fn commit(&self, ops: Vec<crabka_pgkv::WriteOp>) -> Result<(), ExecError> {
+            if self.armed.load(Ordering::SeqCst) {
+                return Err(ExecError::Unsupported("injected commit failure".into()));
+            }
+            self.kv.write_batch(&ops)?;
+            Ok(())
+        }
+    }
+
+    fn replicated_engine_failing_once_armed(armed: &Arc<AtomicBool>) -> SqlEngine {
+        let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+        let committer: Arc<dyn crate::commit::Committer> = Arc::new(ArmedFailCommitter {
+            kv: Arc::clone(&kv),
+            armed: Arc::clone(armed),
+        });
+        SqlEngine::replicated(
+            Arc::clone(&kv),
+            kv,
+            committer,
+            Arc::new(crate::read_gate::LocalLinearizer),
+        )
+        .expect("replicated engine")
+    }
+
     fn replicated_engine_failing_on_commit(fail_on: u64) -> SqlEngine {
         let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
         let committer: Arc<dyn crate::commit::Committer> =
@@ -8476,6 +9648,8 @@ mod tests {
 
     #[tokio::test]
     async fn table_rename_updates_sharded_acl_metadata_in_the_authoritative_catalog() {
+        use assert2::assert;
+
         let data_kv: Arc<dyn Kv> = Arc::new(MemKv::new());
         let catalog_kv: Arc<dyn Kv> = Arc::new(MemKv::new());
         let mut engine = SqlEngine::with_kv(Arc::clone(&data_kv)).expect("data-range engine");
@@ -8492,31 +9666,31 @@ mod tests {
             .await
             .expect("rename through catalog authority");
 
-        let table = crabka_pgcatalog::get_table(catalog_kv.as_ref(), "archived_orders")
+        let renamed = crabka_pgcatalog::RelationName::public("archived_orders");
+        let table = crabka_pgcatalog::get_table(catalog_kv.as_ref(), &renamed)
             .expect("renamed catalog table");
         let privileges = crabka_pgcatalog::list_table_privileges(catalog_kv.as_ref())
             .expect("renamed table privileges");
         assert!(table.sharded);
-        assert_eq!(
-            privileges,
-            vec![crabka_pgcatalog::TablePrivilege {
-                table: "archived_orders".into(),
-                grantee: "reader".into(),
-                privilege: "SELECT".into(),
-            }]
-        );
         assert!(
-            data_kv
-                .get(&crabka_pgkv::key::catalog_key("orders"))
-                .expect("read local data range")
-                .is_none()
+            privileges
+                == vec![crabka_pgcatalog::TablePrivilege {
+                    table: renamed,
+                    grantee: "reader".into(),
+                    privilege: "SELECT".into(),
+                }]
         );
-        assert!(
-            data_kv
-                .get(&crabka_pgkv::key::catalog_key("archived_orders"))
-                .expect("read local data range")
-                .is_none()
-        );
+        for name in ["orders", "archived_orders"] {
+            assert!(
+                data_kv
+                    .get(&crabka_pgkv::key::catalog_key(
+                        crabka_pgcatalog::PUBLIC_SCHEMA,
+                        name
+                    ))
+                    .expect("read local data range")
+                    .is_none()
+            );
+        }
     }
 
     struct FailFirstCommitOracle {
@@ -9275,6 +10449,41 @@ mod tests {
         assert_eq!(sequence_next_rowid(&engine, "t"), Some(1));
     }
 
+    /// An `ON COMMIT` disposition that cannot be discharged is reported once
+    /// and then let go.
+    ///
+    /// The drain runs at the end of *every* transaction, so an entry kept after
+    /// failing is re-attempted by the next statement and by every statement
+    /// after it — one fault becomes the answer to everything the session is
+    /// asked. `PostgreSQL` leaves a session usable after a failed `COMMIT`, and
+    /// the second statement here is what pins that.
+    #[tokio::test]
+    async fn an_undischargeable_on_commit_disposition_is_reported_once_and_let_go() {
+        use assert2::assert;
+
+        let armed = Arc::new(AtomicBool::new(false));
+        let engine = replicated_engine_failing_once_armed(&armed);
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TEMP TABLE wedge (x int) ON COMMIT DELETE ROWS")
+            .await
+            .expect("create temp table");
+
+        armed.store(true, Ordering::SeqCst);
+        let error = session
+            .simple_query("SELECT 1")
+            .await
+            .expect_err("the disposition's TRUNCATE cannot commit");
+        assert!(error.message.contains("injected commit failure"));
+
+        // Still armed. The entry that could not be discharged is gone, so this
+        // statement has nothing of its own to commit and answers normally.
+        session
+            .simple_query("SELECT 1")
+            .await
+            .expect("the session is still usable");
+    }
+
     #[tokio::test]
     async fn sharded_timestamp_dml_maintains_non_unique_global_index_entries() {
         let engine = SqlEngine::new();
@@ -9337,8 +10546,11 @@ mod tests {
     }
 
     fn unresolved_timestamp_intents(engine: &SqlEngine, table_name: &str) -> usize {
-        let table = crabka_pgcatalog::get_table(engine.kv_handle().as_ref(), table_name)
-            .expect("table exists");
+        let table = crabka_pgcatalog::get_table(
+            engine.kv_handle().as_ref(),
+            &crabka_pgcatalog::RelationName::public(table_name),
+        )
+        .expect("table exists");
         engine
             .kv_handle()
             .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
@@ -9353,12 +10565,15 @@ mod tests {
     }
 
     fn index_id(engine: &SqlEngine, table_name: &str, index_name: &str) -> u32 {
-        crabka_pgcatalog::list_table_indexes(engine.kv_handle().as_ref(), table_name)
-            .expect("list indexes")
-            .into_iter()
-            .find(|index| index.name == index_name)
-            .expect("index exists")
-            .id
+        crabka_pgcatalog::list_table_indexes(
+            engine.kv_handle().as_ref(),
+            &crabka_pgcatalog::RelationName::public(table_name),
+        )
+        .expect("list indexes")
+        .into_iter()
+        .find(|index| index.name == index_name)
+        .expect("index exists")
+        .id
     }
 
     fn visible_global_index_names(engine: &SqlEngine, index_id: u32, name: &str) -> usize {
@@ -9373,8 +10588,11 @@ mod tests {
     }
 
     fn sequence_next_rowid(engine: &SqlEngine, table_name: &str) -> Option<u64> {
-        let table = crabka_pgcatalog::get_table(engine.kv_handle().as_ref(), table_name)
-            .expect("table exists");
+        let table = crabka_pgcatalog::get_table(
+            engine.kv_handle().as_ref(),
+            &crabka_pgcatalog::RelationName::public(table_name),
+        )
+        .expect("table exists");
         let bytes = engine
             .kv_handle()
             .get(&crabka_pgkv::key::seq_key(table.id))
@@ -9506,7 +10724,9 @@ mod tests {
             .await
             .expect("copy hash rows");
 
-        let table = crabka_pgcatalog::get_table(kv.as_ref(), "hc").expect("table");
+        let table =
+            crabka_pgcatalog::get_table(kv.as_ref(), &crabka_pgcatalog::RelationName::public("hc"))
+                .expect("table");
         let physical = kv
             .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
             .expect("physical rows");
@@ -10965,8 +12185,11 @@ mod tests {
 
         // `orders` exists as a foreign table; envelope columns are prepended, then
         // the value column `id`; OPTIONS carries the topic name.
-        let orders =
-            crabka_pgcatalog::get_table(&*engine.kv, "orders").expect("orders table exists");
+        let orders = crabka_pgcatalog::get_table(
+            &*engine.kv,
+            &crabka_pgcatalog::RelationName::public("orders"),
+        )
+        .expect("orders table exists");
         let meta = orders.foreign.expect("orders is a foreign table");
         assert_eq!(meta.server, "k");
         assert!(
@@ -10982,7 +12205,11 @@ mod tests {
 
         // `payments` was excluded by LIMIT TO and must not exist.
         assert!(
-            crabka_pgcatalog::get_table(&*engine.kv, "payments").is_err(),
+            crabka_pgcatalog::get_table(
+                &*engine.kv,
+                &crabka_pgcatalog::RelationName::public("payments")
+            )
+            .is_err(),
             "payments was not in LIMIT TO and must not be imported"
         );
     }
@@ -11185,7 +12412,7 @@ mod notify_and_binary_parameter_tests {
     fn array_binary_parameters_round_trip_the_encoder() {
         let cases = [
             ArrayValue::new(ElemType::Int4, vec![Datum::Int4(1), Datum::Int4(-2)]),
-            // The empty array is the 12-byte `ndim = 0` form tokio-postgres emits.
+            // The empty array is the 12-byte `ndim = 0` form crabka encodes.
             ArrayValue::new(ElemType::Int4, vec![]),
             ArrayValue::new(
                 ElemType::Text,
@@ -11233,6 +12460,51 @@ mod notify_and_binary_parameter_tests {
             ColumnType::Array(ElemType::Text),
         );
         assert!(decoded.expect("decode") == empty);
+    }
+
+    /// `array_recv`: a header that yields no elements is the zero-dimensional
+    /// empty array, whichever form the driver wrote. crabka's own encoder emits
+    /// the 12-byte `ndim = 0` header, but `postgres-types` always writes exactly
+    /// one dimension — an empty slice arrives as `ndim = 1, len = 0` — and
+    /// PostgreSQL has no zero-length dimension to keep, so `array_ndims` of the
+    /// result is NULL either way.
+    #[test]
+    fn a_binary_array_with_no_elements_decodes_to_zero_dimensions() {
+        let empty = Datum::Array(ArrayValue::new(ElemType::Int4, vec![]));
+        let single = Datum::Array(ArrayValue::new(ElemType::Int4, vec![Datum::Int4(7)]));
+        let mut one_element = array_header(1, 0, oids::INT4, Some((1, 1)));
+        one_element.extend_from_slice(&int4_element(7));
+
+        let cases = [
+            ("ndim = 0", array_header(0, 0, oids::INT4, None), &empty, 0),
+            (
+                "ndim = 1, len = 0",
+                array_header(1, 0, oids::INT4, Some((0, 1))),
+                &empty,
+                0,
+            ),
+            (
+                "ndim = 1, len = 0, lower bound 3",
+                array_header(1, 0, oids::INT4, Some((0, 3))),
+                &empty,
+                0,
+            ),
+            ("ndim = 1, len = 1", one_element, &single, 1),
+        ];
+
+        for (name, bytes, expected, ndims) in cases {
+            let decoded = decode(
+                &param(oids::INT4ARRAY, 1, &bytes),
+                ColumnType::Array(ElemType::Int4),
+            )
+            .expect("decode");
+            assert!(&decoded == expected, "{name}");
+            let decoded_ndims = match &decoded {
+                Datum::Array(array) => Some(array.ndims()),
+                _ => None,
+            };
+            assert!(decoded_ndims == Some(ndims), "{name}");
+        }
     }
 
     #[test]

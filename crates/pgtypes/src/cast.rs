@@ -390,21 +390,31 @@ pub fn cast_in(
         (Datum::Text(s), Int8) => text_to_i64(s),
         (Datum::Text(s), Float4) => text_to_f32(s),
         (Datum::Text(s), Float8) => text_to_f64(s),
-        // `regclass` values are relation oids in the Int4 datum. The pure cast
-        // accepts numeric input only; a relation NAME needs catalog resolution,
-        // which the executor layers perform before reaching here (a name that
-        // falls through is 22P02, mirroring an unresolvable input).
-        (Datum::Int4(n), ColumnType::Regclass) => Ok(Datum::Int4(*n)),
-        (Datum::Int8(n), ColumnType::Regclass) => i4_from_i64(*n),
-        (Datum::Text(s), ColumnType::Regclass) => {
-            s.trim()
-                .parse::<i32>()
-                .map(Datum::Int4)
-                .map_err(|_| TypeError::InvalidText {
-                    type_name: "regclass",
-                    value: s.clone(),
-                })
+        // `regclass` → the oid family drops the name and keeps the oid, which is
+        // what `regclass::oid`/`::int` yields in PostgreSQL.
+        (Datum::Regclass(r), ColumnType::Regclass) => Ok(Datum::Regclass(r.clone())),
+        (Datum::Regclass(r), Int4) => Ok(Datum::Int4(r.oid)),
+        (Datum::Regclass(r), Int8) => Ok(Datum::Int8(i64::from(r.oid))),
+        // → `regclass`. The pure cast has no catalog, so it can only produce the
+        // unresolved rendering (`regclassout`'s bare-oid fallback); the executor
+        // resolves the name before reaching here when a catalog is in scope. A
+        // relation NAME likewise needs the catalog — a non-numeric string that
+        // falls through is 22P02, mirroring an unresolvable input.
+        (Datum::Int4(n), ColumnType::Regclass) => {
+            Ok(Datum::Regclass(crate::RegclassValue::unresolved(*n)))
         }
+        (Datum::Int8(n), ColumnType::Regclass) => i4_from_i64(*n).map(|d| match d {
+            Datum::Int4(n) => Datum::Regclass(crate::RegclassValue::unresolved(n)),
+            other => other,
+        }),
+        (Datum::Text(s), ColumnType::Regclass) => s
+            .trim()
+            .parse::<i32>()
+            .map(|n| Datum::Regclass(crate::RegclassValue::unresolved(n)))
+            .map_err(|_| TypeError::InvalidText {
+                type_name: "regclass",
+                value: s.clone(),
+            }),
         (Datum::Text(s), Numeric(tm)) => {
             let d = crate::numeric::parse(s).ok_or_else(|| TypeError::InvalidText {
                 type_name: "numeric",

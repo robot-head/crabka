@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use assert2::assert;
+use crabka_pgcatalog::RelationName;
 use crabka_pgexec::{Committer, ExecError, LocalLinearizer, SqlEngine};
 use crabka_pgkv::{Kv, MemKv, WriteOp};
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
@@ -79,7 +80,8 @@ async fn replicated_engine_update_loop_keeps_version_chain_bounded() {
     // the physical chain stays O(1) instead of holding all 100 versions.
     // (Each statement keeps the version it supersedes — its deleter commits
     // only with the batch — plus the new version, so a handful survive.)
-    let table = crabka_pgcatalog::get_table(engine.catalog_kv(), "hot").expect("table");
+    let table = crabka_pgcatalog::get_table(engine.catalog_kv(), &RelationName::public("hot"))
+        .expect("table");
     let versions = xid_version_count(kv.as_ref(), table.id);
     assert!(versions <= 3, "chain grew to {versions} versions");
 }

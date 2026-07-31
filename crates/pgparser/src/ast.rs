@@ -2,6 +2,79 @@
 
 use crabka_pgtypes::{ColumnType, Datum};
 
+/// A relation name exactly as written: an optional schema qualifier and a name.
+///
+/// This is deliberately *unresolved*. The parser has no catalog, so `s.t` is
+/// carried as the pair `(Some("s"), "t")` whether or not `s` exists, and what a
+/// missing schema is reported as is left to the executor — `PostgreSQL` reports
+/// `3F000 schema "s" does not exist` from a utility statement such as
+/// `DROP TABLE s.t` but `42P01 relation "s.t" does not exist` from a
+/// `SELECT`-style reference, a distinction the parser cannot draw.
+///
+/// Both parts arrive from the lexer already case-folded (unquoted spellings
+/// lowercased, quoted ones preserved), so [`Display`](std::fmt::Display)
+/// renders exactly the dotted, unquoted form `PostgreSQL` names in those
+/// messages: `SELECT * FROM S.T` reports `relation "s.t" does not exist`.
+///
+/// There is no N-part form. The engine has one database, so a three-part name
+/// is only ever the `cross-database references are not implemented` refusal,
+/// which is a check against two fields rather than a `match` on a list length
+/// in every consumer.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct RelationRef {
+    /// The qualifier, when one was written. `None` is a bare name, which
+    /// resolves against the search path.
+    pub schema: Option<String>,
+    /// The relation's own name, never containing the qualifier. A quoted
+    /// `"a.b"` is one name with a dot in it, not a qualified reference.
+    pub name: String,
+}
+
+impl RelationRef {
+    /// An unqualified reference — `t`.
+    #[must_use]
+    pub fn bare(name: impl Into<String>) -> Self {
+        Self {
+            schema: None,
+            name: name.into(),
+        }
+    }
+
+    /// A schema-qualified reference — `s.t`.
+    #[must_use]
+    pub fn qualified(schema: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            schema: Some(schema.into()),
+            name: name.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for RelationRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.schema {
+            Some(schema) => write!(f, "{schema}.{}", self.name),
+            None => f.write_str(&self.name),
+        }
+    }
+}
+
+impl From<&str> for RelationRef {
+    /// The whole string is the relation's name. A dot in it is part of the
+    /// name, exactly as a quoted `"a.b"` is — use [`RelationRef::qualified`]
+    /// for a qualifier.
+    fn from(name: &str) -> Self {
+        Self::bare(name)
+    }
+}
+
+impl From<String> for RelationRef {
+    /// See [`From<&str>`](RelationRef::from).
+    fn from(name: String) -> Self {
+        Self::bare(name)
+    }
+}
+
 #[rustfmt::skip]
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
@@ -10,7 +83,7 @@ pub enum Statement {
     /// so parser, session, and compatibility tooling share one contract.
     CompatibilityRefusal(RefusalCommand),
     CreateTable {
-        name: String,
+        name: RelationRef,
         columns: Vec<ColumnDef>,
         constraints: Vec<TableConstraint>,
         sharded: bool,
@@ -24,7 +97,7 @@ pub enum Statement {
         /// `(LIKE source [INCLUDING …])` clauses, in the order written.
         like: Vec<LikeClause>,
         /// `INHERITS (parent, …)` parent relation names.
-        inherits: Vec<String>,
+        inherits: Vec<RelationRef>,
         /// `ON COMMIT {PRESERVE ROWS | DELETE ROWS | DROP}` for a temp table.
         on_commit: Option<OnCommitAction>,
         /// `PARTITION BY <strategy> (<key>, …)` — the relation is a partitioned
@@ -35,8 +108,11 @@ pub enum Statement {
         partition_of: Option<PartitionOf>,
     },
     CreateIndex {
-        name: Option<String>,
-        table: String,
+        /// An index name is never schema-qualified in `PostgreSQL`'s grammar —
+        /// an index lands in its table's schema — so this carries a qualifier
+        /// only for the `CREATE SEQUENCE` spelling, which shares this variant.
+        name: Option<RelationRef>,
+        table: RelationRef,
         keys: Vec<IndexKey>,
         unique: bool,
         placement: IndexPlacement,
@@ -58,7 +134,7 @@ pub enum Statement {
         comment: Option<String>,
     },
     DropIndex {
-        name: String,
+        name: RelationRef,
         if_exists: bool,
         /// `CASCADE` was written: dependent objects are dropped too rather than
         /// the drop being refused with 2BP01. `RESTRICT` is the default and is
@@ -66,7 +142,7 @@ pub enum Statement {
         cascade: bool,
     },
     CreateView {
-        name: String,
+        name: RelationRef,
         /// Exact query text following `AS`, retained for durable catalog storage.
         definition: String,
         /// Parsed definition used by the executor to validate the view schema.
@@ -75,6 +151,10 @@ pub enum Statement {
         /// redefined in place instead of being 42P07, provided the new query
         /// keeps every existing output column's name, type and collation.
         or_replace: bool,
+        /// `CREATE TEMP VIEW` — the view lives in the session's temporary
+        /// namespace and dies with the session. A view over a temporary
+        /// relation is converted to one whether or not this was written.
+        temporary: bool,
         /// The optional `VIEW name (a, b, c)` alias list, which renames the
         /// query's output columns positionally.
         columns: Option<Vec<String>>,
@@ -82,14 +162,14 @@ pub enum Statement {
     DropTable {
         /// One entry per name in `DROP TABLE a, b, c`; the drop is
         /// all-or-nothing across the list, matching `PostgreSQL`.
-        names: Vec<String>,
+        names: Vec<RelationRef>,
         if_exists: bool,
         /// `CASCADE` was written: dependent objects (views) are dropped too
         /// rather than the drop being refused with 2BP01.
         cascade: bool,
     },
     DropView {
-        name: String,
+        name: RelationRef,
         if_exists: bool,
         /// `CASCADE` was written: dependent objects are dropped too rather than
         /// the drop being refused with 2BP01. `RESTRICT` is the default and is
@@ -122,12 +202,12 @@ pub enum Statement {
     /// comma form is one statement: every action applies atomically or none
     /// does, matching `PostgreSQL`.
     AlterTable {
-        table: String,
+        table: RelationRef,
         if_exists: bool,
         actions: Vec<AlterTableAction>,
     },
     Insert {
-        table: String,
+        table: RelationRef,
         columns: Option<Vec<String>>,
         source: InsertSource,
         /// The statement's `WITH` list, which may contain data-modifying CTEs.
@@ -157,7 +237,7 @@ pub enum Statement {
         chain: bool,
     },
     Update {
-        table: String,
+        table: RelationRef,
         /// The statement's `WITH` list, which may contain data-modifying CTEs.
         with: Option<WithClause>,
         /// `UPDATE t AS x …` — the target's alias, which replaces the table name
@@ -171,7 +251,7 @@ pub enum Statement {
         returning: Option<Returning>,
     },
     Delete {
-        table: String,
+        table: RelationRef,
         /// The statement's `WITH` list, which may contain data-modifying CTEs.
         with: Option<WithClause>,
         /// `DELETE FROM t AS x …` — see [`Statement::Update`]'s `alias`.
@@ -183,7 +263,7 @@ pub enum Statement {
     },
     /// `MERGE INTO target USING source ON join_condition WHEN …`.
     Merge {
-        table: String,
+        table: RelationRef,
         /// The statement's `WITH` list, which may contain data-modifying CTEs.
         with: Option<WithClause>,
         alias: Option<String>,
@@ -196,7 +276,7 @@ pub enum Statement {
     },
     /// `CREATE TABLE … AS <query>` and its `SELECT … INTO <table>` spelling.
     CreateTableAs {
-        name: String,
+        name: RelationRef,
         if_not_exists: bool,
         /// An explicit output column list, which renames the query's columns.
         columns: Option<Vec<String>>,
@@ -212,9 +292,15 @@ pub enum Statement {
     Truncate {
         /// One entry per name in `TRUNCATE a, b, c`; the statement is
         /// all-or-nothing across the list, matching `PostgreSQL`.
-        names: Vec<String>,
+        names: Vec<RelationRef>,
         /// `RESTART IDENTITY` was given (`CONTINUE IDENTITY` is the default).
         restart_identity: bool,
+        /// `CASCADE` was given, widening the truncated set to every table
+        /// holding a foreign key onto one of `names` (and, transitively, onto
+        /// those). `RESTRICT` — the default — instead refuses with `0A000` when
+        /// such a table is not itself listed. `CASCADE` does not fire
+        /// `ON DELETE` actions; it only enlarges the set.
+        cascade: bool,
     },
     /// SP37: `SET [LOCAL] <name> = <value>` / `SET <name> TO <value>` / `SET TIME ZONE ...`.
     Set {
@@ -239,12 +325,12 @@ pub enum Statement {
     },
     /* SQL parity matrix row: GRANT. */ GrantTablePrivileges {
         privileges: Vec<String>,
-        table: String,
+        table: RelationRef,
         grantees: Vec<String>,
     },
     /* SQL parity matrix row: REVOKE. */ RevokeTablePrivileges {
         privileges: Vec<String>,
-        table: String,
+        table: RelationRef,
         grantees: Vec<String>,
     },
     /* SQL parity matrix row: SET ROLE. */ SetRole {
@@ -312,14 +398,14 @@ pub enum Statement {
     },
     /// `CREATE FOREIGN TABLE <name> (<col> <type>, …) SERVER <server> OPTIONS (…)`
     CreateForeignTable {
-        name: String,
+        name: RelationRef,
         columns: Vec<ColumnDef>,
         server: String,
         options: OptionList,
     },
     /// `DROP FOREIGN TABLE [IF EXISTS] <name>`
     DropForeignTable {
-        name: String,
+        name: RelationRef,
         if_exists: bool,
         /// `CASCADE` was written: dependent objects are dropped too rather than
         /// the drop being refused with 2BP01. `RESTRICT` is the default and is
@@ -407,7 +493,7 @@ pub enum Statement {
     },
     /// S3: `LOCK [TABLE] <name> [, …] [IN <mode> MODE] [NOWAIT]`.
     LockTable {
-        tables: Vec<String>,
+        tables: Vec<RelationRef>,
         mode: TableLockMode,
         nowait: bool,
     },
@@ -449,34 +535,34 @@ pub enum Statement {
     },
     /// `CREATE TYPE name AS { (field type, …) | ENUM (label, …) }`.
     CreateType {
-        name: String,
+        name: RelationRef,
         definition: CreateTypeDefinition,
     },
     /// `ALTER TYPE name <action>`.
     AlterType {
-        name: String,
+        name: RelationRef,
         action: AlterTypeAction,
     },
     /// `DROP TYPE [IF EXISTS] name [, …] [CASCADE | RESTRICT]`.
     DropType {
-        names: Vec<String>,
+        names: Vec<RelationRef>,
         if_exists: bool,
         cascade: bool,
     },
     /// `CREATE DOMAIN name [AS] base [constraint …]`.
     CreateDomain {
-        name: String,
+        name: RelationRef,
         base: ColumnType,
         constraints: Vec<DomainConstraint>,
     },
     /// `ALTER DOMAIN name <action>`.
     AlterDomain {
-        name: String,
+        name: RelationRef,
         action: AlterDomainAction,
     },
     /// `DROP DOMAIN [IF EXISTS] name [, …] [CASCADE | RESTRICT]`.
     DropDomain {
-        names: Vec<String>,
+        names: Vec<RelationRef>,
         if_exists: bool,
         cascade: bool,
     },
@@ -591,7 +677,14 @@ pub enum UtilityStatement {
     /// `name` is `None` for `RESET ALL`.
     AlterSystem { name: Option<String> },
     /// `SET CONSTRAINTS { ALL | name [, …] } { DEFERRED | IMMEDIATE }`.
-    SetConstraints,
+    SetConstraints {
+        /// The named constraints in written order, or `None` for the `ALL`
+        /// spelling.
+        names: Option<Vec<String>>,
+        /// `DEFERRED` was written; `false` is the `IMMEDIATE` spelling, which
+        /// drains the pending checks at once.
+        deferred: bool,
+    },
     /// `SET [SESSION | LOCAL] SESSION AUTHORIZATION { <role> | DEFAULT }`;
     /// `None` is the `DEFAULT` spelling (and `RESET SESSION AUTHORIZATION`).
     SetSessionAuthorization {
@@ -803,7 +896,7 @@ pub enum AssignmentValue {
 #[derive(Debug, Clone, PartialEq)]
 pub enum MergeSource {
     Table {
-        name: String,
+        name: RelationRef,
         alias: Option<String>,
     },
     Query {
@@ -1271,12 +1364,12 @@ pub enum AlterTableAction {
     OwnerTo(String),
     /// `ATTACH PARTITION <name> <bound>`.
     AttachPartition {
-        partition: String,
+        partition: RelationRef,
         bound: PartitionBound,
     },
     /// `DETACH PARTITION <name> [CONCURRENTLY | FINALIZE]`.
     DetachPartition {
-        partition: String,
+        partition: RelationRef,
         concurrently: bool,
         finalize: bool,
     },
@@ -1315,7 +1408,7 @@ pub struct PartitionKeyElem {
 /// `PARTITION OF <parent> [ (<column options>) ] <bound>` on a `CREATE TABLE`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PartitionOf {
-    pub parent: String,
+    pub parent: RelationRef,
     pub bound: PartitionBound,
     /// `(a NOT NULL, b WITH OPTIONS DEFAULT 0)` — extra constraints on columns
     /// the partition inherits from its parent. A partition declares no types of
@@ -1388,7 +1481,7 @@ impl LikeOption {
 /// One `(LIKE source [INCLUDING …|EXCLUDING …])` clause in a `CREATE TABLE`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LikeClause {
-    pub source: String,
+    pub source: RelationRef,
     /// The properties an `INCLUDING` clause turned on, in no particular order.
     /// `EXCLUDING` removes an option, so the last mention of a property wins
     /// exactly as it does in `PostgreSQL`.
@@ -1426,7 +1519,7 @@ pub struct IndexKey {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CopyStmt {
-    pub table: String,
+    pub table: RelationRef,
     pub columns: Option<Vec<String>>,
     pub format: CopyFormat,
 }
@@ -1483,7 +1576,25 @@ pub enum ImportSelector {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SetValue {
     Default,
-    Value(String),
+    /// The comma-separated items as written, each already joined from the
+    /// space-adjacent tokens that make it up (`SET statement_timeout = 1 min`
+    /// is one item). The items stay separate because a *list* parameter
+    /// re-quotes each one on output — `SET search_path = "MySchema", public`
+    /// has to report back as `"MySchema", public`, and an item holding a comma
+    /// has no representation at all once they are joined.
+    Value(Vec<String>),
+}
+
+impl SetValue {
+    /// The value as a scalar parameter takes it: the items joined back with
+    /// `", "`, no re-quoting. A list parameter uses the items instead.
+    #[must_use]
+    pub fn plain(&self) -> String {
+        match self {
+            Self::Default => String::new(),
+            Self::Value(items) => items.join(", "),
+        }
+    }
 }
 
 /// Transaction isolation levels supported by SP4.
@@ -1555,11 +1666,93 @@ pub struct CheckPredicate {
     pub text: String,
 }
 
-/// The `REFERENCES <table> [(col, …)]` target of a foreign key.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// What a foreign key does to the referencing rows when the referenced row is
+/// deleted (`ON DELETE`) or its key columns are updated (`ON UPDATE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReferentialAction {
+    /// `NO ACTION`, the default: refuse at the end of the statement, honouring
+    /// a deferral.
+    #[default]
+    NoAction,
+    /// `RESTRICT`: refuse immediately, without honouring a deferral.
+    Restrict,
+    /// `CASCADE`: delete the referencing rows, or carry the new key values into
+    /// them.
+    Cascade,
+    /// `SET NULL`: set the referencing columns to NULL.
+    SetNull,
+    /// `SET DEFAULT`: set the referencing columns to their column DEFAULTs.
+    SetDefault,
+}
+
+impl ReferentialAction {
+    /// The action as `PostgreSQL` spells it in `pg_get_constraintdef` and in
+    /// its "a column list with SET NULL is only supported for ON DELETE
+    /// actions" refusal.
+    #[must_use]
+    pub fn as_sql(self) -> &'static str {
+        match self {
+            Self::NoAction => "NO ACTION",
+            Self::Restrict => "RESTRICT",
+            Self::Cascade => "CASCADE",
+            Self::SetNull => "SET NULL",
+            Self::SetDefault => "SET DEFAULT",
+        }
+    }
+}
+
+/// How a foreign key treats a partly-NULL composite key.
+///
+/// `MATCH PARTIAL` has no variant: `PostgreSQL` refuses it at parse analysis
+/// with `0A000` "MATCH PARTIAL not yet implemented", and so does this parser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum MatchType {
+    /// `MATCH SIMPLE` (the default, written or not): a row with any NULL
+    /// referencing column satisfies the constraint.
+    #[default]
+    Simple,
+    /// `MATCH FULL`: the referencing columns must be all NULL or all non-NULL.
+    Full,
+}
+
+/// The `REFERENCES <table> [(col, …)] [MATCH …] [ON DELETE …] [ON UPDATE …]`
+/// target of a foreign key, shared by the column-level `REFERENCES` spelling
+/// and the table-level `FOREIGN KEY (…) REFERENCES` one.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ForeignKeyRef {
-    pub table: String,
+    pub table: RelationRef,
+    /// The referenced columns as written, or empty when the list was omitted
+    /// and the referenced table's primary key is meant.
     pub columns: Vec<String>,
+    pub match_type: MatchType,
+    pub on_delete: ReferentialAction,
+    pub on_update: ReferentialAction,
+    /// `ON DELETE SET { NULL | DEFAULT } (a, b)` — the referencing columns the
+    /// action writes to, in written order. Empty means every referencing
+    /// column, which is also the only possibility for `ON UPDATE`: a column
+    /// list there is a `0A000` refusal.
+    pub set_columns: Vec<String>,
+}
+
+/// The trailing attributes any constraint may carry: `[NOT] DEFERRABLE`,
+/// `INITIALLY { DEFERRED | IMMEDIATE }`, and `NOT VALID`.
+///
+/// `PostgreSQL` also accepts `ENFORCED` / `NOT ENFORCED` and `NO INHERIT` here;
+/// those are consumed and dropped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ConstraintAttributes {
+    /// `NOT VALID` was written. In `ALTER TABLE … ADD CONSTRAINT` this skips
+    /// back-validation of the rows already stored; `PostgreSQL` ignores it in
+    /// `CREATE TABLE`, where there are none. It belongs to the table-constraint
+    /// grammar only, so it is always false on a column constraint.
+    pub not_valid: bool,
+    /// The constraint may be `SET CONSTRAINTS … DEFERRED` within a transaction.
+    /// Writing `INITIALLY DEFERRED` alone implies it.
+    pub deferrable: bool,
+    /// `INITIALLY DEFERRED`: the constraint starts each transaction deferred.
+    /// Never true without [`ConstraintAttributes::deferrable`] — `NOT
+    /// DEFERRABLE INITIALLY DEFERRED` is a `42601` refusal.
+    pub initially_deferred: bool,
 }
 
 /// `GENERATED { ALWAYS | BY DEFAULT } AS IDENTITY [( <sequence options> )]`.
@@ -1575,6 +1768,10 @@ pub struct ColumnConstraint {
     /// Explicit `CONSTRAINT <name>` label, when one was written.
     pub name: Option<String>,
     pub kind: ColumnConstraintKind,
+    /// The deferrability written after this one constraint. `not_valid` is
+    /// always false here — `PostgreSQL` accepts `NOT VALID` only on a table
+    /// constraint.
+    pub attributes: ConstraintAttributes,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1600,10 +1797,8 @@ pub struct TableConstraint {
     /// Explicit `CONSTRAINT <name>` label, when one was written.
     pub name: Option<String>,
     pub kind: TableConstraintKind,
-    /// `NOT VALID` was written. In `ALTER TABLE … ADD CONSTRAINT` this skips
-    /// back-validation of the rows already stored; `PostgreSQL` ignores it in
-    /// `CREATE TABLE`, where there are none.
-    pub not_valid: bool,
+    /// The `[NOT] DEFERRABLE` / `INITIALLY …` / `NOT VALID` tail.
+    pub attributes: ConstraintAttributes,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1925,7 +2120,7 @@ pub enum SelectItem {
 #[derive(Debug, Clone, PartialEq)]
 pub enum TableExpr {
     Table {
-        name: String,
+        name: RelationRef,
         alias: Option<String>,
         /// The alias's column list (`t AS q(x, y)`), which renames the leading
         /// columns. Shorter than the relation is allowed; longer is `42P10`.

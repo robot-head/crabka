@@ -5,6 +5,7 @@
 use std::{sync::Arc, time::Duration};
 
 use assert2::assert;
+use crabka_pgcatalog::RelationName;
 use crabka_pgexec::{ExecError, RowInterval, SqlEngine, TimestampWrite, timestamp_txn};
 use crabka_pgkv::{Kv, MemKv};
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
@@ -30,7 +31,7 @@ async fn int_cell(session: &mut crabka_pgexec::SqlSession, sql: &str) -> String 
 /// Count the stored timestamp tuple versions of a table (its whole physical
 /// chain across every row).
 fn ts_version_count(kv: &dyn Kv, table_name: &str) -> usize {
-    let table = crabka_pgcatalog::get_table(kv, table_name).expect("table");
+    let table = crabka_pgcatalog::get_table(kv, &RelationName::public(table_name)).expect("table");
     kv.scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
         .expect("scan")
         .iter()
@@ -155,7 +156,8 @@ async fn reads_and_prewrites_below_the_published_floor_are_refused() {
         .expect("published floor");
     assert!(floor > 1);
 
-    let table = crabka_pgcatalog::get_table(kv.as_ref(), "hot").expect("table");
+    let table =
+        crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("hot")).expect("table");
     let snapshot = crabka_pgmvcc::visibility::Snapshot {
         xmin: 1,
         xmax: u64::MAX,

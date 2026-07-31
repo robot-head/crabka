@@ -37,10 +37,10 @@
 (3 rows)
 
 ===== \dn
-  List of schemas
-  Name  |  Owner   
---------+----------
- public | postgres
+      List of schemas
+  Name  |       Owner       
+--------+-------------------
+ public | pg_database_owner
 (1 row)
 
 ===== \du

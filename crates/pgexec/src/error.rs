@@ -79,6 +79,11 @@ pub enum ExecError {
     DuplicateObject(String),
     /// A named object does not exist (42704).
     UndefinedObject(String),
+    /// `CREATE` with an unqualified name while no schema on the `search_path`
+    /// exists (3F000). `PostgreSQL` skips a nonexistent path entry rather than
+    /// refusing it, so this is what `SET search_path = notme; CREATE TABLE t`
+    /// reports — a path that is not empty but names nowhere to create in.
+    NoSchemaSelected,
     /// A `DROP <kind>` named a relation that does not exist (42P01).
     /// `PostgreSQL` names the kind the statement asked for ("table", "view",
     /// "sequence") rather than the generic "relation".
@@ -271,6 +276,70 @@ pub enum ExecError {
     ChildMissingColumn(String),
     /// `PARTITION OF` named a relation that is not partitioned (42P17).
     NotPartitioned(String),
+    /// A row write, or a back-validation scan, broke referential integrity —
+    /// 23503 on three of the four sides, and 23001 (`restrict_violation`) when
+    /// `RESTRICT` is what refused a parent-side delete or update.
+    /// [`ForeignKeyViolationSide`] is the discriminator: `RESTRICT` and
+    /// `NO ACTION` read as synonyms but differ in both SQLSTATE and wording, so
+    /// the two must not be collapsed.
+    ///
+    /// `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` over stored rows reports
+    /// [`ForeignKeyViolationSide::KeyNotPresent`] as well — `PostgreSQL` reuses
+    /// the row-write message verbatim for back-validation, so there is no
+    /// separate on-existing-rows variant here (unlike
+    /// [`ExecError::CheckViolationOnExistingRows`]).
+    ///
+    /// Boxed for the same reason as [`ExecError::GucValueOutOfRange`]: the
+    /// payload's four inline `String`s would otherwise widen every frame of the
+    /// recursive evaluator.
+    ForeignKeyViolation(Box<ForeignKeyViolation>),
+    /// The referenced columns are covered by no unique constraint or unique
+    /// index (42830). Carries the referenced table.
+    NoUniqueConstraintForReferencedTable(String),
+    /// The referencing and referenced column lists have different lengths
+    /// (42830).
+    ForeignKeyColumnCountMismatch,
+    /// The referenced-column list names one column twice (42830).
+    DuplicateForeignKeyReferencedColumn,
+    /// `REFERENCES` named a relation that is not a table (42809) — a view, for
+    /// instance. `PostgreSQL`'s message calls it the "referenced relation",
+    /// unlike the general-purpose [`ExecError::WrongObjectType`].
+    ReferencedRelationNotATable(String),
+    /// A `FOREIGN KEY (…)` list names a column the referencing table does not
+    /// have (42703). `PostgreSQL`'s message names the foreign key, unlike the
+    /// bare [`ExecError::UndefinedColumn`].
+    UndefinedForeignKeyColumn(String),
+    /// A referencing column's type is not comparable with its referenced
+    /// column's (42804). The primary message names only the constraint, so the
+    /// column and type names land in `DETAIL`. Boxed: five inline `String`s.
+    ForeignKeyTypeMismatch(Box<ForeignKeyTypeMismatch>),
+    /// `ON DELETE SET NULL (…)` / `ON DELETE SET DEFAULT (…)` named a column
+    /// outside the foreign key (42P10). `PostgreSQL` spells the action
+    /// "ON DELETE SET" for both forms. Carries the offending column.
+    ForeignKeySetColumnNotInKey(String),
+    /// A constraint name collides with one the relation already carries
+    /// (42710). The counterpart of [`ExecError::UndefinedConstraint`], though
+    /// `PostgreSQL` says "for relation" here where the undefined-constraint
+    /// message says "for table".
+    DuplicateConstraint {
+        name: String,
+        table: String,
+    },
+    /// `TRUNCATE` named a table that a foreign key references, without also
+    /// naming the referencing table and without `CASCADE` (0A000).
+    /// `PostgreSQL` raises `ERRCODE_FEATURE_NOT_SUPPORTED` here, but unlike
+    /// [`ExecError::Unsupported`] it also emits `DETAIL` and `HINT`.
+    TruncateReferencedByForeignKey {
+        referencing_table: String,
+        referenced_table: String,
+    },
+    /// A drop was refused because foreign keys depend on the object (2BP01)
+    /// and no `CASCADE` was given. Unlike
+    /// [`ExecError::DependentObjectsStillExist`], which carries a bare message,
+    /// this names every dependent constraint in `DETAIL` — one per line — and
+    /// hints at `CASCADE`. Boxed: the payload holds a [`DroppedObject`] and a
+    /// `Vec` of dependents.
+    DependentForeignKeys(Box<ForeignKeyDependents>),
 }
 
 /// The payload of [`ExecError::GucValueOutOfRange`], boxed to keep the error
@@ -283,6 +352,168 @@ pub struct GucRangeViolation {
     pub max: String,
 }
 
+/// The payload of [`ExecError::ForeignKeyViolation`], boxed to keep the error
+/// enum narrow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeyViolation {
+    /// The table the failing statement wrote, as the primary message names it:
+    /// the referencing table on the child side, the referenced table on the
+    /// parent side.
+    pub table: String,
+    /// The constraint's name, as `pg_constraint.conname` holds it.
+    pub constraint: String,
+    /// Which side was violated. Selects the SQLSTATE as well as the wording of
+    /// both the message and the `DETAIL`.
+    pub side: ForeignKeyViolationSide,
+}
+
+/// Which side of a foreign key a runtime violation came from and, on the parent
+/// side, which referential action refused the delete or update.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForeignKeyViolationSide {
+    /// The written row's key is absent from the referenced table (23503):
+    /// `Key (a, b)=(1, 1) is not present in table "p".` Also the shape a
+    /// back-validation scan reports.
+    KeyNotPresent {
+        /// The `Key (a, b)=(1, 1)` fragment, already rendered — build it with
+        /// [`ForeignKeyViolationSide::render_key`], which assembles everything
+        /// but the values themselves.
+        key: String,
+        /// The referenced table the key is absent from.
+        referenced_table: String,
+    },
+    /// A `MATCH FULL` key mixed null and non-null columns (23503). The primary
+    /// message is the same as [`ForeignKeyViolationSide::KeyNotPresent`]'s; only
+    /// the `DETAIL` differs, and it names no key.
+    MatchFullMixedNulls,
+    /// `NO ACTION` refused a delete or key update of a row that is still
+    /// referenced (23503): `Key (id)=(1) is still referenced from table "c".`
+    StillReferenced {
+        /// The `Key (id)=(1)` fragment, already rendered — see
+        /// [`ForeignKeyViolationSide::render_key`].
+        key: String,
+        /// The referencing table that still holds a matching row. Named in both
+        /// the message and the `DETAIL`.
+        referencing_table: String,
+    },
+    /// `RESTRICT` refused it. Distinct from
+    /// [`ForeignKeyViolationSide::StillReferenced`] in SQLSTATE — 23001
+    /// (`restrict_violation`), not 23503 — in the message, which says
+    /// "violates RESTRICT setting of", and in the `DETAIL`, which says
+    /// "is referenced" where `NO ACTION` says "is still referenced".
+    Restricted {
+        /// The `Key (id)=(1)` fragment, already rendered — see
+        /// [`ForeignKeyViolationSide::render_key`].
+        key: String,
+        /// The referencing table that holds a matching row. Named in both the
+        /// message and the `DETAIL`.
+        referencing_table: String,
+    },
+}
+
+/// The payload of [`ExecError::ForeignKeyTypeMismatch`], boxed to keep the error
+/// enum narrow. Every field lands in the `DETAIL` line; the primary message
+/// names only the constraint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeyTypeMismatch {
+    /// The constraint being defined, quoted in the primary message.
+    pub constraint: String,
+    /// The referencing table's column, quoted in the `DETAIL`.
+    pub referencing_column: String,
+    /// The referenced table's column, quoted in the `DETAIL`.
+    pub referenced_column: String,
+    /// The referencing column's type name, unquoted in the `DETAIL`.
+    pub referencing_type: String,
+    /// The referenced column's type name, unquoted in the `DETAIL`.
+    pub referenced_type: String,
+}
+
+/// The payload of [`ExecError::DependentForeignKeys`], boxed to keep the error
+/// enum narrow.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKeyDependents {
+    /// The object the statement tried to drop.
+    pub dropped: DroppedObject,
+    /// The constraints that depend on it, one `DETAIL` line each, in the order
+    /// they should be listed.
+    pub dependents: Vec<DependentForeignKey>,
+}
+
+/// The object a refused drop named. `PostgreSQL` spells it out in the primary
+/// message and again in every `DETAIL` line, and the two spellings differ for a
+/// dropped constraint, so the choice cannot be reduced to one string.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DroppedObject {
+    /// `DROP TABLE`. Named `table p1` in both the message and the `DETAIL`.
+    Table(String),
+    /// `DROP INDEX`. Named `index uniq_a` in both.
+    Index(String),
+    /// `ALTER TABLE … DROP CONSTRAINT`. Named `constraint p_pkey on table p` in
+    /// the message, but `index p_pkey` in the `DETAIL` — the dependents hang off
+    /// the constraint's backing index, not the constraint.
+    Constraint { name: String, table: String },
+}
+
+/// One foreign key blocking a drop, rendered as a single `DETAIL` line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DependentForeignKey {
+    /// The dependent constraint's name, unquoted in the `DETAIL`.
+    pub constraint: String,
+    /// The table that constraint is defined on, unquoted in the `DETAIL`.
+    pub table: crabka_pgcatalog::RelationName,
+}
+
+impl DroppedObject {
+    /// How the primary message names the object.
+    fn describe(&self) -> String {
+        match self {
+            DroppedObject::Table(name) => format!("table {name}"),
+            DroppedObject::Index(name) => format!("index {name}"),
+            DroppedObject::Constraint { name, table } => {
+                format!("constraint {name} on table {table}")
+            }
+        }
+    }
+
+    /// How a `DETAIL` line names the object its constraint depends on.
+    fn depended_on(&self) -> String {
+        match self {
+            DroppedObject::Table(name) => format!("table {name}"),
+            DroppedObject::Index(name) | DroppedObject::Constraint { name, .. } => {
+                format!("index {name}")
+            }
+        }
+    }
+}
+
+impl ForeignKeyViolationSide {
+    /// Render the `Key (a, b)=(1, 2)` fragment every keyed foreign-key `DETAIL`
+    /// line opens with, from the key's columns and their already-formatted
+    /// values.
+    ///
+    /// Formatting a value to its text representation belongs to the type layer,
+    /// so this takes text and only assembles it: columns and values each join
+    /// with `", "`, in the order the `FOREIGN KEY` clause writes them (which is
+    /// not necessarily the referenced index's order). The result carries no
+    /// trailing period — the sentence built around it supplies that.
+    #[must_use]
+    pub fn render_key<C: AsRef<str>, V: AsRef<str>>(columns: &[C], values: &[V]) -> String {
+        let columns: Vec<&str> = columns.iter().map(AsRef::as_ref).collect();
+        let values: Vec<&str> = values.iter().map(AsRef::as_ref).collect();
+        format!("Key ({})=({})", columns.join(", "), values.join(", "))
+    }
+}
+
+/// The 23503 message both child-side violations share.
+fn referencing_row_message(table: &str, constraint: &str) -> PgError {
+    PgError::error(
+        "23503",
+        format!(
+            "insert or update on table \"{table}\" violates foreign key constraint \"{constraint}\""
+        ),
+    )
+}
+
 impl ExecError {
     pub fn into_pg(self) -> PgError {
         match self {
@@ -291,7 +522,18 @@ impl ExecError {
             }
             ExecError::Remote(error) => error,
             ExecError::Parse(e) => PgError::error(e.sqlstate(), e.to_string()),
-            ExecError::Catalog(e) => PgError::error(e.sqlstate(), e.to_string()),
+            ExecError::Catalog(e) => {
+                let rendered = PgError::error(e.sqlstate(), e.to_string());
+                // The only catalog error PostgreSQL gives a DETAIL of its own.
+                if matches!(e, crabka_pgcatalog::CatalogError::ReservedSchemaName(_)) {
+                    rendered.with_detail(format!(
+                        "The prefix \"{}\" is reserved for system schemas.",
+                        crabka_pgcatalog::RESERVED_SCHEMA_PREFIX
+                    ))
+                } else {
+                    rendered
+                }
+            }
             ExecError::Type(e) => PgError::error(e.sqlstate(), e.to_string()),
             ExecError::Kv(e) => match e {
                 crabka_pgkv::KvError::Io(msg) => {
@@ -403,6 +645,9 @@ impl ExecError {
             ),
             ExecError::DuplicateObject(m) => PgError::error("42710", m),
             ExecError::UndefinedObject(m) => PgError::error("42704", m),
+            ExecError::NoSchemaSelected => {
+                PgError::error("3F000", "no schema has been selected to create in")
+            }
             ExecError::UndefinedRelationOfKind { kind, name } => {
                 PgError::error("42P01", format!("{kind} \"{name}\" does not exist"))
             }
@@ -543,6 +788,140 @@ impl ExecError {
             ExecError::NotPartitioned(relation) => {
                 PgError::error("42P17", format!("\"{relation}\" is not partitioned"))
             }
+            ExecError::ForeignKeyViolation(violation) => {
+                let ForeignKeyViolation {
+                    table,
+                    constraint,
+                    side,
+                } = *violation;
+                match side {
+                    ForeignKeyViolationSide::KeyNotPresent {
+                        key,
+                        referenced_table,
+                    } => referencing_row_message(&table, &constraint)
+                        .with_detail(format!("{key} is not present in table \"{referenced_table}\".")),
+                    ForeignKeyViolationSide::MatchFullMixedNulls => {
+                        referencing_row_message(&table, &constraint).with_detail(
+                            "MATCH FULL does not allow mixing of null and nonnull key values.",
+                        )
+                    }
+                    ForeignKeyViolationSide::StillReferenced {
+                        key,
+                        referencing_table,
+                    } => PgError::error(
+                        "23503",
+                        format!(
+                            "update or delete on table \"{table}\" violates foreign key \
+                             constraint \"{constraint}\" on table \"{referencing_table}\""
+                        ),
+                    )
+                    .with_detail(format!(
+                        "{key} is still referenced from table \"{referencing_table}\"."
+                    )),
+                    ForeignKeyViolationSide::Restricted {
+                        key,
+                        referencing_table,
+                    } => PgError::error(
+                        "23001",
+                        format!(
+                            "update or delete on table \"{table}\" violates RESTRICT setting of \
+                             foreign key constraint \"{constraint}\" on table \"{referencing_table}\""
+                        ),
+                    )
+                    .with_detail(format!(
+                        "{key} is referenced from table \"{referencing_table}\"."
+                    )),
+                }
+            }
+            ExecError::NoUniqueConstraintForReferencedTable(table) => PgError::error(
+                "42830",
+                format!(
+                    "there is no unique constraint matching given keys for referenced table \"{table}\""
+                ),
+            ),
+            ExecError::ForeignKeyColumnCountMismatch => PgError::error(
+                "42830",
+                "number of referencing and referenced columns for foreign key disagree",
+            ),
+            ExecError::DuplicateForeignKeyReferencedColumn => PgError::error(
+                "42830",
+                "foreign key referenced-columns list must not contain duplicates",
+            ),
+            ExecError::ReferencedRelationNotATable(relation) => PgError::error(
+                "42809",
+                format!("referenced relation \"{relation}\" is not a table"),
+            ),
+            ExecError::UndefinedForeignKeyColumn(column) => PgError::error(
+                "42703",
+                format!("column \"{column}\" referenced in foreign key constraint does not exist"),
+            ),
+            ExecError::ForeignKeyTypeMismatch(mismatch) => {
+                let ForeignKeyTypeMismatch {
+                    constraint,
+                    referencing_column,
+                    referenced_column,
+                    referencing_type,
+                    referenced_type,
+                } = *mismatch;
+                PgError::error(
+                    "42804",
+                    format!("foreign key constraint \"{constraint}\" cannot be implemented"),
+                )
+                .with_detail(format!(
+                    "Key columns \"{referencing_column}\" of the referencing table and \
+                     \"{referenced_column}\" of the referenced table are of incompatible types: \
+                     {referencing_type} and {referenced_type}."
+                ))
+            }
+            ExecError::ForeignKeySetColumnNotInKey(column) => PgError::error(
+                "42P10",
+                format!(
+                    "column \"{column}\" referenced in ON DELETE SET action must be part of foreign key"
+                ),
+            ),
+            ExecError::DuplicateConstraint { name, table } => PgError::error(
+                "42710",
+                format!("constraint \"{name}\" for relation \"{table}\" already exists"),
+            ),
+            ExecError::TruncateReferencedByForeignKey {
+                referencing_table,
+                referenced_table,
+            } => PgError::error(
+                "0A000",
+                "cannot truncate a table referenced in a foreign key constraint",
+            )
+            .with_detail(format!(
+                "Table \"{referencing_table}\" references \"{referenced_table}\"."
+            ))
+            .with_hint(format!(
+                "Truncate table \"{referencing_table}\" at the same time, or use TRUNCATE ... CASCADE."
+            )),
+            ExecError::DependentForeignKeys(blocked) => {
+                let ForeignKeyDependents {
+                    dropped,
+                    dependents,
+                } = *blocked;
+                let depended_on = dropped.depended_on();
+                let detail = dependents
+                    .iter()
+                    .map(|dependent| {
+                        format!(
+                            "constraint {} on table {} depends on {depended_on}",
+                            dependent.constraint, dependent.table
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                PgError::error(
+                    "2BP01",
+                    format!(
+                        "cannot drop {} because other objects depend on it",
+                        dropped.describe()
+                    ),
+                )
+                .with_detail(detail)
+                .with_hint("Use DROP ... CASCADE to drop the dependent objects too.")
+            }
         }
     }
 }
@@ -571,6 +950,7 @@ impl From<KvError> for ExecError {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_pgcatalog::RelationName;
 
     use super::*;
 
@@ -622,5 +1002,267 @@ mod tests {
                 "unexpected wire error for {error:?}"
             );
         }
+    }
+
+    fn violation(table: &str, constraint: &str, side: ForeignKeyViolationSide) -> ExecError {
+        ExecError::ForeignKeyViolation(Box::new(ForeignKeyViolation {
+            table: table.into(),
+            constraint: constraint.into(),
+            side,
+        }))
+    }
+
+    /// Every message, `DETAIL` and `HINT` below was captured from a live
+    /// PostgreSQL 18.4, so each row is compared as a whole [`PgError`] — the
+    /// severity and the absence or presence of the secondary fields are part of
+    /// what has to match.
+    #[test]
+    fn foreign_key_errors_map_to_sqlstate_message_detail_and_hint() {
+        let cases: Vec<(ExecError, PgError)> = vec![
+            (
+                violation(
+                    "c12",
+                    "c12_a_b_fkey",
+                    ForeignKeyViolationSide::KeyNotPresent {
+                        key: "Key (a, b)=(1, 1)".into(),
+                        referenced_table: "p".into(),
+                    },
+                ),
+                PgError::error(
+                    "23503",
+                    "insert or update on table \"c12\" violates foreign key constraint \
+                     \"c12_a_b_fkey\"",
+                )
+                .with_detail("Key (a, b)=(1, 1) is not present in table \"p\"."),
+            ),
+            (
+                violation(
+                    "cfull",
+                    "cfull_a_b_fkey",
+                    ForeignKeyViolationSide::MatchFullMixedNulls,
+                ),
+                PgError::error(
+                    "23503",
+                    "insert or update on table \"cfull\" violates foreign key constraint \
+                     \"cfull_a_b_fkey\"",
+                )
+                .with_detail("MATCH FULL does not allow mixing of null and nonnull key values."),
+            ),
+            (
+                violation(
+                    "p1",
+                    "cdel_a_fkey",
+                    ForeignKeyViolationSide::StillReferenced {
+                        key: "Key (id)=(1)".into(),
+                        referencing_table: "cdel".into(),
+                    },
+                ),
+                PgError::error(
+                    "23503",
+                    "update or delete on table \"p1\" violates foreign key constraint \
+                     \"cdel_a_fkey\" on table \"cdel\"",
+                )
+                .with_detail("Key (id)=(1) is still referenced from table \"cdel\"."),
+            ),
+            (
+                violation(
+                    "pre",
+                    "cre_a_fkey",
+                    ForeignKeyViolationSide::Restricted {
+                        key: "Key (id)=(1)".into(),
+                        referencing_table: "cre".into(),
+                    },
+                ),
+                PgError::error(
+                    "23001",
+                    "update or delete on table \"pre\" violates RESTRICT setting of foreign key \
+                     constraint \"cre_a_fkey\" on table \"cre\"",
+                )
+                .with_detail("Key (id)=(1) is referenced from table \"cre\"."),
+            ),
+            (
+                ExecError::NoUniqueConstraintForReferencedTable("nopk".into()),
+                PgError::error(
+                    "42830",
+                    "there is no unique constraint matching given keys for referenced table \
+                     \"nopk\"",
+                ),
+            ),
+            (
+                ExecError::ForeignKeyColumnCountMismatch,
+                PgError::error(
+                    "42830",
+                    "number of referencing and referenced columns for foreign key disagree",
+                ),
+            ),
+            (
+                ExecError::DuplicateForeignKeyReferencedColumn,
+                PgError::error(
+                    "42830",
+                    "foreign key referenced-columns list must not contain duplicates",
+                ),
+            ),
+            (
+                ExecError::ReferencedRelationNotATable("v".into()),
+                PgError::error("42809", "referenced relation \"v\" is not a table"),
+            ),
+            (
+                ExecError::UndefinedForeignKeyColumn("nope".into()),
+                PgError::error(
+                    "42703",
+                    "column \"nope\" referenced in foreign key constraint does not exist",
+                ),
+            ),
+            (
+                ExecError::ForeignKeyTypeMismatch(Box::new(ForeignKeyTypeMismatch {
+                    constraint: "c6_a_fkey".into(),
+                    referencing_column: "a".into(),
+                    referenced_column: "id".into(),
+                    referencing_type: "text".into(),
+                    referenced_type: "integer".into(),
+                })),
+                PgError::error(
+                    "42804",
+                    "foreign key constraint \"c6_a_fkey\" cannot be implemented",
+                )
+                .with_detail(
+                    "Key columns \"a\" of the referencing table and \"id\" of the referenced \
+                     table are of incompatible types: text and integer.",
+                ),
+            ),
+            (
+                ExecError::ForeignKeySetColumnNotInKey("b".into()),
+                PgError::error(
+                    "42P10",
+                    "column \"b\" referenced in ON DELETE SET action must be part of foreign key",
+                ),
+            ),
+            (
+                ExecError::DuplicateConstraint {
+                    name: "dupname".into(),
+                    table: "dup".into(),
+                },
+                PgError::error(
+                    "42710",
+                    "constraint \"dupname\" for relation \"dup\" already exists",
+                ),
+            ),
+            (
+                ExecError::TruncateReferencedByForeignKey {
+                    referencing_table: "cdel".into(),
+                    referenced_table: "p1".into(),
+                },
+                PgError::error(
+                    "0A000",
+                    "cannot truncate a table referenced in a foreign key constraint",
+                )
+                .with_detail("Table \"cdel\" references \"p1\".")
+                .with_hint(
+                    "Truncate table \"cdel\" at the same time, or use TRUNCATE ... CASCADE.",
+                ),
+            ),
+            (
+                ExecError::DependentForeignKeys(Box::new(ForeignKeyDependents {
+                    dropped: DroppedObject::Table("p1".into()),
+                    dependents: vec![DependentForeignKey {
+                        constraint: "cdel_a_fkey".into(),
+                        table: RelationName::public("cdel"),
+                    }],
+                })),
+                PgError::error(
+                    "2BP01",
+                    "cannot drop table p1 because other objects depend on it",
+                )
+                .with_detail("constraint cdel_a_fkey on table cdel depends on table p1")
+                .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
+            ),
+            (
+                ExecError::DependentForeignKeys(Box::new(ForeignKeyDependents {
+                    dropped: DroppedObject::Index("uniqidx_a_uq".into()),
+                    dependents: vec![DependentForeignKey {
+                        constraint: "c11_a_fkey".into(),
+                        table: RelationName::public("c11"),
+                    }],
+                })),
+                PgError::error(
+                    "2BP01",
+                    "cannot drop index uniqidx_a_uq because other objects depend on it",
+                )
+                .with_detail("constraint c11_a_fkey on table c11 depends on index uniqidx_a_uq")
+                .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
+            ),
+            (
+                // Two dependents share one DETAIL, one per line, and a dropped
+                // constraint is reported as its backing index there.
+                ExecError::DependentForeignKeys(Box::new(ForeignKeyDependents {
+                    dropped: DroppedObject::Constraint {
+                        name: "p_pkey".into(),
+                        table: "p".into(),
+                    },
+                    dependents: vec![
+                        DependentForeignKey {
+                            constraint: "c12_a_b_fkey".into(),
+                            table: RelationName::public("c12"),
+                        },
+                        DependentForeignKey {
+                            constraint: "cfull_a_b_fkey".into(),
+                            table: RelationName::public("cfull"),
+                        },
+                    ],
+                })),
+                PgError::error(
+                    "2BP01",
+                    "cannot drop constraint p_pkey on table p because other objects depend on it",
+                )
+                .with_detail(
+                    "constraint c12_a_b_fkey on table c12 depends on index p_pkey\n\
+                     constraint cfull_a_b_fkey on table cfull depends on index p_pkey",
+                )
+                .with_hint("Use DROP ... CASCADE to drop the dependent objects too."),
+            ),
+        ];
+
+        for (error, expected) in cases {
+            let pg = error.clone().into_pg();
+            assert!(pg == expected, "unexpected wire error for {error:?}");
+        }
+    }
+
+    /// DETAIL and HINT exist for the foreign-key errors only; widening them to
+    /// the rest of the executor's errors is not this wave's business.
+    #[test]
+    fn non_foreign_key_errors_carry_no_detail_or_hint() {
+        let cases = vec![
+            ExecError::Unsupported("cannot truncate".into()),
+            ExecError::DependentObjectsStillExist(
+                "cannot drop view v because other objects depend on it".into(),
+            ),
+            ExecError::UniqueViolation("t_pkey".into()),
+            ExecError::CheckViolation {
+                table: "t".into(),
+                constraint: "t_a_check".into(),
+            },
+        ];
+
+        for error in cases {
+            let pg = error.clone().into_pg();
+            assert!(
+                pg.detail.is_none() && pg.hint.is_none(),
+                "unexpected secondary fields for {error:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn key_fragment_renders_single_and_composite_keys() {
+        assert!(ForeignKeyViolationSide::render_key(&["id"], &["1"]) == "Key (id)=(1)");
+        assert!(
+            ForeignKeyViolationSide::render_key(&["a", "b"], &["1", "1"]) == "Key (a, b)=(1, 1)"
+        );
+        // Column order follows the FOREIGN KEY clause, not the referenced index.
+        assert!(
+            ForeignKeyViolationSide::render_key(&["b".to_string(), "a".to_string()], &["1", "2"])
+                == "Key (b, a)=(1, 2)"
+        );
     }
 }

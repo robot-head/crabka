@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crabka_pgcatalog::{Column, Table};
+use crabka_pgcatalog::{Column, RelationName, Table};
 use crabka_pgexec::{
     ColumnPredicate, JoinExecutionStrategy, JoinRangeRequest, JoinRangeResult,
     PartialAggregateFunction, PartialAggregateSpec, PredicateOp, PredicatePushdown,
@@ -55,7 +55,7 @@ fn selected_copartitioned_join_falls_back_when_catalog_proof_is_missing() {
     let left = table();
     let mut right = table();
     right.id = 43;
-    right.name = "other".to_string();
+    right.name = RelationName::public("other");
 
     assert_eq!(
         plan_join_for_tables(
@@ -145,7 +145,9 @@ async fn production_engine_stats_follow_durable_table_sequence() {
         .simple_query("CREATE TABLE runtime_stats (id int4)")
         .await
         .unwrap();
-    let table = crabka_pgcatalog::get_table(engine.catalog_kv(), "runtime_stats").unwrap();
+    let table =
+        crabka_pgcatalog::get_table(engine.catalog_kv(), &RelationName::public("runtime_stats"))
+            .unwrap();
     let before = engine.join_stats().estimated_bytes(u64::from(table.id));
     session
         .simple_query("INSERT INTO runtime_stats VALUES (1), (2), (3)")
@@ -164,7 +166,7 @@ use crabka_pgwire::engine::{Engine, QueryResult, Session};
 fn table() -> Table {
     Table {
         id: 42,
-        name: "items".to_string(),
+        name: RelationName::public("items"),
         columns: vec![
             Column::new("id", ColumnType::Int4),
             Column::new("name", ColumnType::Text),
@@ -942,7 +944,7 @@ fn unsupported_predicate_fails_clearly_for_strict_pushdown() {
 fn strict_predicate_rejects_const_types_the_scanner_cannot_execute() {
     let table = Table {
         id: 99,
-        name: "measurements".to_string(),
+        name: RelationName::public("measurements"),
         columns: vec![Column::new("reading", ColumnType::Float8)],
         sharded: true,
         sharding: None,
@@ -972,9 +974,9 @@ fn strict_predicate_rejects_const_types_the_scanner_cannot_execute() {
     );
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct RecordedScan {
-    table: String,
+    table: RelationName,
     predicate: PredicatePushdown,
     projection: ProjectionPushdown,
     partial_aggregate: Option<PartialAggregateSpec>,
@@ -1675,7 +1677,7 @@ async fn sql_count_star_requests_partial_count_pushdown_and_matches_full_scan() 
         .iter()
         .find(|scan| scan.partial_aggregate.is_some())
         .expect("partial count scan requested");
-    assert_eq!(count_scan.table, "items");
+    assert_eq!(count_scan.table, RelationName::public("items"));
     assert_eq!(count_scan.projection, ProjectionPushdown::All);
     assert_eq!(
         count_scan.partial_aggregate,

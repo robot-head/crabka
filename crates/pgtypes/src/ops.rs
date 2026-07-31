@@ -53,6 +53,9 @@ fn as_i64(d: &Datum) -> Option<i64> {
         Datum::Int2(n) => Some(i64::from(*n)),
         Datum::Int4(n) => Some(i64::from(*n)),
         Datum::Int8(n) => Some(*n),
+        // `regclass` is binary-coercible to `oid`, so it compares and orders as
+        // its oid — `WHERE conrelid = 'pp'::regclass` is an integer comparison.
+        Datum::Regclass(r) => Some(i64::from(r.oid)),
         _ => None,
     }
 }

@@ -2712,7 +2712,7 @@ impl RegistryRangeScanner {
     ) -> Result<Vec<crabka_pgexec::ScannedRow>, crabka_pgexec::ExecError> {
         let req = ScanRangeReq {
             range_id,
-            table_name: request.table.name.clone(),
+            table_id: u64::from(request.table.id),
             interval: WireRowInterval {
                 start: request.interval.start,
                 end: request.interval.end,
@@ -2860,10 +2860,8 @@ impl RegistryRangeScanner {
                 "distributed join requires a local catalog engine".into(),
             )
         })?;
-        let left_table =
-            crabka_pgcatalog::get_table(catalog.catalog_kv(), &request.left.table_name)?;
-        let right_table =
-            crabka_pgcatalog::get_table(catalog.catalog_kv(), &request.right.table_name)?;
+        let left_table = table_by_id(catalog, request.left.table_id)?;
+        let right_table = table_by_id(catalog, request.right.table_id)?;
         if request.strategy == crabka_pgexec::JoinExecutionStrategy::CoPartitioned
             && !crabka_pgexec::plan_dist::co_partitioned_join_keys_match(
                 &left_table,
@@ -3000,7 +2998,7 @@ impl RegistryRangeScanner {
                     .map_err(|error| scanner_error(error.into()))?;
                 let rpc = ScanRangeReq {
                     range_id,
-                    table_name: table.name.clone(),
+                    table_id: u64::from(table.id),
                     interval: WireRowInterval {
                         start: side.interval.start,
                         end: side.interval.end,
@@ -3210,7 +3208,7 @@ impl crabka_pgexec::RangeCursor for RegistryRangeCursor<'_> {
                 for range_id in active {
                     let scan = ScanRangeReq {
                         range_id,
-                        table_name: self.request.table.name.clone(),
+                        table_id: u64::from(self.request.table.id),
                         interval: WireRowInterval {
                             start: self.request.interval.start,
                             end: self.request.interval.end,
@@ -3383,23 +3381,37 @@ impl RangeService for RangeScanService {
     }
 }
 
+/// Resolve the relation a range RPC addresses by its catalog id.
+///
+/// Range RPCs carry a `table_id`, never a name: a name is session-dependent
+/// once `search_path` and `pg_temp` exist, and this node has no notion of the
+/// originating session, so resolving one here would read the wrong relation or
+/// none at all. Resolving by id also pins the column layout against a rename
+/// between planning and scanning, because the id survives a rename and the name
+/// does not.
+///
+/// The lookup is a `get` against the catalog's id-keyed index, not a scan of
+/// every table it holds.
+fn table_by_id(
+    engine: &crabka_pgexec::SqlEngine,
+    table_id: u64,
+) -> Result<crabka_pgcatalog::Table, crabka_pgexec::ExecError> {
+    let id = crabka_pgcatalog::TableId::try_from(table_id).map_err(|_| {
+        crabka_pgcatalog::CatalogError::UndefinedTable(format!("table id {table_id}"))
+    })?;
+    Ok(crabka_pgcatalog::table_by_id(engine.catalog_kv(), id)?)
+}
+
 fn handle_join_range(
     engine: &crabka_pgexec::SqlEngine,
     request: &JoinRangeReq,
 ) -> Result<JoinRangeResp, crabka_pgexec::ExecError> {
-    request
+    let left_table = table_by_id(engine, request.left.table_id)?;
+    let right_table = table_by_id(engine, request.right.table_id)?;
+    let pg_request = request.to_pgexec();
+    pg_request
         .validate()
         .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?;
-    let pg_request = request.to_pgexec();
-    let left_table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.left.table_name)?;
-    let right_table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.right.table_name)?;
-    if u64::from(left_table.id) != request.left.table_id
-        || u64::from(right_table.id) != request.right.table_id
-    {
-        return Err(crabka_pgexec::ExecError::Unsupported(
-            "join table id does not match catalog identity".into(),
-        ));
-    }
     if matches!(request.strategy, WireJoinStrategy::CoPartitioned)
         && !crabka_pgexec::plan_dist::co_partitioned_join_keys_match(
             &left_table,
@@ -3469,7 +3481,7 @@ fn handle_scan_range(
     engine: &crabka_pgexec::SqlEngine,
     request: ScanRangeReq,
 ) -> Result<ScanRangeResp, crabka_pgexec::ExecError> {
-    let table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.table_name)?;
+    let table = table_by_id(engine, request.table_id)?;
     let rows = engine.scan_local_visible_with_timestamp_owner(
         &table,
         &request.global_snapshot.into(),
@@ -3532,7 +3544,7 @@ fn handle_scan_cursor(
             "blocking scan pushdowns cannot use the row cursor protocol".into(),
         ));
     }
-    let table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.scan.table_name)?;
+    let table = table_by_id(engine, request.scan.table_id)?;
     let (next, terminal) = if let Some(token) = request.token.as_deref() {
         decode_owner_cursor_token(token)?
     } else {
@@ -3856,7 +3868,6 @@ fn encode_join_request(
     };
     let table = |value: &crabka_pgexec::JoinTableInterval| WireJoinTableInterval {
         table_id: value.table_id,
-        table_name: value.table_name.clone(),
         interval: WireRowInterval {
             start: value.interval.start,
             end: value.interval.end,
@@ -4179,7 +4190,7 @@ mod tests {
     fn sharded_table() -> Table {
         Table {
             id: 11,
-            name: "t11".to_string(),
+            name: crabka_pgcatalog::RelationName::public("t11"),
             columns: vec![Column::new("id", ColumnType::Int4)],
             sharded: true,
             sharding: None,
@@ -4907,7 +4918,7 @@ mod tests {
         );
         assert_eq!(rows[0].row, vec![Datum::Int4(10)]);
         let left_requests = left.requests.lock().expect("left requests");
-        assert_eq!(left_requests[0].table_name, "t11");
+        assert2::assert!(left_requests[0].table_id == 11);
         assert_eq!(left_requests[0].interval.start, Some(1));
         assert_eq!(left_requests[0].local_snapshot.xip, vec![5]);
         assert_eq!(left_requests[0].own_xid, Some(8));
@@ -5206,6 +5217,11 @@ mod tests {
             .simple_query("INSERT INTO t11 VALUES (1, 'drop'), (2, 'keep')")
             .await
             .expect("insert owner rows");
+        let table = crabka_pgcatalog::get_table(
+            owner.catalog_kv(),
+            &crabka_pgcatalog::RelationName::public("t11"),
+        )
+        .expect("owner catalog row");
         let service = RangeScanService::new(std::collections::BTreeMap::from([(
             RangeId::new(1),
             owner.clone_handle(),
@@ -5214,7 +5230,7 @@ mod tests {
         let response = service
             .handle(RangeRequest::ScanRange(ScanRangeReq {
                 range_id: RangeId::new(1),
-                table_name: "t11".to_string(),
+                table_id: table.id.into(),
                 interval: WireRowInterval {
                     start: None,
                     end: None,
@@ -5270,8 +5286,16 @@ mod tests {
             .simple_query("INSERT INTO jl VALUES (1, 'a'), (2, 'b')")
             .await
             .unwrap();
-        let left = crabka_pgcatalog::get_table(owner.catalog_kv(), "jl").unwrap();
-        let right = crabka_pgcatalog::get_table(owner.catalog_kv(), "jr").unwrap();
+        let left = crabka_pgcatalog::get_table(
+            owner.catalog_kv(),
+            &crabka_pgcatalog::RelationName::public("jl"),
+        )
+        .unwrap();
+        let right = crabka_pgcatalog::get_table(
+            owner.catalog_kv(),
+            &crabka_pgcatalog::RelationName::public("jr"),
+        )
+        .unwrap();
         let service =
             RangeScanService::new(BTreeMap::from([(RangeId::new(1), owner.clone_handle())]));
         let snapshot = WireSnapshot {
@@ -5293,7 +5317,6 @@ mod tests {
                 strategy: WireJoinStrategy::BroadcastRight,
                 left: WireJoinTableInterval {
                     table_id: u64::from(left.id),
-                    table_name: left.name,
                     interval: WireRowInterval {
                         start: None,
                         end: None,
@@ -5301,7 +5324,6 @@ mod tests {
                 },
                 right: WireJoinTableInterval {
                     table_id: u64::from(right.id),
-                    table_name: right.name,
                     interval: WireRowInterval {
                         start: None,
                         end: None,
@@ -5339,8 +5361,16 @@ mod tests {
             "CREATE TABLE cpl (id int4, v text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair; \
              CREATE TABLE cpr (id int4, v text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair",
         ).await.unwrap();
-        let left = crabka_pgcatalog::get_table(owner.catalog_kv(), "cpl").unwrap();
-        let right = crabka_pgcatalog::get_table(owner.catalog_kv(), "cpr").unwrap();
+        let left = crabka_pgcatalog::get_table(
+            owner.catalog_kv(),
+            &crabka_pgcatalog::RelationName::public("cpl"),
+        )
+        .unwrap();
+        let right = crabka_pgcatalog::get_table(
+            owner.catalog_kv(),
+            &crabka_pgcatalog::RelationName::public("cpr"),
+        )
+        .unwrap();
         let service =
             RangeScanService::new(BTreeMap::from([(RangeId::new(1), owner.clone_handle())]));
         let snapshot = WireSnapshot {
@@ -5362,7 +5392,6 @@ mod tests {
                 strategy: WireJoinStrategy::CoPartitioned,
                 left: WireJoinTableInterval {
                     table_id: u64::from(left.id),
-                    table_name: left.name,
                     interval: WireRowInterval {
                         start: None,
                         end: None,
@@ -5370,7 +5399,6 @@ mod tests {
                 },
                 right: WireJoinTableInterval {
                     table_id: u64::from(right.id),
-                    table_name: right.name,
                     interval: WireRowInterval {
                         start: None,
                         end: None,
@@ -5408,8 +5436,16 @@ mod tests {
             .simple_query("INSERT INTO jr VALUES (2, 'z'), (3, 'q')")
             .await
             .expect("insert right");
-        let left = crabka_pgcatalog::get_table(gateway.catalog_kv(), "jl").expect("left table");
-        let right = crabka_pgcatalog::get_table(gateway.catalog_kv(), "jr").expect("right table");
+        let left = crabka_pgcatalog::get_table(
+            gateway.catalog_kv(),
+            &crabka_pgcatalog::RelationName::public("jl"),
+        )
+        .expect("left table");
+        let right = crabka_pgcatalog::get_table(
+            gateway.catalog_kv(),
+            &crabka_pgcatalog::RelationName::public("jr"),
+        )
+        .expect("right table");
         let registry =
             RangeRegistry::from_tenant_record(&record("127.0.0.1:1".into())).expect("registry");
         let scanner = RegistryRangeScanner::new(
@@ -5454,8 +5490,11 @@ mod tests {
             .simple_query("INSERT INTO cursor_items VALUES (10), (20)")
             .await
             .expect("insert owner rows");
-        let table =
-            crabka_pgcatalog::get_table(owner.catalog_kv(), "cursor_items").expect("cursor table");
+        let table = crabka_pgcatalog::get_table(
+            owner.catalog_kv(),
+            &crabka_pgcatalog::RelationName::public("cursor_items"),
+        )
+        .expect("cursor table");
         owner
             .kv_handle()
             .write_batch(&[crabka_pgkv::WriteOp::Delete {
@@ -5468,7 +5507,7 @@ mod tests {
         )]));
         let scan = ScanRangeReq {
             range_id: RangeId::new(1),
-            table_name: "cursor_items".to_string(),
+            table_id: table.id.into(),
             interval: WireRowInterval {
                 start: None,
                 end: None,
@@ -5528,6 +5567,11 @@ mod tests {
             .simple_query("INSERT INTO t11 VALUES (1, 'drop'), (2, 'keep'), (3, 'keep')")
             .await
             .expect("insert owner rows");
+        let table = crabka_pgcatalog::get_table(
+            owner.catalog_kv(),
+            &crabka_pgcatalog::RelationName::public("t11"),
+        )
+        .expect("owner catalog row");
         let service = RangeScanService::new(std::collections::BTreeMap::from([(
             RangeId::new(1),
             owner.clone_handle(),
@@ -5536,7 +5580,7 @@ mod tests {
         let response = service
             .handle(RangeRequest::ScanRange(ScanRangeReq {
                 range_id: RangeId::new(1),
-                table_name: "t11".to_string(),
+                table_id: table.id.into(),
                 interval: WireRowInterval {
                     start: None,
                     end: None,
@@ -5592,6 +5636,11 @@ mod tests {
             .simple_query("INSERT INTO t11 VALUES (10, 'd'), (30, 'z'), (30, 'a'), (20, 'b')")
             .await
             .expect("insert owner rows");
+        let table = crabka_pgcatalog::get_table(
+            owner.catalog_kv(),
+            &crabka_pgcatalog::RelationName::public("t11"),
+        )
+        .expect("owner catalog row");
         let service = RangeScanService::new(std::collections::BTreeMap::from([(
             RangeId::new(1),
             owner.clone_handle(),
@@ -5600,7 +5649,7 @@ mod tests {
         let response = service
             .handle(RangeRequest::ScanRange(ScanRangeReq {
                 range_id: RangeId::new(1),
-                table_name: "t11".to_string(),
+                table_id: table.id.into(),
                 interval: WireRowInterval {
                     start: None,
                     end: None,
@@ -6250,7 +6299,11 @@ mod tests {
             .simple_query("INSERT INTO t11 VALUES (42)")
             .await
             .expect("insert owner row");
-        let owner_table = crabka_pgcatalog::get_table(owner.catalog_kv(), "t11").expect("t11");
+        let owner_table = crabka_pgcatalog::get_table(
+            owner.catalog_kv(),
+            &crabka_pgcatalog::RelationName::public("t11"),
+        )
+        .expect("t11");
         let service = RangeScanService::new(std::collections::BTreeMap::from([(
             RangeId::new(1),
             owner.clone_handle(),

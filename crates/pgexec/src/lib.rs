@@ -33,7 +33,9 @@
 //! xid/clog/snapshot model with uncommitted versions on disk. SP6 removes the
 //! global writer lock: writers run concurrently, serialized only at the row
 //! level via the `RowLockManager`, with rowid allocation via the
-//! `SequenceManager` and DDL serialized behind a small catalog lock.
+//! `SequenceManager` and DDL serialized behind a small catalog lock — with the
+//! table-id counter split out from under it, into a lock of its own that a
+//! session takes once per block of ids rather than once per `CREATE TABLE`.
 
 #![doc(html_root_url = "https://docs.rs/crabka-pgexec/0.3.9")]
 
@@ -50,6 +52,7 @@ mod error;
 mod eval;
 mod exec;
 mod explain;
+pub mod fk;
 pub mod foreign;
 mod format_fn;
 mod func;
@@ -71,10 +74,12 @@ mod procarray;
 mod query;
 mod read_gate;
 mod regexp_fn;
+mod relname;
 mod routine;
 mod rowexpr;
 pub mod scanner;
 mod scope;
+mod search_path;
 mod seq;
 mod session;
 mod setops;
@@ -98,7 +103,10 @@ use std::{
 pub use commit::{Committer, LocalCommitter};
 use crabka_pgkv::{FjallKv, Kv, MemKv};
 use crabka_pgwire::engine::Engine;
-pub use error::{ExecError, GucRangeViolation};
+pub use error::{
+    DependentForeignKey, DroppedObject, ExecError, ForeignKeyDependents, ForeignKeyTypeMismatch,
+    ForeignKeyViolation, ForeignKeyViolationSide, GucRangeViolation,
+};
 pub use gtm::GlobalXidLease;
 pub use hlc::{Hlc, HybridLogicalClock};
 pub use hlc_source::{
@@ -127,6 +135,7 @@ use crate::{lockmgr::RowLockManager, procarray::ProcArray, seq::SequenceManager}
 /// handle.
 struct EngineCoordination {
     catalog_lock: Arc<tokio::sync::Mutex<()>>,
+    table_id_lock: Arc<tokio::sync::Mutex<()>>,
     table_write_gate: Arc<tokio::sync::RwLock<()>>,
     writer_fence: Arc<WriterFence>,
 }
@@ -135,6 +144,7 @@ impl EngineCoordination {
     fn new() -> Self {
         Self {
             catalog_lock: Arc::new(tokio::sync::Mutex::new(())),
+            table_id_lock: Arc::new(tokio::sync::Mutex::new(())),
             table_write_gate: Arc::new(tokio::sync::RwLock::new(())),
             writer_fence: Arc::new(WriterFence::new()),
         }
@@ -339,6 +349,19 @@ pub struct SqlEngine {
     /// [`SqlEngine::set_notify_origin`] is called.
     pub(crate) notify_replication: Arc<NotifyReplication>,
     pub(crate) catalog_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Covers the shared next-table-id counter's read-bump-commit, and nothing
+    /// else.
+    ///
+    /// `catalog_lock` used to cover both the catalog keyspace and this counter,
+    /// which made every `CREATE TABLE` — including a temporary one, whose
+    /// namespace no other session can even name — wait out a cluster-wide
+    /// critical section that spans a Raft round-trip. Split out, a session
+    /// claims a block of ids here and hands them out locally, so the common
+    /// `CREATE TEMP TABLE` coordinates with nobody.
+    ///
+    /// Lock order where a statement wants both: `table_id_lock` first, then
+    /// `catalog_lock`.
+    pub(crate) table_id_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serializes physical rewrites with ordinary writes. Explicit xid writers
     /// additionally retain `writer_fence` through their terminal outcome.
     pub(crate) table_write_gate: Arc<tokio::sync::RwLock<()>>,
@@ -728,6 +751,7 @@ impl SqlEngine {
             notify: Arc::new(notify::NotifyBus::new()),
             notify_replication: Arc::new(NotifyReplication::default()),
             catalog_lock: Arc::clone(&coordination.catalog_lock),
+            table_id_lock: Arc::clone(&coordination.table_id_lock),
             table_write_gate: Arc::clone(&coordination.table_write_gate),
             writer_fence: Arc::clone(&coordination.writer_fence),
             unique_index_lock: Arc::new(tokio::sync::RwLock::new(())),
@@ -1313,6 +1337,7 @@ impl SqlEngine {
             notify: Arc::new(notify::NotifyBus::new()),
             notify_replication: Arc::new(NotifyReplication::default()),
             catalog_lock: Arc::clone(&coordination.catalog_lock),
+            table_id_lock: Arc::clone(&coordination.table_id_lock),
             table_write_gate: Arc::clone(&coordination.table_write_gate),
             writer_fence: Arc::clone(&coordination.writer_fence),
             unique_index_lock: Arc::new(tokio::sync::RwLock::new(())),
@@ -1350,6 +1375,10 @@ impl SqlEngine {
     pub fn reseed_counters(&self) -> Result<(), ExecError> {
         self.procarray.reseed_from_applied()?;
         self.seq.reseed_from_applied();
+        // Becoming the writer is the one moment the SQL sequence cache may be
+        // dropped: every value the previous writer handed to a client is
+        // durable, so re-seeding from the applied store can only move forward.
+        self.seq.reseed_sql_sequences();
         self.timestamp_horizon.invalidate();
         Ok(())
     }
@@ -1379,6 +1408,7 @@ impl SqlEngine {
             notify: Arc::clone(&self.notify),
             notify_replication: Arc::clone(&self.notify_replication),
             catalog_lock: Arc::clone(&self.catalog_lock),
+            table_id_lock: Arc::clone(&self.table_id_lock),
             table_write_gate: Arc::clone(&self.table_write_gate),
             writer_fence: Arc::clone(&self.writer_fence),
             unique_index_lock: Arc::clone(&self.unique_index_lock),
@@ -1619,7 +1649,10 @@ impl SqlEngine {
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
-    pub fn table_uses_global_visibility(&self, name: &str) -> Result<bool, ExecError> {
+    pub fn table_uses_global_visibility(
+        &self,
+        name: &crabka_pgcatalog::RelationName,
+    ) -> Result<bool, ExecError> {
         let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name)?;
         Ok(crate::exec::table_uses_global_visibility(&table))
     }
@@ -1630,7 +1663,7 @@ impl SqlEngine {
     /// Returns an error when the requested operation cannot be completed.
     pub fn table_sharding(
         &self,
-        name: &str,
+        name: &crabka_pgcatalog::RelationName,
     ) -> Result<Option<crabka_pgcatalog::ShardingStrategy>, ExecError> {
         let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name)?;
         Ok(table.sharding)
@@ -1642,7 +1675,7 @@ impl SqlEngine {
     /// Returns an error when the requested operation cannot be completed.
     pub async fn convert_table_to_sharded_metadata(
         &self,
-        name: &str,
+        name: &crabka_pgcatalog::RelationName,
         sharding: Option<&crabka_pgcatalog::ShardingStrategy>,
     ) -> Result<(), ExecError> {
         let _xid_writer_fence = self.writer_fence.conversion().await;
@@ -1664,7 +1697,10 @@ impl SqlEngine {
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
-    pub fn catalog_table(&self, name: &str) -> Result<crabka_pgcatalog::Table, ExecError> {
+    pub fn catalog_table(
+        &self,
+        name: &crabka_pgcatalog::RelationName,
+    ) -> Result<crabka_pgcatalog::Table, ExecError> {
         crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name).map_err(Into::into)
     }
 
@@ -1729,6 +1765,32 @@ impl SqlEngine {
         &self,
         sql: &str,
     ) -> Result<crate::exec::TimestampWritePlan, ExecError> {
+        let (mut plan, sequence_ops) = self.plan_timestamp_write_parts(sql)?;
+        plan.commit_ops.extend(sequence_ops);
+        Ok(plan)
+    }
+
+    /// The plan and its SQL sequence advances kept apart, because the two have
+    /// different lifetimes: a caller that supplies its own hidden rowids drops
+    /// the plan's rowid op, but a `nextval` the statement evaluated still has to
+    /// reach the store or the next writer will hand the same value out again.
+    fn plan_timestamp_write_parts(
+        &self,
+        sql: &str,
+    ) -> Result<(crate::exec::TimestampWritePlan, Vec<crabka_pgkv::WriteOp>), ExecError> {
+        let pending = Arc::new(std::sync::Mutex::new(
+            crate::seq::PendingSequences::default(),
+        ));
+        let plan = self.plan_timestamp_write_with_pending(sql, &pending)?;
+        let sequence_ops = pending.lock().expect("pending sequences").take_ops();
+        Ok((plan, sequence_ops))
+    }
+
+    fn plan_timestamp_write_with_pending(
+        &self,
+        sql: &str,
+        pending: &Arc<std::sync::Mutex<crate::seq::PendingSequences>>,
+    ) -> Result<crate::exec::TimestampWritePlan, ExecError> {
         let statements = crabka_pgparser::parse(sql)?;
         let [statement] = statements.as_slice() else {
             return Err(ExecError::Unsupported(
@@ -1745,12 +1807,23 @@ impl SqlEngine {
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             current_user: "public".into(),
             session_user: "public".into(),
+            // No connection was ever opened for this write, so there is no
+            // backend id to report.
+            backend_pid: 0,
             clock: Arc::clone(&self.clock),
             sequence: Some(Arc::new(crate::clock::SequenceRuntime {
                 kv: Arc::clone(&self.catalog_kv),
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+                pending: Arc::clone(pending),
             })),
+            // The catalog is reachable through `sequence`, which holds the same
+            // handle.
+            catalog: None,
+            // Nor is there a session `search_path` to resolve against, so an
+            // unqualified name in a scattered write takes PostgreSQL's default
+            // path — the same one a fresh session starts with.
+            resolution: None,
             // Planning a sharded write has no session behind it, so `pg_notify`
             // in one reports "requires a SQL session" rather than silently
             // dropping the notification.
@@ -1774,7 +1847,7 @@ impl SqlEngine {
         sql: &str,
         hidden_rowids: &[u64],
     ) -> Result<crate::exec::TimestampWritePlan, ExecError> {
-        let mut plan = self.plan_timestamp_write_sql(sql)?;
+        let (mut plan, sequence_ops) = self.plan_timestamp_write_parts(sql)?;
         if plan.writes.len() != hidden_rowids.len() {
             return Err(ExecError::Unsupported(
                 "hidden row-id lease does not match timestamp write count".into(),
@@ -1783,7 +1856,11 @@ impl SqlEngine {
         for (write, rowid) in plan.writes.iter_mut().zip(hidden_rowids) {
             write.rowid = *rowid;
         }
+        // The rowid counter op goes: these rowids came from the lease, so the
+        // counter was never advanced. A SQL sequence advance is not the same
+        // thing — the statement really did consume those values.
         plan.commit_ops.clear();
+        plan.commit_ops.extend(sequence_ops);
         Ok(plan)
     }
 
@@ -2851,6 +2928,7 @@ fn exclusive_cursor_terminal(sequence: u64, physical_max: Option<u64>) -> Result
 
 #[cfg(test)]
 mod cursor_terminal_tests {
+    use crabka_pgcatalog::RelationName;
     use crabka_pgkv::WriteOp;
     use crabka_pgwire::engine::{Engine, Session};
 
@@ -2874,7 +2952,9 @@ mod cursor_terminal_tests {
             .simple_query("CREATE TABLE h (id int4) SHARDED BY HASH (id) BUCKETS 16")
             .await
             .expect("create hash table");
-        let table = engine.catalog_table("h").expect("hash table");
+        let table = engine
+            .catalog_table(&RelationName::public("h"))
+            .expect("hash table");
         engine
             .kv_handle()
             .write_batch(&[WriteOp::Put {
@@ -3016,14 +3096,23 @@ pub fn describe_fields(
     catalog_kv: &dyn Kv,
     sql: &str,
 ) -> Result<Vec<crabka_pgwire::engine::FieldDescription>, ExecError> {
-    crate::exec::describe(catalog_kv, catalog_kv, sql)
+    crate::exec::describe(
+        catalog_kv,
+        catalog_kv,
+        crate::relname::ResolutionScope::default_scope(),
+        sql,
+    )
 }
 
 impl Engine for SqlEngine {
     type Session = SqlSession;
 
+    /// A session with no client behind it — an embedded caller, or a range
+    /// engine the gateway drives. It still draws a backend id, from the same
+    /// process-wide counter the wire layer announces from, so `pg_backend_pid()`
+    /// identifies it as distinctly as a connected session's does.
     fn connect(&self) -> SqlSession {
-        self.connect_with_pid(0)
+        self.connect_with_pid(crabka_pgwire::server::next_backend_pid())
     }
 
     fn connect_with_pid(&self, pid: i32) -> SqlSession {
@@ -3035,6 +3124,7 @@ impl Engine for SqlEngine {
             lockmgr: Arc::clone(&self.lockmgr),
             session_locks: Arc::clone(&self.session_locks),
             catalog_lock: Arc::clone(&self.catalog_lock),
+            table_id_lock: Arc::clone(&self.table_id_lock),
             table_write_gate: Arc::clone(&self.table_write_gate),
             writer_fence: Arc::clone(&self.writer_fence),
             coordination: Arc::clone(&self.coordination),
@@ -3055,6 +3145,7 @@ impl Engine for SqlEngine {
             gc_horizon: Arc::clone(&self.gc_horizon),
             ts_gc: Arc::clone(&self.ts_gc),
             notify_replication: Arc::clone(&self.notify_replication),
+            backend_pid: pid,
         });
         session.register_notify(&self.notify, pid);
         session
@@ -3063,6 +3154,7 @@ impl Engine for SqlEngine {
 
 #[cfg(test)]
 mod tests {
+    use crabka_pgcatalog::RelationName;
     use crabka_pgwire::engine::Session;
     use tokio::sync::{Barrier, Notify};
 
@@ -3112,10 +3204,10 @@ mod tests {
             .await
             .expect("create local table");
 
-        let sharded = crabka_pgcatalog::get_table(kv.as_ref(), "sharded_t")
+        let sharded = crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("sharded_t"))
             .expect("sharded table catalog row");
-        let local =
-            crabka_pgcatalog::get_table(kv.as_ref(), "local_t").expect("local table catalog row");
+        let local = crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("local_t"))
+            .expect("local table catalog row");
 
         assert!(sharded.sharded);
         assert!(!local.sharded);
@@ -3134,7 +3226,8 @@ mod tests {
             .await
             .expect("create hash sharded table");
 
-        let table = crabka_pgcatalog::get_table(kv.as_ref(), "hash_t").expect("table");
+        let table = crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("hash_t"))
+            .expect("table");
         assert!(table.sharded);
         assert_eq!(
             table.sharding,
@@ -3159,8 +3252,12 @@ mod tests {
             )
             .await
             .expect("create tables");
-        let hash = engine.catalog_table("h").expect("hash table");
-        let ordinary = engine.catalog_table("s").expect("ordinary table");
+        let hash = engine
+            .catalog_table(&RelationName::public("h"))
+            .expect("hash table");
+        let ordinary = engine
+            .catalog_table(&RelationName::public("s"))
+            .expect("ordinary table");
 
         assert!(engine.validate_timestamp_bucket(hash.id, Some(0)).is_ok());
         assert!(engine.validate_timestamp_bucket(hash.id, Some(15)).is_ok());
@@ -3213,11 +3310,12 @@ mod tests {
         });
 
         engine
-            .convert_table_to_sharded_metadata("convert_t", Some(&sharding))
+            .convert_table_to_sharded_metadata(&RelationName::public("convert_t"), Some(&sharding))
             .await
             .expect("convert metadata");
 
-        let table = crabka_pgcatalog::get_table(kv.as_ref(), "convert_t").expect("table");
+        let table = crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("convert_t"))
+            .expect("table");
         assert!(table.sharded);
         assert_eq!(table.sharding, Some(sharding));
     }
@@ -3241,7 +3339,7 @@ mod tests {
             .expect("read before");
 
         engine
-            .convert_table_to_sharded_metadata("convert_visible", None)
+            .convert_table_to_sharded_metadata(&RelationName::public("convert_visible"), None)
             .await
             .expect("metadata conversion");
         let after = session
@@ -3277,7 +3375,10 @@ mod tests {
                 conversion_started.notify_one();
                 release_conversion.notified().await;
                 converting_engine
-                    .convert_table_to_sharded_metadata("conversion_fence", None)
+                    .convert_table_to_sharded_metadata(
+                        &RelationName::public("conversion_fence"),
+                        None,
+                    )
                     .await
             }
         });
@@ -3298,7 +3399,9 @@ mod tests {
             .expect("conversion task")
             .expect("convert table");
 
-        let table = crabka_pgcatalog::get_table(kv.as_ref(), "conversion_fence").expect("table");
+        let table =
+            crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("conversion_fence"))
+                .expect("table");
         for (_, value) in kv
             .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
             .expect("scan converted tuples")
@@ -3347,7 +3450,10 @@ mod tests {
                 conversion_barrier.wait().await;
                 conversion_started.notify_one();
                 converting_engine
-                    .convert_table_to_sharded_metadata("shared_conversion_fence", None)
+                    .convert_table_to_sharded_metadata(
+                        &RelationName::public("shared_conversion_fence"),
+                        None,
+                    )
                     .await
             }
         });
@@ -3368,8 +3474,11 @@ mod tests {
             .expect("conversion task")
             .expect("convert table");
 
-        let table =
-            crabka_pgcatalog::get_table(kv.as_ref(), "shared_conversion_fence").expect("table");
+        let table = crabka_pgcatalog::get_table(
+            kv.as_ref(),
+            &RelationName::public("shared_conversion_fence"),
+        )
+        .expect("table");
         assert!(table.sharded);
         for (_, value) in kv
             .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
@@ -3408,7 +3517,10 @@ mod tests {
         conversion_waiter.as_mut().enable();
         let conversion = tokio::spawn(async move {
             reopened
-                .convert_table_to_sharded_metadata("retained_conversion_fence", None)
+                .convert_table_to_sharded_metadata(
+                    &RelationName::public("retained_conversion_fence"),
+                    None,
+                )
                 .await
         });
         conversion_waiter.await;
@@ -3449,7 +3561,10 @@ mod tests {
                 conversion_barrier.wait().await;
                 conversion_started.notify_one();
                 converting_engine
-                    .convert_table_to_sharded_metadata("conversion_upgrade", None)
+                    .convert_table_to_sharded_metadata(
+                        &RelationName::public("conversion_upgrade"),
+                        None,
+                    )
                     .await
             }
         });
@@ -3497,7 +3612,9 @@ mod tests {
             .await
             .expect("insert 2");
 
-        let table = crabka_pgcatalog::get_table(engine.catalog_kv(), "local_t").expect("table");
+        let table =
+            crabka_pgcatalog::get_table(engine.catalog_kv(), &RelationName::public("local_t"))
+                .expect("table");
         let snapshot = engine.procarray.snapshot();
         let direct_rows = engine
             .scan_local_visible(
@@ -3676,7 +3793,9 @@ mod tests {
         };
         // The dropped session freed li's lock (presumed-abort), so the inherited in-doubt
         // row now has NO live lock holder — exactly the wiped-lock-table condition.
-        let table = crabka_pgcatalog::get_table(kv.as_ref(), "t").expect("t").id;
+        let table = crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("t"))
+            .expect("t")
+            .id;
         // g is still in-doubt (no global decision written): recovery re-acquires li's lock.
         let pairs = engine.reacquire_in_doubt_locks().await.expect("reacquire");
         assert_eq!(

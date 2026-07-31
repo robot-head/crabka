@@ -34,8 +34,60 @@ struct TableSeq {
     durable_end: u64,
 }
 
+/// One SQL sequence's advance, staged for the caller to fold into a commit
+/// batch. `Replicated` mode hands these out instead of writing through the
+/// store, the same way [`SequenceManager::alloc`] hands out a rowid `WriteOp`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StagedSequence {
+    pub name: crabka_pgcatalog::RelationName,
+    pub sequence: crabka_pgcatalog::Sequence,
+}
+
+/// A session's sequence advances that are not in the applied store yet.
+///
+/// Advancing a sequence happens inside *synchronous* expression evaluation,
+/// which cannot await a commit, so the advance is staged here and the session
+/// folds it into the next batch it commits — the same seam
+/// [`crate::clock::EvalCtx::notify`] gives `pg_notify()`. Keying by name rather
+/// than appending collapses the thousand advances of a thousand-row `INSERT`
+/// into the one `Put` that records the last of them.
+#[derive(Debug, Default)]
+pub(crate) struct PendingSequences {
+    staged: std::collections::BTreeMap<crabka_pgcatalog::RelationName, crabka_pgcatalog::Sequence>,
+}
+
+impl PendingSequences {
+    pub fn stage(&mut self, staged: StagedSequence) {
+        self.staged.insert(staged.name, staged.sequence);
+    }
+
+    /// Remove and return the staged advances as write ops, in name order so a
+    /// batch is deterministic.
+    pub fn take_ops(&mut self) -> Vec<crabka_pgkv::WriteOp> {
+        std::mem::take(&mut self.staged)
+            .into_iter()
+            .map(|(name, sequence)| crabka_pgcatalog::put_sequence_op(&name, sequence))
+            .collect()
+    }
+}
+
 pub(crate) struct SequenceManager {
     inner: Mutex<HashMap<crabka_pgcatalog::TableId, TableSeq>>,
+    /// The `Replicated`-mode SQL sequence cache: each sequence's record as of
+    /// this writer's most recent advance, which the applied store has not
+    /// necessarily caught up to yet.
+    ///
+    /// It exists because a `Replicated` advance does not write through the
+    /// store — it rides a commit batch — so without it every `nextval` inside
+    /// one uncommitted statement would re-read the same stale record and hand
+    /// out the same value. It is engine-wide, not per session, because two
+    /// sessions inserting into the same `SERIAL` table must not both be served
+    /// the value the other already took.
+    ///
+    /// Cache entries are authoritative only for the writer that filled them.
+    /// See [`SequenceManager::reseed_sql_sequences`] for why that is safe and
+    /// what enforces it.
+    sql: Mutex<HashMap<crabka_pgcatalog::RelationName, crabka_pgcatalog::Sequence>>,
     mode: PersistMode,
 }
 
@@ -43,6 +95,7 @@ impl SequenceManager {
     pub fn new(mode: PersistMode) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            sql: Mutex::new(HashMap::new()),
             mode,
         }
     }
@@ -110,59 +163,239 @@ impl SequenceManager {
         Ok((start, folded))
     }
 
-    /// On leadership change, clear the cache so the next alloc re-seeds from the
-    /// applied store (counters seed lazily via `read_seq_kv` on first use).
+    /// Clear the rowid cache so the next alloc re-seeds from the applied store
+    /// (counters seed lazily via `read_seq_kv` on first use).
+    ///
+    /// This is the *rowid* counter only. It is called both on leadership change
+    /// and whenever a distributed transaction another node owned resolves, so it
+    /// can fire while this node is midway through a statement — safe for rowids,
+    /// because a rowid is only ever observed through the batch that carries it,
+    /// but not for SQL sequences, whose values are handed to the client. Those
+    /// are cleared by [`SequenceManager::reseed_sql_sequences`] instead.
     pub fn reseed_from_applied(&self) {
         self.inner.lock().expect("seqmgr").clear();
     }
 
-    pub fn nextval(&self, kv: &dyn Kv, name: &str) -> Result<i64, ExecError> {
-        let mut sequence = crabka_pgcatalog::get_sequence(kv, name)?;
-        let value = next_sequence_value(name, &sequence)?;
-        sequence.last_value = value;
-        sequence.is_called = true;
-        let op = crabka_pgcatalog::put_sequence_op(name, sequence);
-        match self.mode {
-            PersistMode::Durable => kv.write_batch(&[op])?,
-            PersistMode::Replicated => {
-                return Err(ExecError::Unsupported(
-                    "replicated SQL sequence updates are not wired yet".into(),
-                ));
-            }
-        }
-        Ok(value)
+    /// Drop the whole SQL sequence cache, so the next `nextval` re-seeds from
+    /// the applied store. Called when this node becomes the writer.
+    ///
+    /// This is the failover invariant, and it only holds because of what the
+    /// caller of a staged advance guarantees: **no `nextval` value reaches a
+    /// client before the op recording it is durable**. Every statement that can
+    /// advance a sequence commits before it returns, so at the moment a new
+    /// writer re-seeds, the applied store already reflects every value the old
+    /// writer handed out — re-seeding from it can only move forward. Values a
+    /// dead writer took but never committed were never observed by anyone, so
+    /// re-issuing them is invisible.
+    ///
+    /// The converse is why this is *not* wired into
+    /// [`SequenceManager::reseed_from_applied`]: clearing mid-statement would
+    /// drop advances this writer had handed out but not yet committed, and the
+    /// re-seed would hand the same values out a second time — inside a single
+    /// multi-row `INSERT`, a duplicate key.
+    pub fn reseed_sql_sequences(&self) {
+        self.sql.lock().expect("sql seqmgr").clear();
     }
 
-    pub fn setval(
+    /// Forget the cached record of every sequence `ops` creates or drops.
+    ///
+    /// `DROP SEQUENCE s; CREATE SEQUENCE s;` reuses the name for a record that
+    /// starts over, and a cache entry that outlived the drop would keep
+    /// advancing the old one. Reading the names out of the committed batch
+    /// rather than the statement covers every path that reaches the catalog:
+    /// `CREATE`/`DROP SEQUENCE`, the implicit sequence of a `SERIAL` column, and
+    /// a `DROP TABLE` that cascades to one.
+    pub fn forget_sequences(&self, ops: &[crabka_pgkv::WriteOp]) {
+        let names: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                crabka_pgkv::WriteOp::Put { key, .. }
+                | crabka_pgkv::WriteOp::ConditionalPut { key, .. }
+                | crabka_pgkv::WriteOp::Delete { key } => {
+                    crabka_pgcatalog::sequence_name_from_key(key)
+                }
+            })
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        let mut cache = self.sql.lock().expect("sql seqmgr");
+        for name in names {
+            cache.remove(&name);
+        }
+    }
+
+    /// `nextval` over the sequence a stored column default names.
+    ///
+    /// The stored text is the catalog's own rendering of a
+    /// [`crabka_pgcatalog::RelationName`] — bare in `public`, `schema.name`
+    /// elsewhere, never quoted — not a `regclass` literal, so it is read back
+    /// the way it was written rather than through
+    /// [`crate::relname::parse_written_relation`]. `nextval('…')` as SQL calls
+    /// it is [`SequenceManager::nextval_written`].
+    pub fn nextval(
         &self,
         kv: &dyn Kv,
-        name: &str,
-        value: i64,
-        is_called: bool,
-    ) -> Result<i64, ExecError> {
-        let mut sequence = crabka_pgcatalog::get_sequence(kv, name)?;
-        if value < sequence.min || value > sequence.max {
-            return Err(ExecError::SequenceLimit(format!(
-                "setval: value {value} is out of bounds for sequence \"{name}\""
-            )));
-        }
-        sequence.last_value = value;
-        sequence.is_called = is_called;
-        let op = crabka_pgcatalog::put_sequence_op(name, sequence);
+        scope: &crate::relname::ResolutionScope,
+        stored: &str,
+    ) -> Result<(i64, Option<StagedSequence>), ExecError> {
+        self.advance(kv, stored_sequence_name(kv, scope, stored)?)
+    }
+
+    /// `nextval(regclass)` as SQL calls it, over a name the user wrote.
+    pub fn nextval_written(
+        &self,
+        kv: &dyn Kv,
+        scope: &crate::relname::ResolutionScope,
+        written: &str,
+    ) -> Result<(i64, Option<StagedSequence>), ExecError> {
+        self.advance(kv, written_sequence_name(kv, scope, written)?)
+    }
+
+    /// Advance `name` and return its new value, plus — in `Replicated` mode —
+    /// the advance for the caller to fold into a commit batch.
+    ///
+    /// `Durable` mode writes the record through the store itself and stages
+    /// nothing, exactly as [`SequenceManager::alloc`] does for rowids.
+    /// `Replicated` mode may not: the applied store is only reachable through
+    /// the replication log, so the record it reads would not see this writer's
+    /// own uncommitted advances. It therefore reads through the cache, which
+    /// holds the record as of the last advance whether or not that advance has
+    /// been applied yet, and hands the new record back to be committed.
+    fn advance(
+        &self,
+        kv: &dyn Kv,
+        name: crabka_pgcatalog::RelationName,
+    ) -> Result<(i64, Option<StagedSequence>), ExecError> {
         match self.mode {
-            PersistMode::Durable => kv.write_batch(&[op])?,
+            PersistMode::Durable => {
+                let mut sequence = crabka_pgcatalog::get_sequence(kv, &name)?;
+                sequence.last_value = next_sequence_value(&name, &sequence)?;
+                sequence.is_called = true;
+                kv.write_batch(&[crabka_pgcatalog::put_sequence_op(&name, sequence)])?;
+                Ok((sequence.last_value, None))
+            }
             PersistMode::Replicated => {
-                return Err(ExecError::Unsupported(
-                    "replicated SQL sequence updates are not wired yet".into(),
-                ));
+                let mut cache = self.sql.lock().expect("sql seqmgr");
+                let mut sequence = match cache.get(&name) {
+                    Some(cached) => *cached,
+                    None => crabka_pgcatalog::get_sequence(kv, &name)?,
+                };
+                sequence.last_value = next_sequence_value(&name, &sequence)?;
+                sequence.is_called = true;
+                cache.insert(name.clone(), sequence);
+                Ok((sequence.last_value, Some(StagedSequence { name, sequence })))
             }
         }
-        Ok(value)
+    }
+
+    /// `setval(regclass, …)` as SQL calls it. There is no stored-default
+    /// counterpart: only `nextval` appears in a column default.
+    pub fn setval_written(
+        &self,
+        kv: &dyn Kv,
+        scope: &crate::relname::ResolutionScope,
+        written: &str,
+        value: i64,
+        is_called: bool,
+    ) -> Result<(i64, Option<StagedSequence>), ExecError> {
+        let name = written_sequence_name(kv, scope, written)?;
+        match self.mode {
+            PersistMode::Durable => {
+                let mut sequence = crabka_pgcatalog::get_sequence(kv, &name)?;
+                setval_record(&name, &mut sequence, value, is_called)?;
+                kv.write_batch(&[crabka_pgcatalog::put_sequence_op(&name, sequence)])?;
+                Ok((value, None))
+            }
+            PersistMode::Replicated => {
+                let mut cache = self.sql.lock().expect("sql seqmgr");
+                let mut sequence = match cache.get(&name) {
+                    Some(cached) => *cached,
+                    None => crabka_pgcatalog::get_sequence(kv, &name)?,
+                };
+                setval_record(&name, &mut sequence, value, is_called)?;
+                cache.insert(name.clone(), sequence);
+                Ok((value, Some(StagedSequence { name, sequence })))
+            }
+        }
     }
 }
 
+/// Apply a `setval` to a sequence record, rejecting a value outside its bounds
+/// the way `PostgreSQL` does — before anything is written.
+fn setval_record(
+    name: &crabka_pgcatalog::RelationName,
+    sequence: &mut crabka_pgcatalog::Sequence,
+    value: i64,
+    is_called: bool,
+) -> Result<(), ExecError> {
+    if value < sequence.min || value > sequence.max {
+        return Err(ExecError::SequenceLimit(format!(
+            "setval: value {value} is out of bounds for sequence \"{}\"",
+            name.name
+        )));
+    }
+    sequence.last_value = value;
+    sequence.is_called = is_called;
+    Ok(())
+}
+
+/// The sequence a `nextval('…')` / `setval('…')` argument names.
+///
+/// The argument is a `regclass` input, so it is read by the one parser that
+/// reads those — [`crate::relname::parse_written_relation`] — and not split on
+/// a dot: `nextval('"My Seq"')` names one sequence with a space in it, and
+/// `nextval('MY SEQ')` is `42602 invalid name syntax`, both on `postgres:18.4`.
+/// An unqualified name then resolves through the session's search path like any
+/// other written name, which is why this takes a scope rather than assuming
+/// `public`.
+///
+/// `regclassin` reports a missing schema as a missing *relation* —
+/// `nextval('nosuch.s')` is `42P01 relation "nosuch.s" does not exist` on
+/// `postgres:18.4`, not `3F000` — so the disposition is
+/// [`SchemaDisposition::Reference`](crate::relname::SchemaDisposition::Reference).
+fn written_sequence_name(
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    written: &str,
+) -> Result<crabka_pgcatalog::RelationName, ExecError> {
+    resolve_sequence(
+        kv,
+        scope,
+        crate::relname::parse_written_relation(written)?.reference,
+    )
+}
+
+/// The sequence a stored `nextval` column default names, whose text is a
+/// [`crabka_pgcatalog::RelationName`]'s own rendering rather than a `regclass`
+/// literal: unquoted throughout, and dotted only outside `public`.
+fn stored_sequence_name(
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    stored: &str,
+) -> Result<crabka_pgcatalog::RelationName, ExecError> {
+    let reference = match stored.split_once('.') {
+        Some((schema, name)) => crabka_pgparser::ast::RelationRef::qualified(schema, name),
+        None => crabka_pgparser::ast::RelationRef::bare(stored),
+    };
+    resolve_sequence(kv, scope, reference)
+}
+
+fn resolve_sequence(
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    reference: crabka_pgparser::ast::RelationRef,
+) -> Result<crabka_pgcatalog::RelationName, ExecError> {
+    crate::relname::resolve_relation(
+        kv,
+        scope,
+        &reference,
+        crate::relname::SchemaDisposition::Reference,
+    )
+}
+
 fn next_sequence_value(
-    name: &str,
+    name: &crabka_pgcatalog::RelationName,
     sequence: &crabka_pgcatalog::Sequence,
 ) -> Result<i64, ExecError> {
     if !sequence.is_called {
@@ -178,12 +411,15 @@ fn next_sequence_value(
 }
 
 fn sequence_wrapped_value(
-    name: &str,
+    name: &crabka_pgcatalog::RelationName,
     sequence: &crabka_pgcatalog::Sequence,
 ) -> Result<i64, ExecError> {
     if !sequence.cycle {
+        // `PostgreSQL` names the sequence with `RelationGetRelationName`, so the
+        // message carries the bare name even for a sequence outside `public`.
         return Err(ExecError::SequenceLimit(format!(
-            "nextval: reached limit of sequence \"{name}\""
+            "nextval: reached limit of sequence \"{}\"",
+            name.name
         )));
     }
     if sequence.increment > 0 {
@@ -206,6 +442,43 @@ mod tests {
         kv.get(&crabka_pgkv::key::seq_key(table))
             .expect("get")
             .map(|b| u64::from_be_bytes(b.try_into().expect("u64")))
+    }
+
+    /// A `regclass` argument is written text, not one identifier: a dot in it
+    /// separates the schema, a quoted part keeps its case, and an unqualified
+    /// name resolves through the session's search path rather than landing in
+    /// `public`.
+    #[test]
+    fn a_written_sequence_name_resolves_through_the_search_path() {
+        let kv = MemKv::new();
+        for schema in ["sch", "other"] {
+            let ops =
+                crabka_pgcatalog::create_schema_ops(&kv, schema, "postgres").expect("schema ops");
+            kv.write_batch(&ops).expect("write");
+            let ops = crabka_pgcatalog::create_sequence_ops(
+                &kv,
+                &crabka_pgcatalog::RelationName::new(schema, "s"),
+                crabka_pgcatalog::Sequence::new(1, 1, None, None, Some(1), false),
+            )
+            .expect("sequence ops");
+            kv.write_batch(&ops).expect("write");
+        }
+        let scope = crate::relname::ResolutionScope {
+            search_path: crate::search_path::SearchPath::from_items(&["sch".into()]),
+            ..crate::relname::ResolutionScope::default()
+        };
+        let cases = [
+            ("s", crabka_pgcatalog::RelationName::new("sch", "s")),
+            ("other.s", crabka_pgcatalog::RelationName::new("other", "s")),
+            ("S", crabka_pgcatalog::RelationName::new("sch", "s")),
+            (
+                " OTHER . \"s\" ",
+                crabka_pgcatalog::RelationName::new("other", "s"),
+            ),
+        ];
+        for (written, expected) in cases {
+            assert!(written_sequence_name(&kv, &scope, written).expect("resolves") == expected);
+        }
     }
 
     #[test]
@@ -334,6 +607,182 @@ mod tests {
         let seq = SequenceManager::new(PersistMode::Durable);
         let (start, _op) = seq.alloc(&*kv, 7, 1).expect("alloc");
         assert!(start == 42);
+    }
+
+    fn seed_sequence(kv: &dyn Kv, name: &crabka_pgcatalog::RelationName) {
+        let ops = crabka_pgcatalog::create_sequence_ops(
+            kv,
+            name,
+            crabka_pgcatalog::Sequence::new(1, 1, None, None, Some(1), false),
+        )
+        .expect("sequence ops");
+        kv.write_batch(&ops).expect("write");
+    }
+
+    fn public(name: &str) -> crabka_pgcatalog::RelationName {
+        crabka_pgcatalog::RelationName::new("public", name)
+    }
+
+    /// The `Replicated` advance mirrors `alloc`: the value comes from the cache,
+    /// the store is untouched, and the op comes back for the caller to fold.
+    #[test]
+    fn replicated_advance_serves_from_cache_and_stages_the_op() {
+        let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+        let name = public("s");
+        seed_sequence(&*kv, &name);
+        let seq = SequenceManager::new(PersistMode::Replicated);
+        let scope = crate::relname::ResolutionScope::default();
+
+        let mut staged = PendingSequences::default();
+        for expected in 1..=3 {
+            let (value, op) = seq.nextval_written(&*kv, &scope, "s").expect("nextval");
+            assert!(value == expected);
+            staged.stage(op.expect("Replicated mode stages the advance"));
+        }
+        // Nothing was written: the applied store still holds the seeded record.
+        assert!(
+            crabka_pgcatalog::get_sequence(&*kv, &name).expect("get")
+                == crabka_pgcatalog::Sequence::new(1, 1, None, None, Some(1), false),
+            "Replicated mode must not write the sequence through the store"
+        );
+        // Three advances collapse to the one op that records the last of them.
+        assert!(
+            staged.take_ops()
+                == vec![crabka_pgcatalog::put_sequence_op(&name, {
+                    let mut expected =
+                        crabka_pgcatalog::Sequence::new(1, 1, None, None, Some(1), false);
+                    expected.last_value = 3;
+                    expected.is_called = true;
+                    expected
+                })]
+        );
+    }
+
+    /// The failover invariant at the manager level: once the staged advance is
+    /// applied, a fresh manager — the successor writer — resumes past every
+    /// value the predecessor handed out, never at one of them.
+    #[test]
+    fn a_reseeded_manager_resumes_past_every_value_already_handed_out() {
+        let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+        seed_sequence(&*kv, &public("s"));
+        let seq = SequenceManager::new(PersistMode::Replicated);
+        let scope = crate::relname::ResolutionScope::default();
+
+        let mut handed_out = Vec::new();
+        let mut staged = PendingSequences::default();
+        for _ in 0..5 {
+            let (value, op) = seq.nextval_written(&*kv, &scope, "s").expect("nextval");
+            handed_out.push(value);
+            staged.stage(op.expect("staged"));
+        }
+        // The statement commits before returning, so the advance is applied.
+        kv.write_batch(&staged.take_ops()).expect("apply");
+
+        // Both shapes of "this node is now the writer": a brand-new manager
+        // (process restart) and an explicit reseed of the live one.
+        for manager in [SequenceManager::new(PersistMode::Replicated), {
+            seq.reseed_sql_sequences();
+            seq
+        }] {
+            let (value, _op) = manager.nextval_written(&*kv, &scope, "s").expect("nextval");
+            assert!(
+                !handed_out.contains(&value),
+                "successor reissued {value}, already handed out {handed_out:?}"
+            );
+            assert!(value > *handed_out.iter().max().expect("nonempty"));
+        }
+    }
+
+    /// A batch that creates or drops a sequence invalidates that name and only
+    /// that name — the cache is read out of the committed ops, so a `SERIAL`
+    /// sequence nobody spelled is caught too.
+    #[test]
+    fn forget_sequences_drops_exactly_the_names_the_batch_touches() {
+        let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+        seed_sequence(&*kv, &public("kept"));
+        seed_sequence(&*kv, &public("reused"));
+        let seq = SequenceManager::new(PersistMode::Replicated);
+        let scope = crate::relname::ResolutionScope::default();
+        for name in ["kept", "reused"] {
+            for _ in 0..2 {
+                seq.nextval_written(&*kv, &scope, name).expect("nextval");
+            }
+        }
+
+        // `reused` is dropped and recreated; `kept` is untouched. An unrelated
+        // key in the same batch must not disturb anything.
+        seq.forget_sequences(&[
+            crabka_pgkv::WriteOp::Delete {
+                key: crabka_pgkv::key::seq_key(7),
+            },
+            crabka_pgcatalog::drop_sequence_ops(&*kv, &public("reused")).expect("drop")[0].clone(),
+        ]);
+        kv.write_batch(
+            &crabka_pgcatalog::drop_sequence_ops(&*kv, &public("reused")).expect("drop"),
+        )
+        .expect("apply drop");
+        seed_sequence(&*kv, &public("reused"));
+
+        assert!(
+            seq.nextval_written(&*kv, &scope, "reused")
+                .expect("nextval")
+                .0
+                == 1,
+            "a recreated sequence starts over"
+        );
+        assert!(
+            seq.nextval_written(&*kv, &scope, "kept")
+                .expect("nextval")
+                .0
+                == 3,
+            "an untouched sequence keeps its cached position"
+        );
+    }
+
+    /// `setval` repositions the cache as well as the record, so the next
+    /// `nextval` follows the value that was set rather than the cached one.
+    #[test]
+    fn replicated_setval_repositions_the_cache() {
+        let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+        seed_sequence(&*kv, &public("s"));
+        let seq = SequenceManager::new(PersistMode::Replicated);
+        let scope = crate::relname::ResolutionScope::default();
+        seq.nextval_written(&*kv, &scope, "s").expect("nextval");
+
+        let (value, op) = seq
+            .setval_written(&*kv, &scope, "s", 50, true)
+            .expect("setval");
+        assert!(value == 50);
+        assert!(op.is_some(), "Replicated mode stages the setval");
+        assert!(seq.nextval_written(&*kv, &scope, "s").expect("nextval").0 == 51);
+
+        // `is_called => false` hands the value itself out next.
+        seq.setval_written(&*kv, &scope, "s", 100, false)
+            .expect("setval");
+        assert!(seq.nextval_written(&*kv, &scope, "s").expect("nextval").0 == 100);
+        assert!(seq.nextval_written(&*kv, &scope, "s").expect("nextval").0 == 101);
+    }
+
+    /// An out-of-bounds `setval` is rejected without disturbing the cache.
+    #[test]
+    fn replicated_setval_out_of_bounds_leaves_the_cache_alone() {
+        let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+        let name = public("s");
+        let ops = crabka_pgcatalog::create_sequence_ops(
+            &*kv,
+            &name,
+            crabka_pgcatalog::Sequence::new(1, 1, Some(1), Some(10), Some(1), false),
+        )
+        .expect("sequence ops");
+        kv.write_batch(&ops).expect("write");
+        let seq = SequenceManager::new(PersistMode::Replicated);
+        let scope = crate::relname::ResolutionScope::default();
+        assert!(seq.nextval_written(&*kv, &scope, "s").expect("nextval").0 == 1);
+        assert!(seq.setval_written(&*kv, &scope, "s", 99, true).is_err());
+        assert!(
+            seq.nextval_written(&*kv, &scope, "s").expect("nextval").0 == 2,
+            "the rejected setval must not have moved the cache"
+        );
     }
 
     #[test]

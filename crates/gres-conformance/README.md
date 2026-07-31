@@ -25,6 +25,14 @@ have a deliberately narrower mutation and query surface than ordinary tables,
 so their parity floor is ratcheted independently against the same corpus and
 PostgreSQL 18 oracle.
 
+The substrate-backed leg — the same corpus replayed against a `crabka-gres`
+whose WAL is a Kafka tenant topic — uses `substrate-baseline.json`, and
+[`substrate-baseline.md`](substrate-baseline.md) names every statement behind
+the difference. That leg runs against its own fresh oracle database, so
+`current_database()` can never match; that one statement is now the whole
+difference, and it is enumerated there rather than absorbed into
+`baseline.json`.
+
 ## Baseline ratchet
 
 Corpus growth and `baseline.json` changes must land together in the same

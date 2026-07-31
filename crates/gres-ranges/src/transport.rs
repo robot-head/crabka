@@ -742,7 +742,16 @@ pub struct WireTopKColumn {
 #[serde(deny_unknown_fields)]
 pub struct ScanRangeReq {
     pub range_id: RangeId,
-    pub table_name: String,
+    /// Catalog id of the relation to scan.
+    ///
+    /// The wire never carries a relation *name*. Names are session-dependent
+    /// once a `search_path` and `pg_temp` exist, and the receiving node has no
+    /// notion of the originating session: `pg_temp_27.t` resolved there is
+    /// either meaningless or, if that node also has a session 27, someone
+    /// else's data. The id is the identity everywhere else too — row keys, lock
+    /// identities, foreign-key referents — and resolving by it also pins the
+    /// column layout against a rename between planning and scanning.
+    pub table_id: u64,
     pub interval: WireRowInterval,
     pub local_snapshot: WireSnapshot,
     pub global_snapshot: WireSnapshot,
@@ -794,8 +803,9 @@ pub enum WireJoinStrategy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WireJoinTableInterval {
+    /// Catalog id of one join input. See [`ScanRangeReq::table_id`] for why the
+    /// wire refuses to carry a relation name.
     pub table_id: u64,
-    pub table_name: String,
     pub interval: WireRowInterval,
 }
 
@@ -834,6 +844,8 @@ pub struct JoinRangeResp {
 }
 
 impl JoinRangeReq {
+    /// Bounds-check the request without consulting a catalog.
+    ///
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -849,6 +861,12 @@ impl JoinRangeReq {
             .is_ok_and(|bytes| bytes.len() <= MAX_FRAME_BYTES)
     }
 
+    /// Lower to the engine request, identifying each side by the catalog id the
+    /// wire carries.
+    ///
+    /// The *receiving* node resolves that id against its own catalog, because a
+    /// relation name is session-dependent once `search_path` and `pg_temp`
+    /// exist and this node has no notion of the originating session.
     pub(crate) fn to_pgexec(&self) -> crabka_pgexec::JoinRangeRequest {
         use crabka_pgexec::{JoinExecutionStrategy as S, JoinKind as K};
         crabka_pgexec::JoinRangeRequest {
@@ -898,7 +916,6 @@ fn join_snapshot(snapshot: &WireSnapshot) -> crabka_pgexec::JoinSnapshot {
 fn join_table(table: &WireJoinTableInterval) -> crabka_pgexec::JoinTableInterval {
     crabka_pgexec::JoinTableInterval {
         table_id: table.table_id,
-        table_name: table.table_name.clone(),
         interval: crabka_pgexec::RowInterval {
             start: table.interval.start,
             end: table.interval.end,
@@ -2194,7 +2211,6 @@ mod tests {
             strategy: WireJoinStrategy::BroadcastRight,
             left: WireJoinTableInterval {
                 table_id: 1,
-                table_name: "l".into(),
                 interval: WireRowInterval {
                     start: None,
                     end: None,
@@ -2202,7 +2218,6 @@ mod tests {
             },
             right: WireJoinTableInterval {
                 table_id: 2,
-                table_name: "r".into(),
                 interval: WireRowInterval {
                     start: None,
                     end: None,
@@ -2673,7 +2688,7 @@ mod tests {
                 &address.to_string(),
                 &RangeRequest::ScanRange(ScanRangeReq {
                     range_id: RangeId::new(1),
-                    table_name: "t".to_string(),
+                    table_id: 1,
                     interval: WireRowInterval {
                         start: None,
                         end: None,
@@ -2846,7 +2861,7 @@ mod tests {
                 &addr.to_string(),
                 &RangeRequest::ScanRange(ScanRangeReq {
                     range_id: RangeId::new(7),
-                    table_name: "t11".to_string(),
+                    table_id: 11,
                     interval: WireRowInterval {
                         start: Some(9),
                         end: Some(20),

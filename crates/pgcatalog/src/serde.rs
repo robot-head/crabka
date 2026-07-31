@@ -17,9 +17,9 @@ use crabka_pgtypes::{
 };
 
 use crate::{
-    CheckConstraint, Column, ColumnDefault, ForeignDataWrapper, ForeignServer, ForeignTableMeta,
-    HashSharding, IdentityKind, Index, IndexConstraint, IndexPlacement, Sequence, ShardingStrategy,
-    TableOptions, UserMapping, View,
+    CheckConstraint, Column, ColumnDefault, ForeignDataWrapper, ForeignKey, ForeignServer,
+    ForeignTableMeta, HashSharding, IdentityKind, Index, IndexConstraint, IndexPlacement,
+    MatchType, ReferentialAction, Sequence, ShardingStrategy, TableOptions, UserMapping, View,
 };
 
 /// Everything [`deserialize_schema`] recovers from a stored table schema.
@@ -48,6 +48,14 @@ const INDEX_PLACEMENT_GLOBAL: u8 = 1;
 const INDEX_CONSTRAINT_NONE: u8 = 0;
 const INDEX_CONSTRAINT_PRIMARY_KEY: u8 = 1;
 const INDEX_CONSTRAINT_UNIQUE: u8 = 2;
+const FOREIGN_KEY_VERSION: u8 = 1;
+const REFERENTIAL_ACTION_NO_ACTION: u8 = 0;
+const REFERENTIAL_ACTION_RESTRICT: u8 = 1;
+const REFERENTIAL_ACTION_CASCADE: u8 = 2;
+const REFERENTIAL_ACTION_SET_NULL: u8 = 3;
+const REFERENTIAL_ACTION_SET_DEFAULT: u8 = 4;
+const MATCH_TYPE_SIMPLE: u8 = 0;
+const MATCH_TYPE_FULL: u8 = 1;
 
 /// Tags for a persisted column DEFAULT value. Like [`type_tag`], this space is
 /// **append-only**: a new value type takes the next free code and an existing
@@ -75,6 +83,13 @@ mod datum_tag {
     /// `real` — stored as the IEEE-754 bit pattern, like [`FLOAT8`].
     /// Append-only — no version bump.
     pub const FLOAT4: u8 = 10;
+    /// `regclass` — followed by the relation's four-byte oid, and only the oid.
+    /// The name `regclassout` prints is derived from the catalog when the
+    /// default is read, never stored, so a default follows a `RENAME` of the
+    /// relation it names and falls back to the bare oid once that relation is
+    /// dropped — what `PostgreSQL` does with the oid its folded `Const` holds.
+    /// Append-only — no version bump.
+    pub const REGCLASS: u8 = 11;
 }
 
 mod type_tag {
@@ -371,6 +386,11 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(array.elem.code());
             write_bytes(out, &crabka_pgkv::rowenc::encode_row(&array.elems));
         }
+        // Only the oid: the relation name is re-derived on read.
+        Datum::Regclass(value) => {
+            out.push(datum_tag::REGCLASS);
+            out.extend_from_slice(&value.oid.to_be_bytes());
+        }
         Datum::Date(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
@@ -445,6 +465,11 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
             let elems = crabka_pgkv::rowenc::decode_row(read_str(cur)?)?;
             Datum::Array(crabka_pgtypes::ArrayValue::new(elem, elems))
         }
+        // Only the oid was stored, so the value comes back unresolved: the
+        // catalog-aware layer above re-derives the name it prints.
+        datum_tag::REGCLASS => Datum::Regclass(crabka_pgtypes::RegclassValue::unresolved(
+            i32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4")),
+        )),
         tag => {
             return Err(KvError::CorruptRow(format!(
                 "unknown default datum tag {tag}"
@@ -455,6 +480,21 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
 }
 
 // ── Options helpers ───────────────────────────────────────────────────────────
+
+/// Write a relation name as its two length-prefixed halves. A stored name is
+/// never a dotted string, for the same reason a catalog key is not: the two
+/// halves are not recoverable from one.
+fn write_relation(out: &mut Vec<u8>, name: &crate::RelationName) {
+    write_str(out, &name.schema);
+    write_str(out, &name.name);
+}
+
+/// Read a relation name written by [`write_relation`].
+fn read_relation(cur: &mut &[u8]) -> Result<crate::RelationName, KvError> {
+    let schema = read_string(cur)?;
+    let name = read_string(cur)?;
+    Ok(crate::RelationName::new(schema, name))
+}
 
 pub(crate) fn write_str(out: &mut Vec<u8>, s: &str) {
     write_bytes(out, s.as_bytes());
@@ -715,9 +755,9 @@ pub fn deserialize_sharding(bytes: &[u8]) -> Result<Option<ShardingStrategy>, Kv
                 take_n(&mut cur, 4)?.try_into().expect("4"),
             ))
             .expect("u32 fits in usize on supported targets");
-            if column_count == 0 {
+            if column_count != 1 {
                 return Err(KvError::CorruptRow(
-                    "hash sharding requires at least one column".into(),
+                    "hash sharding requires exactly one column".into(),
                 ));
             }
             let mut columns = Vec::with_capacity(column_count.min(16));
@@ -784,7 +824,7 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
     out.extend_from_slice(&index.id.to_be_bytes());
     write_str(&mut out, &index.name);
     out.extend_from_slice(&index.table_id.to_be_bytes());
-    write_str(&mut out, &index.table);
+    write_relation(&mut out, &index.table);
     out.push(u8::from(index.unique));
     out.push(match index.placement {
         IndexPlacement::Local => INDEX_PLACEMENT_LOCAL,
@@ -827,7 +867,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     let id = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
     let name = read_string(&mut cur)?;
     let table_id = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
-    let table = read_string(&mut cur)?;
+    let table = read_relation(&mut cur)?;
     let unique = match take_u8(&mut cur)? {
         0 => false,
         1 => true,
@@ -879,6 +919,191 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         placement,
         constraint,
     })
+}
+
+// ── Foreign keys ──────────────────────────────────────────────────────────────
+
+/// Serialize a foreign-key constraint record.
+///
+/// Version byte, then the constraint's own creation-order id and its name; the
+/// child relation's display name and its id; the referenced relation's display
+/// name and its id; the referenced unique index's display name and its id; the
+/// match type, `ON DELETE` and `ON UPDATE` actions as one byte each; the
+/// deferrable, initially-deferred and validated flags as one byte each; and
+/// finally the referencing, referenced and `SET NULL`/`SET DEFAULT` column-name
+/// lists, each a `u32` count followed by that many length-prefixed names.
+///
+/// The ids are the authority — the display names are denormalized copies that a
+/// rename rewrites — so the record is self-describing without a second lookup.
+///
+/// # Panics
+///
+/// Panics when a column list or a string exceeds its `u32` wire limit.
+#[must_use]
+pub fn serialize_foreign_key(fk: &ForeignKey) -> Vec<u8> {
+    let mut out = vec![FOREIGN_KEY_VERSION];
+    out.extend_from_slice(&fk.id.to_be_bytes());
+    write_str(&mut out, &fk.name);
+    write_relation(&mut out, &fk.table);
+    out.extend_from_slice(&fk.table_id.to_be_bytes());
+    write_relation(&mut out, &fk.referenced_table);
+    out.extend_from_slice(&fk.referenced_table_id.to_be_bytes());
+    write_str(&mut out, &fk.referenced_index);
+    out.extend_from_slice(&fk.referenced_index_id.to_be_bytes());
+    out.push(match fk.match_type {
+        MatchType::Simple => MATCH_TYPE_SIMPLE,
+        MatchType::Full => MATCH_TYPE_FULL,
+    });
+    out.push(referential_action_tag(fk.on_delete));
+    out.push(referential_action_tag(fk.on_update));
+    out.push(u8::from(fk.deferrable));
+    out.push(u8::from(fk.initially_deferred));
+    out.push(u8::from(fk.validated));
+    write_string_list(&mut out, &fk.columns);
+    write_string_list(&mut out, &fk.referenced_columns);
+    write_string_list(&mut out, &fk.set_columns);
+    out
+}
+
+/// Deserialize a foreign-key constraint record.
+///
+/// # Errors
+///
+/// Returns catalog corruption errors for a wrong version byte, truncated or
+/// trailing bytes, an unknown enum or flag byte, an empty referencing column
+/// list, or referencing and referenced column lists of different lengths.
+///
+/// # Panics
+///
+/// Panics only if a fixed-width slice validated by the decoder cannot be
+/// converted to its corresponding array or `usize`.
+pub fn deserialize_foreign_key(bytes: &[u8]) -> Result<ForeignKey, KvError> {
+    let mut cur = bytes;
+    let version = take_u8(&mut cur)?;
+    if version != FOREIGN_KEY_VERSION {
+        return Err(KvError::CorruptRow(format!(
+            "unknown foreign key version {version}"
+        )));
+    }
+    let id = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
+    let name = read_string(&mut cur)?;
+    let table = read_relation(&mut cur)?;
+    let table_id = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
+    let referenced_table = read_relation(&mut cur)?;
+    let referenced_table_id = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
+    let referenced_index = read_string(&mut cur)?;
+    let referenced_index_id = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
+    let match_type = match take_u8(&mut cur)? {
+        MATCH_TYPE_SIMPLE => MatchType::Simple,
+        MATCH_TYPE_FULL => MatchType::Full,
+        tag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown foreign key match type tag {tag}"
+            )));
+        }
+    };
+    let on_delete = read_referential_action(&mut cur)?;
+    let on_update = read_referential_action(&mut cur)?;
+    let deferrable = read_foreign_key_flag(&mut cur, "deferrable")?;
+    let initially_deferred = read_foreign_key_flag(&mut cur, "initially deferred")?;
+    let validated = read_foreign_key_flag(&mut cur, "validated")?;
+    let columns = read_string_list(&mut cur)?;
+    if columns.is_empty() {
+        return Err(KvError::CorruptRow(
+            "foreign key requires at least one column".into(),
+        ));
+    }
+    let referenced_columns = read_string_list(&mut cur)?;
+    if referenced_columns.len() != columns.len() {
+        return Err(KvError::CorruptRow(format!(
+            "foreign key references {} columns with {} referencing columns",
+            referenced_columns.len(),
+            columns.len()
+        )));
+    }
+    let set_columns = read_string_list(&mut cur)?;
+    if !cur.is_empty() {
+        return Err(KvError::CorruptRow(
+            "trailing bytes in foreign key record".into(),
+        ));
+    }
+    Ok(ForeignKey {
+        id,
+        name,
+        table,
+        table_id,
+        columns,
+        referenced_table,
+        referenced_table_id,
+        referenced_columns,
+        referenced_index_id,
+        referenced_index,
+        match_type,
+        on_delete,
+        on_update,
+        set_columns,
+        deferrable,
+        initially_deferred,
+        validated,
+    })
+}
+
+fn referential_action_tag(action: ReferentialAction) -> u8 {
+    match action {
+        ReferentialAction::NoAction => REFERENTIAL_ACTION_NO_ACTION,
+        ReferentialAction::Restrict => REFERENTIAL_ACTION_RESTRICT,
+        ReferentialAction::Cascade => REFERENTIAL_ACTION_CASCADE,
+        ReferentialAction::SetNull => REFERENTIAL_ACTION_SET_NULL,
+        ReferentialAction::SetDefault => REFERENTIAL_ACTION_SET_DEFAULT,
+    }
+}
+
+fn read_referential_action(cur: &mut &[u8]) -> Result<ReferentialAction, KvError> {
+    match take_u8(cur)? {
+        REFERENTIAL_ACTION_NO_ACTION => Ok(ReferentialAction::NoAction),
+        REFERENTIAL_ACTION_RESTRICT => Ok(ReferentialAction::Restrict),
+        REFERENTIAL_ACTION_CASCADE => Ok(ReferentialAction::Cascade),
+        REFERENTIAL_ACTION_SET_NULL => Ok(ReferentialAction::SetNull),
+        REFERENTIAL_ACTION_SET_DEFAULT => Ok(ReferentialAction::SetDefault),
+        tag => Err(KvError::CorruptRow(format!(
+            "unknown referential action tag {tag}"
+        ))),
+    }
+}
+
+fn read_foreign_key_flag(cur: &mut &[u8], what: &str) -> Result<bool, KvError> {
+    match take_u8(cur)? {
+        0 => Ok(false),
+        1 => Ok(true),
+        flag => Err(KvError::CorruptRow(format!(
+            "unknown foreign key {what} flag {flag}"
+        ))),
+    }
+}
+
+/// Append a `u32` count followed by that many length-prefixed strings.
+fn write_string_list(out: &mut Vec<u8>, values: &[String]) {
+    out.extend_from_slice(
+        &u32::try_from(values.len())
+            .expect("catalog string list length must fit in u32")
+            .to_be_bytes(),
+    );
+    for value in values {
+        write_str(out, value);
+    }
+}
+
+fn read_string_list(cur: &mut &[u8]) -> Result<Vec<String>, KvError> {
+    let count = usize::try_from(u32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4")))
+        .expect("u32 fits in usize on supported targets");
+    // The count is catalog-supplied, not client-supplied, but sizing the
+    // allocation from it directly would still turn one corrupt byte into a
+    // multi-gigabyte reservation; the pushes grow it for a genuinely long list.
+    let mut values = Vec::with_capacity(count.min(16));
+    for _ in 0..count {
+        values.push(read_string(cur)?);
+    }
+    Ok(values)
 }
 
 #[must_use]
@@ -1250,7 +1475,7 @@ const VIEW_VERSION: u8 = 1;
 #[must_use]
 pub fn serialize_view(view: &View) -> Vec<u8> {
     let mut out = vec![VIEW_VERSION];
-    write_str(&mut out, &view.name);
+    write_relation(&mut out, &view.name);
     write_str(&mut out, &view.definition);
     out.extend_from_slice(
         &u32::try_from(view.columns.len())
@@ -1283,7 +1508,7 @@ pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
             "unknown view version {version}"
         )));
     }
-    let name = read_string(&mut cur)?;
+    let name = read_relation(&mut cur)?;
     let definition = read_string(&mut cur)?;
     let column_count = usize::try_from(u32::from_be_bytes(
         take_n(&mut cur, 4)?.try_into().expect("4"),
@@ -1334,7 +1559,7 @@ mod tests {
     use crabka_pgtypes::{ColumnType, Datum};
 
     use super::*;
-    use crate::{Column, ForeignTableMeta};
+    use crate::{Column, ForeignTableMeta, RelationName};
 
     #[test]
     fn roundtrip_schema() {
@@ -1705,6 +1930,40 @@ mod tests {
     }
 
     #[test]
+    fn hash_sharding_decode_requires_exactly_one_column() {
+        use assert2::assert;
+
+        let hash_with = |columns: Vec<String>| {
+            ShardingStrategy::Hash(HashSharding {
+                columns,
+                buckets: 16,
+                co_location_group: None,
+            })
+        };
+
+        // Zero and two columns are both rejected: `hash_bucket_for_row` hashes
+        // only the first column, so anything but exactly one column would be
+        // stored somewhere no routed lookup would ever probe.
+        for columns in [Vec::new(), vec!["a".into(), "b".into()]] {
+            let bytes = serialize_sharding(Some(&hash_with(columns)));
+            assert!(deserialize_sharding(&bytes).is_err());
+        }
+
+        // A single column still round-trips.
+        let single = hash_with(vec!["a".into()]);
+        let bytes = serialize_sharding(Some(&single));
+        assert!(deserialize_sharding(&bytes).expect("single-column decode") == Some(single));
+
+        // A sharding-less table is unaffected by the hash-only arity check.
+        let bytes = serialize_sharding(None);
+        assert!(
+            deserialize_sharding(&bytes)
+                .expect("no-sharding decode")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn hash_sharding_decode_rejects_trailing_bytes_and_empty_names() {
         let valid = ShardingStrategy::Hash(HashSharding {
             columns: vec!["id".into()],
@@ -1736,7 +1995,7 @@ mod tests {
         let index = Index {
             id: 7,
             name: "orders_email_idx".into(),
-            table: "orders".into(),
+            table: RelationName::public("orders"),
             table_id: 3,
             columns: vec!["email".into()],
             unique: true,
@@ -1747,6 +2006,153 @@ mod tests {
         let bytes = serialize_index(&index);
 
         assert_eq!(deserialize_index(&bytes).expect("index decode"), index);
+    }
+
+    fn foreign_key_fixture() -> ForeignKey {
+        ForeignKey {
+            id: 4,
+            name: "order_items_order_fkey".into(),
+            table: RelationName::public("order_items"),
+            table_id: 12,
+            columns: vec!["order_id".into(), "order_line".into()],
+            referenced_table: RelationName::public("orders"),
+            referenced_table_id: 3,
+            referenced_columns: vec!["id".into(), "line".into()],
+            referenced_index_id: 9,
+            referenced_index: "orders_pkey".into(),
+            match_type: MatchType::Simple,
+            on_delete: ReferentialAction::NoAction,
+            on_update: ReferentialAction::NoAction,
+            set_columns: Vec::new(),
+            deferrable: false,
+            initially_deferred: false,
+            validated: true,
+        }
+    }
+
+    /// Offset of the match-type byte, the first of the six single-byte fields
+    /// that close the record's fixed head.
+    fn match_type_offset(fk: &ForeignKey) -> usize {
+        // A relation name is written as two length-prefixed parts.
+        let relation = |name: &RelationName| (4 + name.schema.len()) + (4 + name.name.len());
+        // Version byte, then the constraint's own id, then its name.
+        1 + 4
+            + (4 + fk.name.len())
+            + relation(&fk.table)
+            + 4
+            + relation(&fk.referenced_table)
+            + 4
+            + (4 + fk.referenced_index.len())
+            + 4
+    }
+
+    /// Every enum value, both match types, both `set_columns` shapes and all
+    /// four flag combinations survive the round trip on a composite key.
+    #[test]
+    fn foreign_key_record_round_trips_every_action_match_and_flag() {
+        use assert2::assert;
+
+        let actions = [
+            ReferentialAction::NoAction,
+            ReferentialAction::Restrict,
+            ReferentialAction::Cascade,
+            ReferentialAction::SetNull,
+            ReferentialAction::SetDefault,
+        ];
+        let mut cases = Vec::new();
+        for on_delete in actions {
+            for on_update in actions {
+                for match_type in [MatchType::Simple, MatchType::Full] {
+                    for set_columns in [Vec::new(), vec!["order_id".into()]] {
+                        for (deferrable, initially_deferred) in
+                            [(false, false), (true, false), (false, true), (true, true)]
+                        {
+                            for validated in [false, true] {
+                                cases.push(ForeignKey {
+                                    on_delete,
+                                    on_update,
+                                    match_type,
+                                    set_columns: set_columns.clone(),
+                                    deferrable,
+                                    initially_deferred,
+                                    validated,
+                                    ..foreign_key_fixture()
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        for fk in cases {
+            let decoded = deserialize_foreign_key(&serialize_foreign_key(&fk)).expect("decode");
+            assert!(decoded == fk);
+        }
+    }
+
+    #[test]
+    fn foreign_key_decode_rejects_wrong_version_truncation_and_trailing_bytes() {
+        use assert2::assert;
+
+        let fk = foreign_key_fixture();
+        let bytes = serialize_foreign_key(&fk);
+
+        let mut wrong_version = bytes.clone();
+        wrong_version[0] = FOREIGN_KEY_VERSION + 1;
+        assert!(deserialize_foreign_key(&wrong_version).is_err());
+        assert!(deserialize_foreign_key(&[]).is_err());
+
+        for truncated in 1..bytes.len() {
+            assert!(
+                deserialize_foreign_key(&bytes[..truncated]).is_err(),
+                "{truncated} bytes decoded as a whole record"
+            );
+        }
+
+        let mut trailing = bytes;
+        trailing.push(0);
+        assert!(deserialize_foreign_key(&trailing).is_err());
+    }
+
+    #[test]
+    fn foreign_key_decode_rejects_unknown_enum_and_flag_bytes() {
+        use assert2::assert;
+
+        let fk = foreign_key_fixture();
+        let bytes = serialize_foreign_key(&fk);
+        // Match type, ON DELETE, ON UPDATE, deferrable, initially deferred,
+        // validated — in that order.
+        for (offset, invalid) in (match_type_offset(&fk)..).zip([2, 5, 5, 2, 2, 2]) {
+            let mut corrupt = bytes.clone();
+            corrupt[offset] = invalid;
+            assert!(
+                deserialize_foreign_key(&corrupt).is_err(),
+                "byte {offset} accepted the invalid value {invalid}"
+            );
+        }
+    }
+
+    /// The two column lists are the constraint's column pairing, so an empty
+    /// referencing list or lists of different lengths are corruption, not a
+    /// constraint over no columns.
+    #[test]
+    fn foreign_key_decode_rejects_unpaired_column_lists() {
+        use assert2::assert;
+
+        for broken in [
+            ForeignKey {
+                columns: Vec::new(),
+                referenced_columns: Vec::new(),
+                ..foreign_key_fixture()
+            },
+            ForeignKey {
+                referenced_columns: vec!["id".into()],
+                ..foreign_key_fixture()
+            },
+        ] {
+            assert!(deserialize_foreign_key(&serialize_foreign_key(&broken)).is_err());
+        }
     }
 
     #[test]

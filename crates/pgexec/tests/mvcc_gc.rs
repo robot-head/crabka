@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use assert2::assert;
+use crabka_pgcatalog::RelationName;
 use crabka_pgexec::{Committer, ExecError, LocalLinearizer, SqlEngine, SqlSession};
 use crabka_pgkv::{Kv, MemKv, WriteOp};
 use crabka_pgwire::engine::{Engine, QueryResult, Session};
@@ -58,7 +59,8 @@ fn index_entry_count(kv: &dyn Kv, table_id: u32, index_id: u32) -> usize {
 }
 
 fn only_local_index(kv: &dyn Kv, table: &str) -> crabka_pgcatalog::Index {
-    let mut indexes = crabka_pgcatalog::list_table_indexes(kv, table).expect("list indexes");
+    let mut indexes = crabka_pgcatalog::list_table_indexes(kv, &RelationName::public(table))
+        .expect("list indexes");
     assert!(indexes.len() == 1, "expected exactly one index on {table}");
     indexes.remove(0)
 }
@@ -75,7 +77,9 @@ async fn hot_row_update_churn_keeps_the_version_chain_bounded() {
     )
     .await;
     exec(&mut session, "INSERT INTO tbl VALUES (0,'x'),(1,'y')").await;
-    let table = engine.catalog_table("tbl").expect("table");
+    let table = engine
+        .catalog_table(&RelationName::public("tbl"))
+        .expect("table");
     let kv = engine.kv_handle();
 
     for i in 0..50 {
@@ -119,7 +123,9 @@ async fn open_repeatable_read_transaction_pins_versions_until_it_ends() {
     )
     .await;
     exec(&mut writer, "INSERT INTO t VALUES (1,'orig')").await;
-    let table = engine.catalog_table("t").expect("table");
+    let table = engine
+        .catalog_table(&RelationName::public("t"))
+        .expect("table");
     let kv = engine.kv_handle();
 
     let mut reader = engine.connect();
@@ -171,7 +177,9 @@ async fn vacuum_reclaims_aborted_insert_garbage_and_its_index_entries() {
         "CREATE TABLE u (id BIGINT PRIMARY KEY, v TEXT)",
     )
     .await;
-    let table = engine.catalog_table("u").expect("table");
+    let table = engine
+        .catalog_table(&RelationName::public("u"))
+        .expect("table");
     let index = only_local_index(engine.catalog_kv(), "u");
     let kv = engine.kv_handle();
 
@@ -206,7 +214,9 @@ async fn vacuum_reclaims_deleted_rows_the_write_path_never_revisits() {
     .await;
     exec(&mut session, "INSERT INTO d VALUES (1,'a'),(2,'b')").await;
     exec(&mut session, "DELETE FROM d WHERE id = 1").await;
-    let table = engine.catalog_table("d").expect("table");
+    let table = engine
+        .catalog_table(&RelationName::public("d"))
+        .expect("table");
     let index = only_local_index(engine.catalog_kv(), "d");
     let kv = engine.kv_handle();
 
@@ -265,7 +275,9 @@ async fn replicated_mode_prunes_in_commit_batches_and_vacuum_is_a_no_op() {
         )
         .await;
     }
-    let table = engine.catalog_table("r").expect("table");
+    let table = engine
+        .catalog_table(&RelationName::public("r"))
+        .expect("table");
 
     // Write-path pruning engages on replicated engines too — the deletes ride
     // each statement's replicated commit batch, so the chain stays bounded
@@ -340,7 +352,9 @@ async fn update_and_delete_results_are_unchanged_with_pruning_active() {
 
     // The pruning engine actually pruned: the churned table's physical version
     // count stays near the live row count instead of the ~48 versions written.
-    let table = local_engine.catalog_table("w").expect("table");
+    let table = local_engine
+        .catalog_table(&RelationName::public("w"))
+        .expect("table");
     let physical = table_version_count(local_engine.kv_handle().as_ref(), table.id);
     assert!(
         physical <= 12,
@@ -367,7 +381,9 @@ async fn vacuum_freezes_survivors_truncates_the_clog_and_updates_still_work() {
         )
         .await;
     }
-    let table = engine.catalog_table("z").expect("table");
+    let table = engine
+        .catalog_table(&RelationName::public("z"))
+        .expect("table");
     let kv = engine.kv_handle();
 
     let stats = engine.vacuum().await.expect("vacuum");
@@ -448,7 +464,9 @@ async fn chunked_steps_sweep_a_large_table_and_truncate_the_clog_only_at_cycle_e
     exec(&mut session, "CREATE TABLE big (id BIGINT PRIMARY KEY)").await;
     // More rows than one step's key budget, so the pass MUST span steps.
     load_rows(&mut session, "big", 50_000).await;
-    let table = engine.catalog_table("big").expect("table");
+    let table = engine
+        .catalog_table(&RelationName::public("big"))
+        .expect("table");
     let kv = engine.kv_handle();
     let floor_before = engine.clog_scan_lo().expect("scan lo");
 
@@ -555,7 +573,9 @@ async fn aborted_delete_stamps_are_cleared_so_the_row_settles() {
     exec(&mut session, "UPDATE s SET v = 'new' WHERE id = 1").await;
     let rows = select_rows(&mut session, "SELECT id, v FROM s").await;
     assert!(rows == vec![vec![Some("1".to_owned()), Some("new".to_owned())]]);
-    let table = engine.catalog_table("s").expect("table");
+    let table = engine
+        .catalog_table(&RelationName::public("s"))
+        .expect("table");
     let (_, _) = run_steps_to_cycle_end(&engine).await;
     assert!(version_count(engine.kv_handle().as_ref(), table.id, 1) == 1);
 }

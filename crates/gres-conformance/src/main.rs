@@ -362,8 +362,10 @@ async fn run_corpus(
         // file, and asymmetrically: `create_index.sql` ends with `SET
         // search_path = 'schema_to_reindex'` and then drops that schema without
         // resetting, so on the oracle every later unqualified CREATE was 3F000
-        // while the subject, which does not implement search_path, accepted it.
-        // That one leak accounted for 75 false mismatches.
+        // while the subject, which did not implement search_path when this was
+        // found, accepted it. That one leak accounted for 75 false mismatches —
+        // and now that the subject does implement it, the leak would make both
+        // sides wrong together instead, which is worse.
         oracle.reset_session().await;
         subject.reset_session().await;
     }

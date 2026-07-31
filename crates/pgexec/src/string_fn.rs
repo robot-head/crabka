@@ -674,7 +674,7 @@ const QUOTED_KEYWORDS: [&str; 164] = [
 /// when it starts with a lowercase letter or `_`, contains nothing but
 /// `[a-z0-9_]`, and is not a non-unreserved keyword; otherwise double-quote it,
 /// doubling any embedded quote.
-fn quote_ident(s: &str) -> String {
+pub(crate) fn quote_ident(s: &str) -> String {
     let safe = s.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
         && s.chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')

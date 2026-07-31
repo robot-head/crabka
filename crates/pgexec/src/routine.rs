@@ -246,9 +246,14 @@ fn resolve_type(
     if KNOWN_TYPE_NAMES.contains(&lowered.as_str()) {
         return Ok(RoutineType::named(lowered));
     }
-    // A relation name is that relation's composite type.
-    let base = lowered.strip_suffix("[]").unwrap_or(&lowered);
-    if crabka_pgcatalog::get_table(kv, base).is_ok() || crabka_pgcatalog::get_view(kv, base).is_ok()
+    // A relation name is that relation's composite type. A routine signature
+    // carries no resolution scope of its own, so the composite type it can name
+    // is the one `public` holds — the schema an unqualified name resolves to
+    // under the default search path.
+    let base =
+        crabka_pgcatalog::RelationName::public(lowered.strip_suffix("[]").unwrap_or(&lowered));
+    if crabka_pgcatalog::get_table(kv, &base).is_ok()
+        || crabka_pgcatalog::get_view(kv, &base).is_ok()
     {
         return Ok(RoutineType::named(lowered));
     }

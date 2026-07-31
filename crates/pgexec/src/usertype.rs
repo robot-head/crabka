@@ -185,7 +185,11 @@ fn register(
     body: UserTypeBody,
     tag: &str,
 ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
-    if crabka_pgcatalog::get_table(kv, name).is_ok() {
+    // A type and a relation share one namespace in `PostgreSQL`, so a name a
+    // relation already holds is 42P07 rather than a duplicate type. A user type
+    // carries no schema of its own here, so `public` is the only namespace it
+    // can collide in.
+    if crabka_pgcatalog::get_table(kv, &crabka_pgcatalog::RelationName::public(name)).is_ok() {
         return Err(ExecError::DuplicateObject(format!(
             "relation \"{name}\" already exists"
         )));

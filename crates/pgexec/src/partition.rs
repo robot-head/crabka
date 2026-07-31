@@ -26,17 +26,26 @@ pub(crate) mod hash;
 
 use std::cmp::Ordering;
 
-use crabka_pgkv::{Kv, WriteOp};
+use crabka_pgcatalog::RelationName;
+use crabka_pgkv::{
+    Kv, WriteOp,
+    key::{key_parts, push_key_part},
+};
 use crabka_pgtypes::{ColumnType, Datum};
 
 use crate::error::ExecError;
 
 /// System-key prefix for a partitioned parent's key definition.
-const SCHEME_PREFIX: &[u8] = b"\0\0\0\0catalog/partition/scheme/";
+///
+/// The three partition families sit *beside* the relation catalog rather than
+/// under it: a scan of `catalog/` answers "every stored relation", and a
+/// partition record living under that prefix would be handed to the relation
+/// decoder as if it were one.
+const SCHEME_PREFIX: &[u8] = b"\0\0\0\0catalog_partition/scheme/";
 /// System-key prefix for a leaf's parent link and bound.
-const CHILD_PREFIX: &[u8] = b"\0\0\0\0catalog/partition/child/";
-/// System-key prefix for the parent → child index (`<parent>\0<child>`).
-const CHILDREN_PREFIX: &[u8] = b"\0\0\0\0catalog/partition/children/";
+const CHILD_PREFIX: &[u8] = b"\0\0\0\0catalog_partition/child/";
+/// System-key prefix for the parent → child index.
+const CHILDREN_PREFIX: &[u8] = b"\0\0\0\0catalog_partition/children/";
 
 const SCHEME_VERSION: u8 = 1;
 const BOUND_VERSION: u8 = 1;
@@ -134,35 +143,58 @@ pub(crate) enum Bound {
 /// A leaf partition: its relation name and its bound.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Partition {
-    pub name: String,
+    pub name: RelationName,
     pub bound: Bound,
 }
 
 // ── Catalog keys ─────────────────────────────────────────────────────────────
 
-fn scheme_key(parent: &str) -> Vec<u8> {
+/// Append a relation to a partition key as two length-prefixed parts.
+///
+/// A relation is never flattened into one string here for the reason
+/// [`RelationName`] gives: `PostgreSQL` lets `"a.b"` in `public` and `b` in
+/// schema `a` be different relations, so a partition of one must not be found
+/// under the other. The length prefixes also make the parent → child index
+/// recoverable — [`partitions_of`] reads the child back out of the key suffix
+/// exactly, instead of splitting on a byte the names were assumed not to hold.
+fn push_relation(key: &mut Vec<u8>, relation: &RelationName) {
+    push_key_part(key, &relation.schema);
+    push_key_part(key, &relation.name);
+}
+
+fn scheme_key(parent: &RelationName) -> Vec<u8> {
     let mut key = SCHEME_PREFIX.to_vec();
-    key.extend_from_slice(parent.as_bytes());
+    push_relation(&mut key, parent);
     key
 }
 
-fn child_key(child: &str) -> Vec<u8> {
+fn child_key(child: &RelationName) -> Vec<u8> {
     let mut key = CHILD_PREFIX.to_vec();
-    key.extend_from_slice(child.as_bytes());
+    push_relation(&mut key, child);
     key
 }
 
-fn children_prefix(parent: &str) -> Vec<u8> {
+fn children_prefix(parent: &RelationName) -> Vec<u8> {
     let mut key = CHILDREN_PREFIX.to_vec();
-    key.extend_from_slice(parent.as_bytes());
-    key.push(0);
+    push_relation(&mut key, parent);
     key
 }
 
-fn children_key(parent: &str, child: &str) -> Vec<u8> {
+fn children_key(parent: &RelationName, child: &RelationName) -> Vec<u8> {
     let mut key = children_prefix(parent);
-    key.extend_from_slice(child.as_bytes());
+    push_relation(&mut key, child);
     key
+}
+
+/// Recover the relation a key suffix written by [`push_relation`] names.
+///
+/// A suffix that is not exactly two length-prefixed parts belongs to no
+/// relation, so it is rejected structurally rather than guessed at.
+fn relation_from_key_suffix(suffix: &[u8]) -> Result<RelationName, ExecError> {
+    match key_parts(suffix, 2).as_deref() {
+        Some([schema, name]) => Ok(RelationName::new(*schema, *name)),
+        _ => Err(corrupt("partition index key does not name a relation")),
+    }
 }
 
 // ── Serialization ────────────────────────────────────────────────────────────
@@ -295,9 +327,10 @@ fn read_range_side(cur: &mut &[u8]) -> Result<Vec<RangeDatum>, ExecError> {
         .collect()
 }
 
-fn serialize_child(parent: &str, bound: &Bound) -> Vec<u8> {
+fn serialize_child(parent: &RelationName, bound: &Bound) -> Vec<u8> {
     let mut out = vec![BOUND_VERSION];
-    write_str(&mut out, parent);
+    write_str(&mut out, &parent.schema);
+    write_str(&mut out, &parent.name);
     match bound {
         Bound::Default => out.push(0),
         Bound::List(values) => {
@@ -318,12 +351,12 @@ fn serialize_child(parent: &str, bound: &Bound) -> Vec<u8> {
     out
 }
 
-fn deserialize_child(bytes: &[u8]) -> Result<(String, Bound), ExecError> {
+fn deserialize_child(bytes: &[u8]) -> Result<(RelationName, Bound), ExecError> {
     let mut cur = bytes;
     if take_u8(&mut cur)? != BOUND_VERSION {
         return Err(corrupt("unsupported partition bound version"));
     }
-    let parent = read_string(&mut cur)?;
+    let parent = RelationName::new(read_string(&mut cur)?, read_string(&mut cur)?);
     let bound = match take_u8(&mut cur)? {
         0 => Bound::Default,
         1 => Bound::List(read_datums(&mut cur)?),
@@ -344,7 +377,7 @@ fn deserialize_child(bytes: &[u8]) -> Result<(String, Bound), ExecError> {
 
 /// The partition key of `name`, or `None` when `name` is not a partitioned
 /// parent.
-pub(crate) fn scheme_of(kv: &dyn Kv, name: &str) -> Result<Option<Scheme>, ExecError> {
+pub(crate) fn scheme_of(kv: &dyn Kv, name: &RelationName) -> Result<Option<Scheme>, ExecError> {
     match kv.get(&scheme_key(name)).map_err(ExecError::Kv)? {
         Some(bytes) => Ok(Some(deserialize_scheme(&bytes)?)),
         None => Ok(None),
@@ -352,12 +385,15 @@ pub(crate) fn scheme_of(kv: &dyn Kv, name: &str) -> Result<Option<Scheme>, ExecE
 }
 
 /// True when `name` is a partitioned parent.
-pub(crate) fn is_partitioned(kv: &dyn Kv, name: &str) -> Result<bool, ExecError> {
+pub(crate) fn is_partitioned(kv: &dyn Kv, name: &RelationName) -> Result<bool, ExecError> {
     Ok(kv.get(&scheme_key(name)).map_err(ExecError::Kv)?.is_some())
 }
 
 /// `(parent, bound)` when `name` is a partition, `None` otherwise.
-pub(crate) fn parent_of(kv: &dyn Kv, name: &str) -> Result<Option<(String, Bound)>, ExecError> {
+pub(crate) fn parent_of(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<Option<(RelationName, Bound)>, ExecError> {
     match kv.get(&child_key(name)).map_err(ExecError::Kv)? {
         Some(bytes) => Ok(Some(deserialize_child(&bytes)?)),
         None => Ok(None),
@@ -365,16 +401,16 @@ pub(crate) fn parent_of(kv: &dyn Kv, name: &str) -> Result<Option<(String, Bound
 }
 
 /// Every direct partition of `parent`, in catalog-name order.
-pub(crate) fn partitions_of(kv: &dyn Kv, parent: &str) -> Result<Vec<Partition>, ExecError> {
+pub(crate) fn partitions_of(
+    kv: &dyn Kv,
+    parent: &RelationName,
+) -> Result<Vec<Partition>, ExecError> {
     let prefix = children_prefix(parent);
     let mut names = kv
         .scan_prefix(&prefix)
         .map_err(ExecError::Kv)?
         .into_iter()
-        .map(|(key, _)| {
-            String::from_utf8(key[prefix.len()..].to_vec())
-                .map_err(|_| corrupt("partition name is not UTF-8"))
-        })
+        .map(|(key, _)| relation_from_key_suffix(&key[prefix.len()..]))
         .collect::<Result<Vec<_>, _>>()?;
     names.sort();
     names
@@ -390,15 +426,19 @@ pub(crate) fn partitions_of(kv: &dyn Kv, parent: &str) -> Result<Vec<Partition>,
 /// Every partition of `parent`, and every partition of those, depth first — the
 /// set of relations that actually store `parent`'s rows plus the intermediate
 /// parents in between.
-pub(crate) fn descendants(kv: &dyn Kv, parent: &str) -> Result<Vec<String>, ExecError> {
+pub(crate) fn descendants(
+    kv: &dyn Kv,
+    parent: &RelationName,
+) -> Result<Vec<RelationName>, ExecError> {
     let mut out = Vec::new();
     // A visited set, not just a queue: a cycle in the partition metadata would
     // otherwise spin this walk forever while pushing to `out`, which burns a
     // core and allocates until the process is killed. `ATTACH PARTITION`
     // rejects the cycles it can see, but this walk is on the DROP path and must
     // terminate on any metadata it is handed, however that metadata got there.
-    let mut seen: std::collections::HashSet<String> = std::iter::once(parent.to_string()).collect();
-    let mut queue: Vec<String> = partitions_of(kv, parent)?
+    let mut seen: std::collections::HashSet<RelationName> =
+        std::iter::once(parent.clone()).collect();
+    let mut queue: Vec<RelationName> = partitions_of(kv, parent)?
         .into_iter()
         .map(|partition| partition.name)
         .collect();
@@ -419,7 +459,10 @@ pub(crate) fn descendants(kv: &dyn Kv, parent: &str) -> Result<Vec<String>, Exec
 
 /// The relations that actually hold `parent`'s rows: every descendant that is
 /// not itself a partitioned parent, in catalog-name order.
-pub(crate) fn leaves_of(kv: &dyn Kv, parent: &str) -> Result<Vec<String>, ExecError> {
+pub(crate) fn leaves_of(
+    kv: &dyn Kv,
+    parent: &RelationName,
+) -> Result<Vec<RelationName>, ExecError> {
     let mut leaves = Vec::new();
     for name in descendants(kv, parent)? {
         if !is_partitioned(kv, &name)? {
@@ -432,7 +475,7 @@ pub(crate) fn leaves_of(kv: &dyn Kv, parent: &str) -> Result<Vec<String>, ExecEr
 // ── Catalog writes ───────────────────────────────────────────────────────────
 
 /// Write ops recording `parent` as partitioned by `scheme`.
-pub(crate) fn put_scheme_ops(parent: &str, scheme: &Scheme) -> Vec<WriteOp> {
+pub(crate) fn put_scheme_ops(parent: &RelationName, scheme: &Scheme) -> Vec<WriteOp> {
     vec![WriteOp::Put {
         key: scheme_key(parent),
         value: serialize_scheme(scheme),
@@ -440,7 +483,11 @@ pub(crate) fn put_scheme_ops(parent: &str, scheme: &Scheme) -> Vec<WriteOp> {
 }
 
 /// Write ops attaching `child` to `parent` with `bound`.
-pub(crate) fn attach_ops(parent: &str, child: &str, bound: &Bound) -> Vec<WriteOp> {
+pub(crate) fn attach_ops(
+    parent: &RelationName,
+    child: &RelationName,
+    bound: &Bound,
+) -> Vec<WriteOp> {
     vec![
         WriteOp::Put {
             key: child_key(child),
@@ -454,7 +501,7 @@ pub(crate) fn attach_ops(parent: &str, child: &str, bound: &Bound) -> Vec<WriteO
 }
 
 /// Write ops detaching `child` from `parent`.
-pub(crate) fn detach_ops(parent: &str, child: &str) -> Vec<WriteOp> {
+pub(crate) fn detach_ops(parent: &RelationName, child: &RelationName) -> Vec<WriteOp> {
     vec![
         WriteOp::Delete {
             key: child_key(child),
@@ -467,7 +514,10 @@ pub(crate) fn detach_ops(parent: &str, child: &str) -> Vec<WriteOp> {
 
 /// Write ops removing `name`'s own partition metadata — its key definition if
 /// it is a parent, and its parent link if it is a partition.
-pub(crate) fn drop_metadata_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, ExecError> {
+pub(crate) fn drop_metadata_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<Vec<WriteOp>, ExecError> {
     let mut ops = vec![WriteOp::Delete {
         key: scheme_key(name),
     }];
@@ -642,7 +692,13 @@ pub(crate) fn check_bound_shape(strategy: Strategy, bound: &Bound) -> Result<(),
 }
 
 /// Reject a range bound whose lower limit is not below its upper limit.
-pub(crate) fn check_range_not_empty(partition: &str, bound: &Bound) -> Result<(), ExecError> {
+///
+/// `PostgreSQL` names the partition with `RelationGetRelationName`, so the
+/// message carries the bare name even for a partition outside `public`.
+pub(crate) fn check_range_not_empty(
+    partition: &RelationName,
+    bound: &Bound,
+) -> Result<(), ExecError> {
     let Bound::Range { from, to } = bound else {
         return Ok(());
     };
@@ -650,7 +706,8 @@ pub(crate) fn check_range_not_empty(partition: &str, bound: &Bound) -> Result<()
         return Ok(());
     }
     Err(ExecError::InvalidObjectDefinition(format!(
-        "empty range bound specified for partition \"{partition}\""
+        "empty range bound specified for partition \"{}\"",
+        partition.name
     )))
 }
 
@@ -674,23 +731,25 @@ fn range_side_ordering(left: &[RangeDatum], right: &[RangeDatum]) -> Result<Orde
 }
 
 /// Reject a bound that overlaps an existing sibling, or a second `DEFAULT`,
-/// using `PostgreSQL`'s 42P17 wording.
+/// using `PostgreSQL`'s 42P17 wording — which names both partitions with
+/// `RelationGetRelationName`, so neither carries its schema.
 pub(crate) fn check_no_overlap(
     strategy: Strategy,
-    partition: &str,
+    partition: &RelationName,
     bound: &Bound,
     siblings: &[Partition],
 ) -> Result<(), ExecError> {
+    let partition = &partition.name;
     for sibling in siblings {
         if let Some(reason) = overlap_reason(strategy, bound, &sibling.bound)? {
             return Err(match reason {
                 Overlap::Default => ExecError::InvalidObjectDefinition(format!(
                     "partition \"{partition}\" conflicts with existing default partition \"{}\"",
-                    sibling.name
+                    sibling.name.name
                 )),
                 Overlap::Bounds => ExecError::InvalidObjectDefinition(format!(
                     "partition \"{partition}\" would overlap partition \"{}\"",
-                    sibling.name
+                    sibling.name.name
                 )),
                 Overlap::HashModulus => ExecError::InvalidObjectDefinition(
                     "every hash partition modulus must be a factor of the next larger modulus"
@@ -887,28 +946,93 @@ mod tests {
 
         let kv = crabka_pgkv::MemKv::default();
         // Hand-write a two-node cycle: each table is recorded as the other's
-        // partition, which `ATTACH PARTITION` now rejects but older metadata or
-        // a direct catalog write could still contain.
+        // partition, which `ATTACH PARTITION` rejects but a direct catalog write
+        // could still produce.
         let bound = Bound::Hash {
             modulus: 1,
             remainder: 0,
         };
         for (parent, child) in [("a", "b"), ("b", "a")] {
-            for op in attach_ops(parent, child, &bound) {
+            for op in attach_ops(
+                &RelationName::public(parent),
+                &RelationName::public(child),
+                &bound,
+            ) {
                 if let WriteOp::Put { key, value } = op {
                     kv.put(key, value).expect("put");
                 }
             }
         }
 
-        let found = descendants(&kv, "a").expect("the walk terminates");
+        let found = descendants(&kv, &RelationName::public("a")).expect("the walk terminates");
 
-        assert!(found == vec!["b".to_string()], "got {found:?}");
+        assert!(found == vec![RelationName::public("b")], "got {found:?}");
     }
     use assert2::assert;
     use crabka_pgtypes::Datum;
 
     use super::*;
+
+    fn hash_bound() -> Bound {
+        Bound::Hash {
+            modulus: 1,
+            remainder: 0,
+        }
+    }
+
+    fn write(kv: &crabka_pgkv::MemKv, ops: Vec<WriteOp>) {
+        kv.write_batch(&ops).expect("write");
+    }
+
+    /// The relation catalog is read by scanning its prefix, so a partition
+    /// record stored under it would be handed to the relation decoder — and
+    /// `DROP SCHEMA … CASCADE`, which lists a schema's contents that way, would
+    /// try to drop it as a relation.
+    #[test]
+    fn partition_metadata_is_stored_outside_the_relation_catalog() {
+        let parent = RelationName::new("sch", "p");
+        let child = RelationName::new("sch", "c");
+        let catalog = crabka_pgkv::key::catalog_prefix();
+        for key in [
+            scheme_key(&parent),
+            child_key(&child),
+            children_key(&parent, &child),
+        ] {
+            assert!(!key.starts_with(&catalog), "{key:?}");
+        }
+    }
+
+    /// Both halves of every partition key are length-prefixed, so one parent's
+    /// child index cannot be read as another's — even when one relation's name
+    /// begins with the other's, which a plain concatenation would confuse.
+    #[test]
+    fn the_children_index_returns_one_parents_partitions_only() {
+        let kv = crabka_pgkv::MemKv::default();
+        let parent = RelationName::new("sch", "p");
+        let neighbour = RelationName::new("sch", "p2");
+        // A dot in the name is not a qualifier: this leaf is `c.1` in `sch`.
+        let child = RelationName::new("sch", "c.1");
+        write(&kv, attach_ops(&parent, &child, &hash_bound()));
+        write(
+            &kv,
+            attach_ops(&neighbour, &RelationName::new("sch", "n"), &hash_bound()),
+        );
+
+        assert!(
+            partitions_of(&kv, &parent).expect("scan")
+                == vec![Partition {
+                    name: child.clone(),
+                    bound: hash_bound(),
+                }]
+        );
+        assert!(parent_of(&kv, &child).expect("link") == Some((parent, hash_bound())));
+        // A relation in another schema of the same name is a different leaf.
+        assert!(
+            parent_of(&kv, &RelationName::new("other", "c.1"))
+                .expect("link")
+                .is_none()
+        );
+    }
 
     fn list_scheme() -> Scheme {
         Scheme {
@@ -939,11 +1063,11 @@ mod tests {
         let scheme = list_scheme();
         let partitions = vec![
             Partition {
-                name: "p_default".into(),
+                name: RelationName::public("p_default"),
                 bound: Bound::Default,
             },
             Partition {
-                name: "p_one".into(),
+                name: RelationName::public("p_one"),
                 bound: Bound::List(vec![Datum::Int4(1), Datum::Int4(2)]),
             },
         ];
@@ -955,7 +1079,7 @@ mod tests {
         ] {
             let routed =
                 route(&scheme, &partitions, std::slice::from_ref(&input)).expect("routing decides");
-            assert!(routed.map(|partition| partition.name.as_str()) == expected);
+            assert!(routed.map(|partition| partition.name.name.as_str()) == expected);
         }
     }
 
@@ -963,11 +1087,11 @@ mod tests {
     fn a_list_bound_of_null_takes_the_null_key() {
         let scheme = list_scheme();
         let partitions = vec![Partition {
-            name: "p_null".into(),
+            name: RelationName::public("p_null"),
             bound: Bound::List(vec![Datum::Null]),
         }];
         let routed = route(&scheme, &partitions, &[Datum::Null]).expect("routing decides");
-        assert!(routed.map(|partition| partition.name.as_str()) == Some("p_null"));
+        assert!(routed.map(|partition| partition.name.name.as_str()) == Some("p_null"));
         let routed = route(&scheme, &partitions, &[Datum::Int4(1)]).expect("routing decides");
         assert!(routed.is_none());
     }
@@ -977,14 +1101,14 @@ mod tests {
         let scheme = range_scheme();
         let partitions = vec![
             Partition {
-                name: "p_low".into(),
+                name: RelationName::public("p_low"),
                 bound: Bound::Range {
                     from: vec![RangeDatum::MinValue],
                     to: vec![value(10)],
                 },
             },
             Partition {
-                name: "p_high".into(),
+                name: RelationName::public("p_high"),
                 bound: Bound::Range {
                     from: vec![value(10)],
                     to: vec![RangeDatum::MaxValue],
@@ -999,7 +1123,7 @@ mod tests {
         ] {
             let routed =
                 route(&scheme, &partitions, &[Datum::Int4(input)]).expect("routing decides");
-            assert!(routed.map(|partition| partition.name.as_str()) == expected);
+            assert!(routed.map(|partition| partition.name.name.as_str()) == expected);
         }
         // A NULL key belongs to no range partition.
         let routed = route(&scheme, &partitions, &[Datum::Null]).expect("routing decides");
@@ -1009,7 +1133,7 @@ mod tests {
     #[test]
     fn overlapping_and_empty_range_bounds_are_refused() {
         let existing = vec![Partition {
-            name: "p_one".into(),
+            name: RelationName::public("p_one"),
             bound: Bound::Range {
                 from: vec![value(10)],
                 to: vec![value(20)],
@@ -1023,27 +1147,51 @@ mod tests {
             from: vec![value(20)],
             to: vec![value(25)],
         };
-        assert!(check_no_overlap(Strategy::Range, "p_new", &overlapping, &existing).is_err());
-        assert!(check_no_overlap(Strategy::Range, "p_new", &adjacent, &existing).is_ok());
+        assert!(
+            check_no_overlap(
+                Strategy::Range,
+                &RelationName::public("p_new"),
+                &overlapping,
+                &existing
+            )
+            .is_err()
+        );
+        assert!(
+            check_no_overlap(
+                Strategy::Range,
+                &RelationName::public("p_new"),
+                &adjacent,
+                &existing
+            )
+            .is_ok()
+        );
         let empty = Bound::Range {
             from: vec![value(1)],
             to: vec![value(1)],
         };
-        assert!(check_range_not_empty("p_new", &empty).is_err());
-        assert!(check_range_not_empty("p_new", &adjacent).is_ok());
+        assert!(check_range_not_empty(&RelationName::public("p_new"), &empty).is_err());
+        assert!(check_range_not_empty(&RelationName::public("p_new"), &adjacent).is_ok());
     }
 
     #[test]
     fn a_second_default_partition_conflicts_with_the_first() {
         let existing = vec![Partition {
-            name: "p_default".into(),
+            name: RelationName::public("p_default"),
             bound: Bound::Default,
         }];
-        assert!(check_no_overlap(Strategy::List, "p_other", &Bound::Default, &existing).is_err());
         assert!(
             check_no_overlap(
                 Strategy::List,
-                "p_other",
+                &RelationName::public("p_other"),
+                &Bound::Default,
+                &existing
+            )
+            .is_err()
+        );
+        assert!(
+            check_no_overlap(
+                Strategy::List,
+                &RelationName::public("p_other"),
                 &Bound::List(vec![Datum::Int4(1)]),
                 &existing,
             )
@@ -1054,7 +1202,7 @@ mod tests {
     #[test]
     fn hash_bounds_require_a_divisibility_chain_and_a_free_remainder() {
         let existing = vec![Partition {
-            name: "p_zero".into(),
+            name: RelationName::public("p_zero"),
             bound: Bound::Hash {
                 modulus: 4,
                 remainder: 0,
@@ -1068,7 +1216,12 @@ mod tests {
             (4, 0, false),
         ] {
             let bound = Bound::Hash { modulus, remainder };
-            let checked = check_no_overlap(Strategy::Hash, "p_new", &bound, &existing);
+            let checked = check_no_overlap(
+                Strategy::Hash,
+                &RelationName::public("p_new"),
+                &bound,
+                &existing,
+            );
             assert!(
                 checked.is_ok() == ok,
                 "modulus {modulus} remainder {remainder}"
@@ -1125,7 +1278,7 @@ mod tests {
     fn a_default_partition_accepts_exactly_what_its_siblings_decline() {
         let scheme = list_scheme();
         let siblings = vec![Partition {
-            name: "p_one".into(),
+            name: RelationName::public("p_one"),
             bound: Bound::List(vec![Datum::Int4(1)]),
         }];
         assert!(
@@ -1168,9 +1321,10 @@ mod tests {
                 remainder: 3,
             },
         ] {
-            let encoded = serialize_child("parent", &bound);
+            let parent = RelationName::new("sch", "parent");
+            let encoded = serialize_child(&parent, &bound);
             let decoded = deserialize_child(&encoded).expect("bound decodes");
-            assert!(decoded == ("parent".to_string(), bound));
+            assert!(decoded == (parent, bound));
         }
     }
 }

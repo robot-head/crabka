@@ -222,6 +222,25 @@ pub(crate) fn is_scalar(name: &str) -> bool {
         || crate::regexp_fn::is_regexp_func(name)
 }
 
+/// The call a bare, unparenthesised `name` denotes, when `PostgreSQL` reserves
+/// that name for a niladic function rather than leaving it available as a
+/// column reference.
+///
+/// `SELECT current_schema` is a function call on 18.4 — `CURRENT_SCHEMA` is a
+/// keyword in its grammar, so the name can never reach an identifier — and the
+/// lexer here hands it over as an ordinary identifier instead. The other
+/// no-paren spellings (`current_date`, `session_user`, `localtimestamp`, …)
+/// are already calls by the time they arrive, so this covers only the ones
+/// that are not.
+pub(crate) fn niladic_keyword_call(name: &str) -> Option<FuncCall> {
+    matches!(name, "current_schema").then(|| FuncCall {
+        name: name.to_string(),
+        distinct: false,
+        args: FuncArgs::Exprs(Vec::new()),
+        filter: None,
+    })
+}
+
 pub(crate) fn undefined_function(name: &str) -> ExecError {
     // `merge_action()` exists, but only inside a MERGE's RETURNING list — the
     // executor rewrites it to a binding there and never reaches this point.
@@ -1063,7 +1082,17 @@ fn eval_eager(
             let runtime = ctx.sequence.as_ref().ok_or_else(|| {
                 ExecError::Unsupported("sequence functions require a SQL session".into())
             })?;
-            let value = runtime.manager.nextval(&*runtime.kv, &name)?;
+            let (value, staged) =
+                runtime
+                    .manager
+                    .nextval_written(&*runtime.kv, ctx.resolution(), &name)?;
+            if let Some(staged) = staged {
+                runtime
+                    .pending
+                    .lock()
+                    .expect("pending sequences")
+                    .stage(staged);
+            }
             runtime
                 .currvals
                 .lock()
@@ -1098,9 +1127,20 @@ fn eval_eager(
             let runtime = ctx.sequence.as_ref().ok_or_else(|| {
                 ExecError::Unsupported("sequence functions require a SQL session".into())
             })?;
-            let value = runtime
-                .manager
-                .setval(&*runtime.kv, &name, value, is_called)?;
+            let (value, staged) = runtime.manager.setval_written(
+                &*runtime.kv,
+                ctx.resolution(),
+                &name,
+                value,
+                is_called,
+            )?;
+            if let Some(staged) = staged {
+                runtime
+                    .pending
+                    .lock()
+                    .expect("pending sequences")
+                    .stage(staged);
+            }
             runtime
                 .currvals
                 .lock()
@@ -1112,9 +1152,20 @@ fn eval_eager(
             require_arity(fc, vals.is_empty())?;
             Ok(Datum::Text("postgres".into()))
         }
+        // The schema a `CREATE` with no qualifier lands in — the first
+        // `search_path` entry that names an existing schema, and NULL when the
+        // path names none. Verified against `postgres:18.4`, where
+        // `SET search_path = notme; SELECT current_schema` is NULL rather than
+        // `public`.
         ScalarFunc::CurrentSchema => {
             require_arity(fc, vals.is_empty())?;
-            Ok(Datum::Text("public".into()))
+            let kv = ctx.catalog().ok_or_else(|| {
+                ExecError::Unsupported("current_schema requires a SQL session".into())
+            })?;
+            Ok(ctx
+                .resolution()
+                .creation_schema(kv)?
+                .map_or(Datum::Null, Datum::Text))
         }
         ScalarFunc::CurrentUser => {
             require_arity(fc, vals.is_empty())?;
@@ -1964,7 +2015,7 @@ fn chr(n: i64) -> Result<Datum, ExecError> {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_pgcatalog::{Column, Table};
+    use crabka_pgcatalog::{Column, RelationName, Table};
     use crabka_pgparser::parser::parse_expr_for_test as pexpr;
 
     use super::*;
@@ -1972,7 +2023,7 @@ mod tests {
     fn table() -> Table {
         Table {
             id: 1,
-            name: "t".into(),
+            name: RelationName::public("t"),
             columns: vec![
                 Column::new("s", ColumnType::Text),
                 Column::new("n", ColumnType::Int4),
@@ -1987,7 +2038,7 @@ mod tests {
     fn table_n() -> Table {
         Table {
             id: 1,
-            name: "t".into(),
+            name: RelationName::public("t"),
             columns: vec![Column::new("qn", ColumnType::Numeric(None))],
             sharded: false,
             sharding: None,
@@ -1999,7 +2050,7 @@ mod tests {
     /// The table's single-relation scope, or the empty (FROM-less) scope.
     fn scope_of(t: Option<&Table>) -> Scope {
         match t {
-            Some(t) => Scope::single(t, &t.name),
+            Some(t) => Scope::single(t, &t.name.name),
             None => Scope::empty(),
         }
     }

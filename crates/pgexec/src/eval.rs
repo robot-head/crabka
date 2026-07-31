@@ -94,6 +94,13 @@ fn eval_depth(
             Ok(value)
         }
         Expr::Column { table, name } => {
+            if table.is_none()
+                && let Some(call) = crate::func::niladic_keyword_call(name)
+            {
+                return crate::func::eval_scalar(&call, ctx, |e| {
+                    eval_depth(e, scope, values, ctx, d)
+                });
+            }
             let idx = scope.resolve(table.as_deref(), name)?;
             Ok(values[idx].clone())
         }
@@ -223,15 +230,21 @@ fn eval_depth(
                 return Ok(empty);
             }
             let v = eval_depth(expr, scope, values, ctx, d)?;
-            // `'name'::regclass`: a non-numeric string is a relation name only
-            // the catalog can resolve (PostgreSQL's regclassin); numeric and
-            // NULL inputs take the pure cast below.
+            // `::regclass` is the one cast that needs the catalog: a name has to
+            // be resolved to its oid (PostgreSQL's regclassin), and an oid has
+            // to be resolved *back* to the name `regclassout` prints, because
+            // the value layer that renders it has no catalog handle. This is the
+            // point where one is in scope, so the name is attached here and
+            // travels with the value — and it is also where the session's search
+            // path is in scope, which is what decides the schema a bare name
+            // lands in. Without a catalog — a planning context or a unit test —
+            // the pure cast below yields the bare-oid rendering.
             if *ty == crabka_pgtypes::ColumnType::Regclass
-                && let Datum::Text(name) = &v
-                && name.trim().parse::<i32>().is_err()
-                && let Some(sequence) = &ctx.sequence
+                && let Some(catalog) = ctx.catalog()
+                && let Some(resolved) =
+                    crate::catalog_fn::regclass_cast(catalog, ctx.resolution(), &v)?
             {
-                return crate::exec::resolve_regclass(sequence.kv.as_ref(), name).map(Datum::Int4);
+                return Ok(resolved);
             }
             let cast = crabka_pgtypes::cast::cast_in(&v, *ty, ctx.output_style())?;
             // A cast to a domain converts through the base type and then has to
@@ -1711,6 +1724,11 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
             Ok(ty)
         }
         Expr::Column { table, name } => {
+            if table.is_none()
+                && let Some(call) = crate::func::niladic_keyword_call(name)
+            {
+                return crate::func::scalar_result_type(&call, scope);
+            }
             let idx = scope.resolve(table.as_deref(), name)?;
             Ok(scope.ty_at(idx))
         }
@@ -2403,7 +2421,7 @@ mod tests {
                 == Datum::Null
         );
     }
-    use crabka_pgcatalog::{Column, Table};
+    use crabka_pgcatalog::{Column, RelationName, Table};
     use crabka_pgparser::parser::parse_expr_for_test as pexpr;
     use crabka_pgtypes::{ColumnType, Datum};
 
@@ -2412,7 +2430,7 @@ mod tests {
     fn table() -> Table {
         Table {
             id: 1,
-            name: "t".into(),
+            name: RelationName::public("t"),
             columns: vec![
                 Column::new("a", ColumnType::Int4),
                 Column::new("b", ColumnType::Int4),
@@ -2428,7 +2446,7 @@ mod tests {
     /// scope, or the empty scope (FROM-less expressions).
     fn scope_of(t: Option<&Table>) -> Scope {
         match t {
-            Some(t) => Scope::single(t, &t.name),
+            Some(t) => Scope::single(t, &t.name.name),
             None => Scope::empty(),
         }
     }
@@ -2873,7 +2891,7 @@ mod tests {
         // infer_type agrees on the result types for these cells (no plan/eval drift).
         let tstz_col = Table {
             id: 9,
-            name: "tz".into(),
+            name: RelationName::public("tz"),
             columns: vec![
                 Column::new("ts", ColumnType::Timestamptz),
                 Column::new("iv", ColumnType::Interval),
@@ -3111,7 +3129,7 @@ mod tests {
         // a float8 column → bool has no defined cast.
         let ft = Table {
             id: 1,
-            name: "t".into(),
+            name: RelationName::public("t"),
             columns: vec![Column::new("a", ColumnType::Float8)],
             sharded: false,
             sharding: None,
@@ -3198,7 +3216,7 @@ mod tests {
     fn jt() -> Table {
         Table {
             id: 2,
-            name: "jt".into(),
+            name: RelationName::public("jt"),
             columns: vec![
                 Column::new("j", ColumnType::Jsonb),
                 Column::new("ia", ColumnType::Array(ElemType::Int4)),

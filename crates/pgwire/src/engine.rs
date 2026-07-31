@@ -268,6 +268,20 @@ pub trait Engine: Send + Sync + 'static {
 /// (`tokio::select!`). Session implementations must be drop-safe mid-execution;
 /// the real engine needs transaction cleanup on drop.
 pub trait Session: Send {
+    /// Release whatever the session owns that outlives the connection but not
+    /// the session, called once when the message loop ends however it ends.
+    ///
+    /// This is not `Drop`: the work is a durable write, so it has to be
+    /// awaited. A session whose connection was severed still reaches here,
+    /// because the loop's outcome is carried past the call rather than
+    /// returned through it.
+    ///
+    /// The default does nothing, which is right for a session that owns no
+    /// such state.
+    fn terminate(&mut self) -> impl Future<Output = ()> + Send {
+        async {}
+    }
+
     /// Execute the full text of a simple-protocol Query message (may contain
     /// multiple statements — splitting is the engine's job).
     fn simple_query(

@@ -210,6 +210,19 @@ pub struct SubjectDdlTransformError {
     message: String,
 }
 
+/// Whether a parse refusal is a feature `crabka` deliberately does not
+/// implement (`0A000`) rather than a malformed statement.
+///
+/// The distinction decides whether [`subject_sharded_statement`] fails closed.
+/// A syntax error in table DDL means the transform would skip a table the
+/// sharded leg is meant to measure, which must be loud. A deliberate refusal
+/// means neither leg creates anything — `PostgreSQL` refuses `MATCH PARTIAL`
+/// with `0A000` and so does the subject — so the corpus is asserting the
+/// refusal itself and the statement is the same on both legs unsharded.
+fn is_unimplemented_feature(error: &crabka_pgparser::ParseError) -> bool {
+    error.sqlstate() == "0A000"
+}
+
 /// Rewrite one subject `CREATE TABLE` statement to use sharding.
 ///
 /// # Errors
@@ -219,7 +232,15 @@ pub struct SubjectDdlTransformError {
 pub fn subject_sharded_statement(sql: &str) -> Result<String, SubjectDdlTransformError> {
     let statements = match crabka_pgparser::parse(sql) {
         Ok(statements) => statements,
-        Err(error) if is_create_table_candidate(sql) => {
+        // A `CREATE TABLE` the parser *cannot* parse is a harness gap: the
+        // transform would silently skip a table the sharded leg is supposed to
+        // measure, so it fails closed. The exception is a refusal the parser
+        // makes deliberately — a feature it does not implement, which
+        // `PostgreSQL` refuses too. That statement creates no table on either
+        // leg, both refuse it identically, and the corpus exists to assert
+        // exactly that, so passing it through is faithful rather than a silent
+        // escape.
+        Err(error) if is_create_table_candidate(sql) && !is_unimplemented_feature(&error) => {
             return Err(SubjectDdlTransformError {
                 sql: sql.to_string(),
                 message: error.to_string(),
@@ -1787,6 +1808,20 @@ mod tests {
             "CREATE/* gap */TABLE lexical_comment (label text DEFAULT 'unterminated)",
         )
         .expect_err("comments must not hide lexer-level malformed table DDL");
+    }
+
+    /// A `CREATE TABLE` the parser refuses *deliberately* is not a harness gap.
+    /// `MATCH PARTIAL` is `0A000` here and in `PostgreSQL`, so neither leg
+    /// creates a table and the corpus is asserting the refusal itself — the
+    /// statement has to reach the subject unchanged to be refused there too.
+    #[test]
+    fn a_deliberate_feature_refusal_in_table_ddl_passes_through() {
+        let sql = "CREATE TABLE fk_e8 (a int4, b int4, \
+                   FOREIGN KEY (a, b) REFERENCES fk_comp_p(x, y) MATCH PARTIAL)";
+        assert!(is_create_table_candidate(sql));
+        let error = crabka_pgparser::parse(sql).expect_err("MATCH PARTIAL is refused");
+        assert!(error.sqlstate() == "0A000");
+        assert!(subject_sharded_statement(sql).expect("passes through") == sql);
     }
 
     #[test]

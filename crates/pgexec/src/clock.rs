@@ -54,8 +54,27 @@ pub struct EvalCtx {
     pub interval_style: crabka_pgtypes::datetime::IntervalStyle,
     pub current_user: String,
     pub session_user: String,
+    /// The session's backend process id — the value the wire layer announced in
+    /// `BackendKeyData`, which `pg_backend_pid()` must agree with because that
+    /// pairing is how a client correlates a cancel request with its session.
+    /// 0 outside a SQL session (a planning context or a unit test), where no
+    /// backend id was ever assigned.
+    pub(crate) backend_pid: i32,
     pub clock: Arc<dyn Clock>,
     pub(crate) sequence: Option<Arc<SequenceRuntime>>,
+    /// The catalog KV on its own, for a context that can read the catalog but
+    /// has no sequence machinery — a DDL statement, which must resolve the
+    /// relation a `'name'::regclass` default names while `nextval()` stays the
+    /// 0A000 it is outside a session. A session leaves this `None` and reads
+    /// through `sequence`, which carries the same handle.
+    pub(crate) catalog: Option<Arc<dyn crabka_pgkv::Kv>>,
+    /// The session's name-resolution scope — its `search_path`, the user
+    /// `"$user"` expands to, and its backend id. `None` outside a SQL session
+    /// (a planning context or a unit test), where
+    /// [`crate::relname::ResolutionScope::default_scope`] stands in: a
+    /// relation named there still has to resolve, and `PostgreSQL`'s own
+    /// default path is the honest answer.
+    pub(crate) resolution: Option<Arc<crate::relname::ResolutionScope>>,
     /// The session's queued `LISTEN`/`NOTIFY` work, so the side-effecting
     /// `pg_notify(channel, payload)` can enqueue from inside expression
     /// evaluation — the same seam `sequence` gives `nextval`. `None` outside a
@@ -71,6 +90,13 @@ pub(crate) struct SequenceRuntime {
     pub(crate) kv: Arc<dyn crabka_pgkv::Kv>,
     pub(crate) manager: Arc<crate::seq::SequenceManager>,
     pub(crate) currvals: Arc<Mutex<HashMap<String, i64>>>,
+    /// The session's sequence advances that are not durable yet, which a
+    /// `Replicated` engine stages here rather than writing through the store.
+    /// The session folds them into the next batch it commits — the same seam
+    /// [`EvalCtx::notify`] gives `pg_notify()`, and for the same reason:
+    /// expression evaluation is synchronous and cannot await a commit.
+    /// `Durable` mode persists as it goes and leaves this empty.
+    pub(crate) pending: Arc<Mutex<crate::seq::PendingSequences>>,
 }
 
 impl EvalCtx {
@@ -91,11 +117,40 @@ impl EvalCtx {
     /// SQL session (a planning context or a unit test), where those functions
     /// report 0A000 rather than inventing an answer.
     pub(crate) fn catalog(&self) -> Option<&dyn crabka_pgkv::Kv> {
-        self.sequence.as_ref().map(|runtime| runtime.kv.as_ref())
+        self.catalog
+            .as_deref()
+            .or_else(|| self.sequence.as_ref().map(|runtime| runtime.kv.as_ref()))
+    }
+
+    /// The scope an unqualified relation name resolves against.
+    pub(crate) fn resolution(&self) -> &crate::relname::ResolutionScope {
+        self.resolution
+            .as_deref()
+            .unwrap_or_else(|| crate::relname::ResolutionScope::default_scope())
     }
 }
 
 impl EvalCtx {
+    /// A non-temporal context that still resolves names the session's way —
+    /// what a DDL statement evaluates its `DEFAULT`s and partition bounds in.
+    /// It has no clock of its own because a DDL statement has no row to stamp;
+    /// it does need the search path, because the relation it names has to land
+    /// in the right schema, and it needs the catalog, because a `DEFAULT
+    /// 'name'::regclass` has a relation name to resolve.
+    ///
+    /// `catalog` is `None` where no session supplied one (a planning context),
+    /// leaving the catalog-reading functions their 0A000.
+    pub(crate) fn for_ddl(
+        scope: &crate::relname::ResolutionScope,
+        catalog: Option<&Arc<dyn crabka_pgkv::Kv>>,
+    ) -> Self {
+        Self {
+            resolution: Some(Arc::new(scope.clone())),
+            catalog: catalog.map(Arc::clone),
+            ..Self::test_default()
+        }
+    }
+
     /// A UTC context anchored at the Unix epoch — for tests / non-temporal eval.
     pub fn test_default() -> Self {
         let epoch = Timestamp::UNIX_EPOCH;
@@ -108,8 +163,11 @@ impl EvalCtx {
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             current_user: "public".into(),
             session_user: "public".into(),
+            backend_pid: 0,
             clock: Arc::new(SystemClock),
             sequence: None,
+            catalog: None,
+            resolution: None,
             notify: None,
         }
     }

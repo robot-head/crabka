@@ -1073,7 +1073,7 @@ mod tests {
 
         let table = |id, name: &str, group: &str| crabka_pgcatalog::Table {
             id,
-            name: name.into(),
+            name: crabka_pgcatalog::RelationName::public(name),
             columns: vec![crabka_pgcatalog::Column::new(
                 "id",
                 crabka_pgtypes::ColumnType::Int4,

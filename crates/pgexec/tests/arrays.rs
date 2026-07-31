@@ -1068,7 +1068,9 @@ async fn binary_format_array_parameters_round_trip() {
             == vec![1, 3]
     );
 
-    // The empty array (tokio-postgres sends the 12-byte ndim=0 header).
+    // The empty array. `postgres-types` always writes exactly one dimension, so
+    // an empty slice goes out as `ndim = 1, len = 0` rather than the 12-byte
+    // `ndim = 0` header crabka's own encoder emits.
     let empty: Vec<i32> = Vec::new();
     let none = client
         .query("SELECT id FROM t WHERE id = ANY($1)", &[&empty])
@@ -1080,6 +1082,60 @@ async fn binary_format_array_parameters_round_trip() {
         .await
         .expect("render empty array parameter");
     assert!(rendered.get::<_, &str>(0) == "{}");
+
+    // PostgreSQL has no zero-length dimension, so `array_recv` collapses that
+    // header: the empty array has no dimensions at all, every dimension
+    // accessor is NULL, and it is equal to `'{}'`. Only `cardinality` — which
+    // counts elements rather than reading the header — answers 0.
+    let describe = client
+        .prepare_typed(
+            "SELECT array_ndims($1), array_dims($1), array_length($1, 1), \
+             array_lower($1, 1), array_upper($1, 1), cardinality($1), $1 = '{}'::int4[]",
+            &[Type::INT4_ARRAY],
+        )
+        .await
+        .expect("prepare empty array describe");
+    let shape = client
+        .query_one(&describe, &[&empty])
+        .await
+        .expect("describe empty array parameter");
+    let shape = (
+        shape.get::<_, Option<i32>>(0),
+        shape.get::<_, Option<String>>(1),
+        shape.get::<_, Option<i32>>(2),
+        shape.get::<_, Option<i32>>(3),
+        shape.get::<_, Option<i32>>(4),
+        shape.get::<_, Option<i32>>(5),
+        shape.get::<_, Option<bool>>(6),
+    );
+    assert!(shape == (None, None, None, None, None, Some(0), Some(true)));
+
+    // A one-element parameter still has exactly one dimension.
+    let shape = client
+        .query_one(&describe, &[&vec![7_i32]])
+        .await
+        .expect("describe one-element array parameter");
+    let shape = (
+        shape.get::<_, Option<i32>>(0),
+        shape.get::<_, Option<String>>(1),
+        shape.get::<_, Option<i32>>(2),
+        shape.get::<_, Option<i32>>(3),
+        shape.get::<_, Option<i32>>(4),
+        shape.get::<_, Option<i32>>(5),
+        shape.get::<_, Option<bool>>(6),
+    );
+    assert!(
+        shape
+            == (
+                Some(1),
+                Some("[1:1]".to_string()),
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(1),
+                Some(false),
+            )
+    );
 
     // NULL elements survive the binary encoding in both directions.
     let with_nulls: Vec<Option<String>> = vec![Some("a,b".to_string()), None];

@@ -7,7 +7,7 @@
 //! the storage key is the routine's `name(argtype, …)` identity, exactly the
 //! identity `PostgreSQL` uses for `DROP FUNCTION f(int)`.
 
-use crabka_pgkv::{Kv, KvError, WriteOp, key};
+use crabka_pgkv::{Kv, KvError, WriteOp};
 use crabka_pgtypes::ColumnType;
 use zerocopy::{FromBytes, IntoBytes, byteorder::big_endian::U32};
 
@@ -281,9 +281,7 @@ pub fn signature_identity(name: &str, arg_types: &[String]) -> String {
 }
 
 fn routine_prefix() -> Vec<u8> {
-    let mut prefix = key::catalog_key("");
-    prefix.extend_from_slice(b"\0routine/");
-    prefix
+    b"\0\0\0\0catalog_routine/".to_vec()
 }
 
 fn routine_key(identity: &str) -> Vec<u8> {
@@ -292,15 +290,10 @@ fn routine_key(identity: &str) -> Vec<u8> {
     k
 }
 
-/// The routine OID counter's key.
-///
-/// The trailing `/` matters: the table catalog treats every slash-free key
-/// under the catalog prefix as a relation schema, so a counter without one
-/// would be scanned as a table and fail to decode.
+/// The routine OID counter's key. It sits in the `meta` family rather than
+/// beside the routine records, so the routine scan sees only routines.
 fn next_routine_oid_key() -> Vec<u8> {
-    let mut k = key::catalog_key("");
-    k.extend_from_slice(b"\0routine-oid/");
-    k
+    b"\0\0\0\0meta/next_routine_oid".to_vec()
 }
 
 fn read_next_routine_oid(kv: &dyn Kv) -> Result<u32, CatalogError> {

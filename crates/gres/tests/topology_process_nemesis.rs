@@ -1231,16 +1231,24 @@ async fn prepare_split_foundation() -> SplitFoundationSetup {
     }
 }
 
+/// Scan one range directly, bypassing the gateway.
+///
+/// `routing_table_id` is the suffix the fixture bakes into the relation name to
+/// pin its routing slot; the scan RPC addresses the relation by *catalog* id, so
+/// the two are resolved against each other here rather than assumed equal.
 async fn direct_successor_rows(
     system: &ProcessHarness,
     range_id: u32,
-    table_id: u64,
+    routing_table_id: u64,
     start: Option<u64>,
     end: Option<u64>,
 ) -> Vec<SplitLedgerRow> {
+    let table_id = system
+        .catalog_table_id(&format!("live_ledger{routing_table_id}"))
+        .await;
     let scan = crabka_gres_ranges::transport::ScanRangeReq {
         range_id: crabka_gres_ranges::RangeId::new(range_id),
-        table_name: format!("live_ledger{table_id}"),
+        table_id,
         interval: crabka_gres_ranges::transport::WireRowInterval { start, end },
         local_snapshot: crabka_gres_ranges::transport::WireSnapshot {
             xmin: 1,

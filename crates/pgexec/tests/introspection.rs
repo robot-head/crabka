@@ -23,6 +23,19 @@ fn cell_text(cell: Option<&Cell>) -> Option<String> {
     cell.map(|cell| String::from_utf8(cell.text.to_vec()).expect("valid text cell"))
 }
 
+/// A whole result as text, so a test can compare an entire expected table
+/// rather than a chain of per-cell assertions.
+fn text_rows(result: &QueryResult) -> Vec<Vec<Option<String>>> {
+    rows(result)
+        .iter()
+        .map(|row| row.iter().map(|cell| cell_text(cell.as_ref())).collect())
+        .collect()
+}
+
+fn some(values: &[&str]) -> Vec<Option<String>> {
+    values.iter().map(|v| Some((*v).to_string())).collect()
+}
+
 #[tokio::test]
 async fn pg_catalog_exposes_user_tables_columns_types_and_indexes() {
     let engine = SqlEngine::new();
@@ -368,5 +381,90 @@ async fn information_schema_exposes_columns_with_type_nullability_and_defaults()
                 Some("'anon'::text".into()),
             ),
         ]
+    );
+}
+
+async fn engine_with_foreign_key_fixtures() -> SqlEngine {
+    let engine = SqlEngine::new();
+    run(
+        &engine,
+        "CREATE TABLE orders (id int4, code int4, PRIMARY KEY (id, code))",
+    )
+    .await;
+    run(
+        &engine,
+        "CREATE TABLE order_lines (a int4, b int4, \
+         CONSTRAINT order_lines_order_fkey FOREIGN KEY (a, b) REFERENCES orders (id, code) \
+         ON UPDATE CASCADE ON DELETE SET NULL DEFERRABLE INITIALLY DEFERRED)",
+    )
+    .await;
+    engine
+}
+
+/// The SQL-standard views describe a foreign key from both ends: its deferral
+/// in `table_constraints`, its rules in `referential_constraints`, its
+/// *referencing* columns in `key_column_usage`, and its *referenced* ones in
+/// `constraint_column_usage`.
+#[tokio::test]
+async fn information_schema_describes_a_foreign_key_from_both_ends() {
+    let engine = engine_with_foreign_key_fixtures().await;
+
+    let constraints = run(
+        &engine,
+        "SELECT constraint_name, table_name, constraint_type, is_deferrable, initially_deferred \
+         FROM information_schema.table_constraints WHERE constraint_type = 'FOREIGN KEY'",
+    )
+    .await;
+    assert2::assert!(
+        text_rows(&constraints)
+            == vec![some(&[
+                "order_lines_order_fkey",
+                "order_lines",
+                "FOREIGN KEY",
+                "YES",
+                "YES",
+            ])]
+    );
+
+    let referential = run(
+        &engine,
+        "SELECT constraint_name, unique_constraint_name, match_option, update_rule, delete_rule \
+         FROM information_schema.referential_constraints",
+    )
+    .await;
+    assert2::assert!(
+        text_rows(&referential)
+            == vec![some(&[
+                "order_lines_order_fkey",
+                "orders_pkey",
+                "NONE",
+                "CASCADE",
+                "SET NULL",
+            ])]
+    );
+
+    let referencing = run(
+        &engine,
+        "SELECT table_name, column_name, ordinal_position, position_in_unique_constraint \
+         FROM information_schema.key_column_usage \
+         WHERE constraint_name = 'order_lines_order_fkey' ORDER BY ordinal_position",
+    )
+    .await;
+    assert2::assert!(
+        text_rows(&referencing)
+            == vec![
+                some(&["order_lines", "a", "1", "1"]),
+                some(&["order_lines", "b", "2", "2"]),
+            ]
+    );
+
+    let referenced = run(
+        &engine,
+        "SELECT table_name, column_name FROM information_schema.constraint_column_usage \
+         WHERE constraint_name = 'order_lines_order_fkey' ORDER BY column_name",
+    )
+    .await;
+    assert2::assert!(
+        text_rows(&referenced) == vec![some(&["orders", "code"]), some(&["orders", "id"])]
     );
 }

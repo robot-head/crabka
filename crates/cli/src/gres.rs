@@ -28,6 +28,12 @@ const EXIT_ERROR: i32 = 1;
 const DEFAULT_WAL_REPLICATION: i32 = 1;
 const DEFAULT_SCRAM_ITERATIONS: u32 = 4096;
 const DEFAULT_BACKEND_PORT: u16 = 5432;
+// Equality routing looks a hash bucket up at rowid 0 and answers for the whole
+// bucket, so cutting a range inside a bucket would leave half its rows on a
+// range the router never consults.
+const HASH_SPLIT_ROWID_ERROR: &str = "ROWID must be 0 for a hash-sharded table split; \
+     a split inside a hash bucket would leave that bucket owned by two ranges and hide half \
+     its rows from equality routing";
 
 #[derive(Args, Debug)]
 pub struct GresArgs {
@@ -169,7 +175,8 @@ struct SplitRangeArgs {
     tenant: String,
     /// Table identifier that starts the successor range.
     table: u64,
-    /// Row identifier at the split point.
+    /// Row identifier at the split point. Must be 0 for a hash-sharded table,
+    /// whose ranges may only be cut on a bucket start.
     rowid: u64,
     /// Hash bucket at the split point; required exactly for hash-sharded tables.
     #[arg(long)]
@@ -556,6 +563,9 @@ fn split_boundary(
         .find(|placement| placement.table_id == table_id);
     match (placement, bucket) {
         (Some(placement), Some(bucket)) if bucket < placement.bucket_count => {
+            if rowid != 0 {
+                return Err(HASH_SPLIT_ROWID_ERROR.to_string());
+            }
             Ok(RangeBoundary::hash(table_id, bucket, rowid))
         }
         (Some(_), Some(_)) => Err("--bucket must be less than the table hash bucket count".into()),
@@ -1169,13 +1179,14 @@ mod tests {
                 "isSharded": true,
                 "autoShardDisabled": false,
                 "convertStoreBytesThreshold": 10000,
-                "convertCommitRateThreshold": 10000
+                "convertCommitRateThreshold": 10000,
+                "hashBucketCount": null
             }],
             "ranges": [{
                 "rangeId": 1,
                 "tableId": 10,
-                "startRowid": 0,
-                "endRowid": 1000,
+                "startKey": { "table_id": 10, "rowid": 0 },
+                "endKey": { "table_id": 10, "rowid": 1000 },
                 "computeId": "c1",
                 "storeBytes": 2500,
                 "checkpointBytes": 0,
@@ -1213,13 +1224,59 @@ mod tests {
                 "isSharded": true,
                 "autoShardDisabled": false,
                 "convertStoreBytesThreshold": 10000,
-                "convertCommitRateThreshold": 10000
+                "convertCommitRateThreshold": 10000,
+                "hashBucketCount": null
             }],
             "ranges": [{
                 "rangeId": 1,
                 "tableId": 10,
-                "startRowid": 0,
-                "endRowid": 1000,
+                "startKey": { "table_id": 10, "rowid": 0 },
+                "endKey": { "table_id": 10, "rowid": 1000 },
+                "computeId": "c1",
+                "storeBytes": 2500,
+                "checkpointBytes": 0,
+                "commitRate": 0,
+                "scanBytes": 0,
+                "isSharded": true,
+                "coLocationGroup": null,
+                "coLocationBucket": null,
+                "isIndexRange": false
+            }]
+        }]
+    }"#;
+
+    const BALANCE_SNAPSHOT_HASH_SHARDED: &str = r#"{
+        "config": {
+            "goals": { "disabledGoals": [] },
+            "context": {
+                "sizeCeilingBytes": 1000,
+                "mergeFloorBytes": 100,
+                "splitStrideRows": 100,
+                "loadSkewHysteresisPct": 25,
+                "maxRangesPerCompute": null,
+                "maxOperations": 32,
+                "cooldownEpochs": 2,
+                "currentEpoch": 10,
+                "cooldowns": []
+            }
+        },
+        "tenants": [{
+            "tenantName": "tenant-a",
+            "computes": [{ "computeId": "c1" }],
+            "tables": [{
+                "tableId": 10,
+                "tableName": "orders",
+                "isSharded": true,
+                "autoShardDisabled": false,
+                "convertStoreBytesThreshold": 10000,
+                "convertCommitRateThreshold": 10000,
+                "hashBucketCount": 16
+            }],
+            "ranges": [{
+                "rangeId": 1,
+                "tableId": 10,
+                "startKey": { "table_id": 10, "bucket": 0, "rowid": 0 },
+                "endKey": { "table_id": 10, "bucket": 8, "rowid": 0 },
                 "computeId": "c1",
                 "storeBytes": 2500,
                 "checkpointBytes": 0,
@@ -1366,7 +1423,7 @@ mod tests {
     }
 
     #[test]
-    fn split_boundary_requires_exact_hash_bucket_contract() {
+    fn split_boundary_requires_a_bucket_aligned_hash_split_point() {
         let mut record = test_record("tenant-a", TenantState::Active);
         record.hash_placements = vec![crabka_gres_control::HashPlacement {
             table_id: 7,
@@ -1375,10 +1432,15 @@ mod tests {
             co_location_group: None,
         }];
 
-        assert!(split_boundary(&record, 7, Some(3), 9) == Ok(RangeBoundary::hash(7, 3, 9)));
-        assert!(split_boundary(&record, 7, None, 9).is_err());
-        assert!(split_boundary(&record, 7, Some(8), 9).is_err());
-        assert!(split_boundary(&record, 9, Some(0), 9).is_err());
+        // A hash-sharded table may only be cut on a bucket start: equality
+        // routing probes a bucket at rowid 0, so a cut inside a bucket would
+        // put the rest of its rows on a range the router never consults.
+        assert!(split_boundary(&record, 7, Some(3), 0) == Ok(RangeBoundary::hash(7, 3, 0)));
+        assert!(split_boundary(&record, 7, Some(3), 9) == Err(HASH_SPLIT_ROWID_ERROR.to_string()));
+        assert!(split_boundary(&record, 7, None, 0).is_err());
+        assert!(split_boundary(&record, 7, Some(8), 0).is_err());
+        assert!(split_boundary(&record, 9, Some(0), 0).is_err());
+        // A row-sharded table stays free to split at any rowid.
         assert!(split_boundary(&record, 9, None, 9) == Ok(RangeBoundary::new(9, 9)));
     }
 
@@ -1476,9 +1538,27 @@ mod tests {
             output.operations
                 == vec![BalanceOperation::Split {
                     tenant_name: "tenant-a".to_string(),
-                    table_id: 10,
                     source_range_id: 1,
-                    split_at_rowid: 500,
+                    split_at: RangeBoundary::new(10, 500),
+                }]
+        );
+    }
+
+    #[test]
+    fn gres_balance_dry_run_cuts_a_hash_sharded_range_on_a_bucket_start() {
+        let input: BalanceDryRunInput =
+            serde_json::from_str(BALANCE_SNAPSHOT_HASH_SHARDED).unwrap();
+
+        let output = plan_balance_dry_run(&input);
+
+        // Buckets 0..8 halve at bucket 4, and never inside a bucket: equality
+        // routing probes a bucket at rowid 0 and answers for all of its rows.
+        assert!(
+            output.operations
+                == vec![BalanceOperation::Split {
+                    tenant_name: "tenant-a".to_string(),
+                    source_range_id: 1,
+                    split_at: RangeBoundary::hash(10, 4, 0),
                 }]
         );
     }

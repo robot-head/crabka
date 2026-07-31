@@ -71,6 +71,9 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         // hashes as 0xffffffff rather than 0x0000ffff.
         Datum::Int2(v) => hash_uint32_extended(i32::from(*v).cast_unsigned(), seed),
         Datum::Int4(v) => hash_uint32_extended(v.cast_unsigned(), seed),
+        // `regclass` hashes through the oid operator family, whose
+        // `hashoidextended` is `hashint4extended` over the oid bits.
+        Datum::Regclass(v) => hash_uint32_extended(v.oid.cast_unsigned(), seed),
         Datum::Int8(v) => hash_int64_extended(*v, seed),
         // `hashtextextended` under a deterministic collation hashes the raw
         // bytes. `bpchar` differs — `hashbpcharextended` strips trailing spaces

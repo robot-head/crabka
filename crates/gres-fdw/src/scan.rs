@@ -136,7 +136,7 @@ mod tests {
     fn raw_value_table() -> Table {
         Table {
             id: 1,
-            name: "events".into(),
+            name: crabka_pgcatalog::RelationName::public("events"),
             columns: vec![
                 Column::new("_partition", ColumnType::Int4),
                 Column::new("_offset", ColumnType::Int8),

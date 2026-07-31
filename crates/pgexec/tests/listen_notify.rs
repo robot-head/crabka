@@ -405,9 +405,10 @@ async fn closing_a_listening_connection_removes_it_from_the_bus() {
 
 #[tokio::test]
 async fn the_plain_connect_path_is_registered_on_the_bus_and_yields_one_receiver() {
-    // `SqlEngine::connect()` is `connect_with_pid(0)`, so every session of this
-    // engine can listen and notify — unlike the gateway's `connect()`, which
-    // deliberately refuses. The receiver is handed out exactly once.
+    // `SqlEngine::connect()` draws its own backend pid and registers on the bus
+    // with it, so every session of this engine can listen and notify — unlike
+    // the gateway's `connect()`, which deliberately refuses. The receiver is
+    // handed out exactly once.
     let engine = SqlEngine::new();
     let mut session = engine.connect();
     assert!(session.take_notifications().is_some());

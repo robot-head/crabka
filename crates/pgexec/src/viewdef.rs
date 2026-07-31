@@ -307,7 +307,7 @@ fn target_item(expr: &Expr, target: &str, ctx: Ctx<'_>) -> String {
 /// The name of the only FROM item, when there is exactly one plain table.
 fn sole_from_name(from: &[TableExpr]) -> Option<&str> {
     match from {
-        [TableExpr::Table { name, alias, .. }] => Some(alias.as_deref().unwrap_or(name)),
+        [TableExpr::Table { name, alias, .. }] => Some(alias.as_deref().unwrap_or(&name.name)),
         _ => None,
     }
 }
@@ -338,7 +338,9 @@ fn order_list(items: &[OrderItem], ctx: Ctx<'_>) -> String {
 fn from_text(item: &TableExpr, ctx: Ctx<'_>) -> String {
     match item {
         TableExpr::Table { name, alias, .. } => {
-            let base = quote_identifier(name);
+            // PostgreSQL deparses a view body under the creator's search path,
+            // printing the relation unqualified when the path reaches it.
+            let base = quote_identifier(&name.name);
             alias.as_ref().map_or(base.clone(), |alias| {
                 format!("{base} {}", quote_identifier(alias))
             })
@@ -725,14 +727,14 @@ fn binary_op_text_rest(op: BinaryOp) -> &'static str {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_pgcatalog::{Column, View};
+    use crabka_pgcatalog::{Column, RelationName, View};
     use crabka_pgtypes::ColumnType;
 
     use crate::catalog_fn::view_definition_text;
 
     fn view(definition: &str, columns: &[&str]) -> View {
         View {
-            name: "v".into(),
+            name: RelationName::public("v"),
             definition: definition.into(),
             columns: columns
                 .iter()

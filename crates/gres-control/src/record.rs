@@ -847,7 +847,7 @@ pub struct HashPlacement {
 }
 
 /// A registry-visible row-key boundary.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct RangeBoundary {
     /// Table identifier component of the range boundary.
     pub table_id: u64,
@@ -1695,6 +1695,10 @@ fn ensure_hash_placements_valid(placements: &[HashPlacement]) -> Result<(), Cont
     Ok(())
 }
 
+// Hash equality routing probes a bucket at rowid 0 and answers for the whole
+// bucket, so every row of a bucket has to live on one range. A boundary that
+// falls between two rows of the same bucket breaks that, which is why a
+// hash-sharded table's boundary must sit exactly on a bucket start.
 fn ensure_boundaries_match_hash_placements(
     ranges: &[RangeLayoutEntry],
     placements: &[HashPlacement],
@@ -1704,7 +1708,16 @@ fn ensure_boundaries_match_hash_placements(
             .iter()
             .find(|placement| placement.table_id == boundary.table_id);
         match (boundary.bucket, placement) {
-            (Some(bucket), Some(placement)) if bucket < placement.bucket_count => {}
+            (Some(bucket), Some(placement)) if bucket < placement.bucket_count => {
+                if boundary.rowid != 0 {
+                    return Err(ControlError::invalid_field(
+                        "ranges.end_key.rowid",
+                        "must be zero on a hash-sharded table boundary: a boundary inside a \
+                         bucket leaves that bucket owned by two ranges, and hash equality \
+                         routing probes the bucket at rowid 0 so it only ever finds the first",
+                    ));
+                }
+            }
             (Some(_), Some(_)) => {
                 return Err(ControlError::invalid_field(
                     "ranges.end_key.bucket",

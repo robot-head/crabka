@@ -58,22 +58,25 @@ pub(crate) fn query_to_relation_with_ctes(
 
 pub(crate) fn describe_query_expr(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     q: &QueryExpr,
 ) -> Result<Vec<FieldDescription>, ExecError> {
     let ctes = crate::cte::CteContext::empty();
-    describe_query_expr_inner(catalog_kv, q, &ctes, true)
+    describe_query_expr_inner(catalog_kv, resolution, q, &ctes, true)
 }
 
 pub(crate) fn describe_query_expr_with_ctes(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     q: &QueryExpr,
     ctes: &crate::cte::CteContext,
 ) -> Result<Vec<FieldDescription>, ExecError> {
-    describe_query_expr_inner(catalog_kv, q, ctes, false)
+    describe_query_expr_inner(catalog_kv, resolution, q, ctes, false)
 }
 
 fn describe_query_expr_inner(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     q: &QueryExpr,
     ctes: &crate::cte::CteContext,
     allow_locking: bool,
@@ -88,7 +91,8 @@ fn describe_query_expr_inner(
             "FOR UPDATE/SHARE with CTEs is not supported".into(),
         ));
     }
-    let query_ctes = crate::cte::describe_with_clause(catalog_kv, q.with.as_ref(), ctes)?;
+    let query_ctes =
+        crate::cte::describe_with_clause(catalog_kv, resolution, q.with.as_ref(), ctes)?;
     match &q.body {
         SetExpr::Query(QueryBody::Select(s)) => {
             if !allow_locking {
@@ -98,10 +102,17 @@ fn describe_query_expr_inner(
                 crate::exec::reject_from_less_wildcard(&s.projection)?;
                 Scope::empty()
             } else {
-                crate::exec::build_from_schema_with_ctes(catalog_kv, &s.from, &query_ctes)?.scope
+                crate::exec::build_from_schema_with_ctes(
+                    catalog_kv,
+                    resolution,
+                    &s.from,
+                    &query_ctes,
+                )?
+                .scope
             };
             let projection = crate::subquery::resolve_types_in_projection_with_ctes(
                 catalog_kv,
+                resolution,
                 &s.projection,
                 &query_ctes,
             )?;
@@ -113,7 +124,12 @@ fn describe_query_expr_inner(
             Ok(fields)
         }
         SetExpr::Query(QueryBody::Values(v)) => {
-            let rel = crate::values::values_schema_relation_with_ctes(catalog_kv, v, &query_ctes)?;
+            let rel = crate::values::values_schema_relation_with_ctes(
+                catalog_kv,
+                resolution,
+                v,
+                &query_ctes,
+            )?;
             Ok(rel
                 .scope
                 .columns
@@ -122,10 +138,10 @@ fn describe_query_expr_inner(
                 .collect())
         }
         SetExpr::Query(QueryBody::Nested(nested)) => {
-            describe_query_expr_inner(catalog_kv, nested, &query_ctes, false)
+            describe_query_expr_inner(catalog_kv, resolution, nested, &query_ctes, false)
         }
         SetExpr::SetOp { .. } => {
-            crate::setops::describe_set_expr_with_ctes(catalog_kv, &q.body, &query_ctes)
+            crate::setops::describe_set_expr_with_ctes(catalog_kv, resolution, &q.body, &query_ctes)
         }
     }
 }

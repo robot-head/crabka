@@ -1,8 +1,9 @@
 use std::sync::{Arc, Mutex};
 
+use assert2::assert;
 use crabka_pgcatalog::{
-    CatalogError, Column, ForeignServer, HashSharding, ShardingStrategy, Table, TablePrivilege,
-    UserMapping, get_table, list_table_privileges,
+    CatalogError, Column, ForeignServer, HashSharding, RelationName, ShardingStrategy, Table,
+    TablePrivilege, UserMapping, get_table, list_table_privileges,
 };
 use crabka_pgexec::{Committer, LocalLinearizer, SqlEngine, foreign};
 use crabka_pgkv::{Kv, MemKv, WriteOp};
@@ -132,7 +133,9 @@ async fn fdw_ddl_routes_all_catalog_writes_through_committer() {
     run(&mut session, "DROP FOREIGN DATA WRAPPER kafka_fdw").await;
 
     let batches = committer.batches();
-    assert_eq!(batches.len(), 8);
+    // Eight statements, plus the one batch that claims this session's block of
+    // table ids — taken once, on the first statement that creates a relation.
+    assert!(batches.len() == 9);
     assert!(batches.iter().all(|batch| !batch.is_empty()));
 }
 
@@ -146,7 +149,9 @@ async fn alter_table_rename_uses_authoritative_catalog_and_preserves_sharding_an
         "CREATE TABLE orders (id int4, region text) SHARDED BY HASH (id) BUCKETS 8",
     )
     .await;
-    let original_table_id = get_table(catalog_kv.as_ref(), "orders")
+    let orders = RelationName::public("orders");
+    let fulfilled = RelationName::public("fulfilled_orders");
+    let original_table_id = get_table(catalog_kv.as_ref(), &orders)
         .expect("original table exists in the authoritative catalog")
         .id;
     run(&mut session, "CREATE ROLE analyst").await;
@@ -162,39 +167,46 @@ async fn alter_table_rename_uses_authoritative_catalog_and_preserves_sharding_an
         buckets: 8,
         co_location_group: None,
     });
-    let renamed = get_table(catalog_kv.as_ref(), "fulfilled_orders")
+    let renamed = get_table(catalog_kv.as_ref(), &fulfilled)
         .expect("renamed table exists in the authoritative catalog");
     assert_eq!(renamed.id, original_table_id);
-    assert_eq!(renamed.name, "fulfilled_orders");
+    // The rename keeps the relation in the schema it was already in.
+    assert_eq!(renamed.name, fulfilled);
     assert!(renamed.sharded);
     assert_eq!(renamed.sharding, Some(expected_sharding.clone()));
     assert_eq!(
         engine
-            .table_sharding("fulfilled_orders")
+            .table_sharding(&fulfilled)
             .expect("engine catalog lookup"),
         Some(expected_sharding),
     );
     assert_eq!(
         list_table_privileges(catalog_kv.as_ref()).expect("catalog privileges"),
         vec![TablePrivilege {
-            table: "fulfilled_orders".into(),
+            table: fulfilled.clone(),
             grantee: "analyst".into(),
             privilege: "SELECT".into(),
         }],
     );
     assert_eq!(
-        get_table(catalog_kv.as_ref(), "orders"),
+        get_table(catalog_kv.as_ref(), &orders),
         Err(CatalogError::UndefinedTable("orders".into())),
     );
     assert_eq!(
         catalog_kv
-            .get(&crabka_pgkv::key::catalog_sharding_key("orders"))
+            .get(&crabka_pgkv::key::catalog_sharding_key(
+                &orders.schema,
+                &orders.name
+            ))
             .expect("old sharding metadata lookup"),
         None,
     );
     assert_eq!(
         data_kv
-            .get(&crabka_pgkv::key::catalog_key("fulfilled_orders"))
+            .get(&crabka_pgkv::key::catalog_key(
+                &fulfilled.schema,
+                &fulfilled.name
+            ))
             .expect("data store lookup"),
         None,
     );
@@ -220,8 +232,12 @@ async fn import_foreign_schema_routes_created_tables_through_committer() {
 
     let batches = committer.batches();
     let import_batch = batches.last().expect("import batch recorded");
-    assert_eq!(batches.len(), 3);
-    assert_eq!(import_batch.len(), 3);
+    // `IMPORT FOREIGN SCHEMA` allocates from the counter under the counter's own
+    // lock rather than claiming a block, so it adds no batch of its own.
+    assert!(batches.len() == 3);
+    // The imported table's schema, its rowid sequence, its id-index entry, and
+    // the one counter bump the batch owes.
+    assert!(import_batch.len() == 4);
 
     let rows = session
         .simple_query("SELECT value FROM imported_one")

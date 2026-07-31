@@ -2755,14 +2755,22 @@ struct OrdinaryPhysicalRow {
     checksum: String,
 }
 
+/// Scan one range directly, bypassing the gateway.
+///
+/// `routing_table_id` is the suffix the fixture bakes into the relation name to
+/// pin its routing slot; the scan RPC addresses the relation by *catalog* id, so
+/// the two are resolved against each other here rather than assumed equal.
 async fn direct_ordinary_physical_rows(
     system: &ProcessHarness,
     range_id: u32,
-    table_id: u64,
+    routing_table_id: u64,
 ) -> Vec<OrdinaryPhysicalRow> {
+    let table_id = system
+        .catalog_table_id(&format!("live_ledger{routing_table_id}"))
+        .await;
     let scan = crabka_gres_ranges::transport::ScanRangeReq {
         range_id: RangeId::new(range_id),
-        table_name: format!("live_ledger{table_id}"),
+        table_id,
         interval: crabka_gres_ranges::transport::WireRowInterval {
             start: None,
             end: None,
@@ -2811,7 +2819,7 @@ async fn direct_ordinary_physical_rows(
                 panic!("unexpected terminal payload tuple {values:?}");
             };
             OrdinaryPhysicalRow {
-                table_id,
+                table_id: routing_table_id,
                 physical_rowid: row.rowid,
                 id: u64::try_from(*id).expect("positive payload id"),
                 seq: u64::try_from(*seq).expect("positive payload seq"),
@@ -2858,14 +2866,19 @@ async fn direct_payload_rows(
         .collect()
 }
 
+/// Scan one hash-sharded range directly. See [`direct_ordinary_physical_rows`]
+/// for why the routing suffix and the catalog id are resolved separately.
 async fn direct_hash_payload_rows(
     system: &ProcessHarness,
     range_id: u32,
-    table_id: u64,
+    routing_table_id: u64,
 ) -> Vec<PhysicalPayloadRow> {
+    let table_id = system
+        .catalog_table_id(&format!("live_ledger{routing_table_id}"))
+        .await;
     let scan = crabka_gres_ranges::transport::ScanRangeReq {
         range_id: RangeId::new(range_id),
-        table_name: format!("live_ledger{table_id}"),
+        table_id,
         interval: crabka_gres_ranges::transport::WireRowInterval {
             start: None,
             end: None,
@@ -2914,7 +2927,7 @@ async fn direct_hash_payload_rows(
                 panic!("unexpected terminal hash payload tuple {values:?}");
             };
             PhysicalPayloadRow {
-                table_id,
+                table_id: routing_table_id,
                 rowid: u64::try_from(*id).expect("positive hash payload id"),
                 seq: u64::try_from(*seq).expect("positive hash payload seq"),
                 checksum: checksum.clone(),
