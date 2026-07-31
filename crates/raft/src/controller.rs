@@ -15,6 +15,7 @@
 use std::{collections::BTreeMap, net::SocketAddr, sync::Arc};
 
 use crabka_metadata::{MetadataImage, MetadataRecord};
+use crabka_units::prelude::{ByteSize, ByteSizeExt as _};
 use tokio::{
     sync::{Mutex, watch},
     task::JoinHandle,
@@ -125,6 +126,11 @@ impl ControllerHandle {
     /// Read up to `max_bytes` of the latest metadata snapshot starting at
     /// `position`. Reads the engine's `.checkpoint` artifacts directly (the
     /// engine writes a bare KIP-630 checkpoint, no `.meta` sidecar).
+    ///
+    /// `position` and `max_bytes` stay the raw KIP-595 `FetchSnapshot` `int64`
+    /// and `int32`: both are byte offsets into an on-disk checkpoint that the
+    /// broker's handler forwards straight off the wire, so there is no domain
+    /// layer between the decode and the slice index for a quantity to occupy.
     #[must_use]
     pub fn read_snapshot_range(&self, position: i64, max_bytes: i32) -> SnapshotRange {
         let Some((id, bytes)) =
@@ -208,10 +214,10 @@ impl ControllerHandle {
     pub async fn metadata_records(
         &self,
         fetch_offset: u64,
-        max_bytes: usize,
+        max_size: ByteSize,
     ) -> crate::kraft::MetadataFetchSlice {
         let off = i64::try_from(fetch_offset).unwrap_or(i64::MAX);
-        self.engine.metadata_fetch(off, max_bytes).await.unwrap_or(
+        self.engine.metadata_fetch(off, max_size).await.unwrap_or(
             crate::kraft::MetadataFetchSlice {
                 records: bytes::Bytes::new(),
                 log_start_offset: 0,
@@ -357,11 +363,13 @@ impl ControllerHandle {
         &self,
         addr: SocketAddr,
         fetch_offset: u64,
-        max_bytes: u32,
+        max_size: ByteSize,
     ) -> Result<crate::wire::CrabkaMetadataFetchResponse, RaftError> {
         let req = crate::wire::CrabkaMetadataFetchRequest {
             fetch_offset: i64::try_from(fetch_offset).unwrap_or(i64::MAX),
-            max_bytes: i32::try_from(max_bytes).unwrap_or(i32::MAX),
+            // `max_bytes` is the KIP-595-shaped `int32` on the Crabka observer
+            // wire; the quantity converts here and nowhere deeper.
+            max_bytes: max_size.bytes_i32(),
         };
         let mut body = Vec::with_capacity(12);
         req.encode_v0(&mut body);
@@ -722,8 +730,6 @@ impl Controller {
             config.client_frame_max,
         ));
 
-        let election_ms = u64::try_from(config.election_timeout.as_millis()).unwrap_or(1_000);
-
         // Build / recover the engine. `Join` nodes with an empty log + empty
         // voter set sit unattached; `Bootstrap` seeds the static voter set.
         let engine = KraftController::open(
@@ -731,7 +737,11 @@ impl Controller {
             config.node_id,
             cluster_id,
             voters.clone(),
-            election_ms,
+            config.election_timeout,
+            config.heartbeat_interval,
+            config.controller_fetch_miss_limit,
+            config.metadata_raft_command_queue_capacity,
+            config.metadata_raft_fetch_max,
             peers,
             config.snapshot_interval_records,
             metadata_snapshot_fetch_max,
@@ -806,11 +816,18 @@ pub fn metadata_log_nonempty(dir: &std::path::Path) -> bool {
 #[cfg(test)]
 mod bootstrap_mode_tests {
     use assert2::check;
+    use crabka_units::prelude::{Time, TimeExt as _, gibibytes, mebibytes, millis, secs};
     use tempfile::TempDir;
 
     use super::*;
 
-    const TEST_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    const TEST_OP_TIMEOUT: Time = secs(2);
+
+    /// Election timeout used by tests that want a leader elected promptly.
+    const FAST_ELECTION_TIMEOUT: Time = millis(200);
+
+    /// A fetch budget large enough that no test log is truncated by it.
+    const UNBOUNDED_FETCH: ByteSize = gibibytes(1);
 
     #[test]
     fn controller_endpoint_addr_keeps_dns_hostname_not_parsed_socketaddr() {
@@ -891,10 +908,13 @@ mod bootstrap_mode_tests {
 
     async fn wait_for_leader(ctrl: &ControllerHandle) {
         let mut leader_rx = ctrl.watch_leader();
-        tokio::time::timeout(TEST_OP_TIMEOUT, leader_rx.wait_for(Option::is_some))
-            .await
-            .expect("no leader elected within 2s")
-            .expect("leader watch channel closed");
+        tokio::time::timeout(
+            TEST_OP_TIMEOUT.to_std(),
+            leader_rx.wait_for(Option::is_some),
+        )
+        .await
+        .expect("no leader elected within 2s")
+        .expect("leader watch channel closed");
     }
 
     async fn submit_change_with_timeout(
@@ -902,7 +922,7 @@ mod bootstrap_mode_tests {
         records: Vec<crabka_metadata::MetadataRecord>,
         context: &str,
     ) -> Result<(), RaftError> {
-        tokio::time::timeout(TEST_OP_TIMEOUT, ctrl.submit_change(records))
+        tokio::time::timeout(TEST_OP_TIMEOUT.to_std(), ctrl.submit_change(records))
             .await
             .unwrap_or_else(|_| panic!("{context} submit_change timed out"))
             .map(|_| ())
@@ -1057,7 +1077,7 @@ mod bootstrap_mode_tests {
     async fn reconfig_ops_reflect_live_single_voter_state_and_submit_records() {
         let dir = TempDir::new().unwrap();
         let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
-        cfg.election_timeout = std::time::Duration::from_millis(200);
+        cfg.election_timeout = FAST_ELECTION_TIMEOUT;
         let ctrl = Controller::start(cfg).await.expect("bootstrap");
         wait_for_leader(&ctrl).await;
 
@@ -1071,7 +1091,7 @@ mod bootstrap_mode_tests {
         );
 
         tokio::time::timeout(
-            TEST_OP_TIMEOUT,
+            TEST_OP_TIMEOUT.to_std(),
             <ControllerHandle as crate::reconfig::ReconfigOps>::submit_records(
                 &ctrl,
                 vec![committable_topic_record("ops-a")],
@@ -1081,7 +1101,7 @@ mod bootstrap_mode_tests {
         .expect("submit ops-a timed out")
         .expect("submit ops-a");
         tokio::time::timeout(
-            TEST_OP_TIMEOUT,
+            TEST_OP_TIMEOUT.to_std(),
             <ControllerHandle as crate::reconfig::ReconfigOps>::submit_records(
                 &ctrl,
                 vec![committable_topic_record("ops-b")],
@@ -1409,9 +1429,12 @@ mod bootstrap_mode_tests {
         .await
         .expect("submit");
 
-        let slice = tokio::time::timeout(TEST_OP_TIMEOUT, ctrl.metadata_records(0, usize::MAX))
-            .await
-            .expect("metadata_records timed out");
+        let slice = tokio::time::timeout(
+            TEST_OP_TIMEOUT.to_std(),
+            ctrl.metadata_records(0, UNBOUNDED_FETCH),
+        )
+        .await
+        .expect("metadata_records timed out");
         assert2::assert!(slice.high_watermark >= 1);
         let image = MetadataImage::new(Uuid::nil());
         let mut buf: &[u8] = &slice.records;
@@ -1463,8 +1486,8 @@ mod bootstrap_mode_tests {
 
         let addr = ctrl.controller_bound_addr();
         let resp = tokio::time::timeout(
-            TEST_OP_TIMEOUT,
-            ctrl.fetch_metadata_from(addr, 0, 1_048_576),
+            TEST_OP_TIMEOUT.to_std(),
+            ctrl.fetch_metadata_from(addr, 0, mebibytes(1)),
         )
         .await
         .expect("fetch_metadata_from timed out")
@@ -1503,7 +1526,7 @@ mod bootstrap_mode_tests {
             client_ids: Arc::clone(&client_ids),
         };
         let mut cfg = ControllerConfig::for_tests(NodeId(1), dir.path().to_path_buf());
-        cfg.election_timeout = std::time::Duration::from_millis(200);
+        cfg.election_timeout = FAST_ELECTION_TIMEOUT;
         cfg.client_id = "metadata-fetch-client".into();
         cfg.dialer = Some(Arc::new(dialer));
 
@@ -1518,8 +1541,8 @@ mod bootstrap_mode_tests {
         .expect("submit");
 
         let resp = tokio::time::timeout(
-            TEST_OP_TIMEOUT,
-            ctrl.fetch_metadata_from(ctrl.controller_bound_addr(), 0, 1_048_576),
+            TEST_OP_TIMEOUT.to_std(),
+            ctrl.fetch_metadata_from(ctrl.controller_bound_addr(), 0, mebibytes(1)),
         )
         .await
         .expect("fetch_metadata_from timed out")

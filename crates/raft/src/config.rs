@@ -1,13 +1,14 @@
 //! Construction-time config for `Controller::start`.
 
-use std::{future::Future, net::SocketAddr, path::PathBuf, pin::Pin, sync::Arc};
+use std::{fmt, future::Future, net::SocketAddr, path::PathBuf, pin::Pin, str::FromStr, sync::Arc};
 
 use bytes::Bytes;
 use crabka_kraft_core::snapshot_fetch::METADATA_SNAPSHOT_FETCH_HARD_MAX;
 use crabka_units::{
     fmt::Human as _,
-    prelude::{ByteSize, Time, hours, mebibytes, millis, secs},
+    prelude::{ByteSize, ByteSizeExt as _, Time, hours, mebibytes, millis, secs},
 };
+use refined_type::rule::{GreaterI32, GreaterU32, GreaterUsize};
 use uuid::Uuid;
 
 use crate::{error::RaftError, network::OutboundDialer, types::NodeId};
@@ -23,6 +24,167 @@ const TEST_ELECTION_TIMEOUT: Time = secs(1);
 
 /// Leader heartbeat cadence used by [`ControllerConfig::for_tests`].
 const TEST_HEARTBEAT_INTERVAL: Time = millis(200);
+
+pub const DEFAULT_CONTROLLER_FETCH_MISS_LIMIT: u32 = 3;
+pub const DEFAULT_METADATA_RAFT_COMMAND_QUEUE_CAPACITY: usize = 256;
+pub const DEFAULT_METADATA_RAFT_FETCH_MAX: ByteSize = mebibytes(8);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ControllerFetchMissLimit(u32);
+
+impl ControllerFetchMissLimit {
+    /// Validate the consecutive fetch-miss limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: u32) -> Result<Self, String> {
+        GreaterU32::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("controller fetch miss limit: {error}"))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u32 {
+        self.0
+    }
+}
+
+impl Default for ControllerFetchMissLimit {
+    fn default() -> Self {
+        Self::new(DEFAULT_CONTROLLER_FETCH_MISS_LIMIT)
+            .expect("default controller fetch miss limit is positive")
+    }
+}
+
+impl FromStr for ControllerFetchMissLimit {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+impl fmt::Display for ControllerFetchMissLimit {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MetadataRaftCommandQueueCapacity(usize);
+
+impl MetadataRaftCommandQueueCapacity {
+    /// Validate the metadata Raft command queue capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: usize) -> Result<Self, String> {
+        GreaterUsize::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("metadata raft command queue capacity: {error}"))
+    }
+
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for MetadataRaftCommandQueueCapacity {
+    fn default() -> Self {
+        Self::new(DEFAULT_METADATA_RAFT_COMMAND_QUEUE_CAPACITY)
+            .expect("default metadata raft command queue capacity is positive")
+    }
+}
+
+impl FromStr for MetadataRaftCommandQueueCapacity {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+impl fmt::Display for MetadataRaftCommandQueueCapacity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MetadataRaftFetchMax(i32);
+
+impl MetadataRaftFetchMax {
+    /// Validate the protocol byte count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero or negative.
+    pub fn new(value: i32) -> Result<Self, String> {
+        GreaterI32::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("metadata raft fetch max: {error}"))
+    }
+
+    #[must_use]
+    pub const fn bytes(self) -> i32 {
+        self.0
+    }
+
+    #[must_use]
+    pub fn size(self) -> ByteSize {
+        ByteSize::from_bytes_i64(i64::from(self.0))
+    }
+}
+
+impl TryFrom<ByteSize> for MetadataRaftFetchMax {
+    type Error = String;
+
+    fn try_from(value: ByteSize) -> Result<Self, Self::Error> {
+        let bytes = value.bytes_f64();
+        if !bytes.is_finite()
+            || bytes.fract() != 0.0
+            || !(1.0..=f64::from(i32::MAX)).contains(&bytes)
+        {
+            return Err(
+                "metadata raft fetch max must be a positive whole-byte value that fits i32"
+                    .to_owned(),
+            );
+        }
+        Self::new(value.bytes_i32())
+    }
+}
+
+impl Default for MetadataRaftFetchMax {
+    fn default() -> Self {
+        Self::try_from(DEFAULT_METADATA_RAFT_FETCH_MAX)
+            .expect("default metadata raft fetch max is protocol-safe")
+    }
+}
+
+impl FromStr for MetadataRaftFetchMax {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        crabka_units::parse::byte_size(value)
+            .map_err(|error| error.to_string())?
+            .try_into()
+    }
+}
+
+impl fmt::Display for MetadataRaftFetchMax {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.size().human().fmt(formatter)
+    }
+}
 
 /// Optional router for KIP-595 traffic addressed to non-metadata quorum shards.
 pub type ShardRouteFuture<'a> =
@@ -90,7 +252,12 @@ pub struct ControllerConfig {
     pub controller_listen_addr: SocketAddr,
     pub log_dir: PathBuf,
     pub election_timeout: Time,
-    pub heartbeat_interval: Time,
+    /// Explicit heartbeat cadence. `None` preserves the derived
+    /// `election_timeout / 3` behavior.
+    pub heartbeat_interval: Option<Time>,
+    pub controller_fetch_miss_limit: ControllerFetchMissLimit,
+    pub metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity,
+    pub metadata_raft_fetch_max: MetadataRaftFetchMax,
     pub client_id: String,
     pub bootstrap_mode: BootstrapMode,
     /// Cluster UUID applied to the `MetadataImage` on first construction.
@@ -147,8 +314,19 @@ impl std::fmt::Debug for ControllerConfig {
             )
             .field(
                 "heartbeat_interval",
-                &self.heartbeat_interval.human().to_string(),
+                &self
+                    .heartbeat_interval
+                    .map(|value| value.human().to_string()),
             )
+            .field(
+                "controller_fetch_miss_limit",
+                &self.controller_fetch_miss_limit,
+            )
+            .field(
+                "metadata_raft_command_queue_capacity",
+                &self.metadata_raft_command_queue_capacity,
+            )
+            .field("metadata_raft_fetch_max", &self.metadata_raft_fetch_max)
             .field("client_id", &self.client_id)
             .field("bootstrap_mode", &self.bootstrap_mode)
             .field("cluster_id", &self.cluster_id)
@@ -201,7 +379,10 @@ impl ControllerConfig {
             controller_listen_addr: listen,
             log_dir,
             election_timeout: TEST_ELECTION_TIMEOUT,
-            heartbeat_interval: TEST_HEARTBEAT_INTERVAL,
+            heartbeat_interval: Some(TEST_HEARTBEAT_INTERVAL),
+            controller_fetch_miss_limit: ControllerFetchMissLimit::default(),
+            metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity::default(),
+            metadata_raft_fetch_max: MetadataRaftFetchMax::default(),
             client_id: "crabka-controller-test".into(),
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: None,
@@ -240,7 +421,44 @@ mod tests {
         check!(cfg.max_bytes_between_snapshots.bytes_u64() == 20 * 1024 * 1024);
         check!(cfg.max_snapshot_interval.millis_i64() == 3_600_000);
         check!(cfg.election_timeout.millis_i64() == 1_000);
-        check!(cfg.heartbeat_interval.millis_i64() == 200);
+        check!(
+            cfg.heartbeat_interval
+                .expect("test heartbeat is explicit")
+                .millis_i64()
+                == 200
+        );
+    }
+
+    #[test]
+    fn raft_runtime_policy_defaults_and_validation() {
+        check!(ControllerFetchMissLimit::default().get() == 3);
+        check!(ControllerFetchMissLimit::new(0).is_err());
+        check!(
+            "7".parse::<ControllerFetchMissLimit>()
+                .expect("positive miss limit")
+                .get()
+                == 7
+        );
+
+        check!(MetadataRaftCommandQueueCapacity::default().get() == 256);
+        check!(MetadataRaftCommandQueueCapacity::new(0).is_err());
+        check!(
+            "512"
+                .parse::<MetadataRaftCommandQueueCapacity>()
+                .expect("positive command queue capacity")
+                .get()
+                == 512
+        );
+
+        check!(MetadataRaftFetchMax::default().size() == mebibytes(8));
+        check!(MetadataRaftFetchMax::try_from(ByteSize::from_bytes_i64(0)).is_err());
+        check!(
+            "4MiB"
+                .parse::<MetadataRaftFetchMax>()
+                .expect("positive whole-byte fetch maximum")
+                .bytes()
+                == 4 * 1024 * 1024
+        );
     }
 
     #[test]

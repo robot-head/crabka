@@ -69,7 +69,10 @@ mod snapshot;
 mod types;
 mod wire;
 
-pub use config::{BootstrapMode, ControllerConfig, RaftShardRouter, ShardRouteFuture};
+pub use config::{
+    BootstrapMode, ControllerConfig, ControllerFetchMissLimit, MetadataRaftCommandQueueCapacity,
+    MetadataRaftFetchMax, RaftShardRouter, ShardRouteFuture,
+};
 pub use controller::{
     Controller, ControllerHandle, QuorumState, SnapshotRange, SnapshotSlice, metadata_log_nonempty,
 };
