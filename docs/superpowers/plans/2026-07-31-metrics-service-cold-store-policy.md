@@ -35,7 +35,7 @@
 - Changes private helper to `normalize_refresh_range(start_ms: i64, end_ms: i64, lookback: Time, now_ms: i64) -> (i64, i64)`.
 - Preserves: `RefreshingMetricBlockStore::new` and public router-helper signatures.
 
-- [ ] **Step 1: Write failing policy tests**
+- [x] **Step 1: Write failing policy tests**
 
 Add these tests to the existing `lib.rs` test module:
 
@@ -84,7 +84,9 @@ fn configured_cold_cache_ttl_controls_freshness() {
         url::Url::parse("memory:///").unwrap(),
     ));
     let cached = super::CachedMetricBlockStore {
-        cached_at: std::time::Instant::now() - std::time::Duration::from_secs(2),
+        cached_at: std::time::Instant::now()
+            .checked_sub(std::time::Duration::from_secs(2))
+            .expect("two seconds before now is representable"),
         start_ms: 0,
         end_ms: 100,
         cold,
@@ -94,7 +96,7 @@ fn configured_cold_cache_ttl_controls_freshness() {
 }
 ```
 
-- [ ] **Step 2: Run focused tests and verify red**
+- [x] **Step 2: Run focused tests and verify red**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -105,7 +107,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: compilation fails because the policy fields, setters, and explicit normalization inputs do not exist.
 
-- [ ] **Step 3: Implement minimal library injection**
+- [x] **Step 3: Implement minimal library injection**
 
 Make the existing constants public, add the two fields, and initialize them:
 
@@ -156,7 +158,7 @@ fn normalize_refresh_range(
 
 Call it from `current_store` with `self.unbounded_compatibility_lookback` and `unix_time_ms()`.
 
-- [ ] **Step 4: Run focused library tests and verify green**
+- [x] **Step 4: Run focused library tests and verify green**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -169,7 +171,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: all selected tests pass.
 
-- [ ] **Step 5: Commit library injection**
+- [x] **Step 5: Commit library injection**
 
 ```bash
 git add -- crates/metrics-service/src/lib.rs
@@ -189,7 +191,7 @@ git commit -m "feat(metrics): inject cold-store policy"
 - Produces: `--unbounded-compatibility-lookback` / `CRABKA_METRICS_UNBOUNDED_COMPATIBILITY_LOOKBACK`.
 - Preserves: the flat CLI and all target startup signatures.
 
-- [ ] **Step 1: Write failing CLI and environment tests**
+- [x] **Step 1: Write failing CLI and environment tests**
 
 Add default, override, and invalid-value coverage:
 
@@ -279,7 +281,7 @@ fn cold_store_policy_reads_environment_and_prefers_cli() {
 }
 ```
 
-- [ ] **Step 2: Run the focused binary test and verify red**
+- [x] **Step 2: Run the focused binary test and verify red**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -289,7 +291,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: compilation fails because both `Cli` fields do not exist.
 
-- [ ] **Step 3: Implement positive UOM fields and role wiring**
+- [x] **Step 3: Implement positive UOM fields and role wiring**
 
 Add both `Cli` fields:
 
@@ -325,7 +327,7 @@ let metric_store = RefreshingMetricBlockStore::new(
 
 Retain each role's existing `Arc::clone`, `WalHead::new`, or `head` argument.
 
-- [ ] **Step 4: Run focused binary and library tests**
+- [x] **Step 4: Run focused binary and library tests**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -336,7 +338,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: both binary policy tests and all library tests pass.
 
-- [ ] **Step 5: Commit CLI and environment wiring**
+- [x] **Step 5: Commit CLI and environment wiring**
 
 ```bash
 git add -- crates/metrics-service/src/main.rs
@@ -355,7 +357,7 @@ git commit -m "feat(metrics): configure cold-store policy"
 - Consumes: the completed library and binary configuration surface.
 - Produces: audit evidence that both cold-store policies are no longer pending.
 
-- [ ] **Step 1: Run the complete focused suite**
+- [x] **Step 1: Run the complete focused suite**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -364,7 +366,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: every non-ignored target passes; Docker-only tests remain explicitly ignored.
 
-- [ ] **Step 2: Run repository verification gates**
+- [x] **Step 2: Run repository verification gates**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -377,7 +379,7 @@ git diff --check
 
 Expected: all commands exit successfully and Clippy emits no warnings.
 
-- [ ] **Step 3: Update the configuration audit**
+- [x] **Step 3: Update the configuration audit**
 
 Replace the pending metrics-service paragraph with a completed statement naming:
 
@@ -391,7 +393,7 @@ values, zero and negative values are rejected, all three roles receive the
 settings, and no CRD owns the standalone service. Record actual focused test
 counts and repository verification gates.
 
-- [ ] **Step 4: Mark the plan complete and inspect the final diff**
+- [x] **Step 4: Mark the plan complete and inspect the final diff**
 
 Change every task checkbox to `[x]`, then run:
 
@@ -404,7 +406,7 @@ git diff --stat HEAD~2
 Expected: only the audit and this plan remain uncommitted; the four protected
 2026-07-28 plans remain untracked and unchanged.
 
-- [ ] **Step 5: Commit audit closure**
+- [x] **Step 5: Commit audit closure**
 
 ```bash
 git add -- docs/configuration-audit.md \

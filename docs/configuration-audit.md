@@ -4882,7 +4882,7 @@ The completed slice passed all 191 library tests, 19 binary tests, and six
 integration/property tests. Workspace all-target checking, strict
 warnings-as-errors Clippy, nightly formatting, and diff hygiene also passed.
 
-## Metrics Service UOM Closure and Remaining Policy
+## Metrics Service UOM and Cold-Store Policy Closure
 
 The metrics-service WAL-head retention flag now accepts `Time` directly and
 the demo uses `5m` instead of raw milliseconds. Every service option is backed
@@ -4890,20 +4890,18 @@ by a `CRABKA_METRICS_*` environment variable, and positive intervals reject
 zero or negative values at parsing.
 
 The scanner reports 12 rows. Eight are tests or embedded test YAML and the
-ruler-state topic is a compatibility name. Two runtime policies remain: the
-30-second cold-manifest cache TTL and the one-hour lookback substituted for an
-unbounded compatibility query.
+ruler-state topic is a compatibility name. The cold-manifest cache TTL and
+unbounded compatibility-query lookback now live as UOM `Time` values in
+`RefreshingMetricBlockStore`. `CRABKA_METRICS_COLD_CACHE_TTL` and
+`CRABKA_METRICS_UNBOUNDED_COMPATIBILITY_LOOKBACK` expose them through the
+standalone binary CLI for querier, query-frontend, and ruler. Defaults remain
+`30s` and `1h`; zero and negative values are rejected. No CRD owns this
+standalone service.
 
-The proposed minimal surface is to store both `Time` values in
-`RefreshingMetricBlockStore` and expose `CRABKA_METRICS_COLD_CACHE_TTL` and
-`CRABKA_METRICS_UNBOUNDED_COMPATIBILITY_LOOKBACK` through the existing
-standalone binary CLI. Defaults preserve current behavior. No CRD currently
-owns this standalone service.
-
-This design is pending explicit approval and has not been implemented. The
-completed UOM/env slice passed 25 library tests, 13 binary tests, the
-non-Docker integration test, and strict all-target Clippy; three Docker-only
-compatibility tests were explicitly ignored.
+The completed slice passed 28 library tests, 17 binary tests, and the
+non-Docker integration test; three Docker-only compatibility tests were
+explicitly ignored. Workspace all-target checking, strict warnings-as-errors
+Clippy, nightly formatting, and diff hygiene also passed.
 
 ## Observability UOM Closure and Remaining Policy
 
