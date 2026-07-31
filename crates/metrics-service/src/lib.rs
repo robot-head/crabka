@@ -1750,7 +1750,9 @@ mod tests {
             url::Url::parse("memory:///").unwrap(),
         ));
         let cached = super::CachedMetricBlockStore {
-            cached_at: std::time::Instant::now() - std::time::Duration::from_secs(2),
+            cached_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(2))
+                .expect("two seconds before now is representable"),
             start_ms: 0,
             end_ms: 100,
             cold,
