@@ -2387,6 +2387,17 @@ pub struct SqlSession {
     ts_gc: Arc<crate::ts_gc::TsVersionGc>,
     timestamp_own_start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
     sequence_currvals: Arc<Mutex<HashMap<String, i64>>>,
+    /// Sequence advances this session made that are not durable yet. A
+    /// `Replicated` engine cannot write a `nextval` through the store from
+    /// inside synchronous expression evaluation, so the advance is staged here
+    /// and folded into the next batch this session commits.
+    ///
+    /// Every statement that can advance a sequence commits before it returns —
+    /// a write statement through its own batch, a read-only `SELECT
+    /// nextval('s')` through [`SqlSession::flush_pending_sequences`] — so a
+    /// value never reaches the client before the op recording it is durable.
+    /// That is what makes re-seeding safe for the next writer.
+    pending_sequences: Arc<Mutex<crate::seq::PendingSequences>>,
     /// This connection's registration on the engine's `LISTEN`/`NOTIFY` bus.
     /// `None` until an owner calls [`SqlSession::register_notify`] or
     /// [`SqlSession::adopt_notify`]; `LISTEN`/`NOTIFY`/`pg_notify` then report a
@@ -2762,6 +2773,7 @@ impl SqlSession {
             ts_gc,
             timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
+            pending_sequences: Arc::new(Mutex::new(crate::seq::PendingSequences::default())),
             notify: None,
             notify_rx: None,
             notify_pending: Arc::new(Mutex::new(NotifyPending::default())),
@@ -2853,6 +2865,7 @@ impl SqlSession {
                 kv: Arc::clone(&self.catalog_kv),
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::clone(&self.sequence_currvals),
+                pending: Arc::clone(&self.pending_sequences),
             })),
             resolution: Some(Arc::new(self.resolution_scope())),
             notify: Some(Arc::clone(&self.notify_pending)),
@@ -2976,6 +2989,35 @@ impl SqlSession {
 
     fn deferred_constraints(&self) -> std::sync::MutexGuard<'_, crate::fk::DeferredConstraints> {
         self.deferred_fk.lock().expect("deferred constraints mutex")
+    }
+
+    /// Remove the sequence advances staged during this statement, as write ops
+    /// to fold into the batch about to be committed.
+    ///
+    /// Taking them unconditionally — on the abort path as much as the commit
+    /// path — is what gives `PostgreSQL`'s non-transactional `nextval`: a
+    /// rolled-back transaction leaves the gap it burned, verified against
+    /// `postgres:18.4`, where advancing, rolling back and advancing again
+    /// yields 1 then 3.
+    fn take_pending_sequence_ops(&self) -> Vec<crabka_pgkv::WriteOp> {
+        self.pending_sequences
+            .lock()
+            .expect("pending sequences mutex")
+            .take_ops()
+    }
+
+    /// Commit the staged sequence advances on their own.
+    ///
+    /// Only a statement with no batch of its own needs this — `SELECT
+    /// nextval('s')` reaches the committer nowhere else, and its value must be
+    /// durable before it is returned, or a writer that died here would let its
+    /// successor hand the same value out again.
+    async fn flush_pending_sequences(&self) -> Result<(), ExecError> {
+        let ops = self.take_pending_sequence_ops();
+        if ops.is_empty() {
+            return Ok(());
+        }
+        self.committer.commit(ops).await
     }
 
     /// Drop the transaction's deferred checks and its `SET CONSTRAINTS`
@@ -4574,6 +4616,19 @@ impl SqlSession {
         {
             ctx.activity_started = true;
         }
+        // A statement that advanced a sequence must leave that advance durable
+        // before it returns, whether or not it committed anything else and
+        // whether or not it succeeded — that is what stops a successor writer
+        // re-issuing a value this one already handed to a client. A write
+        // statement folded its advances into its own batch and leaves nothing
+        // here; `SELECT nextval('s')`, which reaches the committer nowhere else,
+        // is what this exists for. A flush failure must not mask the statement's
+        // own error.
+        if let Err(error) = self.flush_pending_sequences().await
+            && result.is_ok()
+        {
+            return Err(error);
+        }
         if !matches!(self.state, TxnState::Idle) {
             // Inside a block the queue lives until COMMIT (which flushes it) or
             // ROLLBACK/abort (which drops it).
@@ -4614,10 +4669,13 @@ impl SqlSession {
             // Best-effort abort record; the versions are already invisible
             // (in-progress in no future snapshot once deregistered), so even if
             // this write is lost the rows never become visible.
-            let r = self
-                .committer
-                .commit(vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)])
-                .await;
+            // Any sequence advance still staged rides the abort record.
+            // `PostgreSQL` does not roll `nextval` back — advancing, rolling
+            // back and advancing again yields 1 then 3 on `postgres:18.4` — so
+            // the gap the aborted transaction burned has to survive it.
+            let mut ops = vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)];
+            ops.extend(self.take_pending_sequence_ops());
+            let r = self.committer.commit(ops).await;
             // Deregister even if the abort record failed to write: restart
             // re-seeds the ProcArray empty and the rows stay invisible (no clog
             // Committed), so a phantom running xid must not be stranded here.
@@ -4937,6 +4995,7 @@ impl SqlSession {
             // The notify records ride the commit record itself: durable iff the
             // transaction committed, in the transaction's own WAL entry.
             ops.extend(notify_ops);
+            ops.extend(self.take_pending_sequence_ops());
             let r = self.committer.commit(ops).await;
             self.procarray.finish(xid);
             // Free every row this transaction locked, waking waiters.
@@ -5937,6 +5996,11 @@ impl SqlSession {
         // would create metadata that is neither authoritative nor visible to
         // subsequent catalog lookups. The single-store path retains the commit
         // seam; a distinct catalog store owns its own atomic catalog batch.
+        // A sequence this batch creates or drops invalidates whatever the
+        // replicated cache remembers under that name: `DROP SEQUENCE s; CREATE
+        // SEQUENCE s;` is a new sequence that starts over, and a surviving entry
+        // would go on advancing the old one.
+        self.seq.forget_sequences(&ops);
         if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
             self.committer.commit(ops).await?;
         } else {
@@ -6099,6 +6163,7 @@ impl SqlSession {
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
+                ops.extend(self.take_pending_sequence_ops());
                 self.committer.commit(ops).await?;
                 if self.global_xid.is_some() {
                     self.procarray.finish(xid); // deregister-at-prepare
@@ -6173,10 +6238,13 @@ impl SqlSession {
                         }
                         // Autocommit error: abort and stay Idle. Record the abort
                         // (best-effort), deregister, and free this xid's row locks.
-                        let _ = self
-                            .committer
-                            .commit(vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)])
-                            .await;
+                        // The failed statement's sequence advances ride the abort
+                        // record: `PostgreSQL` keeps them, so a rejected row still
+                        // burns its identity value.
+                        let mut abort_ops =
+                            vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)];
+                        abort_ops.extend(self.take_pending_sequence_ops());
+                        let _ = self.committer.commit(abort_ops).await;
                         self.procarray.finish(xid);
                         self.lockmgr.release_all(xid);
                         return Err(e);
@@ -6193,6 +6261,7 @@ impl SqlSession {
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
+                ops.extend(self.take_pending_sequence_ops());
                 // Deregister xid and free its row locks BEFORE propagating any
                 // write error so neither the running set nor the lock table is
                 // left holding a finished xid on a commit-batch failure.
@@ -6280,6 +6349,7 @@ impl SqlSession {
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
+                ops.extend(self.take_pending_sequence_ops());
                 self.committer.commit(ops).await?;
                 Ok(result)
             }
@@ -6354,10 +6424,10 @@ impl SqlSession {
                 let (result, mut ops) = match outcome {
                     Ok(value) => value,
                     Err(error) => {
-                        let _ = self
-                            .committer
-                            .commit(vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)])
-                            .await;
+                        let mut abort_ops =
+                            vec![crabka_pgmvcc::clog::put_op(xid, XidStatus::Aborted)];
+                        abort_ops.extend(self.take_pending_sequence_ops());
+                        let _ = self.committer.commit(abort_ops).await;
                         self.procarray.finish(xid);
                         // Free the unique-key locks the failed COPY acquired.
                         self.lockmgr.release_all(xid);
@@ -6368,6 +6438,7 @@ impl SqlSession {
                 if self.persist_mode == crate::PersistMode::Replicated {
                     ops.push(self.procarray.next_xid_op());
                 }
+                ops.extend(self.take_pending_sequence_ops());
                 let commit = self.committer.commit(ops).await;
                 self.procarray.finish(xid);
                 // Free the unique-key locks this COPY acquired, waking waiters.

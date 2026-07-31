@@ -1082,9 +1082,17 @@ fn eval_eager(
             let runtime = ctx.sequence.as_ref().ok_or_else(|| {
                 ExecError::Unsupported("sequence functions require a SQL session".into())
             })?;
-            let value = runtime
-                .manager
-                .nextval_written(&*runtime.kv, ctx.resolution(), &name)?;
+            let (value, staged) =
+                runtime
+                    .manager
+                    .nextval_written(&*runtime.kv, ctx.resolution(), &name)?;
+            if let Some(staged) = staged {
+                runtime
+                    .pending
+                    .lock()
+                    .expect("pending sequences")
+                    .stage(staged);
+            }
             runtime
                 .currvals
                 .lock()
@@ -1119,13 +1127,20 @@ fn eval_eager(
             let runtime = ctx.sequence.as_ref().ok_or_else(|| {
                 ExecError::Unsupported("sequence functions require a SQL session".into())
             })?;
-            let value = runtime.manager.setval_written(
+            let (value, staged) = runtime.manager.setval_written(
                 &*runtime.kv,
                 ctx.resolution(),
                 &name,
                 value,
                 is_called,
             )?;
+            if let Some(staged) = staged {
+                runtime
+                    .pending
+                    .lock()
+                    .expect("pending sequences")
+                    .stage(staged);
+            }
             runtime
                 .currvals
                 .lock()

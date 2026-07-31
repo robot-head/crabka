@@ -1692,17 +1692,53 @@ fn resolve_insert_targets(
     Ok(target_idx)
 }
 
+/// The row a write path starts from: every column's `DEFAULT`, evaluated only
+/// for the columns the statement did not supply a value for.
+///
+/// Skipping the supplied ones is not just saved work. A `DEFAULT` can be a side
+/// effect — `nextval('s')`, which is what a `SERIAL` column and both flavours of
+/// `GENERATED … AS IDENTITY` desugar to — and `PostgreSQL` advances the sequence
+/// only for a column it actually defaults. `INSERT INTO t (id, b) VALUES (100,
+/// 'x')` therefore leaves the sequence untouched, and the next generated id is
+/// the one that insert would otherwise have burned. The choice is per row and
+/// per column: in `VALUES (100, 'a'), (DEFAULT, 'b')` only the second row
+/// advances, and a supplied identity column does not stop a *different*
+/// identity column in the same row from advancing. All verified against
+/// `postgres:18.4`.
+///
+/// A supplied slot is left `Null` here and overwritten by the caller, which is
+/// also how an explicit `DEFAULT` keyword gets its value — that one does
+/// advance the sequence, because the column really is taking its default.
+fn unsupplied_defaults(
+    table: &Table,
+    target_idx: &[usize],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Vec<Datum>, ExecError> {
+    let mut supplied = vec![false; table.columns.len()];
+    for &slot in target_idx {
+        supplied[slot] = true;
+    }
+    table
+        .columns
+        .iter()
+        .zip(supplied)
+        .map(|(column, supplied)| {
+            if supplied {
+                Ok(Datum::Null)
+            } else {
+                default_value(column, ctx)
+            }
+        })
+        .collect()
+}
+
 fn build_insert_row(
     table: &Table,
     target_idx: &[usize],
     row_exprs: &[Expr],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Vec<Datum>, ExecError> {
-    let mut row = table
-        .columns
-        .iter()
-        .map(|column| default_value(column, ctx))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut row = unsupplied_defaults(table, target_idx, ctx)?;
     for (slot, expr) in target_idx.iter().zip(row_exprs.iter()) {
         let value = match expr {
             Expr::Default => default_value(&table.columns[*slot], ctx)?,
@@ -1739,11 +1775,7 @@ fn build_copy_row(
     row_values: &[Option<String>],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Vec<Datum>, ExecError> {
-    let mut row = table
-        .columns
-        .iter()
-        .map(|column| default_value(column, ctx))
-        .collect::<Result<Vec<_>, _>>()?;
+    let mut row = unsupplied_defaults(table, target_idx, ctx)?;
     for (slot, value) in target_idx.iter().zip(row_values.iter()) {
         row[*slot] = match value {
             Some(value) => crabka_pgtypes::cast::cast(
@@ -1868,9 +1900,17 @@ fn default_value(column: &Column, ctx: &crate::clock::EvalCtx) -> Result<Datum, 
             let runtime = ctx.sequence.as_ref().ok_or_else(|| {
                 ExecError::Unsupported("sequence defaults require a SQL session".into())
             })?;
-            let value = runtime
-                .manager
-                .nextval(&*runtime.kv, ctx.resolution(), sequence)?;
+            let (value, staged) =
+                runtime
+                    .manager
+                    .nextval(&*runtime.kv, ctx.resolution(), sequence)?;
+            if let Some(staged) = staged {
+                runtime
+                    .pending
+                    .lock()
+                    .expect("pending sequences")
+                    .stage(staged);
+            }
             runtime
                 .currvals
                 .lock()

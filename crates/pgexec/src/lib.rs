@@ -1375,6 +1375,10 @@ impl SqlEngine {
     pub fn reseed_counters(&self) -> Result<(), ExecError> {
         self.procarray.reseed_from_applied()?;
         self.seq.reseed_from_applied();
+        // Becoming the writer is the one moment the SQL sequence cache may be
+        // dropped: every value the previous writer handed to a client is
+        // durable, so re-seeding from the applied store can only move forward.
+        self.seq.reseed_sql_sequences();
         self.timestamp_horizon.invalidate();
         Ok(())
     }
@@ -1761,6 +1765,32 @@ impl SqlEngine {
         &self,
         sql: &str,
     ) -> Result<crate::exec::TimestampWritePlan, ExecError> {
+        let (mut plan, sequence_ops) = self.plan_timestamp_write_parts(sql)?;
+        plan.commit_ops.extend(sequence_ops);
+        Ok(plan)
+    }
+
+    /// The plan and its SQL sequence advances kept apart, because the two have
+    /// different lifetimes: a caller that supplies its own hidden rowids drops
+    /// the plan's rowid op, but a `nextval` the statement evaluated still has to
+    /// reach the store or the next writer will hand the same value out again.
+    fn plan_timestamp_write_parts(
+        &self,
+        sql: &str,
+    ) -> Result<(crate::exec::TimestampWritePlan, Vec<crabka_pgkv::WriteOp>), ExecError> {
+        let pending = Arc::new(std::sync::Mutex::new(
+            crate::seq::PendingSequences::default(),
+        ));
+        let plan = self.plan_timestamp_write_with_pending(sql, &pending)?;
+        let sequence_ops = pending.lock().expect("pending sequences").take_ops();
+        Ok((plan, sequence_ops))
+    }
+
+    fn plan_timestamp_write_with_pending(
+        &self,
+        sql: &str,
+        pending: &Arc<std::sync::Mutex<crate::seq::PendingSequences>>,
+    ) -> Result<crate::exec::TimestampWritePlan, ExecError> {
         let statements = crabka_pgparser::parse(sql)?;
         let [statement] = statements.as_slice() else {
             return Err(ExecError::Unsupported(
@@ -1785,6 +1815,7 @@ impl SqlEngine {
                 kv: Arc::clone(&self.catalog_kv),
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+                pending: Arc::clone(pending),
             })),
             // The catalog is reachable through `sequence`, which holds the same
             // handle.
@@ -1816,7 +1847,7 @@ impl SqlEngine {
         sql: &str,
         hidden_rowids: &[u64],
     ) -> Result<crate::exec::TimestampWritePlan, ExecError> {
-        let mut plan = self.plan_timestamp_write_sql(sql)?;
+        let (mut plan, sequence_ops) = self.plan_timestamp_write_parts(sql)?;
         if plan.writes.len() != hidden_rowids.len() {
             return Err(ExecError::Unsupported(
                 "hidden row-id lease does not match timestamp write count".into(),
@@ -1825,7 +1856,11 @@ impl SqlEngine {
         for (write, rowid) in plan.writes.iter_mut().zip(hidden_rowids) {
             write.rowid = *rowid;
         }
+        // The rowid counter op goes: these rowids came from the lease, so the
+        // counter was never advanced. A SQL sequence advance is not the same
+        // thing — the statement really did consume those values.
         plan.commit_ops.clear();
+        plan.commit_ops.extend(sequence_ops);
         Ok(plan)
     }
 

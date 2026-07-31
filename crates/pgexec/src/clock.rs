@@ -90,6 +90,13 @@ pub(crate) struct SequenceRuntime {
     pub(crate) kv: Arc<dyn crabka_pgkv::Kv>,
     pub(crate) manager: Arc<crate::seq::SequenceManager>,
     pub(crate) currvals: Arc<Mutex<HashMap<String, i64>>>,
+    /// The session's sequence advances that are not durable yet, which a
+    /// `Replicated` engine stages here rather than writing through the store.
+    /// The session folds them into the next batch it commits — the same seam
+    /// [`EvalCtx::notify`] gives `pg_notify()`, and for the same reason:
+    /// expression evaluation is synchronous and cannot await a commit.
+    /// `Durable` mode persists as it goes and leaves this empty.
+    pub(crate) pending: Arc<Mutex<crate::seq::PendingSequences>>,
 }
 
 impl EvalCtx {

@@ -2447,6 +2447,18 @@ pub fn get_sequence(kv: &dyn Kv, name: &RelationName) -> Result<Sequence, Catalo
     Ok(deserialize_sequence(&bytes)?)
 }
 
+/// The sequence a catalog key names, or `None` when the key belongs to another
+/// family.
+///
+/// This is how a caller holding a finished write batch can tell which sequences
+/// it touches without re-deriving them from the statement — the batch is the
+/// authority on what actually reached the catalog, including the implicit
+/// sequence behind a `SERIAL` column and one a `DROP TABLE` cascaded to.
+#[must_use]
+pub fn sequence_name_from_key(key: &[u8]) -> Option<RelationName> {
+    relation_name_from_key(SEQUENCE_PREFIX, key)
+}
+
 /// Replace a sequence record.
 #[must_use]
 pub fn put_sequence_op(name: &RelationName, sequence: Sequence) -> WriteOp {

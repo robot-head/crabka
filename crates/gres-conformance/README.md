@@ -29,8 +29,8 @@ The substrate-backed leg — the same corpus replayed against a `crabka-gres`
 whose WAL is a Kafka tenant topic — uses `substrate-baseline.json`, and
 [`substrate-baseline.md`](substrate-baseline.md) names every statement behind
 the difference. That leg runs against its own fresh oracle database, so
-`current_database()` can never match, and the replicated engine refuses
-sequence advances; both are enumerated there rather than absorbed into
+`current_database()` can never match; that one statement is now the whole
+difference, and it is enumerated there rather than absorbed into
 `baseline.json`.
 
 ## Baseline ratchet
