@@ -914,3 +914,21 @@ fn consumer_retry_policy_is_configurable_only_on_the_consume_role() {
         assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_COORDINATOR_"));
     }
 }
+
+#[test]
+fn consumer_fetch_policy_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    for setting in [
+        "CRABKA_DEMO_CONSUMER_FETCH_MIN: \"${CRABKA_DEMO_CONSUMER_FETCH_MIN:-1B}\"",
+        "CRABKA_DEMO_CONSUMER_FETCH_MAX: \"${CRABKA_DEMO_CONSUMER_FETCH_MAX:-50MiB}\"",
+        "CRABKA_DEMO_CONSUMER_FETCH_PARTITION_MAX: \"${CRABKA_DEMO_CONSUMER_FETCH_PARTITION_MAX:-1MiB}\"",
+    ] {
+        assert2::assert!(consume.contains(setting));
+    }
+    for service in ["demo-produce", "demo-stream"] {
+        assert2::assert!(
+            !compose_service_block(&compose, service).contains("CRABKA_DEMO_CONSUMER_FETCH_")
+        );
+    }
+}

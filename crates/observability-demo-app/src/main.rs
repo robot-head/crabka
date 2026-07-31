@@ -19,8 +19,8 @@ use std::{
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use crabka_client_consumer::{
-    Consumer, ConsumerLeaveGroupTimeout, ConsumerRecord, ConsumerRetryPolicy,
-    ConsumerSubscriptionMetadataRefreshInterval,
+    Consumer, ConsumerFetchMaxBytes, ConsumerFetchPartitionMaxBytes, ConsumerLeaveGroupTimeout,
+    ConsumerRecord, ConsumerRetryPolicy, ConsumerSubscriptionMetadataRefreshInterval,
 };
 use crabka_client_core::{
     ClientFrameMax, ConnectionDispatchQueueCapacity, DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
@@ -171,6 +171,27 @@ struct Cli {
         value_parser = parse::positive_time
     )]
     consumer_coordinator_max_backoff: Option<Time>,
+    /// Minimum bytes requested by the classic Consumer fetcher.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_FETCH_MIN",
+        value_parser = parse::positive_byte_size
+    )]
+    consumer_fetch_min: Option<ByteSize>,
+    /// Total response-byte budget for one classic Consumer fetch.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_FETCH_MAX",
+        value_parser = parse::positive_byte_size
+    )]
+    consumer_fetch_max: Option<ByteSize>,
+    /// Per-partition response-byte budget for one classic Consumer fetch.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_FETCH_PARTITION_MAX",
+        value_parser = parse::positive_byte_size
+    )]
+    consumer_fetch_partition_max: Option<ByteSize>,
     /// Kafka Streams broker DNS timeout.
     #[arg(
         long,
@@ -385,6 +406,51 @@ fn effective_consumer_retry_policy(cli: &Cli) -> std::io::Result<ConsumerRetryPo
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
 
+fn effective_consumer_fetch_policy(cli: &Cli) -> std::io::Result<(ByteSize, ByteSize, ByteSize)> {
+    let configured = [
+        ("--consumer-fetch-min", cli.consumer_fetch_min),
+        ("--consumer-fetch-max", cli.consumer_fetch_max),
+        (
+            "--consumer-fetch-partition-max",
+            cli.consumer_fetch_partition_max,
+        ),
+    ];
+    if cli.role != Role::Consume
+        && let Some((name, value)) = configured
+            .into_iter()
+            .find_map(|(name, value)| value.map(|value| (name, value)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{name} ({}) is only valid with --role consume",
+                value.human()
+            ),
+        ));
+    }
+
+    let min = FetchMinBytes::try_from(cli.consumer_fetch_min.unwrap_or_else(|| bytes(1)))
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+        .size();
+    let max =
+        ConsumerFetchMaxBytes::try_from(cli.consumer_fetch_max.unwrap_or_else(|| mebibytes(50)))
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+            .size();
+    if min.bytes_i32() > max.bytes_i32() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "consumer fetch min must not exceed consumer fetch max",
+        ));
+    }
+    let partition_max = ConsumerFetchPartitionMaxBytes::try_from(
+        cli.consumer_fetch_partition_max
+            .unwrap_or_else(|| mebibytes(1)),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+    .size();
+    Ok((min, max, partition_max))
+}
+
 fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
     if cli.role != Role::Stream
         && let Some(timeout) = cli.streams_broker_dns_timeout
@@ -585,6 +651,8 @@ async fn main() -> Result<(), BoxError> {
     let consumer_subscription_metadata_refresh_interval =
         effective_consumer_subscription_metadata_refresh_interval(&cli)?;
     let consumer_retry_policy = effective_consumer_retry_policy(&cli)?;
+    let (consumer_fetch_min, consumer_fetch_max, consumer_fetch_partition_max) =
+        effective_consumer_fetch_policy(&cli)?;
     let streams_broker_dns_timeout = effective_streams_broker_dns_timeout(&cli)?;
     let (streams_poll_interval, streams_commit_interval) = effective_streams_runtime_cadence(&cli)?;
     let streams_rebalance_timeout = effective_streams_rebalance_timeout(&cli)?;
@@ -644,16 +712,19 @@ async fn main() -> Result<(), BoxError> {
             .await?;
         }
         Role::Consume => {
-            run_consume(
+            Box::pin(run_consume(
                 &cli,
                 &metrics,
                 schema_fetch_retry_policy,
                 consumer_leave_group_timeout,
                 consumer_subscription_metadata_refresh_interval,
                 consumer_retry_policy,
+                consumer_fetch_min,
+                consumer_fetch_max,
+                consumer_fetch_partition_max,
                 client_dispatch_queue_capacity,
                 client_frame_max,
-            )
+            ))
             .await?;
         }
     }
@@ -860,6 +931,9 @@ async fn run_consume(
     consumer_leave_group_timeout: ConsumerLeaveGroupTimeout,
     consumer_subscription_metadata_refresh_interval: ConsumerSubscriptionMetadataRefreshInterval,
     consumer_retry_policy: ConsumerRetryPolicy,
+    consumer_fetch_min: ByteSize,
+    consumer_fetch_max: ByteSize,
+    consumer_fetch_partition_max: ByteSize,
     client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
     client_frame_max: ClientFrameMax,
 ) -> Result<(), BoxError> {
@@ -878,6 +952,9 @@ async fn run_consume(
                 .as_time(),
         )
         .retry_policy(consumer_retry_policy)
+        .fetch_min(consumer_fetch_min)
+        .fetch_max(consumer_fetch_max)
+        .fetch_partition_max(consumer_fetch_partition_max)
         .build()
         .await?;
     tracing::info!(topic = %cli.input_topic, "order processor starting");
@@ -1012,6 +1089,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn consumer_fetch_policy_uses_defaults_and_validates_overrides() {
+        let defaults = Cli::try_parse_from(["observability-demo-app", "--role", "consume"])
+            .expect("default CLI");
+        assert_eq!(
+            effective_consumer_fetch_policy(&defaults).expect("default fetch policy"),
+            (bytes(1), mebibytes(50), mebibytes(1))
+        );
+
+        let custom = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "consume",
+            "--consumer-fetch-min",
+            "3B",
+            "--consumer-fetch-max",
+            "32MiB",
+            "--consumer-fetch-partition-max",
+            "2MiB",
+        ])
+        .expect("custom CLI");
+        assert_eq!(
+            effective_consumer_fetch_policy(&custom).expect("custom fetch policy"),
+            (bytes(3), mebibytes(32), mebibytes(2))
+        );
+    }
+
+    #[test]
     fn consumer_retry_policy_uses_defaults_and_validates_overrides() {
         let defaults = Cli::try_parse_from(["observability-demo-app", "--role", "consume"])
             .expect("default CLI");
@@ -1139,6 +1243,9 @@ mod tests {
             consumer_coordinator_retry_timeout: None,
             consumer_coordinator_initial_backoff: None,
             consumer_coordinator_max_backoff: None,
+            consumer_fetch_min: None,
+            consumer_fetch_max: None,
+            consumer_fetch_partition_max: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1214,6 +1321,9 @@ mod tests {
             consumer_coordinator_retry_timeout: None,
             consumer_coordinator_initial_backoff: None,
             consumer_coordinator_max_backoff: None,
+            consumer_fetch_min: None,
+            consumer_fetch_max: None,
+            consumer_fetch_partition_max: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1298,6 +1408,9 @@ mod tests {
             consumer_coordinator_retry_timeout: None,
             consumer_coordinator_initial_backoff: None,
             consumer_coordinator_max_backoff: None,
+            consumer_fetch_min: None,
+            consumer_fetch_max: None,
+            consumer_fetch_partition_max: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1385,6 +1498,9 @@ mod tests {
             consumer_coordinator_retry_timeout: None,
             consumer_coordinator_initial_backoff: None,
             consumer_coordinator_max_backoff: None,
+            consumer_fetch_min: None,
+            consumer_fetch_max: None,
+            consumer_fetch_partition_max: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1434,6 +1550,9 @@ mod tests {
             consumer_coordinator_retry_timeout: None,
             consumer_coordinator_initial_backoff: None,
             consumer_coordinator_max_backoff: None,
+            consumer_fetch_min: None,
+            consumer_fetch_max: None,
+            consumer_fetch_partition_max: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
