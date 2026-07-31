@@ -41,7 +41,7 @@
 - Produces: `HaTracker::elect_now_with_timeout(&self, tenant: &str, series: &[DecodedSeries], failover_timeout: Time) -> HaElection`.
 - Preserves: `HaTracker::elect_now`, `HaTracker::elect`, `IngestEnforcer::with_max_rate_buckets`, and all default constructors.
 
-- [ ] **Step 1: Write failing library tests**
+- [x] **Step 1: Write failing library tests**
 
 In `distributor/ha.rs`, replace default-only `elect_now` test calls with an
 explicit timeout and add a current-clock-independent test around `elect`:
@@ -62,7 +62,12 @@ fn configured_failover_timeout_controls_takeover() {
     let replacement = [series_with("c1", "r2")];
 
     check!(
-        tracker().elect("tenant", &replacement, i64::MAX, secs(-1))
+        tracker().elect(
+            "tenant",
+            &replacement,
+            i64::MAX,
+            Time::from_millis(-1_000),
+        )
             == HaElection::Drop
     );
     check!(matches!(
@@ -88,11 +93,11 @@ In `distributor/mod.rs`, add a state-construction test:
 fn distributor_state_stores_configured_runtime_policy() {
     let sink = Arc::new(RecordingSink::default());
     let state = DistributorState::new(sink)
-        .with_ha_failover_timeout(secs(-1))
+        .with_ha_failover_timeout(Time::from_millis(-1_000))
         .with_max_rate_buckets(7)
         .with_max_decompressed(kibibytes(64));
 
-    check!(state.ha_failover_timeout == secs(-1));
+    check!(state.ha_failover_timeout == Time::from_millis(-1_000));
     check!(state.ingest_enforcer.max_rate_buckets() == 7);
     check!(state.max_decompressed == kibibytes(64));
 }
@@ -109,7 +114,7 @@ fn default_rate_bucket_cap_is_preserved() {
 }
 ```
 
-- [ ] **Step 2: Run focused tests and verify the red state**
+- [x] **Step 2: Run focused tests and verify the red state**
 
 Run:
 
@@ -125,7 +130,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 Expected: compilation fails because the state setters and stored timeout do
 not exist.
 
-- [ ] **Step 3: Implement minimal library injection**
+- [x] **Step 3: Implement minimal library injection**
 
 In `limits/enforce.rs`, make the existing default constant public:
 
@@ -199,7 +204,7 @@ At the sole production call in `apply_ha_election`, pass
 `state.ha_failover_timeout` through `elect_now_with_timeout`. Existing library
 callers of `elect_now` continue using `DEFAULT_HA_FAILOVER_TIMEOUT`.
 
-- [ ] **Step 4: Run focused library tests and verify green**
+- [x] **Step 4: Run focused library tests and verify green**
 
 Run:
 
@@ -216,7 +221,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 Expected: all selected tests pass, including negative timeout and bounded-map
 behavior.
 
-- [ ] **Step 5: Commit the library policy injection**
+- [x] **Step 5: Commit the library policy injection**
 
 ```bash
 git add -- crates/metrics/src/distributor/ha.rs \
@@ -230,6 +235,7 @@ git commit -m "feat(metrics): inject distributor policy"
 ### Task 2: Add CLI and environment configuration
 
 **Files:**
+- Modify: `Cargo.lock`
 - Modify: `crates/metrics/Cargo.toml`
 - Modify: `crates/metrics/src/bin/crabka-metrics.rs`
 
@@ -239,7 +245,7 @@ git commit -m "feat(metrics): inject distributor policy"
 - Produces: CLI/environment options named in the approved design.
 - Produces: binary-local `IngestRateBucketCap` validated by `GreaterUsize<0>`.
 
-- [ ] **Step 1: Write failing CLI parsing tests**
+- [x] **Step 1: Write failing CLI parsing tests**
 
 Add one default/override/validation test:
 
@@ -264,7 +270,7 @@ fn distributor_policy_parses_defaults_overrides_and_boundaries() {
         "64KiB",
     ])
     .unwrap();
-    check!(configured.ha_failover_timeout == secs(-1));
+    check!(configured.ha_failover_timeout == Time::from_millis(-1_000));
     check!(configured.ingest_rate_bucket_cap == 7);
     check!(configured.distributor_max_decompressed == kibibytes(64));
 
@@ -312,7 +318,7 @@ fn distributor_policy_reads_environment_and_prefers_cli() {
 
     let from_env =
         Cli::try_parse_from(["crabka-metrics", "--target", "distributor"]).unwrap();
-    check!(from_env.ha_failover_timeout == secs(-1));
+    check!(from_env.ha_failover_timeout == Time::from_millis(-1_000));
     check!(from_env.ingest_rate_bucket_cap == 7);
     check!(from_env.distributor_max_decompressed == kibibytes(64));
 
@@ -334,7 +340,7 @@ fn distributor_policy_reads_environment_and_prefers_cli() {
 }
 ```
 
-- [ ] **Step 2: Run binary tests and verify the red state**
+- [x] **Step 2: Run binary tests and verify the red state**
 
 Run:
 
@@ -346,7 +352,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: compilation fails because the three `Cli` fields do not exist.
 
-- [ ] **Step 3: Implement validated CLI fields**
+- [x] **Step 3: Implement validated CLI fields**
 
 Add `refined_type = { workspace = true }` to `crates/metrics/Cargo.toml`.
 
@@ -402,7 +408,8 @@ Add the three fields to `Cli`:
     long,
     env = "CRABKA_METRICS_HA_FAILOVER_TIMEOUT",
     default_value = "30s",
-    value_parser = parse::time
+    value_parser = parse::time,
+    allow_hyphen_values = true
 )]
 ha_failover_timeout: Time,
 #[arg(
@@ -421,8 +428,9 @@ ingest_rate_bucket_cap: usize,
 distributor_max_decompressed: ByteSize,
 ```
 
-Import the three library defaults so default tests anchor the CLI values to
-their owners. During `run_distributor`, extend the existing state builder:
+Import `DEFAULT_MAX_RATE_BUCKETS`; compare all three parsed defaults to their
+library constants in tests so the CLI values remain anchored to their owners.
+During `run_distributor`, extend the existing state builder:
 
 ```rust
 .with_ha_failover_timeout(cli.ha_failover_timeout)
@@ -430,7 +438,7 @@ their owners. During `run_distributor`, extend the existing state builder:
 .with_max_decompressed(cli.distributor_max_decompressed)
 ```
 
-- [ ] **Step 4: Run focused binary and library tests**
+- [x] **Step 4: Run focused binary and library tests**
 
 Run:
 
@@ -443,10 +451,11 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: all metrics binary policy tests and all metrics library tests pass.
 
-- [ ] **Step 5: Commit CLI and environment wiring**
+- [x] **Step 5: Commit CLI and environment wiring**
 
 ```bash
-git add -- crates/metrics/Cargo.toml crates/metrics/src/bin/crabka-metrics.rs
+git add -- Cargo.lock crates/metrics/Cargo.toml \
+  crates/metrics/src/bin/crabka-metrics.rs
 git commit -m "feat(metrics): configure distributor policy"
 ```
 
@@ -462,7 +471,7 @@ git commit -m "feat(metrics): configure distributor policy"
 - Consumes: the completed library and binary configuration surface.
 - Produces: audit evidence that the three distributor policies are no longer pending.
 
-- [ ] **Step 1: Run the complete focused suite**
+- [x] **Step 1: Run the complete focused suite**
 
 Run:
 
@@ -473,7 +482,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: every non-ignored `crabka-metrics` target passes.
 
-- [ ] **Step 2: Run repository verification gates**
+- [x] **Step 2: Run repository verification gates**
 
 Run:
 
@@ -488,7 +497,7 @@ git diff --check
 
 Expected: all commands exit successfully and Clippy emits no warnings.
 
-- [ ] **Step 3: Update the configuration audit**
+- [x] **Step 3: Update the configuration audit**
 
 In the metrics distributor section of `docs/configuration-audit.md`, replace
 the pending-design paragraph with a completed statement that names:
@@ -505,7 +514,7 @@ still disables takeover; and no CRD owns the standalone service. Record that
 the focused metrics suite, workspace check, strict Clippy, nightly formatting,
 and diff hygiene passed.
 
-- [ ] **Step 4: Mark this plan complete and inspect the final diff**
+- [x] **Step 4: Mark this plan complete and inspect the final diff**
 
 Change every checkbox in this plan to `[x]`, then run:
 
@@ -518,7 +527,7 @@ git diff --stat HEAD~2
 Expected: only the audit and this plan remain uncommitted; the four protected
 2026-07-28 plan files remain untracked and unchanged.
 
-- [ ] **Step 5: Commit audit closure**
+- [x] **Step 5: Commit audit closure**
 
 ```bash
 git add -- docs/configuration-audit.md \

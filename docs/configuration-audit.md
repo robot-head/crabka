@@ -4850,7 +4850,7 @@ The all-target crate gate passed 185 unit tests and two property tests; the
 Docker-only JVM integration test was explicitly ignored. Every benchmark
 target also completed successfully.
 
-## Metrics UOM Closure and Remaining Policy
+## Metrics UOM and Distributor Policy Closure
 
 The `crabka-metrics` binary now accepts unit-bearing compactor retention and
 sweep intervals instead of raw milliseconds. The demo uses `1h` and `30s`,
@@ -4867,25 +4867,20 @@ is a library fallback for callers that do not supply their own `ByteSize`; no
 production route currently calls that decoder, so adding a deployment knob now
 would configure unused code.
 
-Three distributor policies remain pending:
-
-- the 30-second HA replica failover timeout;
-- the 100,000-tenant ingestion-rate bucket cap; and
-- the 32-MiB distributor decompression cap.
-
-The proposed minimal surface is to reuse the existing `Time`, `ByteSize`,
-`HaTracker::elect` timeout argument, `IngestEnforcer::with_max_rate_buckets`,
-and `DistributorState::with_max_decompressed` paths. The binary would expose
+The three distributor deployment policies now use the existing `Time`,
+`ByteSize`, `HaTracker`, `IngestEnforcer`, and `DistributorState` paths. The
+binary exposes
 `CRABKA_METRICS_HA_FAILOVER_TIMEOUT`,
 `CRABKA_METRICS_INGEST_RATE_BUCKET_CAP`, and
-`CRABKA_METRICS_DISTRIBUTOR_MAX_DECOMPRESSED`, preserving current defaults.
-The positive count would use a validated `refined_type` newtype; the
-dimensioned values remain UOM quantities. No CRD currently owns this
-standalone service.
+`CRABKA_METRICS_DISTRIBUTOR_MAX_DECOMPRESSED`. Defaults remain `30s`,
+`100000`, and `32MiB`. The timeout and byte cap remain UOM quantities, and the
+positive count is validated by a `refined_type` newtype. A negative timeout
+continues to disable HA takeover, while zero permits immediate takeover. No
+CRD owns this standalone service.
 
-This design is pending explicit approval and has not been implemented. The
-completed UOM/env slice passed all 188 library tests, 15 binary tests, six
-integration/property tests, and strict all-target Clippy.
+The completed slice passed all 191 library tests, 19 binary tests, and six
+integration/property tests. Workspace all-target checking, strict
+warnings-as-errors Clippy, nightly formatting, and diff hygiene also passed.
 
 ## Metrics Service UOM Closure and Remaining Policy
 
