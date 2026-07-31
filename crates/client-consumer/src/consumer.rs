@@ -768,7 +768,7 @@ impl Consumer {
         loop {
             match tokio::time::timeout(
                 config.retry_policy.startup_attempt_timeout().to_std(),
-                Self::start_once(config.clone()),
+                Box::pin(Self::start_once(config.clone())),
             )
             .await
             {
