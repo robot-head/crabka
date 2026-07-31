@@ -892,3 +892,25 @@ fn consumer_metadata_refresh_is_configurable_only_on_the_consume_role() {
         );
     }
 }
+
+#[test]
+fn consumer_retry_policy_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    for setting in [
+        "CRABKA_DEMO_CONSUMER_STARTUP_ATTEMPT_TIMEOUT: \"${CRABKA_DEMO_CONSUMER_STARTUP_ATTEMPT_TIMEOUT:-90s}\"",
+        "CRABKA_DEMO_CONSUMER_STARTUP_DEADLINE: \"${CRABKA_DEMO_CONSUMER_STARTUP_DEADLINE:-5m}\"",
+        "CRABKA_DEMO_CONSUMER_STARTUP_INITIAL_BACKOFF: \"${CRABKA_DEMO_CONSUMER_STARTUP_INITIAL_BACKOFF:-500ms}\"",
+        "CRABKA_DEMO_CONSUMER_STARTUP_MAX_BACKOFF: \"${CRABKA_DEMO_CONSUMER_STARTUP_MAX_BACKOFF:-5s}\"",
+        "CRABKA_DEMO_CONSUMER_COORDINATOR_RETRY_TIMEOUT: \"${CRABKA_DEMO_CONSUMER_COORDINATOR_RETRY_TIMEOUT:-30s}\"",
+        "CRABKA_DEMO_CONSUMER_COORDINATOR_INITIAL_BACKOFF: \"${CRABKA_DEMO_CONSUMER_COORDINATOR_INITIAL_BACKOFF:-100ms}\"",
+        "CRABKA_DEMO_CONSUMER_COORDINATOR_MAX_BACKOFF: \"${CRABKA_DEMO_CONSUMER_COORDINATOR_MAX_BACKOFF:-1s}\"",
+    ] {
+        assert2::assert!(consume.contains(setting));
+    }
+    for service in ["demo-produce", "demo-stream"] {
+        let service = compose_service_block(&compose, service);
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_STARTUP_"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_COORDINATOR_"));
+    }
+}

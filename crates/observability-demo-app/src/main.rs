@@ -19,7 +19,7 @@ use std::{
 use bytes::Bytes;
 use clap::{Parser, ValueEnum};
 use crabka_client_consumer::{
-    Consumer, ConsumerLeaveGroupTimeout, ConsumerRecord,
+    Consumer, ConsumerLeaveGroupTimeout, ConsumerRecord, ConsumerRetryPolicy,
     ConsumerSubscriptionMetadataRefreshInterval,
 };
 use crabka_client_core::{
@@ -122,6 +122,55 @@ struct Cli {
         value_parser = parse::positive_time
     )]
     consumer_subscription_metadata_refresh_interval: Option<Time>,
+    /// Timeout for each classic Consumer startup attempt.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_STARTUP_ATTEMPT_TIMEOUT",
+        value_parser = parse::positive_time
+    )]
+    consumer_startup_attempt_timeout: Option<Time>,
+    /// Wall-clock deadline for classic Consumer startup.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_STARTUP_DEADLINE",
+        value_parser = parse::positive_time
+    )]
+    consumer_startup_deadline: Option<Time>,
+    /// Initial classic Consumer startup retry backoff.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_STARTUP_INITIAL_BACKOFF",
+        value_parser = parse::positive_time
+    )]
+    consumer_startup_initial_backoff: Option<Time>,
+    /// Maximum classic Consumer startup retry backoff.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_STARTUP_MAX_BACKOFF",
+        value_parser = parse::positive_time
+    )]
+    consumer_startup_max_backoff: Option<Time>,
+    /// Timeout for classic Consumer coordinator retry loops.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_COORDINATOR_RETRY_TIMEOUT",
+        value_parser = parse::positive_time
+    )]
+    consumer_coordinator_retry_timeout: Option<Time>,
+    /// Initial classic Consumer coordinator retry backoff.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_COORDINATOR_INITIAL_BACKOFF",
+        value_parser = parse::positive_time
+    )]
+    consumer_coordinator_initial_backoff: Option<Time>,
+    /// Maximum classic Consumer coordinator retry backoff.
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_COORDINATOR_MAX_BACKOFF",
+        value_parser = parse::positive_time
+    )]
+    consumer_coordinator_max_backoff: Option<Time>,
     /// Kafka Streams broker DNS timeout.
     #[arg(
         long,
@@ -272,6 +321,68 @@ fn effective_consumer_subscription_metadata_refresh_interval(
                     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
             },
         )
+}
+
+fn effective_consumer_retry_policy(cli: &Cli) -> std::io::Result<ConsumerRetryPolicy> {
+    let configured = [
+        (
+            "--consumer-startup-attempt-timeout",
+            cli.consumer_startup_attempt_timeout,
+        ),
+        ("--consumer-startup-deadline", cli.consumer_startup_deadline),
+        (
+            "--consumer-startup-initial-backoff",
+            cli.consumer_startup_initial_backoff,
+        ),
+        (
+            "--consumer-startup-max-backoff",
+            cli.consumer_startup_max_backoff,
+        ),
+        (
+            "--consumer-coordinator-retry-timeout",
+            cli.consumer_coordinator_retry_timeout,
+        ),
+        (
+            "--consumer-coordinator-initial-backoff",
+            cli.consumer_coordinator_initial_backoff,
+        ),
+        (
+            "--consumer-coordinator-max-backoff",
+            cli.consumer_coordinator_max_backoff,
+        ),
+    ];
+    if cli.role != Role::Consume
+        && let Some((name, value)) = configured
+            .into_iter()
+            .find_map(|(name, value)| value.map(|value| (name, value)))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{name} ({}) is only valid with --role consume",
+                value.human()
+            ),
+        ));
+    }
+
+    let defaults = ConsumerRetryPolicy::default();
+    ConsumerRetryPolicy::new(
+        cli.consumer_startup_attempt_timeout
+            .unwrap_or_else(|| defaults.startup_attempt_timeout()),
+        cli.consumer_startup_deadline
+            .unwrap_or_else(|| defaults.startup_deadline()),
+        cli.consumer_startup_initial_backoff
+            .unwrap_or_else(|| defaults.startup_initial_backoff()),
+        cli.consumer_startup_max_backoff
+            .unwrap_or_else(|| defaults.startup_max_backoff()),
+        cli.consumer_coordinator_retry_timeout
+            .unwrap_or_else(|| defaults.coordinator_retry_timeout()),
+        cli.consumer_coordinator_initial_backoff
+            .unwrap_or_else(|| defaults.coordinator_initial_backoff()),
+        cli.consumer_coordinator_max_backoff
+            .unwrap_or_else(|| defaults.coordinator_max_backoff()),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
 
 fn effective_streams_broker_dns_timeout(cli: &Cli) -> std::io::Result<ClientDnsTimeout> {
@@ -473,6 +584,7 @@ async fn main() -> Result<(), BoxError> {
     let consumer_leave_group_timeout = effective_consumer_leave_group_timeout(&cli)?;
     let consumer_subscription_metadata_refresh_interval =
         effective_consumer_subscription_metadata_refresh_interval(&cli)?;
+    let consumer_retry_policy = effective_consumer_retry_policy(&cli)?;
     let streams_broker_dns_timeout = effective_streams_broker_dns_timeout(&cli)?;
     let (streams_poll_interval, streams_commit_interval) = effective_streams_runtime_cadence(&cli)?;
     let streams_rebalance_timeout = effective_streams_rebalance_timeout(&cli)?;
@@ -538,6 +650,7 @@ async fn main() -> Result<(), BoxError> {
                 schema_fetch_retry_policy,
                 consumer_leave_group_timeout,
                 consumer_subscription_metadata_refresh_interval,
+                consumer_retry_policy,
                 client_dispatch_queue_capacity,
                 client_frame_max,
             )
@@ -739,12 +852,14 @@ async fn run_stream(
 /// producer's distributed trace via the `traceparent` header, and runs a
 /// multi-stage processing pipeline (validate → enrich → `fraud_check` → fulfill),
 /// each stage a child span with a per-stage latency metric.
+#[allow(clippy::too_many_arguments)]
 async fn run_consume(
     cli: &Cli,
     metrics: &DemoMetrics,
     schema_fetch_retry_policy: SchemaFetchRetryPolicy,
     consumer_leave_group_timeout: ConsumerLeaveGroupTimeout,
     consumer_subscription_metadata_refresh_interval: ConsumerSubscriptionMetadataRefreshInterval,
+    consumer_retry_policy: ConsumerRetryPolicy,
     client_dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
     client_frame_max: ClientFrameMax,
 ) -> Result<(), BoxError> {
@@ -762,6 +877,7 @@ async fn run_consume(
                 .duration()
                 .as_time(),
         )
+        .retry_policy(consumer_retry_policy)
         .build()
         .await?;
     tracing::info!(topic = %cli.input_topic, "order processor starting");
@@ -896,6 +1012,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn consumer_retry_policy_uses_defaults_and_validates_overrides() {
+        let defaults = Cli::try_parse_from(["observability-demo-app", "--role", "consume"])
+            .expect("default CLI");
+        assert_eq!(
+            effective_consumer_retry_policy(&defaults).expect("default retry policy"),
+            ConsumerRetryPolicy::default()
+        );
+
+        let custom = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "consume",
+            "--consumer-startup-attempt-timeout",
+            "2s",
+            "--consumer-startup-deadline",
+            "3s",
+            "--consumer-startup-initial-backoff",
+            "10ms",
+            "--consumer-startup-max-backoff",
+            "20ms",
+            "--consumer-coordinator-retry-timeout",
+            "4s",
+            "--consumer-coordinator-initial-backoff",
+            "30ms",
+            "--consumer-coordinator-max-backoff",
+            "40ms",
+        ])
+        .expect("custom CLI");
+        let policy = effective_consumer_retry_policy(&custom).expect("custom retry policy");
+        assert_eq!(policy.startup_attempt_timeout(), secs(2));
+        assert_eq!(policy.startup_deadline(), secs(3));
+        assert_eq!(policy.startup_initial_backoff(), millis(10));
+        assert_eq!(policy.startup_max_backoff(), millis(20));
+        assert_eq!(policy.coordinator_retry_timeout(), secs(4));
+        assert_eq!(policy.coordinator_initial_backoff(), millis(30));
+        assert_eq!(policy.coordinator_max_backoff(), millis(40));
+    }
+
+    #[test]
     fn schema_fetch_retry_policy_uses_defaults_and_valid_explicit_bounds() {
         let defaults = Cli::try_parse_from(["observability-demo-app", "--role", "produce"])
             .expect("default CLI");
@@ -977,6 +1132,13 @@ mod tests {
             orders_per_sec: 50,
             consumer_leave_group_timeout: None,
             consumer_subscription_metadata_refresh_interval: None,
+            consumer_startup_attempt_timeout: None,
+            consumer_startup_deadline: None,
+            consumer_startup_initial_backoff: None,
+            consumer_startup_max_backoff: None,
+            consumer_coordinator_retry_timeout: None,
+            consumer_coordinator_initial_backoff: None,
+            consumer_coordinator_max_backoff: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1045,6 +1207,13 @@ mod tests {
             orders_per_sec: 50,
             consumer_leave_group_timeout: None,
             consumer_subscription_metadata_refresh_interval: None,
+            consumer_startup_attempt_timeout: None,
+            consumer_startup_deadline: None,
+            consumer_startup_initial_backoff: None,
+            consumer_startup_max_backoff: None,
+            consumer_coordinator_retry_timeout: None,
+            consumer_coordinator_initial_backoff: None,
+            consumer_coordinator_max_backoff: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1122,6 +1291,13 @@ mod tests {
             orders_per_sec: 50,
             consumer_leave_group_timeout: None,
             consumer_subscription_metadata_refresh_interval: None,
+            consumer_startup_attempt_timeout: None,
+            consumer_startup_deadline: None,
+            consumer_startup_initial_backoff: None,
+            consumer_startup_max_backoff: None,
+            consumer_coordinator_retry_timeout: None,
+            consumer_coordinator_initial_backoff: None,
+            consumer_coordinator_max_backoff: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1202,6 +1378,13 @@ mod tests {
             orders_per_sec: 50,
             consumer_leave_group_timeout: None,
             consumer_subscription_metadata_refresh_interval: None,
+            consumer_startup_attempt_timeout: None,
+            consumer_startup_deadline: None,
+            consumer_startup_initial_backoff: None,
+            consumer_startup_max_backoff: None,
+            consumer_coordinator_retry_timeout: None,
+            consumer_coordinator_initial_backoff: None,
+            consumer_coordinator_max_backoff: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
@@ -1244,6 +1427,13 @@ mod tests {
             orders_per_sec: 50,
             consumer_leave_group_timeout: None,
             consumer_subscription_metadata_refresh_interval: None,
+            consumer_startup_attempt_timeout: None,
+            consumer_startup_deadline: None,
+            consumer_startup_initial_backoff: None,
+            consumer_startup_max_backoff: None,
+            consumer_coordinator_retry_timeout: None,
+            consumer_coordinator_initial_backoff: None,
+            consumer_coordinator_max_backoff: None,
             streams_broker_dns_timeout: None,
             streams_poll_interval: None,
             streams_commit_interval: None,
