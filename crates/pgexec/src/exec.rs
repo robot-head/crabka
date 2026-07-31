@@ -513,9 +513,9 @@ pub(crate) fn execute_ddl(
             if let Some(aliases) = aliases
                 && aliases.len() > described.len()
             {
-                return Err(ExecError::InvalidColumnReference(format!(
-                    "CREATE VIEW specifies more column names than columns"
-                )));
+                return Err(ExecError::InvalidColumnReference(
+                    "CREATE VIEW specifies more column names than columns".into(),
+                ));
             }
             let columns = described
                 .into_iter()

@@ -656,6 +656,7 @@ fn zone_arg(d: &Datum, name: &str) -> Result<jiff::tz::TimeZone, ExecError> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
     use crabka_pgtypes::{ColumnType, Datum};
 
     use crate::{clock::EvalCtx, scope::Scope};
@@ -690,7 +691,6 @@ mod tests {
         .code
     }
 
-    #[test]
     /// `to_number` reads the digits out of a decorated string, dropping the
     /// decoration a `to_char` template would have emitted. Every expectation is
     /// PostgreSQL 18.4's.

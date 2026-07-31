@@ -935,12 +935,50 @@ pub(crate) fn parse_body(routine: &Routine) -> Result<Vec<Statement>, ExecError>
 }
 
 /// A `LANGUAGE sql` routine's final query — the one whose result is the
-/// routine's result. `PostgreSQL` runs every statement and returns the last.
+/// routine's result.
+///
+/// `PostgreSQL` runs EVERY statement in the body and returns the last one's
+/// result. Gres reaches a SQL routine only by inlining its final query into the
+/// calling query, which cannot run the statements before it — so a body with
+/// more than one statement is refused rather than silently losing them. Running
+/// only the last statement would make `INSERT INTO audit VALUES ($1); SELECT $1`
+/// return the right answer while dropping the write.
 fn final_query(routine: &Routine) -> Result<Option<QueryExpr>, ExecError> {
     let statements = parse_body(routine)?;
+    if statements.len() > 1 {
+        return Err(uncallable(
+            routine,
+            "a SQL body with several statements needs all of them to run, and Gres reaches a \
+             routine only by inlining its final query",
+        ));
+    }
     match statements.last() {
         Some(Statement::Query(query)) => Ok(Some(query.clone())),
         _ => Ok(None),
+    }
+}
+
+/// Whether duplicating `arg` during inlining could change what the call does.
+///
+/// Inlining substitutes the argument EXPRESSION at each parameter reference, so
+/// a parameter used twice evaluates its argument twice — `f(nextval('s'))` over
+/// a body of `SELECT $1 + $1` would consume two sequence values. A literal or a
+/// plain column reference is free to duplicate; anything that could call a
+/// function is not. `PostgreSQL`'s own inliner makes the same check before
+/// inlining.
+fn unsafe_to_duplicate(arg: &Expr) -> bool {
+    match arg {
+        Expr::IntLiteral(_)
+        | Expr::NumericLiteral(_)
+        | Expr::StringLiteral(_)
+        | Expr::BoolLiteral(_)
+        | Expr::NullLiteral
+        | Expr::Param(_)
+        | Expr::Column { .. } => false,
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => unsafe_to_duplicate(expr),
+        Expr::Binary { left, right, .. } => unsafe_to_duplicate(left) || unsafe_to_duplicate(right),
+        // Everything else can reach a function call, so treat it as volatile.
+        _ => true,
     }
 }
 
@@ -975,12 +1013,44 @@ fn callable(routine: &Routine) -> Result<(), ExecError> {
 struct Binding<'a> {
     routine: &'a Routine,
     args: Vec<Expr>,
+    /// How many times each argument has been substituted into the body so far.
+    /// Counted on `substitute`'s own traversal rather than a second walk, and
+    /// checked by [`Binding::reject_repeated_volatile_args`] once it finishes.
+    uses: std::cell::RefCell<Vec<usize>>,
 }
 
 impl Binding<'_> {
     /// The expression bound to `$n`, one-based.
     fn positional(&self, index: u32) -> Option<&Expr> {
-        self.args.get(usize::try_from(index).ok()?.checked_sub(1)?)
+        let position = usize::try_from(index).ok()?.checked_sub(1)?;
+        let bound = self.args.get(position)?;
+        self.note_use(position);
+        Some(bound)
+    }
+
+    fn note_use(&self, position: usize) {
+        if let Some(count) = self.uses.borrow_mut().get_mut(position) {
+            *count += 1;
+        }
+    }
+
+    /// Refuse a call whose inlining would evaluate a volatile argument more than
+    /// once. Inlining substitutes the argument expression at every parameter
+    /// reference, so `f(nextval('s'))` over a body of `SELECT $1 + $1` would
+    /// consume two sequence values and return their sum. PostgreSQL's inliner
+    /// makes the same check; here there is no non-inlined path to fall back to,
+    /// so the call is refused rather than answered wrongly.
+    fn reject_repeated_volatile_args(&self) -> Result<(), ExecError> {
+        for (position, count) in self.uses.borrow().iter().enumerate() {
+            if *count > 1 && self.args.get(position).is_some_and(unsafe_to_duplicate) {
+                return Err(uncallable(
+                    self.routine,
+                    "an argument that may not be constant is used more than once in the body, \
+                     and inlining would evaluate it once per use",
+                ));
+            }
+        }
+        Ok(())
     }
 
     /// The expression bound to a parameter name.
@@ -989,7 +1059,9 @@ impl Binding<'_> {
             .routine
             .input_params()
             .position(|param| param.name.as_deref() == Some(name))?;
-        self.args.get(position)
+        let bound = self.args.get(position)?;
+        self.note_use(position);
+        Some(bound)
     }
 }
 
@@ -1252,9 +1324,11 @@ pub(crate) fn inline_scalar_call(
             routine.identity()
         )));
     }
+    let args = bound_args(&routine, args)?;
     let binding = Binding {
         routine: &routine,
-        args: bound_args(&routine, args)?,
+        uses: std::cell::RefCell::new(vec![0; args.len()]),
+        args,
     };
     let Some(query) = final_query(&routine)? else {
         return Err(uncallable(
@@ -1273,6 +1347,7 @@ pub(crate) fn inline_scalar_call(
         // refused there rather than answered wrongly.
         None => Expr::ScalarSubquery(Box::new(substitute_in_query(&binding, &query)?)),
     };
+    binding.reject_repeated_volatile_args()?;
     let inlined = match result_type(&routine) {
         Some(ty) => Expr::Cast {
             expr: Box::new(inlined),
@@ -1366,9 +1441,11 @@ pub(crate) fn expand_table_function(
         )));
     }
     callable(&routine)?;
+    let args = bound_args(&routine, &call.args)?;
     let binding = Binding {
         routine: &routine,
-        args: bound_args(&routine, &call.args)?,
+        uses: std::cell::RefCell::new(vec![0; args.len()]),
+        args,
     };
     let Some(query) = final_query(&routine)? else {
         return Err(uncallable(
@@ -1376,7 +1453,9 @@ pub(crate) fn expand_table_function(
             "a SQL function's final statement must be a query",
         ));
     };
-    Ok(Some((substitute_in_query(&binding, &query)?, routine)))
+    let substituted = substitute_in_query(&binding, &query)?;
+    binding.reject_repeated_volatile_args()?;
+    Ok(Some((substituted, routine)))
 }
 
 /// Substitute a routine's parameters through a whole body query.
@@ -1517,9 +1596,11 @@ pub(crate) fn expand_procedure_call(
         )));
     }
     callable(&routine)?;
+    let args = bound_args(&routine, args)?;
     let binding = Binding {
         routine: &routine,
-        args: bound_args(&routine, args)?,
+        uses: std::cell::RefCell::new(vec![0; args.len()]),
+        args,
     };
     parse_body(&routine)?
         .iter()
