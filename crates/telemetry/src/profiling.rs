@@ -32,8 +32,18 @@ use crabka_units::{
 };
 use refined_type::rule::GreaterI32;
 use serde::Deserialize;
+use thiserror::Error;
 
 type RefinedPositiveFrequency = GreaterI32<0>;
+
+/// Profiling configuration or admin-server failure.
+#[derive(Debug, Error)]
+pub enum ProfilingError {
+    #[error("invalid profiling configuration: {0}")]
+    Config(String),
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+}
 
 /// A positive, finite, whole-Hz sampling frequency accepted by `pprof`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -293,8 +303,8 @@ async fn heap_profile(
 ///
 /// # Errors
 /// Returns an error when related profiling duration bounds are invalid.
-pub fn pprof_router_with_config(config: ProfilingConfig) -> Result<Router, String> {
-    config.validate()?;
+pub fn pprof_router_with_config(config: ProfilingConfig) -> Result<Router, ProfilingError> {
+    config.validate().map_err(ProfilingError::Config)?;
     Ok(pprof_router_unchecked(config))
 }
 
@@ -346,7 +356,7 @@ pub async fn serve_admin_with_config(
     addr: SocketAddr,
     extra: Router,
     config: ProfilingConfig,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(), ProfilingError> {
     let app = pprof_router_with_config(config)?.merge(extra);
     serve_router(addr, app).await?;
     Ok(())
@@ -374,6 +384,27 @@ pub async fn serve_admin_from_env_with(default_addr: &str, extra: Router) -> std
         .parse()
         .unwrap_or_else(|e| panic!("invalid CRABKA_ADMIN_LISTEN_ADDR `{raw}`: {e}"));
     serve_admin(addr, extra).await
+}
+
+/// Like [`serve_admin_from_env_with`] with explicit profiling policy.
+///
+/// # Errors
+/// Returns an error for invalid profiling configuration or listener failure.
+///
+/// # Panics
+/// Panics when `CRABKA_ADMIN_LISTEN_ADDR` is not a socket address, preserving
+/// the default-compatible wrapper's behavior.
+pub async fn serve_admin_from_env_with_config(
+    default_addr: &str,
+    extra: Router,
+    config: ProfilingConfig,
+) -> Result<(), ProfilingError> {
+    let raw =
+        std::env::var("CRABKA_ADMIN_LISTEN_ADDR").unwrap_or_else(|_| default_addr.to_string());
+    let addr: SocketAddr = raw
+        .parse()
+        .unwrap_or_else(|e| panic!("invalid CRABKA_ADMIN_LISTEN_ADDR `{raw}`: {e}"));
+    serve_admin_with_config(addr, extra, config).await
 }
 
 #[cfg(test)]

@@ -40,6 +40,8 @@ use tracing::info;
     about = "Confluent Schema Registry-compatible service for Crabka"
 )]
 struct Args {
+    #[command(flatten)]
+    profiling: crabka_telemetry::profiling::ProfilingConfig,
     #[arg(long, env = "CRABKA_BOOTSTRAP_SERVERS")]
     bootstrap_servers: String,
     #[arg(
@@ -317,7 +319,12 @@ async fn main() -> anyhow::Result<()> {
         "crabka-schema-registry",
     )?;
 
-    crabka_telemetry::profiling::serve_admin(args.admin_listen_addr, axum::Router::new()).await?;
+    crabka_telemetry::profiling::serve_admin_with_config(
+        args.admin_listen_addr,
+        axum::Router::new(),
+        args.profiling.clone(),
+    )
+    .await?;
 
     let crabka_schema_registry::cli::SecurityOutput {
         config: security,

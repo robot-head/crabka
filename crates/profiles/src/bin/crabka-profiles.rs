@@ -38,6 +38,8 @@ use object_store::{ObjectStore, path::Path as ObjectPath};
 
 #[derive(Debug, Parser)]
 struct Cli {
+    #[command(flatten)]
+    profiling: crabka_telemetry::profiling::ProfilingConfig,
     #[arg(long)]
     target: Target,
     #[arg(long, default_value = "127.0.0.1:4040")]
@@ -290,9 +292,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "crabka-profiles",
     )?;
     let metrics = ServiceMetrics::new();
-    crabka_telemetry::profiling::serve_admin(
+    crabka_telemetry::profiling::serve_admin_with_config(
         cli.admin_listen_addr,
         crabka_profiles::metrics::metrics_router(metrics.registry.clone()),
+        cli.profiling.clone(),
     )
     .await?;
 

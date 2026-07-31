@@ -85,6 +85,8 @@ fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
 #[command(name = "crabka-traces")]
 #[command(about = "Tempo-compatible traces service for Crabka")]
 struct Cli {
+    #[command(flatten)]
+    profiling: crabka_telemetry::profiling::ProfilingConfig,
     #[arg(long)]
     target: Target,
     #[arg(long, default_value = "127.0.0.1:3200")]
@@ -289,9 +291,10 @@ async fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         "crabka-traces",
     )?;
     let metrics = ServiceMetrics::new();
-    crabka_telemetry::profiling::serve_admin(
+    crabka_telemetry::profiling::serve_admin_with_config(
         cli.admin_listen_addr,
         crabka_traces::metrics::metrics_router(metrics.registry.clone()),
+        cli.profiling.clone(),
     )
     .await?;
 

@@ -63,6 +63,8 @@ enum Role {
 #[derive(Debug, Parser)]
 #[command(name = "observability-demo-app")]
 struct Cli {
+    #[command(flatten)]
+    profiling: crabka_telemetry::profiling::ProfilingConfig,
     #[arg(long, value_enum)]
     role: Role,
     #[arg(long, env = "CRABKA_DEMO_BOOTSTRAP", default_value = "127.0.0.1:9092")]
@@ -787,9 +789,10 @@ async fn main() -> Result<(), BoxError> {
     // Business metrics on the shared admin port (:9404) so Alloy scrapes them
     // alongside pprof (crabka_demo_* families).
     let metrics = DemoMetrics::new();
-    crabka_telemetry::profiling::serve_admin_from_env_with(
+    crabka_telemetry::profiling::serve_admin_from_env_with_config(
         "0.0.0.0:9404",
         metrics_router(metrics.registry.clone()),
+        cli.profiling.clone(),
     )
     .await?;
 
@@ -1414,6 +1417,7 @@ mod tests {
     #[test]
     fn streams_broker_dns_timeout_uses_default_and_cli_override() {
         let defaults = Cli {
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
             client_dispatch_queue_capacity: DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
@@ -1459,6 +1463,7 @@ mod tests {
         );
 
         let overridden = Cli {
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             streams_broker_dns_timeout: Some(millis(37)),
             ..defaults
         };
@@ -1499,6 +1504,7 @@ mod tests {
     #[test]
     fn streams_runtime_cadence_uses_defaults_and_independent_overrides() {
         let defaults = Cli {
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
             client_dispatch_queue_capacity: DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
@@ -1546,6 +1552,7 @@ mod tests {
         );
 
         let overridden = Cli {
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             streams_poll_interval: Some(millis(37)),
             streams_commit_interval: Some(millis(41)),
             ..defaults
@@ -1593,6 +1600,7 @@ mod tests {
     #[test]
     fn streams_rebalance_timeout_uses_default_and_cli_override() {
         let defaults = Cli {
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
             client_dispatch_queue_capacity: DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
@@ -1638,6 +1646,7 @@ mod tests {
         );
 
         let overridden = Cli {
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             streams_rebalance_timeout: Some(secs(45)),
             ..defaults
         };
@@ -1690,6 +1699,7 @@ mod tests {
     #[test]
     fn streams_join_retry_backoff_uses_default_and_cli_override() {
         let defaults = Cli {
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
             client_dispatch_queue_capacity: DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
@@ -1735,6 +1745,7 @@ mod tests {
         );
 
         let overridden = Cli {
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             streams_join_retry_backoff: Some(millis(37)),
             ..defaults
         };
@@ -1749,6 +1760,7 @@ mod tests {
     #[test]
     fn streams_interactive_query_queue_capacity_uses_default_and_override() {
         let defaults = Cli {
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             role: Role::Stream,
             bootstrap: "127.0.0.1:9092".to_owned(),
             client_dispatch_queue_capacity: DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
@@ -1794,6 +1806,7 @@ mod tests {
         );
 
         let overridden = Cli {
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             streams_interactive_query_queue_capacity: NonZeroUsize::new(37),
             ..defaults
         };

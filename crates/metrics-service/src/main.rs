@@ -36,6 +36,8 @@ use object_store::ObjectStore;
 
 #[derive(Debug, Parser)]
 struct Cli {
+    #[command(flatten)]
+    profiling: crabka_telemetry::profiling::ProfilingConfig,
     #[arg(long, env = "CRABKA_METRICS_SERVICE_TARGET")]
     target: Target,
     #[arg(
@@ -189,6 +191,7 @@ enum Target {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli = Cli::parse();
     let _telemetry = crabka_telemetry::init(
         OtlpConfig::from_env(
             |k| std::env::var(k).ok(),
@@ -201,13 +204,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "crabka-metrics-service",
     )?;
     let metrics = crabka_promql::metrics::ServiceMetrics::new();
-    crabka_telemetry::profiling::serve_admin_from_env_with(
+    crabka_telemetry::profiling::serve_admin_from_env_with_config(
         "0.0.0.0:9404",
         crabka_promql::metrics::metrics_router(metrics.registry.clone()),
+        cli.profiling.clone(),
     )
     .await?;
 
-    let cli = Cli::parse();
     match cli.target {
         Target::Querier => run_querier(cli, metrics).await?,
         Target::QueryFrontend => run_query_frontend(cli, metrics).await?,

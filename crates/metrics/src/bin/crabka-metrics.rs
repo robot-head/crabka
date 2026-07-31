@@ -35,6 +35,8 @@ use tokio::net::TcpListener;
 
 #[derive(Debug, Parser)]
 struct Cli {
+    #[command(flatten)]
+    profiling: crabka_telemetry::profiling::ProfilingConfig,
     #[arg(long, env = "CRABKA_METRICS_TARGET")]
     target: Target,
     #[arg(long, env = "CRABKA_METRICS_LISTEN", default_value = "127.0.0.1:4041")]
@@ -254,9 +256,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "crabka-metrics",
     )?;
     let metrics = ServiceMetrics::new();
-    crabka_telemetry::profiling::serve_admin(
+    crabka_telemetry::profiling::serve_admin_with_config(
         cli.admin_listen_addr,
         crabka_metrics::metrics::metrics_router(metrics.registry.clone()),
+        cli.profiling.clone(),
     )
     .await?;
 

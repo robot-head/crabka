@@ -21,10 +21,10 @@ binaries flatten and pass the shared config.
 
 ### Task 2: Direct admin-server owners
 
-- [ ] Flatten `ProfilingConfig` into metrics, traces, profiles, schema-registry, metrics-service, observability, and observability-demo-app CLI surfaces.
-- [ ] Pass the parsed policy to the policy-aware admin server functions.
-- [ ] Add focused CLI/environment default and override tests.
-- [ ] Run affected crate tests and strict Clippy; commit direct-owner wiring.
+- [x] Flatten `ProfilingConfig` into metrics, traces, profiles, schema-registry, metrics-service, observability, and observability-demo-app CLI surfaces.
+- [x] Pass the parsed policy to the policy-aware admin server functions.
+- [x] Add focused CLI/environment default and override tests.
+- [x] Run affected crate tests and strict Clippy; commit direct-owner wiring.
 
 ### Task 3: Broker owner
 
