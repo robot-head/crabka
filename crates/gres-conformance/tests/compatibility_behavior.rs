@@ -182,7 +182,7 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
 
 #[tokio::test]
 async fn every_major_feature_probe_matches_its_typed_behavior() {
-    assert!(FEATURE_PROBES.len() == 47);
+    assert!(FEATURE_PROBES.len() == 48);
     for probe in FEATURE_PROBES {
         if probe.behavior == FeatureBehavior::ParserRejectPending {
             assert!(

@@ -2345,7 +2345,7 @@ struct GroupOutput {
 
 #[cfg(test)]
 mod tests {
-    use crabka_pgcatalog::{Column, Table};
+    use crabka_pgcatalog::{Column, RelationName, Table};
     use crabka_pgparser::ast::{QueryBody, SelectStmt, SetExpr, Statement};
     use crabka_pgwire::engine::Cell;
 
@@ -2354,7 +2354,7 @@ mod tests {
     fn table() -> Table {
         Table {
             id: 1,
-            name: "t".into(),
+            name: RelationName::public("t"),
             columns: vec![
                 Column::new("k", ColumnType::Int4),
                 Column::new("v", ColumnType::Int4),
@@ -2369,7 +2369,7 @@ mod tests {
     /// The table's single-relation scope, or the empty (FROM-less) scope.
     fn scope_of(t: Option<&Table>) -> Scope {
         match t {
-            Some(t) => Scope::single(t, &t.name),
+            Some(t) => Scope::single(t, &t.name.name),
             None => Scope::empty(),
         }
     }
@@ -3137,7 +3137,7 @@ mod tests {
     fn ts_table() -> Table {
         Table {
             id: 1,
-            name: "t".into(),
+            name: RelationName::public("t"),
             columns: vec![
                 Column::new("k", ColumnType::Int4),
                 Column::new("ts", ColumnType::Timestamp),
@@ -3203,7 +3203,7 @@ mod tests {
     fn collect_table() -> Table {
         Table {
             id: 3,
-            name: "t".into(),
+            name: RelationName::public("t"),
             columns: vec![
                 Column::new("k", ColumnType::Int4),
                 Column::new("v", ColumnType::Int4),
@@ -3479,7 +3479,7 @@ mod tests {
     fn stats_table() -> Table {
         Table {
             id: 2,
-            name: "t".into(),
+            name: RelationName::public("t"),
             columns: vec![
                 Column::new("s", ColumnType::Text),
                 Column::new("b", ColumnType::Bool),

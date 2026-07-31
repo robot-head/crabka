@@ -1634,12 +1634,15 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
         Datum::Timestamp(_) | Datum::Timestamptz(_) => {
             JsonbValue::String(iso_8601_datetime(&datum_text(d, ctx)))
         }
+        // `regclass` joins the stringly group, not the numbers: PostgreSQL's
+        // `to_jsonb('pp'::regclass)` is `"pp"`, its output function's text.
         Datum::Text(_)
         | Datum::Date(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
         | Datum::Interval(_)
         | Datum::Enum(_)
+        | Datum::Regclass(_)
         | Datum::Bytea(_) => JsonbValue::String(datum_text(d, ctx)),
     })
 }

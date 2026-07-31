@@ -1,9 +1,9 @@
 //! Per-statement execution.
 
 use std::{
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt::Write as _,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use bytes::Bytes;
@@ -20,6 +20,7 @@ use crate::{
     error::ExecError,
     foreign::{ForeignScanner, ScanBounds},
     join::{Relation, join_relations},
+    relname::{SchemaDisposition, is_missing_schema, resolve_relation, resolve_relations},
     scanner::{
         JoinExecutionStrategy, JoinKind as ScannerJoinKind, JoinRangeRequest, JoinRow,
         JoinSnapshot, JoinTableInterval, PredicatePushdown, RowInterval, ScanRequest, ScannedRow,
@@ -49,6 +50,17 @@ pub struct TimestampWritePlan {
 pub(crate) struct ForeignCtx<'a> {
     pub scanner: Option<&'a Arc<dyn ForeignScanner>>,
     pub current_user: &'a str,
+    /// The session's name-resolution scope, so every DDL statement resolves an
+    /// unqualified name against the same `search_path` a `SELECT` does.
+    pub resolution: &'a crate::relname::ResolutionScope,
+    /// Table ids the session claimed from the shared counter, drained from the
+    /// back as this statement creates relations.
+    ///
+    /// A list rather than a single id because one statement can create many
+    /// relations: `IMPORT FOREIGN SCHEMA` creates one per table the scanner
+    /// discovers. `None` outside a session, where every id comes from the
+    /// counter.
+    pub reserved_table_ids: Option<&'a std::sync::Mutex<Vec<crabka_pgcatalog::TableId>>>,
     /// The xid of the open transaction, when this DDL runs inside one.
     ///
     /// A unique-index backfill must see the rows its OWN transaction has written
@@ -68,8 +80,21 @@ impl ForeignCtx<'_> {
         Self {
             scanner: None,
             current_user: "public",
+            resolution: crate::relname::ResolutionScope::default_scope(),
+            reserved_table_ids: None,
             own_xid: None,
         }
+    }
+
+    /// The next reserved id, or the shared counter when there is no block or the
+    /// block is spent.
+    fn table_id(&self) -> crabka_pgcatalog::TableIdSource {
+        self.reserved_table_ids
+            .and_then(|reserved| reserved.lock().expect("table ids").pop())
+            .map_or(
+                crabka_pgcatalog::TableIdSource::Counter,
+                crabka_pgcatalog::TableIdSource::Reserved,
+            )
     }
 }
 
@@ -116,6 +141,14 @@ pub(crate) struct WriteContext<'a> {
     pub range_scanner: &'a dyn crate::scanner::RangeScanner,
     /// The CTE scope the statement starts from (empty for a plain statement).
     pub ctes: &'a crate::cte::CteContext,
+    /// The open transaction's deferred referential checks, which the
+    /// end-of-statement drain promotes into and `COMMIT` drains.
+    ///
+    /// `None` in autocommit, where the statement *is* the transaction: nothing
+    /// is promoted, because no later statement could repair a violation and the
+    /// end-of-statement drain and a commit-time one would report the same thing
+    /// at the same moment.
+    pub deferred_fk: Option<&'a std::sync::Mutex<crate::fk::DeferredConstraints>>,
 }
 
 impl<'a> WriteContext<'a> {
@@ -182,6 +215,22 @@ impl WriteContext<'_> {
             repeatable_read: self.repeatable_read,
         }
     }
+
+    /// [`WriteContext::mutation`] reading through the statement's pending write
+    /// batch layered over the store.
+    ///
+    /// The one caller is a referential action's re-read of the row it is about
+    /// to change. `PostgreSQL` runs the action as a query of its own, once the
+    /// command's rows exist, so the version it operates on is the one the
+    /// command itself last wrote — an image that is only staged here. Reading
+    /// the store instead would stamp a version the command has already
+    /// superseded and leave its replacement live.
+    fn staged_mutation<'b>(&'b self, staged: &'b StagedKv<'b>) -> MutationContext<'b> {
+        MutationContext {
+            kv: staged,
+            ..self.mutation()
+        }
+    }
 }
 
 /// Read a table's durable next-rowid (1 if unset). Single source of truth for
@@ -209,6 +258,7 @@ pub(crate) fn execute_ddl(
     stmt: &Statement,
     fctx: ForeignCtx,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let resolution = fctx.resolution;
     match stmt {
         // P2: SQL routines. Definition, lifecycle and catalog storage live in
         // `routine`; only the DDL routing is here.
@@ -226,26 +276,59 @@ pub(crate) fn execute_ddl(
         } => crate::routine::alter(kv, *object, routine, action),
         // T5: user-defined types. Definition, lifecycle and catalog storage
         // live in `usertype`; only the DDL routing is here.
-        Statement::CreateType { name, definition } => {
-            crate::usertype::create_type(kv, name, definition)
-        }
-        Statement::AlterType { name, action } => crate::usertype::alter_type(kv, name, action),
+        Statement::CreateType { name, definition } => crate::usertype::create_type(
+            kv,
+            &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?.to_string(),
+            definition,
+        ),
+        Statement::AlterType { name, action } => crate::usertype::alter_type(
+            kv,
+            &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?.to_string(),
+            action,
+        ),
         Statement::DropType {
             names,
             if_exists,
             cascade,
-        } => crate::usertype::drop_types(kv, names, *if_exists, *cascade, false),
+        } => crate::usertype::drop_types(
+            kv,
+            &resolve_relations(kv, resolution, names, SchemaDisposition::Utility)?
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            *if_exists,
+            *cascade,
+            false,
+        ),
         Statement::CreateDomain {
             name,
             base,
             constraints,
-        } => crate::usertype::create_domain(kv, name, *base, constraints),
-        Statement::AlterDomain { name, action } => crate::usertype::alter_domain(kv, name, action),
+        } => crate::usertype::create_domain(
+            kv,
+            &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?.to_string(),
+            *base,
+            constraints,
+        ),
+        Statement::AlterDomain { name, action } => crate::usertype::alter_domain(
+            kv,
+            &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?.to_string(),
+            action,
+        ),
         Statement::DropDomain {
             names,
             if_exists,
             cascade,
-        } => crate::usertype::drop_types(kv, names, *if_exists, *cascade, true),
+        } => crate::usertype::drop_types(
+            kv,
+            &resolve_relations(kv, resolution, names, SchemaDisposition::Utility)?
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            *if_exists,
+            *cascade,
+            true,
+        ),
         Statement::CreateTable {
             name,
             columns,
@@ -270,31 +353,46 @@ pub(crate) fn execute_ddl(
                         .into(),
                 ));
             }
-            if matches!(
-                on_commit,
-                Some(
-                    crabka_pgparser::ast::OnCommitAction::DeleteRows
-                        | crabka_pgparser::ast::OnCommitAction::Drop
-                )
-            ) {
-                return Err(ExecError::Unsupported(
-                    "ON COMMIT DELETE ROWS and ON COMMIT DROP are not supported: a temporary \
-                     table is an ordinary relation here, with no session-scoped lifetime to \
-                     hang the disposition off"
-                        .into(),
+            let disposition = if *temporary {
+                SchemaDisposition::TemporaryCreation
+            } else {
+                SchemaDisposition::Creation
+            };
+            let name = &resolve_relation(kv, resolution, name, disposition)?;
+            // `CREATE TABLE pg_temp.t` and a `search_path` whose creation slot
+            // is the temporary namespace both make a temporary relation without
+            // the keyword, so persistence follows the schema the name landed in
+            // rather than the keyword that was written.
+            let temporary = crabka_pgcatalog::is_temp_schema(&name.schema);
+            if on_commit.is_some() && !temporary {
+                return Err(ExecError::InvalidTableDefinition(
+                    "ON COMMIT can only be used on temporary tables".into(),
                 ));
             }
             if *if_not_exists && crabka_pgcatalog::get_table(kv, name).is_ok() {
                 return Ok((command("CREATE TABLE"), Vec::new()));
             }
-            let ddl_ctx = crate::clock::EvalCtx::test_default();
+            let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution);
             // A partition declares no columns of its own: it inherits the
             // parent's list, along with the parent's CHECK constraints, and may
             // only add qualifiers to what it inherits.
-            let (cols, checks, serial_sequences, pending_indexes) = match partition_of {
-                Some(spec) => partition_definition(kv, name, spec, constraints, like, &ddl_ctx)?,
-                None => create_table_definition(kv, name, columns, constraints, like, &ddl_ctx)?,
-            };
+            let (cols, checks, serial_sequences, pending_indexes, pending_foreign_keys) =
+                match partition_of {
+                    Some(spec) => {
+                        partition_definition(kv, name, spec, constraints, like, &ddl_ctx)?
+                    }
+                    None => {
+                        create_table_definition(kv, name, columns, constraints, like, &ddl_ctx)?
+                    }
+                };
+            // `fk::resolve_foreign_key` refuses a sharded relation itself, but
+            // `Table` carries no partition flag, so this is the only place that
+            // knows a partitioned relation is being defined.
+            if (partition_by.is_some() || partition_of.is_some())
+                && let Some(pending) = pending_foreign_keys.first()
+            {
+                return Err(reject_partitioned_foreign_key(&pending.name));
+            }
             let partition_scheme = partition_by
                 .as_ref()
                 .map(|spec| partition_scheme_from_ast(spec, &cols, &pending_indexes))
@@ -317,6 +415,7 @@ pub(crate) fn execute_ddl(
                 crabka_pgcatalog::TableOptions { sharded: *sharded },
                 sharding.as_ref(),
                 checks.clone(),
+                fctx.table_id(),
             )?;
             let table = crabka_pgcatalog::Table {
                 id,
@@ -327,11 +426,41 @@ pub(crate) fn execute_ddl(
                 foreign: None,
                 checks,
             };
-            ops.extend(crabka_pgcatalog::create_indexes_on_table_ops(
-                kv,
-                &table,
-                &pending_indexes,
-            )?);
+            let index_ops =
+                crabka_pgcatalog::create_indexes_on_table_ops(kv, &table, &pending_indexes)?;
+            let staged_indexes = staged_indexes_of(&index_ops, &pending_indexes);
+            ops.extend(index_ops);
+            if !pending_foreign_keys.is_empty() {
+                // Resolved here rather than in `create_table_definition`
+                // because `CREATE TABLE t (… REFERENCES t …)` names a relation
+                // no catalog read can find: the in-flight column and index
+                // lists, under the ids this batch allocates, are the parent.
+                let relation = crate::fk::FkRelation {
+                    id,
+                    name,
+                    columns: &table.columns,
+                    indexes: &staged_indexes,
+                    sharded: *sharded,
+                };
+                for pending in &pending_foreign_keys {
+                    let foreign_key = crate::fk::resolve_foreign_key(
+                        kv,
+                        resolution,
+                        &relation,
+                        &crate::fk::ForeignKeyRequest {
+                            name: Some(&pending.name),
+                            columns: &pending.columns,
+                            reference: &pending.reference,
+                            attributes: pending.attributes,
+                            // PostgreSQL ignores NOT VALID here: a relation
+                            // being created has no stored rows to validate.
+                            validated: true,
+                            self_reference: Some(&relation),
+                        },
+                    )?;
+                    ops.extend(crabka_pgcatalog::create_foreign_key_ops(kv, &foreign_key)?);
+                }
+            }
             for (sequence_name, sequence) in serial_sequences {
                 ops.extend(crabka_pgcatalog::create_sequence_ops(
                     kv,
@@ -345,7 +474,9 @@ pub(crate) fn execute_ddl(
             if let Some((parent, bound)) = &attachment {
                 ops.extend(crate::partition::attach_ops(parent, name, bound));
             }
-            let _ = temporary;
+            if temporary {
+                ops.splice(..0, ensure_schema_ops(kv, &name.schema)?);
+            }
             Ok((
                 QueryResult::Command {
                     tag: "CREATE TABLE".into(),
@@ -363,10 +494,35 @@ pub(crate) fn execute_ddl(
             // IF EXISTS), so a missing name without IF EXISTS drops nothing.
             let mut ops = Vec::new();
             let mut tag = "DROP TABLE";
-            for name in names {
-                if let Some(sequence_name) = name.strip_prefix("__crabka_sequence__:") {
+            // A foreign key whose CHILD is itself being dropped never blocks:
+            // `DROP TABLE p, c` and a mutually referencing pair dropped together
+            // both succeed. The whole set is resolved before any name is
+            // processed, because the list is all-or-nothing.
+            // `DROP SEQUENCE` reaches this arm with its names tagged. The tag
+            // rides the relation's own name, so it comes off before the
+            // qualifier is resolved and goes back on afterwards: `DROP SEQUENCE
+            // public.s` has to reach the same sequence as `DROP SEQUENCE s`.
+            let mut targets = Vec::with_capacity(names.len());
+            for reference in names {
+                let tagged = reference.name.strip_prefix("__crabka_sequence__:");
+                let bare = crabka_pgparser::ast::RelationRef {
+                    schema: reference.schema.clone(),
+                    name: tagged.unwrap_or(&reference.name).to_string(),
+                };
+                match resolve_relation(kv, resolution, &bare, SchemaDisposition::Utility) {
+                    Ok(resolved) => targets.push((resolved, tagged.is_some())),
+                    // `DROP TABLE IF EXISTS nope.t` skips that one name and
+                    // still drops the rest of the list, as PostgreSQL does.
+                    Err(error) if *if_exists && is_missing_schema(&error) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            let dropping: std::collections::HashSet<_> =
+                targets.iter().map(|(name, _)| name.clone()).collect();
+            for (name, is_sequence) in &targets {
+                if *is_sequence {
                     tag = "DROP SEQUENCE";
-                    match crabka_pgcatalog::drop_sequence_ops(kv, sequence_name) {
+                    match crabka_pgcatalog::drop_sequence_ops(kv, name) {
                         Ok(sequence_ops) => ops.extend(sequence_ops),
                         Err(crabka_pgcatalog::CatalogError::UndefinedSequence(_)) if *if_exists => {
                         }
@@ -387,6 +543,12 @@ pub(crate) fn execute_ddl(
                                     ops.extend(crabka_pgcatalog::drop_view_ops(kv, view)?);
                                 }
                             }
+                            ops.extend(drop_blocking_foreign_keys(
+                                kv,
+                                &crabka_pgcatalog::get_table(kv, name)?,
+                                &dropping,
+                                *cascade,
+                            )?);
                             // A partition has no independent existence: dropping
                             // the parent drops it too, without CASCADE, exactly
                             // as PostgreSQL does.
@@ -427,9 +589,6 @@ pub(crate) fn execute_ddl(
             {
                 return Err(ExecError::UndefinedObject(format!("role \"{role}\"")));
             }
-            if *if_not_exists && crabka_pgcatalog::schema_exists(kv, &name)? {
-                return Ok((command("CREATE SCHEMA"), Vec::new()));
-            }
             if !elements.is_empty() {
                 return Err(ExecError::Unsupported(
                     "CREATE SCHEMA with a schema-element list is not supported: DDL commits one \
@@ -438,7 +597,15 @@ pub(crate) fn execute_ddl(
                         .into(),
                 ));
             }
-            let ops = crabka_pgcatalog::create_schema_ops(kv, &name, owner)?;
+            // `IF NOT EXISTS` waives only the duplicate: an unacceptable name is
+            // still unacceptable, so the reserved-prefix refusal has to come out
+            // of `create_schema_ops` rather than be short-circuited before it.
+            let ops = match crabka_pgcatalog::create_schema_ops(kv, &name, owner) {
+                Err(crabka_pgcatalog::CatalogError::DuplicateSchema(_)) if *if_not_exists => {
+                    Vec::new()
+                }
+                result => result?,
+            };
             Ok((command("CREATE SCHEMA"), ops))
         }
         Statement::AlterSchema { name, action } => {
@@ -474,16 +641,7 @@ pub(crate) fn execute_ddl(
                     continue;
                 }
                 if *cascade {
-                    for relation in crabka_pgcatalog::schema_contents(kv, name)? {
-                        if crabka_pgcatalog::get_view(kv, &relation).is_ok() {
-                            ops.extend(crabka_pgcatalog::drop_view_ops(kv, &relation)?);
-                        } else if crabka_pgcatalog::get_table(kv, &relation).is_ok() {
-                            ops.extend(crate::partition::drop_metadata_ops(kv, &relation)?);
-                            ops.extend(crabka_pgcatalog::drop_table_ops(kv, &relation)?);
-                        } else {
-                            ops.extend(crabka_pgcatalog::drop_sequence_ops(kv, &relation)?);
-                        }
-                    }
+                    ops.extend(drop_schema_contents_ops(kv, name)?);
                 }
                 ops.extend(crabka_pgcatalog::drop_schema_ops(kv, name, *cascade)?);
             }
@@ -493,21 +651,45 @@ pub(crate) fn execute_ddl(
             table,
             if_exists,
             actions,
-        } => alter_table_ops(kv, table, *if_exists, actions),
+        } => match resolve_relation(kv, resolution, table, SchemaDisposition::Utility) {
+            Ok(name) => alter_table_ops(kv, resolution, &name, *if_exists, actions, fctx.own_xid),
+            // `ALTER TABLE IF EXISTS nope.t` skips rather than reporting the
+            // schema, as PostgreSQL does.
+            Err(error) if *if_exists && is_missing_schema(&error) => {
+                Ok((command("ALTER TABLE"), Vec::new()))
+            }
+            Err(error) => Err(error),
+        },
         Statement::Comment {
             object_kind,
             object_name,
             comment,
-        } => comment_ops(kv, object_kind, object_name, comment.as_deref()),
+        } => comment_ops(kv, resolution, object_kind, object_name, comment.as_deref()),
         Statement::CreateView {
             name,
             definition,
             query,
             or_replace,
+            temporary,
             columns: aliases,
         } => {
-            validate_view_definition(kv, query)?;
-            let described = crate::query::describe_query_expr(kv, query)?;
+            // The body is analysed before the view's own name is placed,
+            // because what it reads decides where the view can go: a view over
+            // a temporary relation is itself temporary whether or not `TEMP`
+            // was written, so a qualifier naming an ordinary schema is refused.
+            // `postgres:18.4` reports the two in that order.
+            let sources = validate_view_definition(kv, resolution, query)?;
+            let temporary = *temporary
+                || sources
+                    .iter()
+                    .any(|source| crabka_pgcatalog::is_temp_schema(&source.schema));
+            let disposition = if temporary {
+                SchemaDisposition::TemporaryCreation
+            } else {
+                SchemaDisposition::Creation
+            };
+            let name = &resolve_relation(kv, resolution, name, disposition)?;
+            let described = crate::query::describe_query_expr(kv, resolution, query)?;
             // `VIEW name (a, b, c)` renames the output columns positionally; too
             // many names is PostgreSQL's own 42P10.
             if let Some(aliases) = aliases
@@ -549,7 +731,14 @@ pub(crate) fn execute_ddl(
                     columns,
                 })]
             } else {
-                crabka_pgcatalog::create_view_ops(kv, name, definition.clone(), columns)?
+                let mut created = ensure_schema_ops(kv, &name.schema)?;
+                created.extend(crabka_pgcatalog::create_view_ops(
+                    kv,
+                    name,
+                    definition.clone(),
+                    columns,
+                )?);
+                created
             };
             Ok((command("CREATE VIEW"), ops))
         }
@@ -558,6 +747,13 @@ pub(crate) fn execute_ddl(
             if_exists,
             cascade,
         } => {
+            let name = &match resolve_relation(kv, resolution, name, SchemaDisposition::Utility) {
+                Ok(name) => name,
+                Err(error) if *if_exists && is_missing_schema(&error) => {
+                    return Ok((command("DROP VIEW"), Vec::new()));
+                }
+                Err(error) => return Err(error),
+            };
             let ops = match crabka_pgcatalog::drop_view_ops(kv, name) {
                 Ok(mut ops) => {
                     // A view may itself be read by other views. PostgreSQL
@@ -594,19 +790,33 @@ pub(crate) fn execute_ddl(
             predicate,
         } => {
             let _ = concurrently;
-            if table == "__crabka_sequence__" {
+            // `CREATE SEQUENCE` borrows this variant, naming the sequence in
+            // `name` and tagging `table` with a sentinel no relation can carry.
+            if table.schema.is_none() && table.name == "__crabka_sequence__" {
                 let encoded: Vec<String> = keys.iter().map(|key| key.text.clone()).collect();
                 let sequence = sequence_from_encoded_options(&encoded)?;
                 let name = name
-                    .as_deref()
+                    .as_ref()
                     .ok_or_else(|| ExecError::Syntax("CREATE SEQUENCE requires a name".into()))?;
+                let name = &resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?;
                 if *if_not_exists && crabka_pgcatalog::get_sequence(kv, name).is_ok() {
                     return Ok((command("CREATE SEQUENCE"), Vec::new()));
                 }
                 let ops = crabka_pgcatalog::create_sequence_ops(kv, name, sequence)?;
                 return Ok((command("CREATE SEQUENCE"), ops));
             }
-            let name = index_name_or_default(name.as_deref(), table, keys);
+            let table = &resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?;
+            // An index name is never qualified: an index lands in its table's
+            // schema, so only the sequence spelling above can carry one.
+            let index = name
+                .as_ref()
+                .map(|name| resolve_relation(kv, resolution, name, SchemaDisposition::Utility))
+                .transpose()?;
+            let name = table.sibling(index_name_or_default(
+                index.as_ref().map(|name| name.name.as_str()),
+                table,
+                keys,
+            ));
             let columns = index_key_columns(keys, predicate.as_deref(), method.as_deref())?;
             if !include.is_empty() {
                 return Err(ExecError::Unsupported(
@@ -636,7 +846,7 @@ pub(crate) fn execute_ddl(
             }
             let (id, mut ops) = crabka_pgcatalog::create_index_ops(
                 kv,
-                name,
+                &name.name,
                 table,
                 columns.clone(),
                 *unique,
@@ -647,7 +857,7 @@ pub(crate) fn execute_ddl(
                 reject_unwritable_local_index(&table_meta)?;
                 let index = crabka_pgcatalog::Index {
                     id,
-                    name: name.clone(),
+                    name: name.name.clone(),
                     table: table.clone(),
                     table_id: table_meta.id,
                     columns: columns.clone(),
@@ -667,11 +877,15 @@ pub(crate) fn execute_ddl(
         Statement::DropIndex {
             name,
             if_exists,
-            cascade: _,
+            cascade,
         } => {
-            // No object can depend on this one in this engine, so CASCADE and
-            // RESTRICT are indistinguishable; both are accepted.
-
+            let name = &match resolve_relation(kv, resolution, name, SchemaDisposition::Utility) {
+                Ok(name) => name,
+                Err(error) if *if_exists && is_missing_schema(&error) => {
+                    return Ok((command("DROP INDEX"), Vec::new()));
+                }
+                Err(error) => return Err(error),
+            };
             let (index, mut ops) = match crabka_pgcatalog::drop_index_ops(kv, name) {
                 Ok(result) => result,
                 Err(crabka_pgcatalog::CatalogError::UndefinedIndex(_)) if *if_exists => {
@@ -684,6 +898,29 @@ pub(crate) fn execute_ddl(
                     "dropping global indexes is not supported until distributed index cleanup exists"
                         .into(),
                 ));
+            }
+            // A foreign key that chose this index as the one proving its
+            // referenced columns unique depends on it; CASCADE drops the
+            // referencing constraint, not the referencing relation.
+            let dependents = crate::fk::dependents_blocking_index_drop(kv, &index)?;
+            if !dependents.is_empty() {
+                if !*cascade {
+                    return Err(ExecError::DependentForeignKeys(Box::new(
+                        crate::error::ForeignKeyDependents {
+                            dropped: crate::error::DroppedObject::Index(index.name.clone()),
+                            dependents,
+                        },
+                    )));
+                }
+                for dependent in &dependents {
+                    let child = crabka_pgcatalog::get_table(kv, &dependent.table)?;
+                    let (_, drop_ops) = crabka_pgcatalog::drop_foreign_key_ops(
+                        kv,
+                        child.id,
+                        &dependent.constraint,
+                    )?;
+                    ops.extend(drop_ops);
+                }
             }
             for (key, _) in kv.scan_prefix(&crabka_pgkv::key::secondary_index_prefix(
                 index.table_id,
@@ -706,8 +943,12 @@ pub(crate) fn execute_ddl(
             table,
             grantees,
         } => {
-            let ops =
-                crabka_pgcatalog::grant_table_privileges_ops(kv, table, grantees, privileges)?;
+            let ops = crabka_pgcatalog::grant_table_privileges_ops(
+                kv,
+                &resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?,
+                grantees,
+                privileges,
+            )?;
             Ok((command("GRANT"), ops))
         }
         Statement::RevokeTablePrivileges {
@@ -715,8 +956,12 @@ pub(crate) fn execute_ddl(
             table,
             grantees,
         } => {
-            let ops =
-                crabka_pgcatalog::revoke_table_privileges_ops(kv, table, grantees, privileges)?;
+            let ops = crabka_pgcatalog::revoke_table_privileges_ops(
+                kv,
+                &resolve_relation(kv, resolution, table, SchemaDisposition::Utility)?,
+                grantees,
+                privileges,
+            )?;
             Ok((command("REVOKE"), ops))
         }
         Statement::CreateFdw { name, options } => {
@@ -801,10 +1046,11 @@ pub(crate) fn execute_ddl(
                 .collect();
             let (_id, ops) = crabka_pgcatalog::create_foreign_table_ops(
                 kv,
-                name,
+                &resolve_relation(kv, resolution, name, SchemaDisposition::Creation)?,
                 cols,
                 server,
                 options.clone(),
+                fctx.table_id(),
             )?;
             Ok((command("CREATE FOREIGN TABLE"), ops))
         }
@@ -818,6 +1064,7 @@ pub(crate) fn execute_ddl(
 
             // A foreign table shares the ordinary table catalog key, so `drop_table`
             // removes it (catalog entry + sequence + any rows).
+            let name = &resolve_relation(kv, resolution, name, SchemaDisposition::Utility)?;
             let ops = match crabka_pgcatalog::drop_table_ops(kv, name) {
                 Ok(ops) => ops,
                 Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) if *if_exists => Vec::new(),
@@ -839,14 +1086,15 @@ pub(crate) fn execute_ddl(
         // then materializes a foreign table per discovered table through the same
         // write-op seam as local DDL.
         //
-        // `remote_schema` is accepted but unused in phase 1 (Kafka has no nested
-        // schemas); `into_schema` is a flat namespace today — the discovered table
-        // name is used verbatim as the catalog name.
+        // `remote_schema` is accepted but unused in phase 1 (Kafka has no
+        // nested schemas). `INTO <schema>` names the local schema every
+        // discovered table lands in, which must exist — 3F000 otherwise, as for
+        // any other qualifier.
         Statement::ImportForeignSchema {
             remote_schema: _,
             selector,
             server,
-            into_schema: _,
+            into_schema,
         } => {
             // Resolve the server (42704 if undefined) and the current user's
             // optional mapping (no mapping → no credentials).
@@ -859,15 +1107,37 @@ pub(crate) fn execute_ddl(
             let filter = crate::foreign::ImportFilter::from_selector(selector);
             let tables = scanner.import_schema(&srv, mapping.as_ref(), &filter)?;
             let mut ops = Vec::new();
+            // Every table lands in one batch, so the counter cannot be read
+            // again between them — an unapplied bump is invisible to the next
+            // read, and each table would be created under the same id. The
+            // batch allocates from a cursor of its own and owes exactly one
+            // bump, which is sound because the session holds the counter lock
+            // for the whole statement.
+            let mut cursor: Option<crabka_pgcatalog::TableId> = None;
             for table in tables {
+                let into = resolve_relation(
+                    kv,
+                    resolution,
+                    &crabka_pgparser::ast::RelationRef::qualified(into_schema, &table.name),
+                    SchemaDisposition::Creation,
+                )?;
+                let id = match cursor {
+                    Some(next) => next,
+                    None => crabka_pgcatalog::read_next_table_id(kv)?,
+                };
+                cursor = Some(id + 1);
                 let (_id, mut table_ops) = crabka_pgcatalog::create_foreign_table_ops(
                     kv,
-                    &table.name,
+                    &into,
                     table.columns,
                     &srv.name,
                     table.options,
+                    crabka_pgcatalog::TableIdSource::Reserved(id),
                 )?;
                 ops.append(&mut table_ops);
+            }
+            if let Some(next) = cursor {
+                ops.push(crabka_pgcatalog::set_next_table_id_op(next));
             }
             Ok((command("IMPORT FOREIGN SCHEMA"), ops))
         }
@@ -886,7 +1156,7 @@ pub(crate) fn execute_ddl(
 fn check_view_columns_replaceable(
     existing: &[Column],
     replacement: &[Column],
-    view: &str,
+    view: &crabka_pgcatalog::RelationName,
 ) -> Result<(), ExecError> {
     if replacement.len() < existing.len() {
         return Err(ExecError::InvalidTableDefinition(
@@ -922,10 +1192,17 @@ fn check_view_columns_replaceable(
     Ok(())
 }
 
+/// Check a view body against what this engine can store, and report the
+/// relations it reads.
+///
+/// The caller needs those relations, not just the verdict: a view over a
+/// temporary relation is itself temporary, so where the view lands is decided
+/// by what its body names.
 fn validate_view_definition(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     query: &crabka_pgparser::ast::QueryExpr,
-) -> Result<(), ExecError> {
+) -> Result<Vec<crabka_pgcatalog::RelationName>, ExecError> {
     if query.with.is_some() {
         return Err(ExecError::Unsupported(
             "CREATE VIEW currently supports SELECT without WITH".into(),
@@ -948,17 +1225,20 @@ fn validate_view_definition(
             "CREATE VIEW does not support joins or multiple FROM items".into(),
         ));
     }
+    let mut sources = Vec::with_capacity(select.from.len());
     for table in &select.from {
         let crabka_pgparser::ast::TableExpr::Table { name, .. } = table else {
             return Err(ExecError::Unsupported(
                 "CREATE VIEW does not support joins or derived tables".into(),
             ));
         };
-        if crabka_pgcatalog::get_view(catalog_kv, name).is_ok() {
+        let name = resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
+        if crabka_pgcatalog::get_view(catalog_kv, &name).is_ok() {
             return Err(ExecError::Unsupported(
                 "CREATE VIEW does not support references to other views".into(),
             ));
         }
+        sources.push(name);
     }
     for item in &select.projection {
         if let SelectItem::Expr { expr, .. } = item {
@@ -975,7 +1255,7 @@ fn validate_view_definition(
     {
         validate_view_expr(expression)?;
     }
-    Ok(())
+    Ok(sources)
 }
 
 fn validate_view_expr(expr: &Expr) -> Result<(), ExecError> {
@@ -1085,15 +1365,18 @@ fn command(tag: &str) -> QueryResult {
 }
 
 fn create_table_constraint_index(
-    table_name: &str,
+    table_name: &crabka_pgcatalog::RelationName,
     columns: &[String],
     primary_key: bool,
 ) -> crabka_pgcatalog::NewIndex {
     let suffix = if primary_key { "pkey" } else { "key" };
+    // The relation's own name, never its qualified spelling: `PostgreSQL` names
+    // the index for `s1.t`'s primary key `t_pkey`, in schema `s1`.
+    let table = &table_name.name;
     let name = if primary_key {
-        format!("{table_name}_pkey")
+        format!("{table}_pkey")
     } else {
-        format!("{table_name}_{}_{suffix}", columns.join("_"))
+        format!("{table}_{}_{suffix}", columns.join("_"))
     };
     crabka_pgcatalog::NewIndex {
         name,
@@ -1134,10 +1417,10 @@ fn create_table_primary_key_columns<'a>(
 }
 
 fn column_from_ast(
-    table_name: &str,
+    table_name: &crabka_pgcatalog::RelationName,
     column: &crabka_pgparser::ast::ColumnDef,
     ctx: &crate::clock::EvalCtx,
-    serial_sequences: &mut Vec<(String, Sequence)>,
+    serial_sequences: &mut Vec<(crabka_pgcatalog::RelationName, Sequence)>,
     primary_key_columns: &HashSet<&str>,
 ) -> Result<Column, ExecError> {
     let mut catalog_column = Column::new(column.name.clone(), column.ty);
@@ -1145,9 +1428,9 @@ fn column_from_ast(
         catalog_column.not_null = true;
     }
     if column.serial.is_some() {
-        let sequence_name = format!("{table_name}_{}_seq", column.name);
+        let sequence_name = table_name.sibling(format!("{}_{}_seq", table_name.name, column.name));
         catalog_column.not_null = true;
-        catalog_column.default = Some(ColumnDefault::NextVal(sequence_name.clone()));
+        catalog_column.default = Some(ColumnDefault::NextVal(sequence_name.to_string()));
         serial_sequences.push((
             sequence_name,
             Sequence::new(1, 1, None, None, Some(1), false),
@@ -1176,25 +1459,24 @@ fn column_from_ast(
                 }
             }
             crabka_pgparser::ast::ColumnConstraintKind::Identity(spec) => {
-                let sequence_name = format!("{table_name}_{}_seq", column.name);
+                let sequence_name =
+                    table_name.sibling(format!("{}_{}_seq", table_name.name, column.name));
                 catalog_column.not_null = true;
                 catalog_column.identity = Some(if spec.always {
                     crabka_pgcatalog::IdentityKind::Always
                 } else {
                     crabka_pgcatalog::IdentityKind::ByDefault
                 });
-                catalog_column.default = Some(ColumnDefault::NextVal(sequence_name.clone()));
+                catalog_column.default = Some(ColumnDefault::NextVal(sequence_name.to_string()));
                 serial_sequences.push((sequence_name, sequence_from_options(&spec.options)));
             }
             crabka_pgparser::ast::ColumnConstraintKind::Generated(predicate) => {
                 catalog_column.generated = Some(predicate.text.clone());
             }
-            crabka_pgparser::ast::ColumnConstraintKind::Check(_) => {}
-            crabka_pgparser::ast::ColumnConstraintKind::References(_) => {
-                return Err(ExecError::Unsupported(
-                    "REFERENCES constraints are not enforced yet".into(),
-                ));
-            }
+            // A column-level CHECK or REFERENCES contributes a constraint, not a
+            // column property; `create_table_definition` collects both.
+            crabka_pgparser::ast::ColumnConstraintKind::Check(_)
+            | crabka_pgparser::ast::ColumnConstraintKind::References(_) => {}
         }
     }
     Ok(catalog_column)
@@ -1217,7 +1499,7 @@ fn sequence_from_options(options: &crabka_pgparser::ast::SequenceOptions) -> Seq
 /// key that is not a bare column reference.
 fn index_name_or_default(
     explicit: Option<&str>,
-    table: &str,
+    table: &crabka_pgcatalog::RelationName,
     keys: &[crabka_pgparser::ast::IndexKey],
 ) -> String {
     if let Some(name) = explicit {
@@ -1227,7 +1509,7 @@ fn index_name_or_default(
         .iter()
         .map(|key| key.column.as_deref().unwrap_or("expr"))
         .collect();
-    format!("{table}_{}_idx", parts.join("_"))
+    format!("{}_{}_idx", table.name, parts.join("_"))
 }
 
 /// The plain column list an index can be built from. A key that is not a bare
@@ -1296,7 +1578,8 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
     // (`crabka_pgcatalog::serde::write_default`), so they are refused at DDL
     // time rather than written and lost.
     Err(ExecError::Unsupported(
-        "defaults for date/time, interval, bytea, composite and enum columns are not persisted yet"
+        "defaults for date/time, interval, bytea, composite, enum and regclass columns are not \
+         persisted yet"
             .into(),
     ))
 }
@@ -1566,7 +1849,7 @@ fn enforce_not_null(table: &Table, row: &[Datum]) -> Result<(), ExecError> {
         if column.not_null && value.is_null() {
             return Err(ExecError::NotNullViolation {
                 column: column.name.clone(),
-                table: table.name.clone(),
+                table: table.name.to_string(),
             });
         }
     }
@@ -1583,7 +1866,9 @@ fn default_value(column: &Column, ctx: &crate::clock::EvalCtx) -> Result<Datum, 
             let runtime = ctx.sequence.as_ref().ok_or_else(|| {
                 ExecError::Unsupported("sequence defaults require a SQL session".into())
             })?;
-            let value = runtime.manager.nextval(&*runtime.kv, sequence)?;
+            let value = runtime
+                .manager
+                .nextval(&*runtime.kv, ctx.resolution(), sequence)?;
             runtime
                 .currvals
                 .lock()
@@ -1637,16 +1922,71 @@ struct StatementWrites {
     /// per index, so the rowid identifies the freed key. The superseded version
     /// is still in the KV, so the probe still finds it and has to discount it.
     released_unique_keys: HashSet<(crabka_pgcatalog::IndexId, u64)>,
-    /// Every `(table, rowid)` this statement has already updated or deleted.
-    modified_rows: HashSet<(TableId, u64)>,
+    /// Every `(table, rowid)` this statement has already updated or deleted,
+    /// whether by its own DML or by a referential action.
+    row_claims: HashSet<(TableId, u64)>,
+    /// Which `(table, rowid, constraint)` triples a referential action has
+    /// already written — see [`StatementWrites::claim_row_for_action`].
+    action_claims: HashSet<(TableId, u64, String)>,
+    /// The referential checks this statement owes, appended by the write hooks
+    /// and drained once — after the `WITH` list AND the body, because
+    /// `PostgreSQL` treats the whole command as one trigger-firing unit.
+    fk_checks: crate::fk::FkCheckQueue,
+    /// The relations a `TRUNCATE` is emptying, empty for every other statement.
+    ///
+    /// `TRUNCATE` desugars to one unfiltered `DELETE` per relation, and those
+    /// deletes must not fire `ON DELETE CASCADE`: `PostgreSQL`'s `TRUNCATE`
+    /// refuses a child outside the set and `CASCADE` widens the *set* instead.
+    /// Carried here so the desugared `DELETE` can suppress exactly the
+    /// parent-side keys whose child is being truncated too.
+    truncate_set: BTreeSet<TableId>,
 }
 
 impl StatementWrites {
-    /// Claim a row for modification. `false` means another part of this
-    /// statement already modified it, which is what stops this part from
+    /// Claim a row for the command's own DML. `false` means anything else in
+    /// this statement already modified it, which is what stops this part from
     /// modifying it a second time.
+    ///
+    /// `PostgreSQL`'s "a command modifies a given row at most once" rule is
+    /// about the command's own `ModifyTable` nodes, and every one of them runs
+    /// before the trigger queue does, so a referential action can never be what
+    /// this refuses.
     fn claim_row(&mut self, table: TableId, rowid: u64) -> bool {
-        self.modified_rows.insert((table, rowid))
+        self.row_claims.insert((table, rowid))
+    }
+
+    /// Claim a row for one constraint's referential action. `false` means *that
+    /// constraint's* action has already written this row.
+    ///
+    /// A referential action is not one of the command's `ModifyTable` nodes: it
+    /// runs as a separate query the trigger queue issues, so it reaches a row
+    /// the command itself already modified, and so does a *second* constraint's
+    /// action reach a row the first one has just rewritten — which is how one
+    /// `DELETE` of a doubly-referenced parent key nulls both referencing
+    /// columns rather than one.
+    ///
+    /// What is refused is one constraint coming back around to a row its own
+    /// action already wrote. The drain folds each action's ops into the view it
+    /// reads, so a cascade cycle already terminates on the data exactly as
+    /// `PostgreSQL`'s does — a deleted row reads as gone, a re-keyed one no
+    /// longer matches. This bounds the work at one write per
+    /// `(row, constraint)` whatever the data does.
+    fn claim_row_for_action(&mut self, table: TableId, rowid: u64, constraint: &str) -> bool {
+        if !self
+            .action_claims
+            .insert((table, rowid, constraint.to_string()))
+        {
+            return false;
+        }
+        self.row_claims.insert((table, rowid));
+        true
+    }
+
+    /// Has anything in this command already modified this row? The predicate
+    /// `ON CONFLICT DO UPDATE` raises 21000 on, where *what* touched the row
+    /// makes no difference — the upsert may not be the second thing to reach it.
+    fn is_claimed(&self, table: TableId, rowid: u64) -> bool {
+        self.row_claims.contains(&(table, rowid))
     }
 
     /// Does the probe's `holder` still hold the key it was found under, or did
@@ -1677,6 +2017,302 @@ impl StatementWrites {
         }
         Ok(())
     }
+}
+
+impl<'a> WriteContext<'a> {
+    /// The context the foreign-key drain probes and scans through.
+    ///
+    /// The row store it reads is `staged` — this statement's write batch layered
+    /// over the real one — because the drain's whole premise is that the
+    /// statement's rows already exist, and they only reach the KV when the
+    /// session commits the batch.
+    fn fk_exec<'b>(&'b self, staged: &'b StagedKv<'b>) -> crate::fk::FkExecContext<'b>
+    where
+        'a: 'b,
+    {
+        crate::fk::FkExecContext {
+            catalog_kv: self.catalog_kv,
+            kv: staged,
+            global: self.global,
+            global_snapshot: self.global_snapshot,
+            snapshot: self.snapshot,
+            xid: self.xid,
+            eval_ctx: self.eval_ctx,
+        }
+    }
+
+    /// Move the transaction's deferred-check store out of its mutex for the
+    /// duration of a drain, which needs it by `&mut` across `await` points. The
+    /// lock is held only for the swap, never across an await; the store is put
+    /// back by [`WriteContext::restore_deferred_fk`] on every exit path.
+    fn take_deferred_fk(&self) -> Option<crate::fk::DeferredConstraints> {
+        self.deferred_fk
+            .map(|store| std::mem::take(&mut *store.lock().expect("deferred constraints mutex")))
+    }
+
+    fn restore_deferred_fk(&self, store: Option<crate::fk::DeferredConstraints>) {
+        if let Some(slot) = self.deferred_fk
+            && let Some(store) = store
+        {
+            *slot.lock().expect("deferred constraints mutex") = store;
+        }
+    }
+}
+
+/// Both sides of a foreign key name the same lock identity — the referenced
+/// index's entry prefix — which is exactly what the uniqueness check already
+/// locks, so this is a [`crate::lockmgr::LockKey::UniqueKey`] acquire in the
+/// row-lock manager and no new lock mode exists.
+///
+/// The child side takes it SHARED, so many rows referencing one parent key never
+/// convoy; the parent side takes it EXCLUSIVE, because it is removing or moving
+/// the key. Key locks and row locks share one wait-for graph, so a cycle
+/// spanning both is still reported as 40P01, and both are released together at
+/// COMMIT/ROLLBACK.
+impl crate::fk::FkKeyLocks for WriteContext<'_> {
+    async fn lock_key(&self, key: Vec<u8>, mode: crate::fk::FkLockMode) -> Result<(), ExecError> {
+        let mode = match mode {
+            crate::fk::FkLockMode::Shared => crate::lockmgr::LockMode::Shared,
+            crate::fk::FkLockMode::Exclusive => crate::lockmgr::LockMode::Exclusive,
+        };
+        self.lockmgr
+            .acquire_key(
+                crate::lockmgr::LockKey::UniqueKey(key),
+                mode,
+                self.xid,
+                self.lock_wait_cap,
+            )
+            .await
+            .map_err(lock_acquire_error)
+    }
+}
+
+/// The write path a referential action re-enters, over the *outer statement's*
+/// [`StatementWrites`].
+///
+/// `PostgreSQL` runs each referential action as its own query over the row's
+/// current image, so neither an earlier `UPDATE` in the same command nor another
+/// constraint's action exempts a child row from the action its parent's deletion
+/// fires. Each action's ops are folded straight back into the staged view before
+/// it returns, which is what makes "current image" true here: the next action to
+/// reach the row reads what this one wrote, and a cascade cycle terminates
+/// because the row it comes back to reads as deleted or off-key.
+///
+/// [`claim_row_for_action`] then only bounds the work, refusing one constraint a
+/// second write of the same row.
+///
+/// [`claim_row_for_action`]: StatementWrites::claim_row_for_action
+struct StatementCascade<'a, 'w> {
+    write_ctx: &'a WriteContext<'w>,
+    writes: &'a mut StatementWrites,
+    /// The view both this and the drain read through: the statement's pending
+    /// batch over the store, grown by every op an action produces. An action
+    /// re-reads its row here rather than in the store, so it changes the image
+    /// the command — or an earlier action — last wrote.
+    staged: &'a StagedKv<'a>,
+    /// One index-set read per cascaded *relation*, not per cascaded row: a
+    /// cascade walks a chain of relations and revisits each many times.
+    indexes: HashMap<TableId, Vec<crabka_pgcatalog::Index>>,
+}
+
+impl crate::fk::FkCascade for StatementCascade<'_, '_> {
+    async fn modify_row(
+        &mut self,
+        request: crate::fk::FkCascadeRequest<'_>,
+    ) -> Result<(crate::fk::FkCascadeOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
+        let crate::fk::FkCascadeRequest {
+            table,
+            rowid,
+            change,
+            constraint,
+        } = request;
+        // Split the borrows: the index cache and the statement's write
+        // bookkeeping are both reached mutably from the same `&mut self`.
+        let Self {
+            write_ctx,
+            writes,
+            staged,
+            indexes,
+        } = self;
+        let write_ctx = *write_ctx;
+        let staged = *staged;
+        let ctx = write_ctx.eval_ctx;
+        let mut ops = Vec::new();
+        let local_indexes = match indexes.entry(table.id) {
+            std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(writable_local_indexes(write_ctx.catalog_kv, table)?)
+            }
+        };
+        write_ctx
+            .lockmgr
+            .acquire(
+                table.id,
+                rowid,
+                crate::lockmgr::LockMode::Exclusive,
+                write_ctx.xid,
+                write_ctx.lock_wait_cap,
+            )
+            .await
+            .map_err(lock_acquire_error)?;
+        let Some((cur_key_xid, cur_xmin, cur_row)) =
+            eval_plan_qual(&write_ctx.staged_mutation(staged), table, rowid)?
+        else {
+            // Deleted by a concurrent committed transaction, or by this command's
+            // own DML: nothing references the parent through this row any more.
+            return Ok((crate::fk::FkCascadeOutcome::Skipped, ops));
+        };
+        // A row this constraint's own action already wrote. It runs before any
+        // op is built, so a revisited row leaves the batch untouched as well as
+        // unrecursed. A row the command's own DML — or another constraint's
+        // action — modified passes, because the action is a command of its own.
+        if !writes.claim_row_for_action(table.id, rowid, constraint) {
+            return Ok((crate::fk::FkCascadeOutcome::Skipped, ops));
+        }
+        let next = match change {
+            crate::fk::FkRowChange::Delete => None,
+            crate::fk::FkRowChange::Assign(pairs) => {
+                let mut next = cur_row.clone();
+                for (ordinal, value) in pairs {
+                    let ty = cascade_column(table, ordinal)?.ty;
+                    next[ordinal] = coerce(value, ty, ctx)?;
+                }
+                Some(next)
+            }
+            crate::fk::FkRowChange::AssignDefaults(ordinals) => {
+                let mut next = cur_row.clone();
+                for ordinal in ordinals {
+                    next[ordinal] = default_value(cascade_column(table, ordinal)?, ctx)?;
+                }
+                Some(next)
+            }
+        };
+        let Some(next) = next else {
+            apply_locked_row_delete(
+                write_ctx,
+                table,
+                local_indexes,
+                &LockedRowDelete {
+                    rowid,
+                    cur_key_xid,
+                    cur_xmin,
+                    cur_row: &cur_row,
+                },
+                writes,
+                &mut ops,
+            )?;
+            staged.stage(&ops);
+            return Ok((crate::fk::FkCascadeOutcome::Applied { new_row: None }, ops));
+        };
+        // The follow-on checks a cascaded update owes are computed by the drain
+        // from the row it returns, so this write queues none of its own.
+        let no_hooks = crate::fk::StatementFkContext::default();
+        apply_locked_row_update(
+            write_ctx,
+            table,
+            local_indexes,
+            &no_hooks,
+            &LockedRowUpdate {
+                rowid,
+                cur_key_xid,
+                cur_xmin,
+                cur_row: &cur_row,
+                next: &next,
+            },
+            writes,
+            &mut ops,
+        )
+        .await?;
+        staged.stage(&ops);
+        Ok((
+            crate::fk::FkCascadeOutcome::Applied {
+                new_row: Some(next),
+            },
+            ops,
+        ))
+    }
+}
+
+/// Run the referential checks a statement queued, once its whole `WITH` list and
+/// body have staged their rows.
+///
+/// `PostgreSQL` fires its `AFTER ROW` trigger queue once for the whole command,
+/// which is why nothing here happens inline: a `NOT DEFERRABLE` self-referencing
+/// `INSERT INTO t (id, boss) VALUES (1, 1)` succeeds because the row is in place
+/// by the time the check runs. A referential action re-enters the write path
+/// through [`StatementCascade`], which shares this statement's
+/// [`StatementWrites`] — so a cascade that comes back around to a row *an
+/// action* already changed stops rather than recursing, while a row the
+/// statement's own DML modified is still the action's to change.
+async fn drain_statement_fk_checks(
+    write_ctx: &WriteContext<'_>,
+    writes: &mut StatementWrites,
+    staged: &[crabka_pgkv::WriteOp],
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    if writes.fk_checks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut queue = std::mem::take(&mut writes.fk_checks);
+    let staged_kv = StagedKv::new(write_ctx.kv, staged);
+    let exec = write_ctx.fk_exec(&staged_kv);
+    let mut cascade = StatementCascade {
+        write_ctx,
+        writes,
+        staged: &staged_kv,
+        indexes: HashMap::new(),
+    };
+    let mut deferred = write_ctx.take_deferred_fk();
+    let drained = crate::fk::drain_statement_checks(
+        &exec,
+        write_ctx,
+        &mut cascade,
+        &mut queue,
+        deferred.as_mut(),
+    )
+    .await;
+    write_ctx.restore_deferred_fk(deferred);
+    drained
+}
+
+/// Run the checks a transaction deferred, at `COMMIT` or at
+/// `SET CONSTRAINTS … IMMEDIATE`.
+///
+/// Every earlier statement's rows are in the KV under this transaction's xid by
+/// now, so the drain reads storage directly (an empty staged batch) and a
+/// re-supplied key is found — which is what makes `DELETE; INSERT; COMMIT`
+/// succeed under a deferred `NO ACTION`. A referential action re-enters the
+/// write path through the same [`StatementCascade`] the statement drain uses,
+/// over write bookkeeping of its own: the statements whose rows these checks
+/// describe are finished, so there is none to share.
+pub(crate) async fn drain_deferred_fk_checks(
+    write_ctx: &WriteContext<'_>,
+    checks: Vec<crate::fk::PendingCheck>,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    if checks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let staged_kv = StagedKv::new(write_ctx.kv, &[]);
+    let exec = write_ctx.fk_exec(&staged_kv);
+    let mut writes = StatementWrites::default();
+    let mut cascade = StatementCascade {
+        write_ctx,
+        writes: &mut writes,
+        staged: &staged_kv,
+        indexes: HashMap::new(),
+    };
+    crate::fk::drain_deferred_checks(&exec, write_ctx, &mut cascade, checks).await
+}
+
+/// The column a referential action names by ordinal. The ordinals come from the
+/// same catalog relation the request carries, so a miss is catalog corruption.
+fn cascade_column(table: &Table, ordinal: usize) -> Result<&Column, ExecError> {
+    table
+        .columns
+        .get(ordinal)
+        .ok_or_else(|| ExecError::UndefinedTableColumn {
+            column: ordinal.to_string(),
+            table: table.name.to_string(),
+        })
 }
 
 /// What a data-modifying statement produced: the command tag, plus the relation
@@ -1710,9 +2346,28 @@ impl WriteOutcome {
     }
 }
 
+/// Run the whole of one data-modifying statement: its `WITH` list, its body, and
+/// then the referential checks all of those queued.
+///
+/// The drain is here rather than in each part because `PostgreSQL` treats the
+/// `WITH`-list-plus-body as ONE command and fires its `AFTER ROW` trigger queue
+/// once for it.
+async fn execute_write_with_ctes(
+    write_ctx: &WriteContext<'_>,
+    ctes: &crate::cte::CteContext,
+    stmt: &Statement,
+    writes: &mut StatementWrites,
+) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let (outcome, mut ops) = execute_write_parts(write_ctx, ctes, stmt, writes).await?;
+    let fk_ops = drain_statement_fk_checks(write_ctx, writes, &ops).await?;
+    ops.extend(fk_ops);
+    Ok((outcome, ops))
+}
+
 /// Evaluate the statement's `WITH` list — including any data-modifying entries,
 /// which run exactly once each whether or not the body references them — and
-/// then the statement body against that CTE scope.
+/// then the statement body against that CTE scope. The referential checks they
+/// queue are left for [`execute_write_with_ctes`] to drain once for all of them.
 ///
 /// Every entry sees the statement's own snapshot: a data-modifying CTE's rows
 /// are staged as write ops and never written to the KV here, so neither a later
@@ -1724,7 +2379,7 @@ impl WriteOutcome {
 /// `PostgreSQL` runs a data-modifying item when something first demands its
 /// rows, and runs the items nothing demands AFTER the main query, in reverse
 /// list order — the order `ExecPostprocessPlan` walks `es_auxmodifytables`.
-async fn execute_write_with_ctes(
+async fn execute_write_parts(
     write_ctx: &WriteContext<'_>,
     ctes: &crate::cte::CteContext,
     stmt: &Statement,
@@ -1812,7 +2467,7 @@ fn statement_references_relation(stmt: &Statement, name: &str) -> bool {
             using.iter().any(|item| table_expr_references(item, name))
         }
         Statement::Merge { source, .. } => match source {
-            MergeSource::Table { name: source, .. } => source == name,
+            MergeSource::Table { name: source, .. } => source.name == *name,
             MergeSource::Query { query, .. } => crate::cte::query_references(query, name),
         },
         _ => false,
@@ -1822,7 +2477,7 @@ fn statement_references_relation(stmt: &Statement, name: &str) -> bool {
 fn table_expr_references(item: &crabka_pgparser::ast::TableExpr, name: &str) -> bool {
     use crabka_pgparser::ast::TableExpr;
     match item {
-        TableExpr::Table { name: source, .. } => source == name,
+        TableExpr::Table { name: source, .. } => source.name == *name,
         TableExpr::Derived { subquery, .. } => crate::cte::query_references(subquery, name),
         TableExpr::Join { left, right, .. } => {
             table_expr_references(left, name) || table_expr_references(right, name)
@@ -1954,11 +2609,18 @@ async fn partitioned_dml(
     stmt: &Statement,
     writes: &mut StatementWrites,
 ) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let resolution = write_ctx.eval_ctx.resolution();
     let (parent, verb) = match stmt {
-        Statement::Update { table, .. } => (table.clone(), "UPDATE"),
-        Statement::Delete { table, .. } => (table.clone(), "DELETE"),
+        Statement::Update { table, .. } => (table, "UPDATE"),
+        Statement::Delete { table, .. } => (table, "DELETE"),
         _ => unreachable!("the caller matched an UPDATE or a DELETE"),
     };
+    let parent = resolve_relation(
+        write_ctx.catalog_kv,
+        resolution,
+        parent,
+        SchemaDisposition::Reference,
+    )?;
     let mut ops = Vec::new();
     let mut affected: u64 = 0;
     let mut returned: Option<Relation> = None;
@@ -1983,7 +2645,7 @@ async fn partitioned_dml(
         let mut per_leaf = stmt.clone();
         match &mut per_leaf {
             Statement::Update { table, .. } | Statement::Delete { table, .. } => {
-                *table = leaf;
+                *table = crabka_pgparser::ast::RelationRef::qualified(&leaf.schema, &leaf.name);
             }
             _ => unreachable!("the caller matched an UPDATE or a DELETE"),
         }
@@ -2033,7 +2695,9 @@ fn check_partition_constraint(kv: &dyn Kv, table: &Table, row: &[Datum]) -> Resu
     if crate::partition::satisfies(&scheme, &bound, &siblings, &parent_row)? {
         return Ok(());
     }
-    Err(ExecError::PartitionConstraintViolation(table.name.clone()))
+    Err(ExecError::PartitionConstraintViolation(
+        table.name.to_string(),
+    ))
 }
 
 /// `INSERT` into a partitioned parent: every proposed row is routed to the leaf
@@ -2049,6 +2713,7 @@ async fn partitioned_insert(
     stmt: &Statement,
     writes: &mut StatementWrites,
 ) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
+    let resolution = write_ctx.eval_ctx.resolution();
     let Statement::Insert {
         table,
         columns,
@@ -2069,7 +2734,10 @@ async fn partitioned_insert(
                 .into(),
         ));
     }
-    let parent = crabka_pgcatalog::get_table(catalog_kv, table)?;
+    let parent = crabka_pgcatalog::get_table(
+        catalog_kv,
+        &resolve_relation(catalog_kv, resolution, table, SchemaDisposition::Reference)?,
+    )?;
     let (target_idx, rows) = insert_source_rows(write_ctx, ctes, &parent, columns, source)?;
     let mut ops: Vec<crabka_pgkv::WriteOp> = Vec::new();
     if rows.is_empty() {
@@ -2080,12 +2748,21 @@ async fn partitioned_insert(
         .map(|_| Vec::with_capacity(rows.len()))
         .unwrap_or_default();
     let mut inserted: u64 = 0;
+    // Resolved once per leaf rather than once per row: a relation in no foreign
+    // key must pay one boolean test per write, not a catalog read.
+    let mut leaf_fk: HashMap<TableId, crate::fk::StatementFkContext> = HashMap::new();
     for row_exprs in &rows {
         let full = build_insert_row(&parent, &target_idx, row_exprs, ctx)?;
         let Some((leaf, leaf_row)) = route_row_to_leaf(catalog_kv, &parent, &full)? else {
-            return Err(ExecError::NoPartitionForRow(parent.name.clone()));
+            return Err(ExecError::NoPartitionForRow(parent.name.to_string()));
         };
         let local_indexes = writable_local_indexes(catalog_kv, &leaf)?;
+        let fk_ctx = match leaf_fk.entry(leaf.id) {
+            std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(crate::fk::StatementFkContext::resolve(catalog_kv, &leaf)?)
+            }
+        };
         // One rowid per row rather than one block per statement: rows of the
         // same statement can land in different leaves, and each leaf has its
         // own rowid space.
@@ -2093,6 +2770,9 @@ async fn partitioned_insert(
         ops.extend(seq_op);
         enforce_unique_local_indexes(write_ctx, &leaf, &local_indexes, rowid, &leaf_row, writes)
             .await?;
+        if !fk_ctx.is_empty() {
+            writes.fk_checks.after_insert(fk_ctx, rowid, &leaf_row)?;
+        }
         if returning.is_some() {
             returned_rows.push(ReturnedRow {
                 new: Some(full.clone()),
@@ -2117,7 +2797,13 @@ async fn partitioned_insert(
         )?);
         inserted += 1;
     }
-    let spec = ReturningSpec::new(&parent, &parent.name, returning.as_ref(), None, false)?;
+    let spec = ReturningSpec::new(
+        &parent,
+        &parent.name.to_string(),
+        returning.as_ref(),
+        None,
+        false,
+    )?;
     Ok((
         spec.outcome(format!("INSERT 0 {inserted}"), returned_rows, ctx)?,
         ops,
@@ -2132,6 +2818,7 @@ async fn execute_write_body(
 ) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
     let resolved = resolve_write_subqueries(write_ctx, ctes, stmt)?;
     let stmt = &resolved;
+    let resolution = write_ctx.eval_ctx.resolution();
     let catalog_kv = write_ctx.catalog_kv;
     let kv = write_ctx.kv;
     let lockmgr = write_ctx.lockmgr;
@@ -2154,15 +2841,15 @@ async fn execute_write_body(
                 ops,
             ))
         }
-        Statement::Insert { table, .. } if crate::partition::is_partitioned(catalog_kv, table)? => {
+        Statement::Insert { table, .. } if is_partitioned_ref(catalog_kv, resolution, table)? => {
             partitioned_insert(write_ctx, ctes, stmt, writes).await
         }
         Statement::Update { table, .. } | Statement::Delete { table, .. }
-            if crate::partition::is_partitioned(catalog_kv, table)? =>
+            if is_partitioned_ref(catalog_kv, resolution, table)? =>
         {
             Box::pin(partitioned_dml(write_ctx, ctes, stmt, writes)).await
         }
-        Statement::Merge { table, .. } if crate::partition::is_partitioned(catalog_kv, table)? => {
+        Statement::Merge { table, .. } if is_partitioned_ref(catalog_kv, resolution, table)? => {
             Err(ExecError::Unsupported(
                 "MERGE into a partitioned table is not supported: a source row that matches no \
                  target row would have to be routed, and the matched/not-matched decision spans \
@@ -2178,6 +2865,8 @@ async fn execute_write_body(
             returning,
             ..
         } => {
+            let table =
+                &resolve_relation(catalog_kv, resolution, table, SchemaDisposition::Reference)?;
             let t = crabka_pgcatalog::get_table(catalog_kv, table)?;
             let (target_idx, rows) = insert_source_rows(write_ctx, ctes, &t, columns, source)?;
             let rows = &rows;
@@ -2185,6 +2874,7 @@ async fn execute_write_body(
                 return Ok((WriteOutcome::command("INSERT 0 0".into()), ops));
             }
             let local_indexes = writable_local_indexes(catalog_kv, &t)?;
+            let fk_ctx = crate::fk::StatementFkContext::resolve(catalog_kv, &t)?;
             // Arbiter resolution is statement-level: a bad conflict target is an
             // error even when no row would have conflicted.
             let arbiters = match on_conflict {
@@ -2248,6 +2938,7 @@ async fn execute_write_body(
                                 write_ctx,
                                 &t,
                                 &local_indexes,
+                                &fk_ctx,
                                 &ConflictUpdate {
                                     assignments,
                                     filter: filter.as_ref(),
@@ -2279,6 +2970,13 @@ async fn execute_write_body(
                 // PostgreSQL's ordering.
                 enforce_unique_local_indexes(write_ctx, &t, &local_indexes, rowid, &full, writes)
                     .await?;
+                // Append only, never probe: the check runs once the statement's
+                // rows exist, which is what makes a self-referencing
+                // `INSERT INTO t (id, boss) VALUES (1, 1)` succeed under a
+                // NOT DEFERRABLE constraint, exactly as it does in PostgreSQL.
+                if !fk_ctx.is_empty() {
+                    writes.fk_checks.after_insert(&fk_ctx, rowid, &full)?;
+                }
                 if returning.is_some() {
                     returned_rows.push(ReturnedRow {
                         new: Some(full.clone()),
@@ -2299,7 +2997,8 @@ async fn execute_write_body(
                 inserted_or_updated += 1;
             }
             let tag = format!("INSERT 0 {inserted_or_updated}");
-            let spec = ReturningSpec::new(&t, &t.name, returning.as_ref(), None, false)?;
+            let spec =
+                ReturningSpec::new(&t, &t.name.to_string(), returning.as_ref(), None, false)?;
             Ok((spec.outcome(tag, returned_rows, ctx)?, ops))
         }
         Statement::Update {
@@ -2311,8 +3010,11 @@ async fn execute_write_body(
             returning,
             ..
         } => {
+            let table =
+                &resolve_relation(catalog_kv, resolution, table, SchemaDisposition::Reference)?;
             let t = crabka_pgcatalog::get_table(catalog_kv, table)?;
             let local_indexes = writable_local_indexes(catalog_kv, &t)?;
+            let fk_ctx = crate::fk::StatementFkContext::resolve(catalog_kv, &t)?;
             let qualifier = table_qualifier(&t, alias);
             let source = DmlSource::build(write_ctx, ctes, &t, qualifier, from)?;
             let targets = resolve_assignments(write_ctx, ctes, &t, assignments)?;
@@ -2375,6 +3077,7 @@ async fn execute_write_body(
                     write_ctx,
                     &t,
                     &local_indexes,
+                    &fk_ctx,
                     &LockedRowUpdate {
                         rowid,
                         cur_key_xid,
@@ -2406,8 +3109,18 @@ async fn execute_write_body(
             returning,
             ..
         } => {
+            let table =
+                &resolve_relation(catalog_kv, resolution, table, SchemaDisposition::Reference)?;
             let t = crabka_pgcatalog::get_table(catalog_kv, table)?;
             let local_indexes = writable_local_indexes(catalog_kv, &t)?;
+            // A `TRUNCATE` desugars to one of these per relation; the truncate
+            // set suppresses exactly the parent-side keys whose child is being
+            // emptied in the same statement, so no referential action fires.
+            let fk_ctx = crate::fk::StatementFkContext::resolve_for_truncate(
+                catalog_kv,
+                &t,
+                &writes.truncate_set,
+            )?;
             let qualifier = table_qualifier(&t, alias);
             let source = DmlSource::build(write_ctx, ctes, &t, qualifier, using)?;
             let spec = ReturningSpec::new(
@@ -2458,10 +3171,12 @@ async fn execute_write_body(
                 if !writes.claim_row(t.id, rowid) {
                     continue;
                 }
-                // The row's unique keys are free for a later part of this
-                // statement to claim, even though its superseded version is
-                // still in the KV for the probe to find.
-                writes.release_row_keys(&t, &local_indexes, rowid, &cur_row, None)?;
+                // Append only: the parent-side probe needs the KV and the lock
+                // manager, and the row's tombstone is only staged, so the check
+                // waits for the end of the statement.
+                if !fk_ctx.is_empty() {
+                    writes.fk_checks.after_delete(&fk_ctx, rowid, &cur_row)?;
+                }
                 if returning.is_some() {
                     returned_rows.push(ReturnedRow {
                         new: None,
@@ -2470,44 +3185,19 @@ async fn execute_write_body(
                         action: None,
                     });
                 }
-                if cur_xmin == xid {
-                    // Deleting my own uncommitted version: PostgreSQL stamps
-                    // xmax=xid so it is invisible to me. version_key is the same
-                    // key; overwrite it with xmax set.
-                    ops.push(crabka_pgkv::WriteOp::Put {
-                        key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, xid),
-                        value: crabka_pgmvcc::version::encode_tuple(xid, xid, &cur_row),
-                    });
-                } else {
-                    // Set xmax = my xid on the matched version (keep its row
-                    // bytes), targeting its PHYSICAL key — see the UPDATE arm.
-                    ops.push(crabka_pgkv::WriteOp::Put {
-                        key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, cur_key_xid),
-                        value: crabka_pgmvcc::version::encode_tuple(cur_xmin, xid, &cur_row),
-                    });
-                }
-                // Opportunistic per-rowid chain pruning (local engines only) —
-                // see the UPDATE arm. The tombstoned current version survives
-                // (its xmax is our in-progress xid), so its index entries stay;
-                // an engine-level `vacuum` reclaims the chain once the delete
-                // commits below a future horizon.
-                if let Some(horizon) = write_ctx.prune_horizon {
-                    ops.extend(
-                        prune_rowid_chain_ops(
-                            kv,
-                            &t,
-                            &local_indexes,
-                            &ChainPruneRequest {
-                                rowid,
-                                horizon,
-                                keep_xids: &[cur_key_xid, xid],
-                                new_row: None,
-                                freeze_below: None,
-                            },
-                        )?
-                        .ops,
-                    );
-                }
+                apply_locked_row_delete(
+                    write_ctx,
+                    &t,
+                    &local_indexes,
+                    &LockedRowDelete {
+                        rowid,
+                        cur_key_xid,
+                        cur_xmin,
+                        cur_row: &cur_row,
+                    },
+                    writes,
+                    &mut ops,
+                )?;
                 n += 1;
             }
             let tag = format!("DELETE {n}");
@@ -2517,6 +3207,7 @@ async fn execute_write_body(
         Statement::Truncate {
             names,
             restart_identity,
+            cascade,
         } => {
             if *restart_identity {
                 return Err(ExecError::Unsupported(
@@ -2525,20 +3216,38 @@ async fn execute_write_body(
             }
             // Validate every name (and refuse sharded targets) before touching
             // any table: the statement is all-or-nothing across the list.
-            for name in names {
-                let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
+            let mut named = Vec::with_capacity(names.len());
+            for name in
+                resolve_relations(catalog_kv, resolution, names, SchemaDisposition::Utility)?
+            {
+                let t = crabka_pgcatalog::get_table(catalog_kv, &name)?;
                 if table_uses_global_visibility(&t) {
                     return Err(ExecError::Unsupported(
                         "TRUNCATE on sharded tables is not supported".into(),
                     ));
                 }
+                named.push(t);
             }
+            // `TRUNCATE` does not fire `ON DELETE CASCADE`: it refuses when a
+            // relation outside the set references one inside it, and `CASCADE`
+            // widens the *set* instead. Divergence: PostgreSQL also emits a
+            // `NOTICE: truncate cascades to table "…"` per relation `CASCADE`
+            // pulls in, which this engine has no NoticeResponse path for, so
+            // `TruncateSet::cascaded` is computed and left unemitted.
+            let set = crate::fk::expand_truncate_set(catalog_kv, &named, *cascade)?;
+            // Carried on the statement's write state so each desugared DELETE
+            // suppresses exactly the parent-side keys whose child is in the set
+            // — by construction every one of them, so no action ever fires.
+            writes.truncate_set = set.ids();
             // Desugar to an unfiltered DELETE per table: TRUNCATE shares the
             // MVCC write path (row locks, xmax stamping, rollback) rather
             // than clearing storage, so it is transactional like PostgreSQL's.
-            for name in names {
+            for table in &set.tables {
                 let delete = Statement::Delete {
-                    table: name.clone(),
+                    table: crabka_pgparser::ast::RelationRef {
+                        schema: Some(table.name.schema.clone()),
+                        name: table.name.name.clone(),
+                    },
                     alias: None,
                     filter: None,
                     using: Vec::new(),
@@ -2559,7 +3268,7 @@ async fn execute_write_body(
 /// under: its alias when it has one, else the table name — `PostgreSQL` hides
 /// the real name once an alias is given.
 fn table_qualifier<'a>(table: &'a Table, alias: &'a Option<String>) -> &'a str {
-    alias.as_deref().unwrap_or(&table.name)
+    alias.as_deref().unwrap_or(&table.name.name)
 }
 
 /// The `FROM`/`USING` relation joined to a DML target, materialized once for the
@@ -3210,6 +3919,7 @@ async fn execute_merge(
 ) -> Result<(WriteOutcome, Vec<crabka_pgkv::WriteOp>), ExecError> {
     use crabka_pgparser::ast::{MergeAction, MergeMatchKind, MergeSource};
 
+    let resolution = write_ctx.eval_ctx.resolution();
     let Statement::Merge {
         table,
         alias,
@@ -3223,8 +3933,15 @@ async fn execute_merge(
         return Err(ExecError::Unsupported("not a MERGE statement".into()));
     };
     let ctx = write_ctx.eval_ctx;
+    let table = &resolve_relation(
+        write_ctx.catalog_kv,
+        resolution,
+        table,
+        SchemaDisposition::Reference,
+    )?;
     let t = crabka_pgcatalog::get_table(write_ctx.catalog_kv, table)?;
     let local_indexes = writable_local_indexes(write_ctx.catalog_kv, &t)?;
+    let fk_ctx = crate::fk::StatementFkContext::resolve(write_ctx.catalog_kv, &t)?;
     let qualifier = table_qualifier(&t, alias);
     let mut ops: Vec<crabka_pgkv::WriteOp> = Vec::new();
 
@@ -3290,6 +4007,7 @@ async fn execute_merge(
                 &MergeRowAction {
                     table: &t,
                     local_indexes: &local_indexes,
+                    fk: &fk_ctx,
                     ctes,
                     scope: &scope,
                     rowid: *rowid,
@@ -3356,6 +4074,9 @@ async fn execute_merge(
             ops.push(op);
         }
         enforce_unique_local_indexes(write_ctx, &t, &local_indexes, rowid, &full, writes).await?;
+        if !fk_ctx.is_empty() {
+            writes.fk_checks.after_insert(&fk_ctx, rowid, &full)?;
+        }
         ops.push(crabka_pgkv::WriteOp::Put {
             key: crabka_pgmvcc::version::version_key_xid(t.id, rowid, write_ctx.xid),
             value: crabka_pgmvcc::version::encode_tuple(
@@ -3406,6 +4127,7 @@ async fn execute_merge(
             &MergeRowAction {
                 table: &t,
                 local_indexes: &local_indexes,
+                fk: &fk_ctx,
                 ctes,
                 scope: &scope,
                 rowid: *rowid,
@@ -3446,6 +4168,7 @@ fn pick_merge_clause<'a>(
 struct MergeRowAction<'a> {
     table: &'a Table,
     local_indexes: &'a [crabka_pgcatalog::Index],
+    fk: &'a crate::fk::StatementFkContext,
     ctes: &'a crate::cte::CteContext,
     scope: &'a Scope,
     rowid: u64,
@@ -3492,6 +4215,7 @@ async fn apply_merge_row_action(
                 write_ctx,
                 t,
                 request.local_indexes,
+                request.fk,
                 &LockedRowUpdate {
                     rowid: request.rowid,
                     cur_key_xid,
@@ -3514,6 +4238,11 @@ async fn apply_merge_row_action(
             // The deleted row's unique keys are free for a later part of this
             // statement, exactly as on the plain DELETE path.
             writes.release_row_keys(t, request.local_indexes, request.rowid, &cur_row, None)?;
+            if !request.fk.is_empty() {
+                writes
+                    .fk_checks
+                    .after_delete(request.fk, request.rowid, &cur_row)?;
+            }
             if cur_xmin == write_ctx.xid {
                 ops.push(crabka_pgkv::WriteOp::Put {
                     key: crabka_pgmvcc::version::version_key_xid(
@@ -3602,13 +4331,26 @@ pub(crate) async fn execute_copy_write(
     let seq = write_ctx.seq;
     let snapshot_xid = write_ctx.xid;
     let ctx = write_ctx.eval_ctx;
+    let resolution = ctx.resolution();
     let mut ops = Vec::new();
-    let table = crabka_pgcatalog::get_table(catalog_kv, &copy.table)?;
+    let table = crabka_pgcatalog::get_table(
+        catalog_kv,
+        &resolve_relation(
+            catalog_kv,
+            resolution,
+            &copy.table,
+            SchemaDisposition::Utility,
+        )?,
+    )?;
     // Hoisted out of the row loop: the target's index set is the same for every
     // row, so reading it per row was a catalog round trip per row. A row that
     // routes to a partition leaf belongs to a different relation, so that case
     // — and only that case — reads again below.
     let parent_indexes = writable_local_indexes(catalog_kv, &table)?;
+    // Hoisted for the same reason as the index set, and cached per routed leaf
+    // below: one resolution per relation, never one per row.
+    let parent_fk = crate::fk::StatementFkContext::resolve(catalog_kv, &table)?;
+    let mut leaf_fk: HashMap<TableId, crate::fk::StatementFkContext> = HashMap::new();
     let mut writes = StatementWrites::default();
     let target_idx = resolve_targets(&table, &copy.columns)?;
     let n_rows = rows.len() as u64;
@@ -3632,7 +4374,7 @@ pub(crate) async fn execute_copy_write(
         // takes one from its own leaf instead.
         let (table, rowid, full, routed) = if partitioned {
             let Some((leaf, leaf_row)) = route_row_to_leaf(catalog_kv, &table, &full)? else {
-                return Err(ExecError::NoPartitionForRow(table.name.clone()));
+                return Err(ExecError::NoPartitionForRow(table.name.to_string()));
             };
             let (leaf_rowid, seq_op) = seq.alloc(kv, leaf.id, 1)?;
             ops.extend(seq_op);
@@ -3647,8 +4389,21 @@ pub(crate) async fn execute_copy_write(
             None
         };
         let local_indexes = routed_indexes.as_deref().unwrap_or(&parent_indexes);
+        let fk_ctx = if routed {
+            match leaf_fk.entry(table.id) {
+                std::collections::hash_map::Entry::Occupied(slot) => slot.into_mut(),
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(crate::fk::StatementFkContext::resolve(catalog_kv, &table)?)
+                }
+            }
+        } else {
+            &parent_fk
+        };
         enforce_unique_local_indexes(write_ctx, &table, local_indexes, rowid, &full, &mut writes)
             .await?;
+        if !fk_ctx.is_empty() {
+            writes.fk_checks.after_insert(fk_ctx, rowid, &full)?;
+        }
         ops.push(crabka_pgkv::WriteOp::Put {
             key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, snapshot_xid),
             value: crabka_pgmvcc::version::encode_tuple(
@@ -3659,6 +4414,10 @@ pub(crate) async fn execute_copy_write(
         });
         ops.extend(local_index_entry_ops(&table, local_indexes, rowid, &full)?);
     }
+    // `COPY` is one command, so its referential checks fire once, after every
+    // row is staged — the same timing an `INSERT` of the same rows would give.
+    let fk_ops = drain_statement_fk_checks(write_ctx, &mut writes, &ops).await?;
+    ops.extend(fk_ops);
     Ok((command(&format!("COPY {n_rows}")), ops))
 }
 
@@ -3670,7 +4429,16 @@ pub(crate) fn execute_timestamp_copy_write(
     rows: &[Vec<Option<String>>],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<TimestampWritePlan, ExecError> {
-    let table = crabka_pgcatalog::get_table(catalog_kv, &copy.table)?;
+    let resolution = ctx.resolution();
+    let table = crabka_pgcatalog::get_table(
+        catalog_kv,
+        &resolve_relation(
+            catalog_kv,
+            resolution,
+            &copy.table,
+            SchemaDisposition::Utility,
+        )?,
+    )?;
     if !table_uses_global_visibility(&table) {
         return Err(ExecError::Unsupported(
             "timestamp COPY requires a sharded table".into(),
@@ -3767,6 +4535,7 @@ pub(crate) enum UniqueLocalSerialization {
 
 pub(crate) fn write_requires_unique_local_serialization(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     stmt: &Statement,
 ) -> Result<UniqueLocalSerialization, ExecError> {
     let table_name = match stmt {
@@ -3776,14 +4545,120 @@ pub(crate) fn write_requires_unique_local_serialization(
         | Statement::Merge { table, .. } => table,
         _ => return Ok(UniqueLocalSerialization::None),
     };
-    table_requires_unique_local_serialization(catalog_kv, table_name)
+    let table_name = resolve_relation(
+        catalog_kv,
+        resolution,
+        table_name,
+        SchemaDisposition::Reference,
+    )?;
+    table_requires_unique_local_serialization(catalog_kv, &table_name)
 }
 
 pub(crate) fn copy_requires_unique_local_serialization(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     copy: &crabka_pgparser::ast::CopyStmt,
 ) -> Result<UniqueLocalSerialization, ExecError> {
-    table_requires_unique_local_serialization(catalog_kv, &copy.table)
+    table_requires_unique_local_serialization(
+        catalog_kv,
+        &resolve_relation(
+            catalog_kv,
+            resolution,
+            &copy.table,
+            SchemaDisposition::Utility,
+        )?,
+    )
+}
+
+/// The op recording a temporary namespace, when it is not recorded already.
+///
+/// A temporary namespace is created by the engine on behalf of a session that
+/// first puts something in it, never by a statement naming it — `CREATE SCHEMA`
+/// refuses every `pg_`-prefixed name, as `PostgreSQL` does.
+fn ensure_schema_ops(kv: &dyn Kv, schema: &str) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    if crabka_pgcatalog::schema_exists(kv, schema)? {
+        return Ok(Vec::new());
+    }
+    Ok(vec![crabka_pgcatalog::create_temp_schema_op(schema)])
+}
+
+/// The batch that removes every relation `schema` holds, whatever kind each is.
+///
+/// `DROP SCHEMA … CASCADE` is one caller; the others are the three points a
+/// temporary namespace is emptied — `DISCARD TEMP`, the end of a session, and
+/// the purge a session runs over its own namespace before it first uses it, in
+/// case a crashed backend of the same id left rows behind.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub(crate) fn drop_schema_contents_ops(
+    kv: &dyn Kv,
+    schema: &str,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let mut ops = Vec::new();
+    for relation in crabka_pgcatalog::schema_contents(kv, schema)? {
+        if crabka_pgcatalog::get_view(kv, &relation).is_ok() {
+            ops.extend(crabka_pgcatalog::drop_view_ops(kv, &relation)?);
+        } else if crabka_pgcatalog::get_table(kv, &relation).is_ok() {
+            ops.extend(crate::partition::drop_metadata_ops(kv, &relation)?);
+            ops.extend(crabka_pgcatalog::drop_table_ops(kv, &relation)?);
+        } else {
+            ops.extend(crabka_pgcatalog::drop_sequence_ops(kv, &relation)?);
+        }
+    }
+    Ok(ops)
+}
+
+/// How many table ids a DDL statement will allocate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TableIdDemand {
+    /// The statement creates no relation of its own.
+    None,
+    /// The statement creates exactly this many relations.
+    Fixed(usize),
+    /// The count is not knowable before the statement runs.
+    Unbounded,
+}
+
+/// True when `stmt` writes the `TEMPORARY` (or `TEMP`) keyword.
+pub(crate) fn ddl_requests_temporary(stmt: &Statement) -> bool {
+    matches!(
+        stmt,
+        Statement::CreateTable {
+            temporary: true,
+            ..
+        } | Statement::CreateView {
+            temporary: true,
+            ..
+        }
+    )
+}
+
+/// The schema qualifier a relation-creating statement wrote, if it wrote one.
+pub(crate) fn ddl_created_qualifier(stmt: &Statement) -> Option<&str> {
+    let reference = match stmt {
+        Statement::CreateTable { name, .. }
+        | Statement::CreateForeignTable { name, .. }
+        | Statement::CreateView { name, .. } => name,
+        Statement::ImportForeignSchema { into_schema, .. } => return Some(into_schema),
+        _ => return None,
+    };
+    reference.schema.as_deref()
+}
+
+/// The table ids `stmt` will allocate, so the session can claim them before it
+/// takes the catalog lock.
+pub(crate) fn ddl_table_id_demand(stmt: &Statement) -> TableIdDemand {
+    match stmt {
+        Statement::CreateTable { .. } | Statement::CreateForeignTable { .. } => {
+            TableIdDemand::Fixed(1)
+        }
+        // One foreign table per table the scanner discovers, which is only known
+        // once the remote schema has been read.
+        Statement::ImportForeignSchema { .. } => TableIdDemand::Unbounded,
+        _ => TableIdDemand::None,
+    }
 }
 
 pub(crate) fn ddl_requires_unique_local_serialization(stmt: &Statement) -> bool {
@@ -3841,7 +4716,7 @@ fn create_table_has_unique_constraint(
 
 fn table_requires_unique_local_serialization(
     catalog_kv: &dyn Kv,
-    table_name: &str,
+    table_name: &crabka_pgcatalog::RelationName,
 ) -> Result<UniqueLocalSerialization, ExecError> {
     let table = crabka_pgcatalog::get_table(catalog_kv, table_name)?;
     if table.sharded {
@@ -4096,7 +4971,7 @@ fn resolve_arbiter_indexes(
             .map(|index| vec![index.clone()])
             .ok_or_else(|| ExecError::UndefinedConstraint {
                 name: name.clone(),
-                table: table.name.clone(),
+                table: table.name.to_string(),
             }),
     }
 }
@@ -4179,7 +5054,7 @@ async fn arbitrate_insert_row(
             if !do_update {
                 return Ok(InsertRowPlan::Skip);
             }
-            if writes.modified_rows.contains(&(table.id, holder.rowid)) {
+            if writes.is_claimed(table.id, holder.rowid) {
                 return Err(ExecError::OnConflictAffectsRowTwice);
             }
             // The probe deliberately reads all-committed visibility, so it finds
@@ -4264,14 +5139,20 @@ struct LockedRowUpdate<'a> {
 }
 
 /// Stage the writes replacing a locked row with `next`: NOT NULL and unique
-/// enforcement, the MVCC version ops, index entries, and opportunistic chain
-/// pruning. Shared by `UPDATE` and `INSERT … ON CONFLICT DO UPDATE`, whose
-/// stored-row mutation is identical once the row is locked and the post-image
-/// computed.
+/// enforcement, the referential checks the new image owes, the MVCC version ops,
+/// index entries, and opportunistic chain pruning. Shared by `UPDATE`, `MERGE`'s
+/// update action and `INSERT … ON CONFLICT DO UPDATE`, whose stored-row mutation
+/// is identical once the row is locked and the post-image computed — so all
+/// three reach the foreign-key hook through this one site.
+///
+/// `fk` is the statement's resolved foreign-key context; a referential action
+/// re-entering here passes an empty one, because the drain derives the follow-on
+/// checks a cascaded update owes from the row it hands back.
 async fn apply_locked_row_update(
     write_ctx: &WriteContext<'_>,
     table: &Table,
     local_indexes: &[crabka_pgcatalog::Index],
+    fk: &crate::fk::StatementFkContext,
     update: &LockedRowUpdate<'_>,
     writes: &mut StatementWrites,
     ops: &mut Vec<crabka_pgkv::WriteOp>,
@@ -4294,6 +5175,13 @@ async fn apply_locked_row_update(
         writes,
     )
     .await?;
+    // Append only — the probe needs the KV and the lock manager, and it must not
+    // run until the statement's rows exist. A side whose key is unchanged queues
+    // nothing, which is what keeps a non-key update of a hot parent row off the
+    // key lock entirely.
+    if !fk.is_empty() {
+        writes.fk_checks.after_update(fk, rowid, cur_row, next)?;
+    }
     // Whatever keys the superseded version held and this one does not are free
     // for a later part of the same statement to claim.
     writes.release_row_keys(table, local_indexes, rowid, cur_row, Some(next))?;
@@ -4347,6 +5235,82 @@ async fn apply_locked_row_update(
     Ok(())
 }
 
+/// One locked row's tombstone: the version this delete operates on, exactly as
+/// [`eval_plan_qual`] returned it.
+struct LockedRowDelete<'a> {
+    rowid: u64,
+    cur_key_xid: u64,
+    cur_xmin: u64,
+    cur_row: &'a [Datum],
+}
+
+/// Stage the writes that delete a locked row: the unique keys it frees, the MVCC
+/// tombstone, and opportunistic chain pruning. Shared by `DELETE` and by a
+/// cascaded `ON DELETE CASCADE`, whose stored-row mutation is identical once the
+/// row is locked and re-read.
+///
+/// Queues no referential check of its own: the caller knows whether this delete
+/// is the statement's (which queues through [`crate::fk::FkCheckQueue`]) or a
+/// referential action's (whose follow-on checks the drain derives itself).
+fn apply_locked_row_delete(
+    write_ctx: &WriteContext<'_>,
+    table: &Table,
+    local_indexes: &[crabka_pgcatalog::Index],
+    delete: &LockedRowDelete<'_>,
+    writes: &mut StatementWrites,
+    ops: &mut Vec<crabka_pgkv::WriteOp>,
+) -> Result<(), ExecError> {
+    let LockedRowDelete {
+        rowid,
+        cur_key_xid,
+        cur_xmin,
+        cur_row,
+    } = *delete;
+    let xid = write_ctx.xid;
+    // The row's unique keys are free for a later part of this statement to
+    // claim, even though its superseded version is still in the KV for the probe
+    // to find.
+    writes.release_row_keys(table, local_indexes, rowid, cur_row, None)?;
+    if cur_xmin == xid {
+        // Deleting my own uncommitted version: PostgreSQL stamps xmax=xid so it
+        // is invisible to me. version_key is the same key; overwrite it with
+        // xmax set.
+        ops.push(crabka_pgkv::WriteOp::Put {
+            key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, xid),
+            value: crabka_pgmvcc::version::encode_tuple(xid, xid, cur_row),
+        });
+    } else {
+        // Set xmax = my xid on the matched version (keep its row bytes),
+        // targeting its PHYSICAL key — see `apply_locked_row_update`.
+        ops.push(crabka_pgkv::WriteOp::Put {
+            key: crabka_pgmvcc::version::version_key_xid(table.id, rowid, cur_key_xid),
+            value: crabka_pgmvcc::version::encode_tuple(cur_xmin, xid, cur_row),
+        });
+    }
+    // Opportunistic per-rowid chain pruning (local engines only). The tombstoned
+    // current version survives (its xmax is our in-progress xid), so its index
+    // entries stay; an engine-level `vacuum` reclaims the chain once the delete
+    // commits below a future horizon.
+    if let Some(horizon) = write_ctx.prune_horizon {
+        ops.extend(
+            prune_rowid_chain_ops(
+                write_ctx.kv,
+                table,
+                local_indexes,
+                &ChainPruneRequest {
+                    rowid,
+                    horizon,
+                    keep_xids: &[cur_key_xid, xid],
+                    new_row: None,
+                    freeze_below: None,
+                },
+            )?
+            .ops,
+        );
+    }
+    Ok(())
+}
+
 /// One `ON CONFLICT DO UPDATE` application: the clause's assignments and filter,
 /// the locked stored row they run against, and the proposed row bound as
 /// `excluded`.
@@ -4376,6 +5340,7 @@ async fn apply_insert_conflict_update(
     write_ctx: &WriteContext<'_>,
     table: &Table,
     local_indexes: &[crabka_pgcatalog::Index],
+    fk: &crate::fk::StatementFkContext,
     update: &ConflictUpdate<'_>,
     writes: &mut StatementWrites,
     ops: &mut Vec<crabka_pgkv::WriteOp>,
@@ -4401,6 +5366,7 @@ async fn apply_insert_conflict_update(
         write_ctx,
         table,
         local_indexes,
+        fk,
         &LockedRowUpdate {
             rowid: update.rowid,
             cur_key_xid: update.cur_key_xid,
@@ -4777,6 +5743,7 @@ pub(crate) fn execute_timestamp_write(
     stmt: &Statement,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<TimestampWritePlan, ExecError> {
+    let resolution = ctx.resolution();
     match stmt {
         Statement::Insert { returning, .. }
         | Statement::Update { returning, .. }
@@ -4812,6 +5779,12 @@ pub(crate) fn execute_timestamp_write(
             ));
         }
     };
+    let table_name = &resolve_relation(
+        catalog_kv,
+        resolution,
+        table_name,
+        SchemaDisposition::Reference,
+    )?;
     let table = crabka_pgcatalog::get_table(catalog_kv, table_name)?;
     if !table_uses_global_visibility(&table) {
         return Err(ExecError::Unsupported(
@@ -4940,7 +5913,7 @@ fn execute_timestamp_update(
     filter: Option<&Expr>,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<TimestampWritePlan, ExecError> {
-    let scope = Scope::single(table, &table.name);
+    let scope = Scope::single(table, &table.name.name);
     // The sharded write path evaluates assignments without a read, so only the
     // single-expression form is available here.
     let targets = assignments
@@ -5009,7 +5982,7 @@ fn execute_timestamp_delete(
     filter: Option<&Expr>,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<TimestampWritePlan, ExecError> {
-    let scope = Scope::single(table, &table.name);
+    let scope = Scope::single(table, &table.name.name);
     let rows = scan_ts_live_interval(kv, kv, table, ReadTimestamp::MAX, None, RowInterval::ALL)?;
     let mut writes = Vec::new();
     for ScannedRow { rowid, row, .. } in rows {
@@ -5039,10 +6012,17 @@ fn hash_bucket_for_row(table: &Table, row: &[Datum]) -> Result<Option<u32>, Exec
     let Some(crabka_pgcatalog::ShardingStrategy::Hash(hash)) = &table.sharding else {
         return Ok(None);
     };
-    let column = hash
-        .columns
-        .first()
-        .ok_or_else(|| ExecError::Unsupported("hash sharding catalog has no hash column".into()))?;
+    // A row's bucket is the hash of the one shard column, which is the arity
+    // `SHARDED BY HASH` accepts. A wider catalog entry — attachable through the
+    // catalog API, which does not gate arity — has no row encoding here: the
+    // gateway derives a statement's route from every hash column's bytes, so a
+    // row placed under the hash of the first column alone would sit in a range
+    // that routing never visits. Refuse the write instead of misplacing it.
+    let [column] = hash.columns.as_slice() else {
+        return Err(ExecError::Unsupported(
+            "hash sharding requires exactly one hash column".into(),
+        ));
+    };
     let index = table
         .column_index(column)
         .ok_or_else(|| ExecError::Unsupported("hash sharding catalog column mismatch".into()))?;
@@ -5051,6 +6031,9 @@ fn hash_bucket_for_row(table: &Table, row: &[Datum]) -> Result<Option<u32>, Exec
         Datum::Int8(value) => value.to_be_bytes().to_vec(),
         Datum::Text(value) => value.as_bytes().to_vec(),
         Datum::Bytea(value) => value.clone(),
+        // A `regclass` hashes on its oid: the name it renders is derived from
+        // the catalog, so only the oid is stable enough to place a row.
+        Datum::Regclass(value) => value.oid.to_be_bytes().to_vec(),
         Datum::Null => Vec::new(),
         _ => {
             return Err(ExecError::Unsupported(
@@ -5994,6 +6977,7 @@ fn is_single_foreign_table(
     if fctx.scanner.is_none() {
         return false;
     }
+    let resolution = fctx.resolution;
     let [
         crabka_pgparser::ast::TableExpr::Table {
             name,
@@ -6005,10 +6989,12 @@ fn is_single_foreign_table(
     else {
         return false;
     };
-    if ctes.lookup(name).is_some() {
+    if name.schema.is_none() && ctes.lookup(&name.name).is_some() {
         return false;
     }
-    crabka_pgcatalog::get_table(catalog_kv, name).is_ok_and(|t| t.foreign.is_some())
+    resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference).is_ok_and(|name| {
+        crabka_pgcatalog::get_table(catalog_kv, &name).is_ok_and(|t| t.foreign.is_some())
+    })
 }
 
 /// Build the relation for one FROM list (comma items folded as cross joins).
@@ -6102,7 +7088,8 @@ fn lateral_join(
 ) -> Result<Relation, ExecError> {
     use crabka_pgparser::ast::JoinKind;
     let ctx = read_ctx.eval_ctx;
-    let mut binder = LateralBinder::new(read_ctx.catalog_kv, read_ctx.ctes);
+    let mut binder =
+        LateralBinder::new(read_ctx.catalog_kv, read_ctx.fctx.resolution, read_ctx.ctes);
     if matches!(kind, JoinKind::Right | JoinKind::Full) {
         let nulls = vec![Datum::Null; acc.scope.width()];
         let (specialized, referenced) = binder.bind(te, &acc.scope, &nulls);
@@ -6332,6 +7319,7 @@ fn query_children_mut(expr: &mut Expr) -> Vec<&mut crabka_pgparser::ast::QueryEx
 /// blocks are described once (in walk order) and reused for the remaining rows.
 struct LateralBinder<'a> {
     catalog_kv: &'a dyn Kv,
+    resolution: &'a crate::relname::ResolutionScope,
     ctes: &'a crate::cte::CteContext,
     /// The column names each query block's FROM provides, in walk order.
     /// `None` for a block whose FROM could not be described.
@@ -6339,9 +7327,14 @@ struct LateralBinder<'a> {
 }
 
 impl<'a> LateralBinder<'a> {
-    fn new(catalog_kv: &'a dyn Kv, ctes: &'a crate::cte::CteContext) -> Self {
+    fn new(
+        catalog_kv: &'a dyn Kv,
+        resolution: &'a crate::relname::ResolutionScope,
+        ctes: &'a crate::cte::CteContext,
+    ) -> Self {
         Self {
             catalog_kv,
+            resolution,
             ctes,
             described: Vec::new(),
         }
@@ -6437,16 +7430,21 @@ impl BindPass<'_, '_> {
             let names = if from.is_empty() {
                 Some(Vec::new())
             } else {
-                build_from_schema_with_ctes(self.binder.catalog_kv, from, self.binder.ctes)
-                    .ok()
-                    .map(|relation| {
-                        relation
-                            .scope
-                            .columns
-                            .into_iter()
-                            .map(|column| column.name)
-                            .collect()
-                    })
+                build_from_schema_with_ctes(
+                    self.binder.catalog_kv,
+                    self.binder.resolution,
+                    from,
+                    self.binder.ctes,
+                )
+                .ok()
+                .map(|relation| {
+                    relation
+                        .scope
+                        .columns
+                        .into_iter()
+                        .map(|column| column.name)
+                        .collect()
+                })
             };
             self.binder.described.push(names);
         }
@@ -6570,7 +7568,7 @@ fn collect_qualifiers(from: &[crabka_pgparser::ast::TableExpr], out: &mut Vec<St
     for item in from {
         match item {
             TableExpr::Table { name, alias, .. } => {
-                out.push(alias.clone().unwrap_or_else(|| name.clone()));
+                out.push(alias.clone().unwrap_or_else(|| name.to_string()));
             }
             TableExpr::Derived { alias, .. } => out.push(alias.clone()),
             TableExpr::Function {
@@ -6626,7 +7624,7 @@ fn partitioned_scan(
         let relation = build_table_expr(
             read_ctx,
             &crabka_pgparser::ast::TableExpr::Table {
-                name: leaf,
+                name: crabka_pgparser::ast::RelationRef::qualified(&leaf.schema, &leaf.name),
                 alias: None,
                 columns: None,
                 sample: None,
@@ -6694,6 +7692,7 @@ fn build_table_expr(
     scan_plan: Option<&crate::plan_dist::DistributedScanPlan>,
 ) -> Result<Relation, ExecError> {
     let catalog_kv = read_ctx.catalog_kv;
+    let resolution = read_ctx.fctx.resolution;
     let kv = read_ctx.kv;
     let global = read_ctx.global;
     let gsnap = read_ctx.gsnap;
@@ -6727,8 +7726,8 @@ fn build_table_expr(
                     bounds,
                     scan_plan,
                 )?;
-                let qualifier = alias.as_deref().unwrap_or(name);
-                return crate::values::requalify_derived(base, qualifier, &Some(names.clone()));
+                let qualifier = alias.clone().unwrap_or_else(|| name.to_string());
+                return crate::values::requalify_derived(base, &qualifier, &Some(names.clone()));
             }
             if let Some(sample) = sample {
                 let base = build_table_expr(
@@ -6744,11 +7743,17 @@ fn build_table_expr(
                 )?;
                 return apply_tablesample(base, sample, ctx);
             }
-            if let Some(rel) = ctes.lookup(name) {
-                let qualifier = alias.as_deref().unwrap_or(name);
+            // A CTE is never schema-qualified, so `public.t` names the stored
+            // relation even where a CTE `t` is in scope, as PostgreSQL does.
+            if name.schema.is_none()
+                && let Some(rel) = ctes.lookup(&name.name)
+            {
+                let qualifier = alias.as_deref().unwrap_or(&name.name);
                 return Ok(crate::cte::requalify_cte(rel, qualifier));
             }
-            if let Some(rel) = virtual_catalog_relation(catalog_kv, name, alias.as_deref())? {
+            let name =
+                &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
+            if let Some(rel) = virtual_catalog_relation(catalog_kv, name, alias.as_deref(), ctx)? {
                 return Ok(rel);
             }
             match crabka_pgcatalog::get_view(catalog_kv, name) {
@@ -6760,14 +7765,14 @@ fn build_table_expr(
                         ));
                     };
                     let relation = crate::query::query_to_relation(read_ctx, query)?;
-                    let qualifier = alias.as_deref().unwrap_or(&view.name);
+                    let qualifier = alias.as_deref().unwrap_or(&view.name.name);
                     return requalify_view_relation(relation, &view, qualifier);
                 }
                 Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => {}
                 Err(error) => return Err(error.into()),
             }
             let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
-            let qualifier = alias.as_deref().unwrap_or(&t.name);
+            let qualifier = alias.as_deref().unwrap_or(&t.name.name);
             // A partitioned parent owns no rows: reading it is an append over
             // its leaves. Doing this before every other scan path is what keeps
             // a partitioned relation from silently answering empty.
@@ -7014,6 +8019,7 @@ fn try_distributed_inner_equi_join(
     constraint: &crabka_pgparser::ast::JoinConstraint,
 ) -> Result<Option<Relation>, ExecError> {
     let catalog_kv = read_ctx.catalog_kv;
+    let resolution = read_ctx.fctx.resolution;
     let gsnap = read_ctx.gsnap;
     let snapshot = read_ctx.snapshot;
     let own = read_ctx.own;
@@ -7041,9 +8047,23 @@ fn try_distributed_inner_equi_join(
     else {
         return Ok(None);
     };
-    if ctes.lookup(left_name).is_some() || ctes.lookup(right_name).is_some() {
+    if (left_name.schema.is_none() && ctes.lookup(&left_name.name).is_some())
+        || (right_name.schema.is_none() && ctes.lookup(&right_name.name).is_some())
+    {
         return Ok(None);
     }
+    let left_name = &resolve_relation(
+        catalog_kv,
+        resolution,
+        left_name,
+        SchemaDisposition::Reference,
+    )?;
+    let right_name = &resolve_relation(
+        catalog_kv,
+        resolution,
+        right_name,
+        SchemaDisposition::Reference,
+    )?;
     let JoinConstraint::On(Expr::Binary {
         op: BinaryOp::Eq,
         left: key_left,
@@ -7052,11 +8072,13 @@ fn try_distributed_inner_equi_join(
     else {
         return Ok(None);
     };
-    let table = |name: &str| match crabka_pgcatalog::get_table(catalog_kv, name) {
-        Ok(table) => Ok(Some(table)),
-        Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => Ok(None),
-        Err(error) => Err(ExecError::from(error)),
-    };
+    let table =
+        |name: &crabka_pgcatalog::RelationName| match crabka_pgcatalog::get_table(catalog_kv, name)
+        {
+            Ok(table) => Ok(Some(table)),
+            Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => Ok(None),
+            Err(error) => Err(ExecError::from(error)),
+        };
     let Some(left_table) = table(left_name)? else {
         return Ok(None);
     };
@@ -7070,8 +8092,8 @@ fn try_distributed_inner_equi_join(
     {
         return Ok(None);
     }
-    let left_qualifier = left_alias.as_deref().unwrap_or(&left_table.name);
-    let right_qualifier = right_alias.as_deref().unwrap_or(&right_table.name);
+    let left_qualifier = left_alias.as_deref().unwrap_or(&left_table.name.name);
+    let right_qualifier = right_alias.as_deref().unwrap_or(&right_table.name.name);
     fn qualified_key(expr: &Expr) -> Option<(&str, &str)> {
         let Expr::Column {
             table: Some(table),
@@ -7153,12 +8175,10 @@ fn try_distributed_inner_equi_join(
         strategy,
         left: JoinTableInterval {
             table_id: u64::from(left_table.id),
-            table_name: left_table.name.clone(),
             interval: RowInterval::ALL,
         },
         right: JoinTableInterval {
             table_id: u64::from(right_table.id),
-            table_name: right_table.name.clone(),
             interval: RowInterval::ALL,
         },
         broadcast_rows: matches!(
@@ -7291,8 +8311,12 @@ fn try_execute_partial_aggregate_pushdown(
     if !is_plain_partial_aggregate_select(s) {
         return Ok(None);
     }
-    let Some((table, qualifier)) =
-        single_sharded_base_table(read_ctx.catalog_kv, s, read_ctx.ctes)?
+    let Some((table, qualifier)) = single_sharded_base_table(
+        read_ctx.catalog_kv,
+        read_ctx.fctx.resolution,
+        s,
+        read_ctx.ctes,
+    )?
     else {
         return Ok(None);
     };
@@ -7361,7 +8385,12 @@ fn try_execute_local_streaming_aggregate(
     if !is_streamable_aggregate_select(s) {
         return Ok(None);
     }
-    let Some((table, qualifier)) = single_local_base_table(read_ctx.catalog_kv, s, read_ctx.ctes)?
+    let Some((table, qualifier)) = single_local_base_table(
+        read_ctx.catalog_kv,
+        read_ctx.fctx.resolution,
+        s,
+        read_ctx.ctes,
+    )?
     else {
         return Ok(None);
     };
@@ -7530,6 +8559,7 @@ fn invalid_scalar_aggregate_shape() -> ExecError {
 /// through their own scan paths, so they deliberately return `None` here.
 fn single_local_base_table(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     s: &SelectStmt,
     ctes: &crate::cte::CteContext,
 ) -> Result<Option<(Table, String)>, ExecError> {
@@ -7544,7 +8574,11 @@ fn single_local_base_table(
     else {
         return Ok(None);
     };
-    if ctes.lookup(name).is_some() || virtual_table(name).is_some() {
+    if name.schema.is_none() && ctes.lookup(&name.name).is_some() {
+        return Ok(None);
+    }
+    let name = &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
+    if is_virtual_relation(name) {
         return Ok(None);
     }
     match crabka_pgcatalog::get_view(catalog_kv, name) {
@@ -7565,7 +8599,7 @@ fn single_local_base_table(
     {
         return Ok(None);
     }
-    let qualifier = alias.clone().unwrap_or_else(|| table.name.clone());
+    let qualifier = alias.clone().unwrap_or_else(|| table.name.name.clone());
     Ok(Some((table, qualifier)))
 }
 
@@ -7577,6 +8611,7 @@ fn single_local_base_table(
 /// error surfaces from the materializing path instead.
 fn single_sharded_base_table(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     s: &SelectStmt,
     ctes: &crate::cte::CteContext,
 ) -> Result<Option<(Table, String)>, ExecError> {
@@ -7591,7 +8626,11 @@ fn single_sharded_base_table(
     else {
         return Ok(None);
     };
-    if ctes.lookup(name).is_some() || virtual_table(name).is_some() {
+    if name.schema.is_none() && ctes.lookup(&name.name).is_some() {
+        return Ok(None);
+    }
+    let name = &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
+    if is_virtual_relation(name) {
         return Ok(None);
     }
     match crabka_pgcatalog::get_view(catalog_kv, name) {
@@ -7607,7 +8646,7 @@ fn single_sharded_base_table(
     if !table.sharded || table.foreign.is_some() {
         return Ok(None);
     }
-    let qualifier = alias.clone().unwrap_or_else(|| table.name.clone());
+    let qualifier = alias.clone().unwrap_or_else(|| table.name.name.clone());
     Ok(Some((table, qualifier)))
 }
 
@@ -7813,9 +8852,15 @@ fn hash_sharding_from_ast(
 ) -> Result<crabka_pgcatalog::ShardingStrategy, ExecError> {
     match sharding {
         crabka_pgparser::ast::ShardingSpec::Hash(hash) => {
-            if hash.columns.is_empty() {
+            // Redundant for SQL input: the grammar refuses a `SHARDED BY HASH`
+            // list of any length but one outright (42601), so this never fires
+            // for a parsed statement. It is the gate for the callers that build
+            // the AST directly, and it matches the arity the row encoder in
+            // [`hash_bucket_for_row`] has an encoding for — one column, the
+            // only arity that agrees with the route the gateway computes.
+            if hash.columns.len() != 1 {
                 return Err(ExecError::Unsupported(
-                    "hash sharding requires at least one column".into(),
+                    "hash sharding requires exactly one column".into(),
                 ));
             }
             if hash.buckets == 0 || !hash.buckets.is_power_of_two() {
@@ -7841,6 +8886,7 @@ pub(crate) fn select_to_relation_with_ctes(
     s: &SelectStmt,
 ) -> Result<Relation, ExecError> {
     let catalog_kv = read_ctx.catalog_kv;
+    let resolution = read_ctx.fctx.resolution;
     let ctes = read_ctx.ctes;
     let ctx = read_ctx.eval_ctx;
     let fctx = read_ctx.fctx;
@@ -7882,16 +8928,16 @@ pub(crate) fn select_to_relation_with_ctes(
                     columns: None,
                     sample: None,
                 },
-            ] if ctes.lookup(name).is_none()
-                && crabka_pgcatalog::get_table(catalog_kv, name)
-                    .is_ok_and(|table| table.foreign.is_none()) =>
+            ] if (name.schema.is_none() && ctes.lookup(&name.name).is_none())
+                && scan_plan_table(catalog_kv, resolution, name)?.is_some() =>
             {
-                let table = crabka_pgcatalog::get_table(catalog_kv, name)?;
+                let table = scan_plan_table(catalog_kv, resolution, name)?
+                    .expect("the guard just resolved this relation");
                 let mut plan =
                     crate::plan_dist::plan_scan(&table, s.filter.as_ref(), &s.projection);
                 plan.projection = crate::ProjectionPushdown::All;
                 plan.partial_aggregate = None;
-                let qualifier = alias.as_deref().unwrap_or(&table.name);
+                let qualifier = alias.as_deref().unwrap_or(&table.name.name);
                 plan.top_k = top_k_pushdown_for_select(&table, qualifier, s)?;
                 Some(plan)
             }
@@ -7935,6 +8981,7 @@ pub(crate) fn select_to_relation_with_ctes(
 /// pass through untouched.
 fn lateral_schema_item(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     ctes: &crate::cte::CteContext,
     te: &crabka_pgparser::ast::TableExpr,
     outer: &Scope,
@@ -7943,13 +8990,14 @@ fn lateral_schema_item(
         return te.clone();
     }
     let nulls = vec![Datum::Null; outer.width()];
-    LateralBinder::new(catalog_kv, ctes)
+    LateralBinder::new(catalog_kv, resolution, ctes)
         .bind(te, outer, &nulls)
         .0
 }
 
 pub(crate) fn build_from_schema_with_ctes(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     from: &[crabka_pgparser::ast::TableExpr],
     ctes: &crate::cte::CteContext,
 ) -> Result<Relation, ExecError> {
@@ -7957,14 +9005,14 @@ pub(crate) fn build_from_schema_with_ctes(
     let first = iter
         .next()
         .ok_or_else(|| ExecError::Unsupported("build_from_schema on empty FROM".into()))?;
-    let mut acc = build_table_expr_schema_with_ctes(catalog_kv, first, ctes)?;
+    let mut acc = build_table_expr_schema_with_ctes(catalog_kv, resolution, first, ctes)?;
     for te in iter {
         // A lateral item references the accumulated columns, which no schema
         // description of it on its own can resolve. Substituting NULLs of the
         // right types leaves an item the ordinary describe understands and whose
         // output columns are unchanged.
-        let te = &lateral_schema_item(catalog_kv, ctes, te, &acc.scope);
-        let next = build_table_expr_schema_with_ctes(catalog_kv, te, ctes)?;
+        let te = &lateral_schema_item(catalog_kv, resolution, ctes, te, &acc.scope);
+        let next = build_table_expr_schema_with_ctes(catalog_kv, resolution, te, ctes)?;
         // Schema-only: no rows, so no ON predicate is ever evaluated — a default
         // (UTC/epoch) eval context is correct here.
         acc = join_relations(
@@ -7980,6 +9028,7 @@ pub(crate) fn build_from_schema_with_ctes(
 
 fn build_table_expr_schema_with_ctes(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     te: &crabka_pgparser::ast::TableExpr,
     ctes: &crate::cte::CteContext,
 ) -> Result<Relation, ExecError> {
@@ -7994,6 +9043,7 @@ fn build_table_expr_schema_with_ctes(
             if let Some(names) = columns {
                 let base = build_table_expr_schema_with_ctes(
                     catalog_kv,
+                    resolution,
                     &TableExpr::Table {
                         name: name.clone(),
                         alias: alias.clone(),
@@ -8002,21 +9052,25 @@ fn build_table_expr_schema_with_ctes(
                     },
                     ctes,
                 )?;
-                let qualifier = alias.as_deref().unwrap_or(name);
-                return crate::values::requalify_derived(base, qualifier, &Some(names.clone()));
+                let qualifier = alias.clone().unwrap_or_else(|| name.to_string());
+                return crate::values::requalify_derived(base, &qualifier, &Some(names.clone()));
             }
-            if let Some(rel) = ctes.lookup(name) {
-                let qualifier = alias.as_deref().unwrap_or(name);
+            if name.schema.is_none()
+                && let Some(rel) = ctes.lookup(&name.name)
+            {
+                let qualifier = alias.as_deref().unwrap_or(&name.name);
                 let mut rel = crate::cte::requalify_cte(rel, qualifier);
                 rel.rows.clear();
                 return Ok(rel);
             }
+            let name =
+                &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?;
             if let Some(rel) = virtual_catalog_relation_schema(name, alias.as_deref()) {
                 return Ok(rel);
             }
             match crabka_pgcatalog::get_view(catalog_kv, name) {
                 Ok(view) => {
-                    let qualifier = alias.as_deref().unwrap_or(&view.name);
+                    let qualifier = alias.as_deref().unwrap_or(&view.name.name);
                     return Ok(Relation {
                         scope: Scope {
                             columns: view
@@ -8036,7 +9090,7 @@ fn build_table_expr_schema_with_ctes(
                 Err(error) => return Err(error.into()),
             }
             let t = crabka_pgcatalog::get_table(catalog_kv, name)?;
-            let qualifier = alias.as_deref().unwrap_or(&t.name);
+            let qualifier = alias.as_deref().unwrap_or(&t.name.name);
             Ok(Relation {
                 scope: Scope::single(&t, qualifier),
                 rows: Vec::new(),
@@ -8048,9 +9102,9 @@ fn build_table_expr_schema_with_ctes(
             kind,
             constraint,
         } => {
-            let l = build_table_expr_schema_with_ctes(catalog_kv, left, ctes)?;
-            let right = &lateral_schema_item(catalog_kv, ctes, right, &l.scope);
-            let r = build_table_expr_schema_with_ctes(catalog_kv, right, ctes)?;
+            let l = build_table_expr_schema_with_ctes(catalog_kv, resolution, left, ctes)?;
+            let right = &lateral_schema_item(catalog_kv, resolution, ctes, right, &l.scope);
+            let r = build_table_expr_schema_with_ctes(catalog_kv, resolution, right, ctes)?;
             // Schema-only: no rows, so no ON predicate is ever evaluated.
             join_relations(
                 l,
@@ -8066,7 +9120,9 @@ fn build_table_expr_schema_with_ctes(
             columns,
             ..
         } => {
-            let fields = crate::query::describe_query_expr_with_ctes(catalog_kv, subquery, ctes)?;
+            let fields = crate::query::describe_query_expr_with_ctes(
+                catalog_kv, resolution, subquery, ctes,
+            )?;
             let bindings = fields
                 .iter()
                 .map(|f| {
@@ -8138,25 +9194,69 @@ struct BuiltinTypeRow {
 
 fn virtual_catalog_relation(
     catalog_kv: &dyn Kv,
-    name: &str,
+    name: &crabka_pgcatalog::RelationName,
     alias: Option<&str>,
+    ctx: &crate::clock::EvalCtx,
 ) -> Result<Option<Relation>, ExecError> {
-    let Some(table) = virtual_table(name) else {
+    let Some(table) = virtual_table(&virtual_lookup_key(name)) else {
         return Ok(None);
     };
-    let rows = virtual_catalog_rows(catalog_kv, table)?;
+    let rows = virtual_catalog_rows(catalog_kv, table, ctx)?;
     Ok(Some(Relation {
-        scope: Scope::single(&virtual_catalog_table(table), alias.unwrap_or(name)),
+        scope: Scope::single(&virtual_catalog_table(table), alias.unwrap_or(&name.name)),
         rows,
     }))
 }
 
-fn virtual_catalog_relation_schema(name: &str, alias: Option<&str>) -> Option<Relation> {
-    let table = virtual_table(name)?;
+fn virtual_catalog_relation_schema(
+    name: &crabka_pgcatalog::RelationName,
+    alias: Option<&str>,
+) -> Option<Relation> {
+    let key = virtual_lookup_key(name);
+    let table = virtual_table(&key)?;
     Some(Relation {
-        scope: Scope::single(&virtual_catalog_table(table), alias.unwrap_or(name)),
+        scope: Scope::single(&virtual_catalog_table(table), alias.unwrap_or(&name.name)),
         rows: Vec::new(),
     })
+}
+
+/// The ordinary local relation a single-item `FROM` names, or `None` when it is
+/// anything a scan plan cannot be built over (a foreign table, or no relation
+/// at all).
+fn scan_plan_table(
+    catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    reference: &crabka_pgparser::ast::RelationRef,
+) -> Result<Option<Table>, ExecError> {
+    let name = resolve_relation(
+        catalog_kv,
+        resolution,
+        reference,
+        SchemaDisposition::Reference,
+    )?;
+    Ok(crabka_pgcatalog::get_table(catalog_kv, &name)
+        .ok()
+        .filter(|table| table.foreign.is_none()))
+}
+
+/// The key the virtual catalog relations are held under: a bare name for
+/// anything in `pg_catalog`, and `schema.name` elsewhere — which is how
+/// `information_schema.tables` has always been spelled here.
+fn virtual_lookup_key(name: &crabka_pgcatalog::RelationName) -> String {
+    if name.schema == crate::search_path::PG_CATALOG {
+        name.name.clone()
+    } else {
+        format!("{}.{}", name.schema, name.name)
+    }
+}
+
+/// True when `name` denotes a relation the engine synthesises rather than
+/// stores. The resolver consults this alongside the catalog, so an unqualified
+/// `pg_class` finds the catalog relation through the implicit `pg_catalog`
+/// entry exactly as `PostgreSQL` does — including when a user relation of the
+/// same name exists in `public`, which the oracle confirms does not shadow it.
+pub(crate) fn is_virtual_relation(name: &crabka_pgcatalog::RelationName) -> bool {
+    virtual_table(&virtual_lookup_key(name)).is_some()
 }
 
 fn virtual_table(name: &str) -> Option<&'static str> {
@@ -8186,7 +9286,10 @@ fn virtual_table(name: &str) -> Option<&'static str> {
 fn virtual_catalog_table(name: &str) -> Table {
     Table {
         id: virtual_relation_oid(name) as u32,
-        name: virtual_relation_name(name).to_string(),
+        name: crabka_pgcatalog::RelationName::new(
+            virtual_relation_schema(name),
+            virtual_relation_name(name),
+        ),
         columns: virtual_catalog_columns(name),
         sharded: false,
         sharding: None,
@@ -8317,7 +9420,18 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("oid", Int4),
         ]),
         "pg_user" => cols(&[("usename", Text), ("usesuper", Bool), ("usecreatedb", Bool)]),
-        "information_schema.schemata" => cols(&[("catalog_name", Text), ("schema_name", Text)]),
+        // The full standard projection, in PostgreSQL 18.4's column order. The
+        // three `default_character_set_*` columns and `sql_path` are NULL in
+        // PostgreSQL too — the standard defines them, PostgreSQL fills none.
+        "information_schema.schemata" => cols(&[
+            ("catalog_name", Text),
+            ("schema_name", Text),
+            ("schema_owner", Text),
+            ("default_character_set_catalog", Text),
+            ("default_character_set_schema", Text),
+            ("default_character_set_name", Text),
+            ("sql_path", Text),
+        ]),
         "information_schema.tables" => cols(&[
             ("table_catalog", Text),
             ("table_schema", Text),
@@ -8414,7 +9528,11 @@ fn pg_attribute_columns() -> Vec<Column> {
     ])
 }
 
-fn virtual_catalog_rows(catalog_kv: &dyn Kv, name: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn virtual_catalog_rows(
+    catalog_kv: &dyn Kv,
+    name: &str,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     match name {
         "pg_namespace" => pg_namespace_rows(catalog_kv),
         "pg_class" => pg_class_rows(catalog_kv),
@@ -8428,12 +9546,14 @@ fn virtual_catalog_rows(catalog_kv: &dyn Kv, name: &str) -> Result<Vec<Vec<Datum
         "pg_prepared_statements" => pg_prepared_statement_rows(),
         "pg_roles" => pg_roles_rows(catalog_kv),
         "pg_user" => pg_user_rows(catalog_kv),
-        "information_schema.schemata" => Ok(information_schema_schemata_rows()),
-        "information_schema.tables" => information_schema_tables_rows(catalog_kv),
-        "information_schema.columns" => information_schema_columns_rows(catalog_kv),
+        "information_schema.schemata" => information_schema_schemata_rows(catalog_kv),
+        "information_schema.tables" => information_schema_tables_rows(catalog_kv, ctx.backend_pid),
+        "information_schema.columns" => {
+            information_schema_columns_rows(catalog_kv, ctx.backend_pid)
+        }
         "pg_inherits" => pg_inherits_rows(catalog_kv),
         "pg_partitioned_table" => pg_partitioned_table_rows(catalog_kv),
-        _ => crate::catalog_rel::rows(catalog_kv, name),
+        _ => crate::catalog_rel::rows(catalog_kv, name, ctx.backend_pid),
     }
 }
 
@@ -8490,22 +9610,32 @@ fn pg_partitioned_table_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, Exe
     Ok(rows)
 }
 
+/// `pg_namespace`: one row per schema the catalog holds — nothing is added
+/// here, so a schema appears exactly once and a dropped one not at all.
 fn pg_namespace_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
-    let mut rows = vec![vec![
-        int(PUBLIC_NAMESPACE_OID),
-        text("public"),
-        int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
-        Datum::Null,
-    ]];
-    for schema in crabka_pgcatalog::list_schemas(catalog_kv)? {
-        rows.push(vec![
-            int(crate::catalog_rel::namespace_oid(&schema.name)),
-            text(&schema.name),
-            int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
-            Datum::Null,
-        ]);
+    Ok(crabka_pgcatalog::list_schemas(catalog_kv)?
+        .into_iter()
+        .map(|schema| {
+            vec![
+                int(crate::catalog_rel::namespace_oid(&schema.name)),
+                text(&schema.name),
+                int(schema_owner_oid(&schema.owner)),
+                Datum::Null,
+            ]
+        })
+        .collect())
+}
+
+/// The `pg_authid.oid` a schema's owner projects as. `public` belongs to the
+/// implicit `pg_database_owner` role; every other schema projects the bootstrap
+/// superuser, because trust auth makes every session that user and crabka has
+/// no ownership model to distinguish them by.
+fn schema_owner_oid(owner: &str) -> i32 {
+    if owner == crabka_pgcatalog::PUBLIC_SCHEMA_OWNER {
+        crate::catalog_fn::DATABASE_OWNER_ROLE_OID
+    } else {
+        crate::catalog_fn::BOOTSTRAP_ROLE_OID
     }
-    Ok(rows)
 }
 
 /// Every relation crabka has, in the `relkind` PostgreSQL would report: user
@@ -8526,18 +9656,18 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             (false, true) => "p",
             (false, false) => "r",
         };
-        let (schema, relname) = crabka_pgcatalog::split_schema(&table.name);
         let mut row = PgClassRow::new(
             oid_i32(table.id)?,
-            relname,
+            &table.name.name,
             relkind,
-            crate::catalog_rel::namespace_oid(schema),
+            crate::catalog_rel::namespace_oid(&table.name.schema),
         );
         row.relnatts = table.columns.len();
         row.relchecks = table.checks.len();
         row.relhasindex = indexed_table_ids.contains(&table.id);
         row.relam = crate::catalog_rel::BTREE_AM_OID;
         row.relispartition = crate::partition::parent_of(catalog_kv, &table.name)?.is_some();
+        row.relpersistence = crabka_pgcatalog::relpersistence_of(&table.name.schema);
         rows.push(row.build()?);
     }
     for view in crabka_pgcatalog::list_views(catalog_kv)? {
@@ -8545,9 +9675,15 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             .get(&view.name)
             .copied()
             .unwrap_or(0);
-        let mut row = PgClassRow::new(oid, &view.name, "v", PUBLIC_NAMESPACE_OID);
+        let mut row = PgClassRow::new(
+            oid,
+            &view.name.name,
+            "v",
+            crate::catalog_rel::namespace_oid(&view.name.schema),
+        );
         row.relnatts = view.columns.len();
         row.relhasrules = true;
+        row.relpersistence = crabka_pgcatalog::relpersistence_of(&view.name.schema);
         rows.push(row.build()?);
     }
     for (name, _) in crabka_pgcatalog::list_sequences(catalog_kv)? {
@@ -8555,13 +9691,20 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             .get(&name)
             .copied()
             .unwrap_or(0);
-        rows.push(PgClassRow::new(oid, &name, "S", PUBLIC_NAMESPACE_OID).build()?);
+        let mut row = PgClassRow::new(
+            oid,
+            &name.name,
+            "S",
+            crate::catalog_rel::namespace_oid(&name.schema),
+        );
+        row.relpersistence = crabka_pgcatalog::relpersistence_of(&name.schema);
+        rows.push(row.build()?);
     }
     for virtual_table in virtual_table_names() {
         let table = virtual_catalog_table(virtual_table);
         let mut row = PgClassRow::new(
             virtual_relation_oid(virtual_table),
-            &table.name,
+            &table.name.name,
             "v",
             virtual_relation_namespace_oid(virtual_table),
         );
@@ -8569,14 +9712,17 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         rows.push(row.build()?);
     }
     for index in indexes {
+        // An index lives in the schema of the table it indexes, which is also
+        // what makes a temporary table's index temporary.
         let mut row = PgClassRow::new(
             catalog_index_oid(index.id)?,
             &index.name,
             "i",
-            PUBLIC_NAMESPACE_OID,
+            crate::catalog_rel::namespace_oid(&index.table.schema),
         );
         row.relnatts = index.columns.len();
         row.relam = crate::catalog_rel::BTREE_AM_OID;
+        row.relpersistence = crabka_pgcatalog::relpersistence_of(&index.table.schema);
         rows.push(row.build()?);
     }
     Ok(rows)
@@ -8596,6 +9742,10 @@ struct PgClassRow<'a> {
     relhasrules: bool,
     relam: i32,
     relispartition: bool,
+    /// `p` for an ordinary relation, `t` for one in a session's temporary
+    /// namespace — which is where every temporary relation is, so the schema is
+    /// the whole fact and nothing stores it twice.
+    relpersistence: char,
 }
 
 impl<'a> PgClassRow<'a> {
@@ -8611,6 +9761,7 @@ impl<'a> PgClassRow<'a> {
             relhasrules: false,
             relam: 0,
             relispartition: false,
+            relpersistence: 'p',
         }
     }
 
@@ -8636,9 +9787,9 @@ impl<'a> PgClassRow<'a> {
             int(0),
             Datum::Bool(self.relhasindex),
             Datum::Bool(false),
-            // Every crabka relation is permanent, populated and
-            // replica-identity "default".
-            text("p"),
+            // Every crabka relation is populated and replica-identity
+            // "default"; its persistence follows the schema holding it.
+            text(&self.relpersistence.to_string()),
             text(self.relkind),
             Datum::Int2(natts),
             Datum::Int2(checks),
@@ -8681,7 +9832,10 @@ fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> 
             .map_err(|_| ExecError::Unsupported("composite relation oid exceeds int4".into()))?;
         let table = crabka_pgcatalog::Table {
             id: 0,
-            name: ty.name.clone(),
+            name: crabka_pgcatalog::RelationName::new(
+                crate::search_path::PG_CATALOG,
+                ty.name.clone(),
+            ),
             columns: fields
                 .iter()
                 .map(|field| crabka_pgcatalog::Column::new(field.name.clone(), field.ty))
@@ -8696,18 +9850,60 @@ fn pg_attribute_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> 
     Ok(rows)
 }
 
-fn information_schema_schemata_rows() -> Vec<Vec<Datum>> {
-    ["public", "pg_catalog", "information_schema"]
+/// The standard's view of the same schemas `pg_namespace` lists, so a schema
+/// created here appears and a dropped `public` disappears. PostgreSQL builds
+/// this view by joining `pg_namespace.nspowner` to `pg_authid`, so
+/// `schema_owner` is exactly what `pg_get_userbyid(nspowner)` answers. The
+/// character-set columns and `sql_path` are NULL there too.
+fn information_schema_schemata_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crabka_pgcatalog::list_schemas(catalog_kv)?
         .into_iter()
-        .map(|schema| vec![text(CURRENT_DATABASE), text(schema)])
-        .collect()
+        .map(|schema| {
+            vec![
+                text(CURRENT_DATABASE),
+                text(&schema.name),
+                text(schema_owner_name(&schema.owner)),
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+            ]
+        })
+        .collect())
+}
+
+/// The role name behind [`schema_owner_oid`], so the two schema projections
+/// cannot disagree about who owns a schema.
+fn schema_owner_name(owner: &str) -> &'static str {
+    if owner == crabka_pgcatalog::PUBLIC_SCHEMA_OWNER {
+        crabka_pgcatalog::PUBLIC_SCHEMA_OWNER
+    } else {
+        crate::catalog_fn::OBJECT_OWNER
+    }
+}
+
+/// True when `schema` is a temporary namespace belonging to some *other*
+/// session — `PostgreSQL`'s `pg_is_other_temp_schema`, which its
+/// `information_schema` views filter relations on.
+///
+/// `pg_class`, `pg_namespace` and `information_schema.schemata` do not filter:
+/// on `postgres:18.4` another session's temporary relation is visible in
+/// `pg_class` and its namespace in all three. Only the standard's relation
+/// views hide it.
+fn is_other_temp_schema(schema: &str, backend_id: i32) -> bool {
+    crabka_pgcatalog::is_temp_schema(schema)
+        && schema != crabka_pgcatalog::temp_schema_name(backend_id)
 }
 
 /// Every relation the SQL standard calls a table: base tables, foreign tables,
 /// and — F-2 — views, which `table_type = 'VIEW'` distinguishes.
-fn information_schema_tables_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn information_schema_tables_rows(
+    catalog_kv: &dyn Kv,
+    backend_id: i32,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = crabka_pgcatalog::list_tables(catalog_kv)?
         .into_iter()
+        .filter(|table| !is_other_temp_schema(&table.name.schema, backend_id))
         .map(|table| {
             information_schema_table_row(
                 &table.name,
@@ -8722,27 +9918,37 @@ fn information_schema_tables_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>
     rows.extend(
         crabka_pgcatalog::list_views(catalog_kv)?
             .into_iter()
+            .filter(|view| !is_other_temp_schema(&view.name.schema, backend_id))
             .map(|view| information_schema_table_row(&view.name, "VIEW")),
     );
     Ok(rows)
 }
 
-fn information_schema_table_row(name: &str, table_type: &str) -> Vec<Datum> {
+fn information_schema_table_row(
+    name: &crabka_pgcatalog::RelationName,
+    table_type: &str,
+) -> Vec<Datum> {
     vec![
         text(CURRENT_DATABASE),
-        text("public"),
-        text(name),
+        text(&name.schema),
+        text(&name.name),
         text(table_type),
     ]
 }
 
-fn information_schema_columns_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+fn information_schema_columns_rows(
+    catalog_kv: &dyn Kv,
+    backend_id: i32,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(catalog_kv)? {
+        if is_other_temp_schema(&table.name.schema, backend_id) {
+            continue;
+        }
         for (idx, column) in table.columns.iter().enumerate() {
             rows.push(vec![
-                text("public"),
-                text(&table.name),
+                text(&table.name.schema),
+                text(&table.name.name),
                 text(&column.name),
                 int(usize_i32(idx + 1)?),
                 // PostgreSQL reports the literal string `ARRAY` here for every
@@ -8815,6 +10021,7 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         | Datum::Interval(_)
         | Datum::Record(_)
         | Datum::Enum(_)
+        | Datum::Regclass(_)
         | Datum::Bytea(_) => "<unsupported>".to_string(),
     }
 }
@@ -9131,7 +10338,7 @@ fn pg_user_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 /// Every virtual relation, `exec`'s starter set followed by the F-2
 /// introspection surface. `pg_class`/`pg_attribute` describe themselves through
 /// this list, so a relation missing from it is invisible to `\d`.
-fn virtual_table_names() -> &'static [&'static str] {
+pub(crate) fn virtual_table_names() -> &'static [&'static str] {
     static NAMES: std::sync::LazyLock<Vec<&'static str>> = std::sync::LazyLock::new(|| {
         let mut names = vec![
             "pg_namespace",
@@ -9157,6 +10364,16 @@ fn virtual_relation_name(name: &str) -> &str {
     name.rsplit_once('.').map_or(name, |(_, relation)| relation)
 }
 
+/// The schema a synthesised catalog relation lives in — `information_schema`
+/// for the SQL-standard views, `pg_catalog` for everything else.
+fn virtual_relation_schema(name: &str) -> &'static str {
+    if name.starts_with("information_schema.") {
+        "information_schema"
+    } else {
+        crate::search_path::PG_CATALOG
+    }
+}
+
 fn virtual_relation_namespace_oid(name: &str) -> i32 {
     if name.starts_with("information_schema.") {
         INFORMATION_SCHEMA_NAMESPACE_OID
@@ -9178,6 +10395,60 @@ pub(crate) fn resolve_regclass(catalog_kv: &dyn Kv, name: &str) -> Result<i32, E
     crate::catalog_fn::resolve_relation_by_name(catalog_kv, name)
 }
 
+/// The `regclass` value for a relation oid: the oid paired with the name
+/// `regclassout` prints for it. An oid no relation has is not an error in
+/// PostgreSQL — it keeps the fallback rendering, `-` for `InvalidOid` and the
+/// bare number otherwise, which [`RegclassValue::unresolved`] supplies.
+pub(crate) fn regclass_by_oid(
+    catalog_kv: &dyn Kv,
+    oid: i32,
+) -> Result<crabka_pgtypes::RegclassValue, ExecError> {
+    Ok(
+        crate::catalog_fn::relation_name_by_oid(catalog_kv, oid)?.map_or_else(
+            || crabka_pgtypes::RegclassValue::unresolved(oid),
+            |name| crabka_pgtypes::RegclassValue::resolved(oid, &name),
+        ),
+    )
+}
+
+/// PostgreSQL's `regclassin`: an all-digit string is an oid, `-` is
+/// `InvalidOid`, and anything else is a relation name the catalog resolves
+/// (42P01 when it has none).
+pub(crate) fn regclass_from_text(catalog_kv: &dyn Kv, text: &str) -> Result<Datum, ExecError> {
+    let trimmed = text.trim();
+    let oid = if trimmed == "-" {
+        0
+    } else {
+        match trimmed.parse::<i32>() {
+            Ok(oid) => oid,
+            Err(_) => resolve_regclass(catalog_kv, text)?,
+        }
+    };
+    regclass_by_oid(catalog_kv, oid).map(Datum::Regclass)
+}
+
+/// The catalog-aware half of a `… :: regclass` cast. `None` for an operand the
+/// catalog adds nothing to (NULL, an out-of-range `int8`), which then takes the
+/// pure cast in [`crabka_pgtypes::cast`] and its error reporting.
+pub(crate) fn regclass_cast(
+    catalog_kv: &dyn Kv,
+    value: &Datum,
+) -> Result<Option<Datum>, ExecError> {
+    let oid = match value {
+        Datum::Text(text) => return regclass_from_text(catalog_kv, text).map(Some),
+        Datum::Int4(oid) => *oid,
+        Datum::Int8(oid) => match i32::try_from(*oid) {
+            Ok(oid) => oid,
+            Err(_) => return Ok(None),
+        },
+        Datum::Regclass(value) => value.oid,
+        _ => return Ok(None),
+    };
+    regclass_by_oid(catalog_kv, oid)
+        .map(Datum::Regclass)
+        .map(Some)
+}
+
 /// The base-table half of [`resolve_regclass`]: virtual catalog relations and
 /// ordinary/foreign tables. [`crate::catalog_fn`] layers views, sequences and
 /// indexes — the other three `pg_class` kinds — on top.
@@ -9185,15 +10456,19 @@ pub(crate) fn resolve_regclass(catalog_kv: &dyn Kv, name: &str) -> Result<i32, E
 /// # Errors
 ///
 /// Propagates the catalog's undefined-table error (42P01).
-pub(crate) fn resolve_base_relation(catalog_kv: &dyn Kv, bare: &str) -> Result<i32, ExecError> {
-    if virtual_table_names().contains(&bare) {
-        return Ok(virtual_relation_oid(bare));
+pub(crate) fn resolve_base_relation(
+    catalog_kv: &dyn Kv,
+    name: &crabka_pgcatalog::RelationName,
+) -> Result<i32, ExecError> {
+    let key = virtual_lookup_key(name);
+    if virtual_table_names().contains(&key.as_str()) {
+        return Ok(virtual_relation_oid(&key));
     }
-    let table = crabka_pgcatalog::get_table(catalog_kv, bare)?;
+    let table = crabka_pgcatalog::get_table(catalog_kv, name)?;
     oid_i32(table.id)
 }
 
-fn virtual_relation_oid(name: &str) -> i32 {
+pub(crate) fn virtual_relation_oid(name: &str) -> i32 {
     match name {
         "pg_namespace" => 2615,
         "pg_class" => 1259,
@@ -9567,6 +10842,7 @@ pub(crate) async fn execute_read_locking(
     s: &SelectStmt,
 ) -> Result<QueryResult, ExecError> {
     let catalog_kv = read_ctx.catalog_kv;
+    let resolution = read_ctx.fctx.resolution;
     let kv = read_ctx.kv;
     let global = read_ctx.global;
     let gsnap = read_ctx.gsnap;
@@ -9611,9 +10887,12 @@ pub(crate) async fn execute_read_locking(
                 columns: None,
                 sample: None,
             },
-        ] if read_ctx.ctes.lookup(name).is_none() => {
-            let table = crabka_pgcatalog::get_table(catalog_kv, name)?;
-            let qualifier = alias.clone().unwrap_or_else(|| table.name.clone());
+        ] if name.schema.is_none() && read_ctx.ctes.lookup(&name.name).is_none() => {
+            let table = crabka_pgcatalog::get_table(
+                catalog_kv,
+                &resolve_relation(catalog_kv, resolution, name, SchemaDisposition::Reference)?,
+            )?;
+            let qualifier = alias.clone().unwrap_or_else(|| table.name.name.clone());
             if locking.of.is_empty()
                 || locking
                     .of
@@ -9647,7 +10926,7 @@ pub(crate) async fn execute_read_locking(
             locking.strength.as_sql()
         )));
     }
-    let scope = Scope::single(&t, &t.name);
+    let scope = Scope::single(&t, &t.name.name);
 
     // Scan visible rows, then lock and EvalPlanQual-recheck each one.
     let mut kept: Vec<Vec<Datum>> = Vec::new();
@@ -10620,21 +11899,23 @@ pub(crate) fn order_cmp(
 pub(crate) fn describe(
     catalog_kv: &dyn Kv,
     _kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     sql: &str,
 ) -> Result<Vec<crabka_pgwire::engine::FieldDescription>, ExecError> {
     let statements = crabka_pgparser::parse(sql)?;
     let Some(statement) = statements.first() else {
         return Ok(Vec::new());
     };
-    describe_statement(catalog_kv, statement)
+    describe_statement(catalog_kv, resolution, statement)
 }
 
 pub(crate) fn describe_statement(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     statement: &Statement,
 ) -> Result<Vec<crabka_pgwire::engine::FieldDescription>, ExecError> {
     match statement {
-        Statement::Query(q) => crate::query::describe_query_expr(catalog_kv, q),
+        Statement::Query(q) => crate::query::describe_query_expr(catalog_kv, resolution, q),
         Statement::Insert {
             table, returning, ..
         }
@@ -10643,17 +11924,27 @@ pub(crate) fn describe_statement(
         }
         | Statement::Delete {
             table, returning, ..
-        } => describe_returning(catalog_kv, table, returning.as_ref(), false),
+        } => describe_returning(
+            catalog_kv,
+            &resolve_relation(catalog_kv, resolution, table, SchemaDisposition::Reference)?,
+            returning.as_ref(),
+            false,
+        ),
         Statement::Merge {
             table, returning, ..
-        } => describe_returning(catalog_kv, table, returning.as_ref(), true),
+        } => describe_returning(
+            catalog_kv,
+            &resolve_relation(catalog_kv, resolution, table, SchemaDisposition::Reference)?,
+            returning.as_ref(),
+            true,
+        ),
         _ => Ok(Vec::new()),
     }
 }
 
 pub(crate) fn describe_returning(
     catalog_kv: &dyn Kv,
-    table: &str,
+    table: &crabka_pgcatalog::RelationName,
     returning: Option<&crabka_pgparser::ast::Returning>,
     merge: bool,
 ) -> Result<Vec<FieldDescription>, ExecError> {
@@ -10667,7 +11958,13 @@ pub(crate) fn describe_returning(
 
     // Describe resolves against the target alone: OLD/NEW image columns mirror
     // its types, and a joined FROM/USING adds columns the caller must qualify.
-    let spec = ReturningSpec::new(&table, &table.name, Some(returning), None, merge)?;
+    let spec = ReturningSpec::new(
+        &table,
+        &table.name.to_string(),
+        Some(returning),
+        None,
+        merge,
+    )?;
     let (fields, _exprs, _tys) = resolve_projection(&spec.items, &spec.scope)?;
     Ok(fields)
 }
@@ -10675,13 +11972,15 @@ pub(crate) fn describe_returning(
 // ── D1/D4/D7: CREATE TABLE breadth, CHECK constraints, ALTER TABLE ───────────
 
 /// A resolved `CREATE TABLE` definition: catalog columns, `CHECK` constraints,
-/// the sequences its SERIAL/identity columns need, and its constraint-backed
-/// indexes.
+/// the sequences its SERIAL/identity columns need, its constraint-backed
+/// indexes, and the `FOREIGN KEY` clauses it collected (named, but not yet
+/// resolved — see [`PendingForeignKey`]).
 type TableDefinition = (
     Vec<Column>,
     Vec<crabka_pgcatalog::CheckConstraint>,
-    Vec<(String, Sequence)>,
+    Vec<(crabka_pgcatalog::RelationName, Sequence)>,
     Vec<crabka_pgcatalog::NewIndex>,
+    Vec<PendingForeignKey>,
 );
 
 /// Build the definition of a `CREATE TABLE … PARTITION OF parent`.
@@ -10691,17 +11990,19 @@ type TableDefinition = (
 /// what it inherits.
 fn partition_definition(
     kv: &dyn Kv,
-    name: &str,
+    name: &crabka_pgcatalog::RelationName,
     spec: &crabka_pgparser::ast::PartitionOf,
     constraints: &[crabka_pgparser::ast::TableConstraint],
     like: &[crabka_pgparser::ast::LikeClause],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<TableDefinition, ExecError> {
-    let parent = crabka_pgcatalog::get_table(kv, &spec.parent)?;
-    if crate::partition::scheme_of(kv, &spec.parent)?.is_none() {
-        return Err(ExecError::NotPartitioned(spec.parent.clone()));
+    let resolution = ctx.resolution();
+    let parent_name = &resolve_relation(kv, resolution, &spec.parent, SchemaDisposition::Utility)?;
+    let parent = crabka_pgcatalog::get_table(kv, parent_name)?;
+    if crate::partition::scheme_of(kv, parent_name)?.is_none() {
+        return Err(ExecError::NotPartitioned(parent_name.to_string()));
     }
-    let (_, extra_checks, sequences, indexes) =
+    let (_, extra_checks, sequences, indexes, foreign_keys) =
         create_table_definition(kv, name, &[], constraints, like, ctx)?;
     let mut columns = parent.columns.clone();
     for (column, qualifiers) in &spec.column_options {
@@ -10730,7 +12031,7 @@ fn partition_definition(
     }
     let mut checks = parent.checks.clone();
     checks.extend(extra_checks);
-    Ok((columns, checks, sequences, indexes))
+    Ok((columns, checks, sequences, indexes, foreign_keys))
 }
 
 /// Resolve a written `PARTITION BY` clause into the stored partition key.
@@ -10772,20 +12073,22 @@ fn partition_scheme_from_ast(
 /// the stored form, returning `(parent, bound)`.
 fn partition_attachment(
     kv: &dyn Kv,
-    name: &str,
+    name: &crabka_pgcatalog::RelationName,
     spec: &crabka_pgparser::ast::PartitionOf,
     columns: &[Column],
     ctx: &crate::clock::EvalCtx,
-) -> Result<(String, crate::partition::Bound), ExecError> {
-    let scheme = crate::partition::scheme_of(kv, &spec.parent)?
-        .ok_or_else(|| ExecError::NotPartitioned(spec.parent.clone()))?;
+) -> Result<(crabka_pgcatalog::RelationName, crate::partition::Bound), ExecError> {
+    let resolution = ctx.resolution();
+    let parent_name = resolve_relation(kv, resolution, &spec.parent, SchemaDisposition::Utility)?;
+    let scheme = crate::partition::scheme_of(kv, &parent_name)?
+        .ok_or_else(|| ExecError::NotPartitioned(parent_name.to_string()))?;
     let bound = resolve_partition_bound(&spec.bound, &scheme, columns, ctx)?;
-    let siblings = crate::partition::partitions_of(kv, &spec.parent)?;
+    let siblings = crate::partition::partitions_of(kv, &parent_name)?;
     crate::partition::check_bound_shape(scheme.strategy, &bound)?;
     crate::partition::check_hash_bound(&bound)?;
     crate::partition::check_range_not_empty(name, &bound)?;
     crate::partition::check_no_overlap(scheme.strategy, name, &bound, &siblings)?;
-    Ok((spec.parent.clone(), bound))
+    Ok((parent_name, bound))
 }
 
 /// Evaluate a written bound's constant expressions and coerce each to the type
@@ -10887,19 +12190,23 @@ fn check_partition_bound_expr(expr: &Expr) -> Result<(), ExecError> {
 /// explicitly written ones, in clause order, exactly like `PostgreSQL`).
 fn create_table_definition(
     kv: &dyn Kv,
-    name: &str,
+    name: &crabka_pgcatalog::RelationName,
     columns: &[crabka_pgparser::ast::ColumnDef],
     constraints: &[crabka_pgparser::ast::TableConstraint],
     like: &[crabka_pgparser::ast::LikeClause],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<TableDefinition, ExecError> {
+    let resolution = ctx.resolution();
     let mut cols: Vec<Column> = Vec::new();
     let mut checks: Vec<crabka_pgcatalog::CheckConstraint> = Vec::new();
-    let mut sequences: Vec<(String, Sequence)> = Vec::new();
+    let mut sequences: Vec<(crabka_pgcatalog::RelationName, Sequence)> = Vec::new();
     let mut indexes: Vec<crabka_pgcatalog::NewIndex> = Vec::new();
+    let mut foreign_keys: Vec<PendingForeignKey> = Vec::new();
 
     for clause in like {
-        let source = crabka_pgcatalog::get_table(kv, &clause.source)?;
+        let source_name =
+            &resolve_relation(kv, resolution, &clause.source, SchemaDisposition::Utility)?;
+        let source = crabka_pgcatalog::get_table(kv, source_name)?;
         for column in &source.columns {
             let mut copied = column.clone();
             // NOT NULL always rides along; DEFAULT and IDENTITY only when asked.
@@ -10918,15 +12225,17 @@ fn create_table_definition(
         }
         if clause.includes(crabka_pgparser::ast::LikeOption::Constraints) {
             for check in &source.checks {
+                let taken: Vec<&str> = checks.iter().map(|c| c.name.as_str()).collect();
+                let name = unique_constraint_name(&taken, &check.name);
                 checks.push(crabka_pgcatalog::CheckConstraint {
-                    name: unique_check_name(&checks, &check.name),
+                    name,
                     expr: check.expr.clone(),
                     validated: check.validated,
                 });
             }
         }
         if clause.includes(crabka_pgparser::ast::LikeOption::Indexes) {
-            for index in crabka_pgcatalog::list_table_indexes(kv, &clause.source)? {
+            for index in crabka_pgcatalog::list_table_indexes(kv, source_name)? {
                 let Some(constraint) = index.constraint else {
                     continue;
                 };
@@ -10960,12 +12269,14 @@ fn create_table_definition(
         for constraint in &column.constraints {
             match &constraint.kind {
                 crabka_pgparser::ast::ColumnConstraintKind::Check(predicate) => {
+                    let taken = non_check_constraint_names(&indexes, &foreign_keys);
                     push_table_check(
                         &mut checks,
                         name,
                         constraint.name.as_deref(),
                         &predicate.text,
                         &column_names,
+                        &taken,
                     )?;
                 }
                 crabka_pgparser::ast::ColumnConstraintKind::PrimaryKey => {
@@ -10984,6 +12295,22 @@ fn create_table_definition(
                         false,
                     ));
                 }
+                // A column-level REFERENCES is a one-column FOREIGN KEY, named
+                // and resolved exactly as the table-level spelling is.
+                crabka_pgparser::ast::ColumnConstraintKind::References(reference) => {
+                    push_pending_foreign_key(
+                        &mut foreign_keys,
+                        &checks,
+                        &indexes,
+                        name,
+                        &AddForeignKey {
+                            name: constraint.name.as_deref(),
+                            columns: std::slice::from_ref(&column.name),
+                            reference,
+                            attributes: constraint.attributes,
+                        },
+                    )?;
+                }
                 _ => {}
             }
         }
@@ -10991,12 +12318,14 @@ fn create_table_definition(
     for constraint in constraints {
         match &constraint.kind {
             crabka_pgparser::ast::TableConstraintKind::Check(predicate) => {
+                let taken = non_check_constraint_names(&indexes, &foreign_keys);
                 push_table_check(
                     &mut checks,
                     name,
                     constraint.name.as_deref(),
                     &predicate.text,
                     &column_names,
+                    &taken,
                 )?;
             }
             crabka_pgparser::ast::TableConstraintKind::PrimaryKey(key) => {
@@ -11015,10 +12344,22 @@ fn create_table_definition(
                     false,
                 ));
             }
-            crabka_pgparser::ast::TableConstraintKind::ForeignKey { .. } => {
-                return Err(ExecError::Unsupported(
-                    "FOREIGN KEY constraints are not enforced yet".into(),
-                ));
+            crabka_pgparser::ast::TableConstraintKind::ForeignKey {
+                columns: key,
+                references,
+            } => {
+                push_pending_foreign_key(
+                    &mut foreign_keys,
+                    &checks,
+                    &indexes,
+                    name,
+                    &AddForeignKey {
+                        name: constraint.name.as_deref(),
+                        columns: key,
+                        reference: references,
+                        attributes: constraint.attributes,
+                    },
+                )?;
             }
         }
     }
@@ -11026,7 +12367,7 @@ fn create_table_definition(
     // unknown column is a 42703 at DDL time rather than at the first INSERT.
     let table_for_validation = Table {
         id: 0,
-        name: name.to_string(),
+        name: name.clone(),
         columns: cols.clone(),
         sharded: false,
         sharding: None,
@@ -11042,14 +12383,82 @@ fn create_table_definition(
     // constraints collide on the index name first, which the catalog reports as
     // 42P07 instead.
     for check in &checks {
-        if indexes.iter().any(|index| index.name == check.name) {
+        if indexes.iter().any(|index| index.name == check.name)
+            || foreign_keys.iter().any(|fk| fk.name == check.name)
+        {
             return Err(ExecError::DuplicateObject(format!(
                 "constraint \"{}\" for relation \"{name}\" already exists",
                 check.name
             )));
         }
     }
-    Ok((cols, checks, sequences, indexes))
+    Ok((cols, checks, sequences, indexes, foreign_keys))
+}
+
+/// One `FOREIGN KEY` clause a `CREATE TABLE` collected, with its name already
+/// drawn from the relation's constraint namespace.
+///
+/// Resolution waits until the relation's own id and its indexes' ids exist,
+/// because `CREATE TABLE t (… REFERENCES t …)` has to resolve against them and
+/// no catalog read can find them yet.
+struct PendingForeignKey {
+    name: String,
+    columns: Vec<String>,
+    reference: crabka_pgparser::ast::ForeignKeyRef,
+    attributes: crabka_pgparser::ast::ConstraintAttributes,
+}
+
+/// The constraint names a `CREATE TABLE` has assigned to things that are not
+/// `CHECK`s — one namespace per relation, so a `CHECK` has to step around them.
+fn non_check_constraint_names<'a>(
+    indexes: &'a [crabka_pgcatalog::NewIndex],
+    foreign_keys: &'a [PendingForeignKey],
+) -> Vec<&'a str> {
+    indexes
+        .iter()
+        .map(|index| index.name.as_str())
+        .chain(foreign_keys.iter().map(|fk| fk.name.as_str()))
+        .collect()
+}
+
+/// Collect one `FOREIGN KEY` clause, assigning the name `PostgreSQL` would:
+/// the explicit `CONSTRAINT <name>` when written (42710 if the relation already
+/// uses it for a constraint of any kind), else `<table>_<col>…_fkey` with the
+/// lowest free numeric suffix.
+fn push_pending_foreign_key(
+    foreign_keys: &mut Vec<PendingForeignKey>,
+    checks: &[crabka_pgcatalog::CheckConstraint],
+    indexes: &[crabka_pgcatalog::NewIndex],
+    table_name: &crabka_pgcatalog::RelationName,
+    request: &AddForeignKey<'_>,
+) -> Result<(), ExecError> {
+    let taken: Vec<&str> = checks
+        .iter()
+        .map(|check| check.name.as_str())
+        .chain(indexes.iter().map(|index| index.name.as_str()))
+        .chain(foreign_keys.iter().map(|fk| fk.name.as_str()))
+        .collect();
+    let name = match request.name {
+        Some(name) => {
+            if taken.contains(&name) {
+                return Err(ExecError::DuplicateObject(format!(
+                    "constraint \"{name}\" for relation \"{table_name}\" already exists"
+                )));
+            }
+            name.to_string()
+        }
+        None => unique_constraint_name(
+            &taken,
+            &crate::fk::default_foreign_key_name(table_name, request.columns),
+        ),
+    };
+    foreign_keys.push(PendingForeignKey {
+        name,
+        columns: request.columns.to_vec(),
+        reference: request.reference.clone(),
+        attributes: request.attributes,
+    });
+    Ok(())
 }
 
 /// Append one `CREATE TABLE` `CHECK`, applying `PostgreSQL`'s naming rules: an
@@ -11058,10 +12467,11 @@ fn create_table_definition(
 /// numeric suffix.
 fn push_table_check(
     checks: &mut Vec<crabka_pgcatalog::CheckConstraint>,
-    table_name: &str,
+    table_name: &crabka_pgcatalog::RelationName,
     explicit: Option<&str>,
     predicate: &str,
     column_names: &[String],
+    other_names: &[&str],
 ) -> Result<(), ExecError> {
     let name = match explicit {
         Some(name) => {
@@ -11070,12 +12480,21 @@ fn push_table_check(
                     "check constraint \"{name}\" already exists"
                 )));
             }
+            if other_names.contains(&name) {
+                return Err(ExecError::DuplicateObject(format!(
+                    "constraint \"{name}\" for relation \"{table_name}\" already exists"
+                )));
+            }
             name.to_string()
         }
-        None => unique_check_name(
-            checks,
-            &default_check_name(table_name, predicate, column_names),
-        ),
+        None => {
+            let mut taken: Vec<&str> = checks.iter().map(|check| check.name.as_str()).collect();
+            taken.extend_from_slice(other_names);
+            unique_constraint_name(
+                &taken,
+                &default_check_name(table_name, predicate, column_names),
+            )
+        }
     };
     checks.push(crabka_pgcatalog::CheckConstraint {
         name,
@@ -11093,7 +12512,7 @@ fn push_table_check(
 fn validate_generation_expressions(table: &Table) -> Result<(), ExecError> {
     use crabka_pgparser::ast::Expr;
 
-    let scope = Scope::single(table, &table.name);
+    let scope = Scope::single(table, &table.name.name);
     for column in &table.columns {
         let Some(source) = &column.generated else {
             continue;
@@ -11218,7 +12637,7 @@ fn backfill_generated_column(
     let ty = state.table.columns[index].ty;
     let expr = crabka_pgparser::parser::parse_expression(&source)?;
     let table_name = state.table.name.clone();
-    let scope = Scope::single(&state.table, &table_name);
+    let scope = Scope::single(&state.table, &table_name.name);
     let computed = state
         .rows_mut(kv)?
         .iter()
@@ -11244,9 +12663,51 @@ fn backfill_generated_column(
     Ok(())
 }
 
+/// A foreign key on a partitioned relation, or on one of its partitions, is
+/// refused for this wave.
+///
+/// [`crate::fk::resolve_foreign_key`] refuses a *sharded* relation itself, but
+/// [`Table`] carries no partition flag — the partition scheme lives in its own
+/// metadata — so only the DDL caller can raise this.
+fn reject_partitioned_foreign_key(constraint: &str) -> ExecError {
+    ExecError::Unsupported(format!(
+        "foreign key constraint \"{constraint}\" on a partitioned table is not supported"
+    ))
+}
+
+/// The [`crabka_pgcatalog::Index`] records an index batch allocated, read back
+/// out of the batch itself.
+///
+/// A `CREATE TABLE` whose `FOREIGN KEY` references the relation being created
+/// has to name the unique index proving its referenced columns are a key, and
+/// that index exists only as a staged write until the statement commits — this
+/// is where its allocated id can be observed. Values that are not index records
+/// (the next-id counter) simply fail to decode, and only the names this batch
+/// asked for are kept.
+fn staged_indexes_of(
+    ops: &[crabka_pgkv::WriteOp],
+    pending: &[crabka_pgcatalog::NewIndex],
+) -> Vec<crabka_pgcatalog::Index> {
+    let mut staged: Vec<crabka_pgcatalog::Index> = Vec::with_capacity(pending.len());
+    for op in ops {
+        let crabka_pgkv::WriteOp::Put { value, .. } = op else {
+            continue;
+        };
+        let Ok(index) = crabka_pgcatalog::serde::deserialize_index(value) else {
+            continue;
+        };
+        if pending.iter().any(|new| new.name == index.name)
+            && !staged.iter().any(|seen| seen.name == index.name)
+        {
+            staged.push(index);
+        }
+    }
+    staged
+}
+
 fn named_constraint_index(
     explicit: Option<&str>,
-    table_name: &str,
+    table_name: &crabka_pgcatalog::RelationName,
     columns: &[String],
     primary_key: bool,
 ) -> crabka_pgcatalog::NewIndex {
@@ -11257,11 +12718,20 @@ fn named_constraint_index(
     index
 }
 
-fn constraint_index_name(table_name: &str, columns: &[String], primary_key: bool) -> String {
+/// `PostgreSQL`'s default index name for a `PRIMARY KEY`/`UNIQUE` constraint.
+///
+/// It is built from the relation's own name, not its qualified spelling: the
+/// index for `s1.t`'s primary key is `t_pkey`, sitting in `s1` beside the
+/// table.
+fn constraint_index_name(
+    table_name: &crabka_pgcatalog::RelationName,
+    columns: &[String],
+    primary_key: bool,
+) -> String {
     if primary_key {
-        format!("{table_name}_pkey")
+        format!("{}_pkey", table_name.name)
     } else {
-        format!("{table_name}_{}_key", columns.join("_"))
+        format!("{}_{}_key", table_name.name, columns.join("_"))
     }
 }
 
@@ -11269,7 +12739,11 @@ fn constraint_index_name(table_name: &str, columns: &[String], primary_key: bool
 /// the predicate references exactly one of the table's columns, `<table>_check`
 /// otherwise. The referenced set is taken from the predicate's identifier
 /// tokens, so function names and literals never contribute.
-fn default_check_name(table_name: &str, predicate: &str, columns: &[String]) -> String {
+fn default_check_name(
+    table_name: &crabka_pgcatalog::RelationName,
+    predicate: &str,
+    columns: &[String],
+) -> String {
     let mut referenced: Vec<&String> = Vec::new();
     if let Ok(tokens) = crabka_pgparser::lexer::lex(predicate) {
         for (token, _) in &tokens {
@@ -11284,21 +12758,25 @@ fn default_check_name(table_name: &str, predicate: &str, columns: &[String]) -> 
         }
     }
     match referenced.as_slice() {
-        [only] => format!("{table_name}_{only}_check"),
-        _ => format!("{table_name}_check"),
+        [only] => format!("{}_{only}_check", table_name.name),
+        _ => format!("{}_check", table_name.name),
     }
 }
 
 /// `PostgreSQL` disambiguates a colliding default constraint name by appending
 /// the lowest free positive integer.
-fn unique_check_name(existing: &[crabka_pgcatalog::CheckConstraint], base: &str) -> String {
-    if !existing.iter().any(|check| check.name == base) {
+///
+/// One relation has ONE constraint namespace, shared by `CHECK`s, index-backed
+/// constraints and foreign keys alike, so `taken` is every constraint name of
+/// every kind the relation already carries.
+fn unique_constraint_name(taken: &[&str], base: &str) -> String {
+    if !taken.contains(&base) {
         return base.to_string();
     }
     let mut suffix = 1u32;
     loop {
         let candidate = format!("{base}{suffix}");
-        if !existing.iter().any(|check| check.name == candidate) {
+        if !taken.iter().any(|name| *name == candidate) {
             return candidate;
         }
         suffix += 1;
@@ -11315,7 +12793,7 @@ pub(crate) struct CompiledCheck {
 /// Re-parse every stored `CHECK` predicate and verify it resolves against the
 /// current column list. An unknown column surfaces as 42703 here.
 pub(crate) fn compile_check_constraints(table: &Table) -> Result<Vec<CompiledCheck>, ExecError> {
-    let scope = Scope::single(table, &table.name);
+    let scope = Scope::single(table, &table.name.name);
     table
         .checks
         .iter()
@@ -11338,12 +12816,12 @@ pub(crate) fn enforce_check_constraints(
     row: &[Datum],
     ctx: &crate::clock::EvalCtx,
 ) -> Result<(), ExecError> {
-    let scope = Scope::single(table, &table.name);
+    let scope = Scope::single(table, &table.name.name);
     for check in checks {
         let value = crate::eval::eval(&check.expr, &scope, row, ctx)?;
         if matches!(value, Datum::Bool(false)) {
             return Err(ExecError::CheckViolation {
-                table: table.name.clone(),
+                table: table.name.to_string(),
                 constraint: check.name.clone(),
             });
         }
@@ -11365,7 +12843,7 @@ pub(crate) fn apply_generated_columns(
     {
         return Ok(());
     }
-    let scope = Scope::single(table, &table.name);
+    let scope = Scope::single(table, &table.name.name);
     let snapshot = row.to_vec();
     for (index, column) in table.columns.iter().enumerate() {
         let Some(source) = &column.generated else {
@@ -11463,6 +12941,142 @@ struct AlterTableState {
     /// Columns already retyped by this statement; `PostgreSQL` refuses a second
     /// type change for the same column in one `ALTER TABLE`.
     retyped_columns: Vec<String>,
+    /// Foreign keys this statement added. They are not in the catalog yet, so a
+    /// later subcommand — a name collision check, a `VALIDATE`, a `DROP` — can
+    /// only find them here.
+    created_foreign_keys: Vec<crabka_pgcatalog::ForeignKey>,
+    /// Names of foreign keys this statement dropped; a later subcommand must not
+    /// resurrect them from the catalog.
+    dropped_foreign_keys: Vec<String>,
+}
+
+/// A store with one statement's not-yet-committed write batch layered over it.
+///
+/// A statement's ops only reach the KV when the session commits the whole batch,
+/// so anything that has to read *this* statement's own effects cannot read the
+/// store directly. Two things do:
+///
+/// - the end-of-statement referential drain, whose whole premise is that the
+///   statement's rows already exist — `INSERT INTO t (id, boss) VALUES (1, 1)`
+///   against a self-referencing foreign key succeeds because the parent row the
+///   check looks for is the one the statement just staged;
+/// - a foreign key back-validated by a multi-subcommand `ALTER TABLE`, which has
+///   to resolve the relation as this statement has already rewritten it — an
+///   added column, a rebuilt index — not as storage still holds it.
+///
+/// Read-only through the [`Kv`] trait: the real batch is written by the session
+/// once the statement is complete. [`StagedKv::stage`] is the one way the
+/// overlay grows, and the drain's referential actions are the one caller — an
+/// action's ops belong in the view the next action reads, which is what makes a
+/// second constraint's action operate on the row's *current* image and a cascade
+/// cycle come back around to a row that reads as deleted.
+struct StagedKv<'a> {
+    base: &'a dyn Kv,
+    /// `None` marks a key the batch deletes.
+    staged: Mutex<BTreeMap<Vec<u8>, Option<Vec<u8>>>>,
+}
+
+impl<'a> StagedKv<'a> {
+    fn new(base: &'a dyn Kv, ops: &[crabka_pgkv::WriteOp]) -> Self {
+        let view = Self {
+            base,
+            staged: Mutex::new(BTreeMap::new()),
+        };
+        view.stage(ops);
+        view
+    }
+
+    /// Fold more ops into the overlay, so every later read through this view
+    /// sees them.
+    ///
+    /// The lock spans the fold and nothing else — no read here awaits — so the
+    /// interior mutability costs one uncontended acquire per KV operation.
+    fn stage(&self, ops: &[crabka_pgkv::WriteOp]) {
+        let mut staged = self.staged.lock().expect("staged write-batch mutex");
+        for op in ops {
+            match op {
+                crabka_pgkv::WriteOp::Put { key, value }
+                | crabka_pgkv::WriteOp::ConditionalPut { key, value, .. } => {
+                    staged.insert(key.clone(), Some(value.clone()));
+                }
+                crabka_pgkv::WriteOp::Delete { key } => {
+                    staged.insert(key.clone(), None);
+                }
+            }
+        }
+    }
+}
+
+/// Layer the staged writes over a base scan: a staged key replaces (or removes)
+/// whatever the base returned for it, and a staged key the base never had joins
+/// the result.
+fn merge_staged<'s>(
+    staged: &'s BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    mut pairs: crabka_pgkv::KvScan,
+    overlay: impl Iterator<Item = (&'s Vec<u8>, &'s Vec<u8>)>,
+) -> crabka_pgkv::KvScan {
+    pairs.retain(|(key, _)| !staged.contains_key(key));
+    for (key, value) in overlay {
+        pairs.push((key.clone(), value.clone()));
+    }
+    pairs.sort_by(|left, right| left.0.cmp(&right.0));
+    pairs
+}
+
+fn staged_kv_is_read_only() -> crabka_pgkv::KvError {
+    crabka_pgkv::KvError::Io("the staged write-batch view is read-only".into())
+}
+
+impl Kv for StagedKv<'_> {
+    fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, crabka_pgkv::KvError> {
+        let staged = self
+            .staged
+            .lock()
+            .expect("staged write-batch mutex")
+            .get(key)
+            .cloned();
+        match staged {
+            Some(value) => Ok(value),
+            None => self.base.get(key),
+        }
+    }
+
+    fn put(&self, _key: Vec<u8>, _value: Vec<u8>) -> Result<(), crabka_pgkv::KvError> {
+        Err(staged_kv_is_read_only())
+    }
+
+    fn delete(&self, _key: &[u8]) -> Result<(), crabka_pgkv::KvError> {
+        Err(staged_kv_is_read_only())
+    }
+
+    fn scan_prefix(&self, prefix: &[u8]) -> Result<crabka_pgkv::KvScan, crabka_pgkv::KvError> {
+        let base = self.base.scan_prefix(prefix)?;
+        let staged = self.staged.lock().expect("staged write-batch mutex");
+        // Ranged rather than a walk of the whole batch: a bulk COPY stages one
+        // op per row and the drain probes once per queued check.
+        let overlay = staged
+            .range(prefix.to_vec()..)
+            .take_while(|(key, _)| key.starts_with(prefix))
+            .filter_map(|(key, value)| value.as_ref().map(|value| (key, value)));
+        Ok(merge_staged(&staged, base, overlay))
+    }
+
+    fn scan_range(
+        &self,
+        start: &[u8],
+        end: &[u8],
+    ) -> Result<crabka_pgkv::KvScan, crabka_pgkv::KvError> {
+        let base = self.base.scan_range(start, end)?;
+        let staged = self.staged.lock().expect("staged write-batch mutex");
+        let overlay = staged
+            .range(start.to_vec()..end.to_vec())
+            .filter_map(|(key, value)| value.as_ref().map(|value| (key, value)));
+        Ok(merge_staged(&staged, base, overlay))
+    }
+
+    fn write_batch(&self, _ops: &[crabka_pgkv::WriteOp]) -> Result<(), crabka_pgkv::KvError> {
+        Err(staged_kv_is_read_only())
+    }
 }
 
 impl AlterTableState {
@@ -11491,23 +13105,90 @@ impl AlterTableState {
             .column_index(column)
             .ok_or_else(|| ExecError::UndefinedTableColumn {
                 column: column.to_string(),
-                table: self.table.name.clone(),
+                table: self.table.name.to_string(),
             })
+    }
+
+    /// The relation's indexes with this statement's own creations and drops
+    /// folded in — what a foreign key added here must resolve its referenced
+    /// index against.
+    fn current_indexes(&self, kv: &dyn Kv) -> Result<Vec<crabka_pgcatalog::Index>, ExecError> {
+        let mut indexes = crabka_pgcatalog::list_table_indexes(kv, &self.table.name)?;
+        indexes.retain(|index| !self.dropped_indexes.contains(&index.name));
+        for index in &self.created_indexes {
+            if !indexes.iter().any(|listed| listed.name == index.name) {
+                indexes.push(index.clone());
+            }
+        }
+        Ok(indexes)
+    }
+
+    /// The foreign keys the relation carries *as the child*, with this
+    /// statement's own additions and drops folded in.
+    fn current_foreign_keys(
+        &self,
+        kv: &dyn Kv,
+    ) -> Result<Vec<crabka_pgcatalog::ForeignKey>, ExecError> {
+        let mut keys = crabka_pgcatalog::list_table_foreign_keys(kv, self.table.id)?;
+        keys.retain(|fk| !self.dropped_foreign_keys.contains(&fk.name));
+        for fk in &self.created_foreign_keys {
+            if !keys.iter().any(|listed| listed.name == fk.name) {
+                keys.push(fk.clone());
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Every constraint name the relation uses, of every kind — `PostgreSQL`
+    /// keeps one namespace per relation, so a new constraint must step around
+    /// all three kinds.
+    fn taken_constraint_names(&self, kv: &dyn Kv) -> Result<Vec<String>, ExecError> {
+        let mut taken: Vec<String> = self
+            .table
+            .checks
+            .iter()
+            .map(|check| check.name.clone())
+            .collect();
+        taken.extend(
+            self.current_indexes(kv)?
+                .into_iter()
+                .map(|index| index.name),
+        );
+        taken.extend(self.current_foreign_keys(kv)?.into_iter().map(|fk| fk.name));
+        Ok(taken)
+    }
+
+    /// The catalog as this statement has already rewritten it: the working
+    /// column and `CHECK` lists, plus every catalog op staged so far.
+    fn staged_catalog<'a>(&self, kv: &'a dyn Kv) -> Result<StagedKv<'a>, ExecError> {
+        let mut ops = crabka_pgcatalog::replace_table_schema_ops(
+            kv,
+            &self.table.name,
+            &self.table.columns,
+            &self.table.checks,
+        )?;
+        ops.extend_from_slice(&self.ops);
+        Ok(StagedKv::new(kv, &ops))
     }
 }
 
 /// `ALTER TABLE [IF EXISTS] name <action> [, …]`.
 fn alter_table_ops(
     kv: &dyn Kv,
-    table_name: &str,
+    resolution: &crate::relname::ResolutionScope,
+    table_name: &crabka_pgcatalog::RelationName,
     if_exists: bool,
     actions: &[crabka_pgparser::ast::AlterTableAction],
+    own_xid: Option<u64>,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     use crabka_pgparser::ast::AlterTableAction as Action;
 
     // RENAME TO is a statement of its own in PostgreSQL's grammar, so it never
     // shares a comma list and keeps its dedicated catalog path.
     if let [Action::RenameTable { new_name }] = actions {
+        // `RENAME TO` never moves a relation between schemas: the new name is
+        // unqualified and lands beside the old one, exactly as in PostgreSQL.
+        let new_name = &table_name.sibling(new_name);
         return match crabka_pgcatalog::rename_table_ops(kv, table_name, new_name) {
             Ok(mut ops) => {
                 ops.extend(rename_relation_comment_ops(kv, table_name, new_name)?);
@@ -11546,9 +13227,11 @@ fn alter_table_ops(
         dropped_indexes: Vec::new(),
         created_indexes: Vec::new(),
         retyped_columns: Vec::new(),
+        created_foreign_keys: Vec::new(),
+        dropped_foreign_keys: Vec::new(),
     };
     for action in actions {
-        alter_table_action_ops(kv, &mut state, action)?;
+        alter_table_action_ops(kv, resolution, &mut state, action, own_xid)?;
     }
 
     // The schema record is written once, after every action has folded into the
@@ -11606,12 +13289,14 @@ fn alter_action_label(action: &crabka_pgparser::ast::AlterTableAction) -> &'stat
 )]
 fn alter_table_action_ops(
     kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     state: &mut AlterTableState,
     action: &crabka_pgparser::ast::AlterTableAction,
+    own_xid: Option<u64>,
 ) -> Result<(), ExecError> {
     use crabka_pgparser::ast::AlterTableAction as Action;
 
-    let ddl_ctx = crate::clock::EvalCtx::test_default();
+    let ddl_ctx = crate::clock::EvalCtx::for_ddl(resolution);
     let table_name = state.table.name.clone();
     match action {
         Action::AddColumn {
@@ -11624,7 +13309,7 @@ fn alter_table_action_ops(
                 }
                 return Err(ExecError::DuplicateColumn {
                     column: column.name.clone(),
-                    table: table_name,
+                    table: table_name.to_string(),
                 });
             }
             let mut sequences = Vec::new();
@@ -11673,7 +13358,7 @@ fn alter_table_action_ops(
                     if row.get(added).is_none_or(Datum::is_null) {
                         return Err(ExecError::ColumnContainsNullValues {
                             column: column.name.clone(),
-                            table: table_name.clone(),
+                            table: table_name.to_string(),
                         });
                     }
                 }
@@ -11711,6 +13396,22 @@ fn alter_table_action_ops(
                             primary_key,
                         )?;
                     }
+                    // `ADD COLUMN a int REFERENCES p (id)` is a one-column
+                    // FOREIGN KEY on the column just added.
+                    crabka_pgparser::ast::ColumnConstraintKind::References(reference) => {
+                        add_foreign_key_constraint(
+                            kv,
+                            state,
+                            &AddForeignKey {
+                                name: constraint.name.as_deref(),
+                                columns: std::slice::from_ref(&column.name),
+                                reference,
+                                attributes: constraint.attributes,
+                            },
+                            own_xid,
+                            &ddl_ctx,
+                        )?;
+                    }
                     _ => {}
                 }
             }
@@ -11727,7 +13428,7 @@ fn alter_table_action_ops(
                 }
                 return Err(ExecError::UndefinedTableColumn {
                     column: column.clone(),
-                    table: table_name,
+                    table: table_name.to_string(),
                 });
             }
             let dependents = dependent_view_names(kv, &table_name, Some(column))?;
@@ -11745,10 +13446,10 @@ fn alter_table_action_ops(
                 // CASCADE takes the dependent generated columns with it. They
                 // are removed first, so `index` still addresses the target.
                 for name in &generated {
-                    drop_table_column(kv, state, name)?;
+                    drop_table_column(kv, state, name, *cascade)?;
                 }
             }
-            drop_table_column(kv, state, column)
+            drop_table_column(kv, state, column, *cascade)
         }
         Action::SetNotNull(column) => {
             let index = state.column_index(column)?;
@@ -11757,7 +13458,7 @@ fn alter_table_action_ops(
                 if row.get(index).is_none_or(Datum::is_null) {
                     return Err(ExecError::ColumnContainsNullValues {
                         column: column.clone(),
-                        table: table_name,
+                        table: table_name.to_string(),
                     });
                 }
             }
@@ -11812,7 +13513,7 @@ fn alter_table_action_ops(
                     "cannot alter type of a column used by a view or rule".into(),
                 ));
             }
-            let scope = Scope::single(&state.table, &table_name);
+            let scope = Scope::single(&state.table, &table_name.name);
             let rewritten = state
                 .rows_mut(kv)?
                 .iter()
@@ -11870,20 +13571,35 @@ fn alter_table_action_ops(
                 state,
                 constraint.name.clone(),
                 &predicate.text,
-                !constraint.not_valid,
+                !constraint.attributes.not_valid,
                 kv,
                 &ddl_ctx,
             ),
             crabka_pgparser::ast::TableConstraintKind::PrimaryKey(columns) => {
-                reject_not_valid(constraint.not_valid, "PRIMARY KEY")?;
+                reject_not_valid(constraint.attributes.not_valid, "PRIMARY KEY")?;
                 add_constraint_index(kv, state, constraint.name.as_deref(), columns, true)
             }
             crabka_pgparser::ast::TableConstraintKind::Unique { columns, .. } => {
-                reject_not_valid(constraint.not_valid, "UNIQUE")?;
+                reject_not_valid(constraint.attributes.not_valid, "UNIQUE")?;
                 add_constraint_index(kv, state, constraint.name.as_deref(), columns, false)
             }
-            crabka_pgparser::ast::TableConstraintKind::ForeignKey { .. } => Err(
-                ExecError::Unsupported("FOREIGN KEY constraints are not enforced yet".into()),
+            // `reject_not_valid` is deliberately NOT called here: `NOT VALID`
+            // applies to CHECK *and* FOREIGN KEY, the two kinds PostgreSQL can
+            // validate lazily.
+            crabka_pgparser::ast::TableConstraintKind::ForeignKey {
+                columns,
+                references,
+            } => add_foreign_key_constraint(
+                kv,
+                state,
+                &AddForeignKey {
+                    name: constraint.name.as_deref(),
+                    columns,
+                    reference: references,
+                    attributes: constraint.attributes,
+                },
+                own_xid,
+                &ddl_ctx,
             ),
         },
         Action::DropConstraint {
@@ -11891,23 +13607,37 @@ fn alter_table_action_ops(
             if_exists,
             cascade,
         } => {
-            let _ = cascade;
             if let Some(position) = state.table.checks.iter().position(|c| c.name == *name) {
                 state.table.checks.remove(position);
+                return Ok(());
+            }
+            if drop_foreign_key_constraint(kv, state, name) {
                 return Ok(());
             }
             let index_exists = crabka_pgcatalog::list_table_indexes(kv, &table_name)?
                 .into_iter()
                 .any(|index| index.name == *name && index.constraint.is_some());
             if index_exists {
-                return drop_index_by_name(kv, state, name);
+                // The dependents hang off the constraint's backing index, which
+                // is why PostgreSQL's DETAIL names the index where the primary
+                // message names the constraint.
+                return drop_index_by_name(
+                    kv,
+                    state,
+                    name,
+                    &crate::error::DroppedObject::Constraint {
+                        name: name.clone(),
+                        table: table_name.to_string(),
+                    },
+                    *cascade,
+                );
             }
             if *if_exists {
                 return Ok(());
             }
             Err(ExecError::UndefinedRelationConstraint {
                 name: name.clone(),
-                table: table_name,
+                table: table_name.to_string(),
             })
         }
         Action::RenameColumn { column, new_name } => {
@@ -11920,7 +13650,7 @@ fn alter_table_action_ops(
             if state.table.column_index(new_name).is_some() {
                 return Err(ExecError::DuplicateColumn {
                     column: new_name.clone(),
-                    table: table_name,
+                    table: table_name.to_string(),
                 });
             }
             rename_column_dependencies(kv, state, column, new_name)?;
@@ -11932,16 +13662,35 @@ fn alter_table_action_ops(
                 check.name = new_name.clone();
                 return Ok(());
             }
+            if let Some(mut foreign_key) = state
+                .current_foreign_keys(kv)?
+                .into_iter()
+                .find(|fk| fk.name == *name)
+            {
+                // The by-table catalog key carries the constraint name, so a
+                // rename moves the record rather than rewriting it in place.
+                state
+                    .ops
+                    .extend(crabka_pgcatalog::drop_foreign_key_ops(kv, state.table.id, name)?.1);
+                state.dropped_foreign_keys.push(name.clone());
+                foreign_key.name = new_name.clone();
+                state
+                    .ops
+                    .extend(crabka_pgcatalog::put_foreign_key_ops(&foreign_key));
+                state.created_foreign_keys.push(foreign_key);
+                return Ok(());
+            }
             let Some(mut index) = crabka_pgcatalog::list_table_indexes(kv, &table_name)?
                 .into_iter()
                 .find(|index| index.name == *name && index.constraint.is_some())
             else {
                 return Err(ExecError::UndefinedConstraint {
                     name: name.clone(),
-                    table: table_name,
+                    table: table_name.to_string(),
                 });
             };
-            let (_, drop_ops) = crabka_pgcatalog::drop_constraint_index_ops(kv, name)?;
+            let (_, drop_ops) =
+                crabka_pgcatalog::drop_constraint_index_ops(kv, &table_name.sibling(name))?;
             state.ops.extend(drop_ops);
             index.name = new_name.clone();
             state.ops.extend(crabka_pgcatalog::put_index_ops(&index));
@@ -11960,12 +13709,29 @@ fn alter_table_action_ops(
                         enforce_check_constraints(&probe, &compiled, row, &ddl_ctx)
                     {
                         return Err(ExecError::CheckViolationOnExistingRows {
-                            table: table_name,
+                            table: table_name.to_string(),
                             constraint,
                         });
                     }
                 }
                 state.table.checks[position].validated = true;
+                return Ok(());
+            }
+            if let Some(mut foreign_key) = state
+                .current_foreign_keys(kv)?
+                .into_iter()
+                .find(|fk| fk.name == *name)
+            {
+                if foreign_key.validated {
+                    return Ok(());
+                }
+                validate_foreign_key_against_state(kv, state, &foreign_key, own_xid, &ddl_ctx)?;
+                foreign_key.validated = true;
+                state
+                    .ops
+                    .extend(crabka_pgcatalog::put_foreign_key_ops(&foreign_key));
+                state.created_foreign_keys.retain(|fk| fk.name != *name);
+                state.created_foreign_keys.push(foreign_key);
                 return Ok(());
             }
             let index_exists = crabka_pgcatalog::list_table_indexes(kv, &table_name)?
@@ -11979,7 +13745,7 @@ fn alter_table_action_ops(
             }
             Err(ExecError::UndefinedRelationConstraint {
                 name: name.clone(),
-                table: table_name,
+                table: table_name.to_string(),
             })
         }
         // Heap storage parameters and ownership have no counterpart in Crabka's
@@ -11999,6 +13765,8 @@ fn alter_table_action_ops(
             "RENAME TO cannot be combined with other ALTER TABLE subcommands".into(),
         )),
         Action::AttachPartition { partition, bound } => {
+            let partition =
+                &resolve_relation(kv, resolution, partition, SchemaDisposition::Utility)?;
             let ops = attach_partition_ops(kv, &state.table, partition, bound, &ddl_ctx)?;
             state.ops.extend(ops);
             Ok(())
@@ -12013,17 +13781,19 @@ fn alter_table_action_ops(
             // one catalog batch under the global catalog lock, so both spellings
             // detach exactly as the plain form does.
             let _ = (concurrently, finalize);
+            let partition =
+                &resolve_relation(kv, resolution, partition, SchemaDisposition::Utility)?;
             let (parent, _) = crate::partition::parent_of(kv, partition)?
                 .filter(|(parent, _)| *parent == table_name)
                 .ok_or_else(|| {
                     if crabka_pgcatalog::get_table(kv, partition).is_err() {
                         ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedTable(
-                            partition.clone(),
+                            partition.to_string(),
                         ))
                     } else {
                         ExecError::NotAPartitionOf {
-                            partition: partition.clone(),
-                            parent: table_name.clone(),
+                            partition: partition.to_string(),
+                            parent: table_name.to_string(),
                         }
                     }
                 })?;
@@ -12046,12 +13816,12 @@ fn alter_table_action_ops(
 fn attach_partition_ops(
     kv: &dyn Kv,
     parent: &Table,
-    child: &str,
+    child: &crabka_pgcatalog::RelationName,
     bound: &crabka_pgparser::ast::PartitionBound,
     ctx: &crate::clock::EvalCtx,
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     let scheme = crate::partition::scheme_of(kv, &parent.name)?
-        .ok_or_else(|| ExecError::NotPartitioned(parent.name.clone()))?;
+        .ok_or_else(|| ExecError::NotPartitioned(parent.name.to_string()))?;
     let candidate = crabka_pgcatalog::get_table(kv, child)?;
     if let Some(missing) = parent
         .columns
@@ -12070,7 +13840,7 @@ fn attach_partition_ops(
     // not allowed" (42P07), and it must be refused here rather than stored: a
     // cycle turns every later walk of the tree — DROP above all — into an
     // unbounded loop.
-    if child == parent.name || crate::partition::descendants(kv, child)?.contains(&parent.name) {
+    if *child == parent.name || crate::partition::descendants(kv, child)?.contains(&parent.name) {
         return Err(ExecError::CircularInheritance);
     }
     let resolved = resolve_partition_bound(bound, &scheme, &parent.columns, ctx)?;
@@ -12117,6 +13887,163 @@ fn reject_not_valid(not_valid: bool, kind: &str) -> Result<(), ExecError> {
     Ok(())
 }
 
+/// One `FOREIGN KEY` clause as a DDL statement writes it, in either spelling —
+/// `[CONSTRAINT <name>] FOREIGN KEY (…) REFERENCES …` or a column-level
+/// `REFERENCES`. Shared by `CREATE TABLE` and every `ALTER TABLE` subcommand
+/// that can carry one.
+struct AddForeignKey<'a> {
+    name: Option<&'a str>,
+    columns: &'a [String],
+    reference: &'a crabka_pgparser::ast::ForeignKeyRef,
+    attributes: crabka_pgparser::ast::ConstraintAttributes,
+}
+
+/// Add one `FOREIGN KEY`, back-validating it against the relation's live rows
+/// first — unless `NOT VALID`, which stores the constraint without that scan and
+/// still governs every subsequent write.
+///
+/// The scan reads [`AlterTableState::live_rows`] and resolves through
+/// [`AlterTableState::staged_catalog`], never storage, so a constraint added in
+/// the same batch as the column it keys on sees the rewritten rows and the
+/// rewritten column list.
+fn add_foreign_key_constraint(
+    kv: &dyn Kv,
+    state: &mut AlterTableState,
+    request: &AddForeignKey<'_>,
+    own_xid: Option<u64>,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<(), ExecError> {
+    let resolution = ctx.resolution();
+    let table_name = state.table.name.clone();
+    let taken = state.taken_constraint_names(kv)?;
+    let name = match request.name {
+        Some(name) => {
+            if taken.iter().any(|used| used == name) {
+                return Err(ExecError::DuplicateObject(format!(
+                    "constraint \"{name}\" for relation \"{table_name}\" already exists"
+                )));
+            }
+            name.to_string()
+        }
+        None => {
+            let taken: Vec<&str> = taken.iter().map(String::as_str).collect();
+            unique_constraint_name(
+                &taken,
+                &crate::fk::default_foreign_key_name(&table_name, request.columns),
+            )
+        }
+    };
+    // `Table` carries no partition flag, so the DDL caller is the only place
+    // that can refuse a partitioned relation.
+    if crate::partition::is_partitioned(kv, &table_name)?
+        || crate::partition::parent_of(kv, &table_name)?.is_some()
+    {
+        return Err(reject_partitioned_foreign_key(&name));
+    }
+    let indexes = state.current_indexes(kv)?;
+    let foreign_key = {
+        // `REFERENCES` naming this same relation resolves against the working
+        // column and index lists — an index added earlier in this statement is
+        // not in the catalog yet.
+        let child = crate::fk::FkRelation {
+            id: state.table.id,
+            name: &table_name,
+            columns: &state.table.columns,
+            indexes: &indexes,
+            sharded: state.table.sharded,
+        };
+        crate::fk::resolve_foreign_key(
+            kv,
+            resolution,
+            &child,
+            &crate::fk::ForeignKeyRequest {
+                name: Some(&name),
+                columns: request.columns,
+                reference: request.reference,
+                attributes: request.attributes,
+                validated: !request.attributes.not_valid,
+                self_reference: Some(&child),
+            },
+        )?
+    };
+    if foreign_key.validated {
+        validate_foreign_key_against_state(kv, state, &foreign_key, own_xid, ctx)?;
+    }
+    state
+        .ops
+        .extend(crabka_pgcatalog::create_foreign_key_ops(kv, &foreign_key)?);
+    state.created_foreign_keys.push(foreign_key);
+    Ok(())
+}
+
+/// Run one foreign key's back-validation scan over the relation's in-flight
+/// rows, resolving names through the statement's staged catalog.
+///
+/// DDL runs against a single KV handle standing in for the local store, the
+/// catalog and range 0's global clog alike, under an all-committed snapshot plus
+/// the open transaction's own xid — the same visibility a unique-index backfill
+/// uses, and for the same reason: `BEGIN; INSERT …; ALTER TABLE … ADD FOREIGN
+/// KEY` has to validate against the rows this transaction has written.
+fn validate_foreign_key_against_state(
+    kv: &dyn Kv,
+    state: &mut AlterTableState,
+    foreign_key: &crabka_pgcatalog::ForeignKey,
+    own_xid: Option<u64>,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<(), ExecError> {
+    let rows: Vec<Vec<Datum>> = state
+        .live_rows(kv)?
+        .into_iter()
+        .map(|(_, _, row)| row)
+        .collect();
+    let staged = state.staged_catalog(kv)?;
+    let snapshot = all_committed_snapshot();
+    let exec = crate::fk::FkExecContext {
+        catalog_kv: &staged,
+        kv,
+        global: kv,
+        global_snapshot: &snapshot,
+        snapshot: &snapshot,
+        xid: own_xid.unwrap_or(crabka_pgmvcc::xid::INVALID_XID),
+        eval_ctx: ctx,
+    };
+    crate::fk::validate_foreign_key_rows(&exec, foreign_key, &rows)
+}
+
+/// Drop the foreign key `name` names, if the relation carries one, returning
+/// whether it did.
+///
+/// A constraint this same statement added is only staged, so its puts are pulled
+/// back out of the batch rather than paired with deletes of keys that were never
+/// written.
+fn drop_foreign_key_constraint(kv: &dyn Kv, state: &mut AlterTableState, name: &str) -> bool {
+    let Some(position) = state
+        .created_foreign_keys
+        .iter()
+        .position(|fk| fk.name == name)
+    else {
+        let Ok((_, ops)) = crabka_pgcatalog::drop_foreign_key_ops(kv, state.table.id, name) else {
+            return false;
+        };
+        state.ops.extend(ops);
+        state.dropped_foreign_keys.push(name.to_string());
+        return true;
+    };
+    let staged = state.created_foreign_keys.remove(position);
+    let keys: Vec<Vec<u8>> = crabka_pgcatalog::put_foreign_key_ops(&staged)
+        .into_iter()
+        .filter_map(|op| match op {
+            crabka_pgkv::WriteOp::Put { key, .. } => Some(key),
+            _ => None,
+        })
+        .collect();
+    state
+        .ops
+        .retain(|op| !matches!(op, crabka_pgkv::WriteOp::Put { key, .. } if keys.contains(key)));
+    state.dropped_foreign_keys.push(name.to_string());
+    true
+}
+
 /// Reject a `CHECK` predicate `PostgreSQL` refuses at DDL time, before it can be
 /// stored and start failing every later write.
 ///
@@ -12128,7 +14055,7 @@ fn validate_check_predicate(table: &Table, predicate: &str) -> Result<(), ExecEr
     use crabka_pgparser::ast::Expr;
 
     let expr = crabka_pgparser::parser::parse_expression(predicate)?;
-    let scope = Scope::single(table, &table.name);
+    let scope = Scope::single(table, &table.name.name);
     let mut rejection: Option<ExecError> = None;
     crate::grouping::visit_expr(&expr, &mut |node| {
         if rejection.is_some() {
@@ -12199,7 +14126,13 @@ fn add_check_constraint(
     let default = default_check_name(&state.table.name, predicate, &column_names);
     // A generated name takes the lowest free numeric suffix, so only an
     // explicit `CONSTRAINT <name>` can collide here.
-    let name = name.unwrap_or_else(|| unique_check_name(&state.table.checks, &default));
+    let taken: Vec<&str> = state
+        .table
+        .checks
+        .iter()
+        .map(|check| check.name.as_str())
+        .collect();
+    let name = name.unwrap_or_else(|| unique_constraint_name(&taken, &default));
     if state.table.checks.iter().any(|check| check.name == name)
         || constraint_index_named(kv, state, &name)?
     {
@@ -12228,7 +14161,7 @@ fn add_check_constraint(
             enforce_check_constraints(&probe, &compiled, row, ctx)
         {
             return Err(ExecError::CheckViolationOnExistingRows {
-                table: state.table.name.clone(),
+                table: state.table.name.to_string(),
                 constraint,
             });
         }
@@ -12321,7 +14254,7 @@ fn add_constraint_index(
                 if row.get(*column_index).is_none_or(Datum::is_null) {
                     return Err(ExecError::ColumnContainsNullValues {
                         column: column.clone(),
-                        table: state.table.name.clone(),
+                        table: state.table.name.to_string(),
                     });
                 }
             }
@@ -12406,12 +14339,18 @@ fn rebuild_indexes_on_column(
 }
 
 /// Remove one column from the working schema and every stored row version, and
-/// drop the indexes and `CHECK`s that depended on it — `PostgreSQL`'s own
-/// `DROP COLUMN` dependency handling.
+/// drop the indexes, `CHECK`s and foreign keys that depended on it —
+/// `PostgreSQL`'s own `DROP COLUMN` dependency handling.
+///
+/// A foreign key *keyed on* the dropped column goes with it, exactly as its
+/// index does. A foreign key that *references* the column is a different matter:
+/// it hangs off the unique index proving the column a key, so the refusal comes
+/// out of [`drop_index_by_name`] as that index is dropped.
 fn drop_table_column(
     kv: &dyn Kv,
     state: &mut AlterTableState,
     column: &str,
+    cascade: bool,
 ) -> Result<(), ExecError> {
     let Some(index) = state.table.column_index(column) else {
         return Ok(());
@@ -12423,9 +14362,20 @@ fn drop_table_column(
         }
     }
     state.table.columns.remove(index);
+    for foreign_key in state.current_foreign_keys(kv)? {
+        if foreign_key.columns.iter().any(|name| name == column) {
+            drop_foreign_key_constraint(kv, state, &foreign_key.name);
+        }
+    }
     for index_meta in crabka_pgcatalog::list_table_indexes(kv, &table_name)? {
         if index_meta.columns.iter().any(|name| name == column) {
-            drop_index_by_name(kv, state, &index_meta.name)?;
+            drop_index_by_name(
+                kv,
+                state,
+                &index_meta.name,
+                &crate::error::DroppedObject::Index(index_meta.name.clone()),
+                cascade,
+            )?;
         }
     }
     let column_names: Vec<String> = state.table.columns.iter().map(|c| c.name.clone()).collect();
@@ -12436,12 +14386,49 @@ fn drop_table_column(
     Ok(())
 }
 
+/// Drop one index and its entries, refusing when a foreign key chose it as the
+/// index proving its referenced columns unique.
+///
+/// `dropped` is how the *user's* statement named the object, which is what the
+/// 2BP01's primary message quotes; every `DETAIL` line names the index, because
+/// that is what the constraint actually depends on. `CASCADE` drops the
+/// referencing constraints rather than the referencing relations.
 fn drop_index_by_name(
     kv: &dyn Kv,
     state: &mut AlterTableState,
     name: &str,
+    dropped: &crate::error::DroppedObject,
+    cascade: bool,
 ) -> Result<(), ExecError> {
-    let (index, mut ops) = crabka_pgcatalog::drop_constraint_index_ops(kv, name)?;
+    let (index, mut ops) =
+        crabka_pgcatalog::drop_constraint_index_ops(kv, &state.table.name.sibling(name))?;
+    let dependents = crate::fk::dependents_blocking_index_drop(kv, &index)?;
+    let dependents: Vec<crate::error::DependentForeignKey> = dependents
+        .into_iter()
+        .filter(|dependent| {
+            dependent.table != state.table.name
+                || !state.dropped_foreign_keys.contains(&dependent.constraint)
+        })
+        .collect();
+    if !dependents.is_empty() {
+        if !cascade {
+            return Err(ExecError::DependentForeignKeys(Box::new(
+                crate::error::ForeignKeyDependents {
+                    dropped: dropped.clone(),
+                    dependents,
+                },
+            )));
+        }
+        for dependent in &dependents {
+            let child = crabka_pgcatalog::get_table(kv, &dependent.table)?;
+            let (_, drop_ops) =
+                crabka_pgcatalog::drop_foreign_key_ops(kv, child.id, &dependent.constraint)?;
+            ops.extend(drop_ops);
+            state
+                .dropped_foreign_keys
+                .push(dependent.constraint.clone());
+        }
+    }
     for (key, _) in kv.scan_prefix(&crabka_pgkv::key::secondary_index_prefix(
         index.table_id,
         index.id,
@@ -12491,17 +14478,52 @@ fn rename_column_dependencies(
         }
         state.ops.extend(crabka_pgcatalog::put_index_ops(&index));
     }
-    if let Some(comment) =
-        crabka_pgcatalog::get_comment(kv, "column", &format!("{table_name}.{old_name}"))?
-    {
+    // Foreign keys store their columns as names, so both sides follow the
+    // rename. A self-referencing constraint appears on both lists and is
+    // rewritten once, with both column lists updated.
+    let table_id = state.table.id;
+    let mut foreign_keys = crabka_pgcatalog::list_table_foreign_keys(kv, table_id)?;
+    for referencing in crabka_pgcatalog::list_referencing_foreign_keys(kv, table_id)? {
+        if !foreign_keys
+            .iter()
+            .any(|seen| seen.table_id == referencing.table_id && seen.name == referencing.name)
+        {
+            foreign_keys.push(referencing);
+        }
+    }
+    for mut foreign_key in foreign_keys {
+        let rename = |columns: &mut Vec<String>| {
+            let mut touched = false;
+            for column in columns {
+                if column == old_name {
+                    *column = new_name.to_string();
+                    touched = true;
+                }
+            }
+            touched
+        };
+        let mut touched = false;
+        if foreign_key.table_id == table_id {
+            touched |= rename(&mut foreign_key.columns);
+            touched |= rename(&mut foreign_key.set_columns);
+        }
+        if foreign_key.referenced_table_id == table_id {
+            touched |= rename(&mut foreign_key.referenced_columns);
+        }
+        if touched {
+            state
+                .ops
+                .extend(crabka_pgcatalog::put_foreign_key_ops(&foreign_key));
+        }
+    }
+    let old_column = crabka_pgcatalog::CommentObject::Column(&table_name, old_name);
+    if let Some(comment) = crabka_pgcatalog::get_comment(kv, "column", old_column)? {
+        state
+            .ops
+            .push(crabka_pgcatalog::set_comment_op("column", old_column, None));
         state.ops.push(crabka_pgcatalog::set_comment_op(
             "column",
-            &format!("{table_name}.{old_name}"),
-            None,
-        ));
-        state.ops.push(crabka_pgcatalog::set_comment_op(
-            "column",
-            &format!("{table_name}.{new_name}"),
+            crabka_pgcatalog::CommentObject::Column(&table_name, new_name),
             Some(&comment),
         ));
     }
@@ -12526,7 +14548,7 @@ fn rename_column_dependencies(
 fn generated_columns_reading(table: &Table, column: &str) -> Vec<String> {
     use crabka_pgparser::ast::Expr;
 
-    let scope = Scope::single(table, &table.name);
+    let scope = Scope::single(table, &table.name.name);
     let target = table.column_index(column);
     table
         .columns
@@ -12562,10 +14584,14 @@ fn generated_columns_reading(table: &Table, column: &str) -> Vec<String> {
 /// list exactly as a rename decides it. When the catalog cannot resolve some
 /// relation in that list the answer is a plain token match, so a dependency is
 /// never missed.
-fn view_reads_relation(kv: &dyn Kv, definition: &str, table: &str) -> bool {
+fn view_reads_relation(
+    kv: &dyn Kv,
+    definition: &str,
+    table: &crabka_pgcatalog::RelationName,
+) -> bool {
     match view_relation_bindings(kv, definition, table) {
         Some(bindings) => !bindings.qualifiers.is_empty(),
-        None => definition_mentions_identifier(definition, table),
+        None => definition_mentions_identifier(definition, &table.name),
     }
 }
 
@@ -12575,7 +14601,12 @@ fn view_reads_relation(kv: &dyn Kv, definition: &str, table: &str) -> bool {
 /// relation's qualifiers, or a bare `<column>` no other relation in the view's
 /// `FROM` could supply. `SELECT *` reads every column. An unresolvable `FROM`
 /// list answers "yes", so a dependency is never missed.
-fn view_reads_column(kv: &dyn Kv, definition: &str, table: &str, column: &str) -> bool {
+fn view_reads_column(
+    kv: &dyn Kv,
+    definition: &str,
+    table: &crabka_pgcatalog::RelationName,
+    column: &str,
+) -> bool {
     use crabka_pgparser::token::Token;
 
     let Some(bindings) = view_relation_bindings(kv, definition, table) else {
@@ -12618,15 +14649,16 @@ fn view_reads_column(kv: &dyn Kv, definition: &str, table: &str, column: &str) -
 /// is `0A000` rather than a silent change of what the view returns.
 fn rename_table_view_ops(
     kv: &dyn Kv,
-    old_name: &str,
-    new_name: &str,
+    old_name: &crabka_pgcatalog::RelationName,
+    new_name: &crabka_pgcatalog::RelationName,
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
     let mut ops = Vec::new();
     for mut view in crabka_pgcatalog::list_views(kv)? {
-        if !definition_mentions_identifier(&view.definition, old_name) {
+        if !definition_mentions_identifier(&view.definition, &old_name.name) {
             continue;
         }
-        let Some(rewritten) = rewrite_view_relation_name(&view.definition, old_name, new_name)
+        let Some(rewritten) =
+            rewrite_view_relation_name(&view.definition, &old_name.name, &new_name.name)
         else {
             return Err(
                 crabka_pgcatalog::CatalogError::StoredViewDependency(old_name.to_string()).into(),
@@ -12757,11 +14789,62 @@ fn definition_mentions_identifier(definition: &str, name: &str) -> bool {
 /// The stored views that depend on `table`, or on one of its columns when
 /// `column` is given — `PostgreSQL` tracks a view's dependency per column, so
 /// dropping a column no view reads is allowed.
+/// Every relation one `DROP TABLE` statement will remove: each name it resolves,
+/// plus the partitions that go with it. Sequence entries and (under `IF EXISTS`)
+/// missing names contribute nothing.
+/// [`crate::partition::is_partitioned`] for a relation named by the AST — the
+/// DML dispatch tests it in a match guard, where the name has to resolve first.
+fn is_partitioned_ref(
+    kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
+    reference: &crabka_pgparser::ast::RelationRef,
+) -> Result<bool, ExecError> {
+    let name = resolve_relation(kv, resolution, reference, SchemaDisposition::Reference)?;
+    crate::partition::is_partitioned(kv, &name)
+}
+
+/// The ops that clear the foreign keys blocking a `DROP TABLE`, or the 2BP01
+/// that refuses it.
+///
+/// `CASCADE` drops the referencing *constraint*, not the referencing relation —
+/// the child table survives, minus the key.
+fn drop_blocking_foreign_keys(
+    kv: &dyn Kv,
+    table: &Table,
+    dropping: &HashSet<crabka_pgcatalog::RelationName>,
+    cascade: bool,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let dependents: Vec<crate::error::DependentForeignKey> =
+        crate::fk::dependents_blocking_table_drop(kv, table)?
+            .into_iter()
+            .filter(|dependent| !dropping.contains(&dependent.table))
+            .collect();
+    if dependents.is_empty() {
+        return Ok(Vec::new());
+    }
+    if !cascade {
+        return Err(ExecError::DependentForeignKeys(Box::new(
+            crate::error::ForeignKeyDependents {
+                dropped: crate::error::DroppedObject::Table(table.name.to_string()),
+                dependents,
+            },
+        )));
+    }
+    let mut ops = Vec::new();
+    for dependent in &dependents {
+        let child = crabka_pgcatalog::get_table(kv, &dependent.table)?;
+        let (_, drop_ops) =
+            crabka_pgcatalog::drop_foreign_key_ops(kv, child.id, &dependent.constraint)?;
+        ops.extend(drop_ops);
+    }
+    Ok(ops)
+}
+
 fn dependent_view_names(
     kv: &dyn Kv,
-    table: &str,
+    table: &crabka_pgcatalog::RelationName,
     column: Option<&str>,
-) -> Result<Vec<String>, ExecError> {
+) -> Result<Vec<crabka_pgcatalog::RelationName>, ExecError> {
     Ok(crabka_pgcatalog::list_views(kv)?
         .into_iter()
         .filter(|view| match column {
@@ -12786,7 +14869,7 @@ struct ViewRelationBindings {
 fn view_relation_bindings(
     kv: &dyn Kv,
     definition: &str,
-    table: &str,
+    table: &crabka_pgcatalog::RelationName,
 ) -> Option<ViewRelationBindings> {
     use crabka_pgparser::token::{Keyword, Token};
     let tokens = crabka_pgparser::lexer::lex(definition).ok()?;
@@ -12821,11 +14904,11 @@ fn view_relation_bindings(
         {
             alias = candidate.clone();
         }
-        if relation == table {
+        if *relation == table.name {
             qualifiers.push(relation.clone());
             qualifiers.push(alias);
         } else {
-            let other = crabka_pgcatalog::get_table(kv, relation).ok()?;
+            let other = crabka_pgcatalog::get_table(kv, &table.sibling(relation)).ok()?;
             other_columns.extend(other.columns.into_iter().map(|column| column.name));
         }
     }
@@ -12849,7 +14932,7 @@ fn is_query_tail_keyword(word: &str) -> bool {
 fn rewrite_view_definition(
     kv: &dyn Kv,
     definition: &str,
-    table: &str,
+    table: &crabka_pgcatalog::RelationName,
     old_name: &str,
     new_name: &str,
 ) -> Result<Option<String>, ExecError> {
@@ -12918,26 +15001,34 @@ fn rewrite_identifier_tokens(source: &str, old_name: &str, new_name: &str) -> St
 /// Move a relation's comments (and its columns') to a new relation name.
 fn rename_relation_comment_ops(
     kv: &dyn Kv,
-    old_name: &str,
-    new_name: &str,
+    old_name: &crabka_pgcatalog::RelationName,
+    new_name: &crabka_pgcatalog::RelationName,
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    use crabka_pgcatalog::CommentObject;
+
     let mut ops = Vec::new();
-    if let Some(comment) = crabka_pgcatalog::get_comment(kv, "table", old_name)? {
-        ops.push(crabka_pgcatalog::set_comment_op("table", old_name, None));
+    if let Some(comment) =
+        crabka_pgcatalog::get_comment(kv, "table", CommentObject::Relation(old_name))?
+    {
         ops.push(crabka_pgcatalog::set_comment_op(
             "table",
-            new_name,
+            CommentObject::Relation(old_name),
+            None,
+        ));
+        ops.push(crabka_pgcatalog::set_comment_op(
+            "table",
+            CommentObject::Relation(new_name),
             Some(&comment),
         ));
     }
     if let Ok(table) = crabka_pgcatalog::get_table(kv, old_name) {
         for column in &table.columns {
-            let old_key = format!("{old_name}.{}", column.name);
-            if let Some(comment) = crabka_pgcatalog::get_comment(kv, "column", &old_key)? {
-                ops.push(crabka_pgcatalog::set_comment_op("column", &old_key, None));
+            let old_key = CommentObject::Column(old_name, &column.name);
+            if let Some(comment) = crabka_pgcatalog::get_comment(kv, "column", old_key)? {
+                ops.push(crabka_pgcatalog::set_comment_op("column", old_key, None));
                 ops.push(crabka_pgcatalog::set_comment_op(
                     "column",
-                    &format!("{new_name}.{}", column.name),
+                    CommentObject::Column(new_name, &column.name),
                     Some(&comment),
                 ));
             }
@@ -12972,7 +15063,7 @@ fn constraint_index_named(
 /// The kind of relation `name` is, or `None` when no relation of that name
 /// exists. Tables, views, indexes, and sequences share one namespace in
 /// `PostgreSQL`, so a name resolves to at most one of them.
-fn relation_kind(kv: &dyn Kv, name: &str) -> Option<&'static str> {
+fn relation_kind(kv: &dyn Kv, name: &crabka_pgcatalog::RelationName) -> Option<&'static str> {
     if crabka_pgcatalog::get_table(kv, name).is_ok() {
         Some("table")
     } else if crabka_pgcatalog::get_view(kv, name).is_ok() {
@@ -12991,7 +15082,11 @@ fn relation_kind(kv: &dyn Kv, name: &str) -> Option<&'static str> {
 /// only a name that resolves to nothing at all is the 42P01 relation lookup
 /// failure. Crabka has no materialized views or foreign tables, so those kinds
 /// never match a relation it can find.
-fn require_relation_kind(kv: &dyn Kv, requested: &str, name: &str) -> Result<(), ExecError> {
+fn require_relation_kind(
+    kv: &dyn Kv,
+    requested: &str,
+    name: &crabka_pgcatalog::RelationName,
+) -> Result<(), ExecError> {
     let Some(actual) = relation_kind(kv, name) else {
         return Err(ExecError::Catalog(
             crabka_pgcatalog::CatalogError::UndefinedTable(name.to_string()),
@@ -13012,37 +15107,57 @@ fn require_relation_kind(kv: &dyn Kv, requested: &str, name: &str) -> Result<(),
 
 fn comment_ops(
     kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     object_kind: &str,
     object_name: &str,
     comment: Option<&str>,
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
-    match object_kind {
-        "table" | "view" | "materialized view" | "foreign table" | "index" | "sequence" => {
-            require_relation_kind(kv, object_kind, object_name)?;
-        }
+    use crabka_pgcatalog::CommentObject;
+
+    // `Statement::Comment` flattens a column comment's target to
+    // `relation.column`, so the relation half is recovered here and resolved
+    // like any other written name.
+    let (written, column) = match object_kind {
         "column" => {
-            let (relation, column) = object_name.split_once('.').ok_or_else(|| {
+            let (relation, column) = object_name.rsplit_once('.').ok_or_else(|| {
                 ExecError::Syntax("column comments require a table-qualified name".into())
             })?;
-            let table = crabka_pgcatalog::get_table(kv, relation)?;
+            (relation, Some(column))
+        }
+        _ => (object_name, None),
+    };
+    let reference = match written.split_once('.') {
+        Some((schema, name)) => crabka_pgparser::ast::RelationRef::qualified(schema, name),
+        None => crabka_pgparser::ast::RelationRef::bare(written),
+    };
+    let relation = resolve_relation(kv, resolution, &reference, SchemaDisposition::Utility)?;
+    let object = match object_kind {
+        "table" | "view" | "materialized view" | "foreign table" | "index" | "sequence" => {
+            require_relation_kind(kv, object_kind, &relation)?;
+            CommentObject::Relation(&relation)
+        }
+        "column" => {
+            let column = column.expect("a column comment always splits off a column");
+            let table = crabka_pgcatalog::get_table(kv, &relation)?;
             if table.column_index(column).is_none() {
                 return Err(ExecError::UndefinedTableColumn {
                     column: column.to_string(),
                     table: relation.to_string(),
                 });
             }
+            CommentObject::Column(&relation, column)
         }
         other => {
             return Err(ExecError::Unsupported(format!(
                 "COMMENT ON {other} is not supported"
             )));
         }
-    }
+    };
     Ok((
         command("COMMENT"),
         vec![crabka_pgcatalog::set_comment_op(
             object_kind,
-            object_name,
+            object,
             comment,
         )],
     ))
@@ -13052,6 +15167,7 @@ fn comment_ops(
 mod tests {
     use std::sync::Arc;
 
+    use crabka_pgcatalog::RelationName;
     use crabka_pgparser::ast::{QueryBody, SelectStmt, SetExpr, Statement};
     use crabka_pgwire::engine::{Cell, Engine, FieldDescription, QueryResult, Session};
 
@@ -13382,7 +15498,8 @@ mod tests {
             "CREATE TABLE t (a int4 CHECK (a > 0), b int4 CHECK (b > 0), CHECK (a < b), CHECK (a <> 5))",
         )
         .await;
-        let table = crabka_pgcatalog::get_table(engine.catalog_kv(), "t").expect("table");
+        let table = crabka_pgcatalog::get_table(engine.catalog_kv(), &RelationName::public("t"))
+            .expect("table");
         assert!(
             table
                 .checks
@@ -13556,7 +15673,10 @@ mod tests {
         }
         // The supported spellings still build, including the default name.
         run_s(&mut session, "CREATE INDEX ON t (a)").await;
-        assert!(crabka_pgcatalog::get_index(engine.catalog_kv(), "t_a_idx").is_ok());
+        assert!(
+            crabka_pgcatalog::get_index(engine.catalog_kv(), &RelationName::public("t_a_idx"))
+                .is_ok()
+        );
     }
 
     /// The comma form applies every subcommand or none of them.
@@ -13641,11 +15761,16 @@ mod tests {
             .await
             .expect("insert");
 
-        let table = crabka_pgcatalog::get_table(engine.catalog_kv.as_ref(), "t").expect("table");
-        let index = crabka_pgcatalog::list_table_indexes(engine.catalog_kv.as_ref(), "t")
-            .expect("indexes")
-            .pop()
-            .expect("index");
+        let table =
+            crabka_pgcatalog::get_table(engine.catalog_kv.as_ref(), &RelationName::public("t"))
+                .expect("table");
+        let index = crabka_pgcatalog::list_table_indexes(
+            engine.catalog_kv.as_ref(),
+            &RelationName::public("t"),
+        )
+        .expect("indexes")
+        .pop()
+        .expect("index");
         assert_eq!(lookup_index_text(&engine, &table, &index, "a").len(), 2);
         assert_eq!(lookup_index_text(&engine, &table, &index, "b").len(), 1);
 
@@ -13692,8 +15817,11 @@ mod tests {
             .await
             .expect("insert indexed row");
 
-        let index = crabka_pgcatalog::get_index(engine.catalog_kv.as_ref(), "t_name_idx")
-            .expect("index metadata");
+        let index = crabka_pgcatalog::get_index(
+            engine.catalog_kv.as_ref(),
+            &RelationName::public("t_name_idx"),
+        )
+        .expect("index metadata");
         let entry_prefix = crabka_pgkv::key::secondary_index_prefix(index.table_id, index.id);
         assert_eq!(
             engine
@@ -13710,9 +15838,12 @@ mod tests {
             .expect("drop index");
 
         assert_eq!(
-            crabka_pgcatalog::get_index(engine.catalog_kv.as_ref(), "t_name_idx")
-                .expect_err("metadata removed")
-                .sqlstate(),
+            crabka_pgcatalog::get_index(
+                engine.catalog_kv.as_ref(),
+                &RelationName::public("t_name_idx")
+            )
+            .expect_err("metadata removed")
+            .sqlstate(),
             "42704"
         );
         assert!(
@@ -13806,11 +15937,16 @@ mod tests {
         }
 
         let reopened = SqlEngine::open(dir.path()).expect("reopen");
-        let table = crabka_pgcatalog::get_table(reopened.catalog_kv.as_ref(), "t").expect("table");
-        let index = crabka_pgcatalog::list_table_indexes(reopened.catalog_kv.as_ref(), "t")
-            .expect("indexes")
-            .pop()
-            .expect("index");
+        let table =
+            crabka_pgcatalog::get_table(reopened.catalog_kv.as_ref(), &RelationName::public("t"))
+                .expect("table");
+        let index = crabka_pgcatalog::list_table_indexes(
+            reopened.catalog_kv.as_ref(),
+            &RelationName::public("t"),
+        )
+        .expect("indexes")
+        .pop()
+        .expect("index");
         let rows = lookup_index_text(&reopened, &table, &index, "persisted");
 
         assert_eq!(rows.len(), 1);
@@ -15745,7 +17881,7 @@ mod tests {
         // Table id 1, single int4 column "val".
         let table = Table {
             id: 1,
-            name: "t".into(),
+            name: RelationName::public("t"),
             columns: vec![Column::new("val", ColumnType::Int4)],
             sharded: false,
             sharding: None,
@@ -16275,11 +18411,7 @@ mod tests {
         .expect("one statement");
 
         // execute_ddl must succeed and store under "public".
-        let fctx = super::ForeignCtx {
-            scanner: None,
-            current_user: "public",
-            own_xid: None,
-        };
+        let fctx = super::ForeignCtx::none();
         let (result, ops) = super::execute_ddl(&kv, &stmt, fctx).expect("execute_ddl ok");
         assert!(
             matches!(result, crabka_pgwire::engine::QueryResult::Command { tag } if tag == "CREATE USER MAPPING"),
@@ -16323,7 +18455,9 @@ mod tests {
 
         let engine = SqlEngine::new();
         run(&engine, "CREATE TABLE t (id int4 PRIMARY KEY, flag text)").await;
-        let table = crabka_pgcatalog::get_table(engine.catalog_kv.as_ref(), "t").expect("table");
+        let table =
+            crabka_pgcatalog::get_table(engine.catalog_kv.as_ref(), &RelationName::public("t"))
+                .expect("table");
 
         let cases: &[(&str, Option<crabka_pgtypes::Datum>)] = &[
             (
@@ -16801,7 +18935,7 @@ mod tests {
 
         let table = crabka_pgcatalog::Table {
             id: 1,
-            name: "t".into(),
+            name: RelationName::public("t"),
             columns: vec![Column::new("k", ColumnType::Jsonb)],
             sharded: true,
             sharding: Some(crabka_pgcatalog::ShardingStrategy::Hash(
@@ -16830,6 +18964,90 @@ mod tests {
                 .expect("hashable")
                 .is_some()
         );
+    }
+
+    /// The DDL path builds a hash sharding only from a one-column key — the
+    /// arity [`super::hash_bucket_for_row`] can encode. The grammar already
+    /// refuses a wider `SHARDED BY HASH` list, so this covers the seam for an
+    /// AST built by something other than the parser. Bucket counts are still
+    /// checked, and a valid spec still converts.
+    #[test]
+    fn the_ddl_path_builds_a_hash_sharding_only_from_one_column() {
+        use assert2::assert;
+        use crabka_pgparser::ast::{HashShardingSpec, ShardingSpec};
+
+        let spec = |columns: &[&str], buckets: u32| {
+            ShardingSpec::Hash(HashShardingSpec {
+                columns: columns.iter().map(|column| (*column).to_string()).collect(),
+                buckets,
+                co_location_group: None,
+            })
+        };
+        let arity = Some("hash sharding requires exactly one column");
+        let buckets_message = Some("hash sharding bucket count must be a power of two");
+        for (columns, buckets, expected) in [
+            (&[][..], 4, arity),
+            (&["a"][..], 4, None),
+            (&["a", "b"][..], 4, arity),
+            (&["a", "b", "c"][..], 4, arity),
+            (&["a"][..], 0, buckets_message),
+            (&["a"][..], 6, buckets_message),
+        ] {
+            let converted = super::hash_sharding_from_ast(&spec(columns, buckets));
+            match expected {
+                Some(message) => {
+                    let error = converted.expect_err("refused").into_pg();
+                    assert!(error.code == "0A000", "{columns:?}/{buckets}");
+                    assert!(error.message == message, "{columns:?}/{buckets}");
+                }
+                None => assert!(
+                    converted.expect("accepted")
+                        == crabka_pgcatalog::ShardingStrategy::Hash(
+                            crabka_pgcatalog::HashSharding {
+                                columns: vec!["a".into()],
+                                buckets,
+                                co_location_group: None,
+                            }
+                        ),
+                    "{columns:?}/{buckets}"
+                ),
+            }
+        }
+    }
+
+    /// The write-path backstop behind the two creation gates: a multi-column
+    /// hash sharding has no row encoding, so the write is refused rather than
+    /// placing the row under the hash of its first column, where a route
+    /// computed from the whole key never looks.
+    #[test]
+    fn hashing_a_row_refuses_a_multi_column_hash_shard_key() {
+        use assert2::assert;
+        use crabka_pgcatalog::Column;
+        use crabka_pgtypes::{ColumnType, Datum};
+
+        let table = crabka_pgcatalog::Table {
+            id: 1,
+            name: RelationName::public("t"),
+            columns: vec![
+                Column::new("a", ColumnType::Int4),
+                Column::new("b", ColumnType::Int4),
+            ],
+            sharded: true,
+            sharding: Some(crabka_pgcatalog::ShardingStrategy::Hash(
+                crabka_pgcatalog::HashSharding {
+                    columns: vec!["a".into(), "b".into()],
+                    buckets: 4,
+                    co_location_group: None,
+                },
+            )),
+            foreign: None,
+            checks: Vec::new(),
+        };
+        let error = super::hash_bucket_for_row(&table, &[Datum::Int4(1), Datum::Int4(2)])
+            .expect_err("no row encoding for a two-column key")
+            .into_pg();
+        assert!(error.code == "0A000");
+        assert!(error.message == "hash sharding requires exactly one hash column");
     }
 
     #[test]
@@ -17018,7 +19236,7 @@ mod tests {
     ) -> (crabka_pgcatalog::Table, Vec<crabka_pgcatalog::Index>) {
         let table = crabka_pgcatalog::Table {
             id: 1,
-            name: "t".into(),
+            name: RelationName::public("t"),
             columns: columns
                 .iter()
                 .map(|name| crabka_pgcatalog::Column::new(*name, crabka_pgtypes::ColumnType::Int4))
@@ -17035,7 +19253,7 @@ mod tests {
                 |(i, (name, cols, unique, constraint))| crabka_pgcatalog::Index {
                     id: i as u32 + 1,
                     name: (*name).to_string(),
-                    table: "t".into(),
+                    table: RelationName::public("t"),
                     table_id: 1,
                     columns: cols.iter().map(|c| (*c).to_string()).collect(),
                     unique: *unique,
@@ -17177,6 +19395,319 @@ mod tests {
                     vec![Some("3".into()), Some("c".into())],
                     vec![Some("4".into()), Some("d".into())],
                 ]
+        );
+    }
+    // ---- D6: foreign keys wired into the local write path ----
+
+    #[tokio::test]
+    async fn on_delete_cascade_removes_the_referencing_rows() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE p (id int4 PRIMARY KEY)").await;
+        run_s(
+            &mut s,
+            "CREATE TABLE c (id int4 PRIMARY KEY, p int4 REFERENCES p (id) ON DELETE CASCADE)",
+        )
+        .await;
+        run_s(&mut s, "INSERT INTO p VALUES (1), (2)").await;
+        run_s(&mut s, "INSERT INTO c VALUES (10, 1), (11, 1), (12, 2)").await;
+        run_s(&mut s, "DELETE FROM p WHERE id = 1").await;
+        assert!(
+            text_rows_of(&mut s, "SELECT id FROM c ORDER BY id").await
+                == vec![vec![Some("12".to_string())]]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_cascade_cycle_between_two_tables_terminates() {
+        use assert2::assert;
+
+        // a -> b -> a, both ON DELETE CASCADE. The cascade comes back around to
+        // the row the statement itself deleted, which the drain reads through
+        // the staged batch and therefore sees as gone; a cascade that revisits a
+        // row *it* deleted cannot be recognised that way and is stopped by
+        // `StatementWrites` instead.
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE cyc_a (id int4 PRIMARY KEY, b int4)").await;
+        run_s(
+            &mut s,
+            "CREATE TABLE cyc_b (id int4 PRIMARY KEY, \
+             a int4 REFERENCES cyc_a (id) ON DELETE CASCADE)",
+        )
+        .await;
+        run_s(
+            &mut s,
+            "ALTER TABLE cyc_a ADD CONSTRAINT cyc_a_b_fkey \
+             FOREIGN KEY (b) REFERENCES cyc_b (id) ON DELETE CASCADE",
+        )
+        .await;
+        run_s(&mut s, "INSERT INTO cyc_a VALUES (1, NULL)").await;
+        run_s(&mut s, "INSERT INTO cyc_b VALUES (1, 1)").await;
+        run_s(&mut s, "UPDATE cyc_a SET b = 1 WHERE id = 1").await;
+        run_s(&mut s, "DELETE FROM cyc_a WHERE id = 1").await;
+        assert!(text_rows_of(&mut s, "SELECT id FROM cyc_a").await == Vec::<Vec<_>>::new());
+        assert!(text_rows_of(&mut s, "SELECT id FROM cyc_b").await == Vec::<Vec<_>>::new());
+    }
+
+    #[tokio::test]
+    async fn a_self_referencing_cascade_terminates_on_a_tree_and_on_a_self_loop() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(
+            &mut s,
+            "CREATE TABLE tree (id int4 PRIMARY KEY, \
+             parent int4 REFERENCES tree (id) ON DELETE CASCADE)",
+        )
+        .await;
+        run_s(&mut s, "INSERT INTO tree VALUES (1, NULL), (2, 1), (3, 2)").await;
+        // A row that references itself: the cascade revisits the very row the
+        // statement deleted, and stops there.
+        run_s(&mut s, "INSERT INTO tree VALUES (4, 4)").await;
+        run_s(&mut s, "DELETE FROM tree WHERE id = 4").await;
+        run_s(&mut s, "DELETE FROM tree WHERE id = 1").await;
+        assert!(text_rows_of(&mut s, "SELECT id FROM tree").await == Vec::<Vec<_>>::new());
+    }
+
+    #[tokio::test]
+    async fn on_update_cascade_follows_the_referenced_key() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE up (id int4 PRIMARY KEY, v int4)").await;
+        run_s(
+            &mut s,
+            "CREATE TABLE uc (a int4 REFERENCES up (id) ON UPDATE CASCADE)",
+        )
+        .await;
+        run_s(&mut s, "INSERT INTO up VALUES (1, 100)").await;
+        run_s(&mut s, "INSERT INTO uc VALUES (1)").await;
+        // A non-key update of the parent leaves the child alone and never
+        // touches the key lock.
+        run_s(&mut s, "UPDATE up SET v = 200 WHERE id = 1").await;
+        assert!(
+            text_rows_of(&mut s, "SELECT a FROM uc").await == vec![vec![Some("1".to_string())]]
+        );
+        run_s(&mut s, "UPDATE up SET id = 2 WHERE id = 1").await;
+        assert!(
+            text_rows_of(&mut s, "SELECT a FROM uc").await == vec![vec![Some("2".to_string())]]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_null_onto_a_not_null_column_is_the_ordinary_23502() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE np (id int4 PRIMARY KEY)").await;
+        run_s(
+            &mut s,
+            "CREATE TABLE nc (a int4 NOT NULL REFERENCES np (id) ON DELETE SET NULL)",
+        )
+        .await;
+        run_s(&mut s, "INSERT INTO np VALUES (1)").await;
+        run_s(&mut s, "INSERT INTO nc VALUES (1)").await;
+        assert!(sqlstate_of(&mut s, "DELETE FROM np WHERE id = 1").await == "23502");
+    }
+
+    #[tokio::test]
+    async fn restrict_and_no_action_report_different_sqlstates() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE rp1 (id int4 PRIMARY KEY)").await;
+        run_s(&mut s, "CREATE TABLE rc1 (a int4 REFERENCES rp1 (id))").await;
+        run_s(&mut s, "CREATE TABLE rp2 (id int4 PRIMARY KEY)").await;
+        run_s(
+            &mut s,
+            "CREATE TABLE rc2 (a int4 REFERENCES rp2 (id) ON DELETE RESTRICT)",
+        )
+        .await;
+        run_s(
+            &mut s,
+            "INSERT INTO rp1 VALUES (1); INSERT INTO rc1 VALUES (1)",
+        )
+        .await;
+        run_s(
+            &mut s,
+            "INSERT INTO rp2 VALUES (1); INSERT INTO rc2 VALUES (1)",
+        )
+        .await;
+        assert!(sqlstate_of(&mut s, "DELETE FROM rp1 WHERE id = 1").await == "23503");
+        assert!(sqlstate_of(&mut s, "DELETE FROM rp2 WHERE id = 1").await == "23001");
+    }
+
+    #[tokio::test]
+    async fn truncate_refuses_a_child_outside_the_set_and_cascade_widens_it() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE tp (id int4 PRIMARY KEY)").await;
+        run_s(
+            &mut s,
+            "CREATE TABLE tc (id int4 PRIMARY KEY, p int4 REFERENCES tp (id) ON DELETE CASCADE)",
+        )
+        .await;
+        run_s(
+            &mut s,
+            "INSERT INTO tp VALUES (1); INSERT INTO tc VALUES (9, 1)",
+        )
+        .await;
+        assert!(sqlstate_of(&mut s, "TRUNCATE tp").await == "0A000");
+        // Naming both relations empties both, and the ON DELETE CASCADE never
+        // fires: TRUNCATE widens the set, it does not run referential actions.
+        run_s(&mut s, "TRUNCATE tp, tc").await;
+        assert!(text_rows_of(&mut s, "SELECT id FROM tc").await == Vec::<Vec<_>>::new());
+        run_s(
+            &mut s,
+            "INSERT INTO tp VALUES (1); INSERT INTO tc VALUES (9, 1)",
+        )
+        .await;
+        run_s(&mut s, "TRUNCATE tp CASCADE").await;
+        assert!(text_rows_of(&mut s, "SELECT id FROM tp").await == Vec::<Vec<_>>::new());
+        assert!(text_rows_of(&mut s, "SELECT id FROM tc").await == Vec::<Vec<_>>::new());
+    }
+
+    #[tokio::test]
+    async fn dropping_a_referenced_object_is_2bp01_and_cascade_drops_the_constraint() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE dp (id int4 PRIMARY KEY)").await;
+        run_s(&mut s, "CREATE TABLE dc (a int4 REFERENCES dp (id))").await;
+        assert!(sqlstate_of(&mut s, "DROP TABLE dp").await == "2BP01");
+        assert!(sqlstate_of(&mut s, "ALTER TABLE dp DROP CONSTRAINT dp_pkey").await == "2BP01");
+        // CASCADE drops the referencing CONSTRAINT, not the referencing table.
+        run_s(&mut s, "DROP TABLE dp CASCADE").await;
+        run_s(&mut s, "INSERT INTO dc VALUES (42)").await;
+        assert!(
+            text_rows_of(&mut s, "SELECT a FROM dc").await == vec![vec![Some("42".to_string())]]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_mutually_referencing_pair_can_be_dropped_together() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE mp (id int4 PRIMARY KEY, other int4)").await;
+        run_s(
+            &mut s,
+            "CREATE TABLE mc (id int4 PRIMARY KEY, a int4 REFERENCES mp (id))",
+        )
+        .await;
+        run_s(
+            &mut s,
+            "ALTER TABLE mp ADD CONSTRAINT mp_other_fkey FOREIGN KEY (other) REFERENCES mc (id)",
+        )
+        .await;
+        run_s(&mut s, "DROP TABLE mp, mc").await;
+    }
+
+    #[tokio::test]
+    async fn adding_a_foreign_key_back_validates_stored_rows_unless_not_valid() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE bp (id int4 PRIMARY KEY)").await;
+        run_s(&mut s, "CREATE TABLE bc (a int4)").await;
+        run_s(&mut s, "INSERT INTO bc VALUES (7)").await;
+        assert!(
+            sqlstate_of(
+                &mut s,
+                "ALTER TABLE bc ADD CONSTRAINT bv FOREIGN KEY (a) REFERENCES bp (id)"
+            )
+            .await
+                == "23503"
+        );
+        run_s(
+            &mut s,
+            "ALTER TABLE bc ADD CONSTRAINT bv FOREIGN KEY (a) REFERENCES bp (id) NOT VALID",
+        )
+        .await;
+        // NOT VALID skips the scan but still governs every later write.
+        assert!(sqlstate_of(&mut s, "INSERT INTO bc VALUES (8)").await == "23503");
+        assert!(sqlstate_of(&mut s, "ALTER TABLE bc VALIDATE CONSTRAINT bv").await == "23503");
+        run_s(&mut s, "INSERT INTO bp VALUES (7)").await;
+        run_s(&mut s, "ALTER TABLE bc VALIDATE CONSTRAINT bv").await;
+    }
+
+    #[tokio::test]
+    async fn a_foreign_key_added_beside_a_column_validates_the_rewritten_rows() {
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE ap (id int4 PRIMARY KEY)").await;
+        run_s(&mut s, "INSERT INTO ap VALUES (5)").await;
+        run_s(&mut s, "CREATE TABLE ac (x int4)").await;
+        run_s(&mut s, "INSERT INTO ac VALUES (1)").await;
+        // The added column fills the existing row with 5, which the constraint
+        // must see — storage still holds the row without the column at all.
+        run_s(
+            &mut s,
+            "ALTER TABLE ac ADD COLUMN a int4 DEFAULT 5, \
+             ADD CONSTRAINT ac_fk FOREIGN KEY (a) REFERENCES ap (id)",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn renaming_a_referenced_column_rewrites_the_foreign_key() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE qp (id int4 PRIMARY KEY)").await;
+        run_s(&mut s, "CREATE TABLE qc (a int4 REFERENCES qp (id))").await;
+        run_s(&mut s, "ALTER TABLE qp RENAME COLUMN id TO ident").await;
+        run_s(&mut s, "INSERT INTO qp VALUES (1)").await;
+        run_s(&mut s, "INSERT INTO qc VALUES (1)").await;
+        assert!(sqlstate_of(&mut s, "INSERT INTO qc VALUES (2)").await == "23503");
+    }
+
+    #[tokio::test]
+    async fn a_foreign_key_can_be_renamed_and_dropped() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE zp (id int4 PRIMARY KEY)").await;
+        run_s(&mut s, "CREATE TABLE zc (a int4 REFERENCES zp (id))").await;
+        run_s(
+            &mut s,
+            "ALTER TABLE zc RENAME CONSTRAINT zc_a_fkey TO zc_renamed",
+        )
+        .await;
+        assert!(sqlstate_of(&mut s, "INSERT INTO zc VALUES (1)").await == "23503");
+        run_s(&mut s, "ALTER TABLE zc DROP CONSTRAINT zc_renamed").await;
+        run_s(&mut s, "INSERT INTO zc VALUES (1)").await;
+    }
+
+    #[tokio::test]
+    async fn a_foreign_key_on_a_partitioned_table_is_refused_by_name() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        run_s(&mut s, "CREATE TABLE pp (id int4 PRIMARY KEY)").await;
+        let error = s
+            .simple_query(
+                "CREATE TABLE part (id int4, a int4 REFERENCES pp (id)) PARTITION BY RANGE (id)",
+            )
+            .await
+            .expect_err("partitioned foreign key");
+        assert!(error.code == "0A000");
+        assert!(
+            error.message
+                == "foreign key constraint \"part_a_fkey\" on a partitioned table is not supported"
         );
     }
 }

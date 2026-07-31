@@ -121,6 +121,9 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         }
         // `enum_out`: the label, verbatim.
         Datum::Enum(e) => e.label.clone().into_bytes(),
+        // `regclassout`: the relation name the oid resolved to — already quoted
+        // and, for an oid no relation matches, already the bare number.
+        Datum::Regclass(r) => r.name.as_bytes().to_vec(),
     }
 }
 
@@ -218,6 +221,8 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         Datum::Record(r) => encode_record_binary(r),
         // `enum_send` is `textsend` of the label.
         Datum::Enum(e) => e.label.clone().into_bytes(),
+        // `regclasssend` is `oidsend`: the 4-byte oid, not the name.
+        Datum::Regclass(r) => r.oid.to_be_bytes().to_vec(),
     }
 }
 

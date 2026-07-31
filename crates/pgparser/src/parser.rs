@@ -120,7 +120,7 @@ pub(crate) struct Parser {
     /// clause rather than at a statement boundary, so `select_core` records it
     /// here and [`Parser::query_statement`] turns the finished query into a
     /// [`crate::ast::Statement::CreateTableAs`].
-    select_into: Option<String>,
+    select_into: Option<crate::ast::RelationRef>,
     /// One frame per `SELECT` currently being parsed, innermost last: the window
     /// calls met so far in that SELECT. A subquery pushes its own frame, so a
     /// window call always lands on the SELECT that owns it.
@@ -3105,7 +3105,7 @@ impl Parser {
         // `ONLY t` / `t *` control inheritance recursion; a table never has
         // descendants here, so both spellings name the same relation.
         self.eat_ident_eq("only");
-        let table = self.expect_relation_name()?;
+        let table = self.relation_ref()?;
         if *self.peek() == Token::Star {
             self.bump();
         }
@@ -3199,7 +3199,7 @@ impl Parser {
         {
             self.bump();
             self.bump();
-            let partition = self.qualified_relation_name()?;
+            let partition = self.relation_ref()?;
             return Ok(AlterTableAction::AttachPartition {
                 partition,
                 bound: self.partition_bound()?,
@@ -3210,7 +3210,7 @@ impl Parser {
         {
             self.bump();
             self.bump();
-            let partition = self.qualified_relation_name()?;
+            let partition = self.relation_ref()?;
             let concurrently = self.eat_ident_eq("concurrently");
             let finalize = !concurrently && self.eat_ident_eq("finalize");
             return Ok(AlterTableAction::DetachPartition {
@@ -3371,7 +3371,7 @@ impl Parser {
         let privileges = self.privilege_list_until_on()?;
         self.expect(&Token::Keyword(Keyword::On))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
-        let table = self.expect_object_name()?;
+        let table = self.relation_ref()?;
         self.expect(&Token::Keyword(Keyword::To))?;
         let grantees = self.object_name_list()?;
         Ok(crate::ast::Statement::GrantTablePrivileges {
@@ -3386,7 +3386,7 @@ impl Parser {
         let privileges = self.privilege_list_until_on()?;
         self.expect(&Token::Keyword(Keyword::On))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
-        let table = self.expect_object_name()?;
+        let table = self.relation_ref()?;
         self.expect(&Token::Keyword(Keyword::From))?;
         let grantees = self.object_name_list()?;
         Ok(crate::ast::Statement::RevokeTablePrivileges {
@@ -3455,42 +3455,54 @@ impl Parser {
         }
     }
 
-    /// A relation name, with an optional schema qualifier: `t` or `s.t`.
+    /// A relation reference, with an optional schema qualifier: `t` or `s.t`.
     ///
-    /// The qualifier is passed through verbatim rather than interpreted here —
-    /// the parser has no catalog. `crabka_pgkv::key::unqualified_relation` is what
-    /// decides that `public.t` and `pg_temp.t` name the same relation as `t`
-    /// (crabka has one flat namespace, which is what `public` names under
-    /// `PostgreSQL`'s default `search_path`), while `information_schema.tables`
-    /// and `pg_catalog.*` keep resolving by their dotted names and a qualifier
-    /// naming a schema that holds nothing still fails to resolve.
-    fn expect_relation_name(&mut self) -> Result<String, ParseError> {
+    /// This is the one policy for a dotted relation name — every statement that
+    /// names a relation comes through here, so `SELECT * FROM s.t` and
+    /// `INSERT INTO s.t` can no longer disagree about what the dot meant.
+    ///
+    /// The qualifier is carried verbatim rather than interpreted: the parser
+    /// has no catalog, and whether a missing schema is `3F000 schema "s" does
+    /// not exist` or `42P01 relation "s.t" does not exist` depends on what the
+    /// statement was going to do with it, which only the executor knows.
+    ///
+    /// A three-part name is refused here because the engine has one database,
+    /// so `a.b.c` can only ever be the cross-database refusal.
+    fn relation_ref(&mut self) -> Result<crate::ast::RelationRef, ParseError> {
+        use crate::ast::RelationRef;
+        let start = self.peek_pos();
         let first = self.expect_ident()?;
         if *self.peek() != Token::Dot {
-            return Ok(first);
+            return Ok(RelationRef::bare(first));
         }
-        let schema_pos = self.peek_pos();
         self.bump();
         let second = self.expect_ident()?;
-        // `public` and `pg_temp` name the one flat namespace crabka has, so they
-        // resolve to the bare relation. No other schema can hold a relation here,
-        // and accepting the qualifier would create one whose NAME contains a dot —
-        // silently succeeding where PostgreSQL reports the schema missing.
-        if first.eq_ignore_ascii_case("public") || first.eq_ignore_ascii_case("pg_temp") {
-            return Ok(second);
+        if *self.peek() == Token::Dot {
+            self.bump();
+            let third = self.expect_ident()?;
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                format!(
+                    "cross-database references are not implemented: \"{first}.{second}.{third}\""
+                ),
+                start,
+            ));
         }
-        // `information_schema` and `pg_catalog` are real here and resolve by their
-        // dotted names.
-        if first.eq_ignore_ascii_case("information_schema")
-            || first.eq_ignore_ascii_case("pg_catalog")
-        {
-            return Ok(format!("{first}.{second}"));
+        Ok(RelationRef::qualified(first, second))
+    }
+
+    /// A possibly-qualified name that is *not* a relation — a collation, an
+    /// operator class, a set-returning function in `FROM` position, or a
+    /// co-location group. These keep the flattened `a.b` spelling because
+    /// nothing resolves them against a schema.
+    fn qualified_name_text(&mut self) -> Result<String, ParseError> {
+        let mut name = self.expect_ident()?;
+        if *self.peek() == Token::Dot {
+            self.bump();
+            let object = self.expect_ident()?;
+            name = format!("{name}.{object}");
         }
-        Err(ParseError::new_sqlstate(
-            "3F000",
-            format!("schema \"{first}\" does not exist"),
-            schema_pos,
-        ))
+        Ok(name)
     }
 
     fn expect_privilege_name(&mut self) -> Result<String, ParseError> {
@@ -3604,8 +3616,8 @@ impl Parser {
     /// or any other identifier (→ that ident verbatim).
     fn set_value(&mut self) -> Result<crate::ast::SetValue, ParseError> {
         use crate::ast::SetValue;
-        let mut rendered = String::new();
-        let mut separator = "";
+        let mut items: Vec<String> = Vec::new();
+        let mut item = String::new();
         loop {
             let part = match self.peek().clone() {
                 Token::Plus | Token::Minus => {
@@ -3628,7 +3640,7 @@ impl Parser {
                 }
                 Token::Ident(w) if w.eq_ignore_ascii_case("default") => {
                     self.bump();
-                    if rendered.is_empty() && *self.peek() != Token::Comma {
+                    if items.is_empty() && item.is_empty() && *self.peek() != Token::Comma {
                         return Ok(SetValue::Default);
                     }
                     "default".into()
@@ -3658,10 +3670,9 @@ impl Parser {
                     self.peek_pos(),
                 ))?,
             };
-            rendered.push_str(separator);
-            rendered.push_str(&part);
+            item.push_str(&part);
             if self.eat_comma() {
-                separator = ", ";
+                items.push(std::mem::take(&mut item));
                 continue;
             }
             if matches!(
@@ -3680,22 +3691,29 @@ impl Parser {
                             | Keyword::Public
                     )
             ) {
-                separator = " ";
+                item.push(' ');
             } else {
                 break;
             }
         }
-        Ok(SetValue::Value(rendered))
+        items.push(item);
+        Ok(SetValue::Value(items))
     }
 
     /// D6: the tail of `SET CONSTRAINTS { ALL | <name> [, …] } { DEFERRED |
     /// IMMEDIATE }`, positioned after `CONSTRAINTS`.
     fn set_constraints_tail(&mut self) -> Result<crate::ast::Statement, ParseError> {
-        if !self.eat_keyword(Keyword::All) {
-            self.object_name_list()?;
-        }
+        let names = if self.eat_keyword(Keyword::All) {
+            None
+        } else {
+            Some(self.object_name_list()?)
+        };
         let pos = self.peek_pos();
-        if !self.eat_ident_eq("deferred") && !self.eat_ident_eq("immediate") {
+        let deferred = if self.eat_ident_eq("deferred") {
+            true
+        } else if self.eat_ident_eq("immediate") {
+            false
+        } else {
             return Err(ParseError::new(
                 format!(
                     "expected DEFERRED or IMMEDIATE in SET CONSTRAINTS, found {:?}",
@@ -3703,9 +3721,9 @@ impl Parser {
                 ),
                 pos,
             ));
-        }
+        };
         Ok(crate::ast::Statement::Utility(
-            crate::ast::UtilityStatement::SetConstraints,
+            crate::ast::UtilityStatement::SetConstraints { names, deferred },
         ))
     }
 
@@ -3735,7 +3753,7 @@ impl Parser {
         // isolation level reaches the GUC, the access mode being carried by the
         // transaction itself.
         let value = match self.transaction_modes()?.isolation {
-            Some(level) => SetValue::Value(level.render().into()),
+            Some(level) => SetValue::Value(vec![level.render().into()]),
             None => SetValue::Default,
         };
         Ok(Statement::Set {
@@ -3782,7 +3800,7 @@ impl Parser {
         match self.peek().clone() {
             Token::StringLit(s) => {
                 self.bump();
-                Ok(SetValue::Value(s))
+                Ok(SetValue::Value(vec![s]))
             }
             Token::Ident(w)
                 if w.eq_ignore_ascii_case("default") || w.eq_ignore_ascii_case("local") =>
@@ -3796,7 +3814,7 @@ impl Parser {
             }
             Token::Ident(w) => {
                 self.bump();
-                Ok(SetValue::Value(w))
+                Ok(SetValue::Value(vec![w]))
             }
             other => Err(ParseError::new(
                 format!("expected a TIME ZONE value, found {other:?}"),
@@ -4015,7 +4033,9 @@ impl Parser {
         use crate::{ast::UtilityStatement, command::CommandIdentity as I};
         let statement = self.set_stmt()?;
         let identity = match &statement {
-            crate::ast::Statement::Utility(UtilityStatement::SetConstraints) => I::SetConstraints,
+            crate::ast::Statement::Utility(UtilityStatement::SetConstraints { .. }) => {
+                I::SetConstraints
+            }
             crate::ast::Statement::Utility(UtilityStatement::SetSessionAuthorization {
                 ..
             }) => I::SetSessionAuthorization,
@@ -4342,7 +4362,7 @@ impl Parser {
         let mut tables = Vec::new();
         loop {
             self.eat_ident_eq("only");
-            tables.push(self.expect_ident()?);
+            tables.push(self.relation_ref()?);
             if *self.peek() == Token::Star {
                 self.bump();
             }
@@ -4759,10 +4779,10 @@ impl Parser {
     fn update(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Update))?;
-        let table = self.expect_relation_name()?;
+        let table = self.relation_ref()?;
         let alias = self.opt_dml_target_alias()?;
         self.expect(&Token::Keyword(Keyword::Set))?;
-        let assignments = self.assignment_list(&table)?;
+        let assignments = self.assignment_list(&table.name)?;
         let from = if self.eat_keyword(Keyword::From) {
             self.parse_from()?
         } else {
@@ -4880,7 +4900,7 @@ impl Parser {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Delete))?;
         self.expect(&Token::Keyword(Keyword::From))?;
-        let table = self.expect_relation_name()?;
+        let table = self.relation_ref()?;
         let alias = self.opt_dml_target_alias()?;
         let using = if self.eat_keyword(Keyword::Using) {
             self.parse_from()?
@@ -4908,7 +4928,7 @@ impl Parser {
         use crate::ast::{MergeSource, Statement};
         self.expect_ident_eq("merge")?;
         self.expect(&Token::Keyword(Keyword::Into))?;
-        let table = self.expect_relation_name()?;
+        let table = self.relation_ref()?;
         let alias = self.opt_dml_target_alias()?;
         self.expect(&Token::Keyword(Keyword::Using))?;
         let source = if *self.peek() == Token::LParen {
@@ -4927,7 +4947,7 @@ impl Parser {
                 columns,
             }
         } else {
-            let name = self.expect_ident()?;
+            let name = self.relation_ref()?;
             MergeSource::Table {
                 name,
                 alias: self.opt_dml_target_alias()?,
@@ -4937,7 +4957,7 @@ impl Parser {
         let on = self.expr(0)?;
         let mut clauses = Vec::new();
         while *self.peek() == Token::Keyword(Keyword::When) {
-            clauses.push(self.merge_when(&table)?);
+            clauses.push(self.merge_when(&table.name)?);
         }
         if clauses.is_empty() {
             return Err(ParseError::new_sqlstate(
@@ -5045,7 +5065,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
         let if_not_exists = self.eat_if_not_exists();
-        let name = self.expect_ident()?;
+        let name = self.relation_ref()?;
         let columns = if *self.peek() == Token::LParen {
             Some(self.parse_parenthesized_ident_list()?)
         } else {
@@ -5109,7 +5129,7 @@ impl Parser {
         // `TABLE ONLY t` / `TABLE t *` select the same rows here: inheritance is
         // not implemented, so a table never has descendants to include or omit.
         self.eat_ident_eq("only");
-        let name = self.expect_ident()?;
+        let name = self.relation_ref()?;
         if *self.peek() == Token::Star {
             self.bump();
         }
@@ -5147,7 +5167,7 @@ impl Parser {
         let _ = unlogged;
         self.expect(&Token::Keyword(Keyword::Table))?;
         let if_not_exists = self.eat_if_not_exists();
-        let name = self.expect_relation_name()?;
+        let name = self.relation_ref()?;
         let mut columns = Vec::new();
         let mut constraints = Vec::new();
         let mut like = Vec::new();
@@ -5158,7 +5178,7 @@ impl Parser {
         {
             self.bump();
             self.bump();
-            Some(self.qualified_relation_name()?)
+            Some(self.relation_ref()?)
         } else {
             None
         };
@@ -5221,7 +5241,7 @@ impl Parser {
             None => None,
         };
         let inherits = if self.eat_ident_eq("inherits") {
-            self.parse_ident_list()?
+            self.parse_relation_ref_list()?
         } else {
             Vec::new()
         };
@@ -5242,7 +5262,7 @@ impl Parser {
             let buckets = self.expect_hash_bucket_count()?;
             let co_location_group = if self.eat_ident_eq("colocated") {
                 self.expect_keyword_or_ident(Keyword::With, "with")?;
-                Some(self.expect_relation_name()?)
+                Some(self.qualified_name_text()?)
             } else {
                 None
             };
@@ -5320,14 +5340,14 @@ impl Parser {
             };
             let text = self.source[start..self.peek_pos()].trim().to_string();
             let collation = if self.eat_ident_eq("collate") {
-                Some(self.expect_relation_name()?)
+                Some(self.qualified_name_text()?)
             } else {
                 None
             };
             // An operator-class name is a bare identifier in the one position
             // where nothing else can appear.
             let opclass = if matches!(self.peek(), Token::Ident(_)) {
-                Some(self.expect_relation_name()?)
+                Some(self.qualified_name_text()?)
             } else {
                 None
             };
@@ -5533,7 +5553,7 @@ impl Parser {
     /// is already consumed.
     fn like_clause(&mut self) -> Result<crate::ast::LikeClause, ParseError> {
         use crate::ast::LikeOption;
-        let source = self.expect_ident()?;
+        let source = self.relation_ref()?;
         let mut clause = crate::ast::LikeClause {
             source,
             including: Vec::new(),
@@ -5607,7 +5627,7 @@ impl Parser {
     fn table_constraint(&mut self) -> Result<crate::ast::TableConstraint, ParseError> {
         use crate::ast::{TableConstraint, TableConstraintKind};
         let name = if self.eat_ident_eq("constraint") {
-            Some(self.expect_relation_name()?)
+            Some(self.expect_ident()?)
         } else {
             None
         };
@@ -5636,11 +5656,11 @@ impl Parser {
                 pos,
             ));
         };
-        let not_valid = self.eat_constraint_attributes(true)?;
+        let attributes = self.eat_constraint_attributes(true)?;
         Ok(TableConstraint {
             name,
             kind,
-            not_valid,
+            attributes,
         })
     }
 
@@ -5670,65 +5690,222 @@ impl Parser {
     }
 
     /// `REFERENCES <table> [(col, …)] [MATCH …] [ON DELETE …] [ON UPDATE …]`.
+    ///
+    /// `ON DELETE` and `ON UPDATE` may come in either order and at most once
+    /// each; `PostgreSQL`'s grammar admits no repeat, so a second clause for the
+    /// same side is a syntax error naming `DELETE`/`UPDATE`, and a third clause
+    /// once both sides are set is a syntax error naming `ON`.
     fn foreign_key_reference(&mut self) -> Result<crate::ast::ForeignKeyRef, ParseError> {
         self.expect_ident_eq("references")?;
-        let table = self.expect_relation_name()?;
+        let table = self.relation_ref()?;
         let columns = if *self.peek() == Token::LParen {
             self.parse_ident_list()?
         } else {
             Vec::new()
         };
-        if self.eat_ident_eq("match") {
-            self.expect_ident()?;
-        }
+        let match_type = self.foreign_key_match()?;
+        let mut on_delete = None;
+        let mut on_update = None;
+        let mut set_columns = Vec::new();
         while matches!(self.peek(), Token::Keyword(Keyword::On))
             && matches!(
                 self.peek2(),
                 Token::Keyword(Keyword::Delete | Keyword::Update)
             )
         {
-            self.bump();
-            self.bump();
-            if self.eat_ident_eq("set") || self.eat_keyword(Keyword::Set) {
-                if !(self.eat_keyword(Keyword::Null) || self.eat_ident_eq("default")) {
-                    return Err(ParseError::new(
-                        "expected NULL or DEFAULT after SET in a referential action",
-                        self.peek_pos(),
-                    ));
-                }
-            } else if self.eat_ident_eq("cascade")
-                || self.eat_ident_eq("restrict")
-                || self.eat_ident_eq("no")
-            {
-                self.eat_ident_eq("action");
-            } else {
+            let clause_pos = self.peek_pos();
+            if on_delete.is_some() && on_update.is_some() {
                 return Err(ParseError::new(
-                    format!("expected a referential action, found {:?}", self.peek()),
-                    self.peek_pos(),
+                    "syntax error at or near \"ON\"".to_string(),
+                    clause_pos,
                 ));
             }
+            self.bump();
+            let side_pos = self.peek_pos();
+            let on_delete_side = matches!(self.peek(), Token::Keyword(Keyword::Delete));
+            self.bump();
+            if on_delete_side && on_delete.is_some() {
+                return Err(ParseError::new(
+                    "syntax error at or near \"DELETE\"".to_string(),
+                    side_pos,
+                ));
+            }
+            if !on_delete_side && on_update.is_some() {
+                return Err(ParseError::new(
+                    "syntax error at or near \"UPDATE\"".to_string(),
+                    side_pos,
+                ));
+            }
+            let (action, action_columns) = self.referential_action(on_delete_side, clause_pos)?;
+            if on_delete_side {
+                on_delete = Some(action);
+                set_columns = action_columns;
+            } else {
+                on_update = Some(action);
+            }
         }
-        Ok(crate::ast::ForeignKeyRef { table, columns })
+        Ok(crate::ast::ForeignKeyRef {
+            table,
+            columns,
+            match_type,
+            on_delete: on_delete.unwrap_or_default(),
+            on_update: on_update.unwrap_or_default(),
+            set_columns,
+        })
+    }
+
+    /// `MATCH { FULL | PARTIAL | SIMPLE }`, absent meaning `SIMPLE`.
+    ///
+    /// `MATCH PARTIAL` is `PostgreSQL`'s own `0A000` refusal, reported at the
+    /// `MATCH` keyword; keep it rather than inventing semantics for a clause
+    /// `PostgreSQL` has never implemented.
+    fn foreign_key_match(&mut self) -> Result<crate::ast::MatchType, ParseError> {
+        use crate::ast::MatchType;
+        let match_pos = self.peek_pos();
+        if !self.eat_ident_eq("match") {
+            return Ok(MatchType::Simple);
+        }
+        if self.eat_ident_eq("simple") {
+            return Ok(MatchType::Simple);
+        }
+        if self.eat_ident_eq("full") || self.eat_keyword(Keyword::Full) {
+            return Ok(MatchType::Full);
+        }
+        if self.eat_ident_eq("partial") {
+            return Err(ParseError::new_sqlstate(
+                "0A000",
+                "MATCH PARTIAL not yet implemented",
+                match_pos,
+            ));
+        }
+        Err(ParseError::new(
+            format!(
+                "expected FULL, PARTIAL, or SIMPLE after MATCH, found {:?}",
+                self.peek()
+            ),
+            self.peek_pos(),
+        ))
+    }
+
+    /// One referential action body, positioned after `ON DELETE` / `ON UPDATE`.
+    ///
+    /// Returns the action and the `SET { NULL | DEFAULT } (col, …)` column list,
+    /// which is empty unless one was written. `clause_pos` is the offset of the
+    /// clause's `ON`, where `PostgreSQL` puts the caret for the column-list
+    /// refusal.
+    fn referential_action(
+        &mut self,
+        on_delete_side: bool,
+        clause_pos: usize,
+    ) -> Result<(crate::ast::ReferentialAction, Vec<String>), ParseError> {
+        use crate::ast::ReferentialAction;
+        if self.eat_ident_eq("set") || self.eat_keyword(Keyword::Set) {
+            let action = if self.eat_keyword(Keyword::Null) {
+                ReferentialAction::SetNull
+            } else if self.eat_ident_eq("default") {
+                ReferentialAction::SetDefault
+            } else {
+                return Err(ParseError::new(
+                    "expected NULL or DEFAULT after SET in a referential action",
+                    self.peek_pos(),
+                ));
+            };
+            if *self.peek() != Token::LParen {
+                return Ok((action, Vec::new()));
+            }
+            if !on_delete_side {
+                return Err(ParseError::new_sqlstate(
+                    "0A000",
+                    format!(
+                        "a column list with {} is only supported for ON DELETE actions",
+                        action.as_sql()
+                    ),
+                    clause_pos,
+                ));
+            }
+            return Ok((action, self.parse_ident_list()?));
+        }
+        if self.eat_ident_eq("cascade") {
+            return Ok((ReferentialAction::Cascade, Vec::new()));
+        }
+        if self.eat_ident_eq("restrict") {
+            return Ok((ReferentialAction::Restrict, Vec::new()));
+        }
+        if self.eat_ident_eq("no") {
+            self.expect_ident_eq("action")?;
+            return Ok((ReferentialAction::NoAction, Vec::new()));
+        }
+        Err(ParseError::new(
+            format!("expected a referential action, found {:?}", self.peek()),
+            self.peek_pos(),
+        ))
     }
 
     /// `[NOT] DEFERRABLE`, `INITIALLY {DEFERRED|IMMEDIATE}`, `NOT VALID`,
-    /// `NO INHERIT`, `ENFORCED`/`NOT ENFORCED`.
+    /// `NO INHERIT`, `ENFORCED`/`NOT ENFORCED`, in any order.
     ///
-    /// Returns whether `NOT VALID` was written — the one attribute with
-    /// user-visible semantics (it skips back-validation of the rows already
-    /// stored). The rest are accepted and discarded.
+    /// `NO INHERIT` and the `ENFORCED` spellings are accepted and discarded; the
+    /// rest reach the AST. Each of the two mutually exclusive pairs may be
+    /// written at most once, and `INITIALLY DEFERRED` alone implies
+    /// `DEFERRABLE` — all three of `PostgreSQL`'s `42601` refusals here are
+    /// reproduced verbatim, so the returned struct can never claim a
+    /// combination `PostgreSQL` rejects.
     ///
     /// `NOT VALID` belongs to `PostgreSQL`'s *table* constraint grammar only, so
     /// `allow_not_valid` is false for a column constraint and writing it there
     /// is a syntax error rather than a silently accepted no-op.
-    fn eat_constraint_attributes(&mut self, allow_not_valid: bool) -> Result<bool, ParseError> {
-        let mut not_valid = false;
+    fn eat_constraint_attributes(
+        &mut self,
+        allow_not_valid: bool,
+    ) -> Result<crate::ast::ConstraintAttributes, ParseError> {
+        let mut attributes = crate::ast::ConstraintAttributes::default();
+        let mut saw_deferrability = false;
+        let mut saw_initially = false;
         loop {
-            if self.eat_ident_eq("deferrable") || self.eat_ident_eq("enforced") {
+            let pos = self.peek_pos();
+            if self.eat_ident_eq("deferrable") {
+                if saw_deferrability {
+                    return Err(multiple_constraint_attribute(
+                        "DEFERRABLE/NOT DEFERRABLE",
+                        pos,
+                    ));
+                }
+                saw_deferrability = true;
+                attributes.deferrable = true;
+                continue;
+            }
+            if self.eat_ident_eq("enforced") {
                 continue;
             }
             if self.eat_ident_eq("initially") {
-                let _ = self.eat_ident_eq("deferred") || self.eat_ident_eq("immediate");
+                let word_pos = self.peek_pos();
+                let deferred = if self.eat_ident_eq("deferred") {
+                    true
+                } else if self.eat_ident_eq("immediate") {
+                    false
+                } else {
+                    return Err(ParseError::new(
+                        format!(
+                            "expected DEFERRED or IMMEDIATE after INITIALLY, found {:?}",
+                            self.peek()
+                        ),
+                        word_pos,
+                    ));
+                };
+                if saw_initially {
+                    return Err(multiple_constraint_attribute(
+                        "INITIALLY IMMEDIATE/DEFERRED",
+                        pos,
+                    ));
+                }
+                saw_initially = true;
+                attributes.initially_deferred = deferred;
+                if deferred {
+                    if saw_deferrability && !attributes.deferrable {
+                        return Err(initially_deferred_must_be_deferrable(pos));
+                    }
+                    attributes.deferrable = true;
+                }
                 continue;
             }
             if matches!(self.peek(), Token::Keyword(Keyword::Not))
@@ -5746,9 +5923,24 @@ impl Parser {
                         self.peek_pos(),
                     ));
                 }
-                not_valid |= valid;
+                let deferrable =
+                    matches!(self.peek2(), Token::Ident(s) if s.eq_ignore_ascii_case("deferrable"));
                 self.bump();
                 self.bump();
+                attributes.not_valid |= valid;
+                if deferrable {
+                    if saw_deferrability {
+                        return Err(multiple_constraint_attribute(
+                            "DEFERRABLE/NOT DEFERRABLE",
+                            pos,
+                        ));
+                    }
+                    saw_deferrability = true;
+                    attributes.deferrable = false;
+                    if attributes.initially_deferred {
+                        return Err(initially_deferred_must_be_deferrable(pos));
+                    }
+                }
                 continue;
             }
             if matches!(self.peek(), Token::Ident(s) if s.eq_ignore_ascii_case("no"))
@@ -5760,7 +5952,7 @@ impl Parser {
             }
             break;
         }
-        Ok(not_valid)
+        Ok(attributes)
     }
 
     /// `( key [= value] [, …] )` — a storage-parameter list, accepted and
@@ -5826,7 +6018,7 @@ impl Parser {
                 && starts_column_constraint_kind(self.peek3())
             {
                 self.bump();
-                Some(self.expect_relation_name()?)
+                Some(self.expect_ident()?)
             } else {
                 None
             };
@@ -5859,11 +6051,19 @@ impl Parser {
             } else {
                 break;
             };
-            let is_identity = matches!(kind, ColumnConstraintKind::Identity(IdentitySpec { .. }));
-            constraints.push(ColumnConstraint { name, kind });
-            if !is_identity {
-                self.eat_constraint_attributes(false)?;
-            }
+            // An identity column's `GENERATED … AS IDENTITY` tail is followed by
+            // sequence options, not by constraint attributes.
+            let attributes = if matches!(kind, ColumnConstraintKind::Identity(IdentitySpec { .. }))
+            {
+                crate::ast::ConstraintAttributes::default()
+            } else {
+                self.eat_constraint_attributes(false)?
+            };
+            constraints.push(ColumnConstraint {
+                name,
+                kind,
+                attributes,
+            });
         }
         Ok(constraints)
     }
@@ -5933,13 +6133,13 @@ impl Parser {
         let name = if matches!(self.peek(), Token::Keyword(Keyword::On)) {
             None
         } else {
-            Some(self.expect_relation_name()?)
+            Some(self.relation_ref()?)
         };
         self.expect(&Token::Keyword(Keyword::On))?;
         // `ONLY` restricts the build to the named relation, which is what a
         // non-partitioned table does anyway.
         self.eat_ident_eq("only");
-        let table = self.expect_relation_name()?;
+        let table = self.relation_ref()?;
         let method = if self.eat_keyword(Keyword::Using) {
             Some(self.expect_ident()?.to_ascii_lowercase())
         } else {
@@ -6159,12 +6359,9 @@ impl Parser {
         } else {
             false
         };
-        // The storage-class words are accepted and ignored: there is one storage
-        // class, and a view holds no rows of its own either way.
-        self.eat_ident_eq("temp");
-        self.eat_ident_eq("temporary");
+        let temporary = self.eat_ident_eq("temp") || self.eat_ident_eq("temporary");
         self.expect(&Token::Keyword(Keyword::View))?;
-        let name = self.expect_object_name()?;
+        let name = self.relation_ref()?;
         // `VIEW name (a, b, c)` renames the query's output columns positionally.
         let columns = self.opt_column_aliases()?;
         self.expect(&Token::Keyword(Keyword::As))?;
@@ -6179,6 +6376,7 @@ impl Parser {
             definition,
             query,
             or_replace,
+            temporary,
             columns,
         })
     }
@@ -6190,11 +6388,11 @@ impl Parser {
         self.eat_ident_eq("temporary");
         self.expect_ident_eq("sequence")?;
         let if_not_exists = self.eat_if_not_exists();
-        let name = self.expect_ident()?;
+        let name = self.relation_ref()?;
         let options = self.sequence_options(&Token::Semicolon)?;
         Ok(Statement::CreateIndex {
             name: Some(name),
-            table: "__crabka_sequence__".into(),
+            table: crate::ast::RelationRef::bare("__crabka_sequence__"),
             keys: encode_sequence_options(&options),
             unique: false,
             placement: crate::ast::IndexPlacement::Local,
@@ -6268,14 +6466,23 @@ impl Parser {
         Ok(options)
     }
 
+    /// One `DROP SEQUENCE` name, tagged so the shared `DROP TABLE` arm knows a
+    /// sequence was meant. The tag rides the relation's own name, leaving any
+    /// schema qualifier where the resolver can still see it.
+    fn sequence_drop_ref(&mut self) -> Result<crate::ast::RelationRef, ParseError> {
+        let mut reference = self.relation_ref()?;
+        reference.name = format!("__crabka_sequence__:{}", reference.name);
+        Ok(reference)
+    }
+
     fn drop_sequence(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect(&Token::Keyword(Keyword::Drop))?;
         self.expect_ident_eq("sequence")?;
         let if_exists = self.eat_if_exists()?;
-        let mut names = vec![format!("__crabka_sequence__:{}", self.expect_ident()?)];
+        let mut names = vec![self.sequence_drop_ref()?];
         while *self.peek() == Token::Comma {
             self.bump();
-            names.push(format!("__crabka_sequence__:{}", self.expect_ident()?));
+            names.push(self.sequence_drop_ref()?);
         }
         let cascade = self.eat_drop_behavior();
         Ok(crate::ast::Statement::DropTable {
@@ -6296,7 +6503,7 @@ impl Parser {
         use crate::ast::CreateTypeDefinition;
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect_ident_eq("type")?;
-        let name = self.qualified_object_name()?;
+        let name = self.relation_ref()?;
         if !self.eat_keyword(Keyword::As) {
             // A bare `CREATE TYPE name` is a shell type.
             return Ok(crate::ast::Statement::CreateType {
@@ -6389,7 +6596,7 @@ impl Parser {
         use crate::ast::{AlterTypeAction, EnumValuePosition};
         self.expect_ident_eq("alter")?;
         self.expect_ident_eq("type")?;
-        let name = self.qualified_object_name()?;
+        let name = self.relation_ref()?;
         let pos = self.peek_pos();
         if self.eat_ident_eq("add") {
             self.expect_ident_eq("value")?;
@@ -6471,11 +6678,11 @@ impl Parser {
     }
 
     /// The `[IF EXISTS] name [, …] [CASCADE | RESTRICT]` tail both type drops share.
-    fn drop_name_list(&mut self) -> Result<(Vec<String>, bool, bool), ParseError> {
+    fn drop_name_list(&mut self) -> Result<(Vec<crate::ast::RelationRef>, bool, bool), ParseError> {
         let if_exists = self.eat_if_exists()?;
-        let mut names = vec![self.qualified_object_name()?];
+        let mut names = vec![self.relation_ref()?];
         while self.eat_comma() {
-            names.push(self.qualified_object_name()?);
+            names.push(self.relation_ref()?);
         }
         let cascade = self.eat_drop_behavior();
         Ok((names, if_exists, cascade))
@@ -6486,7 +6693,7 @@ impl Parser {
         use crate::ast::DomainConstraint;
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect_ident_eq("domain")?;
-        let name = self.qualified_object_name()?;
+        let name = self.relation_ref()?;
         // `AS` is optional in PostgreSQL's grammar.
         let _ = self.eat_keyword(Keyword::As);
         let base = self.parse_type_name()?;
@@ -6511,7 +6718,7 @@ impl Parser {
                 continue;
             }
             let named = if self.eat_ident_eq("constraint") {
-                Some(self.expect_relation_name()?)
+                Some(self.expect_ident()?)
             } else {
                 None
             };
@@ -6543,7 +6750,7 @@ impl Parser {
         use crate::ast::AlterDomainAction;
         self.expect_ident_eq("alter")?;
         self.expect_ident_eq("domain")?;
-        let name = self.qualified_object_name()?;
+        let name = self.relation_ref()?;
         let pos = self.peek_pos();
         let action = if self.eat_keyword(Keyword::Set) {
             if self.eat_ident_eq("default") {
@@ -6571,7 +6778,7 @@ impl Parser {
             }
         } else if self.eat_ident_eq("add") {
             let named = if self.eat_ident_eq("constraint") {
-                Some(self.expect_relation_name()?)
+                Some(self.expect_ident()?)
             } else {
                 None
             };
@@ -6631,17 +6838,6 @@ impl Parser {
         let _ = self.expr(0)?;
         let end = self.peek_pos();
         Ok(self.source[start..end].trim().to_string())
-    }
-
-    /// A possibly schema-qualified object name, reduced to its bare name: the
-    /// engine has one schema, and `public.t` names the same object as `t`.
-    fn qualified_object_name(&mut self) -> Result<String, ParseError> {
-        let first = self.expect_ident()?;
-        if *self.peek() == Token::Dot {
-            self.bump();
-            return self.expect_ident();
-        }
-        Ok(first)
     }
 
     fn expect_i64(&mut self, what: &str) -> Result<i64, ParseError> {
@@ -6772,16 +6968,16 @@ impl Parser {
     }
 
     /// `TRUNCATE [TABLE] name [, ...] [RESTART IDENTITY | CONTINUE IDENTITY]
-    /// [CASCADE | RESTRICT]`. `CONTINUE IDENTITY` is the `PostgreSQL` default;
-    /// `CASCADE`/`RESTRICT` are accepted and equivalent because no foreign-key
-    /// enforcement exists to distinguish them.
+    /// [CASCADE | RESTRICT]`. `CONTINUE IDENTITY` and `RESTRICT` are the
+    /// `PostgreSQL` defaults; `CASCADE` widens the truncated set to the tables
+    /// holding a foreign key onto one of `names`.
     fn truncate(&mut self) -> Result<crate::ast::Statement, ParseError> {
         self.expect_ident_eq("truncate")?;
         let _ = self.eat_keyword(Keyword::Table);
-        let mut names = vec![self.expect_relation_name()?];
+        let mut names = vec![self.relation_ref()?];
         while *self.peek() == Token::Comma {
             self.bump();
-            names.push(self.expect_ident()?);
+            names.push(self.relation_ref()?);
         }
         let restart_identity = if self.eat_ident_eq("restart") {
             self.expect_ident_eq("identity")?;
@@ -6792,12 +6988,16 @@ impl Parser {
             }
             false
         };
-        if !self.eat_ident_eq("cascade") {
+        let cascade = if self.eat_ident_eq("cascade") {
+            true
+        } else {
             let _ = self.eat_ident_eq("restrict");
-        }
+            false
+        };
         Ok(crate::ast::Statement::Truncate {
             names,
             restart_identity,
+            cascade,
         })
     }
 
@@ -6835,10 +7035,10 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Drop))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
         let if_exists = self.eat_if_exists()?;
-        let mut names = vec![self.expect_relation_name()?];
+        let mut names = vec![self.relation_ref()?];
         while *self.peek() == Token::Comma {
             self.bump();
-            names.push(self.expect_ident()?);
+            names.push(self.relation_ref()?);
         }
         let cascade = self.eat_drop_behavior();
         Ok(Statement::DropTable {
@@ -6854,7 +7054,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Drop))?;
         self.expect(&Token::Keyword(Keyword::Index))?;
         let if_exists = self.eat_if_exists()?;
-        let name = self.expect_ident()?;
+        let name = self.relation_ref()?;
         Ok(Statement::DropIndex {
             name,
             if_exists,
@@ -6868,7 +7068,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Drop))?;
         self.expect(&Token::Keyword(Keyword::View))?;
         let if_exists = self.eat_if_exists()?;
-        let name = self.expect_object_name()?;
+        let name = self.relation_ref()?;
         Ok(Statement::DropView {
             name,
             if_exists,
@@ -6880,7 +7080,7 @@ impl Parser {
         use crate::ast::Statement;
         self.expect(&Token::Keyword(Keyword::Insert))?;
         self.expect(&Token::Keyword(Keyword::Into))?;
-        let table = self.expect_relation_name()?;
+        let table = self.relation_ref()?;
         // `(` starts the target column list, unless it opens a parenthesised
         // query — `INSERT INTO t (SELECT …)` inserts that query's rows.
         let columns = if *self.peek() == Token::LParen && !self.paren_opens_query_expr() {
@@ -7137,7 +7337,7 @@ impl Parser {
         use crate::ast::{CopyFormat, CopyStmt, Statement};
 
         self.expect(&Token::Keyword(Keyword::Copy))?;
-        let table = self.expect_relation_name()?;
+        let table = self.relation_ref()?;
         let columns = if *self.peek() == Token::LParen {
             Some(self.parse_parenthesized_ident_list()?)
         } else {
@@ -7238,11 +7438,11 @@ impl Parser {
         Ok(Statement::Set {
             local: false,
             name: crate::ast::COPY_FROM_STDIN_SENTINEL.into(),
-            value: crate::ast::SetValue::Value(Self::encode_copy_stmt(&CopyStmt {
+            value: crate::ast::SetValue::Value(vec![Self::encode_copy_stmt(&CopyStmt {
                 table,
                 columns,
                 format,
-            })),
+            })]),
         })
     }
 
@@ -7279,7 +7479,21 @@ impl Parser {
                     .join(",")
             })
             .unwrap_or_default();
-        [format, &Self::encode_copy_part(&copy.table), &columns].join("\t")
+        // The schema rides its own field: a qualifier is not part of the
+        // relation's name, and `"a.b"` is a name that legitimately holds a dot.
+        let schema = copy
+            .table
+            .schema
+            .as_deref()
+            .map(Self::encode_copy_part)
+            .unwrap_or_default();
+        [
+            format,
+            &Self::encode_copy_part(&copy.table.name),
+            &columns,
+            &schema,
+        ]
+        .join("\t")
     }
 
     fn encode_copy_part(value: &str) -> String {
@@ -7782,7 +7996,7 @@ impl Parser {
             let mut of = Vec::new();
             if self.eat_ident_eq("of") {
                 loop {
-                    of.push(self.qualified_relation_name()?);
+                    of.push(self.qualified_name_text()?);
                     if self.eat_comma() {
                         continue;
                     }
@@ -7810,17 +8024,6 @@ impl Parser {
             });
         }
         Ok(folded)
-    }
-
-    /// A possibly schema-qualified relation name, kept as written (`s.t`).
-    fn qualified_relation_name(&mut self) -> Result<String, ParseError> {
-        let mut name = self.expect_ident()?;
-        if *self.peek() == Token::Dot {
-            self.bump();
-            let object = self.expect_ident()?;
-            name = format!("{name}.{object}");
-        }
-        Ok(name)
     }
 
     /// Is the current token the identifier `want` (case-insensitively)? The
@@ -7867,7 +8070,7 @@ impl Parser {
         let _ = self.eat_ident_eq("temporary")
             || self.eat_ident_eq("temp")
             || self.eat_ident_eq("unlogged");
-        let name = self.expect_ident()?;
+        let name = self.relation_ref()?;
         if self.select_into.replace(name).is_some() {
             return Err(ParseError::new_sqlstate(
                 "42601",
@@ -8523,16 +8726,12 @@ impl Parser {
         if self.peek_ident_eq("rows") && *self.peek2() == Token::Keyword(Keyword::From) {
             return self.rows_from(lateral);
         }
-        let mut name = self.expect_ident()?;
-        if *self.peek() == Token::Dot {
-            self.bump();
-            let object = self.expect_ident()?;
-            name = format!("{name}.{object}");
-        }
+        let name = self.relation_ref()?;
         // `ident (` in FROM position is a set-returning function call
-        // (`unnest(tags) AS u(tag)`), never a table.
+        // (`unnest(tags) AS u(tag)`), never a table. A qualified call keeps its
+        // dotted spelling, which is how function lookup names it.
         if *self.peek() == Token::LParen {
-            return self.table_function(name, lateral);
+            return self.table_function(name.to_string(), lateral);
         }
         if lateral {
             return Err(ParseError::new(
@@ -8592,7 +8791,7 @@ impl Parser {
         self.expect(&Token::LParen)?;
         let mut functions = Vec::new();
         loop {
-            let name = self.qualified_relation_name()?;
+            let name = self.qualified_name_text()?;
             let args = self.table_function_args()?;
             // Inside ROWS FROM the only per-function tail is a column-definition
             // list, which is never an alias list.
@@ -9020,7 +9219,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Create))?;
         self.expect(&Token::Keyword(Keyword::Foreign))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
-        let name = self.expect_ident()?;
+        let name = self.relation_ref()?;
         self.expect(&Token::LParen)?;
         let mut columns = Vec::new();
         loop {
@@ -9056,7 +9255,7 @@ impl Parser {
         self.expect(&Token::Keyword(Keyword::Foreign))?;
         self.expect(&Token::Keyword(Keyword::Table))?;
         let if_exists = self.eat_if_exists()?;
-        let name = self.expect_ident()?;
+        let name = self.relation_ref()?;
         let cascade = self.eat_drop_behavior();
         Ok(Statement::DropForeignTable {
             name,
@@ -9109,12 +9308,24 @@ impl Parser {
         })
     }
 
-    /// Parse `( ident, ident, … )` — used by `IMPORT FOREIGN SCHEMA`.
+    /// Parse `( ident, ident, … )` — used by `IMPORT FOREIGN SCHEMA` and by
+    /// `CREATE INDEX … INCLUDE`, neither of which names a relation.
     fn parse_ident_list(&mut self) -> Result<Vec<String>, ParseError> {
         self.expect(&Token::LParen)?;
-        let mut names = vec![self.expect_relation_name()?];
+        let mut names = vec![self.expect_ident()?];
         while self.eat_comma() {
             names.push(self.expect_ident()?);
+        }
+        self.expect(&Token::RParen)?;
+        Ok(names)
+    }
+
+    /// Parse `( relation, relation, … )` — the `INHERITS` parent list.
+    fn parse_relation_ref_list(&mut self) -> Result<Vec<crate::ast::RelationRef>, ParseError> {
+        self.expect(&Token::LParen)?;
+        let mut names = vec![self.relation_ref()?];
+        while self.eat_comma() {
+            names.push(self.relation_ref()?);
         }
         self.expect(&Token::RParen)?;
         Ok(names)
@@ -10300,6 +10511,31 @@ fn refusal_tokens_match(candidate: &[(Token, usize)], representative: &str) -> b
 
 /// True when `token` begins a table-level constraint kind, which is what tells
 /// `CONSTRAINT <name> …` apart from a column named `constraint`.
+/// `PostgreSQL`'s refusal when a constraint carries two `DEFERRABLE` /
+/// `NOT DEFERRABLE` clauses, or two `INITIALLY …` ones.
+///
+/// These are `42601` like an ordinary syntax error, but `PostgreSQL` words them
+/// itself rather than reporting a token, so they skip the "syntax error at
+/// position N" framing `ParseError::new` adds.
+fn multiple_constraint_attribute(clause: &'static str, position: usize) -> ParseError {
+    ParseError::new_sqlstate(
+        "42601",
+        format!("multiple {clause} clauses not allowed"),
+        position,
+    )
+}
+
+/// `PostgreSQL`'s refusal when `INITIALLY DEFERRED` meets an explicit
+/// `NOT DEFERRABLE`, in either order. Written alone, `INITIALLY DEFERRED`
+/// implies `DEFERRABLE` instead.
+fn initially_deferred_must_be_deferrable(position: usize) -> ParseError {
+    ParseError::new_sqlstate(
+        "42601",
+        "constraint declared INITIALLY DEFERRED must be DEFERRABLE",
+        position,
+    )
+}
+
 fn starts_constraint_kind(token: &Token) -> bool {
     match token {
         Token::Keyword(Keyword::Unique | Keyword::Foreign) => true,
@@ -10370,6 +10606,17 @@ mod tests {
         TableConstraintKind, UnaryOp,
     };
 
+    /// The [`RelationRef`](crate::ast::RelationRef) a name is expected to parse
+    /// to, written the way the SQL spells it. Splitting here is a test-writing
+    /// convenience only — the parser splits on the token stream, never on a
+    /// string.
+    fn written_relation(spelling: &str) -> crate::ast::RelationRef {
+        match spelling.split_once('.') {
+            Some((schema, name)) => crate::ast::RelationRef::qualified(schema, name),
+            None => crate::ast::RelationRef::bare(spelling),
+        }
+    }
+
     fn one(sql: &str) -> Statement {
         let mut v = parse(sql).expect("parse");
         assert_eq!(v.len(), 1);
@@ -10426,34 +10673,41 @@ mod tests {
             definition,
             query,
             or_replace,
+            temporary,
             columns,
         } = one("CREATE VIEW \"Sales View\" AS SELECT id FROM orders WHERE id > 1")
         else {
             panic!("expected CREATE VIEW");
         };
-        assert_eq!(name, "Sales View");
+        assert2::assert!(name == crate::ast::RelationRef::bare("Sales View"));
         assert_eq!(definition, "SELECT id FROM orders WHERE id > 1");
         assert!(!or_replace);
+        assert!(!temporary);
         assert_eq!(columns, None);
 
         // `OR REPLACE`, the storage-class words, and the positional column alias
-        // list all reach the same statement.
-        for (sql, want_replace, want_columns) in [
-            ("CREATE OR REPLACE VIEW v AS SELECT 1", true, None),
-            ("CREATE TEMP VIEW v AS SELECT 1", false, None),
+        // list all reach the same statement. `TEMP`/`TEMPORARY` is carried
+        // rather than swallowed: the view it creates lives in the session's
+        // temporary namespace.
+        for (sql, want_replace, want_temporary, want_columns) in [
+            ("CREATE OR REPLACE VIEW v AS SELECT 1", true, false, None),
+            ("CREATE TEMP VIEW v AS SELECT 1", false, true, None),
             (
                 "CREATE OR REPLACE TEMPORARY VIEW v (x) AS SELECT 1",
+                true,
                 true,
                 Some(vec!["x".to_string()]),
             ),
             (
                 "CREATE VIEW v (x, y) AS SELECT 1, 2",
                 false,
+                false,
                 Some(vec!["x".to_string(), "y".to_string()]),
             ),
         ] {
             let Statement::CreateView {
                 or_replace,
+                temporary,
                 columns,
                 ..
             } = one(sql)
@@ -10461,6 +10715,7 @@ mod tests {
                 panic!("expected CREATE VIEW for {sql}");
             };
             assert_eq!(or_replace, want_replace, "{sql}");
+            assert_eq!(temporary, want_temporary, "{sql}");
             assert_eq!(columns, want_columns, "{sql}");
         }
         assert!(matches!(
@@ -11243,33 +11498,86 @@ mod tests {
     #[test]
     fn parses_truncate_shapes() {
         use assert2::assert;
-        // (sql, names, restart_identity) — the pgbench -i statement verbatim,
-        // the bare no-TABLE form, and the identity/cascade option tails.
-        let cases: &[(&str, &[&str], bool)] = &[
-            (
-                "truncate table pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers",
-                &[
+        struct Case {
+            sql: &'static str,
+            names: &'static [&'static str],
+            restart_identity: bool,
+            cascade: bool,
+        }
+        // The pgbench -i statement verbatim, the bare no-TABLE form, the
+        // identity option tails, and both drop-behaviour spellings. Every name
+        // in the list takes a schema qualifier, not just the first.
+        let cases = &[
+            Case {
+                sql: "truncate table pgbench_accounts, pgbench_branches, pgbench_history, pgbench_tellers",
+                names: &[
                     "pgbench_accounts",
                     "pgbench_branches",
                     "pgbench_history",
                     "pgbench_tellers",
                 ],
-                false,
-            ),
-            ("TRUNCATE t", &["t"], false),
-            ("TRUNCATE TABLE t RESTART IDENTITY", &["t"], true),
-            ("TRUNCATE t CONTINUE IDENTITY", &["t"], false),
-            ("TRUNCATE t, u CASCADE", &["t", "u"], false),
-            ("TRUNCATE t RESTART IDENTITY RESTRICT", &["t"], true),
+                restart_identity: false,
+                cascade: false,
+            },
+            Case {
+                sql: "TRUNCATE t",
+                names: &["t"],
+                restart_identity: false,
+                cascade: false,
+            },
+            Case {
+                sql: "TRUNCATE TABLE t RESTART IDENTITY",
+                names: &["t"],
+                restart_identity: true,
+                cascade: false,
+            },
+            Case {
+                sql: "TRUNCATE t CONTINUE IDENTITY",
+                names: &["t"],
+                restart_identity: false,
+                cascade: false,
+            },
+            Case {
+                sql: "TRUNCATE t, u CASCADE",
+                names: &["t", "u"],
+                restart_identity: false,
+                cascade: true,
+            },
+            Case {
+                sql: "TRUNCATE t RESTART IDENTITY RESTRICT",
+                names: &["t"],
+                restart_identity: true,
+                cascade: false,
+            },
+            Case {
+                sql: "TRUNCATE t RESTART IDENTITY CASCADE",
+                names: &["t"],
+                restart_identity: true,
+                cascade: true,
+            },
+            Case {
+                sql: "TRUNCATE a, public.b",
+                names: &["a", "public.b"],
+                restart_identity: false,
+                cascade: false,
+            },
+            Case {
+                sql: "TRUNCATE public.a, pg_temp.b, c CASCADE",
+                names: &["public.a", "pg_temp.b", "c"],
+                restart_identity: false,
+                cascade: true,
+            },
         ];
-        for (sql, names, restart_identity) in cases {
+        for case in cases {
             assert!(
-                one(sql)
+                one(case.sql)
                     == Statement::Truncate {
-                        names: names.iter().map(|&n| n.into()).collect(),
-                        restart_identity: *restart_identity,
+                        names: case.names.iter().copied().map(written_relation).collect(),
+                        restart_identity: case.restart_identity,
+                        cascade: case.cascade,
                     },
-                "case: {sql}"
+                "case: {}",
+                case.sql
             );
         }
     }
@@ -11315,7 +11623,7 @@ mod tests {
                 returning,
                 with,
             } => {
-                assert_eq!(table, "t");
+                assert2::assert!(table == crate::ast::RelationRef::bare("t"));
                 assert_eq!(columns, Some(vec!["a".into(), "b".into()]));
                 assert_eq!(rows.len(), 2);
                 assert_eq!(rows[0].len(), 2);
@@ -11336,7 +11644,7 @@ mod tests {
         );
         assert!(matches!(
             s.from.as_slice(),
-            [crate::ast::TableExpr::Table { name, alias: None, .. }] if name == "t"
+            [crate::ast::TableExpr::Table { name, alias: None, .. }] if *name == crate::ast::RelationRef::bare("t")
         ));
         assert!(s.filter.is_some());
         assert_eq!(s.order_by.len(), 2);
@@ -11556,7 +11864,7 @@ mod tests {
                 returning,
                 ..
             } => {
-                assert_eq!(table, "t");
+                assert2::assert!(table == crate::ast::RelationRef::bare("t"));
                 assert_eq!(assignments.len(), 2);
                 assert_eq!(assignments[0].targets, vec!["a".to_string()]);
                 assert_eq!(assignments[1].targets, vec!["b".to_string()]);
@@ -11593,7 +11901,7 @@ mod tests {
                 returning,
                 ..
             } => {
-                assert_eq!(table, "t");
+                assert2::assert!(table == crate::ast::RelationRef::bare("t"));
                 assert!(using.is_empty());
                 assert!(filter.is_some());
                 assert_eq!(returning, None);
@@ -13173,7 +13481,7 @@ mod tests {
             Statement::Set {
                 local: false,
                 name: "timezone".into(),
-                value: SetValue::Value("America/New_York".into()),
+                value: SetValue::Value(vec!["America/New_York".into()]),
             }
         );
         assert_eq!(
@@ -13181,7 +13489,7 @@ mod tests {
             Statement::Set {
                 local: false,
                 name: "timezone".into(),
-                value: SetValue::Value("UTC".into()),
+                value: SetValue::Value(vec!["UTC".into()]),
             }
         );
         // SET TIME ZONE '...' (the special two-word spelling normalizes to `timezone`).
@@ -13190,7 +13498,7 @@ mod tests {
             Statement::Set {
                 local: false,
                 name: "timezone".into(),
-                value: SetValue::Value("America/New_York".into()),
+                value: SetValue::Value(vec!["America/New_York".into()]),
             }
         );
         // An identifier value (no quotes) is accepted too.
@@ -13199,7 +13507,7 @@ mod tests {
             Statement::Set {
                 local: false,
                 name: "timezone".into(),
-                value: SetValue::Value("utc".into()),
+                value: SetValue::Value(vec!["utc".into()]),
             }
         );
         // The GUC name is normalized to lowercase.
@@ -13208,7 +13516,7 @@ mod tests {
             Statement::Set {
                 local: false,
                 name: "timezone".into(),
-                value: SetValue::Value("UTC".into()),
+                value: SetValue::Value(vec!["UTC".into()]),
             }
         );
     }
@@ -13222,7 +13530,7 @@ mod tests {
             Statement::Set {
                 local: true,
                 name: "timezone".into(),
-                value: SetValue::Value("UTC".into()),
+                value: SetValue::Value(vec!["UTC".into()]),
             }
         );
         assert_eq!(
@@ -13230,7 +13538,7 @@ mod tests {
             Statement::Set {
                 local: true,
                 name: "timezone".into(),
-                value: SetValue::Value("America/New_York".into()),
+                value: SetValue::Value(vec!["America/New_York".into()]),
             }
         );
         // `SET TIME ZONE LOCAL` — here LOCAL is the VALUE (→ Default), not the flag.
@@ -13306,7 +13614,7 @@ mod tests {
             Statement::Set {
                 local: false,
                 name: "__set_transaction".into(),
-                value: crate::ast::SetValue::Value("read committed".into())
+                value: crate::ast::SetValue::Value(vec!["read committed".into()])
             }
         );
     }
@@ -13324,7 +13632,7 @@ mod tests {
                 Statement::Set {
                     local: false,
                     name: "application_name".into(),
-                    value: SetValue::Value("session-app".into()),
+                    value: SetValue::Value(vec!["session-app".into()]),
                 }
             );
         }
@@ -13333,24 +13641,31 @@ mod tests {
             Statement::Set {
                 local: false,
                 name: "extra_float_digits".into(),
-                value: SetValue::Value("-15".into()),
+                value: SetValue::Value(vec!["-15".into()]),
             }
         );
+        // A comma keeps the items apart, because a list parameter re-quotes
+        // each one on output; a scalar one such as `DateStyle` joins them back
+        // with `", "` when it is set.
         assert_eq!(
             one("SET DateStyle TO ISO, MDY"),
             Statement::Set {
                 local: false,
                 name: "datestyle".into(),
-                value: SetValue::Value("iso, mdy".into()),
+                value: SetValue::Value(vec!["iso".into(), "mdy".into()]),
             }
         );
+        let Statement::Set { value, .. } = one("SET DateStyle TO ISO, MDY") else {
+            panic!("SET parses as a Set statement");
+        };
+        assert_eq!(value.plain(), "iso, mdy");
         let statements = crate::parser::parse("SET DateStyle TO SQL DMY; SHOW DateStyle").unwrap();
         assert_eq!(
             statements[0],
             Statement::Set {
                 local: false,
                 name: "datestyle".into(),
-                value: SetValue::Value("sql dmy".into()),
+                value: SetValue::Value(vec!["sql dmy".into()]),
             }
         );
         assert_eq!(
@@ -13389,7 +13704,7 @@ mod tests {
             Statement::Set {
                 local: false,
                 name: "datestyle".into(),
-                value: SetValue::Value("ISO, MDY".into()),
+                value: SetValue::Value(vec!["ISO, MDY".into()]),
             }
         );
         assert_eq!(
@@ -13470,7 +13785,9 @@ mod tests {
             }
             other => panic!("expected Join, got {other:?}"),
         }
-        assert!(matches!(&s.from[1], TableExpr::Table { name, alias: None, .. } if name == "c"));
+        assert!(
+            matches!(&s.from[1], TableExpr::Table { name, alias: None, .. } if *name == crate::ast::RelationRef::bare("c"))
+        );
     }
 
     #[test]
@@ -13500,7 +13817,7 @@ mod tests {
 
         assert!(matches!(
             &s.from[..],
-            [crate::ast::TableExpr::Table { name, alias: None, .. }] if name == "information_schema.tables"
+            [crate::ast::TableExpr::Table { name, alias: None, .. }] if *name == crate::ast::RelationRef::qualified("information_schema", "tables")
         ));
     }
 
@@ -14060,7 +14377,7 @@ mod tests {
                 server,
                 options,
             } => {
-                assert_eq!(name, "orders");
+                assert2::assert!(name == crate::ast::RelationRef::bare("orders"));
                 assert_eq!(server, "s");
                 assert_eq!(columns.len(), 2);
                 assert_eq!(options[0], ("topic".into(), "orders".into()));
@@ -14298,7 +14615,7 @@ mod tests {
                 server,
                 options,
             } => {
-                assert_eq!(name, "t");
+                assert2::assert!(name == crate::ast::RelationRef::bare("t"));
                 assert_eq!(server, "s");
                 assert_eq!(columns.len(), 1);
                 assert!(options.is_empty());
@@ -14413,7 +14730,7 @@ mod tests {
             kind: TableConstraintKind::PrimaryKey(
                 columns.iter().map(|column| (*column).to_string()).collect(),
             ),
-            not_valid: false,
+            attributes: crate::ast::ConstraintAttributes::default(),
         })
     }
 
@@ -14653,16 +14970,28 @@ mod tests {
 
     #[test]
     fn copy_from_stdin_parses_supported_text_subset() {
-        let stmts = crate::parse("COPY accounts (id, name) FROM STDIN WITH (FORMAT text)")
-            .expect("COPY FROM STDIN parses");
-        let [crate::ast::Statement::Set { name, value, .. }] = stmts.as_slice() else {
-            panic!("expected COPY sentinel statement, got {stmts:?}");
-        };
-        assert_eq!(name, crate::ast::COPY_FROM_STDIN_SENTINEL);
-        assert_eq!(
-            value,
-            &crate::ast::SetValue::Value("text\taccounts\tid,name".into())
-        );
+        // The schema rides a field of its own, so a qualified target survives
+        // the round trip and an unqualified one leaves that field empty.
+        for (sql, encoded) in [
+            (
+                "COPY accounts (id, name) FROM STDIN WITH (FORMAT text)",
+                "text\taccounts\tid,name\t",
+            ),
+            (
+                "COPY s1.accounts (id, name) FROM STDIN WITH (FORMAT text)",
+                "text\taccounts\tid,name\ts1",
+            ),
+        ] {
+            let stmts = crate::parse(sql).expect("COPY FROM STDIN parses");
+            let [crate::ast::Statement::Set { name, value, .. }] = stmts.as_slice() else {
+                panic!("expected COPY sentinel statement, got {stmts:?}");
+            };
+            assert2::assert!(name == crate::ast::COPY_FROM_STDIN_SENTINEL);
+            assert!(
+                *value == crate::ast::SetValue::Value(vec![encoded.into()]),
+                "{sql}"
+            );
+        }
     }
 
     #[test]
@@ -15696,7 +16025,7 @@ mod json_array_conflict_notify_tests {
         else {
             panic!("expected CREATE TABLE");
         };
-        assert!(name == "conflict");
+        assert!(name == crate::ast::RelationRef::bare("conflict"));
         assert!(
             columns
                 .iter()
@@ -15811,7 +16140,7 @@ mod json_array_conflict_notify_tests {
         else {
             panic!("expected CREATE TABLE");
         };
-        assert!(name == "listen");
+        assert!(name == crate::ast::RelationRef::bare("listen"));
         assert!(
             columns
                 .iter()
@@ -15931,7 +16260,7 @@ mod q1_statement_completeness_tests {
         else {
             panic!("expected UPDATE");
         };
-        assert!(table == "t");
+        assert!(table == crate::ast::RelationRef::bare("t"));
         assert!(alias == Some("x".into()));
         assert!(from.len() == 2);
         assert!(matches!(from[0], TableExpr::Table { .. }));
@@ -16003,7 +16332,7 @@ mod q1_statement_completeness_tests {
         else {
             panic!("expected DELETE");
         };
-        assert!(table == "t");
+        assert!(table == crate::ast::RelationRef::bare("t"));
         assert!(alias == Some("x".into()));
         assert!(using.len() == 1);
         assert!(filter.is_some());
@@ -16048,7 +16377,7 @@ mod q1_statement_completeness_tests {
         else {
             panic!("expected MERGE");
         };
-        assert!(table == "t");
+        assert!(table == crate::ast::RelationRef::bare("t"));
         assert!(alias == Some("x".into()));
         assert!(matches!(source, MergeSource::Query { .. }));
         assert!(returning.is_some());
@@ -16102,7 +16431,7 @@ mod q1_statement_completeness_tests {
         else {
             panic!("expected CREATE TABLE AS");
         };
-        assert!(name == "t");
+        assert!(name == crate::ast::RelationRef::bare("t"));
         assert!(if_not_exists);
         assert!(columns == Some(vec!["a".into(), "b".into()]));
         assert!(!with_data);
@@ -16117,7 +16446,7 @@ mod q1_statement_completeness_tests {
         else {
             panic!("expected SELECT INTO");
         };
-        assert!(name == "t");
+        assert!(name == crate::ast::RelationRef::bare("t"));
         assert!(!if_not_exists);
         assert!(columns.is_none());
         assert!(with_data);

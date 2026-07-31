@@ -40,6 +40,18 @@ const UPSERT_TARGET: &[&str] = &[
     "CREATE TABLE feature_upsert (id int4 PRIMARY KEY, n int4)",
     "INSERT INTO feature_upsert VALUES (1, 1)",
 ];
+/// A referenced parent, a child that cascades on delete, and a self-reference
+/// the child row satisfies within its own `INSERT` — so the probe's `DELETE`
+/// succeeds only if the referential action actually runs: with the constraint
+/// present but the cascade missing, the parent-side check refuses with 23503.
+const FOREIGN_KEY_TABLES: &[&str] = &[
+    "CREATE TABLE feature_fk_parent (id int4 PRIMARY KEY)",
+    "CREATE TABLE feature_fk_child (id int4 PRIMARY KEY, \
+     parent_id int4 REFERENCES feature_fk_parent (id) ON DELETE CASCADE, \
+     boss int4 REFERENCES feature_fk_child (id))",
+    "INSERT INTO feature_fk_parent VALUES (1)",
+    "INSERT INTO feature_fk_child VALUES (10, 1, 10)",
+];
 
 pub const FEATURE_PROBES: &[FeatureProbe] = &[
     FeatureProbe {
@@ -376,6 +388,14 @@ pub const FEATURE_PROBES: &[FeatureProbe] = &[
         sql: "CREATE TABLE feature_unique (id int4 PRIMARY KEY, value int4 UNIQUE)",
         behavior: FeatureBehavior::SessionExecute,
         setup: NONE,
+        sqlstate: None,
+        message_fragment: None,
+    },
+    FeatureProbe {
+        item: "FOREIGN KEY constraints",
+        sql: "DELETE FROM feature_fk_parent WHERE id = 1",
+        behavior: FeatureBehavior::SessionExecute,
+        setup: FOREIGN_KEY_TABLES,
         sqlstate: None,
         message_fragment: None,
     },

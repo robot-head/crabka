@@ -9,6 +9,7 @@ use std::sync::{
 };
 
 use assert2::assert;
+use crabka_pgcatalog::RelationName;
 use crabka_pgexec::{
     CommitTimestamp, PrimaryTxnDecision, SqlEngine, TimestampTransactionId, TimestampTxnDescriptor,
     TimestampTxnOperation, TimestampWrite,
@@ -109,7 +110,9 @@ async fn timestamp_commit_advances_the_cached_read_floor() {
         .simple_query("CREATE TABLE s (id int4) SHARDED")
         .await
         .expect("create sharded table");
-    let table = engine.catalog_table("s").expect("catalog table");
+    let table = engine
+        .catalog_table(&RelationName::public("s"))
+        .expect("catalog table");
 
     // Seed the cached horizon BEFORE the commit so a stale cache would be
     // caught: the commit below must advance the already-warm floor.
@@ -149,7 +152,9 @@ async fn reopened_engine_seeds_the_floor_from_durable_timestamp_state() {
             .simple_query("CREATE TABLE s (id int4) SHARDED")
             .await
             .expect("create sharded table");
-        let table = engine.catalog_table("s").expect("catalog table");
+        let table = engine
+            .catalog_table(&RelationName::public("s"))
+            .expect("catalog table");
         let start_ts = TimestampTransactionId::new(2_000_000).expect("start timestamp");
         let commit_ts = CommitTimestamp::new(2_000_600).expect("commit timestamp");
         let write = sharded_write(table.id, 1);

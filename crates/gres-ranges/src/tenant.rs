@@ -628,7 +628,7 @@ pub fn in_doubt_markers_for_engine(
     let routing_by_physical = crabka_pgcatalog::list_tables(engine.catalog_kv())
         .map_err(|error| SplitError::Hook(format!("list marker tables: {error}")))?
         .into_iter()
-        .map(|table| (table.id, routing_table_id(&table.name)))
+        .map(|table| (table.id, relation_routing_table_id(&table.name)))
         .collect::<BTreeMap<_, _>>();
     let mut markers = Vec::new();
     for descriptor in engine
@@ -1344,7 +1344,7 @@ impl MultiRangeTenant {
             .ok_or(LocalSqlSplitError::RemoteRange)?;
         let table = crabka_pgcatalog::list_tables(coordinator.catalog_kv())?
             .into_iter()
-            .find(|table| routing_table_id(&table.name) == table_id)
+            .find(|table| relation_routing_table_id(&table.name) == table_id)
             .ok_or(LocalSqlSplitError::MissingTable(table_id))?;
         if table.foreign.is_some() {
             return Err(LocalSqlSplitError::UnsupportedTableKind(table_id));
@@ -1379,7 +1379,7 @@ impl MultiRangeTenant {
                 .map(|table| {
                     (
                         TableId::new(u64::from(table.id)),
-                        routing_table_id(&table.name),
+                        relation_routing_table_id(&table.name),
                     )
                 }),
         )?;
@@ -1416,7 +1416,7 @@ impl MultiRangeTenant {
             .get(&RangeId::COORDINATOR)
             .ok_or(LocalSqlSplitError::RemoteRange)?;
         for table in crabka_pgcatalog::list_tables(coordinator.catalog_kv())? {
-            let catalog_table_id = routing_table_id(&table.name);
+            let catalog_table_id = relation_routing_table_id(&table.name);
             if state
                 .target_map
                 .route_table(catalog_table_id)
@@ -1466,7 +1466,7 @@ impl MultiRangeTenant {
         };
         let table = crabka_pgcatalog::list_tables(coordinator.catalog_kv())?
             .into_iter()
-            .find(|table| routing_table_id(&table.name) == table_id)
+            .find(|table| relation_routing_table_id(&table.name) == table_id)
             .ok_or(LocalSqlSplitError::MissingTable(table_id))?;
         if table.foreign.is_some() {
             return Err(LocalSqlSplitError::UnsupportedTableKind(table_id));
@@ -2451,7 +2451,7 @@ impl crabka_pgexec::RangeScanner for InProcessRangeScanner {
                 "sharded scatter scans require a finite statement read timestamp".into(),
             ));
         }
-        let table_id = routing_table_id(&request.table.name);
+        let table_id = relation_routing_table_id(&request.table.name);
         let hash_segments = hash_scan_segments(&self.range_map, request.table, &request)?;
 
         let segments = match hash_segments {
@@ -2508,7 +2508,7 @@ fn hash_scan_segments(
     let Some(ShardingStrategy::Hash(hash)) = table.sharding.as_ref() else {
         return Ok(None);
     };
-    let table_id = routing_table_id(&table.name);
+    let table_id = relation_routing_table_id(&table.name);
     let Some(hash_value) = hash_equality_value(table, hash, &request.predicate) else {
         // Full scan: a hash table partitions across ranges by bucket, so the
         // rowid-sliced `scan_segments` decomposition would hand each range a
@@ -2640,12 +2640,23 @@ impl MultiRangeTenant {
     /// seat the registration on — records why in [`GatewayNotify`] and refuses
     /// the statements rather than accepting them into a queue nothing on this
     /// connection drains.
+    ///
+    /// Every hosted range's session is opened under that same backend pid, as
+    /// the remote ones already are, because a statement can land on any of them
+    /// and `pg_backend_pid()` must answer with the connection's announced id
+    /// whichever one runs it.
     fn open_session(&self, notify_pid: Option<i32>) -> GatewaySession {
         let serving = self.inner.serving.load_full();
         let mut sessions: BTreeMap<RangeId, crabka_pgexec::SqlSession> = serving
             .engines
             .iter()
-            .map(|(range_id, engine)| (*range_id, engine.connect()))
+            .map(|(range_id, engine)| {
+                let session = match notify_pid {
+                    Some(pid) => engine.connect_with_pid(pid),
+                    None => engine.connect(),
+                };
+                (*range_id, session)
+            })
             .collect();
         let (notify, notifications) = match (notify_pid, notify_seat(&sessions)) {
             (None, _) => (GatewayNotify::NoBackendPid, None),
@@ -5668,7 +5679,7 @@ fn timestamp_insert_write_routes(
     writes: &[crabka_pgexec::TimestampWrite],
 ) -> Result<Vec<RangeId>, PgError> {
     let lower = statement.trim_start().to_ascii_lowercase();
-    let table_id = routing_table_id(&table.name);
+    let table_id = relation_routing_table_id(&table.name);
     let routes = if let Some(ShardingStrategy::Hash(hash)) = table.sharding.as_ref() {
         let spec = HashShardSpec::new(
             table_id,
@@ -6258,7 +6269,7 @@ fn route_table(range_map: &RangeMap, table_id: TableId) -> Result<RangeId, PgErr
 
 fn catalog_table_is_sharded(
     catalog: &crabka_pgexec::SqlEngine,
-    table_name: &str,
+    table_name: &crabka_pgcatalog::RelationName,
 ) -> Result<bool, PgError> {
     match catalog.table_uses_global_visibility(table_name) {
         Ok(uses_global_visibility) => Ok(uses_global_visibility),
@@ -6269,16 +6280,23 @@ fn catalog_table_is_sharded(
 
 fn catalog_table(
     catalog: &crabka_pgexec::SqlEngine,
-    table_name: &str,
+    table_name: &crabka_pgcatalog::RelationName,
 ) -> Result<crabka_pgcatalog::Table, PgError> {
     catalog
         .catalog_table(table_name)
         .map_err(ExecError::into_pg)
 }
 
+/// A relation named by a statement the gateway is routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TableRef {
-    name: String,
+    /// The relation as the statement scanner read it.
+    ///
+    /// Routing runs on raw statement text with no session attached, so an
+    /// unqualified reference is taken as `public`. A relation in any other
+    /// schema fails to resolve here and falls back to the unsharded route, the
+    /// same path an unknown relation already takes.
+    name: crabka_pgcatalog::RelationName,
     table_id: TableId,
 }
 
@@ -6341,10 +6359,10 @@ fn table_refs_in_statement(sql: &str) -> Vec<TableRef> {
         if trailing_table_id(table).is_some()
             && !refs
                 .iter()
-                .any(|table_ref: &TableRef| table_ref.name == *table)
+                .any(|table_ref: &TableRef| table_ref.name.name == *table)
         {
             refs.push(TableRef {
-                name: (*table).to_string(),
+                name: crabka_pgcatalog::RelationName::public(*table),
                 table_id: routing_table_id(table),
             });
         }
@@ -6354,6 +6372,17 @@ fn table_refs_in_statement(sql: &str) -> Vec<TableRef> {
 
 fn routing_table_id(table: &str) -> TableId {
     trailing_table_id(table).unwrap_or(TableId::ZERO)
+}
+
+/// Routing id for a catalog relation.
+///
+/// The split contract derives the id from the relation name's trailing digits,
+/// and a schema qualifier carries none, so routing reads the *unqualified* name
+/// only. Two relations named `t11` in different schemas therefore route to the
+/// same id — the same collision the convention already accepts between a table
+/// and any other name ending in `11`.
+fn relation_routing_table_id(name: &crabka_pgcatalog::RelationName) -> TableId {
+    routing_table_id(&name.name)
 }
 
 fn trailing_table_id(table: &str) -> Option<TableId> {
@@ -6685,6 +6714,9 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         Datum::Int8(value) => Some(value.to_be_bytes().to_vec()),
         Datum::Text(value) => Some(value.as_bytes().to_vec()),
         Datum::Bytea(value) => Some(value.clone()),
+        // A `regclass` routes on its oid — the same four bytes the write path
+        // hashes — so `WHERE c = 'pp'::regclass` scans the range the row is in.
+        Datum::Regclass(value) => Some(value.oid.to_be_bytes().to_vec()),
         // The float widths are excluded together: a shard key must have exactly
         // one byte spelling per value, and `-0.0`/`NaN` do not.
         Datum::Null
@@ -7477,7 +7509,9 @@ mod tests {
             .simple_query("CREATE TABLE marker52 (id int4) SHARDED")
             .await
             .expect("marker table");
-        let table = r1.catalog_table("marker52").expect("marker catalog");
+        let table = r1
+            .catalog_table(&crabka_pgcatalog::RelationName::public("marker52"))
+            .expect("marker catalog");
         let start_ts = crabka_pgexec::TimestampTransactionId::new(700).expect("timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
@@ -7700,8 +7734,16 @@ mod tests {
                 .expect("rN-only assembly");
 
         let range1 = &handles.inner.serving.load().engines[&RangeId::new(1)];
-        assert!(range1.catalog_table("follower_table").is_ok());
-        assert!(range1.catalog_table("unrelated_table").is_err());
+        assert!(
+            range1
+                .catalog_table(&crabka_pgcatalog::RelationName::public("follower_table"))
+                .is_ok()
+        );
+        assert!(
+            range1
+                .catalog_table(&crabka_pgcatalog::RelationName::public("unrelated_table"))
+                .is_err()
+        );
 
         let session = gateway.connect();
         assert!(
@@ -8944,7 +8986,7 @@ mod tests {
             .engines
             .get(&RangeId::COORDINATOR)
             .expect("range 0")
-            .catalog_table("t")
+            .catalog_table(&crabka_pgcatalog::RelationName::public("t"))
             .expect("table");
         let range0_versions = committed_timestamp_versions(
             serving.engines.get(&RangeId::COORDINATOR).expect("range 0"),

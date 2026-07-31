@@ -162,6 +162,13 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 }
                 encode_fields(&r.values, out);
             }
+            // A `regclass` stores as its oid, which is all PostgreSQL keeps on
+            // disk too — the name it renders is derived from the catalog at
+            // output time, never stored.
+            Datum::Regclass(r) => {
+                out.push(tag::INT4);
+                out.extend_from_slice(&r.oid.to_be_bytes());
+            }
             Datum::Enum(e) => {
                 out.push(tag::ENUM);
                 out.extend_from_slice(&e.ty.oid.to_be_bytes());

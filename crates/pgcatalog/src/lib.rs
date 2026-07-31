@@ -19,11 +19,11 @@ use zerocopy::{
 };
 
 use crate::serde::{
-    deserialize_fdw, deserialize_index, deserialize_schema, deserialize_sequence,
-    deserialize_server, deserialize_sharding, deserialize_user_mapping, deserialize_user_type,
-    deserialize_view, serialize_fdw, serialize_index, serialize_schema, serialize_sequence,
-    serialize_server, serialize_sharding, serialize_user_mapping, serialize_user_type,
-    serialize_view,
+    deserialize_fdw, deserialize_foreign_key, deserialize_index, deserialize_schema,
+    deserialize_sequence, deserialize_server, deserialize_sharding, deserialize_user_mapping,
+    deserialize_user_type, deserialize_view, serialize_fdw, serialize_foreign_key, serialize_index,
+    serialize_schema, serialize_sequence, serialize_server, serialize_sharding,
+    serialize_user_mapping, serialize_user_type, serialize_view,
 };
 
 /// OID-style table identifier (never 0; 0 is reserved/invalid).
@@ -31,6 +31,72 @@ pub type TableId = u32;
 
 /// OID-style index identifier (never 0; 0 is reserved/invalid).
 pub type IndexId = u32;
+
+/// A relation's resolved name: the schema it lives in, and its name within
+/// that schema.
+///
+/// The two halves are never flattened into one string, because they are not
+/// recoverable from one. `PostgreSQL` lets a relation called `a.b` in `public`
+/// and a relation called `b` in schema `a` exist at the same time with
+/// distinct contents, and a `schema.relation` string cannot tell them apart —
+/// which is why every catalog key that names a relation is built from these
+/// two parts, each length-prefixed.
+///
+/// Constructing one is the only way to reach a catalog lookup, so an
+/// unqualified name cannot silently mean "whatever `public` holds": it has to
+/// pass through the resolver that knows the search path.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RelationName {
+    /// The schema, always resolved — never a qualifier as written.
+    pub schema: String,
+    /// The relation's name within [`RelationName::schema`].
+    pub name: String,
+}
+
+impl RelationName {
+    /// A relation named `name` in `schema`.
+    pub fn new(schema: impl Into<String>, name: impl Into<String>) -> Self {
+        Self {
+            schema: schema.into(),
+            name: name.into(),
+        }
+    }
+
+    /// A relation in `public` — where the default search path puts every
+    /// unqualified name, and where the bootstrap and test fixtures live.
+    pub fn public(name: impl Into<String>) -> Self {
+        Self::new(PUBLIC_SCHEMA, name)
+    }
+
+    /// True when this relation is in `public`.
+    #[must_use]
+    pub fn is_public(&self) -> bool {
+        self.schema == PUBLIC_SCHEMA
+    }
+
+    /// Another object in the same schema — an index or a sequence beside the
+    /// table that owns it, which is where `PostgreSQL` puts both.
+    #[must_use]
+    pub fn sibling(&self, name: impl Into<String>) -> Self {
+        Self::new(self.schema.clone(), name)
+    }
+}
+
+impl std::fmt::Display for RelationName {
+    /// Spelled the way `PostgreSQL` spells a relation in a diagnostic: bare in
+    /// `public`, which the default search path makes the unqualified name, and
+    /// `schema.name` anywhere else.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.is_public() {
+            f.write_str(&self.name)
+        } else {
+            write!(f, "{}.{}", self.schema, self.name)
+        }
+    }
+}
+
+/// The schema an unqualified name resolves to under the default search path.
+pub const PUBLIC_SCHEMA: &str = "public";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ColumnDefault {
@@ -142,12 +208,21 @@ pub enum IndexConstraint {
 pub struct Index {
     pub id: IndexId,
     pub name: String,
-    pub table: String,
+    pub table: RelationName,
     pub table_id: TableId,
     pub columns: Vec<String>,
     pub unique: bool,
     pub placement: IndexPlacement,
     pub constraint: Option<IndexConstraint>,
+}
+
+impl Index {
+    /// The index's own qualified name. An index lives in the schema of the
+    /// table it indexes, exactly as in `PostgreSQL`.
+    #[must_use]
+    pub fn qualified_name(&self) -> RelationName {
+        self.table.sibling(&self.name)
+    }
 }
 
 /// Secondary-index catalog definition to create for a known table.
@@ -158,6 +233,82 @@ pub struct NewIndex {
     pub unique: bool,
     pub placement: IndexPlacement,
     pub constraint: Option<IndexConstraint>,
+}
+
+/// What a foreign key does to the referencing rows when the referenced row is
+/// deleted (`ON DELETE`) or its key columns are updated (`ON UPDATE`) —
+/// `pg_constraint.confdeltype` / `confupdtype`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReferentialAction {
+    /// Refuse at the end of the statement, deferring the check when the
+    /// constraint is deferred. The default.
+    NoAction,
+    /// Refuse immediately, without honoring a deferral.
+    Restrict,
+    /// Delete the referencing rows, or carry the new key values into them.
+    Cascade,
+    /// Set the referencing columns to NULL.
+    SetNull,
+    /// Set the referencing columns to their column DEFAULTs.
+    SetDefault,
+}
+
+/// How a foreign key treats a partly-NULL composite key —
+/// `pg_constraint.confmatchtype`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MatchType {
+    /// `MATCH SIMPLE` (the default): a row with any NULL referencing column
+    /// satisfies the constraint.
+    Simple,
+    /// `MATCH FULL`: the referencing columns must be all NULL or all non-NULL.
+    Full,
+}
+
+/// A `FOREIGN KEY` constraint, as stored in the catalog.
+///
+/// The identity is `(table_id, name)` — constraint names are per-relation in
+/// `PostgreSQL`, so two relations may each carry a `fk_owner`. The referent is
+/// identified by [`ForeignKey::referenced_table_id`] and
+/// [`ForeignKey::referenced_index_id`], the analogues of
+/// `pg_constraint.confrelid` and `conindid`; [`ForeignKey::referenced_table`]
+/// and [`ForeignKey::referenced_index`] are denormalized display copies for
+/// error messages and `pg_get_constraintdef`, rewritten on rename. Columns are
+/// stored as names, like [`Index::columns`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForeignKey {
+    /// Constraint name, unique within the child relation.
+    pub name: String,
+    /// Child relation name — a display copy, rewritten on rename.
+    pub table: RelationName,
+    /// Child relation id; the authority, and the `fk/by-table` key.
+    pub table_id: TableId,
+    /// Referencing columns, in written order.
+    pub columns: Vec<String>,
+    /// Referenced relation name — a display copy, rewritten on rename.
+    pub referenced_table: RelationName,
+    /// Referenced relation id; the authority, and the `fk/by-ref` key.
+    pub referenced_table_id: TableId,
+    /// Referenced columns, paired 1:1 with [`ForeignKey::columns`].
+    pub referenced_columns: Vec<String>,
+    /// The unique index that proves the referenced columns are a key, resolved
+    /// once at DDL time.
+    pub referenced_index_id: IndexId,
+    /// Referenced index name — a display copy.
+    pub referenced_index: String,
+    pub match_type: MatchType,
+    pub on_delete: ReferentialAction,
+    pub on_update: ReferentialAction,
+    /// `ON DELETE SET {NULL|DEFAULT} (a, b)` — empty means all of
+    /// [`ForeignKey::columns`].
+    pub set_columns: Vec<String>,
+    /// The constraint may be `SET CONSTRAINTS … DEFERRED` within a transaction.
+    pub deferrable: bool,
+    /// The constraint starts each transaction deferred; implies `deferrable`.
+    pub initially_deferred: bool,
+    /// `pg_constraint.convalidated`: false for a constraint added `NOT VALID`,
+    /// which is enforced for new writes but was never checked against the rows
+    /// already stored.
+    pub validated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -232,7 +383,7 @@ pub struct Role {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TablePrivilege {
-    pub table: String,
+    pub table: RelationName,
     pub grantee: String,
     pub privilege: String,
 }
@@ -240,7 +391,7 @@ pub struct TablePrivilege {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Table {
     pub id: TableId,
-    pub name: String,
+    pub name: RelationName,
     pub columns: Vec<Column>,
     /// True when the table uses global-visibility semantics and may span ranges.
     pub sharded: bool,
@@ -255,7 +406,7 @@ pub struct Table {
 /// A stored view definition and its resolved output schema.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct View {
-    pub name: String,
+    pub name: RelationName,
     pub definition: String,
     pub columns: Vec<Column>,
 }
@@ -286,12 +437,26 @@ pub enum CatalogError {
     UndefinedIndex(String),
     #[error("cannot drop index \"{0}\" because it is required by a table constraint")]
     DependentObjectsStillExist(String),
+    /// A relation already carries a constraint of this name. Constraint names
+    /// are per-relation, so `PostgreSQL` reports the relation alongside the
+    /// name — and reports 42710, not the 42P07 an index name collision gets.
+    #[error("constraint \"{name}\" for relation \"{relation}\" already exists")]
+    DuplicateConstraint { name: String, relation: String },
+    /// A constraint lookup or `ALTER TABLE … DROP CONSTRAINT` named a
+    /// constraint the relation does not have (42704).
+    #[error("constraint \"{0}\" does not exist")]
+    UndefinedConstraint(String),
     #[error("sequence \"{0}\" already exists")]
     DuplicateSequence(String),
     #[error("sequence \"{0}\" does not exist")]
     UndefinedSequence(String),
     #[error("invalid sequence definition: {0}")]
     InvalidSequence(String),
+    /// A sharding definition describing a table this engine has no encoding
+    /// for. Reported as 0A000 rather than 22023: the spec is well formed, the
+    /// shape it asks for is simply not supported.
+    #[error("invalid sharding definition: {0}")]
+    InvalidSharding(String),
     #[error("relation \"{0}\" is not an ordinary table")]
     NotOrdinaryTable(String),
     #[error("table conversion rewrite does not remove every existing physical tuple")]
@@ -312,6 +477,20 @@ pub enum CatalogError {
     /// `CREATE SCHEMA` named a schema that already exists (42P06).
     #[error("schema \"{0}\" already exists")]
     DuplicateSchema(String),
+    /// `CREATE SCHEMA` named a schema whose name carries the reserved
+    /// [`RESERVED_SCHEMA_PREFIX`] (42939). `PostgreSQL` checks the prefix
+    /// before it checks for a duplicate, so this outranks
+    /// [`CatalogError::DuplicateSchema`] even for `pg_catalog` itself.
+    #[error("unacceptable schema name \"{0}\"")]
+    ReservedSchemaName(String),
+    /// `DROP SCHEMA` named one of the [`SYSTEM_SCHEMAS`] (2BP01).
+    #[error("cannot drop schema {0} because it is required by the database system")]
+    SystemSchemaDrop(String),
+    /// `DROP SCHEMA … RESTRICT` found relations still in the schema (2BP01).
+    /// Distinct from [`CatalogError::DependentObjectsStillExist`], whose
+    /// message is about an index and whose payload is an index name.
+    #[error("cannot drop schema {0} because other objects depend on it")]
+    SchemaNotEmpty(String),
     /// A schema-qualified name or schema command named a schema that does not
     /// exist (3F000).
     #[error("schema \"{0}\" does not exist")]
@@ -330,12 +509,19 @@ impl CatalogError {
             CatalogError::UndefinedTable(_) | CatalogError::UndefinedSequence(_) => "42P01",
             CatalogError::WrongObjectType(_) => "42809",
             CatalogError::UndefinedColumn(_) => "42703",
-            CatalogError::UndefinedIndex(_) | CatalogError::UndefinedObject(_) => "42704",
-            CatalogError::DependentObjectsStillExist(_) => "2BP01",
+            CatalogError::UndefinedIndex(_)
+            | CatalogError::UndefinedObject(_)
+            | CatalogError::UndefinedConstraint(_) => "42704",
+            CatalogError::DependentObjectsStillExist(_)
+            | CatalogError::SystemSchemaDrop(_)
+            | CatalogError::SchemaNotEmpty(_) => "2BP01",
             CatalogError::InvalidSequence(_) => "22023",
-            CatalogError::NotOrdinaryTable(_) | CatalogError::StoredViewDependency(_) => "0A000",
-            CatalogError::DuplicateObject(_) => "42710",
+            CatalogError::NotOrdinaryTable(_)
+            | CatalogError::StoredViewDependency(_)
+            | CatalogError::InvalidSharding(_) => "0A000",
+            CatalogError::DuplicateObject(_) | CatalogError::DuplicateConstraint { .. } => "42710",
             CatalogError::DuplicateSchema(_) => "42P06",
+            CatalogError::ReservedSchemaName(_) => "42939",
             CatalogError::UndefinedSchema(_) => "3F000",
             CatalogError::Storage(KvError::Io(_)) => "58030",
             CatalogError::IncompleteConversionRewrite
@@ -356,15 +542,166 @@ pub struct Schema {
     pub owner: String,
 }
 
-/// The schemas that exist without ever being created, in `pg_namespace` order
-/// of appearance. `public` is a real, droppable schema; the other two are
-/// system namespaces and cannot be created, renamed, or dropped.
-pub const BUILTIN_SCHEMAS: &[&str] = &["pg_catalog", "information_schema"];
-
-const SCHEMA_PREFIX: &[u8] = b"\0\0\0\0catalog/schema/by-name/";
-
 /// The bootstrap superuser every object is owned by.
 const BOOTSTRAP_ROLE: &str = "postgres";
+
+/// `public`'s owner. `PostgreSQL` gives the schema to the implicit
+/// `pg_database_owner` role rather than to the bootstrap superuser, so that
+/// whoever owns the database owns the schema it starts with.
+pub const PUBLIC_SCHEMA_OWNER: &str = "pg_database_owner";
+
+/// The schemas a database has before anything is created in it, each with the
+/// owner `PostgreSQL` bootstraps it under.
+///
+/// None of them is stored: a fresh catalog holds no schema rows at all, and
+/// [`list_schemas`] synthesises these three until a stored row supersedes one
+/// or a tombstone removes it. `public` is an ordinary schema that merely
+/// happens to exist already — it can be dropped and created again — while the
+/// [`SYSTEM_SCHEMAS`] cannot be dropped and cannot be created, the latter
+/// because their names are covered by [`RESERVED_SCHEMA_PREFIX`] or already
+/// taken.
+pub const BOOTSTRAP_SCHEMAS: &[(&str, &str)] = &[
+    ("pg_catalog", BOOTSTRAP_ROLE),
+    ("information_schema", BOOTSTRAP_ROLE),
+    ("public", PUBLIC_SCHEMA_OWNER),
+];
+
+/// The bootstrap schemas the database system itself needs. `DROP SCHEMA`
+/// refuses them with 2BP01 however empty they are.
+pub const SYSTEM_SCHEMAS: &[&str] = &["pg_catalog", "information_schema"];
+
+/// The schema-name prefix `PostgreSQL` reserves for system schemas. `CREATE
+/// SCHEMA` refuses any name carrying it, before it looks for a duplicate.
+pub const RESERVED_SCHEMA_PREFIX: &str = "pg_";
+
+/// The qualifier that names *this* session's temporary namespace, whatever it
+/// is called. `CREATE TABLE pg_temp.t` creates a temporary relation, and
+/// `search_path` may name it to place the temporary namespace explicitly.
+pub const PG_TEMP_ALIAS: &str = "pg_temp";
+
+/// The prefix every session's temporary namespace carries.
+const TEMP_SCHEMA_PREFIX: &str = "pg_temp_";
+
+/// The temporary namespace belonging to the session the wire layer announced
+/// `backend_id` for. Verified against `postgres:18.4`, where a session's
+/// `current_schemas(true)` reports `pg_temp_<n>` first.
+#[must_use]
+pub fn temp_schema_name(backend_id: i32) -> String {
+    format!("{TEMP_SCHEMA_PREFIX}{backend_id}")
+}
+
+/// True when `name` is some session's temporary namespace.
+///
+/// A relation's persistence is derived from the schema holding it rather than
+/// stored beside it: `PostgreSQL` keeps every temporary relation — table, view,
+/// index and the sequence behind a `serial` column — in the owning session's
+/// temporary namespace and nothing else there, so the two are the same fact.
+#[must_use]
+pub fn is_temp_schema(name: &str) -> bool {
+    name.strip_prefix(TEMP_SCHEMA_PREFIX)
+        .is_some_and(|suffix| !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The `pg_class.relpersistence` a relation in `schema` reports.
+#[must_use]
+pub fn relpersistence_of(schema: &str) -> char {
+    if is_temp_schema(schema) { 't' } else { 'p' }
+}
+
+/// The op that records a session's temporary namespace.
+///
+/// [`create_schema_ops`] refuses a `pg_`-prefixed name, as `CREATE SCHEMA`
+/// must; a temporary namespace is created by the engine on the session's
+/// behalf, never by a statement naming it.
+#[must_use]
+pub fn create_temp_schema_op(name: &str) -> WriteOp {
+    WriteOp::Put {
+        key: schema_key(name),
+        value: BOOTSTRAP_ROLE.as_bytes().to_vec(),
+    }
+}
+
+const SCHEMA_PREFIX: &[u8] = b"\0\0\0\0catalog_schema/by-name/";
+
+/// Tombstones for dropped [`BOOTSTRAP_SCHEMAS`]. A bootstrap schema is
+/// synthesised rather than stored, so its absence is what has to be recorded;
+/// only `public` is droppable, so only `public` ever lands here.
+const DROPPED_SCHEMA_PREFIX: &[u8] = b"\0\0\0\0catalog_schema/dropped/";
+
+/// Key for a relation's stored schema record.
+fn catalog_key(relation: &RelationName) -> Vec<u8> {
+    key::catalog_key(&relation.schema, &relation.name)
+}
+
+/// Key for a relation's optional sharding strategy.
+fn sharding_key(relation: &RelationName) -> Vec<u8> {
+    key::catalog_sharding_key(&relation.schema, &relation.name)
+}
+
+/// The id-keyed index entry naming `relation`.
+fn catalog_by_id_op(table_id: TableId, relation: &RelationName) -> WriteOp {
+    let mut value = Vec::new();
+    key::push_key_part(&mut value, &relation.schema);
+    key::push_key_part(&mut value, &relation.name);
+    WriteOp::Put {
+        key: key::catalog_by_id_key(table_id),
+        value,
+    }
+}
+
+/// The relation `table_id` names, or `None` when no table carries that id.
+///
+/// A range RPC ships a table id rather than a relation name, because a name is
+/// session-dependent once `search_path` and `pg_temp` exist and the receiving
+/// node has no notion of the originating session. This is the lookup that
+/// serves it: an id-keyed index entry maintained by the create/drop/rename
+/// batches, so resolving one costs a `get` instead of a scan of every table in
+/// the catalog.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn relation_name_of(
+    kv: &dyn Kv,
+    table_id: TableId,
+) -> Result<Option<RelationName>, CatalogError> {
+    let Some(value) = kv.get(&key::catalog_by_id_key(table_id))? else {
+        return Ok(None);
+    };
+    // `key_parts` yields exactly the count it was asked for, or nothing.
+    let parts = key::key_parts(&value, 2).ok_or_else(|| {
+        KvError::CorruptRow("table id index entry is not two length-prefixed parts".into())
+    })?;
+    Ok(Some(RelationName::new(parts[0], parts[1])))
+}
+
+/// The table `table_id` names.
+///
+/// # Errors
+///
+/// Returns undefined-table or storage/corruption errors from the catalog KV seam.
+pub fn table_by_id(kv: &dyn Kv, table_id: TableId) -> Result<Table, CatalogError> {
+    let name = relation_name_of(kv, table_id)?
+        .ok_or_else(|| CatalogError::UndefinedTable(format!("table id {table_id}")))?;
+    get_table(kv, &name)
+}
+
+const VIEW_PREFIX: &[u8] = b"\0\0\0\0catalog_view/";
+const SEQUENCE_PREFIX: &[u8] = b"\0\0\0\0catalog_sequence/";
+
+fn view_key(relation: &RelationName) -> Vec<u8> {
+    let mut key = VIEW_PREFIX.to_vec();
+    key::push_key_part(&mut key, &relation.schema);
+    key::push_key_part(&mut key, &relation.name);
+    key
+}
+
+fn catalog_sequence_key(relation: &RelationName) -> Vec<u8> {
+    let mut key = SEQUENCE_PREFIX.to_vec();
+    key::push_key_part(&mut key, &relation.schema);
+    key::push_key_part(&mut key, &relation.name);
+    key
+}
 
 fn schema_key(name: &str) -> Vec<u8> {
     let mut key = SCHEMA_PREFIX.to_vec();
@@ -372,31 +709,25 @@ fn schema_key(name: &str) -> Vec<u8> {
     key
 }
 
-/// Split a canonical relation name into `(schema, relation)`.
+fn dropped_schema_key(name: &str) -> Vec<u8> {
+    let mut key = DROPPED_SCHEMA_PREFIX.to_vec();
+    key.extend_from_slice(name.as_bytes());
+    key
+}
+
+/// The owner `name` is bootstrapped under, when it is a bootstrap schema.
+fn bootstrap_schema_owner(name: &str) -> Option<&'static str> {
+    BOOTSTRAP_SCHEMAS
+        .iter()
+        .find(|(schema, _)| *schema == name)
+        .map(|(_, owner)| *owner)
+}
+
+/// Every schema, bootstrap ones included, sorted by name.
 ///
-/// A relation in `public` is stored under its bare name, so that the catalog
-/// keyspace of an engine that never names a schema is exactly what it was; a
-/// relation in any other schema is stored qualified.
-#[must_use]
-pub fn split_schema(name: &str) -> (&str, &str) {
-    match name.split_once('.') {
-        Some((schema, relation)) => (schema, relation),
-        None => ("public", name),
-    }
-}
-
-/// The canonical catalog name of `relation` in `schema` — the inverse of
-/// [`split_schema`].
-#[must_use]
-pub fn qualify(schema: &str, relation: &str) -> String {
-    if schema == "public" {
-        relation.to_string()
-    } else {
-        format!("{schema}.{relation}")
-    }
-}
-
-/// Every schema, built-ins included, sorted by name.
+/// A stored row wins over the bootstrap row of the same name, so
+/// `ALTER SCHEMA … OWNER TO` on a bootstrap schema replaces it rather than
+/// duplicating it.
 ///
 /// # Errors
 ///
@@ -415,10 +746,14 @@ pub fn list_schemas(kv: &dyn Kv) -> Result<Vec<Schema>, CatalogError> {
             Ok(Schema { name, owner })
         })
         .collect::<Result<Vec<_>, CatalogError>>()?;
-    for builtin in BUILTIN_SCHEMAS {
+    for (name, owner) in BOOTSTRAP_SCHEMAS {
+        let stored = schemas.iter().any(|schema| schema.name == *name);
+        if stored || kv.get(&dropped_schema_key(name))?.is_some() {
+            continue;
+        }
         schemas.push(Schema {
-            name: (*builtin).to_string(),
-            owner: BOOTSTRAP_ROLE.to_string(),
+            name: (*name).to_string(),
+            owner: (*owner).to_string(),
         });
     }
     schemas.sort_by(|left, right| left.name.cmp(&right.name));
@@ -431,27 +766,44 @@ pub fn list_schemas(kv: &dyn Kv) -> Result<Vec<Schema>, CatalogError> {
 ///
 /// Returns storage/corruption errors from the catalog KV seam.
 pub fn schema_exists(kv: &dyn Kv, name: &str) -> Result<bool, CatalogError> {
-    Ok(BUILTIN_SCHEMAS.contains(&name) || kv.get(&schema_key(name))?.is_some())
+    if kv.get(&schema_key(name))?.is_some() {
+        return Ok(true);
+    }
+    Ok(bootstrap_schema_owner(name).is_some() && kv.get(&dropped_schema_key(name))?.is_none())
 }
 
 /// Build the write batch for `CREATE SCHEMA`.
 ///
+/// The reserved-prefix rule is checked before the name is looked up, which is
+/// why `CREATE SCHEMA pg_catalog` reports an unacceptable name rather than a
+/// duplicate.
+///
 /// # Errors
 ///
-/// Returns duplicate-schema or storage/corruption errors from the catalog KV
-/// seam.
+/// Returns reserved-name, duplicate-schema, or storage/corruption errors from
+/// the catalog KV seam.
 pub fn create_schema_ops(
     kv: &dyn Kv,
     name: &str,
     owner: &str,
 ) -> Result<Vec<WriteOp>, CatalogError> {
+    if name.starts_with(RESERVED_SCHEMA_PREFIX) {
+        return Err(CatalogError::ReservedSchemaName(name.to_string()));
+    }
     if schema_exists(kv, name)? {
         return Err(CatalogError::DuplicateSchema(name.to_string()));
     }
-    Ok(vec![WriteOp::Put {
+    let mut ops = vec![WriteOp::Put {
         key: schema_key(name),
         value: owner.as_bytes().to_vec(),
-    }])
+    }];
+    if bootstrap_schema_owner(name).is_some() {
+        // Re-creating a dropped bootstrap schema retires its tombstone.
+        ops.push(WriteOp::Delete {
+            key: dropped_schema_key(name),
+        });
+    }
+    Ok(ops)
 }
 
 /// Build the write batch for `ALTER SCHEMA … OWNER TO`.
@@ -476,31 +828,63 @@ pub fn set_schema_owner_ops(
 
 /// The names of every relation, view and sequence stored in `schema`.
 ///
+/// Each family is a prefix scan over the schema's own subtree. With a flat
+/// namespace this could only be answered by listing the entire catalog and
+/// filtering, which is also why `CREATE TABLE "a/b"` used to escape
+/// `DROP SCHEMA … CASCADE`: the scan recovered names by rejecting any key
+/// suffix holding a `/`.
+///
 /// # Errors
 ///
 /// Returns storage/corruption errors from the catalog KV seam.
-pub fn schema_contents(kv: &dyn Kv, schema: &str) -> Result<Vec<String>, CatalogError> {
-    let mut names: Vec<String> = list_tables(kv)?
-        .into_iter()
-        .map(|table| table.name)
-        .chain(list_views(kv)?.into_iter().map(|view| view.name))
-        .chain(list_sequences(kv)?.into_iter().map(|(name, _)| name))
-        .filter(|name| split_schema(name).0 == schema)
-        .collect();
+pub fn schema_contents(kv: &dyn Kv, schema: &str) -> Result<Vec<RelationName>, CatalogError> {
+    let mut names = Vec::new();
+    for family in [
+        key::catalog_prefix(),
+        VIEW_PREFIX.to_vec(),
+        SEQUENCE_PREFIX.to_vec(),
+    ] {
+        let mut in_schema = family.clone();
+        key::push_key_part(&mut in_schema, schema);
+        for (stored, _) in kv.scan_prefix(&in_schema)? {
+            if let Some(name) = relation_name_from_key(&family, &stored) {
+                names.push(name);
+            }
+        }
+    }
     names.sort();
     names.dedup();
     Ok(names)
+}
+
+/// Recover the `(schema, name)` a relation-family key was built from.
+///
+/// A key that does not decode as exactly two length-prefixed parts belongs to
+/// a neighbouring family and is skipped — a structural rejection, where the
+/// flat layout had to guess by looking for a separator character the name was
+/// assumed not to contain.
+fn relation_name_from_key(family_prefix: &[u8], stored: &[u8]) -> Option<RelationName> {
+    let suffix = stored.strip_prefix(family_prefix)?;
+    let [schema, name] = key::key_parts(suffix, 2)?[..] else {
+        return None;
+    };
+    Some(RelationName::new(schema, name))
 }
 
 /// Build the write batch for dropping an empty schema.
 ///
 /// The caller drops the schema's contents first when `CASCADE` was written;
 /// this refuses a non-empty schema with 2BP01, exactly as `RESTRICT` does in
-/// `PostgreSQL`.
+/// `PostgreSQL`, and refuses a [system schema](SYSTEM_SCHEMAS) outright.
+///
+/// Dropping a bootstrap schema leaves a tombstone behind, because there is no
+/// stored row to delete: the schema exists only because [`list_schemas`]
+/// synthesises it.
 ///
 /// # Errors
 ///
-/// Returns undefined-schema, dependent-object, or storage/corruption errors.
+/// Returns undefined-schema, system-schema, dependent-object, or
+/// storage/corruption errors.
 pub fn drop_schema_ops(
     kv: &dyn Kv,
     name: &str,
@@ -509,14 +893,22 @@ pub fn drop_schema_ops(
     if !schema_exists(kv, name)? {
         return Err(CatalogError::UndefinedSchema(name.to_string()));
     }
-    if !cascade && !schema_contents(kv, name)?.is_empty() {
-        return Err(CatalogError::DependentObjectsStillExist(format!(
-            "cannot drop schema {name} because other objects depend on it"
-        )));
+    if SYSTEM_SCHEMAS.contains(&name) {
+        return Err(CatalogError::SystemSchemaDrop(name.to_string()));
     }
-    Ok(vec![WriteOp::Delete {
+    if !cascade && !schema_contents(kv, name)?.is_empty() {
+        return Err(CatalogError::SchemaNotEmpty(name.to_string()));
+    }
+    let mut ops = vec![WriteOp::Delete {
         key: schema_key(name),
-    }])
+    }];
+    if bootstrap_schema_owner(name).is_some() {
+        ops.push(WriteOp::Put {
+            key: dropped_schema_key(name),
+            value: Vec::new(),
+        });
+    }
+    Ok(ops)
 }
 
 /// Build the atomic catalog batch for renaming an ordinary or foreign table.
@@ -524,8 +916,11 @@ pub fn drop_schema_ops(
 /// Rows and local secondary-index entries are keyed by immutable IDs, so their
 /// physical keys do not move. Index *metadata* and table privileges carry the
 /// table name and are rewritten in the same batch. Index names are preserved.
-/// Stored views retain SQL text rather than dependency identities; until that
-/// representation can be rewritten safely, any stored view blocks a rename.
+/// Foreign keys are id-keyed on both sides, so only the denormalized display
+/// names in their payloads are rewritten — on the table's own constraints and
+/// on every constraint that references it. Stored views retain SQL text rather
+/// than dependency identities; until that representation can be rewritten
+/// safely, any stored view blocks a rename.
 ///
 /// # Errors
 ///
@@ -533,10 +928,10 @@ pub fn drop_schema_ops(
 /// storage/corruption errors from the catalog KV seam.
 pub fn rename_table_ops(
     kv: &dyn Kv,
-    name: &str,
-    new_name: &str,
+    name: &RelationName,
+    new_name: &RelationName,
 ) -> Result<Vec<WriteOp>, CatalogError> {
-    let schema = match kv.get(&key::catalog_key(name))? {
+    let schema = match kv.get(&catalog_key(name))? {
         Some(schema) => schema,
         None if kv.get(&view_key(name))?.is_some() => {
             return Err(CatalogError::WrongObjectType(name.to_string()));
@@ -550,28 +945,29 @@ pub fn rename_table_ops(
     let (table_id, _, _, _, _) = deserialize_schema(&schema)?;
     let mut ops = vec![
         WriteOp::Delete {
-            key: key::catalog_key(name),
+            key: catalog_key(name),
         },
         WriteOp::Put {
-            key: key::catalog_key(new_name),
+            key: catalog_key(new_name),
             value: schema,
         },
+        catalog_by_id_op(table_id, new_name),
     ];
-    if let Some(sharding) = kv.get(&key::catalog_sharding_key(name))? {
+    if let Some(sharding) = kv.get(&sharding_key(name))? {
         ops.push(WriteOp::Delete {
-            key: key::catalog_sharding_key(name),
+            key: sharding_key(name),
         });
         ops.push(WriteOp::Put {
-            key: key::catalog_sharding_key(new_name),
+            key: sharding_key(new_name),
             value: sharding,
         });
     }
     for (table_index_key, index_bytes) in kv.scan_prefix(&catalog_table_index_prefix(table_id))? {
         let mut index = deserialize_index(&index_bytes)?;
-        index.table = new_name.to_string();
+        index.table = new_name.clone();
         let renamed_index = serialize_index(&index);
         ops.push(WriteOp::Put {
-            key: catalog_index_key(&index.name),
+            key: catalog_index_key(&index.qualified_name()),
             value: renamed_index.clone(),
         });
         ops.push(WriteOp::Put {
@@ -580,7 +976,7 @@ pub fn rename_table_ops(
         });
     }
     for (privilege_key, privilege) in scan_table_privileges(kv)? {
-        if privilege.table != name {
+        if privilege.table != *name {
             continue;
         }
         ops.push(WriteOp::Delete { key: privilege_key });
@@ -589,6 +985,7 @@ pub fn rename_table_ops(
             value: serialize_table_privilege(new_name, &privilege.grantee, &privilege.privilege),
         });
     }
+    ops.extend(rename_table_foreign_key_ops(kv, table_id, new_name)?);
     Ok(ops)
 }
 
@@ -603,10 +1000,48 @@ pub fn rename_table_ops(
 /// Returns duplicate-table or storage/corruption errors from the catalog KV seam.
 pub fn create_table_ops(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     columns: Vec<Column>,
 ) -> Result<(TableId, Vec<WriteOp>), CatalogError> {
-    create_table_with_options_ops(kv, name, columns, TableOptions::default(), Vec::new())
+    create_table_with_options_ops(
+        kv,
+        name,
+        columns,
+        TableOptions::default(),
+        Vec::new(),
+        TableIdSource::Counter,
+    )
+}
+
+/// Where the id a new table is created under comes from.
+///
+/// The shared counter's read-bump-commit is only atomic while the caller holds
+/// the lock that covers it, so a session that has already claimed a block of
+/// ids under that lock hands one out itself rather than touching the counter
+/// again — which is what keeps `CREATE TEMP TABLE` off the cluster-wide
+/// critical path. The cost is that ids stop being densely allocated in creation
+/// order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TableIdSource {
+    /// Read the shared counter and bump it in the same batch. The caller must
+    /// hold whatever lock makes that pair atomic.
+    Counter,
+    /// Use an id the caller already reserved. The counter is not read and not
+    /// written.
+    Reserved(TableId),
+}
+
+impl TableIdSource {
+    /// The id to create under, and the counter bump the batch owes.
+    fn allocate(self, kv: &dyn Kv) -> Result<(TableId, Option<WriteOp>), CatalogError> {
+        match self {
+            Self::Counter => {
+                let next = read_next_table_id(kv)?;
+                Ok((next, Some(set_next_table_id_op(next + 1))))
+            }
+            Self::Reserved(id) => Ok((id, None)),
+        }
+    }
 }
 
 #[expect(
@@ -620,29 +1055,28 @@ pub fn create_table_ops(
 /// Returns duplicate-table or storage/corruption errors from the catalog KV seam.
 pub fn create_table_with_options_ops(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     columns: Vec<Column>,
     options: TableOptions,
     checks: Vec<CheckConstraint>,
+    id: TableIdSource,
 ) -> Result<(TableId, Vec<WriteOp>), CatalogError> {
     if relation_exists(kv, name)? {
         return Err(CatalogError::DuplicateTable(name.to_string()));
     }
-    let next = read_next_table_id(kv)?;
-    let batch = vec![
+    let (next, bump) = id.allocate(kv)?;
+    let mut batch = vec![
         WriteOp::Put {
-            key: key::catalog_key(name),
+            key: catalog_key(name),
             value: serialize_schema(next, &columns, options, None, &checks),
         },
         WriteOp::Put {
             key: key::seq_key(next),
             value: U64::new(1).as_bytes().to_vec(),
         },
-        WriteOp::Put {
-            key: key::meta_next_table_id_key(),
-            value: U32::new(next + 1).as_bytes().to_vec(),
-        },
+        catalog_by_id_op(next, name),
     ];
+    batch.extend(bump);
     Ok((next, batch))
 }
 
@@ -653,7 +1087,7 @@ pub fn create_table_with_options_ops(
 /// Returns duplicate-relation or storage/corruption errors from the catalog KV seam.
 pub fn create_view_ops(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     definition: String,
     columns: Vec<Column>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
@@ -661,7 +1095,7 @@ pub fn create_view_ops(
         return Err(CatalogError::DuplicateTable(name.to_string()));
     }
     let view = View {
-        name: name.to_string(),
+        name: name.clone(),
         definition,
         columns,
     };
@@ -678,7 +1112,7 @@ pub fn create_view_ops(
 /// Returns duplicate-relation or storage/corruption errors from the catalog KV seam.
 pub fn create_view(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     definition: String,
     columns: Vec<Column>,
 ) -> Result<(), CatalogError> {
@@ -691,7 +1125,7 @@ pub fn create_view(
 /// # Errors
 ///
 /// Returns undefined-relation or storage/corruption errors from the catalog KV seam.
-pub fn get_view(kv: &dyn Kv, name: &str) -> Result<View, CatalogError> {
+pub fn get_view(kv: &dyn Kv, name: &RelationName) -> Result<View, CatalogError> {
     let bytes = kv
         .get(&view_key(name))?
         .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
@@ -704,12 +1138,13 @@ pub fn get_view(kv: &dyn Kv, name: &str) -> Result<View, CatalogError> {
 ///
 /// Returns storage/corruption errors from the catalog KV seam.
 pub fn list_views(kv: &dyn Kv) -> Result<Vec<View>, CatalogError> {
-    let mut prefix = key::catalog_key("");
-    prefix.extend_from_slice(b"\0view/");
-    kv.scan_prefix(&prefix)?
+    let mut views = kv
+        .scan_prefix(VIEW_PREFIX)?
         .into_iter()
         .map(|(_, bytes)| deserialize_view(&bytes).map_err(CatalogError::from))
-        .collect()
+        .collect::<Result<Vec<View>, CatalogError>>()?;
+    views.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(views)
 }
 
 /// Overwrite a stored view record in place (same name, new definition/columns).
@@ -728,7 +1163,7 @@ pub fn put_index_ops(index: &Index) -> Vec<WriteOp> {
     let bytes = serialize_index(index);
     vec![
         WriteOp::Put {
-            key: catalog_index_key(&index.name),
+            key: catalog_index_key(&index.qualified_name()),
             value: bytes.clone(),
         },
         WriteOp::Put {
@@ -748,16 +1183,16 @@ pub fn put_index_ops(index: &Index) -> Vec<WriteOp> {
 /// Returns undefined-table or storage/corruption errors from the catalog KV seam.
 pub fn replace_table_schema_ops(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     columns: &[Column],
     checks: &[CheckConstraint],
 ) -> Result<Vec<WriteOp>, CatalogError> {
     let bytes = kv
-        .get(&key::catalog_key(name))?
+        .get(&catalog_key(name))?
         .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
     let (id, _, options, foreign, _) = deserialize_schema(&bytes)?;
     Ok(vec![WriteOp::Put {
-        key: key::catalog_key(name),
+        key: catalog_key(name),
         value: serialize_schema(id, columns, options, foreign.as_ref(), checks),
     }])
 }
@@ -767,13 +1202,13 @@ pub fn replace_table_schema_ops(
 /// # Errors
 ///
 /// Returns undefined-relation or storage/corruption errors from the catalog KV seam.
-pub fn drop_view_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogError> {
+pub fn drop_view_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, CatalogError> {
     if kv.get(&view_key(name))?.is_some() {
         return Ok(vec![WriteOp::Delete {
             key: view_key(name),
         }]);
     }
-    if kv.get(&key::catalog_key(name))?.is_some() {
+    if kv.get(&catalog_key(name))?.is_some() {
         return Err(CatalogError::WrongObjectType(name.to_string()));
     }
     Err(CatalogError::UndefinedTable(name.to_string()))
@@ -784,7 +1219,7 @@ pub fn drop_view_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogErr
 /// # Errors
 ///
 /// Returns undefined-relation or storage/corruption errors from the catalog KV seam.
-pub fn drop_view(kv: &dyn Kv, name: &str) -> Result<(), CatalogError> {
+pub fn drop_view(kv: &dyn Kv, name: &RelationName) -> Result<(), CatalogError> {
     kv.write_batch(&drop_view_ops(kv, name)?)?;
     Ok(())
 }
@@ -796,19 +1231,21 @@ pub fn drop_view(kv: &dyn Kv, name: &str) -> Result<(), CatalogError> {
 /// Returns duplicate-table or storage/corruption errors from the catalog KV seam.
 pub fn create_table_with_sharding_ops(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     columns: Vec<Column>,
     options: TableOptions,
     sharding: Option<&ShardingStrategy>,
     checks: Vec<CheckConstraint>,
+    id: TableIdSource,
 ) -> Result<(TableId, Vec<WriteOp>), CatalogError> {
     if let Some(ShardingStrategy::Hash(hash)) = sharding {
         validate_hash_sharding_column_defs(&columns, hash)?;
     }
-    let (table_id, mut ops) = create_table_with_options_ops(kv, name, columns, options, checks)?;
+    let (table_id, mut ops) =
+        create_table_with_options_ops(kv, name, columns, options, checks, id)?;
     if let Some(strategy) = sharding {
         ops.push(WriteOp::Put {
-            key: key::catalog_sharding_key(name),
+            key: sharding_key(name),
             value: serialize_sharding(Some(strategy)),
         });
     }
@@ -823,7 +1260,7 @@ pub fn create_table_with_sharding_ops(
 /// Returns duplicate-table or storage/corruption errors from the catalog KV seam.
 pub fn create_table(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     columns: Vec<Column>,
 ) -> Result<TableId, CatalogError> {
     let (next, batch) = create_table_ops(kv, name, columns)?;
@@ -838,11 +1275,18 @@ pub fn create_table(
 /// Returns duplicate-table or storage/corruption errors from the catalog KV seam.
 pub fn create_table_with_options(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     columns: Vec<Column>,
     options: TableOptions,
 ) -> Result<TableId, CatalogError> {
-    let (next, batch) = create_table_with_options_ops(kv, name, columns, options, Vec::new())?;
+    let (next, batch) = create_table_with_options_ops(
+        kv,
+        name,
+        columns,
+        options,
+        Vec::new(),
+        TableIdSource::Counter,
+    )?;
     kv.write_batch(&batch)?;
     Ok(next)
 }
@@ -852,28 +1296,11 @@ pub fn create_table_with_options(
 /// # Errors
 ///
 /// Returns undefined-table or storage/corruption errors from the catalog KV seam.
-pub fn get_table(kv: &dyn Kv, name: &str) -> Result<Table, CatalogError> {
-    // The stored name is the unqualified one, so a `public.t` lookup does not
-    // carry the qualifier into error messages or `pg_class`.
-    let name = key::unqualified_relation(name);
+pub fn get_table(kv: &dyn Kv, name: &RelationName) -> Result<Table, CatalogError> {
     let bytes = kv
-        .get(&key::catalog_key(name))?
+        .get(&catalog_key(name))?
         .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
-    let (id, columns, options, foreign, checks) = deserialize_schema(&bytes)?;
-    let sharding = kv
-        .get(&key::catalog_sharding_key(name))?
-        .map(|bytes| deserialize_sharding(&bytes))
-        .transpose()?
-        .flatten();
-    Ok(Table {
-        id,
-        name: name.to_string(),
-        columns,
-        checks,
-        sharded: options.sharded,
-        sharding,
-        foreign,
-    })
+    table_from_schema_bytes(kv, name, &bytes)
 }
 
 /// Return every ordinary/foreign table in catalog-name order.
@@ -882,50 +1309,52 @@ pub fn get_table(kv: &dyn Kv, name: &str) -> Result<Table, CatalogError> {
 ///
 /// Returns storage/corruption errors from the catalog KV seam.
 pub fn list_tables(kv: &dyn Kv) -> Result<Vec<Table>, CatalogError> {
-    let prefix = key::catalog_key("");
+    let prefix = key::catalog_prefix();
     let mut tables = kv
         .scan_prefix(&prefix)?
         .into_iter()
         .filter_map(|(table_key, bytes)| {
-            table_name_from_catalog_key(&prefix, &table_key)
-                .map(|name| table_from_schema_bytes(kv, name, &bytes))
+            relation_name_from_key(&prefix, &table_key)
+                .map(|name| table_from_schema_bytes(kv, &name, &bytes))
         })
         .collect::<Result<Vec<_>, _>>()?;
     tables.sort_by(|left, right| left.name.cmp(&right.name));
     Ok(tables)
 }
 
-fn table_name_from_catalog_key<'a>(prefix: &[u8], table_key: &'a [u8]) -> Option<&'a str> {
-    let suffix = table_key.strip_prefix(prefix)?;
-    if suffix.contains(&b'/') {
-        return None;
-    }
-    std::str::from_utf8(suffix).ok()
-}
-
-fn view_key(name: &str) -> Vec<u8> {
-    let mut key = key::catalog_key("");
-    key.extend_from_slice(b"\0view/");
-    key.extend_from_slice(key::unqualified_relation(name).as_bytes());
-    key
-}
-
-fn relation_exists(kv: &dyn Kv, name: &str) -> Result<bool, CatalogError> {
-    Ok(kv.get(&key::catalog_key(name))?.is_some()
+/// True when `name` is taken by a table, a view or a sequence.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn relation_exists(kv: &dyn Kv, name: &RelationName) -> Result<bool, CatalogError> {
+    Ok(kv.get(&catalog_key(name))?.is_some()
         || kv.get(&view_key(name))?.is_some()
-        || kv.get(&catalog_sequence_key(name))?.is_some())
+        || kv.get(&catalog_sequence_key(name))?.is_some()
+        // An index shares the relation namespace with tables, views and
+        // sequences, exactly as it does in `pg_class`: `CREATE TABLE i` after
+        // `CREATE INDEX i` is `42P07 relation "i" already exists`. Leaving
+        // indexes out here is not merely a missing duplicate check — it also
+        // makes an index invisible to unqualified name resolution, so a
+        // `DROP INDEX` naming one in a schema other than the fallback walks
+        // the whole search path, matches nothing, and reports `42704`.
+        || kv.get(&catalog_index_key(name))?.is_some())
 }
 
-fn table_from_schema_bytes(kv: &dyn Kv, name: &str, bytes: &[u8]) -> Result<Table, CatalogError> {
+fn table_from_schema_bytes(
+    kv: &dyn Kv,
+    name: &RelationName,
+    bytes: &[u8],
+) -> Result<Table, CatalogError> {
     let (id, columns, options, foreign, checks) = deserialize_schema(bytes)?;
     let sharding = kv
-        .get(&key::catalog_sharding_key(name))?
+        .get(&sharding_key(name))?
         .map(|bytes| deserialize_sharding(&bytes))
         .transpose()?
         .flatten();
     Ok(Table {
         id,
-        name: name.to_string(),
+        name: name.clone(),
         columns,
         sharded: options.sharded,
         sharding,
@@ -941,10 +1370,10 @@ fn table_from_schema_bytes(kv: &dyn Kv, name: &str, bytes: &[u8]) -> Result<Tabl
 /// Returns undefined-table or storage/corruption errors from the catalog KV seam.
 pub fn get_table_sharding(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
 ) -> Result<Option<ShardingStrategy>, CatalogError> {
     let _table = get_table(kv, name)?;
-    let Some(bytes) = kv.get(&key::catalog_sharding_key(name))? else {
+    let Some(bytes) = kv.get(&sharding_key(name))? else {
         return Ok(None);
     };
 
@@ -958,14 +1387,14 @@ pub fn get_table_sharding(
 /// Returns undefined-table or storage/corruption errors from the catalog KV seam.
 pub fn set_table_sharding_ops(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     sharding: Option<&ShardingStrategy>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
     let table = get_table(kv, name)?;
     if let Some(ShardingStrategy::Hash(hash)) = sharding {
         validate_hash_sharding_columns(&table, hash)?;
     }
-    let key = key::catalog_sharding_key(name);
+    let key = sharding_key(name);
     let op = match sharding {
         None => WriteOp::Delete { key },
         Some(strategy) => WriteOp::Put {
@@ -990,12 +1419,12 @@ pub fn set_table_sharding_ops(
 /// undefined-column, or storage/corruption errors from the catalog KV seam.
 pub fn complete_table_conversion_ops(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     sharding: Option<&ShardingStrategy>,
     mut rewrite_ops: Vec<WriteOp>,
 ) -> Result<Vec<WriteOp>, CatalogError> {
     let bytes = kv
-        .get(&key::catalog_key(name))?
+        .get(&catalog_key(name))?
         .ok_or_else(|| CatalogError::UndefinedTable(name.to_string()))?;
     let (id, columns, options, foreign, checks) = deserialize_schema(&bytes)?;
     if foreign.is_some() {
@@ -1003,7 +1432,7 @@ pub fn complete_table_conversion_ops(
     }
     let table = Table {
         id,
-        name: name.to_string(),
+        name: name.clone(),
         columns,
         sharded: options.sharded,
         sharding: get_table_sharding(kv, name)?,
@@ -1016,7 +1445,7 @@ pub fn complete_table_conversion_ops(
     validate_conversion_rewrite(kv, table.id, &rewrite_ops)?;
 
     rewrite_ops.push(WriteOp::Put {
-        key: key::catalog_key(name),
+        key: catalog_key(name),
         value: serialize_schema(
             id,
             &table.columns,
@@ -1073,18 +1502,19 @@ fn validate_conversion_rewrite(
     Err(CatalogError::IncompleteConversionRewrite)
 }
 
-fn catalog_index_key(name: &str) -> Vec<u8> {
-    let mut out = b"\0\0\0\0catalog/index/by-name/".to_vec();
-    out.extend_from_slice(name.as_bytes());
+fn catalog_index_key(name: &RelationName) -> Vec<u8> {
+    let mut out = catalog_index_prefix();
+    key::push_key_part(&mut out, &name.schema);
+    key::push_key_part(&mut out, &name.name);
     out
 }
 
 fn catalog_index_prefix() -> Vec<u8> {
-    b"\0\0\0\0catalog/index/by-name/".to_vec()
+    b"\0\0\0\0catalog_index/by-name/".to_vec()
 }
 
 fn catalog_table_index_key(table_id: TableId, index_name: &str) -> Vec<u8> {
-    let mut out = b"\0\0\0\0catalog/index/by-table/".to_vec();
+    let mut out = b"\0\0\0\0catalog_index/by-table/".to_vec();
     out.extend_from_slice(&table_id.to_be_bytes());
     out.extend_from_slice(b"/");
     out.extend_from_slice(index_name.as_bytes());
@@ -1092,7 +1522,7 @@ fn catalog_table_index_key(table_id: TableId, index_name: &str) -> Vec<u8> {
 }
 
 fn catalog_table_index_prefix(table_id: TableId) -> Vec<u8> {
-    let mut out = b"\0\0\0\0catalog/index/by-table/".to_vec();
+    let mut out = b"\0\0\0\0catalog_index/by-table/".to_vec();
     out.extend_from_slice(&table_id.to_be_bytes());
     out.extend_from_slice(b"/");
     out
@@ -1102,28 +1532,60 @@ fn meta_next_index_id_key() -> Vec<u8> {
     b"\0\0\0\0meta/next_index_id".to_vec()
 }
 
-const COMMENT_PREFIX: &[u8] = b"\0\0\0\0catalog/comment/";
+const COMMENT_PREFIX: &[u8] = b"\0\0\0\0catalog_comment/";
 
-fn comment_key(object_kind: &str, object_name: &str) -> Vec<u8> {
+/// What a `COMMENT ON` statement attached its comment to.
+///
+/// A column comment names a *pair* — the relation and the column — and a
+/// relation name is itself a pair, so flattening either into one dotted string
+/// loses the boundary: `COMMENT ON COLUMN s.t.c` and a relation literally
+/// called `s.t.c` would land on the same key. Each part is stored
+/// length-prefixed instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommentObject<'a> {
+    /// A relation — a table, view, index or sequence.
+    Relation(&'a RelationName),
+    /// One column of a relation.
+    Column(&'a RelationName, &'a str),
+    /// Anything that is not a relation: a schema, a database, a role.
+    Named(&'a str),
+}
+
+impl<'a> CommentObject<'a> {
+    fn key_parts(self) -> Vec<&'a str> {
+        match self {
+            Self::Relation(relation) => vec![&relation.schema, &relation.name],
+            Self::Column(relation, column) => vec![&relation.schema, &relation.name, column],
+            Self::Named(name) => vec![name],
+        }
+    }
+}
+
+fn comment_key(object_kind: &str, object: CommentObject<'_>) -> Vec<u8> {
     let mut out = COMMENT_PREFIX.to_vec();
     out.extend_from_slice(object_kind.as_bytes());
     out.push(b'/');
-    out.extend_from_slice(object_name.as_bytes());
+    for part in object.key_parts() {
+        key::push_key_part(&mut out, part);
+    }
     out
 }
 
 /// Build the write op that sets (or, for `None`, clears) an object comment.
-/// `object_kind` is the lowercase `COMMENT ON <kind>` keyword and
-/// `object_name` the object's catalog name (`table.column` for a column).
+/// `object_kind` is the lowercase `COMMENT ON <kind>` keyword.
 #[must_use]
-pub fn set_comment_op(object_kind: &str, object_name: &str, comment: Option<&str>) -> WriteOp {
+pub fn set_comment_op(
+    object_kind: &str,
+    object: CommentObject<'_>,
+    comment: Option<&str>,
+) -> WriteOp {
     match comment {
         Some(text) => WriteOp::Put {
-            key: comment_key(object_kind, object_name),
+            key: comment_key(object_kind, object),
             value: text.as_bytes().to_vec(),
         },
         None => WriteOp::Delete {
-            key: comment_key(object_kind, object_name),
+            key: comment_key(object_kind, object),
         },
     }
 }
@@ -1136,9 +1598,9 @@ pub fn set_comment_op(object_kind: &str, object_name: &str, comment: Option<&str
 pub fn get_comment(
     kv: &dyn Kv,
     object_kind: &str,
-    object_name: &str,
+    object: CommentObject<'_>,
 ) -> Result<Option<String>, CatalogError> {
-    let Some(bytes) = kv.get(&comment_key(object_kind, object_name))? else {
+    let Some(bytes) = kv.get(&comment_key(object_kind, object))? else {
         return Ok(None);
     };
     String::from_utf8(bytes)
@@ -1152,21 +1614,19 @@ pub fn get_comment(
 /// # Errors
 ///
 /// Returns storage/corruption errors from the catalog KV seam.
-pub fn drop_relation_comment_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogError> {
+pub fn drop_relation_comment_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<Vec<WriteOp>, CatalogError> {
     let mut ops = Vec::new();
     for kind in ["table", "view", "index", "sequence", "column"] {
-        let mut prefix = COMMENT_PREFIX.to_vec();
-        prefix.extend_from_slice(kind.as_bytes());
-        prefix.push(b'/');
-        prefix.extend_from_slice(name.as_bytes());
+        // The relation's two length-prefixed parts are a complete prefix of
+        // both its own comment key and each of its column comment keys, and of
+        // nothing else — so unlike the flat layout this needs no guard against
+        // `t` matching `t2`.
+        let prefix = comment_key(kind, CommentObject::Relation(name));
         for (key, _) in kv.scan_prefix(&prefix)? {
-            // A column comment is keyed `column/<table>.<column>`; a bare prefix
-            // match would also catch `t2` when dropping `t`, so require either an
-            // exact hit or the column separator.
-            let suffix = &key[prefix.len()..];
-            if suffix.is_empty() || suffix.first() == Some(&b'.') {
-                ops.push(WriteOp::Delete { key });
-            }
+            ops.push(WriteOp::Delete { key });
         }
     }
     Ok(ops)
@@ -1192,12 +1652,12 @@ fn read_next_index_id(kv: &dyn Kv) -> Result<IndexId, CatalogError> {
 pub fn create_index_ops(
     kv: &dyn Kv,
     name: &str,
-    table: &str,
+    table: &RelationName,
     columns: Vec<String>,
     unique: bool,
     placement: IndexPlacement,
 ) -> Result<(IndexId, Vec<WriteOp>), CatalogError> {
-    if kv.get(&catalog_index_key(name))?.is_some() {
+    if kv.get(&catalog_index_key(&table.sibling(name)))?.is_some() {
         return Err(CatalogError::DuplicateIndex(name.to_string()));
     }
     let table_meta = get_table(kv, table)?;
@@ -1206,7 +1666,7 @@ pub fn create_index_ops(
     let index = Index {
         id,
         name: name.to_string(),
-        table: table.to_string(),
+        table: table.clone(),
         table_id: table_meta.id,
         columns,
         unique,
@@ -1216,7 +1676,7 @@ pub fn create_index_ops(
     let value = serialize_index(&index);
     let ops = vec![
         WriteOp::Put {
-            key: catalog_index_key(name),
+            key: catalog_index_key(&index.qualified_name()),
             value: value.clone(),
         },
         WriteOp::Put {
@@ -1246,7 +1706,10 @@ pub fn create_index_on_table_ops(
     unique: bool,
     placement: IndexPlacement,
 ) -> Result<(IndexId, Vec<WriteOp>), CatalogError> {
-    if kv.get(&catalog_index_key(name))?.is_some() {
+    if kv
+        .get(&catalog_index_key(&table.name.sibling(name)))?
+        .is_some()
+    {
         return Err(CatalogError::DuplicateIndex(name.to_string()));
     }
     validate_index_columns(table, &columns)?;
@@ -1264,7 +1727,7 @@ pub fn create_index_on_table_ops(
     let value = serialize_index(&index);
     let ops = vec![
         WriteOp::Put {
-            key: catalog_index_key(name),
+            key: catalog_index_key(&index.qualified_name()),
             value: value.clone(),
         },
         WriteOp::Put {
@@ -1296,7 +1759,10 @@ pub fn create_constraint_index_ops(
     table: &Table,
     new_index: &NewIndex,
 ) -> Result<(Index, Vec<WriteOp>), CatalogError> {
-    if kv.get(&catalog_index_key(&new_index.name))?.is_some() {
+    if kv
+        .get(&catalog_index_key(&table.name.sibling(&new_index.name)))?
+        .is_some()
+    {
         return Err(CatalogError::DuplicateIndex(new_index.name.clone()));
     }
     validate_index_columns(table, &new_index.columns)?;
@@ -1314,7 +1780,7 @@ pub fn create_constraint_index_ops(
     let value = serialize_index(&index);
     let ops = vec![
         WriteOp::Put {
-            key: catalog_index_key(&index.name),
+            key: catalog_index_key(&index.qualified_name()),
             value: value.clone(),
         },
         WriteOp::Put {
@@ -1340,11 +1806,11 @@ pub fn create_constraint_index_ops(
 /// from the catalog KV seam.
 pub fn set_columns_not_null_ops(
     kv: &dyn Kv,
-    table_name: &str,
+    table_name: &RelationName,
     not_null_columns: &[String],
 ) -> Result<Vec<WriteOp>, CatalogError> {
     let bytes = kv
-        .get(&key::catalog_key(table_name))?
+        .get(&catalog_key(table_name))?
         .ok_or_else(|| CatalogError::UndefinedTable(table_name.to_string()))?;
     let (id, mut columns, options, foreign, checks) = deserialize_schema(&bytes)?;
     for name in not_null_columns {
@@ -1355,7 +1821,7 @@ pub fn set_columns_not_null_ops(
         column.not_null = true;
     }
     Ok(vec![WriteOp::Put {
-        key: key::catalog_key(table_name),
+        key: catalog_key(table_name),
         value: serialize_schema(id, &columns, options, foreign.as_ref(), &checks),
     }])
 }
@@ -1379,7 +1845,9 @@ pub fn create_indexes_on_table_ops(
     let mut seen_names = HashSet::with_capacity(indexes.len());
     for index in indexes {
         if !seen_names.insert(index.name.as_str())
-            || kv.get(&catalog_index_key(&index.name))?.is_some()
+            || kv
+                .get(&catalog_index_key(&table.name.sibling(&index.name)))?
+                .is_some()
         {
             return Err(CatalogError::DuplicateIndex(index.name.clone()));
         }
@@ -1405,7 +1873,7 @@ pub fn create_indexes_on_table_ops(
         };
         let value = serialize_index(&index);
         ops.push(WriteOp::Put {
-            key: catalog_index_key(&index.name),
+            key: catalog_index_key(&index.qualified_name()),
             value: value.clone(),
         });
         ops.push(WriteOp::Put {
@@ -1431,7 +1899,7 @@ pub fn create_indexes_on_table_ops(
 pub fn create_index(
     kv: &dyn Kv,
     name: &str,
-    table: &str,
+    table: &RelationName,
     columns: Vec<String>,
     unique: bool,
     placement: IndexPlacement,
@@ -1446,10 +1914,10 @@ pub fn create_index(
 /// # Errors
 ///
 /// Returns undefined-index or storage/corruption errors.
-pub fn get_index(kv: &dyn Kv, name: &str) -> Result<Index, CatalogError> {
+pub fn get_index(kv: &dyn Kv, name: &RelationName) -> Result<Index, CatalogError> {
     let bytes = kv
         .get(&catalog_index_key(name))?
-        .ok_or_else(|| CatalogError::UndefinedIndex(name.to_string()))?;
+        .ok_or_else(|| CatalogError::UndefinedIndex(name.name.clone()))?;
     Ok(deserialize_index(&bytes)?)
 }
 
@@ -1462,16 +1930,19 @@ pub fn get_index(kv: &dyn Kv, name: &str) -> Result<Index, CatalogError> {
 ///
 /// Returns undefined-index, wrong-object-type, dependent-object, or storage
 /// errors from the catalog KV seam.
-pub fn drop_index_ops(kv: &dyn Kv, name: &str) -> Result<(Index, Vec<WriteOp>), CatalogError> {
+pub fn drop_index_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+) -> Result<(Index, Vec<WriteOp>), CatalogError> {
     let index = match get_index(kv, name) {
         Ok(index) => index,
         Err(CatalogError::UndefinedIndex(_)) if relation_exists(kv, name)? => {
-            return Err(CatalogError::WrongObjectType(name.to_string()));
+            return Err(CatalogError::WrongObjectType(name.name.clone()));
         }
         Err(error) => return Err(error),
     };
     if index.constraint.is_some() {
-        return Err(CatalogError::DependentObjectsStillExist(name.to_string()));
+        return Err(CatalogError::DependentObjectsStillExist(name.name.clone()));
     }
     Ok((index.clone(), drop_index_record_ops(&index)))
 }
@@ -1486,7 +1957,7 @@ pub fn drop_index_ops(kv: &dyn Kv, name: &str) -> Result<(Index, Vec<WriteOp>), 
 /// Returns undefined-index or storage/corruption errors from the catalog KV seam.
 pub fn drop_constraint_index_ops(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
 ) -> Result<(Index, Vec<WriteOp>), CatalogError> {
     let index = get_index(kv, name)?;
     Ok((index.clone(), drop_index_record_ops(&index)))
@@ -1495,7 +1966,7 @@ pub fn drop_constraint_index_ops(
 fn drop_index_record_ops(index: &Index) -> Vec<WriteOp> {
     vec![
         WriteOp::Delete {
-            key: catalog_index_key(&index.name),
+            key: catalog_index_key(&index.qualified_name()),
         },
         WriteOp::Delete {
             key: catalog_table_index_key(index.table_id, &index.name),
@@ -1518,10 +1989,314 @@ pub fn list_indexes(kv: &dyn Kv) -> Result<Vec<Index>, CatalogError> {
     Ok(indexes)
 }
 
-fn catalog_sequence_key(name: &str) -> Vec<u8> {
-    let mut out = b"\0\0\0\0catalog/sequence/by-name/".to_vec();
-    out.extend_from_slice(key::unqualified_relation(name).as_bytes());
+// ── Foreign keys ──────────────────────────────────────────────────────────────
+
+/// Authoritative foreign-key records, keyed `<child table id BE u32>/<name>`.
+///
+/// `(child_table_id, name)` *is* a constraint's identity: constraint names are
+/// per-relation in `PostgreSQL`, so the child id has to be part of the key. The
+/// key is id-based rather than name-based so a later wave that re-keys the
+/// name-keyed catalog families by schema does not have to touch this one — a
+/// relation can move or be renamed and its foreign keys stay put.
+const FOREIGN_KEY_BY_TABLE_PREFIX: &[u8] = b"\0\0\0\0catalog_fk/by-table/";
+
+/// Reverse index over the referenced side, keyed
+/// `<parent table id BE u32>/<child table id BE u32>/<name>` with an empty
+/// payload: the parent side needs "who references me?" on every DELETE or
+/// UPDATE of a referenced table, and scanning every foreign key in the catalog
+/// for that would make the check O(constraints in the database).
+const FOREIGN_KEY_BY_REF_PREFIX: &[u8] = b"\0\0\0\0catalog_fk/by-ref/";
+
+fn catalog_foreign_key_key(table_id: TableId, name: &str) -> Vec<u8> {
+    let mut out = catalog_table_foreign_key_prefix(table_id);
+    out.extend_from_slice(name.as_bytes());
     out
+}
+
+fn catalog_table_foreign_key_prefix(table_id: TableId) -> Vec<u8> {
+    let mut out = FOREIGN_KEY_BY_TABLE_PREFIX.to_vec();
+    out.extend_from_slice(&table_id.to_be_bytes());
+    out.push(b'/');
+    out
+}
+
+fn catalog_foreign_key_ref_key(
+    referenced_table_id: TableId,
+    table_id: TableId,
+    name: &str,
+) -> Vec<u8> {
+    let mut out = catalog_referencing_foreign_key_prefix(referenced_table_id);
+    out.extend_from_slice(&table_id.to_be_bytes());
+    out.push(b'/');
+    out.extend_from_slice(name.as_bytes());
+    out
+}
+
+fn catalog_referencing_foreign_key_prefix(referenced_table_id: TableId) -> Vec<u8> {
+    let mut out = FOREIGN_KEY_BY_REF_PREFIX.to_vec();
+    out.extend_from_slice(&referenced_table_id.to_be_bytes());
+    out.push(b'/');
+    out
+}
+
+/// Recover `(referenced table id, child table id, constraint name)` from a
+/// `fk/by-ref` key. Both ids are fixed-width and the name closes the key, so a
+/// constraint name containing the separator stays unambiguous.
+fn foreign_key_ref_key_parts(key: &[u8]) -> Result<(TableId, TableId, String), CatalogError> {
+    let corrupt = || CatalogError::Storage(KvError::CorruptRow("malformed fk/by-ref key".into()));
+    let suffix = key
+        .strip_prefix(FOREIGN_KEY_BY_REF_PREFIX)
+        .ok_or_else(corrupt)?;
+    let (referenced_table_id, rest) = split_key_table_id(suffix).ok_or_else(corrupt)?;
+    let (table_id, name) = split_key_table_id(rest).ok_or_else(corrupt)?;
+    let name = String::from_utf8(name.to_vec()).map_err(|_| {
+        CatalogError::Storage(KvError::CorruptRow("non-UTF-8 constraint name".into()))
+    })?;
+    Ok((referenced_table_id, table_id, name))
+}
+
+/// Split a leading `<table id BE u32>/` off a catalog key tail.
+fn split_key_table_id(bytes: &[u8]) -> Option<(TableId, &[u8])> {
+    let (id, rest) = bytes.split_at_checked(4)?;
+    let id = TableId::from_be_bytes(id.try_into().expect("4"));
+    Some((id, rest.strip_prefix(b"/")?))
+}
+
+/// Overwrite a foreign-key catalog record in place, under both the by-table and
+/// by-ref keys the catalog maintains.
+///
+/// Both keys derive from the ids, so this is an in-place rewrite of one
+/// constraint: it is the right call for a display-name rewrite, and the wrong
+/// one for a change of `table_id` or `referenced_table_id`, which moves the
+/// record and needs [`drop_foreign_key_ops`] plus [`create_foreign_key_ops`] so
+/// the old keys are removed.
+#[must_use]
+pub fn put_foreign_key_ops(fk: &ForeignKey) -> Vec<WriteOp> {
+    vec![
+        WriteOp::Put {
+            key: catalog_foreign_key_key(fk.table_id, &fk.name),
+            value: serialize_foreign_key(fk),
+        },
+        WriteOp::Put {
+            key: catalog_foreign_key_ref_key(fk.referenced_table_id, fk.table_id, &fk.name),
+            value: Vec::new(),
+        },
+    ]
+}
+
+/// Build the write batch that records a new foreign-key constraint.
+///
+/// The caller has already resolved the referent and the backing unique index;
+/// this only refuses a name the child relation already uses.
+///
+/// # Errors
+///
+/// Returns duplicate-constraint or storage/corruption errors from the catalog
+/// KV seam.
+pub fn create_foreign_key_ops(kv: &dyn Kv, fk: &ForeignKey) -> Result<Vec<WriteOp>, CatalogError> {
+    if kv
+        .get(&catalog_foreign_key_key(fk.table_id, &fk.name))?
+        .is_some()
+    {
+        return Err(CatalogError::DuplicateConstraint {
+            name: fk.name.clone(),
+            relation: fk.table.to_string(),
+        });
+    }
+    Ok(put_foreign_key_ops(fk))
+}
+
+/// Build the write batch that removes a foreign-key constraint, returning the
+/// definition so the caller can drop whatever it backs in the same batch.
+///
+/// # Errors
+///
+/// Returns undefined-constraint or storage/corruption errors from the catalog
+/// KV seam.
+pub fn drop_foreign_key_ops(
+    kv: &dyn Kv,
+    table_id: TableId,
+    name: &str,
+) -> Result<(ForeignKey, Vec<WriteOp>), CatalogError> {
+    let fk = get_foreign_key(kv, table_id, name)?;
+    let ops = drop_foreign_key_record_ops(&fk);
+    Ok((fk, ops))
+}
+
+fn drop_foreign_key_record_ops(fk: &ForeignKey) -> Vec<WriteOp> {
+    vec![
+        WriteOp::Delete {
+            key: catalog_foreign_key_key(fk.table_id, &fk.name),
+        },
+        WriteOp::Delete {
+            key: catalog_foreign_key_ref_key(fk.referenced_table_id, fk.table_id, &fk.name),
+        },
+    ]
+}
+
+/// Look up one foreign key by its `(child table, name)` identity.
+///
+/// # Errors
+///
+/// Returns undefined-constraint or storage/corruption errors from the catalog
+/// KV seam.
+pub fn get_foreign_key(
+    kv: &dyn Kv,
+    table_id: TableId,
+    name: &str,
+) -> Result<ForeignKey, CatalogError> {
+    let bytes = kv
+        .get(&catalog_foreign_key_key(table_id, name))?
+        .ok_or_else(|| CatalogError::UndefinedConstraint(name.to_string()))?;
+    Ok(deserialize_foreign_key(&bytes)?)
+}
+
+/// Every foreign key declared *on* a table — the child side — sorted by
+/// constraint name.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn list_table_foreign_keys(
+    kv: &dyn Kv,
+    table_id: TableId,
+) -> Result<Vec<ForeignKey>, CatalogError> {
+    let mut foreign_keys = kv
+        .scan_prefix(&catalog_table_foreign_key_prefix(table_id))?
+        .into_iter()
+        .map(|(_, bytes)| deserialize_foreign_key(&bytes).map_err(CatalogError::from))
+        .collect::<Result<Vec<_>, _>>()?;
+    foreign_keys.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(foreign_keys)
+}
+
+/// Every foreign key that *references* a table — the parent side — sorted by
+/// constraint name, then by child table id, since one name may be used by
+/// several referencing relations.
+///
+/// This is the read behind referential maintenance: a DELETE or key UPDATE on a
+/// referenced table asks it for the constraints that must be enforced.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam, including a
+/// reverse-index entry whose authoritative record is missing.
+pub fn list_referencing_foreign_keys(
+    kv: &dyn Kv,
+    table_id: TableId,
+) -> Result<Vec<ForeignKey>, CatalogError> {
+    let mut foreign_keys = Vec::new();
+    for (key, _) in kv.scan_prefix(&catalog_referencing_foreign_key_prefix(table_id))? {
+        let (_, child_id, name) = foreign_key_ref_key_parts(&key)?;
+        foreign_keys.push(read_indexed_foreign_key(kv, child_id, &name)?);
+    }
+    foreign_keys.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then(left.table_id.cmp(&right.table_id))
+    });
+    Ok(foreign_keys)
+}
+
+/// Read the record a reverse-index entry points at. A miss here is catalog
+/// corruption — the reverse entry exists — not the ordinary "no such
+/// constraint" a caller-supplied name can produce.
+fn read_indexed_foreign_key(
+    kv: &dyn Kv,
+    table_id: TableId,
+    name: &str,
+) -> Result<ForeignKey, CatalogError> {
+    get_foreign_key(kv, table_id, name).map_err(|error| match error {
+        CatalogError::UndefinedConstraint(name) => CatalogError::Storage(KvError::CorruptRow(
+            format!("foreign key \"{name}\" is indexed by referent but has no record"),
+        )),
+        error => error,
+    })
+}
+
+/// Every foreign key in the catalog, in child-table-id then constraint-name
+/// order — the enumeration behind `pg_constraint` introspection.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn list_foreign_keys(kv: &dyn Kv) -> Result<Vec<ForeignKey>, CatalogError> {
+    // The by-table key is the id then the name, so the scan already arrives in
+    // that order.
+    kv.scan_prefix(FOREIGN_KEY_BY_TABLE_PREFIX)?
+        .into_iter()
+        .map(|(_, bytes)| deserialize_foreign_key(&bytes).map_err(CatalogError::from))
+        .collect()
+}
+
+/// The write ops that remove every foreign key a table owns as the *child*,
+/// from both key families, plus any reverse entry naming it as a child whose
+/// record has already gone missing.
+///
+/// Constraints that *reference* the table are left alone: refusing (or
+/// cascading) that drop is a policy decision above the catalog.
+fn drop_table_foreign_key_ops(
+    kv: &dyn Kv,
+    table_id: TableId,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut ops = Vec::new();
+    let mut reverse_keys = HashSet::new();
+    for (fk_key, bytes) in kv.scan_prefix(&catalog_table_foreign_key_prefix(table_id))? {
+        let fk = deserialize_foreign_key(&bytes)?;
+        let reverse_key =
+            catalog_foreign_key_ref_key(fk.referenced_table_id, fk.table_id, &fk.name);
+        reverse_keys.insert(reverse_key.clone());
+        ops.push(WriteOp::Delete { key: fk_key });
+        ops.push(WriteOp::Delete { key: reverse_key });
+    }
+    for (key, _) in kv.scan_prefix(FOREIGN_KEY_BY_REF_PREFIX)? {
+        let (_, child_id, _) = foreign_key_ref_key_parts(&key)?;
+        if child_id == table_id && !reverse_keys.contains(&key) {
+            ops.push(WriteOp::Delete { key });
+        }
+    }
+    Ok(ops)
+}
+
+/// The write ops that rewrite the denormalized relation names every foreign key
+/// touching `table_id` carries, for a relation renamed to `new_name`.
+///
+/// Both key families are id-keyed, so nothing moves — only payloads are
+/// rewritten. A self-referencing constraint appears on both sides and is
+/// rewritten once, with both names updated.
+fn rename_table_foreign_key_ops(
+    kv: &dyn Kv,
+    table_id: TableId,
+    new_name: &RelationName,
+) -> Result<Vec<WriteOp>, CatalogError> {
+    let mut renamed: BTreeMap<Vec<u8>, ForeignKey> = BTreeMap::new();
+    for (fk_key, bytes) in kv.scan_prefix(&catalog_table_foreign_key_prefix(table_id))? {
+        let mut fk = deserialize_foreign_key(&bytes)?;
+        fk.table = new_name.clone();
+        renamed.insert(fk_key, fk);
+    }
+    for (key, _) in kv.scan_prefix(&catalog_referencing_foreign_key_prefix(table_id))? {
+        let (_, child_id, name) = foreign_key_ref_key_parts(&key)?;
+        let fk_key = catalog_foreign_key_key(child_id, &name);
+        let fk = match renamed.remove(&fk_key) {
+            Some(fk) => fk,
+            None => read_indexed_foreign_key(kv, child_id, &name)?,
+        };
+        renamed.insert(
+            fk_key,
+            ForeignKey {
+                referenced_table: new_name.clone(),
+                ..fk
+            },
+        );
+    }
+    Ok(renamed
+        .into_iter()
+        .map(|(key, fk)| WriteOp::Put {
+            key,
+            value: serialize_foreign_key(&fk),
+        })
+        .collect())
 }
 
 /// Build the write batch for creating a sequence catalog record.
@@ -1531,7 +2306,7 @@ fn catalog_sequence_key(name: &str) -> Vec<u8> {
 /// Returns duplicate-sequence, invalid-sequence, or storage/corruption errors.
 pub fn create_sequence_ops(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     sequence: Sequence,
 ) -> Result<Vec<WriteOp>, CatalogError> {
     validate_sequence(sequence)?;
@@ -1553,18 +2328,15 @@ pub fn create_sequence_ops(
 /// # Errors
 ///
 /// Returns storage/corruption errors from the catalog KV seam.
-pub fn list_sequences(kv: &dyn Kv) -> Result<Vec<(String, Sequence)>, CatalogError> {
-    let prefix = b"\0\0\0\0catalog/sequence/by-name/";
+pub fn list_sequences(kv: &dyn Kv) -> Result<Vec<(RelationName, Sequence)>, CatalogError> {
     let mut sequences = kv
-        .scan_prefix(prefix)?
+        .scan_prefix(SEQUENCE_PREFIX)?
         .into_iter()
-        .map(|(key, bytes)| {
-            let name = String::from_utf8(key[prefix.len()..].to_vec()).map_err(|_| {
-                CatalogError::Storage(KvError::CorruptRow("non-UTF-8 sequence name".into()))
-            })?;
-            Ok((name, deserialize_sequence(&bytes)?))
+        .filter_map(|(key, bytes)| {
+            let name = relation_name_from_key(SEQUENCE_PREFIX, &key)?;
+            Some(deserialize_sequence(&bytes).map(|sequence| (name, sequence)))
         })
-        .collect::<Result<Vec<_>, CatalogError>>()?;
+        .collect::<Result<Vec<_>, _>>()?;
     sequences.sort_by(|left, right| left.0.cmp(&right.0));
     Ok(sequences)
 }
@@ -1590,7 +2362,7 @@ pub fn server_version_string() -> String {
 /// # Errors
 ///
 /// Returns undefined-sequence or storage/corruption errors.
-pub fn get_sequence(kv: &dyn Kv, name: &str) -> Result<Sequence, CatalogError> {
+pub fn get_sequence(kv: &dyn Kv, name: &RelationName) -> Result<Sequence, CatalogError> {
     let bytes = kv
         .get(&catalog_sequence_key(name))?
         .ok_or_else(|| CatalogError::UndefinedSequence(name.to_string()))?;
@@ -1599,7 +2371,7 @@ pub fn get_sequence(kv: &dyn Kv, name: &str) -> Result<Sequence, CatalogError> {
 
 /// Replace a sequence record.
 #[must_use]
-pub fn put_sequence_op(name: &str, sequence: Sequence) -> WriteOp {
+pub fn put_sequence_op(name: &RelationName, sequence: Sequence) -> WriteOp {
     WriteOp::Put {
         key: catalog_sequence_key(name),
         value: serialize_sequence(sequence),
@@ -1611,7 +2383,7 @@ pub fn put_sequence_op(name: &str, sequence: Sequence) -> WriteOp {
 /// # Errors
 ///
 /// Returns undefined-sequence or storage/corruption errors.
-pub fn drop_sequence_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogError> {
+pub fn drop_sequence_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, CatalogError> {
     let _ = get_sequence(kv, name)?;
     Ok(vec![WriteOp::Delete {
         key: catalog_sequence_key(name),
@@ -1647,7 +2419,7 @@ fn validate_sequence(sequence: Sequence) -> Result<(), CatalogError> {
 /// # Errors
 ///
 /// Returns undefined-table or storage/corruption errors.
-pub fn list_table_indexes(kv: &dyn Kv, table: &str) -> Result<Vec<Index>, CatalogError> {
+pub fn list_table_indexes(kv: &dyn Kv, table: &RelationName) -> Result<Vec<Index>, CatalogError> {
     let table = get_table(kv, table)?;
     let mut indexes = kv
         .scan_prefix(&catalog_table_index_prefix(table.id))?
@@ -1670,7 +2442,26 @@ fn validate_index_columns(table: &Table, columns: &[String]) -> Result<(), Catal
     Ok(())
 }
 
+/// A hash sharding names exactly one column.
+///
+/// That is the arity the executor's row encoder hashes to place a row, and the
+/// only arity it agrees with the gateway on: the gateway derives a statement's
+/// route from *every* hash column's bytes, so a two-column key would store rows
+/// under the hash of the first column alone, in a range routing never visits.
+/// The SQL grammar already caps `SHARDED BY HASH (…)` at one column; this gates
+/// the callers that build a [`HashSharding`] against this API directly, so a
+/// table that could never be written to is never created either.
+fn validate_hash_sharding_arity(hash: &HashSharding) -> Result<(), CatalogError> {
+    if hash.columns.len() == 1 {
+        return Ok(());
+    }
+    Err(CatalogError::InvalidSharding(
+        "hash sharding requires exactly one column".into(),
+    ))
+}
+
 fn validate_hash_sharding_columns(table: &Table, hash: &HashSharding) -> Result<(), CatalogError> {
+    validate_hash_sharding_arity(hash)?;
     for column in &hash.columns {
         if table.column_index(column).is_none() {
             return Err(CatalogError::UndefinedColumn(column.clone()));
@@ -1683,6 +2474,7 @@ fn validate_hash_sharding_column_defs(
     columns: &[Column],
     hash: &HashSharding,
 ) -> Result<(), CatalogError> {
+    validate_hash_sharding_arity(hash)?;
     for hash_column in &hash.columns {
         if !columns.iter().any(|column| column.name == *hash_column) {
             return Err(CatalogError::UndefinedColumn(hash_column.clone()));
@@ -1696,17 +2488,25 @@ fn validate_hash_sharding_column_defs(
 /// table) are identical to `drop_table`. Used by the executor to route DDL
 /// writes through the durable-write seam.
 ///
+/// The table's own foreign keys go with it, from both the by-table and the
+/// by-ref key family. Foreign keys *referencing* the table are left in place:
+/// refusing such a drop, or cascading it, is a policy decision above the
+/// catalog, and the constraints belong to relations that still exist.
+///
 /// # Errors
 ///
 /// Returns undefined-table or storage/corruption errors from the catalog KV seam.
-pub fn drop_table_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogError> {
+pub fn drop_table_ops(kv: &dyn Kv, name: &RelationName) -> Result<Vec<WriteOp>, CatalogError> {
     let table = get_table(kv, name)?;
     let mut ops = vec![
         WriteOp::Delete {
-            key: key::catalog_key(name),
+            key: catalog_key(name),
         },
         WriteOp::Delete {
             key: key::seq_key(table.id),
+        },
+        WriteOp::Delete {
+            key: key::catalog_by_id_key(table.id),
         },
     ];
     for (row_key, _) in kv.scan_prefix(&key::table_prefix(table.id))? {
@@ -1715,12 +2515,13 @@ pub fn drop_table_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogEr
     for (index_table_key, index_bytes) in kv.scan_prefix(&catalog_table_index_prefix(table.id))? {
         let index = deserialize_index(&index_bytes)?;
         ops.push(WriteOp::Delete {
-            key: catalog_index_key(&index.name),
+            key: catalog_index_key(&index.qualified_name()),
         });
         ops.push(WriteOp::Delete {
             key: index_table_key,
         });
     }
+    ops.extend(drop_table_foreign_key_ops(kv, table.id)?);
     Ok(ops)
 }
 
@@ -1730,7 +2531,7 @@ pub fn drop_table_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogEr
 /// # Errors
 ///
 /// Returns undefined-table or storage/corruption errors from the catalog KV seam.
-pub fn drop_table(kv: &dyn Kv, name: &str) -> Result<(), CatalogError> {
+pub fn drop_table(kv: &dyn Kv, name: &RelationName) -> Result<(), CatalogError> {
     let ops = drop_table_ops(kv, name)?;
     kv.write_batch(&ops)?;
     Ok(())
@@ -1860,7 +2661,7 @@ pub fn drop_role_ops(kv: &dyn Kv, name: &str) -> Result<Vec<WriteOp>, CatalogErr
 /// Returns undefined-table, undefined-object, or storage/corruption errors.
 pub fn grant_table_privileges_ops(
     kv: &dyn Kv,
-    table: &str,
+    table: &RelationName,
     grantees: &[String],
     privileges: &[String],
 ) -> Result<Vec<WriteOp>, CatalogError> {
@@ -1885,7 +2686,7 @@ pub fn grant_table_privileges_ops(
 /// Returns undefined-table, undefined-object, or storage/corruption errors.
 pub fn revoke_table_privileges_ops(
     kv: &dyn Kv,
-    table: &str,
+    table: &RelationName,
     grantees: &[String],
     privileges: &[String],
 ) -> Result<Vec<WriteOp>, CatalogError> {
@@ -1929,13 +2730,11 @@ fn role_key(name: &str) -> Vec<u8> {
     key
 }
 
-fn table_privilege_key(table: &str, grantee: &str, privilege: &str) -> Vec<u8> {
+fn table_privilege_key(table: &RelationName, grantee: &str, privilege: &str) -> Vec<u8> {
     let mut key = TABLE_PRIVILEGE_PREFIX.to_vec();
-    key.extend_from_slice(table.as_bytes());
-    key.push(0);
-    key.extend_from_slice(grantee.as_bytes());
-    key.push(0);
-    key.extend_from_slice(privilege.as_bytes());
+    for part in [&table.schema, &table.name, grantee, privilege] {
+        key::push_key_part(&mut key, part);
+    }
     key
 }
 
@@ -1958,22 +2757,25 @@ fn deserialize_role(bytes: &[u8]) -> Result<Role, CatalogError> {
     })
 }
 
-fn serialize_table_privilege(table: &str, grantee: &str, privilege: &str) -> Vec<u8> {
-    [table, grantee, privilege].join("\0").into_bytes()
+fn serialize_table_privilege(table: &RelationName, grantee: &str, privilege: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for part in [&table.schema, &table.name, grantee, privilege] {
+        key::push_key_part(&mut bytes, part);
+    }
+    bytes
 }
 
 fn deserialize_table_privilege(bytes: &[u8]) -> Result<TablePrivilege, CatalogError> {
-    let text = std::str::from_utf8(bytes)
-        .map_err(|_| KvError::CorruptRow("table privilege is not utf8".into()))?;
-    let parts = text.split('\0').collect::<Vec<_>>();
-    if let [table, grantee, privilege] = parts.as_slice() {
-        return Ok(TablePrivilege {
-            table: (*table).to_string(),
-            grantee: (*grantee).to_string(),
-            privilege: (*privilege).to_string(),
-        });
-    }
-    Err(KvError::CorruptRow("table privilege has invalid shape".into()).into())
+    let parts = key::key_parts(bytes, 4)
+        .ok_or_else(|| KvError::CorruptRow("table privilege has invalid shape".into()))?;
+    let [schema, table, grantee, privilege] = parts[..] else {
+        return Err(KvError::CorruptRow("table privilege has invalid shape".into()).into());
+    };
+    Ok(TablePrivilege {
+        table: RelationName::new(schema, table),
+        grantee: grantee.to_string(),
+        privilege: privilege.to_string(),
+    })
 }
 
 // ── User-defined types ────────────────────────────────────────────────────────
@@ -2348,12 +3150,19 @@ fn envelope_columns() -> Vec<Column> {
 /// the catalog KV seam.
 pub fn create_foreign_table(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     value_columns: Vec<Column>,
     server: &str,
     options: Vec<(String, String)>,
 ) -> Result<TableId, CatalogError> {
-    let (next, batch) = create_foreign_table_ops(kv, name, value_columns, server, options)?;
+    let (next, batch) = create_foreign_table_ops(
+        kv,
+        name,
+        value_columns,
+        server,
+        options,
+        TableIdSource::Counter,
+    )?;
     kv.write_batch(&batch)?;
     Ok(next)
 }
@@ -2366,10 +3175,11 @@ pub fn create_foreign_table(
 /// the catalog KV seam.
 pub fn create_foreign_table_ops(
     kv: &dyn Kv,
-    name: &str,
+    name: &RelationName,
     value_columns: Vec<Column>,
     server: &str,
     options: Vec<(String, String)>,
+    id: TableIdSource,
 ) -> Result<(TableId, Vec<WriteOp>), CatalogError> {
     let _ = get_server(kv, server)?;
 
@@ -2377,7 +3187,7 @@ pub fn create_foreign_table_ops(
         return Err(CatalogError::DuplicateTable(name.to_string()));
     }
 
-    let next = read_next_table_id(kv)?;
+    let (next, bump) = id.allocate(kv)?;
     let mut columns = envelope_columns();
     columns.extend(value_columns);
 
@@ -2386,25 +3196,31 @@ pub fn create_foreign_table_ops(
         options,
     };
 
-    let batch = vec![
+    let mut batch = vec![
         WriteOp::Put {
-            key: key::catalog_key(name),
+            key: catalog_key(name),
             value: serialize_schema(next, &columns, TableOptions::default(), Some(&meta), &[]),
         },
         WriteOp::Put {
             key: key::seq_key(next),
             value: U64::new(1).as_bytes().to_vec(),
         },
-        WriteOp::Put {
-            key: key::meta_next_table_id_key(),
-            value: U32::new(next + 1).as_bytes().to_vec(),
-        },
+        catalog_by_id_op(next, name),
     ];
+    batch.extend(bump);
     Ok((next, batch))
 }
 
 /// Read the next `TableId` (defaults to 1 when the meta key is absent).
-fn read_next_table_id(kv: &dyn Kv) -> Result<TableId, CatalogError> {
+///
+/// Public because the session claims a block of ids from this counter under a
+/// lock of its own, rather than letting every `CREATE TABLE` read and bump it
+/// under the cluster-wide catalog lock.
+///
+/// # Errors
+///
+/// Returns storage/corruption errors from the catalog KV seam.
+pub fn read_next_table_id(kv: &dyn Kv) -> Result<TableId, CatalogError> {
     match kv.get(&key::meta_next_table_id_key())? {
         Some(b) => {
             let (v, _) = U32::read_from_prefix(b.as_slice())
@@ -2415,6 +3231,15 @@ fn read_next_table_id(kv: &dyn Kv) -> Result<TableId, CatalogError> {
     }
 }
 
+/// The op that sets the shared next-`TableId` counter to `next`.
+#[must_use]
+pub fn set_next_table_id_op(next: TableId) -> WriteOp {
+    WriteOp::Put {
+        key: key::meta_next_table_id_key(),
+        value: U32::new(next).as_bytes().to_vec(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use crabka_pgkv::{FjallKv, MemKv};
@@ -2422,11 +3247,151 @@ mod tests {
 
     use super::*;
 
+    /// A relation in `public`, which is where every fixture here lives.
+    fn rel(name: &str) -> RelationName {
+        RelationName::public(name)
+    }
+
     fn cols() -> Vec<Column> {
         vec![
             Column::new("id", ColumnType::Int4),
             Column::new("name", ColumnType::Text),
         ]
+    }
+
+    fn schema(name: &str, owner: &str) -> Schema {
+        Schema {
+            name: name.to_string(),
+            owner: owner.to_string(),
+        }
+    }
+
+    fn apply(kv: &MemKv, ops: &[WriteOp]) {
+        kv.write_batch(ops).expect("write");
+    }
+
+    /// A catalog nobody has written to still reports three schemas, each with
+    /// the owner `PostgreSQL` bootstraps it under. Nothing is stored for them,
+    /// so this is what [`list_schemas`] synthesises.
+    #[test]
+    fn a_fresh_catalog_reports_the_bootstrap_schemas() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        assert!(
+            list_schemas(&kv).expect("list")
+                == vec![
+                    schema("information_schema", "postgres"),
+                    schema("pg_catalog", "postgres"),
+                    schema("public", "pg_database_owner"),
+                ]
+        );
+        for name in ["public", "pg_catalog", "information_schema"] {
+            assert!(schema_exists(&kv, name).expect("exists"), "{name}");
+        }
+        assert!(!schema_exists(&kv, "nosuch").expect("exists"));
+    }
+
+    /// `public` is a real schema rather than a projection: it cannot be created
+    /// over, it can be dropped, it stays dropped, and creating it again gives an
+    /// ordinary schema owned by its creator.
+    #[test]
+    fn public_is_a_droppable_schema_that_already_exists() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        assert!(matches!(
+            create_schema_ops(&kv, "public", "alice"),
+            Err(CatalogError::DuplicateSchema(name)) if name == "public"
+        ));
+
+        apply(
+            &kv,
+            &drop_schema_ops(&kv, "public", false).expect("drop ops"),
+        );
+        assert!(!schema_exists(&kv, "public").expect("exists"));
+        assert!(
+            list_schemas(&kv).expect("list")
+                == vec![
+                    schema("information_schema", "postgres"),
+                    schema("pg_catalog", "postgres"),
+                ]
+        );
+        assert!(matches!(
+            drop_schema_ops(&kv, "public", false),
+            Err(CatalogError::UndefinedSchema(name)) if name == "public"
+        ));
+
+        apply(
+            &kv,
+            &create_schema_ops(&kv, "public", "alice").expect("create ops"),
+        );
+        assert!(
+            list_schemas(&kv).expect("list")
+                == vec![
+                    schema("information_schema", "postgres"),
+                    schema("pg_catalog", "postgres"),
+                    schema("public", "alice"),
+                ]
+        );
+    }
+
+    /// The system schemas refuse a drop however empty they are, and re-owning
+    /// one replaces its synthesised row rather than adding a second.
+    #[test]
+    fn system_schemas_refuse_a_drop_and_are_not_duplicated_by_a_stored_row() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        for name in SYSTEM_SCHEMAS {
+            assert!(
+                matches!(
+                    drop_schema_ops(&kv, name, true),
+                    Err(CatalogError::SystemSchemaDrop(dropped)) if dropped == *name
+                ),
+                "{name}"
+            );
+        }
+
+        apply(
+            &kv,
+            &set_schema_owner_ops(&kv, "pg_catalog", "alice").expect("owner ops"),
+        );
+        assert!(
+            list_schemas(&kv).expect("list")
+                == vec![
+                    schema("information_schema", "postgres"),
+                    schema("pg_catalog", "alice"),
+                    schema("public", "pg_database_owner"),
+                ]
+        );
+        assert!(matches!(
+            drop_schema_ops(&kv, "pg_catalog", true),
+            Err(CatalogError::SystemSchemaDrop(name)) if name == "pg_catalog"
+        ));
+    }
+
+    /// The reserved prefix is checked before the name is looked up, so
+    /// `pg_catalog` — which does exist — reports an unacceptable name rather
+    /// than a duplicate, and every SQLSTATE follows from the variant.
+    #[test]
+    fn the_reserved_prefix_outranks_the_duplicate_check() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        for name in ["pg_catalog", "pg_anything", "pg_"] {
+            assert!(
+                matches!(
+                    create_schema_ops(&kv, name, "alice"),
+                    Err(CatalogError::ReservedSchemaName(refused)) if refused == name
+                ),
+                "{name}"
+            );
+        }
+        apply(
+            &kv,
+            &create_schema_ops(&kv, "pgfoo", "alice").expect("create ops"),
+        );
+        assert!(schema_exists(&kv, "pgfoo").expect("exists"));
+
+        assert!(CatalogError::ReservedSchemaName("pg_x".into()).sqlstate() == "42939");
+        assert!(CatalogError::SystemSchemaDrop("pg_catalog".into()).sqlstate() == "2BP01");
     }
 
     /// `CHECK` constraints, identity kinds, and generated-column expressions
@@ -2467,15 +3432,16 @@ mod tests {
         ];
         let (_, ops) = create_table_with_options_ops(
             &kv,
-            "t",
+            &rel("t"),
             columns.clone(),
             TableOptions::default(),
             checks.clone(),
+            TableIdSource::Counter,
         )
         .expect("create ops");
         kv.write_batch(&ops).expect("write");
 
-        let table = get_table(&kv, "t").expect("table");
+        let table = get_table(&kv, &rel("t")).expect("table");
         assert!(table.columns == columns);
         assert!(table.checks == checks);
     }
@@ -2487,9 +3453,9 @@ mod tests {
     fn replacing_a_table_schema_preserves_its_identity() {
         use assert2::assert;
         let kv = MemKv::default();
-        create_table_with_options(&kv, "t", cols(), TableOptions { sharded: true })
+        create_table_with_options(&kv, &rel("t"), cols(), TableOptions { sharded: true })
             .expect("create");
-        let before = get_table(&kv, "t").expect("table");
+        let before = get_table(&kv, &rel("t")).expect("table");
 
         let mut columns = before.columns.clone();
         columns.push(Column::new("extra", ColumnType::Text));
@@ -2498,10 +3464,10 @@ mod tests {
             expr: "id > 0".into(),
             validated: true,
         }];
-        let ops = replace_table_schema_ops(&kv, "t", &columns, &checks).expect("replace ops");
+        let ops = replace_table_schema_ops(&kv, &rel("t"), &columns, &checks).expect("replace ops");
         kv.write_batch(&ops).expect("write");
 
-        let after = get_table(&kv, "t").expect("table");
+        let after = get_table(&kv, &rel("t")).expect("table");
         assert!(
             after
                 == Table {
@@ -2520,23 +3486,56 @@ mod tests {
         use assert2::assert;
         let kv = MemKv::default();
         kv.write_batch(&[
-            set_comment_op("table", "t", Some("table comment")),
-            set_comment_op("column", "t.id", Some("column comment")),
-            set_comment_op("table", "t2", Some("sibling comment")),
+            set_comment_op(
+                "table",
+                CommentObject::Relation(&rel("t")),
+                Some("table comment"),
+            ),
+            set_comment_op(
+                "column",
+                CommentObject::Column(&rel("t"), "id"),
+                Some("column comment"),
+            ),
+            set_comment_op(
+                "table",
+                CommentObject::Relation(&rel("t2")),
+                Some("sibling comment"),
+            ),
         ])
         .expect("write");
 
-        assert!(get_comment(&kv, "table", "t").expect("get") == Some("table comment".into()));
-        assert!(get_comment(&kv, "column", "t.id").expect("get") == Some("column comment".into()));
+        assert!(
+            get_comment(&kv, "table", CommentObject::Relation(&rel("t"))).expect("get")
+                == Some("table comment".into())
+        );
+        assert!(
+            get_comment(&kv, "column", CommentObject::Column(&rel("t"), "id")).expect("get")
+                == Some("column comment".into())
+        );
 
-        kv.write_batch(&[set_comment_op("table", "t", None)])
-            .expect("clear");
-        assert!(get_comment(&kv, "table", "t").expect("get").is_none());
+        kv.write_batch(&[set_comment_op(
+            "table",
+            CommentObject::Relation(&rel("t")),
+            None,
+        )])
+        .expect("clear");
+        assert!(
+            get_comment(&kv, "table", CommentObject::Relation(&rel("t")))
+                .expect("get")
+                .is_none()
+        );
 
-        let ops = drop_relation_comment_ops(&kv, "t").expect("drop ops");
+        let ops = drop_relation_comment_ops(&kv, &rel("t")).expect("drop ops");
         kv.write_batch(&ops).expect("write");
-        assert!(get_comment(&kv, "column", "t.id").expect("get").is_none());
-        assert!(get_comment(&kv, "table", "t2").expect("get") == Some("sibling comment".into()));
+        assert!(
+            get_comment(&kv, "column", CommentObject::Column(&rel("t"), "id"))
+                .expect("get")
+                .is_none()
+        );
+        assert!(
+            get_comment(&kv, "table", CommentObject::Relation(&rel("t2"))).expect("get")
+                == Some("sibling comment".into())
+        );
     }
 
     /// `DROP INDEX` refuses a constraint-backed index (2BP01) while
@@ -2545,8 +3544,8 @@ mod tests {
     fn constraint_backed_indexes_drop_only_through_the_constraint_path() {
         use assert2::assert;
         let kv = MemKv::default();
-        create_table(&kv, "t", cols()).expect("create");
-        let table = get_table(&kv, "t").expect("table");
+        create_table(&kv, &rel("t"), cols()).expect("create");
+        let table = get_table(&kv, &rel("t")).expect("table");
         let (_, ops) = create_constraint_index_ops(
             &kv,
             &table,
@@ -2562,23 +3561,24 @@ mod tests {
         kv.write_batch(&ops).expect("write");
 
         assert!(
-            drop_index_ops(&kv, "t_pkey").unwrap_err()
+            drop_index_ops(&kv, &rel("t_pkey")).unwrap_err()
                 == CatalogError::DependentObjectsStillExist("t_pkey".into())
         );
-        let (_, drop_ops) = drop_constraint_index_ops(&kv, "t_pkey").expect("constraint drop");
+        let (_, drop_ops) =
+            drop_constraint_index_ops(&kv, &rel("t_pkey")).expect("constraint drop");
         kv.write_batch(&drop_ops).expect("write");
-        assert!(get_index(&kv, "t_pkey").is_err());
+        assert!(get_index(&kv, &rel("t_pkey")).is_err());
     }
 
     #[test]
     fn roles_and_table_privileges_round_trip() {
         let kv = MemKv::default();
-        create_table(&kv, "docs", vec![Column::new("id", ColumnType::Int4)]).expect("table");
+        create_table(&kv, &rel("docs"), vec![Column::new("id", ColumnType::Int4)]).expect("table");
         create_role(&kv, "reader", false).expect("role");
 
         let ops = grant_table_privileges_ops(
             &kv,
-            "docs",
+            &rel("docs"),
             &["reader".to_string()],
             &["SELECT".to_string()],
         )
@@ -2588,7 +3588,7 @@ mod tests {
         assert_eq!(
             list_table_privileges(&kv).expect("privileges"),
             vec![TablePrivilege {
-                table: "docs".into(),
+                table: rel("docs"),
                 grantee: "reader".into(),
                 privilege: "SELECT".into(),
             }]
@@ -2596,7 +3596,7 @@ mod tests {
 
         let ops = revoke_table_privileges_ops(
             &kv,
-            "docs",
+            &rel("docs"),
             &["reader".to_string()],
             &["SELECT".to_string()],
         )
@@ -2606,8 +3606,8 @@ mod tests {
     }
 
     fn check_crud(kv: &dyn Kv) {
-        let id = create_table(kv, "t", cols()).expect("create");
-        let t = get_table(kv, "t").expect("lookup");
+        let id = create_table(kv, &rel("t"), cols()).expect("create");
+        let t = get_table(kv, &rel("t")).expect("lookup");
         assert_eq!(t.id, id);
         assert_eq!(t.columns.len(), 2);
         assert_eq!(t.column_index("id"), Some(0));
@@ -2616,15 +3616,22 @@ mod tests {
         assert!(t.foreign.is_none());
         assert!(!t.sharded);
         assert_eq!(
-            create_table(kv, "t", cols()).expect_err("dup").sqlstate(),
+            create_table(kv, &rel("t"), cols())
+                .expect_err("dup")
+                .sqlstate(),
             "42P07"
         );
-        let id2 = create_table(kv, "u", cols()).expect("create u");
+        let id2 = create_table(kv, &rel("u"), cols()).expect("create u");
         assert_ne!(id, id2);
-        drop_table(kv, "t").expect("drop");
-        assert_eq!(get_table(kv, "t").expect_err("gone").sqlstate(), "42P01");
+        drop_table(kv, &rel("t")).expect("drop");
         assert_eq!(
-            drop_table(kv, "nope").expect_err("missing").sqlstate(),
+            get_table(kv, &rel("t")).expect_err("gone").sqlstate(),
+            "42P01"
+        );
+        assert_eq!(
+            drop_table(kv, &rel("nope"))
+                .expect_err("missing")
+                .sqlstate(),
             "42P01"
         );
     }
@@ -2632,15 +3639,15 @@ mod tests {
     #[test]
     fn conversion_batch_rejects_metadata_only_rewrite() {
         let kv = MemKv::new();
-        create_table(&kv, "conversion", cols()).expect("create table");
+        create_table(&kv, &rel("conversion"), cols()).expect("create table");
 
         assert_eq!(
-            complete_table_conversion_ops(&kv, "conversion", None, Vec::new())
+            complete_table_conversion_ops(&kv, &rel("conversion"), None, Vec::new())
                 .expect_err("empty rewrite must not publish conversion"),
             CatalogError::IncompleteConversionRewrite
         );
         assert!(
-            !get_table(&kv, "conversion")
+            !get_table(&kv, &rel("conversion"))
                 .expect("table remains plain")
                 .sharded
         );
@@ -2652,42 +3659,42 @@ mod tests {
         let columns = vec![Column::new("total", ColumnType::Int4)];
         create_view(
             &kv,
-            "sales_view",
+            &rel("sales_view"),
             "SELECT 1 AS total".into(),
             columns.clone(),
         )
         .expect("create view");
         assert_eq!(
-            get_view(&kv, "sales_view").expect("stored view"),
+            get_view(&kv, &rel("sales_view")).expect("stored view"),
             View {
-                name: "sales_view".into(),
+                name: rel("sales_view"),
                 definition: "SELECT 1 AS total".into(),
                 columns,
             }
         );
         assert_eq!(
-            create_table(&kv, "sales_view", cols())
+            create_table(&kv, &rel("sales_view"), cols())
                 .expect_err("view name owns relation namespace")
                 .sqlstate(),
             "42P07"
         );
         assert_eq!(
-            create_view(&kv, "sales_view", "SELECT 1".into(), vec![])
+            create_view(&kv, &rel("sales_view"), "SELECT 1".into(), vec![])
                 .expect_err("duplicate view")
                 .sqlstate(),
             "42P07"
         );
-        drop_view(&kv, "sales_view").expect("drop view");
+        drop_view(&kv, &rel("sales_view")).expect("drop view");
         assert_eq!(
-            get_view(&kv, "sales_view")
+            get_view(&kv, &rel("sales_view"))
                 .expect_err("dropped view")
                 .sqlstate(),
             "42P01"
         );
 
-        create_table(&kv, "sales_table", cols()).expect("create table");
+        create_table(&kv, &rel("sales_table"), cols()).expect("create table");
         assert_eq!(
-            drop_view(&kv, "sales_table")
+            drop_view(&kv, &rel("sales_table"))
                 .expect_err("table cannot be dropped as a view")
                 .sqlstate(),
             "42809"
@@ -2697,7 +3704,7 @@ mod tests {
     #[test]
     fn conversion_batch_rejects_xid_tuple_reinserted_after_delete() {
         let kv = MemKv::new();
-        let table_id = create_table(&kv, "conversion", cols()).expect("create table");
+        let table_id = create_table(&kv, &rel("conversion"), cols()).expect("create table");
         let tuple_key = crabka_pgmvcc::version::version_key_xid(table_id, 1, 7);
         let xid_tuple = crabka_pgmvcc::version::encode_tuple(
             7,
@@ -2710,7 +3717,7 @@ mod tests {
         assert_eq!(
             complete_table_conversion_ops(
                 &kv,
-                "conversion",
+                &rel("conversion"),
                 None,
                 vec![
                     WriteOp::Delete {
@@ -2751,13 +3758,13 @@ mod tests {
         let cols = vec![Column::new("id", ColumnType::Int4)];
         create_foreign_table(
             kv,
-            "orders",
+            &rel("orders"),
             cols,
             "s",
             vec![("topic".into(), "orders".into())],
         )
         .expect("ft");
-        let t = get_table(kv, "orders").expect("get ft");
+        let t = get_table(kv, &rel("orders")).expect("get ft");
         assert!(t.foreign.is_some());
         assert_eq!(t.columns[0].name, "_partition");
         assert_eq!(t.columns[0].ty, ColumnType::Int4);
@@ -2824,10 +3831,14 @@ mod tests {
     #[test]
     fn sharded_table_metadata_roundtrips() {
         let kv = MemKv::new();
-        let id =
-            create_table_with_options(&kv, "sharded_t", cols(), TableOptions { sharded: true })
-                .expect("create sharded table");
-        let table = get_table(&kv, "sharded_t").expect("lookup sharded table");
+        let id = create_table_with_options(
+            &kv,
+            &rel("sharded_t"),
+            cols(),
+            TableOptions { sharded: true },
+        )
+        .expect("create sharded table");
+        let table = get_table(&kv, &rel("sharded_t")).expect("lookup sharded table");
         assert_eq!(table.id, id);
         assert!(table.sharded);
         assert!(table.foreign.is_none());
@@ -2836,7 +3847,7 @@ mod tests {
     #[test]
     fn table_hash_sharding_metadata_roundtrips() {
         let kv = MemKv::new();
-        create_table_with_options(&kv, "hash_t", cols(), TableOptions { sharded: true })
+        create_table_with_options(&kv, &rel("hash_t"), cols(), TableOptions { sharded: true })
             .expect("create hash table");
         let sharding = ShardingStrategy::Hash(HashSharding {
             columns: vec!["id".into()],
@@ -2845,25 +3856,110 @@ mod tests {
         });
 
         kv.write_batch(
-            &set_table_sharding_ops(&kv, "hash_t", Some(&sharding)).expect("sharding ops"),
+            &set_table_sharding_ops(&kv, &rel("hash_t"), Some(&sharding)).expect("sharding ops"),
         )
         .expect("write sharding");
 
         assert_eq!(
-            get_table_sharding(&kv, "hash_t").expect("read sharding"),
+            get_table_sharding(&kv, &rel("hash_t")).expect("read sharding"),
             Some(sharding)
         );
+    }
+
+    fn hash_sharding(columns: &[&str]) -> ShardingStrategy {
+        ShardingStrategy::Hash(HashSharding {
+            columns: columns.iter().map(|column| (*column).to_string()).collect(),
+            buckets: 16,
+            co_location_group: None,
+        })
+    }
+
+    /// A hash sharding names exactly one column, whichever seam attaches it.
+    /// A wider key has no row encoding, so the table it would describe is
+    /// refused at creation rather than created and then unwritable. The column
+    /// must still exist — the arity gate does not swallow that rejection.
+    #[test]
+    fn creating_a_table_refuses_a_hash_sharding_that_is_not_one_column() {
+        use assert2::assert;
+
+        let arity =
+            CatalogError::InvalidSharding("hash sharding requires exactly one column".into());
+        for (columns, expected) in [
+            (&[][..], Some(arity.clone())),
+            (&["id"][..], None),
+            (&["id", "name"][..], Some(arity.clone())),
+            (&["id", "missing"][..], Some(arity)),
+            (
+                &["missing"][..],
+                Some(CatalogError::UndefinedColumn("missing".into())),
+            ),
+        ] {
+            let kv = MemKv::default();
+            let created = create_table_with_sharding_ops(
+                &kv,
+                &rel("t"),
+                cols(),
+                TableOptions { sharded: true },
+                Some(&hash_sharding(columns)),
+                Vec::new(),
+                TableIdSource::Counter,
+            );
+            assert!(created.err() == expected, "{columns:?}");
+
+            // The same arity is refused when the sharding is attached to an
+            // existing table instead of declared with it.
+            create_table_with_options(
+                &kv,
+                &rel("existing"),
+                cols(),
+                TableOptions { sharded: true },
+            )
+            .expect("create table");
+            let attached =
+                set_table_sharding_ops(&kv, &rel("existing"), Some(&hash_sharding(columns)));
+            assert!(attached.err() == expected, "{columns:?}");
+        }
+    }
+
+    /// The accepted single-column shape still creates the table and persists
+    /// its sharding in the same batch.
+    #[test]
+    fn creating_a_table_with_single_column_sharding_persists_it() {
+        use assert2::assert;
+
+        let kv = MemKv::default();
+        let sharding = ShardingStrategy::Hash(HashSharding {
+            columns: vec!["id".into()],
+            buckets: 16,
+            co_location_group: Some("group_a".into()),
+        });
+        let (table_id, ops) = create_table_with_sharding_ops(
+            &kv,
+            &rel("hash_t"),
+            cols(),
+            TableOptions { sharded: true },
+            Some(&sharding),
+            Vec::new(),
+            TableIdSource::Counter,
+        )
+        .expect("create with sharding");
+        kv.write_batch(&ops).expect("write batch");
+
+        let table = get_table(&kv, &rel("hash_t")).expect("lookup table");
+        assert!(table.id == table_id);
+        assert!(table.sharded);
+        assert!(get_table_sharding(&kv, &rel("hash_t")).expect("read sharding") == Some(sharding));
     }
 
     #[test]
     fn create_index_metadata_roundtrips_and_lists_by_table() {
         let kv = MemKv::new();
-        let table_id = create_table(&kv, "users", cols()).expect("create table");
+        let table_id = create_table(&kv, &rel("users"), cols()).expect("create table");
 
         let index_id = create_index(
             &kv,
             "users_name_idx",
-            "users",
+            &rel("users"),
             vec!["name".into()],
             true,
             IndexPlacement::Global,
@@ -2873,16 +3969,19 @@ mod tests {
         let expected = Index {
             id: index_id,
             name: "users_name_idx".into(),
-            table: "users".into(),
+            table: rel("users"),
             table_id,
             columns: vec!["name".into()],
             unique: true,
             placement: IndexPlacement::Global,
             constraint: None,
         };
-        assert_eq!(get_index(&kv, "users_name_idx").expect("index"), expected);
         assert_eq!(
-            list_table_indexes(&kv, "users").expect("list"),
+            get_index(&kv, &rel("users_name_idx")).expect("index"),
+            expected
+        );
+        assert_eq!(
+            list_table_indexes(&kv, &rel("users")).expect("list"),
             vec![expected]
         );
     }
@@ -2890,11 +3989,11 @@ mod tests {
     #[test]
     fn create_index_rejects_missing_columns_and_duplicate_names() {
         let kv = MemKv::new();
-        create_table(&kv, "users", cols()).expect("create table");
+        create_table(&kv, &rel("users"), cols()).expect("create table");
         create_index(
             &kv,
             "users_name_idx",
-            "users",
+            &rel("users"),
             vec!["name".into()],
             false,
             IndexPlacement::Local,
@@ -2905,7 +4004,7 @@ mod tests {
             create_index(
                 &kv,
                 "users_name_idx",
-                "users",
+                &rel("users"),
                 vec!["id".into()],
                 false,
                 IndexPlacement::Local,
@@ -2918,7 +4017,7 @@ mod tests {
             create_index(
                 &kv,
                 "users_bad_idx",
-                "users",
+                &rel("users"),
                 vec!["missing".into()],
                 false,
                 IndexPlacement::Local,
@@ -2944,14 +4043,15 @@ mod tests {
         use assert2::assert;
         let kv = MemKv::default();
         for name in ["s_b", "s_a", "s_ab"] {
-            let ops = create_sequence_ops(&kv, name, Sequence::new(7, 2, None, None, None, true))
-                .expect("create sequence ops");
+            let ops =
+                create_sequence_ops(&kv, &rel(name), Sequence::new(7, 2, None, None, None, true))
+                    .expect("create sequence ops");
             kv.write_batch(&ops).expect("write");
         }
         let listed = list_sequences(&kv).expect("list");
         let names = listed
             .iter()
-            .map(|(name, _)| name.as_str())
+            .map(|(name, _)| name.name.as_str())
             .collect::<Vec<_>>();
         assert!(names == ["s_a", "s_ab", "s_b"]);
         assert!(listed[0].1 == Sequence::new(7, 2, None, None, None, true));
@@ -2962,6 +4062,349 @@ mod tests {
         use assert2::assert;
         let kv = MemKv::default();
         assert!(list_sequences(&kv).expect("list").is_empty());
+    }
+
+    fn foreign_key(
+        name: &str,
+        table: (&str, TableId),
+        referenced_table: (&str, TableId),
+    ) -> ForeignKey {
+        ForeignKey {
+            name: name.into(),
+            table: rel(table.0),
+            table_id: table.1,
+            columns: vec!["parent_id".into()],
+            referenced_table: rel(referenced_table.0),
+            referenced_table_id: referenced_table.1,
+            referenced_columns: vec!["id".into()],
+            referenced_index_id: 1,
+            referenced_index: format!("{}_pkey", referenced_table.0),
+            match_type: MatchType::Simple,
+            on_delete: ReferentialAction::NoAction,
+            on_update: ReferentialAction::NoAction,
+            set_columns: Vec::new(),
+            deferrable: false,
+            initially_deferred: false,
+            validated: true,
+        }
+    }
+
+    // Every by-table record is stored under its own `(table_id, name)` identity
+    // and has exactly one reverse entry; every reverse entry has a record.
+    fn assert_foreign_key_families_agree(kv: &dyn Kv) {
+        use std::collections::BTreeSet;
+
+        use assert2::assert;
+
+        let mut expected = BTreeSet::new();
+        for (key, bytes) in kv
+            .scan_prefix(FOREIGN_KEY_BY_TABLE_PREFIX)
+            .expect("by-table")
+        {
+            let fk = deserialize_foreign_key(&bytes).expect("record");
+            assert!(key == catalog_foreign_key_key(fk.table_id, &fk.name));
+            expected.insert(catalog_foreign_key_ref_key(
+                fk.referenced_table_id,
+                fk.table_id,
+                &fk.name,
+            ));
+        }
+        let stored = kv
+            .scan_prefix(FOREIGN_KEY_BY_REF_PREFIX)
+            .expect("by-ref")
+            .into_iter()
+            .map(|(key, value)| {
+                assert!(value.is_empty(), "reverse entries carry no payload");
+                key
+            })
+            .collect::<BTreeSet<_>>();
+        assert!(stored == expected);
+    }
+
+    fn parent_and_child(kv: &dyn Kv) -> (TableId, TableId) {
+        let parent = create_table(kv, &rel("parent"), cols()).expect("parent");
+        let child = create_table(
+            kv,
+            &rel("child"),
+            vec![
+                Column::new("id", ColumnType::Int4),
+                Column::new("parent_id", ColumnType::Int4),
+            ],
+        )
+        .expect("child");
+        (parent, child)
+    }
+
+    /// A created foreign key is readable by its `(child, name)` identity, from
+    /// the child side, from the parent side, and from the whole-catalog
+    /// enumeration — with the two key families in agreement.
+    #[test]
+    fn creating_a_foreign_key_indexes_it_from_both_sides() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        let (parent_id, child_id) = parent_and_child(&kv);
+        let fk = foreign_key(
+            "child_parent_id_fkey",
+            ("child", child_id),
+            ("parent", parent_id),
+        );
+
+        kv.write_batch(&create_foreign_key_ops(&kv, &fk).expect("create ops"))
+            .expect("write");
+
+        assert!(get_foreign_key(&kv, child_id, &fk.name).expect("get") == fk);
+        assert!(list_table_foreign_keys(&kv, child_id).expect("child side") == vec![fk.clone()]);
+        assert!(
+            list_referencing_foreign_keys(&kv, parent_id).expect("parent side") == vec![fk.clone()]
+        );
+        assert!(list_foreign_keys(&kv).expect("all") == vec![fk]);
+        assert!(
+            list_table_foreign_keys(&kv, parent_id)
+                .expect("parent owns none")
+                .is_empty()
+        );
+        assert!(
+            list_referencing_foreign_keys(&kv, child_id)
+                .expect("nothing references the child")
+                .is_empty()
+        );
+        assert_foreign_key_families_agree(&kv);
+    }
+
+    /// Constraint names are per-relation: the same name on a second child is
+    /// fine, a second one on the same child is 42710. Both then reach the
+    /// parent, ordered by name and broken by child id.
+    #[test]
+    fn constraint_names_are_unique_per_relation_not_per_catalog() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        let (parent_id, child_id) = parent_and_child(&kv);
+        let other_id = create_table(&kv, &rel("other"), cols()).expect("other");
+        let first = foreign_key("fk_owner", ("child", child_id), ("parent", parent_id));
+        let second = foreign_key("fk_owner", ("other", other_id), ("parent", parent_id));
+
+        kv.write_batch(&create_foreign_key_ops(&kv, &first).expect("first ops"))
+            .expect("write");
+        kv.write_batch(&create_foreign_key_ops(&kv, &second).expect("second ops"))
+            .expect("write");
+
+        let duplicate = create_foreign_key_ops(&kv, &first).expect_err("duplicate identity");
+        assert!(
+            duplicate
+                == CatalogError::DuplicateConstraint {
+                    name: "fk_owner".into(),
+                    relation: "child".into(),
+                }
+        );
+        assert!(duplicate.sqlstate() == "42710");
+        assert!(
+            duplicate.to_string()
+                == "constraint \"fk_owner\" for relation \"child\" already exists"
+        );
+        let referencing = list_referencing_foreign_keys(&kv, parent_id).expect("parent side");
+        assert!(referencing == vec![first, second]);
+        assert_foreign_key_families_agree(&kv);
+    }
+
+    /// A self-referencing constraint is indexed once on each side, and the
+    /// parent-side lookup reports it exactly once even though the child and the
+    /// parent are the same relation.
+    #[test]
+    fn a_self_referencing_foreign_key_is_reported_once() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        let tree_id = create_table(
+            &kv,
+            &rel("tree"),
+            vec![
+                Column::new("id", ColumnType::Int4),
+                Column::new("parent_id", ColumnType::Int4),
+            ],
+        )
+        .expect("tree");
+        let fk = foreign_key("tree_parent_id_fkey", ("tree", tree_id), ("tree", tree_id));
+
+        kv.write_batch(&create_foreign_key_ops(&kv, &fk).expect("create ops"))
+            .expect("write");
+
+        assert!(
+            list_referencing_foreign_keys(&kv, tree_id).expect("parent side") == vec![fk.clone()]
+        );
+        assert!(list_table_foreign_keys(&kv, tree_id).expect("child side") == vec![fk]);
+        assert_foreign_key_families_agree(&kv);
+    }
+
+    /// Dropping a constraint clears both key families and leaves a sibling
+    /// constraint on the same relation untouched.
+    #[test]
+    fn dropping_a_foreign_key_clears_both_key_families() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        let (parent_id, child_id) = parent_and_child(&kv);
+        let dropped = foreign_key("fk_dropped", ("child", child_id), ("parent", parent_id));
+        let kept = foreign_key("fk_kept", ("child", child_id), ("parent", parent_id));
+        for fk in [&dropped, &kept] {
+            kv.write_batch(&create_foreign_key_ops(&kv, fk).expect("create ops"))
+                .expect("write");
+        }
+
+        let (returned, ops) = drop_foreign_key_ops(&kv, child_id, "fk_dropped").expect("drop ops");
+        kv.write_batch(&ops).expect("write");
+
+        assert!(returned == dropped);
+        assert!(list_table_foreign_keys(&kv, child_id).expect("child side") == vec![kept.clone()]);
+        assert!(list_referencing_foreign_keys(&kv, parent_id).expect("parent side") == vec![kept]);
+        assert_foreign_key_families_agree(&kv);
+
+        let missing = drop_foreign_key_ops(&kv, child_id, "fk_dropped").expect_err("gone");
+        assert!(missing == CatalogError::UndefinedConstraint("fk_dropped".into()));
+        assert!(missing.sqlstate() == "42704");
+        assert!(get_foreign_key(&kv, child_id, "fk_dropped").is_err());
+    }
+
+    /// `DROP TABLE` takes the relation's own constraints out of both families —
+    /// including a reverse entry orphaned by an earlier partial write — while a
+    /// constraint owned by another relation survives.
+    #[test]
+    fn dropping_a_table_removes_its_foreign_keys_from_both_families() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        let (parent_id, child_id) = parent_and_child(&kv);
+        let other_id = create_table(&kv, &rel("other"), cols()).expect("other");
+        let dropped = foreign_key("child_fkey", ("child", child_id), ("parent", parent_id));
+        let survivor = foreign_key("other_fkey", ("other", other_id), ("parent", parent_id));
+        for fk in [&dropped, &survivor] {
+            kv.write_batch(&create_foreign_key_ops(&kv, fk).expect("create ops"))
+                .expect("write");
+        }
+        kv.put(
+            catalog_foreign_key_ref_key(other_id, child_id, "orphan_fkey"),
+            Vec::new(),
+        )
+        .expect("orphaned reverse entry");
+
+        kv.write_batch(&drop_table_ops(&kv, &rel("child")).expect("drop ops"))
+            .expect("write");
+
+        assert!(
+            list_table_foreign_keys(&kv, child_id)
+                .expect("child side")
+                .is_empty()
+        );
+        assert!(
+            list_referencing_foreign_keys(&kv, parent_id).expect("parent side") == vec![survivor]
+        );
+        assert!(
+            list_referencing_foreign_keys(&kv, other_id)
+                .expect("orphan swept, so nothing to resolve")
+                .is_empty()
+        );
+        assert_foreign_key_families_agree(&kv);
+    }
+
+    /// A rename rewrites only the denormalized display names: the id-keyed
+    /// records stay where they are, on the child's own constraints and on every
+    /// constraint that references the renamed relation.
+    #[test]
+    fn renaming_a_relation_rewrites_foreign_key_display_names() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        let (parent_id, child_id) = parent_and_child(&kv);
+        let fk = foreign_key(
+            "child_parent_id_fkey",
+            ("child", child_id),
+            ("parent", parent_id),
+        );
+        kv.write_batch(&create_foreign_key_ops(&kv, &fk).expect("create ops"))
+            .expect("write");
+
+        kv.write_batch(&rename_table_ops(&kv, &rel("child"), &rel("kid")).expect("child rename"))
+            .expect("write");
+        kv.write_batch(
+            &rename_table_ops(&kv, &rel("parent"), &rel("ancestor")).expect("parent rename"),
+        )
+        .expect("write");
+
+        assert!(
+            get_foreign_key(&kv, child_id, &fk.name).expect("get")
+                == ForeignKey {
+                    table: rel("kid"),
+                    referenced_table: rel("ancestor"),
+                    ..fk
+                }
+        );
+        assert_foreign_key_families_agree(&kv);
+    }
+
+    /// Renaming a self-referencing relation must rewrite both display names —
+    /// the constraint is reached from the child scan and the parent scan, and
+    /// the second pass must not undo the first.
+    #[test]
+    fn renaming_a_self_referencing_relation_rewrites_both_display_names() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        let tree_id = create_table(
+            &kv,
+            &rel("tree"),
+            vec![
+                Column::new("id", ColumnType::Int4),
+                Column::new("parent_id", ColumnType::Int4),
+            ],
+        )
+        .expect("tree");
+        let fk = foreign_key("tree_parent_id_fkey", ("tree", tree_id), ("tree", tree_id));
+        kv.write_batch(&create_foreign_key_ops(&kv, &fk).expect("create ops"))
+            .expect("write");
+
+        kv.write_batch(&rename_table_ops(&kv, &rel("tree"), &rel("forest")).expect("rename"))
+            .expect("write");
+
+        assert!(
+            get_foreign_key(&kv, tree_id, &fk.name).expect("get")
+                == ForeignKey {
+                    table: rel("forest"),
+                    referenced_table: rel("forest"),
+                    ..fk
+                }
+        );
+        assert_foreign_key_families_agree(&kv);
+    }
+
+    /// The whole-catalog enumeration reports every constraint in child-table-id
+    /// then name order, whichever order they were created in.
+    #[test]
+    fn list_foreign_keys_enumerates_the_catalog_in_key_order() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        let (parent_id, child_id) = parent_and_child(&kv);
+        let child_b = foreign_key("fk_b", ("child", child_id), ("parent", parent_id));
+        let child_a = foreign_key("fk_a", ("child", child_id), ("parent", parent_id));
+        let parent_self = foreign_key("fk_self", ("parent", parent_id), ("parent", parent_id));
+        for fk in [&child_b, &child_a, &parent_self] {
+            kv.write_batch(&create_foreign_key_ops(&kv, fk).expect("create ops"))
+                .expect("write");
+        }
+
+        assert!(list_foreign_keys(&kv).expect("all") == vec![parent_self, child_a, child_b]);
+    }
+
+    /// A reverse entry whose authoritative record has gone missing is catalog
+    /// corruption, not an empty result — the parent-side read must not silently
+    /// skip a constraint it is meant to enforce.
+    #[test]
+    fn a_reverse_entry_without_a_record_is_reported_as_corruption() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        let (parent_id, child_id) = parent_and_child(&kv);
+        kv.put(
+            catalog_foreign_key_ref_key(parent_id, child_id, "ghost_fkey"),
+            Vec::new(),
+        )
+        .expect("orphaned reverse entry");
+
+        let error = list_referencing_foreign_keys(&kv, parent_id).expect_err("orphan");
+        assert!(error.sqlstate() == "XX000");
+        assert!(error.to_string().contains("ghost_fkey"));
     }
 
     /// The string `version()` reports: clients parse the `PostgreSQL` version out

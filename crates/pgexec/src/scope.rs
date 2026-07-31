@@ -68,7 +68,11 @@ impl Scope {
     /// is an error there too, and the reference must be written `t.v` or
     /// `excluded.v`.
     pub fn insert_conflict(table: &Table) -> Self {
-        let mut scope = Self::single(table, &table.name);
+        // The qualifier is the relation's own name, never its schema-qualified
+        // spelling: `INSERT INTO s.t … ON CONFLICT DO UPDATE SET v = t.v` is how
+        // PostgreSQL binds the target, because the range table entry an INSERT
+        // adds is aliased to the bare relation name.
+        let mut scope = Self::single(table, &table.name.name);
         scope
             .columns
             .extend(Self::single(table, "excluded").columns);
@@ -125,14 +129,14 @@ impl Scope {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_pgcatalog::{Column, Table};
+    use crabka_pgcatalog::{Column, RelationName, Table};
 
     use super::*;
 
     fn tbl(name: &str, cols: &[(&str, ColumnType)]) -> Table {
         Table {
             id: 1,
-            name: name.to_string(),
+            name: RelationName::public(name),
             columns: cols.iter().map(|(n, t)| Column::new(*n, *t)).collect(),
             sharded: false,
             sharding: None,

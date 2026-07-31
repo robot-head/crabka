@@ -189,6 +189,12 @@ pub fn data_row(out: &mut BytesMut, values: &[Option<Bytes>]) {
     });
 }
 
+/// Encode an `ErrorResponse` as a sequence of typed fields ended by a zero byte.
+///
+/// Field order matches real Postgres: `S`, `V`, `C`, `M`, then the optional
+/// `D` (DETAIL) and `H` (HINT). Absent optional fields are omitted entirely
+/// rather than emitted empty, so a bare error is byte-identical to one from a
+/// server that never sets them.
 pub fn error_response(out: &mut BytesMut, err: &PgError) {
     msg(out, b'E', |b| {
         b.put_u8(b'S');
@@ -199,6 +205,14 @@ pub fn error_response(out: &mut BytesMut, err: &PgError) {
         put_cstr(b, &err.code);
         b.put_u8(b'M');
         put_cstr(b, &err.message);
+        if let Some(detail) = &err.detail {
+            b.put_u8(b'D');
+            put_cstr(b, detail);
+        }
+        if let Some(hint) = &err.hint {
+            b.put_u8(b'H');
+            put_cstr(b, hint);
+        }
         b.put_u8(0);
     });
 }
@@ -243,13 +257,44 @@ mod tests {
 
     #[test]
     fn encodes_error_response_fields() {
+        let base = || PgError::error(sqlstate::SYNTAX_ERROR, "oops");
+        let cases: [(PgError, &[u8]); 4] = [
+            (
+                base(),
+                b"E\x00\x00\x00\x20SERROR\0VERROR\0C42601\0Moops\0\0",
+            ),
+            (
+                base().with_detail("Key (p_id)=(1)"),
+                b"E\x00\x00\x00\x30SERROR\0VERROR\0C42601\0Moops\0DKey (p_id)=(1)\0\0",
+            ),
+            (
+                base().with_hint("use CASCADE"),
+                b"E\x00\x00\x00\x2dSERROR\0VERROR\0C42601\0Moops\0Huse CASCADE\0\0",
+            ),
+            (
+                base().with_detail("Key (p_id)=(1)").with_hint("use CASCADE"),
+                b"E\x00\x00\x00\x3dSERROR\0VERROR\0C42601\0Moops\0DKey (p_id)=(1)\0Huse CASCADE\0\0",
+            ),
+        ];
+
+        for (err, expected) in cases {
+            let mut out = BytesMut::new();
+            error_response(&mut out, &err);
+            assert2::assert!(&out[..] == expected);
+        }
+    }
+
+    #[test]
+    fn encodes_fatal_error_response_with_hint_only() {
         let mut out = BytesMut::new();
-        error_response(&mut out, &PgError::error(sqlstate::SYNTAX_ERROR, "oops"));
-        // tag, len, then S/V/C/M fields, NUL terminator
-        assert_eq!(out[0], b'E');
-        let body = &out[5..];
-        assert!(body.starts_with(b"SERROR\0VERROR\0C42601\0Moops\0"));
-        assert_eq!(*body.last().expect("non-empty"), 0);
+        error_response(
+            &mut out,
+            &PgError::protocol("bad frame").with_hint("check the length prefix"),
+        );
+        assert2::assert!(
+            &out[..]
+                == &b"E\x00\x00\x00\x3eSFATAL\0VFATAL\0C08P01\0Mbad frame\0Hcheck the length prefix\0\0"[..]
+        );
     }
 
     #[test]

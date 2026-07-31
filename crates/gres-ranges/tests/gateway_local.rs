@@ -1305,7 +1305,7 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
     let table = crabka_pgcatalog::list_tables(coordinator.catalog_kv())
         .expect("catalog")
         .into_iter()
-        .find(|table| table.name == "t50")
+        .find(|table| table.name.name == "t50")
         .expect("t50");
     assert!(
         table.sharding.is_none(),

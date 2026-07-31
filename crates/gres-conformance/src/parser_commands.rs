@@ -817,13 +817,15 @@ fn statement_shape(statement: &Statement) -> &'static str {
         Statement::AlterRoutine { .. } => "AlterRoutine",
         Statement::Call { .. } => "Call",
         Statement::DoBlock { .. } => "DoBlock",
-        Statement::CreateIndex { table, .. } if table == "__crabka_sequence__" => "CreateSequence",
+        Statement::CreateIndex { table, .. } if table.name == "__crabka_sequence__" => {
+            "CreateSequence"
+        }
         Statement::CreateIndex { .. } => "CreateIndex",
         Statement::DropIndex { .. } => "DropIndex",
         Statement::DropTable { names, .. }
             if names
                 .first()
-                .is_some_and(|name| name.starts_with("__crabka_sequence__:")) =>
+                .is_some_and(|name| name.name.starts_with("__crabka_sequence__:")) =>
         {
             "DropSequence"
         }
@@ -875,7 +877,7 @@ fn statement_shape(statement: &Statement) -> &'static str {
             crabka_pgparser::ast::UtilityStatement::Reindex => "Reindex",
             crabka_pgparser::ast::UtilityStatement::Checkpoint => "Checkpoint",
             crabka_pgparser::ast::UtilityStatement::AlterSystem { .. } => "AlterSystem",
-            crabka_pgparser::ast::UtilityStatement::SetConstraints => "SetConstraints",
+            crabka_pgparser::ast::UtilityStatement::SetConstraints { .. } => "SetConstraints",
             crabka_pgparser::ast::UtilityStatement::SetSessionAuthorization { .. } => {
                 "SetSessionAuthorization"
             }
@@ -884,7 +886,9 @@ fn statement_shape(statement: &Statement) -> &'static str {
             local: false,
             name,
             value: crabka_pgparser::ast::SetValue::Value(value),
-        } if name == "__set_transaction" && value == "read committed" => "SetTransaction",
+        } if name == "__set_transaction" && value.as_slice() == ["read committed"] => {
+            "SetTransaction"
+        }
         Statement::Set { .. } => "Set",
         Statement::Show { .. } => "Show",
         Statement::Reset { .. } => "Reset",

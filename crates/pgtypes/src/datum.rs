@@ -692,6 +692,55 @@ pub enum Datum {
     Record(RecordValue),
     /// A value of a `CREATE TYPE … AS ENUM` type.
     Enum(EnumValue),
+    /// PostgreSQL `regclass` — a relation's `pg_class` oid plus the name
+    /// `regclassout` prints for it.
+    Regclass(RegclassValue),
+}
+
+/// A `regclass` value: the relation oid, and the relation name that oid
+/// resolves to.
+///
+/// `PostgreSQL` stores `regclass` as a bare oid and only consults the catalog in
+/// `regclassout`. crabka cannot do that — the wire encoder and the `→ text` cast
+/// both live in this crate, which has no catalog handle — so the name is
+/// resolved once, where the catalog *is* in scope (the executor's cast), and
+/// travels with the value. The oid stays the identity: comparison, hashing and
+/// the binary wire form all use it, so `confrelid = 'pp'::regclass` is still an
+/// integer comparison.
+#[derive(Debug, Clone)]
+pub struct RegclassValue {
+    /// The relation's `pg_class` oid.
+    pub oid: i32,
+    /// What `regclassout` prints: the relation name, double-quoted when it is
+    /// not a bare lowercase identifier.
+    pub name: std::sync::Arc<str>,
+}
+
+impl RegclassValue {
+    /// A `regclass` whose oid no relation matches.
+    ///
+    /// `PostgreSQL`'s `regclassout` does not error here: it prints `-` for
+    /// `InvalidOid` and the bare oid otherwise, so `SELECT 999999::oid::regclass`
+    /// yields `999999`.
+    #[must_use]
+    pub fn unresolved(oid: i32) -> Self {
+        let name = if oid == 0 {
+            "-".into()
+        } else {
+            oid.to_string().into()
+        };
+        RegclassValue { oid, name }
+    }
+
+    /// A `regclass` for a relation the catalog resolved. `name` must already be
+    /// quoted as `quote_ident` would.
+    #[must_use]
+    pub fn resolved(oid: i32, name: &str) -> Self {
+        RegclassValue {
+            oid,
+            name: name.into(),
+        }
+    }
 }
 
 /// A composite (row) value.
@@ -979,6 +1028,8 @@ impl PartialEq for Datum {
             // Composites compare field by field; enums by type and label.
             (Datum::Record(a), Datum::Record(b)) => a == b,
             (Datum::Enum(a), Datum::Enum(b)) => a == b,
+            // The oid is the `regclass` identity; the name is derived from it.
+            (Datum::Regclass(a), Datum::Regclass(b)) => a.oid == b.oid,
             _ => false,
         }
     }
@@ -1041,6 +1092,8 @@ impl std::hash::Hash for Datum {
             Datum::Array(a) => a.hash(state),
             Datum::Record(r) => r.hash(state),
             Datum::Enum(e) => e.hash(state),
+            // Hashes the oid alone, matching the `PartialEq` arm above.
+            Datum::Regclass(r) => r.oid.hash(state),
         }
     }
 }
@@ -1070,6 +1123,7 @@ impl Datum {
             Datum::Array(a) => Some(a.column_type()),
             Datum::Record(r) => Some(r.column_type()),
             Datum::Enum(e) => Some(e.column_type()),
+            Datum::Regclass(_) => Some(ColumnType::Regclass),
         }
     }
 

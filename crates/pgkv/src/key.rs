@@ -332,40 +332,89 @@ pub fn topology_activation_receipt_prefix(tenant: &str) -> Vec<u8> {
     key
 }
 
-/// Key for a table's stored schema: `/0/catalog/<name>`.
+/// Append one length-prefixed part to a catalog key.
+///
+/// Every catalog key that names a relation is built from `(schema, name)` this
+/// way rather than from a dotted string, because the two are not
+/// interchangeable: `PostgreSQL` lets a relation called `a.b` in `public` and a
+/// relation called `b` in schema `a` coexist with distinct contents, which no
+/// flattened `schema.relation` string can represent.
+///
+/// The prefix is a big-endian `u32` byte length rather than a separator byte.
+/// A separator would work — an identifier holds no NUL — but `\0` already
+/// separates sub-families inside the catalog prefix, and a length prefix means
+/// a scan recovers a part exactly instead of guessing at it. That guessing is
+/// what let `CREATE TABLE "a/b"` store a relation the catalog projections
+/// could never see.
+///
+/// # Panics
+///
+/// Panics when `part` exceeds 4 GiB, which no identifier does.
+pub fn push_key_part(key: &mut Vec<u8>, part: &str) {
+    put_u32(
+        key,
+        u32::try_from(part.len()).expect("catalog key part exceeds 4 GiB"),
+    );
+    key.extend_from_slice(part.as_bytes());
+}
+
+/// Split a key suffix written by [`push_key_part`] into exactly `count` parts.
+///
+/// Returns `None` for a suffix that is truncated, carries trailing bytes, or
+/// holds a part that is not UTF-8 — so a scan over a family prefix rejects a
+/// neighbouring sub-family's keys structurally rather than by filtering for a
+/// byte the names were assumed not to contain.
 #[must_use]
-pub fn catalog_key(table_name: &str) -> Vec<u8> {
-    let mut k = system_prefix("catalog");
-    k.extend_from_slice(unqualified_relation(table_name).as_bytes());
+pub fn key_parts(suffix: &[u8], count: usize) -> Option<Vec<&str>> {
+    let mut rest = suffix;
+    let mut parts = Vec::with_capacity(count);
+    for _ in 0..count {
+        let len = usize::try_from(take_u32(&mut rest).ok()?).ok()?;
+        let (part, tail) = rest.split_at_checked(len)?;
+        parts.push(std::str::from_utf8(part).ok()?);
+        rest = tail;
+    }
+    rest.is_empty().then_some(parts)
+}
+
+/// Bytes shared by every relation-keyed entry in one catalog sub-family.
+fn relation_family_key(family: &str, schema: &str, name: &str) -> Vec<u8> {
+    let mut k = system_prefix(family);
+    push_key_part(&mut k, schema);
+    push_key_part(&mut k, name);
     k
 }
 
-/// A relation name with a redundant schema qualifier removed.
-///
-/// Crabka has ONE flat namespace, which is exactly what `public` names under
-/// `PostgreSQL`'s default `search_path` — and `pg_temp` likewise, there being one
-/// storage class. So `public.t` and `t` are the same relation, as they are in
-/// `PostgreSQL`, and this normalizes them to one key for reads and writes alike.
-///
-/// Every OTHER qualifier is left alone: `information_schema.tables` and
-/// `pg_catalog.*` are resolved BY their dotted names, and a qualifier naming a
-/// schema that holds nothing must keep failing to resolve rather than silently
-/// reaching the unqualified relation.
+/// Key for a table's stored schema: `/0/catalog/<schema><name>`, each part
+/// length-prefixed.
 #[must_use]
-pub fn unqualified_relation(name: &str) -> &str {
-    for schema in ["public.", "pg_temp."] {
-        if name.len() > schema.len() && name[..schema.len()].eq_ignore_ascii_case(schema) {
-            return &name[schema.len()..];
-        }
-    }
-    name
+pub fn catalog_key(schema: &str, name: &str) -> Vec<u8> {
+    relation_family_key("catalog", schema, name)
 }
 
-/// Key for a table's optional sharding strategy: `/0/catalog_sharding/<name>`.
+/// Prefix covering every stored table schema.
 #[must_use]
-pub fn catalog_sharding_key(table_name: &str) -> Vec<u8> {
-    let mut k = system_prefix("catalog_sharding");
-    k.extend_from_slice(unqualified_relation(table_name).as_bytes());
+pub fn catalog_prefix() -> Vec<u8> {
+    system_prefix("catalog")
+}
+
+/// Key for a table's optional sharding strategy:
+/// `/0/catalog_sharding/<schema><name>`.
+#[must_use]
+pub fn catalog_sharding_key(schema: &str, name: &str) -> Vec<u8> {
+    relation_family_key("catalog_sharding", schema, name)
+}
+
+/// Key for the id-keyed index over stored tables: `/0/catalog_by_id/<id>`.
+///
+/// A table's identity is its id — row keys, lock identities and foreign-key
+/// referents all key on it, and it survives a rename or a move between schemas
+/// where the name does not. Range RPCs therefore ship an id, and the receiving
+/// node needs the relation the id names without a full catalog scan.
+#[must_use]
+pub fn catalog_by_id_key(table_id: u32) -> Vec<u8> {
+    let mut k = system_prefix("catalog_by_id");
+    put_u32(&mut k, table_id);
     k
 }
 
@@ -630,6 +679,8 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
 
     fn table_zero_prefix() -> Vec<u8> {
@@ -800,7 +851,7 @@ mod tests {
 
     #[test]
     fn system_keys_are_distinct_and_under_table_zero() {
-        let cat = catalog_key("users");
+        let cat = catalog_key("public", "users");
         let seq = seq_key(7);
         let meta = meta_next_table_id_key();
         let zero = table_zero_prefix();
@@ -809,8 +860,76 @@ mod tests {
         assert!(meta.starts_with(&zero));
         assert_ne!(cat, seq);
         assert_ne!(seq, meta);
-        assert_ne!(catalog_key("a"), catalog_key("b"));
+        assert_ne!(catalog_key("public", "a"), catalog_key("public", "b"));
         assert_ne!(seq_key(7), seq_key(8));
+    }
+
+    /// A relation key is built from two parts, not from a dotted string, so
+    /// every way of splitting the same characters keys a different relation.
+    /// `PostgreSQL` lets all of these coexist with distinct contents.
+    #[test]
+    fn a_relation_key_keeps_the_schema_and_the_name_apart() {
+        let cases = [
+            ("public", "a.b"),
+            ("a", "b"),
+            ("a.b", ""),
+            ("", "a.b"),
+            ("public", "ab"),
+        ];
+        for (i, (schema, name)) in cases.iter().enumerate() {
+            for (j, (other_schema, other_name)) in cases.iter().enumerate() {
+                let same = catalog_key(schema, name) == catalog_key(other_schema, other_name);
+                assert!(
+                    same == (i == j),
+                    "{schema}.{name} vs {other_schema}.{other_name}"
+                );
+            }
+        }
+        // The two sub-families never collide for the same relation either.
+        assert!(catalog_key("a", "b") != catalog_sharding_key("a", "b"));
+    }
+
+    /// Every part a relation name can hold survives the round trip, including
+    /// the separator bytes a delimited encoding would have to escape. A name
+    /// holding a `/` used to be storable but invisible to every catalog scan.
+    #[test]
+    fn key_parts_recovers_exactly_what_push_key_part_wrote() {
+        for parts in [
+            vec!["public", "t"],
+            vec!["a", "b"],
+            vec!["public", "a.b"],
+            vec!["s1", "a/b"],
+            vec!["", ""],
+            vec!["schema\0with\0nuls", "n\"a'm/e.\\"],
+            vec!["один", "🦀"],
+        ] {
+            let mut key = Vec::new();
+            for part in &parts {
+                push_key_part(&mut key, part);
+            }
+            assert!(key_parts(&key, parts.len()) == Some(parts.clone()));
+        }
+    }
+
+    /// A suffix that is truncated, over-long, or not UTF-8 is rejected rather
+    /// than guessed at — a scan over one family prefix must reject a
+    /// neighbouring family's keys structurally.
+    #[test]
+    fn key_parts_rejects_a_suffix_it_did_not_write() {
+        let mut key = Vec::new();
+        push_key_part(&mut key, "public");
+        push_key_part(&mut key, "t");
+
+        assert!(key_parts(&key, 1).is_none(), "trailing bytes");
+        assert!(key_parts(&key, 3).is_none(), "truncated");
+        assert!(key_parts(&key[..key.len() - 1], 2).is_none(), "short part");
+        assert!(key_parts(&key[1..], 2).is_none(), "misaligned");
+
+        let mut invalid = Vec::new();
+        push_key_part(&mut invalid, "ok");
+        crate::keyenc::put_u32(&mut invalid, 1);
+        invalid.push(0xff);
+        assert!(key_parts(&invalid, 2).is_none(), "not utf-8");
     }
 
     #[test]
@@ -851,7 +970,7 @@ mod tests {
 
     #[test]
     fn system_keys_do_not_collide_with_user_rows() {
-        assert!(!catalog_key("t").starts_with(&table_prefix(1)));
+        assert!(!catalog_key("public", "t").starts_with(&table_prefix(1)));
         assert!(!seq_key(1).starts_with(&table_prefix(1)));
     }
 
@@ -963,7 +1082,7 @@ mod tests {
         let fdw_b = fdw_key("b");
         let srv_a = server_key("a");
         let umap = user_mapping_key("alice", "s");
-        let cat = catalog_key("a");
+        let cat = catalog_key("public", "a");
 
         assert!(!fdw_a.is_empty());
         assert!(!srv_a.is_empty());
@@ -993,13 +1112,11 @@ mod tests {
         assert!(server_key("kafka").starts_with(&prefix));
         assert!(server_key("pg").starts_with(&prefix));
         assert!(!fdw_key("x").starts_with(&prefix));
-        assert!(!catalog_key("t").starts_with(&prefix));
+        assert!(!catalog_key("public", "t").starts_with(&prefix));
     }
 
     #[test]
     fn notify_keys_are_an_isolated_ordered_namespace() {
-        use assert2::assert;
-
         let prefix = notify_prefix();
 
         assert!(notify_key(0).starts_with(&prefix));
@@ -1010,7 +1127,7 @@ mod tests {
         for other in [
             clog_key(3),
             seq_key(3),
-            catalog_key("notify"),
+            catalog_key("public", "notify"),
             next_xid_key(),
             meta_range_map_key(),
             row_key(7, 3),
@@ -1090,7 +1207,7 @@ mod tests {
             ),
             ("sequence", seq_key(7), KeyClass::Sequence { table_id: 7 }),
             ("clog", clog_key(7), KeyClass::Clog { xid: 7 }),
-            ("catalog", catalog_key("users"), KeyClass::System),
+            ("catalog", catalog_key("public", "users"), KeyClass::System),
             ("meta range map", meta_range_map_key(), KeyClass::System),
             ("next xid", next_xid_key(), KeyClass::System),
             ("server", server_key("kafka"), KeyClass::System),

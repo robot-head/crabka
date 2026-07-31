@@ -54,8 +54,21 @@ pub struct EvalCtx {
     pub interval_style: crabka_pgtypes::datetime::IntervalStyle,
     pub current_user: String,
     pub session_user: String,
+    /// The session's backend process id — the value the wire layer announced in
+    /// `BackendKeyData`, which `pg_backend_pid()` must agree with because that
+    /// pairing is how a client correlates a cancel request with its session.
+    /// 0 outside a SQL session (a planning context or a unit test), where no
+    /// backend id was ever assigned.
+    pub(crate) backend_pid: i32,
     pub clock: Arc<dyn Clock>,
     pub(crate) sequence: Option<Arc<SequenceRuntime>>,
+    /// The session's name-resolution scope — its `search_path`, the user
+    /// `"$user"` expands to, and its backend id. `None` outside a SQL session
+    /// (a planning context or a unit test), where
+    /// [`crate::relname::ResolutionScope::default_scope`] stands in: a
+    /// relation named there still has to resolve, and `PostgreSQL`'s own
+    /// default path is the honest answer.
+    pub(crate) resolution: Option<Arc<crate::relname::ResolutionScope>>,
     /// The session's queued `LISTEN`/`NOTIFY` work, so the side-effecting
     /// `pg_notify(channel, payload)` can enqueue from inside expression
     /// evaluation — the same seam `sequence` gives `nextval`. `None` outside a
@@ -93,9 +106,28 @@ impl EvalCtx {
     pub(crate) fn catalog(&self) -> Option<&dyn crabka_pgkv::Kv> {
         self.sequence.as_ref().map(|runtime| runtime.kv.as_ref())
     }
+
+    /// The scope an unqualified relation name resolves against.
+    pub(crate) fn resolution(&self) -> &crate::relname::ResolutionScope {
+        self.resolution
+            .as_deref()
+            .unwrap_or_else(|| crate::relname::ResolutionScope::default_scope())
+    }
 }
 
 impl EvalCtx {
+    /// A non-temporal context that still resolves names the session's way —
+    /// what a DDL statement evaluates its `DEFAULT`s and partition bounds in.
+    /// It has no clock of its own because a DDL statement has no row to stamp;
+    /// it does need the search path, because the relation it names has to land
+    /// in the right schema.
+    pub(crate) fn for_ddl(scope: &crate::relname::ResolutionScope) -> Self {
+        Self {
+            resolution: Some(Arc::new(scope.clone())),
+            ..Self::test_default()
+        }
+    }
+
     /// A UTC context anchored at the Unix epoch — for tests / non-temporal eval.
     pub fn test_default() -> Self {
         let epoch = Timestamp::UNIX_EPOCH;
@@ -108,8 +140,10 @@ impl EvalCtx {
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             current_user: "public".into(),
             session_user: "public".into(),
+            backend_pid: 0,
             clock: Arc::new(SystemClock),
             sequence: None,
+            resolution: None,
             notify: None,
         }
     }

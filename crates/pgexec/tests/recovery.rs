@@ -4,6 +4,7 @@
 
 use std::sync::Arc;
 
+use crabka_pgcatalog::RelationName;
 use crabka_pgexec::{SqlEngine, SqlSession};
 use crabka_pgkv::{Kv, MemKv};
 use crabka_pgmvcc::xid::{FIRST_NORMAL_XID, FROZEN_XID, INVALID_XID};
@@ -21,7 +22,7 @@ async fn rows(s: &mut SqlSession, sql: &str) -> Vec<QueryResult> {
 }
 
 fn tuple_xmin(kv: &dyn Kv, table_name: &str, rowid: u64, xid: u64) -> Option<u64> {
-    let table = crabka_pgcatalog::get_table(kv, table_name).expect("table");
+    let table = crabka_pgcatalog::get_table(kv, &RelationName::public(table_name)).expect("table");
     let key = crabka_pgmvcc::version::version_key_xid(table.id, rowid, xid);
     let bytes = kv.get(&key).expect("tuple lookup")?;
     let (xmin, _xmax, _row) = crabka_pgmvcc::version::decode_tuple(&bytes).expect("tuple decode");
@@ -161,7 +162,9 @@ async fn leaked_block_xids_settle_as_aborted_and_never_wedge_the_horizon() {
     // (1) No xid reuse: the first post-crash write draws from at or above the
     // persisted reservation and its committed row is visible.
     rows(&mut s, "INSERT INTO t VALUES (9)").await;
-    let table = engine.catalog_table("t").expect("table");
+    let table = engine
+        .catalog_table(&RelationName::public("t"))
+        .expect("table");
     let version_xmins = |kv: &dyn Kv| -> Vec<u64> {
         kv.scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
             .expect("scan")

@@ -44,6 +44,7 @@ pub struct ProcessHarness {
     r3_proxy: RangeProxy,
     r0: ProcessNode,
     r1: Option<ProcessNode>,
+    catalog_ids: std::sync::Mutex<BTreeMap<String, u64>>,
 }
 
 struct ProcessNode {
@@ -136,6 +137,7 @@ impl ProcessHarness {
             r3_proxy,
             r0,
             r1: Some(r1),
+            catalog_ids: std::sync::Mutex::default(),
         };
         harness.wait_ready(0).await;
         harness.wait_ready(1).await;
@@ -189,6 +191,7 @@ impl ProcessHarness {
             r3_proxy,
             r0,
             r1: None,
+            catalog_ids: std::sync::Mutex::default(),
         };
         harness.wait_ready(0).await;
         harness.r1_proxy.set_backend(harness.r0.range_port);
@@ -199,6 +202,51 @@ impl ProcessHarness {
 
     pub async fn sql(&self, range: u32) -> tokio_postgres::Client {
         connect(self.node(range).sql_port, &self.tenant).await
+    }
+
+    /// Catalog id of `relation`, read from `pg_class.oid`.
+    ///
+    /// Range RPCs address a relation by catalog id and never by name: a name is
+    /// session-dependent once `search_path` and `pg_temp` exist, and the range
+    /// serving the RPC has no notion of the originating session. The id a store
+    /// hands out bears no relation to the routing suffix a fixture bakes into a
+    /// name, so callers have to ask the catalog rather than reuse the suffix.
+    ///
+    /// Memoized: a relation's id is fixed for the store's lifetime, and callers
+    /// poll these scans in tight loops.
+    pub async fn catalog_table_id(&self, relation: &str) -> u64 {
+        if let Some(id) = self
+            .catalog_ids
+            .lock()
+            .expect("catalog id memo")
+            .get(relation)
+        {
+            return *id;
+        }
+        let rows = self
+            .sql(0)
+            .await
+            .simple_query(&format!(
+                "SELECT oid FROM pg_class WHERE relname = '{relation}'"
+            ))
+            .await
+            .expect("read catalog id");
+        let id = rows
+            .iter()
+            .find_map(|message| match message {
+                tokio_postgres::SimpleQueryMessage::Row(row) => {
+                    row.get(0).map(std::string::ToString::to_string)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("relation {relation} is not catalog-visible"))
+            .parse()
+            .expect("pg_class.oid is numeric");
+        self.catalog_ids
+            .lock()
+            .expect("catalog id memo")
+            .insert(relation.to_owned(), id);
+        id
     }
 
     pub async fn sql_with_driver(

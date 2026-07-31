@@ -181,13 +181,12 @@ async fn regclass_cast_resolves_relation_names_for_the_relkind_probe() {
         );
     }
 
-    // Virtual catalog relations resolve to their fixed oids.
+    // `regclassout` prints the relation name, whichever spelling went in.
     let result = run(&engine, "SELECT 'pg_class'::regclass").await;
-    assert!(row_text(&result, 0) == vec![Some("1259".into())]);
+    assert!(row_text(&result, 0) == vec![Some("pg_class".into())]);
 
-    // Numeric input passes through without catalog resolution.
     let result = run(&engine, "SELECT '1259'::regclass").await;
-    assert!(row_text(&result, 0) == vec![Some("1259".into())]);
+    assert!(row_text(&result, 0) == vec![Some("pg_class".into())]);
 
     // Unknown relation names error like PostgreSQL (42P01).
     let error = engine

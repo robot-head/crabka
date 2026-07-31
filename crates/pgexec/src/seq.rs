@@ -116,12 +116,18 @@ impl SequenceManager {
         self.inner.lock().expect("seqmgr").clear();
     }
 
-    pub fn nextval(&self, kv: &dyn Kv, name: &str) -> Result<i64, ExecError> {
-        let mut sequence = crabka_pgcatalog::get_sequence(kv, name)?;
-        let value = next_sequence_value(name, &sequence)?;
+    pub fn nextval(
+        &self,
+        kv: &dyn Kv,
+        scope: &crate::relname::ResolutionScope,
+        written: &str,
+    ) -> Result<i64, ExecError> {
+        let name = sequence_name(kv, scope, written)?;
+        let mut sequence = crabka_pgcatalog::get_sequence(kv, &name)?;
+        let value = next_sequence_value(&name, &sequence)?;
         sequence.last_value = value;
         sequence.is_called = true;
-        let op = crabka_pgcatalog::put_sequence_op(name, sequence);
+        let op = crabka_pgcatalog::put_sequence_op(&name, sequence);
         match self.mode {
             PersistMode::Durable => kv.write_batch(&[op])?,
             PersistMode::Replicated => {
@@ -136,19 +142,22 @@ impl SequenceManager {
     pub fn setval(
         &self,
         kv: &dyn Kv,
-        name: &str,
+        scope: &crate::relname::ResolutionScope,
+        written: &str,
         value: i64,
         is_called: bool,
     ) -> Result<i64, ExecError> {
-        let mut sequence = crabka_pgcatalog::get_sequence(kv, name)?;
+        let name = sequence_name(kv, scope, written)?;
+        let mut sequence = crabka_pgcatalog::get_sequence(kv, &name)?;
         if value < sequence.min || value > sequence.max {
             return Err(ExecError::SequenceLimit(format!(
-                "setval: value {value} is out of bounds for sequence \"{name}\""
+                "setval: value {value} is out of bounds for sequence \"{}\"",
+                name.name
             )));
         }
         sequence.last_value = value;
         sequence.is_called = is_called;
-        let op = crabka_pgcatalog::put_sequence_op(name, sequence);
+        let op = crabka_pgcatalog::put_sequence_op(&name, sequence);
         match self.mode {
             PersistMode::Durable => kv.write_batch(&[op])?,
             PersistMode::Replicated => {
@@ -161,8 +170,38 @@ impl SequenceManager {
     }
 }
 
+/// The sequence a `nextval('…')` / `setval('…')` argument names.
+///
+/// The argument is a `regclass` input: `PostgreSQL` parses the *text* as a
+/// written, possibly qualified name (`stringToQualifiedNameList`) rather than as
+/// one identifier, so a dot in it separates the schema from the sequence. An
+/// unqualified name then resolves through the session's search path like any
+/// other written name, which is why this takes a scope rather than assuming
+/// `public`.
+///
+/// `regclassin` reports a missing schema as a missing *relation* —
+/// `nextval('nosuch.s')` is `42P01 relation "nosuch.s" does not exist` on
+/// `postgres:18.4`, not `3F000` — so the disposition is
+/// [`SchemaDisposition::Reference`].
+fn sequence_name(
+    kv: &dyn Kv,
+    scope: &crate::relname::ResolutionScope,
+    written: &str,
+) -> Result<crabka_pgcatalog::RelationName, ExecError> {
+    let reference = match written.split_once('.') {
+        Some((schema, name)) => crabka_pgparser::ast::RelationRef::qualified(schema, name),
+        None => crabka_pgparser::ast::RelationRef::bare(written),
+    };
+    crate::relname::resolve_relation(
+        kv,
+        scope,
+        &reference,
+        crate::relname::SchemaDisposition::Reference,
+    )
+}
+
 fn next_sequence_value(
-    name: &str,
+    name: &crabka_pgcatalog::RelationName,
     sequence: &crabka_pgcatalog::Sequence,
 ) -> Result<i64, ExecError> {
     if !sequence.is_called {
@@ -178,12 +217,15 @@ fn next_sequence_value(
 }
 
 fn sequence_wrapped_value(
-    name: &str,
+    name: &crabka_pgcatalog::RelationName,
     sequence: &crabka_pgcatalog::Sequence,
 ) -> Result<i64, ExecError> {
     if !sequence.cycle {
+        // `PostgreSQL` names the sequence with `RelationGetRelationName`, so the
+        // message carries the bare name even for a sequence outside `public`.
         return Err(ExecError::SequenceLimit(format!(
-            "nextval: reached limit of sequence \"{name}\""
+            "nextval: reached limit of sequence \"{}\"",
+            name.name
         )));
     }
     if sequence.increment > 0 {
@@ -206,6 +248,37 @@ mod tests {
         kv.get(&crabka_pgkv::key::seq_key(table))
             .expect("get")
             .map(|b| u64::from_be_bytes(b.try_into().expect("u64")))
+    }
+
+    /// A `regclass` argument is written text, not one identifier: a dot in it
+    /// separates the schema, and an unqualified name resolves through the
+    /// session's search path rather than landing in `public`.
+    #[test]
+    fn a_written_sequence_name_resolves_through_the_search_path() {
+        let kv = MemKv::new();
+        for schema in ["sch", "other"] {
+            let ops =
+                crabka_pgcatalog::create_schema_ops(&kv, schema, "postgres").expect("schema ops");
+            kv.write_batch(&ops).expect("write");
+            let ops = crabka_pgcatalog::create_sequence_ops(
+                &kv,
+                &crabka_pgcatalog::RelationName::new(schema, "s"),
+                crabka_pgcatalog::Sequence::new(1, 1, None, None, Some(1), false),
+            )
+            .expect("sequence ops");
+            kv.write_batch(&ops).expect("write");
+        }
+        let scope = crate::relname::ResolutionScope {
+            search_path: crate::search_path::SearchPath::from_items(&["sch".into()]),
+            ..crate::relname::ResolutionScope::default()
+        };
+        let cases = [
+            ("s", crabka_pgcatalog::RelationName::new("sch", "s")),
+            ("other.s", crabka_pgcatalog::RelationName::new("other", "s")),
+        ];
+        for (written, expected) in cases {
+            assert!(sequence_name(&kv, &scope, written).expect("resolves") == expected);
+        }
     }
 
     #[test]

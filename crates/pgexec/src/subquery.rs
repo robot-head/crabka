@@ -501,6 +501,7 @@ fn lower_quantified(
 /// supplied CTE context instead of catalog tables only.
 pub(crate) fn resolve_types_in_projection_with_ctes(
     catalog_kv: &dyn crabka_pgkv::Kv,
+    resolution: &crate::relname::ResolutionScope,
     items: &[SelectItem],
     ctes: &crate::cte::CteContext,
 ) -> Result<Vec<SelectItem>, ExecError> {
@@ -509,7 +510,7 @@ pub(crate) fn resolve_types_in_projection_with_ctes(
         .map(|it| match it {
             SelectItem::Expr { expr, alias } => {
                 let label = crate::routine::call_label(expr);
-                let resolved = resolve_types_in_expr(catalog_kv, expr, ctes)?;
+                let resolved = resolve_types_in_expr(catalog_kv, resolution, expr, ctes)?;
                 let alias = match (alias, matches!(resolved, Expr::Func(_))) {
                     (Some(alias), _) => Some(alias.clone()),
                     (None, false) => label,
@@ -527,6 +528,7 @@ pub(crate) fn resolve_types_in_projection_with_ctes(
 
 pub(crate) fn resolve_types_in_values_with_ctes(
     catalog_kv: &dyn crabka_pgkv::Kv,
+    resolution: &crate::relname::ResolutionScope,
     v: &ValuesStmt,
     ctes: &crate::cte::CteContext,
 ) -> Result<ValuesStmt, ExecError> {
@@ -536,7 +538,7 @@ pub(crate) fn resolve_types_in_values_with_ctes(
             .iter()
             .map(|row| {
                 row.iter()
-                    .map(|expr| resolve_types_in_expr(catalog_kv, expr, ctes))
+                    .map(|expr| resolve_types_in_expr(catalog_kv, resolution, expr, ctes))
                     .collect()
             })
             .collect::<Result<_, _>>()?,
@@ -546,25 +548,26 @@ pub(crate) fn resolve_types_in_values_with_ctes(
 /// Recursively replace scalar subqueries with `Const { Null, <type> }` (type-only).
 fn resolve_types_in_expr(
     catalog_kv: &dyn crabka_pgkv::Kv,
+    resolution: &crate::relname::ResolutionScope,
     e: &Expr,
     ctes: &crate::cte::CteContext,
 ) -> Result<Expr, ExecError> {
     Ok(match e {
         Expr::ScalarSubquery(s) => Expr::Const {
             value: Datum::Null,
-            ty: scalar_subquery_type(catalog_kv, s, ctes)?,
+            ty: scalar_subquery_type(catalog_kv, resolution, s, ctes)?,
         },
         Expr::Unary { op, expr } => Expr::Unary {
             op: *op,
-            expr: Box::new(resolve_types_in_expr(catalog_kv, expr, ctes)?),
+            expr: Box::new(resolve_types_in_expr(catalog_kv, resolution, expr, ctes)?),
         },
         Expr::Binary { op, left, right } => Expr::Binary {
             op: *op,
-            left: Box::new(resolve_types_in_expr(catalog_kv, left, ctes)?),
-            right: Box::new(resolve_types_in_expr(catalog_kv, right, ctes)?),
+            left: Box::new(resolve_types_in_expr(catalog_kv, resolution, left, ctes)?),
+            right: Box::new(resolve_types_in_expr(catalog_kv, resolution, right, ctes)?),
         },
         Expr::Cast { expr, ty } => Expr::Cast {
-            expr: Box::new(resolve_types_in_expr(catalog_kv, expr, ctes)?),
+            expr: Box::new(resolve_types_in_expr(catalog_kv, resolution, expr, ctes)?),
             ty: *ty,
         },
         // P2: the describe path inlines a user-defined SQL function's body the
@@ -578,13 +581,12 @@ fn resolve_types_in_expr(
                     FuncArgs::Star => FuncArgs::Star,
                     FuncArgs::Exprs(args) => FuncArgs::Exprs(
                         args.iter()
-                            .map(|a| resolve_types_in_expr(catalog_kv, a, ctes))
+                            .map(|a| resolve_types_in_expr(catalog_kv, resolution, a, ctes))
                             .collect::<Result<_, _>>()?,
                     ),
                 },
                 filter: match &fc.filter {
-                    Some(predicate) => Some(Box::new(resolve_types_in_expr(
-                        catalog_kv, predicate, ctes,
+                    Some(predicate) => Some(Box::new(resolve_types_in_expr(catalog_kv, resolution, predicate, ctes,
                     )?)),
                     None => None,
                 },
@@ -592,7 +594,7 @@ fn resolve_types_in_expr(
             match crate::routine::inline_scalar(catalog_kv, &call)? {
                 Some(inlined) => {
                     let _guard = crate::routine::enter_inline()?;
-                    resolve_types_in_expr(catalog_kv, &inlined, ctes)?
+                    resolve_types_in_expr(catalog_kv, resolution, &inlined, ctes)?
                 }
                 None => Expr::Func(call),
             }
@@ -606,10 +608,11 @@ fn resolve_types_in_expr(
 /// The static type of a scalar subquery's single projection column (catalog only).
 fn scalar_subquery_type(
     catalog_kv: &dyn crabka_pgkv::Kv,
+    resolution: &crate::relname::ResolutionScope,
     q: &QueryExpr,
     ctes: &crate::cte::CteContext,
 ) -> Result<ColumnType, ExecError> {
-    let fields = crate::query::describe_query_expr_with_ctes(catalog_kv, q, ctes)?;
+    let fields = crate::query::describe_query_expr_with_ctes(catalog_kv, resolution, q, ctes)?;
     if fields.len() != 1 {
         return Err(ExecError::SubqueryColumns);
     }

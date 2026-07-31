@@ -29,6 +29,19 @@ use crate::{
 
 static NEXT_PID: AtomicI32 = AtomicI32::new(1);
 
+/// Allocate the backend process id that identifies one session.
+///
+/// `PostgreSQL` forks a backend per connection and the pid it announces in
+/// `BackendKeyData` is the one `pg_backend_pid()` reports, so a client can
+/// correlate a cancel request with the session it opened. crabka serves every
+/// session from one OS process, so this counter — not the process id — is what
+/// distinguishes them, and one counter serves the whole process so an engine
+/// opening a session with no client behind it (`Engine::connect`) draws an id
+/// that cannot collide with a connected session's.
+pub fn next_backend_pid() -> i32 {
+    NEXT_PID.fetch_add(1, Ordering::Relaxed)
+}
+
 /// Shared connection/activity accounting for lifecycle decisions outside pgwire.
 #[derive(Debug)]
 pub struct ActivityTracker {
@@ -189,7 +202,7 @@ impl CancelRegistry {
     ///
     /// Panics if the session registry mutex is poisoned.
     pub fn register(self: &Arc<Self>) -> SessionCancel {
-        let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+        let pid = next_backend_pid();
         let secret = rand::rng().random::<i32>();
         let target = Arc::new(CancelTarget {
             slot: Mutex::new(CancellationToken::new()),

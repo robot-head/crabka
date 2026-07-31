@@ -311,7 +311,6 @@ pub struct JoinSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinTableInterval {
     pub table_id: u64,
-    pub table_name: String,
     pub interval: RowInterval,
 }
 
@@ -416,7 +415,7 @@ impl JoinRangeRequest {
             })?;
         }
         for table in [&self.left, &self.right] {
-            if table.table_id == 0 || table.table_name.is_empty() {
+            if table.table_id == 0 {
                 return Err(JoinValidationError::InvalidTableIdentity);
             }
             if matches!((table.interval.start, table.interval.end), (Some(start), Some(end)) if start >= end)
@@ -459,12 +458,10 @@ impl JoinRangeRequest {
             strategy: JoinExecutionStrategy::BroadcastRight,
             left: JoinTableInterval {
                 table_id: 1,
-                table_name: "left".into(),
                 interval: RowInterval::ALL,
             },
             right: JoinTableInterval {
                 table_id: 2,
-                table_name: "right".into(),
                 interval: RowInterval::ALL,
             },
             broadcast_rows: Some(vec![]),
@@ -2066,7 +2063,7 @@ mod cursor_contract_tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use crabka_pgcatalog::{Column, Table};
+    use crabka_pgcatalog::{Column, RelationName, Table};
     use crabka_pgkv::MemKv;
     use crabka_pgmvcc::Snapshot;
     use crabka_pgtypes::{ColumnType, Datum};
@@ -2146,7 +2143,7 @@ mod cursor_contract_tests {
         };
         let table = Table {
             id: 42,
-            name: "items".into(),
+            name: RelationName::public("items"),
             columns: vec![Column::new("id", ColumnType::Int8)],
             sharded: true,
             sharding: None,
@@ -2189,7 +2186,7 @@ mod cursor_contract_tests {
         };
         let table = Table {
             id: 42,
-            name: "items".into(),
+            name: RelationName::public("items"),
             columns: vec![Column::new("id", ColumnType::Int8)],
             sharded: false,
             sharding: None,
@@ -2240,7 +2237,7 @@ mod cursor_contract_tests {
 #[cfg(test)]
 mod streaming_aggregate_tests {
     use assert2::assert;
-    use crabka_pgcatalog::{Column, Table};
+    use crabka_pgcatalog::{Column, RelationName, Table};
     use crabka_pgkv::MemKv;
     use crabka_pgmvcc::Snapshot;
     use crabka_pgtypes::{ColumnType, Datum};
@@ -2261,7 +2258,7 @@ mod streaming_aggregate_tests {
     fn table() -> Table {
         Table {
             id: 42,
-            name: "items".into(),
+            name: RelationName::public("items"),
             columns: vec![Column::new("v", ColumnType::Int8)],
             sharded: false,
             sharding: None,

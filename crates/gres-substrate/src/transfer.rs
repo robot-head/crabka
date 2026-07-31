@@ -365,7 +365,10 @@ mod tests {
         );
         assert!(
             target
-                .get(&key::catalog_key("table_7"))
+                .get(&key::catalog_key(
+                    crabka_pgcatalog::PUBLIC_SCHEMA,
+                    "table_7"
+                ))
                 .expect("catalog")
                 .is_none()
         );
@@ -410,7 +413,10 @@ mod tests {
                 version::version_key_xid(8, 1, 5),
                 version::encode_tuple(5, 0, &[Datum::Int4(99)]),
             ),
-            (key::catalog_key("table_7"), b"catalog".to_vec()),
+            (
+                key::catalog_key(crabka_pgcatalog::PUBLIC_SCHEMA, "table_7"),
+                b"catalog".to_vec(),
+            ),
         ] {
             source.put(key_bytes, value).expect("source pair");
         }

@@ -435,8 +435,11 @@ impl VisibilityWorld {
                 .map(|kv| ManualShard { kv: Arc::clone(kv) })
                 .collect(),
         };
-        let table =
-            crabka_pgcatalog::get_table(self.global.as_ref(), table_name).expect("catalog table");
+        let table = crabka_pgcatalog::get_table(
+            self.global.as_ref(),
+            &crabka_pgcatalog::RelationName::public(table_name),
+        )
+        .expect("catalog table");
         let snapshot = Snapshot {
             xmin: 1,
             xmax: u64::MAX,
@@ -625,7 +628,7 @@ fn put_prepared_version(
 }
 
 fn table_id(kv: &dyn Kv, table_name: &str) -> u32 {
-    crabka_pgcatalog::get_table(kv, table_name)
+    crabka_pgcatalog::get_table(kv, &crabka_pgcatalog::RelationName::public(table_name))
         .expect("catalog table")
         .id
 }

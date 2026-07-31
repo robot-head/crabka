@@ -19,7 +19,9 @@
 
 use std::collections::BTreeMap;
 
-use crabka_pgcatalog::{Column, IndexConstraint};
+use crabka_pgcatalog::{
+    Column, CommentObject, IndexConstraint, MatchType, ReferentialAction, RelationName, Table,
+};
 use crabka_pgkv::Kv;
 use crabka_pgtypes::{ColumnType, Datum, ElemType};
 
@@ -36,6 +38,8 @@ const CHECK_OID_BASE: i32 = 90_000;
 /// First oid of the band reserved for `NOT NULL` constraints, which PostgreSQL
 /// 18 records in `pg_constraint` with `contype = 'n'`.
 const NOT_NULL_OID_BASE: i32 = 130_000;
+/// First oid of the band reserved for `FOREIGN KEY` constraints.
+const FOREIGN_KEY_OID_BASE: i32 = 150_000;
 /// First oid of the band reserved for column defaults (`pg_attrdef`).
 const ATTRDEF_OID_BASE: i32 = 110_000;
 /// Width of every name-hashed oid band.
@@ -225,18 +229,41 @@ fn system_view_oid(name: &str) -> i32 {
     }
 }
 
+/// What a banded oid is hashed from.
+///
+/// A relation is keyed by its own [`RelationName`], so two same-named relations
+/// in different schemas take different oids — the hash has to see the schema,
+/// which the `public`-bare [`std::fmt::Display`] spelling would hide. Everything
+/// else arrives as an already-built dotted key.
+trait BandKey: Ord + Clone {
+    fn band_text(&self) -> String;
+}
+
+impl BandKey for String {
+    fn band_text(&self) -> String {
+        self.clone()
+    }
+}
+
+impl BandKey for RelationName {
+    fn band_text(&self) -> String {
+        format!("{}.{}", self.schema, self.name)
+    }
+}
+
 /// Assign every name in `names` a distinct oid inside the band starting at
 /// `base`. The slot is a hash of the name, so an object keeps its oid when
 /// unrelated objects are created or dropped; a collision probes forward, which
 /// makes the whole assignment a pure function of the (sorted) name set.
-fn banded_oids(base: i32, names: &[String]) -> BTreeMap<String, i32> {
+fn banded_oids<K: BandKey>(base: i32, names: &[K]) -> BTreeMap<K, i32> {
     let mut taken = BTreeMap::new();
     let mut used = std::collections::BTreeSet::new();
-    let mut sorted: Vec<&String> = names.iter().collect();
+    let mut sorted: Vec<&K> = names.iter().collect();
     sorted.sort();
     sorted.dedup();
     for name in sorted {
-        let mut slot = i32::try_from(fnv1a(name) % OID_BAND_WIDTH.unsigned_abs()).unwrap_or(0);
+        let mut slot =
+            i32::try_from(fnv1a(&name.band_text()) % OID_BAND_WIDTH.unsigned_abs()).unwrap_or(0);
         while !used.insert(slot) {
             slot = (slot + 1) % OID_BAND_WIDTH;
         }
@@ -274,8 +301,8 @@ pub(crate) fn namespace_oid(schema: &str) -> i32 {
     }
 }
 
-/// `pg_class` oids of every view, keyed by view name.
-pub(crate) fn view_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError> {
+/// `pg_class` oids of every view, keyed by the view's catalog name.
+pub(crate) fn view_oids(kv: &dyn Kv) -> Result<BTreeMap<RelationName, i32>, ExecError> {
     let names = crabka_pgcatalog::list_views(kv)?
         .into_iter()
         .map(|view| view.name)
@@ -283,8 +310,8 @@ pub(crate) fn view_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError>
     Ok(banded_oids(VIEW_OID_BASE, &names))
 }
 
-/// `pg_class` oids of every sequence, keyed by sequence name.
-pub(crate) fn sequence_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError> {
+/// `pg_class` oids of every sequence, keyed by the sequence's catalog name.
+pub(crate) fn sequence_oids(kv: &dyn Kv) -> Result<BTreeMap<RelationName, i32>, ExecError> {
     let names = crabka_pgcatalog::list_sequences(kv)?
         .into_iter()
         .map(|(name, _)| name)
@@ -339,6 +366,17 @@ pub(crate) fn not_null_constraint_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i
     Ok(banded_oids(NOT_NULL_OID_BASE, &keys))
 }
 
+/// `pg_constraint` oids of every `FOREIGN KEY` constraint, keyed
+/// `<child table>.<name>`. Constraint names are unique per relation rather than
+/// per catalog, so the child's name has to be part of the key.
+pub(crate) fn foreign_key_constraint_oids(kv: &dyn Kv) -> Result<BTreeMap<String, i32>, ExecError> {
+    let keys = crabka_pgcatalog::list_foreign_keys(kv)?
+        .into_iter()
+        .map(|foreign_key| format!("{}.{}", foreign_key.table, foreign_key.name))
+        .collect::<Vec<_>>();
+    Ok(banded_oids(FOREIGN_KEY_OID_BASE, &keys))
+}
+
 /// The `pg_constraint` oid of the constraint an index backs.
 pub(crate) fn index_constraint_oid(index_id: u32) -> Result<i32, ExecError> {
     i32::try_from(index_id)
@@ -354,6 +392,11 @@ pub(crate) fn index_relation_oid(index_id: u32) -> Result<i32, ExecError> {
         .ok()
         .and_then(|id| INDEX_OID_BASE.checked_add(id))
         .ok_or_else(|| ExecError::Unsupported("index oid exceeds int4 range".into()))
+}
+
+/// The `pg_class` oid of a table, which is its catalog id.
+fn table_relation_oid(table_id: u32) -> Result<i32, ExecError> {
+    i32::try_from(table_id).map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))
 }
 
 /// Build a column list from `(name, type)` pairs.
@@ -386,12 +429,17 @@ pub(crate) fn columns(name: &str) -> Vec<Column> {
     }
 }
 
-/// The relation's rows.
+/// The relation's rows. `backend_pid` is the querying session's backend id,
+/// which `pg_stat_activity` reports as its one row's `pid`.
 ///
 /// # Errors
 ///
 /// Propagates catalog read errors.
-pub(crate) fn rows(kv: &dyn Kv, name: &str) -> Result<Vec<Vec<Datum>>, ExecError> {
+pub(crate) fn rows(
+    kv: &dyn Kv,
+    name: &str,
+    backend_pid: i32,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
     match name {
         "pg_am" => Ok(pg_am_rows()),
         "pg_language" => Ok(pg_language_rows()),
@@ -405,7 +453,7 @@ pub(crate) fn rows(kv: &dyn Kv, name: &str) -> Result<Vec<Vec<Datum>>, ExecError
         "pg_indexes" => pg_indexes_rows(kv),
         "pg_rewrite" => pg_rewrite_rows(kv),
         "pg_sequence" => pg_sequence_rows(kv),
-        "pg_stat_activity" => Ok(pg_stat_activity_rows()),
+        "pg_stat_activity" => Ok(pg_stat_activity_rows(backend_pid)),
         "pg_tables" => pg_tables_rows(kv),
         "pg_tablespace" => Ok(pg_tablespace_rows()),
         "pg_views" => pg_views_rows(kv),
@@ -984,11 +1032,15 @@ fn pg_tablespace_rows() -> Vec<Vec<Datum>> {
 /// The current backend, as `pg_stat_activity` describes it. crabka has no
 /// cross-session backend registry, so exactly one row is reported: the backend
 /// running the query, which is what a health check or a "who am I" probe reads.
-fn pg_stat_activity_rows() -> Vec<Vec<Datum>> {
+///
+/// The `pid` is the querying session's backend id, so
+/// `WHERE pid = pg_backend_pid()` selects the row — the pairing every
+/// "am I still connected" probe rests on.
+fn pg_stat_activity_rows(backend_pid: i32) -> Vec<Vec<Datum>> {
     vec![vec![
         int(DATABASE_OID),
         text(crate::exec::CURRENT_DATABASE),
-        int(crate::catalog_fn::backend_pid()),
+        int(backend_pid),
         Datum::Null,
         int(10),
         Datum::Null,
@@ -1062,12 +1114,14 @@ fn pg_description_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     for table in crabka_pgcatalog::list_tables(kv)? {
         let relid = i32::try_from(table.id)
             .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))?;
-        if let Some(comment) = crabka_pgcatalog::get_comment(kv, "table", &table.name)? {
+        if let Some(comment) =
+            crabka_pgcatalog::get_comment(kv, "table", CommentObject::Relation(&table.name))?
+        {
             rows.push(description_row(relid, 0, &comment));
         }
         for (idx, column) in table.columns.iter().enumerate() {
-            let key = format!("{}.{}", table.name, column.name);
-            if let Some(comment) = crabka_pgcatalog::get_comment(kv, "column", &key)? {
+            let object = CommentObject::Column(&table.name, &column.name);
+            if let Some(comment) = crabka_pgcatalog::get_comment(kv, "column", object)? {
                 let attnum = i32::try_from(idx + 1)
                     .map_err(|_| ExecError::Unsupported("attnum exceeds int4 range".into()))?;
                 rows.push(description_row(relid, attnum, &comment));
@@ -1076,7 +1130,9 @@ fn pg_description_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     }
     let view_oids = view_oids(kv)?;
     for view in crabka_pgcatalog::list_views(kv)? {
-        if let Some(comment) = crabka_pgcatalog::get_comment(kv, "view", &view.name)? {
+        if let Some(comment) =
+            crabka_pgcatalog::get_comment(kv, "view", CommentObject::Relation(&view.name))?
+        {
             rows.push(description_row(
                 view_oids.get(&view.name).copied().unwrap_or(0),
                 0,
@@ -1096,9 +1152,8 @@ fn description_row(objoid: i32, objsubid: i32, comment: &str) -> Vec<Datum> {
     ]
 }
 
-/// Primary-key/unique constraints (each backed by an index) and `CHECK`
-/// constraints. crabka has no foreign keys yet, so no `'f'` row is ever
-/// produced — `\d`'s foreign-key section is correctly empty rather than absent.
+/// Primary-key/unique constraints (each backed by an index), `CHECK` and
+/// `NOT NULL` constraints, and `FOREIGN KEY` constraints.
 fn pg_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for index in crabka_pgcatalog::list_indexes(kv)? {
@@ -1117,21 +1172,116 @@ fn pg_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             IndexConstraint::PrimaryKey => "p",
             IndexConstraint::Unique => "u",
         };
-        let relid = i32::try_from(index.table_id)
-            .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))?;
         rows.push(constraint_row(ConstraintRow {
             oid: index_constraint_oid(index.id)?,
             name: &index.name,
+            schema: &index.table.schema,
             contype,
-            conrelid: relid,
+            conrelid: table_relation_oid(index.table_id)?,
             conindid: index_relation_oid(index.id)?,
             conkey: Some(conkey),
             conbin: Datum::Null,
             validated: true,
+            condeferrable: false,
+            condeferred: false,
+            referent: Referent::default(),
         }));
     }
     rows.extend(check_constraint_rows(kv)?);
+    rows.extend(foreign_key_constraint_rows(kv)?);
     Ok(rows)
+}
+
+/// `FOREIGN KEY` constraints (`contype = 'f'`).
+///
+/// `conindid` is the *referenced* index — the unique index that proves the
+/// referenced columns are a key — and `confrelid` the referenced relation.
+/// `confrelid` is load-bearing rather than cosmetic: `psql`'s `\d <parent>`
+/// renders its `Referenced by:` section by filtering `pg_constraint` on it, so
+/// leaving it 0 makes the parent's `\d` silently empty.
+///
+/// `conkey` and `confkey` are both stored in the order the FK clause wrote
+/// them, paired positionally — not sorted, and not permuted into the referenced
+/// index's column order.
+fn foreign_key_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let oids = foreign_key_constraint_oids(kv)?;
+    let mut rows = Vec::new();
+    for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
+        let child = crabka_pgcatalog::get_table(kv, &foreign_key.table)?;
+        let parent = crabka_pgcatalog::get_table(kv, &foreign_key.referenced_table)?;
+        // An empty `set_columns` means the action touches every referencing
+        // column, which PostgreSQL records as a NULL `confdelsetcols` rather
+        // than a copy of `conkey`.
+        let set_columns = if foreign_key.set_columns.is_empty() {
+            None
+        } else {
+            Some(attnums(&child, &foreign_key.set_columns)?)
+        };
+        let key = format!("{}.{}", foreign_key.table, foreign_key.name);
+        rows.push(constraint_row(ConstraintRow {
+            oid: oids.get(&key).copied().unwrap_or(0),
+            name: &foreign_key.name,
+            schema: &foreign_key.table.schema,
+            contype: "f",
+            conrelid: table_relation_oid(foreign_key.table_id)?,
+            conindid: index_relation_oid(foreign_key.referenced_index_id)?,
+            conkey: Some(attnums(&child, &foreign_key.columns)?),
+            conbin: Datum::Null,
+            validated: foreign_key.validated,
+            condeferrable: foreign_key.deferrable,
+            condeferred: foreign_key.initially_deferred,
+            referent: Referent {
+                confrelid: table_relation_oid(foreign_key.referenced_table_id)?,
+                confupdtype: referential_action_code(foreign_key.on_update),
+                confdeltype: referential_action_code(foreign_key.on_delete),
+                confmatchtype: match_type_code(foreign_key.match_type),
+                confkey: Some(attnums(&parent, &foreign_key.referenced_columns)?),
+                confdelsetcols: set_columns,
+            },
+        }));
+    }
+    Ok(rows)
+}
+
+/// The 1-based attnums of `columns` in `table`, in the order written — the
+/// contents of a `pg_constraint` attnum array.
+fn attnums(table: &Table, columns: &[String]) -> Result<Vec<Datum>, ExecError> {
+    columns
+        .iter()
+        .map(|column| {
+            let position =
+                table
+                    .column_index(column)
+                    .ok_or_else(|| ExecError::UndefinedTableColumn {
+                        column: column.clone(),
+                        table: table.name.to_string(),
+                    })?;
+            i16::try_from(position + 1)
+                .map(Datum::Int2)
+                .map_err(|_| ExecError::Unsupported("attnum exceeds int2 range".into()))
+        })
+        .collect()
+}
+
+/// The `"char"` PostgreSQL stores in `confupdtype`/`confdeltype` for a
+/// referential action.
+fn referential_action_code(action: ReferentialAction) -> &'static str {
+    match action {
+        ReferentialAction::NoAction => "a",
+        ReferentialAction::Restrict => "r",
+        ReferentialAction::Cascade => "c",
+        ReferentialAction::SetNull => "n",
+        ReferentialAction::SetDefault => "d",
+    }
+}
+
+/// The `"char"` PostgreSQL stores in `confmatchtype`. `MATCH PARTIAL`'s `p` has
+/// no crabka spelling because the parser refuses it.
+fn match_type_code(match_type: MatchType) -> &'static str {
+    match match_type {
+        MatchType::Simple => "s",
+        MatchType::Full => "f",
+    }
 }
 
 /// `CHECK` constraints (`contype = 'c'`) and the `NOT NULL` constraints
@@ -1142,19 +1292,22 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let not_null_oids = not_null_constraint_oids(kv)?;
     let mut rows = Vec::new();
     for table in crabka_pgcatalog::list_tables(kv)? {
-        let relid = i32::try_from(table.id)
-            .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into()))?;
+        let relid = table_relation_oid(table.id)?;
         for check in &table.checks {
             let key = format!("{}.{}", table.name, check.name);
             rows.push(constraint_row(ConstraintRow {
                 oid: check_oids.get(&key).copied().unwrap_or(0),
                 name: &check.name,
+                schema: &table.name.schema,
                 contype: "c",
                 conrelid: relid,
                 conindid: 0,
                 conkey: None,
                 conbin: text(&check.expr),
                 validated: check.validated,
+                condeferrable: false,
+                condeferred: false,
+                referent: Referent::default(),
             }));
         }
         for (idx, column) in table.columns.iter().enumerate() {
@@ -1166,17 +1319,29 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 .map_err(|_| ExecError::Unsupported("attnum exceeds int2 range".into()))?;
             rows.push(constraint_row(ConstraintRow {
                 oid: not_null_oids.get(&key).copied().unwrap_or(0),
-                name: &format!("{}_{}_not_null", table.name, column.name),
+                name: &not_null_constraint_name(&table.name, &column.name),
+                schema: &table.name.schema,
                 contype: "n",
                 conrelid: relid,
                 conindid: 0,
                 conkey: Some(vec![Datum::Int2(attnum)]),
                 conbin: Datum::Null,
                 validated: true,
+                condeferrable: false,
+                condeferred: false,
+                referent: Referent::default(),
             }));
         }
     }
     Ok(rows)
+}
+
+/// The name PostgreSQL 18 gives the `pg_constraint` row it records for a
+/// `NOT NULL` column: the *unqualified* table name, an underscore, the column
+/// and `_not_null`. A constraint name is never schema-qualified — the schema
+/// lives in `connamespace` instead.
+fn not_null_constraint_name(table: &RelationName, column: &str) -> String {
+    format!("{}_{column}_not_null", table.name)
 }
 
 /// The `pg_constraint` fields that vary by constraint kind; the rest of the
@@ -1184,45 +1349,86 @@ fn check_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 struct ConstraintRow<'a> {
     oid: i32,
     name: &'a str,
+    /// The schema of the relation the constraint is on, which is the one
+    /// `connamespace` names — a constraint has no schema of its own.
+    schema: &'a str,
     contype: &'a str,
     conrelid: i32,
     conindid: i32,
     conkey: Option<Vec<Datum>>,
     conbin: Datum,
     validated: bool,
+    condeferrable: bool,
+    condeferred: bool,
+    referent: Referent,
 }
 
-fn constraint_row(row: ConstraintRow<'_>) -> Vec<Datum> {
-    let conkey = row.conkey.map_or(Datum::Null, |elems| {
+/// The `conf*` columns, which only a `FOREIGN KEY` fills in. [`Default`] is
+/// PostgreSQL's "references nothing" spelling: `confrelid` 0, a single space in
+/// each of the three `"char"` codes, and NULL attnum arrays.
+struct Referent {
+    confrelid: i32,
+    confupdtype: &'static str,
+    confdeltype: &'static str,
+    confmatchtype: &'static str,
+    confkey: Option<Vec<Datum>>,
+    confdelsetcols: Option<Vec<Datum>>,
+}
+
+impl Default for Referent {
+    fn default() -> Self {
+        Self {
+            confrelid: 0,
+            confupdtype: NO_REFERENT_CODE,
+            confdeltype: NO_REFERENT_CODE,
+            confmatchtype: NO_REFERENT_CODE,
+            confkey: None,
+            confdelsetcols: None,
+        }
+    }
+}
+
+/// The `"char"` PostgreSQL leaves in the referential code columns of a
+/// constraint that references nothing.
+const NO_REFERENT_CODE: &str = " ";
+
+/// An `int2` attnum array column, or NULL where the constraint has no such list.
+fn attnum_array(attnums: Option<Vec<Datum>>) -> Datum {
+    attnums.map_or(Datum::Null, |elems| {
         Datum::Array(crabka_pgtypes::ArrayValue::new(ElemType::Int2, elems))
-    });
+    })
+}
+
+/// One `pg_constraint` tuple, in PostgreSQL 18.4's 28-column order.
+fn constraint_row(row: ConstraintRow<'_>) -> Vec<Datum> {
+    let referent = row.referent;
     vec![
         int(row.oid),
         text(row.name),
-        int(crate::exec::PUBLIC_NAMESPACE_OID),
+        int(namespace_oid(row.schema)),
         text(row.contype),
-        Datum::Bool(false),
-        Datum::Bool(false),
+        Datum::Bool(row.condeferrable),
+        Datum::Bool(row.condeferred),
         Datum::Bool(true),
         Datum::Bool(row.validated),
         int(row.conrelid),
         int(0),
         int(row.conindid),
         int(0),
-        int(0),
-        text(" "),
-        text(" "),
-        text(" "),
+        int(referent.confrelid),
+        text(referent.confupdtype),
+        text(referent.confdeltype),
+        text(referent.confmatchtype),
         Datum::Bool(true),
         small(0),
         Datum::Bool(false),
         Datum::Bool(false),
-        conkey,
+        attnum_array(row.conkey),
+        attnum_array(referent.confkey),
         Datum::Null,
         Datum::Null,
         Datum::Null,
-        Datum::Null,
-        Datum::Null,
+        attnum_array(referent.confdelsetcols),
         Datum::Null,
         row.conbin,
     ]
@@ -1234,8 +1440,9 @@ fn pg_indexes_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .map(|index| {
             let table = crabka_pgcatalog::get_table(kv, &index.table)?;
             Ok(vec![
-                text("public"),
-                text(&index.table),
+                // An index lives in the schema of the table it indexes.
+                text(&index.table.schema),
+                text(&index.table.name),
                 text(&index.name),
                 Datum::Null,
                 text(&crate::catalog_fn::index_definition(&index, &table)),
@@ -1254,8 +1461,8 @@ fn pg_tables_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .filter(|table| table.foreign.is_none())
         .map(|table| {
             vec![
-                text("public"),
-                text(&table.name),
+                text(&table.name.schema),
+                text(&table.name.name),
                 text(crate::catalog_fn::OBJECT_OWNER),
                 Datum::Null,
                 Datum::Bool(indexed.contains(&table.name)),
@@ -1272,8 +1479,8 @@ fn pg_views_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
         .into_iter()
         .map(|view| {
             vec![
-                text("public"),
-                text(&view.name),
+                text(&view.name.schema),
+                text(&view.name.name),
                 text(crate::catalog_fn::OBJECT_OWNER),
                 text(&crate::catalog_fn::view_definition_text(&view, false)),
             ]
@@ -1436,15 +1643,16 @@ fn information_schema_rows(kv: &dyn Kv, name: &str) -> Result<Vec<Vec<Datum>>, E
         "information_schema.table_constraints" => table_constraint_rows(kv),
         "information_schema.key_column_usage" => key_column_usage_rows(kv),
         "information_schema.constraint_column_usage" => constraint_column_usage_rows(kv),
+        "information_schema.referential_constraints" => referential_constraint_rows(kv),
         "information_schema.views" => information_schema_view_rows(kv),
         "information_schema.enabled_roles" => enabled_role_rows(kv),
         "information_schema.applicable_roles" => Ok(Vec::new()),
         "information_schema.sequences" => sequence_view_rows(kv),
         "information_schema.table_privileges" => table_privilege_rows(kv),
         "information_schema.column_privileges" => Ok(Vec::new()),
-        // `referential_constraints` needs foreign keys, `routines`/`parameters`
-        // need user-defined routines; crabka has neither object kind yet, so
-        // both are correctly empty rather than absent.
+        // `routines`/`parameters` need user-defined routines, which crabka has
+        // no object kind for yet, so both are correctly empty rather than
+        // absent.
         _ => Ok(Vec::new()),
     }
 }
@@ -1454,8 +1662,30 @@ fn catalog_name() -> Datum {
 }
 
 /// A constraint's `information_schema` identity: catalog, schema, name.
-fn constraint_identity(name: &str) -> [Datum; 3] {
-    [catalog_name(), text("public"), text(name)]
+///
+/// A constraint has no schema of its own — it belongs to the schema of the
+/// relation it constrains, which is what `pg_constraint.connamespace` records
+/// and what the standard views report as `constraint_schema`.
+fn constraint_identity(schema: &str, name: &str) -> [Datum; 3] {
+    [catalog_name(), text(schema), text(name)]
+}
+
+/// A relation's `information_schema` identity: catalog, schema, name — the
+/// `table_catalog`/`table_schema`/`table_name` triple every standard view
+/// carries, reporting the relation's real schema.
+fn relation_identity(relation: &RelationName) -> [Datum; 3] {
+    [catalog_name(), text(&relation.schema), text(&relation.name)]
+}
+
+/// The `information_schema` spelling of a boolean-valued `character_data` column.
+fn yes_no(flag: bool) -> &'static str {
+    if flag { "YES" } else { "NO" }
+}
+
+/// The 1-based `information_schema` ordinal of a 0-based position.
+fn ordinal(position: usize) -> Result<i32, ExecError> {
+    i32::try_from(position + 1)
+        .map_err(|_| ExecError::Unsupported("ordinal exceeds int4 range".into()))
 }
 
 fn table_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
@@ -1472,23 +1702,48 @@ fn table_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             &index.name,
             &index.table,
             constraint_type,
+            false,
+            false,
         ));
     }
     for table in crabka_pgcatalog::list_tables(kv)? {
         for check in &table.checks {
-            rows.push(table_constraint_row(&check.name, &table.name, "CHECK"));
+            rows.push(table_constraint_row(
+                &check.name,
+                &table.name,
+                "CHECK",
+                false,
+                false,
+            ));
         }
+    }
+    // A foreign key is the one constraint kind crabka can defer, so it is the
+    // one that reports anything but NO/NO.
+    for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
+        rows.push(table_constraint_row(
+            &foreign_key.name,
+            &foreign_key.table,
+            "FOREIGN KEY",
+            foreign_key.deferrable,
+            foreign_key.initially_deferred,
+        ));
     }
     Ok(rows)
 }
 
-fn table_constraint_row(name: &str, table: &str, constraint_type: &str) -> Vec<Datum> {
-    let mut row = constraint_identity(name).to_vec();
-    row.extend([catalog_name(), text("public"), text(table)]);
+fn table_constraint_row(
+    name: &str,
+    table: &RelationName,
+    constraint_type: &str,
+    deferrable: bool,
+    initially_deferred: bool,
+) -> Vec<Datum> {
+    let mut row = constraint_identity(&table.schema, name).to_vec();
+    row.extend(relation_identity(table));
     row.extend([
         text(constraint_type),
-        text("NO"),
-        text("NO"),
+        text(yes_no(deferrable)),
+        text(yes_no(initially_deferred)),
         text("YES"),
         if constraint_type == "UNIQUE" {
             text("YES")
@@ -1499,6 +1754,62 @@ fn table_constraint_row(name: &str, table: &str, constraint_type: &str) -> Vec<D
     row
 }
 
+/// `information_schema.referential_constraints`: one row per foreign key.
+///
+/// `unique_constraint_catalog`/`_schema`/`_name` are NULL as a triple when the
+/// referent is a bare `CREATE UNIQUE INDEX` rather than a `PRIMARY KEY` or
+/// `UNIQUE` constraint — PostgreSQL's view LEFT JOINs `pg_constraint` to name
+/// it, so an index with no constraint marker yields no name.
+fn referential_constraint_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = Vec::new();
+    for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
+        let referent = crabka_pgcatalog::get_index(kv, &referenced_index_name(&foreign_key))?;
+        let mut row = constraint_identity(&foreign_key.table.schema, &foreign_key.name).to_vec();
+        if referent.constraint.is_some() {
+            row.extend(constraint_identity(&referent.table.schema, &referent.name));
+        } else {
+            row.extend([Datum::Null, Datum::Null, Datum::Null]);
+        }
+        row.extend([
+            text(match_option(foreign_key.match_type)),
+            text(referential_action_rule(foreign_key.on_update)),
+            text(referential_action_rule(foreign_key.on_delete)),
+        ]);
+        rows.push(row);
+    }
+    Ok(rows)
+}
+
+/// The catalog name of the unique index a foreign key references. A foreign key
+/// stores that index's bare name, and an index lives in the schema of the table
+/// it indexes — here, the referenced table's.
+fn referenced_index_name(foreign_key: &crabka_pgcatalog::ForeignKey) -> RelationName {
+    foreign_key
+        .referenced_table
+        .sibling(&foreign_key.referenced_index)
+}
+
+/// The SQL standard's `match_option`, whose spelling for `MATCH SIMPLE` is
+/// `NONE` rather than `SIMPLE`.
+fn match_option(match_type: MatchType) -> &'static str {
+    match match_type {
+        MatchType::Simple => "NONE",
+        MatchType::Full => "FULL",
+    }
+}
+
+/// The SQL standard's `update_rule`/`delete_rule` — the referential action
+/// spelled out rather than the `pg_constraint` `"char"`.
+fn referential_action_rule(action: ReferentialAction) -> &'static str {
+    match action {
+        ReferentialAction::NoAction => "NO ACTION",
+        ReferentialAction::Restrict => "RESTRICT",
+        ReferentialAction::Cascade => "CASCADE",
+        ReferentialAction::SetNull => "SET NULL",
+        ReferentialAction::SetDefault => "SET DEFAULT",
+    }
+}
+
 fn key_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let mut rows = Vec::new();
     for index in crabka_pgcatalog::list_indexes(kv)? {
@@ -1506,11 +1817,40 @@ fn key_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             continue;
         }
         for (position, column) in index.columns.iter().enumerate() {
-            let ordinal = i32::try_from(position + 1)
-                .map_err(|_| ExecError::Unsupported("ordinal exceeds int4 range".into()))?;
-            let mut row = constraint_identity(&index.name).to_vec();
-            row.extend([catalog_name(), text("public"), text(&index.table)]);
-            row.extend([text(column), int(ordinal), Datum::Null]);
+            let mut row = constraint_identity(&index.table.schema, &index.name).to_vec();
+            row.extend(relation_identity(&index.table));
+            row.extend([text(column), int(ordinal(position)?), Datum::Null]);
+            rows.push(row);
+        }
+    }
+    rows.extend(foreign_key_column_usage_rows(kv)?);
+    Ok(rows)
+}
+
+/// A foreign key's *referencing* columns, which PostgreSQL includes here
+/// because its `key_column_usage` covers `contype IN ('p', 'u', 'f')`.
+///
+/// `position_in_unique_constraint` is the paired referenced column's position
+/// within the referenced *index*, which is why it can disagree with
+/// `ordinal_position`: a permuted composite key pairs by written order while
+/// the index keeps its own.
+fn foreign_key_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let mut rows = Vec::new();
+    for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
+        let referent = crabka_pgcatalog::get_index(kv, &referenced_index_name(&foreign_key))?;
+        for (position, column) in foreign_key.columns.iter().enumerate() {
+            let paired = foreign_key
+                .referenced_columns
+                .get(position)
+                .and_then(|name| referent.columns.iter().position(|keyed| keyed == name));
+            let in_unique = match paired {
+                Some(keyed) => int(ordinal(keyed)?),
+                None => Datum::Null,
+            };
+            let mut row =
+                constraint_identity(&foreign_key.table.schema, &foreign_key.name).to_vec();
+            row.extend(relation_identity(&foreign_key.table));
+            row.extend([text(column), int(ordinal(position)?), in_unique]);
             rows.push(row);
         }
     }
@@ -1524,23 +1864,54 @@ fn constraint_column_usage_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
             continue;
         }
         for column in &index.columns {
-            rows.push(column_usage_row(&index.table, column, &index.name));
+            rows.push(column_usage_row(
+                &index.table,
+                column,
+                &index.table.schema,
+                &index.name,
+            ));
         }
     }
     // PostgreSQL 18 records `NOT NULL` in `pg_constraint`, so it shows up here
     // too, one row per constrained column.
     for table in crabka_pgcatalog::list_tables(kv)? {
         for column in table.columns.iter().filter(|column| column.not_null) {
-            let name = format!("{}_{}_not_null", table.name, column.name);
-            rows.push(column_usage_row(&table.name, &column.name, &name));
+            let name = not_null_constraint_name(&table.name, &column.name);
+            rows.push(column_usage_row(
+                &table.name,
+                &column.name,
+                &table.name.schema,
+                &name,
+            ));
+        }
+    }
+    // A foreign key is attributed to the columns it *references*, on the parent
+    // relation — the mirror of `key_column_usage`, which lists the child's.
+    for foreign_key in crabka_pgcatalog::list_foreign_keys(kv)? {
+        for column in &foreign_key.referenced_columns {
+            rows.push(column_usage_row(
+                &foreign_key.referenced_table,
+                column,
+                &foreign_key.table.schema,
+                &foreign_key.name,
+            ));
         }
     }
     Ok(rows)
 }
 
-fn column_usage_row(table: &str, column: &str, constraint: &str) -> Vec<Datum> {
-    let mut row = vec![catalog_name(), text("public"), text(table), text(column)];
-    row.extend(constraint_identity(constraint));
+/// One `constraint_column_usage` row. The relation and the constraint carry
+/// their own schemas because a foreign key separates them: the columns are the
+/// *parent's*, while the constraint belongs to the child's schema.
+fn column_usage_row(
+    table: &RelationName,
+    column: &str,
+    constraint_schema: &str,
+    constraint: &str,
+) -> Vec<Datum> {
+    let mut row = relation_identity(table).to_vec();
+    row.push(text(column));
+    row.extend(constraint_identity(constraint_schema, constraint));
     row
 }
 
@@ -1550,10 +1921,8 @@ fn information_schema_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
         .map(|view| {
             let updatable = crate::catalog_fn::view_is_auto_updatable(&view);
             let flag = if updatable { "YES" } else { "NO" };
-            vec![
-                catalog_name(),
-                text("public"),
-                text(&view.name),
+            let mut row = relation_identity(&view.name).to_vec();
+            row.extend([
                 text(&crate::catalog_fn::view_definition_text(&view, false)),
                 text("NONE"),
                 text(flag),
@@ -1561,7 +1930,8 @@ fn information_schema_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecErro
                 text("NO"),
                 text("NO"),
                 text("NO"),
-            ]
+            ]);
+            row
         })
         .collect())
 }
@@ -1577,10 +1947,8 @@ fn sequence_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(crabka_pgcatalog::list_sequences(kv)?
         .into_iter()
         .map(|(name, sequence)| {
-            vec![
-                catalog_name(),
-                text("public"),
-                text(&name),
+            let mut row = relation_identity(&name).to_vec();
+            row.extend([
                 text("bigint"),
                 int(64),
                 int(2),
@@ -1590,7 +1958,8 @@ fn sequence_view_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 text(&sequence.max.to_string()),
                 text(&sequence.increment.to_string()),
                 text(if sequence.cycle { "YES" } else { "NO" }),
-            ]
+            ]);
+            row
         })
         .collect())
 }
@@ -1626,13 +1995,10 @@ fn table_privilege_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(rows)
 }
 
-fn privilege_row(grantee: &str, table: &str, privilege: &str, owned: bool) -> Vec<Datum> {
-    vec![
-        text(crate::catalog_fn::OBJECT_OWNER),
-        text(grantee),
-        catalog_name(),
-        text("public"),
-        text(table),
+fn privilege_row(grantee: &str, table: &RelationName, privilege: &str, owned: bool) -> Vec<Datum> {
+    let mut row = vec![text(crate::catalog_fn::OBJECT_OWNER), text(grantee)];
+    row.extend(relation_identity(table));
+    row.extend([
         text(privilege),
         text(if owned { "YES" } else { "NO" }),
         text(if owned && privilege == "SELECT" {
@@ -1640,14 +2006,18 @@ fn privilege_row(grantee: &str, table: &str, privilege: &str, owned: bool) -> Ve
         } else {
             "NO"
         }),
-    ]
+    ]);
+    row
 }
 
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_pgcatalog::{ForeignKey, IndexId, IndexPlacement, NewIndex, TableId};
+    use crabka_pgkv::MemKv;
+    use crabka_pgtypes::ArrayValue;
 
-    use super::{banded_oids, catalog_relation, columns, relation_names, relation_oid};
+    use super::*;
 
     #[test]
     fn every_named_relation_resolves_qualified_and_bare() {
@@ -1678,10 +2048,27 @@ mod tests {
 
     #[test]
     fn banded_oids_are_stable_under_unrelated_additions() {
-        let first = banded_oids(1_000, &["a".into(), "b".into()]);
-        let second = banded_oids(1_000, &["a".into(), "b".into(), "c".into()]);
+        let first = banded_oids(1_000, &["a".to_string(), "b".to_string()]);
+        let second = banded_oids(1_000, &["a".to_string(), "b".to_string(), "c".to_string()]);
         assert!(first["a"] == second["a"]);
         assert!(first["b"] == second["b"]);
+    }
+
+    /// Two relations of the same name in different schemas are two objects, so
+    /// the band has to see the schema — the `public`-bare display spelling
+    /// would give both the same slot.
+    #[test]
+    fn banded_oids_separate_same_named_relations_in_different_schemas() {
+        let names = [
+            RelationName::public("t"),
+            RelationName::new("app", "t"),
+            RelationName::new("other", "t"),
+        ];
+
+        let assigned = banded_oids(1_000, &names);
+
+        let distinct = assigned.values().collect::<std::collections::BTreeSet<_>>();
+        assert!(distinct.len() == names.len());
     }
 
     #[test]
@@ -1690,5 +2077,699 @@ mod tests {
         let assigned = banded_oids(1_000, &names);
         let distinct = assigned.values().collect::<std::collections::BTreeSet<_>>();
         assert!(distinct.len() == names.len());
+    }
+
+    /// Every projection that carries a schema reports the relation's own,
+    /// rather than the `public` the catalog assumed before a relation had one.
+    /// An index is reported in its table's schema, which is where PostgreSQL
+    /// puts it.
+    #[test]
+    fn projections_report_a_relations_real_schema() {
+        const VIEW: &str = "information_schema.table_constraints";
+        let kv = MemKv::default();
+        let ops = crabka_pgcatalog::create_schema_ops(&kv, "app", "postgres").expect("schema ops");
+        kv.write_batch(&ops).expect("write schema");
+        let table = RelationName::new("app", "t");
+        crabka_pgcatalog::create_table(&kv, &table, vec![int4("id")]).expect("t");
+        add_index(
+            &kv,
+            &table,
+            "t_pkey",
+            &["id"],
+            Some(IndexConstraint::PrimaryKey),
+        );
+
+        let tables = rows(&kv, "pg_tables", 0).expect("pg_tables");
+        let indexes = rows(&kv, "pg_indexes", 0).expect("pg_indexes");
+        let constraints = rows(&kv, "pg_constraint", 0).expect("pg_constraint");
+        let standard = rows(&kv, VIEW, 0).expect("table_constraints");
+
+        assert!(field("pg_tables", &tables[0], "schemaname") == text("app"));
+        assert!(field("pg_indexes", &indexes[0], "schemaname") == text("app"));
+        assert!(
+            field("pg_indexes", &indexes[0], "indexdef")
+                == text("CREATE UNIQUE INDEX t_pkey ON app.t USING btree (id)")
+        );
+        let pkey = row_named("pg_constraint", &constraints, "conname", "t_pkey");
+        assert!(field("pg_constraint", &pkey, "connamespace") == int(namespace_oid("app")));
+        let reported = row_named(VIEW, &standard, "constraint_name", "t_pkey");
+        assert!(field(VIEW, &reported, "constraint_schema") == text("app"));
+        assert!(field(VIEW, &reported, "table_schema") == text("app"));
+    }
+
+    // ------------------------------------------------------------ foreign keys
+
+    /// The oracle's shapes: a `pp(id, k, m)` parent carrying a primary key on
+    /// `id`, a `UNIQUE` constraint on `k`, a composite `UNIQUE` constraint on
+    /// `(id, k)` and a bare `CREATE UNIQUE INDEX` on `m`; plus a `cc(a, b, c)`
+    /// child to hang foreign keys off.
+    struct Schema {
+        parent: TableId,
+        child: TableId,
+        pkey: IndexId,
+        unique: IndexId,
+        composite: IndexId,
+        bare: IndexId,
+    }
+
+    fn int4(name: &str) -> Column {
+        Column::new(name, ColumnType::Int4)
+    }
+
+    fn add_index(
+        kv: &MemKv,
+        table: &RelationName,
+        name: &str,
+        index_columns: &[&str],
+        constraint: Option<IndexConstraint>,
+    ) -> IndexId {
+        let table = crabka_pgcatalog::get_table(kv, table).expect("table");
+        let (index, ops) = crabka_pgcatalog::create_constraint_index_ops(
+            kv,
+            &table,
+            &NewIndex {
+                name: name.to_string(),
+                columns: index_columns.iter().map(|c| (*c).to_string()).collect(),
+                unique: true,
+                placement: IndexPlacement::Local,
+                constraint,
+            },
+        )
+        .expect("index ops");
+        kv.write_batch(&ops).expect("write index");
+        index.id
+    }
+
+    fn add_foreign_key(kv: &MemKv, foreign_key: &ForeignKey) {
+        let ops = crabka_pgcatalog::create_foreign_key_ops(kv, foreign_key).expect("fk ops");
+        kv.write_batch(&ops).expect("write fk");
+    }
+
+    fn oracle_schema(kv: &MemKv) -> Schema {
+        let pp = RelationName::public("pp");
+        let parent =
+            crabka_pgcatalog::create_table(kv, &pp, vec![int4("id"), int4("k"), int4("m")])
+                .expect("pp");
+        let child = crabka_pgcatalog::create_table(
+            kv,
+            &RelationName::public("cc"),
+            vec![int4("a"), int4("b"), int4("c")],
+        )
+        .expect("cc");
+        Schema {
+            parent,
+            child,
+            pkey: add_index(
+                kv,
+                &pp,
+                "pp_pkey",
+                &["id"],
+                Some(IndexConstraint::PrimaryKey),
+            ),
+            unique: add_index(kv, &pp, "pp_k_key", &["k"], Some(IndexConstraint::Unique)),
+            composite: add_index(
+                kv,
+                &pp,
+                "pp_id_k_key",
+                &["id", "k"],
+                Some(IndexConstraint::Unique),
+            ),
+            bare: add_index(kv, &pp, "pp_m_idx", &["m"], None),
+        }
+    }
+
+    /// `cc(a) REFERENCES pp(id)` with every option at its default — the shape
+    /// each case below varies one or two fields of.
+    fn base_foreign_key(schema: &Schema, name: &str) -> ForeignKey {
+        ForeignKey {
+            name: name.to_string(),
+            table: RelationName::public("cc"),
+            table_id: schema.child,
+            columns: vec!["a".to_string()],
+            referenced_table: RelationName::public("pp"),
+            referenced_table_id: schema.parent,
+            referenced_columns: vec!["id".to_string()],
+            referenced_index: "pp_pkey".to_string(),
+            referenced_index_id: schema.pkey,
+            match_type: MatchType::Simple,
+            on_delete: ReferentialAction::NoAction,
+            on_update: ReferentialAction::NoAction,
+            set_columns: Vec::new(),
+            deferrable: false,
+            initially_deferred: false,
+            validated: true,
+        }
+    }
+
+    /// The four foreign keys the PostgreSQL 18.4 oracle captured `pg_constraint`
+    /// values for.
+    fn oracle_foreign_keys(schema: &Schema) -> Vec<ForeignKey> {
+        vec![
+            base_foreign_key(schema, "cc_a_fkey"),
+            ForeignKey {
+                columns: vec!["c".to_string()],
+                referenced_columns: vec!["k".to_string()],
+                referenced_index: "pp_k_key".to_string(),
+                referenced_index_id: schema.unique,
+                on_delete: ReferentialAction::SetDefault,
+                deferrable: true,
+                initially_deferred: true,
+                ..base_foreign_key(schema, "cc_def")
+            },
+            ForeignKey {
+                columns: vec!["b".to_string()],
+                match_type: MatchType::Full,
+                on_update: ReferentialAction::Cascade,
+                on_delete: ReferentialAction::SetNull,
+                ..base_foreign_key(schema, "cc_full")
+            },
+            ForeignKey {
+                on_delete: ReferentialAction::Restrict,
+                validated: false,
+                ..base_foreign_key(schema, "cc_nv")
+            },
+        ]
+    }
+
+    fn oracle_catalog() -> (MemKv, Schema) {
+        let kv = MemKv::default();
+        let schema = oracle_schema(&kv);
+        for foreign_key in oracle_foreign_keys(&schema) {
+            add_foreign_key(&kv, &foreign_key);
+        }
+        (kv, schema)
+    }
+
+    /// `cperm(a, b)` with `FOREIGN KEY (b, a) REFERENCES pperm(y, x)`, where
+    /// `pperm`'s primary key is `(x, y)` — the oracle's permuted composite.
+    fn permuted_catalog() -> MemKv {
+        let kv = MemKv::default();
+        let pperm = RelationName::public("pperm");
+        let parent =
+            crabka_pgcatalog::create_table(&kv, &pperm, vec![int4("x"), int4("y")]).expect("pperm");
+        let child = crabka_pgcatalog::create_table(
+            &kv,
+            &RelationName::public("cperm"),
+            vec![int4("a"), int4("b")],
+        )
+        .expect("cperm");
+        let pkey = add_index(
+            &kv,
+            &pperm,
+            "pperm_pkey",
+            &["x", "y"],
+            Some(IndexConstraint::PrimaryKey),
+        );
+        add_foreign_key(
+            &kv,
+            &ForeignKey {
+                name: "cperm_b_a_fkey".to_string(),
+                table: RelationName::public("cperm"),
+                table_id: child,
+                columns: vec!["b".to_string(), "a".to_string()],
+                referenced_table: RelationName::public("pperm"),
+                referenced_table_id: parent,
+                referenced_columns: vec!["y".to_string(), "x".to_string()],
+                referenced_index: "pperm_pkey".to_string(),
+                referenced_index_id: pkey,
+                match_type: MatchType::Simple,
+                on_delete: ReferentialAction::NoAction,
+                on_update: ReferentialAction::NoAction,
+                set_columns: Vec::new(),
+                deferrable: false,
+                initially_deferred: false,
+                validated: true,
+            },
+        );
+        kv
+    }
+
+    /// One column of a row, located by *name* in the relation's declared column
+    /// list, so a positional mistake surfaces as a value mismatch.
+    fn field(relation: &str, row: &[Datum], column: &str) -> Datum {
+        let position = columns(relation)
+            .iter()
+            .position(|declared| declared.name == column)
+            .unwrap_or_else(|| panic!("{relation} has no column {column}"));
+        row[position].clone()
+    }
+
+    fn rows_named(relation: &str, all: &[Vec<Datum>], key: &str, name: &str) -> Vec<Vec<Datum>> {
+        all.iter()
+            .filter(|row| field(relation, row, key) == text(name))
+            .cloned()
+            .collect()
+    }
+
+    fn row_named(relation: &str, all: &[Vec<Datum>], key: &str, name: &str) -> Vec<Datum> {
+        let mut found = rows_named(relation, all, key, name);
+        assert!(found.len() == 1, "{relation} has no single row for {name}");
+        found.remove(0)
+    }
+
+    fn int2s(attnums: &[i16]) -> Datum {
+        Datum::Array(ArrayValue::new(
+            ElemType::Int2,
+            attnums.iter().copied().map(Datum::Int2).collect(),
+        ))
+    }
+
+    fn oid_of(table_id: TableId) -> Datum {
+        int(i32::try_from(table_id).expect("relation oid"))
+    }
+
+    /// Every `pg_constraint` column of a foreign-key row, in PostgreSQL 18.4's
+    /// 28-column order — the case that pins each position rather than trusting
+    /// a remembered index.
+    #[test]
+    fn pg_constraint_foreign_key_row_matches_postgresql_column_for_column() {
+        let (kv, schema) = oracle_catalog();
+        let oids = foreign_key_constraint_oids(&kv).expect("oids");
+        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+
+        let row = row_named("pg_constraint", &all, "conname", "cc_a_fkey");
+
+        assert!(row.len() == columns("pg_constraint").len());
+        assert!(
+            row == vec![
+                int(oids["cc.cc_a_fkey"]),
+                text("cc_a_fkey"),
+                int(crate::exec::PUBLIC_NAMESPACE_OID),
+                text("f"),
+                Datum::Bool(false),
+                Datum::Bool(false),
+                Datum::Bool(true),
+                Datum::Bool(true),
+                oid_of(schema.child),
+                int(0),
+                int(index_relation_oid(schema.pkey).expect("conindid")),
+                int(0),
+                oid_of(schema.parent),
+                text("a"),
+                text("a"),
+                text("s"),
+                Datum::Bool(true),
+                small(0),
+                Datum::Bool(false),
+                Datum::Bool(false),
+                int2s(&[1]),
+                int2s(&[1]),
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+                Datum::Null,
+            ]
+        );
+    }
+
+    /// The `pg_constraint` columns the oracle tabulated for a foreign key.
+    #[derive(Debug, PartialEq, Eq)]
+    struct OracleFacts {
+        condeferrable: Datum,
+        condeferred: Datum,
+        convalidated: Datum,
+        confrelid: Datum,
+        confupdtype: Datum,
+        confdeltype: Datum,
+        confmatchtype: Datum,
+        conkey: Datum,
+        confkey: Datum,
+        confdelsetcols: Datum,
+    }
+
+    fn oracle_facts(row: &[Datum]) -> OracleFacts {
+        let at = |column: &str| field("pg_constraint", row, column);
+        OracleFacts {
+            condeferrable: at("condeferrable"),
+            condeferred: at("condeferred"),
+            convalidated: at("convalidated"),
+            confrelid: at("confrelid"),
+            confupdtype: at("confupdtype"),
+            confdeltype: at("confdeltype"),
+            confmatchtype: at("confmatchtype"),
+            conkey: at("conkey"),
+            confkey: at("confkey"),
+            confdelsetcols: at("confdelsetcols"),
+        }
+    }
+
+    /// The oracle's four rows verbatim: `NOT VALID` clears `convalidated`,
+    /// `DEFERRABLE INITIALLY DEFERRED` sets both deferral flags, and every row
+    /// points `confrelid` at the parent so `\d pp`'s `Referenced by:` finds it.
+    #[test]
+    fn pg_constraint_foreign_key_rows_match_the_verified_oracle() {
+        let (kv, schema) = oracle_catalog();
+        let parent = oid_of(schema.parent);
+        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+        let cases = [
+            (
+                "cc_a_fkey",
+                OracleFacts {
+                    condeferrable: Datum::Bool(false),
+                    condeferred: Datum::Bool(false),
+                    convalidated: Datum::Bool(true),
+                    confrelid: parent.clone(),
+                    confupdtype: text("a"),
+                    confdeltype: text("a"),
+                    confmatchtype: text("s"),
+                    conkey: int2s(&[1]),
+                    confkey: int2s(&[1]),
+                    confdelsetcols: Datum::Null,
+                },
+            ),
+            (
+                "cc_def",
+                OracleFacts {
+                    condeferrable: Datum::Bool(true),
+                    condeferred: Datum::Bool(true),
+                    convalidated: Datum::Bool(true),
+                    confrelid: parent.clone(),
+                    confupdtype: text("a"),
+                    confdeltype: text("d"),
+                    confmatchtype: text("s"),
+                    conkey: int2s(&[3]),
+                    confkey: int2s(&[2]),
+                    confdelsetcols: Datum::Null,
+                },
+            ),
+            (
+                "cc_full",
+                OracleFacts {
+                    condeferrable: Datum::Bool(false),
+                    condeferred: Datum::Bool(false),
+                    convalidated: Datum::Bool(true),
+                    confrelid: parent.clone(),
+                    confupdtype: text("c"),
+                    confdeltype: text("n"),
+                    confmatchtype: text("f"),
+                    conkey: int2s(&[2]),
+                    confkey: int2s(&[1]),
+                    confdelsetcols: Datum::Null,
+                },
+            ),
+            (
+                "cc_nv",
+                OracleFacts {
+                    condeferrable: Datum::Bool(false),
+                    condeferred: Datum::Bool(false),
+                    convalidated: Datum::Bool(false),
+                    confrelid: parent,
+                    confupdtype: text("a"),
+                    confdeltype: text("r"),
+                    confmatchtype: text("s"),
+                    conkey: int2s(&[1]),
+                    confkey: int2s(&[1]),
+                    confdelsetcols: Datum::Null,
+                },
+            ),
+        ];
+        for (name, expected) in cases {
+            let row = row_named("pg_constraint", &all, "conname", name);
+            assert!(oracle_facts(&row) == expected, "{name}");
+        }
+    }
+
+    /// Every referential-action code and both match codes, one foreign key per
+    /// combination.
+    #[test]
+    fn pg_constraint_encodes_every_referential_action_and_match_code() {
+        let actions = [
+            (ReferentialAction::NoAction, "a"),
+            (ReferentialAction::Restrict, "r"),
+            (ReferentialAction::Cascade, "c"),
+            (ReferentialAction::SetNull, "n"),
+            (ReferentialAction::SetDefault, "d"),
+        ];
+        let matches = [(MatchType::Simple, "s"), (MatchType::Full, "f")];
+        let kv = MemKv::default();
+        let schema = oracle_schema(&kv);
+        for (action, code) in actions {
+            for (match_type, match_code) in matches {
+                add_foreign_key(
+                    &kv,
+                    &ForeignKey {
+                        on_update: action,
+                        on_delete: action,
+                        match_type,
+                        ..base_foreign_key(&schema, &format!("fk_{code}_{match_code}"))
+                    },
+                );
+            }
+        }
+
+        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+
+        for (_, code) in actions {
+            for (_, match_code) in matches {
+                let name = format!("fk_{code}_{match_code}");
+                let row = row_named("pg_constraint", &all, "conname", &name);
+                let found = [
+                    field("pg_constraint", &row, "confupdtype"),
+                    field("pg_constraint", &row, "confdeltype"),
+                    field("pg_constraint", &row, "confmatchtype"),
+                ];
+                assert!(
+                    found == [text(code), text(code), text(match_code)],
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    /// PostgreSQL stores `conkey` and `confkey` in the order the FK clause
+    /// wrote them, paired positionally — neither sorted nor permuted into the
+    /// referenced index's own column order.
+    #[test]
+    fn pg_constraint_keeps_composite_key_columns_in_written_order() {
+        let kv = permuted_catalog();
+
+        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+        let row = row_named("pg_constraint", &all, "conname", "cperm_b_a_fkey");
+
+        assert!(field("pg_constraint", &row, "conkey") == int2s(&[2, 1]));
+        assert!(field("pg_constraint", &row, "confkey") == int2s(&[2, 1]));
+    }
+
+    /// `confdelsetcols` holds the written `ON DELETE SET … (cols)` list, in
+    /// written order, and is NULL when no list was written — PostgreSQL does
+    /// not fill it in with a copy of `conkey`.
+    #[test]
+    fn pg_constraint_records_the_on_delete_set_column_list_only_when_written() {
+        let kv = MemKv::default();
+        let schema = oracle_schema(&kv);
+        let composite = ForeignKey {
+            columns: vec!["b".to_string(), "c".to_string()],
+            referenced_columns: vec!["id".to_string(), "k".to_string()],
+            referenced_index: "pp_id_k_key".to_string(),
+            referenced_index_id: schema.composite,
+            on_delete: ReferentialAction::SetNull,
+            ..base_foreign_key(&schema, "cc_setcols")
+        };
+        add_foreign_key(
+            &kv,
+            &ForeignKey {
+                set_columns: vec!["c".to_string(), "b".to_string()],
+                ..composite.clone()
+            },
+        );
+        add_foreign_key(
+            &kv,
+            &ForeignKey {
+                name: "cc_no_setcols".to_string(),
+                ..composite
+            },
+        );
+
+        let all = rows(&kv, "pg_constraint", 0).expect("rows");
+
+        let with = row_named("pg_constraint", &all, "conname", "cc_setcols");
+        assert!(field("pg_constraint", &with, "confdelsetcols") == int2s(&[3, 2]));
+        let without = row_named("pg_constraint", &all, "conname", "cc_no_setcols");
+        assert!(field("pg_constraint", &without, "confdelsetcols") == Datum::Null);
+    }
+
+    #[test]
+    fn foreign_key_constraint_oids_are_distinct_and_in_their_own_band() {
+        let (kv, _) = oracle_catalog();
+
+        let oids = foreign_key_constraint_oids(&kv).expect("oids");
+
+        assert!(oids.len() == 4);
+        // Constraint names are unique per relation, not per catalog, so the key
+        // carries the child relation.
+        assert!(oids.contains_key("cc.cc_a_fkey"));
+        let band = FOREIGN_KEY_OID_BASE..FOREIGN_KEY_OID_BASE + OID_BAND_WIDTH;
+        for (key, oid) in &oids {
+            assert!(band.contains(oid), "{key} oid {oid} is out of band");
+        }
+        let distinct = oids.values().collect::<std::collections::BTreeSet<_>>();
+        assert!(distinct.len() == oids.len());
+    }
+
+    /// `match_option` uses the SQL standard's `NONE` for MATCH SIMPLE, and the
+    /// rules are spelled out rather than coded.
+    #[test]
+    fn referential_constraints_spell_out_the_oracle_rules() {
+        const VIEW: &str = "information_schema.referential_constraints";
+        let (kv, _) = oracle_catalog();
+        let all = rows(&kv, VIEW, 0).expect("rows");
+        let cases = [
+            ("cc_a_fkey", "pp_pkey", "NONE", "NO ACTION", "NO ACTION"),
+            ("cc_def", "pp_k_key", "NONE", "NO ACTION", "SET DEFAULT"),
+            ("cc_full", "pp_pkey", "FULL", "CASCADE", "SET NULL"),
+            ("cc_nv", "pp_pkey", "NONE", "NO ACTION", "RESTRICT"),
+        ];
+        for (name, unique, match_option, update_rule, delete_rule) in cases {
+            let row = row_named(VIEW, &all, "constraint_name", name);
+            assert!(
+                row == vec![
+                    catalog_name(),
+                    text("public"),
+                    text(name),
+                    catalog_name(),
+                    text("public"),
+                    text(unique),
+                    text(match_option),
+                    text(update_rule),
+                    text(delete_rule),
+                ],
+                "{name}"
+            );
+        }
+    }
+
+    /// A foreign key may target a bare `CREATE UNIQUE INDEX`, which carries no
+    /// `pg_constraint` row — PostgreSQL's view LEFT JOINs to find one, so the
+    /// whole `unique_constraint_*` triple comes back NULL.
+    #[test]
+    fn referential_constraints_null_the_unique_constraint_for_a_bare_unique_index() {
+        const VIEW: &str = "information_schema.referential_constraints";
+        let kv = MemKv::default();
+        let schema = oracle_schema(&kv);
+        add_foreign_key(
+            &kv,
+            &ForeignKey {
+                columns: vec!["c".to_string()],
+                referenced_columns: vec!["m".to_string()],
+                referenced_index: "pp_m_idx".to_string(),
+                referenced_index_id: schema.bare,
+                ..base_foreign_key(&schema, "cc_bare")
+            },
+        );
+
+        let all = rows(&kv, VIEW, 0).expect("rows");
+
+        assert!(
+            row_named(VIEW, &all, "constraint_name", "cc_bare")
+                == vec![
+                    catalog_name(),
+                    text("public"),
+                    text("cc_bare"),
+                    Datum::Null,
+                    Datum::Null,
+                    Datum::Null,
+                    text("NONE"),
+                    text("NO ACTION"),
+                    text("NO ACTION"),
+                ]
+        );
+    }
+
+    /// `table_constraints` gains a `FOREIGN KEY` row per foreign key, and it is
+    /// the one constraint kind that can report anything but `NO`/`NO`.
+    #[test]
+    fn table_constraints_report_real_deferrability_for_foreign_keys() {
+        const VIEW: &str = "information_schema.table_constraints";
+        let (kv, _) = oracle_catalog();
+        let all = rows(&kv, VIEW, 0).expect("rows");
+        let cases = [("cc_a_fkey", "NO", "NO"), ("cc_def", "YES", "YES")];
+        for (name, deferrable, deferred) in cases {
+            let row = row_named(VIEW, &all, "constraint_name", name);
+            assert!(
+                row == vec![
+                    catalog_name(),
+                    text("public"),
+                    text(name),
+                    catalog_name(),
+                    text("public"),
+                    text("cc"),
+                    text("FOREIGN KEY"),
+                    text(deferrable),
+                    text(deferred),
+                    text("YES"),
+                    Datum::Null,
+                ],
+                "{name}"
+            );
+        }
+        // Lifting the two flags to parameters must not have moved the other
+        // constraint kinds off `NO`/`NO`.
+        let pkey = row_named(VIEW, &all, "constraint_name", "pp_pkey");
+        assert!(field(VIEW, &pkey, "is_deferrable") == text("NO"));
+        assert!(field(VIEW, &pkey, "initially_deferred") == text("NO"));
+    }
+
+    /// `ordinal_position` follows the FK clause while
+    /// `position_in_unique_constraint` follows the referenced index, so the
+    /// permuted composite reports 1→2 and 2→1.
+    #[test]
+    fn key_column_usage_lists_referencing_columns_with_their_index_positions() {
+        const VIEW: &str = "information_schema.key_column_usage";
+        let kv = permuted_catalog();
+
+        let all = rows(&kv, VIEW, 0).expect("rows");
+
+        assert!(
+            rows_named(VIEW, &all, "constraint_name", "cperm_b_a_fkey")
+                == vec![
+                    vec![
+                        catalog_name(),
+                        text("public"),
+                        text("cperm_b_a_fkey"),
+                        catalog_name(),
+                        text("public"),
+                        text("cperm"),
+                        text("b"),
+                        int(1),
+                        int(2),
+                    ],
+                    vec![
+                        catalog_name(),
+                        text("public"),
+                        text("cperm_b_a_fkey"),
+                        catalog_name(),
+                        text("public"),
+                        text("cperm"),
+                        text("a"),
+                        int(2),
+                        int(1),
+                    ],
+                ]
+        );
+    }
+
+    /// `constraint_column_usage` attributes a foreign key to the columns it
+    /// *references*, on the parent relation — the mirror of `key_column_usage`.
+    #[test]
+    fn constraint_column_usage_names_the_referenced_table_for_a_foreign_key() {
+        const VIEW: &str = "information_schema.constraint_column_usage";
+        let (kv, _) = oracle_catalog();
+
+        let all = rows(&kv, VIEW, 0).expect("rows");
+
+        assert!(
+            rows_named(VIEW, &all, "constraint_name", "cc_def")
+                == vec![vec![
+                    catalog_name(),
+                    text("public"),
+                    text("pp"),
+                    text("k"),
+                    catalog_name(),
+                    text("public"),
+                    text("cc_def"),
+                ]]
+        );
     }
 }

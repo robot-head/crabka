@@ -1156,8 +1156,10 @@ mod tests {
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             current_user: "public".into(),
             session_user: "public".into(),
+            backend_pid: 0,
             clock: Arc::new(FixedClock(now)),
             sequence: None,
+            resolution: None,
             notify: None,
         }
     }
@@ -1268,8 +1270,10 @@ mod tests {
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             current_user: "public".into(),
             session_user: "public".into(),
+            backend_pid: 0,
             clock: Arc::new(FixedClock(ny)),
             sequence: None,
+            resolution: None,
             notify: None,
         };
         assert_eq!(
@@ -1348,8 +1352,10 @@ mod tests {
             interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             current_user: "public".into(),
             session_user: "public".into(),
+            backend_pid: 0,
             clock: Arc::new(FixedClock(ts)),
             sequence: None,
+            resolution: None,
             notify: None,
         };
         assert_eq!(

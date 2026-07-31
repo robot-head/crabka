@@ -2080,13 +2080,19 @@ fn physical_to_logical(
             .map(|table| {
                 (
                     TableId::new(u64::from(table.id)),
-                    routing_table_id(&table.name),
+                    routing_table_id(&table.name.name),
                 )
             }),
     )
     .map_err(|error| std::io::Error::other(format!("activation table mapping: {error}")))
 }
 
+/// Routing id for a relation, read from the trailing digits of its name.
+///
+/// The split contract keys on the *unqualified* name: a schema qualifier
+/// carries no digits, so `s.t42` and `public.t42` route identically. That is the
+/// same collision the convention already accepts between any two names ending in
+/// `42`.
 fn routing_table_id(table: &str) -> TableId {
     let digits = table
         .chars()

@@ -86,18 +86,18 @@ pub(crate) fn plan_statement(statement: &Statement) -> PlanNode {
                 _ => PlanNode::new("Result"),
             };
             let mut node = PlanNode::new("Insert");
-            node.relation = Some(table.clone());
+            node.relation = Some(table.name.clone());
             node.with_child(child)
         }
         Statement::Update { table, filter, .. } => {
             let mut node = PlanNode::new("Update");
-            node.relation = Some(table.clone());
-            node.with_child(scan_node(table, None, filter.as_ref()))
+            node.relation = Some(table.name.clone());
+            node.with_child(scan_node(&table.name, None, filter.as_ref()))
         }
         Statement::Delete { table, filter, .. } => {
             let mut node = PlanNode::new("Delete");
-            node.relation = Some(table.clone());
-            node.with_child(scan_node(table, None, filter.as_ref()))
+            node.relation = Some(table.name.clone());
+            node.with_child(scan_node(&table.name, None, filter.as_ref()))
         }
         other => PlanNode::new(utility_node_type(other)),
     }
@@ -239,7 +239,7 @@ fn plan_table_expr_unqualified(item: &TableExpr, filter: Option<&Expr>) -> PlanN
     match (item, filter) {
         (TableExpr::Table { name, alias, .. }, filter) => {
             let mut node = PlanNode::new("Seq Scan");
-            node.relation = Some(name.clone());
+            node.relation = Some(name.name.clone());
             node.alias = alias.clone();
             if let Some(filter) = filter {
                 node = node.detail("Filter", deparse_with(filter, false));
@@ -252,7 +252,7 @@ fn plan_table_expr_unqualified(item: &TableExpr, filter: Option<&Expr>) -> PlanN
 
 fn plan_table_expr(item: &TableExpr, filter: Option<&Expr>) -> PlanNode {
     match item {
-        TableExpr::Table { name, alias, .. } => scan_node(name, alias.as_deref(), filter),
+        TableExpr::Table { name, alias, .. } => scan_node(&name.name, alias.as_deref(), filter),
         TableExpr::Derived {
             subquery, alias, ..
         } => {

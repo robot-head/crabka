@@ -3,6 +3,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+use crabka_pgcatalog::RelationName;
 use crabka_pgexec::{
     CommitTimestamp, PrimaryTxnDecision, RowInterval, SqlEngine, TimestampTransactionId,
     TimestampTxnDecision, TimestampTxnDescriptor, TimestampTxnIdentity, TimestampWrite,
@@ -99,7 +100,7 @@ async fn rows(s: &mut crabka_pgexec::SqlSession, sql: &str) -> Vec<Vec<Option<Ce
 }
 
 fn only_tuple_xmin(kv: &dyn Kv, table_name: &str) -> u64 {
-    let table = crabka_pgcatalog::get_table(kv, table_name).expect("table");
+    let table = crabka_pgcatalog::get_table(kv, &RelationName::public(table_name)).expect("table");
     let prefix = crabka_pgkv::key::row_key(table.id, 1);
     let versions = kv.scan_prefix(&prefix).expect("scan versions");
     assert_eq!(versions.len(), 1, "expected exactly one tuple version");
@@ -108,7 +109,7 @@ fn only_tuple_xmin(kv: &dyn Kv, table_name: &str) -> u64 {
 }
 
 fn only_timestamp_version(kv: &dyn Kv, table_name: &str) -> crabka_pgmvcc::version::TsTupleVersion {
-    let table = crabka_pgcatalog::get_table(kv, table_name).expect("table");
+    let table = crabka_pgcatalog::get_table(kv, &RelationName::public(table_name)).expect("table");
     let prefix = crabka_pgkv::key::row_key(table.id, 1);
     let versions = kv.scan_prefix(&prefix).expect("scan versions");
     assert_eq!(
@@ -120,7 +121,7 @@ fn only_timestamp_version(kv: &dyn Kv, table_name: &str) -> crabka_pgmvcc::versi
 }
 
 fn table_version_count(kv: &dyn Kv, table_name: &str) -> usize {
-    let table = crabka_pgcatalog::get_table(kv, table_name).expect("table");
+    let table = crabka_pgcatalog::get_table(kv, &RelationName::public(table_name)).expect("table");
     kv.scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
         .expect("scan table versions")
         .len()
@@ -130,7 +131,7 @@ fn table_timestamp_versions(
     kv: &dyn Kv,
     table_name: &str,
 ) -> Vec<crabka_pgmvcc::version::TsTupleVersion> {
-    let table = crabka_pgcatalog::get_table(kv, table_name).expect("table");
+    let table = crabka_pgcatalog::get_table(kv, &RelationName::public(table_name)).expect("table");
     kv.scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
         .expect("scan table versions")
         .into_iter()
@@ -236,7 +237,8 @@ async fn hash_sharded_sql_insert_uses_bucket_leading_timestamp_version_key() {
         .await
         .expect("insert");
 
-    let table = crabka_pgcatalog::get_table(kv.as_ref(), "h").expect("table");
+    let table =
+        crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("h")).expect("table");
     let versions = kv
         .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
         .expect("scan physical table");
@@ -296,7 +298,8 @@ async fn hash_sharded_update_moves_one_row_without_orphaning_old_bucket() {
     assert_eq!(result.len(), 1);
     assert_eq!(text(result[0][0].as_ref()), Some(new_id.to_string()));
     assert_eq!(text(result[0][1].as_ref()).as_deref(), Some("after"));
-    let table = crabka_pgcatalog::get_table(kv.as_ref(), "hmove").expect("table");
+    let table =
+        crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("hmove")).expect("table");
     let keys = kv
         .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
         .expect("physical rows");
@@ -508,7 +511,9 @@ async fn timestamp_descriptor_commit_makes_unresolved_participants_visible_at_on
         .simple_query("CREATE TABLE t (id int4) SHARDED")
         .await
         .expect("create table");
-    let table = coordinator.catalog_table("t").expect("table");
+    let table = coordinator
+        .catalog_table(&RelationName::public("t"))
+        .expect("table");
 
     let left_kv: Arc<dyn Kv> = Arc::new(MemKv::new());
     let right_kv: Arc<dyn Kv> = Arc::new(MemKv::new());
@@ -942,7 +947,9 @@ async fn descriptor_commit_does_not_expose_legacy_or_forged_local_version() {
         .simple_query("CREATE TABLE t (id int4) SHARDED")
         .await
         .expect("create table");
-    let table = engine.catalog_table("t").expect("table");
+    let table = engine
+        .catalog_table(&RelationName::public("t"))
+        .expect("table");
     let start_ts = TimestampTransactionId::new(75).expect("start timestamp");
     let commit_ts = CommitTimestamp::after_start(start_ts, 76).expect("commit timestamp");
     engine
@@ -1350,7 +1357,7 @@ async fn unsharded_update_and_delete_keep_local_commit_path() {
     );
     assert!(
         kv.scan_prefix(&crabka_pgkv::key::table_prefix(
-            crabka_pgcatalog::get_table(kv.as_ref(), "t")
+            crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("t"))
                 .expect("table")
                 .id,
         ))

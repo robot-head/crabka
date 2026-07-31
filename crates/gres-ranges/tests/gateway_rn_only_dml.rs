@@ -322,7 +322,7 @@ fn catalog_table_id(engine: &SqlEngine, name: &str) -> u32 {
     crabka_pgcatalog::list_tables(engine.catalog_kv())
         .expect("list catalog tables")
         .into_iter()
-        .find(|table| table.name == name)
+        .find(|table| table.name.name == name)
         .expect("table is catalog-visible")
         .id
 }

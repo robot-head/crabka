@@ -1004,23 +1004,77 @@ async fn column_defaults_and_not_null_are_enforced_on_insert_and_update() {
 }
 
 #[tokio::test]
-async fn unsupported_create_table_constraints_fail_loudly() {
-    let client = connect(spawn().await).await;
+async fn create_table_foreign_keys_are_resolved_and_enforced() {
+    use assert2::assert;
 
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute("CREATE TABLE fk_p (id int4 PRIMARY KEY)")
+        .await
+        .expect("parent");
+    // Both spellings reach the same resolver: a column-level REFERENCES is a
+    // one-column FOREIGN KEY.
     for sql in [
-        "CREATE TABLE fk_t (id int4 REFERENCES other_t (id))",
-        "CREATE TABLE fk_u (id int4, FOREIGN KEY (id) REFERENCES other_t (id))",
+        "CREATE TABLE fk_t (id int4 REFERENCES fk_p (id))",
+        "CREATE TABLE fk_u (id int4, FOREIGN KEY (id) REFERENCES fk_p (id))",
     ] {
+        client.batch_execute(sql).await.expect(sql);
+    }
+    for table in ["fk_t", "fk_u"] {
         let err = client
-            .batch_execute(sql)
+            .batch_execute(&format!("INSERT INTO {table} VALUES (1)"))
             .await
-            .expect_err("unsupported constraint");
-        assert_eq!(
-            err.as_db_error().expect("db error").code().code(),
-            "0A000",
-            "{sql}"
+            .expect_err("no such parent key");
+        assert!(
+            err.as_db_error().expect("db error").code().code() == "23503",
+            "{table}"
         );
     }
+    client
+        .batch_execute("INSERT INTO fk_p VALUES (1); INSERT INTO fk_t VALUES (1)")
+        .await
+        .expect("parent then child");
+    let err = client
+        .batch_execute("DELETE FROM fk_p WHERE id = 1")
+        .await
+        .expect_err("still referenced");
+    assert!(err.as_db_error().expect("db error").code().code() == "23503");
+
+    // A referenced relation that does not exist is still a DDL error — the
+    // clause is resolved now, not deferred to the first write.
+    let err = client
+        .batch_execute("CREATE TABLE fk_v (id int4 REFERENCES other_t (id))")
+        .await
+        .expect_err("no such relation");
+    assert!(err.as_db_error().expect("db error").code().code() == "42P01");
+}
+
+#[tokio::test]
+async fn a_self_referencing_foreign_key_is_checked_at_end_of_statement() {
+    use assert2::assert;
+
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE fk_self (id int4 PRIMARY KEY, boss int4 REFERENCES fk_self (id))",
+        )
+        .await
+        .expect("self-referencing table");
+    // NOT DEFERRABLE, yet both succeed: the check runs once the statement's own
+    // rows exist, exactly as PostgreSQL's AFTER ROW triggers do.
+    client
+        .batch_execute("INSERT INTO fk_self (id, boss) VALUES (1, 1)")
+        .await
+        .expect("a row may reference itself");
+    client
+        .batch_execute("INSERT INTO fk_self (id, boss) VALUES (2, NULL), (3, 2)")
+        .await
+        .expect("a later row may reference an earlier one");
+    let err = client
+        .batch_execute("INSERT INTO fk_self (id, boss) VALUES (4, 99)")
+        .await
+        .expect_err("no such parent key");
+    assert!(err.as_db_error().expect("db error").code().code() == "23503");
 }
 
 #[tokio::test]

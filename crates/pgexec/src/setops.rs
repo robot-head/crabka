@@ -74,6 +74,7 @@ fn unify_col(
 /// `set_expr_to_relation`.
 fn resolve_set_columns(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     e: &SetExpr,
     ctes: &crate::cte::CteContext,
     depth: usize,
@@ -90,12 +91,13 @@ fn resolve_set_columns(
             let scope = if s.from.is_empty() {
                 Scope::empty()
             } else {
-                crate::exec::build_from_schema_with_ctes(catalog_kv, &s.from, ctes)?.scope
+                crate::exec::build_from_schema_with_ctes(catalog_kv, resolution, &s.from, ctes)?.scope
             };
             // Run the SP34 scalar-subquery type pass (so a subquery column's OID is
             // known without executing), then resolve names + types + unknown-ness.
             let projection = crate::subquery::resolve_types_in_projection_with_ctes(
                 catalog_kv,
+                resolution,
                 &s.projection,
                 ctes,
             )?;
@@ -115,7 +117,7 @@ fn resolve_set_columns(
                 .collect())
         }
         SetExpr::Query(QueryBody::Values(v)) => {
-            let rel = crate::values::values_schema_relation_with_ctes(catalog_kv, v, ctes)?;
+            let rel = crate::values::values_schema_relation_with_ctes(catalog_kv, resolution, v, ctes)?;
             Ok(rel
                 .scope
                 .columns
@@ -128,7 +130,7 @@ fn resolve_set_columns(
                 .collect())
         }
         SetExpr::Query(QueryBody::Nested(nested)) => {
-            crate::query::describe_query_expr_with_ctes(catalog_kv, nested, ctes)?
+            crate::query::describe_query_expr_with_ctes(catalog_kv, resolution, nested, ctes)?
                 .into_iter()
                 .map(|f| {
                     Ok(ResolvedCol {
@@ -142,8 +144,8 @@ fn resolve_set_columns(
         SetExpr::SetOp {
             op, left, right, ..
         } => {
-            let l = resolve_set_columns(catalog_kv, left, ctes, depth + 1)?;
-            let r = resolve_set_columns(catalog_kv, right, ctes, depth + 1)?;
+            let l = resolve_set_columns(catalog_kv, resolution, left, ctes, depth + 1)?;
+            let r = resolve_set_columns(catalog_kv, resolution, right, ctes, depth + 1)?;
             if l.len() != r.len() {
                 return Err(ExecError::SetOpColumnCount {
                     op: *op,
@@ -180,18 +182,20 @@ fn output_type(c: &ResolvedCol) -> ColumnType {
 /// it must not be collapsed to `text` first the way [`output_type`] does.
 pub(crate) fn set_expr_columns(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     body: &SetExpr,
     ctes: &crate::cte::CteContext,
 ) -> Result<Vec<ResolvedCol>, ExecError> {
-    resolve_set_columns(catalog_kv, body, ctes, 0)
+    resolve_set_columns(catalog_kv, resolution, body, ctes, 0)
 }
 
 pub(crate) fn describe_set_expr_with_ctes(
     catalog_kv: &dyn Kv,
+    resolution: &crate::relname::ResolutionScope,
     body: &SetExpr,
     ctes: &crate::cte::CteContext,
 ) -> Result<Vec<crabka_pgwire::engine::FieldDescription>, ExecError> {
-    let cols = resolve_set_columns(catalog_kv, body, ctes, 0)?;
+    let cols = resolve_set_columns(catalog_kv, resolution, body, ctes, 0)?;
     Ok(cols
         .iter()
         .map(|c| crate::exec::field(&c.name, output_type(c)))
@@ -206,7 +210,7 @@ pub(crate) fn set_expr_relation(
     ctx: &crate::subquery::SubCtx<'_>,
     body: &SetExpr,
 ) -> Result<crate::join::Relation, ExecError> {
-    let cols = resolve_set_columns(ctx.catalog_kv, body, ctx.ctes, 0)?;
+    let cols = resolve_set_columns(ctx.catalog_kv, ctx.fctx.resolution, body, ctx.ctes, 0)?;
     let out_tys: Vec<ColumnType> = cols.iter().map(output_type).collect();
     let rows = fold(ctx, body, &out_tys, 0)?;
     let scope = Scope {
@@ -228,7 +232,7 @@ pub(crate) fn set_expr_to_relation(
     order_by: &[crabka_pgparser::ast::OrderItem],
     window: crate::exec::RowWindow,
 ) -> Result<crate::join::Relation, ExecError> {
-    let cols = resolve_set_columns(ctx.catalog_kv, body, ctx.ctes, 0)?;
+    let cols = resolve_set_columns(ctx.catalog_kv, ctx.fctx.resolution, body, ctx.ctes, 0)?;
     let out_tys: Vec<ColumnType> = cols.iter().map(output_type).collect();
     let rows = fold(ctx, body, &out_tys, 0)?;
 

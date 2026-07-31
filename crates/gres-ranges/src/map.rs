@@ -253,6 +253,21 @@ pub enum MapValidationError {
         range_id: RangeId,
         split_at: RangeKey,
     },
+    /// A range boundary falls between two rows of the same hash bucket, which
+    /// would leave the bucket owned by two ranges. Hash-sharded tables may only
+    /// be cut at a bucket start.
+    #[error(
+        "boundary {boundary:?} falls inside a hash bucket; hash-sharded tables split at rowid 0"
+    )]
+    HashBucketSplitBoundary { boundary: RangeKey },
+    /// A range boundary names a bucket the table does not have. The registry
+    /// stores boundaries only below a table's bucket count, so such a boundary
+    /// is refused there, and the successor range it opens owns no rows.
+    #[error("boundary {boundary:?} is outside the table's {bucket_count} hash buckets")]
+    HashBucketOutOfRange {
+        boundary: RangeKey,
+        bucket_count: u32,
+    },
     #[error("ranges r{left} and r{right} are not adjacent")]
     RangesAreNotAdjacent { left: RangeId, right: RangeId },
     #[error("invalid hash shard spec: {reason}")]
@@ -370,6 +385,13 @@ impl RangeMap {
         })
     }
 
+    /// Route an equality predicate on the hash key to the range owning the
+    /// matching bucket.
+    ///
+    /// The bucket is probed at rowid 0, so the answer is only the owner of
+    /// *every* row of that bucket while the map's boundaries are bucket
+    /// aligned. [`RangeMap::validate_hash_shard_boundaries`] decides that.
+    ///
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
@@ -379,6 +401,22 @@ impl RangeMap {
         value: impl AsRef<[u8]>,
     ) -> Result<KeyRoute, MapValidationError> {
         self.range_for_hash_bucket(spec.table_id, spec.bucket_for_value(value), 0)
+    }
+
+    /// Check that every row of every hash bucket of `spec`'s table is owned by
+    /// exactly one range, i.e. that no boundary cuts a bucket in half.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MapValidationError::HashBucketSplitBoundary`] naming the first
+    /// boundary that falls inside a bucket, or
+    /// [`MapValidationError::HashBucketOutOfRange`] naming the first that sits
+    /// past the table's last bucket.
+    pub fn validate_hash_shard_boundaries(
+        &self,
+        spec: &HashShardSpec,
+    ) -> Result<(), MapValidationError> {
+        ensure_boundaries_are_bucket_aligned(&self.ranges, spec.table_id, spec.bucket_count)
     }
 
     /// # Errors
@@ -420,6 +458,12 @@ impl RangeMap {
         split_at: RangeKey,
         new_range_id: RangeId,
     ) -> Result<SplitPlan, MapValidationError> {
+        // The map only knows a table is hash sharded when a co-location group
+        // names it; a caller holding the shard spec wants `plan_hash_split_at_key`.
+        if let Some(bucket_count) = self.declared_bucket_count(split_at.table_id) {
+            ensure_key_is_bucket_aligned(split_at, bucket_count)?;
+        }
+
         let range = self
             .ranges
             .iter()
@@ -436,6 +480,41 @@ impl RangeMap {
             left: RangeSpec::for_interval(range_id, range.start, Some(split_at)),
             right: RangeSpec::for_interval(new_range_id, split_at, range.end),
         })
+    }
+
+    /// Plan a split of a hash-sharded table's range.
+    ///
+    /// `split_at` must name the start of a bucket the table actually has, so
+    /// that both successors still own whole buckets, hash-equality routing keeps
+    /// agreeing with the range that stores the rows, and the registry accepts
+    /// the resulting boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MapValidationError::HashBucketSplitBoundary`] when `split_at`
+    /// falls inside a bucket of `spec`'s table,
+    /// [`MapValidationError::HashBucketOutOfRange`] when it names a bucket past
+    /// the table's last, and otherwise the errors of
+    /// [`RangeMap::plan_split_at_key`].
+    pub fn plan_hash_split_at_key(
+        &self,
+        spec: &HashShardSpec,
+        range_id: RangeId,
+        split_at: RangeKey,
+        new_range_id: RangeId,
+    ) -> Result<SplitPlan, MapValidationError> {
+        if split_at.table_id == spec.table_id {
+            ensure_key_is_bucket_aligned(split_at, spec.bucket_count)?;
+        }
+
+        self.plan_split_at_key(range_id, split_at, new_range_id)
+    }
+
+    fn declared_bucket_count(&self, table_id: TableId) -> Option<u32> {
+        self.co_location_groups
+            .iter()
+            .find(|group| group.tables.contains(&table_id))
+            .map(|group| group.bucket_count)
     }
 
     /// # Errors
@@ -738,8 +817,45 @@ fn validate_co_location_groups(
                 reason: "bucket count must be a power of two".into(),
             });
         }
+        for table in group.tables.iter().copied() {
+            ensure_boundaries_are_bucket_aligned(ranges, table, group.bucket_count)?;
+        }
         ensure_group_buckets_are_co_located(ranges, group)?;
     }
+    Ok(())
+}
+
+fn ensure_boundaries_are_bucket_aligned(
+    ranges: &[RangeSpec],
+    table_id: TableId,
+    bucket_count: u32,
+) -> Result<(), MapValidationError> {
+    // Ranges are contiguous, so every interior boundary is some range's end.
+    for boundary in ranges.iter().filter_map(|range| range.end) {
+        if boundary.table_id == table_id {
+            ensure_key_is_bucket_aligned(boundary, bucket_count)?;
+        }
+    }
+    Ok(())
+}
+
+// A hash-sharded boundary sits on the first row of a bucket the table declares.
+// The registry checks the bucket before the rowid, so this reports the same
+// error for the same boundary.
+fn ensure_key_is_bucket_aligned(
+    key: RangeKey,
+    bucket_count: u32,
+) -> Result<(), MapValidationError> {
+    if key.bucket >= bucket_count {
+        return Err(MapValidationError::HashBucketOutOfRange {
+            boundary: key,
+            bucket_count,
+        });
+    }
+    if key.rowid != 0 {
+        return Err(MapValidationError::HashBucketSplitBoundary { boundary: key });
+    }
+
     Ok(())
 }
 

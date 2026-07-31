@@ -207,6 +207,70 @@ async fn pg_constraint_covers_keys_and_not_null() {
     );
 }
 
+/// A constraint that references nothing leaves the `conf*` columns in
+/// `PostgreSQL`'s blank spelling — `confrelid` 0, a single space in each of the
+/// three `"char"` codes, NULL attnum arrays — which is how a client tells the
+/// foreign keys out of a relation's constraint listing.
+#[tokio::test]
+async fn constraints_without_a_referent_leave_the_referential_columns_blank() {
+    let engine = fixture().await;
+    let listed = grid(
+        &engine,
+        "SELECT con.conname, con.confrelid, con.confupdtype, con.confdeltype, \
+                con.confmatchtype, con.confkey, con.confdelsetcols \
+         FROM pg_catalog.pg_constraint con JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+         WHERE c.relname = 'shop' ORDER BY con.conname",
+    )
+    .await;
+    let blank = |name: &str| {
+        let mut row = some(&[name, "0", " ", " ", " "]);
+        row.extend([None, None]);
+        row
+    };
+    assert2::assert!(
+        listed
+            == vec![
+                blank("shop_code_not_null"),
+                blank("shop_id_not_null"),
+                blank("shop_pkey"),
+            ]
+    );
+}
+
+/// `\d` reads one `pg_constraint` listing per relation, so a foreign key has to
+/// show up beside the keyed and `NOT NULL` constraints of the same table, under
+/// its own `contype` and with its own rebuilt definition.
+#[tokio::test]
+async fn pg_constraint_lists_a_foreign_key_beside_the_other_constraint_kinds() {
+    let engine = fixture().await;
+    run(
+        &engine,
+        "CREATE TABLE sale (id int4 PRIMARY KEY, \
+         shop_id int4 NOT NULL REFERENCES shop (id) ON DELETE CASCADE)",
+    )
+    .await;
+    let listed = grid(
+        &engine,
+        "SELECT con.conname, con.contype, pg_catalog.pg_get_constraintdef(con.oid) \
+         FROM pg_catalog.pg_constraint con JOIN pg_catalog.pg_class c ON c.oid = con.conrelid \
+         WHERE c.relname = 'sale' ORDER BY con.conname",
+    )
+    .await;
+    assert2::assert!(
+        listed
+            == vec![
+                some(&["sale_id_not_null", "n", "NOT NULL id"]),
+                some(&["sale_pkey", "p", "PRIMARY KEY (id)"]),
+                some(&[
+                    "sale_shop_id_fkey",
+                    "f",
+                    "FOREIGN KEY (shop_id) REFERENCES shop(id) ON DELETE CASCADE",
+                ]),
+                some(&["sale_shop_id_not_null", "n", "NOT NULL shop_id"]),
+            ]
+    );
+}
+
 /// `pg_get_indexdef` rebuilds the `CREATE INDEX` statement, schema-qualified.
 #[tokio::test]
 async fn pg_get_indexdef_rebuilds_the_create_statement() {
