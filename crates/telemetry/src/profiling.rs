@@ -15,12 +15,136 @@
 //! CPU profiling uses POSIX signals and is therefore gated to Unix; a 503 stub
 //! is returned on non-Unix targets so the crate compiles on all platforms.
 
-use std::net::SocketAddr;
-#[cfg(unix)]
-use std::time::Duration;
+use std::{net::SocketAddr, str::FromStr};
 
-use axum::{Router, extract::Query, http::StatusCode, response::IntoResponse, routing::get};
+use axum::{
+    Router,
+    extract::{Query, State},
+    http::StatusCode,
+    response::IntoResponse,
+    routing::get,
+};
+use clap::Args;
+use crabka_units::{
+    Frequency, Time,
+    convert::{FrequencyExt as _, TimeExt as _},
+    parse, per_sec, secs,
+};
+use refined_type::rule::GreaterI32;
 use serde::Deserialize;
+
+type RefinedPositiveFrequency = GreaterI32<0>;
+
+/// A positive, finite, whole-Hz sampling frequency accepted by `pprof`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ProfilingSampleFrequency {
+    frequency: Frequency,
+    hertz: i32,
+}
+
+impl ProfilingSampleFrequency {
+    /// Validate a profiling sampling frequency.
+    ///
+    /// # Errors
+    /// Returns an error unless the frequency is positive, finite, whole Hz,
+    /// and representable by `pprof`'s signed frequency input.
+    pub fn new(frequency: Frequency) -> Result<Self, String> {
+        let hertz = frequency.per_sec_f64();
+        if !hertz.is_finite() || hertz.fract() != 0.0 || hertz > f64::from(i32::MAX) {
+            return Err("profiling sample frequency must be finite whole Hz".to_string());
+        }
+        let hertz = i32::try_from(frequency.per_sec_u64())
+            .map_err(|_| "profiling sample frequency exceeds i32".to_string())?;
+        RefinedPositiveFrequency::new(hertz)
+            .map_err(|error| format!("profiling sample frequency: {error}"))?;
+        Ok(Self { frequency, hertz })
+    }
+
+    fn hertz(self) -> i32 {
+        self.hertz
+    }
+
+    /// Return the dimensioned sampling frequency.
+    #[must_use]
+    pub fn frequency(self) -> Frequency {
+        self.frequency
+    }
+}
+
+impl FromStr for ProfilingSampleFrequency {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(parse::frequency(value).map_err(|error| error.to_string())?)
+    }
+}
+
+/// Process-local CPU and heap profiling policy.
+#[derive(Args, Clone, Debug, PartialEq)]
+pub struct ProfilingConfig {
+    #[arg(long, env = "CRABKA_PROFILING_CPU_DEFAULT_DURATION", default_value = "30s", value_parser = parse::positive_time)]
+    pub profiling_cpu_default_duration: Time,
+    #[arg(long, env = "CRABKA_PROFILING_CPU_MAX_DURATION", default_value = "60s", value_parser = parse::positive_time)]
+    pub profiling_cpu_max_duration: Time,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILING_CPU_SAMPLE_FREQUENCY",
+        default_value = "99Hz"
+    )]
+    pub profiling_cpu_sample_frequency: ProfilingSampleFrequency,
+    #[arg(long, env = "CRABKA_PROFILING_HEAP_DEFAULT_DURATION", default_value = "5s", value_parser = parse::positive_time)]
+    pub profiling_heap_default_duration: Time,
+    #[arg(long, env = "CRABKA_PROFILING_HEAP_MAX_DURATION", default_value = "30s", value_parser = parse::positive_time)]
+    pub profiling_heap_max_duration: Time,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILING_NATIVE_FRAME_BLOCKLIST",
+        default_value = "libc,libgcc,pthread,vdso",
+        value_delimiter = ','
+    )]
+    pub profiling_native_frame_blocklist: Vec<String>,
+}
+
+impl ProfilingConfig {
+    /// Validate related profiling bounds.
+    ///
+    /// # Errors
+    /// Returns an error when a default exceeds its maximum or a maximum is
+    /// below the compatible one-second request floor.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.profiling_cpu_default_duration > self.profiling_cpu_max_duration {
+            return Err("profiling CPU default duration exceeds maximum".to_string());
+        }
+        if self.profiling_heap_default_duration > self.profiling_heap_max_duration {
+            return Err("profiling heap default duration exceeds maximum".to_string());
+        }
+        if self.profiling_cpu_max_duration < secs(1) || self.profiling_heap_max_duration < secs(1) {
+            return Err("profiling maximum duration must be at least 1s".to_string());
+        }
+        Ok(())
+    }
+}
+
+impl Default for ProfilingConfig {
+    fn default() -> Self {
+        Self {
+            profiling_cpu_default_duration: secs(30),
+            profiling_cpu_max_duration: secs(60),
+            profiling_cpu_sample_frequency: ProfilingSampleFrequency {
+                frequency: per_sec(99),
+                hertz: 99,
+            },
+            profiling_heap_default_duration: secs(5),
+            profiling_heap_max_duration: secs(30),
+            profiling_native_frame_blocklist: vec![
+                "libc".to_string(),
+                "libgcc".to_string(),
+                "pthread".to_string(),
+                "vdso".to_string(),
+            ],
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct CpuQuery {
@@ -36,15 +160,27 @@ struct HeapQuery {
 
 /// CPU profile in pprof protobuf, sampled for `?seconds=N` (default 30, clamped 1..=60).
 #[cfg(unix)]
-async fn cpu_profile(Query(q): Query<CpuQuery>) -> axum::response::Response {
+async fn cpu_profile(
+    State(config): State<ProfilingConfig>,
+    Query(q): Query<CpuQuery>,
+) -> axum::response::Response {
     // pprof::protos::Message re-exports the prost 0.12 Message trait bundled
     // inside the pprof crate, which is the version Profile was generated with.
     use pprof::protos::Message as _;
 
-    let seconds = q.seconds.unwrap_or(30).clamp(1, 60);
+    let duration = requested_duration(
+        q.seconds,
+        config.profiling_cpu_default_duration,
+        config.profiling_cpu_max_duration,
+    );
+    let blocklist = config
+        .profiling_native_frame_blocklist
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
     let guard = match pprof::ProfilerGuardBuilder::default()
-        .frequency(99)
-        .blocklist(&["libc", "libgcc", "pthread", "vdso"])
+        .frequency(config.profiling_cpu_sample_frequency.hertz())
+        .blocklist(&blocklist)
         .build()
     {
         Ok(g) => g,
@@ -52,7 +188,7 @@ async fn cpu_profile(Query(q): Query<CpuQuery>) -> axum::response::Response {
             return (StatusCode::INTERNAL_SERVER_ERROR, format!("profiler: {e}")).into_response();
         }
     };
-    tokio::time::sleep(Duration::from_secs(seconds)).await;
+    tokio::time::sleep(duration.to_std()).await;
     let report = match guard.report().build() {
         Ok(r) => r,
         Err(e) => {
@@ -95,7 +231,10 @@ fn gzip(raw: &[u8]) -> Vec<u8> {
 // cargo-mutants: non-Unix stub is not built or exercised on the default Linux mutation run.
 #[cfg(not(unix))]
 #[cfg_attr(test, mutants::skip)]
-async fn cpu_profile(_q: Query<CpuQuery>) -> axum::response::Response {
+async fn cpu_profile(
+    _config: State<ProfilingConfig>,
+    _q: Query<CpuQuery>,
+) -> axum::response::Response {
     (
         StatusCode::SERVICE_UNAVAILABLE,
         "CPU profiling requires a Unix target",
@@ -106,7 +245,10 @@ async fn cpu_profile(_q: Query<CpuQuery>) -> axum::response::Response {
 // cargo-mutants: optional heap-profiling route is feature-gated out of the default mutation run.
 #[cfg(all(unix, feature = "heap-profiling"))]
 #[cfg_attr(test, mutants::skip)]
-async fn heap_profile(Query(q): Query<HeapQuery>) -> axum::response::Response {
+async fn heap_profile(
+    State(config): State<ProfilingConfig>,
+    Query(q): Query<HeapQuery>,
+) -> axum::response::Response {
     let Some(ctl) = jemalloc_pprof::PROF_CTL.as_ref() else {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -124,8 +266,12 @@ async fn heap_profile(Query(q): Query<HeapQuery>) -> axum::response::Response {
             )
                 .into_response();
         }
-        let seconds = q.seconds.unwrap_or(5).clamp(1, 30);
-        tokio::time::sleep(Duration::from_secs(seconds)).await;
+        let duration = requested_duration(
+            q.seconds,
+            config.profiling_heap_default_duration,
+            config.profiling_heap_max_duration,
+        );
+        tokio::time::sleep(duration.to_std()).await;
     }
     let dump = ctl.dump_pprof();
     if activated_here && let Err(e) = ctl.deactivate() {
@@ -142,13 +288,34 @@ async fn heap_profile(Query(q): Query<HeapQuery>) -> axum::response::Response {
     }
 }
 
-/// The pprof routes: CPU always (returns 503 on non-Unix); heap under the
-/// `heap-profiling` feature (Unix only).
-pub fn pprof_router() -> Router {
+/// The pprof routes with explicit policy: CPU always (returns 503 on
+/// non-Unix); heap under the `heap-profiling` feature (Unix only).
+///
+/// # Errors
+/// Returns an error when related profiling duration bounds are invalid.
+pub fn pprof_router_with_config(config: ProfilingConfig) -> Result<Router, String> {
+    config.validate()?;
+    Ok(pprof_router_unchecked(config))
+}
+
+fn pprof_router_unchecked(config: ProfilingConfig) -> Router {
     let router = Router::new().route("/debug/pprof/profile", get(cpu_profile));
     #[cfg(all(unix, feature = "heap-profiling"))]
     let router = router.route("/debug/pprof/heap", get(heap_profile));
-    router
+    router.with_state(config)
+}
+
+/// The pprof routes with the compatible default policy.
+pub fn pprof_router() -> Router {
+    pprof_router_unchecked(ProfilingConfig::default())
+}
+
+fn requested_duration(seconds: Option<u64>, default: Time, maximum: Time) -> Time {
+    seconds
+        .map_or(default, |seconds| {
+            secs(u32::try_from(seconds.max(1)).unwrap_or(u32::MAX))
+        })
+        .min(maximum)
 }
 
 /// Bind an admin HTTP server on `addr` serving `pprof_router()` merged with
@@ -156,7 +323,10 @@ pub fn pprof_router() -> Router {
 /// # Errors
 /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn serve_admin(addr: SocketAddr, extra: Router) -> std::io::Result<()> {
-    let app = pprof_router().merge(extra);
+    serve_router(addr, pprof_router().merge(extra)).await
+}
+
+async fn serve_router(addr: SocketAddr, app: Router) -> std::io::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     tracing::info!(%bound, "profiling admin server listening");
@@ -165,6 +335,20 @@ pub async fn serve_admin(addr: SocketAddr, extra: Router) -> std::io::Result<()>
             tracing::warn!(error = %e, "admin server error");
         }
     });
+    Ok(())
+}
+
+/// Bind a profiling admin server with explicit policy.
+///
+/// # Errors
+/// Returns an error for invalid profiling configuration or listener failure.
+pub async fn serve_admin_with_config(
+    addr: SocketAddr,
+    extra: Router,
+    config: ProfilingConfig,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let app = pprof_router_with_config(config)?.merge(extra);
+    serve_router(addr, app).await?;
     Ok(())
 }
 
@@ -190,4 +374,101 @@ pub async fn serve_admin_from_env_with(default_addr: &str, extra: Router) -> std
         .parse()
         .unwrap_or_else(|e| panic!("invalid CRABKA_ADMIN_LISTEN_ADDR `{raw}`: {e}"));
     serve_admin(addr, extra).await
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+    use crabka_units::{convert::FrequencyExt as _, millis, minutes};
+
+    use super::*;
+
+    #[derive(Debug, Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        profiling: ProfilingConfig,
+    }
+
+    #[test]
+    fn profiling_config_defaults_and_overrides() {
+        let defaults = TestCli::parse_from(["test"]).profiling;
+        assert_eq!(defaults, ProfilingConfig::default());
+
+        let configured = TestCli::try_parse_from([
+            "test",
+            "--profiling-cpu-default-duration=2s",
+            "--profiling-cpu-max-duration=3s",
+            "--profiling-cpu-sample-frequency=101Hz",
+            "--profiling-heap-default-duration=4s",
+            "--profiling-heap-max-duration=5s",
+            "--profiling-native-frame-blocklist=libc,custom",
+        ])
+        .expect("valid profiling policy")
+        .profiling;
+        assert_eq!(configured.profiling_cpu_default_duration, secs(2));
+        assert_eq!(configured.profiling_cpu_max_duration, secs(3));
+        assert_eq!(
+            configured.profiling_cpu_sample_frequency.frequency(),
+            Frequency::from_per_sec(101.0)
+        );
+        assert_eq!(configured.profiling_heap_default_duration, secs(4));
+        assert_eq!(configured.profiling_heap_max_duration, secs(5));
+        assert_eq!(
+            configured.profiling_native_frame_blocklist,
+            ["libc", "custom"]
+        );
+        assert!(configured.validate().is_ok());
+    }
+
+    #[test]
+    fn profiling_config_rejects_invalid_values_and_bounds() {
+        for argument in [
+            "--profiling-cpu-default-duration=0s",
+            "--profiling-cpu-max-duration=-1s",
+            "--profiling-cpu-sample-frequency=0Hz",
+            "--profiling-cpu-sample-frequency=1.5Hz",
+            "--profiling-heap-default-duration=0s",
+            "--profiling-heap-max-duration=-1s",
+        ] {
+            assert!(TestCli::try_parse_from(["test", argument]).is_err());
+        }
+
+        let cpu_bounds = TestCli::parse_from([
+            "test",
+            "--profiling-cpu-default-duration=2s",
+            "--profiling-cpu-max-duration=1s",
+        ]);
+        assert!(cpu_bounds.profiling.validate().is_err());
+
+        let heap_bounds = TestCli::parse_from([
+            "test",
+            "--profiling-heap-default-duration=2s",
+            "--profiling-heap-max-duration=1s",
+        ]);
+        assert!(heap_bounds.profiling.validate().is_err());
+    }
+
+    #[test]
+    fn requested_profile_duration_uses_configured_default_floor_and_cap() {
+        assert_eq!(requested_duration(None, secs(2), secs(5)), secs(2));
+        assert_eq!(requested_duration(Some(0), secs(2), secs(5)), secs(1));
+        assert_eq!(requested_duration(Some(3), secs(2), secs(5)), secs(3));
+        assert_eq!(requested_duration(Some(9), secs(2), secs(5)), secs(5));
+        assert!(
+            ProfilingConfig {
+                profiling_cpu_max_duration: millis(500),
+                ..ProfilingConfig::default()
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            ProfilingConfig {
+                profiling_heap_default_duration: minutes(1),
+                ..ProfilingConfig::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
 }

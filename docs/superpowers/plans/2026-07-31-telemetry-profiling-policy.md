@@ -13,11 +13,11 @@ binaries flatten and pass the shared config.
 
 ### Task 1: Shared validated profiling policy
 
-- [ ] Add failing default, override, invalid-value, and duration-bound tests.
-- [ ] Add UOM duration/frequency fields and refined whole-Hz validation.
-- [ ] Add policy-aware router and server functions; keep default wrappers.
-- [ ] Prove configured CPU and heap request default/cap normalization.
-- [ ] Run telemetry tests and strict crate Clippy; commit the shared policy.
+- [x] Add failing default, override, invalid-value, and duration-bound tests.
+- [x] Add UOM duration/frequency fields and refined whole-Hz validation.
+- [x] Add policy-aware router and server functions; keep default wrappers.
+- [x] Prove configured CPU and heap request default/cap normalization.
+- [x] Run telemetry tests and strict crate Clippy; commit the shared policy.
 
 ### Task 2: Direct admin-server owners
 

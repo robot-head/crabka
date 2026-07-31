@@ -3963,6 +3963,7 @@ version = "0.3.9"
 dependencies = [
  "assert2",
  "axum",
+ "clap",
  "crabka-logfmt",
  "crabka-units",
  "flate2",
@@ -3973,6 +3974,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "pprof",
+ "refined_type",
  "serde",
  "thiserror 2.0.19",
  "tokio",
