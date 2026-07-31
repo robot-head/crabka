@@ -484,6 +484,12 @@ fn gateway_args(
         push!(quantity readiness_poll_interval);
         push!(quantity produce_max_body);
         push!(quantity forward_max_body);
+        if let Some(value) = tuning.client_dispatch_queue_capacity {
+            args.push(format!("--client-dispatch-queue-capacity={value}"));
+        }
+        if let Some(value) = tuning.client_frame_max {
+            args.push(format!("--client-frame-max={}B", value.bytes_u64()));
+        }
     }
     if let Some(registry) = &gateway.spec.schema_registry {
         if let Some(value) = registry.url.as_deref() {
@@ -1102,6 +1108,16 @@ fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Res
     nonempty!(spec.membership_topic.as_deref(), "spec.membershipTopic");
 
     if let Some(tuning) = &spec.tuning {
+        tuning
+            .client_dispatch_queue_capacity
+            .map(crabka_client_core::ConnectionDispatchQueueCapacity::new)
+            .transpose()
+            .map_err(|error| format!("spec.tuning.clientDispatchQueueCapacity: {error}"))?;
+        tuning
+            .client_frame_max
+            .map(crabka_client_core::ClientFrameMax::try_from)
+            .transpose()
+            .map_err(|error| format!("spec.tuning.clientFrameMax: {error}"))?;
         validate!(
             tuning.internal_topic_replication_factor,
             refined_type::rule::GreaterI16<0>,
@@ -2277,10 +2293,73 @@ mod tests {
     }
 
     #[test]
+    fn configured_client_policy_renders_once() {
+        let mut gw = gateway_fixture("gw", "demo");
+        gw.spec.tuning = Some(
+            serde_json::from_value(serde_json::json!({
+                "clientDispatchQueueCapacity": 7,
+                "clientFrameMax": "32KiB"
+            }))
+            .unwrap(),
+        );
+        let args = gateway_args(&gw, "gw", "boot:9092", "sni");
+        check!(
+            args.iter()
+                .filter(|arg| *arg == "--client-dispatch-queue-capacity=7")
+                .count()
+                == 1
+        );
+        check!(
+            args.iter()
+                .filter(|arg| *arg == "--client-frame-max=32768B")
+                .count()
+                == 1
+        );
+
+        let omitted = gateway_args(&gateway_fixture("gw", "demo"), "gw", "boot:9092", "sni");
+        check!(
+            omitted.iter().all(|arg| {
+                !arg.starts_with("--client-dispatch-queue-capacity=")
+                    && !arg.starts_with("--client-frame-max=")
+            }),
+            "got: {omitted:?}"
+        );
+    }
+
+    #[test]
+    fn client_policy_rejects_invalid_boundaries() {
+        for (tuning, path) in [
+            (
+                serde_json::json!({"clientDispatchQueueCapacity": 0}),
+                "spec.tuning.clientDispatchQueueCapacity",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "0B"}),
+                "spec.tuning.clientFrameMax",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "1.5B"}),
+                "spec.tuning.clientFrameMax",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "101MiB"}),
+                "spec.tuning.clientFrameMax",
+            ),
+        ] {
+            let mut gw = gateway_fixture("gw", "demo");
+            gw.spec.tuning = Some(serde_json::from_value(tuning).unwrap());
+            let error = validate_config(&gw.spec).expect_err("reject invalid policy");
+            assert!(error.contains(path), "got: {error}");
+        }
+    }
+
+    #[test]
     fn runtime_values_render_to_flags_and_existing_toml_paths() {
         let mut gw = gateway_fixture("gw", "demo");
         gw.spec.membership_topic = Some("members-custom".into());
         gw.spec.tuning = Some(GatewayTuning {
+            client_dispatch_queue_capacity: None,
+            client_frame_max: None,
             internal_topic_replication_factor: Some(2),
             internal_topic_allow_replication_fallback: Some(false),
             internal_topic_create_timeout: Some(millis(7_001)),

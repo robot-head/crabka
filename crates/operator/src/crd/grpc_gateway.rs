@@ -136,6 +136,18 @@ pub struct DedupSpec {
 #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct GatewayTuning {
+    /// Kafka client request-dispatch queue capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub client_dispatch_queue_capacity: Option<usize>,
+    /// Maximum accepted Kafka client frame size.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub client_frame_max: Option<ByteSize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
     pub internal_topic_replication_factor: Option<i16>,
@@ -541,6 +553,8 @@ mod tests {
     #[test]
     fn dimensioned_tuning_fields_serialize_as_unit_carrying_strings() {
         let tuning = GatewayTuning {
+            client_dispatch_queue_capacity: Some(7),
+            client_frame_max: Some(crabka_units::kibibytes(32)),
             internal_topic_create_timeout: Some(secs(10)),
             internal_topic_segment: Some(minutes(1)),
             consumer_poll_timeout: Some(millis(500)),
@@ -556,6 +570,8 @@ mod tests {
         check!(json["readinessPollInterval"] == serde_json::json!("250ms"));
         check!(json["produceMaxBody"] == serde_json::json!("2MiB"));
         check!(json["forwardMaxBody"] == serde_json::json!("3MiB"));
+        check!(json["clientDispatchQueueCapacity"] == 7);
+        check!(json["clientFrameMax"] == "32KiB");
         let back: GatewayTuning = serde_json::from_value(json).unwrap();
         assert!(back == tuning);
     }
@@ -589,10 +605,12 @@ mod tests {
             "readinessPollInterval",
             "produceMaxBody",
             "forwardMaxBody",
+            "clientFrameMax",
         ] {
             check!(props[field]["type"] == "string", "case {field}");
             check!(props[field]["minimum"].is_null(), "case {field}");
         }
+        check!(props["clientDispatchQueueCapacity"]["minimum"].as_f64() == Some(1.0));
     }
 
     #[test]
