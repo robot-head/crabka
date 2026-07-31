@@ -44,7 +44,7 @@ separate process-wide queue/frame pairs.
 - Produces: `RegistryOptions::policy() -> Result<RegistryPolicy, String>` with
   the activator's validated client resource policy
 
-- [ ] **Step 1: Write parser and propagation tests**
+- [x] **Step 1: Write parser and propagation tests**
 
 Add tests that parse defaults, environment values, and overriding CLI values:
 
@@ -69,7 +69,7 @@ assert_eq!(
 
 Cover zero queue, `0B`, `1.5B`, and `101MiB` rejection before network I/O.
 
-- [ ] **Step 2: Run the focused test and confirm failure**
+- [x] **Step 2: Run the focused test and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -78,7 +78,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 
 Expected: parser fields or policy getters are absent.
 
-- [ ] **Step 3: Add the minimal inputs and typed policy assembly**
+- [x] **Step 3: Add the minimal inputs and typed policy assembly**
 
 Add:
 
@@ -109,7 +109,7 @@ Validate with the three existing client-core types and apply
 `RegistryPolicy::with_client_resource_policy`. Return the validation error
 instead of using `expect`.
 
-- [ ] **Step 4: Run tests, strict Clippy, and format**
+- [x] **Step 4: Run tests, strict Clippy, and format**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -121,7 +121,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 git diff --check
 ```
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add crates/gres-activator/src/main.rs
@@ -146,7 +146,7 @@ git commit -m "feat(gres-activator): expose client policy"
   - `GresComputeSpec.fdw_fetch_min: Option<ByteSize>`
   - `GresComputeSpec.wal_recovery_fetch_min: Option<ByteSize>`
 
-- [ ] **Step 1: Write serde, schema, and validation tests**
+- [x] **Step 1: Write serde, schema, and validation tests**
 
 Use non-default values:
 
@@ -163,7 +163,7 @@ Assert queue schema minimum `1`, byte fields have schema type `string`, omitted
 fields remain `None`, and field-qualified errors reject zero/fractional/
 over-ceiling values.
 
-- [ ] **Step 2: Run focused CRD tests and confirm failure**
+- [x] **Step 2: Run focused CRD tests and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -172,7 +172,7 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p crabka-operator crd::kafka --lib --locked
 ```
 
-- [ ] **Step 3: Add optional fields with existing serializers**
+- [x] **Step 3: Add optional fields with existing serializers**
 
 Queue fields use:
 
@@ -198,7 +198,7 @@ Apply `reader_fetch_min` through
 `RegistryPolicy::with_client_resource_policy`, retaining the policy's default
 queue/frame values because those are overridden per consuming process.
 
-- [ ] **Step 4: Extend effective compute validation**
+- [x] **Step 4: Extend effective compute validation**
 
 Validate optional queue/frame/fetch values with:
 
@@ -211,7 +211,7 @@ FetchMinBytes::try_from(value)
 Store typed optional values in `EffectiveGresComputePolicy`; do not add raw
 byte or integer duplicates.
 
-- [ ] **Step 5: Run focused tests and commit**
+- [x] **Step 5: Run focused tests and commit**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -238,7 +238,7 @@ git commit -m "feat(operator): add Gres client policy fields"
   - compute flags for compute queue/frame, shared reader fetch minimum, FDW
     fetch minimum, and WAL-recovery fetch minimum
 
-- [ ] **Step 1: Write failing exact-argument tests**
+- [x] **Step 1: Write failing exact-argument tests**
 
 Assert configured values render as:
 
@@ -254,7 +254,7 @@ Check every pair appears exactly once, omission emits none, activator never
 receives FDW/WAL flags, and both single- and multi-range compute deployments
 receive the correct process pair.
 
-- [ ] **Step 2: Run controller tests and confirm failure**
+- [x] **Step 2: Run controller tests and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -263,14 +263,14 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p crabka-operator controller::gres_tenant --lib --locked
 ```
 
-- [ ] **Step 3: Extend existing argument builders**
+- [x] **Step 3: Extend existing argument builders**
 
 Keep `registry_policy_args`, `wal_consumer_admin_args`, and
 `render_activator_deployment` as the only rendering seams. Append optional
 arguments using typed getters and `ByteSize::human()` or explicit whole-byte
 `B` strings. Do not create a generic argument framework.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -296,7 +296,7 @@ git commit -m "feat(operator): render Gres client policy"
 - Produces optional `clientDispatchQueueCapacity` and `clientFrameMax` fields
   rendered as broker CLI flags
 
-- [ ] **Step 1: Write failing CRD and pod-render tests**
+- [x] **Step 1: Write failing CRD and pod-render tests**
 
 Assert schema/serde behavior, validation errors, no flags when omitted, and
 exact configured fragments:
@@ -308,21 +308,21 @@ exact configured fragments:
 
 Cover both metrics-disabled and metrics-enabled main scripts.
 
-- [ ] **Step 2: Run focused tests and confirm failure**
+- [x] **Step 2: Run focused tests and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p crabka-operator kafka_node_pool --lib --locked
 ```
 
-- [ ] **Step 3: Add fields, validation, and minimal script rendering**
+- [x] **Step 3: Add fields, validation, and minimal script rendering**
 
 Add the same optional field shapes as Task 2. Validate before
 `render_broker_container`. Extend `build_main_script` to accept the two typed
 options and append only configured flags while preserving the existing
 byte-for-byte constant when both are absent.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -344,25 +344,25 @@ git commit -m "feat(operator): render broker client policy"
 - Adds optional queue/frame fields to `GatewayTuning`
 - Renders existing gateway CLI flags from `gateway_args`
 
-- [ ] **Step 1: Add failing serde, validation, and exact-argument tests**
+- [x] **Step 1: Add failing serde, validation, and exact-argument tests**
 
 Assert omission, queue minimum schema, frame string schema, invalid boundary
 errors, and exactly one configured queue/frame flag in the Deployment.
 
-- [ ] **Step 2: Run the focused tests and confirm failure**
+- [x] **Step 2: Run the focused tests and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p crabka-operator grpc_gateway --lib --locked
 ```
 
-- [ ] **Step 3: Implement fields and render through existing seams**
+- [x] **Step 3: Implement fields and render through existing seams**
 
 Add fields to `GatewayTuning`, validate them in `validate_config`, and append
 configured values in `gateway_args`. Render frame maximum as whole bytes with
 `B`; do not inject environment variables.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -384,26 +384,26 @@ git commit -m "feat(operator): render gateway client policy"
 - Adds optional queue/frame fields to `SchemaRegistryRuntime`
 - Renders existing Schema Registry CLI flags through `build_args_and_mounts`
 
-- [ ] **Step 1: Add failing serde, validation, and argument tests**
+- [x] **Step 1: Add failing serde, validation, and argument tests**
 
 Prove omission, schema shape, invalid boundaries, and exact configured output
 from `build_args_and_mounts`.
 
-- [ ] **Step 2: Run focused tests and confirm failure**
+- [x] **Step 2: Run focused tests and confirm failure**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p crabka-operator schema_registry --lib --locked
 ```
 
-- [ ] **Step 3: Add fields, validation, and rendering**
+- [x] **Step 3: Add fields, validation, and rendering**
 
 Add fields to `SchemaRegistryRuntime`. Validate before
 `build_args_and_mounts`, then extend its existing `push_runtime!` quantity
 path to append `--client-dispatch-queue-capacity` and
 `--client-frame-max=<bytes>B` only when configured.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -426,7 +426,7 @@ git commit -m "feat(operator): render registry client policy"
 - Proves checked-in OpenAPI schemas and all runtime render paths match the
   approved design
 
-- [ ] **Step 1: Run the constructor and surface audit**
+- [x] **Step 1: Run the constructor and surface audit**
 
 ```bash
 rg -n 'clientDispatchQueueCapacity|clientFrameMax|readerFetchMin|fdwFetchMin|walRecoveryFetchMin' \
@@ -437,7 +437,7 @@ rg -n 'client-dispatch-queue-capacity|client-frame-max|registry-reader-fetch-min
 
 Classify every production hit as schema, validation, or exact rendering.
 
-- [ ] **Step 2: Regenerate CRDs twice and compare**
+- [x] **Step 2: Regenerate CRDs twice and compare**
 
 ```bash
 crd_first=$(mktemp -d)
@@ -454,14 +454,14 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 diff -ru deploy/crds "$crd_verify"
 ```
 
-- [ ] **Step 3: Run full affected tests**
+- [x] **Step 3: Run full affected tests**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p crabka-gres-activator -p crabka-operator --all-targets --locked
 ```
 
-- [ ] **Step 4: Run workspace gates**
+- [x] **Step 4: Run workspace gates**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
@@ -473,14 +473,14 @@ TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
 git diff --check
 ```
 
-- [ ] **Step 5: Re-run affected tests after final formatting**
+- [x] **Step 5: Re-run affected tests after final formatting**
 
 ```bash
 TMPDIR=/var/tmp RUSTC_WRAPPER= CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0 \
   cargo test -p crabka-gres-activator -p crabka-operator --all-targets --locked
 ```
 
-- [ ] **Step 6: Update the audit and commit**
+- [x] **Step 6: Update the audit and commit**
 
 Record exact CRD paths, CLI/environment names, validation types, generated
 schema evidence, and that the broader repository-wide hardcoded-value audit

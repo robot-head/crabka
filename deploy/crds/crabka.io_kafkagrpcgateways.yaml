@@ -358,6 +358,16 @@ spec:
                 description: Gateway runtime policy overrides.
                 nullable: true
                 properties:
+                  clientDispatchQueueCapacity:
+                    description: Kafka client request-dispatch queue capacity.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientFrameMax:
+                    description: Maximum accepted Kafka client frame size.
+                    nullable: true
+                    type: string
                   consumerPollTimeout:
                     nullable: true
                     type: string

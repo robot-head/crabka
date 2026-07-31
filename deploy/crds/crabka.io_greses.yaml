@@ -24,6 +24,16 @@ spec:
                 description: Wake activator deployment and runtime policy.
                 nullable: true
                 properties:
+                  clientDispatchQueueCapacity:
+                    description: Kafka client request-dispatch queue capacity.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientFrameMax:
+                    description: Maximum accepted Kafka client frame size.
+                    nullable: true
+                    type: string
                   coldStartTimeout:
                     description: Maximum duration to hold one cold-starting connection.
                     nullable: true
@@ -187,6 +197,16 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  clientDispatchQueueCapacity:
+                    description: Kafka client request-dispatch queue capacity.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientFrameMax:
+                    description: Maximum accepted Kafka client frame size.
+                    nullable: true
+                    type: string
                   durableInspectionFoldMaxRecords:
                     description: Maximum records materialized by one durable inspection.
                     format: uint
@@ -203,6 +223,10 @@ spec:
                     type: string
                   fdwBrokerDnsTimeout:
                     description: Timeout for resolving Kafka broker hostnames used by the FDW.
+                    nullable: true
+                    type: string
+                  fdwFetchMin:
+                    description: Minimum response size for FDW Kafka fetches.
                     nullable: true
                     type: string
                   idleSuspendPollInterval:
@@ -320,6 +344,10 @@ spec:
                     type: integer
                   walRecoveryFetchMaxWait:
                     description: Kafka broker long-poll wait for committed-WAL recovery fetches.
+                    nullable: true
+                    type: string
+                  walRecoveryFetchMin:
+                    description: Minimum response size for committed-WAL recovery fetches.
                     nullable: true
                     type: string
                   walRecoveryFetchPartitionMax:

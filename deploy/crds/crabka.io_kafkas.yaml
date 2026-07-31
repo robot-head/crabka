@@ -621,6 +621,10 @@ spec:
                     description: DNS lookup deadline for registry reader and admin paths.
                     nullable: true
                     type: string
+                  readerFetchMin:
+                    description: Minimum response size for registry reader fetches.
+                    nullable: true
+                    type: string
                   readerRetryBackoff:
                     description: Registry reader retry delay.
                     nullable: true

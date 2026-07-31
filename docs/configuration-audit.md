@@ -5889,19 +5889,38 @@ policy-free constructor hits are fixed test inputs, examples, test-only
 helpers, or the client libraries' own default builders; none is a deployed
 owner.
 
-### Remaining CRD Work
+### CRD Propagation
 
-The standalone inputs are complete, but operator-rendered workloads do not yet
-have equivalent CRD fields. A later CRD propagation slice must add typed,
-optional queue/frame fields and exact argument rendering to the existing
-owners:
+Operator-rendered Kafka clients now have equivalent optional CRD fields. The
+exact ownership is:
 
-- `KafkaNodePool` for broker pods;
-- `Kafka.spec.gresRegistry` for the Gres registry process;
-- `Gres.spec.compute` for Gres compute processes, including the three
-  role-specific fetch minima;
-- `KafkaGrpcGateway` for gateway pods; and
-- `SchemaRegistry` for registry pods.
+| Workload | CRD paths |
+|---|---|
+| broker | `KafkaNodePool.spec.clientDispatchQueueCapacity`, `KafkaNodePool.spec.clientFrameMax` |
+| Gres activator | `Gres.spec.activator.clientDispatchQueueCapacity`, `Gres.spec.activator.clientFrameMax`, `Kafka.spec.gresRegistry.readerFetchMin` |
+| Gres compute | `Gres.spec.compute.clientDispatchQueueCapacity`, `Gres.spec.compute.clientFrameMax`, `Gres.spec.compute.fdwFetchMin`, `Gres.spec.compute.walRecoveryFetchMin`, `Kafka.spec.gresRegistry.readerFetchMin` |
+| gRPC gateway | `KafkaGrpcGateway.spec.tuning.clientDispatchQueueCapacity`, `KafkaGrpcGateway.spec.tuning.clientFrameMax` |
+| Schema Registry | `SchemaRegistry.spec.runtime.clientDispatchQueueCapacity`, `SchemaRegistry.spec.runtime.clientFrameMax` |
+
+The activator standalone surface is
+`--client-dispatch-queue-capacity` /
+`CRABKA_GRES_ACTIVATOR_CLIENT_DISPATCH_QUEUE_CAPACITY`,
+`--client-frame-max` / `CRABKA_GRES_ACTIVATOR_CLIENT_FRAME_MAX`, and
+`--registry-reader-fetch-min` /
+`CRABKA_GRES_REGISTRY_READER_FETCH_MIN`.
+
+Queue values use `ConnectionDispatchQueueCapacity`; frame values use
+`ClientFrameMax`; fetch minima use `FetchMinBytes`. All byte-bearing CRD and
+CLI/environment inputs are UOM `ByteSize` values and render as explicit whole
+bytes with a `B` suffix. Omitted CRD fields render no new argument, preserving
+the existing process defaults and byte-identical broker startup script.
+
+Fresh generated schemas contain positive queue minima and string schemas for
+all frame/fetch fields in `crabka.io_kafkanodepools.yaml`,
+`crabka.io_greses.yaml`, `crabka.io_kafkas.yaml`,
+`crabka.io_kafkagrpcgateways.yaml`, and
+`crabka.io_schemaregistries.yaml`. Two independent generations matched, and
+the checked-in files matched a third generation.
 
 Bench-driver, metrics, metrics-service, observability,
 observability-demo-app, profiles, rebalancer, replicator, and traces have no
@@ -5909,5 +5928,7 @@ owning CRD in this operator. Operator's own cached admin clients intentionally
 use process configuration because one operator instance serves many clusters;
 a per-cluster policy would conflict inside that shared process.
 
+Affected all-target tests pass before and after final formatting. Workspace
+all-target check and strict Clippy, nightly formatting, and diff hygiene pass.
 This closes deployment-process propagation only. The repository-wide
 hardcoded operational-value audit remains active.
