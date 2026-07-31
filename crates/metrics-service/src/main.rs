@@ -70,6 +70,20 @@ struct Cli {
         default_value = "metrics"
     )]
     manifest_prefix: String,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_COLD_CACHE_TTL",
+        default_value = "30s",
+        value_parser = parse::positive_time
+    )]
+    cold_cache_ttl: Time,
+    #[arg(
+        long,
+        env = "CRABKA_METRICS_UNBOUNDED_COMPATIBILITY_LOOKBACK",
+        default_value = "1h",
+        value_parser = parse::positive_time
+    )]
+    unbounded_compatibility_lookback: Time,
     #[arg(long, env = "CRABKA_METRICS_RUNTIME_OVERRIDES")]
     runtime_overrides: Option<PathBuf>,
     #[arg(
@@ -222,7 +236,9 @@ async fn run_query_frontend(
         object_store_url.clone(),
         &cli.manifest_prefix,
         WalHead::new(),
-    );
+    )
+    .with_cold_cache_ttl(cli.cold_cache_ttl)
+    .with_unbounded_compatibility_lookback(cli.unbounded_compatibility_lookback);
     let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
         .with_max_concurrent_queries(cli.max_concurrent_queries)
         .with_metrics(metrics)
@@ -270,7 +286,9 @@ async fn run_ruler(
         object_store_url.clone(),
         &cli.manifest_prefix,
         WalHead::new(),
-    );
+    )
+    .with_cold_cache_ttl(cli.cold_cache_ttl)
+    .with_unbounded_compatibility_lookback(cli.unbounded_compatibility_lookback);
     let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
         .with_max_concurrent_queries(cli.max_concurrent_queries)
         .with_metrics(metrics);
@@ -421,7 +439,9 @@ async fn run_querier(
         object_store_url.clone(),
         &cli.manifest_prefix,
         head,
-    );
+    )
+    .with_cold_cache_ttl(cli.cold_cache_ttl)
+    .with_unbounded_compatibility_lookback(cli.unbounded_compatibility_lookback);
     let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
         .with_max_concurrent_queries(cli.max_concurrent_queries)
         .with_metrics(metrics);
@@ -635,6 +655,87 @@ mod tests {
 
         assert2::assert!(&cli.object_store_url == &"file:///tmp/crabka-metrics".to_string());
         assert2::assert!(&cli.manifest_prefix == &"metrics/tenant-a".to_string());
+    }
+
+    #[test]
+    fn cold_store_policy_parses_defaults_overrides_and_boundaries() {
+        let defaults =
+            Cli::try_parse_from(["crabka-metrics-service", "--target", "querier"]).unwrap();
+        assert2::assert!(defaults.cold_cache_ttl == crabka_metrics_service::DEFAULT_COLD_CACHE_TTL);
+        assert2::assert!(
+            defaults.unbounded_compatibility_lookback
+                == crabka_metrics_service::DEFAULT_UNBOUNDED_COMPATIBILITY_LOOKBACK
+        );
+
+        let configured = Cli::try_parse_from([
+            "crabka-metrics-service",
+            "--target",
+            "querier",
+            "--cold-cache-ttl",
+            "5s",
+            "--unbounded-compatibility-lookback",
+            "10m",
+        ])
+        .unwrap();
+        assert2::assert!(configured.cold_cache_ttl == secs(5));
+        assert2::assert!(configured.unbounded_compatibility_lookback == minutes(10));
+
+        for args in [
+            ["--cold-cache-ttl", "0s"],
+            ["--cold-cache-ttl", "-1s"],
+            ["--unbounded-compatibility-lookback", "0s"],
+            ["--unbounded-compatibility-lookback", "-1s"],
+        ] {
+            assert2::assert!(
+                Cli::try_parse_from([
+                    "crabka-metrics-service",
+                    "--target",
+                    "querier",
+                    args[0],
+                    args[1],
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn cold_store_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_METRICS_SERVICE_COLD_STORE_POLICY_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::cold_store_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_METRICS_COLD_CACHE_TTL", "5s")
+                    .env("CRABKA_METRICS_UNBOUNDED_COMPATIBILITY_LOOKBACK", "10m")
+                    .status()
+                    .expect("child test");
+            assert2::assert!(status.success());
+            return;
+        }
+
+        let from_env =
+            Cli::try_parse_from(["crabka-metrics-service", "--target", "querier"]).unwrap();
+        assert2::assert!(from_env.cold_cache_ttl == secs(5));
+        assert2::assert!(from_env.unbounded_compatibility_lookback == minutes(10));
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-metrics-service",
+            "--target",
+            "querier",
+            "--cold-cache-ttl",
+            "7s",
+            "--unbounded-compatibility-lookback",
+            "20m",
+        ])
+        .unwrap();
+        assert2::assert!(from_cli.cold_cache_ttl == secs(7));
+        assert2::assert!(from_cli.unbounded_compatibility_lookback == minutes(20));
     }
 
     #[test]
