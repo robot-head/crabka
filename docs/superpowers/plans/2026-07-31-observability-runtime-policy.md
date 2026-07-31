@@ -14,10 +14,10 @@ newtype, tokio tests.
 
 ### Task 1: Distributor policy
 
-- [ ] Add failing default, override, environment, zero-rejection, and related-bound tests.
-- [ ] Add ingest age, future grace, quota burst, startup deadline/attempt timeout, and initial/maximum startup backoff fields to `ServiceConfig`.
-- [ ] Route the typed values through ingest validation, quota limiting, and dependency startup retry.
-- [ ] Run focused observability library and environment tests; commit the distributor slice.
+- [x] Add failing default, override, environment, zero-rejection, and related-bound tests.
+- [x] Add ingest age, future grace, quota burst, startup deadline/attempt timeout, and initial/maximum startup backoff fields to `ServiceConfig`.
+- [x] Route the typed values through ingest validation, quota limiting, and dependency startup retry.
+- [x] Run focused observability library and environment tests; commit the distributor slice.
 
 ### Task 2: Compactor policy
 

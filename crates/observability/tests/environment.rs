@@ -1,6 +1,6 @@
 use clap::Parser;
 use crabka_observability::{QuerierIndexSource, Role, ServiceConfig};
-use crabka_units::{bytes, kibibytes, millis, nanos};
+use crabka_units::{bytes, days, kibibytes, millis, minutes, nanos, secs};
 
 #[test]
 fn service_config_reads_environment() {
@@ -39,6 +39,25 @@ fn service_config_reads_environment() {
             ("CRABKA_OBSERVABILITY_MAX_QUERY_LENGTH", Some("64B")),
             ("CRABKA_OBSERVABILITY_MAX_INGEST_BODY", Some("2KiB")),
             ("CRABKA_OBSERVABILITY_WAL_APPEND_TIMEOUT", Some("250ms")),
+            (
+                "CRABKA_OBSERVABILITY_REJECT_OLD_SAMPLES_MAX_AGE",
+                Some("8d"),
+            ),
+            ("CRABKA_OBSERVABILITY_CREATION_GRACE_PERIOD", Some("11m")),
+            ("CRABKA_OBSERVABILITY_INGEST_QUOTA_BURST_WINDOW", Some("2s")),
+            (
+                "CRABKA_OBSERVABILITY_WAL_CONNECT_STARTUP_DEADLINE",
+                Some("3m"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_WAL_CONNECT_ATTEMPT_TIMEOUT",
+                Some("16s"),
+            ),
+            (
+                "CRABKA_OBSERVABILITY_WAL_CONNECT_INITIAL_BACKOFF",
+                Some("300ms"),
+            ),
+            ("CRABKA_OBSERVABILITY_WAL_CONNECT_MAX_BACKOFF", Some("3s")),
         ],
         || {
             let config =
@@ -65,6 +84,13 @@ fn service_config_reads_environment() {
                     max_query_length: Some(bytes(64)),
                     max_ingest_body: Some(kibibytes(2)),
                     wal_append_timeout: Some(millis(250)),
+                    reject_old_samples_max_age: days(8),
+                    creation_grace_period: minutes(11),
+                    ingest_quota_burst_window: secs(2),
+                    wal_connect_startup_deadline: minutes(3),
+                    wal_connect_attempt_timeout: secs(16),
+                    wal_connect_initial_backoff: millis(300),
+                    wal_connect_max_backoff: secs(3),
                 }
             );
         },

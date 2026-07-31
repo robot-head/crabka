@@ -111,6 +111,7 @@ fn parses_querier_object_store_shard_catalog_config() {
                 max_query_length: Some(bytes(64)),
                 max_ingest_body: None,
                 wal_append_timeout: None,
+                ..ServiceConfig::default()
             }
     );
 }
@@ -153,6 +154,7 @@ fn parses_distributor_wal_config() {
                 max_query_length: None,
                 max_ingest_body: Some(kibibytes(2)),
                 wal_append_timeout: Some(millis(250)),
+                ..ServiceConfig::default()
             }
     );
 }
@@ -197,6 +199,7 @@ fn parses_compactor_wal_consumer_config() {
                 max_query_length: None,
                 max_ingest_body: None,
                 wal_append_timeout: None,
+                ..ServiceConfig::default()
             }
     );
 }
@@ -237,6 +240,7 @@ fn parses_querier_wal_tail_config() {
                 max_query_length: None,
                 max_ingest_body: None,
                 wal_append_timeout: None,
+                ..ServiceConfig::default()
             }
     );
 }
@@ -262,6 +266,7 @@ async fn querier_dependencies_require_wal_bootstrap_server() {
         max_query_length: None,
         max_ingest_body: None,
         wal_append_timeout: None,
+        ..ServiceConfig::default()
     };
 
     match build_service_dependencies(&config).await {

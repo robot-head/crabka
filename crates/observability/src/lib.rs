@@ -130,10 +130,6 @@ use crate::metrics::ServiceMetrics;
 /// Loki's `reject_old_samples_max_age` default: samples older than this are
 /// refused on ingest.
 const LOKI_REJECT_OLD_SAMPLES_MAX_AGE: Time = days(7);
-/// Loki's `creation_grace_period` default: how far into the future a sample
-/// timestamp may sit before it is refused.
-const LOKI_CREATION_GRACE_PERIOD: Time = minutes(10);
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Role {
     Distributor,
@@ -252,10 +248,69 @@ pub struct ServiceConfig {
         value_parser = crabka_units::parse::non_negative_time
     )]
     pub wal_append_timeout: Option<Time>,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_REJECT_OLD_SAMPLES_MAX_AGE", default_value = "7d", value_parser = crabka_units::parse::positive_time)]
+    pub reject_old_samples_max_age: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_CREATION_GRACE_PERIOD", default_value = "10m", value_parser = crabka_units::parse::positive_time)]
+    pub creation_grace_period: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_INGEST_QUOTA_BURST_WINDOW", default_value = "1s", value_parser = crabka_units::parse::positive_time)]
+    pub ingest_quota_burst_window: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_WAL_CONNECT_STARTUP_DEADLINE", default_value = "2m", value_parser = crabka_units::parse::positive_time)]
+    pub wal_connect_startup_deadline: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_WAL_CONNECT_ATTEMPT_TIMEOUT", default_value = "15s", value_parser = crabka_units::parse::positive_time)]
+    pub wal_connect_attempt_timeout: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_WAL_CONNECT_INITIAL_BACKOFF", default_value = "200ms", value_parser = crabka_units::parse::positive_time)]
+    pub wal_connect_initial_backoff: Time,
+
+    #[arg(long, env = "CRABKA_OBSERVABILITY_WAL_CONNECT_MAX_BACKOFF", default_value = "2s", value_parser = crabka_units::parse::positive_time)]
+    pub wal_connect_max_backoff: Time,
+}
+
+impl Default for ServiceConfig {
+    fn default() -> Self {
+        Self {
+            target: Role::Distributor,
+            listen_addr: "127.0.0.1:3100"
+                .parse()
+                .expect("default observability listen address is valid"),
+            object_store_url: None,
+            wal_bootstrap_server: None,
+            wal_topic: "__crabka_observability_logs_wal".to_string(),
+            wal_group_id: "crabka-observability-compactor".to_string(),
+            data_root: PathBuf::from("."),
+            querier_index_source: QuerierIndexSource::LocalManifest,
+            tenant: None,
+            index_prefix: None,
+            query_start_ns: None,
+            query_end_ns: None,
+            max_query_range: None,
+            max_query_series: None,
+            max_query_read: None,
+            max_query_length: None,
+            max_ingest_body: None,
+            wal_append_timeout: None,
+            reject_old_samples_max_age: days(7),
+            creation_grace_period: minutes(10),
+            ingest_quota_burst_window: secs(1),
+            wal_connect_startup_deadline: minutes(2),
+            wal_connect_attempt_timeout: secs(15),
+            wal_connect_initial_backoff: millis(200),
+            wal_connect_max_backoff: secs(2),
+        }
+    }
 }
 
 #[derive(Debug, Error)]
 pub enum ServiceConfigError {
+    #[error("WAL connect attempt timeout must not exceed startup deadline")]
+    WalConnectAttemptExceedsDeadline,
+    #[error("WAL connect initial backoff must not exceed maximum backoff")]
+    WalConnectInitialBackoffExceedsMaximum,
     #[error("WAL sink is required for distributor service startup")]
     MissingWalSink,
     #[error("WAL consumer is required for compactor service startup")]
@@ -520,13 +575,18 @@ pub fn run(config: ServiceConfig) -> Result<ServiceStatus, Infallible> {
         max_query_length: _max_query_length,
         max_ingest_body: _max_ingest_body,
         wal_append_timeout: _wal_append_timeout,
+        reject_old_samples_max_age: _reject_old_samples_max_age,
+        creation_grace_period: _creation_grace_period,
+        ingest_quota_burst_window: _ingest_quota_burst_window,
+        wal_connect_startup_deadline: _wal_connect_startup_deadline,
+        wal_connect_attempt_timeout: _wal_connect_attempt_timeout,
+        wal_connect_initial_backoff: _wal_connect_initial_backoff,
+        wal_connect_max_backoff: _wal_connect_max_backoff,
     } = config;
 
     Ok(ServiceStatus { role: target })
 }
 
-const WAL_CONNECT_STARTUP_DEADLINE: Time = minutes(2);
-const WAL_CONNECT_ATTEMPT_TIMEOUT: Time = secs(15);
 const COMPACTION_FRONTIER_REFRESH_INTERVAL: Time = secs(5);
 const DYNAMIC_INDEX_CACHE_TTL: Time = secs(5);
 const DYNAMIC_INDEX_SHARD_CACHE_TTL: Time = minutes(5);
@@ -566,6 +626,9 @@ fn compactor_object_store<'a>(
 async fn connect_with_startup_retry<T, E, F, Fut>(
     what: &str,
     deadline: Time,
+    attempt_timeout: Time,
+    initial_backoff: Time,
+    max_backoff: Time,
     mut make: F,
 ) -> Result<T, E>
 where
@@ -573,16 +636,16 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, E>>,
 {
-    // Every attempt is bounded by WAL_CONNECT_ATTEMPT_TIMEOUT — including the
+    // Every attempt is bounded by `attempt_timeout` — including the
     // final one after the deadline.  The previous implementation called an
     // un-timed `make().await` when the deadline expired inside the timeout arm,
     // which could itself hang forever.  Instead we track the last `Err` value
     // and return it on deadline expiry so we never call make() without a timer.
     let start = tokio::time::Instant::now();
-    let mut backoff = millis(200);
+    let mut backoff = initial_backoff;
     let mut last_err: Option<E> = None;
     loop {
-        match tokio::time::timeout(WAL_CONNECT_ATTEMPT_TIMEOUT.to_std(), make()).await {
+        match tokio::time::timeout(attempt_timeout.to_std(), make()).await {
             Ok(Ok(v)) => return Ok(v),
             Ok(Err(error)) => {
                 if start.elapsed().as_time() >= deadline {
@@ -602,7 +665,7 @@ where
                     // All attempts so far only timed out (no Err variant captured).
                     // Do one final timed attempt; whatever it returns is the answer.
                     return if let Ok(result) =
-                        tokio::time::timeout(WAL_CONNECT_ATTEMPT_TIMEOUT.to_std(), make()).await
+                        tokio::time::timeout(attempt_timeout.to_std(), make()).await
                     {
                         result
                     } else {
@@ -613,7 +676,7 @@ where
                         eprintln!(
                             "[crabka-observability] WAL dependency {what} connect timed out repeatedly; giving up"
                         );
-                        sleep(millis(200).to_std()).await;
+                        sleep(initial_backoff.to_std()).await;
                         continue;
                     };
                 }
@@ -625,8 +688,18 @@ where
         sleep(backoff.to_std()).await;
         // `Time` is `PartialOrd` but not `Ord`, so `Time::min` rather than
         // `std::cmp::min`.
-        backoff = (backoff * 2.0).min(secs(2));
+        backoff = (backoff * 2.0).min(max_backoff);
     }
+}
+
+fn validate_distributor_policy(config: &ServiceConfig) -> Result<(), ServiceConfigError> {
+    if config.wal_connect_attempt_timeout > config.wal_connect_startup_deadline {
+        return Err(ServiceConfigError::WalConnectAttemptExceedsDeadline);
+    }
+    if config.wal_connect_initial_backoff > config.wal_connect_max_backoff {
+        return Err(ServiceConfigError::WalConnectInitialBackoffExceedsMaximum);
+    }
+    Ok(())
 }
 
 /// # Errors
@@ -648,36 +721,56 @@ pub async fn build_service_dependencies_with_client_resource_policy(
 ) -> Result<ServiceDependencies, ServiceRuntimeError> {
     match config.target {
         Role::Distributor => {
+            validate_distributor_policy(config)?;
             let bootstrap = config
                 .wal_bootstrap_server
                 .as_deref()
                 .ok_or(ServiceConfigError::MissingWalBootstrapServer)?;
             let bootstrap_owned = bootstrap.to_string();
             let topic = config.wal_topic.clone();
-            let sink = connect_with_startup_retry("wal-sink", WAL_CONNECT_STARTUP_DEADLINE, || {
-                let b = bootstrap_owned.clone();
-                let t = topic.clone();
-                async move {
-                    KafkaLogWalSink::connect_with_client_resource_policy(
-                        &b,
-                        t,
-                        client_resource_policy,
-                    )
-                    .await
-                }
-            })
+            let sink = connect_with_startup_retry(
+                "wal-sink",
+                config.wal_connect_startup_deadline,
+                config.wal_connect_attempt_timeout,
+                config.wal_connect_initial_backoff,
+                config.wal_connect_max_backoff,
+                || {
+                    let b = bootstrap_owned.clone();
+                    let t = topic.clone();
+                    async move {
+                        KafkaLogWalSink::connect_with_client_resource_policy(
+                            &b,
+                            t,
+                            client_resource_policy,
+                        )
+                        .await
+                    }
+                },
+            )
             .await?;
             let bootstrap_owned2 = bootstrap.to_string();
             let topic2 = config.wal_topic.clone();
-            let limiter =
-                connect_with_startup_retry("ingest-limiter", WAL_CONNECT_STARTUP_DEADLINE, || {
+            let limiter = connect_with_startup_retry(
+                "ingest-limiter",
+                config.wal_connect_startup_deadline,
+                config.wal_connect_attempt_timeout,
+                config.wal_connect_initial_backoff,
+                config.wal_connect_max_backoff,
+                || {
                     let b = bootstrap_owned2.clone();
                     let t = topic2.clone();
                     async move {
-                        BrokerBackedIngestLimiter::connect(&b, t, client_resource_policy).await
+                        BrokerBackedIngestLimiter::connect(
+                            &b,
+                            t,
+                            client_resource_policy,
+                            config.ingest_quota_burst_window,
+                        )
+                        .await
                     }
-                })
-                .await?;
+                },
+            )
+            .await?;
             Ok(ServiceDependencies::default()
                 .with_wal_sink(sink)
                 .with_ingest_limiter(limiter))
@@ -2441,6 +2534,7 @@ const PRODUCER_BYTE_RATE_QUOTA_KEY: &str = "producer_byte_rate";
 struct BrokerBackedIngestLimiter {
     admin: tokio::sync::Mutex<AdminClient>,
     wal_topic: String,
+    burst_window: Time,
     buckets: Mutex<BTreeMap<String, IngestQuotaBucket>>,
 }
 
@@ -2449,6 +2543,7 @@ impl BrokerBackedIngestLimiter {
         bootstrap: &str,
         wal_topic: String,
         client_resource_policy: ClientResourcePolicy,
+        burst_window: Time,
     ) -> Result<Self, AdminError> {
         let admin = AdminClient::connect_with_options(
             &[bootstrap.to_string()],
@@ -2458,6 +2553,7 @@ impl BrokerBackedIngestLimiter {
         Ok(Self {
             admin: tokio::sync::Mutex::new(admin),
             wal_topic,
+            burst_window,
             buckets: Mutex::new(BTreeMap::new()),
         })
     }
@@ -2512,7 +2608,7 @@ impl LogIngestLimiter for BrokerBackedIngestLimiter {
         let mut buckets = self.buckets.lock().expect("ingest quota lock poisoned");
         let bucket = buckets
             .entry(tenant.to_string())
-            .or_insert_with(|| IngestQuotaBucket::new(rate));
+            .or_insert_with(|| IngestQuotaBucket::new(rate, self.burst_window));
         bucket.update_rate(rate);
         if bucket.consume(batch) {
             return Ok(());
@@ -2621,10 +2717,6 @@ fn matches_acl_topic_pattern(acl: &AclEntry, wal_topic: &str) -> bool {
     }
 }
 
-/// How much throughput the bucket may bank, expressed as a window over the
-/// configured rate: one second's worth, matching Kafka's own quota burst.
-const INGEST_QUOTA_BURST_WINDOW: Time = secs(1);
-
 /// Per-tenant byte token bucket for the `producer_byte_rate` ingest quota.
 ///
 /// `updated_at` stays an [`Instant`] because it is a coordinate, not an extent;
@@ -2632,15 +2724,17 @@ const INGEST_QUOTA_BURST_WINDOW: Time = secs(1);
 #[derive(Debug)]
 struct IngestQuotaBucket {
     rate: ByteRate,
+    burst_window: Time,
     available: ByteSize,
     updated_at: Instant,
 }
 
 impl IngestQuotaBucket {
-    fn new(rate: ByteRate) -> Self {
+    fn new(rate: ByteRate, burst_window: Time) -> Self {
         Self {
             rate,
-            available: Self::burst_capacity(rate),
+            burst_window,
+            available: Self::burst_capacity(rate, burst_window),
             updated_at: Instant::now(),
         }
     }
@@ -2672,11 +2766,11 @@ impl IngestQuotaBucket {
     }
 
     fn capacity(&self) -> ByteSize {
-        Self::burst_capacity(self.rate)
+        Self::burst_capacity(self.rate, self.burst_window)
     }
 
-    fn burst_capacity(rate: ByteRate) -> ByteSize {
-        (rate * INGEST_QUOTA_BURST_WINDOW).into()
+    fn burst_capacity(rate: ByteRate, burst_window: Time) -> ByteSize {
+        (rate * burst_window).into()
     }
 }
 
@@ -6287,8 +6381,8 @@ async fn build_service_router_with_shutdown(
                     ingest_limiter,
                     config.max_ingest_body,
                     config.wal_append_timeout,
-                    Some(LOKI_REJECT_OLD_SAMPLES_MAX_AGE),
-                    Some(LOKI_CREATION_GRACE_PERIOD),
+                    Some(config.reject_old_samples_max_age),
+                    Some(config.creation_grace_period),
                     metrics,
                 ),
                 None,
@@ -21564,7 +21658,10 @@ mod tests {
     #[tokio::test]
     async fn connect_with_startup_retry_succeeds_on_first_try() {
         let result: Result<u32, String> =
-            connect_with_startup_retry("test", secs(5), || async { Ok::<u32, String>(42) }).await;
+            connect_with_startup_retry("test", secs(5), secs(1), millis(1), millis(10), || async {
+                Ok::<u32, String>(42)
+            })
+            .await;
 
         assert_eq!(result.unwrap(), 42);
     }
@@ -21576,17 +21673,24 @@ mod tests {
         let counter = Arc::new(AtomicU32::new(0));
         let counter2 = counter.clone();
 
-        let result: Result<u32, String> = connect_with_startup_retry("test", secs(10), move || {
-            let c = counter2.clone();
-            async move {
-                let n = c.fetch_add(1, AO::SeqCst);
-                if n < 2 {
-                    Err(format!("not ready yet (attempt {n})"))
-                } else {
-                    Ok(99u32)
+        let result: Result<u32, String> = connect_with_startup_retry(
+            "test",
+            secs(10),
+            secs(1),
+            millis(1),
+            millis(10),
+            move || {
+                let c = counter2.clone();
+                async move {
+                    let n = c.fetch_add(1, AO::SeqCst);
+                    if n < 2 {
+                        Err(format!("not ready yet (attempt {n})"))
+                    } else {
+                        Ok(99u32)
+                    }
                 }
-            }
-        })
+            },
+        )
         .await;
 
         assert_eq!(result.unwrap(), 99);
@@ -21599,6 +21703,9 @@ mod tests {
         let result: Result<u32, String> = connect_with_startup_retry(
             "test",
             millis(50), // very short deadline
+            millis(10),
+            millis(1),
+            millis(10),
             || async { Err::<u32, String>("always fails".to_string()) },
         )
         .await;
@@ -21627,9 +21734,105 @@ mod tests {
     }
 
     #[test]
-    fn service_duration_constants_are_exact() {
+    fn missing_timestamp_fallback_age_is_exact() {
         check!(LOKI_REJECT_OLD_SAMPLES_MAX_AGE == hours(168));
-        check!(LOKI_CREATION_GRACE_PERIOD == secs(600));
+    }
+
+    #[test]
+    fn distributor_policy_uses_defaults_and_cli_overrides() {
+        let defaults =
+            ServiceConfig::parse_from(["crabka-observability", "--target", "distributor"]);
+        check!(defaults.reject_old_samples_max_age == days(7));
+        check!(defaults.creation_grace_period == minutes(10));
+        check!(defaults.ingest_quota_burst_window == secs(1));
+        check!(defaults.wal_connect_startup_deadline == minutes(2));
+        check!(defaults.wal_connect_attempt_timeout == secs(15));
+        check!(defaults.wal_connect_initial_backoff == millis(200));
+        check!(defaults.wal_connect_max_backoff == secs(2));
+
+        let configured = ServiceConfig::try_parse_from([
+            "crabka-observability",
+            "--target",
+            "distributor",
+            "--reject-old-samples-max-age=8d",
+            "--creation-grace-period=11m",
+            "--ingest-quota-burst-window=2s",
+            "--wal-connect-startup-deadline=3m",
+            "--wal-connect-attempt-timeout=16s",
+            "--wal-connect-initial-backoff=300ms",
+            "--wal-connect-max-backoff=3s",
+        ])
+        .expect("valid distributor policy");
+        check!(configured.reject_old_samples_max_age == days(8));
+        check!(configured.creation_grace_period == minutes(11));
+        check!(configured.ingest_quota_burst_window == secs(2));
+        check!(configured.wal_connect_startup_deadline == minutes(3));
+        check!(configured.wal_connect_attempt_timeout == secs(16));
+        check!(configured.wal_connect_initial_backoff == millis(300));
+        check!(configured.wal_connect_max_backoff == secs(3));
+    }
+
+    #[test]
+    fn distributor_policy_rejects_zero_and_invalid_bounds() {
+        for argument in [
+            "--reject-old-samples-max-age=0s",
+            "--creation-grace-period=0s",
+            "--ingest-quota-burst-window=0s",
+            "--wal-connect-startup-deadline=0s",
+            "--wal-connect-attempt-timeout=0s",
+            "--wal-connect-initial-backoff=0s",
+            "--wal-connect-max-backoff=0s",
+        ] {
+            check!(
+                ServiceConfig::try_parse_from([
+                    "crabka-observability",
+                    "--target",
+                    "distributor",
+                    argument,
+                ])
+                .is_err(),
+                "accepted {argument}"
+            );
+        }
+
+        let attempt_above_deadline = ServiceConfig::parse_from([
+            "crabka-observability",
+            "--target",
+            "distributor",
+            "--wal-connect-startup-deadline=1s",
+            "--wal-connect-attempt-timeout=2s",
+        ]);
+        check!(validate_distributor_policy(&attempt_above_deadline).is_err());
+
+        let initial_above_max = ServiceConfig::parse_from([
+            "crabka-observability",
+            "--target",
+            "distributor",
+            "--wal-connect-initial-backoff=2s",
+            "--wal-connect-max-backoff=1s",
+        ]);
+        check!(validate_distributor_policy(&initial_above_max).is_err());
+    }
+
+    #[tokio::test]
+    async fn distributor_dependency_startup_rejects_invalid_policy_before_connecting() {
+        let config = ServiceConfig::parse_from([
+            "crabka-observability",
+            "--target",
+            "distributor",
+            "--wal-bootstrap-server=127.0.0.1:1",
+            "--wal-connect-startup-deadline=1s",
+            "--wal-connect-attempt-timeout=2s",
+        ]);
+
+        let Err(error) = build_service_dependencies(&config).await else {
+            panic!("invalid policy must fail before broker connection");
+        };
+        check!(
+            error
+                .to_string()
+                .contains("must not exceed startup deadline")
+        );
     }
 
     #[test]
@@ -21845,7 +22048,7 @@ mod tests {
             + "abc".len();
         check!(ingest_quota_bytes(&[record]) == measured_size(expected_bytes));
 
-        let mut bucket = IngestQuotaBucket::new(bytes_per_sec(10));
+        let mut bucket = IngestQuotaBucket::new(bytes_per_sec(10), secs(1));
         check!(bucket.capacity() == bytes(10));
         check!(bucket.consume(bytes(10)));
         check!(!bucket.consume(ByteSize::from_bytes_f64(0.1)));
@@ -21855,6 +22058,9 @@ mod tests {
         bucket.update_rate(bytes_per_sec(20));
         check!(bucket.available >= bytes(4));
         check!(bucket.consume(bytes(4)));
+
+        let bucket = IngestQuotaBucket::new(bytes_per_sec(10), secs(2));
+        check!(bucket.capacity() == bytes(20));
     }
 
     #[test]
