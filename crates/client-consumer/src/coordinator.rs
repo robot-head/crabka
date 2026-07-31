@@ -51,7 +51,7 @@ use crate::{
         AutoOffsetReset, decode_assignment, decode_subscription, encode_assignment,
         encode_subscription,
     },
-    consumer::{reset_starting_offset, starting_offset},
+    consumer::{ConsumerRetryPolicy, reset_starting_offset, starting_offset},
     error::ConsumerError,
     offset_wire::{build_commit_topics, build_offset_fetch, id_to_name, parse_offset_fetch},
 };
@@ -63,10 +63,24 @@ pub(crate) const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 pub(crate) const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 pub(crate) const NOT_COORDINATOR: i16 = 16;
 
-/// How long `with_coordinator_retry` keeps retrying a cold coordinator before
-/// surfacing the last error. Matches a typical client `request.timeout.ms`.
-pub(crate) const COORDINATOR_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 const UNKNOWN_EPOCH: i32 = -1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CoordinatorRetryPolicy {
+    pub timeout: Duration,
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+impl From<ConsumerRetryPolicy> for CoordinatorRetryPolicy {
+    fn from(value: ConsumerRetryPolicy) -> Self {
+        Self {
+            timeout: value.coordinator_retry_timeout().to_std(),
+            initial_backoff: value.coordinator_initial_backoff().to_std(),
+            max_backoff: value.coordinator_max_backoff().to_std(),
+        }
+    }
+}
 
 pub(crate) fn is_retriable_coordinator_code(code: i16) -> bool {
     matches!(
@@ -125,8 +139,9 @@ fn coordinator_node_id(r: &FindCoordinatorResponse) -> i32 {
 pub(crate) async fn find_coordinator(
     client: &Client,
     group_id: &str,
+    retry: CoordinatorRetryPolicy,
 ) -> Result<i32, ConsumerError> {
-    let resp = with_coordinator_retry(COORDINATOR_RETRY_TIMEOUT, coordinator_error_code, || {
+    let resp = with_coordinator_retry(retry, coordinator_error_code, || {
         let group_id = group_id.to_string();
         async move {
             match client.send(build_find_coordinator_request(group_id)).await {
@@ -227,7 +242,7 @@ pub(crate) async fn with_coordinator_refind<R, F, Fut>(
     client: &Client,
     group_id: &str,
     coordinator_id: &AtomicI32,
-    timeout: Duration,
+    retry: CoordinatorRetryPolicy,
     code: impl Fn(&R) -> i16,
     make: F,
 ) -> Result<R, ConsumerError>
@@ -235,21 +250,20 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<R, ConsumerError>>,
 {
-    const MAX_BACKOFF: Duration = Duration::from_secs(1);
     let start = tokio::time::Instant::now();
-    let mut backoff = Duration::from_millis(100);
+    let mut backoff = retry.initial_backoff;
     loop {
         let needs_refind = match make().await {
             Ok(r) if !is_retriable_coordinator_code(code(&r)) => return Ok(r),
             Ok(r) => {
-                if retry_deadline_elapsed(start, timeout) {
+                if retry_deadline_elapsed(start, retry.timeout) {
                     return Ok(r);
                 }
                 // Retriable broker code: the coordinator likely moved.
                 true
             }
             Err(ConsumerError::Client(e)) if is_retriable_transport_error(&e) => {
-                if retry_deadline_elapsed(start, timeout) {
+                if retry_deadline_elapsed(start, retry.timeout) {
                     return Err(ConsumerError::CoordinatorUnavailable);
                 }
                 // The socket to the coordinator is gone (bounced / failed
@@ -264,7 +278,7 @@ where
             // Best-effort re-discovery. A transient failure here just means the
             // next attempt reuses the last-known id; the outer deadline (and
             // find_coordinator's own retry) still bound us.
-            match find_coordinator(client, group_id).await {
+            match find_coordinator(client, group_id, retry).await {
                 Ok(id) => coordinator_id.store(id, Ordering::Relaxed),
                 Err(e) => {
                     tracing::warn!(
@@ -275,7 +289,7 @@ where
             }
         }
         tokio::time::sleep(backoff).await;
-        backoff = next_backoff(backoff, MAX_BACKOFF);
+        backoff = next_backoff(backoff, retry.max_backoff);
     }
 }
 
@@ -287,7 +301,7 @@ where
 /// `error_code` handling runs) or `CoordinatorUnavailable` if the last attempt
 /// was a transport failure.
 pub(crate) async fn with_coordinator_retry<R, F, Fut>(
-    timeout: Duration,
+    retry: CoordinatorRetryPolicy,
     code: impl Fn(&R) -> i16,
     make: F,
 ) -> Result<R, ConsumerError>
@@ -295,26 +309,25 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<R, ConsumerError>>,
 {
-    const MAX_BACKOFF: Duration = Duration::from_secs(1);
     let start = tokio::time::Instant::now();
-    let mut backoff = Duration::from_millis(100);
+    let mut backoff = retry.initial_backoff;
     loop {
         match make().await {
             Ok(r) if !is_retriable_coordinator_code(code(&r)) => return Ok(r),
             Ok(r) => {
-                if retry_deadline_elapsed(start, timeout) {
+                if retry_deadline_elapsed(start, retry.timeout) {
                     return Ok(r);
                 }
             }
             Err(ConsumerError::Client(e)) if is_retriable_transport_error(&e) => {
-                if retry_deadline_elapsed(start, timeout) {
+                if retry_deadline_elapsed(start, retry.timeout) {
                     return Err(ConsumerError::CoordinatorUnavailable);
                 }
             }
             Err(e) => return Err(e),
         }
         tokio::time::sleep(backoff).await;
-        backoff = next_backoff(backoff, MAX_BACKOFF);
+        backoff = next_backoff(backoff, retry.max_backoff);
     }
 }
 
@@ -368,6 +381,7 @@ pub(crate) struct CoordinatorState {
     /// starting, comparing equal to the baseline forever and stranding the
     /// empty cold-start assignment permanently.
     pub initial_subscribed_counts: HashMap<String, i32>,
+    pub retry_policy: CoordinatorRetryPolicy,
 }
 
 /// Set the coordinator's working generation AND publish it to the shared atomic
@@ -688,7 +702,7 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
 /// failure (the next tick retries).
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: best-effort discovery I/O, exercised by integration tests
 async fn refind_after(state: &CoordinatorState, ctx: &str) {
-    match find_coordinator(&state.client, &state.group_id).await {
+    match find_coordinator(&state.client, &state.group_id, state.retry_policy).await {
         Ok(id) => state.coordinator_id.store(id, Ordering::Relaxed),
         Err(e) => {
             tracing::warn!(error = %e, context = ctx, "coordinator re-discovery failed");
@@ -1030,7 +1044,7 @@ async fn perform_join(
         &client,
         &group_id,
         &coordinator_id,
-        COORDINATOR_RETRY_TIMEOUT,
+        state.retry_policy,
         |r: &JoinGroupResponse| r.error_code,
         || {
             let group_id = group_id.clone();
@@ -1072,7 +1086,7 @@ async fn perform_join(
             &client,
             &group_id,
             &coordinator_id,
-            COORDINATOR_RETRY_TIMEOUT,
+            state.retry_policy,
             |r: &JoinGroupResponse| r.error_code,
             || {
                 let group_id = group_id.clone();
@@ -1255,7 +1269,7 @@ async fn sync_assignment(
         &state.client,
         &state.group_id,
         &state.coordinator_id,
-        COORDINATOR_RETRY_TIMEOUT,
+        state.retry_policy,
         |response: &SyncGroupResponse| response.error_code,
         || {
             let request = build_sync_group_request(
@@ -1366,6 +1380,14 @@ mod retry_tests {
 
     use super::*;
 
+    fn retry(timeout: Duration) -> CoordinatorRetryPolicy {
+        CoordinatorRetryPolicy {
+            timeout,
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(1),
+        }
+    }
+
     struct Resp {
         error_code: i16,
     }
@@ -1458,6 +1480,7 @@ mod retry_tests {
             auto_offset_reset: AutoOffsetReset::Latest,
             client_rack: None,
             initial_subscribed_counts: HashMap::new(),
+            retry_policy: retry(Duration::from_secs(30)),
         };
 
         tokio::time::timeout(Duration::from_secs(1), leave_group(&state))
@@ -1771,7 +1794,7 @@ mod retry_tests {
     async fn retries_until_coordinator_finishes_loading() {
         let calls = AtomicUsize::new(0);
         let r = with_coordinator_retry(
-            Duration::from_secs(30),
+            retry(Duration::from_secs(30)),
             |r: &Resp| r.error_code,
             || {
                 let n = calls.fetch_add(1, Ordering::SeqCst);
@@ -1790,9 +1813,31 @@ mod retry_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn configured_coordinator_retry_policy_controls_backoff_and_timeout() {
+        let calls = AtomicUsize::new(0);
+        let retry = CoordinatorRetryPolicy {
+            timeout: Duration::from_millis(35),
+            initial_backoff: Duration::from_millis(5),
+            max_backoff: Duration::from_millis(10),
+        };
+        let r = with_coordinator_retry(
+            retry,
+            |r: &Resp| r.error_code,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<_, ConsumerError>(Resp { error_code: 15 }) }
+            },
+        )
+        .await
+        .unwrap();
+        assert2::assert!(r.error_code == 15);
+        assert2::assert!(calls.load(Ordering::SeqCst) == 5);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn surfaces_last_response_after_deadline() {
         let r = with_coordinator_retry(
-            Duration::from_secs(1),
+            retry(Duration::from_secs(1)),
             |r: &Resp| r.error_code,
             || async { Ok::<_, ConsumerError>(Resp { error_code: 15 }) },
         )
@@ -1807,7 +1852,7 @@ mod retry_tests {
     async fn non_retriable_code_returns_immediately() {
         let calls = AtomicUsize::new(0);
         let r = with_coordinator_retry(
-            Duration::from_secs(30),
+            retry(Duration::from_secs(30)),
             |r: &Resp| r.error_code,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -1823,7 +1868,7 @@ mod retry_tests {
     #[tokio::test(start_paused = true)]
     async fn disconnect_past_deadline_surfaces_coordinator_unavailable() {
         let r = with_coordinator_retry(
-            Duration::from_secs(1),
+            retry(Duration::from_secs(1)),
             |r: &Resp| r.error_code,
             || async {
                 Err::<Resp, _>(ConsumerError::Client(
@@ -1839,7 +1884,7 @@ mod retry_tests {
     async fn connect_past_deadline_surfaces_coordinator_unavailable() {
         let calls = AtomicUsize::new(0);
         let r = with_coordinator_retry(
-            Duration::from_millis(1),
+            retry(Duration::from_millis(1)),
             |r: &Resp| r.error_code,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -1926,6 +1971,14 @@ mod refind_tests {
 
     use super::*;
 
+    fn retry(timeout: Duration) -> CoordinatorRetryPolicy {
+        CoordinatorRetryPolicy {
+            timeout,
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(1),
+        }
+    }
+
     struct Resp {
         error_code: i16,
     }
@@ -1950,7 +2003,7 @@ mod refind_tests {
             &client,
             "g",
             &coord,
-            Duration::from_secs(30),
+            retry(Duration::from_secs(30)),
             |r: &Resp| r.error_code,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -1980,7 +2033,7 @@ mod refind_tests {
             &client,
             "g",
             &coord,
-            Duration::from_secs(30),
+            retry(Duration::from_secs(30)),
             |r: &Resp| r.error_code,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -2009,7 +2062,7 @@ mod refind_tests {
             &client,
             "g",
             &coord,
-            Duration::from_millis(1),
+            retry(Duration::from_millis(1)),
             |r: &Resp| r.error_code,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);

@@ -38,7 +38,7 @@ use crate::{
         encode_subscription,
     },
     coordinator::{
-        COORDINATOR_RETRY_TIMEOUT, CoordinatorState, find_coordinator, with_coordinator_refind,
+        CoordinatorRetryPolicy, CoordinatorState, find_coordinator, with_coordinator_refind,
     },
     error::ConsumerError,
     group_metadata::ConsumerGroupMetadata,
@@ -56,6 +56,7 @@ pub struct Consumer {
     /// (shared `Arc<AtomicI32>`). The commit path (`commit.rs`) reads it to route
     /// `OffsetCommit` to the coordinator over this data-path client.
     pub(crate) coordinator_id: Arc<AtomicI32>,
+    pub(crate) retry_policy: CoordinatorRetryPolicy,
     pub(crate) member_id: String,
     pub(crate) group_instance_id: Option<String>,
     /// The group generation the commit path stamps onto `OffsetCommit`. Shared
@@ -865,7 +866,10 @@ impl Consumer {
         //    `find_coordinator` also `refresh_metadata`s the main client's pool
         //    so it learns the coordinator broker's address (needed by
         //    `client.broker(coordinator_id)` here and by `commit.rs`).
-        let coordinator_id = Arc::new(AtomicI32::new(find_coordinator(&client, &group_id).await?));
+        let coordinator_retry = CoordinatorRetryPolicy::from(config.retry_policy);
+        let coordinator_id = Arc::new(AtomicI32::new(
+            find_coordinator(&client, &group_id, coordinator_retry).await?,
+        ));
         tracing::Span::current().record("coordinator_id", coordinator_id.load(Ordering::Relaxed));
 
         // First JoinGroup uses empty `owned_partitions` + `generation_id=-1`:
@@ -882,7 +886,7 @@ impl Consumer {
             &client,
             &group_id,
             &coordinator_id,
-            COORDINATOR_RETRY_TIMEOUT,
+            coordinator_retry,
             |r: &JoinGroupResponse| r.error_code,
             || {
                 let group_id = group_id.clone();
@@ -956,6 +960,7 @@ async fn finish_startup(
     timeouts_ms: (i32, i32),
 ) -> Result<Consumer, ConsumerError> {
     let spawn_config = config.clone();
+    let coordinator_retry = CoordinatorRetryPolicy::from(config.retry_policy);
     let StartConfig {
         group_id,
         group_instance_id,
@@ -968,7 +973,7 @@ async fn finish_startup(
         &client,
         &group_id,
         &coordinator_id,
-        COORDINATOR_RETRY_TIMEOUT,
+        coordinator_retry,
         |r: &JoinGroupResponse| r.error_code,
         || {
             let group_id = group_id.clone();
@@ -1137,7 +1142,7 @@ async fn resolve_initial_assignment(
         client,
         group_id,
         coordinator_id,
-        COORDINATOR_RETRY_TIMEOUT,
+        config.retry_policy.into(),
         |r: &SyncGroupResponse| r.error_code,
         || {
             let group_id = group_id.clone();
@@ -1214,7 +1219,7 @@ async fn spawn_consumer(
         leave_group_timeout,
         client_rack,
         security,
-        retry_policy: _,
+        retry_policy,
     } = config;
     let StartupState {
         generation_id,
@@ -1286,6 +1291,7 @@ async fn spawn_consumer(
         // include a topic created during start-up (which would strand a
         // cold-start empty assignment permanently).
         initial_subscribed_counts: topic_partitions,
+        retry_policy: retry_policy.into(),
     };
     // IMPORTANT: `tokio::spawn` is the very last operation — no `.await`
     // follows it.  Dropping a timed-out `start_once` future before this
@@ -1296,6 +1302,7 @@ async fn spawn_consumer(
         client,
         group_id,
         coordinator_id,
+        retry_policy: retry_policy.into(),
         member_id,
         group_instance_id: group_instance_id.clone(),
         current_generation,
@@ -1534,9 +1541,33 @@ mod consumer_retry_policy_tests {
         }
 
         for values in [
-            [secs(13), secs(12), millis(1), millis(2), secs(3), millis(1), millis(2)],
-            [secs(1), secs(2), millis(3), millis(2), secs(3), millis(1), millis(2)],
-            [secs(1), secs(2), millis(1), millis(2), secs(3), millis(3), millis(2)],
+            [
+                secs(13),
+                secs(12),
+                millis(1),
+                millis(2),
+                secs(3),
+                millis(1),
+                millis(2),
+            ],
+            [
+                secs(1),
+                secs(2),
+                millis(3),
+                millis(2),
+                secs(3),
+                millis(1),
+                millis(2),
+            ],
+            [
+                secs(1),
+                secs(2),
+                millis(1),
+                millis(2),
+                secs(3),
+                millis(3),
+                millis(2),
+            ],
         ] {
             assert!(
                 ConsumerRetryPolicy::new(
@@ -2049,6 +2080,7 @@ mod security_arg_tests {
             client,
             group_id: "group-a".into(),
             coordinator_id: Arc::new(AtomicI32::new(3)),
+            retry_policy: ConsumerRetryPolicy::default().into(),
             member_id: "member-a".into(),
             group_instance_id: Some("instance-a".into()),
             current_generation: Arc::new(AtomicI32::new(7)),
