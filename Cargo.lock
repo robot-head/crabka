@@ -4394,9 +4394,9 @@ checksum = "a64b04cdfc4c8533100fe00304eb9687173bda47b1f1dac8af12ba13712ed49d"
 
 [[package]]
 name = "dashu-float"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dff9b4987c9fe252fb0e7ec775b676f419e0a44b28138ae79bf3475581932f63"
+checksum = "4db96addbb2973e45cfdb329d40e68e58cdf66ca4bb0a7bbf12e30f1c68ab64e"
 dependencies = [
  "dashu-base",
  "dashu-int",
