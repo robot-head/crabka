@@ -2202,6 +2202,7 @@ mod tests {
     /// each case below varies one or two fields of.
     fn base_foreign_key(schema: &Schema, name: &str) -> ForeignKey {
         ForeignKey {
+            id: 1,
             name: name.to_string(),
             table: RelationName::public("cc"),
             table_id: schema.child,
@@ -2283,6 +2284,7 @@ mod tests {
         add_foreign_key(
             &kv,
             &ForeignKey {
+                id: 1,
                 name: "cperm_b_a_fkey".to_string(),
                 table: RelationName::public("cperm"),
                 table_id: child,

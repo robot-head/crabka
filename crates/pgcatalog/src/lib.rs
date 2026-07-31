@@ -32,6 +32,14 @@ pub type TableId = u32;
 /// OID-style index identifier (never 0; 0 is reserved/invalid).
 pub type IndexId = u32;
 
+/// OID-style foreign-key identifier (never 0; 0 is reserved/invalid).
+///
+/// It is drawn from one monotonic counter, so comparing two of them compares
+/// the order the constraints were created in — which is the order `PostgreSQL`
+/// fires their referential-integrity triggers, and the order it lists them as
+/// dependents of an object being dropped.
+pub type ForeignKeyId = u32;
+
 /// A relation's resolved name: the schema it lives in, and its name within
 /// that schema.
 ///
@@ -276,6 +284,12 @@ pub enum MatchType {
 /// stored as names, like [`Index::columns`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ForeignKey {
+    /// Creation-order id, the stand-in for `pg_constraint.oid`.
+    ///
+    /// Not the identity — that stays `(table_id, name)`, because a constraint
+    /// is looked up by the name a statement writes. This orders constraints
+    /// against each other, and it survives a rename, exactly as an OID does.
+    pub id: ForeignKeyId,
     /// Constraint name, unique within the child relation.
     pub name: String,
     /// Child relation name — a display copy, rewritten on rename.
@@ -2007,6 +2021,54 @@ const FOREIGN_KEY_BY_TABLE_PREFIX: &[u8] = b"\0\0\0\0catalog_fk/by-table/";
 /// for that would make the check O(constraints in the database).
 const FOREIGN_KEY_BY_REF_PREFIX: &[u8] = b"\0\0\0\0catalog_fk/by-ref/";
 
+fn meta_next_foreign_key_id_key() -> Vec<u8> {
+    b"\0\0\0\0meta/next_foreign_key_id".to_vec()
+}
+
+fn read_next_foreign_key_id(kv: &dyn Kv) -> Result<ForeignKeyId, CatalogError> {
+    match kv.get(&meta_next_foreign_key_id_key())? {
+        Some(bytes) => {
+            let (id, _) = U32::read_from_prefix(bytes.as_slice())
+                .map_err(|_| KvError::CorruptRow("next_foreign_key_id is not u32".into()))?;
+            Ok(id.get())
+        }
+        None => Ok(1),
+    }
+}
+
+/// Hands out the [`ForeignKeyId`]s that one write batch's new constraints are
+/// stamped with.
+///
+/// A single statement can create several — `CREATE TABLE` with two `FOREIGN
+/// KEY` clauses, `ALTER TABLE` with two `ADD CONSTRAINT` subcommands — and none
+/// of them are in the KV until the batch commits, so every one of them would
+/// read the same stored counter. The cursor is held in memory across the batch
+/// instead, and each [`create_foreign_key_ops`] carries the counter write that
+/// moves the stored value past the id it stamped; the last one applied leaves
+/// the counter correct.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ForeignKeyIds {
+    /// `None` until the first id is asked for — a statement that creates no
+    /// constraint must not read the counter at all.
+    next: Option<ForeignKeyId>,
+}
+
+impl ForeignKeyIds {
+    /// The next creation-order id, reading the shared counter the first time.
+    ///
+    /// # Errors
+    ///
+    /// Returns storage/corruption errors from the catalog KV seam.
+    pub fn allocate(&mut self, kv: &dyn Kv) -> Result<ForeignKeyId, CatalogError> {
+        let id = match self.next {
+            Some(id) => id,
+            None => read_next_foreign_key_id(kv)?,
+        };
+        self.next = Some(id + 1);
+        Ok(id)
+    }
+}
+
 fn catalog_foreign_key_key(table_id: TableId, name: &str) -> Vec<u8> {
     let mut out = catalog_table_foreign_key_prefix(table_id);
     out.extend_from_slice(name.as_bytes());
@@ -2086,8 +2148,10 @@ pub fn put_foreign_key_ops(fk: &ForeignKey) -> Vec<WriteOp> {
 
 /// Build the write batch that records a new foreign-key constraint.
 ///
-/// The caller has already resolved the referent and the backing unique index;
-/// this only refuses a name the child relation already uses.
+/// The caller has already resolved the referent, the backing unique index and
+/// the [`ForeignKeyId`] (from a [`ForeignKeyIds`] cursor); this only refuses a
+/// name the child relation already uses, and adds the counter write that keeps
+/// the next constraint's id above this one's.
 ///
 /// # Errors
 ///
@@ -2103,7 +2167,12 @@ pub fn create_foreign_key_ops(kv: &dyn Kv, fk: &ForeignKey) -> Result<Vec<WriteO
             relation: fk.table.to_string(),
         });
     }
-    Ok(put_foreign_key_ops(fk))
+    let mut ops = put_foreign_key_ops(fk);
+    ops.push(WriteOp::Put {
+        key: meta_next_foreign_key_id_key(),
+        value: U32::new(fk.id + 1).as_bytes().to_vec(),
+    });
+    Ok(ops)
 }
 
 /// Build the write batch that removes a foreign-key constraint, returning the
@@ -2151,8 +2220,12 @@ pub fn get_foreign_key(
     Ok(deserialize_foreign_key(&bytes)?)
 }
 
-/// Every foreign key declared *on* a table — the child side — sorted by
-/// constraint name.
+/// Every foreign key declared *on* a table — the child side — in creation
+/// order.
+///
+/// The order is what a row violating two of them reports: `PostgreSQL` fires
+/// the constraints' triggers in OID order, so the constraint declared first
+/// raises the 23503, whatever the two are called.
 ///
 /// # Errors
 ///
@@ -2166,16 +2239,25 @@ pub fn list_table_foreign_keys(
         .into_iter()
         .map(|(_, bytes)| deserialize_foreign_key(&bytes).map_err(CatalogError::from))
         .collect::<Result<Vec<_>, _>>()?;
-    foreign_keys.sort_by(|left, right| left.name.cmp(&right.name));
+    foreign_keys.sort_by_key(|fk| fk.id);
     Ok(foreign_keys)
 }
 
-/// Every foreign key that *references* a table — the parent side — sorted by
-/// constraint name, then by child table id, since one name may be used by
-/// several referencing relations.
+/// Every foreign key that *references* a table — the parent side — in creation
+/// order.
 ///
 /// This is the read behind referential maintenance: a DELETE or key UPDATE on a
-/// referenced table asks it for the constraints that must be enforced.
+/// referenced table asks it for the constraints that must be enforced, and the
+/// order is load-bearing whenever two of them act on the same referencing
+/// column. `PostgreSQL` fires their RI triggers in OID order, so `ON DELETE SET
+/// NULL` declared before `ON DELETE CASCADE` clears the key the cascade would
+/// have matched and the row survives — the opposite outcome to firing them the
+/// other way round. [`ForeignKeyId`] is that order, and it is a total order
+/// across relations, so the several children a parent may have need no
+/// tie-break.
+///
+/// The same order drives the 2BP01 `DETAIL` that lists an object's dependent
+/// constraints, which `PostgreSQL` also emits in OID order.
 ///
 /// # Errors
 ///
@@ -2190,11 +2272,7 @@ pub fn list_referencing_foreign_keys(
         let (_, child_id, name) = foreign_key_ref_key_parts(&key)?;
         foreign_keys.push(read_indexed_foreign_key(kv, child_id, &name)?);
     }
-    foreign_keys.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then(left.table_id.cmp(&right.table_id))
-    });
+    foreign_keys.sort_by_key(|fk| fk.id);
     Ok(foreign_keys)
 }
 
@@ -4065,11 +4143,13 @@ mod tests {
     }
 
     fn foreign_key(
+        id: ForeignKeyId,
         name: &str,
         table: (&str, TableId),
         referenced_table: (&str, TableId),
     ) -> ForeignKey {
         ForeignKey {
+            id,
             name: name.into(),
             table: rel(table.0),
             table_id: table.1,
@@ -4144,6 +4224,7 @@ mod tests {
         let kv = MemKv::default();
         let (parent_id, child_id) = parent_and_child(&kv);
         let fk = foreign_key(
+            1,
             "child_parent_id_fkey",
             ("child", child_id),
             ("parent", parent_id),
@@ -4173,15 +4254,16 @@ mod tests {
 
     /// Constraint names are per-relation: the same name on a second child is
     /// fine, a second one on the same child is 42710. Both then reach the
-    /// parent, ordered by name and broken by child id.
+    /// parent, in creation order — which is a total order even when the two
+    /// share a name.
     #[test]
     fn constraint_names_are_unique_per_relation_not_per_catalog() {
         use assert2::assert;
         let kv = MemKv::default();
         let (parent_id, child_id) = parent_and_child(&kv);
         let other_id = create_table(&kv, &rel("other"), cols()).expect("other");
-        let first = foreign_key("fk_owner", ("child", child_id), ("parent", parent_id));
-        let second = foreign_key("fk_owner", ("other", other_id), ("parent", parent_id));
+        let first = foreign_key(1, "fk_owner", ("child", child_id), ("parent", parent_id));
+        let second = foreign_key(2, "fk_owner", ("other", other_id), ("parent", parent_id));
 
         kv.write_batch(&create_foreign_key_ops(&kv, &first).expect("first ops"))
             .expect("write");
@@ -4222,7 +4304,12 @@ mod tests {
             ],
         )
         .expect("tree");
-        let fk = foreign_key("tree_parent_id_fkey", ("tree", tree_id), ("tree", tree_id));
+        let fk = foreign_key(
+            1,
+            "tree_parent_id_fkey",
+            ("tree", tree_id),
+            ("tree", tree_id),
+        );
 
         kv.write_batch(&create_foreign_key_ops(&kv, &fk).expect("create ops"))
             .expect("write");
@@ -4241,8 +4328,8 @@ mod tests {
         use assert2::assert;
         let kv = MemKv::default();
         let (parent_id, child_id) = parent_and_child(&kv);
-        let dropped = foreign_key("fk_dropped", ("child", child_id), ("parent", parent_id));
-        let kept = foreign_key("fk_kept", ("child", child_id), ("parent", parent_id));
+        let dropped = foreign_key(1, "fk_dropped", ("child", child_id), ("parent", parent_id));
+        let kept = foreign_key(2, "fk_kept", ("child", child_id), ("parent", parent_id));
         for fk in [&dropped, &kept] {
             kv.write_batch(&create_foreign_key_ops(&kv, fk).expect("create ops"))
                 .expect("write");
@@ -4271,8 +4358,8 @@ mod tests {
         let kv = MemKv::default();
         let (parent_id, child_id) = parent_and_child(&kv);
         let other_id = create_table(&kv, &rel("other"), cols()).expect("other");
-        let dropped = foreign_key("child_fkey", ("child", child_id), ("parent", parent_id));
-        let survivor = foreign_key("other_fkey", ("other", other_id), ("parent", parent_id));
+        let dropped = foreign_key(1, "child_fkey", ("child", child_id), ("parent", parent_id));
+        let survivor = foreign_key(2, "other_fkey", ("other", other_id), ("parent", parent_id));
         for fk in [&dropped, &survivor] {
             kv.write_batch(&create_foreign_key_ops(&kv, fk).expect("create ops"))
                 .expect("write");
@@ -4311,6 +4398,7 @@ mod tests {
         let kv = MemKv::default();
         let (parent_id, child_id) = parent_and_child(&kv);
         let fk = foreign_key(
+            1,
             "child_parent_id_fkey",
             ("child", child_id),
             ("parent", parent_id),
@@ -4352,7 +4440,12 @@ mod tests {
             ],
         )
         .expect("tree");
-        let fk = foreign_key("tree_parent_id_fkey", ("tree", tree_id), ("tree", tree_id));
+        let fk = foreign_key(
+            1,
+            "tree_parent_id_fkey",
+            ("tree", tree_id),
+            ("tree", tree_id),
+        );
         kv.write_batch(&create_foreign_key_ops(&kv, &fk).expect("create ops"))
             .expect("write");
 
@@ -4377,15 +4470,69 @@ mod tests {
         use assert2::assert;
         let kv = MemKv::default();
         let (parent_id, child_id) = parent_and_child(&kv);
-        let child_b = foreign_key("fk_b", ("child", child_id), ("parent", parent_id));
-        let child_a = foreign_key("fk_a", ("child", child_id), ("parent", parent_id));
-        let parent_self = foreign_key("fk_self", ("parent", parent_id), ("parent", parent_id));
+        let child_b = foreign_key(1, "fk_b", ("child", child_id), ("parent", parent_id));
+        let child_a = foreign_key(2, "fk_a", ("child", child_id), ("parent", parent_id));
+        let parent_self = foreign_key(3, "fk_self", ("parent", parent_id), ("parent", parent_id));
         for fk in [&child_b, &child_a, &parent_self] {
             kv.write_batch(&create_foreign_key_ops(&kv, fk).expect("create ops"))
                 .expect("write");
         }
 
         assert!(list_foreign_keys(&kv).expect("all") == vec![parent_self, child_a, child_b]);
+    }
+
+    /// Both per-relation listings report constraints in creation order, not by
+    /// name: `PostgreSQL` fires referential triggers in OID order, so a
+    /// constraint declared first acts first however late its name sorts.
+    #[test]
+    fn per_relation_listings_are_ordered_by_creation_not_by_name() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        let (parent_id, child_id) = parent_and_child(&kv);
+        // Names descend as ids ascend, so name order and creation order are
+        // exact opposites and no listing can satisfy both.
+        let zz = foreign_key(1, "zz", ("child", child_id), ("parent", parent_id));
+        let mm = foreign_key(2, "mm", ("child", child_id), ("parent", parent_id));
+        let aa = foreign_key(3, "aa", ("child", child_id), ("parent", parent_id));
+        for fk in [&zz, &mm, &aa] {
+            kv.write_batch(&create_foreign_key_ops(&kv, fk).expect("create ops"))
+                .expect("write");
+        }
+
+        let expected = vec![zz, mm, aa];
+        assert!(list_table_foreign_keys(&kv, child_id).expect("child side") == expected);
+        assert!(list_referencing_foreign_keys(&kv, parent_id).expect("parent side") == expected);
+    }
+
+    /// The id cursor hands out ascending ids without re-reading the counter, so
+    /// several constraints created in one batch are ordered against each other;
+    /// the counter each `create` op carries then leaves the stored value past
+    /// the last id used, so the next batch does not repeat them.
+    #[test]
+    fn the_foreign_key_id_cursor_spans_a_batch_and_leaves_the_counter_past_it() {
+        use assert2::assert;
+        let kv = MemKv::default();
+        let (parent_id, child_id) = parent_and_child(&kv);
+        let mut ids = ForeignKeyIds::default();
+        let mut batch = Vec::new();
+        for name in ["zz", "mm"] {
+            let id = ids.allocate(&kv).expect("allocate");
+            let fk = foreign_key(id, name, ("child", child_id), ("parent", parent_id));
+            batch.extend(create_foreign_key_ops(&kv, &fk).expect("create ops"));
+        }
+        kv.write_batch(&batch).expect("write");
+
+        let listed = list_table_foreign_keys(&kv, child_id).expect("child side");
+        assert!(
+            listed.iter().map(|fk| fk.id).collect::<Vec<_>>() == vec![1, 2],
+            "one cursor, ascending ids"
+        );
+        // A fresh cursor reads the stored counter, which the batch moved past
+        // both ids.
+        assert!(
+            ForeignKeyIds::default().allocate(&kv).expect("allocate") == 3,
+            "the counter survives the batch"
+        );
     }
 
     /// A reverse entry whose authoritative record has gone missing is catalog

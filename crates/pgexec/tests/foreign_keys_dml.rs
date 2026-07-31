@@ -171,6 +171,34 @@ async fn child_violation_from_every_simple_query_write_path() {
     }
 }
 
+/// A row that violates two of the child's foreign keys at once reports the one
+/// declared first, whatever the two are called.
+///
+/// `PostgreSQL` fires the child-side triggers in `pg_constraint.oid` order, so
+/// the constraint written first raises the `23503` and the second never runs.
+/// Each pair below is written in both name orders, so nothing here passes by
+/// the names happening to sort the right way.
+#[tokio::test]
+async fn the_first_declared_child_side_constraint_reports_the_violation() {
+    for (first, second) in [("zz", "aa"), ("aa", "zz")] {
+        let (_engine, mut s) = engine_with(&[
+            "CREATE TABLE p1 (id int4 PRIMARY KEY)",
+            "CREATE TABLE p2 (id int4 PRIMARY KEY)",
+            &format!(
+                "CREATE TABLE c (id int4 PRIMARY KEY, a int4, \
+                 CONSTRAINT {first} FOREIGN KEY (a) REFERENCES p1 (id), \
+                 CONSTRAINT {second} FOREIGN KEY (a) REFERENCES p2 (id))"
+            ),
+        ])
+        .await;
+        assert!(
+            failure(&mut s, "INSERT INTO c VALUES (1, 99)").await
+                == key_not_present("c", first, "Key (a)=(99)", "p1"),
+            "the constraint declared first reports, not the one named first"
+        );
+    }
+}
+
 /// `COPY FROM STDIN` reaches the write path through the copy-in protocol, which
 /// bypasses simple-query statement dispatch entirely — the drain has to be
 /// wired into it separately, and the failed copy must leave no rows.

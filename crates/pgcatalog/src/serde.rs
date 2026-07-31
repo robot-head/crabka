@@ -909,13 +909,13 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
 
 /// Serialize a foreign-key constraint record.
 ///
-/// Version byte, then the constraint name; the child relation's display name and
-/// its id; the referenced relation's display name and its id; the referenced
-/// unique index's display name and its id; the match type, `ON DELETE` and
-/// `ON UPDATE` actions as one byte each; the deferrable, initially-deferred and
-/// validated flags as one byte each; and finally the referencing, referenced and
-/// `SET NULL`/`SET DEFAULT` column-name lists, each a `u32` count followed by
-/// that many length-prefixed names.
+/// Version byte, then the constraint's own creation-order id and its name; the
+/// child relation's display name and its id; the referenced relation's display
+/// name and its id; the referenced unique index's display name and its id; the
+/// match type, `ON DELETE` and `ON UPDATE` actions as one byte each; the
+/// deferrable, initially-deferred and validated flags as one byte each; and
+/// finally the referencing, referenced and `SET NULL`/`SET DEFAULT` column-name
+/// lists, each a `u32` count followed by that many length-prefixed names.
 ///
 /// The ids are the authority — the display names are denormalized copies that a
 /// rename rewrites — so the record is self-describing without a second lookup.
@@ -926,6 +926,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
 #[must_use]
 pub fn serialize_foreign_key(fk: &ForeignKey) -> Vec<u8> {
     let mut out = vec![FOREIGN_KEY_VERSION];
+    out.extend_from_slice(&fk.id.to_be_bytes());
     write_str(&mut out, &fk.name);
     write_relation(&mut out, &fk.table);
     out.extend_from_slice(&fk.table_id.to_be_bytes());
@@ -968,6 +969,7 @@ pub fn deserialize_foreign_key(bytes: &[u8]) -> Result<ForeignKey, KvError> {
             "unknown foreign key version {version}"
         )));
     }
+    let id = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
     let name = read_string(&mut cur)?;
     let table = read_relation(&mut cur)?;
     let table_id = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
@@ -1010,6 +1012,7 @@ pub fn deserialize_foreign_key(bytes: &[u8]) -> Result<ForeignKey, KvError> {
         ));
     }
     Ok(ForeignKey {
+        id,
         name,
         table,
         table_id,
@@ -1991,6 +1994,7 @@ mod tests {
 
     fn foreign_key_fixture() -> ForeignKey {
         ForeignKey {
+            id: 4,
             name: "order_items_order_fkey".into(),
             table: RelationName::public("order_items"),
             table_id: 12,
@@ -2015,7 +2019,9 @@ mod tests {
     fn match_type_offset(fk: &ForeignKey) -> usize {
         // A relation name is written as two length-prefixed parts.
         let relation = |name: &RelationName| (4 + name.schema.len()) + (4 + name.name.len());
-        1 + (4 + fk.name.len())
+        // Version byte, then the constraint's own id, then its name.
+        1 + 4
+            + (4 + fk.name.len())
             + relation(&fk.table)
             + 4
             + relation(&fk.referenced_table)

@@ -442,12 +442,17 @@ pub(crate) fn execute_ddl(
                     indexes: &staged_indexes,
                     sharded: *sharded,
                 };
+                // One cursor for the whole statement: every clause reads the
+                // same stored counter, so the ids have to ascend in memory or
+                // two constraints on one column would tie.
+                let mut foreign_key_ids = crabka_pgcatalog::ForeignKeyIds::default();
                 for pending in &pending_foreign_keys {
                     let foreign_key = crate::fk::resolve_foreign_key(
                         kv,
                         resolution,
                         &relation,
                         &crate::fk::ForeignKeyRequest {
+                            id: foreign_key_ids.allocate(kv)?,
                             name: Some(&pending.name),
                             columns: &pending.columns,
                             reference: &pending.reference,
@@ -12948,6 +12953,11 @@ struct AlterTableState {
     /// Names of foreign keys this statement dropped; a later subcommand must not
     /// resurrect them from the catalog.
     dropped_foreign_keys: Vec<String>,
+    /// Creation-order ids for the foreign keys this statement adds. One cursor
+    /// spans every subcommand, because none of their records reach the KV until
+    /// the whole batch commits — two `ADD CONSTRAINT`s reading the stored
+    /// counter would otherwise tie, and a tie has no defined firing order.
+    foreign_key_ids: crabka_pgcatalog::ForeignKeyIds,
 }
 
 /// A store with one statement's not-yet-committed write batch layered over it.
@@ -13229,6 +13239,7 @@ fn alter_table_ops(
         retyped_columns: Vec::new(),
         created_foreign_keys: Vec::new(),
         dropped_foreign_keys: Vec::new(),
+        foreign_key_ids: crabka_pgcatalog::ForeignKeyIds::default(),
     };
     for action in actions {
         alter_table_action_ops(kv, resolution, &mut state, action, own_xid)?;
@@ -13941,6 +13952,7 @@ fn add_foreign_key_constraint(
         return Err(reject_partitioned_foreign_key(&name));
     }
     let indexes = state.current_indexes(kv)?;
+    let id = state.foreign_key_ids.allocate(kv)?;
     let foreign_key = {
         // `REFERENCES` naming this same relation resolves against the working
         // column and index lists — an index added earlier in this statement is
@@ -13957,6 +13969,7 @@ fn add_foreign_key_constraint(
             resolution,
             &child,
             &crate::fk::ForeignKeyRequest {
+                id,
                 name: Some(&name),
                 columns: request.columns,
                 reference: request.reference,

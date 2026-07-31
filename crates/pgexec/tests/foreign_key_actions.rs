@@ -756,9 +756,10 @@ async fn a_cascade_beside_a_set_null_deletes_the_row_either_way() {
 ///
 /// `SET NULL` first leaves the row with no key for the `CASCADE`'s search to
 /// match, so the row survives; `CASCADE` first deletes it, and the `SET NULL`
-/// then has nothing to update. `PostgreSQL` fires the constraints in creation
-/// order and this engine in name order, so the constraints are named to make the
-/// two orders agree.
+/// then has nothing to update. The constraints run in the order they were
+/// declared — see
+/// [`conflicting_actions_fire_in_declaration_order_whatever_the_names`] for what
+/// happens when their names disagree with that order.
 #[tokio::test]
 async fn conflicting_actions_on_one_column_resolve_in_constraint_order() {
     struct Case {
@@ -801,6 +802,145 @@ async fn conflicting_actions_on_one_column_resolve_in_constraint_order() {
             case.why
         );
     }
+}
+
+/// The same conflict, with the constraints named so that name order and
+/// declaration order can disagree.
+///
+/// `PostgreSQL` fires referential triggers in `pg_constraint.oid` order — the
+/// order the constraints were created in — so the one written first acts first
+/// whatever it is called. `zz` declared before `aa` nulls the key, and the
+/// `CASCADE` that follows finds nothing to match, so the row survives at
+/// `(100, NULL)`; the two names swapped keep that outcome, because the outcome
+/// never depended on the names. Ordering the constraints by name instead would
+/// invert both `zz`-first cases.
+///
+/// Each pair is declared three ways — inline in `CREATE TABLE`, added by two
+/// separate `ALTER TABLE`s, and added by one `ALTER TABLE` with two
+/// subcommands — because the ids are handed out per statement and the last of
+/// those allocates two of them from one batch.
+#[tokio::test]
+async fn conflicting_actions_fire_in_declaration_order_whatever_the_names() {
+    struct Case {
+        first: (&'static str, &'static str),
+        second: (&'static str, &'static str),
+        expect: Vec<Vec<Option<String>>>,
+        why: &'static str,
+    }
+    let cases = [
+        Case {
+            first: ("zz", "ON DELETE SET NULL"),
+            second: ("aa", "ON DELETE CASCADE"),
+            expect: rows(&[&[Some("100"), None]]),
+            why: "the later-sorting name was declared first, and declaration order decides: \
+                  the nulled key no longer matches the cascade's search",
+        },
+        Case {
+            first: ("zz", "ON DELETE CASCADE"),
+            second: ("aa", "ON DELETE SET NULL"),
+            expect: no_rows(),
+            why: "the same pair with the actions swapped: the cascade still runs first, \
+                  because it is still the constraint declared first",
+        },
+        Case {
+            first: ("aa", "ON DELETE SET NULL"),
+            second: ("zz", "ON DELETE CASCADE"),
+            expect: rows(&[&[Some("100"), None]]),
+            why: "names in ascending order now, and the first-declared SET NULL still wins",
+        },
+        Case {
+            first: ("aa", "ON DELETE CASCADE"),
+            second: ("zz", "ON DELETE SET NULL"),
+            expect: no_rows(),
+            why: "names in ascending order now, and the first-declared CASCADE still wins",
+        },
+    ];
+    for case in cases {
+        let inline = format!(
+            "CREATE TABLE c (id int4 PRIMARY KEY, a int4, \
+             CONSTRAINT {} FOREIGN KEY (a) REFERENCES p (id) {}, \
+             CONSTRAINT {} FOREIGN KEY (a) REFERENCES p (id) {})",
+            case.first.0, case.first.1, case.second.0, case.second.1
+        );
+        let bare = "CREATE TABLE c (id int4 PRIMARY KEY, a int4)".to_string();
+        let add = |constraint: (&str, &str)| {
+            format!(
+                "ADD CONSTRAINT {} FOREIGN KEY (a) REFERENCES p (id) {}",
+                constraint.0, constraint.1
+            )
+        };
+        let declarations: [Vec<String>; 3] = [
+            vec![inline],
+            vec![
+                bare.clone(),
+                format!("ALTER TABLE c {}", add(case.first)),
+                format!("ALTER TABLE c {}", add(case.second)),
+            ],
+            vec![
+                bare,
+                format!("ALTER TABLE c {}, {}", add(case.first), add(case.second)),
+            ],
+        ];
+        for declaration in declarations {
+            let mut setup = vec!["CREATE TABLE p (id int4 PRIMARY KEY)".to_string()];
+            setup.extend(declaration.clone());
+            setup.push("INSERT INTO p VALUES (1)".to_string());
+            setup.push("INSERT INTO c VALUES (100, 1)".to_string());
+            let setup: Vec<&str> = setup.iter().map(String::as_str).collect();
+            let (_engine, mut s) = engine_with(&setup).await;
+            run(&mut s, "DELETE FROM p WHERE id = 1").await;
+            assert!(
+                query(&mut s, "SELECT id, a FROM c").await == case.expect,
+                "{}, declared as {declaration:?}",
+                case.why
+            );
+        }
+    }
+}
+
+/// Dropping a constraint and adding it back moves it to the *end* of the firing
+/// order, because the constraint that comes back is a new one with a new id —
+/// `PostgreSQL` gives it a fresh `pg_constraint.oid` rather than the one it had.
+///
+/// Renaming one, by contrast, keeps its place: `ALTER TABLE … RENAME CONSTRAINT`
+/// rewrites the name in place and never touches the oid.
+///
+/// Both start from the same pair — `zz` `SET NULL` ahead of `aa` `CASCADE`,
+/// which leaves the row at `(100, NULL)`. Re-adding `zz` changes that outcome
+/// and renaming it does not, which is the whole difference between the two.
+#[tokio::test]
+async fn re_adding_a_constraint_moves_it_last_while_renaming_one_leaves_it_put() {
+    let declare = [
+        "CREATE TABLE p (id int4 PRIMARY KEY)",
+        "CREATE TABLE c (id int4 PRIMARY KEY, a int4, \
+         CONSTRAINT zz FOREIGN KEY (a) REFERENCES p (id) ON DELETE SET NULL, \
+         CONSTRAINT aa FOREIGN KEY (a) REFERENCES p (id) ON DELETE CASCADE)",
+    ];
+    let populate = ["INSERT INTO p VALUES (1)", "INSERT INTO c VALUES (100, 1)"];
+
+    let mut setup = declare.to_vec();
+    setup.extend([
+        "ALTER TABLE c DROP CONSTRAINT zz",
+        "ALTER TABLE c ADD CONSTRAINT zz FOREIGN KEY (a) REFERENCES p (id) ON DELETE SET NULL",
+    ]);
+    setup.extend(populate);
+    let (_engine, mut s) = engine_with(&setup).await;
+    run(&mut s, "DELETE FROM p WHERE id = 1").await;
+    assert!(
+        query(&mut s, "SELECT id, a FROM c").await == no_rows(),
+        "the re-added SET NULL is now last, so the CASCADE it used to follow runs first"
+    );
+
+    let mut setup = declare.to_vec();
+    setup.push("ALTER TABLE c RENAME CONSTRAINT zz TO bb");
+    setup.extend(populate);
+    let (_engine, mut s) = engine_with(&setup).await;
+    run(&mut s, "DELETE FROM p WHERE id = 1").await;
+    assert!(
+        query(&mut s, "SELECT id, a FROM c").await == rows(&[&[Some("100"), None]]),
+        "the renamed SET NULL keeps its place ahead of the CASCADE, \
+         even though its new name still sorts after the CASCADE's"
+    );
 }
 
 // ---------------------------------------------------------------------------

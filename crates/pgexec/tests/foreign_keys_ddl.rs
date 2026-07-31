@@ -575,6 +575,73 @@ async fn dropping_a_referenced_object_lists_every_dependent_constraint() {
     }
 }
 
+/// The `DETAIL` lists dependents in the order they were created, not by name.
+///
+/// `PostgreSQL` walks `pg_depend` and reports what it finds in oid order, so
+/// `zz` declared before `aa` is named first — on the same child relation and on
+/// two different ones alike. Sorting the dependents by name would swap both
+/// pairs.
+#[tokio::test]
+async fn dependent_constraints_are_listed_in_creation_order() {
+    struct Case {
+        setup: &'static [&'static str],
+        sql: &'static str,
+        expect: Failure,
+        why: &'static str,
+    }
+
+    let cases = [
+        Case {
+            setup: &[
+                "CREATE TABLE dp (id int4 PRIMARY KEY)",
+                "CREATE TABLE dc (id int4 PRIMARY KEY, a int4, \
+                 CONSTRAINT zz FOREIGN KEY (a) REFERENCES dp (id), \
+                 CONSTRAINT aa FOREIGN KEY (a) REFERENCES dp (id))",
+            ],
+            sql: "DROP TABLE dp",
+            expect: Failure::new(
+                "2BP01",
+                "cannot drop table dp because other objects depend on it",
+            )
+            .detail(
+                "constraint zz on table dc depends on table dp\n\
+                 constraint aa on table dc depends on table dp",
+            )
+            .hint(CASCADE_HINT),
+            why: "two constraints on one child, declared later-name first",
+        },
+        Case {
+            setup: &[
+                "CREATE TABLE dp (id int4 PRIMARY KEY, u int4)",
+                "CREATE UNIQUE INDEX dp_u_uq ON dp (u)",
+                "CREATE TABLE zc (a int4, CONSTRAINT zz FOREIGN KEY (a) REFERENCES dp (u))",
+                "CREATE TABLE ac (a int4, CONSTRAINT aa FOREIGN KEY (a) REFERENCES dp (u))",
+            ],
+            sql: "DROP INDEX dp_u_uq",
+            expect: Failure::new(
+                "2BP01",
+                "cannot drop index dp_u_uq because other objects depend on it",
+            )
+            .detail(
+                "constraint zz on table zc depends on index dp_u_uq\n\
+                 constraint aa on table ac depends on index dp_u_uq",
+            )
+            .hint(CASCADE_HINT),
+            why: "an index's dependents span two relations, and creation order is \
+                  a total order across them",
+        },
+    ];
+
+    for case in cases {
+        let (_engine, mut s) = engine_with(case.setup).await;
+        assert!(
+            failure_of(&mut s, case.sql).await == case.expect,
+            "{}",
+            case.why
+        );
+    }
+}
+
 /// `CASCADE` drops the referencing *constraint*, not the referencing relation:
 /// the child survives and afterwards accepts anything.
 #[tokio::test]

@@ -84,8 +84,8 @@ use std::{
 };
 
 use crabka_pgcatalog::{
-    Column, ForeignKey, Index, IndexConstraint, MatchType, ReferentialAction, RelationName, Table,
-    TableId,
+    Column, ForeignKey, ForeignKeyId, Index, IndexConstraint, MatchType, ReferentialAction,
+    RelationName, Table, TableId,
 };
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgmvcc::visibility::Snapshot;
@@ -167,6 +167,11 @@ impl ParentSource<'_> {
 /// One `FOREIGN KEY (…) REFERENCES …` clause, as `CREATE TABLE` and
 /// `ALTER TABLE … ADD CONSTRAINT` both present it.
 pub struct ForeignKeyRequest<'a> {
+    /// The creation-order id to stamp the constraint with, from the statement's
+    /// [`crabka_pgcatalog::ForeignKeyIds`] cursor. It decides which of two
+    /// constraints acts first, so it has to ascend with the order the clauses
+    /// are written — one cursor per statement, not one read per clause.
+    pub id: ForeignKeyId,
     /// An explicit `CONSTRAINT <name>` label, or `None` to derive
     /// `<table>_<col>…_fkey`.
     pub name: Option<&'a str>,
@@ -315,6 +320,7 @@ pub fn resolve_foreign_key(
     }
 
     Ok(ForeignKey {
+        id: request.id,
         name,
         table: child.name.clone(),
         table_id: child.id,
@@ -2172,6 +2178,7 @@ mod tests {
 
     fn request<'a>(columns: &'a [String], reference: &'a ForeignKeyRef) -> ForeignKeyRequest<'a> {
         ForeignKeyRequest {
+            id: 1,
             name: None,
             columns,
             reference,
@@ -2348,6 +2355,7 @@ mod tests {
         assert!(
             resolved
                 == ForeignKey {
+                    id: 1,
                     name: "cperm_b_a_fkey".into(),
                     table: RelationName::public("cperm"),
                     table_id: 7,
@@ -2602,6 +2610,7 @@ mod tests {
 
     fn deferrable_fk(name: &str, initially_deferred: bool) -> ForeignKey {
         ForeignKey {
+            id: 1,
             name: name.to_string(),
             table: RelationName::public("c"),
             table_id: 1,

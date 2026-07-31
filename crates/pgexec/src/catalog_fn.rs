@@ -1091,6 +1091,7 @@ mod tests {
     // clause at its default, so a case only sets what it exercises.
     fn sample_foreign_key() -> ForeignKey {
         ForeignKey {
+            id: 1,
             name: "cc_a_fkey".into(),
             table: RelationName::public("cc"),
             table_id: 2,
