@@ -227,14 +227,34 @@ pub fn subject_sharded_statement(sql: &str) -> Result<String, SubjectDdlTransfor
         }
         Err(_) => return Ok(sql.to_string()),
     };
+    // A TEMP table has no sharded form either — it is session-local, so both legs
+    // create an ordinary table — and appending `SHARDED BY` after a trailing
+    // clause like `ON COMMIT PRESERVE ROWS` would not even parse.
+    if matches!(
+        statements.as_slice(),
+        [crabka_pgparser::ast::Statement::CreateTable {
+            temporary: true,
+            ..
+        }]
+    ) {
+        return Ok(sql.to_string());
+    }
     if !matches!(
         statements.as_slice(),
         [crabka_pgparser::ast::Statement::CreateTable { .. }]
     ) {
-        // A statement that *looks* like table DDL but is not the plain
-        // `CREATE TABLE` this transform understands — `CREATE TABLE … AS`, for
-        // instance — must not slip through unsharded, or the sharded leg would
-        // silently measure an ordinary table and report parity for it.
+        // `CREATE TABLE … AS` has no `SHARDED BY` spelling, so an ordinary table
+        // is the only thing either leg can create; passing it through is the
+        // faithful transform, not a silent escape.
+        if matches!(
+            statements.as_slice(),
+            [crabka_pgparser::ast::Statement::CreateTableAs { .. }]
+        ) {
+            return Ok(sql.to_string());
+        }
+        // A statement that *looks* like table DDL but did not parse into a shape
+        // this transform knows must not slip through unsharded, or the sharded
+        // leg would silently measure an ordinary table and report parity for it.
         if is_create_table_candidate(sql) {
             return Err(SubjectDdlTransformError {
                 sql: sql.to_string(),
@@ -1736,14 +1756,31 @@ mod tests {
         );
     }
 
+    /// The two table-DDL shapes that have no `SHARDED BY` spelling at all pass
+    /// through: both legs can only ever create an ordinary table, so rewriting is
+    /// not merely unsupported but meaningless. Failing closed on these aborted the
+    /// whole sharded run at the corpus's first `CREATE TABLE … AS`.
+    #[test]
+    fn sharded_subject_transform_passes_through_table_ddl_with_no_sharded_form() {
+        for sql in [
+            "CREATE TABLE copied AS SELECT 1",
+            "CREATE TEMP TABLE tt (a int4) ON COMMIT PRESERVE ROWS",
+            "CREATE TEMPORARY TABLE tt2 (a int4)",
+        ] {
+            assert_eq!(
+                subject_sharded_statement(sql).expect("passes through"),
+                sql,
+                "{sql}"
+            );
+        }
+    }
+
     #[test]
     fn sharded_subject_transform_fails_closed_for_malformed_create_table() {
         let error = subject_sharded_statement("CREATE TABLE broken (id int4")
             .expect_err("malformed table DDL must not pass through");
         assert!(error.to_string().contains("CREATE TABLE"));
 
-        subject_sharded_statement("CREATE TABLE copied AS SELECT 1")
-            .expect_err("unsupported table DDL must not pass through unchanged");
         subject_sharded_statement("CREATE TABLE lexical (label text DEFAULT 'unterminated)")
             .expect_err("lexer-level malformed table DDL must not pass through unchanged");
         subject_sharded_statement(
