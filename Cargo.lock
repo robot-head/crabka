@@ -2768,6 +2768,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "clap",
+ "crabka-client-core",
  "crabka-gres",
  "crabka-gres-control",
  "crabka-gres-substrate",

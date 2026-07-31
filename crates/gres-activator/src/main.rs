@@ -42,6 +42,27 @@ struct Args {
 #[derive(Debug, clap::Args)]
 struct RegistryOptions {
     #[arg(
+        long = "client-dispatch-queue-capacity",
+        env = "CRABKA_GRES_ACTIVATOR_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    #[arg(
+        long = "client-frame-max",
+        env = "CRABKA_GRES_ACTIVATOR_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
+    #[arg(
+        long = "registry-reader-fetch-min",
+        env = "CRABKA_GRES_REGISTRY_READER_FETCH_MIN",
+        default_value = "1B",
+        value_parser = parse_fetch_min
+    )]
+    reader_fetch_min: ByteSize,
+    #[arg(
         long = "registry-replication-factor",
         env = "CRABKA_GRES_REGISTRY_REPLICATION_FACTOR",
         default_value = "1"
@@ -90,6 +111,23 @@ struct RegistryOptions {
 }
 
 impl RegistryOptions {
+    fn dispatch_queue_capacity(&self) -> crabka_client_core::ConnectionDispatchQueueCapacity {
+        crabka_client_core::ConnectionDispatchQueueCapacity::new(
+            self.client_dispatch_queue_capacity,
+        )
+        .expect("validated activator client dispatch queue capacity")
+    }
+
+    fn frame_max(&self) -> crabka_client_core::ClientFrameMax {
+        crabka_client_core::ClientFrameMax::try_from(self.client_frame_max)
+            .expect("validated activator client frame maximum")
+    }
+
+    fn reader_fetch_min(&self) -> crabka_client_core::FetchMinBytes {
+        crabka_client_core::FetchMinBytes::try_from(self.reader_fetch_min)
+            .expect("validated registry reader fetch minimum")
+    }
+
     fn policy(&self) -> RegistryPolicy {
         let defaults = RegistryPolicy::default();
 
@@ -111,7 +149,31 @@ impl RegistryOptions {
                 .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
         )
         .expect("validated registry reader/admin DNS timeout")
+        .with_client_resource_policy(
+            self.dispatch_queue_capacity(),
+            self.frame_max(),
+            self.reader_fetch_min(),
+        )
     }
+}
+
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    crabka_client_core::ConnectionDispatchQueueCapacity::new(value)
+        .map(crabka_client_core::ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    crabka_client_core::ClientFrameMax::try_from(value)
+        .map(crabka_client_core::ClientFrameMax::size)
+}
+
+fn parse_fetch_min(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    crabka_client_core::FetchMinBytes::try_from(value).map(crabka_client_core::FetchMinBytes::size)
 }
 
 #[tokio::main]
@@ -160,11 +222,14 @@ mod tests {
     use super::Args;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    const CLEAN_CONFIG_ENV: [(&str, Option<&str>); 12] = [
+    const CLEAN_CONFIG_ENV: [(&str, Option<&str>); 15] = [
         ("CRABKA_GRES_ACTIVATOR_LISTEN", None),
         ("CRABKA_GRES_ACTIVATOR_BOOTSTRAP", None),
         ("CRABKA_GRES_ACTIVATOR_REGISTRY_POLL", None),
         ("CRABKA_GRES_ACTIVATOR_COLD_START_TIMEOUT", None),
+        ("CRABKA_GRES_ACTIVATOR_CLIENT_DISPATCH_QUEUE_CAPACITY", None),
+        ("CRABKA_GRES_ACTIVATOR_CLIENT_FRAME_MAX", None),
+        ("CRABKA_GRES_REGISTRY_READER_FETCH_MIN", None),
         ("CRABKA_GRES_REGISTRY_REPLICATION_FACTOR", None),
         ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", None),
         ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF", None),
@@ -201,6 +266,12 @@ mod tests {
                 .is_err()
             );
             for value in [
+                "--client-dispatch-queue-capacity=0",
+                "--client-frame-max=0B",
+                "--client-frame-max=1.5B",
+                "--client-frame-max=101MiB",
+                "--registry-reader-fetch-min=0B",
+                "--registry-reader-fetch-min=1.5B",
                 "--registry-poll=0ms",
                 "--cold-start-timeout=0ms",
                 "--registry-replication-factor=0",
@@ -223,6 +294,52 @@ mod tests {
                     .is_err()
                 );
             }
+        });
+    }
+
+    #[test]
+    fn client_policy_reads_environment_and_prefers_cli() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("environment lock");
+        temp_env::with_vars(CLEAN_CONFIG_ENV, || {
+            temp_env::with_vars(
+                [
+                    (
+                        "CRABKA_GRES_ACTIVATOR_CLIENT_DISPATCH_QUEUE_CAPACITY",
+                        Some("7"),
+                    ),
+                    ("CRABKA_GRES_ACTIVATOR_CLIENT_FRAME_MAX", Some("32KiB")),
+                    ("CRABKA_GRES_REGISTRY_READER_FETCH_MIN", Some("3B")),
+                ],
+                || {
+                    let environment = Args::try_parse_from([
+                        "crabka-gres-activator",
+                        "--listen=127.0.0.1:6433",
+                        "--bootstrap=broker:9092",
+                    ])
+                    .expect("parse environment client policy");
+                    let environment_policy = environment.registry.policy();
+                    assert!(environment_policy.dispatch_queue_capacity().get() == 7);
+                    assert!(environment_policy.frame_max().size() == crabka_units::kibibytes(32));
+                    assert!(environment_policy.reader_fetch_min().size() == crabka_units::bytes(3));
+
+                    let cli = Args::try_parse_from([
+                        "crabka-gres-activator",
+                        "--listen=127.0.0.1:6433",
+                        "--bootstrap=broker:9092",
+                        "--client-dispatch-queue-capacity=9",
+                        "--client-frame-max=64KiB",
+                        "--registry-reader-fetch-min=5B",
+                    ])
+                    .expect("parse CLI client policy");
+                    let cli_policy = cli.registry.policy();
+                    assert!(cli_policy.dispatch_queue_capacity().get() == 9);
+                    assert!(cli_policy.frame_max().size() == crabka_units::kibibytes(64));
+                    assert!(cli_policy.reader_fetch_min().size() == crabka_units::bytes(5));
+                },
+            );
         });
     }
 
