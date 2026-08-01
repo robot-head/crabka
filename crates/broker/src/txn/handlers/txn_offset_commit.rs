@@ -515,7 +515,7 @@ mod tests {
             .expect("offsets partition");
         let log = part.log.lock().expect("lock offsets log");
         let read = log
-            .read(crabka_log::Offset(0), 1024 * 1024)
+            .read(crabka_log::Offset(0), crabka_units::mebibytes(1))
             .expect("read offsets log");
         assert!(read.batches.len() == 1);
         let batch = &read.batches[0];
@@ -557,7 +557,7 @@ mod tests {
             .expect("offsets partition");
         let log = part.log.lock().expect("lock offsets log");
         let read = log
-            .read(crabka_log::Offset(0), 1024 * 1024)
+            .read(crabka_log::Offset(0), crabka_units::mebibytes(1))
             .expect("read offsets log");
         assert!(read.batches.is_empty());
     }

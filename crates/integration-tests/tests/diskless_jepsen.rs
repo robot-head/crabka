@@ -111,9 +111,9 @@ async fn consume_count(bootstrap: &str, expected: usize) -> usize {
         .bootstrap(bootstrap)
         .client_id("diskless-jepsen-consumer")
         .group_id("diskless-jepsen-group")
-        .session_timeout(Duration::from_secs(30))
-        .rebalance_timeout(Duration::from_secs(2))
-        .heartbeat_interval(Duration::from_secs(1))
+        .session_timeout(crabka_units::secs(30))
+        .rebalance_timeout(crabka_units::secs(2))
+        .heartbeat_interval(crabka_units::secs(1))
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .subscribe([TOPIC.to_string()])
         .build()
@@ -124,7 +124,7 @@ async fn consume_count(bootstrap: &str, expected: usize) -> usize {
     let deadline = Instant::now() + Duration::from_secs(15);
     while seen < expected && Instant::now() < deadline {
         seen += consumer
-            .poll(Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .expect("poll")
             .len();

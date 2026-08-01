@@ -286,12 +286,12 @@ where
                     agg_name.clone(),
                     move || KStreamSessionAggregateProcessor {
                         store_name: store_for_proc.clone(),
-                        gap_ms: windows.gap_ms,
+                        gap: windows.gap,
                         init: init.clone(),
                         agg: agg.clone(),
                         merger: merger.clone(),
                         emit,
-                        grace_ms: windows.grace_ms,
+                        grace: windows.grace,
                         stream_time: i64::MIN,
                         last_emitted_close: i64::MIN,
                         forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder::default(),
@@ -303,8 +303,8 @@ where
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
-                windows.gap_ms,
-                windows.grace_ms,
+                windows.gap,
+                windows.grace,
                 [h.name().to_string()],
             );
             // Cache only emit-on-update session aggregates: emit-final stays
@@ -325,7 +325,7 @@ where
             SessionWindowedSerde::new(key_serde.clone()),
             value_serde.clone(),
         )
-        .with_window_grace(Some(windows.grace_ms))
+        .with_window_grace(Some(windows.grace))
         .with_suppress_factory(Some(suppress_factory))
     }
 
@@ -384,10 +384,10 @@ where
                     red_name.clone(),
                     move || KStreamSessionReduceProcessor {
                         store_name: store_for_proc.clone(),
-                        gap_ms: windows.gap_ms,
+                        gap: windows.gap,
                         reducer: reducer.clone(),
                         emit,
-                        grace_ms: windows.grace_ms,
+                        grace: windows.grace,
                         stream_time: i64::MIN,
                         last_emitted_close: i64::MIN,
                         forwarder: crate::dsl::processors::tuple_forwarder::TupleForwarder::default(),
@@ -399,8 +399,8 @@ where
                 store_for_thunk.clone(),
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
-                windows.gap_ms,
-                windows.grace_ms,
+                windows.gap,
+                windows.grace,
                 [h.name().to_string()],
             );
             // Cache only emit-on-update session reduces (see aggregate lower).
@@ -419,7 +419,7 @@ where
             SessionWindowedSerde::new(key_serde.clone()),
             value_serde.clone(),
         )
-        .with_window_grace(Some(windows.grace_ms))
+        .with_window_grace(Some(windows.grace))
         .with_suppress_factory(Some(suppress_factory))
     }
 }
@@ -455,6 +455,7 @@ where
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use crate::{
         dsl::{
@@ -473,13 +474,13 @@ mod tests {
         let b = StreamsBuilder::new();
         b.stream::<String, String>(["in"])
             .group_by_key()
-            .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+            .windowed_by_session(SessionWindows::of_inactivity_gap(millis(60)))
             .count("s");
         let built = b.build("app").unwrap();
         let g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
-            10_485_760,
+            mebibytes(10),
         ))
         .unwrap();
         check!(
@@ -497,14 +498,14 @@ mod tests {
         let b = StreamsBuilder::new();
         b.stream::<String, String>(["in"])
             .group_by_key()
-            .windowed_by_session(SessionWindows::of_inactivity_gap(60).grace(10))
+            .windowed_by_session(SessionWindows::of_inactivity_gap(millis(60)).grace(millis(10)))
             .emit_strategy(EmitStrategy::on_window_close())
             .count("s");
         let built = b.build("app").unwrap();
         let g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
-            10_485_760,
+            mebibytes(10),
         ))
         .unwrap();
         check!(
@@ -527,7 +528,7 @@ mod tests {
         let b = StreamsBuilder::new();
         b.stream::<String, String>(["in"])
             .group_by_key()
-            .windowed_by_session(SessionWindows::of_inactivity_gap(60).grace(10))
+            .windowed_by_session(SessionWindows::of_inactivity_gap(millis(60)).grace(millis(10)))
             .emit_strategy(EmitStrategy::on_window_close())
             .count("s")
             .to_stream()

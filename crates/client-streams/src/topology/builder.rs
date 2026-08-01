@@ -19,7 +19,13 @@ pub(crate) type StoreFactory = Box<
         + Sync,
 >;
 
+/// The JVM's `windowstore.changelog.additional.retention.ms` default: the slack
+/// added on top of a window store's own retention so a restoring instance can
+/// still read the records backing its open windows.
+const CHANGELOG_ADDITIONAL_RETENTION: Time = days(1);
+
 use crabka_protocol::owned::streams_group_heartbeat_request::Topology as WireTopology;
+use crabka_units::prelude::*;
 
 use super::{
     grouping::group_nodes,
@@ -115,7 +121,7 @@ pub struct Topology {
     /// Materialized KV stores whose record cache is eligible (JVM `Materialized`
     /// caching, default on). Populated by [`Topology::mark_store_caching`] at the
     /// materialized KTable/aggregate lowering sites; consumed by `instantiate` to
-    /// wrap the store in a [`NamedCache`] when `cache_max_bytes > 0`.
+    /// wrap the store in a [`NamedCache`] when the cache budget is positive.
     caching_stores: std::collections::HashSet<String>,
 }
 
@@ -531,28 +537,27 @@ impl Topology {
     ///
     /// Like [`add_state_store`] but for windowed stores. The changelog topic
     /// carries `compact,delete` configs and a `retention.ms` derived from
-    /// `size_ms + grace_ms + 86_400_000` (the JVM's
-    /// `windowstore.changelog.additional.retention.ms` default of 1 day).
+    /// `size + grace +` [`CHANGELOG_ADDITIONAL_RETENTION`].
     ///
     /// [`add_state_store`]: Topology::add_state_store
     ///
-    /// `size_ms` is the **retention basis**: it drives the changelog
-    /// `retention.ms = size_ms + grace_ms + 86_400_000`. For tumbling/hopping
-    /// windows it equals the window size; for sliding windows it is the
-    /// retention span (`2 * timeDifferenceMs`), which is wider than the window.
+    /// The tuple is `(retention_basis, window_size, grace)`. The **retention
+    /// basis** drives the changelog `retention.ms`; for tumbling/hopping windows
+    /// it equals the window size, and for sliding windows it is the retention
+    /// span (`2 * time_difference`), which is wider than the window.
     ///
-    /// `window_size_ms` is the **true window length** used only by the store's
+    /// The **window size** is the true window length, used only by the store's
     /// cache flush to reconstruct the downstream `Windowed<K>` key's
-    /// `end = start + window_size_ms` (the store-key bytes hold only the start).
-    /// For sliding windows this is `timeDifferenceMs` (1×), NOT the retention
+    /// `end = start + window_size` (the store-key bytes hold only the start).
+    /// For sliding windows this is `time_difference` (1x), NOT the retention
     /// span.
-    // size_ms (retention basis) + window_size_ms (key-end) are distinct
+    // retention basis + window size (key-end) are distinct
     pub fn add_window_store<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
-        window: (i64, i64, i64),
+        window: (Time, Time, Time),
         processors: impl IntoIterator<Item = impl Into<String>>,
     ) -> &mut Self
     where
@@ -561,12 +566,11 @@ impl Topology {
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
-        let (size_ms, window_size_ms, grace_ms) = window;
+        let (retention_basis, window_size, grace) = window;
         let name: String = name.into();
-        // windowstore.changelog.additional.retention.ms default = 1 day (86_400_000 ms)
-        let retention_ms = size_ms + grace_ms + 86_400_000;
+        let retention = retention_basis + grace + CHANGELOG_ADDITIONAL_RETENTION;
         let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
-        self.reg.add_window_store(&name, procs, None, retention_ms);
+        self.reg.add_window_store(&name, procs, None, retention);
         self.store_factories.insert(
             name.clone(),
             (
@@ -582,11 +586,11 @@ impl Topology {
                             Box::new(value_serde.clone()),
                             changelog,
                             // Aggregate window stores need the real window size so the
-                            // cache flush can reconstruct `end = start + window_size_ms`
+                            // cache flush can reconstruct `end = start + window_size`
                             // for the downstream `Windowed` key (the store-key bytes hold
-                            // only the start). This is distinct from `size_ms`, which is
-                            // the retention basis — they diverge for sliding windows.
-                            window_size_ms,
+                            // only the start). This is distinct from the retention basis
+                            // — they diverge for sliding windows.
+                            window_size,
                         )) as Box<dyn crate::store::api::StateStore>
                     },
                 ),
@@ -599,17 +603,17 @@ impl Topology {
     ///
     /// Like [`add_window_store`] but for join window stores (retainDuplicates).
     /// The changelog topic carries `delete`-only configs and a `retention.ms`
-    /// derived from `before_ms + after_ms + grace_ms + 86_400_000`. Compaction is
-    /// not applicable because the store retains duplicates.
+    /// derived from `before + after + grace + `[`CHANGELOG_ADDITIONAL_RETENTION`].
+    /// Compaction is not applicable because the store retains duplicates.
     ///
     /// [`add_window_store`]: Topology::add_window_store
-    // mirrors add_window_store + extra before_ms/after_ms split
+    // mirrors add_window_store + extra before/after split
     pub fn add_join_window_store<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
-        window: (i64, i64, i64),
+        window: (Time, Time, Time),
         processors: impl IntoIterator<Item = impl Into<String>>,
     ) -> &mut Self
     where
@@ -618,13 +622,12 @@ impl Topology {
         KS: Serde<K> + Clone,
         VS: Serde<V> + Clone,
     {
-        let (before_ms, after_ms, grace_ms) = window;
+        let (before, after, grace) = window;
         let name: String = name.into();
-        // windowstore.changelog.additional.retention.ms default = 1 day (86_400_000 ms)
-        let retention_ms = before_ms + after_ms + grace_ms + 86_400_000;
+        let retention = before + after + grace + CHANGELOG_ADDITIONAL_RETENTION;
         let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
         self.reg
-            .add_join_window_store(&name, procs, None, retention_ms);
+            .add_join_window_store(&name, procs, None, retention);
         self.store_factories.insert(
             name.clone(),
             (
@@ -651,9 +654,8 @@ impl Topology {
     ///
     /// Like [`add_window_store`] but for session stores. Reuses the windowed
     /// (`compact,delete`) changelog config; the `retention.ms` is derived from
-    /// `gap_ms + grace_ms + 86_400_000` (JVM `windowstore.changelog.additional.
-    /// retention.ms` default of 1 day). The store holds the raw aggregate
-    /// (`SessionBytesStore`).
+    /// `gap + grace + `[`CHANGELOG_ADDITIONAL_RETENTION`]. The store holds the
+    /// raw aggregate (`SessionBytesStore`).
     ///
     /// [`add_window_store`]: Topology::add_window_store
     pub fn add_session_store<K, V, KS, VS>(
@@ -661,8 +663,8 @@ impl Topology {
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
-        gap_ms: i64,
-        grace_ms: i64,
+        gap: Time,
+        grace: Time,
         processors: impl IntoIterator<Item = impl Into<String>>,
     ) -> &mut Self
     where
@@ -672,11 +674,11 @@ impl Topology {
         VS: Serde<V> + Clone,
     {
         let name: String = name.into();
-        let retention_ms = gap_ms + grace_ms + 86_400_000;
+        let retention = gap + grace + CHANGELOG_ADDITIONAL_RETENTION;
         let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
         // Session changelog == windowed changelog (compact,delete + retention);
         // reuse the AggWindow ChangelogKind via add_window_store.
-        self.reg.add_window_store(&name, procs, None, retention_ms);
+        self.reg.add_window_store(&name, procs, None, retention);
         self.store_factories.insert(
             name.clone(),
             (
@@ -701,14 +703,15 @@ impl Topology {
 
     /// Register a versioned state store (KIP-889) connected to the given
     /// processors. The changelog topic carries `compact` + `min.compaction.lag.ms
-    /// = history_retention_ms + 86_400_000`. The version-chain store is
-    /// self-contained in memory; the supplied byte backend is unused.
+    /// = history_retention + `[`CHANGELOG_ADDITIONAL_RETENTION`]. The
+    /// version-chain store is self-contained in memory; the supplied byte backend
+    /// is unused.
     pub fn add_versioned_store<K, V, KS, VS>(
         &mut self,
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
-        history_retention_ms: i64,
+        history_retention: Time,
         processors: impl IntoIterator<Item = impl Into<String>>,
     ) -> &mut Self
     where
@@ -721,7 +724,7 @@ impl Topology {
             name,
             key_serde,
             value_serde,
-            history_retention_ms,
+            history_retention,
             processors,
             None,
         )
@@ -739,7 +742,7 @@ impl Topology {
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
-        history_retention_ms: i64,
+        history_retention: Time,
         processors: impl IntoIterator<Item = impl Into<String>>,
         changelog_topic: impl Into<String>,
     ) -> &mut Self
@@ -753,7 +756,7 @@ impl Topology {
             name,
             key_serde,
             value_serde,
-            history_retention_ms,
+            history_retention,
             processors,
             Some(changelog_topic.into()),
         )
@@ -764,7 +767,7 @@ impl Topology {
         name: impl Into<String>,
         key_serde: KS,
         value_serde: VS,
-        history_retention_ms: i64,
+        history_retention: Time,
         processors: impl IntoIterator<Item = impl Into<String>>,
         changelog_override: Option<String>,
     ) -> &mut Self
@@ -775,14 +778,10 @@ impl Topology {
         VS: Serde<V> + Clone,
     {
         let name: String = name.into();
-        let min_compaction_lag_ms = history_retention_ms + 86_400_000;
+        let min_compaction_lag = history_retention + CHANGELOG_ADDITIONAL_RETENTION;
         let procs: Vec<String> = processors.into_iter().map(Into::into).collect();
-        self.reg.add_versioned_store(
-            &name,
-            procs,
-            changelog_override.clone(),
-            min_compaction_lag_ms,
-        );
+        self.reg
+            .add_versioned_store(&name, procs, changelog_override.clone(), min_compaction_lag);
         self.store_factories.insert(
             name.clone(),
             (
@@ -794,7 +793,7 @@ impl Topology {
                         Box::new(
                             crate::store::versioned::VersionedBytesStore::<K, V>::new(
                                 store_name.to_string(),
-                                history_retention_ms,
+                                history_retention,
                                 Box::new(key_serde.clone()),
                                 Box::new(value_serde.clone()),
                                 changelog,
@@ -1323,7 +1322,7 @@ pub struct BuiltTopology {
     global_store_topics: HashMap<String, String>,
     /// Materialized KV stores whose record cache is eligible (default-on JVM
     /// `Materialized` caching, opt-out via `with_caching(false)`). `instantiate`
-    /// wraps each in a [`NamedCache`] when `cache_max_bytes > 0`.
+    /// wraps each in a [`NamedCache`] when the cache budget is positive.
     caching_stores: std::collections::HashSet<String>,
     /// Store name → its connected processor names. `instantiate` maps a cached
     /// store's (single, materializing) processor name to that node's graph index
@@ -1415,14 +1414,14 @@ impl BuiltTopology {
         name = "streams.topology.instantiate",
         level = "info",
         skip_all,
-        fields(app_id = %app_id, nodes = self.node_specs.len(), cache_max_bytes),
+        fields(app_id = %app_id, nodes = self.node_specs.len(), cache_max_bytes = cache_max_bytes.bytes_i64()),
         err,
     )]
     pub(crate) async fn instantiate(
         &self,
         backend: &crate::store::backend::StoreBackend,
         app_id: &str,
-        cache_max_bytes: i64,
+        cache_max_bytes: ByteSize,
     ) -> Result<Graph, ProcessorError> {
         // 1. Collect the processor/sink nodes in spec order and build a name→idx map.
         //    Sources are NOT in the nodes vec — they become GraphSources.
@@ -1518,7 +1517,7 @@ impl BuiltTopology {
         }
 
         // Build-time record-cache wiring (see `wire_record_caches`): a no-op when
-        // `cache_max_bytes == 0` (TopologyTestDriver) or no store is marked.
+        // the budget is zero (TopologyTestDriver) or no store is marked.
         let (cache, cache_owner) =
             self.wire_record_caches(&mut store_registry, &name_to_idx, cache_max_bytes);
 
@@ -1550,23 +1549,21 @@ impl BuiltTopology {
     /// hook), and root its forwarded changes at the materializing node.
     ///
     /// Returns the populated `ThreadCache` and the `store name → owning node
-    /// index` map for `Graph::flush_caches`. With `cache_max_bytes == 0`
+    /// index` map for `Graph::flush_caches`. With a zero budget
     /// (`TopologyTestDriver`) or no marked stores, the cache stays empty and the
     /// owner map is empty, so every store stays uncached (goldens unchanged).
     fn wire_record_caches(
         &self,
         store_registry: &mut crate::store::registry::StoreRegistry,
         name_to_idx: &HashMap<&str, usize>,
-        cache_max_bytes: i64,
+        cache_max_bytes: ByteSize,
     ) -> (
         crate::store::cache::thread::ThreadCache,
         HashMap<String, usize>,
     ) {
-        let mut cache = crate::store::cache::thread::ThreadCache::new(
-            usize::try_from(cache_max_bytes.max(0)).unwrap_or(0),
-        );
+        let mut cache = crate::store::cache::thread::ThreadCache::new(cache_max_bytes);
         let mut cache_owner: HashMap<String, usize> = HashMap::new();
-        if cache_max_bytes <= 0 {
+        if cache_max_bytes <= ByteSize::ZERO {
             return (cache, cache_owner);
         }
         for store_name in &self.caching_stores {
@@ -1760,7 +1757,7 @@ mod tests {
         let mut g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
-            0,
+            ByteSize::ZERO,
         ))
         .unwrap();
         pollster::block_on(g.pipe("in", Some(b"k"), b"hi", 0)).unwrap();
@@ -1874,7 +1871,7 @@ mod tests {
         let mut g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
-            0,
+            ByteSize::ZERO,
         ))
         .unwrap();
         pollster::block_on(g.pipe("in", None, b"hi", 0)).unwrap();
@@ -1917,7 +1914,7 @@ mod tests {
         let mut g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
-            0,
+            ByteSize::ZERO,
         ))
         .unwrap();
         pollster::block_on(g.pipe("in", None, b"x", 0)).unwrap();
@@ -2018,7 +2015,7 @@ mod tests {
         let mut g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
-            1024,
+            kibibytes(1),
         ))
         .unwrap();
         check!(g.cache_owner.get("counts") == Some(&0));
@@ -2050,7 +2047,7 @@ mod tests {
         let mut g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
-            0,
+            ByteSize::ZERO,
         ))
         .unwrap();
         check!(g.cache_owner.is_empty());
@@ -2071,7 +2068,7 @@ mod tests {
         let g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
-            1024,
+            kibibytes(1),
         ))
         .unwrap();
         check!(g.cache_owner.is_empty());
@@ -2088,7 +2085,7 @@ mod tests {
             "vstore",
             StringSerde,
             I64Serde,
-            600_000,
+            minutes(10),
             [proc.name()],
         );
         t.add_sink("out", "out-topic", [&proc]);
@@ -2099,7 +2096,7 @@ mod tests {
             blob.contains("min.compaction.lag.ms"),
             "min.compaction.lag.ms key not in wire"
         );
-        // history_retention_ms=600_000 → min_compaction_lag_ms = 600_000 + 86_400_000 = 87_000_000
+        // history_retention = 10m -> min.compaction.lag.ms = 600_000 + 86_400_000 = 87_000_000
         check!(blob.contains("87000000"), "lag value not in wire");
     }
 
@@ -2109,7 +2106,7 @@ mod tests {
         // retention basis of `2 * timeDifferenceMs` but a TRUE window size of
         // `1 * timeDifferenceMs`. The flushed `Windowed` key end must be
         // `start + windowSize`, NOT `start + retentionBasis`. Before the fix the
-        // factory fed `size_ms` (the retention basis) to `WindowBytesStore::new`,
+        // factory fed the retention basis to `WindowBytesStore::new`,
         // so the end was doubled (this asserts `end == 10`, which would be `20`).
         use std::sync::{Arc, Mutex};
 
@@ -2127,10 +2124,16 @@ mod tests {
             },
         };
 
-        const D: i64 = 10;
+        const D: Time = millis(10);
         let mut t = Topology::new();
-        // size_ms = 2*D (retention basis), window_size_ms = D (true window size).
-        t.add_window_store::<String, i64, _, _>("sw", StringSerde, I64Serde, (D * 2, D, 0), ["p"]);
+        // The retention basis is 2*D; the true window size (the key end) is D.
+        t.add_window_store::<String, i64, _, _>(
+            "sw",
+            StringSerde,
+            I64Serde,
+            (D * 2.0, D, Time::ZERO),
+            ["p"],
+        );
 
         // Pull the registered factory and instantiate the store over a fresh backend.
         let (_changelog, factory) = t.store_factories.get("sw").expect("factory registered");
@@ -2165,7 +2168,13 @@ mod tests {
             .unwrap();
         assert_eq!(key.key, "a");
         // end == start + window_size (D), NOT start + retention basis (2*D).
-        assert_eq!(key.window, Window { start: 0, end: D });
+        check!(
+            key.window
+                == Window {
+                    start: 0,
+                    end: D.millis_i64()
+                }
+        );
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
         assert_eq!(change.new, Some(1));
     }

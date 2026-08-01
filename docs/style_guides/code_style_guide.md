@@ -230,6 +230,23 @@ Guidance:
 
 **Don't newtype for its own sake.** A value used in a single place, where no other same-typed value is in scope to confuse it with, does not need a wrapper — `struct X(i32)` around a lone loop counter is noise. The test is whether a *mix-up is possible and would be a bug*, not whether a primitive appears.
 
+## Dimensioned Values
+
+A newtype separates two values that share a primitive. It does nothing about a value whose *unit* is wrong: `session_timeout_ms` and `retention_ms` are both durations, and a newtype for each still lets seconds be stored where milliseconds were meant.
+
+**A magnitude with a unit is a `crabka-units` quantity, not a bare number.** Sizes are `ByteSize`, throughputs are `ByteRate`, timeouts and intervals and retention windows are `Time`, event rates are `Frequency`, fractions are `Ratio`. These are [`uom`](https://docs.rs/uom) quantities, so unit conversion is a method call rather than a hand-written `* 1024`, and arithmetic across dimensions is checked — `ByteSize / Time` is a `ByteRate` and nothing else.
+
+```rust
+use crabka_units::prelude::*;
+
+let quota: ByteRate = mebibytes_per_sec(10);
+let drain: Time = quota.time_to_transfer(mebibytes(50));
+```
+
+The same two exceptions apply as for newtypes, plus one more. The **generated wire codec stays raw**; convert at the hand-written boundary with the extension traits in `crabka_units::convert`. **Instants are not magnitudes** — an offset, an epoch, or an epoch-milliseconds timestamp is a coordinate and stays a `crabka-ids` newtype; `Time` is always an *extent*. And **dimensionless counts stay integers**: a partition count or a retry budget has no unit to get wrong.
+
+Drop the unit from the name once the type carries it — `fetch_max_bytes: i32` becomes `fetch_max: ByteSize`. Keep the suffix only where the name mirrors a Kafka config key or wire field that is still a raw integer. See [`docs/uom-adoption.md`](../uom-adoption.md).
+
 ## Feature Flags
 
 Crabka is not `no_std` — the broker and services run on `std`, and the client crates target `std` hosts. Two portability constraints do exist and must be preserved: `crabka-voters` (and the `crabka-playground` consensus demo built on it) is kept crypto-free so the consensus core compiles to WebAssembly. Don't pull `std`-only or native-only dependencies into those crates.

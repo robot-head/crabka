@@ -32,6 +32,7 @@ use crabka_object_store::{
     DEFAULT_MULTIPART_CHUNK_SIZE, DEFAULT_MULTIPART_THRESHOLD, ObjectOps, ObjectStoreClient,
     ObjectStoreConfig, ObjectStoreError, S3Config, build_object_store,
 };
+use crabka_units::prelude::{ByteSize, ByteSizeExt as _};
 use object_store::{GetRange, ObjectStore, path::Path as ObjectPath};
 use tracing::instrument;
 
@@ -53,9 +54,17 @@ pub struct S3RemoteStorage {
     /// multiple Crabka clusters share a bucket safely.
     prefix: Option<String>,
     /// File-size threshold above which uploads switch to S3 multipart.
-    multipart_threshold: u64,
+    multipart_threshold: ByteSize,
     /// Per-part size used by the multipart path.
-    multipart_chunk_size: usize,
+    multipart_chunk_size: ByteSize,
+}
+
+/// Lift a raw byte count from [`crabka_object_store`]'s config layer, which
+/// still speaks primitives, into the dimensioned domain. Saturates rather than
+/// wrapping — a `usize` above `u64::MAX` cannot occur on any target Crabka
+/// builds for.
+pub(crate) fn size_from_usize(bytes: usize) -> ByteSize {
+    ByteSize::from_bytes(u64::try_from(bytes).unwrap_or(u64::MAX))
 }
 
 impl std::fmt::Debug for S3RemoteStorage {
@@ -78,8 +87,8 @@ impl S3RemoteStorage {
         Self {
             ops: ObjectStoreClient::new(store),
             prefix,
-            multipart_threshold: DEFAULT_MULTIPART_THRESHOLD,
-            multipart_chunk_size: DEFAULT_MULTIPART_CHUNK_SIZE,
+            multipart_threshold: ByteSize::from_bytes(DEFAULT_MULTIPART_THRESHOLD),
+            multipart_chunk_size: size_from_usize(DEFAULT_MULTIPART_CHUNK_SIZE),
         }
     }
 
@@ -87,7 +96,7 @@ impl S3RemoteStorage {
     /// chaining. Tests use this to force the multipart path on small
     /// fixtures; production typically leaves the defaults alone.
     #[must_use]
-    pub fn with_multipart_tuning(mut self, threshold: u64, chunk_size: usize) -> Self {
+    pub fn with_multipart_tuning(mut self, threshold: ByteSize, chunk_size: ByteSize) -> Self {
         self.multipart_threshold = threshold;
         self.multipart_chunk_size = chunk_size;
         self
@@ -103,8 +112,12 @@ impl S3RemoteStorage {
     pub fn from_s3_config(cfg: &S3Config) -> Result<Self, RemoteStorageError> {
         let store = build_object_store(&ObjectStoreConfig::S3(cfg.clone()))
             .map_err(|e| RemoteStorageError::InvalidArgument(e.to_string()))?;
-        Ok(Self::with_store(store, cfg.prefix.clone())
-            .with_multipart_tuning(cfg.multipart_threshold, cfg.multipart_chunk_size))
+        Ok(
+            Self::with_store(store, cfg.prefix.clone()).with_multipart_tuning(
+                ByteSize::from_bytes(cfg.multipart_threshold),
+                size_from_usize(cfg.multipart_chunk_size),
+            ),
+        )
     }
 
     fn segment_key(&self, metadata: &RemoteLogSegmentMetadata, suffix: &str) -> ObjectPath {
@@ -173,8 +186,9 @@ impl RemoteStorageManager for S3RemoteStorage {
         metadata: &RemoteLogSegmentMetadata,
         data: &LogSegmentData,
     ) -> Result<Option<CustomMetadata>, RemoteStorageError> {
-        let threshold = self.multipart_threshold;
-        let chunk_size = self.multipart_chunk_size;
+        // `ObjectOps` is a primitive-typed substrate: hand it raw counts.
+        let threshold = self.multipart_threshold.bytes_u64();
+        let chunk_size = self.multipart_chunk_size.bytes_usize();
         Self::block_os(self.ops.put_from_path(
             &self.log_key(metadata),
             &data.log_segment,
@@ -324,6 +338,7 @@ mod tests {
     use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_ids::LeaderEpoch;
+    use crabka_units::prelude::{kibibytes, mebibytes};
     use object_store::memory::InMemory;
     use tempfile::TempDir;
     use uuid::Uuid;
@@ -335,6 +350,30 @@ mod tests {
 
     fn rsm(prefix: Option<&str>) -> S3RemoteStorage {
         S3RemoteStorage::with_store(Arc::new(InMemory::new()), prefix.map(str::to_string))
+    }
+
+    /// The multipart tunables cross two seams: in from
+    /// [`crabka_object_store`]'s primitive config, and back out to the
+    /// primitive-typed `ObjectOps` substrate. Both must be lossless for every
+    /// size the config can express, so a mis-scaled conversion (a stray
+    /// `* 1024`) cannot silently change when a segment switches to multipart.
+    #[test]
+    fn multipart_tuning_round_trips_through_the_primitive_seams() {
+        let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), None);
+        check!(store.multipart_threshold.bytes_u64() == DEFAULT_MULTIPART_THRESHOLD);
+        check!(store.multipart_chunk_size.bytes_usize() == DEFAULT_MULTIPART_CHUNK_SIZE);
+
+        let tuned = store.with_multipart_tuning(mebibytes(64), kibibytes(512));
+        check!(tuned.multipart_threshold.bytes_u64() == 64 * 1024 * 1024);
+        check!(tuned.multipart_chunk_size.bytes_usize() == 512 * 1024);
+    }
+
+    /// `usize::MAX` has no `u64` image on a hypothetical 128-bit target; the
+    /// lift saturates rather than wrapping to a tiny chunk size.
+    #[test]
+    fn size_from_usize_saturates_instead_of_wrapping() {
+        check!(size_from_usize(0).bytes_usize() == 0);
+        check!(size_from_usize(usize::MAX).bytes_usize() == usize::MAX);
     }
 
     #[test]
@@ -567,13 +606,12 @@ mod tests {
     async fn put_path_uses_multipart_above_threshold_and_round_trips() {
         // 100 KiB segment, 8 KiB threshold → multipart, 4 KiB chunks
         // → 25 parts (last one full, no tail).
-        const SEG_LEN: usize = 100 * 1024;
-        const CHUNK: usize = 4 * 1024;
+        let seg_len = kibibytes(100).bytes_usize();
         let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), None)
-            .with_multipart_tuning(8 * 1024, CHUNK);
+            .with_multipart_tuning(kibibytes(8), kibibytes(4));
         let src = TempDir::new().unwrap();
         let md = sample_metadata(40);
-        let log_path = write_log_segment(src.path(), SEG_LEN);
+        let log_path = write_log_segment(src.path(), seg_len);
         let data = LogSegmentData {
             log_segment: log_path,
             offset_index: write_file(src.path(), "00.index", b"OFFSET-IDX"),
@@ -585,7 +623,7 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             store.copy_log_segment_data(&md, &data).unwrap();
             let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
-            assert!(fetched.len() == SEG_LEN);
+            assert!(fetched.len() == seg_len);
             for (i, b) in fetched.iter().enumerate() {
                 assert!(*b == u8::try_from(i % 251).unwrap(), "byte mismatch at {i}");
             }
@@ -601,13 +639,13 @@ mod tests {
     /// dropped from the uploaded object).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn multipart_flushes_partial_tail_chunk() {
-        const CHUNK: usize = 4 * 1024;
-        const SEG_LEN: usize = 3 * CHUNK + 137; // 3 full parts + tail
+        let chunk = kibibytes(4);
+        let seg_len = 3 * chunk.bytes_usize() + 137; // 3 full parts + tail
         let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), None)
-            .with_multipart_tuning(1024, CHUNK);
+            .with_multipart_tuning(kibibytes(1), chunk);
         let src = TempDir::new().unwrap();
         let md = sample_metadata(41);
-        let log_path = write_log_segment(src.path(), SEG_LEN);
+        let log_path = write_log_segment(src.path(), seg_len);
         let data = LogSegmentData {
             log_segment: log_path,
             offset_index: write_file(src.path(), "00.index", b"OFFSET-IDX"),
@@ -619,9 +657,9 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             store.copy_log_segment_data(&md, &data).unwrap();
             let fetched = store.fetch_log_segment(&md, 0, None).unwrap();
-            assert!(fetched.len() == SEG_LEN);
+            assert!(fetched.len() == seg_len);
             assert!(
-                fetched.last().copied() == Some(u8::try_from((SEG_LEN - 1) % 251).unwrap()),
+                fetched.last().copied() == Some(u8::try_from((seg_len - 1) % 251).unwrap()),
                 "tail byte was dropped"
             );
         })
@@ -638,7 +676,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn put_path_stays_on_single_put_below_threshold() {
         let store = S3RemoteStorage::with_store(Arc::new(InMemory::new()), None)
-            .with_multipart_tuning(1024 * 1024, 4 * 1024);
+            .with_multipart_tuning(mebibytes(1), kibibytes(4));
         let src = TempDir::new().unwrap();
         let md = sample_metadata(42);
         let log_path = write_log_segment(src.path(), 10); // ten bytes, well under 1 MiB

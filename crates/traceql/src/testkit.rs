@@ -2,6 +2,8 @@
 
 use std::{fmt::Write as _, fs, path::Path, sync::Arc};
 
+use crabka_units::{Time, convert::TimeExt as _};
+
 use crate::{AttrValue, EngineOpts, InMemorySpanStore, InputSpan, SearchResponse, TraceqlEngine};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -438,7 +440,7 @@ fn span(
         name: name.into(),
         kind: 0,
         start_unix_nano: 1_000 + i64::from(id),
-        duration_nanos,
+        duration: Time::from_nanos(duration_nanos),
         status_code: 0,
         status_message: String::new(),
         instrumentation_name: String::new(),
@@ -454,6 +456,7 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use assert2::assert;
+    use crabka_units::nanos;
 
     use super::*;
 
@@ -549,7 +552,7 @@ query: { .svc = "x" }
                 name: "child".into(),
                 kind: 0,
                 start_unix_nano: 1_002,
-                duration_nanos: 123,
+                duration: nanos(123),
                 status_code: 0,
                 status_message: String::new(),
                 instrumentation_name: String::new(),

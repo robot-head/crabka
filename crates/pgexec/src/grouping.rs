@@ -374,7 +374,7 @@ fn augmented_rows(
             }
             augmented.push(Datum::Int4(set_ordinal(ordinal)?));
             bytes = bytes.saturating_add(crate::scanner::datum_row_bytes(&augmented));
-            if bytes > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+            if crate::scanner::exceeds_query_memory(bytes, crate::scanner::BLOCKING_QUERY_MEMORY) {
                 return Err(crate::scanner::memory_budget_exceeded());
             }
             out.push(augmented);

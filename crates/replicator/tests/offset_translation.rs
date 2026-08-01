@@ -5,7 +5,7 @@
 
 mod common;
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use crabka_replicator::{
     config::{ClusterConfig, Delivery, FlowConfig, NamingPolicy, ReplicatorConfig, Selectors},
@@ -16,6 +16,7 @@ use crabka_replicator::{
     supervisor::FlowSupervisor,
     tasks::checkpoint::{CheckpointParams, run_once},
 };
+use crabka_units::prelude::secs;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn offset_translation_never_skips_unreplicated_data() {
@@ -68,13 +69,7 @@ async fn offset_translation_never_skips_unreplicated_data() {
     let sup = FlowSupervisor::run(config).await.expect("supervisor start");
 
     // Wait until all 50 records land in the target's replicated topic.
-    common::await_count(
-        &target.bootstrap,
-        "us-east.orders",
-        50,
-        Duration::from_secs(30),
-    )
-    .await;
+    common::await_count(&target.bootstrap, "us-east.orders", 50, secs(30)).await;
 
     // ------------------------------------------ commit consumer group on source
     // Group "analytics" reads and commits all 50 records on the source.

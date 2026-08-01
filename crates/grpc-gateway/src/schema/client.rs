@@ -7,8 +7,9 @@
 //! - `by_subject_latest` — schema-id of the latest version per subject, with
 //!   a TTL so topology changes are picked up within a bounded window.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use crabka_units::prelude::*;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -29,7 +30,7 @@ pub struct SchemaRegistryClient {
     pub by_id: DashMap<i32, (String, SchemaFormat)>,
     /// Cache: subject → (latest schema-id, fetched-at timestamp for TTL).
     pub by_subject_latest: DashMap<String, (i32, Instant)>,
-    latest_cache_ttl: Duration,
+    latest_cache_ttl: Time,
 }
 
 // ── Confluent wire shapes ────────────────────────────────────────────────────
@@ -104,9 +105,7 @@ impl SchemaRegistryClient {
     pub fn new(base_url: &str) -> Result<Self, CodecError> {
         Self::new_with_policy(
             base_url,
-            Duration::from_millis(
-                GatewayRuntimeConfig::default().schema_registry_latest_cache_ttl_ms,
-            ),
+            GatewayRuntimeConfig::default().schema_registry_latest_cache_ttl,
         )
     }
 
@@ -114,7 +113,7 @@ impl SchemaRegistryClient {
     ///
     /// # Errors
     /// Returns an error when `base_url` is invalid.
-    pub fn new_with_policy(base_url: &str, latest_cache_ttl: Duration) -> Result<Self, CodecError> {
+    pub fn new_with_policy(base_url: &str, latest_cache_ttl: Time) -> Result<Self, CodecError> {
         let base = Url::parse(base_url)
             .map_err(|e| CodecError::Registry(format!("invalid schema registry URL: {e}")))?;
         let http = reqwest::Client::new();
@@ -239,7 +238,7 @@ impl SchemaRegistryClient {
         // Check cache: if the subject entry is fresh AND by_id has the schema, return it.
         if let Some(entry) = self.by_subject_latest.get(subject) {
             let (cached_id, fetched_at) = *entry;
-            if fetched_at.elapsed() < self.latest_cache_ttl
+            if fetched_at.elapsed().as_time() < self.latest_cache_ttl
                 && let Some(schema_entry) = self.by_id.get(&cached_id)
             {
                 let (schema, fmt) = schema_entry.clone();
@@ -529,17 +528,16 @@ mod tests {
         });
 
         rt.block_on(async {
-            let short =
-                SchemaRegistryClient::new_with_policy(&base_url, Duration::from_millis(1)).unwrap();
+            let short = SchemaRegistryClient::new_with_policy(&base_url, millis(1)).unwrap();
             short.latest("short-value").await.unwrap();
-            tokio::time::sleep(Duration::from_millis(5)).await;
+            tokio::time::sleep(millis(5).to_std()).await;
             short.latest("short-value").await.unwrap();
-            assert!(matches!(requests.load(Ordering::SeqCst), 2));
+            assert2::check!(requests.load(Ordering::SeqCst) == 2);
 
-            let long = SchemaRegistryClient::new_with_policy(&base_url, Duration::MAX).unwrap();
+            let long = SchemaRegistryClient::new_with_policy(&base_url, days(365)).unwrap();
             long.latest("long-value").await.unwrap();
             long.latest("long-value").await.unwrap();
-            assert!(matches!(requests.load(Ordering::SeqCst), 3));
+            assert2::check!(requests.load(Ordering::SeqCst) == 3);
         });
     }
 }

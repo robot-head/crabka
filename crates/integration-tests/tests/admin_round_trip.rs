@@ -59,7 +59,7 @@ async fn admin_round_trip_create_alter_delete() {
                 replicas: 1,
                 configs,
             }],
-            5_000,
+            crabka_units::secs(5),
         )
         .await
         .unwrap();
@@ -80,7 +80,7 @@ async fn admin_round_trip_create_alter_delete() {
                 name: "foo".into(),
                 new_total_count: 5,
             }],
-            5_000,
+            crabka_units::secs(5),
         )
         .await
         .unwrap();
@@ -154,7 +154,10 @@ async fn admin_round_trip_create_alter_delete() {
     assert2::assert!(!still_has_retention);
 
     // 8. Delete the topic.
-    let outcomes = admin.delete_topics(&["foo"], 5_000).await.unwrap();
+    let outcomes = admin
+        .delete_topics(&["foo"], crabka_units::secs(5))
+        .await
+        .unwrap();
     assert2::assert!(outcomes[0].error.is_none());
     // Bounded poll until metadata no longer reports `foo` as a live topic
     // (either absent entirely, or present but error-marked as unknown).

@@ -52,6 +52,7 @@ crabka-remote-storage-topic = { version = "0.3.8", path = "../remote-storage-top
 crabka-object-store = { version = "0.3.8", path = "../object-store" }
 crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-throttle = { version = "0.3.8", path = "../throttle" }
+crabka-units = { workspace = true }
 crabka-security.workspace = true
 qubit-clock = { workspace = true, features = ["tokio"] }
 arc-swap.workspace = true

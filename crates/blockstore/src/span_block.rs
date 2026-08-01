@@ -10,6 +10,7 @@ use arrow::{
     datatypes::{DataType, Field, Fields, Int32Type},
     record_batch::RecordBatch,
 };
+use crabka_units::prelude::*;
 
 use crate::{
     error::{BlockStoreError, Result},
@@ -38,10 +39,13 @@ pub struct SpanAttr {
 }
 
 /// One nested span event.
+///
+/// `time_since_start` is an offset from the owning span's start, so it is an
+/// extent rather than an instant; the span's start itself stays a raw stamp.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpanEvent {
     pub name: String,
-    pub time_since_start_nano: i64,
+    pub time_since_start: Time,
     pub attrs: Vec<(String, String)>,
 }
 
@@ -64,11 +68,11 @@ pub struct SpanRow {
     pub root_service_name: Option<String>,
     pub root_span_name: Option<String>,
     pub trace_start_unix_nano: i64,
-    pub trace_duration_nanos: i64,
+    pub trace_duration: Time,
     pub name: Option<String>,
     pub kind: SpanKind,
     pub start_unix_nano: i64,
-    pub duration_nanos: i64,
+    pub duration: Time,
     pub status_code: StatusCode,
     pub status_message: Option<String>,
     pub instrumentation_name: Option<String>,
@@ -223,11 +227,11 @@ impl SpanColumnBuilders {
             .append_option(row.root_service_name.as_deref());
         self.root_name.append_option(row.root_span_name.as_deref());
         self.trace_start.append_value(row.trace_start_unix_nano);
-        self.trace_dur.append_value(row.trace_duration_nanos);
+        self.trace_dur.append_value(row.trace_duration.nanos_i64());
         self.name.append_option(row.name.as_deref());
         self.kind.append_value(row.kind.as_i32());
         self.start.append_value(row.start_unix_nano);
-        self.dur.append_value(row.duration_nanos);
+        self.dur.append_value(row.duration.nanos_i64());
         self.status.append_value(row.status_code.as_i32());
         self.status_msg.append_option(row.status_message.as_deref());
         self.instrumentation_name
@@ -455,7 +459,7 @@ fn append_events(events: &mut ListBuilder<StructBuilder>, rows: &[SpanEvent]) {
             .append_value(&event.name);
         sb.field_builder::<Int64Builder>(1)
             .expect("event time builder")
-            .append_value(event.time_since_start_nano);
+            .append_value(event.time_since_start.nanos_i64());
         append_kv(sb, &event.attrs);
         sb.append(true);
     }
@@ -529,11 +533,11 @@ mod tests {
             root_service_name: Some("checkout".into()),
             root_span_name: Some("POST /pay".into()),
             trace_start_unix_nano: 1_000,
-            trace_duration_nanos: 500,
+            trace_duration: nanos(500),
             name: Some("db.query".into()),
             kind: SpanKind::Client,
             start_unix_nano: 1_100,
-            duration_nanos: 50,
+            duration: nanos(50),
             status_code: StatusCode::Error,
             status_message: Some("timeout".into()),
             instrumentation_name: Some("tracer".into()),
@@ -545,7 +549,7 @@ mod tests {
             }],
             events: vec![SpanEvent {
                 name: "exception".into(),
-                time_since_start_nano: 10,
+                time_since_start: nanos(10),
                 attrs: vec![("exception.type".into(), "IOError".into())],
             }],
             links: vec![SpanLink {
@@ -586,6 +590,56 @@ mod tests {
         assert2::assert!(tids.value(0) == [1_u8; 16].as_slice());
         assert2::assert!(kinds.value(0) == SpanKind::Client.as_i32());
         assert2::assert!(lefts.value(1) == 2);
+    }
+
+    #[test]
+    fn duration_columns_hold_exact_nanosecond_integers() {
+        // The block format stores nanoseconds as `Int64`. `SpanRow` carries the
+        // durations as `Time` now, so this pins that the encoded columns still
+        // hold the exact integers — down to a single nanosecond, and up to a
+        // magnitude far past any real span.
+        let mut row = sample_row(1, None, 1);
+        row.trace_duration = Time::from_nanos(9_007_199_254_740_991);
+        row.duration = nanos(1);
+        row.events = vec![SpanEvent {
+            name: "exception".into(),
+            time_since_start: Time::from_nanos(1_234_567_891),
+            attrs: vec![],
+        }];
+        let batch = encode_span_rows(&[row]).unwrap();
+
+        let int64 = |name: &str| {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0)
+        };
+        let events = batch
+            .column_by_name(crate::span_schema::SCOL_EVENTS)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .unwrap()
+            .value(0);
+        let event_time = events
+            .as_any()
+            .downcast_ref::<arrow::array::StructArray>()
+            .unwrap()
+            .column_by_name("time_since_start_nano")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap()
+            .value(0);
+
+        assert2::assert!(
+            int64(crate::span_schema::SCOL_TRACE_DURATION_NANOS) == 9_007_199_254_740_991
+        );
+        assert2::assert!(int64(crate::span_schema::SCOL_DURATION_NANOS) == 1);
+        assert2::assert!(event_time == 1_234_567_891);
     }
 
     fn row_with_attrs(attrs: Vec<SpanAttr>) -> SpanRow {

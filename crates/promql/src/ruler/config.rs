@@ -1,5 +1,7 @@
 use std::collections::BTreeMap;
 
+use crabka_units::prelude::*;
+
 use crate::PromqlError;
 
 pub(super) fn yaml_string_map(value: &serde_yaml::Value, key: &str) -> BTreeMap<String, String> {
@@ -17,28 +19,29 @@ pub(super) fn yaml_string_map(value: &serde_yaml::Value, key: &str) -> BTreeMap<
 }
 
 /// Parse a Prometheus duration for the given rule field, surfacing malformed
-/// values as a hard error to the caller. A missing field is `0` (no duration);
-/// an empty, negative, or otherwise unparseable value is rejected rather than
-/// silently coerced to `0` (which would make `for`/`interval` fire immediately).
-pub(super) fn yaml_duration_ms(value: &serde_yaml::Value, key: &str) -> Result<i64, PromqlError> {
+/// values as a hard error to the caller. A missing field is a zero extent (no
+/// duration); an empty, negative, or otherwise unparseable value is rejected
+/// rather than silently coerced to zero (which would make `for`/`interval` fire
+/// immediately).
+pub(super) fn yaml_duration(value: &serde_yaml::Value, key: &str) -> Result<Time, PromqlError> {
     match yaml_optional_string(value, key) {
-        Some(duration) => parse_duration_ms(&duration),
-        None => Ok(0),
+        Some(duration) => parse_duration(&duration),
+        None => Ok(Time::ZERO),
     }
 }
 
-/// Parse a Prometheus duration string into milliseconds.
+/// Parse a Prometheus duration string into a time extent.
 ///
 /// Supports the full Prometheus unit set (`ms`, `s`, `m`, `h`, `d`, `w`, `y`)
 /// and compound durations such as `1h30m`. Mirrors the conformance harness'
 /// `parse_duration_ms`. Empty, negative, or unparseable input is a hard error.
-pub(super) fn parse_duration_ms(duration: &str) -> Result<i64, PromqlError> {
+pub(super) fn parse_duration(duration: &str) -> Result<Time, PromqlError> {
     let src = duration.trim();
     if src.is_empty() {
         return Err(PromqlError::Exec("empty duration".into()));
     }
     if src == "0" {
-        return Ok(0);
+        return Ok(Time::ZERO);
     }
     if src.starts_with('-') {
         return Err(PromqlError::Exec(format!("negative duration `{src}`")));
@@ -79,7 +82,7 @@ pub(super) fn parse_duration_ms(duration: &str) -> Result<i64, PromqlError> {
             .ok_or_else(|| PromqlError::Exec(format!("duration overflow `{src}`")))?;
     }
 
-    Ok(total_ms)
+    Ok(Time::from_millis(total_ms))
 }
 
 pub(super) fn yaml_optional_string(value: &serde_yaml::Value, key: &str) -> Option<String> {

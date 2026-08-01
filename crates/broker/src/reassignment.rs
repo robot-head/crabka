@@ -308,7 +308,7 @@ mod tests {
     }
 
     async fn liveness(alive: &[u64]) -> ControllerLivenessState {
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in alive {
             l.record_heartbeat(*n).await;
         }

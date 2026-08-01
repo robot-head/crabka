@@ -17,6 +17,7 @@ use std::{
     fmt::{Arguments, Write},
 };
 
+use crabka_units::prelude::*;
 use plotly::{
     Bar, Layout, Plot, Scatter,
     common::{ErrorData, ErrorType, Line, Mode, Title},
@@ -27,7 +28,8 @@ use crate::{
     aggregate::{
         CellAgg, ScalarMetric, TsSeries, aggregate_cells, averaged_timeseries, scalar_metrics,
     },
-    numeric::to_f64,
+    ids::TimeOffsetMs,
+    numeric::mebibytes_f64,
     scenario::{RunOutput, Stack},
 };
 
@@ -132,7 +134,7 @@ pub fn render_web_fragment(tagged: &[(String, RunOutput)]) -> String {
 struct WebMetric {
     avg_key: &'static str,
     label: &'static str,
-    per_run: fn(&RunOutput) -> Vec<(u64, f64)>,
+    per_run: fn(&RunOutput) -> Vec<(TimeOffsetMs, f64)>,
 }
 
 fn web_metrics() -> Vec<WebMetric> {
@@ -143,7 +145,7 @@ fn web_metrics() -> Vec<WebMetric> {
             per_run: |r| {
                 r.samples
                     .iter()
-                    .map(|s| (u64::from(s.t_offset_ms), s.producer_msgs_per_sec))
+                    .map(|s| (s.t_offset_ms, s.producer_rate.per_sec_f64()))
                     .collect()
             },
         },
@@ -153,7 +155,7 @@ fn web_metrics() -> Vec<WebMetric> {
             per_run: |r| {
                 r.broker_samples
                     .iter()
-                    .map(|b| (u64::from(b.t_offset_ms), b.cpu_cores))
+                    .map(|b| (b.t_offset_ms, b.cpu_cores))
                     .collect()
             },
         },
@@ -163,12 +165,7 @@ fn web_metrics() -> Vec<WebMetric> {
             per_run: |r| {
                 r.broker_samples
                     .iter()
-                    .map(|b| {
-                        (
-                            u64::from(b.t_offset_ms),
-                            to_f64(b.mem_working_set_bytes) / 1_048_576.0,
-                        )
-                    })
+                    .map(|b| (b.t_offset_ms, mebibytes_f64(b.mem_working_set)))
                     .collect()
             },
         },
@@ -201,7 +198,7 @@ fn per_run_chart(
             if pts.is_empty() {
                 continue;
             }
-            let x: Vec<f64> = pts.iter().map(|(t, _)| to_f64(*t) / 1000.0).collect();
+            let x: Vec<f64> = pts.iter().map(|(t, _)| t.as_time().secs_f64()).collect();
             let y: Vec<f64> = pts.iter().map(|(_, v)| *v).collect();
             plot.add_trace(
                 Scatter::new(x, y)
@@ -222,7 +219,7 @@ fn per_run_chart(
             let x: Vec<f64> = series
                 .points
                 .iter()
-                .map(|p| to_f64(u64::from(p.t_offset_ms)) / 1000.0)
+                .map(|p| p.t_offset_ms.as_time().secs_f64())
                 .collect();
             let y: Vec<f64> = series.points.iter().map(|p| p.mean).collect();
             let n = series.points.iter().map(|p| p.n).max().unwrap_or(0);
@@ -303,7 +300,7 @@ fn timeseries_charts(ts: &[TsSeries]) -> String {
             let x: Vec<f64> = s
                 .points
                 .iter()
-                .map(|p| to_f64(u64::from(p.t_offset_ms)) / 1000.0)
+                .map(|p| p.t_offset_ms.as_time().secs_f64())
                 .collect();
             let y: Vec<f64> = s.points.iter().map(|p| p.mean).collect();
             plot.add_trace(
@@ -388,16 +385,16 @@ mod tests {
     fn run(
         stack: Stack,
         scenario: &str,
-        prod_mps: f64,
-        p99: f64,
+        producer_rate: Frequency,
+        p99: Time,
         samples: Vec<Sample>,
     ) -> RunOutput {
         RunOutput {
             scenario: Scenario {
                 name: scenario.into(),
                 mode_tag: ModeTag::Cluster,
-                msg_size_bytes: 100,
-                key_size_bytes: 0,
+                msg_size: bytes(100),
+                key_size: ByteSize::ZERO,
                 partitions: 100,
                 replication_factor: 3,
                 producers: 1,
@@ -405,10 +402,10 @@ mod tests {
                 mode: LoadMode::Saturate,
                 acks: Acks::Leader,
                 compression: Compression::None,
-                linger_ms: 5,
-                batch_size: 16384,
-                duration_s: 60,
-                warmup_s: 10,
+                linger: millis(5),
+                batch_size: kibibytes(16),
+                duration: secs(60),
+                warmup: secs(10),
                 failover: None,
             },
             stack,
@@ -420,18 +417,18 @@ mod tests {
             wallclock_start_unix_ms: WallclockMs(0),
             wallclock_end_unix_ms: WallclockMs(60_000),
             throughput: Throughput {
-                producer_msgs_per_sec: prod_mps,
+                producer_rate,
                 ..Throughput::default()
             },
-            producer_latency_ms: LatencyPercentiles {
-                p99_ms: p99,
+            producer_latency: LatencyPercentiles {
+                p99,
                 ..LatencyPercentiles::default()
             },
-            consumer_e2e_latency_ms: LatencyPercentiles::default(),
+            consumer_e2e_latency: LatencyPercentiles::default(),
             resource: Resource::default(),
             disturbance: None,
-            startup_ms: None,
-            first_ack_ms: 0,
+            startup: None,
+            first_ack: Time::ZERO,
             errors: vec![],
             notes: vec![],
             samples,
@@ -439,14 +436,14 @@ mod tests {
         }
     }
 
-    fn sample(t: u64, prod_mps: f64) -> Sample {
+    fn sample(t: u64, producer_rate: Frequency) -> Sample {
         Sample {
             t_offset_ms: TimeOffsetMs(t),
-            producer_msgs_per_sec: prod_mps,
-            consumer_msgs_per_sec: prod_mps * 0.9,
-            producer_p50_ms: 1.0,
-            producer_p99_ms: 4.0,
-            consumer_e2e_p99_ms: 7.0,
+            producer_rate,
+            consumer_rate: producer_rate * 0.9,
+            producer_p50: millis(1),
+            producer_p99: millis(4),
+            consumer_e2e_p99: millis(7),
         }
     }
 
@@ -456,19 +453,19 @@ mod tests {
             run(
                 Stack::Crabka,
                 "small-msg",
-                1000.0,
-                5.0,
-                vec![sample(0, 1000.0), sample(2000, 1100.0)],
+                per_sec(1000),
+                millis(5),
+                vec![sample(0, per_sec(1000)), sample(2000, per_sec(1100))],
             ),
             run(
                 Stack::Kafka,
                 "small-msg",
-                800.0,
-                7.0,
-                vec![sample(0, 800.0), sample(2000, 820.0)],
+                per_sec(800),
+                millis(7),
+                vec![sample(0, per_sec(800)), sample(2000, per_sec(820))],
             ),
-            run(Stack::Crabka, "fan-out", 500.0, 9.0, vec![]),
-            run(Stack::Kafka, "fan-out", 400.0, 11.0, vec![]),
+            run(Stack::Crabka, "fan-out", per_sec(500), millis(9), vec![]),
+            run(Stack::Kafka, "fan-out", per_sec(400), millis(11), vec![]),
         ];
         let html = render_html(&runs, "Crabka vs Strimzi");
 
@@ -501,24 +498,24 @@ mod tests {
     #[test]
     fn web_fragment_has_per_run_and_mean_for_cpu_mem_throughput() {
         use crate::scenario::BrokerSample;
-        let mk = |stack, prod: f64, cpu: f64, mem: u64| {
+        let mk = |stack, prod: Frequency, cpu: f64, mem: ByteSize| {
             let mut r = run(
                 stack,
                 "small-msg",
                 prod,
-                5.0,
+                millis(5),
                 vec![sample(0, prod), sample(2000, prod * 1.1)],
             );
             r.broker_samples = vec![
                 BrokerSample {
                     t_offset_ms: TimeOffsetMs(0),
                     cpu_cores: cpu,
-                    mem_working_set_bytes: mem,
+                    mem_working_set: mem,
                 },
                 BrokerSample {
                     t_offset_ms: TimeOffsetMs(2000),
                     cpu_cores: cpu,
-                    mem_working_set_bytes: mem,
+                    mem_working_set: mem,
                 },
             ];
             r
@@ -526,19 +523,19 @@ mod tests {
         let tagged = vec![
             (
                 "run01".to_string(),
-                mk(Stack::Crabka, 1000.0, 2.0, 300 * 1_048_576),
+                mk(Stack::Crabka, per_sec(1000), 2.0, mebibytes(300)),
             ),
             (
                 "run02".to_string(),
-                mk(Stack::Crabka, 1200.0, 2.2, 320 * 1_048_576),
+                mk(Stack::Crabka, per_sec(1200), 2.2, mebibytes(320)),
             ),
             (
                 "run01".to_string(),
-                mk(Stack::Kafka, 800.0, 3.5, 2000 * 1_048_576),
+                mk(Stack::Kafka, per_sec(800), 3.5, mebibytes(2000)),
             ),
             (
                 "run02".to_string(),
-                mk(Stack::Kafka, 820.0, 3.6, 2100 * 1_048_576),
+                mk(Stack::Kafka, per_sec(820), 3.6, mebibytes(2100)),
             ),
         ];
         let html = render_web_fragment(&tagged);

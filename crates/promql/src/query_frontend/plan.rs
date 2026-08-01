@@ -1,4 +1,5 @@
 use crabka_blockstore::QUERY_SHARD_LABEL;
+use crabka_units::prelude::*;
 use promql_parser::{
     label as prom_label,
     parser::{
@@ -19,7 +20,7 @@ use crate::{PromqlError, engine::MAX_RESOLUTION_POINTS, parse_promql};
 /// Plan query-frontend fan-out for a Prometheus range query.
 ///
 /// Time splitting happens first. Sub-range boundaries align to *absolute*
-/// multiples of `split_interval_ms` (Mimir-style): every evaluation timestamp
+/// multiples of `split_interval` (Mimir-style): every evaluation timestamp
 /// `start + n*step` is assigned to the absolute split window
 /// `floor(t / split_interval) * split_interval`, and the eval points falling in
 /// one window form one sub-range `[first_eval, last_eval]`. Eval points stay on
@@ -37,15 +38,15 @@ pub fn plan_range_query(
     query: &str,
     start_ms: i64,
     end_ms: i64,
-    step_ms: i64,
+    step: Time,
     opts: QueryFrontendOptions,
 ) -> Result<Vec<FrontendRangeQuery>, PromqlError> {
-    if step_ms <= 0 {
+    if step <= Time::ZERO {
         return Err(PromqlError::Plan(
             "query range step must be positive".into(),
         ));
     }
-    if opts.split_interval_ms <= 0 {
+    if opts.split_interval <= Time::ZERO {
         return Err(PromqlError::Plan(
             "query split interval must be positive".into(),
         ));
@@ -58,14 +59,15 @@ pub fn plan_range_query(
     if start_ms > end_ms {
         return Ok(Vec::new());
     }
-    check_range_resolution(start_ms, end_ms, step_ms)?;
+    check_range_resolution(start_ms, end_ms, step)?;
 
     let shard_count = if query_supports_frontend_sharding(query)? {
         opts.shard_count
     } else {
         1
     };
-    let split_interval = opts.split_interval_ms;
+    let split_interval_ms = opts.split_interval.millis_i64();
+    let step_ms = step.millis_i64();
     let mut subqueries = Vec::new();
     let mut eval = start_ms;
     // Track the open sub-range: the absolute window it belongs to plus the first
@@ -73,7 +75,7 @@ pub fn plan_range_query(
     let mut current: Option<(i64, i64, i64)> = None;
 
     while eval <= end_ms {
-        let window = absolute_split_window(eval, split_interval);
+        let window = absolute_split_window(eval, split_interval_ms);
         match current.as_mut() {
             Some((open_window, _, last)) if *open_window == window => {
                 *last = eval;
@@ -85,7 +87,7 @@ pub fn plan_range_query(
                         query,
                         range_start,
                         range_end,
-                        step_ms,
+                        step,
                         shard_count,
                     );
                 }
@@ -105,7 +107,7 @@ pub fn plan_range_query(
             query,
             range_start,
             range_end,
-            step_ms,
+            step,
             shard_count,
         );
     }
@@ -118,8 +120,9 @@ pub fn plan_range_query(
 /// (`(end - start) / step > maxResolution`, integer division, where
 /// `maxResolution` is [`MAX_RESOLUTION_POINTS`]). Enforced before the per-step
 /// fan-out so an abusive resolution errors instead of expanding into ~1e11
-/// sub-queries. `step_ms` is already validated positive by [`plan_range_query`].
-fn check_range_resolution(start_ms: i64, end_ms: i64, step_ms: i64) -> Result<(), PromqlError> {
+/// sub-queries. `step` is already validated positive by [`plan_range_query`].
+fn check_range_resolution(start_ms: i64, end_ms: i64, step: Time) -> Result<(), PromqlError> {
+    let step_ms = step.millis_i64();
     if step_ms <= 0 {
         return Ok(());
     }
@@ -328,7 +331,7 @@ fn push_sharded_subqueries(
     query: &str,
     start_ms: i64,
     end_ms: i64,
-    step_ms: i64,
+    step: Time,
     shard_count: usize,
 ) {
     if shard_count == 1 {
@@ -336,7 +339,7 @@ fn push_sharded_subqueries(
             query: query.to_string(),
             start_ms,
             end_ms,
-            step_ms,
+            step,
             shard: None,
         });
         return;
@@ -347,7 +350,7 @@ fn push_sharded_subqueries(
             query: query.to_string(),
             start_ms,
             end_ms,
-            step_ms,
+            step,
             shard: Some(QueryShard {
                 index,
                 total: shard_count,

@@ -12,6 +12,7 @@ use crabka_operator::{
     crd::{KafkaCondition, KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus},
     rebalancer_client::ProposalStatus,
 };
+use crabka_units::mebibytes_per_sec;
 use http::{Method, Request};
 use hyper::body::Bytes;
 
@@ -132,7 +133,7 @@ async fn approve_executes_and_enters_rebalancing() {
         .await;
 
     let mut kr = with_state(rebalance("demo"), "ProposalReady", Some("p1"));
-    kr.spec.throttle_bytes_per_sec = Some(52_428_800);
+    kr.spec.throttle_bytes_per_sec = Some(mebibytes_per_sec(50));
     let kr = annotate(kr, "approve");
     reconcile(Arc::new(kr), ctx).await.unwrap();
 
@@ -140,7 +141,7 @@ async fn approve_executes_and_enters_rebalancing() {
         fake.calls()
             == vec![RebalCall::ExecuteProposal {
                 id: "p1".into(),
-                throttle: Some(52_428_800),
+                throttle: Some(mebibytes_per_sec(50)),
             }]
     );
 

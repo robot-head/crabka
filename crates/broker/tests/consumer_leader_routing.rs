@@ -236,9 +236,9 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
         .bootstrap(bootstrap.clone())
         .client_id("routing-consumer-rf1")
         .group_id("routing-grp-rf1")
-        .session_timeout(Duration::from_secs(30))
-        .rebalance_timeout(Duration::from_secs(2))
-        .heartbeat_interval(Duration::from_secs(1))
+        .session_timeout(crabka_units::secs(30))
+        .rebalance_timeout(crabka_units::secs(2))
+        .heartbeat_interval(crabka_units::secs(1))
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .subscribe([topic.to_string()])
         .build()
@@ -248,7 +248,7 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
     let mut seen: HashSet<String> = HashSet::new();
     let deadline = Instant::now() + Duration::from_secs(30);
     while seen.len() < expected.len() && Instant::now() < deadline {
-        for r in consumer.poll(Duration::from_millis(300)).await.unwrap() {
+        for r in consumer.poll(crabka_units::millis(300)).await.unwrap() {
             seen.insert(String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned());
         }
     }

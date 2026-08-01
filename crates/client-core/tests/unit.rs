@@ -6,8 +6,6 @@
 //!
 //! Run with: `cargo test -p crabka-client-core --features mock --test unit`
 
-use std::time::Duration;
-
 use assert2::{assert, check};
 use bytes::BytesMut;
 use crabka_client_core::{ClientError, Connection, ConnectionOptions, MockBroker};
@@ -132,8 +130,8 @@ async fn timeout_when_handler_silent() {
     .await;
 
     let opts = ConnectionOptions {
-        connect_timeout: Duration::from_millis(200),
-        request_timeout: Duration::from_secs(30),
+        connect_timeout: crabka_units::millis(200),
+        request_timeout: crabka_units::secs(30),
         ..ConnectionOptions::default()
     };
 

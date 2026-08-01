@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use crabka_units::{Time, convert::TimeExt as _};
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
@@ -120,7 +121,7 @@ impl ControllerMetrics {
 
     /// Record one reconcile pass: bump the `{kind,result}` outcome counter and
     /// observe the pass duration against the `{kind}` histogram.
-    pub fn record_reconcile(&self, kind: &str, result: ReconcileResult, duration_secs: f64) {
+    pub fn record_reconcile(&self, kind: &str, result: ReconcileResult, duration: Time) {
         self.reconciliations
             .get_or_create(&ReconcileOutcomeLabels {
                 kind: kind.to_string(),
@@ -131,7 +132,7 @@ impl ControllerMetrics {
             .get_or_create(&KindLabel {
                 kind: kind.to_string(),
             })
-            .observe(duration_secs);
+            .observe(duration.secs_f64());
     }
 
     /// Set the `managed_resources{kind}` gauge to `count`.
@@ -180,6 +181,7 @@ pub fn new_registry_with_metrics() -> (Registry, ControllerMetrics) {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::millis;
 
     use super::*;
 
@@ -203,9 +205,9 @@ mod tests {
     #[test]
     fn controller_metrics_register_and_encode() {
         let (registry, metrics) = new_registry_with_metrics();
-        metrics.record_reconcile("Kafka", ReconcileResult::Ok, 0.42);
-        metrics.record_reconcile("Kafka", ReconcileResult::Error, 0.1);
-        metrics.record_reconcile("KafkaTopic", ReconcileResult::Requeue, 0.01);
+        metrics.record_reconcile("Kafka", ReconcileResult::Ok, Time::from_secs_f64(0.42));
+        metrics.record_reconcile("Kafka", ReconcileResult::Error, millis(100));
+        metrics.record_reconcile("KafkaTopic", ReconcileResult::Requeue, millis(10));
         metrics.set_managed_resources("Kafka", 3);
 
         let mut s = String::new();
@@ -233,8 +235,8 @@ mod tests {
     fn controller_metrics_handles_clone_share_state() {
         let (_registry, metrics) = new_registry_with_metrics();
         let cloned = metrics.clone();
-        cloned.record_reconcile("Kafka", ReconcileResult::Ok, 0.01);
-        cloned.record_reconcile("Kafka", ReconcileResult::Ok, 0.02);
+        cloned.record_reconcile("Kafka", ReconcileResult::Ok, millis(10));
+        cloned.record_reconcile("Kafka", ReconcileResult::Ok, millis(20));
         // Increments on the clone are visible through the original handle
         // (Family entries are Arc-backed).
         let n = metrics

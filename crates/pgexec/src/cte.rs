@@ -476,7 +476,7 @@ fn check_recursive_term_types(
 
 fn accumulate(bytes: usize, row: &[Datum]) -> Result<usize, ExecError> {
     let bytes = bytes.saturating_add(crate::scanner::datum_row_bytes(row));
-    if bytes > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+    if crate::scanner::exceeds_query_memory(bytes, crate::scanner::BLOCKING_QUERY_MEMORY) {
         return Err(crate::scanner::memory_budget_exceeded());
     }
     Ok(bytes)

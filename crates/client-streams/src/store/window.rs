@@ -7,6 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use crabka_units::prelude::*;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
@@ -104,11 +105,11 @@ pub struct WindowBytesStore<K, V> {
     value_serde: Box<dyn Serde<V>>,
     changelog: Vec<(Bytes, Option<Bytes>)>,
     logging: bool,
-    /// Window size in ms. The windowed store-key bytes encode only the window
-    /// START (and seqnum), not the size/end, so the store must know its size to
-    /// reconstruct `end = start + window_size_ms` for the downstream
+    /// Window size. The windowed store-key bytes encode only the window START
+    /// (and seqnum), not the size/end, so the store must know its size to
+    /// reconstruct `end = start + window_size` for the downstream
     /// [`Windowed`](crate::dsl::windows::Windowed) key forwarded on cache flush.
-    window_size_ms: i64,
+    window_size: Time,
     /// Set via [`StateStore::set_record_context`]; attached to the next cached
     /// write so the deduped `Change` can be forwarded with the right context on
     /// flush. Only meaningful when `backing` is `Cached`.
@@ -123,7 +124,7 @@ impl<K: 'static, V: 'static> WindowBytesStore<K, V> {
         key_serde: Box<dyn Serde<K>>,
         value_serde: Box<dyn Serde<V>>,
         changelog_topic: String,
-        window_size_ms: i64,
+        window_size: Time,
     ) -> Self {
         Self {
             name,
@@ -133,7 +134,7 @@ impl<K: 'static, V: 'static> WindowBytesStore<K, V> {
             value_serde,
             changelog: Vec::new(),
             logging: true,
-            window_size_ms,
+            window_size,
             pending_ctx: None,
         }
     }
@@ -144,7 +145,7 @@ impl<K: 'static, V: 'static> WindowBytesStore<K, V> {
         key_serde: Box<dyn Serde<K>>,
         value_serde: Box<dyn Serde<V>>,
         changelog_topic: String,
-        window_size_ms: i64,
+        window_size: Time,
     ) -> Self {
         Self::new(
             name,
@@ -152,7 +153,7 @@ impl<K: 'static, V: 'static> WindowBytesStore<K, V> {
             key_serde,
             value_serde,
             changelog_topic,
-            window_size_ms,
+            window_size,
         )
     }
 
@@ -283,7 +284,7 @@ impl<K: Send + 'static, V: Send + 'static> StateStore for WindowBytesStore<K, V>
                     key,
                     window: Window {
                         start: window_start,
-                        end: window_start + self.window_size_ms,
+                        end: window_start + self.window_size.millis_i64(),
                     },
                 };
                 let change = Change { old, new };
@@ -542,7 +543,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
-            10,
+            millis(10),
         );
         s.put("k".to_string(), 0, 1, 5).await;
         s.put("k".to_string(), 0, 2, 7).await;
@@ -564,7 +565,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
-            10,
+            millis(10),
         );
         s.put("k".into(), 0, 10, 5).await; // window start 0, value 10, recordTs 5
         s.put("k".into(), 10, 20, 17).await; // window start 10, value 20, recordTs 17
@@ -579,7 +580,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
-            10,
+            millis(10),
         );
         // Two keys, three windows. windowStart ∈ {0, 0, 10}.
         s.put("a".into(), 0, 1, 5).await;
@@ -608,7 +609,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "w-changelog".into(),
-            1000,
+            secs(1),
         );
         s.put("a".into(), 0, 10, 5).await;
         s.put("a".into(), 1000, 20, 1005).await;
@@ -673,7 +674,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "w-changelog".into(),
-            1000,
+            secs(1),
         );
         s.put("a".into(), 0, 10, 5).await;
         s.put("a".into(), 1000, 20, 1005).await;
@@ -694,13 +695,13 @@ mod tests {
 
     // ── Record-cache tests (mirror kv.rs) ───────────────────────────────────
 
-    fn cached_store(window_size_ms: i64) -> WindowBytesStore<String, i64> {
+    fn cached_store(window_size: Time) -> WindowBytesStore<String, i64> {
         let mut s = WindowBytesStore::<String, i64>::in_memory(
             "w".into(),
             Box::new(StringSerde),
             Box::new(I64Serde),
             "w-changelog".into(),
-            window_size_ms,
+            window_size,
         );
         s.enable_cache(Arc::new(Mutex::new(NamedCache::new("w".into()))));
         s
@@ -717,7 +718,7 @@ mod tests {
 
     #[tokio::test]
     async fn cached_window_store_reads_your_writes() {
-        let mut s = cached_store(10);
+        let mut s = cached_store(millis(10));
         s.set_record_context(ctx_at(0));
         // Two cached puts to the SAME windowed key (window start 0).
         s.put("a".into(), 0, 1, 5).await;
@@ -734,7 +735,7 @@ mod tests {
             processors::change::Change,
             windows::{Window, Windowed},
         };
-        let mut s = cached_store(10);
+        let mut s = cached_store(millis(10));
         // Seed a committed value (flush it through + clear the changelog buffer).
         s.set_record_context(ctx_at(0));
         s.put("a".into(), 0, 1, 5).await;
@@ -802,10 +803,10 @@ mod tests {
             windows::{Window, Windowed},
         };
 
-        // D = 10 (the real sliding window size = time_difference_ms); the retention
-        // basis a sliding aggregate passes is 2*D = 20. The store's window_size_ms
-        // is the TRUE size (D = 10), which is what `add_window_store` now forwards.
-        const D: i64 = 10;
+        // D = 10ms (the real sliding window size = time_difference); the retention
+        // basis a sliding aggregate passes is 2*D = 20ms. The store's window size
+        // is the TRUE size (D), which is what `add_window_store` forwards.
+        const D: Time = millis(10);
         let mut s = cached_store(D);
 
         // Stage a cached put for a window starting at ws = 0.
@@ -829,7 +830,7 @@ mod tests {
             key.window,
             Window {
                 start: ws,
-                end: ws + D
+                end: ws + D.millis_i64()
             }
         );
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
@@ -841,7 +842,7 @@ mod tests {
     /// wins over a colliding inner window.
     #[tokio::test]
     async fn cached_window_store_fetch_overlays_cache() {
-        let mut s = cached_store(10);
+        let mut s = cached_store(millis(10));
         s.set_record_context(ctx_at(0));
         // Stage three windows for "a": starts 0, 10, 20.
         s.put("a".into(), 0, 1, 5).await;
@@ -869,7 +870,7 @@ mod tests {
     /// overlaying the cache across all keys.
     #[tokio::test]
     async fn cached_window_store_fetch_all_overlays_cache() {
-        let mut s = cached_store(10);
+        let mut s = cached_store(millis(10));
         s.set_record_context(ctx_at(0));
         s.put("a".into(), 0, 1, 5).await;
         s.put("b".into(), 50, 2, 55).await;
@@ -890,7 +891,7 @@ mod tests {
     /// dirty entry → an empty cache flush) and a `None` deletes through.
     #[tokio::test]
     async fn cached_window_store_apply_changelog_goes_below_cache() {
-        let mut s = cached_store(10);
+        let mut s = cached_store(millis(10));
         let sk = store_key(
             &StringSerde.serialize("w-changelog", &"a".to_string()),
             0,
@@ -914,7 +915,7 @@ mod tests {
     /// store and drops the buffered changelog.
     #[tokio::test]
     async fn cached_window_store_clear_empties_everything() {
-        let mut s = cached_store(10);
+        let mut s = cached_store(millis(10));
         s.set_record_context(ctx_at(0));
         s.put("a".into(), 0, 1, 5).await;
         StateStore::clear(&mut s).await;
@@ -934,7 +935,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "w-changelog".into(),
-            10,
+            millis(10),
         );
         assert!(!s.is_cached());
         s.enable_cache(Arc::new(Mutex::new(NamedCache::new("w".into()))));
@@ -952,7 +953,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "w-changelog".into(),
-            10,
+            millis(10),
         );
         s.put("a".into(), 0, 1, 5).await;
         assert_eq!(s.fetch_single(&"a".to_string(), 0).await, Some((5, 1)));
@@ -974,7 +975,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "w-changelog".into(),
-            10,
+            millis(10),
         );
         // Logging off → no changelog buffered.
         s.set_logging(false);

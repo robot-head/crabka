@@ -38,7 +38,7 @@ impl QuotaBuckets {
             return b.clone();
         }
         let b = Arc::new(TokenBucket::new());
-        b.set_rate(initial_rate);
+        b.set_byte_rate(super::bucket_rate(initial_rate));
         let entry = self
             .buckets
             .entry((quota_key.to_string(), entity_key.clone()))
@@ -71,7 +71,7 @@ impl QuotaBuckets {
 mod tests {
     use assert2::{assert, check};
 
-    use super::*;
+    use super::{super::bucket_rate, *};
 
     fn key(user: &str) -> EntityKey {
         vec![("user".into(), Some(user.into()))]
@@ -81,7 +81,7 @@ mod tests {
     fn get_or_create_returns_new_bucket_first_time() {
         let buckets = QuotaBuckets::new();
         let b = buckets.get_or_create("producer_byte_rate", &key("alice"), 1024);
-        assert!(b.rate() == 1024);
+        assert!(b.byte_rate() == bucket_rate(1024));
         assert!(buckets.len() == 1);
     }
 
@@ -92,7 +92,7 @@ mod tests {
         let b2 = buckets.get_or_create("producer_byte_rate", &key("alice"), 4096);
         // Same Arc — initial_rate on second call is ignored.
         check!(Arc::ptr_eq(&b1, &b2));
-        check!(b1.rate() == 1024);
+        check!(b1.byte_rate() == bucket_rate(1024));
         check!(buckets.len() == 1);
     }
 

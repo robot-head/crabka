@@ -6,6 +6,7 @@ use std::{
 use assert2::check;
 use crabka_blockstore::Labels;
 use crabka_metrics::{SamplePayload, WalRecord};
+use crabka_units::prelude::*;
 
 use crate::{EngineOpts, InMemoryMetricStore, PromqlEngine};
 
@@ -17,23 +18,23 @@ fn labels(metric: &str, job: &str) -> Labels {
 }
 
 #[test]
-fn parse_duration_ms_supports_all_units_and_compounds_and_rejects_bad_input() {
+fn parse_duration_supports_all_units_and_compounds_and_rejects_bad_input() {
     // Compound multi-unit durations, single-unit coverage across the full
-    // Prometheus unit set, and hard errors (`None`, never `0`) for negative,
-    // empty, and unparseable input.
-    for (input, want_ms) in [
-        ("1h30m", Some(5_400_000)),
-        ("100ms", Some(100)),
-        ("5s", Some(5_000)),
-        ("1w", Some(604_800_000)),
-        ("1y", Some(31_536_000_000)),
-        ("0", Some(0)),
+    // Prometheus unit set, and hard errors (`None`, never a zero extent) for
+    // negative, empty, and unparseable input.
+    for (input, want) in [
+        ("1h30m", Some(millis(5_400_000))),
+        ("100ms", Some(millis(100))),
+        ("5s", Some(secs(5))),
+        ("1w", Some(days(7))),
+        ("1y", Some(days(365))),
+        ("0", Some(Time::ZERO)),
         ("-5m", None),
         ("", None),
         ("5x", None),
         ("abc", None),
     ] {
-        assert2::assert!(super::parse_duration_ms(input).ok() == want_ms);
+        assert2::assert!(super::parse_duration(input).ok() == want);
     }
 }
 

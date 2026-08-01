@@ -5,13 +5,13 @@
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
-    time::Duration,
 };
 
 use crabka_client_core::{
     ClientError, ClientSecurity, Connection, ConnectionOptions, fetch_partition,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_units::prelude::*;
 use parking_lot::RwLock;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -28,18 +28,19 @@ pub struct StoreReader {
     pub applied_rx: watch::Receiver<i64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// `PartialEq` but not `Eq`: the quantities store `f64`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct ReaderPolicy {
-    retry_backoff: Duration,
-    fetch_max_wait_ms: i32,
-    fetch_max_bytes: i32,
+    retry_backoff: Time,
+    fetch_max_wait: Time,
+    fetch_max: ByteSize,
 }
 
 fn reader_policy(runtime: &RegistryRuntimeConfig) -> ReaderPolicy {
     ReaderPolicy {
-        retry_backoff: Duration::from_millis(runtime.store_reader_retry_backoff_ms),
-        fetch_max_wait_ms: runtime.store_reader_fetch_max_wait_ms,
-        fetch_max_bytes: runtime.store_reader_fetch_max_bytes,
+        retry_backoff: runtime.store_reader_retry_backoff,
+        fetch_max_wait: runtime.store_reader_fetch_max_wait,
+        fetch_max: runtime.store_reader_fetch_max,
     }
 }
 
@@ -66,11 +67,11 @@ fn resolve_bootstrap_addr(bootstrap: &str) -> Option<SocketAddr> {
         .find_map(|mut addrs| addrs.next())
 }
 
-async fn sleep_or_cancel(cancel: &CancellationToken, duration: Duration) -> bool {
+async fn sleep_or_cancel(cancel: &CancellationToken, duration: Time) -> bool {
     tokio::select! {
         biased;
         () = cancel.cancelled() => true,
-        () = tokio::time::sleep(duration) => false,
+        () = tokio::time::sleep(duration.to_std()) => false,
     }
 }
 
@@ -183,8 +184,8 @@ pub fn spawn(
                         topic_id,
                         0,
                         next,
-                        policy.fetch_max_wait_ms,
-                        policy.fetch_max_bytes,
+                        policy.fetch_max_wait,
+                        policy.fetch_max,
                     ) => {
                         match res {
                             Ok(records) => {
@@ -231,7 +232,7 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
-    use std::{io, time::Duration};
+    use std::io;
 
     use crabka_client_core::ClientError;
 
@@ -245,18 +246,18 @@ mod tests {
     #[test]
     fn reader_policy_uses_configured_runtime() {
         let runtime = RegistryRuntimeConfig {
-            store_reader_retry_backoff_ms: 333,
-            store_reader_fetch_max_wait_ms: 777,
-            store_reader_fetch_max_bytes: 2_097_152,
+            store_reader_retry_backoff: millis(333),
+            store_reader_fetch_max_wait: millis(777),
+            store_reader_fetch_max: mebibytes(2),
             ..RegistryRuntimeConfig::default()
         };
 
-        assert2::assert!(
+        assert2::check!(
             reader_policy(&runtime)
                 == ReaderPolicy {
-                    retry_backoff: Duration::from_millis(333),
-                    fetch_max_wait_ms: 777,
-                    fetch_max_bytes: 2_097_152,
+                    retry_backoff: millis(333),
+                    fetch_max_wait: millis(777),
+                    fetch_max: mebibytes(2),
                 }
         );
     }
@@ -294,7 +295,7 @@ mod tests {
             ),
             (
                 "timeout",
-                ClientError::Timeout(Duration::from_millis(1)),
+                ClientError::Timeout(crabka_units::millis(1)),
                 FetchErrorAction::Reconnect,
             ),
             (

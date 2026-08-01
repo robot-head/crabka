@@ -64,10 +64,7 @@ async fn consumer_record_carries_headers() {
         .await
         .unwrap();
     let recs = loop {
-        let r = consumer
-            .poll(std::time::Duration::from_secs(2))
-            .await
-            .unwrap();
+        let r = consumer.poll(crabka_units::secs(2)).await.unwrap();
         if !r.is_empty() {
             break r;
         }

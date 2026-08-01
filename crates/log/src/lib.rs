@@ -29,13 +29,14 @@
 //! use crabka_ids::Offset;
 //! use crabka_log::{Log, LogConfig};
 //! use crabka_protocol::records::RecordBatch;
+//! use crabka_units::prelude::mebibytes;
 //!
 //! let mut log = Log::open("/var/kafka/my-topic-0", LogConfig::default()).unwrap();
 //! let mut batch = RecordBatch::default();
 //! // ... fill the batch ...
 //! let assigned_offset = log.append(&mut batch).unwrap();
 //!
-//! let out = log.read(Offset(0), 1024 * 1024).unwrap();
+//! let out = log.read(Offset(0), mebibytes(1)).unwrap();
 //! # let _ = (assigned_offset, out);
 //! ```
 //! ## Exporting a segment

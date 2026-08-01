@@ -1,5 +1,7 @@
 //! Error type for the substrate durability layer.
 
+use crabka_units::{ByteSize, fmt::Human as _};
+
 /// Errors from WAL framing, journaling, and recovery.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -31,13 +33,14 @@ pub enum SubstrateError {
     Kv(#[from] crabka_pgkv::KvError),
     /// One operation cannot fit in the configured WAL frame size.
     #[error(
-        "WAL operation is too large: encoded length {encoded_len} exceeds frame limit {max_frame_bytes}"
+        "WAL operation is too large: encoded length {encoded_len} exceeds frame limit {}",
+        .max_frame_size.human()
     )]
     OversizedOperation {
         /// Encoded bytes needed by the single operation frame.
         encoded_len: usize,
-        /// Configured maximum frame size in bytes.
-        max_frame_bytes: usize,
+        /// Configured maximum frame size.
+        max_frame_size: ByteSize,
     },
     /// A WAL topic operation failed.
     #[error("WAL topic operation failed: {0}")]

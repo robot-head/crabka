@@ -9,13 +9,9 @@ pub mod phases;
 pub mod state;
 pub mod throttle;
 
-use std::{
-    fmt::Write as _,
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{fmt::Write as _, path::PathBuf, sync::Arc, time::Instant};
 
+use crabka_units::{ByteRate, Time, convert::TimeExt as _};
 use tokio::{sync::Mutex, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
@@ -41,9 +37,9 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct ExecutorConfig {
     pub data_dir: PathBuf,
-    pub default_throttle_bytes_per_sec: i64,
-    pub poll_interval: Duration,
-    pub execute_deadline: Duration,
+    pub default_throttle: ByteRate,
+    pub poll_interval: Time,
+    pub execute_deadline: Time,
     pub batch_size: usize,
 }
 
@@ -75,7 +71,7 @@ pub struct Execution<C: ClientFacade + ?Sized + 'static> {
     state: ExecutorState,
     proposal: Proposal,
     targets: ThrottleTargets,
-    throttle_bytes_per_sec: i64,
+    throttle: ByteRate,
     cancel: CancellationToken,
     starting_phase: Phase,
 }
@@ -86,7 +82,7 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
         client: Arc<C>,
         state: ExecutorState,
         proposal: Proposal,
-        throttle_bytes_per_sec: i64,
+        throttle: ByteRate,
         cancel: CancellationToken,
     ) -> Self {
         let targets = compute_throttle_targets(&proposal.movements);
@@ -95,7 +91,7 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
             state,
             proposal,
             targets,
-            throttle_bytes_per_sec,
+            throttle,
             cancel,
             starting_phase: Phase::ApplyThrottle,
         }
@@ -115,7 +111,7 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
             state,
             proposal,
             targets,
-            throttle_bytes_per_sec: in_flight.throttle_bytes_per_sec,
+            throttle: in_flight.throttle,
             cancel,
             starting_phase: in_flight.phase,
         }
@@ -277,12 +273,7 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
     }
 
     async fn do_apply_throttle(&self) -> Result<(), PhaseError> {
-        apply_throttle(
-            self.client.as_ref(),
-            &self.targets,
-            self.throttle_bytes_per_sec,
-        )
-        .await
+        apply_throttle(self.client.as_ref(), &self.targets, self.throttle).await
     }
 
     async fn do_submit(&self) -> Result<(), PhaseError> {
@@ -296,8 +287,8 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
 
     async fn do_wait(&self) -> WaitOutcome {
         let scope = partition_keys(&self.proposal.movements);
-        let mut ticker = tokio::time::interval(self.state.config.poll_interval);
-        let deadline = tokio::time::Instant::now() + self.state.config.execute_deadline;
+        let mut ticker = tokio::time::interval(self.state.config.poll_interval.to_std());
+        let deadline = tokio::time::Instant::now() + self.state.config.execute_deadline.to_std();
         loop {
             tokio::select! {
                 _ = ticker.tick() => {
@@ -337,7 +328,7 @@ impl<C: ClientFacade + ?Sized + 'static> Execution<C> {
             self.proposal.id.clone(),
             phase,
             self.proposal.started_at_ms,
-            self.throttle_bytes_per_sec,
+            self.throttle,
         );
         f.target_terminal_status = target;
         f.failure_reason = reason;
@@ -396,6 +387,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     use assert2::check;
+    use crabka_units::{millis, secs};
 
     use super::*;
     use crate::{
@@ -417,12 +409,15 @@ mod tests {
         panic!("condition never held: {what}");
     }
 
+    /// The binary's default KIP-73 replication throttle.
+    const DEFAULT_THROTTLE: ByteRate = crabka_units::bytes_per_sec(50_000_000);
+
     fn cfg(dir: &std::path::Path) -> ExecutorConfig {
         ExecutorConfig {
             data_dir: dir.to_path_buf(),
-            default_throttle_bytes_per_sec: 50_000_000,
-            poll_interval: Duration::from_millis(5),
-            execute_deadline: Duration::from_secs(5),
+            default_throttle: DEFAULT_THROTTLE,
+            poll_interval: millis(5),
+            execute_deadline: secs(5),
             batch_size: 200,
         }
     }
@@ -516,7 +511,7 @@ mod tests {
             started_at_ms: 1,
             terminated_at_ms: 0,
             failure_reason: None,
-            throttle_bytes_per_sec: 50_000_000,
+            throttle: DEFAULT_THROTTLE,
         }
     }
 
@@ -551,7 +546,7 @@ mod tests {
 
         let client = Arc::new(MockClient::new());
         let cancel = CancellationToken::new();
-        let exec = Execution::new(client.clone(), state.clone(), p, 50_000_000, cancel);
+        let exec = Execution::new(client.clone(), state.clone(), p, DEFAULT_THROTTLE, cancel);
         let before = now_ms();
         exec.run().await;
 
@@ -582,7 +577,7 @@ mod tests {
             .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
 
         let cancel = CancellationToken::new();
-        let exec = Execution::new(client.clone(), state.clone(), p, 50_000_000, cancel);
+        let exec = Execution::new(client.clone(), state.clone(), p, DEFAULT_THROTTLE, cancel);
         exec.run().await;
 
         let after = state.store.get("p1").unwrap();
@@ -606,7 +601,7 @@ mod tests {
 
         let cancel = CancellationToken::new();
         let cancel_for_caller = cancel.clone();
-        let exec = Execution::new(client.clone(), state.clone(), p, 50_000_000, cancel);
+        let exec = Execution::new(client.clone(), state.clone(), p, DEFAULT_THROTTLE, cancel);
         let handle = tokio::spawn(async move {
             exec.run().await;
         });
@@ -643,7 +638,7 @@ mod tests {
         let client = Arc::new(MockClient::new());
         let cancel = CancellationToken::new();
         cancel.cancel(); // already cancelled before run() starts
-        let exec = Execution::new(client.clone(), state.clone(), p, 50_000_000, cancel);
+        let exec = Execution::new(client.clone(), state.clone(), p, DEFAULT_THROTTLE, cancel);
         exec.run().await;
 
         let after = state.store.get("p1").unwrap();
@@ -665,7 +660,7 @@ mod tests {
             .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
 
         let cancel = CancellationToken::new();
-        let exec = Execution::new(client, state.clone(), p, 50_000_000, cancel);
+        let exec = Execution::new(client, state.clone(), p, DEFAULT_THROTTLE, cancel);
         exec.run().await;
 
         let writes = backend.writes();
@@ -686,7 +681,8 @@ mod tests {
 
         // Pre-seed the backend with a ClearThrottle in-flight record so
         // the executor resumes with the correct terminal target.
-        let mut in_flight = InFlightFile::new(p.id.clone(), Phase::ClearThrottle, 1, 50_000_000);
+        let mut in_flight =
+            InFlightFile::new(p.id.clone(), Phase::ClearThrottle, 1, DEFAULT_THROTTLE);
         in_flight.target_terminal_status = Some(ProposalStatus::Completed);
 
         let backend = Arc::new(crate::state_topic::fake::InMemoryBackend::new_loaded());
@@ -731,7 +727,8 @@ mod tests {
     async fn cancelled_resume_from_clear_throttle_preserves_terminal_target() {
         let dir = tempfile::tempdir().unwrap();
         let p = proposal_with_movements("p1", vec![mv("t", 0, vec![1], vec![2])]);
-        let mut in_flight = InFlightFile::new(p.id.clone(), Phase::ClearThrottle, 1, 50_000_000);
+        let mut in_flight =
+            InFlightFile::new(p.id.clone(), Phase::ClearThrottle, 1, DEFAULT_THROTTLE);
         in_flight.target_terminal_status = Some(ProposalStatus::Completed);
 
         let backend = Arc::new(RecordingBackend::with_state(in_flight.clone()));
@@ -741,7 +738,7 @@ mod tests {
         cancel.cancel();
         let exec = Execution::resume(client.clone(), state.clone(), p, &in_flight, cancel);
 
-        tokio::time::timeout(Duration::from_secs(1), exec.run())
+        tokio::time::timeout(secs(1).to_std(), exec.run())
             .await
             .expect("clear-throttle resume should terminate");
 

@@ -1,6 +1,7 @@
 //! `remote_write` v2 (`io.prometheus.write.v2.Request`) request decoder.
 
 use crabka_blockstore::Labels;
+use crabka_units::prelude::*;
 use prost::Message;
 
 use super::{
@@ -21,7 +22,7 @@ pub struct WrittenCounts {
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn decode_v2(
     body: &[u8],
-    max_decompressed: usize,
+    max_decompressed: ByteSize,
 ) -> Result<(Vec<DecodedSeries>, WrittenCounts), WireError> {
     let raw = snappy_block_decode(body, max_decompressed)?;
     let req = pb::v2::Request::decode(raw.as_slice())
@@ -161,7 +162,7 @@ mod tests {
             }],
         };
 
-        let (decoded, counts) = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
+        let (decoded, counts) = decode_v2(&snappy(&req.encode_to_vec()), mebibytes(1)).unwrap();
 
         assert!(decoded.len() == 1);
         check!(decoded[0].labels.get("__name__") == Some("up"));
@@ -196,7 +197,7 @@ mod tests {
             }],
         };
 
-        let (decoded, counts) = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
+        let (decoded, counts) = decode_v2(&snappy(&req.encode_to_vec()), mebibytes(1)).unwrap();
 
         assert!(counts.histograms == 1);
         assert!(decoded[0].histograms[0].1.positive_counts == vec![1.0, 3.0]);
@@ -209,7 +210,7 @@ mod tests {
             timeseries: Vec::new(),
         };
 
-        let err = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap_err();
+        let err = decode_v2(&snappy(&req.encode_to_vec()), mebibytes(1)).unwrap_err();
 
         assert!(matches!(err, WireError::Invalid(_)));
     }
@@ -236,7 +237,7 @@ mod tests {
             }],
         };
 
-        let err = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap_err();
+        let err = decode_v2(&snappy(&req.encode_to_vec()), mebibytes(1)).unwrap_err();
 
         assert!(matches!(err, WireError::Invalid(_)));
         assert!(format!("{err}").contains("duplicate label `job`"));
@@ -257,7 +258,7 @@ mod tests {
             }],
         };
 
-        let (decoded, _) = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
+        let (decoded, _) = decode_v2(&snappy(&req.encode_to_vec()), mebibytes(1)).unwrap();
 
         assert!(
             decoded[0].samples == vec![DecodedSample::with_start_timestamp(1000, 1.0, Some(500))]

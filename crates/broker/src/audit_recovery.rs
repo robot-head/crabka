@@ -4,6 +4,9 @@ use crabka_audit::{
     EVENT_CLASS_CHECKPOINT, HEADER_PREV_HASH, HEADER_SEQ,
     chain::{chain_hash, from_hex32},
 };
+use crabka_units::ByteSize;
+#[cfg(test)]
+use crabka_units::{bytes, kibibytes, mebibytes};
 
 use crate::partition::Partition;
 
@@ -16,7 +19,7 @@ const HEADER_EVENT_CLASS: &str = "event_class";
 pub(crate) fn recover_from_partition_tail(
     partition: &Partition,
     tail_window_offsets: i64,
-    tail_read_max_bytes: usize,
+    tail_read_max: ByteSize,
 ) -> Option<(u64, [u8; 32])> {
     let leo = partition.log_end_offset();
     if leo <= crabka_log::Offset(0) {
@@ -24,7 +27,7 @@ pub(crate) fn recover_from_partition_tail(
     }
     // Read a bounded tail window (audit records are small).
     let start = tail_window_start(leo, tail_window_offsets);
-    let out = partition.read_log(start, tail_read_max_bytes).ok()?;
+    let out = partition.read_log(start, tail_read_max).ok()?;
     let mut last: Option<(u64, [u8; 32])> = None;
     for batch in &out.batches {
         for rec in &batch.records {
@@ -164,7 +167,7 @@ mod tests {
     async fn recover_empty_partition_returns_none() {
         let (partition, _td) = test_partition();
 
-        assert!(recover_from_partition_tail(&partition, 4096, 1 << 20).is_none());
+        assert!(recover_from_partition_tail(&partition, 4096, mebibytes(1)).is_none());
     }
 
     #[tokio::test]
@@ -175,7 +178,7 @@ mod tests {
         append_records(&partition, vec![chained_record(seq, &GENESIS_HEAD, value)]);
 
         let recovered =
-            recover_from_partition_tail(&partition, 4096, 1 << 20).expect("tail record");
+            recover_from_partition_tail(&partition, 4096, mebibytes(1)).expect("tail record");
 
         assert!(recovered.0 == seq + 1);
         assert!(recovered.1 == chain_hash(&GENESIS_HEAD, seq, value));
@@ -190,8 +193,8 @@ mod tests {
         let last_head = chain_hash(&first_head, 9, b"last");
         append_records(&partition, vec![first, last]);
 
-        let recovered =
-            recover_from_partition_tail(&partition, 4096, 1 << 20).expect("last chained record");
+        let recovered = recover_from_partition_tail(&partition, 4096, mebibytes(1))
+            .expect("last chained record");
 
         assert!(recovered == (10, last_head));
     }
@@ -213,8 +216,8 @@ mod tests {
             vec![first, checkpoint_record(), malformed, second],
         );
 
-        let recovered =
-            recover_from_partition_tail(&partition, 4096, 1 << 20).expect("last chained record");
+        let recovered = recover_from_partition_tail(&partition, 4096, mebibytes(1))
+            .expect("last chained record");
 
         assert!(recovered == (2, second_head));
     }
@@ -226,9 +229,9 @@ mod tests {
         append_records(&partition, vec![chained_record(7, &GENESIS_HEAD, value)]);
         append_records(&partition, vec![checkpoint_record()]);
 
-        assert!(recover_from_partition_tail(&partition, 1, 1_024).is_none());
+        assert!(recover_from_partition_tail(&partition, 1, kibibytes(1)).is_none());
         assert!(
-            recover_from_partition_tail(&partition, 2, 1_024)
+            recover_from_partition_tail(&partition, 2, kibibytes(1))
                 == Some((8, chain_hash(&GENESIS_HEAD, 7, value)))
         );
     }
@@ -239,9 +242,9 @@ mod tests {
         let value = b"chained";
         append_records(&partition, vec![chained_record(7, &GENESIS_HEAD, value)]);
 
-        assert!(recover_from_partition_tail(&partition, 1, 1).is_none());
+        assert!(recover_from_partition_tail(&partition, 1, bytes(1)).is_none());
         assert!(
-            recover_from_partition_tail(&partition, 1, 1_024)
+            recover_from_partition_tail(&partition, 1, kibibytes(1))
                 == Some((8, chain_hash(&GENESIS_HEAD, 7, value)))
         );
     }

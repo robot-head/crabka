@@ -42,6 +42,10 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -366,11 +370,11 @@ pub(crate) struct CoordinatorState {
     pub next_offsets: Arc<Mutex<HashMap<(String, i32), i64>>>,
     pub positions: Arc<Mutex<HashMap<(String, i32), crate::position::PartitionPosition>>>,
     pub topic_ids: Arc<Mutex<HashMap<String, WireUuid>>>,
-    pub session_timeout: Duration,
-    pub rebalance_timeout: Duration,
-    pub heartbeat_interval: Duration,
-    pub subscription_metadata_refresh_interval: Duration,
-    pub leave_group_timeout: Duration,
+    pub session_timeout: Time,
+    pub rebalance_timeout: Time,
+    pub heartbeat_interval: Time,
+    pub subscription_metadata_refresh_interval: Time,
+    pub leave_group_timeout: Time,
     pub auto_offset_reset: AutoOffsetReset,
     pub client_rack: Option<String>,
     /// Subscribed-topic partition counts the INITIAL assignment was computed
@@ -430,8 +434,8 @@ fn heartbeat_outcome(error_code: i16) -> HeartbeatOutcome {
 /// as soon as the broker signals a rebalance; the next tick performs
 /// the rejoin in place of heartbeating.
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: long-running I/O event loop, exercised by integration tests
-fn subscription_metadata_refresh_due(last_check: tokio::time::Instant, interval: Duration) -> bool {
-    last_check.elapsed() >= interval
+fn subscription_metadata_refresh_due(last_check: tokio::time::Instant, interval: Time) -> bool {
+    last_check.elapsed().as_time() >= interval
 }
 
 /// Current partition count of each subscribed topic that exists in broker
@@ -500,7 +504,7 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
         tracing::warn!(error = %e, "coordinator client metadata refresh failed at startup");
     }
 
-    let mut ticker = tokio::time::interval(state.heartbeat_interval);
+    let mut ticker = tokio::time::interval(state.heartbeat_interval.to_std());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut needs_rejoin = false;
     // Subscribed-topic partition counts the current assignment was computed
@@ -636,7 +640,7 @@ async fn leave_group(state: &CoordinatorState) {
         state.member_id.clone(),
         state.group_instance_id.clone(),
     ));
-    let _ = tokio::time::timeout(state.leave_group_timeout, send).await;
+    let _ = tokio::time::timeout(state.leave_group_timeout.to_std(), send).await;
 }
 
 /// Send one `Heartbeat` to the coordinator broker and translate the response
@@ -1012,9 +1016,11 @@ async fn perform_join(
     state: &mut CoordinatorState,
     owned: &[(String, i32)],
 ) -> Result<JoinGroupResponse, ConsumerError> {
-    let session_timeout_ms = i32::try_from(state.session_timeout.as_millis()).unwrap_or(i32::MAX);
-    let rebalance_timeout_ms =
-        i32::try_from(state.rebalance_timeout.as_millis()).unwrap_or(i32::MAX);
+    // Truncating, not rounding: these are `JoinGroupRequest` `int32`
+    // milliseconds the coordinator range-checks, and `Duration::as_millis`
+    // truncated here before the conversion.
+    let session_timeout_ms = crate::consumer::protocol_millis_i32(state.session_timeout);
+    let rebalance_timeout_ms = crate::consumer::protocol_millis_i32(state.rebalance_timeout);
 
     let subscription_bytes = encode_subscription(
         &state.subscribed_topics,
@@ -1377,6 +1383,7 @@ mod retry_tests {
             leave_group_request,
         },
     };
+    use crabka_units::{millis, minutes, secs};
 
     use super::*;
 
@@ -1428,7 +1435,7 @@ mod retry_tests {
     #[tokio::test(start_paused = true)]
     async fn subscription_metadata_refresh_due_uses_configured_inclusive_boundary() {
         let last_check = tokio::time::Instant::now();
-        let interval = Duration::from_millis(37);
+        let interval = millis(37);
 
         tokio::time::advance(Duration::from_millis(36)).await;
         assert2::assert!(!subscription_metadata_refresh_due(last_check, interval));
@@ -1454,7 +1461,7 @@ mod retry_tests {
         .await;
         let client = Client::builder()
             .bootstrap(mock.addr.to_string())
-            .request_timeout(Duration::from_secs(5))
+            .request_timeout(crabka_units::secs(5))
             .build()
             .await
             .expect("client");
@@ -1472,11 +1479,11 @@ mod retry_tests {
             next_offsets: Arc::new(Mutex::new(HashMap::new())),
             positions: Arc::new(Mutex::new(HashMap::new())),
             topic_ids: Arc::new(Mutex::new(HashMap::new())),
-            session_timeout: Duration::from_secs(45),
-            rebalance_timeout: Duration::from_mins(1),
-            heartbeat_interval: Duration::from_secs(3),
-            subscription_metadata_refresh_interval: Duration::from_millis(37),
-            leave_group_timeout: Duration::from_millis(37),
+            session_timeout: secs(45),
+            rebalance_timeout: minutes(1),
+            heartbeat_interval: secs(3),
+            subscription_metadata_refresh_interval: millis(37),
+            leave_group_timeout: millis(37),
             auto_offset_reset: AutoOffsetReset::Latest,
             client_rack: None,
             initial_subscribed_counts: HashMap::new(),
@@ -2051,8 +2058,8 @@ mod refind_tests {
     async fn connect_error_refinds_until_deadline() {
         let client = Client::builder()
             .bootstrap("127.0.0.1:1")
-            .connect_timeout(Duration::from_millis(10))
-            .request_timeout(Duration::from_millis(10))
+            .connect_timeout(crabka_units::millis(10))
+            .request_timeout(crabka_units::millis(10))
             .build()
             .await
             .unwrap();

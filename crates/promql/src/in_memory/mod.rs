@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crabka_blockstore::{LabelMatcher, Labels, SeriesFingerprint};
 use crabka_metrics::NativeHistogram;
+use crabka_units::prelude::*;
 
 use crate::{
     error::Result,
@@ -44,7 +45,7 @@ struct ExemplarRow {
 }
 
 /// Default head retention window: six hours of samples are kept hot.
-pub const DEFAULT_RETENTION_MS: i64 = 6 * 60 * 60 * 1_000;
+pub const DEFAULT_RETENTION: Time = hours(6);
 
 /// Counts of what a [`InMemoryMetricStore::prune`] pass evicted.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -74,9 +75,9 @@ pub struct InMemoryMetricStore {
     exemplars: HashMap<String, Vec<ExemplarRow>>,
     metadata: HashMap<String, Vec<MetadataRecord>>,
     blocks: HashMap<String, Vec<TsdbBlock>>,
-    /// Samples whose timestamp is older than `now_ms - retention_ms` are
-    /// eligible for [`InMemoryMetricStore::prune`].
-    retention_ms: i64,
+    /// Samples whose timestamp is older than `now_ms - retention` are eligible
+    /// for [`InMemoryMetricStore::prune`].
+    retention: Time,
     /// WAL offset range currently materialized in the head, keyed by partition.
     /// Offsets track ingestion progress for observability and rebuild bounds;
     /// they are independent of timestamp-based retention.
@@ -91,7 +92,7 @@ impl Default for InMemoryMetricStore {
             exemplars: HashMap::new(),
             metadata: HashMap::new(),
             blocks: HashMap::new(),
-            retention_ms: DEFAULT_RETENTION_MS,
+            retention: DEFAULT_RETENTION,
             watermarks: BTreeMap::new(),
         }
     }
@@ -103,24 +104,24 @@ impl InMemoryMetricStore {
         Self::default()
     }
 
-    /// Build a store with an explicit retention window in milliseconds.
+    /// Build a store with an explicit retention window.
     #[must_use]
-    pub fn with_retention_ms(retention_ms: i64) -> Self {
+    pub fn with_retention(retention: Time) -> Self {
         Self {
-            retention_ms,
+            retention,
             ..Self::default()
         }
     }
 
-    /// The retention window in milliseconds.
+    /// The retention window.
     #[must_use]
-    pub fn retention_ms(&self) -> i64 {
-        self.retention_ms
+    pub fn retention(&self) -> Time {
+        self.retention
     }
 
-    /// Set the retention window in milliseconds.
-    pub fn set_retention_ms(&mut self, retention_ms: i64) {
-        self.retention_ms = retention_ms;
+    /// Set the retention window.
+    pub fn set_retention(&mut self, retention: Time) {
+        self.retention = retention;
     }
 
     /// Distinct label sets matching the matchers within the time window.

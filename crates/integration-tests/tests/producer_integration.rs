@@ -143,9 +143,9 @@ async fn idempotent_produce_then_consume() {
         .bootstrap(&bootstrap)
         .client_id("rp1-consumer")
         .group_id("rp1-grp")
-        .session_timeout(Duration::from_secs(30))
-        .rebalance_timeout(Duration::from_secs(2))
-        .heartbeat_interval(Duration::from_secs(1))
+        .session_timeout(crabka_units::secs(30))
+        .rebalance_timeout(crabka_units::secs(2))
+        .heartbeat_interval(crabka_units::secs(1))
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .subscribe(["rp1".to_string()])
         .build()
@@ -156,7 +156,7 @@ async fn idempotent_produce_then_consume() {
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     while seen < PRODUCE_N && std::time::Instant::now() < deadline {
         seen += consumer
-            .poll(Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .expect("poll")
             .len();

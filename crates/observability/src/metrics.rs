@@ -11,6 +11,10 @@
 
 use std::sync::Arc;
 
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, histogram::Histogram},
@@ -161,16 +165,16 @@ impl ServiceMetrics {
     /// produce failure); the WAL/produce-specific failure counter is bumped
     /// separately via [`Self::record_wal_append_failure`] only at the actual
     /// produce error site so a 4xx client error does not inflate it.
-    pub fn record_ingest(&self, ok: bool, bytes: u64, items: u64, secs: f64) {
+    pub fn record_ingest(&self, ok: bool, body: ByteSize, items: u64, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.ingest_requests
             .get_or_create(&StatusLabel {
                 status: status.into(),
             })
             .inc();
-        self.ingest_bytes.inc_by(bytes);
+        self.ingest_bytes.inc_by(body.bytes_u64());
         self.ingest_items.inc_by(items);
-        self.ingest_duration.observe(secs);
+        self.ingest_duration.observe(elapsed.secs_f64());
     }
 
     /// Bump the WAL/produce append-failure counter. Called only when the
@@ -202,7 +206,7 @@ impl ServiceMetrics {
 
     /// Record one querier request: bumps the per-(route, status) request
     /// counter and observes the per-route handler latency.
-    pub fn record_query(&self, route: &str, ok: bool, secs: f64) {
+    pub fn record_query(&self, route: &str, ok: bool, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.query_requests
             .get_or_create(&RouteStatusLabel {
@@ -214,7 +218,7 @@ impl ServiceMetrics {
             .get_or_create(&RouteLabel {
                 route: route.into(),
             })
-            .observe(secs);
+            .observe(elapsed.secs_f64());
     }
 }
 
@@ -265,6 +269,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode},
     };
+    use crabka_units::{bytes, millis};
     use tower::ServiceExt as _;
 
     use super::*;
@@ -272,13 +277,13 @@ mod tests {
     #[tokio::test]
     async fn registry_has_logs_prefix_and_all_metrics() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, 1_024, 7, 0.01);
-        m.record_ingest(false, 0, 0, 0.002);
+        m.record_ingest(true, bytes(1_024), 7, millis(10));
+        m.record_ingest(false, bytes(0), 0, millis(2));
         m.record_wal_append_failure();
         m.record_ingest_lines("demo", 7);
         m.record_block_written();
-        m.record_query("query", true, 0.05);
-        m.record_query("query_range", false, 0.2);
+        m.record_query("query", true, millis(50));
+        m.record_query("query_range", false, millis(200));
 
         let mut buf = String::new();
         let r = m.registry.lock().await;
@@ -306,8 +311,8 @@ mod tests {
     #[test]
     fn ingest_counters_accumulate() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, 100, 3, 0.01);
-        m.record_ingest(true, 50, 2, 0.01);
+        m.record_ingest(true, bytes(100), 3, millis(10));
+        m.record_ingest(true, bytes(50), 2, millis(10));
         check!(m.ingest_bytes.get() == 150);
         check!(m.ingest_items.get() == 5);
         check!(
@@ -324,7 +329,7 @@ mod tests {
     fn wal_append_failure_is_separate_from_request_outcome() {
         let m = ServiceMetrics::new();
         // A 4xx client error: error outcome, but NOT a WAL failure.
-        m.record_ingest(false, 0, 0, 0.001);
+        m.record_ingest(false, bytes(0), 0, millis(1));
         assert!(m.wal_append_failures.get() == 0);
         // A produce failure: bump explicitly at the WAL error site.
         m.record_wal_append_failure();
@@ -334,10 +339,10 @@ mod tests {
     #[test]
     fn query_counters_split_by_route_and_status() {
         let m = ServiceMetrics::new();
-        m.record_query("query", true, 0.01);
-        m.record_query("query", true, 0.02);
-        m.record_query("query", false, 0.03);
-        m.record_query("labels", true, 0.01);
+        m.record_query("query", true, millis(10));
+        m.record_query("query", true, millis(20));
+        m.record_query("query", false, millis(30));
+        m.record_query("labels", true, millis(10));
         for (route, status, want) in [
             ("query", "ok", 2u64),
             ("query", "error", 1),
@@ -358,7 +363,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_route_returns_openmetrics() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, 42, 1, 0.01);
+        m.record_ingest(true, bytes(42), 1, millis(10));
         let app = metrics_router(m.registry);
         let resp = app
             .oneshot(

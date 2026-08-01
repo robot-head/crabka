@@ -9,6 +9,8 @@
 //! name. Materialized ops (`map_values`/`filter`) also register a state store.
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc, sync::Arc};
 
+use crabka_units::prelude::*;
+
 use crate::{
     dsl::{
         builder::InternalStreamsBuilder,
@@ -153,13 +155,13 @@ pub struct KTable<K, V, KS = <K as DefaultSerde>::Serde, VS = <V as DefaultSerde
     #[allow(dead_code)]
     pub(crate) source_topic: Option<String>,
     /// For windowed tables: the upstream window's grace (suppress closes a window
-    /// at `window.end + window_grace_ms`). `None` for non-windowed tables.
-    pub(crate) window_grace_ms: Option<i64>,
-    /// `Some(history_retention_ms)` when this table is materialized into a
-    /// versioned store (KIP-889). Drives as-of stream–table join lookups
-    /// (KIP-914) + the table–table out-of-order gate + grace validation.
-    /// Mirrors `window_grace_ms`. `None` for non-versioned / derived tables.
-    pub(crate) versioned_retention_ms: Option<i64>,
+    /// at `window.end + window_grace`). `None` for non-windowed tables.
+    pub(crate) window_grace: Option<Time>,
+    /// The history retention when this table is materialized into a versioned
+    /// store (KIP-889). Drives as-of stream–table join lookups (KIP-914) + the
+    /// table–table out-of-order gate + grace validation. Mirrors `window_grace`.
+    /// `None` for non-versioned / derived tables.
+    pub(crate) versioned_retention: Option<Time>,
     /// Set by serde-carrying producers (aggregations, `builder.table`); read by
     /// `suppress` to register its store with the right serdes. `None` on derived
     /// tables whose value type changed (`map_values`) — `suppress` then panics.
@@ -183,8 +185,8 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
             node,
             store_name,
             source_topic,
-            window_grace_ms: None,
-            versioned_retention_ms: None,
+            window_grace: None,
+            versioned_retention: None,
             suppress_store_factory: None,
             key_serde,
             value_serde,
@@ -198,8 +200,8 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
             node: self.node,
             store_name: self.store_name,
             source_topic: self.source_topic,
-            window_grace_ms: self.window_grace_ms,
-            versioned_retention_ms: self.versioned_retention_ms,
+            window_grace: self.window_grace,
+            versioned_retention: self.versioned_retention,
             suppress_store_factory: self.suppress_store_factory,
             key_serde: serde,
             value_serde: self.value_serde,
@@ -213,8 +215,8 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
             node: self.node,
             store_name: self.store_name,
             source_topic: self.source_topic,
-            window_grace_ms: self.window_grace_ms,
-            versioned_retention_ms: self.versioned_retention_ms,
+            window_grace: self.window_grace,
+            versioned_retention: self.versioned_retention,
             suppress_store_factory: self.suppress_store_factory,
             key_serde: self.key_serde,
             value_serde: serde,
@@ -259,10 +261,10 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
 
     /// Tag this table with its upstream window's grace (set by windowed/session
     /// aggregations; propagated through `Change`-preserving ops). Read by `suppress`
-    /// (which accesses the `window_grace_ms` field directly).
+    /// (which accesses the `window_grace` field directly).
     #[must_use]
-    pub(crate) fn with_window_grace(mut self, grace_ms: Option<i64>) -> Self {
-        self.window_grace_ms = grace_ms;
+    pub(crate) fn with_window_grace(mut self, grace: Option<Time>) -> Self {
+        self.window_grace = grace;
         self
     }
 
@@ -270,8 +272,8 @@ impl<K, V, KS, VS> KTable<K, V, KS, VS> {
     /// `builder.table` when `Materialized::as_versioned` was used). Read by the
     /// stream–table join (as-of routing) and table–table join (out-of-order gate).
     #[must_use]
-    pub(crate) fn with_versioned_retention(mut self, retention_ms: Option<i64>) -> Self {
-        self.versioned_retention_ms = retention_ms;
+    pub(crate) fn with_versioned_retention(mut self, retention: Option<Time>) -> Self {
+        self.versioned_retention = retention;
         self
     }
 
@@ -375,7 +377,7 @@ where
         F: Fn(&V) -> V2 + Clone + Send + Sync + 'static,
         KS: Clone,
     {
-        let grace = self.window_grace_ms;
+        let grace = self.window_grace;
         let parent_id = self.node;
         let mut g = self.builder.borrow_mut();
         let name = g.new_processor_name(names::TABLE_MAPVALUES);
@@ -427,7 +429,7 @@ where
         F: Fn(&V) -> V2 + Clone + Send + Sync + 'static,
     {
         let materialized = materialized.into();
-        let grace = self.window_grace_ms;
+        let grace = self.window_grace;
         let store_name = mint_table_store(&self.builder, &materialized, names::TABLE_MAPVALUES);
         let key_serde = materialized.key_serde.clone();
         let value_serde = materialized.value_serde.clone();
@@ -505,7 +507,7 @@ where
         P: Fn(&K, &V) -> bool + Clone + Send + Sync + 'static,
     {
         let materialized = materialized.into();
-        let grace = self.window_grace_ms;
+        let grace = self.window_grace;
         // filter preserves V → suppress can still register a store with the same
         // serdes; propagate the factory.
         let suppress_factory = self.suppress_store_factory.clone();
@@ -774,14 +776,8 @@ where
         // KIP-914: each side's OWN store name, set only when that side is
         // versioned. The matching processor reads its own latest `valid_from`
         // and suppresses out-of-order updates (record ts strictly older).
-        let this_versioned_store = self
-            .versioned_retention_ms
-            .is_some()
-            .then(|| a_store.clone());
-        let other_versioned_store = other
-            .versioned_retention_ms
-            .is_some()
-            .then(|| b_store.clone());
+        let this_versioned_store = self.versioned_retention.is_some().then(|| a_store.clone());
+        let other_versioned_store = other.versioned_retention.is_some().then(|| b_store.clone());
 
         // KIP-914: table-table joins read the OTHER side's LATEST value. Each
         // processor must know whether ITS other store is versioned so the read
@@ -789,8 +785,8 @@ where
         // returns `None` for a `VersionedBytesStore`).
         // - This-processor reads the OTHER (b) table → versioned iff `other` is.
         // - Other-processor reads the OTHER (a/self) table → versioned iff `self` is.
-        let other_is_versioned_this = other.versioned_retention_ms.is_some();
-        let other_is_versioned_other = self.versioned_retention_ms.is_some();
+        let other_is_versioned_this = other.versioned_retention.is_some();
+        let other_is_versioned_other = self.versioned_retention.is_some();
 
         let mut g = self.builder.borrow_mut();
         let join_this = g.new_processor_name(names::KTABLE_JOIN_THIS);
@@ -1305,9 +1301,11 @@ where
         KS: Clone,
         VS: Clone,
     {
-        let wait_ms = match suppressed.wait {
-            crate::dsl::suppress::WaitKind::UpstreamGrace => self.window_grace_ms.unwrap_or(0),
-            crate::dsl::suppress::WaitKind::Fixed(ms) => ms,
+        let wait = match suppressed.wait {
+            crate::dsl::suppress::WaitKind::UpstreamGrace => {
+                self.window_grace.unwrap_or(Time::ZERO)
+            }
+            crate::dsl::suppress::WaitKind::Fixed(wait) => wait,
         };
         let buffer_time = suppressed.buffer_time;
         let max_records = suppressed.buffer.record_cap();
@@ -1343,7 +1341,7 @@ where
                     move || {
                         crate::dsl::processors::suppress::KTableSuppressProcessor::<K, V>::new(
                             store_for_proc.clone(),
-                            wait_ms,
+                            wait,
                             buffer_time,
                             max_records,
                             max_bytes,
@@ -1369,7 +1367,7 @@ where
             self.key_serde.clone(),
             self.value_serde.clone(),
         )
-        .with_window_grace(self.window_grace_ms)
+        .with_window_grace(self.window_grace)
         .with_suppress_factory(self.suppress_store_factory.clone())
     }
 }
@@ -1389,6 +1387,9 @@ fn mint_table_store<KS, VS>(
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+    use crabka_units::prelude::*;
+
     #[test]
     fn versioned_table_handle_carries_retention() {
         use crate::{
@@ -1400,16 +1401,16 @@ mod tests {
         let t = b.table_explicit::<StringSerde, I64Serde>(
             "in",
             crate::processor::serde::Consumed::with(StringSerde, I64Serde),
-            Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+            Materialized::with(StringSerde, I64Serde).as_versioned("vt", minutes(10)),
         );
-        assert_eq!(t.versioned_retention_ms, Some(600_000));
+        check!(t.versioned_retention == Some(minutes(10)));
 
         let plain = b.table_explicit::<StringSerde, I64Serde>(
             "in2",
             crate::processor::serde::Consumed::with(StringSerde, I64Serde),
             Materialized::with(StringSerde, I64Serde).as_store("pt"),
         );
-        assert_eq!(plain.versioned_retention_ms, None);
+        check!(plain.versioned_retention == None);
     }
 }
 

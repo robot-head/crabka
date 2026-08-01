@@ -5,7 +5,7 @@
 //! (`member_epoch = -1`) on shutdown. Meaningful changes are emitted as
 //! [`StreamsEvent`]s.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crabka_client_core::{Client, ClientError};
 use crabka_protocol::owned::{
@@ -18,6 +18,7 @@ use crabka_protocol::owned::{
     streams_group_heartbeat_request::StreamsGroupHeartbeatRequest,
     streams_group_heartbeat_response::StreamsGroupHeartbeatResponse,
 };
+use crabka_units::prelude::*;
 use tokio::sync::{Mutex, mpsc};
 use tokio_util::sync::CancellationToken;
 
@@ -60,7 +61,9 @@ pub(crate) struct CoordinatorState<T: HeartbeatTransport> {
     pub member_id: String,
     pub process_id: String,
     pub instance_id: Option<String>,
-    pub rebalance_timeout_ms: i32,
+    /// Rebalance deadline advertised to the coordinator; rendered as the raw
+    /// `StreamsGroupHeartbeat.rebalance_timeout_ms` wire field.
+    pub rebalance_timeout: Time,
     pub topology: Arc<BuiltTopology>,
     pub member_epoch: Arc<Mutex<i32>>,
     /// Owned tasks last adopted, echoed back as `active_tasks` next heartbeat.
@@ -71,8 +74,8 @@ pub(crate) struct CoordinatorState<T: HeartbeatTransport> {
     pub owned_warmup: Arc<Mutex<Vec<RespTaskIds>>>,
     /// Tracker containing current and end offsets of all tasks.
     pub tracker: Arc<Mutex<TaskOffsetTracker>>,
-    pub heartbeat_interval: Duration,
-    pub leave_heartbeat_timeout: Duration,
+    pub heartbeat_interval: Time,
+    pub leave_heartbeat_timeout: Time,
     pub events: mpsc::UnboundedSender<StreamsEvent>,
     /// The last assignment emitted, to suppress duplicate `Assigned` events
     /// (the broker re-sends `active_tasks: Some(...)` every heartbeat).
@@ -96,7 +99,7 @@ pub(crate) async fn run<T: HeartbeatTransport>(
     state: CoordinatorState<T>,
     shutdown: CancellationToken,
 ) {
-    let mut ticker = tokio::time::interval(state.heartbeat_interval);
+    let mut ticker = tokio::time::interval(state.heartbeat_interval.to_std());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut rejoining = false;
 
@@ -134,7 +137,7 @@ pub(crate) async fn run<T: HeartbeatTransport>(
         member_epoch: -1,
         ..Default::default()
     });
-    let _ = tokio::time::timeout(state.leave_heartbeat_timeout, leave).await;
+    let _ = tokio::time::timeout(state.leave_heartbeat_timeout.to_std(), leave).await;
 }
 
 #[tracing::instrument(
@@ -207,7 +210,7 @@ async fn heartbeat_once<T: HeartbeatTransport>(
         member_epoch: epoch,
         process_id: Some(state.process_id.clone()),
         instance_id: state.instance_id.clone(),
-        rebalance_timeout_ms: state.rebalance_timeout_ms,
+        rebalance_timeout_ms: state.rebalance_timeout.millis_i32(),
         topology,
         active_tasks,
         standby_tasks,
@@ -312,7 +315,7 @@ fn resp_to_req(t: &RespTaskIds) -> ReqTaskIds {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::VecDeque, sync::Mutex as StdMutex};
+    use std::{collections::VecDeque, sync::Mutex as StdMutex, time::Duration};
 
     use assert2::check;
     use crabka_protocol::owned::common::streams_group_heartbeat_response::task_ids::TaskIds as RespTaskIds2;
@@ -430,15 +433,15 @@ mod tests {
             member_id: "m".into(),
             process_id: "p".into(),
             instance_id: None,
-            rebalance_timeout_ms: 30_000,
+            rebalance_timeout: secs(30),
             topology: built(),
             member_epoch: Arc::new(Mutex::new(7)),
             owned_active: Arc::new(Mutex::new(Vec::new())),
             owned_standby: Arc::new(Mutex::new(Vec::new())),
             owned_warmup: Arc::new(Mutex::new(Vec::new())),
             tracker: Arc::new(Mutex::new(TaskOffsetTracker::default())),
-            heartbeat_interval: Duration::from_millis(1),
-            leave_heartbeat_timeout: DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
+            heartbeat_interval: millis(1),
+            leave_heartbeat_timeout: DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT.as_time(),
             events: tx,
             last_assignment: tokio::sync::Mutex::new(StreamsAssignment::default()),
         };
@@ -464,7 +467,7 @@ mod tests {
         let fake = FakeTransport::new(vec![ok_resp(9, vec![0])]);
         let sent = fake.sent_arc();
         let (mut state, _rx) = state_with(fake);
-        state.rebalance_timeout_ms = 45_000;
+        state.rebalance_timeout = secs(45);
 
         check!(matches!(heartbeat_once(&state, false).await, Outcome::Ok));
         check!(sent.lock().unwrap()[0].rebalance_timeout_ms == 45_000);
@@ -645,7 +648,7 @@ mod tests {
     #[tokio::test]
     async fn run_loop_bounds_stalled_leave_with_configured_timeout() {
         let (mut state, _rx) = state_with(HangingLeaveTransport);
-        state.leave_heartbeat_timeout = Duration::from_millis(37);
+        state.leave_heartbeat_timeout = millis(37);
         let shutdown = CancellationToken::new();
         shutdown.cancel();
 

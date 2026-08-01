@@ -125,7 +125,7 @@ async fn start_three_tiered_brokers() -> (
             cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
                 dir: remote_dir.path().to_path_buf(),
             });
-            cfg.remote_log_manager_interval = Duration::from_secs(1);
+            cfg.remote_log_manager_interval = crabka_units::secs(1);
             // RLMM: all 3 brokers bootstrap into broker 1's loopback.
             // num_partitions=1 keeps all metadata on a single partition.
             // replication=1: partition 0 lives exclusively on broker 1.
@@ -136,7 +136,7 @@ async fn start_three_tiered_brokers() -> (
                 bootstrap: format!("127.0.0.1:{}", client_addrs[0].port()),
                 num_partitions: 1,
                 replication: 1,
-                snapshot_interval: Duration::from_hours(1),
+                snapshot_interval: crabka_units::hours(1),
                 snapshot_dir: std::path::PathBuf::new(), // derived from log_dir
                 security: None,
                 ..KafkaRlmmConfig::default()
@@ -388,8 +388,8 @@ async fn create_tiered_topic(admin: &Client, b1: &BrokerHandle, b2: &BrokerHandl
                 .partition_log_config_for_test(TOPIC, 0)
                 .is_some_and(|config| {
                     config.remote_storage_enable
-                        && config.segment_bytes == 1024
-                        && config.local_retention_bytes == Some(1)
+                        && config.segment_size == crabka_units::kibibytes(1)
+                        && config.local_retention_size == Some(crabka_units::bytes(1))
                 })
         };
         if ready(b1) || ready(b2) {

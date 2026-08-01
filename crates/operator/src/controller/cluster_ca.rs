@@ -16,6 +16,12 @@ use std::{collections::BTreeMap, net::IpAddr};
 use crabka_security::ca::{
     CaMaterial, SubjectAltName, generate_clients_ca, generate_cluster_ca, issue_broker_cert,
 };
+use crabka_units::{
+    Time,
+    convert::TimeExt as _,
+    days,
+    uom::{num_traits::ToPrimitive as _, si::time::day},
+};
 use k8s_openapi::{
     ByteString, api::core::v1::Secret, apimachinery::pkg::apis::meta::v1::ObjectMeta,
 };
@@ -182,8 +188,8 @@ pub(crate) struct CaState {
 pub(crate) struct RotationInputs {
     /// `generateCertificateAuthority` — BYO CAs are never rotated.
     pub generate: bool,
-    pub validity_days: u32,
-    pub renewal_days: u32,
+    pub validity: Time,
+    pub renewal: Time,
     /// `crabka.io/force-renew-ca` present on the `Kafka` CR.
     pub force: ForceRotation,
     /// Every pool carries the desired config-hash AND is Ready (so the previous
@@ -273,7 +279,7 @@ pub(crate) fn plan_ca_rotation(state: &CaState, inp: &RotationInputs) -> CaRotat
             }
             let signing = state.bundle.first().map_or("", String::as_str);
             let renew_due = inp.force.renews_certificate()
-                || renew_if_expiring(signing, inp.renewal_days, inp.now).unwrap_or(false);
+                || renew_if_expiring(signing, inp.renewal, inp.now).unwrap_or(false);
             if renew_due {
                 return CaRotationPlan::RenewCertSameKey;
             }
@@ -410,8 +416,8 @@ pub(crate) async fn reconcile_ca(
         };
         let inp = RotationInputs {
             generate: spec.generate_certificate_authority,
-            validity_days: spec.validity_days,
-            renewal_days: spec.renewal_days,
+            validity: days(spec.validity_days),
+            renewal: days(spec.renewal_days),
             force: match (force_renew, force_replace_key) {
                 (false, false) => ForceRotation::None,
                 (true, false) => ForceRotation::RenewCertificate,
@@ -540,10 +546,10 @@ async fn apply_ca_rotation(
         CaRotationPlan::RenewCertSameKey => {
             let new_cert = match which {
                 WhichCa::Cluster => {
-                    crabka_security::ca::renew_cluster_ca(&key_pem, cn, inp.validity_days)?
+                    crabka_security::ca::renew_cluster_ca(&key_pem, cn, whole_days(inp.validity))?
                 }
                 WhichCa::Clients => {
-                    crabka_security::ca::renew_clients_ca(&key_pem, cn, inp.validity_days)?
+                    crabka_security::ca::renew_clients_ca(&key_pem, cn, whole_days(inp.validity))?
                 }
             };
             let mut blocks = vec![normalize_block(&new_cert)];
@@ -555,7 +561,7 @@ async fn apply_ca_rotation(
             raw_override = None;
         }
         CaRotationPlan::StartKeyReplace => {
-            let new = generate_cluster_ca(cn, inp.validity_days)?;
+            let new = generate_cluster_ca(cn, whole_days(inp.validity))?;
             // Old signing cert stays first (still signing with the old key); the
             // new cert is appended as trust-only.
             let mut blocks = prune_expired(&state.bundle, now);
@@ -837,11 +843,13 @@ pub(crate) async fn ensure_broker_keystore(
     let namespace = kafka.meta().namespace.clone().unwrap_or_default();
     let name = broker_keystore_name(&cluster);
 
-    let validity = kafka
-        .spec
-        .cluster_ca
-        .as_ref()
-        .map_or(365, |c| c.validity_days);
+    let validity = days(
+        kafka
+            .spec
+            .cluster_ca
+            .as_ref()
+            .map_or(365, |c| c.validity_days),
+    );
 
     let existing = secret_api.get_opt(&name).await?;
     let mut data: BTreeMap<String, ByteString> = existing
@@ -882,7 +890,7 @@ pub(crate) async fn ensure_broker_keystore(
             &req.cn,
             &req.sans,
             &req.extra_sans,
-            validity,
+            whole_days(validity),
         )?;
         data.insert(crt_key, ByteString(leaf.cert_pem.into_bytes()));
         data.insert(key_key, ByteString(leaf.key_pem.into_bytes()));
@@ -992,15 +1000,38 @@ pub fn compute_san_digest(base_sans: &[SubjectAltName], extras: &[SubjectAltName
 // Renewal predicate
 // ---------------------------------------------------------------------------
 
+/// A `time`-crate span as a [`Time`] extent. The sign is preserved, so a
+/// `notAfter` already behind `now` stays negative and still compares as
+/// "inside the renewal window".
+fn span_as_time(span: time::Duration) -> Time {
+    Time::from_secs_f64(span.as_seconds_f64())
+}
+
+/// A certificate lifetime in whole days — the unit `crabka_security::ca`
+/// speaks. The CRD carries these as `u32` days, so the round-trip is exact for
+/// every configured value; a negative extent floors at zero and an absurd one
+/// saturates.
+fn whole_days(extent: Time) -> u32 {
+    let value = extent.get::<day>().round();
+    if value <= 0.0 {
+        0
+    } else {
+        value.to_u32().unwrap_or(u32::MAX)
+    }
+}
+
+/// Is `cert_pem` inside its renewal window — i.e. does it expire within
+/// `renewal` of `now`?
+///
 /// # Errors
 /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub fn renew_if_expiring(
     cert_pem: &str,
-    renewal_days: u32,
+    renewal: Time,
     now: OffsetDateTime,
 ) -> Result<bool, ReconcileError> {
     let not_after = cert_not_after(cert_pem)?;
-    Ok(not_after - now <= time::Duration::days(i64::from(renewal_days)))
+    Ok(span_as_time(not_after - now) <= renewal)
 }
 
 // ---------------------------------------------------------------------------
@@ -1071,8 +1102,8 @@ async fn renew_one(client: &kube::Client, kafka: &Kafka) -> Result<(), Reconcile
         client,
         kafka,
         &cluster_ca,
-        cluster_ca_spec.renewal_days,
-        cluster_ca_spec.validity_days,
+        days(cluster_ca_spec.renewal_days),
+        days(cluster_ca_spec.validity_days),
         now,
     )
     .await?;
@@ -1117,7 +1148,7 @@ async fn flag_ca_if_expiring(
     which: WhichCa,
     now: OffsetDateTime,
 ) -> Result<(), ReconcileError> {
-    if !renew_if_expiring(ca_cert_pem, spec.renewal_days, now)? {
+    if !renew_if_expiring(ca_cert_pem, days(spec.renewal_days), now)? {
         return Ok(());
     }
     let ns = kafka.meta().namespace.clone().unwrap_or_default();
@@ -1259,8 +1290,8 @@ async fn renew_broker_leafs(
     client: &kube::Client,
     kafka: &Kafka,
     cluster_ca: &CaMaterial,
-    renewal_days: u32,
-    validity_days: u32,
+    renewal: Time,
+    validity: Time,
     now: OffsetDateTime,
 ) -> Result<(), ReconcileError> {
     let ns = kafka.meta().namespace.clone().unwrap_or_default();
@@ -1297,7 +1328,7 @@ async fn renew_broker_leafs(
         let Ok(cert_pem) = std::str::from_utf8(&cert_bytes.0) else {
             continue;
         };
-        if !renew_if_expiring(cert_pem, renewal_days, now)? {
+        if !renew_if_expiring(cert_pem, renewal, now)? {
             continue;
         }
         let (cn, sans) = match read_existing_cn_and_sans(cert_pem) {
@@ -1318,7 +1349,7 @@ async fn renew_broker_leafs(
             &cn,
             &sans,
             &[],
-            validity_days,
+            whole_days(validity),
         )?;
         data.insert(crt_key.clone(), ByteString(leaf.cert_pem.into_bytes()));
         data.insert(format!("{id}.key"), ByteString(leaf.key_pem.into_bytes()));
@@ -1453,7 +1484,7 @@ mod tests {
         let ca = generate_clients_ca("c1", 365).expect("CA");
         let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 5).expect("leaf");
         let now = OffsetDateTime::now_utc();
-        assert!(renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
+        assert!(renew_if_expiring(&user.cert_pem, days(30), now).expect("predicate"));
     }
 
     #[test]
@@ -1461,7 +1492,7 @@ mod tests {
         let ca = generate_clients_ca("c1", 365).expect("CA");
         let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 365).expect("leaf");
         let now = OffsetDateTime::now_utc();
-        assert!(!renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
+        assert!(!renew_if_expiring(&user.cert_pem, days(30), now).expect("predicate"));
     }
 
     #[test]
@@ -1469,7 +1500,7 @@ mod tests {
         let ca = generate_clients_ca("c1", 365).expect("CA");
         let user = issue_user_cert(&ca.cert_pem, &ca.key_pem, "alice", 1).expect("leaf");
         let now = OffsetDateTime::now_utc() + time::Duration::days(10);
-        assert!(renew_if_expiring(&user.cert_pem, 30, now).expect("predicate"));
+        assert!(renew_if_expiring(&user.cert_pem, days(30), now).expect("predicate"));
     }
 }
 
@@ -1668,8 +1699,8 @@ mod rotation_tests {
     fn inputs(generate: bool, which: WhichCa) -> RotationInputs {
         RotationInputs {
             generate,
-            validity_days: 365,
-            renewal_days: 30,
+            validity: days(365),
+            renewal: days(30),
             force: ForceRotation::None,
             rollout_converged: false,
             now: OffsetDateTime::now_utc(),

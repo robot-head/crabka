@@ -212,9 +212,9 @@ async fn rust_producer_to_rust_consumer_through_group() {
         .bootstrap(&bootstrap)
         .client_id("rust-consumer")
         .group_id("g1")
-        .session_timeout(Duration::from_secs(30))
-        .rebalance_timeout(Duration::from_secs(2))
-        .heartbeat_interval(Duration::from_secs(1))
+        .session_timeout(crabka_units::secs(30))
+        .rebalance_timeout(crabka_units::secs(2))
+        .heartbeat_interval(crabka_units::secs(1))
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .subscribe(["rrtopic".to_string()])
         .build()
@@ -224,7 +224,7 @@ async fn rust_producer_to_rust_consumer_through_group() {
     let mut seen: Vec<String> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     while std::time::Instant::now() < deadline && seen.len() < 3 {
-        let records = consumer.poll(Duration::from_millis(500)).await.unwrap();
+        let records = consumer.poll(crabka_units::millis(500)).await.unwrap();
         for r in records {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned());
         }
@@ -261,8 +261,8 @@ async fn offsets_survive_broker_restart() {
             .client_id("c")
             .group_id("persist-grp")
             .auto_offset_reset(AutoOffsetReset::Earliest)
-            .rebalance_timeout(Duration::from_secs(2))
-            .heartbeat_interval(Duration::from_secs(1))
+            .rebalance_timeout(crabka_units::secs(2))
+            .heartbeat_interval(crabka_units::secs(1))
             .subscribe(["persist".to_string()])
             .build()
             .await
@@ -271,7 +271,7 @@ async fn offsets_survive_broker_restart() {
         let mut seen = 0;
         while std::time::Instant::now() < deadline && seen < 3 {
             seen += consumer
-                .poll(Duration::from_millis(500))
+                .poll(crabka_units::millis(500))
                 .await
                 .unwrap()
                 .len();
@@ -294,15 +294,15 @@ async fn offsets_survive_broker_restart() {
             .bootstrap(&bootstrap)
             .client_id("c2")
             .group_id("persist-grp")
-            .rebalance_timeout(Duration::from_secs(2))
-            .heartbeat_interval(Duration::from_secs(1))
+            .rebalance_timeout(crabka_units::secs(2))
+            .heartbeat_interval(crabka_units::secs(1))
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .subscribe(["persist".to_string()])
             .build()
             .await
             .unwrap();
         // Quick poll: should NOT receive the same x/y/z again.
-        let r = consumer.poll(Duration::from_millis(500)).await.unwrap();
+        let r = consumer.poll(crabka_units::millis(500)).await.unwrap();
         assert2::assert!(r.is_empty());
         consumer.close().await.unwrap();
         broker.shutdown().await;
@@ -341,9 +341,9 @@ async fn eager_rebalance_reacquires_and_primes() {
                 .bootstrap(&bootstrap)
                 .client_id(client_id)
                 .group_id("eager-grp")
-                .session_timeout(Duration::from_secs(30))
-                .rebalance_timeout(Duration::from_secs(2))
-                .heartbeat_interval(Duration::from_millis(500))
+                .session_timeout(crabka_units::secs(30))
+                .rebalance_timeout(crabka_units::secs(2))
+                .heartbeat_interval(crabka_units::millis(500))
                 .auto_offset_reset(AutoOffsetReset::Earliest)
                 .subscribe(["eagerrebal".to_string()])
                 .build()
@@ -380,7 +380,7 @@ async fn eager_rebalance_reacquires_and_primes() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let regain = Instant::now() + Duration::from_secs(30);
         loop {
-            let _ = m1.poll(Duration::from_millis(200)).await;
+            let _ = m1.poll(crabka_units::millis(200)).await;
             if m1.assignment().await.len() == 2 {
                 break;
             }
@@ -399,7 +399,7 @@ async fn eager_rebalance_reacquires_and_primes() {
     let mut second: HashSet<String> = HashSet::new();
     let deadline = Instant::now() + Duration::from_secs(15);
     while second.len() < 2 && Instant::now() < deadline {
-        for r in m1.poll(Duration::from_millis(200)).await.unwrap() {
+        for r in m1.poll(crabka_units::millis(200)).await.unwrap() {
             let v = String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned();
             if v.starts_with('b') {
                 second.insert(v);
@@ -443,9 +443,9 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
                 .bootstrap(&bootstrap)
                 .client_id(client_id)
                 .group_id("genbump-grp")
-                .session_timeout(Duration::from_secs(30))
-                .rebalance_timeout(Duration::from_secs(2))
-                .heartbeat_interval(Duration::from_millis(500))
+                .session_timeout(crabka_units::secs(30))
+                .rebalance_timeout(crabka_units::secs(2))
+                .heartbeat_interval(crabka_units::millis(500))
                 .auto_offset_reset(AutoOffsetReset::Earliest)
                 .subscribe(["genbump".to_string()])
                 .build()
@@ -476,7 +476,7 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let regain = Instant::now() + Duration::from_secs(30);
         loop {
-            let _ = m1.poll(Duration::from_millis(200)).await;
+            let _ = m1.poll(crabka_units::millis(200)).await;
             if m1.assignment().await.len() == 2 {
                 break;
             }
@@ -500,7 +500,7 @@ async fn commit_succeeds_after_rebalance_bumps_generation() {
     let mut seen: HashSet<String> = HashSet::new();
     let deadline = Instant::now() + Duration::from_secs(15);
     while seen.len() < 2 && Instant::now() < deadline {
-        for r in m1.poll(Duration::from_millis(200)).await.unwrap() {
+        for r in m1.poll(crabka_units::millis(200)).await.unwrap() {
             let v = String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned();
             if v.starts_with('g') {
                 seen.insert(v);
@@ -594,9 +594,9 @@ async fn consumer_resets_on_offset_out_of_range_latest() {
         .bootstrap(&bootstrap)
         .client_id("c")
         .group_id("oor-latest-grp")
-        .session_timeout(Duration::from_secs(30))
-        .rebalance_timeout(Duration::from_secs(2))
-        .heartbeat_interval(Duration::from_secs(1))
+        .session_timeout(crabka_units::secs(30))
+        .rebalance_timeout(crabka_units::secs(2))
+        .heartbeat_interval(crabka_units::secs(1))
         .auto_offset_reset(AutoOffsetReset::Latest)
         .subscribe(["oor-latest".to_string()])
         .build()
@@ -606,7 +606,7 @@ async fn consumer_resets_on_offset_out_of_range_latest() {
     // First poll: fetch from 0 → OFFSET_OUT_OF_RANGE → reset to the Latest
     // sentinel. It must NOT surface an error.
     let first = consumer
-        .poll(Duration::from_millis(400))
+        .poll(crabka_units::millis(400))
         .await
         .expect("OOR under Latest must reset, not error");
     assert2::assert!(first.is_empty());
@@ -618,7 +618,7 @@ async fn consumer_resets_on_offset_out_of_range_latest() {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline && seen.len() < 3 {
         for r in consumer
-            .poll(Duration::from_millis(300))
+            .poll(crabka_units::millis(300))
             .await
             .expect("post-reset poll must not error")
         {
@@ -677,9 +677,9 @@ async fn consumer_resets_on_offset_out_of_range_earliest() {
         .bootstrap(&bootstrap)
         .client_id("c")
         .group_id("oor-earliest-grp")
-        .session_timeout(Duration::from_secs(30))
-        .rebalance_timeout(Duration::from_secs(2))
-        .heartbeat_interval(Duration::from_secs(1))
+        .session_timeout(crabka_units::secs(30))
+        .rebalance_timeout(crabka_units::secs(2))
+        .heartbeat_interval(crabka_units::secs(1))
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .subscribe(["oor-earliest".to_string()])
         .build()
@@ -694,7 +694,7 @@ async fn consumer_resets_on_offset_out_of_range_earliest() {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline && seen.len() < 3 {
         for r in consumer
-            .poll(Duration::from_millis(300))
+            .poll(crabka_units::millis(300))
             .await
             .expect("Earliest OOR reset must not error")
         {
@@ -760,9 +760,9 @@ async fn consumer_none_policy_surfaces_log_truncation() {
             .bootstrap(&bootstrap)
             .client_id("seed")
             .group_id("oor-none-grp")
-            .session_timeout(Duration::from_secs(30))
-            .rebalance_timeout(Duration::from_secs(2))
-            .heartbeat_interval(Duration::from_secs(1))
+            .session_timeout(crabka_units::secs(30))
+            .rebalance_timeout(crabka_units::secs(2))
+            .heartbeat_interval(crabka_units::secs(1))
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .subscribe(["oor-none".to_string()])
             .build()
@@ -795,9 +795,9 @@ async fn consumer_none_policy_surfaces_log_truncation() {
         .bootstrap(&bootstrap)
         .client_id("c")
         .group_id("oor-none-grp")
-        .session_timeout(Duration::from_secs(30))
-        .rebalance_timeout(Duration::from_secs(2))
-        .heartbeat_interval(Duration::from_secs(1))
+        .session_timeout(crabka_units::secs(30))
+        .rebalance_timeout(crabka_units::secs(2))
+        .heartbeat_interval(crabka_units::secs(1))
         .auto_offset_reset(AutoOffsetReset::None)
         .subscribe(["oor-none".to_string()])
         .build()
@@ -810,7 +810,7 @@ async fn consumer_none_policy_surfaces_log_truncation() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut got_truncation = false;
     while Instant::now() < deadline {
-        match consumer.poll(Duration::from_millis(300)).await {
+        match consumer.poll(crabka_units::millis(300)).await {
             Ok(recs) => {
                 assert2::assert!(recs.is_empty());
             }
@@ -878,9 +878,9 @@ async fn committed_leader_epoch_survives_restart() {
             .bootstrap(&bootstrap)
             .client_id("c")
             .group_id("epoch-grp")
-            .session_timeout(Duration::from_secs(30))
-            .rebalance_timeout(Duration::from_secs(2))
-            .heartbeat_interval(Duration::from_secs(1))
+            .session_timeout(crabka_units::secs(30))
+            .rebalance_timeout(crabka_units::secs(2))
+            .heartbeat_interval(crabka_units::secs(1))
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .subscribe(["epoch-persist".to_string()])
             .build()
@@ -890,7 +890,7 @@ async fn committed_leader_epoch_survives_restart() {
         let mut epochs: Vec<i32> = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline && epochs.len() < 3 {
-            for r in consumer.poll(Duration::from_millis(300)).await.unwrap() {
+            for r in consumer.poll(crabka_units::millis(300)).await.unwrap() {
                 epochs.push(r.leader_epoch);
             }
         }
@@ -989,9 +989,9 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
         .bootstrap(&bootstrap)
         .client_id("c")
         .group_id("cold-start-grp")
-        .session_timeout(Duration::from_secs(30))
-        .heartbeat_interval(Duration::from_millis(500))
-        .subscription_metadata_refresh_interval(Duration::from_millis(750))
+        .session_timeout(crabka_units::secs(30))
+        .heartbeat_interval(crabka_units::millis(500))
+        .subscription_metadata_refresh_interval(crabka_units::millis(750))
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .subscribe(["wal-late".to_string()])
         .build()
@@ -1000,7 +1000,7 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
 
     // Let the initial join settle, then assert it really is the empty-assignment
     // cold start (a single Stable member with nothing to consume).
-    let _ = consumer.poll(Duration::from_millis(200)).await;
+    let _ = consumer.poll(crabka_units::millis(200)).await;
     assert2::assert!(consumer.assignment().await.is_empty());
 
     // The distributor creates the WAL topic AFTER the consumer has joined.
@@ -1012,7 +1012,7 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let _ = consumer.poll(Duration::from_millis(200)).await;
+            let _ = consumer.poll(crabka_units::millis(200)).await;
             if consumer.assignment().await.len() == 2 {
                 break;
             }
@@ -1033,7 +1033,7 @@ async fn cold_start_rejoins_when_subscribed_topic_appears() {
     tokio::time::timeout(Duration::from_secs(30), async {
         let deadline = Instant::now() + Duration::from_secs(30);
         while seen.len() < 4 {
-            for r in consumer.poll(Duration::from_millis(200)).await.unwrap() {
+            for r in consumer.poll(crabka_units::millis(200)).await.unwrap() {
                 seen.insert(
                     String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned(),
                 );

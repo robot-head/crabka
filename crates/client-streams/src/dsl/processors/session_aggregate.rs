@@ -7,11 +7,12 @@
 //! `on_window_update` strategy it forwards a tombstone per merged-away session and
 //! a `Change::update` for the new session. Under `on_window_close` (emit-final)
 //! those per-update forwards are suppressed; instead a close-scan forwards each
-//! session whose `end <= window_close_time` (= `stream_time - grace_ms`) exactly
+//! session whose `end <= window_close_time` (= `stream_time - grace`) exactly
 //! once, advancing `last_emitted_close` to prevent re-emission.
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
+use crabka_units::prelude::*;
 
 use crate::{
     dsl::{
@@ -33,14 +34,14 @@ type Marker<T> = PhantomData<fn() -> T>;
 #[allow(dead_code)]
 pub(crate) struct KStreamSessionAggregateProcessor<K, V, VA, I, A, M> {
     pub store_name: String,
-    pub gap_ms: i64,
+    pub gap: Time,
     pub init: I,
     pub agg: A,
     pub merger: M,
     /// Emit on every update (default) or only on window close (KIP-825).
     pub emit: crate::dsl::emit::EmitStrategy,
-    /// Session grace period (ms) — `window_close_time = stream_time - grace_ms`.
-    pub grace_ms: i64,
+    /// Session grace period — `window_close_time = stream_time - grace`.
+    pub grace: Time,
     /// Observed max record timestamp (per task instance).
     pub stream_time: i64,
     /// Highest `window_close_time` already emitted; prevents re-emit.
@@ -76,9 +77,9 @@ where
     ) {
         let key = r.key.expect("session aggregate requires a non-null key");
         let ts = r.timestamp;
-        let gap = self.gap_ms;
+        let gap = self.gap.millis_i64();
         self.stream_time = self.stream_time.max(ts);
-        let window_close_time = self.stream_time - self.grace_ms;
+        let window_close_time = self.stream_time - self.grace.millis_i64();
         // Stash the source record context so a cached store stamps it on staged
         // writes (`write_ctx` clones, not takes — persists across removes + put).
         let rc = ctx.record_context().clone();
@@ -204,12 +205,12 @@ where
 #[allow(dead_code)]
 pub(crate) struct KStreamSessionReduceProcessor<K, V, R> {
     pub store_name: String,
-    pub gap_ms: i64,
+    pub gap: Time,
     pub reducer: R,
     /// Emit on every update (default) or only on window close (KIP-825).
     pub emit: crate::dsl::emit::EmitStrategy,
-    /// Session grace period (ms) — `window_close_time = stream_time - grace_ms`.
-    pub grace_ms: i64,
+    /// Session grace period — `window_close_time = stream_time - grace`.
+    pub grace: Time,
     /// Observed max record timestamp (per task instance).
     pub stream_time: i64,
     /// Highest `window_close_time` already emitted; prevents re-emit.
@@ -237,9 +238,9 @@ where
     ) {
         let key = r.key.expect("session reduce requires a non-null key");
         let ts = r.timestamp;
-        let gap = self.gap_ms;
+        let gap = self.gap.millis_i64();
         self.stream_time = self.stream_time.max(ts);
-        let window_close_time = self.stream_time - self.grace_ms;
+        let window_close_time = self.stream_time - self.grace.millis_i64();
         // Stash the source record context for cached writes (see aggregate proc).
         let rc = ctx.record_context().clone();
 
@@ -397,12 +398,12 @@ mod tests {
 
         let mut proc = KStreamSessionAggregateProcessor {
             store_name: "s".into(),
-            gap_ms: 60,
+            gap: millis(60),
             init: || 0i64,
             agg: |_k: &String, _v: &String, a: i64| a + 1,
             merger: |_k: &String, a: i64, b: i64| a + b,
             emit: crate::dsl::emit::EmitStrategy::on_window_update(),
-            grace_ms: 0,
+            grace: Time::ZERO,
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
             forwarder: TupleForwarder::default(),
@@ -484,12 +485,12 @@ mod tests {
         };
         let mut proc = KStreamSessionAggregateProcessor {
             store_name: "s".into(),
-            gap_ms: 60,
+            gap: millis(60),
             init: || 0i64,
             agg: |_k: &String, _v: &String, a: i64| a + 1,
             merger: |_k: &String, a: i64, b: i64| a + b,
             emit: crate::dsl::emit::EmitStrategy::on_window_update(),
-            grace_ms: 0,
+            grace: Time::ZERO,
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
             forwarder: TupleForwarder::default(),
@@ -535,12 +536,12 @@ mod tests {
         };
         let mut proc = KStreamSessionAggregateProcessor {
             store_name: "s".into(),
-            gap_ms: 60,
+            gap: millis(60),
             init: || 0i64,
             agg: |_k: &String, _v: &String, a: i64| a + 1,
             merger: |_k: &String, a: i64, b: i64| a + b,
             emit: crate::dsl::emit::EmitStrategy::on_window_update(),
-            grace_ms: 0,
+            grace: Time::ZERO,
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
             forwarder: TupleForwarder::default(),
@@ -639,7 +640,7 @@ mod tests {
         };
         let mut proc = KStreamSessionAggregateProcessor {
             store_name: "s".into(),
-            gap_ms: 10,
+            gap: millis(10),
             init: || 0i64,
             agg: |_k: &String, _v: &String, a: i64| a + 1,
             merger: |_k: &String, a: i64, b: i64| a + b,
@@ -648,7 +649,7 @@ mod tests {
             // `window_close_time >= end`. A grace of 10 keeps the data-defined
             // `[0,4]` session open at its own stream_time (close_time = ts - 10),
             // closing only when stream_time jumps far ahead.
-            grace_ms: 10,
+            grace: millis(10),
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
             forwarder: TupleForwarder::default(),
@@ -732,10 +733,10 @@ mod tests {
         };
         let mut proc = KStreamSessionReduceProcessor {
             store_name: "s".into(),
-            gap_ms: 60,
+            gap: millis(60),
             reducer: |a: &String, b: &String| format!("{a}{b}"),
             emit: crate::dsl::emit::EmitStrategy::on_window_update(),
-            grace_ms: 0,
+            grace: Time::ZERO,
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
             forwarder: TupleForwarder::default(),
@@ -799,13 +800,13 @@ mod tests {
         };
         let mut proc = KStreamSessionReduceProcessor {
             store_name: "s".into(),
-            gap_ms: 10,
+            gap: millis(10),
             reducer: |a: &String, b: &String| format!("{a}{b}"),
             emit: crate::dsl::emit::EmitStrategy::on_window_close(),
             // Session ends are inclusive; grace 10 keeps the data-defined [0,4]
             // session open at its own stream_time (close_time = ts - 10), closing
             // only when stream_time jumps far ahead. Mirrors the aggregate test.
-            grace_ms: 10,
+            grace: millis(10),
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
             forwarder: TupleForwarder::default(),
@@ -907,12 +908,12 @@ mod tests {
         };
         let mut proc = KStreamSessionAggregateProcessor {
             store_name: "s".into(),
-            gap_ms: 60,
+            gap: millis(60),
             init: || 0i64,
             agg: |_k: &String, _v: &String, a: i64| a + 1,
             merger: |_k: &String, a: i64, b: i64| a + b,
             emit: crate::dsl::emit::EmitStrategy::on_window_update(),
-            grace_ms: 0,
+            grace: Time::ZERO,
             stream_time: i64::MIN,
             last_emitted_close: i64::MIN,
             forwarder: TupleForwarder::default(),

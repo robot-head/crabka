@@ -23,6 +23,7 @@ use crabka_grpc_gateway::{
     state::AppState,
     types::GatewayRecord,
 };
+use crabka_units::prelude::*;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -174,7 +175,7 @@ async fn forward_handler_error_arm_returns_retriable() {
             client_id: "fh".into(),
             dedup_topic: DEDUP.into(),
             dedup_partitions: N,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
             dedup_ownership_group: "__crabka_grpc_gateway_dedup_owners".into(),
             dedup_txn_id_prefix: "fh-dedup".into(),
             advertised_addr: "127.0.0.1:0".into(),
@@ -277,7 +278,7 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
         trust_roots_path: None,
         client_ca_path: None,
         client_auth: ClientAuthMode::Disabled,
-        reload_interval_secs: 30,
+        reload_interval: secs(30),
     });
 
     let state = Arc::new(AppState {
@@ -288,7 +289,7 @@ async fn forward_handler_rejects_anonymous_when_tls_enabled() {
             client_id: "fh-tls".into(),
             dedup_topic: DEDUP.into(),
             dedup_partitions: N,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
             dedup_ownership_group: "__crabka_grpc_gateway_dedup_owners".into(),
             dedup_txn_id_prefix: "fh-tls-dedup".into(),
             advertised_addr: "127.0.0.1:0".into(),

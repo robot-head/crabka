@@ -1,7 +1,7 @@
 //! Produce via `ProduceCore` against an in-process broker; read the record
 //! back with a native consumer to prove it landed.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use assert2::check;
 use bytes::Bytes;
@@ -31,7 +31,7 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
         configs: BTreeMap::new(),
     };
     admin
-        .create_topics(&[spec], 10_000)
+        .create_topics(&[spec], crabka_units::secs(10))
         .await
         .expect("create_topics");
 }
@@ -81,7 +81,7 @@ async fn produce_plain_then_read_back() {
     let mut seen = vec![];
     for _ in 0..20 {
         let recs = consumer
-            .poll(Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .expect("poll");
         for r in recs {

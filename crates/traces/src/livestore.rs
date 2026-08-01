@@ -3,11 +3,11 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
-    time::Duration,
 };
 
 use arrow::record_batch::RecordBatch;
 use crabka_client_consumer::Consumer;
+use crabka_units::{Time, convert::TimeExt as _};
 use datafusion::catalog::MemTable;
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
@@ -149,7 +149,7 @@ pub async fn run(
 ) -> Result<(), TracesError> {
     while !shutdown.is_cancelled() {
         let records = consumer
-            .poll(Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .map_err(|err| TracesError::Wal(err.to_string()))?;
         if records.is_empty() {
@@ -420,7 +420,7 @@ fn span_ref(span: &Span, nested: nested_set::NestedSet) -> crabka_traceql::SpanR
         nested_set_right: nested.right,
         nested_set_parent: nested.parent_id,
         start_time_unix_nano: non_negative_u64(span.start_ns),
-        duration_nanos: non_negative_u64(span.duration_ns),
+        duration: Time::from_nanos(span.duration_ns),
         status_code: span.status.as_i32(),
         status_message: span.status_message.clone(),
         instrumentation_name: span.instrumentation_scope.clone(),
@@ -446,11 +446,7 @@ fn span_ref(span: &Span, nested: nested_set::NestedSet) -> crabka_traceql::SpanR
 
 fn event_ref(span: &Span, event: &EventRecord) -> crabka_traceql::EventRef {
     crabka_traceql::EventRef {
-        time_since_start_nano: event
-            .time_unix_nano
-            .saturating_sub(span.start_ns)
-            .try_into()
-            .unwrap_or(0),
+        time_since_start: Time::from_nanos(event.time_unix_nano.saturating_sub(span.start_ns)),
         name: event.name.clone(),
         attributes: event
             .attrs

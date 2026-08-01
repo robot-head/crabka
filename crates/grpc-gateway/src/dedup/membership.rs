@@ -15,12 +15,12 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
 };
 
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_units::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{config::GatewayRuntimeConfig, error::GatewayError};
@@ -43,7 +43,7 @@ struct NodeEntry {
 pub struct MembershipStore {
     nodes: RwLock<HashMap<String, NodeEntry>>,
     routing: RwLock<HashMap<u32, String>>,
-    poll_timeout: Duration,
+    poll_timeout: Time,
 }
 
 impl MembershipStore {
@@ -57,7 +57,7 @@ impl MembershipStore {
         Self {
             nodes: RwLock::new(HashMap::new()),
             routing: RwLock::new(HashMap::new()),
-            poll_timeout: Duration::from_millis(runtime.consumer_poll_timeout_ms),
+            poll_timeout: runtime.consumer_poll_timeout,
         }
     }
 

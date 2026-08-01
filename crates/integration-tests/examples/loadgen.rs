@@ -141,16 +141,16 @@ async fn main() {
                 .bootstrap(&bootstrap)
                 .client_id("loadgen-consumer")
                 .group_id("loadgen-grp")
-                .session_timeout(Duration::from_secs(30))
-                .rebalance_timeout(Duration::from_secs(5))
-                .heartbeat_interval(Duration::from_secs(1))
+                .session_timeout(crabka_units::secs(30))
+                .rebalance_timeout(crabka_units::secs(5))
+                .heartbeat_interval(crabka_units::secs(1))
                 .auto_offset_reset(AutoOffsetReset::Earliest)
                 .subscribe([topic])
                 .build()
                 .await
                 .expect("consumer build");
             while !stop.load(Ordering::Relaxed) {
-                let _ = consumer.poll(Duration::from_millis(200)).await;
+                let _ = consumer.poll(crabka_units::millis(200)).await;
             }
             consumer.close().await.ok();
         }));

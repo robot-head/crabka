@@ -1,6 +1,10 @@
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use crabka_gres_control::TenantName;
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
+};
 use tokio::time::sleep;
 
 use crate::{ActivatorError, WakeRegistry};
@@ -29,12 +33,14 @@ pub enum Readiness {
 }
 
 /// Bounds for cold-start readiness waits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Eq`: both bounds are `f64`-backed quantities.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct WaitForReadyConfig {
     /// Maximum time to wait.
-    pub timeout: Duration,
+    pub timeout: Time,
     /// Poll interval while the registry watch surface is still pending.
-    pub poll_interval: Duration,
+    pub poll_interval: Time,
 }
 
 /// Wait until a tenant is active, or fail when the configured timeout elapses.
@@ -49,7 +55,9 @@ pub async fn wait_for_ready<R>(
 where
     R: WakeRegistry,
 {
-    let deadline = Instant::now() + cfg.timeout;
+    // The deadline is an instant, so it stays raw; only the extent left to wait
+    // is a quantity.
+    let deadline = Instant::now() + cfg.timeout.to_std();
     loop {
         if let Readiness::Ready(endpoint) = registry.readiness(tenant).await? {
             return Ok(endpoint);
@@ -61,6 +69,7 @@ where
                 timeout: cfg.timeout,
             });
         }
-        sleep(cfg.poll_interval.min(deadline - now)).await;
+        let remaining = deadline.duration_since(now).as_time();
+        sleep(cfg.poll_interval.min(remaining).to_std()).await;
     }
 }

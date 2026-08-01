@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
 use crabka_blockstore::Labels;
+use crabka_units::prelude::*;
 
 use super::{
     AlertStateKey, AlertmanagerAlert, AlertmanagerSink, NoopRulerStateSink, RulerAlertState,
     RulerAlertStateRecord, RulerStateSink,
-    config::{yaml_duration_ms, yaml_optional_string, yaml_required_string, yaml_string_map},
+    config::{yaml_duration, yaml_optional_string, yaml_required_string, yaml_string_map},
 };
 use crate::{MetricStore, PromqlEngine, PromqlError, QueryResult, SampleValue};
 
@@ -116,8 +117,8 @@ where
 
     let rule_labels = yaml_string_map(rule, "labels");
     let annotations = yaml_string_map(rule, "annotations");
-    let duration_ms = yaml_duration_ms(rule, "for")?;
-    let keep_firing_for_ms = yaml_duration_ms(rule, "keep_firing_for")?;
+    let hold_for = yaml_duration(rule, "for")?;
+    let keep_firing_for = yaml_duration(rule, "keep_firing_for")?;
     let rule_id = format!("{alert_name}\n{expr}");
     let mut active_keys = Vec::new();
     let mut active_records = Vec::new();
@@ -148,16 +149,17 @@ where
             labels: labels.clone(),
             active_since_ms: Some(starts_at_ms),
         });
-        if eval_time_ms.saturating_sub(starts_at_ms) < duration_ms {
+        if eval_time_ms.saturating_sub(starts_at_ms) < hold_for.millis_i64() {
             // Still pending: not firing yet, so it cannot be kept firing.
             state.keep_firing_until_ms.remove(&key);
             continue;
         }
         // Firing: (re)arm the keep-firing deadline so that if the series stops
         // matching on a later tick the alert keeps firing for `keep_firing_for`.
-        state
-            .keep_firing_until_ms
-            .insert(key, eval_time_ms.saturating_add(keep_firing_for_ms));
+        state.keep_firing_until_ms.insert(
+            key,
+            eval_time_ms.saturating_add(keep_firing_for.millis_i64()),
+        );
         let annotations = expand_alert_label_map(&annotations, value, &sample.labels);
         alerts.push(AlertmanagerAlert {
             labels,

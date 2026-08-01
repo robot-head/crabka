@@ -5535,7 +5535,7 @@ impl GatewaySession {
             for enlisted_range in enlisted {
                 if let Some(session) = self.sessions.get_mut(&enlisted_range) {
                     session.set_lock_wait_cap(Some(
-                        self.inner.runtime_policy.cross_range_lock_wait_cap,
+                        self.inner.runtime_policy.cross_range_lock_wait_cap.to_std(),
                     ));
                 }
             }
@@ -6386,7 +6386,8 @@ fn catalog_table_is_sharded(
     catalog: &crabka_pgexec::SqlEngine,
     table_name: &str,
 ) -> Result<bool, PgError> {
-    match catalog.table_uses_global_visibility(table_name) {
+    let table_name = crabka_pgcatalog::RelationName::public(table_name);
+    match catalog.table_uses_global_visibility(&table_name) {
         Ok(uses_global_visibility) => Ok(uses_global_visibility),
         Err(ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedTable(_))) => Ok(false),
         Err(error) => Err(error.into_pg()),
@@ -6397,8 +6398,9 @@ fn catalog_table(
     catalog: &crabka_pgexec::SqlEngine,
     table_name: &str,
 ) -> Result<crabka_pgcatalog::Table, PgError> {
+    let table_name = crabka_pgcatalog::RelationName::public(table_name);
     catalog
-        .catalog_table(table_name)
+        .catalog_table(&table_name)
         .map_err(ExecError::into_pg)
 }
 
@@ -6431,7 +6433,8 @@ fn reject_unsupported_cross_range_statement(
         return Ok(());
     }
     let all_global_visibility = table_refs.iter().try_fold(true, |all_global, table_ref| {
-        let uses_global = match catalog.table_uses_global_visibility(&table_ref.name) {
+        let table_name = crabka_pgcatalog::RelationName::public(&table_ref.name);
+        let uses_global = match catalog.table_uses_global_visibility(&table_name) {
             Ok(uses_global) => uses_global,
             Err(ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedTable(_))) => false,
             Err(error) => return Err(error.into_pg()),
@@ -6478,8 +6481,9 @@ fn table_refs_in_statement(sql: &str) -> Vec<TableRef> {
     refs
 }
 
-fn routing_table_id(table: &str) -> TableId {
-    trailing_table_id(table).unwrap_or(TableId::ZERO)
+fn routing_table_id<T: std::fmt::Display + ?Sized>(table: &T) -> TableId {
+    let table = table.to_string();
+    trailing_table_id(&table).unwrap_or(TableId::ZERO)
 }
 
 fn trailing_table_id(table: &str) -> Option<TableId> {
@@ -6811,15 +6815,23 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         Datum::Text(value) => Some(value.as_bytes().to_vec()),
         Datum::Bytea(value) => Some(value.clone()),
         Datum::Null
+        | Datum::Int2(_)
+        | Datum::Float4(_)
         | Datum::Float8(_)
         | Datum::Numeric(_)
         | Datum::Date(_)
         | Datum::Time(_)
+        | Datum::Timetz(_)
         | Datum::Timestamp(_)
         | Datum::Timestamptz(_)
         | Datum::Interval(_)
         | Datum::Jsonb(_)
-        | Datum::Array(_) => None,
+        | Datum::Array(_)
+        | Datum::Record(_)
+        | Datum::Enum(_)
+        | Datum::Regclass(_)
+        | Datum::TsVector(_)
+        | Datum::TsQuery(_) => None,
     }
 }
 
@@ -7594,7 +7606,9 @@ mod tests {
             .simple_query("CREATE TABLE marker52 (id int4) SHARDED")
             .await
             .expect("marker table");
-        let table = r1.catalog_table("marker52").expect("marker catalog");
+        let table = r1
+            .catalog_table(&crabka_pgcatalog::RelationName::public("marker52"))
+            .expect("marker catalog");
         let start_ts = crabka_pgexec::TimestampTransactionId::new(700).expect("timestamp");
         let identity = crabka_pgexec::TimestampTxnIdentity {
             start_ts,
@@ -7817,8 +7831,16 @@ mod tests {
                 .expect("rN-only assembly");
 
         let range1 = &handles.inner.serving.load().engines[&RangeId::new(1)];
-        assert!(range1.catalog_table("follower_table").is_ok());
-        assert!(range1.catalog_table("unrelated_table").is_err());
+        assert!(
+            range1
+                .catalog_table(&crabka_pgcatalog::RelationName::public("follower_table"))
+                .is_ok()
+        );
+        assert!(
+            range1
+                .catalog_table(&crabka_pgcatalog::RelationName::public("unrelated_table"))
+                .is_err()
+        );
 
         let session = gateway.connect();
         assert!(
@@ -9061,7 +9083,7 @@ mod tests {
             .engines
             .get(&RangeId::COORDINATOR)
             .expect("range 0")
-            .catalog_table("t")
+            .catalog_table(&crabka_pgcatalog::RelationName::public("t"))
             .expect("table");
         let range0_versions = committed_timestamp_versions(
             serving.engines.get(&RangeId::COORDINATOR).expect("range 0"),

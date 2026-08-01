@@ -1,5 +1,7 @@
 //! Select-series result types and step-bucketing helpers.
 
+use crabka_units::{Time, convert::TimeExt as _, millis};
+
 use crate::ProfileError;
 
 /// One time series returned by `select_series` in the next slice.
@@ -16,26 +18,50 @@ pub enum SeriesAgg {
     Average,
 }
 
+/// The epoch-millisecond start of the bucket `ts_ms` falls in, for a query of
+/// the given step.
+///
+/// The timestamp is an instant and the bucket start is one too, so both stay
+/// epoch milliseconds; only the step is an extent. Flooring is Euclidean, so a
+/// timestamp before the epoch lands in the bucket below it rather than being
+/// truncated toward zero.
 #[must_use]
-pub fn step_bucket_ms(ts_ms: i64, step_ms: i64) -> i64 {
+pub fn step_bucket_ms(ts_ms: i64, step: Time) -> i64 {
+    let step_ms = step.millis_i64();
     ts_ms.div_euclid(step_ms) * step_ms
 }
 
+/// The step of a select-series query, read from the fractional seconds the
+/// Pyroscope `step` query parameter carries.
+///
 /// # Errors
-/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
-pub fn step_ms_from_secs(step_secs: f64) -> Result<i64, ProfileError> {
+/// Returns [`ProfileError::Plan`] when the step is not a positive finite number
+/// of seconds, is shorter than a millisecond, or is too long to express as whole
+/// milliseconds in an `i64`.
+pub fn step_from_secs(step_secs: f64) -> Result<Time, ProfileError> {
+    validated_step(Time::from_secs_f64(step_secs))
+}
+
+/// The same bounds as [`step_from_secs`], checked on a step that arrives already
+/// typed, so a query cannot reach the bucketing arithmetic with a step of zero.
+pub(crate) fn validated_step(step: Time) -> Result<Time, ProfileError> {
+    let step_secs = step.secs_f64();
     if !(step_secs.is_finite() && step_secs > 0.0) {
         return Err(ProfileError::Plan(format!(
             "step must be a positive finite number of seconds, got {step_secs}"
         )));
     }
-    if step_secs * 1000.0 < 1.0 {
+    if step < millis(1) {
         return Err(ProfileError::Plan("step must be >= 1ms".to_string()));
     }
-    let rounded_ms = (step_secs * 1000.0).round();
-    format!("{rounded_ms:.0}")
-        .parse::<i64>()
-        .map_err(|_| ProfileError::Plan(format!("step is too large: {step_secs}")))
+    // `millis_i64` saturates, so a step beyond `i64::MAX` milliseconds would
+    // silently bucket at the saturated value rather than fail.
+    if step >= Time::from_millis(i64::MAX) {
+        return Err(ProfileError::Plan(format!(
+            "step is too large: {step_secs}"
+        )));
+    }
+    Ok(step)
 }
 
 #[must_use]
@@ -64,6 +90,7 @@ fn decimal_usize_to_f64(value: usize) -> f64 {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::secs;
 
     use super::*;
 
@@ -82,13 +109,13 @@ mod tests {
     }
 
     #[test]
-    fn step_secs_to_ms_rounds_and_rejects_nonpositive() {
-        assert!(step_ms_from_secs(15.0).unwrap() == 15_000);
-        assert!(step_ms_from_secs(0.5).unwrap() == 500);
-        let zero = step_ms_from_secs(0.0).unwrap_err();
+    fn step_from_secs_reads_fractional_seconds_and_rejects_nonpositive() {
+        assert!(step_from_secs(15.0).unwrap() == secs(15));
+        assert!(step_from_secs(0.5).unwrap() == millis(500));
+        let zero = step_from_secs(0.0).unwrap_err();
         assert!(matches!(zero, ProfileError::Plan(message) if message.contains("positive finite")));
-        assert!(step_ms_from_secs(-1.0).is_err());
-        let infinity = step_ms_from_secs(f64::INFINITY).unwrap_err();
+        assert!(step_from_secs(-1.0).is_err());
+        let infinity = step_from_secs(f64::INFINITY).unwrap_err();
         assert!(
             matches!(infinity, ProfileError::Plan(message) if message.contains("positive finite"))
         );
@@ -100,10 +127,17 @@ mod tests {
             (0.0001, None),
             (0.0005, None),
             (0.000_999_9, None),
-            (0.001, Some(1)),
+            (0.001, Some(millis(1))),
         ] {
-            assert!(step_ms_from_secs(step_secs).ok() == want, "{step_secs}");
+            assert!(step_from_secs(step_secs).ok() == want, "{step_secs}");
         }
+    }
+
+    #[test]
+    fn step_secs_rejects_steps_beyond_i64_milliseconds() {
+        let too_large = step_from_secs(1e18).unwrap_err();
+        assert!(matches!(too_large, ProfileError::Plan(message) if message.contains("too large")));
+        assert!(step_from_secs(1e15).is_ok());
     }
 
     #[test]
@@ -115,7 +149,7 @@ mod tests {
             (-1, -15_000),
         ] {
             assert!(
-                step_bucket_ms(timestamp_ms, 15_000) == want,
+                step_bucket_ms(timestamp_ms, secs(15)) == want,
                 "{timestamp_ms}"
             );
         }

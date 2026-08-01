@@ -12,6 +12,7 @@ use std::{
 use crabka_ids::LeaderEpoch;
 use crabka_protocol::owned::alter_partition_request::AlterPartitionRequest;
 use crabka_raft::NodeId;
+use crabka_units::{Time, convert::TimeExt as _};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -26,10 +27,10 @@ pub(crate) struct Config {
     pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub node_id: NodeId,
-    pub scan_interval: Duration,
+    pub scan_interval: Time,
     pub partitions: Arc<PartitionRegistry>,
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
-    pub replica_lag_time_max: Duration,
+    pub replica_lag_time_max: Time,
     pub broker_id: i32,
     pub shutdown: CancellationToken,
     /// Bumped on each proposed shrink / expand.
@@ -37,7 +38,7 @@ pub(crate) struct Config {
 }
 
 pub(crate) async fn run(cfg: Config) {
-    let mut tick = tokio::time::interval(cfg.scan_interval);
+    let mut tick = tokio::time::interval(cfg.scan_interval.to_std());
     // Reused across ticks to avoid re-allocating the snapshot Vec each second.
     // Holds cheap `Arc<Partition>` clones (no String allocation, no second
     // registry lookup). Cleared and refilled each tick.
@@ -60,7 +61,8 @@ pub(crate) async fn run(cfg: Config) {
             {
                 continue;
             }
-            let Some(proposal) = compute_proposal(&part, cfg.replica_lag_time_max).await else {
+            let Some(proposal) = compute_proposal(&part, cfg.replica_lag_time_max.to_std()).await
+            else {
                 continue;
             };
             // Classify the proposal as shrink/expand using the ISRs captured
@@ -376,6 +378,7 @@ mod tests {
     use crabka_ids::PartitionIndex;
     use crabka_log::Offset;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
+    use crabka_units::{millis, secs};
     use tempfile::tempdir;
     use tokio::sync::watch;
 
@@ -650,10 +653,10 @@ mod tests {
                 crabka_client_core::ConnectionDispatchQueueCapacity::default(),
             client_frame_max: crabka_client_core::ClientFrameMax::default(),
             node_id: NodeId(1),
-            scan_interval: Duration::from_millis(7),
+            scan_interval: millis(7),
             partitions,
             controller,
-            replica_lag_time_max: Duration::from_secs(5),
+            replica_lag_time_max: secs(5),
             broker_id: 1,
             shutdown: shutdown.clone(),
             metrics: metrics.clone(),

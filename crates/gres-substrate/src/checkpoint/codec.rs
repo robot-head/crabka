@@ -4,12 +4,17 @@ use std::collections::BTreeMap;
 
 use crabka_gres_ranges::{RangeKey, RowInterval, TableId};
 use crabka_pgkv::key;
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use sha2::{Digest, Sha256};
 
 use crate::{error::SubstrateError, frame::Reader};
 
 /// One key/value pair carried by a checkpoint part.
 pub type PartPayload = (Vec<u8>, Vec<u8>);
+
+/// Encoded length of a part holding one empty key/value pair: the smallest part
+/// size that can make progress.
+const MIN_PART_BYTES: usize = 8;
 
 /// Row-key interval used to ingest a checkpoint subset during range restore.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -358,11 +363,13 @@ impl CheckpointPart {
     /// Returns an error when the requested operation cannot be completed.
     pub fn split_at_target_size(
         pairs: impl IntoIterator<Item = PartPayload>,
-        part_max_bytes: usize,
+        part_max_size: ByteSize,
     ) -> Result<Vec<Self>, SubstrateError> {
-        if part_max_bytes < 8 {
+        // Encoded pair lengths are `usize`; comparing there keeps the cap exact.
+        let part_max_bytes = part_max_size.bytes_usize();
+        if part_max_bytes < MIN_PART_BYTES {
             return Err(SubstrateError::Checkpoint(
-                "part_max_bytes must fit one empty key/value pair".into(),
+                "checkpoint part size must fit one empty key/value pair".into(),
             ));
         }
 
@@ -658,7 +665,8 @@ mod tests {
             (b"c".to_vec(), b"3333".to_vec()),
         ];
 
-        let parts = CheckpointPart::split_at_target_size(pairs.clone(), 13).expect("split");
+        let parts = CheckpointPart::split_at_target_size(pairs.clone(), crabka_units::bytes(13))
+            .expect("split");
 
         assert!(parts.len() == 3);
         assert!(
@@ -681,9 +689,9 @@ mod tests {
         #[test]
         fn prop_split_round_trips_all_pairs(
             pairs in proptest::collection::vec(pair_strategy(), 0..64),
-            part_max_bytes in 8_usize..256,
+            part_max_bytes in 8_u32..256,
         ) {
-            let parts = CheckpointPart::split_at_target_size(pairs.clone(), part_max_bytes).expect("split");
+            let parts = CheckpointPart::split_at_target_size(pairs.clone(), crabka_units::bytes(part_max_bytes)).expect("split");
             let decoded = parts
                 .into_iter()
                 .flat_map(|part| CheckpointPart::decode(&part.encode()).expect("decode").pairs)

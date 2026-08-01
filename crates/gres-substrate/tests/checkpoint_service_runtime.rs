@@ -10,7 +10,7 @@ use crabka_gres_substrate::{
     SubstrateError, TransactionalWalWriter, WalFrame, WriterGeneration, apply_frame,
     checkpoint::{
         CheckpointConfig, CheckpointService, CheckpointSnapshot, CheckpointStats, CheckpointStore,
-        CheckpointTrigger, CheckpointWalPruner, DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES,
+        CheckpointTrigger, CheckpointWalPruner, DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_SIZE,
         InMemoryCheckpointStore, ObjectOpsCheckpointStore, RestoreTail,
         restore_latest_and_replay_tail,
     },
@@ -168,8 +168,8 @@ async fn live_broker_checkpoint_delete_records_and_recovery_replays_retained_tai
             recovery.checkpoint_namespace(),
             topic.clone(),
             2,
-            0,
-            DEFAULT_PART_MAX_BYTES,
+            crabka_units::bytes(0),
+            DEFAULT_PART_MAX_SIZE,
             DEFAULT_CHECKPOINT_RETAIN,
             std::time::Duration::from_secs(1),
         )
@@ -282,7 +282,7 @@ impl CheckpointWalPruner for AdminDeleteRecordsPruner {
             .admin
             .lock()
             .await
-            .delete_records(ops, 5_000)
+            .delete_records(ops, crabka_units::secs(5))
             .await
             .map_err(|error| SubstrateError::Checkpoint(format!("delete records: {error}")))?;
         if let Some(failed) = outcomes.iter().find(|outcome| outcome.error_code != 0) {
@@ -380,8 +380,8 @@ fn checkpoint_config() -> CheckpointConfig {
         "tenant-a".to_string(),
         "__gres_wal.tenant-a.r0".to_string(),
         2,
-        0,
-        DEFAULT_PART_MAX_BYTES,
+        crabka_units::bytes(0),
+        DEFAULT_PART_MAX_SIZE,
         DEFAULT_CHECKPOINT_RETAIN,
         std::time::Duration::from_secs(1),
     )

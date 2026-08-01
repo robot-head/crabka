@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use crabka_blockstore::Labels;
+use crabka_units::prelude::*;
 use prost::Message;
 
 use super::{
@@ -12,7 +13,7 @@ use super::{
 
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
-pub fn decode_v1(body: &[u8], max_decompressed: usize) -> Result<Vec<DecodedSeries>, WireError> {
+pub fn decode_v1(body: &[u8], max_decompressed: ByteSize) -> Result<Vec<DecodedSeries>, WireError> {
     let raw = snappy_block_decode(body, max_decompressed)?;
     let req = pb::v1::WriteRequest::decode(raw.as_slice())
         .map_err(|error| WireError::ProtobufDecode(error.to_string()))?;
@@ -141,7 +142,7 @@ mod tests {
             metadata: Vec::new(),
         };
 
-        let decoded = decode_v1(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
+        let decoded = decode_v1(&snappy(&req.encode_to_vec()), mebibytes(1)).unwrap();
 
         assert!(decoded.len() == 1);
         check!(decoded[0].labels.get("__name__") == Some("up"));
@@ -168,7 +169,7 @@ mod tests {
             ..Default::default()
         };
 
-        let decoded = decode_v1(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
+        let decoded = decode_v1(&snappy(&req.encode_to_vec()), mebibytes(1)).unwrap();
 
         assert!(decoded[0].histograms.len() == 1);
         check!(decoded[0].histograms[0].0 == 10);
@@ -202,7 +203,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = decode_v1(&snappy(&req.encode_to_vec()), 1 << 20).unwrap_err();
+        let err = decode_v1(&snappy(&req.encode_to_vec()), mebibytes(1)).unwrap_err();
 
         assert!(matches!(err, WireError::Invalid(_)));
         assert!(format!("{err}").contains("duplicate label `job`"));

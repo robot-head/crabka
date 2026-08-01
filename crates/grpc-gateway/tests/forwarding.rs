@@ -25,6 +25,7 @@ use crabka_grpc_gateway::{
     state::AppState,
     types::GatewayRecord,
 };
+use crabka_units::prelude::*;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -128,7 +129,7 @@ async fn spawn_gateway(bootstrap: &str, client: &str) -> Gw {
             client_id: client.into(),
             dedup_topic: DEDUP.into(),
             dedup_partitions: N,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
             dedup_ownership_group: OWNERS_GROUP.into(),
             dedup_txn_id_prefix: format!("crabka-grpc-dedup-{client}"),
             advertised_addr: addr.clone(),
@@ -181,7 +182,7 @@ async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
         .unwrap();
     let mut n = 0;
     for _ in 0..10 {
-        let batch = consumer.poll(Duration::from_millis(500)).await.unwrap();
+        let batch = consumer.poll(crabka_units::millis(500)).await.unwrap();
         for r in batch {
             if r.value.as_deref() == Some(key_filter.as_bytes()) {
                 n += 1;
@@ -199,7 +200,7 @@ async fn keyed_record_forwards_to_owner_and_dedups() {
         &bootstrap,
         DEDUP,
         N,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()
@@ -230,7 +231,7 @@ async fn keyed_record_forwards_to_owner_and_dedups() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();

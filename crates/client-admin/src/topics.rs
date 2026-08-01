@@ -14,6 +14,7 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as ProtoUuid,
 };
+use crabka_units::{Time, convert::TimeExt as _};
 use uuid::Uuid;
 
 use crate::{AdminClient, AdminError, KafkaError, NOT_CONTROLLER, kafka_error_if};
@@ -97,10 +98,10 @@ impl AdminClient {
     pub async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError> {
         let first = {
-            let req = build_create_topics(specs, timeout_ms);
+            let req = build_create_topics(specs, timeout);
             let resp = self.conn.send(req).await?;
             parse_create_topics(resp)
         };
@@ -109,7 +110,7 @@ impl AdminClient {
         }
         self.refresh_controller_connection().await?;
         let second = {
-            let req = build_create_topics(specs, timeout_ms);
+            let req = build_create_topics(specs, timeout);
             let resp = self.conn.send(req).await?;
             parse_create_topics(resp)
         };
@@ -124,7 +125,7 @@ impl AdminClient {
     pub async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteTopicOutcome>, AdminError> {
         // Populate BOTH fields so the request works regardless of the
         // negotiated protocol version: `topic_names` is the legacy field
@@ -141,7 +142,7 @@ impl AdminClient {
                     ..Default::default()
                 })
                 .collect(),
-            timeout_ms,
+            timeout_ms: timeout.millis_i32(),
             ..Default::default()
         };
         let first = parse_delete_topics(self.conn.send(build()).await?);
@@ -161,7 +162,7 @@ impl AdminClient {
     pub async fn create_partitions(
         &mut self,
         ops: &[CreatePartitionsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreatePartitionsOutcome>, AdminError> {
         let build = || CreatePartitionsRequest {
             topics: ops
@@ -173,7 +174,7 @@ impl AdminClient {
                     ..Default::default()
                 })
                 .collect(),
-            timeout_ms,
+            timeout_ms: timeout.millis_i32(),
             validate_only: false,
             ..Default::default()
         };
@@ -203,7 +204,7 @@ impl AdminClient {
     pub async fn delete_records(
         &mut self,
         ops: &[DeleteRecordsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteRecordsOutcome>, AdminError> {
         if ops.is_empty() {
             return Ok(Vec::new());
@@ -215,7 +216,7 @@ impl AdminClient {
             .await?;
         for (endpoint, leader_ops) in groups {
             self.reconnect(&endpoint).await?;
-            let req = build_delete_records(&leader_ops, timeout_ms);
+            let req = build_delete_records(&leader_ops, timeout);
             let resp = self.conn.send(req).await?;
             outcomes.extend(parse_delete_records(resp));
         }
@@ -330,7 +331,7 @@ fn build_metadata(topics: &[&str]) -> MetadataRequest {
     }
 }
 
-fn build_create_topics(specs: &[CreateTopicSpec], timeout_ms: i32) -> CreateTopicsRequest {
+fn build_create_topics(specs: &[CreateTopicSpec], timeout: Time) -> CreateTopicsRequest {
     CreateTopicsRequest {
         topics: specs
             .iter()
@@ -351,13 +352,13 @@ fn build_create_topics(specs: &[CreateTopicSpec], timeout_ms: i32) -> CreateTopi
                 ..Default::default()
             })
             .collect(),
-        timeout_ms,
+        timeout_ms: timeout.millis_i32(),
         validate_only: false,
         ..Default::default()
     }
 }
 
-fn build_delete_records(ops: &[DeleteRecordsOp], timeout_ms: i32) -> DeleteRecordsRequest {
+fn build_delete_records(ops: &[DeleteRecordsOp], timeout: Time) -> DeleteRecordsRequest {
     let mut topics = BTreeMap::<String, Vec<DeleteRecordsPartition>>::new();
     for op in ops {
         topics
@@ -379,7 +380,7 @@ fn build_delete_records(ops: &[DeleteRecordsOp], timeout_ms: i32) -> DeleteRecor
                 ..Default::default()
             })
             .collect(),
-        timeout_ms,
+        timeout_ms: timeout.millis_i32(),
         ..Default::default()
     }
 }
@@ -511,7 +512,7 @@ mod tests {
                 replicas: 1,
                 configs: BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]),
             }],
-            5_000,
+            crabka_units::secs(5),
         );
         assert2::assert!(
             req == CreateTopicsRequest {
@@ -554,12 +555,11 @@ mod tests {
                     offset: 75,
                 },
             ],
-            5_000,
+            crabka_units::secs(5),
         );
 
-        assert_eq!(
-            req,
-            DeleteRecordsRequest {
+        assert2::assert!(
+            req == DeleteRecordsRequest {
                 topics: vec![
                     DeleteRecordsTopic {
                         name: "alpha".to_string(),

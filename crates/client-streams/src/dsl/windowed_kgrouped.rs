@@ -338,7 +338,7 @@ where
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
                 // Tumbling/hopping: retention basis == window size.
-                (windows.size_ms, windows.size_ms, windows.grace_ms),
+                (windows.size, windows.size, windows.grace),
                 [h.name().to_string()],
             );
             // Cache only emit-on-update windowed aggregates: emit-final must stay
@@ -356,10 +356,10 @@ where
             agg_id,
             Some(store_name),
             None,
-            TimeWindowedSerde::new(key_serde.clone(), windows.size_ms),
+            TimeWindowedSerde::new(key_serde.clone(), windows.size),
             value_serde.clone(),
         )
-        .with_window_grace(Some(windows.grace_ms))
+        .with_window_grace(Some(windows.grace))
         .with_suppress_factory(Some(suppress_factory))
     }
 
@@ -440,7 +440,7 @@ where
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
                 // Tumbling/hopping: retention basis == window size.
-                (windows.size_ms, windows.size_ms, windows.grace_ms),
+                (windows.size, windows.size, windows.grace),
                 [h.name().to_string()],
             );
             // Cache only emit-on-update windowed reduces (see aggregate lower).
@@ -456,10 +456,10 @@ where
             red_id,
             Some(store_name),
             None,
-            TimeWindowedSerde::new(key_serde.clone(), windows.size_ms),
+            TimeWindowedSerde::new(key_serde.clone(), windows.size),
             value_serde.clone(),
         )
-        .with_window_grace(Some(windows.grace_ms))
+        .with_window_grace(Some(windows.grace))
         .with_suppress_factory(Some(suppress_factory))
     }
 }
@@ -487,7 +487,7 @@ where
                 .topology
                 .add_suppress_store::<Windowed<K>, VA, TimeWindowedSerde<KS>, VS>(
                     store_name.to_string(),
-                    TimeWindowedSerde::new(key_serde.clone(), windows.size_ms),
+                    TimeWindowedSerde::new(key_serde.clone(), windows.size),
                     value_serde.clone(),
                     logging,
                     [proc_name.to_string()],
@@ -499,6 +499,7 @@ where
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use crate::{
         dsl::{
@@ -517,13 +518,13 @@ mod tests {
         let b = StreamsBuilder::new();
         b.stream::<String, String>(["in"])
             .group_by_key()
-            .windowed_by(TimeWindows::of_size(10))
+            .windowed_by(TimeWindows::of_size(millis(10)))
             .count("w");
         let built = b.build("app").unwrap();
         let g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
-            10_485_760,
+            mebibytes(10),
         ))
         .unwrap();
         check!(
@@ -542,14 +543,14 @@ mod tests {
         let b = StreamsBuilder::new();
         b.stream::<String, String>(["in"])
             .group_by_key()
-            .windowed_by(TimeWindows::of_size(10))
+            .windowed_by(TimeWindows::of_size(millis(10)))
             .emit_strategy(EmitStrategy::on_window_close())
             .count("w");
         let built = b.build("app").unwrap();
         let g = pollster::block_on(built.instantiate(
             &crate::store::backend::StoreBackend::InMemory,
             "app",
-            10_485_760,
+            mebibytes(10),
         ))
         .unwrap();
         check!(
@@ -570,13 +571,13 @@ mod tests {
         let b = StreamsBuilder::new();
         b.stream::<String, String>(["in"])
             .group_by_key()
-            .windowed_by(TimeWindows::of_size(10))
+            .windowed_by(TimeWindows::of_size(millis(10)))
             .emit_strategy(EmitStrategy::on_window_close())
             .count("w")
             .to_stream()
             .to_explicit(
                 "out",
-                Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+                Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
             );
         let built = b.build("app").unwrap();
         let mut d = TopologyTestDriver::new(&built).unwrap();
@@ -589,7 +590,7 @@ mod tests {
                 ts,
             );
         }
-        let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+        let p = || Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde);
         assert_eq!(
             d.read_output("out", p()),
             Some((

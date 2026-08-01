@@ -2,6 +2,7 @@
 
 pub use crabka_blockstore::QUERY_SHARD_LABEL;
 use crabka_blockstore::{LabelMatcher, MatchOp};
+use crabka_units::prelude::*;
 use promql_parser::parser::LabelModifier;
 
 mod cache;
@@ -26,20 +27,23 @@ use plan::query_with_shard_selector;
 use crate::PromqlError;
 
 /// Query-frontend range splitting and sharding options.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+///
+/// Not `Eq`: `split_interval` is a [`Time`], which stores `f64`.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct QueryFrontendOptions {
-    pub split_interval_ms: i64,
+    /// Width of the absolute window each sub-range is split on.
+    pub split_interval: Time,
     pub shard_count: usize,
 }
 
 /// One user range query entering the query-frontend.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FrontendRangeRequest {
     pub tenant: String,
     pub query: String,
     pub start_ms: i64,
     pub end_ms: i64,
-    pub step_ms: i64,
+    pub step: Time,
     pub opts: QueryFrontendOptions,
 }
 
@@ -68,12 +72,14 @@ impl QueryShard {
 }
 
 /// One subquery the query-frontend can fan out to a querier.
-#[derive(Clone, Debug, Eq, PartialEq)]
+///
+/// Not `Eq`: `step` is a [`Time`], which stores `f64`.
+#[derive(Clone, Debug, PartialEq)]
 pub struct FrontendRangeQuery {
     pub query: String,
     pub start_ms: i64,
     pub end_ms: i64,
-    pub step_ms: i64,
+    pub step: Time,
     pub shard: Option<QueryShard>,
 }
 

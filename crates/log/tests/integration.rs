@@ -12,6 +12,7 @@ use std::{
 };
 
 use crabka_log::{Log, LogConfig};
+use crabka_units::prelude::gibibytes;
 use tempfile::tempdir;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::kafka::{KAFKA_PORT, Kafka};
@@ -140,7 +141,7 @@ async fn read_jvm_produced_log_dir() {
     // 5. Open with crabka-log and read everything back.
     let log = Log::open(&host_target, LogConfig::default()).expect("open log");
     let out = log
-        .read(log.log_start_offset(), usize::MAX)
+        .read(log.log_start_offset(), gibibytes(4))
         .expect("read log");
     assert2::assert!(!out.batches.is_empty());
     let total_records: usize = out.batches.iter().map(|b| b.records.len()).sum();

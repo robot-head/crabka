@@ -12,6 +12,7 @@ use std::{any::Any, collections::BTreeMap};
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use crabka_units::prelude::*;
 
 use crate::{processor::serde::Serde, store::api::StateStore};
 
@@ -45,7 +46,7 @@ pub trait VersionedKeyValueStore<K: Send + Sync, V: Send>: StateStore {
 pub struct VersionedBytesStore<K, V> {
     name: String,
     changelog_topic: String,
-    history_retention_ms: i64,
+    history_retention: Time,
     key_serde: Box<dyn Serde<K>>,
     value_serde: Box<dyn Serde<V>>,
     // key bytes -> (validFrom -> Some(value bytes) | None tombstone)
@@ -60,7 +61,7 @@ impl<K: 'static, V: 'static> VersionedBytesStore<K, V> {
     #[must_use]
     pub(crate) fn new(
         name: String,
-        history_retention_ms: i64,
+        history_retention: Time,
         key_serde: Box<dyn Serde<K>>,
         value_serde: Box<dyn Serde<V>>,
         changelog_topic: String,
@@ -68,7 +69,7 @@ impl<K: 'static, V: 'static> VersionedBytesStore<K, V> {
         Self {
             name,
             changelog_topic,
-            history_retention_ms,
+            history_retention,
             key_serde,
             value_serde,
             chains: BTreeMap::new(),
@@ -81,14 +82,14 @@ impl<K: 'static, V: 'static> VersionedBytesStore<K, V> {
     #[must_use]
     pub fn in_memory(
         name: String,
-        history_retention_ms: i64,
+        history_retention: Time,
         key_serde: Box<dyn Serde<K>>,
         value_serde: Box<dyn Serde<V>>,
         changelog_topic: String,
     ) -> Self {
         Self::new(
             name,
-            history_retention_ms,
+            history_retention,
             key_serde,
             value_serde,
             changelog_topic,
@@ -98,8 +99,10 @@ impl<K: 'static, V: 'static> VersionedBytesStore<K, V> {
     /// The retention horizon: versions whose `valid_to` is strictly below this
     /// are unreachable and may be evicted; a put below it is dropped.
     fn horizon(&self) -> i64 {
+        // The horizon is an instant, so the retention extent crosses into epoch
+        // milliseconds here.
         self.observed_stream_time
-            .saturating_sub(self.history_retention_ms)
+            .saturating_sub(self.history_retention.millis_i64())
     }
 
     /// Insert raw (already-serialized) version bytes into a chain, applying
@@ -346,7 +349,7 @@ mod tests {
     use super::*;
     use crate::processor::serde::{I64Serde, StringSerde};
 
-    fn store(retention: i64) -> VersionedBytesStore<String, i64> {
+    fn store(retention: Time) -> VersionedBytesStore<String, i64> {
         VersionedBytesStore::in_memory(
             "v".into(),
             retention,
@@ -358,7 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn latest_and_as_of() {
-        let mut s = store(1_000_000);
+        let mut s = store(secs(1_000));
         s.put("k".into(), Some(10), 100).await;
         s.put("k".into(), Some(20), 200).await;
         assert_eq!(s.get(&"k".into()).await.map(|r| r.value), Some(20));
@@ -369,7 +372,7 @@ mod tests {
 
     #[tokio::test]
     async fn out_of_order_does_not_clobber_latest() {
-        let mut s = store(1_000_000);
+        let mut s = store(secs(1_000));
         s.put("k".into(), Some(20), 200).await;
         s.put("k".into(), Some(10), 100).await;
         assert_eq!(s.get(&"k".into()).await.map(|r| r.value), Some(20));
@@ -381,7 +384,7 @@ mod tests {
 
     #[tokio::test]
     async fn tombstone_hides_latest_but_keeps_history() {
-        let mut s = store(1_000_000);
+        let mut s = store(secs(1_000));
         s.put("k".into(), Some(10), 100).await;
         let prev = s.delete(&"k".into(), 200).await;
         assert_eq!(prev.map(|r| r.value), Some(10));
@@ -394,7 +397,7 @@ mod tests {
 
     #[tokio::test]
     async fn retention_drops_old_put_and_evicts_history() {
-        let mut s = store(50);
+        let mut s = store(millis(50));
         s.put("k".into(), Some(10), 100).await;
         s.put("k".into(), Some(20), 200).await;
         s.put("k".into(), Some(5), 40).await;
@@ -407,7 +410,7 @@ mod tests {
     // one cohesive test of every iq2_execute branch
     async fn iq2_versioned_key_and_multi() {
         use crate::store::iq::{Iq2Failure, Iq2Query, IqQueryable, StoreKind};
-        let mut s = store(1_000_000);
+        let mut s = store(secs(1_000));
         // Three in-order versions of "k": 10@100, 20@200, 30@300.
         s.put("k".into(), Some(10), 100).await;
         s.put("k".into(), Some(20), 200).await;
@@ -532,12 +535,12 @@ mod tests {
 
     #[tokio::test]
     async fn changelog_roundtrip_restores_chain() {
-        let mut s = store(1_000_000);
+        let mut s = store(secs(1_000));
         s.put("k".into(), Some(10), 100).await;
         s.delete(&"k".into(), 150).await;
         s.put("k".into(), Some(30), 300).await;
         let cl = s.take_changelog_ts();
-        let mut r = store(1_000_000);
+        let mut r = store(secs(1_000));
         r.set_logging(false);
         for (k, v, ts) in cl {
             r.apply_changelog_ts(k, v, ts.unwrap()).await;

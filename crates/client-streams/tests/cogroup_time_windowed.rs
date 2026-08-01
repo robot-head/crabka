@@ -3,6 +3,7 @@ use crabka_client_streams::{
     Consumed, I64Serde, Materialized, Produced, StringSerde, TimeWindowedSerde, TimeWindows,
     dsl::StreamsBuilder,
 };
+use crabka_units::prelude::*;
 
 fn assert_matches_fixture(wire: &crabka_client_streams::topology::WireTopology, fixture: &str) {
     let path = format!("tests/testdata/golden/dsl/{fixture}.topology.json");
@@ -21,7 +22,7 @@ fn cogroup_time_matches_jvm() {
     let g2 = b.stream::<String, String>(["in2"]).group_by_key();
     g1.cogroup::<i64, _>(|_k, v: &String, acc| acc + i64::try_from(v.len()).unwrap_or(i64::MAX))
         .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-        .windowed_by(TimeWindows::of_size(100))
+        .windowed_by(TimeWindows::of_size(millis(100)))
         .aggregate_explicit(
             || 0i64,
             Materialized::with(StringSerde, I64Serde).as_store("cg-store"),
@@ -29,7 +30,7 @@ fn cogroup_time_matches_jvm() {
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 100), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(100)), I64Serde),
         );
     let wire = b.build_optimized("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "cogroup_time");
@@ -52,7 +53,7 @@ fn cogroup_time_matches_jvm_behavior() {
     let g2 = b.stream::<String, String>(["in2"]).group_by_key();
     g1.cogroup::<i64, _>(|_k, v: &String, acc| acc + i64::try_from(v.len()).unwrap_or(i64::MAX))
         .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-        .windowed_by(TimeWindows::of_size(100))
+        .windowed_by(TimeWindows::of_size(millis(100)))
         .aggregate_explicit(
             || 0i64,
             Materialized::with(StringSerde, I64Serde).as_store("cg-store"),
@@ -60,7 +61,7 @@ fn cogroup_time_matches_jvm_behavior() {
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 100), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(100)), I64Serde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -88,7 +89,7 @@ fn cogroup_time_matches_jvm_behavior() {
     let mut got: Vec<Row> = Vec::new();
     while let Some((Some(wk), v)) = d.read_output(
         "out",
-        Produced::with(TimeWindowedSerde::new(StringSerde, 100), I64Serde),
+        Produced::with(TimeWindowedSerde::new(StringSerde, millis(100)), I64Serde),
     ) {
         got.push(Row {
             key: wk.key,

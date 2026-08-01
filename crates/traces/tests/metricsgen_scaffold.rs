@@ -2,6 +2,7 @@ use assert2::check;
 use crabka_traces::metricsgen::{
     BucketSpan, NativeHistogram, SpanKind, SpanRecord, StatusCode, TRACES_WAL_TOPIC,
 };
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
 #[test]
 fn metricsgen_contract_exposes_wal_projection() {
@@ -18,7 +19,7 @@ fn metricsgen_contract_exposes_wal_projection() {
         status_message: String::new(),
         service_name: "checkout".into(),
         attributes: vec![("http.method".into(), "GET".into())],
-        size_bytes: 128,
+        size: ByteSize::from_bytes(128),
     };
 
     let hist = NativeHistogram {

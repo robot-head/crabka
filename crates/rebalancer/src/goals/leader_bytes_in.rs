@@ -7,6 +7,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crabka_units::{Ratio, convert::ByteRateExt};
+
 use crate::{
     goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
     model::{ClusterState, Movement, PartitionView},
@@ -28,11 +30,12 @@ impl LeaderBytesIn {
         crate::goals::leader_totals(partitions, broker_ids, |broker, topic, partition| {
             ctx.broker_usages
                 .bytes_in_rate(broker, topic, partition, Window::FiveMin, now_ms)
+                .map(ByteRateExt::bytes_per_sec_f64)
         })
     }
 
-    fn imbalance_pct(totals: &HashMap<i32, f64>) -> u32 {
-        crate::goals::imbalance_pct_f64(totals)
+    fn imbalance(totals: &HashMap<i32, f64>) -> Ratio {
+        crate::goals::imbalance_ratio_f64(totals)
     }
 }
 
@@ -65,7 +68,7 @@ impl Goal for LeaderBytesIn {
             if totals.values().all(|v| *v == 0.0) {
                 break;
             }
-            if Self::imbalance_pct(&totals) <= ctx.imbalance_threshold_pct {
+            if Self::imbalance(&totals) <= ctx.imbalance_threshold {
                 break;
             }
             let mut by_load: Vec<(i32, f64)> = totals.into_iter().collect();
@@ -104,9 +107,11 @@ impl Goal for LeaderBytesIn {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+
+    use std::sync::Arc;
 
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -116,7 +121,7 @@ mod tests {
 
     fn ctx_with(store: Arc<UsageStore>) -> GoalContext {
         GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(crate::capacity::BrokerCapacities::default()),
@@ -158,8 +163,8 @@ mod tests {
         // Inserts at t=now-1000 and t=now so rate = (v_t1 - v_t0)/sec
         // and both samples sit inside the 5-min stale-data guard window.
         let store = UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_hours(1),
+            scrape_interval: secs(30),
+            retention: hours(1),
         });
         let now_ms = crate::goals::now_ms();
         let t0 = now_ms - 1000;
@@ -244,9 +249,9 @@ mod tests {
     }
 
     #[test]
-    fn imbalance_pct_uses_difference_times_100_over_total() {
+    fn imbalance_is_spread_over_total() {
         let totals = std::collections::HashMap::from([(1, 300.0), (2, 100.0)]);
-        assert2::assert!(LeaderBytesIn::imbalance_pct(&totals) == 50);
+        assert2::assert!(LeaderBytesIn::imbalance(&totals) == percent(50));
     }
 
     #[test]

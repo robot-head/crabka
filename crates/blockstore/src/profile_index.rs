@@ -9,6 +9,7 @@ use std::{
     sync::Arc,
 };
 
+use crabka_units::prelude::*;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -37,7 +38,7 @@ pub const LABEL_PROFILE_TYPE: &str = "__profile_type__";
 /// object from shared storage could otherwise OOM the process. The object is
 /// `head()`ed first and rejected above this cap, mirroring the profiles gunzip
 /// `max_decompressed` pattern. Defaults to 256 MiB.
-pub const MAX_PROFILE_INDEX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_PROFILE_INDEX_SNAPSHOT_BYTES: ByteSize = mebibytes(256);
 
 #[derive(Default, Serialize, Deserialize)]
 struct TenantProfileExtras {
@@ -570,7 +571,8 @@ mod tests {
 
     #[test]
     fn snapshot_size_cap_is_256_mib() {
-        assert2::assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES == 256 * 1024 * 1024);
+        assert2::assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES == mebibytes(256));
+        assert2::assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES.bytes_u64() == 256 * 1024 * 1024);
     }
 
     #[test]

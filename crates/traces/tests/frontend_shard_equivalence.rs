@@ -13,6 +13,7 @@ use crabka_traces::frontend::{
     job::{BlockMetaInfo, MockCatalog, RowGroupInfo},
     wire::{Metrics, SpanJson, SpanSetJson, TraceJson},
 };
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, millis};
 
 fn block(id: &str, start: i64, end: i64, rgs: &[u64]) -> BlockMetaInfo {
     let row_groups = rgs
@@ -20,14 +21,14 @@ fn block(id: &str, start: i64, end: i64, rgs: &[u64]) -> BlockMetaInfo {
         .enumerate()
         .map(|(i, &b)| RowGroupInfo {
             index: u32::try_from(i).unwrap(),
-            compressed_bytes: b,
+            compressed: ByteSize::from_bytes(b),
         })
         .collect();
     BlockMetaInfo {
         block_id: id.to_string(),
         start_ns: start,
         end_ns: end,
-        size_bytes: rgs.iter().sum(),
+        size: ByteSize::from_bytes(rgs.iter().sum()),
         row_groups,
     }
 }
@@ -48,7 +49,7 @@ fn trace_with_spans(tid: &str, start: u64, span_ids: &[&str]) -> TraceJson {
         root_service_name: "svc".to_string(),
         root_trace_name: "GET /".to_string(),
         start_time_unix_nano: start.to_string(),
-        duration_ms: 1,
+        duration: millis(1),
         span_sets: vec![SpanSetJson { spans, matched }],
     }
 }
@@ -84,7 +85,7 @@ async fn sharded_search_equals_unsharded() {
     backend.stub_search(partial(vec![trace_with_spans("02", 150, &["03"])], 300)); // b2-rg1
 
     let cfg = FrontendConfig {
-        target_bytes_per_job: 10_000,
+        target_per_job: ByteSize::from_bytes(10_000),
         max_concurrency: 1,
         hot_frontier_ns: 150,
         ..FrontendConfig::default()

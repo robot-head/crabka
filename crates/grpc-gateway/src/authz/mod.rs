@@ -2,12 +2,13 @@
 //! and an `ArcSwap`'d `AclCache` refreshed by polling the broker's `DescribeAcls`.
 
 pub mod auth_layer;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 pub use auth_layer::{BearerValidator, anonymous, resolve_principal};
 use crabka_authz::{AclCache, Authorizer};
 use crabka_client_admin::AdminClient;
+use crabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 
 pub struct GatewayAuthz {
@@ -39,7 +40,7 @@ impl GatewayAuthz {
     pub async fn run_acl_refresh(
         self: Arc<Self>,
         bootstrap: String,
-        refresh: Duration,
+        refresh: Time,
         shutdown: CancellationToken,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) {
@@ -72,7 +73,7 @@ impl GatewayAuthz {
             }
             tokio::select! {
                 () = shutdown.cancelled() => return,
-                () = tokio::time::sleep(refresh) => {}
+                () = tokio::time::sleep(refresh.to_std()) => {}
             }
         }
     }

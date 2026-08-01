@@ -12,6 +12,7 @@ use crabka_promql::{
     EngineOpts, InMemoryMetricStore, PrometheusApiState, QueryFrontendOptions,
     RulerAlertStateRecord, RulerGroupStateRecord, prometheus_router,
 };
+use crabka_units::prelude::*;
 use prost::Message;
 use serde_json::Value;
 use snap::raw::{Decoder as SnappyDecoder, Encoder as SnappyEncoder};
@@ -532,7 +533,7 @@ async fn query_range_endpoint_can_use_query_frontend_split_and_merge() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 1,
             },
         ),
@@ -616,7 +617,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_sum() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -654,7 +655,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_avg() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -692,7 +693,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_stdvar() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -743,7 +744,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_topk() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -799,7 +800,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_min() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -836,7 +837,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_max() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -873,7 +874,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_group() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),

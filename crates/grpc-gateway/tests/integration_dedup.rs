@@ -4,6 +4,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
+use crabka_units::prelude::*;
 use tempfile::TempDir;
 
 async fn boot() -> (BrokerHandle, String, TempDir) {
@@ -43,7 +44,7 @@ async fn duplicate_idempotency_key_produces_once() {
         &bootstrap,
         dedup_topic,
         4,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()
@@ -63,7 +64,7 @@ async fn duplicate_idempotency_key_produces_once() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -128,7 +129,7 @@ async fn duplicate_idempotency_key_produces_once() {
     let mut count = 0;
     for _ in 0..10 {
         count += consumer
-            .poll(std::time::Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .unwrap()
             .len();
@@ -156,7 +157,7 @@ async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
         &bootstrap,
         topic,
         4,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()
@@ -236,7 +237,7 @@ async fn concurrent_duplicates_produce_once() {
         &bootstrap,
         dedup_topic,
         4,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()
@@ -256,7 +257,7 @@ async fn concurrent_duplicates_produce_once() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -337,7 +338,7 @@ async fn concurrent_duplicates_produce_once() {
     let mut count = 0;
     for _ in 0..10 {
         count += consumer
-            .poll(std::time::Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .unwrap()
             .len();

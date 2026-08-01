@@ -785,12 +785,18 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
             .inspect_hosted_range_kv(range)
             .expect("inspect source catalog"),
     );
-    let table_id = crabka_pgcatalog::get_table(&source_catalog, "t1")
-        .expect("source relation")
-        .id;
-    let unrelated_table_id = crabka_pgcatalog::get_table(&source_catalog, "transfer_unrelated")
-        .expect("unrelated relation")
-        .id;
+    let table_id = crabka_pgcatalog::get_table(
+        &source_catalog,
+        &crabka_pgcatalog::RelationName::public("t1"),
+    )
+    .expect("source relation")
+    .id;
+    let unrelated_table_id = crabka_pgcatalog::get_table(
+        &source_catalog,
+        &crabka_pgcatalog::RelationName::public("transfer_unrelated"),
+    )
+    .expect("unrelated relation")
+    .id;
     assert_ne!(table_id, unrelated_table_id);
 
     for sql in [
@@ -2572,8 +2578,8 @@ fn assert_selected_table_transfer(
         "unrelated table versions are absent"
     );
     assert!(
-        !staged_pairs.contains_key(&key::catalog_key("t10"))
-            && !staged_pairs.contains_key(&key::catalog_key("transfer_unrelated")),
+        !staged_pairs.contains_key(&key::catalog_key("public", "t10"))
+            && !staged_pairs.contains_key(&key::catalog_key("public", "transfer_unrelated")),
         "catalog entries are absent"
     );
 
@@ -2699,9 +2705,12 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
             .inspect_hosted_range_kv(RangeId::COORDINATOR)
             .expect("inspect source catalog"),
     );
-    let physical_table_id = crabka_pgcatalog::get_table(&source_catalog, "t10")
-        .expect("t10 relation")
-        .id;
+    let physical_table_id = crabka_pgcatalog::get_table(
+        &source_catalog,
+        &crabka_pgcatalog::RelationName::public("t10"),
+    )
+    .expect("t10 relation")
+    .id;
     assert_ne!(u64::from(physical_table_id), 10);
     let predecessor_before = runtime
         .inspect_hosted_range_kv(RangeId::new(1))

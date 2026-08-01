@@ -48,6 +48,7 @@ use crabka_grpc_gateway::{
     state::AppState,
     types::GatewayRecord,
 };
+use crabka_units::prelude::*;
 
 struct AuditVisitor(Option<String>, Option<bool>);
 
@@ -137,7 +138,7 @@ async fn app_state(bootstrap: &str, client: &str, authz: Arc<GatewayAuthz>) -> A
             client_id: client.into(),
             dedup_topic: DEDUP.into(),
             dedup_partitions: N,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
             dedup_ownership_group: OWNERS_GROUP.into(),
             dedup_txn_id_prefix: format!("{client}-dedup"),
             advertised_addr: "127.0.0.1:0".into(),
@@ -168,7 +169,7 @@ async fn create_topic(bootstrap: &str, name: &str) {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -325,7 +326,7 @@ async fn simpleacl_allows_authorized_produce() {
     let shutdown = CancellationToken::new();
     tokio::spawn(authz.clone().run_acl_refresh(
         bootstrap.clone(),
-        Duration::from_millis(200),
+        millis(200),
         shutdown.clone(),
         None,
     ));
@@ -370,7 +371,7 @@ async fn bearer_token_resolves_principal() {
 
     let validator = BearerSettings {
         principal_claim_name: "sub".to_string(),
-        allowable_clock_skew_ms: 30_000,
+        allowable_clock_skew: secs(30),
     }
     .build()
     .expect("bearer validator builds");
@@ -407,7 +408,7 @@ async fn forwarding_owner_reauthorizes_caller() {
         &bootstrap,
         DEDUP,
         N,
-        3_600_000,
+        hours(1),
         &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
             replication_factor: 1,
             ..Default::default()
@@ -630,7 +631,7 @@ async fn count_value(bootstrap: &str, topic: &str, value: &[u8]) -> usize {
         .unwrap();
     let mut n = 0;
     for _ in 0..10 {
-        let batch = consumer.poll(Duration::from_millis(500)).await.unwrap();
+        let batch = consumer.poll(crabka_units::millis(500)).await.unwrap();
         for r in batch {
             if r.value.as_deref() == Some(value) {
                 n += 1;
@@ -742,7 +743,7 @@ async fn spawn_acl_gateway(bootstrap: &str, client: &str) -> AclGw {
         let authz = authz.clone();
         let bootstrap = bootstrap.to_string();
         let token = token.clone();
-        tokio::spawn(authz.run_acl_refresh(bootstrap, Duration::from_millis(200), token, None));
+        tokio::spawn(authz.run_acl_refresh(bootstrap, millis(200), token, None));
     }
 
     let state = Arc::new(AppState {
@@ -753,7 +754,7 @@ async fn spawn_acl_gateway(bootstrap: &str, client: &str) -> AclGw {
             client_id: client.into(),
             dedup_topic: DEDUP.into(),
             dedup_partitions: N,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
             dedup_ownership_group: OWNERS_GROUP.into(),
             dedup_txn_id_prefix: format!("crabka-grpc-dedup-{client}"),
             advertised_addr: addr.clone(),

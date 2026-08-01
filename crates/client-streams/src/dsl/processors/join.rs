@@ -102,6 +102,7 @@ mod tests {
     use std::{collections::VecDeque, marker::PhantomData};
 
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -222,7 +223,7 @@ mod tests {
         let mut stores = StoreRegistry::default();
         let mut v = VersionedBytesStore::<String, i64>::in_memory(
             "vt".into(),
-            1_000_000,
+            secs(1_000),
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-vt-changelog".into(),

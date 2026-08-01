@@ -27,6 +27,11 @@ use crabka_remote_storage::{
     RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState, RemotePartitionDeleteMetadata,
     RemotePartitionDeleteState, RemoteStorageManager, TopicIdPartition,
 };
+use crabka_units::{
+    ByteSize, Time, bytes,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    secs,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 use uuid::Uuid;
@@ -34,12 +39,15 @@ use uuid::Uuid;
 use crate::{partition::Partition, partition_registry::PartitionRegistry};
 
 /// Default cadence of the tiered-storage sweep (copy + retention passes).
-const DEFAULT_TIERING_INTERVAL: Duration = Duration::from_secs(30);
+const DEFAULT_TIERING_INTERVAL: Time = secs(30);
+
+/// The floor of every size-budget walk in this module.
+const NO_BYTES: ByteSize = bytes(0);
 
 /// Tunables for [`run`].
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteLogManagerConfig {
-    pub interval: Duration,
+    pub interval: Time,
 }
 
 impl Default for RemoteLogManagerConfig {
@@ -66,7 +74,7 @@ pub(crate) async fn run(
     cfg: RemoteLogManagerConfig,
     shutdown: CancellationToken,
 ) {
-    let mut ticker = tokio::time::interval(cfg.interval);
+    let mut ticker = tokio::time::interval(cfg.interval.to_std());
     loop {
         tokio::select! {
             _ = ticker.tick() => {}
@@ -171,9 +179,9 @@ pub(crate) async fn copy_eligible(
 ///
 /// A segment is eligible iff its `base_offset` is in `finished_bases`
 /// (i.e. `CopySegmentFinished` in the RLMM) AND it satisfies either
-/// time-based eviction (`now_ms - seg.max_timestamp > effective_local_ms`)
+/// time-based eviction (`now_ms - seg.max_timestamp > effective_local`)
 /// or size-based eviction (oldest-first until sealed-total fits
-/// `effective_local_bytes`). The walk stops at the first non-finished
+/// `effective_local_size`). The walk stops at the first non-finished
 /// segment so the local prefix stays contiguous (matches Kafka).
 ///
 /// Size-based eviction ignores the active segment — operators set
@@ -182,30 +190,31 @@ pub(crate) async fn copy_eligible(
 pub(crate) fn local_retention_target(
     exports: &[SegmentExport],
     finished_bases: &HashSet<i64>,
-    effective_local_ms: Option<i64>,
-    effective_local_bytes: Option<u64>,
+    effective_local: Option<Time>,
+    effective_local_size: Option<ByteSize>,
     now_ms: i64,
 ) -> Option<i64> {
-    let sealed_total: u64 = exports.iter().map(|e| e.size_bytes).sum();
+    let sealed_total: ByteSize = exports
+        .iter()
+        .map(|e| e.size)
+        .fold(NO_BYTES, |acc, size| acc + size);
     let mut deletable_size_remaining =
-        effective_local_bytes.map_or(0, |budget| sealed_total.saturating_sub(budget));
+        effective_local_size.map_or(NO_BYTES, |budget| (sealed_total - budget).max(NO_BYTES));
 
     let mut delete_through_last: Option<i64> = None;
     for ex in exports {
         if !finished_bases.contains(&ex.base_offset.0) {
             break;
         }
-        let by_time = matches!(
-            effective_local_ms,
-            Some(retention) if now_ms.saturating_sub(ex.max_timestamp) > retention
-        );
-        let by_size = deletable_size_remaining > 0;
+        let age = Time::from_millis(now_ms.saturating_sub(ex.max_timestamp));
+        let by_time = matches!(effective_local, Some(retention) if age > retention);
+        let by_size = deletable_size_remaining > NO_BYTES;
         if !(by_time || by_size) {
             break;
         }
         delete_through_last = Some(ex.last_offset.0);
         if by_size {
-            deletable_size_remaining = deletable_size_remaining.saturating_sub(ex.size_bytes);
+            deletable_size_remaining = (deletable_size_remaining - ex.size).max(NO_BYTES);
         }
     }
 
@@ -224,13 +233,10 @@ pub(crate) fn local_retention_pass(
     rlmm: &Arc<dyn RemoteLogMetadataManager>,
     now_ms: i64,
 ) -> usize {
-    let effective_local_ms = log_config
-        .local_retention_ms
-        .or(log_config.retention_ms)
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-    let effective_local_bytes = log_config
-        .local_retention_bytes
-        .or(log_config.retention_bytes);
+    let effective_local = log_config.local_retention.or(log_config.retention);
+    let effective_local_size = log_config
+        .local_retention_size
+        .or(log_config.retention_size);
 
     let finished_bases: HashSet<i64> = match rlmm.list_remote_log_segments(tp) {
         Ok(list) => list
@@ -248,8 +254,8 @@ pub(crate) fn local_retention_pass(
     let Some(target) = local_retention_target(
         exports,
         &finished_bases,
-        effective_local_ms,
-        effective_local_bytes,
+        effective_local,
+        effective_local_size,
         now_ms,
     ) else {
         return 0;
@@ -280,40 +286,44 @@ pub(crate) fn local_retention_pass(
 /// contiguous (matches Kafka).
 ///
 /// A segment is deletable when either:
-/// - `now_ms - md.max_timestamp_ms > retention_ms`, or
+/// - `now_ms - md.max_timestamp_ms > retention`, or
 /// - the running sum of sizes from the oldest forward must exceed
-///   `total_bytes - retention_bytes` (greedy size eviction).
+///   `total - retention_size` (greedy size eviction).
 ///
 /// `None` settings disable that axis. Caller must already have filtered to
 /// `CopySegmentFinished` and sorted by `start_offset`.
 pub(crate) fn remote_retention_eviction_set(
     finished: &[RemoteLogSegmentMetadata],
-    retention_ms: Option<i64>,
-    retention_bytes: Option<u64>,
+    retention: Option<Time>,
+    retention_size: Option<ByteSize>,
     now_ms: i64,
 ) -> Vec<RemoteLogSegmentMetadata> {
-    let total: u64 = finished
+    let total: ByteSize = finished
         .iter()
-        .map(|m| u64::try_from(m.segment_size_in_bytes().max(0)).unwrap_or(0))
-        .sum();
-    let mut size_to_reclaim = retention_bytes.map_or(0, |budget| total.saturating_sub(budget));
+        .map(segment_size)
+        .fold(NO_BYTES, |acc, size| acc + size);
+    let mut size_to_reclaim =
+        retention_size.map_or(NO_BYTES, |budget| (total - budget).max(NO_BYTES));
     let mut out = Vec::new();
     for md in finished {
-        let by_time = matches!(
-            retention_ms,
-            Some(window) if now_ms.saturating_sub(md.max_timestamp_ms()) > window
-        );
-        let by_size = size_to_reclaim > 0;
+        let age = Time::from_millis(now_ms.saturating_sub(md.max_timestamp_ms()));
+        let by_time = matches!(retention, Some(window) if age > window);
+        let by_size = size_to_reclaim > NO_BYTES;
         if !(by_time || by_size) {
             break;
         }
-        let bytes = u64::try_from(md.segment_size_in_bytes().max(0)).unwrap_or(0);
         if by_size {
-            size_to_reclaim = size_to_reclaim.saturating_sub(bytes);
+            size_to_reclaim = (size_to_reclaim - segment_size(md)).max(NO_BYTES);
         }
         out.push(md.clone());
     }
     out
+}
+
+/// The remote metadata's `segment_size_in_bytes` (a wire `int32`) as a
+/// quantity. Negative sizes are impossible but cheap to clamp.
+fn segment_size(md: &RemoteLogSegmentMetadata) -> ByteSize {
+    ByteSize::from_bytes_i64(i64::from(md.segment_size_in_bytes().max(0)))
 }
 
 /// KIP-405: evict remote segments past the topic's total
@@ -333,11 +343,9 @@ pub(crate) async fn remote_retention_pass(
     rlmm: &Arc<dyn RemoteLogMetadataManager>,
     now_ms: i64,
 ) -> usize {
-    let retention_ms = log_config
-        .retention_ms
-        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-    let retention_bytes = log_config.retention_bytes;
-    if retention_ms.is_none() && retention_bytes.is_none() {
+    let retention = log_config.retention;
+    let retention_size = log_config.retention_size;
+    if retention.is_none() && retention_size.is_none() {
         return 0;
     }
 
@@ -354,7 +362,7 @@ pub(crate) async fn remote_retention_pass(
     };
     finished.sort_by_key(RemoteLogSegmentMetadata::start_offset);
 
-    let evict = remote_retention_eviction_set(&finished, retention_ms, retention_bytes, now_ms);
+    let evict = remote_retention_eviction_set(&finished, retention, retention_size, now_ms);
     let mut deleted = 0;
     for md in evict {
         if delete_one_segment(tp, broker_id, &md, rsm, rlmm).await {
@@ -572,7 +580,7 @@ async fn copy_one(
             .map(|&(epoch, off)| (epoch, off.0))
             .collect()
     };
-    let size = i32::try_from(ex.size_bytes).unwrap_or(i32::MAX);
+    let size = ex.size.bytes_i32();
 
     let metadata = match RemoteLogSegmentMetadata::new(
         id.clone(),
@@ -719,6 +727,7 @@ mod tests {
         CustomMetadata, IndexType, InmemoryRemoteLogMetadataManager, LocalTieredStorage,
         RemoteStorageError,
     };
+    use crabka_units::{hours, millis};
 
     use super::*;
 
@@ -900,7 +909,7 @@ mod tests {
         let mut log = Log::open(
             dir,
             LogConfig {
-                segment_bytes: 256, // tiny so we roll fast
+                segment_size: bytes(256), // tiny so we roll fast
                 ..LogConfig::default()
             },
         )
@@ -941,10 +950,10 @@ mod tests {
         rolled_tiered_partition_with_config(
             log_dir,
             LogConfig {
-                segment_bytes: 256,
+                segment_size: bytes(256),
                 remote_storage_enable: true,
-                retention_ms: None,
-                retention_bytes: None,
+                retention: None,
+                retention_size: None,
                 ..LogConfig::default()
             },
         )
@@ -996,7 +1005,7 @@ mod tests {
                 broker_id: 1,
             },
             RemoteLogManagerConfig {
-                interval: Duration::from_millis(10),
+                interval: millis(10),
             },
             shutdown.clone(),
         ));
@@ -1074,10 +1083,10 @@ mod tests {
         let partition = rolled_tiered_partition_with_config(
             log_dir.path(),
             LogConfig {
-                segment_bytes: 256,
+                segment_size: bytes(256),
                 remote_storage_enable: false,
-                retention_ms: None,
-                retention_bytes: None,
+                retention: None,
+                retention_size: None,
                 ..LogConfig::default()
             },
         );
@@ -1199,7 +1208,7 @@ mod tests {
             base_offset: Offset(0),
             last_offset: Offset(9),
             max_timestamp: 42,
-            size_bytes: 10,
+            size: bytes(10),
             log_path: write("00.log", b"0123456789"),
             offset_index_path: write("00.index", b"i"),
             time_index_path: write("00.timeindex", b"t"),
@@ -1214,12 +1223,12 @@ mod tests {
         assert!(md.segment_leader_epochs().get(&LeaderEpoch(3)) == Some(&0));
     }
 
-    fn synth_export(base: i64, last: i64, max_ts: i64, size: u64) -> SegmentExport {
+    fn synth_export(base: i64, last: i64, max_ts: i64, size: u32) -> SegmentExport {
         SegmentExport {
             base_offset: Offset(base),
             last_offset: Offset(last),
             max_timestamp: max_ts,
-            size_bytes: size,
+            size: bytes(size),
             log_path: std::path::PathBuf::new(),
             offset_index_path: std::path::PathBuf::new(),
             time_index_path: std::path::PathBuf::new(),
@@ -1233,7 +1242,7 @@ mod tests {
         let exports = vec![synth_export(0, 9, 100, 64), synth_export(10, 19, 200, 64)];
         let finished: HashSet<i64> = HashSet::new();
         // Big enough time-pressure to delete everything, but nothing is finished.
-        assert!(local_retention_target(&exports, &finished, Some(1), None, 10_000) == None);
+        assert!(local_retention_target(&exports, &finished, Some(millis(1)), None, 10_000) == None);
     }
 
     #[test]
@@ -1246,7 +1255,7 @@ mod tests {
         let finished: HashSet<i64> = [0, 10, 20].into_iter().collect();
         // now=1000, retention=500ms → segs with max_ts<500 are deletable.
         // Only seg0 (max_ts=100) and seg1 (max_ts=200) qualify; seg2 stops it.
-        let target = local_retention_target(&exports, &finished, Some(500), None, 1_000);
+        let target = local_retention_target(&exports, &finished, Some(millis(500)), None, 1_000);
         assert!(target == Some(20));
     }
 
@@ -1260,16 +1269,16 @@ mod tests {
         let finished: HashSet<i64> = [0, 10, 20].into_iter().collect();
         let cases = [
             // Total = 300; budget = 150 → must evict 150 bytes → oldest two go.
-            (Some(150), Some(20)),
+            (Some(bytes(150)), Some(20)),
             // Budget tighter than one segment: still only the oldest, because
             // after evicting 100B the remaining is 100 (>budget? no, 200>150,
             // wait: total=300, budget=150 → need to evict 150; after dropping
             // first 100B we still need 50 more → second segment also drops.
             // Test with budget = 50: need to evict 250 → all three? but the
             // walk stops since segments 0..=2 all become deletable.
-            (Some(50), Some(30)),
+            (Some(bytes(50)), Some(30)),
             // Budget larger than total → nothing deletable.
-            (Some(10_000), None),
+            (Some(bytes(10_000)), None),
         ];
         for (budget, expected) in cases {
             let target = local_retention_target(&exports, &finished, None, budget, 1_000);
@@ -1281,7 +1290,7 @@ mod tests {
     fn local_retention_target_equal_size_budget_keeps_all_segments() {
         let exports = vec![synth_export(0, 9, 100, 100), synth_export(10, 19, 200, 100)];
         let finished: HashSet<i64> = [0, 10].into_iter().collect();
-        let target = local_retention_target(&exports, &finished, None, Some(200), 1_000);
+        let target = local_retention_target(&exports, &finished, None, Some(bytes(200)), 1_000);
         assert!(target == None);
     }
 
@@ -1294,7 +1303,7 @@ mod tests {
         ];
         // Segment at base=10 has NOT been copy-finished. Walk stops there.
         let finished: HashSet<i64> = [0, 20].into_iter().collect();
-        let target = local_retention_target(&exports, &finished, Some(1), None, 10_000);
+        let target = local_retention_target(&exports, &finished, Some(millis(1)), None, 10_000);
         assert!(
             target == Some(10),
             "only seg0 deletable; walk stops at seg1"
@@ -1305,12 +1314,12 @@ mod tests {
     fn local_retention_target_uses_already_resolved_effective_ms() {
         // The pure helper takes already-resolved effective_* args. This test
         // pins that contract: when caller passes effective_local_ms equal to
-        // the topic's retention_ms (the fallback), the helper deletes the
-        // same set as if local_retention_ms had been set directly.
+        // the topic's `retention` (the fallback), the helper deletes the
+        // same set as if `local_retention` had been set directly.
         let exports = vec![synth_export(0, 9, 100, 64), synth_export(10, 19, 200, 64)];
         let finished: HashSet<i64> = [0, 10].into_iter().collect();
-        // Caller resolved effective_local_ms = retention_ms = 250ms; now=1000.
-        let target = local_retention_target(&exports, &finished, Some(250), None, 1_000);
+        // Caller resolved effective_local = retention = 250ms; now=1000.
+        let target = local_retention_target(&exports, &finished, Some(millis(250)), None, 1_000);
         assert!(target == Some(20));
     }
 
@@ -1323,19 +1332,16 @@ mod tests {
         log_config: &LogConfig,
         now_ms: i64,
     ) -> usize {
-        let effective_local_ms = log_config
-            .local_retention_ms
-            .or(log_config.retention_ms)
-            .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
-        let effective_local_bytes = log_config
-            .local_retention_bytes
-            .or(log_config.retention_bytes);
+        let effective_local = log_config.local_retention.or(log_config.retention);
+        let effective_local_size = log_config
+            .local_retention_size
+            .or(log_config.retention_size);
         let exports = log.tierable_segments();
         let Some(target) = local_retention_target(
             &exports,
             finished_bases,
-            effective_local_ms,
-            effective_local_bytes,
+            effective_local,
+            effective_local_size,
             now_ms,
         ) else {
             return 0;
@@ -1350,9 +1356,9 @@ mod tests {
         let mut log = Log::open(
             log_dir.path(),
             LogConfig {
-                segment_bytes: 256,
+                segment_size: bytes(256),
                 remote_storage_enable: true,
-                local_retention_ms: Some(Duration::from_millis(1)),
+                local_retention: Some(millis(1)),
                 ..LogConfig::default()
             },
         )
@@ -1410,9 +1416,9 @@ mod tests {
         let partition = rolled_tiered_partition_with_config(
             log_dir.path(),
             LogConfig {
-                segment_bytes: 256,
+                segment_size: bytes(256),
                 remote_storage_enable: true,
-                local_retention_ms: Some(Duration::from_millis(1)),
+                local_retention: Some(millis(1)),
                 ..LogConfig::default()
             },
         );
@@ -1479,7 +1485,7 @@ mod tests {
 
     #[test]
     fn remote_retention_eviction_set_returns_empty_when_no_segments() {
-        let out = remote_retention_eviction_set(&[], Some(1), Some(1), 10_000);
+        let out = remote_retention_eviction_set(&[], Some(millis(1)), Some(bytes(1)), 10_000);
         assert!(out.is_empty());
     }
 
@@ -1492,7 +1498,7 @@ mod tests {
         ];
         // now=10_000, retention=500ms → seg with max_ts < 9_500 is deletable.
         // seg0 (100) + seg1 (200) qualify; seg2 (9_500) stops the walk.
-        let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
+        let out = remote_retention_eviction_set(&segs, Some(millis(500)), None, 10_000);
         assert!(out.len() == 2);
         check!(out[0].start_offset() == 0);
         check!(out[1].start_offset() == 10);
@@ -1507,11 +1513,11 @@ mod tests {
         ];
         let cases = [
             // Total=300, budget=150 → reclaim 150 → oldest two go.
-            (Some(150), 2),
+            (Some(bytes(150)), 2),
             // Budget tighter than one segment → all three.
-            (Some(50), 3),
+            (Some(bytes(50)), 3),
             // Budget larger than total → none.
-            (Some(10_000), 0),
+            (Some(bytes(10_000)), 0),
         ];
         for (budget, expected_len) in cases {
             let out = remote_retention_eviction_set(&segs, None, budget, 1_000);
@@ -1522,7 +1528,7 @@ mod tests {
     #[test]
     fn remote_retention_eviction_set_equal_size_budget_keeps_all_segments() {
         let segs = vec![synth_remote_md(10, 0, 9, 100, 100)];
-        let out = remote_retention_eviction_set(&segs, None, Some(100), 1_000);
+        let out = remote_retention_eviction_set(&segs, None, Some(bytes(100)), 1_000);
         assert!(out.is_empty());
     }
 
@@ -1535,7 +1541,8 @@ mod tests {
         ];
         // Time-window: seg0+seg1 qualify (max_ts<500). Budget very generous
         // so size-based evicts nothing. Result is the time-window prefix.
-        let out = remote_retention_eviction_set(&segs, Some(500), Some(10_000), 1_000);
+        let out =
+            remote_retention_eviction_set(&segs, Some(millis(500)), Some(bytes(10_000)), 1_000);
         assert!(out.len() == 2);
     }
 
@@ -1554,7 +1561,7 @@ mod tests {
             synth_remote_md(12, 20, 29, 200, 100),   // also deletable by time, but
                                                      // walk stopped at seg1 already.
         ];
-        let out = remote_retention_eviction_set(&segs, Some(500), None, 10_000);
+        let out = remote_retention_eviction_set(&segs, Some(millis(500)), None, 10_000);
         assert!(out.len() == 1);
         assert!(out[0].start_offset() == 0);
     }
@@ -1575,7 +1582,7 @@ mod tests {
         assert!(!pre.is_empty());
 
         let cfg = LogConfig {
-            retention_ms: Some(Duration::from_millis(1)),
+            retention: Some(millis(1)),
             ..LogConfig::default()
         };
         // far-future `now_ms` → every finished segment is past the window.
@@ -1610,8 +1617,8 @@ mod tests {
 
         let cfg = LogConfig {
             // Long retention; nothing is past the window.
-            retention_ms: Some(Duration::from_hours(8760)),
-            retention_bytes: None,
+            retention: Some(hours(8_760)),
+            retention_size: None,
             ..LogConfig::default()
         };
         // Use a `now_ms` close to the segments' max_timestamp so the test
@@ -1632,8 +1639,8 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         let cfg = LogConfig {
-            retention_ms: None,
-            retention_bytes: None,
+            retention: None,
+            retention_size: None,
             ..LogConfig::default()
         };
         let deleted = remote_retention_pass(&tp(), 1, &cfg, &rsm, &rlmm, now_ms()).await;

@@ -32,6 +32,7 @@ crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
 crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-logql = { version = "0.3.8", path = "../logql" }
 crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
+crabka-units = { workspace = true }
 datafusion.workspace = true
 flate2 = { workspace = true }
 futures-util = { workspace = true }

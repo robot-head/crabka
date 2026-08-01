@@ -9,11 +9,11 @@ topology:
 workload:
   connections: 24
   rate: saturate
-  warmup_s: 10
-  duration_s: 60
+  warmup: 10s
+  duration: 60s
   mix:
     single_shard_insert: 70
     read_only: 30
 faults:
-  - at_s: 20
-    kill_node: { node: 2, restart_after_s: 10 }
+  - at: 20s
+    kill_node: { node: 2, restart_after: 10s }

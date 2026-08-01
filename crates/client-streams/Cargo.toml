@@ -24,6 +24,7 @@ crabka-schema-serde = { version = "0.3.9", path = "../schema-serde", features = 
 crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
 crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
+crabka-units = { workspace = true }
 async-trait = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }

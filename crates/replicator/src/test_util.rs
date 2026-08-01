@@ -2,11 +2,15 @@
 //!
 //! These functions panic on error — they are designed for use in tests only.
 
-use std::time::Duration;
-
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::{Producer, ProducerRecord};
+use crabka_units::prelude::{StdDurationExt as _, Time, TimeExt as _, millis};
+
+/// How long each poll waits for records while draining a topic.
+const POLL_TIMEOUT: Time = millis(500);
+/// Gap between successive count probes in [`await_topic_count`].
+const PROBE_INTERVAL: Time = millis(100);
 
 /// Create a topic via [`crate::admin_util::ensure_topic`].
 pub async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
@@ -53,15 +57,15 @@ pub async fn topic_record_count(bootstrap: &str, topic: &str) -> usize {
 }
 
 /// Poll `topic_record_count` until it reaches `n` or panic on timeout.
-pub async fn await_topic_count(bootstrap: &str, topic: &str, n: usize, timeout: Duration) {
+pub async fn await_topic_count(bootstrap: &str, topic: &str, n: usize, timeout: Time) {
     let start = tokio::time::Instant::now();
     loop {
         let count = topic_record_count(bootstrap, topic).await;
         if count >= n {
             return;
         }
-        assert2::assert!(start.elapsed() < timeout);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert2::assert!(start.elapsed().as_time() < timeout);
+        tokio::time::sleep(PROBE_INTERVAL.to_std()).await;
     }
 }
 
@@ -83,7 +87,7 @@ pub async fn commit_group(bootstrap: &str, group: &str, topic: &str) {
     let mut empty_streak = 0usize;
     loop {
         let batch = consumer
-            .poll(Duration::from_millis(500))
+            .poll(POLL_TIMEOUT)
             .await
             .unwrap_or_else(|e| panic!("commit_group({group}): poll: {e}"));
         if batch.is_empty() {

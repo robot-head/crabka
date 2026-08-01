@@ -20,6 +20,7 @@ use axum::{
 use crabka_authz::{AuthorizationRequest, AuthorizationResult};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
+use crabka_units::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -293,7 +294,7 @@ async fn forward_handler(
 ) -> Response {
     let Ok(body) = axum::body::to_bytes(
         request.into_body(),
-        state.config.runtime.forward_max_body_bytes,
+        state.config.runtime.forward_max_body.bytes_usize(),
     )
     .await
     else {
@@ -437,7 +438,7 @@ mod tests {
             client_id: "fh".into(),
             dedup_topic: dedup.into(),
             dedup_partitions: N,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
             dedup_ownership_group: "__crabka_grpc_gateway_dedup_owners".into(),
             dedup_txn_id_prefix: "fh-dedup".into(),
             advertised_addr: "127.0.0.1:0".into(),
@@ -528,14 +529,14 @@ mod tests {
         let mut state = build_state(&bootstrap, DEDUP, None, Arc::new(DenyAllAuthorizer)).await;
         let state_mut = Arc::get_mut(&mut state).unwrap();
         let mut config = (*state_mut.config).clone();
-        config.runtime.forward_max_body_bytes = 4 * 1024 * 1024;
+        config.runtime.forward_max_body = mebibytes(4);
         state_mut.config = Arc::new(config);
 
         let mut record = forward_record("orders");
         record.value = vec![255; 600_000];
         let body = serde_json::to_vec(&record).unwrap();
-        assert2::assert!(body.len() > 2 * 1024 * 1024);
-        assert2::assert!(body.len() < 4 * 1024 * 1024);
+        assert2::assert!(body.len() > mebibytes(2).bytes_usize());
+        assert2::assert!(body.len() < mebibytes(4).bytes_usize());
 
         let app = forward_router(state);
         let response = app
@@ -580,7 +581,7 @@ mod tests {
             trust_roots_path: None,
             client_ca_path: None,
             client_auth: ClientAuthMode::Disabled,
-            reload_interval_secs: 30,
+            reload_interval: secs(30),
         });
         let state = build_state(&bootstrap, DEDUP, tls, Arc::new(AllowAllAuthorizer)).await;
 

@@ -9,9 +9,11 @@
 
 use std::collections::BTreeMap;
 
+use crabka_units::prelude::*;
+
 use crate::{
     ids::TimeOffsetMs,
-    numeric::to_f64,
+    numeric::{mebibytes_f64, millis_f64, to_f64},
     scenario::{BrokerSample, RunOutput, Sample, Stack},
 };
 
@@ -57,6 +59,11 @@ pub fn stat(values: &[f64]) -> Stat {
 
 /// A headline scalar metric: its key, how to pull it from a run, and which
 /// direction counts as "better" (so a renderer can colour/ratio correctly).
+///
+/// `extract` returns a plain number in the metric's stated `unit`, because the
+/// statistics below (and the Plotly axes above) are dimension-agnostic — a
+/// mean and a stddev are taken over whatever unit the axis is labelled with.
+/// The quantity-to-number seam is in each metric's `extract`.
 #[derive(Clone, Copy)]
 pub struct ScalarMetric {
     pub key: &'static str,
@@ -82,42 +89,42 @@ pub fn scalar_metrics() -> Vec<ScalarMetric> {
             label: "Producer throughput",
             unit: "msgs/s",
             higher_better: true,
-            extract: |r| r.throughput.producer_msgs_per_sec,
+            extract: |r| r.throughput.producer_rate.per_sec_f64(),
         },
         ScalarMetric {
             key: "consumer_msgs_per_sec",
             label: "Consumer throughput",
             unit: "msgs/s",
             higher_better: true,
-            extract: |r| r.throughput.consumer_msgs_per_sec,
+            extract: |r| r.throughput.consumer_rate.per_sec_f64(),
         },
         ScalarMetric {
             key: "producer_p99_ms",
             label: "Producer ack p99",
             unit: "ms",
             higher_better: false,
-            extract: |r| r.producer_latency_ms.p99_ms,
+            extract: |r| millis_f64(r.producer_latency.p99),
         },
         ScalarMetric {
             key: "consumer_e2e_p99_ms",
             label: "Consumer e2e p99",
             unit: "ms",
             higher_better: false,
-            extract: |r| r.consumer_e2e_latency_ms.p99_ms,
+            extract: |r| millis_f64(r.consumer_e2e_latency.p99),
         },
         ScalarMetric {
             key: "msgs_per_cpu_core",
             label: "Efficiency",
             unit: "msgs/s per CPU-core",
             higher_better: true,
-            extract: |r| r.resource.msgs_per_cpu_core,
+            extract: |r| r.resource.msgs_per_cpu_second.per_sec_f64(),
         },
         ScalarMetric {
             key: "mem_working_set_mb",
             label: "Broker working set",
             unit: "MiB",
             higher_better: false,
-            extract: |r| to_f64(r.resource.mem_cgroup_working_set_bytes) / 1_048_576.0,
+            extract: |r| mebibytes_f64(r.resource.mem_cgroup_working_set),
         },
     ]
 }
@@ -208,10 +215,10 @@ type BrokerExtract = fn(&BrokerSample) -> f64;
 
 fn client_ts_metrics() -> Vec<(&'static str, SampleExtract)> {
     vec![
-        ("producer_msgs_per_sec", |s| s.producer_msgs_per_sec),
-        ("consumer_msgs_per_sec", |s| s.consumer_msgs_per_sec),
-        ("producer_p99_ms", |s| s.producer_p99_ms),
-        ("consumer_e2e_p99_ms", |s| s.consumer_e2e_p99_ms),
+        ("producer_msgs_per_sec", |s| s.producer_rate.per_sec_f64()),
+        ("consumer_msgs_per_sec", |s| s.consumer_rate.per_sec_f64()),
+        ("producer_p99_ms", |s| millis_f64(s.producer_p99)),
+        ("consumer_e2e_p99_ms", |s| millis_f64(s.consumer_e2e_p99)),
     ]
 }
 
@@ -219,7 +226,7 @@ fn broker_ts_metrics() -> Vec<(&'static str, BrokerExtract)> {
     vec![
         ("broker_cpu_cores", |b| b.cpu_cores),
         ("broker_mem_working_set_mb", |b| {
-            to_f64(b.mem_working_set_bytes) / 1_048_576.0
+            mebibytes_f64(b.mem_working_set)
         }),
     ]
 }
@@ -332,7 +339,7 @@ mod tests {
         stack: Stack,
         scenario: &str,
         broker_count: u32,
-        prod_mps: f64,
+        producer_rate: Frequency,
         samples: Vec<Sample>,
         broker_samples: Vec<BrokerSample>,
     ) -> RunOutput {
@@ -340,8 +347,8 @@ mod tests {
             scenario: Scenario {
                 name: scenario.into(),
                 mode_tag: ModeTag::Cluster,
-                msg_size_bytes: 100,
-                key_size_bytes: 0,
+                msg_size: bytes(100),
+                key_size: ByteSize::ZERO,
                 partitions: 100,
                 replication_factor: 3,
                 producers: 1,
@@ -349,10 +356,10 @@ mod tests {
                 mode: LoadMode::Saturate,
                 acks: Acks::Leader,
                 compression: Compression::None,
-                linger_ms: 5,
-                batch_size: 16384,
-                duration_s: 60,
-                warmup_s: 10,
+                linger: millis(5),
+                batch_size: kibibytes(16),
+                duration: secs(60),
+                warmup: secs(10),
                 failover: None,
             },
             stack,
@@ -364,15 +371,15 @@ mod tests {
             wallclock_start_unix_ms: WallclockMs(0),
             wallclock_end_unix_ms: WallclockMs(60_000),
             throughput: Throughput {
-                producer_msgs_per_sec: prod_mps,
+                producer_rate,
                 ..Throughput::default()
             },
-            producer_latency_ms: LatencyPercentiles::default(),
-            consumer_e2e_latency_ms: LatencyPercentiles::default(),
+            producer_latency: LatencyPercentiles::default(),
+            consumer_e2e_latency: LatencyPercentiles::default(),
             resource: Resource::default(),
             disturbance: None,
-            startup_ms: None,
-            first_ack_ms: 0,
+            startup: None,
+            first_ack: Time::ZERO,
             errors: vec![],
             notes: vec![],
             samples,
@@ -380,14 +387,11 @@ mod tests {
         }
     }
 
-    fn sample(t: u64, prod_mps: f64) -> Sample {
+    fn sample(t: u64, producer_rate: Frequency) -> Sample {
         Sample {
             t_offset_ms: TimeOffsetMs(t),
-            producer_msgs_per_sec: prod_mps,
-            consumer_msgs_per_sec: 0.0,
-            producer_p50_ms: 0.0,
-            producer_p99_ms: 0.0,
-            consumer_e2e_p99_ms: 0.0,
+            producer_rate,
+            ..Sample::default()
         }
     }
 
@@ -423,11 +427,11 @@ mod tests {
     #[test]
     fn aggregate_cells_groups_and_averages_each_stack() {
         let runs = vec![
-            run(Stack::Crabka, "sat", 6, 100.0, vec![], vec![]),
-            run(Stack::Crabka, "sat", 6, 200.0, vec![], vec![]),
-            run(Stack::Crabka, "sat", 6, 300.0, vec![], vec![]),
-            run(Stack::Kafka, "sat", 6, 50.0, vec![], vec![]),
-            run(Stack::Kafka, "sat", 6, 50.0, vec![], vec![]),
+            run(Stack::Crabka, "sat", 6, per_sec(100), vec![], vec![]),
+            run(Stack::Crabka, "sat", 6, per_sec(200), vec![], vec![]),
+            run(Stack::Crabka, "sat", 6, per_sec(300), vec![], vec![]),
+            run(Stack::Kafka, "sat", 6, per_sec(50), vec![], vec![]),
+            run(Stack::Kafka, "sat", 6, per_sec(50), vec![], vec![]),
         ];
         let cells = aggregate_cells(&runs);
         assert2::assert!(cells.len() == 1);
@@ -449,8 +453,8 @@ mod tests {
     #[test]
     fn aggregate_cells_separates_topologies() {
         let runs = vec![
-            run(Stack::Crabka, "sat", 3, 10.0, vec![], vec![]),
-            run(Stack::Crabka, "sat", 6, 20.0, vec![], vec![]),
+            run(Stack::Crabka, "sat", 3, per_sec(10), vec![], vec![]),
+            run(Stack::Crabka, "sat", 6, per_sec(20), vec![], vec![]),
         ];
         let cells = aggregate_cells(&runs);
         assert2::assert!(cells.len() == 2);
@@ -465,24 +469,24 @@ mod tests {
                 Stack::Crabka,
                 "sat",
                 6,
-                0.0,
-                vec![sample(0, 1000.0), sample(2000, 2000.0)],
+                Frequency::ZERO,
+                vec![sample(0, per_sec(1000)), sample(2000, per_sec(2000))],
                 vec![BrokerSample {
                     t_offset_ms: TimeOffsetMs(0),
                     cpu_cores: 2.0,
-                    mem_working_set_bytes: 1_048_576,
+                    mem_working_set: mebibytes(1),
                 }],
             ),
             run(
                 Stack::Crabka,
                 "sat",
                 6,
-                0.0,
-                vec![sample(0, 3000.0), sample(2000, 4000.0)],
+                Frequency::ZERO,
+                vec![sample(0, per_sec(3000)), sample(2000, per_sec(4000))],
                 vec![BrokerSample {
                     t_offset_ms: TimeOffsetMs(0),
                     cpu_cores: 4.0,
-                    mem_working_set_bytes: 3_145_728,
+                    mem_working_set: mebibytes(3),
                 }],
             ),
         ];
@@ -533,11 +537,18 @@ mod tests {
                 Stack::Kafka,
                 "sat",
                 6,
-                0.0,
-                vec![sample(0, 10.0), sample(2000, 20.0)],
+                Frequency::ZERO,
+                vec![sample(0, per_sec(10)), sample(2000, per_sec(20))],
                 vec![],
             ),
-            run(Stack::Kafka, "sat", 6, 0.0, vec![sample(0, 30.0)], vec![]),
+            run(
+                Stack::Kafka,
+                "sat",
+                6,
+                Frequency::ZERO,
+                vec![sample(0, per_sec(30))],
+                vec![],
+            ),
         ];
         let series = averaged_timeseries(&runs);
         let prod = series

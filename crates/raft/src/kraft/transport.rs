@@ -102,7 +102,7 @@ pub enum Command {
     /// `API_KEY_METADATA_FETCH` (1004), encoded as Kafka record batches.
     MetadataFetch {
         fetch_offset: i64,
-        max_bytes: usize,
+        max_size: crabka_units::ByteSize,
         reply: oneshot::Sender<MetadataFetchSlice>,
     },
     /// Test-only: append a metadata batch to the log (as the leader's

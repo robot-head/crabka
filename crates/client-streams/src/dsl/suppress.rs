@@ -6,14 +6,19 @@
 //! overflow toggle + eager `max_records(n)` constructor + `record_cap()`/`is_emit_early()`.
 //! Slice D adds the logging toggle.
 
+use crabka_units::prelude::*;
+
 /// How the suppress buffer is bounded + what happens when it's full.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// A [`ByteSize`] stores `f64`, so this is `PartialEq` but not `Eq`; nothing keys
+/// a map or set on a buffer config, so the weaker bound costs nothing.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BufferConfig {
     max_records: Option<usize>,
     /// Cap on the total serialized size of the buffer (`key_bytes + value_bytes`
     /// summed). Enforced by the processor against the registered store's
     /// `byte_size()`. The JVM `BufferConfig.maxBytes`.
-    max_bytes: Option<usize>,
+    max_bytes: Option<ByteSize>,
     /// `false` = shutDownWhenFull (strict, panic); `true` = emitEarlyWhenFull (eager).
     emit_early: bool,
 }
@@ -43,14 +48,14 @@ impl BufferConfig {
         }
     }
 
-    /// Cap at `n` bytes, EAGER (emit-early-when-full) — the JVM static
-    /// `BufferConfig.maxBytes(n)`. The byte unit is the serialized
+    /// Cap at `n`, EAGER (emit-early-when-full) — the JVM static
+    /// `BufferConfig.maxBytes(n)`. The cap is measured against the serialized
     /// `key_bytes + value_bytes` summed across buffered entries.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
-    pub fn max_bytes(n: usize) -> Self {
-        assert!(n >= 1, "max_bytes must be >= 1");
+    pub fn max_bytes(n: ByteSize) -> Self {
+        assert!(n >= bytes(1), "max_bytes must be >= 1");
         Self {
             max_records: None,
             max_bytes: Some(n),
@@ -71,13 +76,13 @@ impl BufferConfig {
         }
     }
 
-    /// Cap at `n` bytes, keeping the current overflow mode — the JVM
+    /// Cap at `n`, keeping the current overflow mode — the JVM
     /// `unbounded().withMaxBytes(n)`.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
-    pub fn with_max_bytes(self, n: usize) -> Self {
-        assert!(n >= 1, "max_bytes must be >= 1");
+    pub fn with_max_bytes(self, n: ByteSize) -> Self {
+        assert!(n >= bytes(1), "max_bytes must be >= 1");
         Self {
             max_bytes: Some(n),
             ..self
@@ -105,7 +110,7 @@ impl BufferConfig {
     pub(crate) fn record_cap(&self) -> Option<usize> {
         self.max_records
     }
-    pub(crate) fn byte_cap(&self) -> Option<usize> {
+    pub(crate) fn byte_cap(&self) -> Option<ByteSize> {
         self.max_bytes
     }
     pub(crate) fn is_emit_early(&self) -> bool {
@@ -163,8 +168,8 @@ impl<K> Suppressed<K> {
 pub(crate) enum WaitKind {
     /// Window-close: wait = the upstream window's grace (from the `KTable` handle).
     UpstreamGrace,
-    /// Time-limit: wait = the configured duration (ms).
-    Fixed(i64),
+    /// Time-limit: wait = the configured duration.
+    Fixed(Time),
 }
 
 impl<KInner> Suppressed<crate::dsl::windows::Windowed<KInner>> {
@@ -188,17 +193,17 @@ impl<KInner> Suppressed<crate::dsl::windows::Windowed<KInner>> {
 }
 
 impl<K> Suppressed<K> {
-    /// Rate-limiter: emit at most one update per key per `wait_ms` (stream-time); a
+    /// Rate-limiter: emit at most one update per key per `wait` (stream-time); a
     /// newer record for a key replaces the buffered one and resets the timer.
     #[must_use]
     /// # Panics
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
-    pub fn until_time_limit(wait_ms: i64, buffer: BufferConfig) -> Self {
-        assert!(wait_ms >= 0, "time limit must be >= 0");
+    pub fn until_time_limit(wait: Time, buffer: BufferConfig) -> Self {
+        assert!(wait >= Time::ZERO, "time limit must be >= 0");
         Self {
             buffer,
             buffer_time: |_k, ts| ts,
-            wait: WaitKind::Fixed(wait_ms),
+            wait: WaitKind::Fixed(wait),
             logging: true,
         }
     }
@@ -212,13 +217,13 @@ mod tests {
 
     #[test]
     fn buffer_config_caps_and_overflow() {
-        assert_eq!(BufferConfig::unbounded().record_cap(), None);
-        assert!(!BufferConfig::unbounded().is_emit_early()); // strict
+        check!(BufferConfig::unbounded().record_cap() == None);
+        check!(!BufferConfig::unbounded().is_emit_early()); // strict
         let strict = BufferConfig::unbounded().with_max_records(3);
-        assert_eq!(strict.record_cap(), Some(3));
-        assert!(!strict.is_emit_early());
+        check!(strict.record_cap() == Some(3));
+        check!(!strict.is_emit_early());
         let eager = BufferConfig::max_records(5); // eager
-        assert_eq!(eager.record_cap(), Some(5));
+        check!(eager.record_cap() == Some(5));
         check!(eager.is_emit_early());
         check!(!eager.shut_down_when_full().is_emit_early());
         check!(
@@ -230,37 +235,37 @@ mod tests {
 
     #[test]
     fn buffer_config_byte_caps() {
-        assert_eq!(BufferConfig::unbounded().byte_cap(), None);
-        let eager = BufferConfig::max_bytes(1024); // eager static
-        assert_eq!(eager.byte_cap(), Some(1024));
-        assert_eq!(eager.record_cap(), None);
-        assert!(eager.is_emit_early());
+        check!(BufferConfig::unbounded().byte_cap() == None);
+        let eager = BufferConfig::max_bytes(kibibytes(1)); // eager static
+        check!(eager.byte_cap() == Some(kibibytes(1)));
+        check!(eager.record_cap() == None);
+        check!(eager.is_emit_early());
         // strict path keeps shutDownWhenFull
-        let strict = BufferConfig::unbounded().with_max_bytes(512);
-        assert_eq!(strict.byte_cap(), Some(512));
-        assert!(!strict.is_emit_early());
+        let strict = BufferConfig::unbounded().with_max_bytes(bytes(512));
+        check!(strict.byte_cap() == Some(bytes(512)));
+        check!(!strict.is_emit_early());
         // records + bytes coexist
         let both = BufferConfig::unbounded()
             .with_max_records(3)
-            .with_max_bytes(99);
-        assert_eq!(both.record_cap(), Some(3));
-        assert_eq!(both.byte_cap(), Some(99));
+            .with_max_bytes(bytes(99));
+        check!(both.record_cap() == Some(3));
+        check!(both.byte_cap() == Some(bytes(99)));
     }
 
     #[test]
     fn logging_toggles() {
         use crate::dsl::windows::{Window, Windowed};
         let on = Suppressed::until_window_closes(BufferConfig::unbounded());
-        assert!(on.logging); // default on
+        check!(on.logging); // default on
         let off = on.with_logging_disabled();
-        assert!(!off.logging);
-        assert!(off.with_logging_enabled().logging);
+        check!(!off.logging);
+        check!(off.with_logging_enabled().logging);
         // window-close buffer_time still reads window.end after the toggle
         let wk = Windowed {
             key: "k".to_string(),
             window: Window { start: 0, end: 7 },
         };
-        assert_eq!((off.buffer_time)(&wk, 1), 7);
+        check!((off.buffer_time)(&wk, 1) == 7);
     }
 
     #[test]
@@ -271,8 +276,8 @@ mod tests {
             key: "k".to_string(),
             window: Window { start: 0, end: 99 },
         };
-        assert_eq!((wc.buffer_time)(&wk, 5), 99); // window.end
-        let tl = Suppressed::<String>::until_time_limit(50, BufferConfig::max_records(2));
-        assert_eq!((tl.buffer_time)(&"k".to_string(), 5), 5); // record ts
+        check!((wc.buffer_time)(&wk, 5) == 99); // window.end
+        let tl = Suppressed::<String>::until_time_limit(millis(50), BufferConfig::max_records(2));
+        check!((tl.buffer_time)(&"k".to_string(), 5) == 5); // record ts
     }
 }

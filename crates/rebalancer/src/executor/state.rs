@@ -7,6 +7,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crabka_units::ByteRate;
 use serde::{Deserialize, Serialize};
 
 use crate::model::proposal::ProposalStatus;
@@ -34,13 +35,16 @@ pub enum Phase {
     ClearThrottle,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `PartialEq` but not `Eq`: [`InFlightFile::throttle`] is an `f64`-backed
+/// quantity, so equality is not reflexive over the whole domain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InFlightFile {
     pub version: u32,
     pub proposal_id: String,
     pub phase: Phase,
     pub started_at_ms: i64,
-    pub throttle_bytes_per_sec: i64,
+    #[serde(with = "crabka_units::serde_units::numeric::bytes_per_sec_i64")]
+    pub throttle: ByteRate,
     /// Set when transitioning into `ClearThrottle` so a resume-during-clear
     /// knows which terminal status to commit.
     #[serde(default)]
@@ -53,18 +57,13 @@ pub struct InFlightFile {
 
 impl InFlightFile {
     #[must_use]
-    pub fn new(
-        proposal_id: String,
-        phase: Phase,
-        started_at_ms: i64,
-        throttle_bytes_per_sec: i64,
-    ) -> Self {
+    pub fn new(proposal_id: String, phase: Phase, started_at_ms: i64, throttle: ByteRate) -> Self {
         Self {
             version: FILE_VERSION,
             proposal_id,
             phase,
             started_at_ms,
-            throttle_bytes_per_sec,
+            throttle,
             target_terminal_status: None,
             failure_reason: None,
         }
@@ -119,13 +118,19 @@ fn path_of(data_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::{convert::ByteRateExt as _, mebibytes_per_sec};
 
     use super::*;
 
     #[test]
     fn round_trip_write_load() {
         let dir = tempfile::tempdir().unwrap();
-        let mut f = InFlightFile::new("p".into(), Phase::Submit, 42, 50_000_000);
+        let mut f = InFlightFile::new(
+            "p".into(),
+            Phase::Submit,
+            42,
+            ByteRate::from_bytes_per_sec(50_000_000),
+        );
         f.write(dir.path()).unwrap();
         let loaded = InFlightFile::load(dir.path()).unwrap().unwrap();
         assert2::assert!(
@@ -135,7 +140,7 @@ mod tests {
                     proposal_id: "p".to_string(),
                     phase: Phase::Submit,
                     started_at_ms: 42,
-                    throttle_bytes_per_sec: 50_000_000,
+                    throttle: ByteRate::from_bytes_per_sec(50_000_000),
                     target_terminal_status: None,
                     failure_reason: None,
                 }
@@ -152,6 +157,22 @@ mod tests {
     }
 
     #[test]
+    fn throttle_persists_as_a_bytes_per_sec_integer() {
+        let dir = tempfile::tempdir().unwrap();
+        InFlightFile::new("p".into(), Phase::Wait, 1, mebibytes_per_sec(8))
+            .write(dir.path())
+            .unwrap();
+
+        let raw: serde_json::Value =
+            serde_json::from_slice(&fs::read(path_of(dir.path())).unwrap()).unwrap();
+
+        assert2::assert!(raw["throttle"] == serde_json::json!(8 * 1024 * 1024));
+        assert2::assert!(
+            InFlightFile::load(dir.path()).unwrap().unwrap().throttle == mebibytes_per_sec(8)
+        );
+    }
+
+    #[test]
     fn load_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert2::assert!(InFlightFile::load(dir.path()).unwrap().is_none());
@@ -160,7 +181,7 @@ mod tests {
     #[test]
     fn delete_is_idempotent() {
         let dir = tempfile::tempdir().unwrap();
-        InFlightFile::new("p".into(), Phase::Submit, 0, 0)
+        InFlightFile::new("p".into(), Phase::Submit, 0, ByteRate::ZERO)
             .write(dir.path())
             .unwrap();
         InFlightFile::delete(dir.path()).unwrap();
@@ -171,7 +192,8 @@ mod tests {
     #[test]
     fn load_rejects_unsupported_version() {
         let dir = tempfile::tempdir().unwrap();
-        let bogus = r#"{"version":999,"proposal_id":"x","phase":"Submit","started_at_ms":0,"throttle_bytes_per_sec":0}"#;
+        let bogus =
+            r#"{"version":999,"proposal_id":"x","phase":"Submit","started_at_ms":0,"throttle":0}"#;
         std::fs::write(dir.path().join(FILENAME), bogus).unwrap();
         let err = InFlightFile::load(dir.path()).unwrap_err();
         assert2::assert!(matches!(

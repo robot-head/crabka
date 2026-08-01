@@ -18,7 +18,12 @@ use crabka_raft::kraft::{
     KraftLog,
     types::{Epoch, LogView},
 };
+use crabka_units::prelude::{ByteSize, gibibytes};
 use sim_harness::{Sim, SimNodeLog};
+
+/// A read budget larger than any log this simulation builds, so every read
+/// returns the whole log.
+const UNBOUNDED_READ: ByteSize = gibibytes(1);
 
 // --------------------------------------------------------------------------
 // A real-KraftLog-backed per-node log for the simulation harness.
@@ -47,7 +52,7 @@ impl KraftBackedLog {
             return Vec::new();
         }
         self.log
-            .read_decoded(Offset(0), usize::MAX)
+            .read_decoded(Offset(0), UNBOUNDED_READ)
             .expect("read_decoded")
     }
 }
@@ -189,7 +194,7 @@ fn new_with_kraft_log(voter_ids: &[NodeId]) -> Sim<KraftBackedLog> {
 fn committed_bytes(sim: &Sim<KraftBackedLog>, node: NodeId) -> bytes::Bytes {
     let log = &sim.node_log(node).log;
     let raw = log
-        .read_committed(Offset(0), usize::MAX)
+        .read_committed(Offset(0), UNBOUNDED_READ)
         .expect("read_committed");
     raw.bytes
 }
@@ -197,7 +202,7 @@ fn committed_bytes(sim: &Sim<KraftBackedLog>, node: NodeId) -> bytes::Bytes {
 /// Decoded committed batches of `node`'s log up to the consensus HWM.
 fn committed_batches(sim: &Sim<KraftBackedLog>, node: NodeId, hwm: i64) -> Vec<RecordBatch> {
     let log = &sim.node_log(node).log;
-    log.read_decoded(Offset(0), usize::MAX)
+    log.read_decoded(Offset(0), UNBOUNDED_READ)
         .expect("read_decoded")
         .into_iter()
         .filter(|b| b.base_offset < hwm)

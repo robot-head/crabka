@@ -467,6 +467,8 @@ impl ShareCoordinator {
             .copied()
             .collect();
 
+        let read_max = self.config.recovery_read_max;
+
         for p in local_partitions {
             let Some(part) = self.partitions.get(bootstrap::TOPIC, p) else {
                 continue;
@@ -474,7 +476,7 @@ impl ShareCoordinator {
 
             let mut offset = part.log_start_offset();
             loop {
-                let out = match part.read_log(offset, self.config.recovery_read_max_bytes) {
+                let out = match part.read_log(offset, read_max) {
                     Ok(o) => o,
                     Err(e) => {
                         warn!(
@@ -698,7 +700,7 @@ mod tests {
             crabka_audit::NodeId(1),
             Arc::clone(&registry),
             ShareCoordinatorConfig {
-                recovery_read_max_bytes: 700,
+                recovery_read_max: crabka_units::bytes(700),
                 ..ShareCoordinatorConfig::default()
             },
         );
@@ -709,7 +711,7 @@ mod tests {
             crabka_audit::NodeId(1),
             registry,
             ShareCoordinatorConfig {
-                recovery_read_max_bytes: 4_096,
+                recovery_read_max: crabka_units::kibibytes(4),
                 ..ShareCoordinatorConfig::default()
             },
         );

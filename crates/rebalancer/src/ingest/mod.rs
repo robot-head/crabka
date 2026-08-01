@@ -4,10 +4,11 @@
 
 pub mod admin_client;
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use crabka_client_core::Client;
+use crabka_units::{Time, convert::TimeExt as _};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -26,7 +27,7 @@ pub fn new_shared_snapshot() -> SharedSnapshot {
 
 pub struct Ingester {
     client: Client,
-    interval: Duration,
+    interval: Time,
     snapshot: SharedSnapshot,
     shutdown: CancellationToken,
     metrics: RebalancerMetrics,
@@ -36,7 +37,7 @@ impl Ingester {
     #[must_use]
     pub fn new(
         client: Client,
-        interval: Duration,
+        interval: Time,
         snapshot: SharedSnapshot,
         shutdown: CancellationToken,
         metrics: RebalancerMetrics,
@@ -51,7 +52,7 @@ impl Ingester {
     }
 
     pub async fn run(self) {
-        let mut ticker = tokio::time::interval(self.interval);
+        let mut ticker = tokio::time::interval(self.interval.to_std());
         // First tick fires immediately - snapshot once at startup before
         // sleeping.
         loop {

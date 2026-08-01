@@ -25,6 +25,7 @@ use crabka_protocol::owned::{
     renew_delegation_token_request::RenewDelegationTokenRequest,
 };
 use crabka_security::KafkaPrincipal;
+use crabka_units::{Time, convert::wire::opt_time_to_millis_i64};
 
 use crate::{AdminClient, AdminError, kafka_error_name};
 
@@ -40,15 +41,19 @@ impl AdminClient {
     ///
     /// `renewers` items are `"User:bob"` form; entries without a `:`
     /// are interpreted with type `"User"`.
+    ///
+    /// `max_lifetime` of `None` reaches the wire as KIP-48's `-1`
+    /// sentinel, deferring to the broker's
+    /// `delegation.token.max.lifetime.ms`.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn create_delegation_token_as_owner(
         &mut self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<CreateDelegationTokenResponse, AdminError> {
-        let req = build_create_delegation_token(owner_principal_name, renewers, max_lifetime_ms);
+        let req = build_create_delegation_token(owner_principal_name, renewers, max_lifetime);
         let resp = self.conn.send(req).await?;
         if resp.error_code != 0 {
             return Err(broker_err("CreateDelegationToken", resp.error_code, None));
@@ -104,7 +109,7 @@ impl AdminClient {
 fn build_create_delegation_token(
     owner_principal_name: &str,
     renewers: &[String],
-    max_lifetime_ms: i64,
+    max_lifetime: Option<Time>,
 ) -> CreateDelegationTokenRequest {
     CreateDelegationTokenRequest {
         owner_principal_type: Some("User".into()),
@@ -113,7 +118,7 @@ fn build_create_delegation_token(
             .iter()
             .map(|s| renewer_str_to_wire(s.as_str()))
             .collect(),
-        max_lifetime_ms,
+        max_lifetime_ms: opt_time_to_millis_i64(max_lifetime),
         ..Default::default()
     }
 }
@@ -245,7 +250,7 @@ mod tests {
         let req = build_create_delegation_token(
             "alice",
             &["User:bob".to_string(), "carol".to_string()],
-            60_000,
+            Some(crabka_units::secs(60)),
         );
         assert2::assert!(
             req == CreateDelegationTokenRequest {
@@ -269,6 +274,14 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields(vec![]),
             }
         );
+    }
+
+    /// An absent lifetime is KIP-48's "use the broker's configured
+    /// ceiling", which the wire spells `-1` rather than `0`.
+    #[test]
+    fn build_create_sends_minus_one_for_an_absent_max_lifetime() {
+        let req = build_create_delegation_token("alice", &[], None);
+        assert2::assert!(req.max_lifetime_ms == -1);
     }
 
     // ── build_renew_delegation_token / build_expire_delegation_token ─

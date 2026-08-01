@@ -7,7 +7,7 @@
 //! exercises handler logic at the same level a real Connect call
 //! would, but without any HTTP serialization. HTTP smoke is T15.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use assert2::check;
 use async_trait::async_trait;
@@ -37,6 +37,11 @@ use crabka_rebalancer::{
     scraper::UsageStore,
     state_topic::StateBackend as _,
 };
+use crabka_units::{
+    ByteRate, Time, bytes_per_sec,
+    convert::{ByteRateExt as _, TimeExt as _},
+    millis, minutes, percent, secs,
+};
 use prometheus_client::registry::Registry;
 use tempfile::TempDir;
 
@@ -52,7 +57,7 @@ impl ClientFacade for NoopClient {
         &self,
         _op: ConfigOp,
         _targets: &ThrottleTargets,
-        _throttle_bytes_per_sec: i64,
+        _throttle: ByteRate,
     ) -> Result<(), PhaseError> {
         Ok(())
     }
@@ -84,6 +89,15 @@ async fn boot_broker() -> (BrokerHandle, String, TempDir) {
     (broker, bootstrap, dir)
 }
 
+/// How long the broker may take to acknowledge a test `CreateTopics`.
+const CREATE_TOPIC_TIMEOUT: Time = secs(5);
+
+/// The binary's default KIP-73 replication throttle.
+const DEFAULT_THROTTLE: ByteRate = bytes_per_sec(50_000_000);
+
+/// Bound on how long a test waits for a broker to shut down.
+const SHUTDOWN_TIMEOUT: Time = secs(30);
+
 /// Create a topic with `partitions` partitions and replication factor
 /// 1 via a short-lived [`Client`]. Asserts success on the response.
 async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
@@ -101,7 +115,7 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
                 replication_factor: 1,
                 ..Default::default()
             }],
-            timeout_ms: 5_000,
+            timeout_ms: CREATE_TOPIC_TIMEOUT.millis_i32(),
             ..Default::default()
         })
         .await
@@ -127,9 +141,9 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
         store: store.clone(),
         config: ExecutorConfig {
             data_dir: std::path::PathBuf::from("/tmp/crabka-rebalancer-test"),
-            default_throttle_bytes_per_sec: 50_000_000,
-            poll_interval: Duration::from_millis(50),
-            execute_deadline: Duration::from_secs(30),
+            default_throttle: DEFAULT_THROTTLE,
+            poll_interval: millis(50),
+            execute_deadline: secs(30),
             batch_size: 200,
         },
         metrics: metrics.clone(),
@@ -141,7 +155,7 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
         store,
         goal_registry: Arc::new(GoalRegistry::default_registry()),
         goal_ctx: GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),
@@ -384,7 +398,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
 
     // Bound the test's wall-clock — broker shutdown can hang if a task
     // is stuck; surface that as a test failure rather than a CI timeout.
-    tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
+    tokio::time::timeout(SHUTDOWN_TIMEOUT.to_std(), broker.shutdown())
         .await
         .expect("broker shutdown within 30s");
 }
@@ -494,7 +508,7 @@ async fn execute_proposal_settles_against_real_broker() {
         started_at_ms: 0,
         terminated_at_ms: 0,
         failure_reason: None,
-        throttle_bytes_per_sec: 0,
+        throttle: ByteRate::ZERO,
     };
     store.insert(proposal.clone());
 
@@ -505,9 +519,9 @@ async fn execute_proposal_settles_against_real_broker() {
         store: store.clone(),
         config: ExecutorConfig {
             data_dir: dir.path().to_path_buf(),
-            default_throttle_bytes_per_sec: 50_000_000,
-            poll_interval: Duration::from_millis(50),
-            execute_deadline: Duration::from_secs(30),
+            default_throttle: DEFAULT_THROTTLE,
+            poll_interval: millis(50),
+            execute_deadline: secs(30),
             batch_size: 200,
         },
         metrics,
@@ -517,10 +531,16 @@ async fn execute_proposal_settles_against_real_broker() {
     let live_client = Arc::new(LiveClient::new(client));
 
     let cancel = tokio_util::sync::CancellationToken::new();
-    let exec = Execution::new(live_client, executor_state, proposal, 50_000_000, cancel);
+    let exec = Execution::new(
+        live_client,
+        executor_state,
+        proposal,
+        DEFAULT_THROTTLE,
+        cancel,
+    );
     let exec_task = tokio::spawn(exec.run());
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + secs(10).to_std();
     let mut final_status = ProposalStatus::Executing;
     while Instant::now() < deadline {
         final_status = store.get("exec-1").unwrap().status;
@@ -538,7 +558,7 @@ async fn execute_proposal_settles_against_real_broker() {
     // After terminal the backend must be tombstoned.
     assert2::assert!(backend.loaded().is_none());
 
-    tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
+    tokio::time::timeout(SHUTDOWN_TIMEOUT.to_std(), broker.shutdown())
         .await
         .expect("broker shutdown within 30s");
 }
@@ -583,7 +603,7 @@ async fn cancel_clears_throttle_and_reverts() {
         started_at_ms: 0,
         terminated_at_ms: 0,
         failure_reason: None,
-        throttle_bytes_per_sec: 0,
+        throttle: ByteRate::ZERO,
     };
     store.insert(proposal.clone());
 
@@ -594,9 +614,9 @@ async fn cancel_clears_throttle_and_reverts() {
         store: store.clone(),
         config: ExecutorConfig {
             data_dir: dir.path().to_path_buf(),
-            default_throttle_bytes_per_sec: 50_000_000,
-            poll_interval: Duration::from_millis(50),
-            execute_deadline: Duration::from_secs(30),
+            default_throttle: DEFAULT_THROTTLE,
+            poll_interval: millis(50),
+            execute_deadline: secs(30),
             batch_size: 200,
         },
         metrics,
@@ -606,7 +626,13 @@ async fn cancel_clears_throttle_and_reverts() {
     let live_client = Arc::new(LiveClient::new(client));
     let cancel = tokio_util::sync::CancellationToken::new();
     let cancel_for_caller = cancel.clone();
-    let exec = Execution::new(live_client, executor_state, proposal, 50_000_000, cancel);
+    let exec = Execution::new(
+        live_client,
+        executor_state,
+        proposal,
+        DEFAULT_THROTTLE,
+        cancel,
+    );
     let exec_task = tokio::spawn(exec.run());
 
     // Wait until the execution is genuinely under way — it persists an
@@ -617,7 +643,7 @@ async fn cancel_clears_throttle_and_reverts() {
     // terminal fallback keeps the loop from hanging if the no-op plan wins
     // the race and tombstones the backend before we observe it. Bounded so a
     // stuck run surfaces as a failure rather than a hang.
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + secs(10).to_std();
     loop {
         let started = backend.loaded().is_some();
         let terminal = matches!(
@@ -628,10 +654,10 @@ async fn cancel_clears_throttle_and_reverts() {
             break;
         }
         assert2::assert!(std::time::Instant::now() < deadline);
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(millis(5).to_std()).await;
     }
     cancel_for_caller.cancel();
-    let _ = tokio::time::timeout(Duration::from_secs(10), exec_task).await;
+    let _ = tokio::time::timeout(secs(10).to_std(), exec_task).await;
 
     let after = store.get("cancel-1").unwrap();
     assert2::assert!(matches!(
@@ -641,7 +667,7 @@ async fn cancel_clears_throttle_and_reverts() {
     // After terminal the backend must be tombstoned.
     assert2::assert!(backend.loaded().is_none());
 
-    tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
+    tokio::time::timeout(SHUTDOWN_TIMEOUT.to_std(), broker.shutdown())
         .await
         .expect("broker shutdown within 30s");
 }
@@ -690,12 +716,12 @@ async fn restart_resumes_in_flight_plan() {
         started_at_ms: 1,
         terminated_at_ms: 0,
         failure_reason: None,
-        throttle_bytes_per_sec: 50_000_000,
+        throttle: DEFAULT_THROTTLE,
     };
     store.insert(proposal.clone());
 
     // Seed the backend as if a previous run persisted Submit phase.
-    let in_flight = InFlightFile::new(proposal.id.clone(), Phase::Submit, 1, 50_000_000);
+    let in_flight = InFlightFile::new(proposal.id.clone(), Phase::Submit, 1, DEFAULT_THROTTLE);
     let backend = Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded());
     *backend.state.lock().unwrap() = Some(in_flight.clone());
 
@@ -705,9 +731,9 @@ async fn restart_resumes_in_flight_plan() {
         store: store.clone(),
         config: ExecutorConfig {
             data_dir: dir.path().to_path_buf(),
-            default_throttle_bytes_per_sec: 50_000_000,
-            poll_interval: Duration::from_millis(50),
-            execute_deadline: Duration::from_secs(30),
+            default_throttle: DEFAULT_THROTTLE,
+            poll_interval: millis(50),
+            execute_deadline: secs(30),
             batch_size: 200,
         },
         metrics,
@@ -717,7 +743,7 @@ async fn restart_resumes_in_flight_plan() {
     let live_client = Arc::new(LiveClient::new(client));
     let cancel = tokio_util::sync::CancellationToken::new();
     let exec = Execution::resume(live_client, executor_state, proposal, &in_flight, cancel);
-    let _ = tokio::time::timeout(Duration::from_secs(10), exec.run()).await;
+    let _ = tokio::time::timeout(secs(10).to_std(), exec.run()).await;
 
     let after = store.get("resume-1").unwrap();
     assert2::assert!(matches!(
@@ -727,7 +753,7 @@ async fn restart_resumes_in_flight_plan() {
     // After terminal the backend must be tombstoned.
     assert2::assert!(backend.loaded().is_none());
 
-    tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
+    tokio::time::timeout(SHUTDOWN_TIMEOUT.to_std(), broker.shutdown())
         .await
         .expect("broker shutdown within 30s");
 }
@@ -778,7 +804,7 @@ async fn rack_aware_eliminates_same_rack_collisions() {
     };
 
     let ctx = GoalContext {
-        imbalance_threshold_pct: 10,
+        imbalance_threshold: percent(10),
         max_movements_per_proposal: 256,
         min_topic_leaders_per_broker: 0,
         broker_capacities: Arc::new(BrokerCapacities::default()),
@@ -861,7 +887,7 @@ async fn replica_capacity_evicts_over_capacity_broker() {
     let caps = BrokerCapacities { by_broker };
 
     let ctx = GoalContext {
-        imbalance_threshold_pct: 10,
+        imbalance_threshold: percent(10),
         max_movements_per_proposal: 256,
         min_topic_leaders_per_broker: 0,
         broker_capacities: Arc::new(caps),
@@ -908,7 +934,7 @@ async fn replica_capacity_evicts_over_capacity_broker() {
 /// broker 1's total.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn disk_usage_evicts_hot_broker() {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
 
     use crabka_rebalancer::{
         goals::{Goal, GoalContext, disk_usage::DiskUsage},
@@ -954,8 +980,8 @@ async fn disk_usage_evicts_hot_broker() {
     };
 
     let store = UsageStore::new(WindowConfig {
-        scrape_interval: Duration::from_secs(30),
-        retention: Duration::from_hours(1),
+        scrape_interval: secs(30),
+        retention: crabka_units::hours(1),
     });
     // Insert at wall-clock "now" so DiskUsage's now_ms()-anchored
     // stale-data guard sees the samples as fresh.
@@ -993,7 +1019,7 @@ async fn disk_usage_evicts_hot_broker() {
     }
 
     let ctx = GoalContext {
-        imbalance_threshold_pct: 10,
+        imbalance_threshold: percent(10),
         max_movements_per_proposal: 256,
         min_topic_leaders_per_broker: 0,
         broker_capacities: Arc::new(crabka_rebalancer::capacity::BrokerCapacities::default()),
@@ -1101,7 +1127,7 @@ async fn auto_trigger_skipped_when_executor_in_flight() {
     let metrics = DetectorMetrics::register(&mut registry);
     let config = DetectorConfig {
         auto_trigger_enabled: true,
-        default_mute_window: Duration::from_mins(15),
+        default_mute_window: minutes(15),
         ..DetectorConfig::default()
     };
     let anomaly = Anomaly {
@@ -1194,7 +1220,7 @@ async fn disk_pressure_anomaly_auto_triggers_proposal() {
     let metrics = DetectorMetrics::register(&mut registry);
     let config = DetectorConfig {
         auto_trigger_enabled: true,
-        default_mute_window: Duration::from_mins(15),
+        default_mute_window: minutes(15),
         ..DetectorConfig::default()
     };
 

@@ -34,6 +34,7 @@ use crabka_remote_storage::{
     RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState, RemotePartitionDeleteMetadata,
     RemoteStorageError, TopicIdPartition,
 };
+use crabka_units::prelude::{StdDurationExt as _, TimeExt as _};
 use futures_util::StreamExt;
 use tokio::{runtime::Handle, sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -137,6 +138,9 @@ impl TopicBasedRemoteLogMetadataManager {
         snapshot_dir: std::path::PathBuf,
         snapshot_interval: std::time::Duration,
     ) -> Result<Arc<Self>, RemoteStorageError> {
+        // The parameter is a `Duration` because the broker's config layer hands
+        // one over; the cadence is a time extent everywhere below this line.
+        let snapshot_interval = snapshot_interval.as_time();
         let n = usize::try_from(log.partition_count()).expect("partition_count fits in usize");
         let (applied_tx, _) = watch::channel(0u64);
         let inner = Arc::new(InmemoryRemoteLogMetadataManager::new());
@@ -207,7 +211,7 @@ impl TopicBasedRemoteLogMetadataManager {
                     tokio::select! {
                         biased;
                         () = shutdown.cancelled() => return,
-                        () = tokio::time::sleep(snapshot_interval) => {}
+                        () = tokio::time::sleep(snapshot_interval.to_std()) => {}
                     }
                     let Some(m) = weak.upgrade() else { return };
                     // Only write when the cache advanced since the last snapshot.

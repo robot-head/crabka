@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use crabka_units::{ByteRate, convert::ByteRateExt as _};
 use uuid::Uuid;
 
 use crate::{
@@ -172,7 +173,7 @@ pub fn optimize(
             started_at_ms: 0,
             terminated_at_ms: 0,
             failure_reason: None,
-            throttle_bytes_per_sec: 0,
+            throttle: ByteRate::ZERO,
         },
         state_after: working,
     })
@@ -254,6 +255,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::check;
+    use crabka_units::{percent, prelude::*};
 
     use super::*;
     use crate::{
@@ -265,7 +267,7 @@ mod tests {
 
     fn ctx() -> GoalContext {
         GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),
@@ -485,7 +487,7 @@ mod tests {
             movements: soft_movements,
         };
         let ctx = GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 3,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),
@@ -569,7 +571,7 @@ mod tests {
 
         let goals: Vec<&dyn Goal> = vec![&RackAware, &bad_soft];
         let ctx = GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),
@@ -584,7 +586,7 @@ mod tests {
 
     #[test]
     fn soft_movement_that_violates_capacity_invariant_is_dropped() {
-        use std::{sync::Arc, time::Duration};
+        use std::sync::Arc;
 
         use crate::{
             capacity::{BrokerCapacities, BrokerCapacity},
@@ -645,15 +647,15 @@ mod tests {
         by.insert(
             3,
             BrokerCapacity {
-                disk_bytes: Some(1000),
+                disk_bytes: Some(bytes(1000)),
                 ..Default::default()
             },
         );
         let caps = BrokerCapacities { by_broker: by };
 
         let store = UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_hours(1),
+            scrape_interval: secs(30),
+            retention: hours(1),
         });
         // Insert at "now" so DiskCapacity::is_satisfied_with_ctx sees
         // the samples as fresh (its now_ms() comes from wall clock).
@@ -682,7 +684,7 @@ mod tests {
             sample_at,
         );
         let ctx = GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(caps),
@@ -738,7 +740,7 @@ mod tests {
             movements,
         };
         let ctx = GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 3,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),
@@ -784,7 +786,7 @@ mod tests {
             movements,
         };
         let ctx = GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 3,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),

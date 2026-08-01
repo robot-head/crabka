@@ -18,6 +18,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use crabka_units::prelude::*;
 
 use crate::{
     dsl::processors::change::Change,
@@ -51,9 +52,9 @@ pub(crate) trait SuppressStore<K: Send + Sync, V: Send>: StateStore {
     /// exercised only by the store's own tests.
     #[allow(dead_code)]
     fn is_empty(&self) -> bool;
-    /// Total buffered bytes (`key_bytes.len() + new_bytes.len()` per entry), the
+    /// Total buffered size (`key_bytes.len() + new_bytes.len()` per entry), the
     /// JVM `maxBytes`-cap accounting unit.
-    fn byte_size(&self) -> usize;
+    fn byte_size(&self) -> ByteSize;
 }
 
 /// One buffered entry. `new_bytes`/`old_bytes` are the (de)serializable sides of
@@ -285,8 +286,10 @@ impl<K: Send + Sync + 'static, V: Send + 'static> SuppressStore<K, V> for Suppre
         self.entries.is_empty()
     }
 
-    fn byte_size(&self) -> usize {
-        self.byte_size
+    fn byte_size(&self) -> ByteSize {
+        // The running total is kept as a `usize` so the incremental add/subtract
+        // stays exact; the dimension is put back on at the accessor.
+        ByteSize::from_bytes(self.byte_size.try_into().unwrap_or(u64::MAX))
     }
 }
 
@@ -372,7 +375,7 @@ mod tests {
             .await;
         check!(s.len() == 2);
         check!(!s.is_empty());
-        check!(s.byte_size() > 0);
+        check!(s.byte_size() > ByteSize::ZERO);
         // threshold 30 drains both, earliest buffer_time first.
         let out = s.evict_while(30).await;
         check!(out.len() == 2);
@@ -380,7 +383,7 @@ mod tests {
         check!(out[1].0 == "a" && out[1].1.new == Some(1) && out[1].2 == 30);
         check!(s.len() == 0);
         check!(s.is_empty());
-        check!(s.byte_size() == 0);
+        check!(s.byte_size() == ByteSize::ZERO);
     }
 
     #[tokio::test]
@@ -493,7 +496,7 @@ mod tests {
         fn win_store() -> SuppressBytesStore<Windowed<String>, i64> {
             SuppressBytesStore::<Windowed<String>, i64>::in_memory(
                 "sup".into(),
-                Box::new(TimeWindowedSerde::new(StringSerde, 10)),
+                Box::new(TimeWindowedSerde::new(StringSerde, millis(10))),
                 Box::new(I64Serde),
                 "app-sup-changelog".into(),
             )

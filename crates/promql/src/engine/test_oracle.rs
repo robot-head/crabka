@@ -1,4 +1,5 @@
 use crabka_blockstore::Labels;
+use crabka_units::prelude::*;
 use futures::{FutureExt, future::BoxFuture};
 use promql_parser::parser::{
     AggregateExpr, BinaryExpr, Call, Expr, MatrixSelector, UnaryExpr, VectorSelector,
@@ -1381,7 +1382,7 @@ impl<S: MetricStore> PromqlEngine<S> {
         if range
             .series
             .iter()
-            .any(|series| range_has_samples(series, range.end_ms, range.range_ms))
+            .any(|series| range_has_samples(series, range.end_ms, range.range))
         {
             return Ok(QueryResult::InstantVector(Vec::new()));
         }
@@ -1512,7 +1513,7 @@ impl<S: MetricStore> PromqlEngine<S> {
                 call.args.args.len()
             )));
         };
-        let duration_seconds = self
+        let duration = self
             .eval_scalar_arg(tenant, call, 1, time_ms, "duration")
             .await?;
         let range = self
@@ -1520,7 +1521,7 @@ impl<S: MetricStore> PromqlEngine<S> {
             .await?;
         let samples = apply_outer_range_fn(
             range,
-            OuterRangeFn::PredictLinear(duration_seconds),
+            OuterRangeFn::PredictLinear(Time::from_secs_f64(duration)),
             time_ms,
         );
         Ok(QueryResult::InstantVector(samples))

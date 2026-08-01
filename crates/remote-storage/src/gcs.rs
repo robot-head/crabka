@@ -30,8 +30,12 @@
 //! Identity and required HMAC interoperability keys).
 
 use crabka_object_store::{GcsConfig, ObjectStoreConfig, build_object_store};
+use crabka_units::prelude::{ByteSize, ByteSizeExt as _};
 
-use crate::{error::RemoteStorageError, s3::S3RemoteStorage};
+use crate::{
+    error::RemoteStorageError,
+    s3::{S3RemoteStorage, size_from_usize},
+};
 
 impl S3RemoteStorage {
     /// Build a `GoogleCloudStorage` client from `cfg` and wrap it in the
@@ -49,8 +53,12 @@ impl S3RemoteStorage {
     pub fn from_gcs_config(cfg: &GcsConfig) -> Result<Self, RemoteStorageError> {
         let store = build_object_store(&ObjectStoreConfig::Gcs(cfg.clone()))
             .map_err(|e| RemoteStorageError::InvalidArgument(e.to_string()))?;
-        Ok(Self::with_store(store, cfg.prefix.clone())
-            .with_multipart_tuning(cfg.multipart_threshold, cfg.multipart_chunk_size))
+        Ok(
+            Self::with_store(store, cfg.prefix.clone()).with_multipart_tuning(
+                ByteSize::from_bytes(cfg.multipart_threshold),
+                size_from_usize(cfg.multipart_chunk_size),
+            ),
+        )
     }
 }
 

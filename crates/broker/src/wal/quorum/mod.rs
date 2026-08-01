@@ -15,6 +15,7 @@ use async_trait::async_trait;
 use crabka_ids::{Offset, PartitionIndex};
 use crabka_kraft_core::NodeId;
 use crabka_log::{Log, LogConfig};
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use uuid::Uuid;
 
 use self::engine::WalShardEngine;
@@ -184,7 +185,9 @@ impl WalStore for QuorumWalStore {
                 .source
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .read_raw(start, durable, usize::MAX)?;
+                // The hot tail must mirror every batch that just went durable,
+                // so the read is uncapped.
+                .read_raw(start, durable, ByteSize::from_bytes(u64::MAX))?;
             target
                 .cache
                 .insert_run(target.topic_id, target.partition, &raw.bytes);

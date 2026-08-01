@@ -128,7 +128,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
             &blocks,
             end_ns,
             self.cfg.hot_frontier_ns,
-            self.cfg.target_bytes_per_job,
+            self.cfg.target_per_job,
         );
         let total_jobs = plan.jobs.len() as u64;
         let total_blocks = plan.total_blocks;
@@ -210,8 +210,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
             return Err(e);
         }
 
-        let (trace, mut metrics, status) =
-            merge::assemble_trace(partials, self.cfg.max_trace_bytes);
+        let (trace, mut metrics, status) = merge::assemble_trace(partials, self.cfg.max_trace);
         metrics.total_jobs = total_jobs;
         Ok((trace, metrics, status))
     }
@@ -236,7 +235,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
             &blocks,
             end_ns,
             self.cfg.hot_frontier_ns,
-            self.cfg.target_bytes_per_job,
+            self.cfg.target_per_job,
         );
         let total_jobs = plan.jobs.len() as u64;
         let total_blocks = plan.total_blocks;
@@ -283,7 +282,7 @@ impl<B: QuerierBackend + 'static, C: BlockCatalog + 'static> QueryFrontend<B, C>
             &blocks,
             end_ns,
             self.cfg.hot_frontier_ns,
-            self.cfg.target_bytes_per_job,
+            self.cfg.target_per_job,
         );
         let total_jobs = plan.jobs.len() as u64;
         let total_blocks = plan.total_blocks;
@@ -355,6 +354,7 @@ mod orch_tests {
     use std::sync::Arc;
 
     use assert2::check;
+    use crabka_units::{ByteSize, bytes, convert::ByteSizeExt as _, millis};
 
     use super::*;
     use crate::frontend::{
@@ -369,14 +369,14 @@ mod orch_tests {
             .enumerate()
             .map(|(i, &b)| RowGroupInfo {
                 index: u32::try_from(i).unwrap(),
-                compressed_bytes: b,
+                compressed: ByteSize::from_bytes(b),
             })
             .collect();
         BlockMetaInfo {
             block_id: id.to_string(),
             start_ns: start,
             end_ns: end,
-            size_bytes: rgs.iter().sum(),
+            size: ByteSize::from_bytes(rgs.iter().sum()),
             row_groups,
         }
     }
@@ -388,7 +388,7 @@ mod orch_tests {
                 root_service_name: "svc".to_string(),
                 root_trace_name: "GET /".to_string(),
                 start_time_unix_nano: start.to_string(),
-                duration_ms: 1,
+                duration: millis(1),
                 span_sets: vec![SpanSetJson {
                     spans: vec![SpanJson {
                         span_id: tid.to_string(),
@@ -421,7 +421,7 @@ mod orch_tests {
         backend.stub_search(one_trace("02", 150));
         backend.stub_search(one_trace("03", 250));
         let cfg = FrontendConfig {
-            target_bytes_per_job: 10_000,
+            target_per_job: bytes(10_000),
             max_concurrency: 1,
             hot_frontier_ns: 150,
             ..FrontendConfig::default()

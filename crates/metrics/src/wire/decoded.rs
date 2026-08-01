@@ -2,6 +2,7 @@
 //! `remote_write` status mapping.
 
 use crabka_blockstore::Labels;
+use crabka_units::prelude::*;
 
 use crate::NativeHistogram;
 
@@ -147,10 +148,10 @@ fn proto_param_value(param: &str) -> Option<String> {
 #[cfg_attr(test, mutants::skip)]
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
-pub fn snappy_block_decode(body: &[u8], max_output: usize) -> Result<Vec<u8>, WireError> {
+pub fn snappy_block_decode(body: &[u8], max_output: ByteSize) -> Result<Vec<u8>, WireError> {
     snappy_block_decode_raw(
         body,
-        max_output,
+        max_output.bytes_usize(),
         WireError::SnappyDecode,
         WireError::SnappyOutputTooLarge,
     )
@@ -224,7 +225,7 @@ mod tests {
         let input = b"remote-write-body";
         let compressed = snap::raw::Encoder::new().compress_vec(input).unwrap();
 
-        let back = snappy_block_decode(&compressed, 1 << 20).unwrap();
+        let back = snappy_block_decode(&compressed, mebibytes(1)).unwrap();
 
         assert!(back == input);
     }
@@ -235,7 +236,7 @@ mod tests {
             .compress_vec(b"larger than allowed")
             .unwrap();
 
-        let err = snappy_block_decode(&compressed, 4).unwrap_err();
+        let err = snappy_block_decode(&compressed, bytes(4)).unwrap_err();
 
         assert!(matches!(err, WireError::SnappyOutputTooLarge(4)));
         assert!(err.status_code() == 400);
@@ -263,7 +264,7 @@ mod tests {
 
         assert!(snap::raw::decompress_len(&frame).unwrap() as u64 == huge);
 
-        let err = snappy_block_decode(&frame, 1 << 20).unwrap_err();
+        let err = snappy_block_decode(&frame, mebibytes(1)).unwrap_err();
 
         assert!(matches!(err, WireError::SnappyOutputTooLarge(_)));
         assert!(err.status_code() == 400);

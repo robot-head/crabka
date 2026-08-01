@@ -32,6 +32,7 @@ crabka-client-consumer = { path = "../client-consumer", version = "0.3.9" }
 crabka-client-producer = { path = "../client-producer", version = "0.3.9" }
 crabka-client-core = { path = "../client-core", version = "0.3.9" }
 crabka-traceql = { path = "../traceql", version = "0.3.7" }
+crabka-units = { workspace = true }
 arrow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true, features = ["json"] }

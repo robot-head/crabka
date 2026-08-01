@@ -28,6 +28,7 @@ use axum::{
 };
 use crabka_traceql::{AttrValue, EngineOpts, InMemorySpanStore, InputSpan, TraceqlEngine};
 use crabka_traces::querier::http::router;
+use crabka_units::{Time, convert::TimeExt as _};
 
 const TENANT: &str = "anonymous";
 // OTLP span kinds.
@@ -64,7 +65,7 @@ fn span(
         name: name.to_string(),
         kind,
         start_unix_nano: base + start_offset_ms * 1_000_000,
-        duration_nanos: duration_ms * 1_000_000,
+        duration: Time::from_millis(duration_ms),
         status_code: status,
         status_message: status_message.to_string(),
         instrumentation_name: "crabka-demo".to_string(),

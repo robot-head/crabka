@@ -150,7 +150,7 @@ pub fn start_with_audit_key(
     config.audit_signing_key_path = Some(key_path.to_path_buf());
     config.audit_signing_key_id = Some(key_id.to_string());
     config.audit_checkpoint_every_n = every_n;
-    config.audit_checkpoint_every_secs = 3600; // only count trigger fires
+    config.audit_checkpoint_every = crabka_units::hours(1); // only count trigger fires
     Box::pin(async move {
         let broker = Broker::start(config).await.expect("broker start");
         let bootstrap = broker.listen_addr().to_string();

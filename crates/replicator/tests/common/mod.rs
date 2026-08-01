@@ -3,12 +3,16 @@
 //! broker/producer/consumer clients.
 #![allow(dead_code)]
 
-use std::time::Duration;
-
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_units::prelude::{StdDurationExt as _, Time, TimeExt as _, millis};
 use tempfile::TempDir;
+
+/// How long each poll waits for records while draining a topic.
+const POLL_TIMEOUT: Time = millis(500);
+/// Gap between successive count probes in [`await_count`].
+const PROBE_INTERVAL: Time = millis(300);
 
 /// A running in-process broker plus its bootstrap address. Holds the temp dir so
 /// the data directory lives as long as the broker.
@@ -73,17 +77,17 @@ pub async fn count(bootstrap: &str, topic: &str) -> usize {
 }
 
 /// Poll `count` until it reaches at least `n`, panicking on timeout.
-pub async fn await_count(bootstrap: &str, topic: &str, n: usize, timeout: Duration) {
+pub async fn await_count(bootstrap: &str, topic: &str, n: usize, timeout: Time) {
     let start = std::time::Instant::now();
     loop {
         if count(bootstrap, topic).await >= n {
             return;
         }
-        assert2::assert!(start.elapsed() <= timeout);
+        assert2::assert!(start.elapsed().as_time() <= timeout);
         // real-time wait (not a progress poll): shared helper polling cross-cluster
         // replication via a full consumer-drain (`count`/`read_all`) round-trip; waits on
         // the replicator's copy cadence, not a cheap in-process observable.
-        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::time::sleep(PROBE_INTERVAL.to_std()).await;
     }
 }
 
@@ -100,10 +104,7 @@ pub async fn consume_and_commit(bootstrap: &str, group: &str, topic: &str) {
         .expect("consumer");
     let mut idle = 0;
     while idle < 3 {
-        let recs = consumer
-            .poll(Duration::from_millis(500))
-            .await
-            .expect("poll");
+        let recs = consumer.poll(POLL_TIMEOUT).await.expect("poll");
         if recs.is_empty() {
             idle += 1;
         } else {

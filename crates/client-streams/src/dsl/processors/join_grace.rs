@@ -1,12 +1,13 @@
 //! KIP-923 stream–table join grace processor. Buffers each stream record into a
 //! `JoinGraceBufferStore`, advances `observed_stream_time`, then drains every
-//! buffered record with `bufTs <= streamTime - grace_ms` in ascending `(ts, seq)`
+//! buffered record with `bufTs <= streamTime - grace` in ascending `(ts, seq)`
 //! order — performing the versioned as-of join (`get_as_of(key, bufTs)`) at drain
 //! time and forwarding at `bufTs`. A record already late on arrival drains in the
 //! same pass. Inner skips on miss; left passes `None`.
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
+use crabka_units::prelude::*;
 
 use crate::processor::{
     api::{Processor, ProcessorContext},
@@ -21,7 +22,7 @@ type Marker<T> = PhantomData<fn() -> T>;
 /// Each incoming stream record is appended to the named [`JoinGraceBufferStore`]
 /// rather than joined immediately, and `observed_stream_time` is advanced to the
 /// max record timestamp seen. The processor then drains every buffered record
-/// whose timestamp is `<= observed_stream_time - grace_ms` — in ascending
+/// whose timestamp is `<= observed_stream_time - grace` — in ascending
 /// `(ts, seq)` order — and joins each one against the versioned table *as of its
 /// own buffer timestamp*, forwarding at that timestamp. A record that is already
 /// past the grace horizon on arrival drains in the same `process` call.
@@ -33,7 +34,7 @@ type Marker<T> = PhantomData<fn() -> T>;
 pub(crate) struct KStreamKTableJoinGraceProcessor<K, V, VT, VO, F> {
     pub table_store: String,
     pub buffer_store: String,
-    pub grace_ms: i64,
+    pub grace: Time,
     pub joiner: F,
     pub emit_on_miss: bool,
     pub observed_stream_time: i64,
@@ -59,7 +60,9 @@ where
                 .expect("join grace buffer store not found");
             buf.put(key, r.value, r.timestamp).await;
         }
-        let threshold = self.observed_stream_time - self.grace_ms;
+        // The threshold is an instant, so the grace extent crosses into epoch
+        // milliseconds here.
+        let threshold = self.observed_stream_time - self.grace.millis_i64();
         let due = {
             // buffer is always connected by add_join_grace_store
             let buf = ctx
@@ -108,7 +111,7 @@ mod tests {
 
         let mut vt = VersionedBytesStore::<String, i64>::in_memory(
             "vt".into(),
-            1_000_000,
+            secs(1_000),
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-vt-changelog".into(),
@@ -182,7 +185,7 @@ mod tests {
         let mut proc = KStreamKTableJoinGraceProcessor {
             table_store: "vt".into(),
             buffer_store: "buf".into(),
-            grace_ms: 50,
+            grace: millis(50),
             joiner: |v: &i64, vt: Option<&i64>| v + vt.copied().unwrap_or(0),
             emit_on_miss: false, // inner
             observed_stream_time: i64::MIN,

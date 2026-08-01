@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
+use crabka_units::prelude::*;
+
 use super::{
     RulerGroupState,
-    config::{stable_hash_parts, yaml_duration_ms},
+    config::{stable_hash_parts, yaml_duration},
 };
 use crate::PromqlError;
 
@@ -121,8 +123,8 @@ fn ruler_group_due_for_eval(
     // A malformed `interval` is a config error; skip the group rather than
     // treating an unparseable value as `0` and re-evaluating every tick. The
     // `for`/`expr` paths surface the same parse error as a hard failure.
-    let Ok(interval_ms) = yaml_duration_ms(group, "interval") else {
+    let Ok(interval) = yaml_duration(group, "interval") else {
         return false;
     };
-    eval_time_ms.saturating_sub(last_eval_ms) >= interval_ms
+    eval_time_ms.saturating_sub(last_eval_ms) >= interval.millis_i64()
 }

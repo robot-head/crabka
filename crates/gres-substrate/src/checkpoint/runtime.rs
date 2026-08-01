@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 
 use crabka_client_admin::DeleteRecordsOp;
 use crabka_pgkv::{KvError, KvPair, KvSnapshot, RestoreKv, SnapshotKv};
+use crabka_units::ByteSize;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -239,17 +240,9 @@ pub async fn write_checkpoint(
     tenant: &str,
     kv: &dyn SnapshotKv,
     snapshot: CheckpointSnapshot,
-    part_max_bytes: usize,
+    part_max_size: ByteSize,
 ) -> Result<Manifest, SubstrateError> {
-    write_checkpoint_inner(
-        store,
-        tenant,
-        kv.snapshot()?,
-        snapshot,
-        part_max_bytes,
-        None,
-    )
-    .await
+    write_checkpoint_inner(store, tenant, kv.snapshot()?, snapshot, part_max_size, None).await
 }
 
 pub(crate) async fn write_captured_checkpoint(
@@ -257,9 +250,9 @@ pub(crate) async fn write_captured_checkpoint(
     tenant: &str,
     kv_snapshot: Box<dyn KvSnapshot>,
     snapshot: CheckpointSnapshot,
-    part_max_bytes: usize,
+    part_max_size: ByteSize,
 ) -> Result<Manifest, SubstrateError> {
-    write_checkpoint_inner(store, tenant, kv_snapshot, snapshot, part_max_bytes, None).await
+    write_checkpoint_inner(store, tenant, kv_snapshot, snapshot, part_max_size, None).await
 }
 
 #[cfg(feature = "checkpoint-test-hooks")]
@@ -268,7 +261,7 @@ pub(crate) async fn write_captured_checkpoint_with_failpoint(
     tenant: &str,
     kv_snapshot: Box<dyn KvSnapshot>,
     snapshot: CheckpointSnapshot,
-    part_max_bytes: usize,
+    part_max_size: ByteSize,
     failpoint: &super::CheckpointFailpoint,
 ) -> Result<Manifest, SubstrateError> {
     write_checkpoint_inner(
@@ -276,7 +269,7 @@ pub(crate) async fn write_captured_checkpoint_with_failpoint(
         tenant,
         kv_snapshot,
         snapshot,
-        part_max_bytes,
+        part_max_size,
         Some(failpoint),
     )
     .await
@@ -288,7 +281,7 @@ pub(crate) async fn write_checkpoint_with_failpoint(
     tenant: &str,
     kv: &dyn SnapshotKv,
     snapshot: CheckpointSnapshot,
-    part_max_bytes: usize,
+    part_max_size: ByteSize,
     failpoint: &super::CheckpointFailpoint,
 ) -> Result<Manifest, SubstrateError> {
     write_checkpoint_inner(
@@ -296,7 +289,7 @@ pub(crate) async fn write_checkpoint_with_failpoint(
         tenant,
         kv.snapshot()?,
         snapshot,
-        part_max_bytes,
+        part_max_size,
         Some(failpoint),
     )
     .await
@@ -307,7 +300,7 @@ async fn write_checkpoint_inner(
     tenant: &str,
     mut kv_snapshot: Box<dyn KvSnapshot>,
     snapshot: CheckpointSnapshot,
-    part_max_bytes: usize,
+    part_max_size: ByteSize,
     #[cfg_attr(not(feature = "checkpoint-test-hooks"), allow(unused_variables))] failpoint: Option<
         &CheckpointFailpoint,
     >,
@@ -323,7 +316,7 @@ async fn write_checkpoint_inner(
         snapshot.covered_offset,
         snapshot.producer_epoch,
     );
-    let parts = CheckpointPart::split_at_target_size(pairs, part_max_bytes)?;
+    let parts = CheckpointPart::split_at_target_size(pairs, part_max_size)?;
     let mut entries = Vec::with_capacity(parts.len());
 
     for (index, part) in parts.iter().enumerate() {
@@ -1180,7 +1173,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        checkpoint::{DEFAULT_PART_MAX_BYTES, InMemoryCheckpointStore},
+        checkpoint::{DEFAULT_PART_MAX_SIZE, InMemoryCheckpointStore},
         frame::{BARRIER_SEQ, WalFrame},
     };
 
@@ -1209,7 +1202,7 @@ mod tests {
             "t",
             &old,
             snapshot_at(5),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("old checkpoint");
@@ -1220,7 +1213,7 @@ mod tests {
             "t",
             &new,
             snapshot_at(9),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("new checkpoint");
@@ -1265,7 +1258,7 @@ mod tests {
             "t",
             &old,
             snapshot_at(1),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("old checkpoint");
@@ -1282,7 +1275,7 @@ mod tests {
             "t",
             &newest,
             snapshot_at(2),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("new checkpoint");
@@ -1347,7 +1340,7 @@ mod tests {
             "t",
             &base,
             snapshot_at(1),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -1396,7 +1389,7 @@ mod tests {
             "t",
             &base,
             snapshot_at(4),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -1450,7 +1443,7 @@ mod tests {
             "t",
             &base,
             snapshot_at(4),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -1569,7 +1562,7 @@ mod tests {
             "t",
             &base,
             snapshot_at(4),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -1594,7 +1587,7 @@ mod tests {
             "t",
             &base,
             snapshot_at(4),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -1624,7 +1617,7 @@ mod tests {
                 "t",
                 &kv,
                 snapshot_at(offset),
-                DEFAULT_PART_MAX_BYTES,
+                DEFAULT_PART_MAX_SIZE,
             )
             .await
             .expect("checkpoint");
@@ -1662,7 +1655,7 @@ mod tests {
                 "t",
                 &kv,
                 snapshot_at(offset),
-                DEFAULT_PART_MAX_BYTES,
+                DEFAULT_PART_MAX_SIZE,
             )
             .await
             .expect("checkpoint");

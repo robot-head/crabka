@@ -6,6 +6,7 @@ use crabka_blockstore::{
     read_log_block_from_object_store, series_fingerprint, write_log_block,
     write_log_block_to_object_store,
 };
+use crabka_units::prelude::*;
 use datafusion::{
     arrow::datatypes::{DataType, Fields},
     parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder,
@@ -44,7 +45,7 @@ fn parquet_log_block_round_trips_rows_sorted_by_series_and_timestamp() {
 
     assert2::assert!(descriptor.key == key.clone());
     assert2::assert!(descriptor.fingerprints == BTreeSet::from([api, worker]));
-    check!(descriptor.size_bytes > 0);
+    check!(descriptor.size > ByteSize::ZERO);
 
     let rows = read_log_block(dir.path(), &key).unwrap();
     let mut expected = vec![
@@ -177,7 +178,7 @@ async fn parquet_log_block_round_trips_through_object_store() {
 
     assert2::assert!(descriptor.key == key.clone());
     assert2::assert!(descriptor.fingerprints == BTreeSet::from([api, worker]));
-    check!(descriptor.size_bytes > 0);
+    check!(descriptor.size > ByteSize::ZERO);
 
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
         .await

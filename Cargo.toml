@@ -47,6 +47,7 @@ promql-parser = { version = "0.10", features = ["ser"] }
 columnar = "0.13"
 bytes = "1"
 num-traits = "0.2.19"
+uom = { version = "0.38", default-features = false, features = ["autoconvert", "f64", "si", "std", "use_serde"] }
 thiserror = "2"
 # Derive boilerplate for domain newtypes (Display/From/Into/Deref/AsRef/
 # Constructor/FromStr and numeric ops) so wrappers over wire/domain primitives
@@ -196,6 +197,7 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "ring",
 sspi = { version = "=0.21.3", default-features = false, features = ["network_client", "ring"] }
 crabka-audit = { path = "crates/audit", version = "0.3.8" }
 crabka-security = { path = "crates/security", version = "0.3.9" }
+crabka-units = { path = "crates/units", version = "0.3.9" }
 kube = { version = "4.0", default-features = false, features = ["client", "runtime", "derive", "rustls-tls"] }
 k8s-openapi = { version = "0.28", default-features = false, features = ["v1_32"] }
 schemars = "1.2"

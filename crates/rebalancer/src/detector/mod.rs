@@ -12,10 +12,11 @@ pub mod metrics;
 pub mod rules;
 pub mod store;
 
-use std::{collections::VecDeque, sync::Arc, time::Duration};
+use std::{collections::VecDeque, sync::Arc};
 
 pub use anomaly::{Anomaly, AnomalyKey, AnomalyKind, AnomalySeverity};
 pub use auto_trigger::{AutoTriggerError, goals_for_kind, maybe_trigger};
+use crabka_units::{Ratio, Time, convert::TimeExt as _, minutes, percent, secs};
 pub use metrics::DetectorMetrics;
 pub use store::{AnomalyStore, StoreError};
 use tokio::sync::Mutex as AsyncMutex;
@@ -33,14 +34,17 @@ use crate::{
 
 #[derive(Debug, Clone)]
 pub struct DetectorConfig {
-    pub tick_interval: Duration,
-    pub broker_death_threshold: Duration,
-    pub under_replicated_threshold: Duration,
-    pub disk_pressure_pct: f64,
-    pub disk_critical_pct: f64,
+    pub tick_interval: Time,
+    pub broker_death_threshold: Time,
+    pub under_replicated_threshold: Time,
+    pub disk_pressure_threshold: Ratio,
+    pub disk_critical_threshold: Ratio,
+    /// Multiple of the cluster median CPU-core usage above which a broker is
+    /// "slow". Dimensionless.
     pub slow_broker_multiplier: f64,
+    /// Absolute CPU-core floor below which `SlowBroker` never fires.
     pub slow_broker_min_cores: f64,
-    pub default_mute_window: Duration,
+    pub default_mute_window: Time,
     pub auto_trigger_enabled: bool,
     pub history_capacity: usize,
 }
@@ -48,14 +52,14 @@ pub struct DetectorConfig {
 impl Default for DetectorConfig {
     fn default() -> Self {
         Self {
-            tick_interval: Duration::from_secs(30),
-            broker_death_threshold: Duration::from_mins(1),
-            under_replicated_threshold: Duration::from_mins(2),
-            disk_pressure_pct: 0.85,
-            disk_critical_pct: 0.95,
+            tick_interval: secs(30),
+            broker_death_threshold: minutes(1),
+            under_replicated_threshold: minutes(2),
+            disk_pressure_threshold: percent(85),
+            disk_critical_threshold: percent(95),
             slow_broker_multiplier: 2.0,
             slow_broker_min_cores: 0.5,
-            default_mute_window: Duration::from_mins(15),
+            default_mute_window: minutes(15),
             auto_trigger_enabled: false,
             history_capacity: 10,
         }
@@ -197,11 +201,11 @@ impl Detector {
 
     pub async fn run(self) {
         info!(
-            tick_secs = self.cfg.tick_interval.as_secs(),
+            tick_secs = self.cfg.tick_interval.secs_f64(),
             auto_trigger = self.cfg.auto_trigger_enabled,
             "detector starting"
         );
-        let mut ticker = tokio::time::interval(self.cfg.tick_interval);
+        let mut ticker = tokio::time::interval(self.cfg.tick_interval.to_std());
         loop {
             tokio::select! {
                 _ = ticker.tick() => {}
@@ -337,6 +341,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::check;
+    use crabka_units::{bytes_per_sec, millis};
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -413,7 +418,7 @@ mod tests {
         let usage_store = Arc::new(UsageStore::default());
         let capacities = Arc::new(BrokerCapacities::default());
         let goal_ctx = GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: capacities.clone(),
@@ -423,9 +428,9 @@ mod tests {
             store: proposal_store.clone(),
             config: ExecutorConfig {
                 data_dir: std::path::PathBuf::new(),
-                default_throttle_bytes_per_sec: 50_000_000,
-                poll_interval: Duration::from_millis(10),
-                execute_deadline: Duration::from_secs(1),
+                default_throttle: bytes_per_sec(50_000_000),
+                poll_interval: millis(10),
+                execute_deadline: secs(1),
                 batch_size: 200,
             },
             metrics: crate::metrics::RebalancerMetrics::default(),
@@ -487,7 +492,7 @@ mod tests {
         let shutdown = CancellationToken::new();
         let detector = detector_with(
             DetectorConfig {
-                tick_interval: Duration::from_mins(1),
+                tick_interval: minutes(1),
                 ..DetectorConfig::default()
             },
             snapshot,
@@ -498,10 +503,10 @@ mod tests {
         );
 
         let handle = tokio::spawn(detector.run());
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(millis(10).to_std()).await;
         assert2::assert!(!handle.is_finished());
         shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(1), handle)
+        tokio::time::timeout(secs(1).to_std(), handle)
             .await
             .expect("detector should stop after cancellation")
             .expect("detector task should join");
@@ -516,7 +521,7 @@ mod tests {
         let metrics = DetectorMetrics::default();
         let detector = detector_with(
             DetectorConfig {
-                under_replicated_threshold: Duration::from_mins(2),
+                under_replicated_threshold: minutes(2),
                 auto_trigger_enabled: false,
                 ..DetectorConfig::default()
             },

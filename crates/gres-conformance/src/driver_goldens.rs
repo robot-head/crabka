@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, io};
 
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, mebibytes};
 use serde::{
     Deserialize, Deserializer,
     de::{MapAccess, Visitor},
@@ -21,6 +22,13 @@ const POSTGRES_IMAGE: &str =
     "postgres@sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4";
 const POSTGRES_IMAGE_ID: &str =
     "sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4";
+
+/// Largest backend message [`replay_startup`] will buffer.
+///
+/// The wire protocol sets no ceiling of its own, so this is the replayer's own
+/// budget: a desynchronized or hostile endpoint must not be able to make the
+/// harness allocate an arbitrary payload.
+const MAX_BACKEND_MESSAGE: ByteSize = mebibytes(16);
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -469,7 +477,9 @@ pub async fn replay_startup(
     loop {
         let kind = stream.read_u8().await?;
         let length = stream.read_u32().await?;
-        if !(4..=16 * 1024 * 1024).contains(&length) {
+        // The floor of four is the length field counting itself — protocol
+        // layout rather than a budget — so it stays a raw integer.
+        if !(4..=MAX_BACKEND_MESSAGE.bytes_u64()).contains(&u64::from(length)) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "invalid backend message length",
@@ -511,9 +521,83 @@ fn error_message(payload: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, io};
 
-    use super::parse_and_validate;
+    use assert2::check;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    use super::{parse_and_validate, replay_startup};
+
+    /// The ceiling written out, so the test pins the budget rather than
+    /// restating whichever constant the code happens to hold.
+    const CEILING_BYTES: usize = 16 * 1024 * 1024;
+
+    /// A backend message header: kind byte then the big-endian length, which
+    /// counts itself.
+    fn header(kind: u8, length: u32) -> Vec<u8> {
+        let mut out = vec![kind];
+        out.extend_from_slice(&length.to_be_bytes());
+        out
+    }
+
+    /// A complete backend message with `payload_len` zero bytes after the header.
+    fn frame(kind: u8, payload_len: usize) -> Vec<u8> {
+        let length = u32::try_from(payload_len + 4).expect("frame length fits an int32");
+        let mut out = header(kind, length);
+        out.resize(out.len() + payload_len, 0);
+        out
+    }
+
+    /// Serve one connection that swallows the startup packet and replies with
+    /// `frames`, yielding the loopback port to point the replayer at.
+    async fn serve_frames(frames: Vec<Vec<u8>>) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback backend");
+        let port = listener.local_addr().expect("listener address").port();
+        drop(tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept replay client");
+            let mut startup = [0_u8; 1024];
+            let _ = stream.read(&mut startup).await;
+            for frame in frames {
+                if stream.write_all(&frame).await.is_err() {
+                    return;
+                }
+            }
+        }));
+        port
+    }
+
+    async fn replay_against(port: u16) -> io::Result<()> {
+        replay_startup(
+            "127.0.0.1",
+            port,
+            "fixture_user",
+            "fixture_db",
+            &BTreeMap::new(),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn backend_message_at_the_size_ceiling_is_buffered() {
+        let port = serve_frames(vec![frame(b'S', CEILING_BYTES - 4), frame(b'Z', 1)]).await;
+
+        check!(replay_against(port).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn backend_message_one_byte_past_the_ceiling_is_refused() {
+        let over = u32::try_from(CEILING_BYTES + 1).expect("ceiling plus one fits an int32");
+        let port = serve_frames(vec![header(b'S', over)]).await;
+
+        let error = replay_against(port)
+            .await
+            .expect_err("an oversized backend message must not be buffered");
+
+        check!(error.kind() == io::ErrorKind::InvalidData);
+        check!(error.to_string() == "invalid backend message length");
+    }
 
     fn assert_rejected(text: &str) {
         assert!(

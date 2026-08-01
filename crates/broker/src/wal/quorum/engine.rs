@@ -10,8 +10,13 @@ use crabka_ids::{LeaderEpoch, Offset, ProducerId};
 use crabka_kraft_core::{NodeId, QuorumState, QuorumStateMachine};
 use crabka_log::{Log, VerbatimBatch};
 use crabka_protocol::records::RecordBatch;
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, millis};
 
 use crate::error::BrokerError;
+
+/// Election timeout the in-process WAL quorum's state machine runs with. The
+/// replicas are local, so the window only has to cover a stalled replica task.
+const ELECTION_TIMEOUT: crabka_units::Time = millis(1_000);
 
 /// A single durable member of a WAL quorum.
 #[allow(dead_code)]
@@ -53,7 +58,7 @@ impl WalShardEngine {
     #[must_use]
     pub(crate) fn new(me: NodeId, state: QuorumState, replicas: Vec<WalReplica>) -> Self {
         Self {
-            core: Mutex::new(QuorumStateMachine::new(me, state, 1_000)),
+            core: Mutex::new(QuorumStateMachine::new(me, state, ELECTION_TIMEOUT)),
             replicas,
             durable_watermark: AtomicI64::new(0),
         }
@@ -115,10 +120,10 @@ impl WalShardEngine {
     pub(crate) fn serve_fetch(
         &self,
         fetch_offset: Offset,
-        max_bytes: usize,
+        max_size: ByteSize,
     ) -> Result<(Offset, Bytes), BrokerError> {
         let hwm = self.durable_watermark();
-        if fetch_offset < Offset(0) || fetch_offset >= hwm || max_bytes == 0 {
+        if fetch_offset < Offset(0) || fetch_offset >= hwm || max_size == ByteSize::ZERO {
             return Ok((hwm, Bytes::new()));
         }
         let replica = self
@@ -132,7 +137,7 @@ impl WalShardEngine {
             .log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .read_raw(fetch_offset, hwm, max_bytes)?;
+            .read_raw(fetch_offset, hwm, max_size)?;
         Ok((hwm, raw.bytes))
     }
 }
@@ -152,7 +157,9 @@ fn read_batches(
     let raw = source
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .read_raw(start, target, usize::MAX)?;
+        // Replication must carry every batch in `start..target`, so the read
+        // is uncapped.
+        .read_raw(start, target, ByteSize::from_bytes(u64::MAX))?;
     split_batches(&raw.bytes)
 }
 

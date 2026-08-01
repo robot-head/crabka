@@ -18,13 +18,14 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<InFlightFile, StateTopicError> {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::mebibytes_per_sec;
 
     use super::*;
     use crate::executor::state::Phase;
 
     #[test]
     fn round_trip_preserves_all_fields() {
-        let f = InFlightFile::new("p-abc".into(), Phase::Wait, 1234, 50_000_000);
+        let f = InFlightFile::new("p-abc".into(), Phase::Wait, 1234, mebibytes_per_sec(48));
         let bytes = encode(&f).unwrap();
         let back = decode(&bytes).unwrap();
         assert2::assert!(back == f);

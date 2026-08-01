@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use crabka_units::prelude::*;
 
 use super::{
     FrontendRangeQuery, FrontendRangeRequest, MomentReduction, QueryShardExecution,
@@ -39,7 +40,7 @@ impl<S: MetricStore> RangeQueryExecutor for PromqlEngine<S> {
             &query_text,
             query.start_ms,
             query.end_ms,
-            query.step_ms,
+            query.step,
         )
         .await
     }
@@ -55,7 +56,7 @@ impl<S: MetricStore> RangeQueryExecutor for PromqlEngine<S> {
         query = %request.query,
         start_ms = request.start_ms,
         end_ms = request.end_ms,
-        step_ms = request.step_ms
+        step_ms = request.step.millis_i64()
     ),
     err
 )]
@@ -113,7 +114,7 @@ where
         &request.query,
         request.start_ms,
         request.end_ms,
-        request.step_ms,
+        request.step,
         request.opts,
     )?;
     let results = execute_planned_range_queries(executor, cache, &request.tenant, planned).await?;
@@ -188,14 +189,14 @@ where
         sum_query,
         request.start_ms,
         request.end_ms,
-        request.step_ms,
+        request.step,
         request.opts,
     )?;
     let count_plan = plan_range_query(
         count_query,
         request.start_ms,
         request.end_ms,
-        request.step_ms,
+        request.step,
         request.opts,
     )?;
     let sum_results =
@@ -224,21 +225,21 @@ where
         sum_query,
         request.start_ms,
         request.end_ms,
-        request.step_ms,
+        request.step,
         request.opts,
     )?;
     let count_plan = plan_range_query(
         count_query,
         request.start_ms,
         request.end_ms,
-        request.step_ms,
+        request.step,
         request.opts,
     )?;
     let sum_squares_plan = plan_range_query(
         sum_squares_query,
         request.start_ms,
         request.end_ms,
-        request.step_ms,
+        request.step,
         request.opts,
     )?;
     let sum_results =

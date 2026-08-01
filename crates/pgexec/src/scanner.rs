@@ -4,6 +4,7 @@ use std::{cmp::Ordering, ops::RangeBounds};
 
 use crabka_pgcatalog::Table;
 use crabka_pgmvcc::visibility::Snapshot;
+use crabka_units::convert::ByteSizeExt as _;
 
 use crate::ExecError;
 
@@ -285,6 +286,55 @@ pub const MAX_JOIN_BROADCAST_ROWS: usize = 8_192;
 pub const MAX_JOIN_ROW_BYTES: usize = 256 * 1024;
 pub const MAX_JOIN_RESULT_ROWS: usize = 65_536;
 
+/// Owner-enforced structural limits for distributed join requests and results.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct JoinPolicy {
+    pub key_columns: usize,
+    pub projection_columns: usize,
+    pub predicates: usize,
+    pub snapshot_xids: usize,
+    pub broadcast_rows: usize,
+    pub row_bytes: usize,
+    pub result_rows: usize,
+}
+
+impl Default for JoinPolicy {
+    fn default() -> Self {
+        Self {
+            key_columns: MAX_JOIN_KEY_COLUMNS,
+            projection_columns: MAX_JOIN_PROJECTION_COLUMNS,
+            predicates: MAX_JOIN_PREDICATES,
+            snapshot_xids: MAX_JOIN_SNAPSHOT_XIDS,
+            broadcast_rows: MAX_JOIN_BROADCAST_ROWS,
+            row_bytes: MAX_JOIN_ROW_BYTES,
+            result_rows: MAX_JOIN_RESULT_ROWS,
+        }
+    }
+}
+
+impl JoinPolicy {
+    /// Reject zero limits.
+    ///
+    /// # Errors
+    /// Returns an error when any limit is zero.
+    pub fn validate(self) -> Result<Self, JoinValidationError> {
+        if [
+            self.key_columns,
+            self.projection_columns,
+            self.predicates,
+            self.snapshot_xids,
+            self.broadcast_rows,
+            self.row_bytes,
+            self.result_rows,
+        ]
+        .contains(&0)
+        {
+            return Err(JoinValidationError::InvalidPolicy);
+        }
+        Ok(self)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinKind {
     Inner,
@@ -311,6 +361,7 @@ pub struct JoinSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinTableInterval {
     pub table_id: u64,
+    pub table_name: String,
     pub interval: RowInterval,
 }
 
@@ -346,6 +397,8 @@ pub struct JoinRangeResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum JoinValidationError {
+    #[error("distributed join limits must be positive")]
+    InvalidPolicy,
     #[error("join read timestamp must be nonzero")]
     MissingReadTimestamp,
     #[error("join key lists must be nonempty and have equal length")]
@@ -377,28 +430,33 @@ impl JoinRangeRequest {
     ///
     /// Returns an error when the requested operation cannot be completed.
     pub fn validate(&self) -> Result<(), JoinValidationError> {
+        self.validate_with_policy(JoinPolicy::default())
+    }
+
+    /// Validate against limits owned by the receiving process.
+    ///
+    /// # Errors
+    /// Returns an error when the request exceeds or violates the policy.
+    pub fn validate_with_policy(&self, policy: JoinPolicy) -> Result<(), JoinValidationError> {
+        let policy = policy.validate()?;
         if self.read_ts == 0 {
             return Err(JoinValidationError::MissingReadTimestamp);
         }
         if self.left_keys.is_empty() || self.left_keys.len() != self.right_keys.len() {
             return Err(JoinValidationError::InvalidJoinKeys);
         }
-        bound(
-            self.left_keys.len(),
-            MAX_JOIN_KEY_COLUMNS,
-            |actual, limit| JoinValidationError::TooManyJoinKeys { actual, limit },
-        )?;
+        bound(self.left_keys.len(), policy.key_columns, |actual, limit| {
+            JoinValidationError::TooManyJoinKeys { actual, limit }
+        })?;
         bound(
             self.projection.len(),
-            MAX_JOIN_PROJECTION_COLUMNS,
+            policy.projection_columns,
             |actual, limit| JoinValidationError::TooManyProjectionColumns { actual, limit },
         )?;
         for snapshot in [&self.local_snapshot, &self.global_snapshot] {
-            bound(
-                snapshot.xip.len(),
-                MAX_JOIN_SNAPSHOT_XIDS,
-                |actual, limit| JoinValidationError::TooManySnapshotXids { actual, limit },
-            )?;
+            bound(snapshot.xip.len(), policy.snapshot_xids, |actual, limit| {
+                JoinValidationError::TooManySnapshotXids { actual, limit }
+            })?;
             if snapshot.xmin > snapshot.xmax
                 || !snapshot.xip.windows(2).all(|pair| pair[0] < pair[1])
             {
@@ -410,12 +468,12 @@ impl JoinRangeRequest {
                 PredicatePushdown::FullScan => 0,
                 PredicatePushdown::Conjunctive(items) => items.len(),
             };
-            bound(count, MAX_JOIN_PREDICATES, |actual, limit| {
+            bound(count, policy.predicates, |actual, limit| {
                 JoinValidationError::TooManyPredicates { actual, limit }
             })?;
         }
         for table in [&self.left, &self.right] {
-            if table.table_id == 0 {
+            if table.table_id == 0 || table.table_name.is_empty() {
                 return Err(JoinValidationError::InvalidTableIdentity);
             }
             if matches!((table.interval.start, table.interval.end), (Some(start), Some(end)) if start >= end)
@@ -431,10 +489,10 @@ impl JoinRangeRequest {
             return Err(JoinValidationError::InvalidBroadcastRows);
         }
         if let Some(rows) = &self.broadcast_rows {
-            bound(rows.len(), MAX_JOIN_BROADCAST_ROWS, |actual, limit| {
+            bound(rows.len(), policy.broadcast_rows, |actual, limit| {
                 JoinValidationError::TooManyBroadcastRows { actual, limit }
             })?;
-            validate_join_rows(rows)?;
+            validate_join_rows(rows, policy.row_bytes)?;
         }
         Ok(())
     }
@@ -458,10 +516,12 @@ impl JoinRangeRequest {
             strategy: JoinExecutionStrategy::BroadcastRight,
             left: JoinTableInterval {
                 table_id: 1,
+                table_name: "left".into(),
                 interval: RowInterval::ALL,
             },
             right: JoinTableInterval {
                 table_id: 2,
+                table_name: "right".into(),
                 interval: RowInterval::ALL,
             },
             broadcast_rows: Some(vec![]),
@@ -477,10 +537,19 @@ impl JoinRangeResult {
     ///
     /// Returns an error when the requested operation cannot be completed.
     pub fn validate(&self) -> Result<(), JoinValidationError> {
-        bound(self.rows.len(), MAX_JOIN_RESULT_ROWS, |actual, limit| {
+        self.validate_with_policy(JoinPolicy::default())
+    }
+
+    /// Validate against limits owned by the receiving process.
+    ///
+    /// # Errors
+    /// Returns an error when result rows exceed or violate the policy.
+    pub fn validate_with_policy(&self, policy: JoinPolicy) -> Result<(), JoinValidationError> {
+        let policy = policy.validate()?;
+        bound(self.rows.len(), policy.result_rows, |actual, limit| {
             JoinValidationError::TooManyResultRows { actual, limit }
         })?;
-        validate_join_rows(&self.rows)
+        validate_join_rows(&self.rows, policy.row_bytes)
     }
 }
 
@@ -497,8 +566,24 @@ pub fn execute_materialized_join(
     left: &[JoinRow],
     right: &[JoinRow],
 ) -> Result<JoinRangeResult, ExecError> {
-    request
+    execute_materialized_join_with_policy(request, left, right, JoinPolicy::default())
+}
+
+/// Execute a materialized join under limits owned by the receiving process.
+///
+/// # Errors
+/// Returns an error when validation or join execution fails.
+pub fn execute_materialized_join_with_policy(
+    request: &JoinRangeRequest,
+    left: &[JoinRow],
+    right: &[JoinRow],
+    policy: JoinPolicy,
+) -> Result<JoinRangeResult, ExecError> {
+    let policy = policy
         .validate()
+        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+    request
+        .validate_with_policy(policy)
         .map_err(|error| ExecError::Unsupported(error.to_string()))?;
     if request.kind != JoinKind::Inner {
         return Err(ExecError::Unsupported(
@@ -513,11 +598,11 @@ pub fn execute_materialized_join(
             if !join_keys_equal(left_row, right_row, &request.left_keys, &request.right_keys)? {
                 continue;
             }
-            if rows.len() == MAX_JOIN_RESULT_ROWS {
+            if rows.len() == policy.result_rows {
                 return Err(ExecError::Unsupported(
                     JoinValidationError::TooManyResultRows {
-                        actual: MAX_JOIN_RESULT_ROWS + 1,
-                        limit: MAX_JOIN_RESULT_ROWS,
+                        actual: policy.result_rows.saturating_add(1),
+                        limit: policy.result_rows,
                     }
                     .to_string(),
                 ));
@@ -550,7 +635,7 @@ pub fn execute_materialized_join(
     rows.sort_by(|left, right| left.tuple.cmp(&right.tuple));
     let result = JoinRangeResult { rows };
     result
-        .validate()
+        .validate_with_policy(policy)
         .map_err(|error| ExecError::Unsupported(error.to_string()))?;
     Ok(result)
 }
@@ -592,9 +677,9 @@ fn join_keys_equal(
     Ok(true)
 }
 
-fn validate_join_rows(rows: &[JoinRow]) -> Result<(), JoinValidationError> {
+fn validate_join_rows(rows: &[JoinRow], row_bytes: usize) -> Result<(), JoinValidationError> {
     for row in rows {
-        bound(row.tuple.len(), MAX_JOIN_ROW_BYTES, |actual, limit| {
+        bound(row.tuple.len(), row_bytes, |actual, limit| {
             JoinValidationError::JoinRowTooLarge { actual, limit }
         })?;
     }
@@ -832,7 +917,12 @@ mod join_protocol_tests {
 }
 
 /// Default cap for rows retained by a blocking executor fallback.
-pub const BLOCKING_QUERY_MEMORY_BYTES: usize = 16 * 1024 * 1024;
+pub const BLOCKING_QUERY_MEMORY: crabka_units::ByteSize = crabka_units::mebibytes(16);
+
+#[must_use]
+pub fn exceeds_query_memory(used: usize, limit: crabka_units::ByteSize) -> bool {
+    used > limit.bytes_usize()
+}
 
 /// Collect a cursor for a blocking operator while charging one central byte budget.
 /// # Errors
@@ -841,8 +931,9 @@ pub const BLOCKING_QUERY_MEMORY_BYTES: usize = 16 * 1024 * 1024;
 pub fn collect_cursor_bounded(
     scanner: &dyn RangeScanner,
     request: ScanRequest<'_>,
-    max_bytes: usize,
+    budget: crabka_units::ByteSize,
 ) -> Result<Vec<ScannedRow>, ExecError> {
+    let max_bytes = crabka_units::convert::ByteSizeExt::bytes_usize(budget);
     let cancel = crate::session::query_cancel_runtime();
     std::thread::scope(|scope| {
         scope
@@ -897,8 +988,9 @@ pub(crate) fn collect_partial_aggregates_bounded(
     scanner: &dyn RangeScanner,
     request: ScanRequest<'_>,
     specs: &[PartialAggregateSpec],
-    max_bytes: usize,
+    budget: crabka_units::ByteSize,
 ) -> Result<Vec<Vec<ScannedRow>>, ExecError> {
+    let max_bytes = crabka_units::convert::ByteSizeExt::bytes_usize(budget);
     if specs.is_empty() {
         return Err(ExecError::Unsupported(
             "partial aggregate streaming requires at least one aggregate".into(),
@@ -2073,6 +2165,7 @@ mod cursor_contract_tests {
     use crabka_pgkv::MemKv;
     use crabka_pgmvcc::Snapshot;
     use crabka_pgtypes::{ColumnType, Datum};
+    use crabka_units::bytes;
 
     use super::{
         MaterializedRangeCursor, PredicatePushdown, ProjectionPushdown, RangeCursor, RangeScanner,
@@ -2220,7 +2313,7 @@ mod cursor_contract_tests {
                 partial_aggregate: None,
                 top_k: None,
             },
-            64,
+            bytes(64),
         )
         .expect_err("row must be rejected before exceeding budget");
 
@@ -2247,6 +2340,7 @@ mod streaming_aggregate_tests {
     use crabka_pgkv::MemKv;
     use crabka_pgmvcc::Snapshot;
     use crabka_pgtypes::{ColumnType, Datum};
+    use crabka_units::{ByteSize, bytes, convert::ByteSizeExt as _};
 
     use super::{
         PartialAggregateSpec, PredicatePushdown, ProjectionPushdown, RangeScanner, RowInterval,
@@ -2254,6 +2348,10 @@ mod streaming_aggregate_tests {
     };
 
     struct FixedRowsScanner(Vec<ScannedRow>);
+
+    fn budget_of(total: usize) -> ByteSize {
+        ByteSize::from_bytes(u64::try_from(total).expect("budget fits u64"))
+    }
 
     impl RangeScanner for FixedRowsScanner {
         fn scan(&self, _request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, super::ExecError> {
@@ -2322,7 +2420,7 @@ mod streaming_aggregate_tests {
             .sum::<usize>();
         // A budget the whole table exceeds but a single 1024-row page does not:
         // the streaming fold must succeed exactly where whole-table collection fails.
-        let budget = whole_table_bytes - 1;
+        let budget = budget_of(whole_table_bytes - 1);
         let scanner = FixedRowsScanner(rows);
         let (local, snapshot, table) = (MemKv::new(), snapshot(), table());
         let specs = vec![
@@ -2391,7 +2489,7 @@ mod streaming_aggregate_tests {
             &scanner,
             request(&local, &snapshot, &table),
             &specs,
-            64,
+            bytes(64),
         )
         .expect_err("one oversized page must fail closed");
 
@@ -2427,7 +2525,7 @@ mod streaming_aggregate_tests {
             request(&local, &snapshot, &table),
             &specs,
             // Above one page (and its per-page state), below two pages of groups.
-            page_bytes + page_bytes / 2,
+            budget_of(page_bytes + page_bytes / 2),
         )
         .expect_err("unbounded distinct group keys must fail closed");
 

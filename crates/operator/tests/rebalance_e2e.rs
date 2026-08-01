@@ -34,6 +34,7 @@ use crabka_rebalancer::{
     model::{Movement, ProposalStore},
     scraper::UsageStore,
 };
+use crabka_units::{ByteRate, bytes_per_sec, millis, percent, secs};
 
 /// Stand-in for the executor's client facade — these tests only exercise
 /// `CreateProposal` / `GetProposal` / (failed) `ExecuteProposal`, never the
@@ -46,7 +47,7 @@ impl ClientFacade for NoopClient {
         &self,
         _op: ConfigOp,
         _targets: &ThrottleTargets,
-        _throttle_bytes_per_sec: i64,
+        _throttle: ByteRate,
     ) -> Result<(), PhaseError> {
         Ok(())
     }
@@ -77,9 +78,9 @@ fn build_state(snapshot: SharedSnapshot) -> Arc<AppState> {
         store: store.clone(),
         config: ExecutorConfig {
             data_dir: std::env::temp_dir().join("crabka-operator-rebalance-e2e"),
-            default_throttle_bytes_per_sec: 50_000_000,
-            poll_interval: Duration::from_millis(50),
-            execute_deadline: Duration::from_secs(30),
+            default_throttle: bytes_per_sec(50_000_000),
+            poll_interval: millis(50),
+            execute_deadline: secs(30),
             batch_size: 200,
         },
         metrics: metrics.clone(),
@@ -91,7 +92,7 @@ fn build_state(snapshot: SharedSnapshot) -> Arc<AppState> {
         store,
         goal_registry: Arc::new(GoalRegistry::default_registry()),
         goal_ctx: GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),
@@ -129,7 +130,7 @@ async fn operator_client_round_trips_against_real_rebalancer() {
                 replicas: 1,
                 configs: BTreeMap::default(),
             }],
-            5_000,
+            crabka_units::secs(5),
         )
         .await
         .unwrap();
@@ -185,7 +186,10 @@ async fn operator_client_round_trips_against_real_rebalancer() {
 
     // ExecuteProposal on a zero-movement proposal is rejected with a
     // Connect FailedPrecondition — verifies the error decode path.
-    match client.execute_proposal(&proposal.id, Some(1_000_000)).await {
+    match client
+        .execute_proposal(&proposal.id, Some(bytes_per_sec(1_000_000)))
+        .await
+    {
         Err(RebalancerError::Rpc { code, .. }) => {
             assert!(!code.is_empty(), "execute rejection must carry a code");
         }

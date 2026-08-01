@@ -223,7 +223,7 @@ async fn full_cycle_commit_and_read(bootstrap: &str, topic: &str, tid: &str, gro
     let mut seen: Vec<String> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while seen.len() < 3 && std::time::Instant::now() < deadline {
-        for r in consumer.poll(Duration::from_millis(200)).await.unwrap() {
+        for r in consumer.poll(crabka_units::millis(200)).await.unwrap() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }

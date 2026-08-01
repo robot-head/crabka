@@ -545,7 +545,7 @@ pub(crate) async fn select_new_leader_for_partition(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
+    use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
     use assert2::{assert, check};
     use crabka_metadata::{
@@ -593,7 +593,7 @@ mod tests {
     }
 
     async fn liveness_with_alive(alive: &[u64]) -> Arc<ControllerLivenessState> {
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for &n in alive {
             l.record_heartbeat(n).await;
         }
@@ -920,7 +920,7 @@ mod tests {
     async fn failover_picks_alive_isr_member_when_available() {
         // Leader 1 dies, ISR {1, 2, 3}, both 2 and 3 alive — pick 2.
         let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
@@ -954,7 +954,7 @@ mod tests {
         // Synthetic but valid during ISR churn: dead broker is the current
         // leader/replica, while the ISR already contains only surviving peers.
         let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[2, 3]);
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
@@ -978,7 +978,7 @@ mod tests {
         // Broker 9 is neither a replica nor an ISR member. Even if some other
         // ISR member is dead, this scan must not rewrite the partition.
         let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [1u64, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1001,7 +1001,7 @@ mod tests {
         // `unclean.leader.election.enable=false` (the default) the
         // controller must not elect — partition stays unavailable.
         let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1027,7 +1027,7 @@ mod tests {
         // (broker 2) as leader with singleton ISR.
         let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
         set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1060,7 +1060,7 @@ mod tests {
         // bump the unclean-election counter — the metric is reserved
         // for the KIP-841 data-loss footgun path.
         let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1074,7 +1074,7 @@ mod tests {
         // Unclean opt-in but ALL replicas dead — no election possible.
         let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
         set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         // No heartbeats — nobody alive.
         let plan = compute_failover_changes(
             &img,
@@ -1096,7 +1096,7 @@ mod tests {
         // Explicit `false` must behave the same as unset.
         let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
         set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "false");
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1120,7 +1120,7 @@ mod tests {
         // skip it — otherwise we'd re-elect the dead broker.
         let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
         set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         // Only broker 3 alive — broker 2 also dead.
         l.record_heartbeat(3).await;
         let plan = compute_failover_changes(
@@ -1143,7 +1143,7 @@ mod tests {
         // fires when alive_isr is empty.)
         let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2]);
         set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1169,7 +1169,7 @@ mod tests {
         // dead member must be dropped from ISR without bumping the
         // leader_epoch (the leader isn't changing).
         let img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1, 2, 3]);
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [1u64, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1261,7 +1261,7 @@ mod tests {
         let bad = uuid::Uuid::from_u128(0xDEAD);
         let good = uuid::Uuid::from_u128(0x1);
         let img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2, 3], &[bad, good, good]);
-        let l = ControllerLivenessState::new(std::time::Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [1u64, 2, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1297,7 +1297,7 @@ mod tests {
         let bad = uuid::Uuid::from_u128(0xDEAD);
         let good = uuid::Uuid::from_u128(0x1);
         let img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2, 3], &[good, good, good]);
-        let l = ControllerLivenessState::new(std::time::Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [1u64, 2, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1318,7 +1318,7 @@ mod tests {
         let bad = uuid::Uuid::from_u128(0xDEAD);
         let good = uuid::Uuid::from_u128(0x1);
         let img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2, 3], &[good, bad, good]);
-        let l = ControllerLivenessState::new(std::time::Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [1u64, 2, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1356,7 +1356,7 @@ mod tests {
         // After failover: broker 1's dir is bad but broker 1 is no longer
         // leader (broker 2 is), and broker 1 is not in ISR {2,3} either.
         let img = img_with_dirs("t", 2, &[1, 2, 3], &[2, 3], &[bad, good, good]);
-        let l = ControllerLivenessState::new(std::time::Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [1u64, 2, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1386,7 +1386,7 @@ mod tests {
         let good = uuid::Uuid::from_u128(0x1);
         let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
         set_topic_config(&mut img, "t", UNCLEAN_RECOVERY_STRATEGY, "Balanced");
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         // Only broker 3 alive but it's NOT in the ISR — alive_isr = empty.
         l.record_heartbeat(3).await;
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
@@ -1417,7 +1417,7 @@ mod tests {
         let good = uuid::Uuid::from_u128(0x1);
         let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
         set_topic_config(&mut img, "t", UNCLEAN_RECOVERY_STRATEGY, "Aggressive");
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         // broker 2 is not alive, broker 3 is alive but not in ISR.
         l.record_heartbeat(3).await;
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
@@ -1447,7 +1447,7 @@ mod tests {
         let good = uuid::Uuid::from_u128(0x1);
         let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
         set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         // broker 3 alive, broker 2 dead (no heartbeat).
         l.record_heartbeat(3).await;
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
@@ -1484,7 +1484,7 @@ mod tests {
         let bad = uuid::Uuid::from_u128(0xDEAD);
         let good = uuid::Uuid::from_u128(0x1);
         let img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         l.record_heartbeat(3).await; // only 3 alive, but not in ISR
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let plan = compute_offline_dir_failover_changes(
@@ -1511,7 +1511,7 @@ mod tests {
         let good = uuid::Uuid::from_u128(0x1);
         let mut img = img_with_dirs("t", 1, &[1, 2, 3], &[1, 2], &[bad, good, good]);
         set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         // No heartbeats — nobody alive.
         let offline: std::collections::HashSet<uuid::Uuid> = [bad].into_iter().collect();
         let metrics = crate::metrics::BrokerMetrics::new();
@@ -1539,7 +1539,7 @@ mod tests {
         // partition to the URM via `recoveries`.
         let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
         set_topic_config(&mut img, "t", UNCLEAN_RECOVERY_STRATEGY, "Balanced");
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }
@@ -1565,7 +1565,7 @@ mod tests {
         // the KIP-841 behavior: blind pick of the first alive replica.
         let mut img = img_with_partition("t", 0, /*leader*/ 1, &[1, 2, 3], &[1]);
         set_topic_config(&mut img, "t", UNCLEAN_LEADER_ELECTION_ENABLE, "true");
-        let l = ControllerLivenessState::new(Duration::from_secs(10));
+        let l = ControllerLivenessState::new(crabka_units::secs(10));
         for n in [2u64, 3] {
             l.record_heartbeat(n).await;
         }

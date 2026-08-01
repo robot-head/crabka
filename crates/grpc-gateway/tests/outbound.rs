@@ -49,6 +49,7 @@ use crabka_protocol::owned::{
     fetch_request::{FetchPartition, FetchRequest, FetchTopic},
     metadata_request::MetadataRequest,
 };
+use crabka_units::prelude::*;
 use hmac::{Hmac, KeyInit, Mac};
 use serde_json::Value;
 use sha2::Sha256;
@@ -80,7 +81,7 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -181,9 +182,9 @@ fn sub(
         signing_secret,
         dead_letter_topic,
         max_attempts,
-        base_backoff_ms: 50,
-        max_backoff_ms: 200,
-        request_timeout_ms: 2_000,
+        base_backoff: millis(50),
+        max_backoff: millis(200),
+        request_timeout: secs(2),
         filter,
         headers: vec![],
         decode_to_json: false,
@@ -349,7 +350,7 @@ async fn delivers_2xx() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
-        (None, Duration::from_millis(500)),
+        (None, millis(500)),
         Arc::new(RawCodec),
     ));
 
@@ -431,7 +432,7 @@ async fn retries_then_succeeds() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
-        (None, Duration::from_millis(500)),
+        (None, millis(500)),
         Arc::new(RawCodec),
     ));
 
@@ -492,7 +493,7 @@ async fn dead_letters_on_exhaustion() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
-        (None, Duration::from_millis(500)),
+        (None, millis(500)),
         Arc::new(RawCodec),
     ));
 
@@ -549,7 +550,7 @@ async fn ordering_within_partition() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
-        (None, Duration::from_millis(500)),
+        (None, millis(500)),
         Arc::new(RawCodec),
     ));
 
@@ -595,7 +596,7 @@ async fn filter_skips_nonmatching() {
         "test-out".into(),
         dlq_producer,
         token.clone(),
-        (None, Duration::from_millis(500)),
+        (None, millis(500)),
         Arc::new(RawCodec),
     ));
 

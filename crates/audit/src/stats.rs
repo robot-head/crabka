@@ -3,9 +3,14 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ids::{RecordCount, SpoolBytes};
+use crabka_units::prelude::{ByteSize, ByteSizeExt as _};
+
+use crate::ids::RecordCount;
 
 /// Cumulative + current spool statistics.
+///
+/// The counters are `AtomicU64`, which cannot hold a quantity; the byte gauge
+/// converts to and from [`ByteSize`] in its accessors.
 #[derive(Debug, Default)]
 pub struct AuditStats {
     spooled: AtomicU64,
@@ -30,9 +35,9 @@ impl AuditStats {
     pub(crate) fn inc_dropped(&self) {
         self.dropped.fetch_add(1, Ordering::Relaxed);
     }
-    pub(crate) fn set_depth(&self, count: RecordCount, bytes: SpoolBytes) {
+    pub(crate) fn set_depth(&self, count: RecordCount, size: ByteSize) {
         self.depth.store(count.0, Ordering::Relaxed);
-        self.spool_bytes.store(bytes.0, Ordering::Relaxed);
+        self.spool_bytes.store(size.bytes_u64(), Ordering::Relaxed);
     }
 
     #[must_use]
@@ -51,8 +56,10 @@ impl AuditStats {
     pub fn depth(&self) -> u64 {
         self.depth.load(Ordering::Relaxed)
     }
+    /// Bytes currently held in the spool. Named for the `audit_spool_bytes`
+    /// gauge the broker exports it as.
     #[must_use]
-    pub fn spool_bytes(&self) -> u64 {
-        self.spool_bytes.load(Ordering::Relaxed)
+    pub fn spool_bytes(&self) -> ByteSize {
+        ByteSize::from_bytes(self.spool_bytes.load(Ordering::Relaxed))
     }
 }

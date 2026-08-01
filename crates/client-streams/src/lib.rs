@@ -257,7 +257,7 @@
 //! [`KGroupedStream::windowed_by_sliding`] produces a
 //! [`SlidingWindowedKGroupedStream`] with `count`/`reduce`/`aggregate`. Sliding
 //! windows are **data-defined** inclusive windows of fixed size
-//! `time_difference_ms`: a record at time `t` falls into every window
+//! `time_difference`: a record at time `t` falls into every window
 //! `[ws, ws + time_difference]` with `ws ∈ [t - time_difference, t]`. Unlike
 //! tumbling/hopping windows there is no epoch alignment; the aggregator
 //! discovers affected windows by scanning the window store and emits on update.
@@ -452,11 +452,12 @@
 //!
 //! ```
 //! use crabka_client_streams::{BufferConfig, StreamsBuilder, Suppressed, TimeWindows};
+//! use crabka_units::prelude::*;
 //!
 //! let b = StreamsBuilder::new();
 //! b.stream::<String, String>(["clicks"])
 //!     .group_by_key()
-//!     .windowed_by(TimeWindows::of_size(60_000).grace(10_000))
+//!     .windowed_by(TimeWindows::of_size(minutes(1)).grace(secs(10)))
 //!     .count("click-counts")
 //!     .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
 //!     .to_stream()
@@ -484,6 +485,7 @@
 //!     format::avro::AvroSerde,
 //!     set_default_registry,
 //! };
+//! use crabka_units::prelude::*;
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
@@ -513,7 +515,7 @@
 //! let b = StreamsBuilder::new();
 //! b.stream::<String, Order>(["orders"]) // keyed by region
 //!     .group_by_key()
-//!     .windowed_by(TimeWindows::of_size(60_000).grace(10_000))
+//!     .windowed_by(TimeWindows::of_size(minutes(1)).grace(secs(10)))
 //!     .aggregate(
 //!         || Revenue {
 //!             order_count: 0,
@@ -883,7 +885,7 @@
 //!
 //! ## Versioned tables (KIP-889)
 //!
-//! `builder.table(..., Materialized::as_versioned(name, history_retention_ms))`
+//! `builder.table(..., Materialized::as_versioned(name, history_retention))`
 //! materializes a table into a versioned key-value store, so out-of-order
 //! records are recorded as historical versions without clobbering the latest,
 //! and point-in-time reads are available via `get_as_of`.

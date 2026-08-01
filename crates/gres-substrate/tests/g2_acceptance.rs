@@ -89,9 +89,10 @@ async fn oversized_batch_chunks_and_recovers_atomically() {
             value: b"small".to_vec(),
         },
     ];
-    let frames = crabka_gres_substrate::chunk_wal_batch(ops.clone(), 0, 48).expect("chunk batch");
+    let frames = crabka_gres_substrate::chunk_wal_batch(ops.clone(), 0, crabka_units::bytes(48))
+        .expect("chunk batch");
     let compute = substrate_committer(first_cache, log.clone(), WriterGeneration(0), 0)
-        .with_max_frame_bytes(48);
+        .with_max_frame_size(crabka_units::bytes(48));
 
     compute.commit(ops).await.expect("commit chunked group");
     drop(compute);

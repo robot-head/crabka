@@ -14,6 +14,7 @@ use std::{
 use arc_swap::ArcSwap;
 use crabka_ids::PartitionIndex;
 use crabka_log::{Log, Offset};
+use crabka_units::Time;
 use tokio::{
     runtime::{Handle, RuntimeFlavor},
     sync::{Notify, mpsc},
@@ -308,10 +309,10 @@ async fn active_producers_for_compaction(
     topic: &str,
     partition: PartitionIndex,
     now_ms: i64,
-    producer_id_expiration_ms: i64,
+    producer_id_expiration: Time,
 ) -> std::collections::HashMap<crabka_log::ProducerId, Offset> {
     producer_state
-        .active_snapshot(topic, partition, now_ms, producer_id_expiration_ms)
+        .active_snapshot(topic, partition, now_ms, producer_id_expiration)
         .await
         .into_iter()
         .map(|(producer_id, offset)| (crabka_log::ProducerId(producer_id), Offset(offset)))
@@ -322,7 +323,7 @@ async fn handle_compact(
     identity: (&str, PartitionIndex),
     storage: (&Arc<Mutex<Log>>, &Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
     producer_state: &ProducerState,
-    producer_id_expiration_ms: i64,
+    producer_id_expiration: Time,
     ack: tokio::sync::oneshot::Sender<Result<(), crate::error::BrokerError>>,
 ) {
     let (topic, partition) = identity;
@@ -338,7 +339,7 @@ async fn handle_compact(
         topic,
         partition,
         now_ms,
-        producer_id_expiration_ms,
+        producer_id_expiration,
     )
     .await;
     let context = crabka_log::CompactionContext {
@@ -506,7 +507,7 @@ pub async fn run(
         signals,
         services,
         (
-            crate::config::BrokerConfig::default().producer_id_expiration_ms,
+            crate::config::BrokerConfig::default().producer_id_expiration,
             crate::config::BrokerConfig::default().max_produce_group,
         ),
         None,
@@ -528,14 +529,14 @@ pub async fn run_with_sequencer(
         Arc<ProducerState>,
         Option<crate::wal::SharedWal>,
     ),
-    limits: (i64, usize),
+    limits: (Time, usize),
     sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
 ) {
     let (topic, partition) = identity;
     let (log, log_dir) = storage;
     let (append_notify, replica_state, hw_advance_notify) = signals;
     let (log_dir_status, producer_state, wal) = services;
-    let (producer_id_expiration_ms, max_produce_group) = limits;
+    let (producer_id_expiration, max_produce_group) = limits;
     // `pending` holds a non-Produce message that was pulled off the channel
     // while group-draining Produce jobs (see the Produce arm). It is handled on
     // the next iteration so control messages are never reordered ahead of the
@@ -597,7 +598,7 @@ pub async fn run_with_sequencer(
                     (&topic, partition),
                     (&log, &log_dir, &log_dir_status),
                     &producer_state,
-                    producer_id_expiration_ms,
+                    producer_id_expiration,
                     ack,
                 )
                 .await;
@@ -720,6 +721,7 @@ mod tests {
     use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
     use crabka_protocol::records::{Record, RecordBatch};
+    use crabka_units::millis;
     use tempfile::tempdir;
     use tokio::sync::oneshot;
 
@@ -845,7 +847,7 @@ mod tests {
             "t",
             PartitionIndex(0),
             last_activity_ms + 2,
-            1,
+            millis(1),
         )
         .await;
         let active = active_producers_for_compaction(
@@ -853,7 +855,7 @@ mod tests {
             "t",
             PartitionIndex(0),
             last_activity_ms + 2,
-            2,
+            millis(2),
         )
         .await;
 
@@ -991,7 +993,7 @@ mod tests {
                 wal,
             ),
             (
-                crate::config::BrokerConfig::default().producer_id_expiration_ms,
+                crate::config::BrokerConfig::default().producer_id_expiration,
                 crate::config::BrokerConfig::default().max_produce_group,
             ),
             Some(test_sequencer()),
@@ -1071,7 +1073,7 @@ mod tests {
                     wal,
                 ),
                 (
-                    crate::config::BrokerConfig::default().producer_id_expiration_ms,
+                    crate::config::BrokerConfig::default().producer_id_expiration,
                     crate::config::BrokerConfig::default().max_produce_group,
                 ),
                 Some(test_sequencer()),
@@ -1144,7 +1146,7 @@ mod tests {
                 Some(wal),
             ),
             (
-                crate::config::BrokerConfig::default().producer_id_expiration_ms,
+                crate::config::BrokerConfig::default().producer_id_expiration,
                 MAX_GROUP,
             ),
             Some(test_sequencer()),
@@ -1254,7 +1256,7 @@ mod tests {
         let r = log
             .lock()
             .unwrap()
-            .read_raw(Offset(0), Offset(1), 10 * 1024 * 1024)
+            .read_raw(Offset(0), Offset(1), crabka_units::mebibytes(10))
             .unwrap();
         assert!(&r.bytes[21..] == &wire[21..], "CRC-covered region verbatim");
         assert!(&r.bytes[17..21] == &wire[17..21], "CRC unchanged");
@@ -1294,7 +1296,7 @@ mod tests {
         let read = log
             .lock()
             .unwrap()
-            .read(Offset(0), 10 * 1024 * 1024)
+            .read(Offset(0), crabka_units::mebibytes(10))
             .unwrap();
         assert!(read.batches.len() == 1);
         check!(read.batches[0].attributes.compression() == CompressionType::Lz4);
@@ -1621,7 +1623,7 @@ mod tests {
         ));
 
         let new_cfg = LogConfig {
-            retention_ms: Some(std::time::Duration::from_mins(2)),
+            retention: Some(crabka_units::minutes(2)),
             ..LogConfig::default()
         };
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
@@ -1634,7 +1636,7 @@ mod tests {
         ack_rx.await.expect("ack");
 
         let observed = log.lock().expect("lock").config_snapshot();
-        assert!(observed.retention_ms == new_cfg.retention_ms);
+        assert!(observed.retention == new_cfg.retention);
 
         drop(tx);
         writer.await.expect("writer join");

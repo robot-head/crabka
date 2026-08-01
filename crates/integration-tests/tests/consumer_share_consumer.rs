@@ -358,7 +358,7 @@ async fn poll_acquires_and_implicit_accept_advances() {
     let mut first: Vec<ShareConsumerRecord> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     while std::time::Instant::now() < deadline && first.len() < 3 {
-        let recs = consumer.poll(Duration::from_millis(300)).await.unwrap();
+        let recs = consumer.poll(crabka_units::millis(300)).await.unwrap();
         first.extend(recs);
     }
     assert2::assert!(first.len() == 3);
@@ -377,7 +377,7 @@ async fn poll_acquires_and_implicit_accept_advances() {
     let mut second = 0usize;
     for _ in 0..5 {
         second += consumer
-            .poll(Duration::from_millis(300))
+            .poll(crabka_units::millis(300))
             .await
             .unwrap()
             .len();
@@ -399,7 +399,7 @@ async fn poll_until(
     let mut acc: Vec<ShareConsumerRecord> = Vec::new();
     let deadline = std::time::Instant::now() + budget;
     while std::time::Instant::now() < deadline && acc.len() < n {
-        let recs = consumer.poll(Duration::from_millis(300)).await.unwrap();
+        let recs = consumer.poll(crabka_units::millis(300)).await.unwrap();
         acc.extend(recs);
     }
     acc
@@ -584,10 +584,10 @@ async fn two_consumers_share_topic() {
     let mut got2: Vec<(i32, String)> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while std::time::Instant::now() < deadline && got1.len() + got2.len() < 4 {
-        for r in c1.poll(Duration::from_millis(250)).await.unwrap() {
+        for r in c1.poll(crabka_units::millis(250)).await.unwrap() {
             got1.push((r.partition, val(&r)));
         }
-        for r in c2.poll(Duration::from_millis(250)).await.unwrap() {
+        for r in c2.poll(crabka_units::millis(250)).await.unwrap() {
             got2.push((r.partition, val(&r)));
         }
     }
@@ -726,7 +726,7 @@ async fn explicit_renew_prevents_redelivery() {
     let deadline = std::time::Instant::now() + Duration::from_secs(15);
     let mut acquired_at = std::time::Instant::now();
     while std::time::Instant::now() < deadline && first.is_empty() {
-        let recs = consumer.poll(Duration::from_millis(200)).await.unwrap();
+        let recs = consumer.poll(crabka_units::millis(200)).await.unwrap();
         if !recs.is_empty() {
             acquired_at = std::time::Instant::now();
             first = recs;
@@ -765,11 +765,7 @@ async fn explicit_renew_prevents_redelivery() {
     // ~T_acq+1300ms, still before the renewed ~1400ms deadline).
     let mut redelivered = 0usize;
     for _ in 0..2 {
-        redelivered += consumer
-            .poll(Duration::from_millis(60))
-            .await
-            .unwrap()
-            .len();
+        redelivered += consumer.poll(crabka_units::millis(60)).await.unwrap().len();
     }
     assert2::assert!(redelivered == 0);
 

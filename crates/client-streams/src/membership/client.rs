@@ -13,6 +13,7 @@ use crabka_client_core::{
     Client, ClientDnsTimeout, ClientFrameMax, ConnectionDispatchQueueCapacity,
 };
 use crabka_protocol::owned::streams_group_heartbeat_request::StreamsGroupHeartbeatRequest;
+use crabka_units::prelude::*;
 use refined_type::rule::MinMaxU128;
 use tokio::{
     sync::{Mutex, mpsc},
@@ -257,7 +258,7 @@ impl StreamsMembership {
         let process_id = process_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         let member_id = uuid::Uuid::new_v4().to_string();
         tracing::Span::current().record("member_id", tracing::field::display(&member_id));
-        let rebalance_timeout_ms = rebalance_timeout.milliseconds();
+        let rebalance_timeout = Time::from_millis(i64::from(rebalance_timeout.milliseconds()));
 
         let client = Client::builder()
             .bootstrap(&bootstrap)
@@ -277,7 +278,7 @@ impl StreamsMembership {
                     &member_id,
                     &process_id,
                     instance_id.clone(),
-                    rebalance_timeout_ms,
+                    rebalance_timeout,
                     &topology,
                 ))
                 .await?;
@@ -329,7 +330,7 @@ impl StreamsMembership {
             member_id: member_id.clone(),
             process_id,
             instance_id,
-            rebalance_timeout_ms,
+            rebalance_timeout,
             topology: Arc::clone(&topology),
             member_epoch: Arc::clone(&member_epoch),
             owned_active,
@@ -337,7 +338,7 @@ impl StreamsMembership {
             owned_warmup,
             tracker: tracker.clone(),
             heartbeat_interval: hb_interval,
-            leave_heartbeat_timeout: leave_heartbeat_timeout.duration(),
+            leave_heartbeat_timeout: leave_heartbeat_timeout.duration().as_time(),
             events: events_tx,
             last_assignment: tokio::sync::Mutex::new(initial),
         };
@@ -428,7 +429,7 @@ fn build_join_heartbeat(
     member_id: &str,
     process_id: &str,
     instance_id: Option<String>,
-    rebalance_timeout_ms: i32,
+    rebalance_timeout: Time,
     topology: &crate::topology::BuiltTopology,
 ) -> StreamsGroupHeartbeatRequest {
     StreamsGroupHeartbeatRequest {
@@ -436,17 +437,21 @@ fn build_join_heartbeat(
         member_id: member_id.to_string(),
         process_id: Some(process_id.to_string()),
         instance_id,
-        rebalance_timeout_ms,
+        // The generated request field is raw `int32` milliseconds.
+        rebalance_timeout_ms: rebalance_timeout.millis_i32(),
         topology: Some(topology.to_wire_request()),
         ..Default::default()
     }
 }
 
-fn heartbeat_interval(heartbeat_interval_ms: i32) -> Duration {
-    if heartbeat_interval_ms > 0 {
-        Duration::from_millis(u64::try_from(heartbeat_interval_ms).unwrap_or(3000))
+/// The coordinator's advertised heartbeat cadence, or the JVM default when the
+/// broker sends a non-positive value. `raw` is the response's raw `int32`
+/// milliseconds.
+fn heartbeat_interval(raw: i32) -> Time {
+    if raw > 0 {
+        Time::from_millis(i64::from(raw))
     } else {
-        Duration::from_secs(3)
+        secs(3)
     }
 }
 
@@ -494,6 +499,7 @@ mod tests {
 
     use assert2::check;
     use crabka_protocol::owned::streams_group_heartbeat_response::StreamsGroupHeartbeatResponse;
+    use crabka_units::prelude::*;
     use tokio::sync::{Mutex, mpsc};
     use tokio_util::sync::CancellationToken;
 
@@ -531,7 +537,7 @@ mod tests {
             "member-1",
             "process-1",
             Some("instance-1".into()),
-            45_000,
+            secs(45),
             &topology,
         );
 
@@ -674,10 +680,10 @@ mod tests {
 
     #[test]
     fn heartbeat_interval_uses_positive_broker_value_or_default() {
-        check!(heartbeat_interval(1) == std::time::Duration::from_millis(1));
-        check!(heartbeat_interval(3_000) == std::time::Duration::from_secs(3));
-        check!(heartbeat_interval(0) == std::time::Duration::from_secs(3));
-        check!(heartbeat_interval(-1) == std::time::Duration::from_secs(3));
+        check!(heartbeat_interval(1) == millis(1));
+        check!(heartbeat_interval(3_000) == secs(3));
+        check!(heartbeat_interval(0) == secs(3));
+        check!(heartbeat_interval(-1) == secs(3));
     }
 
     #[test]

@@ -13,6 +13,7 @@ use crabka_protocol::{
         create_acls_response::{AclCreationResult, CreateAclsResponse},
     },
 };
+use crabka_units::convert::ByteSizeExt as _;
 
 use super::acl_wire::{
     CLUSTER_RESOURCE_NAME, operation_concrete, pattern_type_concrete, permission_concrete,
@@ -68,8 +69,8 @@ pub(crate) async fn handle(
     for c in &req.creations {
         match validate(
             c,
-            broker.config.acl_max_principal_bytes,
-            broker.config.acl_max_resource_name_bytes,
+            broker.config.acl_max_principal.bytes_usize(),
+            broker.config.acl_max_resource_name.bytes_usize(),
         ) {
             Ok(entry) => {
                 let idx = results.len();
@@ -275,9 +276,15 @@ mod tests {
         const PRINCIPAL_LIMIT: usize = 10;
         const RESOURCE_NAME_LIMIT: usize = 8;
 
+        fn limit(characters: usize) -> crabka_units::ByteSize {
+            crabka_units::ByteSize::from_bytes(
+                u64::try_from(characters).expect("test limit fits u64"),
+            )
+        }
+
         let (broker_handle, _dir) = start_broker_with(|config| {
-            config.acl_max_principal_bytes = PRINCIPAL_LIMIT;
-            config.acl_max_resource_name_bytes = RESOURCE_NAME_LIMIT;
+            config.acl_max_principal = limit(PRINCIPAL_LIMIT);
+            config.acl_max_resource_name = limit(RESOURCE_NAME_LIMIT);
             config.audit_enabled = false;
         })
         .await;

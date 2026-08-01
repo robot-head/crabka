@@ -531,6 +531,7 @@ mod tests {
     use std::{collections::HashMap, sync::Mutex as StdMutex};
 
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -746,7 +747,11 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
+                .instantiate(
+                    &crate::store::backend::StoreBackend::InMemory,
+                    "app",
+                    ByteSize::ZERO,
+                )
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -793,7 +798,11 @@ mod tests {
         let mut task_a = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
+                .instantiate(
+                    &crate::store::backend::StoreBackend::InMemory,
+                    "app",
+                    ByteSize::ZERO,
+                )
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -845,7 +854,11 @@ mod tests {
         let mut task_b = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
+                .instantiate(
+                    &crate::store::backend::StoreBackend::InMemory,
+                    "app",
+                    ByteSize::ZERO,
+                )
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -949,7 +962,11 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             stream_time_punct_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
+                .instantiate(
+                    &crate::store::backend::StoreBackend::InMemory,
+                    "app",
+                    ByteSize::ZERO,
+                )
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -1001,7 +1018,11 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
+                .instantiate(
+                    &crate::store::backend::StoreBackend::InMemory,
+                    "app",
+                    ByteSize::ZERO,
+                )
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -1063,7 +1084,11 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
+                .instantiate(
+                    &crate::store::backend::StoreBackend::InMemory,
+                    "app",
+                    ByteSize::ZERO,
+                )
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -1106,7 +1131,11 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
+                .instantiate(
+                    &crate::store::backend::StoreBackend::InMemory,
+                    "app",
+                    ByteSize::ZERO,
+                )
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -1199,7 +1228,11 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             stateful_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
+                .instantiate(
+                    &crate::store::backend::StoreBackend::InMemory,
+                    "app",
+                    ByteSize::ZERO,
+                )
                 .await
                 .unwrap(),
             vec![TopicPartition {
@@ -1255,7 +1288,11 @@ mod tests {
         StreamTask::new(
             "0".into(),
             built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 0)
+                .instantiate(
+                    &crate::store::backend::StoreBackend::InMemory,
+                    "app",
+                    ByteSize::ZERO,
+                )
                 .await
                 .unwrap(),
             sources,
@@ -1452,7 +1489,11 @@ mod tests {
         let mut task = StreamTask::new(
             "0".into(),
             cached_writer_built()
-                .instantiate(&crate::store::backend::StoreBackend::InMemory, "app", 1024)
+                .instantiate(
+                    &crate::store::backend::StoreBackend::InMemory,
+                    "app",
+                    kibibytes(1),
+                )
                 .await
                 .unwrap(),
             vec![TopicPartition {

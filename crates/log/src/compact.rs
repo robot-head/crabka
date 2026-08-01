@@ -23,6 +23,7 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use crabka_ids::{Offset, ProducerId};
 use crabka_protocol::records::RecordBatch;
+use crabka_units::prelude::{ByteSize, Time, TimeExt};
 // ---------------------------------------------------------------------------
 // KIP-534 pure decision cores
 //
@@ -506,7 +507,7 @@ mod build_map_tests {
             attributes: Attributes::default(),
             ..RecordBatch::default()
         };
-        seg.append(&batch, 4096).unwrap();
+        seg.append(&batch, INDEX_INTERVAL).unwrap();
         seg.seal();
         seg
     }
@@ -518,7 +519,7 @@ mod build_map_tests {
         let base = batches.first().map_or(0, |b| b.base_offset);
         let mut seg = Segment::create(dir, Offset(base)).unwrap();
         for batch in batches {
-            seg.append(batch, 4096).unwrap();
+            seg.append(batch, INDEX_INTERVAL).unwrap();
         }
         seg.seal();
         seg
@@ -695,10 +696,10 @@ pub struct RewriteOutput {
 /// Time-based retention inputs used while rewriting compacted segments.
 #[derive(Debug, Clone, Copy)]
 pub struct RewriteRetention {
-    /// Current wall-clock time in milliseconds.
+    /// Current wall-clock time in milliseconds. An instant, so it stays raw.
     pub now_ms: i64,
-    /// Time a tombstone remains eligible for reads before deletion.
-    pub delete_retention_ms: i64,
+    /// How long a tombstone remains eligible for reads before deletion.
+    pub delete_retention: Time,
 }
 
 /// Stream `segments` (oldest → newest) into new `.swap` files, applying the
@@ -740,8 +741,14 @@ pub fn rewrite_segments(
     txn_meta: &CleanedTransactionMetadata,
     retention: RewriteRetention,
     active_producers: &HashMap<ProducerId, Offset>,
-    _index_interval_bytes: u32,
+    _index_interval: ByteSize,
 ) -> Result<RewriteOutput, LogError> {
+    // The Creusot-verified retain kernel is stated over integer milliseconds,
+    // and the horizon it computes is stamped into an on-disk `base_timestamp`,
+    // so the extent crosses to a raw count once, here, truncating rather than
+    // rounding so a stamped horizon can never land a millisecond late.
+    let delete_retention_ms = retention.delete_retention.millis_i64_trunc();
+
     let first = segments
         .first()
         .ok_or_else(|| LogError::Io(std::io::Error::other("rewrite_segments: empty input")))?;
@@ -822,7 +829,7 @@ pub fn rewrite_segments(
                 is_newest_for_key,
                 txn,
                 retention.now_ms,
-                retention.delete_retention_ms,
+                delete_retention_ms,
             ) {
                 RetainDecision::Keep => kept.push(record.clone()),
                 RetainDecision::SetHorizon(h) => {
@@ -932,6 +939,15 @@ pub fn rewrite_segments(
     })
 }
 
+/// Kafka's default `index.interval.bytes`. The compaction tests do not
+/// exercise sparse-index density, so they all pass the default through.
+#[cfg(test)]
+const INDEX_INTERVAL: ByteSize = crabka_units::kibibytes(4);
+
+/// The `delete.retention.ms` the rewrite tests share.
+#[cfg(test)]
+const RETENTION: Time = crabka_units::secs(1);
+
 fn swap_path(dir: &Path, base_offset: i64, ext: &str) -> PathBuf {
     dir.join(format!(
         "{}.{}.swap",
@@ -946,6 +962,7 @@ mod rewrite_tests {
 
     use crabka_ids::Offset;
     use crabka_protocol::records::{Attributes, Record};
+    use crabka_units::prelude::millis;
 
     use super::{
         build_map_tests::{control_batch, make_record, write_sealed_batches, write_sealed_segment},
@@ -955,7 +972,6 @@ mod rewrite_tests {
     /// A far-future `now` so nothing in the simple tests ages out, plus an
     /// empty active-producer set and no surviving transactions.
     const NEVER_AGE_NOW_MS: i64 = 0;
-    const RET_MS: i64 = 1_000;
 
     fn rewrite_simple(dir: &Path, segment_refs: &[&Segment]) -> RewriteOutput {
         let map = build_offset_map(segment_refs).unwrap();
@@ -968,10 +984,10 @@ mod rewrite_tests {
             &txn,
             RewriteRetention {
                 now_ms: NEVER_AGE_NOW_MS,
-                delete_retention_ms: RET_MS,
+                delete_retention: RETENTION,
             },
             &active,
-            4096,
+            INDEX_INTERVAL,
         )
         .unwrap()
     }
@@ -1045,7 +1061,7 @@ mod rewrite_tests {
                 == RecordBatch {
                     base_offset: 0,
                     last_offset_delta: 1,
-                    base_timestamp: RET_MS,
+                    base_timestamp: RETENTION.millis_i64(),
                     attributes: Attributes::default().with_delete_horizon(true),
                     records: vec![record],
                     ..RecordBatch::default()
@@ -1152,6 +1168,7 @@ mod rewrite_tests {
         let txn = CleanedTransactionMetadata::build(&segment_refs, &map).unwrap();
         let now = 5_000i64;
         let ret = 50i64;
+        let retention = Time::from_millis(ret);
         let out = rewrite_segments(
             dir.path(),
             &segment_refs,
@@ -1159,10 +1176,10 @@ mod rewrite_tests {
             &txn,
             RewriteRetention {
                 now_ms: now,
-                delete_retention_ms: ret,
+                delete_retention: retention,
             },
             &HashMap::new(),
-            4096,
+            INDEX_INTERVAL,
         )
         .unwrap();
         let bytes = fs::read(&out.log_swap).unwrap();
@@ -1214,10 +1231,10 @@ mod rewrite_tests {
             &txn,
             RewriteRetention {
                 now_ms: 200,
-                delete_retention_ms: 50,
+                delete_retention: millis(50),
             },
             &HashMap::new(),
-            4096,
+            INDEX_INTERVAL,
         )
         .unwrap();
         let bytes = fs::read(&out.log_swap).unwrap();
@@ -1273,10 +1290,10 @@ mod rewrite_tests {
             &txn,
             RewriteRetention {
                 now_ms: 0,
-                delete_retention_ms: RET_MS,
+                delete_retention: RETENTION,
             },
             &active,
-            4096,
+            INDEX_INTERVAL,
         )
         .unwrap();
         let bytes = fs::read(&out.log_swap).unwrap();
@@ -1456,6 +1473,7 @@ pub fn atomic_swap(
 mod swap_tests {
     use assert2::check;
     use crabka_ids::Offset;
+    use crabka_units::prelude::secs;
 
     use super::{
         build_map_tests::{make_record, write_sealed_segment},
@@ -1489,10 +1507,10 @@ mod swap_tests {
                 &txn,
                 RewriteRetention {
                     now_ms: 0,
-                    delete_retention_ms: 1_000,
+                    delete_retention: secs(1),
                 },
                 &HashMap::new(),
-                4096,
+                INDEX_INTERVAL,
             )
             .unwrap()
             // first_segment, second_segment dropped here — file handles closed

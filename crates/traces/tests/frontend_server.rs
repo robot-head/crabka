@@ -15,16 +15,17 @@ use crabka_traces::frontend::{
         TraceByIdResponseJson, TraceEnvelopeJson, TraceJson,
     },
 };
+use crabka_units::{ByteSize, convert::ByteSizeExt as _, millis};
 
 fn block(id: &str) -> BlockMetaInfo {
     BlockMetaInfo {
         block_id: id.to_string(),
         start_ns: 0,
         end_ns: 100,
-        size_bytes: 10,
+        size: ByteSize::from_bytes(10),
         row_groups: vec![RowGroupInfo {
             index: 0,
-            compressed_bytes: 10,
+            compressed: ByteSize::from_bytes(10),
         }],
     }
 }
@@ -46,7 +47,7 @@ async fn server_round_trips_search_and_echo() {
             root_service_name: "svc".to_string(),
             root_trace_name: "GET /".to_string(),
             start_time_unix_nano: "1".to_string(),
-            duration_ms: 1,
+            duration: millis(1),
             span_sets: vec![SpanSetJson {
                 spans: vec![],
                 matched: 0,

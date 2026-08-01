@@ -1,5 +1,9 @@
 use std::collections::HashMap;
 
+use crabka_units::{
+    ByteSize, Frequency, Time,
+    convert::{ByteSizeExt as _, FrequencyExt as _, TimeExt},
+};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -57,8 +61,10 @@ struct RuntimeFile {
     overrides: HashMap<String, PartialLimits>,
 }
 
-// This is intentionally partial configuration, not old-schema compatibility:
-// each tenant entry overrides only the limit fields it names.
+// The Tempo-shaped runtime-overrides keys, in the units an operator writes them
+// (spans/sec, bytes, seconds). This is intentionally partial configuration, not
+// old-schema compatibility: each tenant entry overrides only the limit fields it
+// names, and `merge_limits` lifts them into the dimensioned `Limits`.
 #[derive(Default, Deserialize)]
 #[serde(default)]
 struct PartialLimits {
@@ -72,9 +78,9 @@ struct PartialLimits {
 
 fn merge_limits(defaults: &Limits, partial: &PartialLimits) -> Limits {
     Limits {
-        ingestion_rate_spans_per_sec: partial
+        ingestion_rate: partial
             .ingestion_rate_spans_per_sec
-            .unwrap_or(defaults.ingestion_rate_spans_per_sec),
+            .map_or(defaults.ingestion_rate, Frequency::from_per_sec),
         ingestion_burst_spans: partial
             .ingestion_burst_spans
             .unwrap_or(defaults.ingestion_burst_spans),
@@ -84,17 +90,20 @@ fn merge_limits(defaults: &Limits, partial: &PartialLimits) -> Limits {
         max_spans_per_trace: partial
             .max_spans_per_trace
             .unwrap_or(defaults.max_spans_per_trace),
-        max_attribute_bytes: partial
+        max_attribute: partial
             .max_attribute_bytes
-            .unwrap_or(defaults.max_attribute_bytes),
-        max_search_duration_secs: partial
+            .map_or(defaults.max_attribute, ByteSize::from_bytes),
+        max_search_duration: partial
             .max_search_duration_secs
-            .unwrap_or(defaults.max_search_duration_secs),
+            .map_or(defaults.max_search_duration, |secs| {
+                Time::from_secs(i64::try_from(secs).unwrap_or(i64::MAX))
+            }),
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::{bytes, per_sec};
 
     use super::*;
     use crate::limits::Limits;
@@ -117,12 +126,12 @@ overrides:
         assert2::assert!(
             *tenant_a
                 == Limits {
-                    ingestion_rate_spans_per_sec: 500.0,
+                    ingestion_rate: per_sec(500),
                     ingestion_burst_spans: 100_000,
                     max_traces_per_search: 1000,
                     max_spans_per_trace: 1000,
-                    max_attribute_bytes: 2048,
-                    max_search_duration_secs: 0,
+                    max_attribute: bytes(2048),
+                    max_search_duration: <Time as TimeExt>::ZERO,
                 }
         );
     }
@@ -132,13 +141,8 @@ overrides:
         let provider = OverridesProvider::from_yaml(YAML).unwrap();
         let tenant_b = provider.for_tenant("tenant-b");
 
-        assert2::assert!(tenant_b.max_attribute_bytes == 64);
-        assert2::assert!(
-            (tenant_b.ingestion_rate_spans_per_sec
-                - Limits::default().ingestion_rate_spans_per_sec)
-                .abs()
-                < f64::EPSILON
-        );
+        assert2::assert!(tenant_b.max_attribute == bytes(64));
+        assert2::assert!(tenant_b.ingestion_rate == Limits::default().ingestion_rate);
     }
 
     #[test]

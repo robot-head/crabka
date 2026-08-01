@@ -9,12 +9,13 @@
 //!
 //! All inputs are decoded `&[f64]` values paired 1:1 with `&[i64]` millisecond
 //! timestamps (as produced by `RangeManipulate`'s `<value>_range` /
-//! `<time>_range` columns). `range_ms` is the range-selector window width in
-//! milliseconds; `range_end_ms` is the eval instant `t` the window closes on;
-//! `range_start_ms` is `t - range_ms`. Every function returns `None` where
+//! `<time>_range` columns). `range` is the range-selector window width;
+//! `range_end_ms` is the eval instant `t` the window closes on;
+//! `range_start_ms` is `t - range`. Every function returns `None` where
 //! Prometheus yields no sample (fewer than two points, a zero-width sampled
 //! interval, etc.), which the UDF layer renders as a **NULL** cell.
 
+use crabka_units::prelude::*;
 use num_traits::ToPrimitive;
 
 /// The reset-correcting / windowed range functions evaluated over a full
@@ -56,7 +57,7 @@ pub fn extrapolated_rate(
     values: &[f64],
     range_start_ms: i64,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     kind: RangeKind,
 ) -> Option<f64> {
     let n = timestamps.len();
@@ -105,7 +106,7 @@ pub fn extrapolated_rate(
     let extrapolate_to_interval = sampled_interval + duration_to_start + duration_to_end;
     result *= extrapolate_to_interval / sampled_interval;
     if kind == RangeKind::Rate {
-        let range_seconds = range_ms.to_f64()? / 1000.0;
+        let range_seconds = range.secs_f64();
         if range_seconds <= 0.0 {
             return None;
         }
@@ -159,8 +160,15 @@ mod tests {
         let timestamps = [0_i64, 60_000, 120_000, 180_000, 240_000];
         let values = [0.0, 1.0, 2.0, 3.0, 4.0];
         // range_end = 300_000, range = 300_000 (5m) => range_start = 0.
-        let got =
-            extrapolated_rate(&timestamps, &values, 0, 300_000, 300_000, RangeKind::Rate).unwrap();
+        let got = extrapolated_rate(
+            &timestamps,
+            &values,
+            0,
+            300_000,
+            millis(300_000),
+            RangeKind::Rate,
+        )
+        .unwrap();
         assert2::assert!(approx_eq(got, 5.0 / 300.0));
     }
 
@@ -177,7 +185,7 @@ mod tests {
             &values,
             0,
             120_000,
-            120_000,
+            millis(120_000),
             RangeKind::Increase,
         )
         .unwrap();
@@ -193,8 +201,15 @@ mod tests {
         let timestamps = [30_000_i64, 60_000];
         let values = [4.0, 3.0];
         // range_end = 60_000, range = 60_000 (1m) => range_start = 0.
-        let got =
-            extrapolated_rate(&timestamps, &values, 0, 60_000, 60_000, RangeKind::Delta).unwrap();
+        let got = extrapolated_rate(
+            &timestamps,
+            &values,
+            0,
+            60_000,
+            millis(60_000),
+            RangeKind::Delta,
+        )
+        .unwrap();
         assert2::assert!(approx_eq(got, -2.0));
     }
 
@@ -204,8 +219,15 @@ mod tests {
     fn extrapolation_threshold_uses_ten_percent_slack() {
         let timestamps = [11_050_i64, 21_050];
         let values = [2.0, 12.0];
-        let got =
-            extrapolated_rate(&timestamps, &values, 0, 21_050, 21_050, RangeKind::Delta).unwrap();
+        let got = extrapolated_rate(
+            &timestamps,
+            &values,
+            0,
+            21_050,
+            millis(21_050),
+            RangeKind::Delta,
+        )
+        .unwrap();
         assert2::assert!(approx_eq(got, 15.0));
     }
 
@@ -215,8 +237,15 @@ mod tests {
     fn counter_zero_anchor_limits_start_extrapolation() {
         let timestamps = [5_000_i64, 15_000];
         let values = [1.0, 4.0];
-        let got = extrapolated_rate(&timestamps, &values, 0, 15_000, 15_000, RangeKind::Increase)
-            .unwrap();
+        let got = extrapolated_rate(
+            &timestamps,
+            &values,
+            0,
+            15_000,
+            millis(15_000),
+            RangeKind::Increase,
+        )
+        .unwrap();
         assert2::assert!(approx_eq(got, 4.0));
     }
 
@@ -226,7 +255,15 @@ mod tests {
         let timestamps = [60_000_i64];
         let values = [1.0];
         assert2::assert!(
-            extrapolated_rate(&timestamps, &values, 0, 60_000, 60_000, RangeKind::Rate).is_none()
+            extrapolated_rate(
+                &timestamps,
+                &values,
+                0,
+                60_000,
+                millis(60_000),
+                RangeKind::Rate
+            )
+            .is_none()
         );
         assert2::assert!(instant_delta(&timestamps, &values, InstantKind::Irate).is_none());
     }
@@ -237,7 +274,15 @@ mod tests {
         let timestamps = [0_i64, 60_000];
         let values = [1.0];
         assert2::assert!(
-            extrapolated_rate(&timestamps, &values, 0, 60_000, 60_000, RangeKind::Rate).is_none()
+            extrapolated_rate(
+                &timestamps,
+                &values,
+                0,
+                60_000,
+                millis(60_000),
+                RangeKind::Rate
+            )
+            .is_none()
         );
     }
 
@@ -247,7 +292,15 @@ mod tests {
         let timestamps = [60_000_i64, 60_000];
         let values = [1.0, 2.0];
         assert2::assert!(
-            extrapolated_rate(&timestamps, &values, 0, 60_000, 60_000, RangeKind::Rate).is_none()
+            extrapolated_rate(
+                &timestamps,
+                &values,
+                0,
+                60_000,
+                millis(60_000),
+                RangeKind::Rate
+            )
+            .is_none()
         );
     }
 

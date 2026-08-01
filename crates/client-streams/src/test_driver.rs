@@ -5,6 +5,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crabka_units::prelude::*;
+
 use crate::{
     processor::{
         erased::{OutputRecord, ProcessorError},
@@ -46,7 +48,7 @@ impl TopologyTestDriver {
         // The JVM `TopologyTestDriver` defaults `statestore.cache.max.bytes` to 0
         // (caching disabled), so stores emit on every update and goldens stay
         // deterministic. Match that here.
-        let mut graph = pollster::block_on(built.instantiate(&backend, "app", 0))?;
+        let mut graph = pollster::block_on(built.instantiate(&backend, "app", ByteSize::ZERO))?;
         // The TopologyTestDriver builds the SHARED, fully-replicated global stores
         // into a `GlobalStateManager` and lends it to the graph's dispatch — the
         // same shared manager the real app runtime uses (the global consumer that
@@ -533,7 +535,7 @@ mod tests {
         // so the driver builds its graph with caching disabled (emit-on-update).
         let built = map_filter();
         let d = TopologyTestDriver::new(&built).unwrap();
-        check!(d.graph.cache_max_bytes() == 0);
+        check!(d.graph.cache_max_bytes() == ByteSize::ZERO);
     }
 
     #[test]

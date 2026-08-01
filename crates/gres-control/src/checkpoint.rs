@@ -2,20 +2,27 @@
 
 use std::str::FromStr;
 
+use crabka_units::{ByteSize, Time, convert::ByteSizeExt as _, mebibytes, secs};
 use refined_type::rule::{GreaterEqualUsize, GreaterUsize};
 
 /// Default checkpoint trigger threshold in committed WAL frames.
+///
+/// A frame count, not a magnitude, so it stays a plain integer.
 pub const DEFAULT_CHECKPOINT_FRAMES: u64 = 10_000;
 /// Default checkpoint trigger threshold in committed WAL bytes.
-pub const DEFAULT_CHECKPOINT_BYTES: u64 = 67_108_864;
-/// Default Kafka `DeleteRecords` timeout in milliseconds.
-pub const DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS: i32 = 30_000;
-/// Default checkpoint threshold polling interval in milliseconds.
-pub const DEFAULT_CHECKPOINT_POLL_INTERVAL_MS: u64 = 1_000;
-/// Default idle-suspend polling interval in milliseconds.
-pub const DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS: u64 = 1_000;
+pub const DEFAULT_CHECKPOINT_BYTES: ByteSize = mebibytes(64);
+/// Default Kafka `DeleteRecords` timeout.
+pub const DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT: Time = secs(30);
+/// Default checkpoint threshold polling interval.
+pub const DEFAULT_CHECKPOINT_POLL_INTERVAL: Time = secs(1);
+/// Default idle-suspend polling interval.
+pub const DEFAULT_IDLE_SUSPEND_POLL_INTERVAL: Time = secs(1);
 
 /// Checkpoint part size large enough to contain the fixed part header.
+///
+/// The validated magnitude is stored as a `usize` so the type stays `Eq` for the
+/// operator's CRD spec, which diffs by equality; [`Self::into_value`] is the seam
+/// that hands out a dimensioned [`ByteSize`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CheckpointPartBytes(usize);
 
@@ -31,10 +38,10 @@ impl CheckpointPartBytes {
             .map_err(|error| error.to_string())
     }
 
-    /// Return the validated byte count.
+    /// Return the validated part size.
     #[must_use]
-    pub const fn into_value(self) -> usize {
-        self.0
+    pub fn into_value(self) -> ByteSize {
+        ByteSize::from_bytes(u64::try_from(self.0).unwrap_or(u64::MAX))
     }
 }
 
@@ -85,14 +92,25 @@ impl FromStr for PositiveUsize {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+    use crabka_units::convert::TimeExt as _;
+
     use super::*;
 
     #[test]
     fn owns_cross_layer_checkpoint_defaults() {
-        assert_eq!(DEFAULT_CHECKPOINT_FRAMES, 10_000);
-        assert_eq!(DEFAULT_CHECKPOINT_BYTES, 67_108_864);
-        assert_eq!(DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS, 30_000);
-        assert_eq!(DEFAULT_CHECKPOINT_POLL_INTERVAL_MS, 1_000);
-        assert_eq!(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL_MS, 1_000);
+        check!(DEFAULT_CHECKPOINT_FRAMES == 10_000);
+        check!(DEFAULT_CHECKPOINT_BYTES.bytes_u64() == 67_108_864);
+        check!(DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT.millis_i32() == 30_000);
+        check!(DEFAULT_CHECKPOINT_POLL_INTERVAL.millis_i64() == 1_000);
+        check!(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL.millis_i64() == 1_000);
+    }
+
+    #[test]
+    fn checkpoint_part_size_carries_its_dimension() {
+        let part = CheckpointPartBytes::new(4_096).expect("a 4 KiB part is valid");
+
+        check!(part.into_value() == crabka_units::kibibytes(4));
+        check!(CheckpointPartBytes::new(7).is_err());
     }
 }

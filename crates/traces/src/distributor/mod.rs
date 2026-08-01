@@ -11,6 +11,11 @@ use axum::{
     routing::post,
 };
 use crabka_client_producer::{Header, Producer, ProducerRecord};
+use crabka_units::{
+    ByteSize, Frequency,
+    convert::{ByteSizeExt as _, FrequencyExt, StdDurationExt as _},
+    kibibytes, mebibytes,
+};
 use flate2::read::GzDecoder;
 use opentelemetry_proto::tonic::{
     collector::trace::v1::{
@@ -55,9 +60,11 @@ const CONTENT_ENCODING: &str = "content-encoding";
 pub struct TenantLimits {
     pub max_spans_per_request: usize,
     pub max_spans_per_trace: usize,
-    pub max_ingest_spans_per_second: usize,
+    /// Sustained ingest rate ceiling; zero is unlimited.
+    pub max_ingest_rate: Frequency,
     pub ingest_rate_burst: usize,
-    pub max_attr_value_len: usize,
+    /// Maximum size of one attribute key plus its value.
+    pub max_attr_value: ByteSize,
 }
 
 impl Default for TenantLimits {
@@ -65,9 +72,9 @@ impl Default for TenantLimits {
         Self {
             max_spans_per_request: 10_000,
             max_spans_per_trace: usize::MAX,
-            max_ingest_spans_per_second: usize::MAX,
+            max_ingest_rate: <Frequency as FrequencyExt>::ZERO,
             ingest_rate_burst: usize::MAX,
-            max_attr_value_len: 64 * 1024,
+            max_attr_value: kibibytes(64),
         }
     }
 }
@@ -76,12 +83,12 @@ impl TenantLimits {
     #[must_use]
     pub fn to_shared_limits(&self) -> Limits {
         Limits {
-            ingestion_rate_spans_per_sec: f64_limit_from_usize(self.max_ingest_spans_per_second),
+            ingestion_rate: self.max_ingest_rate,
             ingestion_burst_spans: u64_limit_from_usize(self.ingest_rate_burst),
             max_traces_per_search: Limits::default().max_traces_per_search,
             max_spans_per_trace: u64_limit_from_usize(self.max_spans_per_trace),
-            max_attribute_bytes: u64_limit_from_usize(self.max_attr_value_len),
-            max_search_duration_secs: Limits::default().max_search_duration_secs,
+            max_attribute: self.max_attr_value,
+            max_search_duration: Limits::default().max_search_duration,
         }
     }
 }
@@ -143,7 +150,8 @@ pub struct DistributorState {
     pub shared_limits: Limits,
     pub overrides: Option<OverridesProvider>,
     pub ingest_enforcer: IngestEnforcer,
-    pub max_decompressed: usize,
+    /// Ceiling on a decompressed request body.
+    pub max_decompressed: ByteSize,
     pub metrics: ServiceMetrics,
 }
 
@@ -161,7 +169,7 @@ impl DistributorState {
             shared_limits: TenantLimits::default().to_shared_limits(),
             overrides: None,
             ingest_enforcer: IngestEnforcer::new(),
-            max_decompressed: 10 * 1024 * 1024,
+            max_decompressed: mebibytes(10),
             metrics,
         }
     }
@@ -349,7 +357,7 @@ async fn otlp_push(
     body: Bytes,
 ) -> Response {
     let start = std::time::Instant::now();
-    let bytes = body.len() as u64;
+    let body_size = ByteSize::from_bytes(body.len() as u64);
     // One ingest span per request (NOT per span-record). The accepted-span count
     // is only known after decode, so it is declared `Empty` and recorded below;
     // this span becomes the local parent whose context is injected onto each WAL
@@ -361,14 +369,15 @@ async fn otlp_push(
         messaging.destination.name = TRACES_WAL_TOPIC,
         crabka.tenant = %tenant(&headers),
         crabka.ingest.spans = tracing::field::Empty,
-        crabka.ingest.bytes = bytes,
+        // A span field is a raw-number seam: emit the byte count itself.
+        crabka.ingest.bytes = body_size.bytes_u64(),
     );
     async move {
         if let Err(err) = require_content_type(
             &headers,
             &["application/x-protobuf", "application/protobuf"],
         ) {
-            return record_ingest_response(&state, error_response(&err), bytes, 0, start);
+            return record_ingest_response(&state, error_response(&err), body_size, 0, start);
         }
         match decode_body(&headers, &body, state.max_decompressed)
             .and_then(|body| {
@@ -382,9 +391,9 @@ async fn otlp_push(
                 tracing::Span::current().record("crabka.ingest.spans", items);
                 let resp =
                     append_decoded_response(&state, &headers, spans, otlp_success_response()).await;
-                record_ingest_response(&state, resp, bytes, items, start)
+                record_ingest_response(&state, resp, body_size, items, start)
             }
-            Err(err) => record_ingest_response(&state, error_response(&err), bytes, 0, start),
+            Err(err) => record_ingest_response(&state, error_response(&err), body_size, 0, start),
         }
     }
     .instrument(span)
@@ -397,18 +406,18 @@ async fn zipkin_push(
     body: Bytes,
 ) -> Response {
     let start = std::time::Instant::now();
-    let bytes = body.len() as u64;
+    let body_size = ByteSize::from_bytes(body.len() as u64);
     if let Err(err) = require_content_type(&headers, &["application/json"]) {
-        return record_ingest_response(&state, error_response(&err), bytes, 0, start);
+        return record_ingest_response(&state, error_response(&err), body_size, 0, start);
     }
     match decode_body(&headers, &body, state.max_decompressed).and_then(|body| decode_zipkin(&body))
     {
         Ok(spans) => {
             let items = spans.len() as u64;
             let resp = append_decoded(&state, &headers, spans, StatusCode::ACCEPTED).await;
-            record_ingest_response(&state, resp, bytes, items, start)
+            record_ingest_response(&state, resp, body_size, items, start)
         }
-        Err(err) => record_ingest_response(&state, error_response(&err), bytes, 0, start),
+        Err(err) => record_ingest_response(&state, error_response(&err), body_size, 0, start),
     }
 }
 
@@ -418,7 +427,7 @@ async fn jaeger_push(
     body: Bytes,
 ) -> Response {
     let start = std::time::Instant::now();
-    let bytes = body.len() as u64;
+    let body_size = ByteSize::from_bytes(body.len() as u64);
     if let Err(err) = require_content_type(
         &headers,
         &[
@@ -427,7 +436,7 @@ async fn jaeger_push(
             "application/vnd.apache.thrift.binary",
         ],
     ) {
-        return record_ingest_response(&state, error_response(&err), bytes, 0, start);
+        return record_ingest_response(&state, error_response(&err), body_size, 0, start);
     }
     match decode_body(&headers, &body, state.max_decompressed).and_then(|body| {
         if is_jaeger_binary_thrift(&headers) {
@@ -439,9 +448,9 @@ async fn jaeger_push(
         Ok(spans) => {
             let items = spans.len() as u64;
             let resp = append_decoded(&state, &headers, spans, StatusCode::ACCEPTED).await;
-            record_ingest_response(&state, resp, bytes, items, start)
+            record_ingest_response(&state, resp, body_size, items, start)
         }
-        Err(err) => record_ingest_response(&state, error_response(&err), bytes, 0, start),
+        Err(err) => record_ingest_response(&state, error_response(&err), body_size, 0, start),
     }
 }
 
@@ -449,17 +458,20 @@ async fn jaeger_push(
 /// the response unchanged. `ok` is true for any 2xx; the WAL/produce failure
 /// counter is bumped separately at the [`produce_spans`] error site, so a 4xx
 /// validation/rate-limit reject here does not inflate it.
+///
+/// `start` stays an [`Instant`](std::time::Instant) — an instant is a
+/// coordinate, not a magnitude; only the elapsed extent is a quantity.
 fn record_ingest_response(
     state: &DistributorState,
     resp: Response,
-    bytes: u64,
+    body: ByteSize,
     items: u64,
     start: std::time::Instant,
 ) -> Response {
     let ok = resp.status().is_success();
     state
         .metrics
-        .record_ingest(ok, bytes, items, start.elapsed().as_secs_f64());
+        .record_ingest(ok, body, items, start.elapsed().as_time());
     resp
 }
 
@@ -555,8 +567,9 @@ fn is_jaeger_binary_thrift(headers: &HeaderMap) -> bool {
 fn decode_body(
     headers: &HeaderMap,
     body: &[u8],
-    max_decompressed: usize,
+    max_decompressed: ByteSize,
 ) -> Result<Vec<u8>, TracesError> {
+    let max_decompressed = max_decompressed.bytes_usize();
     let encoding = headers
         .get(CONTENT_ENCODING)
         .and_then(|value| value.to_str().ok())
@@ -688,7 +701,7 @@ fn check_shared_attrs(limits: &Limits, attrs: &[KeyValue]) -> Result<(), TracesE
 /// Pair an attribute key with the TRUE encoded byte length of its value.
 ///
 /// Measuring the real byte length (rather than stringifying) ensures the
-/// `max_attribute_bytes` cap sees the actual size of `Bytes`/`Int`/`Double`
+/// `Limits::max_attribute` cap sees the actual size of `Bytes`/`Int`/`Double`
 /// values, which a `String` conversion would mis-report (e.g. a large byte
 /// blob would otherwise read as length 0 and bypass the limit).
 fn shared_attr_measured(attr: &KeyValue) -> (String, u64) {
@@ -720,14 +733,6 @@ fn u64_limit_from_usize(value: usize) -> u64 {
     }
 }
 
-fn f64_limit_from_usize(value: usize) -> f64 {
-    if value == usize::MAX {
-        0.0
-    } else {
-        value.to_string().parse().unwrap_or(f64::INFINITY)
-    }
-}
-
 fn validate_attrs(attrs: &[KeyValue], limits: &TenantLimits) -> Result<(), TracesError> {
     for attr in attrs {
         let len = attr.key.len()
@@ -736,10 +741,11 @@ fn validate_attrs(attrs: &[KeyValue], limits: &TenantLimits) -> Result<(), Trace
                 AttrValue::Bytes(value) => value.len(),
                 AttrValue::Int(_) | AttrValue::Double(_) | AttrValue::Bool(_) => 0,
             };
-        if len > limits.max_attr_value_len {
+        if len > limits.max_attr_value.bytes_usize() {
             return Err(TracesError::Limit(format!(
                 "attribute `{}` exceeds limit {}",
-                attr.key, limits.max_attr_value_len
+                attr.key,
+                limits.max_attr_value.bytes_usize()
             )));
         }
     }
@@ -808,6 +814,7 @@ mod tests {
 
     use assert2::check;
     use axum::{body::Body, http::Request};
+    use crabka_units::{bytes, per_sec};
     use flate2::{Compression, write::GzEncoder};
     use http_body_util::BodyExt as _;
     use opentelemetry_proto::tonic::{
@@ -856,7 +863,7 @@ mod tests {
         let mut state = DistributorState::new(sink.clone());
         state.shared_limits = limits.to_shared_limits();
         state.limits = limits;
-        state.max_decompressed = 1024 * 1024;
+        state.max_decompressed = mebibytes(1);
         (Arc::new(state), sink)
     }
 
@@ -866,7 +873,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let mut state = DistributorState::new(sink.clone());
         state.shared_limits = limits;
-        state.max_decompressed = 1024 * 1024;
+        state.max_decompressed = mebibytes(1);
         (Arc::new(state), sink)
     }
 
@@ -876,7 +883,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let mut state = DistributorState::new(sink.clone());
         state.overrides = Some(overrides);
-        state.max_decompressed = 1024 * 1024;
+        state.max_decompressed = mebibytes(1);
         (Arc::new(state), sink)
     }
 
@@ -1321,7 +1328,7 @@ overrides:
     #[tokio::test]
     async fn shared_ingest_rate_limit_is_per_tenant() {
         let limits = crate::limits::Limits {
-            ingestion_rate_spans_per_sec: 1.0,
+            ingestion_rate: per_sec(1),
             ingestion_burst_spans: 1,
             ..crate::limits::Limits::default()
         };
@@ -1383,7 +1390,7 @@ overrides:
     #[tokio::test]
     async fn ingest_rate_limit_is_per_tenant() {
         let limits = TenantLimits {
-            max_ingest_spans_per_second: 1,
+            max_ingest_rate: per_sec(1),
             ingest_rate_burst: 1,
             ..TenantLimits::default()
         };
@@ -1457,7 +1464,7 @@ overrides:
     #[test]
     fn validate_rejects_large_attribute_values() {
         let limits = TenantLimits {
-            max_attr_value_len: 2,
+            max_attr_value: bytes(2),
             ..TenantLimits::default()
         };
         let span = Span {
@@ -1486,7 +1493,7 @@ overrides:
     #[test]
     fn validate_rejects_large_attribute_keys() {
         let limits = TenantLimits {
-            max_attr_value_len: 4,
+            max_attr_value: bytes(4),
             ..TenantLimits::default()
         };
         let span = Span {
@@ -1628,7 +1635,7 @@ overrides:
     #[test]
     fn oversized_bytes_attr_is_rejected_by_attribute_size_cap() {
         let limits = crate::limits::Limits {
-            max_attribute_bytes: 4,
+            max_attribute: bytes(4),
             ..crate::limits::Limits::default()
         };
         // A `Bytes` value of 8 bytes exceeds the 4-byte cap. The old stringless

@@ -12,10 +12,11 @@
 //! `delegation_tokens`). This matches Kafka's "every broker sweeps,
 //! idempotent" pattern from KIP-48 §6.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use crabka_metadata::{DeleteDelegationTokenRecord, MetadataImage, MetadataRecord};
+use crabka_units::{Time, convert::TimeExt as _};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -31,10 +32,10 @@ pub(crate) trait DelegationTokenController: Send + Sync {
 /// Spawned task entry point. Returns when `shutdown` is cancelled.
 pub(crate) async fn run(
     controller: Arc<dyn DelegationTokenController>,
-    interval: Duration,
+    interval: Time,
     shutdown: CancellationToken,
 ) {
-    let mut tick = tokio::time::interval(interval);
+    let mut tick = tokio::time::interval(interval.to_std());
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {
@@ -82,11 +83,12 @@ pub(crate) async fn sweep(controller: &dyn DelegationTokenController) {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::{sync::Mutex, time::Duration};
 
     use assert2::assert;
     use crabka_metadata::{DelegationTokenRecord, MetadataImage, MetadataRecord};
     use crabka_security::KafkaPrincipal;
+    use crabka_units::hours;
     use uuid::Uuid;
 
     use super::*;
@@ -203,7 +205,7 @@ mod tests {
             submitted: Mutex::new(Vec::new()),
         });
         let shutdown = CancellationToken::new();
-        let mut task = tokio::spawn(run(mock.clone(), Duration::from_hours(1), shutdown.clone()));
+        let mut task = tokio::spawn(run(mock.clone(), hours(1), shutdown.clone()));
 
         tokio::time::timeout(Duration::from_secs(1), async {
             loop {

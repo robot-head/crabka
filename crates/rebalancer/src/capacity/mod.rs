@@ -11,6 +11,7 @@ pub mod load;
 
 use std::collections::HashMap;
 
+use crabka_units::{ByteRate, ByteSize};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -19,12 +20,24 @@ pub struct BrokerCapacities {
     pub by_broker: HashMap<i32, BrokerCapacity>,
 }
 
+/// Limits for one broker. Field names are the keys of the operator-supplied
+/// capacity YAML, so they keep their unit suffixes even though the types now
+/// carry the dimension.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 pub struct BrokerCapacity {
     pub max_replicas: Option<u32>,
-    pub disk_bytes: Option<u64>,
-    pub network_in_bytes_per_sec: Option<u64>,
-    pub network_out_bytes_per_sec: Option<u64>,
+    #[serde(default, with = "crabka_units::serde_units::numeric::option_bytes_u64")]
+    pub disk_bytes: Option<ByteSize>,
+    #[serde(
+        default,
+        with = "crabka_units::serde_units::numeric::option_bytes_per_sec_i64"
+    )]
+    pub network_in_bytes_per_sec: Option<ByteRate>,
+    #[serde(
+        default,
+        with = "crabka_units::serde_units::numeric::option_bytes_per_sec_i64"
+    )]
+    pub network_out_bytes_per_sec: Option<ByteRate>,
     pub cpu_cores: Option<f64>,
 }
 

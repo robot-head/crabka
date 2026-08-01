@@ -71,15 +71,15 @@ fn remote_write_v1_body() -> Vec<u8> {
 /// Per-tenant overrides: org-a is rate-limited to a single sample of burst;
 /// org-b is effectively unlimited. Unlisted tenants fall back to defaults.
 fn tenant_overrides() -> OverridesProvider {
-    let yaml = "
+    let yaml = r#"
 overrides:
   org-a:
-    ingestion_rate: 1
+    ingestion_rate: "1/s"
     ingestion_burst_size: 1
   org-b:
-    ingestion_rate: 1000000
+    ingestion_rate: "1000000/s"
     ingestion_burst_size: 1000000
-";
+"#;
     OverridesProvider::from_yaml(yaml).expect("parse tenant overrides")
 }
 

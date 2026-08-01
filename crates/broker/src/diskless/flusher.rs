@@ -8,6 +8,7 @@ use std::{
 };
 
 use crabka_log::{Log, Offset};
+use crabka_units::{ByteSize, mebibytes};
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
@@ -19,13 +20,13 @@ use super::{
 };
 
 pub(crate) const FLUSH_INTERVAL: Duration = Duration::from_millis(250);
-pub(crate) const FLUSH_MAX_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const FLUSH_MAX_SIZE: ByteSize = mebibytes(8);
 pub(crate) const DEFAULT_TRIM_SAFETY_LAG: i64 = 1;
 
 #[derive(Debug, Clone)]
 pub(crate) struct FlushConfig {
     pub(crate) interval: Duration,
-    pub(crate) max_bytes: usize,
+    pub(crate) max_size: ByteSize,
     pub(crate) trim_safety_lag: Option<i64>,
 }
 
@@ -33,7 +34,7 @@ impl Default for FlushConfig {
     fn default() -> Self {
         Self {
             interval: FLUSH_INTERVAL,
-            max_bytes: FLUSH_MAX_BYTES,
+            max_size: FLUSH_MAX_SIZE,
             trim_safety_lag: Some(DEFAULT_TRIM_SAFETY_LAG),
         }
     }
@@ -64,7 +65,7 @@ pub(crate) async fn flush_once(
             .log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .read_raw(Offset(start), partition.high_watermark, config.max_bytes)
+            .read_raw(Offset(start), partition.high_watermark, config.max_size)
             .map_err(crate::error::BrokerError::from)?;
         let Some(last_offset) = raw.last_offset else {
             continue;

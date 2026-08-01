@@ -2,6 +2,7 @@
 //! optimizer, persist the resulting proposal, tag the anomaly. Guarded
 //! by config and by in-flight-execution / in-flight-reassignment gates.
 
+use crabka_units::convert::{StdDurationExt as _, TimeExt as _};
 use tracing::{debug, info, warn};
 
 use super::DetectorConfig;
@@ -120,7 +121,7 @@ pub async fn maybe_trigger(
             return Err(AutoTriggerError::Optimizer(e));
         }
     };
-    rebal_metrics.observe_rebalance_duration(started.elapsed().as_secs_f64());
+    rebal_metrics.observe_rebalance_duration(started.elapsed().as_time());
     if out.proposal.movements.is_empty() {
         rebal_metrics.record_rebalance("no_movements");
         ctx.metrics.auto_trigger_skipped_no_movements.inc();
@@ -132,9 +133,9 @@ pub async fn maybe_trigger(
     let proposal_id = out.proposal.id.clone();
     ctx.proposal_store.insert(out.proposal);
 
-    let mute_until_ms = ctx.now_ms.saturating_add(
-        i64::try_from(ctx.config.default_mute_window.as_millis()).unwrap_or(i64::MAX),
-    );
+    let mute_until_ms = ctx
+        .now_ms
+        .saturating_add(ctx.config.default_mute_window.millis_i64());
     ctx.anomaly_store
         .set_triggered_proposal(&anomaly.id, proposal_id.clone(), mute_until_ms);
 
@@ -151,8 +152,9 @@ pub async fn maybe_trigger(
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
 
+    use crabka_units::{bytes_per_sec, millis, minutes, percent, secs};
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
@@ -239,9 +241,9 @@ mod tests {
             store: proposal_store.clone(),
             config: ExecutorConfig {
                 data_dir: dir.path().to_path_buf(),
-                default_throttle_bytes_per_sec: 50_000_000,
-                poll_interval: Duration::from_millis(50),
-                execute_deadline: Duration::from_secs(30),
+                default_throttle: bytes_per_sec(50_000_000),
+                poll_interval: millis(50),
+                execute_deadline: secs(30),
                 batch_size: 200,
             },
             metrics: rebal_metrics,
@@ -253,7 +255,7 @@ mod tests {
 
         let goal_registry = GoalRegistry::default_registry();
         let goal_ctx = GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(BrokerCapacities::default()),
@@ -270,7 +272,7 @@ mod tests {
             metrics,
             config: DetectorConfig {
                 auto_trigger_enabled,
-                default_mute_window: Duration::from_mins(15),
+                default_mute_window: minutes(15),
                 ..DetectorConfig::default()
             },
             _dir: dir,

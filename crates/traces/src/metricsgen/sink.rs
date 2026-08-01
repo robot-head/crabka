@@ -3,11 +3,11 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use async_trait::async_trait;
 use crabka_client_consumer::{Consumer, ConsumerRecord};
+use crabka_units::{ByteSize, Time, convert::ByteSizeExt as _, millis};
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::{
@@ -43,7 +43,7 @@ pub trait SpanSource: Send + Sync {
 /// Kafka-backed source for the traces WAL consumer group.
 pub struct KafkaSpanSource {
     consumer: AsyncMutex<Consumer>,
-    poll_timeout: Duration,
+    poll_timeout: Time,
 }
 
 impl KafkaSpanSource {
@@ -51,12 +51,12 @@ impl KafkaSpanSource {
     pub fn new(consumer: Consumer) -> Self {
         Self {
             consumer: AsyncMutex::new(consumer),
-            poll_timeout: Duration::from_millis(500),
+            poll_timeout: millis(500),
         }
     }
 
     #[must_use]
-    pub fn with_poll_timeout(mut self, poll_timeout: Duration) -> Self {
+    pub fn with_poll_timeout(mut self, poll_timeout: Time) -> Self {
         self.poll_timeout = poll_timeout;
         self
     }
@@ -91,9 +91,9 @@ pub fn decode_consumer_records(records: Vec<ConsumerRecord>) -> Result<Vec<SpanR
         .into_iter()
         .filter_map(|record| {
             record.value.map(|value| {
-                let size_bytes = u64::try_from(value.len()).unwrap_or(u64::MAX);
+                let size = ByteSize::from_bytes(u64::try_from(value.len()).unwrap_or(u64::MAX));
                 wal::SpanRecord::decode(&value)
-                    .map(|wal| project_wal_record(wal, size_bytes))
+                    .map(|wal| project_wal_record(wal, size))
                     .map_err(|err| SinkError::Decode(err.to_string()))
             })
         })
@@ -101,7 +101,7 @@ pub fn decode_consumer_records(records: Vec<ConsumerRecord>) -> Result<Vec<SpanR
 }
 
 #[must_use]
-pub fn project_wal_record(record: wal::SpanRecord, size_bytes: u64) -> SpanRecord {
+pub fn project_wal_record(record: wal::SpanRecord, size: ByteSize) -> SpanRecord {
     let service_name = service_name(&record.span.resource_attrs);
     let attributes = record
         .span
@@ -125,7 +125,7 @@ pub fn project_wal_record(record: wal::SpanRecord, size_bytes: u64) -> SpanRecor
         status_message: record.span.status_message,
         service_name,
         attributes,
-        size_bytes,
+        size,
     }
 }
 
@@ -307,7 +307,7 @@ mod tests {
             status_message: String::new(),
             service_name: "api".into(),
             attributes: vec![],
-            size_bytes: 0,
+            size: ByteSize::from_bytes(0),
         }
     }
 
@@ -370,7 +370,7 @@ mod tests {
             span: wal_span(),
         };
 
-        let projected = project_wal_record(record, 123);
+        let projected = project_wal_record(record, ByteSize::from_bytes(123));
 
         assert2::assert!(
             projected
@@ -390,7 +390,7 @@ mod tests {
                         ("db.system".into(), "postgresql".into()),
                         ("http.status_code".into(), "200".into()),
                     ],
-                    size_bytes: 123,
+                    size: ByteSize::from_bytes(123),
                 }
         );
     }
@@ -401,7 +401,7 @@ mod tests {
             tenant: "tenant-a".into(),
             span: wal_span(),
         };
-        let bytes = record.encode().unwrap();
+        let encoded = record.encode().unwrap();
         let records = vec![
             crabka_client_consumer::ConsumerRecord {
                 topic: crate::TRACES_WAL_TOPIC.into(),
@@ -410,7 +410,7 @@ mod tests {
                 leader_epoch: -1,
                 timestamp: 0,
                 key: None,
-                value: Some(bytes::Bytes::from(bytes.clone())),
+                value: Some(bytes::Bytes::from(encoded.clone())),
                 headers: Vec::new(),
             },
             crabka_client_consumer::ConsumerRecord {
@@ -429,6 +429,6 @@ mod tests {
 
         assert2::assert!(projected.len() == 1);
         check!(projected[0].tenant == "tenant-a");
-        check!(projected[0].size_bytes == u64::try_from(bytes.len()).unwrap());
+        check!(projected[0].size.bytes_usize() == encoded.len());
     }
 }

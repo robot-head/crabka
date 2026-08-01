@@ -15,6 +15,7 @@
 use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD as B64URL};
+use crabka_units::{Time, convert::TimeExt, fmt::Human as _, secs};
 use jsonpath_rust::{parser::model::JpQuery, query::js_path_process};
 use serde_json::Value;
 
@@ -116,9 +117,9 @@ fn parse_gs2_header(gs2: &str) -> Result<Option<String>, AuthError> {
 pub struct UnsecuredJwsValidator {
     /// Claim whose string value becomes the principal name. Default `sub`.
     pub principal_claim_name: String,
-    /// Tolerance, in milliseconds, applied to the `exp` / `iat` temporal
-    /// checks to absorb clock drift between the client and broker.
-    pub allowable_clock_skew_ms: i64,
+    /// Tolerance applied to the `exp` / `iat` temporal checks to absorb clock
+    /// drift between the client and broker.
+    pub allowable_clock_skew: Time,
     /// Precompiled `JsonPath` expression evaluated against the
     /// token's claim set. Token is rejected when the expression yields
     /// empty/null/false. Compile once at validator construction.
@@ -146,7 +147,7 @@ impl Default for UnsecuredJwsValidator {
     fn default() -> Self {
         Self {
             principal_claim_name: "sub".to_string(),
-            allowable_clock_skew_ms: 30_000,
+            allowable_clock_skew: secs(30),
             custom_claim_check: None,
             valid_token_type: None,
             fallback_user_name_claim: None,
@@ -203,14 +204,15 @@ impl UnsecuredJwsValidator {
 
         let claims: Value = decode_json_segment(payload_b64)?;
 
+        let skew_ms = skew_millis(self.allowable_clock_skew);
         // `exp` is required and must be in the future (within skew).
         let exp_ms = numeric_date_ms(&claims, "exp").ok_or(AuthError::InvalidToken)?;
-        if exp_ms + self.allowable_clock_skew_ms <= now_ms {
+        if exp_ms + skew_ms <= now_ms {
             return Err(AuthError::InvalidToken);
         }
         // `iat` is optional; if present it must not be in the future (within skew).
         if let Some(iat_ms) = numeric_date_ms(&claims, "iat")
-            && iat_ms - self.allowable_clock_skew_ms > now_ms
+            && iat_ms - skew_ms > now_ms
         {
             return Err(AuthError::InvalidToken);
         }
@@ -342,6 +344,17 @@ fn decode_json_segment(seg: &str) -> Result<Value, AuthError> {
     serde_json::from_slice(&bytes).map_err(|_| AuthError::InvalidToken)
 }
 
+/// A clock-skew tolerance in whole milliseconds, the unit the JWT
+/// `NumericDate` claims are normalized to.
+///
+/// The temporal checks compare epoch-millisecond instants, which stay raw
+/// integers, so the tolerance has to meet them in that unit. Rounding to
+/// nearest matches every other timeout that crosses this seam; no wire field
+/// carries this value, so truncation is not required.
+fn skew_millis(skew: Time) -> i64 {
+    skew.millis_i64()
+}
+
 /// Read a JWT `NumericDate` claim (seconds since the epoch, possibly
 /// fractional) and convert it to integer milliseconds.
 fn numeric_date_ms(claims: &Value, key: &str) -> Option<i64> {
@@ -379,8 +392,8 @@ pub fn invalid_token_json() -> String {
 pub struct SignedJwsValidator {
     /// Claim whose string value becomes the principal name. Default `sub`.
     pub principal_claim_name: String,
-    /// Tolerance, in milliseconds, applied to `exp` / `iat` / `nbf`.
-    pub allowable_clock_skew_ms: i64,
+    /// Tolerance applied to `exp` / `iat` / `nbf`.
+    pub allowable_clock_skew: Time,
     /// When set, the token `iss` claim must equal this exactly.
     pub valid_issuer: Option<String>,
     /// When set, the token `aud` claim must contain this value.
@@ -398,13 +411,12 @@ pub struct SignedJwsValidator {
     pub groups_claim: Option<JpQuery>,
     /// Delimiter when `groups_claim` resolves to a string.
     pub groups_claim_delimiter: Option<String>,
-    /// Hard cache-expiry threshold, in milliseconds. When set,
-    /// the validator rejects tokens if the paired refresher has not had a
-    /// successful fetch within this window (using
-    /// [`JwksHandle::last_successful_fetch_ms`]). `None` = no expiry check.
-    /// Fails closed on prolonged `IdP` outage so a
-    /// rotated-out key can't keep signing valid tokens indefinitely.
-    pub expiry_ms: Option<i64>,
+    /// Hard cache-expiry threshold. When set, the validator rejects tokens if
+    /// the paired refresher has not had a successful fetch within this window
+    /// (using [`JwksHandle::last_successful_fetch_ms`]). `None` = no expiry
+    /// check. Fails closed on prolonged `IdP` outage so a rotated-out key
+    /// can't keep signing valid tokens indefinitely.
+    pub cache_expiry: Option<Time>,
     /// The live JWKS, swapped in by the broker's refresher.
     keys: JwksHandle,
 }
@@ -416,7 +428,7 @@ impl SignedJwsValidator {
     pub fn new(keys: JwksHandle) -> Self {
         Self {
             principal_claim_name: "sub".to_string(),
-            allowable_clock_skew_ms: 30_000,
+            allowable_clock_skew: secs(30),
             valid_issuer: None,
             expected_audience: None,
             custom_claim_check: None,
@@ -425,7 +437,7 @@ impl SignedJwsValidator {
             fallback_user_name_prefix: None,
             groups_claim: None,
             groups_claim_delimiter: None,
-            expiry_ms: None,
+            cache_expiry: None,
             keys,
         }
     }
@@ -477,19 +489,19 @@ impl SignedJwsValidator {
             return Err(AuthError::InvalidToken);
         }
 
-        // Hard cache-expiry. If the last successful refresh is
-        // older than `expiry_ms`, reject all tokens until the refresher
-        // succeeds again. The `last_fetch > 0` guard skips this on a
-        // never-fetched handle so the "broker is still starting
-        // up" path stays open (the verify-level check below will reject
-        // anyway because the key set is empty).
-        if let Some(expiry_ms) = self.expiry_ms {
+        // Hard cache-expiry. If the last successful refresh is older than
+        // `cache_expiry`, reject all tokens until the refresher succeeds
+        // again. The `last_fetch > 0` guard skips this on a never-fetched
+        // handle so the "broker is still starting up" path stays open (the
+        // verify-level check below will reject anyway because the key set is
+        // empty).
+        if let Some(cache_expiry) = self.cache_expiry {
             let last_fetch = self.keys.last_successful_fetch_ms();
-            if last_fetch > 0 && now_ms.saturating_sub(last_fetch) > expiry_ms {
+            if last_fetch > 0 && now_ms.saturating_sub(last_fetch) > cache_expiry.millis_i64() {
                 tracing::debug!(
                     last_fetch_ms = last_fetch,
                     now_ms,
-                    expiry_ms,
+                    cache_expiry = %cache_expiry.human(),
                     "JWKS cache expired; rejecting token until next successful refresh",
                 );
                 return Err(AuthError::InvalidToken);
@@ -525,20 +537,21 @@ impl SignedJwsValidator {
     /// already-signature-verified `claims`. Split out so the policy is
     /// unit-testable without minting signed tokens.
     fn check_claims(&self, claims: &Value, now_ms: i64) -> Result<AuthOutcome, AuthError> {
+        let skew_ms = skew_millis(self.allowable_clock_skew);
         // `exp` required and in the future (within skew).
         let exp_ms = numeric_date_ms(claims, "exp").ok_or(AuthError::InvalidToken)?;
-        if exp_ms + self.allowable_clock_skew_ms <= now_ms {
+        if exp_ms + skew_ms <= now_ms {
             return Err(AuthError::InvalidToken);
         }
         // `iat` optional: must not be in the future (within skew).
         if let Some(iat_ms) = numeric_date_ms(claims, "iat")
-            && iat_ms - self.allowable_clock_skew_ms > now_ms
+            && iat_ms - skew_ms > now_ms
         {
             return Err(AuthError::InvalidToken);
         }
         // `nbf` optional: token not valid before it (within skew).
         if let Some(nbf_ms) = numeric_date_ms(claims, "nbf")
-            && nbf_ms - self.allowable_clock_skew_ms > now_ms
+            && nbf_ms - skew_ms > now_ms
         {
             return Err(AuthError::InvalidToken);
         }
@@ -711,7 +724,7 @@ pub struct IntrospectionValidator {
     pub call_userinfo: bool,
     /// Clock-skew tolerance for `exp`/`iat`/`nbf` checks on
     /// introspection-response timestamps (when present).
-    pub allowable_clock_skew_ms: i64,
+    pub allowable_clock_skew: Time,
     /// When set, the introspection-response `aud` claim (RFC 7662 §2.2) must
     /// contain this value. Defaults to `None` (no audience restriction).
     /// Prevents a token minted for another resource server of the same `IdP`,
@@ -770,7 +783,7 @@ impl IntrospectionValidator {
         {
             return Err(AuthError::InvalidToken);
         }
-        check_temporal_claims(&claims, now_ms, self.allowable_clock_skew_ms)?;
+        check_temporal_claims(&claims, now_ms, self.allowable_clock_skew)?;
         // Capture `exp_ms` from the introspection response BEFORE any userinfo
         // merge. Introspection's `exp` is the authoritative session expiry
         // (RFC 7662); userinfo typically doesn't carry `exp`, and the
@@ -841,7 +854,8 @@ impl IntrospectionValidator {
 
 /// Skew-tolerant temporal-claims check for introspection responses.
 /// RFC 7662 doesn't mandate exp/iat/nbf, but honor them when present.
-fn check_temporal_claims(claims: &Value, now_ms: i64, skew_ms: i64) -> Result<(), AuthError> {
+fn check_temporal_claims(claims: &Value, now_ms: i64, skew: Time) -> Result<(), AuthError> {
+    let skew_ms = skew_millis(skew);
     if let Some(exp_s) = claims.get("exp").and_then(Value::as_i64) {
         let exp_ms = exp_s.saturating_mul(1000);
         if now_ms.saturating_sub(skew_ms) > exp_ms {
@@ -882,6 +896,7 @@ fn merge_userinfo_over_introspection(introspection: &mut Value, userinfo: Value)
 #[cfg(test)]
 mod tests {
 
+    use crabka_units::{millis, minutes};
     use jsonpath_rust::parser::parse_json_path;
 
     use super::*;
@@ -1002,10 +1017,44 @@ mod tests {
         );
     }
 
+    /// The temporal checks compare epoch-millisecond instants, so the
+    /// configured skew has to arrive there in whole milliseconds. Pins the
+    /// seam, including that a sub-millisecond tolerance rounds rather than
+    /// collapsing to zero the way an `as i64` truncation would.
+    #[test]
+    fn clock_skew_crosses_into_the_temporal_checks_in_whole_milliseconds() {
+        for (_name, skew, expected_ms) in [
+            ("zero", <Time as TimeExt>::ZERO, 0),
+            ("default", secs(30), 30_000),
+            ("one millisecond", millis(1), 1),
+            ("sub-millisecond rounds up", Time::from_secs_f64(0.0006), 1),
+            (
+                "sub-millisecond rounds down",
+                Time::from_secs_f64(0.0004),
+                0,
+            ),
+            ("five minutes", minutes(5), 300_000),
+        ] {
+            assert2::check!(skew_millis(skew) == expected_ms);
+        }
+    }
+
+    /// `exp` is compared as `exp_ms + skew <= now_ms`, so the accept/reject
+    /// boundary must sit exactly at the configured tolerance.
+    #[test]
+    fn unsecured_exp_boundary_tracks_the_configured_skew_exactly() {
+        // exp = 1000 s ⇒ exp_ms = 1_000_000. With 30 s of skew the token is
+        // still good at now = 1_030_000 and dead one millisecond later.
+        let token = unsecured("admin", 900, 1_000);
+        let v = UnsecuredJwsValidator::default();
+        assert2::check!(v.validate(&token, 1_029_999).is_ok());
+        assert2::check!(v.validate(&token, 1_030_000).is_err());
+    }
+
     #[test]
     fn validate_rejects_expired_token() {
         let v = UnsecuredJwsValidator {
-            allowable_clock_skew_ms: 0,
+            allowable_clock_skew: <Time as TimeExt>::ZERO,
             ..Default::default()
         };
         let now = 2_000_000_000_000;
@@ -1016,7 +1065,7 @@ mod tests {
     #[test]
     fn validate_rejects_future_iat() {
         let v = UnsecuredJwsValidator {
-            allowable_clock_skew_ms: 0,
+            allowable_clock_skew: <Time as TimeExt>::ZERO,
             ..Default::default()
         };
         let now = 1_000_000_000_000;
@@ -1028,7 +1077,7 @@ mod tests {
     #[test]
     fn validate_accepts_exp_and_iat_at_skew_boundaries() {
         let v = UnsecuredJwsValidator {
-            allowable_clock_skew_ms: 1_000,
+            allowable_clock_skew: secs(1),
             ..Default::default()
         };
 
@@ -1433,7 +1482,7 @@ mod tests {
     fn signed_rejects_expired() {
         let (token, jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":1000}");
         let (mut v, _h) = signed(&jwks);
-        v.allowable_clock_skew_ms = 0;
+        v.allowable_clock_skew = <Time as TimeExt>::ZERO;
         // now (ms) far past exp (1000 s).
         assert2::assert!(v.validate(&token, 5_000_000_000_000) == Err(AuthError::InvalidToken));
     }
@@ -1445,7 +1494,7 @@ mod tests {
             "{\"sub\":\"a\",\"exp\":9999999999,\"nbf\":5000000000}",
         );
         let (mut v, _h) = signed(&jwks);
-        v.allowable_clock_skew_ms = 0;
+        v.allowable_clock_skew = <Time as TimeExt>::ZERO;
         // now = 1e12 ms = 1e9 s, which is before nbf (5e9 s).
         assert2::assert!(v.validate(&token, 1_000_000_000_000) == Err(AuthError::InvalidToken));
     }
@@ -1638,7 +1687,7 @@ mod tests {
             "{\"sub\":\"a\",\"exp\":2000,\"iat\":2001,\"nbf\":2001}",
         );
         let (mut v, _h) = signed(&jwks);
-        v.allowable_clock_skew_ms = 1_000;
+        v.allowable_clock_skew = secs(1);
         assert2::assert!(v.validate(&token, 2_000_000).is_ok());
     }
 
@@ -1646,17 +1695,17 @@ mod tests {
     fn signed_rejects_temporal_claims_outside_skew_boundaries() {
         let (expired, expired_jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":1999}");
         let (mut expired_v, _h) = signed(&expired_jwks);
-        expired_v.allowable_clock_skew_ms = 1_000;
+        expired_v.allowable_clock_skew = secs(1);
         assert2::assert!(expired_v.validate(&expired, 2_000_000).is_err());
 
         let (future_iat, iat_jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":3000,\"iat\":2002}");
         let (mut iat_v, _h) = signed(&iat_jwks);
-        iat_v.allowable_clock_skew_ms = 1_000;
+        iat_v.allowable_clock_skew = secs(1);
         assert2::assert!(iat_v.validate(&future_iat, 2_000_000).is_err());
 
         let (future_nbf, nbf_jwks) = mint_rs256("k1", "{\"sub\":\"a\",\"exp\":3000,\"nbf\":2002}");
         let (mut nbf_v, _h) = signed(&nbf_jwks);
-        nbf_v.allowable_clock_skew_ms = 1_000;
+        nbf_v.allowable_clock_skew = secs(1);
         assert2::assert!(nbf_v.validate(&future_nbf, 2_000_000).is_err());
     }
 
@@ -1723,7 +1772,7 @@ mod tests {
         let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
         // Last fetch 2s ago; expiry threshold 1s ⇒ expired.
         let (mut v, _rx) = signed_with_handles(&jwks, now_ms - 2_000);
-        v.expiry_ms = Some(1_000);
+        v.cache_expiry = Some(secs(1));
         assert2::assert!(v.validate(&token, now_ms) == Err(AuthError::InvalidToken));
     }
 
@@ -1734,7 +1783,7 @@ mod tests {
         let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
         // Last fetch 500ms ago; expiry threshold 1s ⇒ still fresh.
         let (mut v, _rx) = signed_with_handles(&jwks, now_ms - 500);
-        v.expiry_ms = Some(1_000);
+        v.cache_expiry = Some(secs(1));
         let outcome = v.validate(&token, now_ms).expect("valid");
         assert2::assert!(outcome.principal.name == "alice");
     }
@@ -1745,7 +1794,7 @@ mod tests {
         let exp_secs: i64 = (now_ms / 1000) + 60;
         let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
         let (mut v, _rx) = signed_with_handles(&jwks, now_ms - 1_000);
-        v.expiry_ms = Some(1_000);
+        v.cache_expiry = Some(secs(1));
         let outcome = v.validate(&token, now_ms).expect("valid");
         assert2::assert!(outcome.principal.name == "alice");
     }
@@ -1755,9 +1804,9 @@ mod tests {
         let now_ms: i64 = 10_000_000;
         let exp_secs: i64 = (now_ms / 1000) + 60;
         let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
-        // Cache "is" very stale, but expiry_ms = None ⇒ no check fires.
+        // Cache "is" very stale, but cache_expiry = None ⇒ no check fires.
         let (v, _rx) = signed_with_handles(&jwks, now_ms - 999_999_999);
-        // expiry_ms left at default None.
+        // cache_expiry left at default None.
         assert2::assert!(v.validate(&token, now_ms).is_ok());
     }
 
@@ -1771,7 +1820,7 @@ mod tests {
         let exp_secs: i64 = (now_ms / 1000) + 60;
         let (token, jwks) = mint_rs256("k1", &format!("{{\"sub\":\"alice\",\"exp\":{exp_secs}}}"));
         let (mut v, _rx) = signed_with_handles(&jwks, 0);
-        v.expiry_ms = Some(1);
+        v.cache_expiry = Some(millis(1));
         // Cache "age" math would say "very expired" if we ran it, but the
         // sentinel-zero guard skips. Verification succeeds.
         assert2::assert!(v.validate(&token, now_ms).is_ok());
@@ -1870,7 +1919,9 @@ mod introspection_tests {
             ("at boundary", 10_000, true),
             ("past expiry", 10_001, false),
         ] {
-            assert2::assert!(check_temporal_claims(&claims, now_ms, 0).is_ok() == expected);
+            assert2::assert!(
+                check_temporal_claims(&claims, now_ms, <Time as TimeExt>::ZERO).is_ok() == expected
+            );
         }
     }
 
@@ -1878,12 +1929,12 @@ mod introspection_tests {
     fn temporal_claims_iat_and_nbf_future_rejected() {
         // iat: at the boundary it's valid; issued in the future is rejected.
         let iat = json!({ "iat": 10 }); // iat_ms = 10_000
-        assert2::assert!(check_temporal_claims(&iat, 10_000, 0).is_ok());
-        assert2::assert!(check_temporal_claims(&iat, 9_999, 0).is_err());
+        assert2::assert!(check_temporal_claims(&iat, 10_000, <Time as TimeExt>::ZERO).is_ok());
+        assert2::assert!(check_temporal_claims(&iat, 9_999, <Time as TimeExt>::ZERO).is_err());
         // nbf (not-before): same shape.
         let nbf = json!({ "nbf": 10 });
-        assert2::assert!(check_temporal_claims(&nbf, 10_000, 0).is_ok());
-        assert2::assert!(check_temporal_claims(&nbf, 9_999, 0).is_err());
+        assert2::assert!(check_temporal_claims(&nbf, 10_000, <Time as TimeExt>::ZERO).is_ok());
+        assert2::assert!(check_temporal_claims(&nbf, 9_999, <Time as TimeExt>::ZERO).is_err());
     }
 
     #[test]
@@ -1956,7 +2007,7 @@ mod introspection_tests {
             principal_claim_name: "sub".into(),
             custom_claim_check: None,
             call_userinfo: false,
-            allowable_clock_skew_ms: 30_000,
+            allowable_clock_skew: secs(30),
             expected_audience: None,
             fallback_user_name_claim: None,
             fallback_user_name_prefix: None,

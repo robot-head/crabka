@@ -42,7 +42,7 @@ async fn jvm_consumer_reads_gateway_output() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .expect("create");

@@ -7,10 +7,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use crabka_units::{fmt::Human as _, prelude::*};
 
 use crate::{
-    ids::TimeOffsetMs,
-    numeric::{nonnegative_f64_to_u64, to_f64},
+    numeric::{mebibytes_f64, millis_f64, to_f64},
     scenario::{RunOutput, Stack},
 };
 
@@ -18,6 +18,56 @@ fn push_fmt(output: &mut String, args: Arguments<'_>) {
     output
         .write_fmt(args)
         .expect("writing formatted data to a String cannot fail");
+}
+
+/// How a metric's cross-run mean is written into a table cell.
+///
+/// A mean and a standard deviation are dimension-agnostic, so the statistics
+/// below run over plain numbers in one fixed unit per metric; this says which
+/// quantity to rebuild the mean into so the cell carries its unit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Render {
+    /// A dimensionless number (a count, a rate of dimensionless things).
+    Number,
+    /// A time extent, from a sample of seconds.
+    Extent,
+    /// A byte count, from a sample of bytes.
+    Size,
+    /// A byte throughput, from a sample of bytes per second.
+    Throughput,
+    /// An event rate, from a sample of events per second.
+    Rate,
+}
+
+impl Render {
+    /// The mean of `values` in this metric's unit.
+    fn mean(self, values: &[f64]) -> String {
+        let m = mean(values);
+        match self {
+            Render::Number => format!("{m:.3}"),
+            Render::Extent => Time::from_secs_f64(m).human().to_string(),
+            Render::Size => ByteSize::from_bytes_f64(m).human().to_string(),
+            Render::Throughput => ByteRate::from_bytes_per_sec_f64(m).human().to_string(),
+            Render::Rate => Frequency::from_per_sec(m).human().to_string(),
+        }
+    }
+
+    /// Render per-run samples as `mean` (single run) or `mean (±cv%)` (multiple
+    /// runs), where cv is the coefficient of variation.
+    fn cell(self, values: &[f64]) -> String {
+        let rendered = self.mean(values);
+        if values.len() > 1 {
+            let m = mean(values);
+            let cv = if m == 0.0 {
+                0.0
+            } else {
+                (sample_stddev(values) / m).abs() * 100.0
+            };
+            format!("{rendered} (±{cv:.0}%)")
+        } else {
+            rendered
+        }
+    }
 }
 
 /// Walk `input_dir` for `*.json` files, deserialize each into a
@@ -90,12 +140,12 @@ fn render_group(out: &mut String, name: &str, brokers: u32, runs: &[RunOutput]) 
         push_fmt(
             out,
             format_args!(
-                "Topology: partitions={}, RF={}, broker_count={} (per stack). Duration={}s, warmup={}s. Runs averaged: crabka={}, kafka={}.\n\n",
+                "Topology: partitions={}, RF={}, broker_count={} (per stack). Duration={}, warmup={}. Runs averaged: crabka={}, kafka={}.\n\n",
                 r.topology.partitions,
                 r.topology.replication_factor,
                 r.topology.broker_count,
-                r.scenario.duration_s,
-                r.scenario.warmup_s,
+                r.scenario.duration.human(),
+                r.scenario.warmup.human(),
                 crabka.len(),
                 kafka.len(),
             ),
@@ -108,138 +158,121 @@ fn render_group(out: &mut String, name: &str, brokers: u32, runs: &[RunOutput]) 
     row_metric(
         out,
         "producer msgs/s (higher better)",
-        &crabka,
-        &kafka,
-        |t| t.throughput.producer_msgs_per_sec,
+        (&crabka, &kafka),
+        (|t| t.throughput.producer_rate.per_sec_f64(), Render::Rate),
         true,
     );
     row_metric(
         out,
         "consumer msgs/s (higher better)",
-        &crabka,
-        &kafka,
-        |t| t.throughput.consumer_msgs_per_sec,
+        (&crabka, &kafka),
+        (|t| t.throughput.consumer_rate.per_sec_f64(), Render::Rate),
         true,
     );
     row_metric(
         out,
-        "producer MB/s (higher better)",
-        &crabka,
-        &kafka,
-        |t| t.throughput.mb_in / to_f64(t.scenario.duration_s.max(1)),
+        "producer byte rate (higher better)",
+        (&crabka, &kafka),
+        (
+            |t| producer_byte_rate(t).bytes_per_sec_f64(),
+            Render::Throughput,
+        ),
         true,
     );
     row_metric(
         out,
-        "p99 producer ack ms (lower better)",
-        &crabka,
-        &kafka,
-        |t| t.producer_latency_ms.p99_ms,
+        "p99 producer ack (lower better)",
+        (&crabka, &kafka),
+        (|t| t.producer_latency.p99.secs_f64(), Render::Extent),
         false,
     );
     row_metric(
         out,
-        "p99 consumer e2e ms (lower better)",
-        &crabka,
-        &kafka,
-        |t| t.consumer_e2e_latency_ms.p99_ms,
+        "p99 consumer e2e (lower better)",
+        (&crabka, &kafka),
+        (|t| t.consumer_e2e_latency.p99.secs_f64(), Render::Extent),
         false,
     );
     row_metric(
         out,
         "msgs/s per CPU-core (higher better)",
-        &crabka,
-        &kafka,
-        |t| t.resource.msgs_per_cpu_core,
+        (&crabka, &kafka),
+        (
+            |t| t.resource.msgs_per_cpu_second.per_sec_f64(),
+            Render::Rate,
+        ),
         true,
     );
     row_metric(
         out,
-        "cgroup working-set MB (lower better)",
-        &crabka,
-        &kafka,
-        |t| to_f64(t.resource.mem_cgroup_working_set_bytes) / 1_048_576.0,
+        "cgroup working set (lower better)",
+        (&crabka, &kafka),
+        (
+            |t| t.resource.mem_cgroup_working_set.bytes_f64(),
+            Render::Size,
+        ),
         false,
     );
     row_metric(
         out,
-        "startup ms (CR-apply → Ready) (lower better)",
-        &crabka,
-        &kafka,
-        |t| to_f64(t.startup_ms.unwrap_or(0)),
+        "startup (CR-apply → Ready) (lower better)",
+        (&crabka, &kafka),
+        (
+            |t| t.startup.unwrap_or(Time::ZERO).secs_f64(),
+            Render::Extent,
+        ),
         false,
     );
     row_metric(
         out,
-        "first-ack ms (Ready → first ack) (lower better)",
-        &crabka,
-        &kafka,
-        |t| to_f64(t.first_ack_ms),
+        "first ack (Ready → first ack) (lower better)",
+        (&crabka, &kafka),
+        (|t| t.first_ack.secs_f64(), Render::Extent),
         false,
     );
     out.push('\n');
 
     // ── Latency percentiles (mean across runs) ──────────────────────────
-    out.push_str("**Producer ack latency (ms):**\n\n");
-    out.push_str("| percentile | crabka | kafka |\n|---|---|---|\n");
-    for (label, sel) in latency_percentiles_pairs() {
-        let c: Vec<f64> = crabka.iter().map(|r| sel(&r.producer_latency_ms)).collect();
-        let k: Vec<f64> = kafka.iter().map(|r| sel(&r.producer_latency_ms)).collect();
-        push_fmt(
-            out,
-            format_args!("| {label} | {} | {} |\n", fmt_cell(&c), fmt_cell(&k)),
-        );
-    }
-    out.push('\n');
-
-    out.push_str("**Consumer end-to-end latency (ms):**\n\n");
-    out.push_str("| percentile | crabka | kafka |\n|---|---|---|\n");
-    for (label, sel) in latency_percentiles_pairs() {
-        let c: Vec<f64> = crabka
-            .iter()
-            .map(|r| sel(&r.consumer_e2e_latency_ms))
-            .collect();
-        let k: Vec<f64> = kafka
-            .iter()
-            .map(|r| sel(&r.consumer_e2e_latency_ms))
-            .collect();
-        push_fmt(
-            out,
-            format_args!("| {label} | {} | {} |\n", fmt_cell(&c), fmt_cell(&k)),
-        );
-    }
-    out.push('\n');
+    render_latency_table(out, "**Producer ack latency:**", (&crabka, &kafka), |r| {
+        &r.producer_latency
+    });
+    render_latency_table(
+        out,
+        "**Consumer end-to-end latency:**",
+        (&crabka, &kafka),
+        |r| &r.consumer_e2e_latency,
+    );
 
     // ── Kafka-only memory split (mean across kafka runs that report it) ──
     let heap: Vec<f64> = kafka
         .iter()
-        .filter_map(|r| r.resource.jvm_heap_used_bytes)
-        .map(to_f64)
+        .filter_map(|r| r.resource.jvm_heap_used)
+        .map(ByteSizeExt::bytes_f64)
         .collect();
     let nonheap: Vec<f64> = kafka
         .iter()
-        .filter_map(|r| r.resource.jvm_nonheap_used_bytes)
-        .map(to_f64)
+        .filter_map(|r| r.resource.jvm_nonheap_used)
+        .map(ByteSizeExt::bytes_f64)
         .collect();
     let pc: Vec<f64> = kafka
         .iter()
-        .filter_map(|r| r.resource.kafka_page_cache_approx_bytes)
-        .map(to_f64)
+        .filter_map(|r| r.resource.kafka_page_cache_approx)
+        .map(ByteSizeExt::bytes_f64)
         .collect();
     if !heap.is_empty() && !nonheap.is_empty() && !pc.is_empty() {
         let ws: Vec<f64> = kafka
             .iter()
-            .map(|r| to_f64(r.resource.mem_cgroup_working_set_bytes))
+            .map(|r| r.resource.mem_cgroup_working_set.bytes_f64())
             .collect();
-        out.push_str("**Kafka memory split (MiB):**\n\n");
+        out.push_str("**Kafka memory split:**\n\n");
         push_fmt(
             out,
             format_args!(
-                "- JVM heap used: {:.1}\n- JVM non-heap used: {:.1}\n- Page-cache (approx, working-set − heap − non-heap): {:.1}\n- cgroup working-set (limit-relevant): {:.1}\n\n",
-                mean(&heap) / 1_048_576.0,
-                mean(&nonheap) / 1_048_576.0,
-                mean(&pc) / 1_048_576.0,
-                mean(&ws) / 1_048_576.0,
+                "- JVM heap used: {}\n- JVM non-heap used: {}\n- Page-cache (approx, working-set − heap − non-heap): {}\n- cgroup working-set (limit-relevant): {}\n\n",
+                Render::Size.mean(&heap),
+                Render::Size.mean(&nonheap),
+                Render::Size.mean(&pc),
+                Render::Size.mean(&ws),
             ),
         );
     }
@@ -255,18 +288,21 @@ fn render_group(out: &mut String, name: &str, brokers: u32, runs: &[RunOutput]) 
         }
         let recovery: Vec<f64> = dists
             .iter()
-            .map(|d| to_f64(d.recovery_at_ms.0.saturating_sub(d.kill_at_ms.0)))
+            .map(|d| d.recovery_at_ms.since(d.kill_at_ms).secs_f64())
             .collect();
         let dropped: Vec<f64> = dists.iter().map(|d| to_f64(d.dropped.0)).collect();
-        let spike: Vec<f64> = dists.iter().map(|d| d.latency_spike_max_ms).collect();
+        let spike: Vec<f64> = dists
+            .iter()
+            .map(|d| d.latency_spike_max.secs_f64())
+            .collect();
         push_fmt(
             out,
             format_args!(
-                "**Failover ({label}, n={}):** recovery {:.0} ms, {:.0} drops, max latency spike {:.1} ms.\n\n",
+                "**Failover ({label}, n={}):** recovery {}, {:.0} drops, max latency spike {}.\n\n",
                 dists.len(),
-                mean(&recovery),
+                Render::Extent.mean(&recovery),
                 mean(&dropped),
-                mean(&spike),
+                Render::Extent.mean(&spike),
             ),
         );
     }
@@ -333,15 +369,48 @@ fn truncate_list(items: &[String], n: usize) -> String {
 
 type LatencySelector = fn(&crate::scenario::LatencyPercentiles) -> f64;
 
-fn latency_percentiles_pairs() -> [(&'static str, LatencySelector); 6] {
+/// The percentile rows of a latency table: a label, how to read the value out in
+/// the unit the statistics run over, and how to write the mean back.
+fn latency_percentiles_pairs() -> [(&'static str, LatencySelector, Render); 7] {
     [
-        ("p50", |p| p.p50_ms),
-        ("p95", |p| p.p95_ms),
-        ("p99", |p| p.p99_ms),
-        ("p99.9", |p| p.p999_ms),
-        ("max", |p| p.max_ms),
-        ("count", |p| to_f64(p.count)),
+        ("p50", |p| p.p50.secs_f64(), Render::Extent),
+        ("p95", |p| p.p95.secs_f64(), Render::Extent),
+        ("p99", |p| p.p99.secs_f64(), Render::Extent),
+        ("p99.9", |p| p.p999.secs_f64(), Render::Extent),
+        ("max", |p| p.max.secs_f64(), Render::Extent),
+        ("mean", |p| p.mean.secs_f64(), Render::Extent),
+        ("count", |p| to_f64(p.count), Render::Number),
     ]
+}
+
+/// One stack-vs-stack latency percentile table.
+fn render_latency_table(
+    out: &mut String,
+    heading: &str,
+    (crabka, kafka): (&[&RunOutput], &[&RunOutput]),
+    select: fn(&RunOutput) -> &crate::scenario::LatencyPercentiles,
+) {
+    push_fmt(out, format_args!("{heading}\n\n"));
+    out.push_str("| percentile | crabka | kafka |\n|---|---|---|\n");
+    for (label, value, render) in latency_percentiles_pairs() {
+        let c: Vec<f64> = crabka.iter().map(|r| value(select(r))).collect();
+        let k: Vec<f64> = kafka.iter().map(|r| value(select(r))).collect();
+        push_fmt(
+            out,
+            format_args!("| {label} | {} | {} |\n", render.cell(&c), render.cell(&k)),
+        );
+    }
+    out.push('\n');
+}
+
+/// The rate at which a run pushed record bytes over its measurement window.
+fn producer_byte_rate(r: &RunOutput) -> ByteRate {
+    let window = if r.scenario.duration > Time::ZERO {
+        r.scenario.duration
+    } else {
+        secs(1)
+    };
+    byte_rate(r.throughput.bytes_in, window)
 }
 
 /// Arithmetic mean of a sample. Empty sample → 0.0 (an absent stack renders
@@ -365,11 +434,11 @@ fn sample_stddev(v: &[f64]) -> f64 {
     var.sqrt()
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct RateRecovery {
-    baseline_mps: f64,
-    min_after_kill_mps: f64,
-    recovery_ms: Option<u64>,
+    baseline: Frequency,
+    min_after_kill: Frequency,
+    recovery: Option<Time>,
 }
 
 fn render_failover_comparison(out: &mut String, crabka: &[&RunOutput], kafka: &[&RunOutput]) {
@@ -384,7 +453,11 @@ fn render_failover_comparison(out: &mut String, crabka: &[&RunOutput], kafka: &[
     } else {
         "FAIL"
     };
-    let delta = nonnegative_f64_to_u64((c_recovery - k_recovery).abs().round());
+    let delta = if c_recovery <= k_recovery {
+        k_recovery - c_recovery
+    } else {
+        c_recovery - k_recovery
+    };
     let faster = if c_recovery <= k_recovery {
         "faster than"
     } else {
@@ -393,7 +466,10 @@ fn render_failover_comparison(out: &mut String, crabka: &[&RunOutput], kafka: &[
     push_fmt(
         out,
         format_args!(
-            "**Failover comparison:** {verdict} — Crabka recovered {delta} ms {faster} kafka (crabka {c_recovery:.0} ms, kafka {k_recovery:.0} ms).\n\n",
+            "**Failover comparison:** {verdict} — Crabka recovered {} {faster} kafka (crabka {}, kafka {}).\n\n",
+            delta.human(),
+            c_recovery.human(),
+            k_recovery.human(),
         ),
     );
 
@@ -463,7 +539,9 @@ fn failover_gate_violations_for_runs(runs: &[RunOutput]) -> Vec<String> {
         };
         if c_recovery > k_recovery {
             violations.push(format!(
-                "{label}: Crabka recovery {c_recovery:.0} ms is slower than kafka {k_recovery:.0} ms"
+                "{label}: Crabka recovery {} is slower than kafka {}",
+                c_recovery.human(),
+                k_recovery.human()
             ));
         }
         compare_failover_smoothness(&mut violations, &label, &crabka, &kafka);
@@ -511,7 +589,9 @@ fn compare_failover_smoothness(
     ) && c_spike > k_spike
     {
         violations.push(format!(
-            "{label}: Crabka latency spike {c_spike:.1} ms is higher than kafka {k_spike:.1} ms"
+            "{label}: Crabka latency spike {} is higher than kafka {}",
+            c_spike.human(),
+            k_spike.human()
         ));
     }
 }
@@ -522,7 +602,7 @@ fn compare_rate_recovery(
     crabka: &[&RunOutput],
     kafka: &[&RunOutput],
     metric: &str,
-    select: fn(&crate::scenario::Sample) -> f64,
+    select: SampleRate,
 ) {
     let (Some(c_rate), Some(k_rate)) = (
         mean_rate_recovery(crabka, select),
@@ -531,12 +611,15 @@ fn compare_rate_recovery(
         return;
     };
 
-    match (c_rate.recovery_ms, k_rate.recovery_ms) {
-        (Some(c_ms), Some(k_ms)) if c_ms > k_ms => violations.push(format!(
-            "{label}: Crabka {metric} rate recovery {c_ms} ms is slower than kafka {k_ms} ms"
+    match (c_rate.recovery, k_rate.recovery) {
+        (Some(c), Some(k)) if c > k => violations.push(format!(
+            "{label}: Crabka {metric} rate recovery {} is slower than kafka {}",
+            c.human(),
+            k.human()
         )),
-        (None, Some(k_ms)) => violations.push(format!(
-            "{label}: Crabka {metric} rate did not recover while kafka recovered in {k_ms} ms"
+        (None, Some(k)) => violations.push(format!(
+            "{label}: Crabka {metric} rate did not recover while kafka recovered in {}",
+            k.human()
         )),
         (None, None) => violations.push(format!("{label}: Crabka {metric} rate did not recover")),
         _ => {}
@@ -564,13 +647,13 @@ fn require_rate_samples(
     }
 }
 
-fn mean_failover_recovery(runs: &[&RunOutput]) -> Option<f64> {
+fn mean_failover_recovery(runs: &[&RunOutput]) -> Option<Time> {
     let vals: Vec<f64> = runs
         .iter()
         .filter_map(|r| r.disturbance.as_ref())
-        .map(|d| to_f64(d.recovery_at_ms.0.saturating_sub(d.kill_at_ms.0)))
+        .map(|d| d.recovery_at_ms.since(d.kill_at_ms).secs_f64())
         .collect();
-    (!vals.is_empty()).then(|| mean(&vals))
+    (!vals.is_empty()).then(|| Time::from_secs_f64(mean(&vals)))
 }
 
 fn mean_failover_dropped(runs: &[&RunOutput]) -> Option<f64> {
@@ -582,19 +665,16 @@ fn mean_failover_dropped(runs: &[&RunOutput]) -> Option<f64> {
     (!vals.is_empty()).then(|| mean(&vals))
 }
 
-fn mean_failover_latency_spike(runs: &[&RunOutput]) -> Option<f64> {
+fn mean_failover_latency_spike(runs: &[&RunOutput]) -> Option<Time> {
     let vals: Vec<f64> = runs
         .iter()
         .filter_map(|r| r.disturbance.as_ref())
-        .map(|d| d.latency_spike_max_ms)
+        .map(|d| d.latency_spike_max.secs_f64())
         .collect();
-    (!vals.is_empty()).then(|| mean(&vals))
+    (!vals.is_empty()).then(|| Time::from_secs_f64(mean(&vals)))
 }
 
-fn mean_rate_recovery(
-    runs: &[&RunOutput],
-    select: fn(&crate::scenario::Sample) -> f64,
-) -> Option<RateRecovery> {
+fn mean_rate_recovery(runs: &[&RunOutput], select: SampleRate) -> Option<RateRecovery> {
     let vals: Vec<RateRecovery> = runs
         .iter()
         .filter_map(|r| rate_recovery_for_run(r, select))
@@ -602,138 +682,126 @@ fn mean_rate_recovery(
     if vals.is_empty() {
         return None;
     }
-    let baselines: Vec<f64> = vals.iter().map(|v| v.baseline_mps).collect();
-    let mins: Vec<f64> = vals.iter().map(|v| v.min_after_kill_mps).collect();
+    let baselines: Vec<f64> = vals.iter().map(|v| v.baseline.per_sec_f64()).collect();
+    let mins: Vec<f64> = vals
+        .iter()
+        .map(|v| v.min_after_kill.per_sec_f64())
+        .collect();
     let recoveries: Vec<f64> = vals
         .iter()
-        .filter_map(|v| v.recovery_ms.map(to_f64))
+        .filter_map(|v| v.recovery.map(TimeExt::secs_f64))
         .collect();
     Some(RateRecovery {
-        baseline_mps: mean(&baselines),
-        min_after_kill_mps: mean(&mins),
-        recovery_ms: (!recoveries.is_empty())
-            .then(|| nonnegative_f64_to_u64(mean(&recoveries).round())),
+        baseline: Frequency::from_per_sec(mean(&baselines)),
+        min_after_kill: Frequency::from_per_sec(mean(&mins)),
+        recovery: (!recoveries.is_empty()).then(|| Time::from_secs_f64(mean(&recoveries))),
     })
 }
 
-fn rate_recovery_for_run(
-    r: &RunOutput,
-    select: fn(&crate::scenario::Sample) -> f64,
-) -> Option<RateRecovery> {
+fn rate_recovery_for_run(r: &RunOutput, select: SampleRate) -> Option<RateRecovery> {
     let failover = r.scenario.failover.as_ref()?;
     if r.samples.is_empty() {
         return None;
     }
-    let kill_offset_ms = TimeOffsetMs(
-        failover
-            .kill_at_s
-            .saturating_sub(r.scenario.warmup_s)
-            .saturating_mul(1000),
-    );
+    // Sample offsets are measured from the *measurement* window start, so the
+    // kill offset drops the warmup the scenario spent before it.
+    let kill_offset = failover.kill_after - r.scenario.warmup;
+    let rate_at = |s: &crate::scenario::Sample| select(s).per_sec_f64();
     let baseline: Vec<f64> = r
         .samples
         .iter()
-        .filter(|s| s.t_offset_ms < kill_offset_ms)
-        .map(select)
+        .filter(|s| s.t_offset_ms.as_time() < kill_offset)
+        .map(rate_at)
         .collect();
     if baseline.is_empty() {
         return None;
     }
-    let baseline_mps = mean(&baseline);
+    let baseline_rate = mean(&baseline);
     let after: Vec<&crate::scenario::Sample> = r
         .samples
         .iter()
-        .filter(|s| s.t_offset_ms >= kill_offset_ms)
+        .filter(|s| s.t_offset_ms.as_time() >= kill_offset)
         .collect();
     if after.is_empty() {
         return None;
     }
-    let min_after_kill_mps = after
+    let min_after_kill = after
         .iter()
-        .map(|s| select(s))
+        .map(|s| rate_at(s))
         .fold(f64::INFINITY, f64::min);
-    let threshold = baseline_mps * 0.90;
-    let recovery_ms = after
+    let threshold = baseline_rate * 0.90;
+    let recovery = after
         .iter()
-        .find(|s| select(s) >= threshold)
-        .map(|s| s.t_offset_ms.0.saturating_sub(kill_offset_ms.0));
+        .find(|s| rate_at(s) >= threshold)
+        .map(|s| s.t_offset_ms.as_time() - kill_offset);
 
     Some(RateRecovery {
-        baseline_mps,
-        min_after_kill_mps,
-        recovery_ms,
+        baseline: Frequency::from_per_sec(baseline_rate),
+        min_after_kill: Frequency::from_per_sec(min_after_kill),
+        recovery,
     })
 }
 
-fn producer_sample_rate(s: &crate::scenario::Sample) -> f64 {
-    s.producer_msgs_per_sec
+/// How one of the two client message rates is read out of a time-series sample.
+type SampleRate = fn(&crate::scenario::Sample) -> Frequency;
+
+fn producer_sample_rate(s: &crate::scenario::Sample) -> Frequency {
+    s.producer_rate
 }
 
-fn consumer_sample_rate(s: &crate::scenario::Sample) -> f64 {
-    s.consumer_msgs_per_sec
+fn consumer_sample_rate(s: &crate::scenario::Sample) -> Frequency {
+    s.consumer_rate
 }
 
 fn render_rate_recovery_row(
     out: &mut String,
     stack: &str,
-    failover_recovery_ms: f64,
+    failover_recovery: Time,
     producer_rate: Option<RateRecovery>,
     consumer_rate: Option<RateRecovery>,
 ) {
+    let recovery = |rate: &RateRecovery| {
+        rate.recovery
+            .map_or_else(|| "unrecovered".into(), |t| t.human().to_string())
+    };
     match (producer_rate, consumer_rate) {
         (Some(producer_rate), Some(consumer_rate)) => push_fmt(
             out,
             format_args!(
-                "| {stack} | {failover_recovery_ms:.0} | {:.0} | {:.0} | {} | {:.0} | {:.0} | {} |\n",
-                producer_rate.baseline_mps,
-                producer_rate.min_after_kill_mps,
-                producer_rate
-                    .recovery_ms
-                    .map_or_else(|| "unrecovered".into(), |ms| ms.to_string()),
-                consumer_rate.baseline_mps,
-                consumer_rate.min_after_kill_mps,
-                consumer_rate
-                    .recovery_ms
-                    .map_or_else(|| "unrecovered".into(), |ms| ms.to_string())
+                "| {stack} | {} | {} | {} | {} | {} | {} | {} |\n",
+                failover_recovery.human(),
+                producer_rate.baseline.human(),
+                producer_rate.min_after_kill.human(),
+                recovery(&producer_rate),
+                consumer_rate.baseline.human(),
+                consumer_rate.min_after_kill.human(),
+                recovery(&consumer_rate),
             ),
         ),
         _ => push_fmt(
             out,
             format_args!(
-                "| {stack} | {failover_recovery_ms:.0} | n/a | n/a | n/a | n/a | n/a | n/a |\n"
+                "| {stack} | {} | n/a | n/a | n/a | n/a | n/a | n/a |\n",
+                failover_recovery.human()
             ),
         ),
     }
 }
 
-/// Render per-run samples as `mean` (single run) or `mean (±cv%)` (multiple
-/// runs), where cv is the coefficient of variation.
-fn fmt_cell(v: &[f64]) -> String {
-    let m = mean(v);
-    if v.len() > 1 {
-        let cv = if m == 0.0 {
-            0.0
-        } else {
-            (sample_stddev(v) / m).abs() * 100.0
-        };
-        format!("{m:.3} (±{cv:.0}%)")
-    } else {
-        format!("{m:.3}")
-    }
-}
-
-/// Render one comparison row: the mean (± CV) of `sel` over each stack's
+/// Render one comparison row: the mean (± CV) of `value` over each stack's
 /// runs, plus the crabka-vs-kafka ratio of the two means.
+///
+/// The ratio divides two means in the same unit, so it is dimensionless
+/// whatever `render` writes the cells as.
 fn row_metric(
     out: &mut String,
     label: &str,
-    crabka: &[&RunOutput],
-    kafka: &[&RunOutput],
-    sel: impl Fn(&RunOutput) -> f64,
+    (crabka, kafka): (&[&RunOutput], &[&RunOutput]),
+    (value, render): (impl Fn(&RunOutput) -> f64, Render),
     higher_is_better: bool,
 ) {
-    let cvals: Vec<f64> = crabka.iter().map(|&r| sel(r)).collect();
-    let kvals: Vec<f64> = kafka.iter().map(|&r| sel(r)).collect();
+    let cvals: Vec<f64> = crabka.iter().map(|&r| value(r)).collect();
+    let kvals: Vec<f64> = kafka.iter().map(|&r| value(r)).collect();
     let c = mean(&cvals);
     let k = mean(&kvals);
     let ratio = if higher_is_better {
@@ -751,8 +819,8 @@ fn row_metric(
         out,
         format_args!(
             "| {label} | {} | {} | {ratio} |\n",
-            fmt_cell(&cvals),
-            fmt_cell(&kvals)
+            render.cell(&cvals),
+            render.cell(&kvals)
         ),
     );
 }
@@ -838,6 +906,8 @@ pub fn render_csv(input_dir: &Path, strict: bool) -> Result<String> {
             ))
     });
 
+    // Every column names the unit it is written in, because a CSV cell is a
+    // bare number: sizes in bytes or MiB, extents in ms.
     let mut out = String::new();
     out.push_str(
         "scenario,stack,run_tag,broker_count,partitions,replication_factor,producers,consumers,\
@@ -856,18 +926,20 @@ notes,errors_count\n",
         let (rec, drop, spike) = match &r.disturbance {
             Some(d) => (
                 d.recovery_at_ms
-                    .0
-                    .saturating_sub(d.kill_at_ms.0)
+                    .since(d.kill_at_ms)
+                    .millis_i64()
                     .to_string(),
                 d.dropped.to_string(),
-                format!("{:.3}", d.latency_spike_max_ms),
+                format!("{:.3}", millis_f64(d.latency_spike_max)),
             ),
             None => (String::new(), String::new(), String::new()),
         };
-        let opt_u = |o: Option<u64>| o.map(|v| v.to_string()).unwrap_or_default();
-        let opt_i = |o: Option<i64>| o.map(|v| v.to_string()).unwrap_or_default();
-        let p = &r.producer_latency_ms;
-        let c = &r.consumer_e2e_latency_ms;
+        let opt_bytes =
+            |o: Option<ByteSize>| o.map(|v| v.bytes_i64().to_string()).unwrap_or_default();
+        let opt_millis =
+            |o: Option<Time>| o.map(|v| v.millis_i64().to_string()).unwrap_or_default();
+        let p = &r.producer_latency;
+        let c = &r.consumer_e2e_latency;
         let cols = [
             csv_field(&r.scenario.name),
             stack_str(r.stack).to_string(),
@@ -877,35 +949,35 @@ notes,errors_count\n",
             r.topology.replication_factor.to_string(),
             r.scenario.producers.to_string(),
             r.scenario.consumers.to_string(),
-            r.scenario.msg_size_bytes.to_string(),
+            r.scenario.msg_size.bytes_u64().to_string(),
             acks,
             mode_tag,
-            r.scenario.duration_s.to_string(),
+            r.scenario.duration.secs_i64().to_string(),
             r.wallclock_start_unix_ms.to_string(),
             r.throughput.msgs_produced.to_string(),
             r.throughput.msgs_consumed.to_string(),
-            format!("{:.6}", r.throughput.mb_in),
-            format!("{:.6}", r.throughput.mb_out),
-            format!("{:.3}", r.throughput.producer_msgs_per_sec),
-            format!("{:.3}", r.throughput.consumer_msgs_per_sec),
-            format!("{:.3}", p.p50_ms),
-            format!("{:.3}", p.p95_ms),
-            format!("{:.3}", p.p99_ms),
-            format!("{:.3}", p.p999_ms),
-            format!("{:.3}", p.max_ms),
-            format!("{:.3}", c.p50_ms),
-            format!("{:.3}", c.p95_ms),
-            format!("{:.3}", c.p99_ms),
-            format!("{:.3}", c.p999_ms),
-            format!("{:.3}", c.max_ms),
-            format!("{:.3}", r.resource.broker_cpu_seconds),
-            r.resource.mem_cgroup_working_set_bytes.to_string(),
-            format!("{:.3}", r.resource.msgs_per_cpu_core),
-            opt_u(r.resource.jvm_heap_used_bytes),
-            opt_u(r.resource.jvm_nonheap_used_bytes),
-            opt_i(r.resource.kafka_page_cache_approx_bytes),
-            opt_u(r.startup_ms),
-            r.first_ack_ms.to_string(),
+            format!("{:.6}", mebibytes_f64(r.throughput.bytes_in)),
+            format!("{:.6}", mebibytes_f64(r.throughput.bytes_out)),
+            format!("{:.3}", r.throughput.producer_rate.per_sec_f64()),
+            format!("{:.3}", r.throughput.consumer_rate.per_sec_f64()),
+            format!("{:.3}", millis_f64(p.p50)),
+            format!("{:.3}", millis_f64(p.p95)),
+            format!("{:.3}", millis_f64(p.p99)),
+            format!("{:.3}", millis_f64(p.p999)),
+            format!("{:.3}", millis_f64(p.max)),
+            format!("{:.3}", millis_f64(c.p50)),
+            format!("{:.3}", millis_f64(c.p95)),
+            format!("{:.3}", millis_f64(c.p99)),
+            format!("{:.3}", millis_f64(c.p999)),
+            format!("{:.3}", millis_f64(c.max)),
+            format!("{:.3}", r.resource.broker_cpu.secs_f64()),
+            r.resource.mem_cgroup_working_set.bytes_u64().to_string(),
+            format!("{:.3}", r.resource.msgs_per_cpu_second.per_sec_f64()),
+            opt_bytes(r.resource.jvm_heap_used),
+            opt_bytes(r.resource.jvm_nonheap_used),
+            opt_bytes(r.resource.kafka_page_cache_approx),
+            opt_millis(r.startup),
+            r.first_ack.millis_i64().to_string(),
             rec,
             drop,
             spike,
@@ -954,11 +1026,11 @@ pub fn render_timeseries_csv(input_dir: &Path, strict: bool) -> Result<String> {
         );
         for s in &r.samples {
             for (metric, value) in [
-                ("producer_msgs_per_sec", s.producer_msgs_per_sec),
-                ("consumer_msgs_per_sec", s.consumer_msgs_per_sec),
-                ("producer_p50_ms", s.producer_p50_ms),
-                ("producer_p99_ms", s.producer_p99_ms),
-                ("consumer_e2e_p99_ms", s.consumer_e2e_p99_ms),
+                ("producer_msgs_per_sec", s.producer_rate.per_sec_f64()),
+                ("consumer_msgs_per_sec", s.consumer_rate.per_sec_f64()),
+                ("producer_p50_ms", millis_f64(s.producer_p50)),
+                ("producer_p99_ms", millis_f64(s.producer_p99)),
+                ("consumer_e2e_p99_ms", millis_f64(s.consumer_e2e_p99)),
             ] {
                 push_fmt(
                     &mut out,
@@ -978,7 +1050,8 @@ pub fn render_timeseries_csv(input_dir: &Path, strict: bool) -> Result<String> {
                 &mut out,
                 format_args!(
                     "{prefix},{},broker_mem_working_set_bytes,{}\n",
-                    b.t_offset_ms, b.mem_working_set_bytes
+                    b.t_offset_ms,
+                    b.mem_working_set.bytes_u64()
                 ),
             );
         }
@@ -1019,7 +1092,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        ids::{MessageCount, WallclockMs},
+        ids::{MessageCount, TimeOffsetMs, WallclockMs},
+        numeric::{event_rate, nonnegative_i64_to_u64},
         scenario::{
             Acks, Compression, Disturbance, LoadMode, ModeTag, Sample, Scenario, Throughput,
             Topology,
@@ -1031,8 +1105,8 @@ mod tests {
             scenario: Scenario {
                 name: "small-msg-saturate".into(),
                 mode_tag: ModeTag::Ci,
-                msg_size_bytes: 100,
-                key_size_bytes: 0,
+                msg_size: bytes(100),
+                key_size: ByteSize::ZERO,
                 partitions: 6,
                 replication_factor: 1,
                 producers: 1,
@@ -1040,10 +1114,10 @@ mod tests {
                 mode: LoadMode::Saturate,
                 acks: Acks::Leader,
                 compression: Compression::None,
-                linger_ms: 5,
-                batch_size: 16384,
-                duration_s: 60,
-                warmup_s: 10,
+                linger: millis(5),
+                batch_size: kibibytes(16),
+                duration: secs(60),
+                warmup: secs(10),
                 failover: None,
             },
             stack,
@@ -1057,25 +1131,25 @@ mod tests {
             throughput: Throughput {
                 msgs_produced: MessageCount(msgs),
                 msgs_consumed: MessageCount(msgs),
-                mb_in: 5.0,
-                mb_out: 5.0,
-                producer_msgs_per_sec: to_f64(msgs) / 60.0,
-                consumer_msgs_per_sec: to_f64(msgs) / 60.0,
+                bytes_in: mebibytes(5),
+                bytes_out: mebibytes(5),
+                producer_rate: event_rate(msgs, secs(60)),
+                consumer_rate: event_rate(msgs, secs(60)),
             },
             ..RunOutput::default_placeholder()
         }
     }
 
-    fn fake_failover_run(stack: Stack, recovery_ms: u64, post_kill_min_mps: f64) -> RunOutput {
+    fn fake_failover_run(stack: Stack, recovery: Time, post_kill_min: Frequency) -> RunOutput {
         let mut r = fake_run(stack, 600_000);
         r.scenario.name = "failover".into();
         r.scenario.mode_tag = ModeTag::Cluster;
         r.scenario.partitions = 12;
         r.scenario.replication_factor = 3;
-        r.scenario.duration_s = 12;
-        r.scenario.warmup_s = 0;
+        r.scenario.duration = secs(12);
+        r.scenario.warmup = Time::ZERO;
         r.scenario.failover = Some(crate::scenario::FailoverSpec {
-            kill_at_s: 4,
+            kill_after: secs(4),
             target: "partition0_leader".into(),
         });
         r.topology.partitions = 12;
@@ -1083,33 +1157,33 @@ mod tests {
         r.topology.broker_count = 3;
         r.disturbance = Some(Disturbance {
             kill_at_ms: TimeOffsetMs(4_000),
-            recovery_at_ms: TimeOffsetMs(4_000 + recovery_ms),
+            recovery_at_ms: TimeOffsetMs(4_000 + nonnegative_i64_to_u64(recovery.millis_i64())),
             dropped: MessageCount(0),
-            latency_spike_max_ms: 42.0,
+            latency_spike_max: millis(42),
         });
         r.samples = vec![
             Sample {
                 t_offset_ms: TimeOffsetMs(0),
-                producer_msgs_per_sec: 10_000.0,
-                consumer_msgs_per_sec: 9_800.0,
+                producer_rate: per_sec(10_000),
+                consumer_rate: per_sec(9_800),
                 ..Sample::default()
             },
             Sample {
                 t_offset_ms: TimeOffsetMs(2_000),
-                producer_msgs_per_sec: 10_200.0,
-                consumer_msgs_per_sec: 9_900.0,
+                producer_rate: per_sec(10_200),
+                consumer_rate: per_sec(9_900),
                 ..Sample::default()
             },
             Sample {
                 t_offset_ms: TimeOffsetMs(4_000),
-                producer_msgs_per_sec: post_kill_min_mps,
-                consumer_msgs_per_sec: post_kill_min_mps * 0.9,
+                producer_rate: post_kill_min,
+                consumer_rate: post_kill_min * 0.9,
                 ..Sample::default()
             },
             Sample {
                 t_offset_ms: TimeOffsetMs(6_000),
-                producer_msgs_per_sec: 9_500.0,
-                consumer_msgs_per_sec: 9_200.0,
+                producer_rate: per_sec(9_500),
+                consumer_rate: per_sec(9_200),
                 ..Sample::default()
             },
         ];
@@ -1123,8 +1197,8 @@ mod tests {
                 scenario: Scenario {
                     name: "x".into(),
                     mode_tag: ModeTag::Ci,
-                    msg_size_bytes: 100,
-                    key_size_bytes: 0,
+                    msg_size: bytes(100),
+                    key_size: ByteSize::ZERO,
                     partitions: 1,
                     replication_factor: 1,
                     producers: 1,
@@ -1132,10 +1206,10 @@ mod tests {
                     mode: LoadMode::Saturate,
                     acks: Acks::Leader,
                     compression: Compression::None,
-                    linger_ms: 0,
-                    batch_size: 16384,
-                    duration_s: 1,
-                    warmup_s: 0,
+                    linger: Time::ZERO,
+                    batch_size: kibibytes(16),
+                    duration: secs(1),
+                    warmup: Time::ZERO,
                     failover: None,
                 },
                 stack: Stack::Crabka,
@@ -1147,12 +1221,12 @@ mod tests {
                 wallclock_start_unix_ms: WallclockMs(0),
                 wallclock_end_unix_ms: WallclockMs(0),
                 throughput: Throughput::default(),
-                producer_latency_ms: crate::scenario::LatencyPercentiles::default(),
-                consumer_e2e_latency_ms: crate::scenario::LatencyPercentiles::default(),
+                producer_latency: crate::scenario::LatencyPercentiles::default(),
+                consumer_e2e_latency: crate::scenario::LatencyPercentiles::default(),
                 resource: crate::scenario::Resource::default(),
                 disturbance: None,
-                startup_ms: None,
-                first_ack_ms: 0,
+                startup: None,
+                first_ack: Time::ZERO,
                 errors: vec![],
                 notes: vec![],
                 samples: vec![],
@@ -1222,12 +1296,14 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(
             dir.path().join("crabka-failover-3broker-rf3-run01.json"),
-            serde_json::to_string(&fake_failover_run(Stack::Crabka, 2_000, 8_000.0)).unwrap(),
+            serde_json::to_string(&fake_failover_run(Stack::Crabka, secs(2), per_sec(8_000)))
+                .unwrap(),
         )
         .unwrap();
         std::fs::write(
             dir.path().join("kafka-failover-3broker-rf3-run01.json"),
-            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, secs(3), per_sec(6_000)))
+                .unwrap(),
         )
         .unwrap();
 
@@ -1235,10 +1311,10 @@ mod tests {
 
         for needle in [
             "**Failover comparison:** PASS",
-            "Crabka recovered 1000 ms faster than kafka",
+            "Crabka recovered 1s faster than kafka",
             "| stack | recovery ms | producer baseline msgs/s | producer min after kill msgs/s | producer rate recovery ms | consumer baseline msgs/s | consumer min after kill msgs/s | consumer rate recovery ms |",
-            "| crabka | 2000 | 10100 | 8000 | 2000 | 9850 | 7200 | 2000 |",
-            "| kafka | 3000 | 10100 | 6000 | 2000 | 9850 | 5400 | 2000 |",
+            "| crabka | 2s | 10100/s | 8000/s | 2s | 9850/s | 7200/s | 2s |",
+            "| kafka | 3s | 10100/s | 6000/s | 2s | 9850/s | 5400/s | 2s |",
         ] {
             assert2::assert!(md.contains(needle));
         }
@@ -1249,12 +1325,14 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(
             dir.path().join("crabka-failover-3broker-rf3-run01.json"),
-            serde_json::to_string(&fake_failover_run(Stack::Crabka, 2_000, 8_000.0)).unwrap(),
+            serde_json::to_string(&fake_failover_run(Stack::Crabka, secs(2), per_sec(8_000)))
+                .unwrap(),
         )
         .unwrap();
         std::fs::write(
             dir.path().join("kafka-failover-3broker-rf3-run01.json"),
-            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, secs(3), per_sec(6_000)))
+                .unwrap(),
         )
         .unwrap();
 
@@ -1291,10 +1369,10 @@ mod tests {
     #[test]
     fn failover_gate_does_not_compare_different_topologies() {
         let dir = tempdir().unwrap();
-        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
+        let mut crabka = fake_failover_run(Stack::Crabka, secs(2), per_sec(8_000));
         crabka.topology.partitions = 12;
         crabka.topology.replication_factor = 3;
-        let mut kafka = fake_failover_run(Stack::Kafka, 3_000, 6_000.0);
+        let mut kafka = fake_failover_run(Stack::Kafka, secs(3), per_sec(6_000));
         kafka.topology.partitions = 24;
         kafka.topology.replication_factor = 3;
         std::fs::write(
@@ -1321,11 +1399,12 @@ mod tests {
     #[test]
     fn failover_gate_fails_when_crabka_recovers_slower_or_rate_samples_missing() {
         let dir = tempdir().unwrap();
-        let mut kafka = fake_failover_run(Stack::Kafka, 2_000, 6_000.0);
+        let mut kafka = fake_failover_run(Stack::Kafka, secs(2), per_sec(6_000));
         kafka.samples.clear();
         std::fs::write(
             dir.path().join("crabka-failover-3broker-rf3-run01.json"),
-            serde_json::to_string(&fake_failover_run(Stack::Crabka, 4_000, 8_000.0)).unwrap(),
+            serde_json::to_string(&fake_failover_run(Stack::Crabka, secs(4), per_sec(8_000)))
+                .unwrap(),
         )
         .unwrap();
         std::fs::write(
@@ -1339,7 +1418,7 @@ mod tests {
         assert2::assert!(
             violations
                 .iter()
-                .any(|v| v.contains("Crabka recovery 4000 ms is slower than kafka 2000 ms"))
+                .any(|v| v.contains("Crabka recovery 4s is slower than kafka 2s"))
         );
         assert2::assert!(
             violations
@@ -1351,12 +1430,12 @@ mod tests {
     #[test]
     fn failover_gate_fails_when_crabka_message_rate_recovers_slower_than_kafka() {
         let dir = tempdir().unwrap();
-        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
-        crabka.samples[3].producer_msgs_per_sec = 8_500.0;
+        let mut crabka = fake_failover_run(Stack::Crabka, secs(2), per_sec(8_000));
+        crabka.samples[3].producer_rate = per_sec(8_500);
         crabka.samples.push(Sample {
             t_offset_ms: TimeOffsetMs(8_000),
-            producer_msgs_per_sec: 9_500.0,
-            consumer_msgs_per_sec: 9_200.0,
+            producer_rate: per_sec(9_500),
+            consumer_rate: per_sec(9_200),
             ..Sample::default()
         });
         std::fs::write(
@@ -1366,35 +1445,38 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.path().join("kafka-failover-3broker-rf3-run01.json"),
-            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, secs(3), per_sec(6_000)))
+                .unwrap(),
         )
         .unwrap();
 
         let violations = failover_gate_violations(dir.path(), true).unwrap();
 
-        assert2::assert!(violations.iter().any(|v| {
-            v.contains("Crabka producer rate recovery 4000 ms is slower than kafka 2000 ms")
-        }));
+        assert2::assert!(
+            violations.iter().any(|v| {
+                v.contains("Crabka producer rate recovery 4s is slower than kafka 2s")
+            })
+        );
     }
 
     #[test]
     fn failover_gate_fails_when_crabka_message_rate_never_recovers() {
         let dir = tempdir().unwrap();
-        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
+        let mut crabka = fake_failover_run(Stack::Crabka, secs(2), per_sec(8_000));
         for sample in crabka
             .samples
             .iter_mut()
             .filter(|sample| sample.t_offset_ms >= 4_000)
         {
-            sample.producer_msgs_per_sec = 8_500.0;
+            sample.producer_rate = per_sec(8_500);
         }
-        let mut kafka = fake_failover_run(Stack::Kafka, 3_000, 6_000.0);
+        let mut kafka = fake_failover_run(Stack::Kafka, secs(3), per_sec(6_000));
         for sample in kafka
             .samples
             .iter_mut()
             .filter(|sample| sample.t_offset_ms >= 4_000)
         {
-            sample.producer_msgs_per_sec = 8_500.0;
+            sample.producer_rate = per_sec(8_500);
         }
         std::fs::write(
             dir.path().join("crabka-failover-3broker-rf3-run01.json"),
@@ -1419,12 +1501,12 @@ mod tests {
     #[test]
     fn failover_gate_fails_when_crabka_consumer_rate_recovers_slower_than_kafka() {
         let dir = tempdir().unwrap();
-        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
-        crabka.samples[3].consumer_msgs_per_sec = 8_000.0;
+        let mut crabka = fake_failover_run(Stack::Crabka, secs(2), per_sec(8_000));
+        crabka.samples[3].consumer_rate = per_sec(8_000);
         crabka.samples.push(Sample {
             t_offset_ms: TimeOffsetMs(8_000),
-            producer_msgs_per_sec: 9_500.0,
-            consumer_msgs_per_sec: 9_200.0,
+            producer_rate: per_sec(9_500),
+            consumer_rate: per_sec(9_200),
             ..Sample::default()
         });
         std::fs::write(
@@ -1434,21 +1516,24 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.path().join("kafka-failover-3broker-rf3-run01.json"),
-            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, secs(3), per_sec(6_000)))
+                .unwrap(),
         )
         .unwrap();
 
         let violations = failover_gate_violations(dir.path(), true).unwrap();
 
-        assert2::assert!(violations.iter().any(|v| {
-            v.contains("Crabka consumer rate recovery 4000 ms is slower than kafka 2000 ms")
-        }));
+        assert2::assert!(
+            violations.iter().any(|v| {
+                v.contains("Crabka consumer rate recovery 4s is slower than kafka 2s")
+            })
+        );
     }
 
     #[test]
     fn failover_gate_fails_when_crabka_drops_more_messages_than_kafka() {
         let dir = tempdir().unwrap();
-        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
+        let mut crabka = fake_failover_run(Stack::Crabka, secs(2), per_sec(8_000));
         crabka.disturbance.as_mut().unwrap().dropped = MessageCount(5);
         std::fs::write(
             dir.path().join("crabka-failover-3broker-rf3-run01.json"),
@@ -1457,7 +1542,8 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.path().join("kafka-failover-3broker-rf3-run01.json"),
-            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, secs(3), per_sec(6_000)))
+                .unwrap(),
         )
         .unwrap();
 
@@ -1473,8 +1559,8 @@ mod tests {
     #[test]
     fn failover_gate_fails_when_crabka_latency_spike_is_higher_than_kafka() {
         let dir = tempdir().unwrap();
-        let mut crabka = fake_failover_run(Stack::Crabka, 2_000, 8_000.0);
-        crabka.disturbance.as_mut().unwrap().latency_spike_max_ms = 90.0;
+        let mut crabka = fake_failover_run(Stack::Crabka, secs(2), per_sec(8_000));
+        crabka.disturbance.as_mut().unwrap().latency_spike_max = millis(90);
         std::fs::write(
             dir.path().join("crabka-failover-3broker-rf3-run01.json"),
             serde_json::to_string(&crabka).unwrap(),
@@ -1482,7 +1568,8 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.path().join("kafka-failover-3broker-rf3-run01.json"),
-            serde_json::to_string(&fake_failover_run(Stack::Kafka, 3_000, 6_000.0)).unwrap(),
+            serde_json::to_string(&fake_failover_run(Stack::Kafka, secs(3), per_sec(6_000)))
+                .unwrap(),
         )
         .unwrap();
 
@@ -1491,7 +1578,7 @@ mod tests {
         assert2::assert!(
             violations
                 .iter()
-                .any(|v| v.contains("Crabka latency spike 90.0 ms is higher than kafka 42.0 ms"))
+                .any(|v| v.contains("Crabka latency spike 90ms is higher than kafka 42ms"))
         );
     }
 
@@ -1575,25 +1662,25 @@ mod tests {
         r.samples = vec![
             Sample {
                 t_offset_ms: TimeOffsetMs(0),
-                producer_msgs_per_sec: 1000.0,
-                consumer_msgs_per_sec: 900.0,
-                producer_p50_ms: 1.5,
-                producer_p99_ms: 4.2,
-                consumer_e2e_p99_ms: 7.0,
+                producer_rate: per_sec(1000),
+                consumer_rate: per_sec(900),
+                producer_p50: micros(1500),
+                producer_p99: micros(4200),
+                consumer_e2e_p99: millis(7),
             },
             Sample {
                 t_offset_ms: TimeOffsetMs(2000),
-                producer_msgs_per_sec: 1100.0,
-                consumer_msgs_per_sec: 950.0,
-                producer_p50_ms: 1.6,
-                producer_p99_ms: 4.5,
-                consumer_e2e_p99_ms: 7.5,
+                producer_rate: per_sec(1100),
+                consumer_rate: per_sec(950),
+                producer_p50: micros(1600),
+                producer_p99: micros(4500),
+                consumer_e2e_p99: micros(7500),
             },
         ];
         r.broker_samples = vec![BrokerSample {
             t_offset_ms: TimeOffsetMs(0),
             cpu_cores: 2.5,
-            mem_working_set_bytes: 1_048_576,
+            mem_working_set: mebibytes(1),
         }];
         std::fs::write(
             dir.path().join("crabka-x-6broker-rf3-run03.json"),

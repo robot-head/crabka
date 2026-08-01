@@ -9,6 +9,7 @@
 use crabka_client_streams::{
     Consumed, Grouped, I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
 };
+use crabka_units::prelude::*;
 
 #[test]
 fn dsl_count_executes() {
@@ -1127,12 +1128,12 @@ fn dsl_windowed_count_tumbling_executes() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(10))
+        .windowed_by(TimeWindows::of_size(millis(10)))
         .count("w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -1157,7 +1158,7 @@ fn dsl_windowed_count_tumbling_executes() {
         "x".to_string(),
         12,
     );
-    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde);
     assert_eq!(
         d.read_output("out", p()),
         Some((
@@ -1202,12 +1203,12 @@ fn dsl_windowed_count_hopping_executes() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(10).advance_by(5))
+        .windowed_by(TimeWindows::of_size(millis(10)).advance_by(millis(5)))
         .count("w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -1218,7 +1219,7 @@ fn dsl_windowed_count_hopping_executes() {
         "x".to_string(),
         12,
     );
-    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde);
     // windows_for(12) for size=10 advance=5 = [5, 10] → two emissions
     assert_eq!(
         d.read_output("out", p()),
@@ -1253,12 +1254,12 @@ fn dsl_windowed_reduce_executes() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(10))
+        .windowed_by(TimeWindows::of_size(millis(10)))
         .reduce(|acc: &String, v: &String| format!("{acc}{v}"), "w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), StringSerde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -1283,7 +1284,7 @@ fn dsl_windowed_reduce_executes() {
         "9".to_string(),
         12,
     );
-    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde);
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), StringSerde);
     assert_eq!(
         d.read_output("out", p()),
         Some((
@@ -1327,12 +1328,12 @@ fn dsl_windowed_aggregate_executes() {
     let b = StreamsBuilder::new();
     b.stream::<String, i64>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(10))
+        .windowed_by(TimeWindows::of_size(millis(10)))
         .aggregate(|| 0i64, |_k: &String, v: &i64, acc: i64| acc + *v, "w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -1357,7 +1358,7 @@ fn dsl_windowed_aggregate_executes() {
         2i64,
         12,
     );
-    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde);
     assert_eq!(
         d.read_output("out", p()),
         Some((
@@ -1409,7 +1410,7 @@ fn dsl_stream_stream_inner_join_executes() {
     left.join(
         &right,
         |a: &String, c: &String| format!("{a}{c}"),
-        JoinWindows::of(10),
+        JoinWindows::of(millis(10)),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
     .to("out");
@@ -1456,7 +1457,7 @@ fn dsl_stream_stream_inner_join_executes() {
     );
 }
 
-/// Asymmetric `JoinWindows::of(10).before(0).after(20)` proves the OTHER-side
+/// Asymmetric `JoinWindows::of(millis(10)).before(millis(0)).after(millis(20))` proves the OTHER-side
 /// fetch-window swap. A record at `t` matches the other side over `[t-before,
 /// t+after]` *from this record's perspective*; the per-side processor swaps
 /// `before`/`after` so this holds for whichever side drives the record.
@@ -1471,7 +1472,9 @@ fn dsl_stream_stream_join_swap_asymmetric() {
     left.join(
         &right,
         |a: &String, c: &String| format!("{a}{c}"),
-        JoinWindows::of(10).before(0).after(20),
+        JoinWindows::of(millis(10))
+            .before(millis(0))
+            .after(millis(20)),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
     .to("out");
@@ -1547,7 +1550,7 @@ fn dsl_stream_stream_join_duplicates() {
     left.join(
         &right,
         |a: &String, c: &String| format!("{a}{c}"),
-        JoinWindows::of(10),
+        JoinWindows::of(millis(10)),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
     .to("out");
@@ -1616,7 +1619,7 @@ fn dsl_stream_stream_left_join_executes() {
     left.left_join(
         &right,
         |a: &String, b: Option<&String>| format!("{a}{}", b.cloned().unwrap_or_default()),
-        JoinWindows::of(10),
+        JoinWindows::of(millis(10)),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
     .to("out");
@@ -1707,7 +1710,7 @@ fn dsl_stream_stream_outer_join_executes() {
                 b.cloned().unwrap_or_default()
             )
         },
-        JoinWindows::of(10),
+        JoinWindows::of(millis(10)),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
     .to("out");
@@ -1757,7 +1760,7 @@ fn dsl_session_count_merges_within_gap() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(millis(60)))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .to_stream()
         .to_explicit(
@@ -1824,7 +1827,7 @@ fn dsl_session_count_separate_beyond_gap() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(millis(60)))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .to_stream()
         .to_explicit(
@@ -1877,7 +1880,7 @@ fn dsl_session_reduce_executes() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(millis(60)))
         .reduce_explicit(
             |a: &String, c: &String| format!("{a}{c}"),
             Materialized::with(StringSerde, StringSerde),
@@ -1933,7 +1936,7 @@ fn dsl_session_aggregate_executes() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(millis(60)))
         .aggregate_explicit(
             || 0i64,
             |_k: &String, _v: &String, acc: i64| acc + 1,
@@ -1992,13 +1995,16 @@ fn dsl_suppress_until_window_closes_emits_final_only() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(60_000))
+        .windowed_by(TimeWindows::of_size(millis(60_000)))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+            Produced::with(
+                TimeWindowedSerde::new(StringSerde, millis(60_000)),
+                I64Serde,
+            ),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -2012,7 +2018,10 @@ fn dsl_suppress_until_window_closes_emits_final_only() {
             ts,
         );
     }
-    let out = Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde);
+    let out = Produced::with(
+        TimeWindowedSerde::new(StringSerde, millis(60_000)),
+        I64Serde,
+    );
     assert_eq!(d.read_output("out", out), None); // buffered, window not yet closed
     // A record in window [60000,120000) advances stream-time to 65000 >= 60000 ->
     // window [0,60000) closes, emitting its final count (2) exactly once.
@@ -2051,17 +2060,23 @@ fn dsl_suppress_closes_multiple_windows_in_order() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(60_000))
+        .windowed_by(TimeWindows::of_size(millis(60_000)))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+            Produced::with(
+                TimeWindowedSerde::new(StringSerde, millis(60_000)),
+                I64Serde,
+            ),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
-    let out = Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde);
+    let out = Produced::with(
+        TimeWindowedSerde::new(StringSerde, millis(60_000)),
+        I64Serde,
+    );
     // "a" and "b" both land in window [0,60000) → two buffered entries, no output.
     d.pipe_input(
         "in",
@@ -2129,7 +2144,7 @@ fn dsl_suppress_max_records_shuts_down_when_full() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(60_000))
+        .windowed_by(TimeWindows::of_size(millis(60_000)))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_window_closes(
             BufferConfig::unbounded().with_max_records(2),
@@ -2137,7 +2152,10 @@ fn dsl_suppress_max_records_shuts_down_when_full() {
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+            Produced::with(
+                TimeWindowedSerde::new(StringSerde, millis(60_000)),
+                I64Serde,
+            ),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -2168,15 +2186,18 @@ fn dsl_suppress_max_bytes_shuts_down_when_full() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(60_000))
+        .windowed_by(TimeWindows::of_size(millis(60_000)))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_window_closes(
-            BufferConfig::unbounded().with_max_bytes(20),
+            BufferConfig::unbounded().with_max_bytes(bytes(20)),
         ))
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+            Produced::with(
+                TimeWindowedSerde::new(StringSerde, millis(60_000)),
+                I64Serde,
+            ),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -2205,8 +2226,8 @@ fn dsl_suppress_max_bytes_emit_early() {
         .group_by_key()
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_time_limit(
-            1_000_000,
-            BufferConfig::max_bytes(10),
+            millis(1_000_000),
+            BufferConfig::max_bytes(bytes(10)),
         ))
         .to_stream()
         .to("out");
@@ -2247,7 +2268,10 @@ fn dsl_suppress_until_time_limit_rate_limits() {
     b.stream::<String, String>(["in"])
         .group_by_key()
         .count_explicit(Materialized::with(StringSerde, I64Serde))
-        .suppress(Suppressed::until_time_limit(50, BufferConfig::unbounded()))
+        .suppress(Suppressed::until_time_limit(
+            millis(50),
+            BufferConfig::unbounded(),
+        ))
         .to_stream()
         .to("out");
     let built = b.build("app").unwrap();
@@ -2288,7 +2312,7 @@ fn dsl_suppress_emit_early_when_full_evicts_oldest() {
         .group_by_key()
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_time_limit(
-            100_000,
+            millis(100_000),
             BufferConfig::max_records(1),
         )) // eager cap 1
         .to_stream()
@@ -2853,12 +2877,12 @@ fn sliding_window_count_matches_jvm_behavior() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(millis(10)))
         .count("w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -2874,7 +2898,7 @@ fn sliding_window_count_matches_jvm_behavior() {
     let mut got: Vec<Row> = Vec::new();
     while let Some((Some(wk), v)) = d.read_output(
         "out",
-        Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
     ) {
         got.push(Row {
             key: wk.key,
@@ -2917,13 +2941,13 @@ fn emit_final_time_window_matches_jvm_behavior() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(10))
+        .windowed_by(TimeWindows::of_size(millis(10)))
         .emit_strategy(EmitStrategy::on_window_close())
         .count("w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -2939,7 +2963,7 @@ fn emit_final_time_window_matches_jvm_behavior() {
     let mut got: Vec<EmitFinalRow> = Vec::new();
     while let Some((Some(wk), v)) = d.read_output(
         "out",
-        Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
     ) {
         got.push(EmitFinalRow {
             key: wk.key,
@@ -2966,13 +2990,13 @@ fn emit_final_sliding_window_matches_jvm_behavior() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(millis(10)))
         .emit_strategy(EmitStrategy::on_window_close())
         .count("w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -2988,7 +3012,7 @@ fn emit_final_sliding_window_matches_jvm_behavior() {
     let mut got: Vec<EmitFinalRow> = Vec::new();
     while let Some((Some(wk), v)) = d.read_output(
         "out",
-        Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+        Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
     ) {
         got.push(EmitFinalRow {
             key: wk.key,
@@ -3021,7 +3045,7 @@ fn emit_final_session_window_matches_jvm_behavior() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_session(SessionWindows::of_inactivity_gap(10))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(millis(10)))
         .emit_strategy(EmitStrategy::on_window_close())
         .count("w")
         .to_stream()
@@ -3071,12 +3095,12 @@ fn sliding_window_count_builds() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(millis(10)))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
         );
     // Building must not panic and must yield a wire topology.
     let _ = b.build_optimized("app").unwrap().to_wire();
@@ -3108,12 +3132,12 @@ fn sliding_window_reduce_matches_jvm_behavior() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(millis(10)))
         .reduce(|a: &String, v: &String| format!("{a}|{v}"), "w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), StringSerde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -3129,7 +3153,7 @@ fn sliding_window_reduce_matches_jvm_behavior() {
     let mut got: Vec<Row> = Vec::new();
     while let Some((Some(wk), v)) = d.read_output(
         "out",
-        Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde),
+        Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), StringSerde),
     ) {
         got.push(Row {
             key: wk.key,
@@ -3160,12 +3184,12 @@ fn sliding_window_aggregate_executes() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(millis(10)))
         .aggregate(|| 0i64, |_k: &String, _v: &String, a: i64| a + 1, "w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -3185,7 +3209,7 @@ fn sliding_window_aggregate_executes() {
         "x".to_string(),
         25,
     );
-    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde);
     // First emission: left window [10,20] with count=1.
     assert_eq!(
         d.read_output("out", p()),
@@ -3214,18 +3238,21 @@ fn sliding_window_emit_final_emits_only_on_close() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_sliding(SlidingWindows::of_time_difference_and_grace(10, 100))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_and_grace(
+            millis(10),
+            millis(100),
+        ))
         .emit_strategy(EmitStrategy::on_window_close())
         .aggregate(|| 0i64, |_k: &String, _v: &String, a: i64| a + 1, "w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
     let consume = || Consumed::with(StringSerde, StringSerde);
-    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
+    let p = || Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde);
     // Two in-window records (grace 100 keeps their windows open).
     d.pipe_input("in", consume(), Some("k".to_string()), "x".to_string(), 20);
     d.pipe_input("in", consume(), Some("k".to_string()), "x".to_string(), 25);
@@ -3262,12 +3289,12 @@ fn sliding_window_count_nonexplicit_builds_and_runs() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(millis(10)))
         .count("w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -3282,7 +3309,7 @@ fn sliding_window_count_nonexplicit_builds_and_runs() {
     assert_eq!(
         d.read_output(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde)
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), I64Serde)
         ),
         Some((
             Some(Windowed {
@@ -3306,12 +3333,12 @@ fn sliding_window_reduce_nonexplicit() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(10))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(millis(10)))
         .reduce(|a: &String, v: &String| format!("{a}|{v}"), "w")
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), StringSerde),
         );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -3326,7 +3353,7 @@ fn sliding_window_reduce_nonexplicit() {
     assert_eq!(
         d.read_output(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 10), StringSerde)
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(10)), StringSerde)
         ),
         Some((
             Some(Windowed {
@@ -3349,7 +3376,7 @@ fn versioned_table_keeps_latest_on_out_of_order() {
     b.table_explicit(
         "in",
         Consumed::with(StringSerde, I64Serde),
-        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", millis(600_000)),
     )
     .to_stream()
     .to("out");
@@ -3421,7 +3448,7 @@ fn versioned_table_changelog_matches_jvm() {
     b.table_explicit(
         "in",
         Consumed::with(StringSerde, I64Serde),
-        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", millis(600_000)),
     );
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -3474,7 +3501,7 @@ fn versioned_table_behavioral_matches_jvm() {
     b.table_explicit(
         "in",
         Consumed::with(StringSerde, I64Serde),
-        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", millis(600_000)),
     )
     .to_stream()
     .to("out");

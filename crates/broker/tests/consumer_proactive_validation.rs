@@ -230,9 +230,9 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
             .bootstrap(&bootstrap)
             .client_id("seed")
             .group_id("proactive-grp")
-            .session_timeout(Duration::from_secs(30))
-            .rebalance_timeout(Duration::from_secs(2))
-            .heartbeat_interval(Duration::from_secs(1))
+            .session_timeout(crabka_units::secs(30))
+            .rebalance_timeout(crabka_units::secs(2))
+            .heartbeat_interval(crabka_units::secs(1))
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .subscribe([topic.to_string()])
             .build()
@@ -242,7 +242,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         let deadline = Instant::now() + Duration::from_secs(15);
         while Instant::now() < deadline && epochs.len() < 4 {
             for r in seed
-                .poll(Duration::from_millis(300))
+                .poll(crabka_units::millis(300))
                 .await
                 .expect("seed consume must not error")
             {
@@ -304,9 +304,9 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
         .bootstrap(&bootstrap)
         .client_id("c")
         .group_id("proactive-grp")
-        .session_timeout(Duration::from_secs(30))
-        .rebalance_timeout(Duration::from_secs(2))
-        .heartbeat_interval(Duration::from_secs(1))
+        .session_timeout(crabka_units::secs(30))
+        .rebalance_timeout(crabka_units::secs(2))
+        .heartbeat_interval(crabka_units::secs(1))
         .auto_offset_reset(AutoOffsetReset::None)
         .subscribe([topic.to_string()])
         .build()
@@ -359,7 +359,7 @@ async fn consumer_proactively_validates_and_surfaces_truncation() {
     let deadline = Instant::now() + Duration::from_secs(15);
     let mut got = None;
     while Instant::now() < deadline {
-        match consumer.poll(Duration::from_millis(300)).await {
+        match consumer.poll(crabka_units::millis(300)).await {
             Ok(recs) => {
                 assert!(
                     recs.is_empty(),

@@ -4,7 +4,7 @@
 //! [`crate::dsl::windowed_kgrouped::TimeWindowedKGroupedStream`]: same grouped
 //! lineage + window store, but the aggregate processor implements the KIP-450
 //! left/right-window algorithm and the windows are data-defined inclusive
-//! windows of size `time_difference_ms`.
+//! windows of size `time_difference`.
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc};
 
 use crate::{
@@ -303,9 +303,9 @@ where
                 // Retention basis = 2 * timeDiff (the [t-timeDiff, t+timeDiff] span);
                 // the true window size for the key end is 1 * timeDiff.
                 (
-                    windows.time_difference_ms * 2,
-                    windows.time_difference_ms,
-                    windows.grace_ms,
+                    windows.time_difference * 2.0,
+                    windows.time_difference,
+                    windows.grace,
                 ),
                 [h.name().to_string()],
             );
@@ -324,10 +324,10 @@ where
             agg_id,
             Some(store_name),
             None,
-            TimeWindowedSerde::new(key_serde.clone(), windows.time_difference_ms),
+            TimeWindowedSerde::new(key_serde.clone(), windows.time_difference),
             value_serde.clone(),
         )
-        .with_window_grace(Some(windows.grace_ms))
+        .with_window_grace(Some(windows.grace))
         .with_suppress_factory(Some(suppress_factory))
     }
 
@@ -407,9 +407,9 @@ where
                 // Retention basis = 2 * timeDiff (the [t-timeDiff, t+timeDiff] span);
                 // the true window size for the key end is 1 * timeDiff.
                 (
-                    windows.time_difference_ms * 2,
-                    windows.time_difference_ms,
-                    windows.grace_ms,
+                    windows.time_difference * 2.0,
+                    windows.time_difference,
+                    windows.grace,
                 ),
                 [h.name().to_string()],
             );
@@ -426,10 +426,10 @@ where
             red_id,
             Some(store_name),
             None,
-            TimeWindowedSerde::new(key_serde.clone(), windows.time_difference_ms),
+            TimeWindowedSerde::new(key_serde.clone(), windows.time_difference),
             value_serde.clone(),
         )
-        .with_window_grace(Some(windows.grace_ms))
+        .with_window_grace(Some(windows.grace))
         .with_suppress_factory(Some(suppress_factory))
     }
 }
@@ -451,7 +451,7 @@ where
                 .topology
                 .add_suppress_store::<Windowed<K>, VA, TimeWindowedSerde<KS>, VS>(
                     store_name.to_string(),
-                    TimeWindowedSerde::new(key_serde.clone(), windows.time_difference_ms),
+                    TimeWindowedSerde::new(key_serde.clone(), windows.time_difference),
                     value_serde.clone(),
                     logging,
                     [proc_name.to_string()],

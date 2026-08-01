@@ -29,6 +29,7 @@ crabka-ids = { version = "0.3.8", path = "../ids" }
 thiserror = { workspace = true }
 uuid = { workspace = true }
 crabka-security = { workspace = true }
+crabka-units = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

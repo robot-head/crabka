@@ -10,6 +10,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crabka_blockstore::Labels;
+use crabka_units::prelude::*;
 use serde_json::{Map, Value, json};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use url::form_urlencoded;
@@ -362,7 +363,7 @@ async fn prometheus_rule_groups_json<S: MetricStore>(
             groups.push(json!({
                 "name": group_name,
                 "file": namespace,
-                "interval": duration_seconds_from_yaml(&group, "interval"),
+                "interval": yaml_duration(&group, "interval").secs_i64(),
                 "lastEvaluation": last_evaluation,
                 "evaluationTime": 0.0,
                 "lastError": "",
@@ -426,7 +427,7 @@ async fn prometheus_rule_json<S: MetricStore>(
     };
     let mut rule_json = json!({
         "annotations": yaml_mapping_json(rule, "annotations"),
-        "duration": duration_seconds_from_yaml(rule, "for"),
+        "duration": yaml_duration(rule, "for").secs_i64(),
         "evaluationTime": 0.0,
         "health": health,
         "lastError": last_error,
@@ -480,8 +481,7 @@ async fn prometheus_alerts_for_rule_json<S: MetricStore>(
     let QueryResult::InstantVector(samples) = result else {
         return Ok(Vec::new());
     };
-    let duration_seconds = duration_seconds_from_yaml(rule, "for");
-    let duration_ms = duration_seconds.saturating_mul(1000);
+    let hold = yaml_duration(rule, "for");
     let rule_id = format!("{name}\n{query}");
     let mut evaluated = Vec::new();
     let mut active_keys = BTreeSet::new();
@@ -510,10 +510,8 @@ async fn prometheus_alerts_for_rule_json<S: MetricStore>(
     let mut alerts = Vec::new();
     for (key, labels, value) in evaluated {
         let active_at_ms = *alert_states.entry(key).or_insert(eval_time_ms);
-        let alert_state = if duration_ms == 0
-            || u64::try_from(eval_time_ms.saturating_sub(active_at_ms))
-                .is_ok_and(|active_ms| active_ms >= duration_ms)
-        {
+        let active = Time::from_millis(eval_time_ms.saturating_sub(active_at_ms));
+        let alert_state = if hold == Time::ZERO || active >= hold {
             "firing"
         } else {
             "pending"
@@ -534,7 +532,7 @@ async fn prometheus_alerts_for_rule_json<S: MetricStore>(
         alerts.push(json!({
             "activeAt": rfc3339_time_string(active_at_ms),
             "annotations": annotations,
-            "duration": duration_seconds,
+            "duration": hold.secs_i64(),
             "labels": labels_map_json(expanded_labels),
             "name": name,
             "query": query,
@@ -621,24 +619,30 @@ fn yaml_mapping_json(value: &serde_yaml::Value, key: &str) -> Value {
         )
 }
 
-fn duration_seconds_from_yaml(value: &serde_yaml::Value, key: &str) -> u64 {
+/// A rule-file duration key (`for:`, a group's `interval:`) as an extent. An
+/// absent or unparseable value is a zero extent.
+fn yaml_duration(value: &serde_yaml::Value, key: &str) -> Time {
     value
         .get(key)
         .and_then(serde_yaml::Value::as_str)
-        .and_then(parse_duration_seconds)
-        .unwrap_or(0)
+        .and_then(parse_yaml_duration)
+        .unwrap_or(Time::ZERO)
 }
 
-fn parse_duration_seconds(value: &str) -> Option<u64> {
+/// The `s`/`m`/`h` suffixes this surface accepts, and a bare number read as
+/// seconds. The amount parses as `u64`, so a negative or otherwise malformed
+/// value is `None` and reads as "no duration" rather than a backwards window.
+fn parse_yaml_duration(value: &str) -> Option<Time> {
     let value = value.trim();
-    if let Some(seconds) = value.strip_suffix('s') {
-        return seconds.parse().ok();
-    }
-    if let Some(minutes) = value.strip_suffix('m') {
-        return minutes.parse::<u64>().ok().map(|minutes| minutes * 60);
-    }
-    if let Some(hours) = value.strip_suffix('h') {
-        return hours.parse::<u64>().ok().map(|hours| hours * 60 * 60);
-    }
-    value.parse().ok()
+    let (amount, unit_seconds) = if let Some(amount) = value.strip_suffix('s') {
+        (amount, 1)
+    } else if let Some(amount) = value.strip_suffix('m') {
+        (amount, 60)
+    } else if let Some(amount) = value.strip_suffix('h') {
+        (amount, 60 * 60)
+    } else {
+        (value, 1)
+    };
+    let amount = i64::try_from(amount.parse::<u64>().ok()?).ok()?;
+    Some(Time::from_secs(amount.saturating_mul(unit_seconds)))
 }

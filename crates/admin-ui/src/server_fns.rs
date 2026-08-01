@@ -738,7 +738,7 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
                         replicas: request.replicas,
                         configs,
                     }],
-                    self.0.cfg.topic_mutation_timeout_ms.into_value(),
+                    mutation_timeout(&self.0.cfg),
                 )
                 .await?;
 
@@ -754,10 +754,7 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
             let mut facade = self.0.facade().await?;
             let outcomes = facade
                 .client_mut()
-                .delete_topics(
-                    &[request.name.as_str()],
-                    self.0.cfg.topic_mutation_timeout_ms.into_value(),
-                )
+                .delete_topics(&[request.name.as_str()], mutation_timeout(&self.0.cfg))
                 .await?;
 
             Ok(resource_outcome_rows(outcomes))
@@ -777,7 +774,7 @@ impl AdminMutationSeam for BrokerAdminMutationSeam {
                         name: request.topic,
                         new_total_count: request.total_count,
                     }],
-                    self.0.cfg.topic_mutation_timeout_ms.into_value(),
+                    mutation_timeout(&self.0.cfg),
                 )
                 .await?;
 

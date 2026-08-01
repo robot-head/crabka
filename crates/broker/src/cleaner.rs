@@ -14,6 +14,7 @@ use std::{
 };
 
 use crabka_metadata::NodeId;
+use crabka_units::{Time, convert::TimeExt as _};
 use qubit_clock::sleep::{AsyncSleeper, SystemSleeper};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
@@ -23,7 +24,7 @@ use crate::{metrics::BrokerMetrics, partition::Partition, partition_registry::Pa
 /// Tunables for [`run`].
 #[derive(Clone)]
 pub(crate) struct CleanerConfig {
-    pub interval: Duration,
+    pub interval: Time,
     /// Relative sleeper driving the compaction-sweep cadence. Production uses
     /// [`qubit_clock::sleep::SystemSleeper`] (real time); tests inject a
     /// [`qubit_clock::sleep::MockSleeper`] so the sweep interval fires on a
@@ -32,7 +33,7 @@ pub(crate) struct CleanerConfig {
 }
 
 impl CleanerConfig {
-    pub(crate) fn system(interval: Duration) -> Self {
+    pub(crate) fn system(interval: Time) -> Self {
         Self {
             interval,
             sleeper: Arc::new(SystemSleeper::new()),
@@ -61,7 +62,7 @@ pub(crate) async fn run(
         tokio::select! {
             () = &mut tick => {
                 tick_all(&partitions, node_id, &metrics).await;
-                tick = sleeper.sleep_for_async(cfg.interval);
+                tick = sleeper.sleep_for_async(cfg.interval.to_std());
             }
             () = shutdown.cancelled() => {
                 debug!("cleaner task shutting down");
@@ -124,6 +125,7 @@ mod tests {
     use bytes::Bytes;
     use crabka_ids::PartitionIndex;
     use crabka_protocol::records::{Record, RecordBatch};
+    use crabka_units::secs;
     use tempfile::TempDir;
     use tokio_util::sync::CancellationToken;
 
@@ -153,7 +155,7 @@ mod tests {
         std::fs::create_dir_all(&part_dir).expect("create partition dir");
         let cfg = crabka_log::LogConfig {
             cleanup_policy,
-            segment_bytes: 256,
+            segment_size: crabka_units::bytes(256),
             ..Default::default()
         };
         let mut log = crabka_log::Log::open(&part_dir, cfg).expect("open compactable log");
@@ -182,7 +184,7 @@ mod tests {
             .log
             .lock()
             .expect("partition log lock")
-            .read(crabka_log::Offset(0), 1 << 20)
+            .read(crabka_log::Offset(0), crabka_units::mebibytes(1))
             .expect("read partition log");
         read.batches.iter().map(|batch| batch.records.len()).sum()
     }
@@ -256,7 +258,7 @@ mod tests {
         );
 
         // Drive the sweep cadence on a mock timeline instead of wall-clock time.
-        let interval = Duration::from_secs(30);
+        let interval = secs(30);
         let sleeper = MockSleeper::new();
         let timeline = sleeper.timeline();
         let shutdown = CancellationToken::new();
@@ -297,7 +299,7 @@ mod tests {
         // re-parks — proving it keeps ticking on the injected cadence with no
         // wall-clock time (the second sweep is idempotent, so the log stays
         // compacted rather than shrinking further).
-        timeline.advance(interval);
+        timeline.advance(interval.to_std());
         let tl = timeline.clone();
         let parked_again = tokio::task::spawn_blocking(move || {
             tl.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, Duration::from_secs(5))

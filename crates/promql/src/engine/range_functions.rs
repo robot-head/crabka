@@ -1,5 +1,6 @@
 use crabka_blockstore::Labels;
 use crabka_metrics::{BucketSpan, NativeHistogram, ResetHint};
+use crabka_units::prelude::*;
 use num_traits::ToPrimitive;
 
 use super::{
@@ -75,7 +76,7 @@ pub(super) enum OuterRangeFn {
     Deriv,
     OverTime(OverTimeFn),
     QuantileOverTime(f64),
-    PredictLinear(f64),
+    PredictLinear(Time),
     #[cfg(feature = "experimental-functions")]
     DoubleExponentialSmoothing {
         smoothing: f64,
@@ -99,7 +100,7 @@ pub(super) fn apply_outer_range_fn(
             outer_range_sample_from_series(
                 &series,
                 range.end_ms,
-                range.range_ms,
+                range.range,
                 outer,
                 range.modifier,
             )
@@ -118,33 +119,31 @@ pub(super) fn apply_outer_range_fn(
 fn outer_range_sample_from_series(
     series: &RangeSeries,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     outer: OuterRangeFn,
     modifier: Option<ExtendedSelectorModifier>,
 ) -> Option<(Labels, SampleValue)> {
     match outer {
         OuterRangeFn::Range(kind) => {
-            range_function_sample_from_series(series, range_end_ms, range_ms, kind, modifier)
+            range_function_sample_from_series(series, range_end_ms, range, kind, modifier)
                 .map(|value| (labels_without_metric_name(&series.labels), value))
         }
         OuterRangeFn::InstantDelta(kind) => {
-            instant_delta_sample_from_series(series, range_end_ms, range_ms, kind).map(|value| {
+            instant_delta_sample_from_series(series, range_end_ms, range, kind).map(|value| {
                 (
                     labels_without_metric_name(&series.labels),
                     SampleValue::Float(value),
                 )
             })
         }
-        OuterRangeFn::Deriv => {
-            deriv_sample_from_series(series, range_end_ms, range_ms).map(|value| {
-                (
-                    labels_without_metric_name(&series.labels),
-                    SampleValue::Float(value),
-                )
-            })
-        }
+        OuterRangeFn::Deriv => deriv_sample_from_series(series, range_end_ms, range).map(|value| {
+            (
+                labels_without_metric_name(&series.labels),
+                SampleValue::Float(value),
+            )
+        }),
         OuterRangeFn::OverTime(kind) => {
-            over_time_sample_from_series(series, range_end_ms, range_ms, kind).map(|value| {
+            over_time_sample_from_series(series, range_end_ms, range, kind).map(|value| {
                 let labels = if kind.preserves_metric_name() {
                     series.labels.clone()
                 } else {
@@ -154,7 +153,7 @@ fn outer_range_sample_from_series(
             })
         }
         OuterRangeFn::QuantileOverTime(quantile) => {
-            quantile_over_time_sample_from_series(series, range_end_ms, range_ms, quantile).map(
+            quantile_over_time_sample_from_series(series, range_end_ms, range, quantile).map(
                 |value| {
                     (
                         labels_without_metric_name(&series.labels),
@@ -163,22 +162,20 @@ fn outer_range_sample_from_series(
                 },
             )
         }
-        OuterRangeFn::PredictLinear(duration_seconds) => {
-            predict_linear_sample_from_series(series, range_end_ms, range_ms, duration_seconds).map(
-                |value| {
-                    (
-                        labels_without_metric_name(&series.labels),
-                        SampleValue::Float(value),
-                    )
-                },
-            )
+        OuterRangeFn::PredictLinear(duration) => {
+            predict_linear_sample_from_series(series, range_end_ms, range, duration).map(|value| {
+                (
+                    labels_without_metric_name(&series.labels),
+                    SampleValue::Float(value),
+                )
+            })
         }
         #[cfg(feature = "experimental-functions")]
         OuterRangeFn::DoubleExponentialSmoothing { smoothing, trend } => {
             double_exponential_smoothing_sample_from_series(
                 series,
                 range_end_ms,
-                range_ms,
+                range,
                 smoothing,
                 trend,
             )
@@ -195,11 +192,11 @@ fn outer_range_sample_from_series(
 fn range_function_sample_from_series(
     series: &RangeSeries,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     kind: RangeFn,
     modifier: Option<ExtendedSelectorModifier>,
 ) -> Option<SampleValue> {
-    let range_start_ms = range_end_ms.saturating_sub(range_ms);
+    let range_start_ms = range_end_ms.saturating_sub(range.millis_i64());
     let mut timestamps = Vec::new();
     let mut values = Vec::new();
     let mut histograms = Vec::new();
@@ -231,8 +228,7 @@ fn range_function_sample_from_series(
     }
 
     if matches!(modifier, Some(ExtendedSelectorModifier::Anchored)) && !values.is_empty() {
-        let value =
-            anchored_float_range_value(&timestamps, &values, range_start_ms, range_ms, kind)?;
+        let value = anchored_float_range_value(&timestamps, &values, range_start_ms, range, kind)?;
         return Some(SampleValue::Float(value));
     }
     if matches!(modifier, Some(ExtendedSelectorModifier::Smoothed)) && !values.is_empty() {
@@ -241,7 +237,7 @@ fn range_function_sample_from_series(
             &values,
             range_start_ms,
             range_end_ms,
-            range_ms,
+            range,
             kind,
         )?;
         return Some(SampleValue::Float(value));
@@ -256,7 +252,7 @@ fn range_function_sample_from_series(
             &histograms,
             range_start_ms,
             range_end_ms,
-            range_ms,
+            range,
             kind,
         )
         .map(SampleValue::Histogram);
@@ -269,7 +265,7 @@ fn range_function_sample_from_series(
             &values,
             range_start_ms,
             range_end_ms,
-            range_ms,
+            range,
             kind,
         ),
     }?;
@@ -280,7 +276,7 @@ fn anchored_float_range_value(
     timestamps: &[i64],
     values: &[f64],
     range_start_ms: i64,
-    range_ms: i64,
+    range: Time,
     kind: RangeFn,
 ) -> Option<f64> {
     let mut selected = Vec::new();
@@ -347,7 +343,7 @@ fn anchored_float_range_value(
         RangeFn::Increase | RangeFn::Rate => {
             let result = counter_delta(&selected_values)?;
             if kind == RangeFn::Rate {
-                let range_seconds = range_ms.to_f64()? / 1000.0;
+                let range_seconds = range.secs_f64();
                 if range_seconds <= 0.0 {
                     return None;
                 }
@@ -378,7 +374,7 @@ fn smoothed_float_range_value(
     values: &[f64],
     range_start_ms: i64,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     kind: RangeFn,
 ) -> Option<f64> {
     if !matches!(kind, RangeFn::Delta | RangeFn::Increase | RangeFn::Rate) {
@@ -400,7 +396,7 @@ fn smoothed_float_range_value(
         result = 0.0;
     }
     if kind == RangeFn::Rate {
-        let range_seconds = range_ms.to_f64()? / 1000.0;
+        let range_seconds = range.secs_f64();
         if range_seconds <= 0.0 {
             return None;
         }
@@ -503,7 +499,7 @@ fn range_histogram_sample(
     histograms: &[NativeHistogram],
     range_start_ms: i64,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     kind: RangeFn,
 ) -> Option<NativeHistogram> {
     if !matches!(kind, RangeFn::Rate | RangeFn::Increase | RangeFn::Delta) || histograms.len() < 2 {
@@ -523,7 +519,7 @@ fn range_histogram_sample(
         reset_indices: &resets,
         range_start_ms,
         range_end_ms,
-        range_ms,
+        range,
         kind,
     };
 
@@ -645,7 +641,7 @@ struct HistogramExtrapolation<'a> {
     reset_indices: &'a [usize],
     range_start_ms: i64,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     kind: RangeFn,
 }
 
@@ -700,7 +696,7 @@ fn extrapolated_histogram_component(
             values,
             extrapolation.range_start_ms,
             extrapolation.range_end_ms,
-            extrapolation.range_ms,
+            extrapolation.range,
             extrapolation.kind,
         );
     }
@@ -719,7 +715,7 @@ fn extrapolated_histogram_component(
         result,
         extrapolation.range_start_ms,
         extrapolation.range_end_ms,
-        extrapolation.range_ms,
+        extrapolation.range,
         extrapolation.kind,
     )
 }
@@ -729,7 +725,7 @@ fn extrapolate_histogram_delta(
     mut result: f64,
     range_start_ms: i64,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     kind: RangeFn,
 ) -> Option<f64> {
     let n = timestamps.len();
@@ -755,7 +751,7 @@ fn extrapolate_histogram_delta(
     let extrapolated_interval = sampled_interval + duration_to_start + duration_to_end;
     result *= extrapolated_interval / sampled_interval;
     if kind == RangeFn::Rate {
-        result /= range_ms.to_f64()? / 1000.0;
+        result /= range.secs_f64();
     }
     Some(result)
 }
@@ -763,10 +759,10 @@ fn extrapolate_histogram_delta(
 fn instant_delta_sample_from_series(
     series: &RangeSeries,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     kind: IrateFn,
 ) -> Option<f64> {
-    let range_start_ms = range_end_ms.saturating_sub(range_ms);
+    let range_start_ms = range_end_ms.saturating_sub(range.millis_i64());
     let mut timestamps = Vec::new();
     let mut values = Vec::new();
     for (timestamp, value) in &series.samples {
@@ -785,23 +781,23 @@ fn instant_delta_sample_from_series(
 fn over_time_sample_from_series(
     series: &RangeSeries,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     kind: OverTimeFn,
 ) -> Option<SampleValue> {
     if matches!(
         kind,
         OverTimeFn::Count | OverTimeFn::First | OverTimeFn::Last | OverTimeFn::Present
     ) {
-        let sample_count = range_sample_count(series, range_end_ms, range_ms);
+        let sample_count = range_sample_count(series, range_end_ms, range);
         if sample_count == 0 {
             return None;
         }
         return match kind {
             OverTimeFn::Count => Some(SampleValue::Float((0..sample_count).map(|_| 1.0).sum())),
-            OverTimeFn::First => range_samples(series, range_end_ms, range_ms)
+            OverTimeFn::First => range_samples(series, range_end_ms, range)
                 .min_by_key(|(timestamp, _)| *timestamp)
                 .map(|(_, value)| value.clone()),
-            OverTimeFn::Last => range_samples(series, range_end_ms, range_ms)
+            OverTimeFn::Last => range_samples(series, range_end_ms, range)
                 .max_by_key(|(timestamp, _)| *timestamp)
                 .map(|(_, value)| value.clone()),
             OverTimeFn::Present => Some(SampleValue::Float(1.0)),
@@ -810,13 +806,13 @@ fn over_time_sample_from_series(
     }
 
     if matches!(kind, OverTimeFn::Sum | OverTimeFn::Avg) {
-        let histograms = histogram_range_samples(series, range_end_ms, range_ms);
+        let histograms = histogram_range_samples(series, range_end_ms, range);
         if !histograms.is_empty() {
             return over_time_histogram_sample(&histograms, kind).map(SampleValue::Histogram);
         }
     }
 
-    let samples = float_range_samples(series, range_end_ms, range_ms);
+    let samples = float_range_samples(series, range_end_ms, range);
     if samples.is_empty() {
         return None;
     }
@@ -899,23 +895,23 @@ fn over_time_histogram_sample(
 fn quantile_over_time_sample_from_series(
     series: &RangeSeries,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     quantile: f64,
 ) -> Option<f64> {
-    let mut values = float_range_samples(series, range_end_ms, range_ms)
+    let mut values = float_range_samples(series, range_end_ms, range)
         .into_iter()
         .map(|(_, value)| value)
         .collect::<Vec<_>>();
     quantile_value(quantile, &mut values)
 }
 
-fn deriv_sample_from_series(series: &RangeSeries, range_end_ms: i64, range_ms: i64) -> Option<f64> {
-    let samples = float_range_samples(series, range_end_ms, range_ms);
+fn deriv_sample_from_series(series: &RangeSeries, range_end_ms: i64, range: Time) -> Option<f64> {
+    let samples = float_range_samples(series, range_end_ms, range);
     regression_slope(&samples, range_end_ms)
 }
 
-fn float_range_samples(series: &RangeSeries, range_end_ms: i64, range_ms: i64) -> Vec<(i64, f64)> {
-    let range_start_ms = range_end_ms.saturating_sub(range_ms);
+fn float_range_samples(series: &RangeSeries, range_end_ms: i64, range: Time) -> Vec<(i64, f64)> {
+    let range_start_ms = range_end_ms.saturating_sub(range.millis_i64());
     series
         .samples
         .iter()
@@ -934,9 +930,9 @@ fn float_range_samples(series: &RangeSeries, range_end_ms: i64, range_ms: i64) -
 fn histogram_range_samples(
     series: &RangeSeries,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
 ) -> Vec<NativeHistogram> {
-    range_samples(series, range_end_ms, range_ms)
+    range_samples(series, range_end_ms, range)
         .filter_map(|(_, value)| match value {
             SampleValue::Histogram(histogram) => Some(histogram.clone()),
             SampleValue::Float(_) => None,
@@ -944,20 +940,20 @@ fn histogram_range_samples(
         .collect()
 }
 
-pub(super) fn range_has_samples(series: &RangeSeries, range_end_ms: i64, range_ms: i64) -> bool {
-    range_sample_count(series, range_end_ms, range_ms) != 0
+pub(super) fn range_has_samples(series: &RangeSeries, range_end_ms: i64, range: Time) -> bool {
+    range_sample_count(series, range_end_ms, range) != 0
 }
 
-fn range_sample_count(series: &RangeSeries, range_end_ms: i64, range_ms: i64) -> usize {
-    range_samples(series, range_end_ms, range_ms).count()
+fn range_sample_count(series: &RangeSeries, range_end_ms: i64, range: Time) -> usize {
+    range_samples(series, range_end_ms, range).count()
 }
 
 fn range_samples(
     series: &RangeSeries,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
 ) -> impl Iterator<Item = (i64, &SampleValue)> {
-    let range_start_ms = range_end_ms.saturating_sub(range_ms);
+    let range_start_ms = range_end_ms.saturating_sub(range.millis_i64());
     series
         .samples
         .iter()
@@ -1084,22 +1080,22 @@ fn over_time_mad(samples: &[(i64, f64)]) -> Option<f64> {
 fn predict_linear_sample_from_series(
     series: &RangeSeries,
     range_end_ms: i64,
-    range_ms: i64,
-    duration_seconds: f64,
+    range: Time,
+    duration: Time,
 ) -> Option<f64> {
-    let samples = float_range_samples(series, range_end_ms, range_ms);
-    predict_linear(&samples, range_end_ms, duration_seconds)
+    let samples = float_range_samples(series, range_end_ms, range);
+    predict_linear(&samples, range_end_ms, duration)
 }
 
 #[cfg(feature = "experimental-functions")]
 fn double_exponential_smoothing_sample_from_series(
     series: &RangeSeries,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     smoothing_factor: f64,
     trend_factor: f64,
 ) -> Option<f64> {
-    let samples = float_range_samples(series, range_end_ms, range_ms);
+    let samples = float_range_samples(series, range_end_ms, range);
     double_exponential_smoothing(&samples, smoothing_factor, trend_factor)
 }
 
@@ -1110,7 +1106,7 @@ fn extrapolated_rate(
     values: &[f64],
     range_start_ms: i64,
     range_end_ms: i64,
-    range_ms: i64,
+    range: Time,
     kind: RangeFn,
 ) -> Option<f64> {
     let n = timestamps.len();
@@ -1158,7 +1154,7 @@ fn extrapolated_rate(
     let extrapolate_to_interval = sampled_interval + duration_to_start + duration_to_end;
     result *= extrapolate_to_interval / sampled_interval;
     if kind == RangeFn::Rate {
-        let range_seconds = range_ms.to_f64()? / 1000.0;
+        let range_seconds = range.secs_f64();
         if range_seconds <= 0.0 {
             return None;
         }
@@ -1197,7 +1193,8 @@ fn count_resets(values: &[f64]) -> Option<f64> {
     Some(resets)
 }
 
-pub(super) fn align_subquery_start(start_ms: i64, step_ms: i64) -> i64 {
+pub(super) fn align_subquery_start(start_ms: i64, step: Time) -> i64 {
+    let step_ms = step.millis_i64();
     let remainder = start_ms.rem_euclid(step_ms);
     if remainder == 0 {
         start_ms
@@ -1207,9 +1204,9 @@ pub(super) fn align_subquery_start(start_ms: i64, step_ms: i64) -> i64 {
 }
 
 // Prometheus predicts gauges from a simple linear regression in f64 seconds.
-fn predict_linear(samples: &[(i64, f64)], range_end_ms: i64, duration_seconds: f64) -> Option<f64> {
+fn predict_linear(samples: &[(i64, f64)], range_end_ms: i64, duration: Time) -> Option<f64> {
     let (slope, intercept) = regression_slope_and_intercept(samples, range_end_ms)?;
-    Some(intercept + (slope * duration_seconds))
+    Some(intercept + (slope * duration.secs_f64()))
 }
 
 #[cfg(feature = "experimental-functions")]

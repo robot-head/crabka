@@ -29,7 +29,7 @@ async fn admin_log_dirs_alter_then_describe_converges() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            5_000,
+            crabka_units::secs(5),
         )
         .await
         .expect("create_topics");

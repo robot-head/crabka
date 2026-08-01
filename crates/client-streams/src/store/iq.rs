@@ -142,6 +142,8 @@ pub trait IqQueryable: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::prelude::*;
+
     use super::*;
     use crate::{
         processor::serde::{I64Serde, Serde, StringSerde},
@@ -183,7 +185,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "w-changelog".into(),
-            1000,
+            secs(1),
         );
         s.put("k".into(), 0, 10, 5).await;
         s.put("k".into(), 1000, 20, 1005).await;
@@ -202,7 +204,7 @@ mod tests {
         use crate::store::versioned::{VersionedBytesStore, VersionedKeyValueStore};
         let mut s = VersionedBytesStore::<String, i64>::in_memory(
             "v".into(),
-            1_000_000,
+            secs(1_000),
             Box::new(StringSerde),
             Box::new(I64Serde),
             "v-changelog".into(),

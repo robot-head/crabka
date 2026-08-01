@@ -5,19 +5,20 @@
 use std::collections::BTreeMap;
 
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
+use crabka_units::prelude::*;
 
 use crate::{config::GatewayRuntimeConfig, error::GatewayError};
 
 const INVALID_REPLICATION_FACTOR: i16 = 38;
 const TOPIC_ALREADY_EXISTS: i16 = 36;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct InternalTopicPolicy {
     pub replication_factor: i16,
     pub allow_replication_fallback: bool,
-    pub create_timeout_ms: i32,
-    pub segment_ms: i64,
-    pub min_cleanable_dirty_ratio: String,
+    pub create_timeout: Time,
+    pub segment: Time,
+    pub min_cleanable_dirty_ratio: Ratio,
 }
 
 #[must_use]
@@ -25,12 +26,9 @@ pub fn internal_topic_policy(runtime: &GatewayRuntimeConfig) -> InternalTopicPol
     InternalTopicPolicy {
         replication_factor: runtime.internal_topic_replication_factor,
         allow_replication_fallback: runtime.internal_topic_allow_replication_fallback,
-        create_timeout_ms: runtime.internal_topic_create_timeout_ms,
-        segment_ms: runtime.internal_topic_segment_ms,
-        min_cleanable_dirty_ratio: (f64::from(
-            runtime.internal_topic_min_cleanable_dirty_ratio_basis_points,
-        ) / 10_000.0)
-            .to_string(),
+        create_timeout: runtime.internal_topic_create_timeout,
+        segment: runtime.internal_topic_segment,
+        min_cleanable_dirty_ratio: runtime.internal_topic_min_cleanable_dirty_ratio,
     }
 }
 
@@ -46,7 +44,7 @@ pub async fn ensure_dedup_topic(
     bootstrap: &str,
     name: &str,
     partitions: u32,
-    window_ms: i64,
+    window: Time,
     policy: &InternalTopicPolicy,
     security: Option<crabka_client_core::security::ClientSecurity>,
 ) -> Result<(), GatewayError> {
@@ -79,16 +77,33 @@ pub async fn ensure_dedup_topic_with_policy(
         .await
         .map_err(|e| GatewayError::Other(format!("admin connect: {e}")))?;
 
-    let mut configs = BTreeMap::new();
+    let configs = dedup_topic_configs(window, policy);
+    create_with_rf(&mut admin, name, partitions, policy, &configs).await
+}
+
+/// Kafka's topic configs are raw strings in fixed units: `retention.ms` and
+/// `segment.ms` are millisecond integers, `min.cleanable.dirty.ratio` a bare
+/// fraction. This is where the gateway's quantities become those strings.
+fn dedup_topic_configs(window: Time, policy: &InternalTopicPolicy) -> BTreeMap<String, String> {
+    let mut configs = compaction_configs(policy);
     configs.insert("cleanup.policy".to_string(), "compact,delete".to_string());
-    configs.insert("retention.ms".to_string(), window_ms.to_string());
+    configs.insert("retention.ms".to_string(), window.millis_i64().to_string());
+    configs
+}
+
+/// The compaction configs both internal topics share.
+fn compaction_configs(policy: &InternalTopicPolicy) -> BTreeMap<String, String> {
+    let mut configs = BTreeMap::new();
+    configs.insert("cleanup.policy".to_string(), "compact".to_string());
     configs.insert(
         "min.cleanable.dirty.ratio".to_string(),
-        policy.min_cleanable_dirty_ratio.clone(),
+        policy.min_cleanable_dirty_ratio.as_f64().to_string(),
     );
-    configs.insert("segment.ms".to_string(), policy.segment_ms.to_string());
-
-    create_with_rf(&mut admin, name, partitions, policy, &configs).await
+    configs.insert(
+        "segment.ms".to_string(),
+        policy.segment.millis_i64().to_string(),
+    );
+    configs
 }
 
 /// Idempotently create the compacted, single-partition membership topic.
@@ -128,14 +143,7 @@ pub async fn ensure_membership_topic_with_policy(
         .await
         .map_err(|e| GatewayError::Other(format!("admin connect: {e}")))?;
 
-    let mut configs = BTreeMap::new();
-    configs.insert("cleanup.policy".to_string(), "compact".to_string());
-    configs.insert(
-        "min.cleanable.dirty.ratio".to_string(),
-        policy.min_cleanable_dirty_ratio.clone(),
-    );
-    configs.insert("segment.ms".to_string(), policy.segment_ms.to_string());
-
+    let configs = compaction_configs(policy);
     create_with_rf(&mut admin, name, 1, policy, &configs).await
 }
 
@@ -168,7 +176,7 @@ async fn create_with_rf(
         configs: configs.clone(),
     };
     let outcomes = admin
-        .create_topics(&[spec], policy.create_timeout_ms)
+        .create_topics(&[spec], policy.create_timeout)
         .await
         .map_err(|e| GatewayError::Other(format!("create_topics: {e}")))?;
     for o in outcomes {
@@ -200,32 +208,56 @@ fn topic_partition_count(partitions: u32) -> Result<i32, GatewayError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
+    use crabka_units::prelude::*;
 
-    use super::{InternalTopicPolicy, internal_topic_policy, topic_partition_count};
+    use super::{
+        InternalTopicPolicy, compaction_configs, dedup_topic_configs, internal_topic_policy,
+        topic_partition_count,
+    };
     use crate::config::GatewayRuntimeConfig;
+
+    fn policy() -> InternalTopicPolicy {
+        InternalTopicPolicy {
+            replication_factor: 2,
+            allow_replication_fallback: false,
+            create_timeout: secs(7),
+            segment: secs(22),
+            min_cleanable_dirty_ratio: fraction(0.025),
+        }
+    }
 
     #[test]
     fn internal_topic_policy_uses_runtime_values() {
         let runtime = GatewayRuntimeConfig {
             internal_topic_replication_factor: 2,
             internal_topic_allow_replication_fallback: false,
-            internal_topic_create_timeout_ms: 7_000,
-            internal_topic_segment_ms: 22_000,
-            internal_topic_min_cleanable_dirty_ratio_basis_points: 250,
+            internal_topic_create_timeout: secs(7),
+            internal_topic_segment: secs(22),
+            internal_topic_min_cleanable_dirty_ratio: fraction(0.025),
             ..GatewayRuntimeConfig::default()
         };
 
-        assert!(
-            internal_topic_policy(&runtime)
-                == InternalTopicPolicy {
-                    replication_factor: 2,
-                    allow_replication_fallback: false,
-                    create_timeout_ms: 7_000,
-                    segment_ms: 22_000,
-                    min_cleanable_dirty_ratio: "0.025".into(),
-                }
-        );
+        assert!(internal_topic_policy(&runtime) == policy());
+    }
+
+    /// Each quantity reaches Kafka in the unit its topic config is defined in:
+    /// `retention.ms` / `segment.ms` as millisecond integers, the dirty ratio
+    /// as a bare fraction.
+    #[test]
+    fn topic_configs_render_quantities_in_kafka_units() {
+        let dedup = dedup_topic_configs(hours(1), &policy());
+
+        check!(dedup.get("cleanup.policy").map(String::as_str) == Some("compact,delete"));
+        check!(dedup.get("retention.ms").map(String::as_str) == Some("3600000"));
+        check!(dedup.get("segment.ms").map(String::as_str) == Some("22000"));
+        check!(dedup.get("min.cleanable.dirty.ratio").map(String::as_str) == Some("0.025"));
+
+        let membership = compaction_configs(&policy());
+
+        check!(membership.get("cleanup.policy").map(String::as_str) == Some("compact"));
+        check!(membership.get("retention.ms") == None);
+        check!(membership.get("segment.ms").map(String::as_str) == Some("22000"));
     }
 
     #[test]

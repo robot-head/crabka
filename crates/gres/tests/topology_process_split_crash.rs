@@ -654,7 +654,7 @@ impl RangeRetirementAdmin for CountingRetirementAdmin {
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: crabka_units::Time,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
         if names != [self.expected_topic.as_str()] {
             let mut ledger = self.ledger.lock().expect("delete ledger");
@@ -668,7 +668,7 @@ impl RangeRetirementAdmin for CountingRetirementAdmin {
             ));
         }
         self.ledger.lock().expect("delete ledger").exact_calls += 1;
-        let result = self.inner.delete_topics(names, timeout_ms).await?;
+        let result = self.inner.delete_topics(names, timeout).await?;
         if self.fail_after_delete && result.iter().all(|outcome| outcome.error.is_none()) {
             self.fail_after_delete = false;
             let mut ledger = self.ledger.lock().expect("delete ledger");
@@ -2774,12 +2774,9 @@ async fn direct_ordinary_physical_rows(
     range_id: u32,
     routing_table_id: u64,
 ) -> Vec<OrdinaryPhysicalRow> {
-    let table_id = system
-        .catalog_table_id(&format!("live_ledger{routing_table_id}"))
-        .await;
     let scan = crabka_gres_ranges::transport::ScanRangeReq {
         range_id: RangeId::new(range_id),
-        table_id,
+        table_name: format!("live_ledger{routing_table_id}"),
         interval: crabka_gres_ranges::transport::WireRowInterval {
             start: None,
             end: None,
@@ -2882,12 +2879,9 @@ async fn direct_hash_payload_rows(
     range_id: u32,
     routing_table_id: u64,
 ) -> Vec<PhysicalPayloadRow> {
-    let table_id = system
-        .catalog_table_id(&format!("live_ledger{routing_table_id}"))
-        .await;
     let scan = crabka_gres_ranges::transport::ScanRangeReq {
         range_id: RangeId::new(range_id),
-        table_id,
+        table_name: format!("live_ledger{routing_table_id}"),
         interval: crabka_gres_ranges::transport::WireRowInterval {
             start: None,
             end: None,
@@ -4455,7 +4449,7 @@ async fn prepare_split_system(
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            30_000,
+            crabka_units::secs(30),
         )
         .await
         .expect("create sentinel topic");

@@ -25,6 +25,7 @@ crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = 
 crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
 crabka-compression = { version = "0.3.9", path = "../compression" }
+crabka-units = { workspace = true }
 async-trait = { workspace = true }
 bon = { workspace = true }
 bytes = { workspace = true }

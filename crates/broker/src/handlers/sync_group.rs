@@ -12,6 +12,7 @@ use crabka_protocol::{
     Decode,
     owned::{sync_group_request::SyncGroupRequest, sync_group_response::SyncGroupResponse},
 };
+use crabka_units::convert::TimeExt as _;
 use tokio::sync::oneshot;
 
 use crate::{
@@ -69,7 +70,8 @@ pub(crate) async fn handle(
         // The leader and the already-Stable follower reply immediately; a
         // not-yet-synced follower is parked and resolved when the leader's
         // SyncGroup installs assignments, bounded by the configured follower wait.
-        let Ok(Ok(result)) = tokio::time::timeout(broker.config.sync_group_follower_wait, rx).await
+        let Ok(Ok(result)) =
+            tokio::time::timeout(broker.config.sync_group_follower_wait.to_std(), rx).await
         else {
             return encode_err(version, codes::REBALANCE_IN_PROGRESS, None, None);
         };

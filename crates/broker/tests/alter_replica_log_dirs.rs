@@ -443,7 +443,7 @@ async fn alter_replica_log_dirs_preserves_records_across_move() {
     let deadline = Instant::now() + Duration::from_secs(15);
     while received_values.len() < 50 && Instant::now() < deadline {
         for r in consumer
-            .poll(Duration::from_millis(200))
+            .poll(crabka_units::millis(200))
             .await
             .expect("poll")
         {

@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use crabka_units::Ratio;
+
 use crate::{
     goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
     model::{ClusterState, Movement, PartitionView},
@@ -26,8 +28,8 @@ impl ReplicaDistribution {
         m
     }
 
-    fn imbalance_pct(counts: &HashMap<i32, usize>) -> u32 {
-        crate::goals::imbalance_pct_usize(counts)
+    fn imbalance(counts: &HashMap<i32, usize>) -> Ratio {
+        crate::goals::imbalance_ratio_usize(counts)
     }
 }
 
@@ -62,7 +64,7 @@ impl Goal for ReplicaDistribution {
                     *counts.entry(*r).or_insert(0) += 1;
                 }
             }
-            if Self::imbalance_pct(&counts) <= ctx.imbalance_threshold_pct {
+            if Self::imbalance(&counts) <= ctx.imbalance_threshold {
                 break;
             }
             // Sort brokers by load: descending for "most loaded", ascending for "least loaded".
@@ -97,14 +99,16 @@ impl Goal for ReplicaDistribution {
 
 #[cfg(test)]
 mod tests {
+
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::model::BrokerView;
 
     fn ctx() -> GoalContext {
         GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: std::sync::Arc::new(crate::capacity::BrokerCapacities::default()),
@@ -185,9 +189,9 @@ mod tests {
     }
 
     #[test]
-    fn imbalance_pct_uses_difference_times_100_over_total() {
+    fn imbalance_is_spread_over_total() {
         let counts = std::collections::HashMap::from([(1, 3), (2, 1)]);
-        assert2::assert!(ReplicaDistribution::imbalance_pct(&counts) == 50);
+        assert2::assert!(ReplicaDistribution::imbalance(&counts) == percent(50));
     }
 
     #[test]

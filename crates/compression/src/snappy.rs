@@ -16,6 +16,7 @@
 //! suite once the oracle gains a `compress` op.
 
 use bytes::{BufMut, Bytes, BytesMut};
+use crabka_units::prelude::{ByteSize, ByteSizeExt as _, kibibytes};
 
 use crate::CompressionError;
 
@@ -28,14 +29,15 @@ const XERIAL_HEADER: [u8; 16] = [
 /// Largest single chunk Kafka writes. Kafka's `SnappyOutputStream` writes
 /// chunks up to 32 KiB by default; using the same size keeps our output
 /// byte-identical with the JVM for differential-equal cases.
-const XERIAL_CHUNK_SIZE: usize = 32 * 1024;
+const XERIAL_CHUNK: ByteSize = kibibytes(32);
 
 pub fn compress(data: &[u8]) -> Result<Bytes, CompressionError> {
     let mut out = BytesMut::with_capacity(XERIAL_HEADER.len() + data.len());
     out.put_slice(&XERIAL_HEADER);
 
     let mut encoder = snap::raw::Encoder::new();
-    for chunk in data.chunks(XERIAL_CHUNK_SIZE) {
+    // `slice::chunks` is a primitive-typed substrate: hand it a raw count.
+    for chunk in data.chunks(XERIAL_CHUNK.bytes_usize()) {
         let max = snap::raw::max_compress_len(chunk.len());
         let mut buf = vec![0u8; max];
         let n = encoder
@@ -165,21 +167,44 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn compress_uses_32kib_chunks() {
-        // A payload between 1 KiB and 32 KiB must serialize as a SINGLE xerial
-        // chunk (chunk size is 32 * 1024). A smaller chunk size would split it
-        // into several length-prefixed chunks.
-        let payload = vec![0x5Au8; 4096];
-        let z = compress(&payload).unwrap();
-        let mut rest = &z[XERIAL_HEADER.len()..];
+    /// Count the xerial length-prefixed chunks in a compressed payload.
+    fn chunk_count(compressed: &[u8]) -> usize {
+        let mut rest = &compressed[XERIAL_HEADER.len()..];
         let mut chunks = 0;
         while rest.len() >= 4 {
             let len = u32::from_be_bytes([rest[0], rest[1], rest[2], rest[3]]) as usize;
             rest = &rest[4 + len..];
             chunks += 1;
         }
-        assert2::assert!(chunks == 1);
+        chunks
+    }
+
+    #[test]
+    fn compress_splits_exactly_at_the_xerial_chunk_boundary() {
+        // The chunk size is what keeps our framing byte-identical with the JVM's
+        // `SnappyOutputStream`, so pin it by behaviour rather than by reading the
+        // constant: a payload of exactly one chunk emits one length-prefixed
+        // chunk, and a single byte more emits two. A mis-scaled `ByteSize` (a
+        // stray factor of 1024 either way) moves that boundary and fails here.
+        let chunk = XERIAL_CHUNK.bytes_usize();
+        for (payload_len, expected_chunks) in [
+            (4096, 1),
+            (chunk - 1, 1),
+            (chunk, 1),
+            (chunk + 1, 2),
+            (2 * chunk, 2),
+            (2 * chunk + 1, 3),
+        ] {
+            // Incompressible bytes, so no chunk collapses to nothing.
+            let payload: Vec<u8> = (0..payload_len)
+                .map(|i| u8::try_from(i % 251).unwrap())
+                .collect();
+            let z = compress(&payload).unwrap();
+            assert2::check!(
+                chunk_count(&z) == expected_chunks,
+                "payload of {payload_len} bytes"
+            );
+        }
     }
 
     #[test]

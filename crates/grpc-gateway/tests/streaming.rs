@@ -11,6 +11,7 @@ use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_grpc_gateway::{
     codec::RawCodec, config::GatewayConfig, pb, produce::ProduceCore, state::AppState, streaming,
 };
+use crabka_units::prelude::*;
 use futures_util::StreamExt;
 use tempfile::TempDir;
 
@@ -36,7 +37,7 @@ async fn state_for(bootstrap: &str) -> Arc<AppState> {
             client_id: "stream".into(),
             dedup_topic: "__crabka_grpc_dedup".into(),
             dedup_partitions: 4,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
             dedup_ownership_group: "__crabka_grpc_gateway_dedup_owners".into(),
             dedup_txn_id_prefix: "stream-dedup".into(),
             advertised_addr: "127.0.0.1:0".into(),
@@ -97,7 +98,7 @@ async fn send_stream_produces_all_records() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -143,7 +144,7 @@ async fn send_stream_produces_all_records() {
     let mut seen = 0;
     for _ in 0..10 {
         seen += consumer
-            .poll(std::time::Duration::from_millis(500))
+            .poll(crabka_units::millis(500))
             .await
             .unwrap()
             .len();
@@ -170,7 +171,7 @@ async fn subscribe_streams_records_then_commits() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -260,7 +261,7 @@ async fn streaming_wrappers_and_router_build() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();

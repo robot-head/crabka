@@ -37,7 +37,6 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 
 use crabka_protocol::{
@@ -47,6 +46,10 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid,
     records::{Attributes, Record, RecordBatch, RecordHeader},
+};
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
 };
 use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -151,11 +154,11 @@ pub(crate) struct SenderConfig {
     pub producer_epoch: i16,
     pub acks: Acks,
     pub compression: Compression,
-    pub linger: Duration,
+    pub linger: Time,
     pub request_timeout_ms: i32,
     pub retries: i32,
-    pub retry_backoff: Duration,
-    pub routing_retry_budget: Duration,
+    pub retry_backoff: Time,
+    pub routing_retry_budget: Time,
     /// Maximum number of Produce requests fired **concurrently per drain
     /// cycle**, across all partitions — the cross-partition / per-connection
     /// pipelining bound (Kafka's `max.in.flight.requests.per.connection`).
@@ -253,7 +256,7 @@ async fn schedule(cfg: &SenderConfig, state: &PipelineState, force: bool) -> Sch
         include_deadline(
             &mut schedule,
             first_sent
-                .checked_add(cfg.routing_retry_budget)
+                .checked_add(cfg.routing_retry_budget.to_std())
                 .unwrap_or(now),
             now,
         );
@@ -314,7 +317,10 @@ async fn schedule(cfg: &SenderConfig, state: &PipelineState, force: bool) -> Sch
             } else {
                 include_deadline(
                     &mut schedule,
-                    batch.first_append_at.checked_add(cfg.linger).unwrap_or(now),
+                    batch
+                        .first_append_at
+                        .checked_add(cfg.linger.to_std())
+                        .unwrap_or(now),
                     now,
                 );
             }
@@ -513,7 +519,10 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState, intent: D
                     && (matches!(intent, DrainIntent::Force)
                         || batch_crosses_recovery_barrier(cfg, batch.transaction_generation)
                         || (matches!(intent, DrainIntent::Expired)
-                            && now.saturating_duration_since(batch.first_append_at) >= cfg.linger))
+                            && now
+                                .saturating_duration_since(batch.first_append_at)
+                                .as_time()
+                                >= cfg.linger))
             });
             if should_seal {
                 a.seal_current();
@@ -565,7 +574,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState, intent: D
 fn collect_retries(
     retry: &mut HashMap<(String, i32), PreparedBatch>,
     now: Instant,
-    routing_retry_budget: Duration,
+    routing_retry_budget: Time,
     max_to_send: usize,
 ) -> (Vec<PreparedBatch>, Vec<PreparedBatch>) {
     let mut to_send: Vec<PreparedBatch> = Vec::new();
@@ -577,7 +586,7 @@ fn collect_retries(
     for (key, mut pb) in retry.drain() {
         if pb
             .first_sent
-            .is_some_and(|t| now.duration_since(t) >= routing_retry_budget)
+            .is_some_and(|t| now.duration_since(t).as_time() >= routing_retry_budget)
         {
             expired.push(pb);
             continue;
@@ -921,8 +930,8 @@ fn fence(cfg: &SenderConfig, state: &mut PipelineState, to_fail: Vec<PreparedBat
 /// The instant a transport-failed batch becomes eligible to resend: `now` plus
 /// the configured `retry_backoff`. Pulled out so the offset direction (the
 /// deadline must be in the *future*) is unit-testable.
-fn backoff_deadline(now: Instant, retry_backoff: Duration) -> Instant {
-    now.checked_add(retry_backoff).unwrap_or(now)
+fn backoff_deadline(now: Instant, retry_backoff: Time) -> Instant {
+    now.checked_add(retry_backoff.to_std()).unwrap_or(now)
 }
 
 /// Send a single batch as its own single-partition `ProduceRequest`, resolving
@@ -1372,7 +1381,10 @@ fn fail_batch(records: Vec<PendingRecord>, err: ProducerError) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use assert2::check;
+    use crabka_units::{millis, secs};
     use tokio::sync::oneshot;
 
     use super::*;
@@ -1491,12 +1503,7 @@ mod tests {
         retry.insert(("t".to_string(), 0), old);
         retry.insert(("t".to_string(), 1), recent);
 
-        let (to_send, expired) = collect_retries(
-            &mut retry,
-            Instant::now(),
-            Duration::from_secs(30),
-            usize::MAX,
-        );
+        let (to_send, expired) = collect_retries(&mut retry, Instant::now(), secs(30), usize::MAX);
 
         check!(
             (
@@ -1522,7 +1529,7 @@ mod tests {
             retry.insert(("t".to_owned(), partition), batch);
         }
 
-        let (to_send, expired) = collect_retries(&mut retry, now, Duration::from_secs(30), 2);
+        let (to_send, expired) = collect_retries(&mut retry, now, secs(30), 2);
 
         assert_eq!(to_send.len(), 2);
         assert_eq!(expired.len(), 1);
@@ -1547,8 +1554,7 @@ mod tests {
         let (old, _rx) = prepared("t", 0, 0, Some(first_sent));
         retry.insert(("t".to_owned(), 0), old);
 
-        let (to_send, expired) =
-            collect_retries(&mut retry, now, Duration::from_millis(10), usize::MAX);
+        let (to_send, expired) = collect_retries(&mut retry, now, millis(10), usize::MAX);
 
         assert2::assert!((to_send.len(), expired.len()) == (0, 1));
     }
@@ -1560,8 +1566,7 @@ mod tests {
         retry.insert(("t".to_string(), 0), pb);
 
         let now = Instant::now();
-        let (to_send, expired) =
-            collect_retries(&mut retry, now, Duration::from_secs(30), usize::MAX);
+        let (to_send, expired) = collect_retries(&mut retry, now, secs(30), usize::MAX);
 
         check!((expired.is_empty(), to_send.len(), to_send[0].first_sent) == (true, 1, Some(now)));
     }
@@ -1583,12 +1588,8 @@ mod tests {
             let (mut pb, _rx) = prepared("t", 0, 0, Some(now));
             pb.backoff_until = Some(now + backoff);
             retry.insert(("t".to_string(), 0), pb);
-            let (to_send, expired) = collect_retries(
-                &mut retry,
-                now + elapsed,
-                Duration::from_secs(30),
-                usize::MAX,
-            );
+            let (to_send, expired) =
+                collect_retries(&mut retry, now + elapsed, secs(30), usize::MAX);
             assert2::assert!(expired.is_empty());
             (to_send.len(), retry.len())
         };
@@ -1612,8 +1613,8 @@ mod tests {
         // `now`. A `+` -> `-` (deadline in the past) would disable the backoff
         // and re-admit the connection-refused hot loop.
         let now = Instant::now();
-        let d = Duration::from_millis(100);
-        assert2::assert!(backoff_deadline(now, d) == now + d);
+        let d = millis(100);
+        assert2::assert!(backoff_deadline(now, d) == now + d.to_std());
     }
 
     #[test]
@@ -1637,9 +1638,12 @@ mod tests {
 /// described in the module docs.
 #[cfg(test)]
 mod harness {
-    use std::sync::{
-        Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicI64, AtomicU64},
+    use std::{
+        sync::{
+            Mutex as StdMutex,
+            atomic::{AtomicBool, AtomicI64, AtomicU64},
+        },
+        time::Duration,
     };
 
     use assert2::check;
@@ -1656,6 +1660,7 @@ mod harness {
         },
         records::{Attributes, Record, RecordBatch},
     };
+    use crabka_units::{millis, minutes, secs};
     use tokio::sync::oneshot;
 
     use super::*;
@@ -2094,7 +2099,7 @@ mod harness {
     /// Spawn a sender backed by `transport`, with `max_in_flight` and a 1ms
     /// linger so batch deadlines expire quickly.
     fn spawn_sender(transport: Arc<MockTransport>, max_in_flight: usize) -> Harness {
-        spawn_sender_with(transport, max_in_flight, Duration::from_millis(1))
+        spawn_sender_with(transport, max_in_flight, millis(1))
     }
 
     /// Spawn a sender with an explicit `linger`. A long linger keeps the batch
@@ -2103,7 +2108,7 @@ mod harness {
     fn spawn_sender_with(
         transport: Arc<MockTransport>,
         max_in_flight: usize,
-        linger: Duration,
+        linger: Time,
     ) -> Harness {
         spawn_sender_with_retries(transport, max_in_flight, linger, i32::MAX)
     }
@@ -2111,24 +2116,18 @@ mod harness {
     fn spawn_sender_with_retries(
         transport: Arc<MockTransport>,
         max_in_flight: usize,
-        linger: Duration,
+        linger: Time,
         retries: i32,
     ) -> Harness {
-        spawn_sender_with_policy(
-            transport,
-            max_in_flight,
-            linger,
-            retries,
-            Duration::from_secs(30),
-        )
+        spawn_sender_with_policy(transport, max_in_flight, linger, retries, secs(30))
     }
 
     fn spawn_sender_with_policy(
         transport: Arc<MockTransport>,
         max_in_flight: usize,
-        linger: Duration,
+        linger: Time,
         retries: i32,
-        routing_retry_budget: Duration,
+        routing_retry_budget: Time,
     ) -> Harness {
         let accumulators: AccumulatorMap = Arc::new(DashMap::new());
         let next_seq: Arc<DashMap<(String, i32), i32>> = Arc::new(DashMap::new());
@@ -2155,7 +2154,7 @@ mod harness {
             linger,
             request_timeout_ms: 5_000,
             retries,
-            retry_backoff: Duration::from_millis(1),
+            retry_backoff: millis(1),
             routing_retry_budget,
             max_in_flight,
             metadata_cache: Arc::clone(&metadata_cache),
@@ -2319,7 +2318,7 @@ mod harness {
     #[tokio::test(start_paused = true)]
     async fn nonzero_linger_coalesces_until_the_batch_expires() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 5, Duration::from_millis(100));
+        let h = spawn_sender_with(transport.clone(), 5, millis(100));
         let rxs = produce_single_batch_without_wake(&h, "t", 0, 2).await;
 
         tokio::task::yield_now().await;
@@ -2348,7 +2347,7 @@ mod harness {
     #[tokio::test(start_paused = true)]
     async fn rollover_wake_sends_ready_only_and_leaves_young_currents_open() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 5, Duration::from_millis(100));
+        let h = spawn_sender_with(transport.clone(), 5, millis(100));
         tokio::task::yield_now().await;
 
         let rollover = Arc::new(Mutex::new(Accumulator::new(20)));
@@ -2413,7 +2412,7 @@ mod harness {
     #[tokio::test(start_paused = true)]
     async fn zero_linger_force_wake_sends_without_advancing_time() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 5, Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, secs(0));
         tokio::task::yield_now().await;
         let mut rxs = produce_single_batch_without_wake(&h, "t", 0, 1).await;
 
@@ -2433,7 +2432,7 @@ mod harness {
     #[tokio::test(start_paused = true)]
     async fn explicit_flush_intent_bypasses_nonzero_linger() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 5, Duration::from_mins(1));
+        let h = spawn_sender_with(transport.clone(), 5, minutes(1));
         tokio::task::yield_now().await;
         let mut rxs = produce_single_batch_without_wake(&h, "t", 0, 1).await;
 
@@ -2453,7 +2452,7 @@ mod harness {
     #[tokio::test(start_paused = true)]
     async fn off_phase_append_sends_at_its_own_linger_deadline() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 5, Duration::from_millis(100));
+        let h = spawn_sender_with(transport.clone(), 5, millis(100));
         tokio::task::yield_now().await;
         tokio::time::advance(Duration::from_millis(50)).await;
         let mut receivers = produce_single_batch_without_wake(&h, "t", 0, 1).await;
@@ -2481,7 +2480,7 @@ mod harness {
     #[tokio::test(start_paused = true)]
     async fn force_drains_more_partitions_than_max_in_flight_without_linger_wait() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 2, Duration::from_mins(1));
+        let h = spawn_sender_with(transport.clone(), 2, minutes(1));
         tokio::task::yield_now().await;
         let start = Instant::now();
         let mut receivers = Vec::new();
@@ -2509,7 +2508,7 @@ mod harness {
     async fn eligible_retries_never_exceed_max_in_flight() {
         let transport = MockTransport::new(Duration::from_millis(1));
         transport.fail_next(6);
-        let h = spawn_sender_with(transport.clone(), 2, Duration::from_mins(1));
+        let h = spawn_sender_with(transport.clone(), 2, minutes(1));
         let mut receivers = Vec::new();
         for partition in 0..6 {
             receivers.extend(produce_ready_batches_without_wake(&h, "t", partition, 1).await);
@@ -2539,7 +2538,7 @@ mod harness {
     #[tokio::test(start_paused = true)]
     async fn force_drains_multiple_ready_batches_from_one_partition_without_linger_wait() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 5, Duration::from_mins(1));
+        let h = spawn_sender_with(transport.clone(), 5, minutes(1));
         tokio::task::yield_now().await;
         let start = Instant::now();
         let receivers = produce_ready_batches_without_wake(&h, "t", 0, 3).await;
@@ -2563,7 +2562,7 @@ mod harness {
     #[tokio::test(start_paused = true)]
     async fn one_ready_wake_drains_coalesced_backlog_past_the_cycle_cap() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 2, Duration::from_mins(1));
+        let h = spawn_sender_with(transport.clone(), 2, minutes(1));
         tokio::task::yield_now().await;
         let start = Instant::now();
         let mut receivers = Vec::new();
@@ -2591,7 +2590,7 @@ mod harness {
     async fn retry_release_resumes_same_partition_ready_backlog() {
         let transport = MockTransport::new(Duration::ZERO);
         transport.fail_once_on(0);
-        let h = spawn_sender_with(transport.clone(), 5, Duration::from_mins(1));
+        let h = spawn_sender_with(transport.clone(), 5, minutes(1));
         tokio::task::yield_now().await;
         let start = Instant::now();
         let receivers = produce_ready_batches_without_wake(&h, "t", 0, 2).await;
@@ -2622,7 +2621,7 @@ mod harness {
     #[tokio::test(start_paused = true)]
     async fn shutdown_drains_multiple_batches_without_waiting_for_linger() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 5, Duration::from_mins(1));
+        let h = spawn_sender_with(transport.clone(), 5, minutes(1));
         tokio::task::yield_now().await;
         let start = Instant::now();
         let receivers = produce_ready_batches_without_wake(&h, "t", 0, 3).await;
@@ -2638,7 +2637,7 @@ mod harness {
     async fn channel_close_waits_for_retry_deadline_not_linger() {
         let transport = MockTransport::new(Duration::ZERO);
         transport.fail_once_on(0);
-        let h = spawn_sender_with(transport.clone(), 5, Duration::from_mins(1));
+        let h = spawn_sender_with(transport.clone(), 5, minutes(1));
         tokio::task::yield_now().await;
         let mut receivers = produce_ready_batches_without_wake(&h, "t", 0, 1).await;
         let first_send = transport.send_started.notified();
@@ -3120,7 +3119,7 @@ mod harness {
     async fn exhausted_retry_fences_before_a_sequence_gap_can_be_sent() {
         let transport = MockTransport::new(Duration::ZERO);
         transport.inject_code_once(0, codes::NOT_LEADER_OR_FOLLOWER);
-        let h = spawn_sender_with_retries(transport.clone(), 1, Duration::from_millis(1), 0);
+        let h = spawn_sender_with_retries(transport.clone(), 1, millis(1), 0);
 
         let first = produce_burst(&h, "t", 0, 1).await.pop().expect("first ack");
         let first_error = tokio::time::timeout(Duration::from_secs(1), first)
@@ -3153,7 +3152,7 @@ mod harness {
         transport.add_known_broker(1);
         transport.fail_once_on_leader(0);
         transport.delay_leader(1, Duration::from_millis(20));
-        let h = spawn_sender_with_retries(transport.clone(), 2, Duration::from_secs(1), 0);
+        let h = spawn_sender_with_retries(transport.clone(), 2, secs(1), 0);
         h.partition_leaders.insert(("t".to_owned(), 0), 0);
         h.partition_leaders.insert(("t".to_owned(), 1), 1);
 
@@ -3183,13 +3182,7 @@ mod harness {
     async fn exhausted_routing_budget_fences_the_producer() {
         let transport = MockTransport::new(Duration::ZERO);
         transport.inject_code_once(0, codes::NOT_LEADER_OR_FOLLOWER);
-        let h = spawn_sender_with_policy(
-            transport,
-            1,
-            Duration::from_millis(1),
-            i32::MAX,
-            Duration::from_millis(1),
-        );
+        let h = spawn_sender_with_policy(transport, 1, millis(1), i32::MAX, millis(1));
 
         let ack = produce_burst(&h, "t", 0, 1).await.pop().expect("ack");
         let error = tokio::time::timeout(Duration::from_secs(1), ack)
@@ -3451,7 +3444,7 @@ mod harness {
     async fn recovery_fails_accumulator_batches_even_behind_same_partition_retry() {
         let transport = MockTransport::new(Duration::ZERO);
         transport.fail_next(1);
-        let h = spawn_sender_with(transport.clone(), 1, Duration::from_mins(1));
+        let h = spawn_sender_with(transport.clone(), 1, minutes(1));
         let retry_receiver = produce_ready_batches_without_wake(&h, "t", 0, 1)
             .await
             .remove(0);
@@ -3528,7 +3521,7 @@ mod harness {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_transactional_batch_is_failed_after_recovery_before_reinitialization() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 1, Duration::from_secs(30));
+        let h = spawn_sender_with(transport.clone(), 1, secs(30));
         let accumulator = Arc::new(Mutex::new(Accumulator::new(1024)));
         h.accumulators
             .insert(("t".to_string(), 0), Arc::clone(&accumulator));
@@ -3573,7 +3566,7 @@ mod harness {
     async fn retry_slot_transactional_batch_is_failed_after_recovery_without_resend() {
         let transport = MockTransport::new(Duration::ZERO);
         transport.fail_once_on(0);
-        let h = spawn_sender_with(transport.clone(), 1, Duration::from_secs(30));
+        let h = spawn_sender_with(transport.clone(), 1, secs(30));
         let accumulator = Arc::new(Mutex::new(Accumulator::new(1024)));
         h.accumulators
             .insert(("t".to_string(), 0), Arc::clone(&accumulator));
@@ -3635,7 +3628,7 @@ mod harness {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn finish_in_flight_notifies_when_drained() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 5, Duration::from_secs(30));
+        let h = spawn_sender_with(transport.clone(), 5, secs(30));
 
         let flush = Arc::clone(&h.flush_notify);
         // Register the flush waiter synchronously: a `Notified` future only

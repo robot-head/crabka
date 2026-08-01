@@ -9,9 +9,17 @@ use std::sync::{
     atomic::{AtomicU64, Ordering, Ordering::Relaxed},
 };
 
+use crabka_units::prelude::{
+    ByteRate, ByteRateExt as _, ByteSize, ByteSizeExt as _, Frequency, FrequencyExt as _, Time,
+    secs,
+};
 use qubit_clock::{NanoClock, NanoMonotonicClock};
 
 use crate::{AvailableTokens, BurstCapacity, RefillTokens, RequestedTokens, plan_consume};
+
+/// The window whose worth of throughput [`TokenBucket::set_byte_rate`] uses as the
+/// burst capacity when the caller does not name one.
+const DEFAULT_BURST_WINDOW: Time = secs(1);
 
 /// Reads the injected clock's current epoch-nanoseconds as a `u64`.
 ///
@@ -23,13 +31,31 @@ fn clock_nanos(clock: &dyn NanoClock) -> u64 {
     u64::try_from(clock.nanos()).expect("clock nanoseconds must fit in u64")
 }
 
+/// A throughput in the bucket's raw storage unit: whole bytes per second.
+///
+/// The bucket stores its rate in an `AtomicU64` because the refill arithmetic is
+/// verified over integers, so every rate crossing the accessor boundary narrows
+/// here. A negative rate is not a throughput and collapses to `0`, the bucket's
+/// "no limit configured" sentinel.
+fn rate_to_bytes_per_sec(rate: ByteRate) -> u64 {
+    u64::try_from(rate.bytes_per_sec_i64()).unwrap_or(0)
+}
+
+/// The inverse of [`rate_to_bytes_per_sec`].
+///
+/// Exact for every value the bucket can hold: a stored rate came through
+/// [`rate_to_bytes_per_sec`], which saturates at `i64::MAX`.
+fn rate_from_bytes_per_sec(raw: u64) -> ByteRate {
+    ByteRate::from_bytes_per_sec(i64::try_from(raw).unwrap_or(i64::MAX))
+}
+
 pub struct TokenBucket {
     rate_per_sec: AtomicU64,
     burst: AtomicU64,
     available: AtomicU64,
     last_refill_nanos: AtomicU64,
     /// Seqlock generation guarding the `{rate, burst, available, last_refill}`
-    /// group. `set_rate_with_burst` makes it odd while writing and even when
+    /// group. `set_token_rate_with_burst` makes it odd while writing and even when
     /// quiescent; a consumer that observes an odd value, or a value that
     /// changed across its read-compute-commit, retries so a straddled reset is
     /// never clobbered by a stale `available` CAS. See the stateright model in
@@ -81,19 +107,25 @@ impl TokenBucket {
         clock_nanos(&*self.clock)
     }
 
-    /// Update the rate. Resets `available` to a one-second burst at the new rate.
-    pub fn set_rate(&self, new_rate: u64) {
-        self.set_rate_with_burst(new_rate, new_rate);
+    /// Update the rate in raw tokens per second. Resets `available` to a
+    /// one-second burst at the new rate.
+    ///
+    /// This is the primitive: the bucket counts tokens and does not care what a
+    /// token means. Callers metering a dimensioned quantity should reach for the
+    /// typed pair that says which — [`Self::set_byte_rate`] or
+    /// [`Self::set_event_rate`].
+    pub fn set_token_rate(&self, tokens_per_sec: u64) {
+        self.set_token_rate_with_burst(tokens_per_sec, tokens_per_sec);
     }
 
-    /// Update the rate and independent burst capacity.
+    /// Update the rate and independent burst capacity, both in raw tokens.
     ///
     /// The `{rate, burst, available, last_refill}` group is published as one
     /// seqlock critical section: `generation` is bumped to an odd value before
     /// the stores and to the next even value after, so a concurrent
     /// `try_consume` that straddles the reset is forced to retry rather than
     /// clobber the freshly reset `available` with a stale CAS.
-    pub fn set_rate_with_burst(&self, new_rate: u64, burst: u64) {
+    pub fn set_token_rate_with_burst(&self, new_rate: u64, burst: u64) {
         // Enter the write section (generation becomes odd).
         let gen_start = self.generation.fetch_add(1, Relaxed);
         // Release fence so the group stores below cannot be reordered before the
@@ -109,21 +141,70 @@ impl TokenBucket {
         self.generation.store(gen_start.wrapping_add(2), Relaxed);
     }
 
+    /// The configured rate in raw tokens per second. `0` means no limit.
     #[must_use]
-    pub fn rate(&self) -> u64 {
+    pub fn token_rate(&self) -> u64 {
         self.rate_per_sec.load(Relaxed)
     }
 
+    /// The configured burst capacity in raw tokens — the most the bucket holds.
     #[must_use]
-    pub fn burst(&self) -> u64 {
+    pub fn token_burst(&self) -> u64 {
         self.burst.load(Relaxed)
+    }
+
+    /// Update a byte throughput, bursting one second's worth.
+    ///
+    /// The burst is `rate * DEFAULT_BURST_WINDOW`, which `uom` type-checks as a
+    /// [`ByteRate`] times a [`Time`] yielding a [`ByteSize`].
+    pub fn set_byte_rate(&self, new_rate: ByteRate) {
+        self.set_byte_rate_with_burst(new_rate, (new_rate * DEFAULT_BURST_WINDOW).into());
+    }
+
+    /// Update a byte throughput and an independent byte burst capacity.
+    pub fn set_byte_rate_with_burst(&self, new_rate: ByteRate, burst: ByteSize) {
+        self.set_token_rate_with_burst(rate_to_bytes_per_sec(new_rate), burst.bytes_u64());
+    }
+
+    /// The configured byte throughput. [`ByteRateExt::ZERO`] means no limit.
+    #[must_use]
+    pub fn byte_rate(&self) -> ByteRate {
+        rate_from_bytes_per_sec(self.token_rate())
+    }
+
+    /// The configured byte burst capacity.
+    #[must_use]
+    pub fn byte_burst(&self) -> ByteSize {
+        ByteSize::from_bytes(self.token_burst())
+    }
+
+    /// Update an event throughput — samples, records, requests — bursting one
+    /// second's worth.
+    ///
+    /// A token here is one event, not one byte. Metering events through the byte
+    /// pair above would compile and would be wrong, which is the whole reason
+    /// these are separate.
+    pub fn set_event_rate(&self, new_rate: Frequency) {
+        let per_sec = new_rate.per_sec_u64();
+        self.set_token_rate_with_burst(per_sec, per_sec);
+    }
+
+    /// Update an event throughput and an independent burst, in whole events.
+    pub fn set_event_rate_with_burst(&self, new_rate: Frequency, burst: u64) {
+        self.set_token_rate_with_burst(new_rate.per_sec_u64(), burst);
+    }
+
+    /// The configured event throughput. Zero means no limit.
+    #[must_use]
+    pub fn event_rate(&self) -> Frequency {
+        Frequency::from_per_sec_u64(self.token_rate())
     }
 
     /// Try to consume up to `requested` tokens. Returns the amount actually
     /// granted. Rate-0 grants the full request.
     ///
     /// `rate` and `burst` are re-read inside the CAS loop under a seqlock
-    /// generation check so a concurrent [`Self::set_rate_with_burst`] reset that
+    /// generation check so a concurrent [`Self::set_token_rate_with_burst`] reset that
     /// straddles this call's refill-claim and CAS commit can never be applied
     /// non-atomically: an odd or mismatched generation forces a retry, and on
     /// retry the refill gap is re-claimed against the post-reset `last_refill`.
@@ -229,6 +310,7 @@ mod tests {
     };
 
     use assert2::check;
+    use crabka_units::prelude::{bytes, bytes_per_sec, kibibytes, kibibytes_per_sec, mebibytes};
     use qubit_clock::MockTime;
 
     use super::*;
@@ -271,12 +353,45 @@ mod tests {
     #[test]
     fn debug_renders_bucket_fields() {
         let b = TokenBucket::new();
-        b.set_rate_with_burst(100, 200);
+        b.set_byte_rate_with_burst(bytes_per_sec(100), bytes(200));
         let s = format!("{b:?}");
         check!(s.contains("TokenBucket"));
         check!(s.contains("rate_per_sec"));
         check!(s.contains("burst"));
         check!(s.contains("last_refill_nanos"));
+    }
+
+    // The bucket narrows every rate and burst to raw bytes and bytes-per-second
+    // for the verified integer kernel, so the accessors are the only place a
+    // scale factor could go missing. Each case pairs a value written in one unit
+    // with the byte-denominated magnitude it must read back as: a dropped or
+    // doubled 1024 in either direction fails here.
+    #[test]
+    fn rate_and_burst_round_trip_through_the_accessors() {
+        let cases = [
+            (bytes_per_sec(0), bytes(0)),
+            (bytes_per_sec(1), bytes(1)),
+            (kibibytes_per_sec(1), bytes(1024)),
+            (bytes_per_sec(1024), kibibytes(1)),
+            (bytes_per_sec(3_000_000), mebibytes(2)),
+            (kibibytes_per_sec(64), mebibytes(1)),
+        ];
+
+        for (rate, burst) in cases {
+            let b = TokenBucket::new();
+            b.set_byte_rate_with_burst(rate, burst);
+            check!((b.byte_rate(), b.byte_burst()) == (rate, burst));
+        }
+    }
+
+    // `set_rate` derives the burst from one second's worth of the rate, so the
+    // burst it publishes must be the byte count the rate delivers in that
+    // second — not the rate's bare number in some other unit.
+    #[test]
+    fn set_rate_bursts_one_second_of_throughput() {
+        let b = TokenBucket::new();
+        b.set_byte_rate(kibibytes_per_sec(64));
+        check!((b.byte_rate(), b.byte_burst()) == (kibibytes_per_sec(64), kibibytes(64)));
     }
 
     #[test]
@@ -288,21 +403,27 @@ mod tests {
     #[test]
     fn first_consume_under_rate_succeeds() {
         let b = Arc::new(TokenBucket::new());
-        b.set_rate(1024);
+        b.set_byte_rate(bytes_per_sec(1024));
         assert2::assert!(try_consume_with_timeout(&b, 512) == 512);
     }
 
     #[test]
     fn independent_burst_can_exceed_rate() {
         let b = Arc::new(TokenBucket::new());
-        b.set_rate_with_burst(100, 1000);
-        check!((b.rate(), b.burst(), try_consume_with_timeout(&b, 500)) == (100, 1000, 500));
+        b.set_byte_rate_with_burst(bytes_per_sec(100), bytes(1000));
+        check!(
+            (
+                b.byte_rate(),
+                b.byte_burst(),
+                try_consume_with_timeout(&b, 500)
+            ) == (bytes_per_sec(100), bytes(1000), 500)
+        );
     }
 
     #[test]
     fn consume_drains_bucket() {
         let b = Arc::new(TokenBucket::new());
-        b.set_rate(1024);
+        b.set_byte_rate(bytes_per_sec(1024));
         assert2::assert!(try_consume_with_timeout(&b, 1024) == 1024);
         let g = try_consume_with_timeout(&b, 1024);
         assert2::assert!(g < 100);
@@ -311,7 +432,7 @@ mod tests {
     #[test]
     fn bucket_refills_at_rate_after_elapsed_time() {
         let (b, mock) = mock_bucket();
-        b.set_rate(1024);
+        b.set_byte_rate(bytes_per_sec(1024));
         try_consume_with_timeout(&b, 1024);
         // 500ms at 1024 tokens/s refills exactly 512 tokens — deterministic,
         // where a real 500ms sleep only gets "roughly" 512 under scheduler jitter.
@@ -323,7 +444,7 @@ mod tests {
     #[test]
     fn bucket_caps_at_burst_capacity() {
         let (b, mock) = mock_bucket();
-        b.set_rate_with_burst(1024, 2048);
+        b.set_byte_rate_with_burst(bytes_per_sec(1024), bytes(2048));
         try_consume_with_timeout(&b, 2048);
         // 2.5s at 1024 tokens/s would refill 2560 tokens, but the 2048 burst cap
         // clamps it; advancing logical time makes this exact and instant.
@@ -335,16 +456,16 @@ mod tests {
     #[test]
     fn set_rate_resets_available() {
         let b = Arc::new(TokenBucket::new());
-        b.set_rate(1024);
+        b.set_byte_rate(bytes_per_sec(1024));
         try_consume_with_timeout(&b, 1024);
-        b.set_rate(2048);
+        b.set_byte_rate(bytes_per_sec(2048));
         assert2::assert!(try_consume_with_timeout(&b, 2048) == 2048);
     }
 
     #[test]
     fn positive_rate_zero_burst_grants_zero() {
         let b = Arc::new(TokenBucket::new());
-        b.set_rate_with_burst(1024, 0);
+        b.set_byte_rate_with_burst(bytes_per_sec(1024), bytes(0));
 
         assert2::assert!(try_consume_with_timeout(&b, 1) == 0);
     }
@@ -352,7 +473,7 @@ mod tests {
     #[test]
     fn try_consume_waits_while_generation_is_odd() {
         let b = Arc::new(TokenBucket::new());
-        b.set_rate(4);
+        b.set_byte_rate(bytes_per_sec(4));
         b.generation.store(1, Relaxed);
 
         let (tx, rx) = std::sync::mpsc::channel();
@@ -385,9 +506,9 @@ mod tests {
     // clobbered by a stale CAS would let `available` exceed the new burst here.
     #[test]
     fn concurrent_set_rate_never_over_grants_past_burst() {
-        const BURST: u64 = 4096;
+        const BURST: ByteSize = bytes(4096);
         let b = Arc::new(TokenBucket::new());
-        b.set_rate_with_burst(1024, BURST);
+        b.set_byte_rate_with_burst(bytes_per_sec(1024), BURST);
         let stop = Arc::new(AtomicBool::new(false));
 
         // Resetter: hammer set_rate_with_burst with the same burst cap.
@@ -396,7 +517,7 @@ mod tests {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
                 while !stop.load(Relaxed) {
-                    b.set_rate_with_burst(1024, BURST);
+                    b.set_byte_rate_with_burst(bytes_per_sec(1024), BURST);
                     std::thread::yield_now();
                 }
             })
@@ -412,7 +533,7 @@ mod tests {
             consumer_handles.push(std::thread::spawn(move || {
                 for _ in 0..5_000 {
                     let g = b.try_consume(128);
-                    if g > BURST {
+                    if g > BURST.bytes_u64() {
                         let _ = done_tx.send(Err(g));
                         return;
                     }

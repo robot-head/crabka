@@ -11,12 +11,12 @@ topology:
 workload:
   connections: 32
   rate: saturate
-  warmup_s: 10
-  duration_s: 60
+  warmup: 10s
+  duration: 60s
   mix:
     single_shard_insert: 50
     cross_shard_txn: 25
     read_only: 25
 faults:
-  - at_s: 0
-    latency: { target: all-ranges, ms: 50, jitter_ms: 10, duration_s: 60 }
+  - at: 0s
+    latency: { target: all-ranges, delay: 50ms, jitter: 10ms, duration: 60s }

@@ -27,6 +27,7 @@ use crabka_grpc_gateway::{
     produce::ProduceCore,
     state::AppState,
 };
+use crabka_units::prelude::*;
 use tempfile::TempDir;
 use tower::ServiceExt;
 
@@ -103,7 +104,7 @@ async fn send_handler_ok_and_error_arms() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -132,7 +133,7 @@ async fn send_handler_ok_and_error_arms() {
             client_id: "wire".into(),
             dedup_topic: "__crabka_grpc_dedup".into(),
             dedup_partitions: 4,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
             dedup_ownership_group: "__crabka_grpc_gateway_dedup_owners".into(),
             dedup_txn_id_prefix: "wire-dedup".into(),
             advertised_addr: "127.0.0.1:0".into(),

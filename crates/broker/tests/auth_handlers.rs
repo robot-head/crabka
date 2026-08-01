@@ -1014,7 +1014,7 @@ fn start_oauthbearer_broker(
 fn start_oauthbearer_broker_with_cap(
     log_dir: &std::path::Path,
     validator: crabka_security::OAuthBearerValidator,
-    max_session_lifetime_seconds: Option<u32>,
+    max_session_lifetime: Option<crabka_units::Time>,
 ) -> impl std::future::Future<Output = crabka_broker::BrokerHandle> {
     let mut cfg = BrokerConfig::for_tests(log_dir.to_path_buf());
     cfg.listeners = vec![ListenerSpec {
@@ -1028,7 +1028,7 @@ fn start_oauthbearer_broker_with_cap(
     cfg.inter_broker_listener_name = "SASL_PLAINTEXT".to_string();
     cfg.enabled_sasl_mechanisms = vec![SaslMechanism::OAuthBearer];
     cfg.oauthbearer_validator = validator;
-    cfg.oauthbearer_max_session_lifetime_seconds = max_session_lifetime_seconds;
+    cfg.oauthbearer_max_session_lifetime = max_session_lifetime;
     Box::pin(async move { Broker::start(cfg).await.expect("broker must start") })
 }
 
@@ -1154,7 +1154,7 @@ async fn sasl_oauthbearer_invalid_token_two_round_failure() {
     let log_dir = tempfile::tempdir().unwrap();
     let validator =
         crabka_security::OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
-            allowable_clock_skew_ms: 0,
+            allowable_clock_skew: crabka_units::secs(0),
             ..Default::default()
         });
     let handle = start_oauthbearer_broker(log_dir.path(), validator).await;
@@ -1356,7 +1356,7 @@ async fn sasl_oauthbearer_signed_token_wrong_key_two_round_failure() {
 /// the assertion windows in the re-auth tests don't drift.
 fn oauthbearer_zero_skew_validator() -> crabka_security::OAuthBearerValidator {
     crabka_security::OAuthBearerValidator::Unsecured(crabka_security::UnsecuredJwsValidator {
-        allowable_clock_skew_ms: 0,
+        allowable_clock_skew: crabka_units::secs(0),
         ..Default::default()
     })
 }
@@ -1478,7 +1478,7 @@ async fn oauthbearer_session_capped_by_broker_max_session_lifetime_seconds() {
     let handle = start_oauthbearer_broker_with_cap(
         log_dir.path(),
         oauthbearer_zero_skew_validator(),
-        Some(30), // 30s cap
+        Some(crabka_units::secs(30)), // 30s cap
     )
     .await;
     let addr = handle.listen_addr();

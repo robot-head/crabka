@@ -108,8 +108,12 @@ mod tests {
         use crabka_compression::CompressionType;
         let raw = b"the quick brown fox";
         let compressed = Compression::Gzip.compress(raw).unwrap();
-        let decoded =
-            crabka_compression::decompress(CompressionType::Gzip, &compressed, usize::MAX).unwrap();
+        let decoded = crabka_compression::decompress(
+            CompressionType::Gzip,
+            &compressed,
+            crabka_units::convert::ByteSizeExt::from_bytes(u64::MAX),
+        )
+        .unwrap();
         assert2::assert!(decoded.as_ref() == raw);
     }
 

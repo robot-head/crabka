@@ -44,6 +44,7 @@ verbatim bytes for network or tiered-storage transfer.
 ```sh
 cargo add crabka-log
 cargo add crabka-protocol
+cargo add crabka-units
 ```
 
 For workspace development, use the path dependency from this repository.
@@ -55,13 +56,14 @@ Open a Kafka-compatible log directory, append a batch, and read it back:
 ```rust,no_run
 use crabka_log::{Log, LogConfig, Offset};
 use crabka_protocol::records::RecordBatch;
+use crabka_units::prelude::mebibytes;
 
 # fn run() -> Result<(), Box<dyn std::error::Error>> {
 let mut log = Log::open("./target/orders-0", LogConfig::default())?;
 let mut batch = RecordBatch::default();
 
 let base_offset = log.append(&mut batch)?;
-let output = log.read(Offset(0), 1024 * 1024)?;
+let output = log.read(Offset(0), mebibytes(1))?;
 
 println!("wrote at {base_offset:?}; read {} batches", output.batches.len());
 # Ok(())
