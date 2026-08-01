@@ -2185,9 +2185,8 @@ mod tests {
             output.operations
                 == vec![BalanceOperation::Split {
                     tenant_name: "tenant-a".to_string(),
-                    table_id: 10,
                     source_range_id: 1,
-                    split_at_rowid: 500,
+                    split_at: RangeBoundary::new(10, 500),
                 }]
         );
     }

@@ -63,20 +63,44 @@ pub struct DecodedSample {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TenantLimits {
     /// Cap on the UTF-8 bytes of a label name.
-    #[serde(
-        default = "default_max_label_name",
-        with = "crabka_units::serde_units::human::byte_size"
-    )]
+    #[serde(default = "default_max_label_name", with = "label_byte_limit")]
     pub max_label_name: ByteSize,
     pub max_label_names_per_series: usize,
     /// Cap on the UTF-8 bytes of a label value.
-    #[serde(with = "crabka_units::serde_units::human::byte_size")]
+    #[serde(with = "label_byte_limit")]
     pub max_label_value: ByteSize,
     pub session_id_buckets: u64,
 }
 
 const fn default_max_label_name() -> ByteSize {
     bytes(1024)
+}
+
+mod label_byte_limit {
+    use crabka_units::{ByteSize, convert::ByteSizeExt as _};
+    use serde::{Deserializer, Serializer, de::Error as _};
+
+    #[cfg(target_pointer_width = "64")]
+    const USIZE_UPPER_EXCLUSIVE: f64 = 18_446_744_073_709_551_616.0;
+    #[cfg(target_pointer_width = "32")]
+    const USIZE_UPPER_EXCLUSIVE: f64 = 4_294_967_296.0;
+
+    #[allow(clippy::trivially_copy_pass_by_ref)] // Required by serde's `with` adapter contract.
+    pub fn serialize<S: Serializer>(value: &ByteSize, serializer: S) -> Result<S::Ok, S::Error> {
+        crabka_units::serde_units::human::byte_size::serialize(value, serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<ByteSize, D::Error> {
+        let value = crabka_units::serde_units::human::byte_size::deserialize(deserializer)?;
+        let bytes = value.bytes_f64();
+        if bytes >= 0.0 && bytes.fract() == 0.0 && bytes < USIZE_UPPER_EXCLUSIVE {
+            Ok(value)
+        } else {
+            Err(D::Error::custom(
+                "label byte limit must be a non-negative whole byte count representable by usize",
+            ))
+        }
+    }
 }
 
 impl Default for TenantLimits {
@@ -318,6 +342,19 @@ mod tests {
 
         assert!(config.for_tenant("tenant-a").max_label_value == bytes(5));
         assert!(config.for_tenant("tenant-b") == &TenantLimits::default());
+    }
+
+    #[test]
+    fn tenant_limits_reject_invalid_label_byte_caps() {
+        for cap in ["-1B", "1.5B", "18446744073709551616B"] {
+            let json = serde_json::json!({
+                "max_label_name": cap,
+                "max_label_names_per_series": 30,
+                "max_label_value": "2KiB",
+                "session_id_buckets": 1024,
+            });
+            assert!(serde_json::from_value::<TenantLimits>(json).is_err());
+        }
     }
 
     #[test]

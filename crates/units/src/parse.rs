@@ -105,6 +105,15 @@ fn split(input: &str) -> Result<(f64, String), ParseError> {
     Ok((magnitude, unit.to_lowercase()))
 }
 
+fn finite(input: &str, value: f64) -> Result<f64, ParseError> {
+    value
+        .is_finite()
+        .then_some(value)
+        .ok_or_else(|| ParseError::NotFinite {
+            input: input.to_owned(),
+        })
+}
+
 /// The byte scale named by a lowercased size unit.
 fn size_scale(unit: &str) -> Option<f64> {
     match unit {
@@ -155,7 +164,7 @@ pub fn byte_size(input: &str) -> Result<ByteSize, ParseError> {
         unit,
         input: input.to_owned(),
     })?;
-    Ok(ByteSize::from_bytes_f64(magnitude * scale))
+    Ok(ByteSize::from_bytes_f64(finite(input, magnitude * scale)?))
 }
 
 /// A time extent: `30s`, `500ms`, `7d`, `1.5h`, `250 us`.
@@ -171,7 +180,10 @@ pub fn time(input: &str) -> Result<Time, ParseError> {
         unit,
         input: input.to_owned(),
     })?;
-    Ok(Time::from_secs_f64(magnitude * numerator / denominator))
+    Ok(Time::from_secs_f64(finite(
+        input,
+        magnitude * numerator / denominator,
+    )?))
 }
 
 /// A byte throughput: `10MiB/s`, `1048576B/s`, `64KiBps`, `5 MB / sec`.
@@ -204,9 +216,10 @@ pub fn byte_rate(input: &str) -> Result<ByteRate, ParseError> {
 
     let size = size_scale(size_unit).ok_or_else(unknown)?;
     let (numerator, denominator) = time_scale(time_unit).ok_or_else(unknown)?;
-    Ok(ByteRate::from_bytes_per_sec_f64(
+    Ok(ByteRate::from_bytes_per_sec_f64(finite(
+        input,
         magnitude * size * denominator / numerator,
-    ))
+    )?))
 }
 
 /// An event rate: `100/s`, `2.5Hz`, `60/min`.
@@ -231,7 +244,10 @@ pub fn frequency(input: &str) -> Result<Frequency, ParseError> {
             time_scale(time_unit).ok_or_else(unknown)?
         }
     };
-    Ok(Frequency::from_per_sec(magnitude * denominator / numerator))
+    Ok(Frequency::from_per_sec(finite(
+        input,
+        magnitude * denominator / numerator,
+    )?))
 }
 
 /// A dimensionless fraction: `25%`, `0.25`, `1`.
@@ -261,7 +277,7 @@ pub fn ratio(input: &str) -> Result<Ratio, ParseError> {
             input: input.to_owned(),
         });
     }
-    Ok(fraction(magnitude * scale))
+    Ok(fraction(finite(input, magnitude * scale)?))
 }
 
 fn require_sign<T>(

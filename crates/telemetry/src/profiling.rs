@@ -319,7 +319,7 @@ pub fn pprof_router() -> Router {
     pprof_router_unchecked(ProfilingConfig::default())
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, test))]
 fn requested_duration(seconds: Option<u64>, default: Time, maximum: Time) -> Time {
     seconds
         .map_or(default, |seconds| {

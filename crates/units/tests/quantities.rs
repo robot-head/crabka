@@ -247,6 +247,26 @@ fn parse_rejects_ambiguous_and_malformed_input() {
     assert!(let Err(ParseError::InvalidNumber { .. }) = parse::ratio("many%"));
 }
 
+#[test]
+fn parse_rejects_unit_scaling_overflow() {
+    assert!(matches!(
+        parse::byte_size(&format!("{}TiB", f64::MAX)),
+        Err(ParseError::NotFinite { .. })
+    ));
+    assert!(matches!(
+        parse::time(&format!("{}d", f64::MAX)),
+        Err(ParseError::NotFinite { .. })
+    ));
+    assert!(matches!(
+        parse::byte_rate(&format!("{}TiB/s", f64::MAX)),
+        Err(ParseError::NotFinite { .. })
+    ));
+    assert!(matches!(
+        parse::frequency(&format!("{}/ns", f64::MAX)),
+        Err(ParseError::NotFinite { .. })
+    ));
+}
+
 /// Rendering picks the unit an operator would have written.
 #[test]
 fn rendering_picks_the_operator_unit() {

@@ -1669,6 +1669,14 @@ fn apply_config_tail(
             .collect::<Result<_, _>>()?;
     }
     if let Some(gssapi) = tail.gssapi {
+        let max_time_skew = gssapi
+            .max_time_skew
+            .unwrap_or(crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW);
+        if max_time_skew < Time::ZERO {
+            return Err(FileConfigError::InvalidConfig(
+                "gssapi.max_time_skew must be non-negative".to_owned(),
+            ));
+        }
         let rules = gssapi
             .principal_to_local_rules
             .iter()
@@ -1688,9 +1696,7 @@ fn apply_config_tail(
             principal_to_local_rules: rules,
             realm: gssapi.realm,
             kdc: gssapi.kdc,
-            max_time_skew: gssapi
-                .max_time_skew
-                .unwrap_or(crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW),
+            max_time_skew,
         });
     }
     if let Some(FileInterBrokerCredentials::Gssapi {
@@ -4631,6 +4637,18 @@ max_time_skew = "0s"
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
         assert!(cfg.gssapi.unwrap().max_time_skew == secs(0));
+    }
+
+    #[test]
+    fn apply_to_gssapi_rejects_negative_clock_skew() {
+        let src = r#"
+[gssapi]
+keytab_path = "/k/keytab"
+max_time_skew = "-1s"
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        assert!(file.apply_to(&mut cfg).is_err());
     }
 
     #[test]

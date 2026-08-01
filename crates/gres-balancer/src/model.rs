@@ -1,5 +1,6 @@
 //! Registry snapshot and dry-run operation model.
 
+use crabka_gres_control::RangeBoundary;
 use crabka_gres_substrate::RangeStatsSnapshot;
 use crabka_units::{ByteSize, Frequency};
 use serde::{Deserialize, Serialize};
@@ -28,6 +29,8 @@ pub struct TablePolicy {
     pub convert_store_threshold: ByteSize,
     #[serde(with = "crabka_units::serde_units::human::frequency")]
     pub convert_commit_rate_threshold: Frequency,
+    /// Bucket count for hash placement, present exactly for hash-sharded tables.
+    pub hash_bucket_count: Option<u32>,
 }
 
 /// Per-range registry layout plus aggregated metrics.
@@ -36,8 +39,10 @@ pub struct TablePolicy {
 pub struct RangeMetrics {
     pub range_id: u32,
     pub table_id: u64,
-    pub start_rowid: u64,
-    pub end_rowid: Option<u64>,
+    /// Inclusive lower bound of the keys this range owns.
+    pub start_key: RangeBoundary,
+    /// Exclusive upper bound, or open-ended for the final range.
+    pub end_key: Option<RangeBoundary>,
     pub compute_id: String,
     /// Authoritative stored bytes. `None` means unknown, never zero.
     pub store_bytes: Option<u64>,
@@ -129,9 +134,8 @@ impl OperationKind {
 pub enum BalanceOperation {
     Split {
         tenant_name: String,
-        table_id: u64,
         source_range_id: u32,
-        split_at_rowid: u64,
+        split_at: RangeBoundary,
     },
     Move {
         tenant_name: String,
