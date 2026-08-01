@@ -32,8 +32,8 @@ through existing runtime owners; render identical values from
 
 ### Task 4: Closure
 
-- [ ] Run `gres-ranges`, `gres`, and operator all-target tests.
-- [ ] Run workspace all-target check and strict Clippy.
-- [ ] Run nightly formatting and diff hygiene.
-- [ ] Update `docs/configuration-audit.md` and commit closure docs.
-- [ ] Leave the repository-wide goal active.
+- [x] Run `gres-ranges`, `gres`, and operator all-target tests.
+- [x] Run workspace all-target check and strict Clippy.
+- [x] Run nightly formatting and diff hygiene.
+- [x] Update `docs/configuration-audit.md` and commit closure docs.
+- [x] Leave the repository-wide goal active.

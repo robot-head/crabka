@@ -6138,3 +6138,25 @@ router tests pass. Workspace all-target check and strict Clippy, nightly
 formatting, and diff hygiene pass. This closes only the telemetry profiling
 policy slice; the repository-wide hardcoded operational-value audit remains
 active.
+
+## Gres Range Runtime Policy
+
+Distributed-range transport, session, inspection, coordination, release, and
+timestamp-oracle tuning now share one validated `RangeRuntimePolicy`. The 19
+settings retain their previous defaults and are exposed through matching
+`--range-*` / `CRABKA_GRES_RANGE_*` CLI and environment options. Durations and
+byte limits use UOM values; positive counts and persistence strides use
+`refined_type`-validated newtypes. Cross-field validation keeps the client pool
+TTL below the server idle timeout, reply and lock budgets below the RPC request
+timeout, and the logical base persistence stride at or below its maximum.
+
+`GresComputeSpec` has matching optional camelCase fields. Unit-bearing values
+are represented as strings in the generated CRD schema, count fields carry a
+minimum of one, and the operator resolves the same shared policy before
+rendering all 19 Gres flags. Fixed protocol framing overhead and derived SQL
+chunk headroom remain non-configurable.
+
+The Gres ranges, Gres, and operator all-target suites pass. Workspace
+all-target check and strict Clippy, nightly formatting, generated-CRD sync, and
+diff hygiene pass. This closes only the Gres range runtime-policy slice; the
+repository-wide hardcoded operational-value audit remains active.
