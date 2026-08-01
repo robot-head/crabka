@@ -52,6 +52,7 @@ positive_newtype!(PositiveU64, u64, GreaterU64);
 /// Process-owned limits and pacing for distributed ranges.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RangeRuntimePolicy {
+    pub join: crabka_pgexec::scanner::JoinPolicy,
     pub rpc_frame_max: ByteSize,
     pub rpc_request_timeout: Time,
     pub rpc_server_idle_timeout: Time,
@@ -80,6 +81,7 @@ impl RangeRuntimePolicy {
     /// Returns an error when a value is non-positive/non-finite or coupled
     /// limits are inconsistent.
     pub fn validate(&self) -> Result<(), String> {
+        self.join.validate().map_err(|error| error.to_string())?;
         for (name, value) in [
             ("RPC request timeout", self.rpc_request_timeout),
             ("RPC server idle timeout", self.rpc_server_idle_timeout),
@@ -135,6 +137,7 @@ impl RangeRuntimePolicy {
 impl Default for RangeRuntimePolicy {
     fn default() -> Self {
         Self {
+            join: crabka_pgexec::scanner::JoinPolicy::default(),
             rpc_frame_max: mebibytes(1),
             rpc_request_timeout: secs(5),
             rpc_server_idle_timeout: minutes(1),

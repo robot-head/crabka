@@ -634,6 +634,45 @@ pub struct ServeArgs {
 /// Optional CLI overrides for distributed range runtime policy.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct RangeRuntimeOptions {
+    /// Maximum distributed join key columns.
+    #[arg(
+        long = "range-join-key-columns",
+        env = "CRABKA_GRES_RANGE_JOIN_KEY_COLUMNS"
+    )]
+    pub join_key_columns: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Maximum distributed join projection columns.
+    #[arg(
+        long = "range-join-projection-columns",
+        env = "CRABKA_GRES_RANGE_JOIN_PROJECTION_COLUMNS"
+    )]
+    pub join_projection_columns: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Maximum predicates per distributed join side.
+    #[arg(
+        long = "range-join-predicates",
+        env = "CRABKA_GRES_RANGE_JOIN_PREDICATES"
+    )]
+    pub join_predicates: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Maximum active XIDs in each distributed join snapshot.
+    #[arg(
+        long = "range-join-snapshot-xids",
+        env = "CRABKA_GRES_RANGE_JOIN_SNAPSHOT_XIDS"
+    )]
+    pub join_snapshot_xids: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Maximum materialized broadcast rows.
+    #[arg(
+        long = "range-join-broadcast-rows",
+        env = "CRABKA_GRES_RANGE_JOIN_BROADCAST_ROWS"
+    )]
+    pub join_broadcast_rows: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Maximum encoded distributed join row size.
+    #[arg(long = "range-join-row-max", env = "CRABKA_GRES_RANGE_JOIN_ROW_MAX", value_parser = parse_positive_whole_byte_size)]
+    pub join_row_max: Option<ByteSize>,
+    /// Maximum distributed join result rows.
+    #[arg(
+        long = "range-join-result-rows",
+        env = "CRABKA_GRES_RANGE_JOIN_RESULT_ROWS"
+    )]
+    pub join_result_rows: Option<crabka_gres_ranges::PositiveUsize>,
     /// Maximum encoded range RPC frame size.
     #[arg(long = "range-rpc-frame-max", env = "CRABKA_GRES_RANGE_RPC_FRAME_MAX", value_parser = crabka_units::parse::positive_byte_size)]
     pub rpc_frame_max: Option<ByteSize>,
@@ -798,6 +837,36 @@ impl RangeRuntimeOptions {
     fn effective_policy(&self) -> std::io::Result<crabka_gres_ranges::RangeRuntimePolicy> {
         let defaults = crabka_gres_ranges::RangeRuntimePolicy::default();
         let policy = crabka_gres_ranges::RangeRuntimePolicy {
+            join: crabka_pgexec::scanner::JoinPolicy {
+                key_columns: self.join_key_columns.map_or(
+                    defaults.join.key_columns,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+                projection_columns: self.join_projection_columns.map_or(
+                    defaults.join.projection_columns,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+                predicates: self.join_predicates.map_or(
+                    defaults.join.predicates,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+                snapshot_xids: self.join_snapshot_xids.map_or(
+                    defaults.join.snapshot_xids,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+                broadcast_rows: self.join_broadcast_rows.map_or(
+                    defaults.join.broadcast_rows,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+                row_bytes: self.join_row_max.map_or(
+                    defaults.join.row_bytes,
+                    crabka_units::convert::ByteSizeExt::bytes_usize,
+                ),
+                result_rows: self.join_result_rows.map_or(
+                    defaults.join.result_rows,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+            },
             rpc_frame_max: self.rpc_frame_max.unwrap_or(defaults.rpc_frame_max),
             rpc_request_timeout: self
                 .rpc_request_timeout
@@ -10186,12 +10255,26 @@ mod tests {
             "--range-rpc-server-idle-timeout=8s",
             "--range-logical-base-persist-stride=7",
             "--range-logical-max-persist-stride=11",
+            "--range-join-key-columns=3",
+            "--range-join-projection-columns=4",
+            "--range-join-predicates=5",
+            "--range-join-snapshot-xids=6",
+            "--range-join-broadcast-rows=7",
+            "--range-join-row-max=8KiB",
+            "--range-join-result-rows=9",
         ])
         .unwrap();
         let policy = cli.serve.range_runtime.effective_policy().unwrap();
         assert2::assert!(policy.rpc_frame_max == crabka_units::mebibytes(2));
         assert2::assert!(policy.rpc_request_timeout == crabka_units::secs(9));
         assert2::assert!(policy.logical_base_persist_stride.get() == 7);
+        assert2::assert!(policy.join.key_columns == 3);
+        assert2::assert!(policy.join.projection_columns == 4);
+        assert2::assert!(policy.join.predicates == 5);
+        assert2::assert!(policy.join.snapshot_xids == 6);
+        assert2::assert!(policy.join.broadcast_rows == 7);
+        assert2::assert!(policy.join.row_bytes == 8192);
+        assert2::assert!(policy.join.result_rows == 9);
 
         let invalid = Cli::try_parse_from([
             "crabka-gres",

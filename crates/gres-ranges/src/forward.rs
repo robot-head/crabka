@@ -568,7 +568,7 @@ impl HostedRangeService {
                     Ok(engine) => engine,
                     Err(response) => return response,
                 };
-                match handle_join_range(engine, &request) {
+                match handle_join_range(engine, &request, self.runtime_policy.join) {
                     Ok(response) => RangeResponse::JoinRange(response),
                     Err(error) => RangeResponse::Error {
                         error: WireErrorKind::Failed,
@@ -2643,6 +2643,7 @@ pub struct RegistryRangeScanner {
     registry: RangeRegistry,
     client: FramedTcpClient,
     local_engines: std::collections::BTreeMap<RangeId, crabka_pgexec::SqlEngine>,
+    join_policy: crabka_pgexec::scanner::JoinPolicy,
 }
 
 impl Clone for RegistryRangeScanner {
@@ -2655,6 +2656,7 @@ impl Clone for RegistryRangeScanner {
                 .iter()
                 .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
                 .collect(),
+            join_policy: self.join_policy,
         }
     }
 }
@@ -2667,10 +2669,27 @@ impl RegistryRangeScanner {
         client: FramedTcpClient,
         local_engines: std::collections::BTreeMap<RangeId, crabka_pgexec::SqlEngine>,
     ) -> Self {
+        Self::new_with_policy(
+            registry,
+            client,
+            local_engines,
+            crabka_pgexec::scanner::JoinPolicy::default(),
+        )
+    }
+
+    /// Build a scanner with explicit owner-enforced distributed join limits.
+    #[must_use]
+    pub fn new_with_policy(
+        registry: RangeRegistry,
+        client: FramedTcpClient,
+        local_engines: std::collections::BTreeMap<RangeId, crabka_pgexec::SqlEngine>,
+        join_policy: crabka_pgexec::scanner::JoinPolicy,
+    ) -> Self {
         Self {
             registry,
             client,
             local_engines,
+            join_policy,
         }
     }
 
@@ -2870,7 +2889,7 @@ impl RegistryRangeScanner {
         mut request: crabka_pgexec::JoinRangeRequest,
     ) -> Result<crabka_pgexec::JoinRangeResult, crabka_pgexec::ExecError> {
         request
-            .validate()
+            .validate_with_policy(self.join_policy)
             .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?;
         let catalog = self.local_engines.values().next().ok_or_else(|| {
             crabka_pgexec::ExecError::Unsupported(
@@ -2898,7 +2917,12 @@ impl RegistryRangeScanner {
             let right = self
                 .materialize_join_side(&request, &right_table, false)
                 .await?;
-            return crabka_pgexec::scanner::execute_materialized_join(&request, &left, &right);
+            return crabka_pgexec::scanner::execute_materialized_join_with_policy(
+                &request,
+                &left,
+                &right,
+                self.join_policy,
+            );
         }
         if matches!(
             request.strategy,
@@ -2937,15 +2961,24 @@ impl RegistryRangeScanner {
             let right = self
                 .materialize_join_side(&request, &right_table, false)
                 .await?;
-            return crabka_pgexec::scanner::execute_materialized_join(&request, &left, &right);
+            return crabka_pgexec::scanner::execute_materialized_join_with_policy(
+                &request,
+                &left,
+                &right,
+                self.join_policy,
+            );
         }
         request
-            .validate()
+            .validate_with_policy(self.join_policy)
             .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?;
         let mut rows = Vec::new();
         for range_id in self.registry.range_ids().await {
             let response = if let Some(engine) = self.local_engines.get(&range_id) {
-                handle_join_range(engine, &encode_join_request(range_id, &request)?)?
+                handle_join_range(
+                    engine,
+                    &encode_join_request(range_id, &request)?,
+                    self.join_policy,
+                )?
             } else {
                 self.join_remote_range(range_id, encode_join_request(range_id, &request)?)
                     .await?
@@ -2956,7 +2989,7 @@ impl RegistryRangeScanner {
                     .into_iter()
                     .map(|row| crabka_pgexec::JoinRow { tuple: row.tuple }),
             );
-            if rows.len() > crabka_pgexec::scanner::MAX_JOIN_RESULT_ROWS {
+            if rows.len() > self.join_policy.result_rows {
                 return Err(crabka_pgexec::ExecError::Unsupported(
                     "join result row count exceeds limit".into(),
                 ));
@@ -2965,7 +2998,7 @@ impl RegistryRangeScanner {
         rows.sort_by(|left, right| left.tuple.cmp(&right.tuple));
         let result = crabka_pgexec::JoinRangeResult { rows };
         result
-            .validate()
+            .validate_with_policy(self.join_policy)
             .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?;
         Ok(result)
     }
@@ -3069,11 +3102,11 @@ impl RegistryRangeScanner {
                 (crabka_pgexec::JoinExecutionStrategy::BroadcastLeft, true)
                     | (crabka_pgexec::JoinExecutionStrategy::BroadcastRight, false)
             );
-            if is_broadcast_side && rows.len() > crabka_pgexec::scanner::MAX_JOIN_BROADCAST_ROWS {
+            if is_broadcast_side && rows.len() > self.join_policy.broadcast_rows {
                 return Err(crabka_pgexec::ExecError::Unsupported(
                     crabka_pgexec::JoinValidationError::TooManyBroadcastRows {
                         actual: rows.len(),
-                        limit: crabka_pgexec::scanner::MAX_JOIN_BROADCAST_ROWS,
+                        limit: self.join_policy.broadcast_rows,
                     }
                     .to_string(),
                 ));
@@ -3292,6 +3325,7 @@ impl crabka_pgexec::RangeCursor for RegistryRangeCursor<'_> {
 /// Range-compute service that evaluates scan visibility on the owning local engine.
 pub struct RangeScanService {
     engines: std::collections::BTreeMap<RangeId, crabka_pgexec::SqlEngine>,
+    join_policy: crabka_pgexec::scanner::JoinPolicy,
 }
 
 /// Range-compute service that answers timestamp transaction primary-resolution RPCs.
@@ -3352,7 +3386,19 @@ impl RangeScanService {
     /// Build a scan service for locally hosted range engines.
     #[must_use]
     pub fn new(engines: std::collections::BTreeMap<RangeId, crabka_pgexec::SqlEngine>) -> Self {
-        Self { engines }
+        Self::new_with_policy(engines, crabka_pgexec::scanner::JoinPolicy::default())
+    }
+
+    /// Build a scan service with explicit owner-enforced distributed join limits.
+    #[must_use]
+    pub fn new_with_policy(
+        engines: std::collections::BTreeMap<RangeId, crabka_pgexec::SqlEngine>,
+        join_policy: crabka_pgexec::scanner::JoinPolicy,
+    ) -> Self {
+        Self {
+            engines,
+            join_policy,
+        }
     }
 }
 
@@ -3381,7 +3427,7 @@ impl RangeService for RangeScanService {
                 handle_scan_cursor(engine, request).map(RangeResponse::ScanCursor)
             }
             (None, Some(request)) => {
-                handle_join_range(engine, &request).map(RangeResponse::JoinRange)
+                handle_join_range(engine, &request, self.join_policy).map(RangeResponse::JoinRange)
             }
             (None, None) => handle_scan_range(engine, scan_request.expect("scan request present"))
                 .map(RangeResponse::ScanRange),
@@ -3403,9 +3449,10 @@ impl RangeService for RangeScanService {
 fn handle_join_range(
     engine: &crabka_pgexec::SqlEngine,
     request: &JoinRangeReq,
+    join_policy: crabka_pgexec::scanner::JoinPolicy,
 ) -> Result<JoinRangeResp, crabka_pgexec::ExecError> {
     request
-        .validate()
+        .validate_with_policy(join_policy)
         .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?;
     let pg_request = request.to_pgexec();
     let left_table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.left.table_name)?;
@@ -3472,7 +3519,12 @@ fn handle_join_range(
             scan(&right_table, &request.right.interval)?,
         ),
     };
-    let result = crabka_pgexec::scanner::execute_materialized_join(&pg_request, &left, &right)?;
+    let result = crabka_pgexec::scanner::execute_materialized_join_with_policy(
+        &pg_request,
+        &left,
+        &right,
+        join_policy,
+    )?;
     Ok(JoinRangeResp {
         rows: result
             .rows

@@ -368,6 +368,42 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub range0_follower_rebuild_backoff_ceiling: Option<Time>,
 
+    /// Maximum distributed join key columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_join_key_columns: Option<usize>,
+
+    /// Maximum distributed join projection columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_join_projection_columns: Option<usize>,
+
+    /// Maximum predicates per distributed join side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_join_predicates: Option<usize>,
+
+    /// Maximum active XIDs in each distributed join snapshot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_join_snapshot_xids: Option<usize>,
+
+    /// Maximum materialized broadcast rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_join_broadcast_rows: Option<usize>,
+
+    /// Maximum encoded distributed join row size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub range_join_row_max: Option<ByteSize>,
+
+    /// Maximum distributed join result rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_join_result_rows: Option<usize>,
+
     /// Maximum encoded range RPC frame size.
     #[serde(
         default,
@@ -868,7 +904,47 @@ impl GresComputeSpec {
         .map_err(|error| format!("spec.compute.pgkv: {error}"))?;
         let schema_fetch_retry_defaults = crabka_schema_serde::SchemaFetchRetryPolicy::default();
         let range_defaults = crabka_gres_ranges::RangeRuntimePolicy::default();
+        let range_join_row_max = self.range_join_row_max.unwrap_or_else(|| {
+            crabka_units::ByteSize::from_bytes(
+                u64::try_from(range_defaults.join.row_bytes).expect("compiled default fits u64"),
+            )
+        });
+        let range_join_row_bytes =
+            whole_bytes_usize("spec.compute.rangeJoinRowMax", range_join_row_max)?;
         let range_runtime_policy = crabka_gres_ranges::RangeRuntimePolicy {
+            join: crabka_pgexec::scanner::JoinPolicy {
+                key_columns: positive_usize(
+                    "spec.compute.rangeJoinKeyColumns",
+                    self.range_join_key_columns
+                        .unwrap_or(range_defaults.join.key_columns),
+                )?,
+                projection_columns: positive_usize(
+                    "spec.compute.rangeJoinProjectionColumns",
+                    self.range_join_projection_columns
+                        .unwrap_or(range_defaults.join.projection_columns),
+                )?,
+                predicates: positive_usize(
+                    "spec.compute.rangeJoinPredicates",
+                    self.range_join_predicates
+                        .unwrap_or(range_defaults.join.predicates),
+                )?,
+                snapshot_xids: positive_usize(
+                    "spec.compute.rangeJoinSnapshotXids",
+                    self.range_join_snapshot_xids
+                        .unwrap_or(range_defaults.join.snapshot_xids),
+                )?,
+                broadcast_rows: positive_usize(
+                    "spec.compute.rangeJoinBroadcastRows",
+                    self.range_join_broadcast_rows
+                        .unwrap_or(range_defaults.join.broadcast_rows),
+                )?,
+                row_bytes: range_join_row_bytes,
+                result_rows: positive_usize(
+                    "spec.compute.rangeJoinResultRows",
+                    self.range_join_result_rows
+                        .unwrap_or(range_defaults.join.result_rows),
+                )?,
+            },
             rpc_frame_max: self
                 .range_rpc_frame_max
                 .unwrap_or(range_defaults.rpc_frame_max),
@@ -2481,7 +2557,7 @@ mod tests {
             .wal_producer_retry_policy;
         assert!(effective == crabka_client_producer::ProducerRetryPolicy::default());
 
-        for (policy, expected) in [
+        for (policy, expected) in vec![
             (
                 GresComputeSpec {
                     wal_producer_request_timeout: Some(Time::ZERO),
@@ -3112,6 +3188,13 @@ mod tests {
     #[test]
     fn compute_range_runtime_policy_round_trips_validates_and_has_schema_types() {
         let spec = GresComputeSpec {
+            range_join_key_columns: Some(3),
+            range_join_projection_columns: Some(4),
+            range_join_predicates: Some(5),
+            range_join_snapshot_xids: Some(6),
+            range_join_broadcast_rows: Some(7),
+            range_join_row_max: Some(crabka_units::kibibytes(8)),
+            range_join_result_rows: Some(9),
             range_rpc_frame_max: Some(crabka_units::mebibytes(2)),
             range_rpc_request_timeout: Some(crabka_units::secs(8)),
             range_rpc_server_idle_timeout: Some(crabka_units::secs(30)),
@@ -3127,6 +3210,13 @@ mod tests {
         assert!(policy.rpc_frame_max == crabka_units::mebibytes(2));
         assert!(policy.remote_session_max.get() == 17);
         assert!(policy.logical_max_persist_stride.get() == 4096);
+        assert!(policy.join.key_columns == 3);
+        assert!(policy.join.projection_columns == 4);
+        assert!(policy.join.predicates == 5);
+        assert!(policy.join.snapshot_xids == 6);
+        assert!(policy.join.broadcast_rows == 7);
+        assert!(policy.join.row_bytes == 8192);
+        assert!(policy.join.result_rows == 9);
 
         let invalid = GresComputeSpec {
             range_rpc_request_timeout: Some(crabka_units::secs(2)),
@@ -3141,5 +3231,7 @@ mod tests {
         assert!(properties["rangeRpcFrameMax"]["type"] == "string");
         assert!(properties["rangeRpcRequestTimeout"]["type"] == "string");
         assert!(properties["rangeRemoteSessionMax"]["minimum"].as_f64() == Some(1.0));
+        assert!(properties["rangeJoinKeyColumns"]["minimum"].as_f64() == Some(1.0));
+        assert!(properties["rangeJoinRowMax"]["type"] == "string");
     }
 }

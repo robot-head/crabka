@@ -339,6 +339,46 @@ spec:
                     description: Wall-clock headroom persisted by the HLC oracle.
                     nullable: true
                     type: string
+                  rangeJoinBroadcastRows:
+                    description: Maximum materialized broadcast rows.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeJoinKeyColumns:
+                    description: Maximum distributed join key columns.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeJoinPredicates:
+                    description: Maximum predicates per distributed join side.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeJoinProjectionColumns:
+                    description: Maximum distributed join projection columns.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeJoinResultRows:
+                    description: Maximum distributed join result rows.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeJoinRowMax:
+                    description: Maximum encoded distributed join row size.
+                    nullable: true
+                    type: string
+                  rangeJoinSnapshotXids:
+                    description: Maximum active XIDs in each distributed join snapshot.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   rangeLogicalBasePersistStride:
                     description: Initial logical horizon persistence stride.
                     format: uint64

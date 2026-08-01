@@ -839,13 +839,14 @@ impl MultiRangeTenant {
             .collect();
         let range_scanner: Arc<dyn crabka_pgexec::RangeScanner> =
             match config.range_registry.clone() {
-                Some(registry) => Arc::new(RegistryRangeScanner::new(
+                Some(registry) => Arc::new(RegistryRangeScanner::new_with_policy(
                     registry,
                     config
                         .range_client
                         .clone()
                         .ok_or(TenantError::MissingRangeTls)?,
                     scanner_engines,
+                    config.runtime_policy.join,
                 )),
                 None => Arc::new(InProcessRangeScanner {
                     engines: scanner_engines,

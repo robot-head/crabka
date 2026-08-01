@@ -6586,3 +6586,22 @@ complete PgExec library suite, focused Gres and operator policy tests,
 generated-CRD parity, workspace all-target Clippy, nightly formatting and diff
 hygiene pass. The repository-wide hardcoded operational-value audit remains
 active.
+
+## Distributed Join Structural Policy
+
+The range runtime policy now owns the distributed-join key-column,
+projection-column, predicate, snapshot-XID, broadcast-row, encoded-row-byte and
+result-row limits. Existing defaults remain 16, 256, 256, 65,536, 8,192, 256
+KiB and 65,536 respectively. Counts use positive `refined_type` newtypes at
+CLI and CRD boundaries; the row limit is a dimensioned UOM byte value.
+
+Gres exposes the limits through `--range-join-*` arguments backed by matching
+`CRABKA_GRES_RANGE_JOIN_*` environment variables. `Gres.spec.compute` exposes
+the same seven values, and the operator renders them into every compute pod.
+The receiving range process supplies the policy to shared request, row and
+result validation, so a sender cannot choose looser bounds.
+
+The complete Gres range, Gres and operator library suites, focused PgExec
+owner-policy tests, generated-CRD parity, workspace all-target Clippy, nightly
+formatting and diff hygiene pass. The repository-wide hardcoded operational-
+value audit remains active.

@@ -2155,6 +2155,24 @@ fn wal_consumer_admin_args(policy: &EffectiveGresComputePolicy) -> [String; 28] 
 
 fn range_runtime_args(policy: crabka_gres_ranges::RangeRuntimePolicy) -> Vec<String> {
     vec![
+        "--range-join-key-columns".to_owned(),
+        policy.join.key_columns.to_string(),
+        "--range-join-projection-columns".to_owned(),
+        policy.join.projection_columns.to_string(),
+        "--range-join-predicates".to_owned(),
+        policy.join.predicates.to_string(),
+        "--range-join-snapshot-xids".to_owned(),
+        policy.join.snapshot_xids.to_string(),
+        "--range-join-broadcast-rows".to_owned(),
+        policy.join.broadcast_rows.to_string(),
+        "--range-join-row-max".to_owned(),
+        crabka_units::ByteSize::from_bytes(
+            u64::try_from(policy.join.row_bytes).expect("validated row limit fits u64"),
+        )
+        .human()
+        .to_string(),
+        "--range-join-result-rows".to_owned(),
+        policy.join.result_rows.to_string(),
         "--range-rpc-frame-max".to_owned(),
         policy.rpc_frame_max.human().to_string(),
         "--range-rpc-request-timeout".to_owned(),
@@ -4500,6 +4518,11 @@ mod tests {
     #[test]
     fn range_runtime_policy_renders_every_gres_flag() {
         let policy = crabka_gres_ranges::RangeRuntimePolicy {
+            join: crabka_pgexec::scanner::JoinPolicy {
+                key_columns: 3,
+                row_bytes: 8192,
+                ..Default::default()
+            },
             rpc_frame_max: crabka_units::mebibytes(2),
             remote_session_max: crabka_gres_ranges::PositiveUsize::new(17).unwrap(),
             ..Default::default()
@@ -4516,8 +4539,16 @@ mod tests {
         );
         assert!(
             args.windows(2)
+                .any(|pair| pair == ["--range-join-key-columns", "3"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--range-join-row-max", "8KiB"])
+        );
+        assert!(
+            args.windows(2)
                 .any(|pair| pair == ["--range-hlc-horizon-headroom", "128ms"])
         );
-        assert!(args.len() == 38);
+        assert!(args.len() == 52);
     }
 }

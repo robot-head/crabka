@@ -828,6 +828,17 @@ impl JoinRangeReq {
         self.to_pgexec().validate()
     }
 
+    /// Validate against limits owned by the receiving process.
+    ///
+    /// # Errors
+    /// Returns an error when the request exceeds or violates the policy.
+    pub fn validate_with_policy(
+        &self,
+        policy: crabka_pgexec::scanner::JoinPolicy,
+    ) -> Result<(), crabka_pgexec::JoinValidationError> {
+        self.to_pgexec().validate_with_policy(policy)
+    }
+
     /// Whether the fully materialized request, including enum/request JSON
     /// overhead, fits the production bounded frame.
     #[must_use]
