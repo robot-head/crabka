@@ -1007,6 +1007,10 @@ pub struct FileGssapiConfig {
     /// falls back to krb5.conf when omitted.
     #[serde(default)]
     pub kdc: Option<String>,
+    /// Maximum tolerated difference between client and broker clocks.
+    #[serde(default, with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub max_time_skew: Option<Time>,
 }
 
 /// TOML shape of `[inter_broker_credentials]`. A `type` discriminator
@@ -1674,6 +1678,9 @@ fn apply_config_tail(
             principal_to_local_rules: rules,
             realm: gssapi.realm,
             kdc: gssapi.kdc,
+            max_time_skew: gssapi
+                .max_time_skew
+                .unwrap_or(crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW),
         });
     }
     if let Some(FileInterBrokerCredentials::Gssapi {
@@ -4546,6 +4553,7 @@ service_name = "kafka"
 principal_to_local_rules = ["RULE:[1:$1@$0](.*@EXAMPLE.COM)s/@.*//", "DEFAULT"]
 realm = "EXAMPLE.COM"
 kdc = "tcp://kdc:88"
+max_time_skew = "17s"
 "#;
         let file: FileConfig = toml::from_str(src).expect("parse [gssapi]");
         let mut cfg = crate::config::BrokerConfig::default();
@@ -4561,6 +4569,7 @@ kdc = "tcp://kdc:88"
         ));
         check!(g.realm.as_deref() == Some("EXAMPLE.COM"));
         check!(g.kdc.as_deref() == Some("tcp://kdc:88"));
+        check!(g.max_time_skew == secs(17));
     }
 
     #[test]
@@ -4573,7 +4582,22 @@ principal_to_local_rules = ["DEFAULT"]
         let file: FileConfig = toml::from_str(src).unwrap();
         let mut cfg = crate::config::BrokerConfig::default();
         file.apply_to(&mut cfg).unwrap();
-        assert!(cfg.gssapi.unwrap().service_name == "kafka");
+        let gssapi = cfg.gssapi.unwrap();
+        assert!(gssapi.service_name == "kafka");
+        assert!(gssapi.max_time_skew == crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW);
+    }
+
+    #[test]
+    fn apply_to_gssapi_accepts_zero_clock_skew() {
+        let src = r#"
+[gssapi]
+keytab_path = "/k/keytab"
+max_time_skew = "0s"
+"#;
+        let file: FileConfig = toml::from_str(src).unwrap();
+        let mut cfg = crate::config::BrokerConfig::default();
+        file.apply_to(&mut cfg).unwrap();
+        assert!(cfg.gssapi.unwrap().max_time_skew == secs(0));
     }
 
     #[test]

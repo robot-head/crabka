@@ -18,10 +18,10 @@ broker configuration, and lower it to `std::time::Duration` only at SSPI.
 
 ### Task 2: Broker TOML boundary
 
-- [ ] Add failing omitted-default and explicit-UOM file-config tests.
-- [ ] Add optional `max_time_skew` to `[gssapi]` and resolve omission to `5m`.
-- [ ] Update broker GSSAPI callers and fixtures without changing behavior.
-- [ ] Run focused broker tests and strict all-target Clippy; commit.
+- [x] Add failing omitted-default and explicit-UOM file-config tests.
+- [x] Add optional `max_time_skew` to `[gssapi]` and resolve omission to `5m`.
+- [x] Update broker GSSAPI callers and fixtures without changing behavior.
+- [x] Run focused broker tests and strict all-target Clippy; commit.
 
 ### Task 3: Kafka listener CRD and operator rendering
 

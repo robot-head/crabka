@@ -612,6 +612,7 @@ pub fn handle_authenticate_gssapi(
         let acceptor = match crabka_security::gssapi::provider::SspiAcceptor::new(
             &keytab,
             &config.service_name,
+            config.max_time_skew,
         ) {
             Ok(a) => a,
             Err(e) => return fail_authenticate(&format!("GSSAPI acceptor init failed: {e}")),
@@ -1226,6 +1227,7 @@ mod tests {
             principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
             realm: Some("CRABKA.TEST".to_string()),
             kdc: None,
+            max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
         };
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::Gssapi,
@@ -1266,6 +1268,7 @@ mod tests {
             principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
             realm: Some("OTHER.REALM".to_string()),
             kdc: None,
+            max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
         };
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::Gssapi,
@@ -1292,6 +1295,7 @@ mod tests {
             principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
             realm: Some("CRABKA.TEST".to_string()),
             kdc: None,
+            max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
         };
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::Gssapi,
@@ -1353,6 +1357,7 @@ mod tests {
             principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
             realm: Some("CRABKA.TEST".to_string()),
             kdc: None,
+            max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
         };
 
         // Drive the exchange to `AwaitingChoice` up front (mirroring round
@@ -1401,6 +1406,7 @@ mod tests {
             principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
             realm: Some("CRABKA.TEST".to_string()),
             kdc: None,
+            max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
         };
 
         let short = map_gssapi_principal("alice@crabka.test", &config).expect("map principal");

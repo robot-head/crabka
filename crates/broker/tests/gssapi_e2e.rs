@@ -102,6 +102,7 @@ async fn start_host_gssapi_broker() -> (BrokerHandle, tempfile::TempDir) {
         principal_to_local_rules: vec![Rule::Default],
         realm: Some("CRABKA.TEST".to_string()),
         kdc: Some(kdc_url),
+        max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
     });
 
     let handle = Broker::start(cfg).await.expect("start gssapi broker");

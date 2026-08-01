@@ -2776,6 +2776,7 @@ async fn gssapi_handshake_advertised_when_enabled() {
         principal_to_local_rules: vec![],
         realm: Some("CRABKA.TEST".to_string()),
         kdc: None,
+        max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
     });
 
     let handle = Broker::start(cfg).await.expect("broker must start");
@@ -2863,6 +2864,7 @@ async fn gssapi_inter_broker_client_authenticates_from_keytab() {
         principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
         realm: Some("CRABKA.TEST".to_string()),
         kdc: Some(kdc_url.clone()),
+        max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
     });
 
     let handle = Broker::start(cfg).await.expect("broker must start");
