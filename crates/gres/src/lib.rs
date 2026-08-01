@@ -714,6 +714,15 @@ pub struct RangeRuntimeOptions {
 /// Optional CLI overrides for SQL executor runtime policy.
 #[derive(clap::Args, Debug, Clone, Default)]
 pub struct PgExecRuntimeOptions {
+    /// Memory retained by one blocking query operator.
+    #[arg(long = "pgexec-blocking-query-memory", env = "CRABKA_GRES_PGEXEC_BLOCKING_QUERY_MEMORY", value_parser = parse_positive_whole_byte_size)]
+    pub blocking_query_memory: Option<ByteSize>,
+    /// Maximum encoded size of one result page.
+    #[arg(long = "pgexec-result-page-max", env = "CRABKA_GRES_PGEXEC_RESULT_PAGE_MAX", value_parser = parse_positive_whole_byte_size)]
+    pub result_page_max: Option<ByteSize>,
+    /// Largest estimated join input eligible for broadcast.
+    #[arg(long = "pgexec-join-broadcast-threshold", env = "CRABKA_GRES_PGEXEC_JOIN_BROADCAST_THRESHOLD", value_parser = parse_positive_whole_byte_size)]
+    pub join_broadcast_threshold: Option<ByteSize>,
     /// Per-session LISTEN/NOTIFY queue capacity.
     #[arg(
         long = "pgexec-notify-queue-capacity",
@@ -758,6 +767,13 @@ impl PgExecRuntimeOptions {
     fn effective_policy(&self) -> crabka_pgexec::RuntimePolicy {
         let defaults = crabka_pgexec::RuntimePolicy::default();
         crabka_pgexec::RuntimePolicy {
+            blocking_query_memory: self
+                .blocking_query_memory
+                .unwrap_or(defaults.blocking_query_memory),
+            result_page_max: self.result_page_max.unwrap_or(defaults.result_page_max),
+            join_broadcast_threshold: self
+                .join_broadcast_threshold
+                .unwrap_or(defaults.join_broadcast_threshold),
             notify_queue_capacity: self
                 .notify_queue_capacity
                 .map_or(defaults.notify_queue_capacity, PositiveUsize::into_value),
@@ -11458,6 +11474,9 @@ mod tests {
             "--substrate-bootstrap=memory://",
             "--tenant=tenant-a",
             "--pgexec-notify-queue-capacity=37",
+            "--pgexec-blocking-query-memory=34B",
+            "--pgexec-result-page-max=35B",
+            "--pgexec-join-broadcast-threshold=36B",
             "--pgexec-xid-reservation=38",
             "--pgexec-rowid-reservation=39",
             "--pgexec-ts-prune-versions-per-row=40",
@@ -11471,6 +11490,9 @@ mod tests {
         assert!(
             config.pgexec_runtime_policy
                 == crabka_pgexec::RuntimePolicy {
+                    blocking_query_memory: crabka_units::bytes(34),
+                    result_page_max: crabka_units::bytes(35),
+                    join_broadcast_threshold: crabka_units::bytes(36),
                     notify_queue_capacity: 37,
                     xid_reservation: 38,
                     rowid_reservation: 39,

@@ -237,12 +237,24 @@ spec:
                     description: Tenant lifecycle reconciliation interval.
                     nullable: true
                     type: string
+                  pgexecBlockingQueryMemory:
+                    description: Memory retained by one blocking query operator.
+                    nullable: true
+                    type: string
+                  pgexecJoinBroadcastThreshold:
+                    description: Largest estimated join input eligible for broadcast.
+                    nullable: true
+                    type: string
                   pgexecNotifyQueueCapacity:
                     description: Per-session LISTEN/NOTIFY queue capacity.
                     format: uint
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  pgexecResultPageMax:
+                    description: Maximum encoded size of one result page.
+                    nullable: true
+                    type: string
                   pgexecRowidReservation:
                     description: Durable internal row-ID reservation size.
                     format: uint64

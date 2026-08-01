@@ -80,7 +80,7 @@ use std::{
 pub use commit::{Committer, LocalCommitter};
 use crabka_pgkv::{FjallKv, Kv, MemKv};
 use crabka_pgwire::engine::Engine;
-use crabka_units::convert::TimeExt as _;
+use crabka_units::convert::{ByteSizeExt as _, TimeExt as _};
 pub use error::ExecError;
 pub use gtm::GlobalXidLease;
 pub use hlc::{Hlc, HybridLogicalClock};
@@ -297,6 +297,9 @@ pub(crate) enum PersistMode {
 /// timestamp-version reclamation.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RuntimePolicy {
+    pub blocking_query_memory: crabka_units::ByteSize,
+    pub result_page_max: crabka_units::ByteSize,
+    pub join_broadcast_threshold: crabka_units::ByteSize,
     pub notify_queue_capacity: usize,
     pub xid_reservation: u64,
     pub rowid_reservation: u64,
@@ -307,6 +310,9 @@ pub struct RuntimePolicy {
 impl Default for RuntimePolicy {
     fn default() -> Self {
         Self {
+            blocking_query_memory: scanner::BLOCKING_QUERY_MEMORY,
+            result_page_max: session::RESULT_PAGE_MAX,
+            join_broadcast_threshold: plan_dist::PlannerConfig::default().broadcast_threshold,
             notify_queue_capacity: notify::NOTIFY_QUEUE_CAPACITY,
             xid_reservation: procarray::DURABLE_XID_BLOCK,
             rowid_reservation: seq::DURABLE_BLOCK,
@@ -324,7 +330,17 @@ impl RuntimePolicy {
     /// by the engine's whole-millisecond clock.
     pub fn validate(self) -> Result<Self, ExecError> {
         let floor_lag_millis = self.ts_gc_floor_lag.millis_i64();
-        if self.notify_queue_capacity == 0
+        let whole_positive_bytes = |value: crabka_units::ByteSize| {
+            let bytes = value.bytes_usize();
+            bytes > 0
+                && value.bytes_f64().is_finite()
+                && u64::try_from(bytes)
+                    .is_ok_and(|bytes| crabka_units::ByteSize::from_bytes(bytes) == value)
+        };
+        if !whole_positive_bytes(self.blocking_query_memory)
+            || !whole_positive_bytes(self.result_page_max)
+            || !whole_positive_bytes(self.join_broadcast_threshold)
+            || self.notify_queue_capacity == 0
             || self.xid_reservation == 0
             || self.rowid_reservation == 0
             || self.ts_prune_versions_per_row == 0
@@ -333,7 +349,7 @@ impl RuntimePolicy {
             || crabka_units::Time::from_millis(floor_lag_millis) != self.ts_gc_floor_lag
         {
             return Err(ExecError::Unsupported(
-                "PgExec runtime counts must be positive and GC lag must be finite, nonnegative, and whole milliseconds"
+                "PgExec byte limits and counts must be positive whole values and GC lag must be finite, nonnegative, and whole milliseconds"
                     .into(),
             ));
         }
@@ -406,6 +422,8 @@ pub struct SqlEngine {
     pub(crate) range_scanner: Arc<dyn scanner::RangeScanner>,
     pub(crate) join_stats: Arc<dyn plan_dist::Stats>,
     pub(crate) join_strategy_config: plan_dist::PlannerConfig,
+    pub(crate) blocking_query_memory: crabka_units::ByteSize,
+    pub(crate) result_page_max: crabka_units::ByteSize,
     /// Timestamp oracle backing the sharded timestamp transaction path.
     pub(crate) timestamp_oracle: Arc<dyn timestamp_txn::TimestampSource>,
     /// Cached durable-timestamp horizon over `kv`/`catalog_kv`. Seeded lazily
@@ -809,7 +827,11 @@ impl SqlEngine {
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
             join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&kv))),
-            join_strategy_config: plan_dist::PlannerConfig::default(),
+            join_strategy_config: plan_dist::PlannerConfig {
+                broadcast_threshold: policy.join_broadcast_threshold,
+            },
+            blocking_query_memory: policy.blocking_query_memory,
+            result_page_max: policy.result_page_max,
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampSource::default()),
             timestamp_horizon,
             local_sequence,
@@ -1427,7 +1449,11 @@ impl SqlEngine {
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
             join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&sm_kv))),
-            join_strategy_config: plan_dist::PlannerConfig::default(),
+            join_strategy_config: plan_dist::PlannerConfig {
+                broadcast_threshold: policy.join_broadcast_threshold,
+            },
+            blocking_query_memory: policy.blocking_query_memory,
+            result_page_max: policy.result_page_max,
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampSource::default()),
             timestamp_horizon,
             local_sequence,
@@ -1490,6 +1516,8 @@ impl SqlEngine {
             range_scanner: Arc::clone(&self.range_scanner),
             join_stats: Arc::clone(&self.join_stats),
             join_strategy_config: self.join_strategy_config,
+            blocking_query_memory: self.blocking_query_memory,
+            result_page_max: self.result_page_max,
             timestamp_oracle: Arc::clone(&self.timestamp_oracle),
             timestamp_horizon: self.timestamp_horizon.clone(),
             local_sequence: Arc::clone(&self.local_sequence),
@@ -3143,6 +3171,8 @@ impl Engine for SqlEngine {
             range_scanner: Arc::clone(&self.range_scanner),
             join_stats: Arc::clone(&self.join_stats),
             join_strategy_config: self.join_strategy_config,
+            blocking_query_memory: self.blocking_query_memory,
+            result_page_max: self.result_page_max,
             timestamp_oracle: Arc::clone(&self.timestamp_oracle),
             timestamp_horizon: self.timestamp_horizon.clone(),
             local_sequence: Arc::clone(&self.local_sequence),
@@ -3158,7 +3188,7 @@ impl Engine for SqlEngine {
 #[cfg(test)]
 mod tests {
     use crabka_pgwire::engine::Session;
-    use crabka_units::convert::TimeExt as _;
+    use crabka_units::convert::{ByteSizeExt as _, TimeExt as _};
     use tokio::sync::{Barrier, Notify};
 
     use super::*;
@@ -3167,6 +3197,18 @@ mod tests {
     fn runtime_policy_rejects_zero_counts_and_negative_gc_lag() {
         let defaults = RuntimePolicy::default();
         for policy in [
+            RuntimePolicy {
+                blocking_query_memory: crabka_units::ByteSize::ZERO,
+                ..defaults
+            },
+            RuntimePolicy {
+                result_page_max: crabka_units::ByteSize::from_bytes_f64(0.5),
+                ..defaults
+            },
+            RuntimePolicy {
+                join_broadcast_threshold: crabka_units::ByteSize::ZERO,
+                ..defaults
+            },
             RuntimePolicy {
                 notify_queue_capacity: 0,
                 ..defaults
@@ -3202,6 +3244,27 @@ mod tests {
             .validate()
             .is_ok()
         );
+    }
+
+    #[test]
+    fn runtime_query_policy_reaches_engine_and_planner() {
+        let policy = RuntimePolicy {
+            blocking_query_memory: crabka_units::bytes(34),
+            result_page_max: crabka_units::bytes(35),
+            join_broadcast_threshold: crabka_units::bytes(36),
+            ..Default::default()
+        };
+        let engine = SqlEngine::new_with_policy(policy).expect("policy");
+
+        assert_eq!(engine.blocking_query_memory, crabka_units::bytes(34));
+        assert_eq!(engine.result_page_max, crabka_units::bytes(35));
+        assert_eq!(
+            engine.join_strategy_config.broadcast_threshold,
+            crabka_units::bytes(36)
+        );
+        let clone = engine.clone_handle();
+        assert_eq!(clone.blocking_query_memory, engine.blocking_query_memory);
+        assert_eq!(clone.result_page_max, engine.result_page_max);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

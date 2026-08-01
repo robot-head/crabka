@@ -2236,6 +2236,24 @@ fn render_deployment(
             .pgexec_runtime_policy
             .notify_queue_capacity
             .to_string(),
+        "--pgexec-blocking-query-memory".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .blocking_query_memory
+            .human()
+            .to_string(),
+        "--pgexec-result-page-max".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .result_page_max
+            .human()
+            .to_string(),
+        "--pgexec-join-broadcast-threshold".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .join_broadcast_threshold
+            .human()
+            .to_string(),
         "--pgexec-xid-reservation".to_owned(),
         compute_policy
             .pgexec_runtime_policy
@@ -3254,6 +3272,9 @@ mod tests {
             client_frame_max: Some(crabka_units::kibibytes(32)),
             pgwire_max_message_size: Some(crabka_units::bytes(37)),
             pgexec_notify_queue_capacity: Some(38),
+            pgexec_blocking_query_memory: Some(crabka_units::bytes(35)),
+            pgexec_result_page_max: Some(crabka_units::bytes(36)),
+            pgexec_join_broadcast_threshold: Some(crabka_units::bytes(37)),
             pgexec_xid_reservation: Some(39),
             pgexec_rowid_reservation: Some(40),
             pgexec_ts_prune_versions_per_row: Some(41),
@@ -3299,6 +3320,9 @@ mod tests {
                 ["--client-frame-max", "32768B"],
                 ["--pgwire-max-message-size", "37B"],
                 ["--pgexec-notify-queue-capacity", "38"],
+                ["--pgexec-blocking-query-memory", "35B"],
+                ["--pgexec-result-page-max", "36B"],
+                ["--pgexec-join-broadcast-threshold", "37B"],
                 ["--pgexec-xid-reservation", "39"],
                 ["--pgexec-rowid-reservation", "40"],
                 ["--pgexec-ts-prune-versions-per-row", "41"],

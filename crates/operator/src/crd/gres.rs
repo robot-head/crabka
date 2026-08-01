@@ -259,6 +259,24 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub pgwire_max_message_size: Option<ByteSize>,
 
+    /// Memory retained by one blocking query operator.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub pgexec_blocking_query_memory: Option<ByteSize>,
+
+    /// Maximum encoded size of one result page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub pgexec_result_page_max: Option<ByteSize>,
+
+    /// Largest estimated join input eligible for broadcast.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub pgexec_join_broadcast_threshold: Option<ByteSize>,
+
     /// Per-session LISTEN/NOTIFY queue capacity.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1))]
@@ -775,6 +793,24 @@ impl GresComputeSpec {
             .unwrap_or_else(|| mebibytes(64));
         whole_bytes_usize("spec.compute.pgwireMaxMessageSize", pgwire_max_message_size)?;
         let pgexec_defaults = crabka_pgexec::RuntimePolicy::default();
+        let pgexec_blocking_query_memory = self
+            .pgexec_blocking_query_memory
+            .unwrap_or(pgexec_defaults.blocking_query_memory);
+        whole_bytes_usize(
+            "spec.compute.pgexecBlockingQueryMemory",
+            pgexec_blocking_query_memory,
+        )?;
+        let pgexec_result_page_max = self
+            .pgexec_result_page_max
+            .unwrap_or(pgexec_defaults.result_page_max);
+        whole_bytes_usize("spec.compute.pgexecResultPageMax", pgexec_result_page_max)?;
+        let pgexec_join_broadcast_threshold = self
+            .pgexec_join_broadcast_threshold
+            .unwrap_or(pgexec_defaults.join_broadcast_threshold);
+        whole_bytes_usize(
+            "spec.compute.pgexecJoinBroadcastThreshold",
+            pgexec_join_broadcast_threshold,
+        )?;
         let positive_usize = |field: &str, value: usize| {
             GreaterUsize::<0>::new(value)
                 .map(refined_type::Refined::into_value)
@@ -809,6 +845,9 @@ impl GresComputeSpec {
                 .unwrap_or(pgexec_defaults.ts_prune_versions_per_row),
         )?;
         let pgexec_runtime_policy = crabka_pgexec::RuntimePolicy {
+            blocking_query_memory: pgexec_blocking_query_memory,
+            result_page_max: pgexec_result_page_max,
+            join_broadcast_threshold: pgexec_join_broadcast_threshold,
             notify_queue_capacity: pgexec_notify_queue_capacity,
             xid_reservation: pgexec_xid_reservation,
             rowid_reservation: pgexec_rowid_reservation,
@@ -2334,6 +2373,9 @@ mod tests {
     fn pgexec_runtime_policy_has_overrides_schema_and_validation() {
         let spec = GresComputeSpec {
             pgexec_notify_queue_capacity: Some(37),
+            pgexec_blocking_query_memory: Some(crabka_units::bytes(34)),
+            pgexec_result_page_max: Some(crabka_units::bytes(35)),
+            pgexec_join_broadcast_threshold: Some(crabka_units::bytes(36)),
             pgexec_xid_reservation: Some(38),
             pgexec_rowid_reservation: Some(39),
             pgexec_ts_prune_versions_per_row: Some(40),
@@ -2342,6 +2384,9 @@ mod tests {
         };
         let policy = spec.effective_policy().expect("overrides");
         assert_eq!(policy.pgexec_runtime_policy.notify_queue_capacity, 37);
+        assert!(policy.pgexec_runtime_policy.blocking_query_memory == crabka_units::bytes(34));
+        assert!(policy.pgexec_runtime_policy.result_page_max == crabka_units::bytes(35));
+        assert!(policy.pgexec_runtime_policy.join_broadcast_threshold == crabka_units::bytes(36));
         assert_eq!(policy.pgexec_runtime_policy.xid_reservation, 38);
         assert_eq!(policy.pgexec_runtime_policy.rowid_reservation, 39);
         assert_eq!(policy.pgexec_runtime_policy.ts_prune_versions_per_row, 40);
@@ -2359,6 +2404,13 @@ mod tests {
             assert!(fields[field]["minimum"].as_f64() == Some(1.0));
         }
         assert!(fields["pgexecTsGcFloorLag"]["type"] == "string");
+        for field in [
+            "pgexecBlockingQueryMemory",
+            "pgexecResultPageMax",
+            "pgexecJoinBroadcastThreshold",
+        ] {
+            assert!(fields[field]["type"] == "string");
+        }
 
         let error = GresComputeSpec {
             pgexec_xid_reservation: Some(0),

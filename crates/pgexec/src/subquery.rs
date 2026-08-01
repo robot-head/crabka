@@ -37,6 +37,8 @@ pub(crate) struct SubCtx<'a> {
     pub fctx: crate::exec::ForeignCtx<'a>,
     /// G-8: ordinary table scanner seam forwarded through nested subqueries.
     pub range_scanner: &'a dyn crate::scanner::RangeScanner,
+    /// Memory retained by one blocking query operator.
+    pub blocking_query_memory: crabka_units::ByteSize,
 }
 
 impl<'a> SubCtx<'a> {
@@ -55,6 +57,7 @@ impl<'a> SubCtx<'a> {
             eval_ctx: self.eval_ctx,
             fctx: self.fctx,
             range_scanner: self.range_scanner,
+            blocking_query_memory: self.blocking_query_memory,
         }
     }
 }

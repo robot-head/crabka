@@ -6565,3 +6565,24 @@ recovered multi-range, and split-successor engines. PgExec's 547 library tests,
 focused Gres parsing and operator CRD/rendering tests, generated-CRD parity,
 workspace all-target Clippy, nightly formatting and diff hygiene pass. The
 repository-wide hardcoded operational-value audit remains active.
+
+## PgExec Query Memory and Paging Policy
+
+PgExec's runtime policy now owns the blocking-query memory budget, result-page
+byte cap and distributed-join broadcast threshold. Existing defaults remain 16
+MiB, 1 MiB and 64 MiB. All three are dimensioned UOM byte values and reject
+zero, fractional bytes and values that cannot be represented by the runtime.
+
+Gres exposes these as `--pgexec-blocking-query-memory`,
+`--pgexec-result-page-max` and `--pgexec-join-broadcast-threshold`, backed by
+matching `CRABKA_GRES_PGEXEC_*` environment variables. `Gres.spec.compute`
+exposes the same values, and the operator renders them into every compute pod.
+
+The blocking budget is applied consistently to materialized scans, joins,
+aggregations, set operations, ordering, distinct processing and locking
+queries, including nested-query paths. Result streaming uses the configured
+page cap, while the planner uses the configured broadcast threshold. The
+complete PgExec library suite, focused Gres and operator policy tests,
+generated-CRD parity, workspace all-target Clippy, nightly formatting and diff
+hygiene pass. The repository-wide hardcoded operational-value audit remains
+active.
