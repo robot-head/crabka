@@ -8,16 +8,14 @@ use crabka_client_core::{ClientFrameMax, ConnectionDispatchQueueCapacity, FetchM
 use crabka_gres_control::{RegistryPolicy, RegistryReplicationFactor};
 use crabka_gres_loadtest::{
     cluster::Binaries,
+    config::{LoadtestRuntimePolicy, NonNegativeUsize, PositiveUsize},
     external::{self, ExternalTarget},
     report::{self, LatencySummary, RunReport},
     runner::{self, ExternalRunConfig, RunConfig},
     scenario::{ModeSpec, Scenario},
 };
+use crabka_units::{fmt::Human as _, prelude::*};
 use tracing_subscriber::EnvFilter;
-
-/// `max_offset_ms` for the HLC leg of `compare` when the scenario's own
-/// mode is not HLC.
-const DEFAULT_HLC_MAX_OFFSET_MS: u64 = 250;
 
 #[derive(Parser)]
 #[command(
@@ -35,6 +33,8 @@ enum CliCommand {
     Run {
         #[command(flatten)]
         registry: RegistryOptions,
+        #[command(flatten)]
+        runtime: RuntimeOptions,
         /// Path to the scenario YAML.
         #[arg(long)]
         scenario: PathBuf,
@@ -42,9 +42,6 @@ enum CliCommand {
         /// (`logical-tso` or `hlc`). Meaningless with `--external`.
         #[arg(long, conflicts_with = "external")]
         mode: Option<String>,
-        /// `max_offset_ms` when `--mode hlc` is given.
-        #[arg(long, default_value_t = 250)]
-        hlc_max_offset_ms: u64,
         /// Output directory for reports.
         #[arg(long, default_value = "loadtest-out")]
         out: PathBuf,
@@ -58,6 +55,8 @@ enum CliCommand {
     Compare {
         #[command(flatten)]
         registry: RegistryOptions,
+        #[command(flatten)]
+        runtime: RuntimeOptions,
         /// Path to the scenario YAML.
         #[arg(long)]
         scenario: PathBuf,
@@ -79,6 +78,127 @@ enum CliCommand {
         #[arg(long)]
         scenario: PathBuf,
     },
+}
+
+#[derive(Args)]
+struct RuntimeOptions {
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_LAUNCH_TIMEOUT", default_value = "2m", value_parser = crabka_units::parse::positive_time)]
+    launch_timeout: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_KILL_TIMEOUT", default_value = "10s", value_parser = crabka_units::parse::positive_time)]
+    kill_timeout: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_LOG_DRAIN_TIMEOUT", default_value = "5s", value_parser = crabka_units::parse::positive_time)]
+    log_drain_timeout: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_BROKER_POLL_INTERVAL", default_value = "100ms", value_parser = crabka_units::parse::positive_time)]
+    broker_poll_interval: Time,
+    #[arg(long = "topic-create-timeout", env = "CRABKA_GRES_LOADTEST_TOPIC_CREATE_TIMEOUT", default_value = "30s", value_parser = crabka_units::parse::positive_time)]
+    loadtest_topic_create_timeout: Time,
+    #[arg(
+        long,
+        env = "CRABKA_GRES_LOADTEST_LOG_TAIL_LINES",
+        default_value = "40"
+    )]
+    log_tail_lines: PositiveUsize,
+    #[arg(
+        long,
+        env = "CRABKA_GRES_LOADTEST_MAX_SERIALIZATION_RETRIES",
+        default_value = "5"
+    )]
+    max_serialization_retries: NonNegativeUsize,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_OPERATION_TIMEOUT", default_value = "30s", value_parser = crabka_units::parse::positive_time)]
+    operation_timeout: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_CONNECT_TIMEOUT", default_value = "5s", value_parser = crabka_units::parse::positive_time)]
+    connect_timeout: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_STARTUP_DEADLINE", default_value = "30s", value_parser = crabka_units::parse::positive_time)]
+    startup_deadline: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_STARTUP_RETRY_DELAY", default_value = "250ms", value_parser = crabka_units::parse::positive_time)]
+    startup_retry_delay: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_SHUTDOWN_GRACE", default_value = "5s", value_parser = crabka_units::parse::positive_time)]
+    shutdown_grace: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_RECONNECT_BACKOFF_MIN", default_value = "100ms", value_parser = crabka_units::parse::positive_time)]
+    reconnect_backoff_min: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_RECONNECT_BACKOFF_MAX", default_value = "2s", value_parser = crabka_units::parse::positive_time)]
+    reconnect_backoff_max: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_HISTOGRAM_MIN", default_value = "1us", value_parser = crabka_units::parse::positive_time)]
+    histogram_min: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_HISTOGRAM_MAX", default_value = "60s", value_parser = crabka_units::parse::positive_time)]
+    histogram_max: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_MIN_PACING_WAIT", default_value = "500us", value_parser = crabka_units::parse::positive_time)]
+    min_pacing_wait: Time,
+    #[arg(
+        long,
+        env = "CRABKA_GRES_LOADTEST_READ_SLICE_ROWS",
+        default_value = "1024"
+    )]
+    read_slice_rows: PositiveUsize,
+    #[arg(
+        long,
+        env = "CRABKA_GRES_LOADTEST_SEED_BATCH_ROWS",
+        default_value = "500"
+    )]
+    seed_batch_rows: PositiveUsize,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_PROXY_MIN_BURST", default_value = "64KiB", value_parser = crabka_units::parse::positive_byte_size)]
+    proxy_min_burst: ByteSize,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_PROXY_BURST_WINDOW", default_value = "100ms", value_parser = crabka_units::parse::positive_time)]
+    proxy_burst_window: Time,
+    #[arg(
+        long,
+        env = "CRABKA_GRES_LOADTEST_PROXY_DELAY_QUEUE_DEPTH",
+        default_value = "256"
+    )]
+    proxy_delay_queue_depth: PositiveUsize,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_SAMPLE_INTERVAL", default_value = "1s", value_parser = crabka_units::parse::positive_time)]
+    sample_interval: Time,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_FAULT_WINDOW", default_value = "5s", value_parser = crabka_units::parse::positive_time)]
+    fault_window: Time,
+    #[arg(
+        long,
+        env = "CRABKA_GRES_LOADTEST_TIMELINE_ROW_CAP",
+        default_value = "60"
+    )]
+    timeline_row_cap: PositiveUsize,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_DEVIATION_THRESHOLD", default_value = "30%", value_parser = crabka_units::parse::unit_ratio)]
+    deviation_threshold: Ratio,
+    #[arg(long, env = "CRABKA_GRES_LOADTEST_MIN_FLAP_PERIOD", default_value = "1s", value_parser = crabka_units::parse::positive_time)]
+    min_flap_period: Time,
+    #[arg(long = "hlc-max-offset", env = "CRABKA_GRES_LOADTEST_HLC_MAX_OFFSET", default_value = "250ms", value_parser = crabka_units::parse::positive_time)]
+    compare_hlc_max_offset: Time,
+}
+
+impl RuntimeOptions {
+    fn policy(self) -> anyhow::Result<LoadtestRuntimePolicy> {
+        let policy = LoadtestRuntimePolicy {
+            launch_timeout: self.launch_timeout,
+            kill_timeout: self.kill_timeout,
+            log_drain_timeout: self.log_drain_timeout,
+            broker_poll_interval: self.broker_poll_interval,
+            topic_create_timeout: self.loadtest_topic_create_timeout,
+            log_tail_lines: self.log_tail_lines,
+            max_serialization_retries: self.max_serialization_retries,
+            operation_timeout: self.operation_timeout,
+            connect_timeout: self.connect_timeout,
+            startup_deadline: self.startup_deadline,
+            startup_retry_delay: self.startup_retry_delay,
+            shutdown_grace: self.shutdown_grace,
+            reconnect_backoff_min: self.reconnect_backoff_min,
+            reconnect_backoff_max: self.reconnect_backoff_max,
+            histogram_min: self.histogram_min,
+            histogram_max: self.histogram_max,
+            min_pacing_wait: self.min_pacing_wait,
+            read_slice_rows: self.read_slice_rows,
+            seed_batch_rows: self.seed_batch_rows,
+            proxy_min_burst: self.proxy_min_burst,
+            proxy_burst_window: self.proxy_burst_window,
+            proxy_delay_queue_depth: self.proxy_delay_queue_depth,
+            sample_interval: self.sample_interval,
+            fault_window: self.fault_window,
+            timeline_row_cap: self.timeline_row_cap,
+            deviation_threshold: self.deviation_threshold,
+            min_flap_period: self.min_flap_period,
+            compare_hlc_max_offset: self.compare_hlc_max_offset,
+        };
+        policy.validate().map_err(anyhow::Error::msg)?;
+        Ok(policy)
+    }
 }
 
 #[derive(Args)]
@@ -278,9 +398,9 @@ async fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
         CliCommand::Run {
             registry,
+            runtime,
             scenario,
             mode,
-            hlc_max_offset_ms,
             out,
             keep_work_dir,
             external,
@@ -288,23 +408,31 @@ async fn main() -> anyhow::Result<()> {
             run(
                 &scenario,
                 mode.as_deref(),
-                hlc_max_offset_ms,
                 &out,
                 keep_work_dir,
                 external,
                 registry.policy(),
+                runtime.policy()?,
             )
             .await
         }
         CliCommand::Compare {
             registry,
+            runtime,
             scenario,
             out,
             keep_work_dir,
             external,
         } => {
             ensure_compare_is_internal(external.as_deref())?;
-            compare(&scenario, &out, keep_work_dir, registry.policy()).await
+            compare(
+                &scenario,
+                &out,
+                keep_work_dir,
+                registry.policy(),
+                runtime.policy()?,
+            )
+            .await
         }
         CliCommand::Validate { scenario } => validate(&scenario),
     }
@@ -315,11 +443,11 @@ async fn main() -> anyhow::Result<()> {
 async fn run(
     scenario_path: &Path,
     mode: Option<&str>,
-    hlc_max_offset_ms: u64,
     out: &Path,
     keep_work_dir: bool,
     external: ExternalFlags,
     registry_policy: RegistryPolicy,
+    runtime_policy: LoadtestRuntimePolicy,
 ) -> anyhow::Result<()> {
     let scenario = load_scenario(scenario_path)?;
     if let Some(target) = external_target(external)? {
@@ -327,12 +455,13 @@ async fn run(
             scenario,
             target,
             out_dir: out.to_path_buf(),
+            runtime_policy,
         })
         .await?;
         print_summary(&report, out, runner::EXTERNAL_MODE);
         return Ok(());
     }
-    let mode_override = parse_mode(mode, hlc_max_offset_ms)?;
+    let mode_override = parse_mode(mode, runtime_policy.compare_hlc_max_offset)?;
     let effective_mode = mode_override.unwrap_or(scenario.mode);
     let binaries = Binaries::resolve()?;
     let report = runner::run_scenario(RunConfig {
@@ -342,6 +471,7 @@ async fn run(
         binaries,
         keep_work_dir,
         registry_policy,
+        runtime_policy,
     })
     .await?;
     print_summary(&report, out, &runner::mode_slug(effective_mode));
@@ -355,13 +485,14 @@ async fn compare(
     out: &Path,
     keep_work_dir: bool,
     registry_policy: RegistryPolicy,
+    runtime_policy: LoadtestRuntimePolicy,
 ) -> anyhow::Result<()> {
     let scenario = load_scenario(scenario_path)?;
     let binaries = Binaries::resolve()?;
     let hlc = match scenario.mode {
         hlc @ ModeSpec::Hlc { .. } => hlc,
         ModeSpec::LogicalTso => ModeSpec::Hlc {
-            max_offset_ms: DEFAULT_HLC_MAX_OFFSET_MS,
+            max_offset: runtime_policy.compare_hlc_max_offset,
         },
     };
     let mut reports = Vec::with_capacity(2);
@@ -373,6 +504,7 @@ async fn compare(
             binaries: binaries.clone(),
             keep_work_dir,
             registry_policy: registry_policy.clone(),
+            runtime_policy,
         })
         .await
         .with_context(|| format!("run scenario {} under {mode}", scenario.name))?;
@@ -402,12 +534,12 @@ fn load_scenario(path: &Path) -> anyhow::Result<Scenario> {
 }
 
 /// Maps the `--mode` string to a mode override.
-fn parse_mode(mode: Option<&str>, hlc_max_offset_ms: u64) -> anyhow::Result<Option<ModeSpec>> {
+fn parse_mode(mode: Option<&str>, hlc_max_offset: Time) -> anyhow::Result<Option<ModeSpec>> {
     match mode {
         None => Ok(None),
         Some("logical-tso") => Ok(Some(ModeSpec::LogicalTso)),
         Some("hlc") => Ok(Some(ModeSpec::Hlc {
-            max_offset_ms: hlc_max_offset_ms,
+            max_offset: hlc_max_offset,
         })),
         Some(other) => anyhow::bail!("unknown mode {other:?}: expected `logical-tso` or `hlc`"),
     }
@@ -420,12 +552,15 @@ fn print_summary(report: &RunReport, out_dir: &Path, slug: &str) {
     println!("scenario:  {} ({})", report.scenario, report.mode);
     println!(
         "committed: {} txn, {:.2} tps mean, {} failed",
-        report.throughput.committed_txn, report.throughput.tps_mean, report.throughput.failed_txn
+        report.throughput.committed_txn,
+        report.throughput.mean_rate.per_sec_f64(),
+        report.throughput.failed_txn
     );
     match busiest_class(report) {
         Some((class, latency)) => println!(
-            "p99:       {:.2} ms ({class}, {} ops)",
-            latency.p99_ms, latency.count
+            "p99:       {} ({class}, {} ops)",
+            latency.p99.human(),
+            latency.count
         ),
         None => println!("p99:       no operations completed"),
     }
@@ -451,16 +586,20 @@ fn busiest_class(report: &RunReport) -> Option<(&str, &LatencySummary)> {
 
 /// One-line mean-TPS delta between the two compared runs.
 fn delta_headline(left: &RunReport, right: &RunReport) -> String {
-    let left_tps = left.throughput.tps_mean;
-    let right_tps = right.throughput.tps_mean;
-    let delta = if left_tps > 0.0 {
-        format!("{:+.2}%", (right_tps - left_tps) / left_tps * 100.0)
+    let left_rate = left.throughput.mean_rate;
+    let right_rate = right.throughput.mean_rate;
+    let delta = if left_rate > Frequency::ZERO {
+        let relative: Ratio = (right_rate - left_rate) / left_rate;
+        format!("{:+.2}%", relative.percent_f64())
     } else {
         "n/a".to_owned()
     };
     format!(
-        "mean tps: {left_tps:.2} ({}) vs {right_tps:.2} ({}) — {delta}",
-        left.mode, right.mode
+        "mean tps: {:.2} ({}) vs {:.2} ({}) — {delta}",
+        left_rate.per_sec_f64(),
+        left.mode,
+        right_rate.per_sec_f64(),
+        right.mode
     )
 }
 
@@ -479,10 +618,14 @@ mod tests {
     fn registry_policy_options_use_exact_defaults_and_validation() {
         let defaults =
             Cli::try_parse_from(["loadtest", "run", "--scenario=test.yaml"]).expect("defaults");
-        let CliCommand::Run { registry, .. } = defaults.command else {
+        let CliCommand::Run {
+            registry, runtime, ..
+        } = defaults.command
+        else {
             panic!("run");
         };
         assert!(registry.policy() == crabka_gres_control::RegistryPolicy::default());
+        assert!(runtime.policy().expect("runtime defaults") == LoadtestRuntimePolicy::default());
         for option in [
             "--registry-replication-factor=0",
             "--registry-replication-factor=32768",
@@ -500,6 +643,18 @@ mod tests {
                 Cli::try_parse_from(["loadtest", "run", "--scenario=test.yaml", option]).is_err()
             );
         }
+        let invalid = Cli::try_parse_from([
+            "loadtest",
+            "run",
+            "--scenario=test.yaml",
+            "--reconnect-backoff-min=3s",
+            "--reconnect-backoff-max=2s",
+        ])
+        .expect("scalar values parse");
+        let CliCommand::Run { runtime, .. } = invalid.command else {
+            panic!("run");
+        };
+        assert!(runtime.policy().is_err());
     }
 
     #[test]
@@ -592,7 +747,7 @@ mod tests {
         assert!(registry.policy() == cli_policy);
     }
 
-    fn fixture(mode: &str, tps_mean: f64, classes: &[(&str, u64, f64)]) -> RunReport {
+    fn fixture(mode: &str, mean_rate: Frequency, classes: &[(&str, u64, Time)]) -> RunReport {
         RunReport {
             scenario: "steady".to_owned(),
             description: String::new(),
@@ -602,25 +757,25 @@ mod tests {
                 nodes: 2,
                 ranges: 3,
             },
-            duration_s: 60.0,
+            duration: secs(60),
             throughput: ThroughputSummary {
                 committed_txn: 100,
                 failed_txn: 0,
-                tps_mean,
+                mean_rate,
             },
             latency_by_class: classes
                 .iter()
-                .map(|(class, count, p99_ms)| {
+                .map(|(class, count, p99)| {
                     (
                         (*class).to_owned(),
                         LatencySummary {
                             count: *count,
-                            mean_ms: 1.0,
-                            p50_ms: 1.0,
-                            p95_ms: 2.0,
-                            p99_ms: *p99_ms,
-                            p999_ms: 5.0,
-                            max_ms: 9.0,
+                            mean: millis(1),
+                            p50: millis(1),
+                            p95: millis(2),
+                            p99: *p99,
+                            p999: millis(5),
+                            max: millis(9),
                         },
                     )
                 })
@@ -629,8 +784,8 @@ mod tests {
             timeline: Vec::new(),
             resources: Vec::new(),
             efficiency: EfficiencySummary {
-                total_cpu_core_seconds: 1.0,
-                committed_txn_per_cpu_second: 100.0,
+                total_cpu: secs(1),
+                committed_txn_per_cpu: per_sec(100),
             },
             faults: Vec::new(),
         }
@@ -639,14 +794,20 @@ mod tests {
     #[test]
     fn parse_mode_maps_strings_to_mode_specs() {
         let cases = [
-            (None, 250, Some(None)),
-            (Some("logical-tso"), 250, Some(Some(ModeSpec::LogicalTso))),
+            (None, millis(250), Some(None)),
+            (
+                Some("logical-tso"),
+                millis(250),
+                Some(Some(ModeSpec::LogicalTso)),
+            ),
             (
                 Some("hlc"),
-                300,
-                Some(Some(ModeSpec::Hlc { max_offset_ms: 300 })),
+                millis(300),
+                Some(Some(ModeSpec::Hlc {
+                    max_offset: millis(300),
+                })),
             ),
-            (Some("banana"), 250, None),
+            (Some("banana"), millis(250), None),
         ];
         for (input, max_offset, expected) in cases {
             if let Some(expected) = expected {
@@ -662,19 +823,19 @@ mod tests {
     fn busiest_class_picks_the_highest_count() {
         let report = fixture(
             "logical-tso",
-            100.0,
+            per_sec(100),
             &[
-                ("read-only", 40, 2.0),
-                ("single-shard-insert", 900, 3.5),
-                ("cross-shard-txn", 60, 8.0),
+                ("read-only", 40, millis(2)),
+                ("single-shard-insert", 900, micros(3500)),
+                ("cross-shard-txn", 60, millis(8)),
             ],
         );
         assert!(let Some(("single-shard-insert", _)) = busiest_class(&report));
         let (_, latency) = busiest_class(&report).expect("classes present");
         assert!(latency.count == 900);
-        assert!((latency.p99_ms - 3.5).abs() < f64::EPSILON);
+        assert!(latency.p99 == micros(3500));
 
-        let empty = fixture("logical-tso", 100.0, &[]);
+        let empty = fixture("logical-tso", per_sec(100), &[]);
         assert!(busiest_class(&empty) == None);
     }
 
@@ -846,14 +1007,14 @@ mod tests {
 
     #[test]
     fn delta_headline_reports_percentage_or_na() {
-        let left = fixture("logical-tso", 1000.0, &[]);
-        let right = fixture("hlc(max_offset_ms=250)", 1250.0, &[]);
+        let left = fixture("logical-tso", per_sec(1000), &[]);
+        let right = fixture("hlc(max_offset=250ms)", per_sec(1250), &[]);
         assert!(
             delta_headline(&left, &right)
-                == "mean tps: 1000.00 (logical-tso) vs 1250.00 (hlc(max_offset_ms=250)) — +25.00%"
+                == "mean tps: 1000.00 (logical-tso) vs 1250.00 (hlc(max_offset=250ms)) — +25.00%"
         );
 
-        let zero = fixture("logical-tso", 0.0, &[]);
+        let zero = fixture("logical-tso", Frequency::ZERO, &[]);
         let headline = delta_headline(&zero, &right);
         assert!(headline.ends_with("n/a"), "headline {headline:?}");
     }

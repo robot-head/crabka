@@ -25,6 +25,7 @@ use tokio::time::Instant;
 
 use crate::{
     cluster::{Binaries, Cluster, ClusterOptions, ProcessRoster, SqlEndpoint},
+    config::LoadtestRuntimePolicy,
     external::{self, ExternalTarget},
     faults,
     metrics::ProcSampler,
@@ -59,6 +60,8 @@ pub struct RunConfig {
     pub keep_work_dir: bool,
     /// Shared registry policy used by provisioning and spawned computes.
     pub registry_policy: RegistryPolicy,
+    /// Harness-owned runtime policy.
+    pub runtime_policy: LoadtestRuntimePolicy,
 }
 
 /// Paths of the two report files one run writes.
@@ -194,6 +197,8 @@ pub struct ExternalRunConfig {
     pub target: ExternalTarget,
     /// Directory for reports.
     pub out_dir: PathBuf,
+    /// Harness-owned runtime policy.
+    pub runtime_policy: LoadtestRuntimePolicy,
 }
 
 /// Runs one scenario against an external pgwire-speaking system and writes
@@ -214,6 +219,7 @@ pub async fn run_external_scenario(config: ExternalRunConfig) -> anyhow::Result<
         scenario,
         target,
         out_dir,
+        runtime_policy: _,
     } = config;
     external::validate_scenario(&scenario)?;
     tracing::info!(
@@ -576,6 +582,7 @@ mod tests {
         )
         .expect("policy");
         let config = RunConfig {
+            runtime_policy: LoadtestRuntimePolicy::default(),
             scenario: test_scenario(ModeSpec::LogicalTso, &[]),
             mode_override: None,
             out_dir: PathBuf::from("/out"),

@@ -29,6 +29,7 @@
 //! - [`runner`] — ties the above together for one scenario run.
 
 pub mod cluster;
+pub mod config;
 pub mod external;
 pub mod faults;
 pub mod metrics;

@@ -2888,6 +2888,7 @@ dependencies = [
  "futures",
  "hdrhistogram",
  "rand 0.10.2",
+ "refined_type",
  "rustix 1.1.4",
  "serde",
  "serde_json",

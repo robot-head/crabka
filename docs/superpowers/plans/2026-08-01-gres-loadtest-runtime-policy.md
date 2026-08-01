@@ -11,10 +11,10 @@ dimensioned value and `refined_type`-validated newtypes for positive counts.
 
 ### Task 1: Policy and CLI boundary
 
-- [ ] Add policy defaults and invariant tests.
-- [ ] Add unit-bearing CLI/environment options to `run` and `compare`.
-- [ ] Make compare's HLC offset use the shared environment-backed boundary.
-- [ ] Run focused CLI and policy tests; commit.
+- [x] Add policy defaults and invariant tests.
+- [x] Add unit-bearing CLI/environment options to `run` and `compare`.
+- [x] Make compare's HLC offset use the shared environment-backed boundary.
+- [x] Run focused CLI and policy tests; commit.
 
 ### Task 2: Cluster and chaos runtime
 
