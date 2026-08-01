@@ -307,6 +307,46 @@ impl RowLockManager {
         }
     }
 
+    /// Snapshot every lock `my_xid` currently holds for a savepoint boundary.
+    pub(crate) fn held_locks(&self, my_xid: u64) -> HashMap<LockKey, LockMode> {
+        self.inner
+            .lock()
+            .expect("lockmgr")
+            .locks
+            .iter()
+            .filter(|(_, lock)| lock.holders.contains(&my_xid))
+            .map(|(key, lock)| (key.clone(), lock.mode))
+            .collect()
+    }
+
+    /// Restore `my_xid`'s lock set to a savepoint snapshot, releasing locks
+    /// acquired later and undoing a later shared-to-exclusive upgrade.
+    pub(crate) fn restore_locks(&self, my_xid: u64, snapshot: &HashMap<LockKey, LockMode>) {
+        let to_wake = {
+            let mut inner = self.inner.lock().expect("lockmgr");
+            inner.locks.retain(|key, lock| {
+                if !lock.holders.contains(&my_xid) {
+                    return true;
+                }
+                match snapshot.get(key) {
+                    Some(mode) => {
+                        lock.mode = *mode;
+                        true
+                    }
+                    None => {
+                        lock.holders.remove(&my_xid);
+                        !lock.holders.is_empty()
+                    }
+                }
+            });
+            inner.wait_for.remove(&my_xid);
+            inner.waiters.remove(&my_xid).unwrap_or_default()
+        };
+        for waiter in to_wake {
+            waiter.notify_one();
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn wait_for_register_only(&self, waiter: u64, holder: u64) {
         self.inner
@@ -461,6 +501,29 @@ impl TableLockManager {
             .retain(|(_, hold)| hold.session != session);
     }
 
+    pub(crate) fn hold_count_for(&self, session: SessionLockId) -> usize {
+        self.holds
+            .lock()
+            .expect("table lock manager")
+            .iter()
+            .filter(|(_, hold)| hold.session == session)
+            .count()
+    }
+
+    pub(crate) fn restore_hold_count(&self, session: SessionLockId, count: usize) {
+        let mut seen = 0;
+        self.holds
+            .lock()
+            .expect("table lock manager")
+            .retain(|(_, hold)| {
+                if hold.session != session {
+                    return true;
+                }
+                seen += 1;
+                seen <= count
+            });
+    }
+
     /// The modes `session` currently holds on `table`, weakest first.
     #[cfg(test)]
     #[must_use]
@@ -580,6 +643,29 @@ impl AdvisoryLockManager {
             .lock()
             .expect("advisory lock manager")
             .retain(|hold| hold.session != session || hold.scope != AdvisoryScope::Transaction);
+    }
+
+    pub(crate) fn transaction_hold_count(&self, session: SessionLockId) -> usize {
+        self.holds
+            .lock()
+            .expect("advisory lock manager")
+            .iter()
+            .filter(|hold| hold.session == session && hold.scope == AdvisoryScope::Transaction)
+            .count()
+    }
+
+    pub(crate) fn restore_transaction_hold_count(&self, session: SessionLockId, count: usize) {
+        let mut seen = 0;
+        self.holds
+            .lock()
+            .expect("advisory lock manager")
+            .retain(|hold| {
+                if hold.session != session || hold.scope != AdvisoryScope::Transaction {
+                    return true;
+                }
+                seen += 1;
+                seen <= count
+            });
     }
 
     /// Release everything `session` holds, at disconnect.

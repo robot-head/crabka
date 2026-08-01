@@ -82,6 +82,7 @@ pub struct ActivityTracker {
     accepting_sessions: AtomicBool,
     open_sessions: AtomicUsize,
     last_activity_millis: AtomicU64,
+    maintenance_gate: Arc<tokio::sync::RwLock<()>>,
 }
 
 impl Default for ActivityTracker {
@@ -104,6 +105,7 @@ impl ActivityTracker {
             accepting_sessions: AtomicBool::new(true),
             open_sessions: AtomicUsize::new(0),
             last_activity_millis: AtomicU64::new(last_activity_unix_millis),
+            maintenance_gate: Arc::new(tokio::sync::RwLock::new(())),
         }
     }
 
@@ -123,6 +125,12 @@ impl ActivityTracker {
     pub fn touch(&self) {
         self.last_activity_millis
             .store(current_unix_millis(), Ordering::SeqCst);
+    }
+
+    /// Exclude SQL statements while one background maintenance step mutates
+    /// physical storage visible to their scans.
+    pub async fn begin_maintenance(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        Arc::clone(&self.maintenance_gate).write_owned().await
     }
 
     /// Atomically stop admitting new sessions so a lifecycle monitor can suspend safely.
@@ -171,7 +179,25 @@ pub struct SessionActivity {
 }
 
 impl SessionActivity {
-    pub(crate) fn touch(&self) {
+    pub(crate) async fn begin_statement(&self) -> StatementActivity {
+        let guard = Arc::clone(&self.tracker.maintenance_gate)
+            .read_owned()
+            .await;
+        self.tracker.touch();
+        StatementActivity {
+            tracker: Arc::clone(&self.tracker),
+            _guard: guard,
+        }
+    }
+}
+
+pub(crate) struct StatementActivity {
+    tracker: Arc<ActivityTracker>,
+    _guard: tokio::sync::OwnedRwLockReadGuard<()>,
+}
+
+impl Drop for StatementActivity {
+    fn drop(&mut self) {
         self.tracker.touch();
     }
 }
@@ -586,5 +612,31 @@ where
                 return Ok(());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use super::ActivityTracker;
+
+    #[tokio::test]
+    async fn maintenance_waits_for_active_statement() {
+        let tracker = Arc::new(ActivityTracker::new());
+        let session = tracker.try_open_session().expect("session admitted");
+        let statement = session.begin_statement().await;
+        let maintenance_tracker = Arc::clone(&tracker);
+        let maintenance = tokio::spawn(async move {
+            let _guard = maintenance_tracker.begin_maintenance().await;
+        });
+
+        tokio::task::yield_now().await;
+        assert!(!maintenance.is_finished());
+        drop(statement);
+        tokio::time::timeout(Duration::from_secs(1), maintenance)
+            .await
+            .expect("maintenance unblocked")
+            .expect("maintenance task");
     }
 }

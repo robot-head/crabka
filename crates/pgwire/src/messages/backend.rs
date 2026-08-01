@@ -189,32 +189,45 @@ pub fn data_row(out: &mut BytesMut, values: &[Option<Bytes>]) {
     });
 }
 
-/// Encode an `ErrorResponse` as a sequence of typed fields ended by a zero byte.
-///
-/// Field order matches real Postgres: `S`, `V`, `C`, `M`, then the optional
-/// `D` (DETAIL) and `H` (HINT). Absent optional fields are omitted entirely
-/// rather than emitted empty, so a bare error is byte-identical to one from a
-/// server that never sets them.
-pub fn error_response(out: &mut BytesMut, err: &PgError) {
-    msg(out, b'E', |b| {
+fn diagnostic_response(out: &mut BytesMut, tag: u8, diagnostic: &PgError) {
+    msg(out, tag, |b| {
         b.put_u8(b'S');
-        put_cstr(b, err.severity.as_str());
+        put_cstr(b, diagnostic.severity.as_str());
         b.put_u8(b'V');
-        put_cstr(b, err.severity.as_str());
+        put_cstr(b, diagnostic.severity.as_str());
         b.put_u8(b'C');
-        put_cstr(b, &err.code);
+        put_cstr(b, &diagnostic.code);
         b.put_u8(b'M');
-        put_cstr(b, &err.message);
-        if let Some(detail) = &err.detail {
-            b.put_u8(b'D');
-            put_cstr(b, detail);
-        }
-        if let Some(hint) = &err.hint {
-            b.put_u8(b'H');
-            put_cstr(b, hint);
+        put_cstr(b, &diagnostic.message);
+        let fields = diagnostic.diagnostics.as_deref();
+        for (tag, value) in [
+            (b'D', fields.and_then(|fields| fields.detail.as_deref())),
+            (b'H', fields.and_then(|fields| fields.hint.as_deref())),
+            (b'W', fields.and_then(|fields| fields.context.as_deref())),
+            (b's', fields.and_then(|fields| fields.schema.as_deref())),
+            (b't', fields.and_then(|fields| fields.table.as_deref())),
+            (b'c', fields.and_then(|fields| fields.column.as_deref())),
+            (b'd', fields.and_then(|fields| fields.datatype.as_deref())),
+            (b'n', fields.and_then(|fields| fields.constraint.as_deref())),
+        ] {
+            if let Some(value) = value {
+                b.put_u8(tag);
+                put_cstr(b, value);
+            }
         }
         b.put_u8(0);
     });
+}
+
+pub fn error_response(out: &mut BytesMut, error: &PgError) {
+    diagnostic_response(out, b'E', error);
+}
+
+/// Encode a `PostgreSQL` `NoticeResponse`. Its fields are identical to an
+/// `ErrorResponse`; only the leading message tag differs.
+pub fn notice_response(out: &mut BytesMut, notice: &PgError) {
+    debug_assert!(notice.severity.is_notice());
+    diagnostic_response(out, b'N', notice);
 }
 
 #[cfg(test)]
@@ -294,6 +307,27 @@ mod tests {
         assert2::assert!(
             &out[..]
                 == &b"E\x00\x00\x00\x3eSFATAL\0VFATAL\0C08P01\0Mbad frame\0Hcheck the length prefix\0\0"[..]
+        );
+    }
+
+    #[test]
+    fn encodes_notice_response_with_structured_fields_exactly() {
+        let mut out = BytesMut::new();
+        let notice = PgError::warning("careful")
+            .with_code("01004")
+            .with_detail("shortened")
+            .with_hint("widen it")
+            .with_context("function f() line 2")
+            .with_schema("public")
+            .with_table("things")
+            .with_column("name")
+            .with_datatype("text")
+            .with_constraint("things_name_check");
+        notice_response(&mut out, &notice);
+
+        assert2::assert!(
+            &out[..]
+                == b"N\x00\x00\x00\x80SWARNING\0VWARNING\0C01004\0Mcareful\0Dshortened\0Hwiden it\0Wfunction f() line 2\0spublic\0tthings\0cname\0dtext\0nthings_name_check\0\0"
         );
     }
 

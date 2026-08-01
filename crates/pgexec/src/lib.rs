@@ -70,6 +70,8 @@ pub mod notify;
 mod partition;
 mod pattern;
 pub mod plan_dist;
+mod plpgsql;
+mod plpgsql_sqlstate;
 mod procarray;
 mod query;
 mod read_gate;

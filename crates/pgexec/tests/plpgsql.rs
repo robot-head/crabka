@@ -1,0 +1,1363 @@
+//! Behavior-level PL/pgSQL conformance, adapted from `PostgreSQL` 18's
+//! `plpgsql_simple`, `plpgsql_control`, and `plpgsql_trap` coverage to SQL
+//! features Crabka already exposes.
+
+use assert2::assert;
+use crabka_pgexec::{SqlEngine, SqlSession};
+use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
+
+async fn execute(session: &mut SqlSession, sql: &str) -> Vec<QueryResult> {
+    session
+        .simple_query(sql)
+        .await
+        .unwrap_or_else(|error| panic!("`{sql}` failed: {error:?}"))
+}
+
+async fn query(session: &mut SqlSession, sql: &str) -> Vec<Vec<Option<String>>> {
+    let results = execute(session, sql).await;
+    let QueryResult::Rows { rows, .. } = &results[0] else {
+        panic!("`{sql}` did not return rows: {:?}", results[0]);
+    };
+    rows.iter()
+        .map(|row| row.iter().map(|cell| cell.as_ref().map(text)).collect())
+        .collect()
+}
+
+async fn scalar(session: &mut SqlSession, sql: &str) -> Option<String> {
+    let rows = query(session, sql).await;
+    assert!(rows.len() == 1, "`{sql}` returned {rows:?}");
+    assert!(rows[0].len() == 1, "`{sql}` returned {rows:?}");
+    rows[0][0].clone()
+}
+
+fn text(cell: &Cell) -> String {
+    String::from_utf8(cell.text.to_vec()).expect("server text is UTF-8")
+}
+
+fn row(values: &[&str]) -> Vec<Option<String>> {
+    values
+        .iter()
+        .map(|value| Some((*value).to_string()))
+        .collect()
+}
+
+#[tokio::test]
+async fn scalar_functions_are_evaluated_for_each_input_row() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE pl_scalar_input (n int4);
+        INSERT INTO pl_scalar_input VALUES (1), (2), (3);
+        CREATE FUNCTION pl_transform(x int4) RETURNS int4 LANGUAGE plpgsql AS $$
+        BEGIN
+          IF x % 2 = 0 THEN
+            RETURN x * 10;
+          END IF;
+          RETURN x + 1;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT n, pl_transform(n) FROM pl_scalar_input ORDER BY n",
+        )
+        .await
+            == vec![row(&["1", "2"]), row(&["2", "20"]), row(&["3", "4"])]
+    );
+}
+
+#[tokio::test]
+async fn labeled_control_flow_and_simple_case_choose_the_postgres_branch() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(&mut session, "CREATE TABLE pl_control_result (total int4)").await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE total int4 := 0;
+        BEGIN
+          <<numbers>>
+          FOR i IN 1..5 LOOP
+            CONTINUE numbers WHEN i = 2;
+            CASE i
+              WHEN 1 THEN total := total + 1;
+              WHEN 3 THEN total := total + 30;
+              ELSE total := total + 100;
+            END CASE;
+            EXIT numbers WHEN i = 3;
+          END LOOP numbers;
+          INSERT INTO pl_control_result VALUES (total);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(scalar(&mut session, "SELECT total FROM pl_control_result").await == Some("31".into()));
+}
+
+#[tokio::test]
+async fn case_without_a_matching_arm_raises_case_not_found() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let error = session
+        .simple_query("DO $$ BEGIN CASE 7 WHEN 1 THEN NULL; END CASE; END $$")
+        .await
+        .expect_err("CASE without ELSE must fail");
+
+    assert!(error.code == "20000", "{error:?}");
+}
+
+#[tokio::test]
+async fn query_for_assigns_each_selected_column_to_scalar_targets() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_query_input (n int4, weight int4); \
+         INSERT INTO pl_query_input VALUES (1, 10), (2, 20), (3, 30); \
+         CREATE TABLE pl_query_result (total int4)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE query_n int4; query_weight int4; total int4 := 0;
+        BEGIN
+          FOR query_n, query_weight IN
+            SELECT source.n, source.weight
+            FROM pl_query_input AS source
+            ORDER BY source.n
+          LOOP
+            total := total + query_n * query_weight;
+          END LOOP;
+          INSERT INTO pl_query_result VALUES (total);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(scalar(&mut session, "SELECT total FROM pl_query_result").await == Some("140".into()));
+}
+
+#[tokio::test]
+async fn query_for_populates_record_fields() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_record_input (n int4, weight int4); \
+         INSERT INTO pl_record_input VALUES (1, 10), (2, 20), (3, 30); \
+         CREATE TABLE pl_record_result (total int4)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE r record; total int4 := 0;
+        BEGIN
+          FOR r IN
+            SELECT source.n, source.weight
+            FROM pl_record_input AS source
+            ORDER BY source.n
+          LOOP
+            total := total + r.n * r.weight;
+          END LOOP;
+          INSERT INTO pl_record_result VALUES (total);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(scalar(&mut session, "SELECT total FROM pl_record_result").await == Some("140".into()));
+}
+
+#[tokio::test]
+async fn dynamic_execute_binds_using_parameters_once() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(&mut session, "CREATE TABLE pl_dynamic_result (answer int4)").await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE answer int4;
+        BEGIN
+          EXECUTE 'SELECT $1::int4 + $2::int4'
+            INTO STRICT answer USING 19, 23;
+          INSERT INTO pl_dynamic_result VALUES (answer);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        scalar(&mut session, "SELECT answer FROM pl_dynamic_result").await == Some("42".into())
+    );
+}
+
+#[tokio::test]
+async fn dynamic_for_binds_using_parameters_and_iterates_rows() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_dynamic_input (n int4); \
+         INSERT INTO pl_dynamic_input VALUES (1), (2), (3), (4); \
+         CREATE TABLE pl_dynamic_for_result (total int4)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE n int4; total int4 := 0;
+        BEGIN
+          FOR n IN EXECUTE
+            'SELECT n FROM pl_dynamic_input WHERE n >= $1 ORDER BY n'
+            USING 2
+          LOOP
+            total := total + n;
+          END LOOP;
+          INSERT INTO pl_dynamic_for_result VALUES (total);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        scalar(&mut session, "SELECT total FROM pl_dynamic_for_result").await == Some("9".into())
+    );
+}
+
+#[tokio::test]
+async fn declared_cursors_open_fetch_move_and_close() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_cursor_input (n int4); \
+         INSERT INTO pl_cursor_input VALUES (10), (20), (30); \
+         CREATE TABLE pl_cursor_result (total int4)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE
+          values_cursor SCROLL CURSOR FOR
+            SELECT n FROM pl_cursor_input ORDER BY n;
+          value int4;
+          total int4 := 0;
+        BEGIN
+          OPEN values_cursor;
+          FETCH NEXT FROM values_cursor INTO value;
+          total := total + value;
+          MOVE NEXT FROM values_cursor;
+          FETCH NEXT FROM values_cursor INTO value;
+          total := total + value;
+          FETCH PRIOR FROM values_cursor INTO value;
+          total := total + value;
+          CLOSE values_cursor;
+          INSERT INTO pl_cursor_result VALUES (total);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(scalar(&mut session, "SELECT total FROM pl_cursor_result").await == Some("60".into()));
+}
+
+#[tokio::test]
+async fn caught_exceptions_roll_back_only_the_protected_block() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(&mut session, "CREATE TABLE pl_trap (n int4 PRIMARY KEY)").await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        BEGIN
+          INSERT INTO pl_trap VALUES (1);
+          BEGIN
+            INSERT INTO pl_trap VALUES (2);
+            INSERT INTO pl_trap VALUES (1);
+          EXCEPTION WHEN unique_violation THEN
+            INSERT INTO pl_trap VALUES (3);
+          END;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(&mut session, "SELECT n FROM pl_trap ORDER BY n").await
+            == vec![row(&["1"]), row(&["3"])]
+    );
+}
+
+#[tokio::test]
+async fn exception_condition_categories_match_member_sqlstates() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_category_result (caught bool)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        BEGIN
+          PERFORM 1 / 0;
+        EXCEPTION WHEN data_exception THEN
+          INSERT INTO pl_category_result VALUES (true);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        scalar(&mut session, "SELECT caught FROM pl_category_result").await == Some("t".into())
+    );
+}
+
+#[tokio::test]
+async fn current_diagnostics_reports_the_previous_statement_row_count() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_diag_input (n int4); \
+         INSERT INTO pl_diag_input VALUES (1), (2), (3); \
+         CREATE TABLE pl_diag_result (affected int8)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE affected int8;
+        BEGIN
+          UPDATE pl_diag_input SET n = n + 10 WHERE n >= 2;
+          GET CURRENT DIAGNOSTICS affected = ROW_COUNT;
+          INSERT INTO pl_diag_result VALUES (affected);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(scalar(&mut session, "SELECT affected FROM pl_diag_result").await == Some("2".into()));
+}
+
+#[tokio::test]
+async fn stacked_diagnostics_exposes_the_caught_error() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_stacked_result (state text, message text)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE state text; message text;
+        BEGIN
+          RAISE EXCEPTION 'bad math' USING ERRCODE = '22012';
+        EXCEPTION WHEN division_by_zero THEN
+          GET STACKED DIAGNOSTICS
+            state = RETURNED_SQLSTATE,
+            message = MESSAGE_TEXT;
+          INSERT INTO pl_stacked_result VALUES (state, message);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(&mut session, "SELECT state, message FROM pl_stacked_result").await
+            == vec![row(&["22012", "bad math"])]
+    );
+}
+
+#[tokio::test]
+async fn raise_notice_preserves_message_code_detail_and_hint() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    let mut notices = session.take_notices().expect("notice receiver");
+
+    execute(
+        &mut session,
+        "DO $$ BEGIN RAISE NOTICE 'processed %', 3 \
+         USING DETAIL = 'three rows', HINT = 'keep going'; END $$",
+    )
+    .await;
+
+    let notice = notices.try_recv().expect("one notice");
+    assert!(notice.code == "00000", "{notice:?}");
+    assert!(notice.message == "processed 3", "{notice:?}");
+    let fields = notice.diagnostics.expect("structured fields");
+    assert!(fields.detail.as_deref() == Some("three rows"), "{fields:?}");
+    assert!(fields.hint.as_deref() == Some("keep going"), "{fields:?}");
+}
+
+#[tokio::test]
+async fn assert_accepts_true_and_raises_p0004_with_the_supplied_message() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(&mut session, "DO $$ BEGIN ASSERT 2 + 2 = 4; END $$").await;
+
+    let error = session
+        .simple_query("DO $$ BEGIN ASSERT false, 'broken invariant'; END $$")
+        .await
+        .expect_err("false ASSERT must fail");
+    assert!(error.code == "P0004", "{error:?}");
+    assert!(error.message == "broken invariant", "{error:?}");
+}
+
+#[tokio::test]
+async fn scalar_out_and_inout_parameters_are_return_values() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_out_value(input int4, OUT doubled int4)
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          doubled := input * 2;
+        END
+        $$;
+        CREATE FUNCTION pl_inout_value(INOUT value int4)
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          value := value + 1;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(&mut session, "SELECT pl_out_value(9), pl_inout_value(9)").await
+            == vec![row(&["18", "10"])]
+    );
+}
+
+#[tokio::test]
+async fn procedures_return_inout_parameters_as_a_call_row() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE PROCEDURE pl_inout_procedure(INOUT value int4)
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          value := value + 5;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(query(&mut session, "CALL pl_inout_procedure(7)").await == vec![row(&["12"])]);
+}
+
+#[tokio::test]
+async fn procedure_out_parameters_use_full_call_arity_and_assign_nested_targets() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE PROCEDURE pl_mixed_procedure(
+          IN seed int4, OUT doubled int4, INOUT total int4
+        )
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          doubled := seed * 2;
+          total := total + seed;
+        END
+        $$;
+        CREATE PROCEDURE pl_out_only(OUT answer int4)
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          answer := 42;
+        END
+        $$;
+        CREATE TABLE pl_call_results (doubled int4, total int4, answer int4);
+        ",
+    )
+    .await;
+
+    assert!(
+        query(&mut session, "CALL pl_mixed_procedure(3, NULL, 5)").await == vec![row(&["6", "8"])]
+    );
+    assert!(query(&mut session, "CALL pl_out_only(NULL)").await == vec![row(&["42"])]);
+
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE doubled int4; total int4 := 10; answer int4;
+        BEGIN
+          CALL pl_mixed_procedure(4, doubled, total);
+          CALL pl_out_only(answer);
+          INSERT INTO pl_call_results VALUES (doubled, total, answer);
+        END
+        $$
+        ",
+    )
+    .await;
+    assert!(
+        query(
+            &mut session,
+            "SELECT doubled, total, answer FROM pl_call_results",
+        )
+        .await
+            == vec![row(&["8", "14", "42"])]
+    );
+}
+
+#[tokio::test]
+async fn nested_procedure_output_requires_a_writable_target() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE PROCEDURE pl_requires_target(OUT value int4)
+        LANGUAGE plpgsql AS $$ BEGIN value := 1; END $$
+        ",
+    )
+    .await;
+
+    let error = session
+        .simple_query("DO $$ BEGIN CALL pl_requires_target(NULL); END $$")
+        .await
+        .expect_err("PL/pgSQL output arguments must be writable");
+    assert!(error.code == "42601", "{error:?}");
+    assert!(error.message.contains("not writable"), "{error:?}");
+}
+
+#[tokio::test]
+async fn setof_functions_append_return_next_and_return_query_rows() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_emit(limit_value int4) RETURNS SETOF int4
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          FOR i IN 1..limit_value LOOP
+            RETURN NEXT i;
+          END LOOP;
+          RETURN QUERY SELECT limit_value * 10;
+          RETURN;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(&mut session, "SELECT * FROM pl_emit(3)").await
+            == vec![row(&["1"]), row(&["2"]), row(&["3"]), row(&["30"])]
+    );
+}
+
+#[tokio::test]
+async fn table_functions_preserve_next_query_and_dynamic_query_order() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_table_rows(seed int4)
+        RETURNS TABLE(value int4, source text)
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          value := seed;
+          source := 'next';
+          RETURN NEXT;
+          RETURN QUERY SELECT seed + 1, 'query'::text;
+          RETURN QUERY EXECUTE 'SELECT $1::int4, $2::text'
+            USING seed + 2, 'dynamic';
+          RETURN;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT * FROM pl_table_rows(5) WITH ORDINALITY AS emitted(v, kind, position)",
+        )
+        .await
+            == vec![
+                row(&["5", "next", "1"]),
+                row(&["6", "query", "2"]),
+                row(&["7", "dynamic", "3"]),
+            ]
+    );
+}
+
+#[tokio::test]
+async fn out_functions_form_from_rows_and_set_functions_can_return_no_rows() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_out_row(input int4, OUT doubled int4, OUT label text)
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          doubled := input * 2;
+          label := 'done';
+        END
+        $$;
+        CREATE FUNCTION pl_no_rows() RETURNS SETOF int4
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT * FROM pl_out_row(4) AS result(value, status)",
+        )
+        .await
+            == vec![row(&["8", "done"])]
+    );
+    assert!(
+        query(&mut session, "SELECT * FROM pl_no_rows()")
+            .await
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn set_functions_are_implicitly_lateral_to_prior_from_items() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE pl_lateral_input (n int4);
+        INSERT INTO pl_lateral_input VALUES (1), (2);
+        CREATE FUNCTION pl_lateral_emit(limit_value int4) RETURNS SETOF int4
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          FOR i IN 1..limit_value LOOP
+            RETURN NEXT i;
+          END LOOP;
+          RETURN;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT source.n, emitted.value \
+             FROM pl_lateral_input AS source, \
+                  pl_lateral_emit(source.n) AS emitted(value) \
+             ORDER BY source.n, emitted.value",
+        )
+        .await
+            == vec![row(&["1", "1"]), row(&["2", "1"]), row(&["2", "2"])]
+    );
+}
+
+#[tokio::test]
+async fn set_functions_keep_default_strict_and_recursive_call_semantics() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_default_rows(seed int4 DEFAULT 4) RETURNS SETOF int4
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN NEXT seed;
+          RETURN;
+        END
+        $$;
+        CREATE FUNCTION pl_strict_rows(seed int4) RETURNS SETOF int4
+        LANGUAGE plpgsql STRICT AS $$
+        BEGIN
+          PERFORM 1 / seed;
+          RETURN NEXT seed;
+          RETURN;
+        END
+        $$;
+        CREATE FUNCTION pl_recursive_rows(seed int4) RETURNS SETOF int4
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          IF seed <= 0 THEN
+            RETURN;
+          END IF;
+          RETURN NEXT seed;
+          RETURN QUERY SELECT * FROM pl_recursive_rows(seed - 1);
+          RETURN;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(query(&mut session, "SELECT * FROM pl_default_rows()").await == vec![row(&["4"])]);
+    assert!(
+        query(&mut session, "SELECT * FROM pl_strict_rows(NULL)")
+            .await
+            .is_empty()
+    );
+    assert!(
+        query(&mut session, "SELECT * FROM pl_recursive_rows(3)").await
+            == vec![row(&["3"]), row(&["2"]), row(&["1"])]
+    );
+}
+
+#[tokio::test]
+async fn strict_from_functions_do_not_execute_for_null_inputs() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE pl_strict_log (kind text);
+        CREATE FUNCTION pl_strict_scalar(seed int4) RETURNS int4
+        LANGUAGE plpgsql STRICT AS $$
+        BEGIN
+          INSERT INTO pl_strict_log VALUES ('scalar');
+          RETURN seed;
+        END
+        $$;
+        CREATE FUNCTION pl_strict_set(seed int4) RETURNS SETOF int4
+        LANGUAGE plpgsql STRICT AS $$
+        BEGIN
+          INSERT INTO pl_strict_log VALUES ('set');
+          RETURN NEXT seed;
+          RETURN;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(query(&mut session, "SELECT * FROM pl_strict_scalar(NULL)").await == vec![vec![None]]);
+    assert!(
+        query(&mut session, "SELECT * FROM pl_strict_set(NULL)")
+            .await
+            .is_empty()
+    );
+    assert!(scalar(&mut session, "SELECT count(*) FROM pl_strict_log").await == Some("0".into()));
+}
+
+#[tokio::test]
+async fn set_function_side_effects_share_the_outer_statement_transaction() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE pl_set_log (value int4);
+        CREATE FUNCTION pl_atomic_rows() RETURNS SETOF int4
+        LANGUAGE plpgsql AS $$
+        BEGIN
+          INSERT INTO pl_set_log VALUES (1);
+          RETURN NEXT 1;
+          RETURN NEXT 2;
+          RETURN;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    let error = session
+        .simple_query(
+            "SELECT CASE WHEN value = 2 THEN 1 / 0 ELSE value END \
+             FROM pl_atomic_rows() AS emitted(value)",
+        )
+        .await
+        .expect_err("later output row must fail the whole statement");
+    assert!(error.code == "22012", "{error:?}");
+    assert!(scalar(&mut session, "SELECT count(*) FROM pl_set_log").await == Some("0".into()));
+}
+
+#[tokio::test]
+async fn found_tracks_perform_select_update_and_query_for() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_found_input (n int4); \
+         INSERT INTO pl_found_input VALUES (1), (2); \
+         CREATE TABLE pl_found_result \
+           (after_perform bool, after_select bool, after_update bool, after_loop bool)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE
+          selected int4;
+          after_perform bool;
+          after_select bool;
+          after_update bool;
+          after_loop bool;
+        BEGIN
+          PERFORM 1;
+          after_perform := FOUND;
+          SELECT source.n INTO selected
+            FROM pl_found_input AS source WHERE source.n = 99;
+          after_select := FOUND;
+          UPDATE pl_found_input SET n = n + 10;
+          after_update := FOUND;
+          FOR selected IN SELECT source.n FROM pl_found_input AS source LOOP
+            NULL;
+          END LOOP;
+          after_loop := FOUND;
+          INSERT INTO pl_found_result VALUES
+            (after_perform, after_select, after_update, after_loop);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT after_perform, after_select, after_update, after_loop \
+             FROM pl_found_result",
+        )
+        .await
+            == vec![row(&["t", "f", "t", "t"])]
+    );
+}
+
+#[tokio::test]
+async fn procedure_commit_and_rollback_start_fresh_transactions() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE pl_tx_result (n int4);
+        CREATE PROCEDURE pl_tx_control() LANGUAGE plpgsql AS $$
+        BEGIN
+          INSERT INTO pl_tx_result VALUES (1);
+          COMMIT;
+          INSERT INTO pl_tx_result VALUES (2);
+          ROLLBACK;
+          INSERT INTO pl_tx_result VALUES (3);
+        END
+        $$
+        ",
+    )
+    .await;
+    execute(&mut session, "CALL pl_tx_control()").await;
+
+    assert!(
+        query(&mut session, "SELECT n FROM pl_tx_result ORDER BY n").await
+            == vec![row(&["1"]), row(&["3"])]
+    );
+}
+
+#[tokio::test]
+async fn foreach_iterates_arrays_and_sets_found() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_foreach_result (total int4, iterated bool)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE value int4; total int4 := 0; iterated bool;
+        BEGIN
+          FOREACH value IN ARRAY ARRAY[2, 3, 5] LOOP
+            total := total + value;
+          END LOOP;
+          iterated := FOUND;
+          INSERT INTO pl_foreach_result VALUES (total, iterated);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT total, iterated FROM pl_foreach_result"
+        )
+        .await
+            == vec![row(&["10", "t"])]
+    );
+}
+
+#[tokio::test]
+async fn record_fields_can_be_read_and_assigned() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_record_assignment_input (n int4); \
+         INSERT INTO pl_record_assignment_input VALUES (41); \
+         CREATE TABLE pl_record_assignment_result (n int4)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE r record;
+        BEGIN
+          SELECT source.n INTO r FROM pl_record_assignment_input AS source;
+          r.n := r.n + 1;
+          INSERT INTO pl_record_assignment_result VALUES (r.n);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        scalar(&mut session, "SELECT n FROM pl_record_assignment_result").await
+            == Some("42".into())
+    );
+}
+
+#[tokio::test]
+async fn array_elements_can_be_assignment_targets() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_array_target_result \
+           (array_value int4, json_value text, record_array int4, record_json text)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r#"
+        DO $$
+        DECLARE
+          values_ int4[] := ARRAY[1, 2, 3];
+          payload jsonb := '{"answer": 0}'::jsonb;
+          index_ int4 := 2;
+          r record;
+        BEGIN
+          values_[index_] := 41;
+          values_[index_] := values_[index_] + 1;
+          payload['answer'] := '42'::jsonb;
+          SELECT ARRAY[1, 2] AS items, '{"answer": 1}'::jsonb AS document INTO r;
+          r.items[1] := 42;
+          r.document['answer'] := '42'::jsonb;
+          INSERT INTO pl_array_target_result VALUES
+            (values_[2], payload ->> 'answer', r.items[1], r.document ->> 'answer');
+        END
+        $$
+        "#,
+    )
+    .await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT array_value, json_value, record_array, record_json \
+             FROM pl_array_target_result",
+        )
+        .await
+            == vec![row(&["42", "42", "42", "42"])]
+    );
+}
+
+#[tokio::test]
+async fn cursor_arguments_and_dynamic_open_using_are_bound() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_open_input (n int4); \
+         INSERT INTO pl_open_input VALUES (1), (2), (3); \
+         CREATE TABLE pl_open_result (declared int4, dynamic int4)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE
+          declared_cursor CURSOR(bound_ int4) FOR
+            SELECT n FROM pl_open_input WHERE n >= bound_ ORDER BY n;
+          dynamic_cursor refcursor;
+          declared_value int4;
+          dynamic_value int4;
+        BEGIN
+          OPEN declared_cursor(2);
+          FETCH NEXT FROM declared_cursor INTO declared_value;
+          CLOSE declared_cursor;
+          OPEN dynamic_cursor FOR EXECUTE
+            'SELECT n FROM pl_open_input WHERE n = $1' USING 3;
+          FETCH NEXT FROM dynamic_cursor INTO dynamic_value;
+          CLOSE dynamic_cursor;
+          INSERT INTO pl_open_result VALUES (declared_value, dynamic_value);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(&mut session, "SELECT declared, dynamic FROM pl_open_result").await
+            == vec![row(&["2", "3"])]
+    );
+}
+
+#[tokio::test]
+async fn execute_discards_rows_and_dml_returning_rejects_multiple_rows() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_returning_input (n int4); \
+         INSERT INTO pl_returning_input VALUES (1), (2); \
+         CREATE TABLE pl_returning_result (state text)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE picked int4;
+        BEGIN
+          EXECUTE 'SELECT n FROM pl_returning_input ORDER BY n';
+          BEGIN
+            EXECUTE 'UPDATE pl_returning_input SET n = n + 10 RETURNING n' INTO picked;
+          EXCEPTION WHEN too_many_rows THEN
+            INSERT INTO pl_returning_result VALUES (SQLSTATE);
+          END;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        scalar(&mut session, "SELECT state FROM pl_returning_result").await == Some("P0003".into())
+    );
+    assert!(
+        query(&mut session, "SELECT n FROM pl_returning_input ORDER BY n").await
+            == vec![row(&["1"]), row(&["2"])]
+    );
+}
+
+#[tokio::test]
+async fn call_keeps_unknown_literals_and_transaction_eligibility() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE pl_call_result (value text);
+        CREATE TABLE pl_call_atomic (value int4 PRIMARY KEY);
+        CREATE PROCEDURE pl_overloaded(value int4) LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO pl_call_result VALUES ('integer'); END
+        $$;
+        CREATE PROCEDURE pl_overloaded(value text) LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO pl_call_result VALUES ('text'); END
+        $$;
+        CREATE PROCEDURE pl_inner_commit() LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO pl_call_result VALUES ('before commit'); COMMIT; END
+        $$;
+        CREATE PROCEDURE pl_outer_commit() LANGUAGE plpgsql AS $$
+        BEGIN CALL pl_inner_commit(); INSERT INTO pl_call_result VALUES ('after commit'); END
+        $$;
+        CREATE FUNCTION pl_sql_call_argument(value int4) RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE computed int4;
+        BEGIN SELECT value + 1 INTO computed; RETURN computed; END
+        $$;
+        CREATE PROCEDURE pl_accept_call_argument(value int4) LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO pl_call_result VALUES (value::text); END
+        $$;
+        CREATE FUNCTION pl_atomic_call_argument(value int4) RETURNS int4 LANGUAGE plpgsql AS $$
+        BEGIN INSERT INTO pl_call_atomic VALUES (1); RETURN value; END
+        $$;
+        CREATE PROCEDURE pl_fail_after_argument(value int4) LANGUAGE plpgsql AS $$
+        BEGIN
+          INSERT INTO pl_call_atomic VALUES (2);
+          INSERT INTO pl_call_atomic VALUES (2);
+        END
+        $$
+        ",
+    )
+    .await;
+    execute(
+        &mut session,
+        "CALL pl_overloaded('unknown literal'); \
+         CALL pl_outer_commit(); \
+         CALL pl_accept_call_argument(pl_sql_call_argument(41))",
+    )
+    .await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT value FROM pl_call_result ORDER BY value"
+        )
+        .await
+            == vec![
+                row(&["42"]),
+                row(&["after commit"]),
+                row(&["before commit"]),
+                row(&["text"])
+            ]
+    );
+    let error = session
+        .simple_query("CALL pl_fail_after_argument(pl_atomic_call_argument(42))")
+        .await
+        .expect_err("procedure failure must roll back argument side effects");
+    assert!(error.code == "23505", "{error:?}");
+    assert!(scalar(&mut session, "SELECT count(*) FROM pl_call_atomic").await == Some("0".into()));
+}
+
+#[tokio::test]
+async fn restricted_procedures_reject_transaction_control() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE PROCEDURE pl_security_commit() LANGUAGE plpgsql SECURITY DEFINER AS $$
+        BEGIN COMMIT; END
+        $$;
+        CREATE PROCEDURE pl_config_commit() LANGUAGE plpgsql SET work_mem = '64MB' AS $$
+        BEGIN COMMIT; END
+        $$
+        ",
+    )
+    .await;
+
+    for name in ["pl_security_commit", "pl_config_commit"] {
+        let error = session
+            .simple_query(&format!("CALL {name}()"))
+            .await
+            .expect_err("restricted procedure must reject COMMIT");
+        assert!(error.code == "25001", "{name}: {error:?}");
+    }
+}
+
+#[tokio::test]
+async fn diagnostics_include_plpgsql_context() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        "CREATE TABLE pl_context_result (current_context text, exception_context text)",
+    )
+    .await;
+    execute(
+        &mut session,
+        r"
+        DO $$
+        DECLARE current_context text; exception_context text;
+        BEGIN
+          GET CURRENT DIAGNOSTICS current_context = PG_CONTEXT;
+          BEGIN
+            RAISE EXCEPTION 'context source';
+          EXCEPTION WHEN raise_exception THEN
+            GET STACKED DIAGNOSTICS exception_context = PG_EXCEPTION_CONTEXT;
+          END;
+          INSERT INTO pl_context_result VALUES (current_context, exception_context);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        query(
+            &mut session,
+            "SELECT current_context LIKE 'PL/pgSQL%', exception_context LIKE 'PL/pgSQL%' \
+             FROM pl_context_result",
+        )
+        .await
+            == vec![row(&["t", "t"])]
+    );
+}
+
+#[tokio::test]
+async fn scalar_raise_exception_formats_percent_and_using_diagnostics() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_scalar_raise(value int4) RETURNS int4 LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'value %% %', value
+            USING ERRCODE = '22012', DETAIL = 'scalar detail', HINT = 'scalar hint';
+        END
+        $$
+        ",
+    )
+    .await;
+
+    let error = session
+        .simple_query("SELECT pl_scalar_raise(7)")
+        .await
+        .expect_err("scalar RAISE EXCEPTION must fail");
+    assert!(error.code == "22012", "{error:?}");
+    assert!(error.message == "value % 7", "{error:?}");
+    let diagnostics = error.diagnostics.expect("RAISE diagnostics");
+    assert!(diagnostics.detail.as_deref() == Some("scalar detail"));
+    assert!(diagnostics.hint.as_deref() == Some("scalar hint"));
+}
+
+#[tokio::test]
+async fn scalar_raise_expressions_can_call_sql_bearing_plpgsql_functions_atomically() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE pl_raise_audit (value int4);
+        CREATE FUNCTION pl_raise_argument() RETURNS int4 LANGUAGE plpgsql AS $$
+        BEGIN
+          INSERT INTO pl_raise_audit VALUES (7);
+          RETURN 7;
+        END
+        $$;
+        CREATE FUNCTION pl_raise_outer() RETURNS int4 LANGUAGE plpgsql AS $$
+        BEGIN
+          RAISE EXCEPTION 'value %', pl_raise_argument();
+        END
+        $$
+        ",
+    )
+    .await;
+
+    let error = session
+        .simple_query("SELECT pl_raise_outer()")
+        .await
+        .expect_err("RAISE must propagate its SQL-bearing argument's value");
+    assert!(error.code == "P0001", "{error:?}");
+    assert!(error.message == "value 7", "{error:?}");
+    assert!(scalar(&mut session, "SELECT count(*) FROM pl_raise_audit").await == Some("0".into()));
+}
+
+#[tokio::test]
+async fn sql_json_expressions_bind_plpgsql_variables() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_json_scalar(value int4) RETURNS jsonb LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN JSON_SCALAR(value);
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(scalar(&mut session, "SELECT pl_json_scalar(42)").await == Some("42".into()));
+}
+
+#[tokio::test]
+async fn scalar_expression_subqueries_use_the_async_session_interpreter() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE TABLE pl_subquery_source (value int4);
+        INSERT INTO pl_subquery_source VALUES (42);
+        CREATE FUNCTION pl_return_subquery() RETURNS int4 LANGUAGE plpgsql AS $$
+        BEGIN
+          RETURN (SELECT value FROM pl_subquery_source);
+        END
+        $$;
+        CREATE FUNCTION pl_default_subquery() RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE picked int4 := (SELECT value FROM pl_subquery_source);
+        BEGIN
+          RETURN picked;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(scalar(&mut session, "SELECT pl_return_subquery()").await == Some("42".into()));
+    assert!(scalar(&mut session, "SELECT pl_default_subquery()").await == Some("42".into()));
+}
+
+#[tokio::test]
+async fn current_diagnostics_reports_the_routine_oid() {
+    let engine = SqlEngine::new();
+    let mut session = engine.connect();
+    execute(
+        &mut session,
+        r"
+        CREATE FUNCTION pl_current_oid() RETURNS int4 LANGUAGE plpgsql AS $$
+        DECLARE result int4;
+        BEGIN
+          GET DIAGNOSTICS result = PG_ROUTINE_OID;
+          RETURN result;
+        END
+        $$
+        ",
+    )
+    .await;
+
+    assert!(
+        scalar(
+            &mut session,
+            "SELECT pl_current_oid() = oid FROM pg_proc WHERE proname = 'pl_current_oid'",
+        )
+        .await
+            == Some("t".into())
+    );
+}

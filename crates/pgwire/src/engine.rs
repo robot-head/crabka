@@ -71,6 +71,13 @@ pub enum ResultPage {
 #[async_trait::async_trait]
 pub trait ResultSink: Send {
     async fn send(&mut self, page: ResultPage) -> Result<(), PgError>;
+
+    /// Deliver a non-error `PostgreSQL` diagnostic. Existing sinks may ignore
+    /// notices; wire-facing sinks can override this to emit `NoticeResponse`.
+    async fn send_notice(&mut self, notice: PgError) -> Result<(), PgError> {
+        debug_assert!(notice.severity.is_notice());
+        Ok(())
+    }
 }
 
 /// Compatibility sink used by callers that still require `Vec<QueryResult>`.
@@ -264,9 +271,9 @@ pub trait Engine: Send + Sync + 'static {
 /// connections. `simple_query`/`describe` take `&mut self` because they mutate
 /// transaction state.
 ///
-/// Cancellation: the wire layer may DROP an in-flight `simple_query` future
-/// (`tokio::select!`). Session implementations must be drop-safe mid-execution;
-/// the real engine needs transaction cleanup on drop.
+/// Cancellation: the wire layer may DROP an in-flight query future
+/// (`tokio::select!`), then awaits [`Session::cancel_current_query`] before it
+/// reports `ReadyForQuery`. Implementations must make that pair drop-safe.
 pub trait Session: Send {
     /// Release whatever the session owns that outlives the connection but not
     /// the session, called once when the message loop ends however it ends.
@@ -424,12 +431,26 @@ pub trait Session: Send {
         None
     }
 
+    /// Hand the wire layer this session's non-error diagnostic stream.
+    ///
+    /// The default keeps existing engines source-compatible and silent.
+    fn take_notices(&mut self) -> Option<mpsc::Receiver<PgError>> {
+        None
+    }
+
     /// Mark the current statement as failed after a protocol-side error.
     ///
     /// COPY FROM STDIN can fail because the client sends `CopyFail`, before the
     /// engine sees `copy_in`. Engines with explicit transaction state must abort
     /// the open transaction block here while leaving autocommit sessions usable.
     fn mark_statement_failed(&mut self) {}
+
+    /// Finish engine-side cancellation after the wire layer drops an in-flight
+    /// query future. Implementations with detached workers must stop and join
+    /// them here before releasing transaction resources.
+    fn cancel_current_query(&mut self) -> impl Future<Output = ()> + Send {
+        async move { self.mark_statement_failed() }
+    }
 
     /// The transaction status reported to the client in `ReadyForQuery`.
     fn tx_status(&self) -> TxStatus;
@@ -485,6 +506,18 @@ mod tests {
             .finish()
             .expect_err("a result cannot change kind between pages");
         assert_eq!(error.code, crate::error::sqlstate::PROTOCOL_VIOLATION);
+    }
+
+    #[tokio::test]
+    async fn default_notice_seams_keep_existing_sinks_and_sessions_compatible() {
+        let mut sink = CollectingResultSink::default();
+        sink.send_notice(PgError::notice("hello"))
+            .await
+            .expect("default notice sink");
+        assert2::assert!(sink.pages().is_empty());
+
+        let mut session = RecordingSession;
+        assert2::assert!(session.take_notices().is_none());
     }
     use crate::stub::StubEngine;
 

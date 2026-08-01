@@ -43,6 +43,7 @@ pub(crate) fn eval(
     values: &[Datum],
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
+    crate::session::check_query_canceled()?;
     eval_depth(expr, scope, values, ctx, 0)
 }
 
@@ -128,6 +129,11 @@ fn eval_depth(
         // F-2: the pg_catalog introspection family (`pg_get_viewdef`,
         // `pg_get_indexdef`, `obj_description`, the `has_*_privilege` family,
         // …), tried alongside the other post-SP29 families.
+        Expr::Func(fc)
+            if let Some(result) = crate::routine::eval_plpgsql_scalar(fc, scope, values, ctx) =>
+        {
+            result
+        }
         Expr::Func(fc) if crate::catalog_fn::is_catalog_func(&fc.name) => {
             crate::catalog_fn::eval_catalog(fc, ctx, |e| eval_depth(e, scope, values, ctx, d))
         }
@@ -1880,6 +1886,11 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         // Q3: `GROUPING(…)` is `int4` — the grouping-set rewrite folds it to a
         // `CASE` over the grouping-set ordinal before anything evaluates it, so
         // the type pass has to accept it where a scalar function would not be.
+        Expr::Func(fc)
+            if let Some(result) = crate::routine::plpgsql_scalar_result_type(fc, scope) =>
+        {
+            result
+        }
         Expr::Func(fc) if crate::grouping::is_grouping_call(fc) => Ok(ColumnType::Int4),
         Expr::Func(fc) if crate::catalog_fn::is_catalog_func(&fc.name) => {
             crate::catalog_fn::catalog_func_result_type(fc, scope)

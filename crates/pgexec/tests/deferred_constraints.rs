@@ -502,20 +502,19 @@ async fn rollback_to_savepoint_restores_the_deferral_modes() {
     assert!(err_code(&mut s, "COMMIT").await == "23503");
 }
 
-/// The reason the pending queue itself never needs unwinding: every statement
-/// that can queue a check modifies rows, and `ROLLBACK TO SAVEPOINT` across a
-/// row-modifying sub-transaction is refused outright. Pinning that here means a
-/// future relaxation of the refusal has to come back and deal with the queue.
+/// Rolling back a row-modifying sub-transaction removes both its row and the
+/// deferred check that row queued.
 #[tokio::test]
-async fn rollback_to_savepoint_refuses_a_sub_transaction_that_queued_a_check() {
+async fn rollback_to_savepoint_unwinds_a_queued_check() {
     let (_engine, mut s) = pair_with("DEFERRABLE INITIALLY DEFERRED").await;
     run(&mut s, "INSERT INTO p VALUES (1)").await;
 
     run(&mut s, "BEGIN").await;
     run(&mut s, "SAVEPOINT sp").await;
     run(&mut s, "INSERT INTO c VALUES (1)").await;
-    assert!(err_code(&mut s, "ROLLBACK TO SAVEPOINT sp").await == "0A000");
-    run(&mut s, "ROLLBACK").await;
+    run(&mut s, "ROLLBACK TO SAVEPOINT sp").await;
+    run(&mut s, "DELETE FROM p WHERE id = 1").await;
+    run(&mut s, "COMMIT").await;
     assert!(query(&mut s, "SELECT a FROM c").await.is_empty());
 }
 

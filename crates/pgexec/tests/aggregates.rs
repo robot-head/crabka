@@ -113,6 +113,32 @@ async fn count_distinct_and_min_max() {
 }
 
 #[tokio::test]
+async fn overloaded_plpgsql_wrapper_resolves_aggregate_argument_from_input_scope() {
+    let client = connect(spawn().await).await;
+    client
+        .batch_execute(
+            "CREATE TABLE zz_input (i int4); \
+             INSERT INTO zz_input VALUES (1), (3), (2); \
+             CREATE FUNCTION zz(value int4) RETURNS int4 LANGUAGE plpgsql AS \
+             $$ BEGIN RETURN value + 1; END $$; \
+             CREATE FUNCTION zz(value text) RETURNS text LANGUAGE plpgsql AS \
+             $$ BEGIN RETURN value || '!'; END $$",
+        )
+        .await
+        .expect("setup overloaded wrapper");
+
+    let messages = client
+        .simple_query("SELECT zz(max(i)) FROM zz_input")
+        .await
+        .expect("resolve zz(integer)");
+    let value = messages.iter().find_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => row.get(0),
+        _ => None,
+    });
+    assert_eq!(value, Some("4"));
+}
+
+#[tokio::test]
 async fn bare_aggregate_over_empty_table_is_one_row() {
     let client = connect(spawn().await).await;
     client

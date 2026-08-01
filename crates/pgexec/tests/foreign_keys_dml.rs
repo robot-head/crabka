@@ -70,10 +70,11 @@ struct Failure {
 
 impl From<PgError> for Failure {
     fn from(error: PgError) -> Self {
+        let diagnostics = error.diagnostics.unwrap_or_default();
         Self {
             code: error.code,
             message: error.message,
-            detail: error.detail,
+            detail: diagnostics.detail,
         }
     }
 }

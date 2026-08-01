@@ -8,12 +8,14 @@
 //! how `PostgreSQL` treats a simple SQL function, and it means a routine never
 //! carries a stale plan.
 //!
-//! Routines in other languages are still *defined* — the catalog records them
-//! and `pg_proc` reports them — but calling one is `0A000`: Gres has no PL
-//! interpreter and no dynamic loader, and returning a wrong answer would be
-//! worse than refusing.
+//! PL/pgSQL bodies are parsed when they are defined and re-parsed for execution,
+//! just like SQL bodies. Dynamic C/internal routines remain catalog-only.
 
-use std::fmt::Write as _;
+use std::{
+    cell::{Cell, RefCell},
+    fmt::Write as _,
+    sync::Arc,
+};
 
 use crabka_pgcatalog::routine::{
     BodyForm, ParamMode, Routine, RoutineKind, RoutineParam, RoutineResult, RoutineType,
@@ -22,14 +24,87 @@ use crabka_pgcatalog::routine::{
 };
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgparser::ast::{
-    AlterRoutineAction, CreateRoutineStmt, Expr, FuncArgs, FuncCall, QueryExpr, RoutineArg,
-    RoutineArgMode, RoutineBody, RoutineObject, RoutineOption, RoutineParallel, RoutineReturn,
-    RoutineSignature, RoutineVolatility, SelectItem, SelectStmt, Statement,
+    AlterRoutineAction, CreateRoutineStmt, Expr, FuncArgs, FuncCall, PlPgSqlBlock,
+    PlPgSqlStatement, QueryExpr, RoutineArg, RoutineArgMode, RoutineBody, RoutineObject,
+    RoutineOption, RoutineParallel, RoutineReturn, RoutineSignature, RoutineVolatility, SelectItem,
+    SelectStmt, Statement,
 };
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::QueryResult;
 
 use crate::{error::ExecError, eval::ArgType};
+
+pub(crate) struct ScalarFunctionRequest {
+    pub routine: Routine,
+    pub values: Vec<Datum>,
+    pub kind: FunctionRequestKind,
+    pub reply: std::sync::mpsc::Sender<Result<FunctionRequestResult, ExecError>>,
+}
+
+pub(crate) enum FunctionRequestKind {
+    Scalar,
+    Table(Vec<(String, ColumnType)>),
+}
+
+pub(crate) enum FunctionRequestResult {
+    Scalar(Datum),
+    Table(Vec<Vec<Datum>>),
+}
+
+type FunctionColumns = Vec<(String, ColumnType)>;
+type PlPgSqlTableSchema = (Routine, FunctionColumns);
+type PlPgSqlTableRows = (FunctionColumns, Vec<Vec<Datum>>);
+
+#[derive(Clone)]
+struct ScalarRuntime {
+    catalog: Arc<dyn Kv>,
+    requests: Option<tokio::sync::mpsc::Sender<ScalarFunctionRequest>>,
+}
+
+thread_local! {
+    /// Catalog available to the synchronous scalar evaluator for the duration
+    /// of one statement. This mirrors the existing GUC/advisory-lock runtimes:
+    /// it is installed only around synchronous execution and never crosses an
+    /// await point.
+    static SCALAR_RUNTIME: RefCell<Option<ScalarRuntime>> = const { RefCell::new(None) };
+    static PLPGSQL_CALL_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+const MAX_PLPGSQL_CALL_DEPTH: usize = 64;
+
+pub(crate) fn with_scalar_runtime<T>(
+    catalog: &Arc<dyn Kv>,
+    requests: Option<tokio::sync::mpsc::Sender<ScalarFunctionRequest>>,
+    f: impl FnOnce() -> T,
+) -> T {
+    SCALAR_RUNTIME.with(|cell| {
+        let previous = cell.replace(Some(ScalarRuntime {
+            catalog: Arc::clone(catalog),
+            requests,
+        }));
+        let result = f();
+        cell.replace(previous);
+        result
+    })
+}
+
+struct PlPgSqlCallGuard;
+
+impl Drop for PlPgSqlCallGuard {
+    fn drop(&mut self) {
+        PLPGSQL_CALL_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+fn enter_plpgsql_call() -> Result<PlPgSqlCallGuard, ExecError> {
+    PLPGSQL_CALL_DEPTH.with(|depth| {
+        if depth.get() >= MAX_PLPGSQL_CALL_DEPTH {
+            return Err(ExecError::StackDepthExceeded);
+        }
+        depth.set(depth.get() + 1);
+        Ok(PlPgSqlCallGuard)
+    })
+}
 
 /// The languages `pg_language` lists. A routine in any other language does not
 /// exist as far as `CREATE FUNCTION` is concerned (`42704`).
@@ -205,7 +280,7 @@ fn invalid_definition(message: impl Into<String>) -> ExecError {
 
 /// 42809 — the named routine exists but is not of the kind the statement asked
 /// for.
-fn wrong_routine_kind(message: impl Into<String>) -> ExecError {
+pub(crate) fn wrong_routine_kind(message: impl Into<String>) -> ExecError {
     ExecError::FunctionError {
         sqlstate: "42809",
         message: message.into(),
@@ -221,7 +296,7 @@ fn duplicate_routine(name: &str) -> ExecError {
 }
 
 /// 42883 — no routine matches the identity a statement or call named.
-fn undefined_routine(message: impl Into<String>) -> ExecError {
+pub(crate) fn undefined_routine(message: impl Into<String>) -> ExecError {
     ExecError::UndefinedFunction(message.into())
 }
 
@@ -423,17 +498,19 @@ fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<R
         security_definer: options.security_definer.unwrap_or(false),
         leakproof: options.leakproof.unwrap_or(false),
         cost: options.cost.unwrap_or(100.0),
-        rows: options.rows.unwrap_or(if returns_set(&stmt.returns) {
-            1000.0
-        } else {
-            0.0
-        }),
+        rows: options
+            .rows
+            .unwrap_or(if parsed_returns_set(&stmt.returns) {
+                1000.0
+            } else {
+                0.0
+            }),
         config: options.config,
         owner: owner.to_string(),
     })
 }
 
-fn returns_set(returns: &RoutineReturn) -> bool {
+fn parsed_returns_set(returns: &RoutineReturn) -> bool {
     match returns {
         RoutineReturn::Type { setof, .. } => *setof,
         RoutineReturn::Table(_) => true,
@@ -468,6 +545,17 @@ pub(crate) fn create(
     // with the default `check_function_bodies`.
     if routine.language == "sql" {
         parse_body(&routine)?;
+    } else if routine.language == "plpgsql"
+        && let Err(error) = parse_plpgsql_body(&routine)
+        && !matches!(
+            &error,
+            ExecError::FunctionError {
+                sqlstate: "0A000",
+                ..
+            }
+        )
+    {
+        return Err(error);
     }
     let ops = put_routine_ops(kv, &routine)?;
     Ok((
@@ -777,6 +865,158 @@ pub(crate) fn resolve_call(
     )))
 }
 
+/// A resolved routine plus the call arguments after unknown-literal coercion
+/// and trailing parameter defaults have been applied.
+#[derive(Debug, Clone)]
+pub(crate) struct BoundRoutineCall {
+    pub routine: Routine,
+    pub args: Vec<Expr>,
+}
+
+/// Resolve an overload and bind its arguments without choosing an execution
+/// strategy. The returned routine retains its `strict` flag and kind so the
+/// caller can apply the appropriate function/procedure semantics.
+pub(crate) fn bind_call(
+    kv: &dyn Kv,
+    name: &str,
+    args: &[Expr],
+    given: &[ArgType],
+) -> Result<Option<BoundRoutineCall>, ExecError> {
+    let Some(routine) = resolve_call(kv, name, given)? else {
+        return Ok(None);
+    };
+    let args = bound_args(&routine, args)?;
+    Ok(Some(BoundRoutineCall { routine, args }))
+}
+
+/// Resolve a procedure call whose argument list includes `OUT` placeholders.
+/// Unlike function calls, procedure arguments remain aligned with the full
+/// declaration; output-only expressions do not participate in overload
+/// resolution and are never coerced or evaluated.
+pub(crate) fn bind_procedure_call(
+    kv: &dyn Kv,
+    name: &str,
+    args: &[Expr],
+) -> Result<Option<BoundRoutineCall>, ExecError> {
+    let candidates = routines_named(kv, name)?;
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+    let mut exact = Vec::new();
+    let mut coercible = Vec::new();
+    for routine in candidates {
+        if args.len() > routine.params.len()
+            || routine.params[args.len()..]
+                .iter()
+                .any(|param| param.default.is_none())
+        {
+            continue;
+        }
+        let input_args = routine
+            .params
+            .iter()
+            .zip(args)
+            .filter_map(|(param, arg)| param.mode.is_input().then_some(arg.clone()))
+            .collect::<Vec<_>>();
+        let given = input_args
+            .iter()
+            .map(|arg| {
+                crate::eval::static_arg_types(
+                    std::slice::from_ref(arg),
+                    &crate::scope::Scope::empty(),
+                )
+                .map(|mut types| types.remove(0))
+                .or_else(|error| match error {
+                    ExecError::UndefinedFunction(_) => Ok(ArgType::Opaque),
+                    error => Err(error),
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let input_params = routine
+            .params
+            .iter()
+            .take(args.len())
+            .filter(|param| param.mode.is_input())
+            .collect::<Vec<_>>();
+        let mut is_exact = true;
+        let mut is_coercible = true;
+        for (arg, param) in given.iter().zip(&input_params) {
+            let Some(target) = param.ty.column else {
+                is_exact = false;
+                is_coercible = matches!(arg, ArgType::Unknown | ArgType::Opaque);
+                continue;
+            };
+            match arg {
+                ArgType::Known(source) if *source == target => {}
+                ArgType::Known(source) => {
+                    is_exact = false;
+                    if !implicitly_coercible(*source, target) {
+                        is_coercible = false;
+                    }
+                }
+                ArgType::Unknown | ArgType::Opaque => is_exact = false,
+            }
+        }
+        if is_exact {
+            exact.push((routine, given));
+        } else if is_coercible {
+            coercible.push((routine, given));
+        }
+    }
+    let selected = if exact.len() == 1 {
+        exact.pop().map(|(routine, _)| routine)
+    } else if exact.is_empty() && coercible.len() == 1 {
+        coercible.pop().map(|(routine, _)| routine)
+    } else if exact.is_empty() {
+        let preferred = coercible
+            .iter()
+            .filter(|(routine, given)| prefers_text_at_unknowns(routine, given))
+            .map(|(routine, _)| routine.clone())
+            .collect::<Vec<_>>();
+        (preferred.len() == 1).then(|| preferred[0].clone())
+    } else {
+        None
+    };
+    let Some(routine) = selected else {
+        if exact.len() > 1 || coercible.len() > 1 {
+            return Err(ExecError::FunctionError {
+                sqlstate: "42725",
+                message: format!("procedure {name} is not unique"),
+            });
+        }
+        return Err(undefined_routine(format!(
+            "procedure {name} does not exist"
+        )));
+    };
+    let mut bound = Vec::with_capacity(routine.params.len());
+    for (arg, param) in args.iter().zip(&routine.params) {
+        if param.mode.is_input()
+            && let Some(ty) = param.ty.column
+            && crate::func::is_unknown_arg(arg)
+        {
+            bound.push(Expr::Cast {
+                expr: Box::new(arg.clone()),
+                ty,
+            });
+            continue;
+        }
+        bound.push(arg.clone());
+    }
+    for param in routine.params.iter().skip(args.len()) {
+        let default = param.default.as_ref().ok_or_else(|| {
+            undefined_routine(format!("procedure {} does not exist", routine.name))
+        })?;
+        bound.push(
+            crabka_pgparser::parser::parse_expression(default)
+                .map_err(|error| ExecError::Syntax(error.message))?,
+        );
+    }
+    Ok(Some(BoundRoutineCall {
+        routine,
+        args: bound,
+    }))
+}
+
 /// Is `source` implicitly coercible to `target` for the purpose of resolving a
 /// routine call?
 ///
@@ -923,11 +1163,252 @@ pub(crate) fn inline_scalar(kv: &dyn Kv, call: &FuncCall) -> Result<Option<Expr>
         return Ok(None);
     }
     let given = best_effort_arg_types(args);
+    // PL/pgSQL is executed by the scalar runtime rather than inlined. Keeping
+    // the call node intact is what lets its arguments vary with each input row.
+    match resolve_call(kv, &call.name, &given) {
+        Ok(Some(routine)) if routine.language == "plpgsql" => return Ok(None),
+        Err(_)
+            if routines_named(kv, &call.name)?
+                .iter()
+                .all(|routine| routine.language == "plpgsql") =>
+        {
+            return Ok(None);
+        }
+        Err(_) if known_builtin(&call.name) => return Ok(None),
+        Ok(_) => {}
+        Err(error) => return Err(error),
+    }
     match inline_scalar_call(kv, call, &given) {
         Ok(inlined) => Ok(inlined),
         Err(_) if known_builtin(&call.name) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+pub(crate) fn plpgsql_declared_call_type(
+    kv: &dyn Kv,
+    call: &FuncCall,
+) -> Result<Option<ColumnType>, ExecError> {
+    let FuncArgs::Exprs(args) = &call.args else {
+        return Ok(None);
+    };
+    if !is_user_routine(kv, &call.name) {
+        return Ok(None);
+    }
+    let given = best_effort_arg_types(args);
+    let routine = match resolve_call(kv, &call.name, &given) {
+        Ok(Some(routine)) if routine.language == "plpgsql" => routine,
+        Ok(_) => return Ok(None),
+        Err(_) if known_builtin(&call.name) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    validate_plpgsql_scalar(&routine)?;
+    declared_scalar_result_type(&routine)
+        .ok_or_else(|| {
+            ExecError::Unsupported(format!(
+                "function {} has no scalar result type",
+                routine.identity()
+            ))
+        })
+        .map(Some)
+}
+
+/// Resolve the declared type of a PL/pgSQL scalar call while a statement
+/// runtime is installed. `None` lets the ordinary built-in/aggregate resolver
+/// keep its existing error and overload fallback behavior.
+pub(crate) fn plpgsql_scalar_result_type(
+    call: &FuncCall,
+    scope: &crate::scope::Scope,
+) -> Option<Result<ColumnType, ExecError>> {
+    let FuncArgs::Exprs(args) = &call.args else {
+        return None;
+    };
+    SCALAR_RUNTIME.with(|runtime| {
+        let runtime = runtime.borrow();
+        let runtime = runtime.as_ref()?;
+        if !is_user_routine(runtime.catalog.as_ref(), &call.name) {
+            return None;
+        }
+        let given = crate::eval::static_arg_types(args, scope);
+        let result = given.and_then(|given| {
+            let Some(routine) = resolve_call(runtime.catalog.as_ref(), &call.name, &given)? else {
+                return Err(undefined_routine(format!(
+                    "function {} does not exist",
+                    call.name
+                )));
+            };
+            if routine.language != "plpgsql" {
+                return Err(undefined_routine(format!(
+                    "function {} does not exist",
+                    call.name
+                )));
+            }
+            validate_plpgsql_scalar(&routine)?;
+            declared_scalar_result_type(&routine).ok_or_else(|| {
+                ExecError::Unsupported(format!(
+                    "function {} has no scalar result type",
+                    routine.identity()
+                ))
+            })
+        });
+        Some(result)
+    })
+}
+
+pub(crate) fn is_plpgsql_scalar_runtime(call: &FuncCall, scope: &crate::scope::Scope) -> bool {
+    let FuncArgs::Exprs(args) = &call.args else {
+        return false;
+    };
+    SCALAR_RUNTIME.with(|runtime| {
+        let runtime = runtime.borrow();
+        let Some(runtime) = runtime.as_ref() else {
+            return false;
+        };
+        let Ok(given) = crate::eval::static_arg_types(args, scope) else {
+            return false;
+        };
+        resolve_call(runtime.catalog.as_ref(), &call.name, &given)
+            .is_ok_and(|routine| routine.is_some_and(|routine| routine.language == "plpgsql"))
+    })
+}
+
+/// Evaluate a PL/pgSQL scalar call against the current input row. Arguments
+/// are evaluated exactly once before parameter binding; the procedural body
+/// then uses ordinary scalar evaluation, so nested calls and lazy SQL
+/// conditionals keep the caller's semantics.
+pub(crate) fn eval_plpgsql_scalar(
+    call: &FuncCall,
+    scope: &crate::scope::Scope,
+    row: &[Datum],
+    ctx: &crate::clock::EvalCtx,
+) -> Option<Result<Datum, ExecError>> {
+    eval_plpgsql_scalar_with(call, ctx, |arg| crate::eval::eval(arg, scope, row, ctx))
+}
+
+pub(crate) fn eval_plpgsql_scalar_with(
+    call: &FuncCall,
+    ctx: &crate::clock::EvalCtx,
+    mut eval_arg: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+) -> Option<Result<Datum, ExecError>> {
+    let FuncArgs::Exprs(args) = &call.args else {
+        return None;
+    };
+    SCALAR_RUNTIME.with(|runtime| {
+        let runtime = runtime.borrow();
+        let runtime = runtime.as_ref()?.clone();
+        if !is_user_routine(runtime.catalog.as_ref(), &call.name) {
+            return None;
+        }
+        let result = (|| {
+            if call.distinct || call.filter.is_some() {
+                return Err(ExecError::Syntax(format!(
+                    "FILTER or DISTINCT is not allowed for function {}",
+                    call.name
+                )));
+            }
+            let mut values = args
+                .iter()
+                .map(&mut eval_arg)
+                .collect::<Result<Vec<_>, _>>()?;
+            let given = crate::eval::value_arg_types(args, &values);
+            let Some(BoundRoutineCall {
+                routine,
+                args: bound_args,
+            }) = bind_call(runtime.catalog.as_ref(), &call.name, args, &given)?
+            else {
+                return Err(undefined_routine(format!(
+                    "function {} does not exist",
+                    call.name
+                )));
+            };
+            if routine.language != "plpgsql" {
+                return Err(undefined_routine(format!(
+                    "function {} does not exist",
+                    call.name
+                )));
+            }
+            validate_plpgsql_scalar(&routine)?;
+            for default in &bound_args[values.len()..] {
+                values.push(eval_arg(default)?);
+            }
+            let params = routine
+                .input_params()
+                .map(|param| param.ty.column)
+                .collect::<Vec<_>>();
+            crate::eval::coerce_unknown_args(&bound_args, &mut values, &params, ctx)?;
+            if routine.strict && values.iter().any(Datum::is_null) {
+                return Ok(Datum::Null);
+            }
+            let _guard = enter_plpgsql_call()?;
+            let value = if crate::plpgsql::scalar_function_requires_session(
+                runtime.catalog.as_ref(),
+                &routine,
+            )? {
+                let requests = runtime.requests.ok_or_else(|| {
+                    ExecError::Unsupported(
+                        "SQL-bearing PL/pgSQL function requires a session executor".into(),
+                    )
+                })?;
+                let (reply, response) = std::sync::mpsc::channel();
+                requests
+                    .try_send(ScalarFunctionRequest {
+                        routine: routine.clone(),
+                        values: values.clone(),
+                        kind: FunctionRequestKind::Scalar,
+                        reply,
+                    })
+                    .map_err(|_| {
+                        ExecError::ObjectNotInPrerequisiteState(
+                            "PL/pgSQL function executor stopped".into(),
+                        )
+                    })?;
+                match response.recv().map_err(|_| {
+                    ExecError::ObjectNotInPrerequisiteState(
+                        "PL/pgSQL function executor stopped".into(),
+                    )
+                })?? {
+                    FunctionRequestResult::Scalar(value) => value,
+                    FunctionRequestResult::Table(_) => {
+                        return Err(ExecError::ObjectNotInPrerequisiteState(
+                            "PL/pgSQL function executor returned rows for a scalar call".into(),
+                        ));
+                    }
+                }
+            } else {
+                crate::plpgsql::eval_scalar_function(&routine, &values, ctx)?
+            };
+            match declared_scalar_result_type(&routine) {
+                Some(ty) => {
+                    crabka_pgtypes::cast::cast(&value, ty, &ctx.time_zone).map_err(ExecError::from)
+                }
+                None if declared_returns_void(&routine) => Ok(Datum::Null),
+                None => Ok(value),
+            }
+        })();
+        Some(result)
+    })
+}
+
+fn validate_plpgsql_scalar(routine: &Routine) -> Result<(), ExecError> {
+    if routine.kind != RoutineKind::Function {
+        return Err(wrong_routine_kind(format!(
+            "{} is a procedure\nHINT:  To call a procedure, use CALL.",
+            spelled_signature(routine)
+        )));
+    }
+    if declared_returns_set(routine) {
+        return Err(ExecError::Unsupported(format!(
+            "set-returning function {} is only supported in FROM position",
+            routine.identity()
+        )));
+    }
+    if declared_output_parameter_count(routine) > 1 {
+        return Err(ExecError::Unsupported(format!(
+            "{} returns a record; only FROM position is supported for a routine with several OUT parameters",
+            routine.identity()
+        )));
+    }
+    Ok(())
 }
 
 /// The parsed body of a `LANGUAGE sql` routine, as a statement list.
@@ -937,6 +1418,64 @@ pub(crate) fn parse_body(routine: &Routine) -> Result<Vec<Statement>, ExecError>
         BodyForm::Source | BodyForm::Atomic => routine.body.clone(),
     };
     crabka_pgparser::parse(&source).map_err(|error| ExecError::Syntax(error.message))
+}
+
+/// Parse the stored source of a PL/pgSQL routine.
+pub(crate) fn parse_plpgsql_body(routine: &Routine) -> Result<PlPgSqlBlock, ExecError> {
+    if routine.body_form != BodyForm::Source {
+        return Err(invalid_definition(
+            "PL/pgSQL function body must be a string literal",
+        ));
+    }
+    let block = crabka_pgparser::parse_plpgsql(&routine.body).map_err(|error| {
+        ExecError::FunctionError {
+            sqlstate: error.sqlstate(),
+            message: error.message,
+        }
+    })?;
+    if routine.kind == RoutineKind::Procedure && plpgsql_has_return_value(&block) {
+        return Err(ExecError::FunctionError {
+            sqlstate: "42804",
+            message: "RETURN cannot have a parameter in a procedure\nHINT:  Use RETURN without a parameter in a procedure."
+                .into(),
+        });
+    }
+    Ok(block)
+}
+
+fn plpgsql_has_return_value(block: &PlPgSqlBlock) -> bool {
+    fn statements_have_return_value(statements: &[PlPgSqlStatement]) -> bool {
+        statements.iter().any(|statement| match statement {
+            PlPgSqlStatement::Return(Some(_)) => true,
+            PlPgSqlStatement::Block(block) => plpgsql_has_return_value(block),
+            PlPgSqlStatement::If {
+                branches,
+                else_body,
+            } => {
+                branches
+                    .iter()
+                    .any(|(_, body)| statements_have_return_value(body))
+                    || statements_have_return_value(else_body)
+            }
+            PlPgSqlStatement::Case {
+                arms, else_body, ..
+            } => {
+                arms.iter()
+                    .any(|(_, body)| statements_have_return_value(body))
+                    || else_body
+                        .as_deref()
+                        .is_some_and(statements_have_return_value)
+            }
+            PlPgSqlStatement::Loop { body, .. } => statements_have_return_value(body),
+            _ => false,
+        })
+    }
+
+    statements_have_return_value(&block.statements)
+        || block
+            .exceptions
+            .iter()
+            .any(|handler| statements_have_return_value(&handler.statements))
 }
 
 /// A `LANGUAGE sql` routine's final query — the one whose result is the
@@ -1306,7 +1845,7 @@ pub(crate) fn inline_scalar_call(
     let FuncArgs::Exprs(args) = &call.args else {
         return Ok(None);
     };
-    let Some(routine) = resolve_call(kv, &call.name, given)? else {
+    let Some(BoundRoutineCall { routine, args }) = bind_call(kv, &call.name, args, given)? else {
         return Ok(None);
     };
     if routine.kind == RoutineKind::Procedure {
@@ -1316,20 +1855,19 @@ pub(crate) fn inline_scalar_call(
         )));
     }
     callable(&routine)?;
-    if routine.returns_set() {
+    if declared_returns_set(&routine) {
         return Err(ExecError::Unsupported(format!(
             "set-returning function {} is only supported in FROM position",
             routine.identity()
         )));
     }
-    if routine.output_params().count() > 1 {
+    if declared_output_parameter_count(&routine) > 1 {
         return Err(ExecError::Unsupported(format!(
             "{} returns a record; only FROM position is supported for a routine with several \
              OUT parameters",
             routine.identity()
         )));
     }
-    let args = bound_args(&routine, args)?;
     let binding = Binding {
         routine: &routine,
         uses: std::cell::RefCell::new(vec![0; args.len()]),
@@ -1353,7 +1891,7 @@ pub(crate) fn inline_scalar_call(
         None => Expr::ScalarSubquery(Box::new(substitute_in_query(&binding, &query)?)),
     };
     binding.reject_repeated_volatile_args()?;
-    let inlined = match result_type(&routine) {
+    let inlined = match declared_scalar_result_type(&routine) {
         Some(ty) => Expr::Cast {
             expr: Box::new(inlined),
             ty,
@@ -1362,7 +1900,7 @@ pub(crate) fn inline_scalar_call(
     };
     // `RETURNS void` discards the body's value but still evaluates it, so an
     // error inside the body still surfaces.
-    let inlined = if returns_void(&routine) {
+    let inlined = if declared_returns_void(&routine) {
         Expr::Case {
             operand: None,
             whens: vec![(
@@ -1410,20 +1948,30 @@ fn strict_guard(args: &[Expr], body: Expr) -> Expr {
 }
 
 /// Does the routine return `void`?
-fn returns_void(routine: &Routine) -> bool {
+pub(crate) fn declared_returns_void(routine: &Routine) -> bool {
     matches!(&routine.result, RoutineResult::Type { ty, setof: false } if ty.is_void())
 }
 
 /// The scalar type a routine's result carries, when Gres models it.
-fn result_type(routine: &Routine) -> Option<ColumnType> {
+pub(crate) fn declared_scalar_result_type(routine: &Routine) -> Option<ColumnType> {
     match &routine.result {
         RoutineResult::Type { ty, setof: false } => ty.column,
-        RoutineResult::Unspecified => routine
+        RoutineResult::Unspecified if routine.output_params().count() == 1 => routine
             .output_params()
             .next()
             .and_then(|param| param.ty.column),
         _ => None,
     }
+}
+
+/// Whether the declared result produces more than one row.
+pub(crate) fn declared_returns_set(routine: &Routine) -> bool {
+    routine.returns_set()
+}
+
+/// Number of explicit `OUT`/`INOUT` parameters in declaration order.
+pub(crate) fn declared_output_parameter_count(routine: &Routine) -> usize {
+    routine.output_params().count()
 }
 
 /// The query a set-returning call of a user routine expands to, with the
@@ -1436,7 +1984,8 @@ pub(crate) fn expand_table_function(
     call: &crabka_pgparser::ast::TableFuncCall,
     given: &[ArgType],
 ) -> Result<Option<(QueryExpr, Routine)>, ExecError> {
-    let Some(routine) = resolve_call(kv, &call.name, given)? else {
+    let Some(BoundRoutineCall { routine, args }) = bind_call(kv, &call.name, &call.args, given)?
+    else {
         return Ok(None);
     };
     if routine.kind == RoutineKind::Procedure {
@@ -1446,7 +1995,6 @@ pub(crate) fn expand_table_function(
         )));
     }
     callable(&routine)?;
-    let args = bound_args(&routine, &call.args)?;
     let binding = Binding {
         routine: &routine,
         uses: std::cell::RefCell::new(vec![0; args.len()]),
@@ -1575,6 +2123,166 @@ pub(crate) fn table_function_columns(routine: &Routine) -> Option<Vec<String>> {
     }
 }
 
+fn is_record_type(ty: &RoutineType) -> bool {
+    ty.is_record() || matches!(ty.column, Some(ColumnType::Record(_)))
+}
+
+pub(crate) fn plpgsql_table_function_schema(
+    kv: &dyn Kv,
+    call: &crabka_pgparser::ast::TableFuncCall,
+) -> Result<Option<PlPgSqlTableSchema>, ExecError> {
+    let given = best_effort_arg_types(&call.args);
+    let Some(routine) = resolve_call(kv, &call.name, &given)? else {
+        return Ok(None);
+    };
+    if routine.language != "plpgsql" {
+        return Ok(None);
+    }
+    if routine.kind != RoutineKind::Function {
+        return Err(wrong_routine_kind(format!(
+            "{} is a procedure\nHINT:  To call a procedure, use CALL.",
+            spelled_signature(&routine)
+        )));
+    }
+    let columns = match &routine.result {
+        RoutineResult::Table(columns) => columns
+            .iter()
+            .map(|(name, ty)| {
+                ty.column.map(|ty| (name.clone(), ty)).ok_or_else(|| {
+                    ExecError::Unsupported(format!(
+                        "function {} returns unsupported type {}",
+                        routine.identity(),
+                        ty.name
+                    ))
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        RoutineResult::Unspecified => routine
+            .output_params()
+            .enumerate()
+            .map(|(index, param)| {
+                param
+                    .ty
+                    .column
+                    .map(|ty| {
+                        (
+                            param
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| format!("column{}", index + 1)),
+                            ty,
+                        )
+                    })
+                    .ok_or_else(|| {
+                        ExecError::Unsupported(format!(
+                            "function {} returns unsupported type {}",
+                            routine.identity(),
+                            param.ty.name
+                        ))
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        RoutineResult::Type { ty, .. } if is_record_type(ty) => call
+            .column_defs
+            .as_ref()
+            .ok_or_else(|| {
+                ExecError::Syntax(format!(
+                    "a column definition list is required for functions returning record: {}",
+                    routine.identity()
+                ))
+            })?
+            .iter()
+            .map(|column| (column.name.clone(), column.ty))
+            .collect(),
+        RoutineResult::Type { ty, .. } => vec![(
+            routine.name.clone(),
+            ty.column.ok_or_else(|| {
+                ExecError::Unsupported(format!(
+                    "function {} returns unsupported type {}",
+                    routine.identity(),
+                    ty.name
+                ))
+            })?,
+        )],
+    };
+    if columns.is_empty() {
+        return Err(ExecError::Unsupported(format!(
+            "function {} has no table result columns",
+            routine.identity()
+        )));
+    }
+    Ok(Some((routine, columns)))
+}
+
+pub(crate) fn eval_plpgsql_table_function(
+    call: &crabka_pgparser::ast::TableFuncCall,
+    ctx: &crate::clock::EvalCtx,
+) -> Result<Option<PlPgSqlTableRows>, ExecError> {
+    SCALAR_RUNTIME.with(|runtime| {
+        let runtime = runtime.borrow();
+        let Some(runtime) = runtime.as_ref().cloned() else {
+            return Ok(None);
+        };
+        let Some((_routine, columns)) =
+            plpgsql_table_function_schema(runtime.catalog.as_ref(), call)?
+        else {
+            return Ok(None);
+        };
+        let mut values = call
+            .args
+            .iter()
+            .map(|arg| crate::eval::eval(arg, &crate::scope::Scope::empty(), &[], ctx))
+            .collect::<Result<Vec<_>, _>>()?;
+        let given = crate::eval::value_arg_types(&call.args, &values);
+        let BoundRoutineCall {
+            routine,
+            args: bound_args,
+        } = bind_call(runtime.catalog.as_ref(), &call.name, &call.args, &given)?
+            .ok_or_else(|| undefined_routine(format!("function {} does not exist", call.name)))?;
+        for default in &bound_args[values.len()..] {
+            values.push(crate::eval::eval(
+                default,
+                &crate::scope::Scope::empty(),
+                &[],
+                ctx,
+            )?);
+        }
+        let params = routine
+            .input_params()
+            .map(|param| param.ty.column)
+            .collect::<Vec<_>>();
+        crate::eval::coerce_unknown_args(&bound_args, &mut values, &params, ctx)?;
+        if routine.strict && values.iter().any(Datum::is_null) {
+            let rows = if routine.returns_set() {
+                Vec::new()
+            } else {
+                vec![vec![Datum::Null; columns.len()]]
+            };
+            return Ok(Some((columns, rows)));
+        }
+        let requests = runtime.requests.ok_or_else(|| {
+            ExecError::Unsupported("PL/pgSQL table function requires a session executor".into())
+        })?;
+        let (reply, response) = std::sync::mpsc::channel();
+        requests
+            .try_send(ScalarFunctionRequest {
+                routine,
+                values,
+                kind: FunctionRequestKind::Table(columns.clone()),
+                reply,
+            })
+            .map_err(|_| {
+                ExecError::ObjectNotInPrerequisiteState("PL/pgSQL function executor stopped".into())
+            })?;
+        match response.recv().map_err(|_| {
+            ExecError::ObjectNotInPrerequisiteState("PL/pgSQL function executor stopped".into())
+        })?? {
+            FunctionRequestResult::Table(rows) => Ok(Some((columns, rows))),
+            FunctionRequestResult::Scalar(value) => Ok(Some((columns, vec![vec![value]]))),
+        }
+    })
+}
+
 /// The statements a `CALL` of a SQL procedure runs, with the call's arguments
 /// substituted for the procedure's parameters.
 pub(crate) fn expand_procedure_call(
@@ -1583,17 +2291,18 @@ pub(crate) fn expand_procedure_call(
     args: &[Expr],
 ) -> Result<Vec<Statement>, ExecError> {
     let given = crate::eval::static_arg_types(args, &crate::scope::Scope::empty())?;
-    let routine = resolve_call(kv, name, &given)?.ok_or_else(|| {
-        undefined_routine(format!(
-            "procedure {name}({}) does not exist",
-            given
-                .iter()
-                .copied()
-                .map(spelled_arg_type)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ))
-    })?;
+    let BoundRoutineCall { routine, args } =
+        bind_call(kv, name, args, &given)?.ok_or_else(|| {
+            undefined_routine(format!(
+                "procedure {name}({}) does not exist",
+                given
+                    .iter()
+                    .copied()
+                    .map(spelled_arg_type)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        })?;
     if routine.kind != RoutineKind::Procedure {
         return Err(wrong_routine_kind(format!(
             "{} is not a procedure\nHINT:  To call a function, use SELECT.",
@@ -1601,7 +2310,6 @@ pub(crate) fn expand_procedure_call(
         )));
     }
     callable(&routine)?;
-    let args = bound_args(&routine, args)?;
     let binding = Binding {
         routine: &routine,
         uses: std::cell::RefCell::new(vec![0; args.len()]),
@@ -2351,7 +3059,8 @@ mod tests {
         let kv = MemKv::default();
         define(
             &kv,
-            "CREATE FUNCTION d(a int, b int DEFAULT 2) RETURNS int AS 'SELECT $1 + $2' LANGUAGE sql",
+            "CREATE FUNCTION d(a int, b int DEFAULT 2) RETURNS int AS 'SELECT $1 + $2' \
+             LANGUAGE sql STRICT",
         )
         .expect("definition");
         for arity in [1_usize, 2] {
@@ -2361,6 +3070,16 @@ mod tests {
                 "arity {arity}"
             );
         }
+        let bound = bind_call(
+            &kv,
+            "d",
+            &[Expr::IntLiteral("1".into())],
+            &[ArgType::Known(ColumnType::Int4)],
+        )
+        .expect("binds")
+        .expect("routine");
+        assert!(bound.routine.strict);
+        assert!(bound.args == vec![Expr::IntLiteral("1".into()), Expr::IntLiteral("2".into())]);
         let error = resolve_call(&kv, "d", &[]).expect_err("no zero-argument overload");
         assert!(sqlstate(&error) == "42883");
     }
@@ -2566,27 +3285,115 @@ mod tests {
     }
 
     #[test]
-    fn calling_a_routine_in_a_language_gres_cannot_run_is_refused() {
+    fn plpgsql_bodies_are_validated_when_defined() {
         let kv = MemKv::default();
-        define(
+        let routine = defined(
             &kv,
             "CREATE FUNCTION plp(a int) RETURNS int LANGUAGE plpgsql AS $$ BEGIN RETURN a; END $$",
+        );
+        let body = parse_plpgsql_body(&routine).expect("stored body reparses");
+        assert!(body.statements.len() == 1);
+
+        let error = define(
+            &kv,
+            "CREATE FUNCTION broken() RETURNS int LANGUAGE plpgsql AS \
+             $$ BEGIN IF THEN RETURN 1; END IF; END $$",
         )
-        .expect("the definition is accepted");
-        let call = FuncCall {
-            name: "plp".into(),
-            distinct: false,
-            args: FuncArgs::Exprs(vec![Expr::IntLiteral("1".into())]),
-            filter: None,
-        };
-        let error = inline_scalar(&kv, &call).expect_err("cannot run PL/pgSQL");
-        assert!(sqlstate(&error) == "0A000");
+        .expect_err("invalid body is rejected");
+        assert!(sqlstate(&error) == "42601");
+        assert!(routines_named(&kv, "broken").expect("catalog").is_empty());
+
+        defined(
+            &kv,
+            "CREATE FUNCTION deferred_sql() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN PERFORM string_agg(v, ',' ORDER BY v) FROM t; RETURN NULL; END $$",
+        );
+    }
+
+    #[test]
+    fn plpgsql_procedure_rejects_return_values_when_defined() {
+        let kv = MemKv::default();
+        let error = define(
+            &kv,
+            "CREATE PROCEDURE bad_return() LANGUAGE plpgsql AS \
+             $$ BEGIN IF true THEN RETURN 1; END IF; END $$",
+        )
+        .expect_err("procedure RETURN value is rejected");
+        assert!(sqlstate(&error) == "42804");
         assert!(
             error
                 .into_pg()
                 .message
-                .contains("Gres has no plpgsql interpreter")
+                .contains("RETURN cannot have a parameter in a procedure")
         );
+        assert!(
+            routines_named(&kv, "bad_return")
+                .expect("catalog")
+                .is_empty()
+        );
+
+        define(
+            &kv,
+            "CREATE PROCEDURE plain_return() LANGUAGE plpgsql AS $$ BEGIN RETURN; END $$",
+        )
+        .expect("a valueless RETURN is valid");
+    }
+
+    #[test]
+    fn plpgsql_requires_a_source_string_body() {
+        let kv = MemKv::default();
+        let error = define(
+            &kv,
+            "CREATE FUNCTION f() RETURNS int LANGUAGE plpgsql RETURN 1",
+        )
+        .expect_err("SQL-standard body is not PL/pgSQL");
+        assert!(sqlstate(&error) == "42P13");
+        assert!(error.into_pg().message == "PL/pgSQL function body must be a string literal");
+    }
+
+    #[test]
+    fn declared_result_helpers_cover_scalar_void_set_and_outputs() {
+        let scalar = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION scalar_result() RETURNS int LANGUAGE plpgsql AS \
+             $$ BEGIN RETURN 1; END $$",
+        );
+        assert!(declared_scalar_result_type(&scalar) == Some(ColumnType::Int4));
+        assert!(!declared_returns_void(&scalar));
+        assert!(!declared_returns_set(&scalar));
+        assert!(declared_output_parameter_count(&scalar) == 0);
+
+        let void = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION void_result() RETURNS void LANGUAGE plpgsql AS \
+             $$ BEGIN RETURN; END $$",
+        );
+        assert!(declared_returns_void(&void));
+        assert!(declared_scalar_result_type(&void).is_none());
+
+        let set = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION set_result() RETURNS SETOF int LANGUAGE plpgsql AS \
+             $$ BEGIN RETURN NEXT 1; END $$",
+        );
+        assert!(declared_returns_set(&set));
+        assert!(declared_scalar_result_type(&set).is_none());
+
+        let outputs = defined(
+            &MemKv::default(),
+            "CREATE FUNCTION output_result(IN a int, OUT b int, OUT c text) LANGUAGE plpgsql AS \
+             $$ BEGIN b := a; c := 'x'; END $$",
+        );
+        assert!(declared_output_parameter_count(&outputs) == 2);
+        assert!(declared_scalar_result_type(&outputs).is_none());
+    }
+
+    #[test]
+    fn record_return_recognition_covers_named_and_resolved_forms() {
+        assert!(is_record_type(&RoutineType::named("record".into())));
+        assert!(is_record_type(&RoutineType::builtin(ColumnType::Record(
+            None
+        ))));
     }
 
     #[test]

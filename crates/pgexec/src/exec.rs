@@ -6793,6 +6793,7 @@ pub(crate) fn scan_live_interval(
     let mut out: Vec<ScannedRow> = Vec::new();
     let mut i = 0;
     while i < scanned.len() {
+        crate::session::check_query_canceled()?;
         let prefix = crabka_pgmvcc::version::row_prefix_of(&scanned[i].0)?.to_vec();
         let rowid = physical_rowid(table, &prefix)?;
         if !interval.contains(rowid) {
@@ -6850,6 +6851,7 @@ pub(crate) fn scan_ts_live_interval(
     let mut out = Vec::new();
     let mut i = 0;
     while i < scanned.len() {
+        crate::session::check_query_canceled()?;
         let prefix = crabka_pgmvcc::version::row_prefix_of(&scanned[i].0)?.to_vec();
         let rowid = physical_rowid(table, &prefix)?;
         let bucket = physical_bucket(table, &prefix)?;
@@ -8174,6 +8176,18 @@ fn build_table_expr(
             column_aliases,
             ..
         } if crate::routine::expands_as_table(read_ctx.catalog_kv, functions) => {
+            if let Some((columns, rows)) =
+                crate::routine::eval_plpgsql_table_function(&functions[0], ctx)?
+            {
+                return crate::srf::user_function_relation(
+                    &functions[0].name,
+                    columns,
+                    rows,
+                    *with_ordinality,
+                    alias.as_deref(),
+                    column_aliases,
+                );
+            }
             if *with_ordinality {
                 return Err(ExecError::Unsupported(
                     "WITH ORDINALITY over a user-defined function is not supported".into(),
@@ -9469,12 +9483,27 @@ fn build_table_expr_schema_with_ctes(
             alias,
             column_aliases,
             ..
-        } => crate::srf::from_item_schema(
-            functions,
-            *with_ordinality,
-            alias.as_deref(),
-            column_aliases,
-        ),
+        } => {
+            if functions.len() == 1
+                && let Some((_routine, columns)) =
+                    crate::routine::plpgsql_table_function_schema(catalog_kv, &functions[0])?
+            {
+                return crate::srf::user_function_relation(
+                    &functions[0].name,
+                    columns,
+                    Vec::new(),
+                    *with_ordinality,
+                    alias.as_deref(),
+                    column_aliases,
+                );
+            }
+            crate::srf::from_item_schema(
+                functions,
+                *with_ordinality,
+                alias.as_deref(),
+                column_aliases,
+            )
+        }
     }
 }
 
@@ -11329,10 +11358,12 @@ pub(crate) fn execute_read(
     read_ctx: &crate::subquery::SubCtx<'_>,
     stmt: &Statement,
 ) -> Result<QueryResult, ExecError> {
+    crate::session::check_query_canceled()?;
     let Statement::Query(q) = stmt else {
         return Err(ExecError::Unsupported("not a query statement".into()));
     };
     let rel = crate::query::query_to_relation(read_ctx, q)?;
+    crate::session::check_query_canceled()?;
     Ok(crate::query::relation_to_rows_result(
         rel,
         read_ctx.eval_ctx,
@@ -11890,7 +11921,7 @@ pub(crate) fn rows_result(
     )
 }
 
-fn rows_result_with_tag(
+pub(crate) fn rows_result_with_tag(
     fields: Vec<FieldDescription>,
     projected: &[Vec<Datum>],
     style: crabka_pgtypes::encoding::OutputStyle<'_>,

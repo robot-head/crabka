@@ -1247,7 +1247,9 @@ mod tests {
         for error in cases {
             let pg = error.clone().into_pg();
             assert!(
-                pg.detail.is_none() && pg.hint.is_none(),
+                pg.diagnostics
+                    .as_deref()
+                    .is_none_or(|fields| fields.detail.is_none() && fields.hint.is_none()),
                 "unexpected secondary fields for {error:?}"
             );
         }

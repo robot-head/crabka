@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     engine::{
         BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, Notification, QueryResult,
-        Session, TxStatus,
+        ResultPage, ResultSink, Session, TxStatus,
     },
     error::{PgError, Severity, sqlstate},
     messages::{
@@ -301,6 +301,7 @@ async fn handle_execute<Sess: Session>(
     portal_name: &str,
     max_rows: i32,
     token: CancellationToken,
+    notices: Option<&mut mpsc::Receiver<PgError>>,
     out: &mut BytesMut,
 ) -> Result<Option<CopyInState>, PgError> {
     if max_rows < 0 {
@@ -314,12 +315,14 @@ async fn handle_execute<Sess: Session>(
         // (the pending flag from the extended-batch window) must win even
         // against an engine future that is ready on its first poll.
         biased;
-        () = token.cancelled() => return Err(PgError::error(
-            sqlstate::QUERY_CANCELED,
-            "canceling statement due to user request",
-        )),
-        r = session.execute(portal_name, max_rows.cast_unsigned()) => r?,
+        () = token.cancelled() => None,
+        r = session.execute(portal_name, max_rows.cast_unsigned()) => Some(r?),
     };
+    let Some(outcome) = outcome else {
+        session.cancel_current_query().await;
+        return Err(query_canceled());
+    };
+    write_notices(out, notices);
     if let ExecuteOutcome::CopyIn { response } = outcome {
         write_copy_in_response(out, &response);
         return Ok(Some(CopyInState {
@@ -331,6 +334,13 @@ async fn handle_execute<Sess: Session>(
     }
     encode_execute_outcome(out, outcome)?;
     Ok(None)
+}
+
+fn query_canceled() -> PgError {
+    PgError::error(
+        sqlstate::QUERY_CANCELED,
+        "canceling statement due to user request",
+    )
 }
 
 fn encode_execute_outcome(out: &mut BytesMut, outcome: ExecuteOutcome) -> Result<(), PgError> {
@@ -482,10 +492,18 @@ where
     }
 }
 
-// ── Asynchronous notifications ──────────────────────────────────────────────
+// ── Asynchronous diagnostics and notifications ─────────────────────────────
+
+fn write_notices(out: &mut BytesMut, notices: Option<&mut mpsc::Receiver<PgError>>) {
+    if let Some(rx) = notices {
+        while let Ok(notice) = rx.try_recv() {
+            backend::notice_response(out, &notice);
+        }
+    }
+}
 
 /// Write the `ReadyForQuery` that closes an exchange, preceded by any pending
-/// `NotificationResponse` messages.
+/// `NoticeResponse` and `NotificationResponse` messages.
 ///
 /// Postgres delivers notifications only between transactions: a session that
 /// is idle *in* a transaction block accumulates them until the block ends, so
@@ -493,8 +511,10 @@ where
 fn write_ready<Sess: Session>(
     out: &mut BytesMut,
     session: &Sess,
+    notices: Option<&mut mpsc::Receiver<PgError>>,
     notifications: Option<&mut mpsc::Receiver<Notification>>,
 ) {
+    write_notices(out, notices);
     let status = session.tx_status();
     if status == TxStatus::Idle
         && let Some(rx) = notifications
@@ -606,18 +626,16 @@ where
     // built with is the one just announced in `BackendKeyData`, so a
     // self-notify reaches the client stamped with its own pid.
     let mut session = engine.connect_with_pid(cancel.pid);
-    // The loop, not the session, owns the notification stream: taking it once
-    // here keeps the idle `select!` free of a second borrow of `session`.
+    // The loop, not the session, owns the asynchronous streams: taking them
+    // once here avoids a second borrow of `session` during protocol handling.
     let mut notifications = session.take_notifications();
+    let mut notices = session.take_notices();
 
-    write_ready(&mut out, &session, notifications.as_mut());
+    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
     stream.write_all(&out).await?;
     out.clear();
 
-    // The message loop is wrapped so that however it ends — a Terminate, a
-    // protocol error, a client that went away, or an I/O failure — the session
-    // is torn down exactly once on the way out. Temporary relations die with
-    // the session that made them, and this is where they go.
+    // Always terminate the engine session, regardless of how the protocol loop exits.
     let outcome: std::io::Result<()> = async {
         let mut ext = ExtendedState::default();
         let mut copy_in: Option<CopyInState> = None;
@@ -656,14 +674,11 @@ where
                         let CopyInState { target, chunks } =
                             copy_in.take().expect("copy state present");
                         let extended = matches!(target, CopyInTarget::Portal { .. });
-                        activity.touch();
+                        let _statement_activity = activity.begin_statement().await;
                         let token = cancel.begin_query();
                         let outcome = tokio::select! {
                             biased;
-                            () = token.cancelled() => Err(PgError::error(
-                                sqlstate::QUERY_CANCELED,
-                                "canceling statement due to user request",
-                            )),
+                            () = token.cancelled() => None,
                             r = async {
                                 match &target {
                                     CopyInTarget::Statement { sql } => {
@@ -673,8 +688,15 @@ where
                                         session.copy_in_portal(name, chunks).await
                                     }
                                 }
-                            } => r,
+                            } => Some(r),
                         };
+                        let outcome = if let Some(outcome) = outcome {
+                            outcome
+                        } else {
+                            session.cancel_current_query().await;
+                            Err(query_canceled())
+                        };
+                        write_notices(&mut out, notices.as_mut());
                         match outcome {
                             Ok(QueryResult::Command { tag }) => {
                                 backend::command_complete(&mut out, &tag);
@@ -702,7 +724,12 @@ where
                         // CopyDone) produces ReadyForQuery; simple protocol owes
                         // it now.
                         if !extended {
-                            write_ready(&mut out, &session, notifications.as_mut());
+                            write_ready(
+                                &mut out,
+                                &session,
+                                notices.as_mut(),
+                                notifications.as_mut(),
+                            );
                         }
                         stream.write_all(&out).await?;
                         out.clear();
@@ -720,7 +747,12 @@ where
                             fail_extended(&mut ext, &mut out, &e);
                         } else {
                             backend::error_response(&mut out, &e);
-                            write_ready(&mut out, &session, notifications.as_mut());
+                            write_ready(
+                                &mut out,
+                                &session,
+                                notices.as_mut(),
+                                notifications.as_mut(),
+                            );
                         }
                         stream.write_all(&out).await?;
                         out.clear();
@@ -743,18 +775,22 @@ where
             match msg {
                 FrontendMessage::Terminate => return Ok(()),
                 FrontendMessage::Query { sql } => {
-                    activity.touch();
+                    let _statement_activity = activity.begin_statement().await;
                     let token = cancel.begin_query();
                     let copy_start = tokio::select! {
                         biased;
-                        () = token.cancelled() => Err(PgError::error(
-                            sqlstate::QUERY_CANCELED,
-                            "canceling statement due to user request",
-                        )),
-                        r = session.begin_copy_in(&sql) => r,
+                        () = token.cancelled() => None,
+                        r = session.begin_copy_in(&sql) => Some(r),
+                    };
+                    let copy_start = if let Some(copy_start) = copy_start {
+                        copy_start
+                    } else {
+                        session.cancel_current_query().await;
+                        Err(query_canceled())
                     };
                     match copy_start {
                         Ok(Some(response)) => {
+                            write_notices(&mut out, notices.as_mut());
                             write_copy_in_response(&mut out, &response);
                             stream.write_all(&out).await?;
                             out.clear();
@@ -766,26 +802,40 @@ where
                         }
                         Ok(None) => {}
                         Err(e) => {
+                            write_notices(&mut out, notices.as_mut());
                             backend::error_response(&mut out, &e);
-                            write_ready(&mut out, &session, notifications.as_mut());
+                            write_ready(
+                                &mut out,
+                                &session,
+                                notices.as_mut(),
+                                notifications.as_mut(),
+                            );
                             stream.write_all(&out).await?;
                             out.clear();
                             continue;
                         }
                     }
                     let token = cancel.begin_query();
+                    let mut sink = WireResultSink {
+                        out: &mut out,
+                        notices: notices.as_mut(),
+                    };
                     let outcome = tokio::select! {
                         // biased + cancellation-first; see handle_execute.
                         biased;
-                        () = token.cancelled() => Err(PgError::error(
-                            sqlstate::QUERY_CANCELED,
-                            "canceling statement due to user request",
-                        )),
-                        r = session.simple_query(&sql) => r,
+                        () = token.cancelled() => None,
+                        r = session.simple_query_into(&sql, 1024, &mut sink) => Some(r),
+                    };
+                    let outcome = if let Some(outcome) = outcome {
+                        outcome
+                    } else {
+                        session.cancel_current_query().await;
+                        Err(query_canceled())
                     };
                     match outcome {
-                        Ok(results) => write_results(&mut out, &results),
+                        Ok(()) => {}
                         Err(e) => {
+                            write_notices(&mut out, notices.as_mut());
                             backend::error_response(&mut out, &e);
                             if e.severity == Severity::Fatal {
                                 stream.write_all(&out).await?;
@@ -793,16 +843,18 @@ where
                             }
                         }
                     }
-                    write_ready(&mut out, &session, notifications.as_mut());
+                    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
                     stream.write_all(&out).await?;
                     out.clear();
                 }
                 FrontendMessage::Sync => {
-                    if let Err(e) = session.sync().await {
+                    let result = session.sync().await;
+                    write_notices(&mut out, notices.as_mut());
+                    if let Err(e) = result {
                         backend::error_response(&mut out, &e);
                     }
                     ext.failed = false;
-                    write_ready(&mut out, &session, notifications.as_mut());
+                    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
                     stream.write_all(&out).await?;
                     out.clear();
                 }
@@ -864,16 +916,23 @@ where
                     if ext.failed {
                         continue;
                     }
-                    activity.touch();
+                    let _statement_activity = activity.begin_statement().await;
                     // Cancel window: between extended messages no engine future runs; the pending flag in CancelRegistry makes a cancel received there fire on the next engine call.
                     let token = cancel.begin_query();
-                    match handle_execute(&mut session, &portal, max_rows, token, &mut out).await {
+                    match handle_execute(
+                        &mut session,
+                        &portal,
+                        max_rows,
+                        token,
+                        notices.as_mut(),
+                        &mut out,
+                    )
+                    .await
+                    {
                         Ok(Some(copy_start)) => copy_in = Some(copy_start),
                         Ok(None) => {}
                         Err(e) => {
-                            if e.code == sqlstate::QUERY_CANCELED {
-                                session.mark_statement_failed();
-                            }
+                            write_notices(&mut out, notices.as_mut());
                             fail_extended(&mut ext, &mut out, &e);
                         }
                     }
@@ -928,24 +987,42 @@ where
     outcome
 }
 
-/// Simple protocol always sends text format.
-fn write_results(out: &mut BytesMut, results: &[QueryResult]) {
-    for result in results {
-        match result {
-            QueryResult::Rows { fields, rows, tag } => {
-                backend::row_description(out, fields);
-                for row in rows {
-                    let values: Vec<Option<Bytes>> = row
-                        .iter()
-                        .map(|c| c.as_ref().map(|c| c.text.clone()))
-                        .collect();
-                    backend::data_row(out, &values);
+struct WireResultSink<'a> {
+    out: &'a mut BytesMut,
+    notices: Option<&'a mut mpsc::Receiver<PgError>>,
+}
+
+#[async_trait::async_trait]
+impl ResultSink for WireResultSink<'_> {
+    async fn send(&mut self, page: ResultPage) -> Result<(), PgError> {
+        write_notices(self.out, self.notices.as_deref_mut());
+        match page {
+            ResultPage::Rows {
+                fields, rows, tag, ..
+            } => {
+                if let Some(fields) = fields {
+                    backend::row_description(self.out, &fields);
                 }
-                backend::command_complete(out, tag);
+                for row in rows {
+                    let values = row
+                        .into_iter()
+                        .map(|cell| cell.map(|cell| cell.text))
+                        .collect::<Vec<_>>();
+                    backend::data_row(self.out, &values);
+                }
+                if let Some(tag) = tag {
+                    backend::command_complete(self.out, &tag);
+                }
             }
-            QueryResult::Command { tag } => backend::command_complete(out, tag),
-            QueryResult::Empty => backend::empty_query_response(out),
+            ResultPage::Command { tag, .. } => backend::command_complete(self.out, &tag),
+            ResultPage::Empty { .. } => backend::empty_query_response(self.out),
         }
+        Ok(())
+    }
+
+    async fn send_notice(&mut self, notice: PgError) -> Result<(), PgError> {
+        backend::notice_response(self.out, &notice);
+        Ok(())
     }
 }
 
