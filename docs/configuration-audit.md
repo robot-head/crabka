@@ -6374,8 +6374,8 @@ The former `-ns`, `-ms`, and `-secs` flags remain visible aliases. Bare values
 passed through those aliases retain their former units, while both aliases and
 primary flags also accept UOM strings. Defaults remain 30m, 5s, 10s, absent
 file overrides, and the configured histogram list. Positive deployment
-durations reject zero; collection interval and edge TTL retain their supported
-zero values.
+durations and collection interval reject zero; edge TTL retains its supported
+zero value.
 
 Legacy-alias, UOM CLI, environment-precedence, default, and runtime wiring
 tests pass. No CRD owns the standalone traces process. This closes only the
@@ -6413,6 +6413,19 @@ exact nanoseconds. The compaction defaults remain epoch start through
 `i64::MAX`; an omitted live frontier remains zero at the frontend boundary.
 Legacy-alias, UOM CLI, environment-precedence, and runtime-wiring tests pass.
 This closes the remaining dimensioned traces process arguments; the
+repository-wide hardcoded operational-value audit remains active.
+
+## Traces Interval Floor Closure
+
+The live-store index refresh now honors the configured positive block-builder
+window directly, including subsecond values, instead of silently clamping it
+to one second. The metrics-generator likewise uses its configured collection
+interval directly; zero now returns an invalid-input startup error rather than
+being silently rewritten to one second.
+
+CLI and service-level zero rejection and the complete Traces suite pass. The
+removed one-second literals were hidden policy, not protocol or safety
+constants. This closes the remaining Traces production cadence literals; the
 repository-wide hardcoded operational-value audit remains active.
 
 ## Traces Process Boundary Completion

@@ -39,7 +39,7 @@ use crabka_traces::{
 use crabka_units::{
     ByteSize, Frequency, Time,
     convert::{ByteSizeExt as _, FrequencyExt, TimeExt as _},
-    kibibytes, parse, secs,
+    kibibytes, parse,
 };
 use num_traits::ToPrimitive as _;
 use object_store::{ObjectStore, path::Path};
@@ -334,7 +334,7 @@ struct Cli {
         long = "collection-interval",
         visible_alias = "collection-interval-secs",
         env = "CRABKA_TRACES_COLLECTION_INTERVAL",
-        value_parser = parse_non_negative_time_or_secs
+        value_parser = parse_positive_time_or_secs
     )]
     collection_interval: Option<Time>,
     #[arg(long, env = "CRABKA_TRACES_MAX_EXEMPLARS_PER_SERIES")]
@@ -780,7 +780,7 @@ async fn run_querier(
     let refresh_shutdown = shutdown.clone();
     let refresh_store = Arc::clone(&store);
     let refresh_index = Arc::clone(&trace_index);
-    let refresh_interval = cli.block_builder_window.max(secs(1));
+    let refresh_interval = cli.block_builder_window;
     let index_snapshot_max = cli.index_snapshot_max;
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(refresh_interval.to_std());
@@ -1268,7 +1268,7 @@ async fn run_metrics_generator(
             cli.metrics_generator_poll_batch_size,
             cli.metrics_generator_poll_error_backoff,
         );
-    service.run(shutdown).await;
+    service.run(shutdown).await?;
     Ok(())
 }
 
@@ -1356,7 +1356,7 @@ mod tests {
         http::{Request, StatusCode as HttpStatusCode},
     };
     use clap::{CommandFactory as _, Parser};
-    use crabka_units::minutes;
+    use crabka_units::{minutes, secs};
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
@@ -2509,6 +2509,14 @@ mod tests {
                 Some(secs(15)),
                 Some(vec![crabka_units::millis(3), crabka_units::millis(4)]),
             )
+        );
+        check!(
+            Cli::try_parse_from([
+                "crabka-traces",
+                "--target=metrics-generator",
+                "--collection-interval=0s",
+            ])
+            .is_err()
         );
     }
 

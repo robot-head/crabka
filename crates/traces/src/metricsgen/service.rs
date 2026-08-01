@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crabka_units::{Time, convert::TimeExt as _, millis, secs};
+use crabka_units::{Time, convert::TimeExt as _, millis};
 use tokio_util::sync::CancellationToken;
 
 use crate::metricsgen::{
@@ -250,9 +250,17 @@ where
         }
     }
 
-    pub async fn run(self, shutdown: CancellationToken) {
-        let interval = self.cfg.collection_interval.max(secs(1));
-        let mut ticker = tokio::time::interval(interval.to_std());
+    /// # Errors
+    ///
+    /// Returns an invalid-input error when the collection interval is not positive.
+    pub async fn run(self, shutdown: CancellationToken) -> std::io::Result<()> {
+        if self.cfg.collection_interval <= Time::ZERO {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "metrics-generator collection interval must be positive",
+            ));
+        }
+        let mut ticker = tokio::time::interval(self.cfg.collection_interval.to_std());
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -261,7 +269,7 @@ where
                     if let Err(err) = self.collect_once().await {
                         tracing::warn!(error = %err, "metrics-generator final flush failed");
                     }
-                    return;
+                    return Ok(());
                 }
                 _ = ticker.tick() => {
                     if let Err(err) = self.collect_once().await {
@@ -334,6 +342,23 @@ mod tests {
         assert2::assert!(
             (configured.poll_batch_size, configured.poll_error_backoff) == (7, millis(11))
         );
+    }
+
+    #[tokio::test]
+    async fn run_rejects_non_positive_collection_interval() {
+        let source = Arc::new(MockSpanSource::default());
+        let sink = Arc::new(MockRemoteWriteSink::default());
+        let service = MetricsGenService::new(
+            MetricsGenConfig {
+                collection_interval: Time::ZERO,
+                ..MetricsGenConfig::default()
+            },
+            Arc::new(MockClock::new(0)),
+            source,
+            sink,
+        );
+        let error = service.run(CancellationToken::new()).await.unwrap_err();
+        assert2::assert!(error.kind() == std::io::ErrorKind::InvalidInput);
     }
 
     #[tokio::test]
