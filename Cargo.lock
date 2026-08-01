@@ -11212,14 +11212,23 @@ checksum = "5a651516ddc9168ebd67b24afd085a718be02f8858fe406591b013d101ce2f40"
 
 [[package]]
 name = "qubit-clock"
-version = "0.8.1"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "78fd5f61da2a970d1b637134429f107f7a8d119227ad31e5f3c9b8cc5ef7df08"
+checksum = "44724c36c9518bcff289afc2c2cb86b9f4a202552817be0ffe549f918de76c86"
 dependencies = [
- "chrono",
- "chrono-tz",
- "parking_lot",
+ "pin-project-lite",
+ "qubit-collections",
+ "thiserror 2.0.19",
  "tokio",
+]
+
+[[package]]
+name = "qubit-collections"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fcb596d37e055a48800f0381926881152612b9171cad3be8e91dee97daee6f5b"
+dependencies = [
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
