@@ -237,6 +237,10 @@ spec:
                     description: Tenant lifecycle reconciliation interval.
                     nullable: true
                     type: string
+                  range0BarrierReplyBudget:
+                    description: Whole-reply budget for range-0 barriers.
+                    nullable: true
+                    type: string
                   range0FollowerPollInterval:
                     description: Periodic range-0 follower refresh cadence.
                     nullable: true
@@ -247,6 +251,90 @@ spec:
                     type: string
                   range0FollowerRebuildBackoffFloor:
                     description: Initial delay before retrying consecutive range-0 follower rebuilds.
+                    nullable: true
+                    type: string
+                  range0WaitTimeout:
+                    description: Range-0 catch-up wait timeout.
+                    nullable: true
+                    type: string
+                  rangeCrossRangeLockWaitCap:
+                    description: Lock-wait cap for cross-range transactions.
+                    nullable: true
+                    type: string
+                  rangeDecisionReleaseLagRetries:
+                    description: Decision-release lag retry count.
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeDecisionReleaseRetryBackoff:
+                    description: Decision-release retry backoff.
+                    nullable: true
+                    type: string
+                  rangeDurableInspectMaxRecords:
+                    description: Durable range-inspection record ceiling.
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeDurableInspectMaxSize:
+                    description: Durable range-inspection byte ceiling.
+                    nullable: true
+                    type: string
+                  rangeHlcHorizonHeadroom:
+                    description: Wall-clock headroom persisted by the HLC oracle.
+                    nullable: true
+                    type: string
+                  rangeLogicalBasePersistStride:
+                    description: Initial logical horizon persistence stride.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeLogicalMaxPersistStride:
+                    description: Maximum adaptive logical horizon persistence stride.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeLogicalMinPersistInterval:
+                    description: Minimum interval between logical horizon persists.
+                    nullable: true
+                    type: string
+                  rangeRemoteSessionIdle:
+                    description: Hosted remote-session idle retention.
+                    nullable: true
+                    type: string
+                  rangeRemoteSessionMax:
+                    description: Maximum hosted remote sessions.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeRpcFrameMax:
+                    description: Maximum encoded range RPC frame size.
+                    nullable: true
+                    type: string
+                  rangeRpcPoolIdleTtl:
+                    description: Range RPC client-pool idle connection lifetime.
+                    nullable: true
+                    type: string
+                  rangeRpcPoolMaxIdlePerEndpoint:
+                    description: Maximum idle range RPC connections retained per endpoint.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeRpcRequestTimeout:
+                    description: Deadline for one range RPC request.
+                    nullable: true
+                    type: string
+                  rangeRpcServerIdleTimeout:
+                    description: Range RPC server connection idle timeout.
+                    nullable: true
+                    type: string
+                  rangeTsoHeartbeatInterval:
+                    description: Timestamp-oracle heartbeat cadence.
                     nullable: true
                     type: string
                   readinessProbePeriodSeconds:

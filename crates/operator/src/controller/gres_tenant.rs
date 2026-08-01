@@ -2153,6 +2153,49 @@ fn wal_consumer_admin_args(policy: &EffectiveGresComputePolicy) -> [String; 28] 
     ]
 }
 
+fn range_runtime_args(policy: crabka_gres_ranges::RangeRuntimePolicy) -> Vec<String> {
+    vec![
+        "--range-rpc-frame-max".to_owned(),
+        policy.rpc_frame_max.human().to_string(),
+        "--range-rpc-request-timeout".to_owned(),
+        policy.rpc_request_timeout.human().to_string(),
+        "--range-rpc-server-idle-timeout".to_owned(),
+        policy.rpc_server_idle_timeout.human().to_string(),
+        "--range-rpc-pool-idle-ttl".to_owned(),
+        policy.rpc_pool_idle_ttl.human().to_string(),
+        "--range-rpc-pool-max-idle-per-endpoint".to_owned(),
+        policy.rpc_pool_max_idle_per_endpoint.get().to_string(),
+        "--range-remote-session-idle".to_owned(),
+        policy.remote_session_idle.human().to_string(),
+        "--range-remote-session-max".to_owned(),
+        policy.remote_session_max.get().to_string(),
+        "--range0-wait-timeout".to_owned(),
+        policy.range0_wait_timeout.human().to_string(),
+        "--range0-barrier-reply-budget".to_owned(),
+        policy.range0_barrier_reply_budget.human().to_string(),
+        "--range-cross-range-lock-wait-cap".to_owned(),
+        policy.cross_range_lock_wait_cap.human().to_string(),
+        "--range-durable-inspect-max-records".to_owned(),
+        policy.durable_inspect_max_records.get().to_string(),
+        "--range-durable-inspect-max-size".to_owned(),
+        policy.durable_inspect_max_size.human().to_string(),
+        "--range-decision-release-lag-retries".to_owned(),
+        policy.decision_release_lag_retries.get().to_string(),
+        "--range-decision-release-retry-backoff".to_owned(),
+        policy.decision_release_retry_backoff.human().to_string(),
+        "--range-tso-heartbeat-interval".to_owned(),
+        policy.tso_heartbeat_interval.human().to_string(),
+        "--range-logical-min-persist-interval".to_owned(),
+        policy.logical_min_persist_interval.human().to_string(),
+        "--range-logical-base-persist-stride".to_owned(),
+        policy.logical_base_persist_stride.get().to_string(),
+        "--range-logical-max-persist-stride".to_owned(),
+        policy.logical_max_persist_stride.get().to_string(),
+        "--range-hlc-horizon-headroom".to_owned(),
+        policy.hlc_horizon_headroom.human().to_string(),
+    ]
+}
+
 #[allow(clippy::too_many_lines)]
 fn render_deployment(
     obj: &GresTenant,
@@ -2203,6 +2246,7 @@ fn render_deployment(
     args.extend(wal_consumer_admin_args(&compute_policy));
     args.extend(wal_producer_args(&compute_policy));
     if config.range_control_enabled {
+        args.extend(range_runtime_args(compute_policy.range_runtime_policy));
         args.extend([
             "--ranges".to_owned(),
             ranges.clone(),
@@ -4366,5 +4410,29 @@ mod tests {
         // thresholds stay at the runtime defaults.
         assert!(!args.iter().any(|arg| arg == "--checkpoint-frames"));
         assert!(!args.iter().any(|arg| arg == "--checkpoint-bytes"));
+    }
+
+    #[test]
+    fn range_runtime_policy_renders_every_gres_flag() {
+        let policy = crabka_gres_ranges::RangeRuntimePolicy {
+            rpc_frame_max: crabka_units::mebibytes(2),
+            remote_session_max: crabka_gres_ranges::PositiveUsize::new(17).unwrap(),
+            ..Default::default()
+        };
+        let args = range_runtime_args(policy);
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--range-rpc-frame-max", "2MiB"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--range-remote-session-max", "17"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--range-hlc-horizon-headroom", "128ms"])
+        );
+        assert!(args.len() == 38);
     }
 }

@@ -797,6 +797,9 @@ spec:
                           format: int32
                           minimum: 1.0
                           type: integer
+                        maxTimeSkew:
+                          minLength: 1
+                          type: string
                         principalToLocalRules:
                           items:
                             minLength: 1

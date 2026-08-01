@@ -315,6 +315,153 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub range0_follower_rebuild_backoff_ceiling: Option<Time>,
 
+    /// Maximum encoded range RPC frame size.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range_rpc_frame_max: Option<ByteSize>,
+
+    /// Deadline for one range RPC request.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range_rpc_request_timeout: Option<Time>,
+
+    /// Range RPC server connection idle timeout.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range_rpc_server_idle_timeout: Option<Time>,
+
+    /// Range RPC client-pool idle connection lifetime.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range_rpc_pool_idle_ttl: Option<Time>,
+
+    /// Maximum idle range RPC connections retained per endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_rpc_pool_max_idle_per_endpoint: Option<usize>,
+
+    /// Hosted remote-session idle retention.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range_remote_session_idle: Option<Time>,
+
+    /// Maximum hosted remote sessions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_remote_session_max: Option<usize>,
+
+    /// Range-0 catch-up wait timeout.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range0_wait_timeout: Option<Time>,
+
+    /// Whole-reply budget for range-0 barriers.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range0_barrier_reply_budget: Option<Time>,
+
+    /// Lock-wait cap for cross-range transactions.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range_cross_range_lock_wait_cap: Option<Time>,
+
+    /// Durable range-inspection record ceiling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_durable_inspect_max_records: Option<u32>,
+
+    /// Durable range-inspection byte ceiling.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range_durable_inspect_max_size: Option<ByteSize>,
+
+    /// Decision-release lag retry count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_decision_release_lag_retries: Option<u32>,
+
+    /// Decision-release retry backoff.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range_decision_release_retry_backoff: Option<Time>,
+
+    /// Timestamp-oracle heartbeat cadence.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range_tso_heartbeat_interval: Option<Time>,
+
+    /// Minimum interval between logical horizon persists.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range_logical_min_persist_interval: Option<Time>,
+
+    /// Initial logical horizon persistence stride.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_logical_base_persist_stride: Option<u64>,
+
+    /// Maximum adaptive logical horizon persistence stride.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub range_logical_max_persist_stride: Option<u64>,
+
+    /// Wall-clock headroom persisted by the HLC oracle.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub range_hlc_horizon_headroom: Option<Time>,
+
     /// Deadline for one durable record inspection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[serde(with = "crabka_units::serde_units::human::option_time")]
@@ -507,6 +654,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) range0_follower_poll_interval_ms: PositiveMillis,
     pub(crate) range0_follower_rebuild_backoff_floor_ms: PositiveMillis,
     pub(crate) range0_follower_rebuild_backoff_ceiling_ms: PositiveMillis,
+    pub(crate) range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy,
     pub(crate) durable_inspection_timeout_ms: PositiveMillis,
     pub(crate) durable_inspection_fold_max_records: PositiveUsize,
     pub(crate) durable_inspection_fold_max_size: ByteSize,
@@ -567,6 +715,81 @@ impl GresComputeSpec {
             durable_inspection_fold_max_size,
         )?;
         let schema_fetch_retry_defaults = crabka_schema_serde::SchemaFetchRetryPolicy::default();
+        let range_defaults = crabka_gres_ranges::RangeRuntimePolicy::default();
+        let range_runtime_policy = crabka_gres_ranges::RangeRuntimePolicy {
+            rpc_frame_max: self
+                .range_rpc_frame_max
+                .unwrap_or(range_defaults.rpc_frame_max),
+            rpc_request_timeout: self
+                .range_rpc_request_timeout
+                .unwrap_or(range_defaults.rpc_request_timeout),
+            rpc_server_idle_timeout: self
+                .range_rpc_server_idle_timeout
+                .unwrap_or(range_defaults.rpc_server_idle_timeout),
+            rpc_pool_idle_ttl: self
+                .range_rpc_pool_idle_ttl
+                .unwrap_or(range_defaults.rpc_pool_idle_ttl),
+            rpc_pool_max_idle_per_endpoint: crabka_gres_ranges::PositiveUsize::new(
+                self.range_rpc_pool_max_idle_per_endpoint
+                    .unwrap_or(range_defaults.rpc_pool_max_idle_per_endpoint.get()),
+            )
+            .map_err(|error| format!("spec.compute.rangeRpcPoolMaxIdlePerEndpoint: {error}"))?,
+            remote_session_idle: self
+                .range_remote_session_idle
+                .unwrap_or(range_defaults.remote_session_idle),
+            remote_session_max: crabka_gres_ranges::PositiveUsize::new(
+                self.range_remote_session_max
+                    .unwrap_or(range_defaults.remote_session_max.get()),
+            )
+            .map_err(|error| format!("spec.compute.rangeRemoteSessionMax: {error}"))?,
+            range0_wait_timeout: self
+                .range0_wait_timeout
+                .unwrap_or(range_defaults.range0_wait_timeout),
+            range0_barrier_reply_budget: self
+                .range0_barrier_reply_budget
+                .unwrap_or(range_defaults.range0_barrier_reply_budget),
+            cross_range_lock_wait_cap: self
+                .range_cross_range_lock_wait_cap
+                .unwrap_or(range_defaults.cross_range_lock_wait_cap),
+            durable_inspect_max_records: crabka_gres_ranges::PositiveU32::new(
+                self.range_durable_inspect_max_records
+                    .unwrap_or(range_defaults.durable_inspect_max_records.get()),
+            )
+            .map_err(|error| format!("spec.compute.rangeDurableInspectMaxRecords: {error}"))?,
+            durable_inspect_max_size: self
+                .range_durable_inspect_max_size
+                .unwrap_or(range_defaults.durable_inspect_max_size),
+            decision_release_lag_retries: crabka_gres_ranges::PositiveU32::new(
+                self.range_decision_release_lag_retries
+                    .unwrap_or(range_defaults.decision_release_lag_retries.get()),
+            )
+            .map_err(|error| format!("spec.compute.rangeDecisionReleaseLagRetries: {error}"))?,
+            decision_release_retry_backoff: self
+                .range_decision_release_retry_backoff
+                .unwrap_or(range_defaults.decision_release_retry_backoff),
+            tso_heartbeat_interval: self
+                .range_tso_heartbeat_interval
+                .unwrap_or(range_defaults.tso_heartbeat_interval),
+            logical_min_persist_interval: self
+                .range_logical_min_persist_interval
+                .unwrap_or(range_defaults.logical_min_persist_interval),
+            logical_base_persist_stride: crabka_gres_ranges::PositiveU64::new(
+                self.range_logical_base_persist_stride
+                    .unwrap_or(range_defaults.logical_base_persist_stride.get()),
+            )
+            .map_err(|error| format!("spec.compute.rangeLogicalBasePersistStride: {error}"))?,
+            logical_max_persist_stride: crabka_gres_ranges::PositiveU64::new(
+                self.range_logical_max_persist_stride
+                    .unwrap_or(range_defaults.logical_max_persist_stride.get()),
+            )
+            .map_err(|error| format!("spec.compute.rangeLogicalMaxPersistStride: {error}"))?,
+            hlc_horizon_headroom: self
+                .range_hlc_horizon_headroom
+                .unwrap_or(range_defaults.hlc_horizon_headroom),
+        };
+        range_runtime_policy
+            .validate()
+            .map_err(|error| format!("spec.compute range runtime policy: {error}"))?;
         let schema_fetch_retry_policy = crabka_schema_serde::SchemaFetchRetryPolicy::new(
             self.schema_fetch_retry_initial_backoff
                 .unwrap_or_else(|| schema_fetch_retry_defaults.initial_backoff()),
@@ -640,6 +863,7 @@ impl GresComputeSpec {
             .map_err(|error| format!("spec.compute.range0FollowerPollInterval: {error}"))?,
             range0_follower_rebuild_backoff_floor_ms,
             range0_follower_rebuild_backoff_ceiling_ms,
+            range_runtime_policy,
             durable_inspection_timeout_ms: PositiveMillis::new(whole_millis(
                 "spec.compute.durableInspectionTimeout",
                 self.durable_inspection_timeout
@@ -2555,5 +2779,39 @@ mod tests {
         assert!(!json.contains("confirmedPgdogConfigHash"), "got: {json}");
         assert!(!json.contains("serviceUrl"), "got: {json}");
         assert!(!json.contains("balancer"), "got: {json}");
+    }
+
+    #[test]
+    fn compute_range_runtime_policy_round_trips_validates_and_has_schema_types() {
+        let spec = GresComputeSpec {
+            range_rpc_frame_max: Some(crabka_units::mebibytes(2)),
+            range_rpc_request_timeout: Some(crabka_units::secs(8)),
+            range_rpc_server_idle_timeout: Some(crabka_units::secs(30)),
+            range_rpc_pool_idle_ttl: Some(crabka_units::secs(3)),
+            range_remote_session_max: Some(17),
+            range_logical_base_persist_stride: Some(2048),
+            range_logical_max_persist_stride: Some(4096),
+            ..GresComputeSpec::default()
+        };
+        let json = serde_json::to_string(&spec).expect("serialize range runtime policy");
+        assert!(serde_json::from_str::<GresComputeSpec>(&json).unwrap() == spec);
+        let policy = spec.effective_policy().unwrap().range_runtime_policy;
+        assert!(policy.rpc_frame_max == crabka_units::mebibytes(2));
+        assert!(policy.remote_session_max.get() == 17);
+        assert!(policy.logical_max_persist_stride.get() == 4096);
+
+        let invalid = GresComputeSpec {
+            range_rpc_request_timeout: Some(crabka_units::secs(2)),
+            range0_barrier_reply_budget: Some(crabka_units::secs(2)),
+            ..GresComputeSpec::default()
+        };
+        assert!(invalid.effective_policy().is_err());
+
+        let crd = serde_json::to_value(Gres::crd()).unwrap();
+        let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"];
+        assert!(properties["rangeRpcFrameMax"]["type"] == "string");
+        assert!(properties["rangeRpcRequestTimeout"]["type"] == "string");
+        assert!(properties["rangeRemoteSessionMax"]["minimum"].as_f64() == Some(1.0));
     }
 }

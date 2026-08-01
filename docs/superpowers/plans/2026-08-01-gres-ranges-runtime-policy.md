@@ -25,10 +25,10 @@ through existing runtime owners; render identical values from
 
 ### Task 3: Compute CRD
 
-- [ ] Add matching optional unit-bearing `GresComputeSpec` fields.
-- [ ] Validate with the shared policy and render existing CLI arguments.
-- [ ] Regenerate and verify the CRD schema.
-- [ ] Run operator tests and strict Clippy; commit.
+- [x] Add matching optional unit-bearing `GresComputeSpec` fields.
+- [x] Validate with the shared policy and render existing CLI arguments.
+- [x] Regenerate and verify the CRD schema.
+- [x] Run operator tests and strict Clippy; commit.
 
 ### Task 4: Closure
 
