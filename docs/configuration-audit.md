@@ -6649,3 +6649,23 @@ All 1,854 broker library, 18 broker binary and 773 operator library tests,
 operator-to-broker TOML, generated-CRD parity, workspace all-target Clippy,
 nightly formatting and diff hygiene pass. The repository-wide hardcoded
 operational-value audit remains active.
+
+## Repository-Wide Runtime Configuration Audit Complete
+
+The repository-wide scan produced 5,645 runtime-value candidates across all 64
+crate owners. Every candidate has an owner disposition in this ledger. Live
+deployment policy is exposed through the appropriate CRD or through CLI
+arguments backed by environment variables. Dimensioned inputs use UOM values,
+and positive counts and other constrained inputs use `refined_type` validation
+at their input boundaries while preserving existing defaults and behavior.
+
+The remaining fixed values are protocol, persisted-format and schema
+identities; algorithmic and security invariants; values derived from configured
+inputs; test and harness inputs; allocation hints; or staged code without a
+production caller. Exposing those values would either break compatibility or
+create meaningless or no-op settings. No unresolved production deployment
+policy literals remain.
+
+The full workspace all-target test suite, generated-CRD parity, workspace
+all-target Clippy with warnings denied, nightly formatting, and diff hygiene
+all pass. The repository-wide hardcoded operational-value audit is complete.
