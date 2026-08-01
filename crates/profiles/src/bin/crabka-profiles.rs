@@ -21,7 +21,7 @@ use crabka_profiles::{
     cold_store::ColdProfileStore,
     compactor::{DownsamplePolicy, compact_once_with_policy},
     distributor::{DistributorState, KafkaSink, serve},
-    hot_store::{RetentionConfig, WalTailProfileStore, run_wal_tail},
+    hot_store::{RetentionConfig, WalTailProfileStore},
     ingest::{RelabelConfig, TenantLimitConfig},
     limits::{Limits, OverridesProvider},
     metrics::ServiceMetrics,
@@ -59,6 +59,20 @@ struct Cli {
         default_value = "127.0.0.1:9092"
     )]
     bootstrap: String,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_WAL_TOPIC",
+        default_value = crabka_profiles::PROFILES_WAL_TOPIC,
+        value_parser = parse_non_empty_string
+    )]
+    wal_topic: String,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_BLOCK_BUILDER_GROUP_ID",
+        default_value = "crabka-profiles-block-builder",
+        value_parser = parse_non_empty_string
+    )]
+    block_builder_group_id: String,
     #[arg(
         long,
         env = "CRABKA_PROFILES_CLIENT_DISPATCH_QUEUE_CAPACITY",
@@ -107,6 +121,13 @@ struct Cli {
         default_value = "file://./.crabka-profiles-blocks"
     )]
     object_store_url: String,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_INDEX_OBJECT_KEY",
+        default_value = "index/profiles.json",
+        value_parser = parse_non_empty_string
+    )]
+    index_object_key: String,
     #[arg(
         long,
         env = "CRABKA_PROFILES_INDEX_SNAPSHOT_MAX",
@@ -163,7 +184,8 @@ struct Cli {
     #[arg(
         long,
         env = "CRABKA_PROFILES_QUERY_WAL_TAIL_GROUP_ID",
-        default_value = "crabka-profiles-query-wal-tail"
+        default_value = "crabka-profiles-query-wal-tail",
+        value_parser = parse_non_empty_string
     )]
     query_wal_tail_group_id: String,
     #[arg(long, env = "CRABKA_PROFILES_COMPACTOR_MAX_BLOCKS_PER_JOB", default_value_t = 8, value_parser = parse_min_two_usize)]
@@ -261,6 +283,12 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
     use refined_type::rule::GreaterUsize;
 
     GreaterUsize::<0>::new(value.parse::<usize>().map_err(|error| error.to_string())?)
+        .map(refined_type::Refined::into_value)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_non_empty_string(value: &str) -> Result<String, String> {
+    refined_type::rule::NonEmptyString::new(value.to_owned())
         .map(refined_type::Refined::into_value)
         .map_err(|error| error.to_string())
 }
@@ -409,7 +437,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .build()
                 .await?;
             let state = Arc::new(DistributorState {
-                sink: Arc::new(KafkaSink::new(Arc::new(producer))),
+                sink: Arc::new(KafkaSink::with_topic(Arc::new(producer), cli.wal_topic)),
                 limits,
                 profile_overrides,
                 active_series: Mutex::default(),
@@ -429,10 +457,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Target::BlockBuilder => {
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
+            let index_key = configured.object_key(&cli.index_object_key);
             let mut config =
                 BlockBuilderConfig::new(cli.bootstrap, configured.store).with_metrics(metrics);
             config.client_dispatch_queue_capacity = client_dispatch_queue_capacity;
             config.client_frame_max = client_frame_max;
+            config.wal_topic = cli.wal_topic;
+            config.group_id = cli.block_builder_group_id;
+            config.index_key = index_key;
             config.wal_fetch_max = cli.wal_fetch_max;
             config.wal_fetch_partition_max = cli.wal_fetch_partition_max;
             config.flush_records = cli.block_builder_flush_records;
@@ -448,7 +480,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
-            let index_key = configured.object_key("index/profiles.json");
+            let index_key = configured.object_key(&cli.index_object_key);
             let index = ProfileIndex::load_latest_snapshot_with_max_bytes(
                 &configured.store,
                 &index_key,
@@ -497,7 +529,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
-            let index_key = configured.object_key("index/profiles.json");
+            let index_key = configured.object_key(&cli.index_object_key);
             let index = ProfileIndex::load_latest_snapshot_with_max_bytes(
                 &configured.store,
                 &index_key,
@@ -558,7 +590,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Target::Compactor => {
             let configured = build_object_store(&cli.object_store_url)
                 .map_err(|e| format!("object store: {e}"))?;
-            let index_key = configured.object_key("index/profiles.json");
+            let index_key = configured.object_key(&cli.index_object_key);
             let mut index = ProfileIndex::load_latest_snapshot_with_max_bytes(
                 &configured.store,
                 &index_key,
@@ -624,12 +656,14 @@ fn spawn_wal_tail(
 ) {
     let bootstrap = cli.bootstrap.clone();
     let group_id = cli.query_wal_tail_group_id.clone();
+    let wal_topic = cli.wal_topic.clone();
     let poll_timeout = cli.wal_poll_timeout;
     tokio::spawn(async move {
-        if let Err(err) = run_wal_tail(
+        if let Err(err) = crabka_profiles::hot_store::run_wal_tail_with_topic(
             hot,
             bootstrap,
             group_id,
+            wal_topic,
             poll_timeout,
             client_dispatch_queue_capacity,
             client_frame_max,
@@ -885,6 +919,42 @@ mod tests {
                 Cli::try_parse_from(["crabka-profiles", "--target", "querier", flag, invalid])
                     .is_err(),
                 "{flag} should reject {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn deployment_identity_preserves_defaults_and_rejects_empty_values() {
+        let defaults = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
+        assert!(defaults.wal_topic == crabka_profiles::PROFILES_WAL_TOPIC);
+        assert!(defaults.block_builder_group_id == "crabka-profiles-block-builder");
+        assert!(defaults.index_object_key == "index/profiles.json");
+
+        let custom = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "querier",
+            "--wal-topic",
+            "profiles-a",
+            "--block-builder-group-id",
+            "builders-a",
+            "--index-object-key",
+            "indexes/a.json",
+        ])
+        .unwrap();
+        assert!(custom.wal_topic == "profiles-a");
+        assert!(custom.block_builder_group_id == "builders-a");
+        assert!(custom.index_object_key == "indexes/a.json");
+
+        for flag in [
+            "--wal-topic",
+            "--block-builder-group-id",
+            "--index-object-key",
+            "--query-wal-tail-group-id",
+        ] {
+            assert!(
+                Cli::try_parse_from(["crabka-profiles", "--target", "querier", flag, ""]).is_err(),
+                "{flag} should reject an empty value"
             );
         }
     }

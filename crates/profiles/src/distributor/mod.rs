@@ -57,12 +57,18 @@ pub trait WalSink: Send + Sync {
 
 pub struct KafkaSink {
     producer: Arc<Producer>,
+    topic: String,
 }
 
 impl KafkaSink {
     #[must_use]
     pub fn new(producer: Arc<Producer>) -> Self {
-        Self { producer }
+        Self::with_topic(producer, PROFILES_WAL_TOPIC.to_owned())
+    }
+
+    #[must_use]
+    pub fn with_topic(producer: Arc<Producer>, topic: String) -> Self {
+        Self { producer, topic }
     }
 }
 
@@ -85,7 +91,7 @@ impl WalSink for KafkaSink {
         let ack = self
             .producer
             .send(ProducerRecord {
-                topic: PROFILES_WAL_TOPIC.to_string(),
+                topic: self.topic.clone(),
                 partition: None,
                 key: Some(key),
                 value: Some(Bytes::from(value)),

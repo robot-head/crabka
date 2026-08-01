@@ -301,12 +301,37 @@ pub async fn run_wal_tail(
     client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     client_frame_max: crabka_client_core::ClientFrameMax,
 ) -> Result<(), ProfilesError> {
+    run_wal_tail_with_topic(
+        store,
+        bootstrap,
+        group_id,
+        PROFILES_WAL_TOPIC.to_owned(),
+        poll_timeout,
+        client_dispatch_queue_capacity,
+        client_frame_max,
+    )
+    .await
+}
+
+/// Consume the configured profiles WAL topic into the hot query store.
+///
+/// # Errors
+/// Returns an error when the consumer cannot be built, polled, decoded, or committed.
+pub async fn run_wal_tail_with_topic(
+    store: WalTailProfileStore,
+    bootstrap: String,
+    group_id: String,
+    wal_topic: String,
+    poll_timeout: Time,
+    client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    client_frame_max: crabka_client_core::ClientFrameMax,
+) -> Result<(), ProfilesError> {
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap)
         .dispatch_queue_capacity(client_dispatch_queue_capacity.get())
         .frame_max(client_frame_max.size())
         .group_id(group_id)
-        .subscribe(vec![PROFILES_WAL_TOPIC.to_string()])
+        .subscribe(vec![wal_topic])
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .build()
         .await

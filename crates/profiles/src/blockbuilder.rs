@@ -58,6 +58,7 @@ pub struct BlockBuilderConfig {
     pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub bootstrap: String,
+    pub wal_topic: String,
     pub group_id: String,
     pub store: Arc<dyn ObjectStore>,
     pub index_key: String,
@@ -85,6 +86,7 @@ impl BlockBuilderConfig {
                 crabka_client_core::ConnectionDispatchQueueCapacity::default(),
             client_frame_max: crabka_client_core::ClientFrameMax::default(),
             bootstrap,
+            wal_topic: PROFILES_WAL_TOPIC.to_owned(),
             group_id: "crabka-profiles-block-builder".to_string(),
             store,
             index_key: "index/profiles.json".to_string(),
@@ -321,7 +323,7 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
         .group_instance_id(config.group_id)
         .fetch_max(config.wal_fetch_max)
         .fetch_partition_max(config.wal_fetch_partition_max)
-        .subscribe(vec![PROFILES_WAL_TOPIC.to_string()])
+        .subscribe(vec![config.wal_topic.clone()])
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .build()
         .await
