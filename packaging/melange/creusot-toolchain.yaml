@@ -1,6 +1,6 @@
 package:
   name: creusot-toolchain
-  version: 0.12.0
+  version: 0.13.0
   epoch: 0
   description: Creusot deductive verifier toolchain (cargo-creusot, Why3, why3find, SMT provers)
   copyright:
@@ -44,9 +44,9 @@ pipeline:
       mkdir -p "$HOME"
       export PATH="$HOME/.cargo/bin:$PATH"
       export OPAMVAR_in_creusot_ci=true
-      export CRABKA_CREUSOT_RUST_TOOLCHAIN=1.97.0
+      export CRABKA_CREUSOT_RUST_TOOLCHAIN=nightly-2026-06-22
 
-      git clone --depth 1 --branch v0.12.0 https://github.com/creusot-rs/creusot /tmp/creusot
+      git clone --depth 1 --branch v0.13.0 https://github.com/creusot-rs/creusot /tmp/creusot
       cd /tmp/creusot
 
       # rustup: install exactly the Rust version the image pins.

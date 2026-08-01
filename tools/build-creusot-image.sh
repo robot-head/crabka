@@ -5,7 +5,7 @@
 set -euo pipefail
 PIN="$(cat "$(dirname "$0")/../.creusot-version")"
 TAG="${1:-crabka-creusot:${PIN}}"
-RUST_TOOLCHAIN="1.97.0"
+RUST_TOOLCHAIN="nightly-2026-06-22"
 RUNNER="${MELANGE_RUNNER:-docker}"
 WORK="$(pwd)"
 mkdir -p packages

@@ -17,7 +17,7 @@ contents:
 environment:
   HOME: /opt/creusot/home
   PATH: /opt/creusot/home/.cargo/bin:/usr/sbin:/sbin:/usr/bin:/bin
-  RUSTUP_TOOLCHAIN: "1.97.0"
+  RUSTUP_TOOLCHAIN: "nightly-2026-06-22"
 
 # Root on purpose: this is a dev/CI tool that bind-mounts the workspace
 # read-write and writes proof sessions back through the mount.
