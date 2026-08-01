@@ -109,6 +109,10 @@ pub struct ServeArgs {
     #[command(flatten)]
     pub local_vacuum: LocalVacuumOptions,
 
+    /// Distributed range runtime limits and pacing.
+    #[command(flatten)]
+    pub range_runtime: Box<RangeRuntimeOptions>,
+
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:5433")]
     pub listen: String,
@@ -577,6 +581,151 @@ pub struct ServeArgs {
         value_parser = crabka_units::parse::positive_time
     )]
     pub idle_suspend_poll_interval: Option<Time>,
+}
+
+/// Optional CLI overrides for distributed range runtime policy.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct RangeRuntimeOptions {
+    /// Maximum encoded range RPC frame size.
+    #[arg(long = "range-rpc-frame-max", env = "CRABKA_GRES_RANGE_RPC_FRAME_MAX", value_parser = crabka_units::parse::positive_byte_size)]
+    pub rpc_frame_max: Option<ByteSize>,
+    /// Deadline for one range RPC request.
+    #[arg(long = "range-rpc-request-timeout", env = "CRABKA_GRES_RANGE_RPC_REQUEST_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    pub rpc_request_timeout: Option<Time>,
+    /// Server connection idle timeout.
+    #[arg(long = "range-rpc-server-idle-timeout", env = "CRABKA_GRES_RANGE_RPC_SERVER_IDLE_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    pub rpc_server_idle_timeout: Option<Time>,
+    /// Client pool connection idle TTL.
+    #[arg(long = "range-rpc-pool-idle-ttl", env = "CRABKA_GRES_RANGE_RPC_POOL_IDLE_TTL", value_parser = crabka_units::parse::positive_time)]
+    pub rpc_pool_idle_ttl: Option<Time>,
+    /// Maximum idle connections retained per endpoint.
+    #[arg(
+        long = "range-rpc-pool-max-idle-per-endpoint",
+        env = "CRABKA_GRES_RANGE_RPC_POOL_MAX_IDLE_PER_ENDPOINT"
+    )]
+    pub rpc_pool_max_idle_per_endpoint: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Hosted remote-session idle retention.
+    #[arg(long = "range-remote-session-idle", env = "CRABKA_GRES_RANGE_REMOTE_SESSION_IDLE", value_parser = crabka_units::parse::positive_time)]
+    pub remote_session_idle: Option<Time>,
+    /// Maximum hosted remote sessions.
+    #[arg(
+        long = "range-remote-session-max",
+        env = "CRABKA_GRES_RANGE_REMOTE_SESSION_MAX"
+    )]
+    pub remote_session_max: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Range-0 catch-up wait timeout.
+    #[arg(long = "range0-wait-timeout", env = "CRABKA_GRES_RANGE0_WAIT_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    pub range0_wait_timeout: Option<Time>,
+    /// Whole-reply budget for range-0 barriers.
+    #[arg(long = "range0-barrier-reply-budget", env = "CRABKA_GRES_RANGE0_BARRIER_REPLY_BUDGET", value_parser = crabka_units::parse::positive_time)]
+    pub range0_barrier_reply_budget: Option<Time>,
+    /// Lock-wait cap for cross-range transactions.
+    #[arg(long = "range-cross-range-lock-wait-cap", env = "CRABKA_GRES_RANGE_CROSS_RANGE_LOCK_WAIT_CAP", value_parser = crabka_units::parse::positive_time)]
+    pub cross_range_lock_wait_cap: Option<Time>,
+    /// Durable-inspection record ceiling.
+    #[arg(
+        long = "range-durable-inspect-max-records",
+        env = "CRABKA_GRES_RANGE_DURABLE_INSPECT_MAX_RECORDS"
+    )]
+    pub durable_inspect_max_records: Option<crabka_gres_ranges::PositiveU32>,
+    /// Durable-inspection byte ceiling.
+    #[arg(long = "range-durable-inspect-max-size", env = "CRABKA_GRES_RANGE_DURABLE_INSPECT_MAX_SIZE", value_parser = crabka_units::parse::positive_byte_size)]
+    pub durable_inspect_max_size: Option<ByteSize>,
+    /// Decision-release lag retry count.
+    #[arg(
+        long = "range-decision-release-lag-retries",
+        env = "CRABKA_GRES_RANGE_DECISION_RELEASE_LAG_RETRIES"
+    )]
+    pub decision_release_lag_retries: Option<crabka_gres_ranges::PositiveU32>,
+    /// Decision-release retry backoff.
+    #[arg(long = "range-decision-release-retry-backoff", env = "CRABKA_GRES_RANGE_DECISION_RELEASE_RETRY_BACKOFF", value_parser = crabka_units::parse::positive_time)]
+    pub decision_release_retry_backoff: Option<Time>,
+    /// Timestamp-oracle heartbeat cadence.
+    #[arg(long = "range-tso-heartbeat-interval", env = "CRABKA_GRES_RANGE_TSO_HEARTBEAT_INTERVAL", value_parser = crabka_units::parse::positive_time)]
+    pub tso_heartbeat_interval: Option<Time>,
+    /// Minimum interval between logical horizon persists.
+    #[arg(long = "range-logical-min-persist-interval", env = "CRABKA_GRES_RANGE_LOGICAL_MIN_PERSIST_INTERVAL", value_parser = crabka_units::parse::positive_time)]
+    pub logical_min_persist_interval: Option<Time>,
+    /// Initial logical horizon persistence stride.
+    #[arg(
+        long = "range-logical-base-persist-stride",
+        env = "CRABKA_GRES_RANGE_LOGICAL_BASE_PERSIST_STRIDE"
+    )]
+    pub logical_base_persist_stride: Option<crabka_gres_ranges::PositiveU64>,
+    /// Maximum adaptive logical horizon persistence stride.
+    #[arg(
+        long = "range-logical-max-persist-stride",
+        env = "CRABKA_GRES_RANGE_LOGICAL_MAX_PERSIST_STRIDE"
+    )]
+    pub logical_max_persist_stride: Option<crabka_gres_ranges::PositiveU64>,
+    /// Wall-clock headroom persisted by the HLC oracle.
+    #[arg(long = "range-hlc-horizon-headroom", env = "CRABKA_GRES_RANGE_HLC_HORIZON_HEADROOM", value_parser = crabka_units::parse::positive_time)]
+    pub hlc_horizon_headroom: Option<Time>,
+}
+
+impl RangeRuntimeOptions {
+    fn effective_policy(&self) -> std::io::Result<crabka_gres_ranges::RangeRuntimePolicy> {
+        let defaults = crabka_gres_ranges::RangeRuntimePolicy::default();
+        let policy = crabka_gres_ranges::RangeRuntimePolicy {
+            rpc_frame_max: self.rpc_frame_max.unwrap_or(defaults.rpc_frame_max),
+            rpc_request_timeout: self
+                .rpc_request_timeout
+                .unwrap_or(defaults.rpc_request_timeout),
+            rpc_server_idle_timeout: self
+                .rpc_server_idle_timeout
+                .unwrap_or(defaults.rpc_server_idle_timeout),
+            rpc_pool_idle_ttl: self.rpc_pool_idle_ttl.unwrap_or(defaults.rpc_pool_idle_ttl),
+            rpc_pool_max_idle_per_endpoint: self
+                .rpc_pool_max_idle_per_endpoint
+                .unwrap_or(defaults.rpc_pool_max_idle_per_endpoint),
+            remote_session_idle: self
+                .remote_session_idle
+                .unwrap_or(defaults.remote_session_idle),
+            remote_session_max: self
+                .remote_session_max
+                .unwrap_or(defaults.remote_session_max),
+            range0_wait_timeout: self
+                .range0_wait_timeout
+                .unwrap_or(defaults.range0_wait_timeout),
+            range0_barrier_reply_budget: self
+                .range0_barrier_reply_budget
+                .unwrap_or(defaults.range0_barrier_reply_budget),
+            cross_range_lock_wait_cap: self
+                .cross_range_lock_wait_cap
+                .unwrap_or(defaults.cross_range_lock_wait_cap),
+            durable_inspect_max_records: self
+                .durable_inspect_max_records
+                .unwrap_or(defaults.durable_inspect_max_records),
+            durable_inspect_max_size: self
+                .durable_inspect_max_size
+                .unwrap_or(defaults.durable_inspect_max_size),
+            decision_release_lag_retries: self
+                .decision_release_lag_retries
+                .unwrap_or(defaults.decision_release_lag_retries),
+            decision_release_retry_backoff: self
+                .decision_release_retry_backoff
+                .unwrap_or(defaults.decision_release_retry_backoff),
+            tso_heartbeat_interval: self
+                .tso_heartbeat_interval
+                .unwrap_or(defaults.tso_heartbeat_interval),
+            logical_min_persist_interval: self
+                .logical_min_persist_interval
+                .unwrap_or(defaults.logical_min_persist_interval),
+            logical_base_persist_stride: self
+                .logical_base_persist_stride
+                .unwrap_or(defaults.logical_base_persist_stride),
+            logical_max_persist_stride: self
+                .logical_max_persist_stride
+                .unwrap_or(defaults.logical_max_persist_stride),
+            hlc_horizon_headroom: self
+                .hlc_horizon_headroom
+                .unwrap_or(defaults.hlc_horizon_headroom),
+        };
+        policy
+            .validate()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        Ok(policy)
+    }
 }
 
 /// Optional local-engine vacuum pacing overrides.
@@ -1254,6 +1403,8 @@ pub struct SubstrateRuntimeConfig {
     pub hlc_wall_offset_ms: i64,
     /// Shared Gres registry policy.
     pub registry_policy: RegistryPolicy,
+    /// Distributed range execution limits and pacing.
+    pub range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy,
 }
 
 /// Validated TLS-only range RPC configuration.
@@ -1458,6 +1609,7 @@ impl SubstrateRuntimeConfig {
                 .to_mode(whole_millis_u64("HLC maximum offset", args.hlc_max_offset)?),
             hlc_wall_offset_ms: whole_millis_i64("HLC wall offset", args.hlc_wall_offset)?,
             registry_policy: args.registry.policy(),
+            range_runtime_policy: args.range_runtime.effective_policy()?,
         }))
     }
 
@@ -2741,169 +2893,177 @@ pub async fn serve_listener(listener: TcpListener, args: ServeArgs) -> std::io::
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
-pub async fn serve_listener_with_tenant_config_loader(
+pub fn serve_listener_with_tenant_config_loader(
     listener: TcpListener,
     args: ServeArgs,
     tenant_config_loader: &impl TenantConfigLoader,
-) -> std::io::Result<()> {
-    validate_multirange_operational_policy(&args)?;
-    validate_wal_recovery_read_policy(&args)?;
-    let local_vacuum_policy = local_vacuum_policy(&args)?;
-    let sql_addr = listener.local_addr()?;
-    let tls = match (&args.tls_cert, &args.tls_key) {
-        (Some(cert), Some(key)) => Some(tls_acceptor(cert, key)?),
-        _ => None,
-    };
-
-    let mut tenant_record = load_substrate_tenant_record(&args, tenant_config_loader).await?;
-    let tenant_security_enabled = tenant_record
-        .as_ref()
-        .is_some_and(|record| tenant_kafka_security_from_env(record.name.as_str()).is_some());
-    let mut lifecycle_registry = None;
-    if let (Some(record), Some(bootstrap)) = (
-        tenant_record.as_ref(),
-        lifecycle_registry_bootstrap(args.substrate_bootstrap.as_deref(), tenant_security_enabled),
-    ) {
-        let mut registry =
-            crabka_gres_control::Registry::connect_with_policy(bootstrap, args.registry.policy())
-                .await
-                .map_err(|error| {
-                    std::io::Error::other(format!("tenant registry connect: {error}"))
-                })?;
-        registry
-            .ensure_topic()
-            .await
-            .map_err(|error| std::io::Error::other(format!("tenant registry ensure: {error}")))?;
-        tenant_record = registry
-            .get(record.name.as_str())
-            .await
-            .map_err(|error| std::io::Error::other(format!("tenant registry read: {error}")))?;
-        lifecycle_registry = Some(registry);
-    }
-    let effective_args = apply_tenant_runtime_defaults(args, tenant_record.as_ref())?;
-    let (early_range_service, early_range_server) =
-        match bind_early_range_transport(&effective_args).await? {
-            Some((service, server)) => (Some(service), Some(server)),
-            None => (None, None),
+) -> impl std::future::Future<Output = std::io::Result<()>> + '_ {
+    Box::pin(async move {
+        validate_multirange_operational_policy(&args)?;
+        validate_wal_recovery_read_policy(&args)?;
+        let local_vacuum_policy = local_vacuum_policy(&args)?;
+        let sql_addr = listener.local_addr()?;
+        let tls = match (&args.tls_cert, &args.tls_key) {
+            (Some(cert), Some(key)) => Some(tls_acceptor(cert, key)?),
+            _ => None,
         };
-    let mut runtime = Box::pin(open_runtime_with_tenant_record(
-        &effective_args,
-        tenant_record.as_ref(),
-        early_range_service,
-    ))
-    .await?;
-    register_kafka_scanner_with_default_bootstrap_and_policy(
-        &mut runtime.engine,
-        kafka_scanner_default_bootstrap(&effective_args),
-        effective_fdw_broker_dns_timeout(&effective_args)?,
-        effective_schema_fetch_retry_policy(&effective_args)?,
-        effective_args.registry.dispatch_queue_capacity(),
-        effective_args.registry.frame_max(),
-        effective_args.registry.fdw_fetch_min(),
-    );
-    let session_config = build_session_config_from_tenant(&effective_args, tenant_record.as_ref())?;
 
-    let range_service = runtime.range_service();
-    let (engine, checkpoint_runtime, _range_transfer_keepalive) = runtime.into_parts();
-    let activity = Arc::new(crabka_pgwire::server::ActivityTracker::new());
-    let shutdown = CancellationToken::new();
-    // Periodic dead-version sweep for the single-range LOCAL engine (mem or
-    // --data-dir). Substrate/replicated engines refuse local pruning
-    // (`supports_local_vacuum` is false there) and rely on checkpoint-time GC.
-    // The loop runs on a child token whose drop guard lives on THIS future's
-    // stack: whether serving returns or is aborted, the sweep task stops and
-    // releases its engine handle (and with it a --data-dir store lock).
-    let _vacuum_guard = if let RuntimeEngine::Single(sql_engine) = &engine
-        && let Some(policy) =
-            local_vacuum_spawn_policy(local_vacuum_policy, sql_engine.supports_local_vacuum())
-    {
-        let vacuum_token = shutdown.child_token();
-        tokio::spawn(run_local_vacuum_loop(
-            sql_engine.clone_handle(),
-            Arc::clone(&activity),
-            vacuum_token.clone(),
-            policy,
-        ));
-        Some(vacuum_token.drop_guard())
-    } else {
-        None
-    };
-    let serve = crabka_pgwire::server::serve_tls_with_activity_until(
-        listener,
-        Arc::new(engine),
-        Arc::new(session_config),
-        tls,
-        Arc::clone(&activity),
-        shutdown.clone(),
-    );
+        let mut tenant_record = load_substrate_tenant_record(&args, tenant_config_loader).await?;
+        let tenant_security_enabled = tenant_record
+            .as_ref()
+            .is_some_and(|record| tenant_kafka_security_from_env(record.name.as_str()).is_some());
+        let mut lifecycle_registry = None;
+        if let (Some(record), Some(bootstrap)) = (
+            tenant_record.as_ref(),
+            lifecycle_registry_bootstrap(
+                args.substrate_bootstrap.as_deref(),
+                tenant_security_enabled,
+            ),
+        ) {
+            let mut registry = crabka_gres_control::Registry::connect_with_policy(
+                bootstrap,
+                args.registry.policy(),
+            )
+            .await
+            .map_err(|error| std::io::Error::other(format!("tenant registry connect: {error}")))?;
+            registry.ensure_topic().await.map_err(|error| {
+                std::io::Error::other(format!("tenant registry ensure: {error}"))
+            })?;
+            tenant_record = registry
+                .get(record.name.as_str())
+                .await
+                .map_err(|error| std::io::Error::other(format!("tenant registry read: {error}")))?;
+            lifecycle_registry = Some(registry);
+        }
+        let effective_args = apply_tenant_runtime_defaults(args, tenant_record.as_ref())?;
+        let (early_range_service, early_range_server) =
+            match bind_early_range_transport(&effective_args).await? {
+                Some((service, server)) => (Some(service), Some(server)),
+                None => (None, None),
+            };
+        let mut runtime = Box::pin(open_runtime_with_tenant_record(
+            &effective_args,
+            tenant_record.as_ref(),
+            early_range_service,
+        ))
+        .await?;
+        register_kafka_scanner_with_default_bootstrap_and_policy(
+            &mut runtime.engine,
+            kafka_scanner_default_bootstrap(&effective_args),
+            effective_fdw_broker_dns_timeout(&effective_args)?,
+            effective_schema_fetch_retry_policy(&effective_args)?,
+            effective_args.registry.dispatch_queue_capacity(),
+            effective_args.registry.frame_max(),
+            effective_args.registry.fdw_fetch_min(),
+        );
+        let session_config =
+            build_session_config_from_tenant(&effective_args, tenant_record.as_ref())?;
 
-    let range_server = if let Some(server) = early_range_server {
-        if range_service.is_none() {
-            // Dropping the guard aborts the warming serve task before the
-            // startup error is reported.
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "--range-listen requires a multi-range runtime",
+        let range_service = runtime.range_service();
+        let (engine, checkpoint_runtime, _range_transfer_keepalive) = runtime.into_parts();
+        let activity = Arc::new(crabka_pgwire::server::ActivityTracker::new());
+        let shutdown = CancellationToken::new();
+        // Periodic dead-version sweep for the single-range LOCAL engine (mem or
+        // --data-dir). Substrate/replicated engines refuse local pruning
+        // (`supports_local_vacuum` is false there) and rely on checkpoint-time GC.
+        // The loop runs on a child token whose drop guard lives on THIS future's
+        // stack: whether serving returns or is aborted, the sweep task stops and
+        // releases its engine handle (and with it a --data-dir store lock).
+        let _vacuum_guard = if let RuntimeEngine::Single(sql_engine) = &engine
+            && let Some(policy) =
+                local_vacuum_spawn_policy(local_vacuum_policy, sql_engine.supports_local_vacuum())
+        {
+            let vacuum_token = shutdown.child_token();
+            tokio::spawn(run_local_vacuum_loop(
+                sql_engine.clone_handle(),
+                Arc::clone(&activity),
+                vacuum_token.clone(),
+                policy,
             ));
-        }
-        Some(server.release())
-    } else {
-        start_range_service(&effective_args, range_service).await?
-    };
-    let checkpointer = live_final_checkpointer(checkpoint_runtime);
-    let registry = mark_active_after_recovery(tenant_record.as_ref(), lifecycle_registry).await?;
-    let suspend = if let Some(policy) = SuspendPolicy::from_tenant_record(tenant_record.as_ref()) {
-        match (registry, checkpointer) {
-            (Some(registry), Some(checkpointer)) => Some((
-                policy,
-                Box::new(LiveSuspendRegistry { registry }) as Box<dyn SuspendRegistry>,
-                checkpointer,
-            )),
-            (None, _) => {
-                tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled without live registry bootstrap");
-                None
-            }
-            (_, None) => {
-                tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled: final checkpoint snapshot seam unavailable");
-                None
-            }
-        }
-    } else {
-        None
-    };
+            Some(vacuum_token.drop_guard())
+        } else {
+            None
+        };
+        let serve = crabka_pgwire::server::serve_tls_with_activity_until(
+            listener,
+            Arc::new(engine),
+            Arc::new(session_config),
+            tls,
+            Arc::clone(&activity),
+            shutdown.clone(),
+        );
 
-    // Publish Active only after every potentially blocking runtime component is
-    // initialized. The activator treats Active as permission to connect, so an
-    // earlier write can leave its held startup queued on a bound-but-unpolled
-    // listener while initialization stalls.
-    tracing::info!(listen = %sql_addr, "crabka-gres ready to accept sessions");
-    let range_addr = range_server
-        .as_ref()
-        .map_or_else(|| "-".to_string(), |(_, address)| address.to_string());
-    println!("CRABKA_GRES_READY {sql_addr} {range_addr}");
-    let serve_result = if let Some((policy, registry, checkpointer)) = suspend {
-        tokio::select! {
-            result = serve => result,
-            result = run_suspend_monitor(
-                policy,
-                activity,
-                checkpointer,
-                registry,
-                shutdown,
-                effective_args
-                    .idle_suspend_poll_interval
-                    .unwrap_or(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL)
-                    .to_std(),
-            ) => result,
+        let range_server = if let Some(server) = early_range_server {
+            if range_service.is_none() {
+                // Dropping the guard aborts the warming serve task before the
+                // startup error is reported.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--range-listen requires a multi-range runtime",
+                ));
+            }
+            Some(server.release())
+        } else {
+            start_range_service(&effective_args, range_service).await?
+        };
+        let checkpointer = live_final_checkpointer(checkpoint_runtime);
+        let registry =
+            mark_active_after_recovery(tenant_record.as_ref(), lifecycle_registry).await?;
+        let suspend = if let Some(policy) =
+            SuspendPolicy::from_tenant_record(tenant_record.as_ref())
+        {
+            match (registry, checkpointer) {
+                (Some(registry), Some(checkpointer)) => Some((
+                    policy,
+                    Box::new(LiveSuspendRegistry { registry }) as Box<dyn SuspendRegistry>,
+                    checkpointer,
+                )),
+                (None, _) => {
+                    tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled without live registry bootstrap");
+                    None
+                }
+                (_, None) => {
+                    tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled: final checkpoint snapshot seam unavailable");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Publish Active only after every potentially blocking runtime component is
+        // initialized. The activator treats Active as permission to connect, so an
+        // earlier write can leave its held startup queued on a bound-but-unpolled
+        // listener while initialization stalls.
+        tracing::info!(listen = %sql_addr, "crabka-gres ready to accept sessions");
+        let range_addr = range_server
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |(_, address)| address.to_string());
+        println!("CRABKA_GRES_READY {sql_addr} {range_addr}");
+        let serve_result = if let Some((policy, registry, checkpointer)) = suspend {
+            tokio::select! {
+                result = serve => result,
+                result = run_suspend_monitor(
+                    policy,
+                    activity,
+                    checkpointer,
+                    registry,
+                    shutdown,
+                    effective_args
+                        .idle_suspend_poll_interval
+                        .unwrap_or(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL)
+                        .to_std(),
+                ) => result,
+            }
+        } else {
+            serve.await
+        };
+        if let Some((server, _)) = range_server {
+            server.abort();
+            let _ = server.await;
         }
-    } else {
-        serve.await
-    };
-    if let Some((server, _)) = range_server {
-        server.abort();
-        let _ = server.await;
-    }
-    serve_result
+        serve_result
+    })
 }
 
 fn local_vacuum_spawn_policy(
@@ -9076,6 +9236,7 @@ mod tests {
                 reader_admin_dns_timeout: None,
             },
             local_vacuum: LocalVacuumOptions::default(),
+            range_runtime: Box::default(),
             listen: "127.0.0.1:0".to_string(),
             tls_cert: None,
             tls_key: None,
@@ -9694,6 +9855,32 @@ mod tests {
             cli.serve.cache_dir,
             Some(std::path::PathBuf::from("/tmp/crabka-gres-cache"))
         );
+    }
+
+    #[test]
+    fn range_runtime_policy_parses_overrides_and_rejects_invalid_relations() {
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--range-rpc-frame-max=2MiB",
+            "--range-rpc-request-timeout=9s",
+            "--range-rpc-pool-idle-ttl=3s",
+            "--range-rpc-server-idle-timeout=8s",
+            "--range-logical-base-persist-stride=7",
+            "--range-logical-max-persist-stride=11",
+        ])
+        .unwrap();
+        let policy = cli.serve.range_runtime.effective_policy().unwrap();
+        assert2::assert!(policy.rpc_frame_max == crabka_units::mebibytes(2));
+        assert2::assert!(policy.rpc_request_timeout == crabka_units::secs(9));
+        assert2::assert!(policy.logical_base_persist_stride.get() == 7);
+
+        let invalid = Cli::try_parse_from([
+            "crabka-gres",
+            "--range-rpc-pool-idle-ttl=8s",
+            "--range-rpc-server-idle-timeout=8s",
+        ])
+        .unwrap();
+        assert2::assert!(invalid.serve.range_runtime.effective_policy().is_err());
     }
 
     #[test]
@@ -11496,6 +11683,7 @@ mod tests {
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
             registry_policy: RegistryPolicy::default(),
+            range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
         };
 
         let Err(error) = open_substrate_runtime(&config).await else {
@@ -11588,6 +11776,7 @@ mod tests {
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
             registry_policy: RegistryPolicy::default(),
+            range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
         };
         let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
         let kv = Arc::new(MemKv::default());
@@ -11961,6 +12150,7 @@ mod tests {
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
             registry_policy: RegistryPolicy::default(),
+            range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
         };
 
         let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
@@ -12062,6 +12252,7 @@ mod tests {
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
             registry_policy: RegistryPolicy::default(),
+            range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
         };
 
         let Err(error) = open_substrate_engine(&config).await else {
