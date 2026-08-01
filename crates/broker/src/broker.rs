@@ -616,6 +616,7 @@ async fn start_coordinators(
         Arc::clone(partitions),
         Arc::clone(producer_ids),
         config.transaction_state_num_partitions,
+        config.transaction_recovery_read_max,
     ));
     if let Err(error) = txn_coordinator.recover(&controller.current_image()).await {
         tracing::warn!(%error, "transaction coordinator recovery error");

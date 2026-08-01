@@ -492,6 +492,9 @@ spec:
                   transactionMinTimeout:
                     nullable: true
                     type: string
+                  transactionRecoveryReadMax:
+                    nullable: true
+                    type: string
                   transactionStateNumPartitions:
                     format: int32
                     minimum: 1.0

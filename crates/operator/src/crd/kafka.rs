@@ -570,6 +570,7 @@ define_broker_tuning! {
     refined #[schemars(range(min = 1))] share_state_num_partitions: i32 => refined_type::rule::GreaterI32<0>;
     refined #[schemars(range(min = 1))] share_state_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
     refined #[schemars(range(min = 1))] transaction_state_num_partitions: i32 => refined_type::rule::GreaterI32<0>;
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] transaction_recovery_read_max: ByteSize => ();
     refined #[schemars(range(min = 1))] transaction_state_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
     time_i32 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] transaction_min_timeout: Time => ();
     time_transaction_max #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] transaction_max_timeout: Time => ();
@@ -1687,6 +1688,7 @@ mod tests {
             "shareRecoveryReadMax",
             "logReadBufferCap",
             "logTimestampScanWindow",
+            "transactionRecoveryReadMax",
             "socketRequestMax",
             "sendfileMin",
             "socketSendBuffer",
@@ -1736,6 +1738,23 @@ mod tests {
             .expect("apply operator TOML to broker");
         assert!(broker.log_config.read_buffer_cap == crabka_units::mebibytes(2));
         assert!(broker.log_config.timestamp_scan_window == crabka_units::kibibytes(32));
+    }
+
+    #[test]
+    fn broker_tuning_transaction_recovery_policy_reaches_broker_config() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "transactionRecoveryReadMax": "3MiB"
+        }))
+        .expect("deserialize transaction recovery policy");
+        tuning
+            .validate()
+            .expect("validate transaction recovery policy");
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&tuning.render_runtime_toml()).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        assert!(broker.transaction_recovery_read_max == crabka_units::mebibytes(3));
     }
 
     #[test]

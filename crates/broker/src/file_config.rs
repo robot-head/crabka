@@ -436,6 +436,9 @@ pub struct RuntimeFileConfig {
     pub share_state_num_partitions: Option<i32>,
     pub share_state_replication_factor: Option<i16>,
     pub transaction_state_num_partitions: Option<i32>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub transaction_recovery_read_max: Option<ByteSize>,
     pub transaction_state_replication_factor: Option<i16>,
     #[serde(default, with = "crabka_units::serde_units::human::option_time")]
     #[schemars(with = "Option<String>")]
@@ -2453,6 +2456,12 @@ impl RuntimeFileConfig {
             runtime,
             transaction_state_num_partitions,
             cfg.transaction_state_num_partitions
+        );
+        set_runtime_size_bytes!(
+            runtime,
+            transaction_recovery_read_max,
+            cfg.transaction_recovery_read_max,
+            whole_bytes_usize
         );
         if let Some(value) = runtime.transaction_state_replication_factor {
             cfg.transaction_state_replication_factor =

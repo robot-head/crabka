@@ -350,6 +350,7 @@ mod tests {
             Arc::clone(&partitions),
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
             50,
+            crabka_units::mebibytes(1),
         );
 
         // Materialize a local partition for `__transaction_state`-style data.
@@ -397,6 +398,7 @@ mod tests {
             partitions,
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
             50,
+            crabka_units::mebibytes(1),
         );
         let mut entry = TxnEntry::new_empty("tx-2".to_string(), ProducerId(2000), 0, 60_000, 0);
         entry.partitions.insert(TopicPartition {

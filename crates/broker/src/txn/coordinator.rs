@@ -16,6 +16,7 @@ use crabka_ids::PartitionIndex;
 use crabka_log::{Offset, ProducerId};
 use crabka_metadata::MetadataImage;
 use crabka_protocol::records::{Record, RecordBatch};
+use crabka_units::ByteSize;
 use dashmap::DashMap;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
@@ -174,6 +175,7 @@ pub(crate) struct TxnCoordinator {
     pub(crate) partitions: Arc<PartitionRegistry>,
     pub(crate) producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
     num_partitions: i32,
+    recovery_read_max: ByteSize,
     /// Live in-memory state: `transactional_id` → locked `TxnEntry`.
     state: DashMap<String, Arc<Mutex<TxnEntry>>>,
     /// Set of `__transaction_state` partition indices this broker leads.
@@ -200,12 +202,14 @@ impl TxnCoordinator {
         partitions: Arc<PartitionRegistry>,
         producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
         num_partitions: i32,
+        recovery_read_max: ByteSize,
     ) -> Self {
         Self {
             node_id,
             partitions,
             producer_ids,
             num_partitions,
+            recovery_read_max,
             state: DashMap::new(),
             leader_partitions: RwLock::new(HashSet::new()),
             pid_to_tid: DashMap::new(),
@@ -436,7 +440,7 @@ impl TxnCoordinator {
 
             let mut offset = part.log_start_offset();
             loop {
-                let out = match part.read_log(offset, 1 << 20) {
+                let out = match part.read_log(offset, self.recovery_read_max) {
                     Ok(o) => o,
                     // OffsetTooLow can happen when the partition just opened
                     // with no data written yet (log_start == log_end == 0
@@ -622,6 +626,7 @@ mod tests {
             Arc::new(PartitionRegistry::new()),
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
             num_partitions,
+            crabka_units::mebibytes(1),
         )
     }
 

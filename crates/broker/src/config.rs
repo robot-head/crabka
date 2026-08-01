@@ -282,6 +282,8 @@ pub struct BrokerConfig {
     pub future_log_move_read_chunk: ByteSize,
     /// Partition count for the transaction-state internal topic.
     pub transaction_state_num_partitions: i32,
+    /// Maximum bytes requested by each transaction-state recovery read.
+    pub transaction_recovery_read_max: ByteSize,
     /// Desired replication factor for the transaction-state internal topic.
     pub transaction_state_replication_factor: i16,
     /// Minimum accepted transaction timeout.
@@ -1053,6 +1055,7 @@ impl BrokerConfig {
             default_min_insync_replicas: 1,
             future_log_move_read_chunk: mebibytes(1),
             transaction_state_num_partitions: 50,
+            transaction_recovery_read_max: mebibytes(1),
             transaction_state_replication_factor: 3,
             transaction_min_timeout: secs(1),
             transaction_max_timeout: minutes(15),
@@ -1765,6 +1768,10 @@ impl BrokerConfig {
                 "future_log_move_read_chunk",
                 self.future_log_move_read_chunk,
             ),
+            (
+                "transaction_recovery_read_max",
+                self.transaction_recovery_read_max,
+            ),
         ] {
             require_positive_size(name, value)?;
         }
@@ -1952,6 +1959,7 @@ impl Default for BrokerConfig {
             default_min_insync_replicas: 1,
             future_log_move_read_chunk: mebibytes(1),
             transaction_state_num_partitions: 50,
+            transaction_recovery_read_max: mebibytes(1),
             transaction_state_replication_factor: 3,
             transaction_min_timeout: secs(1),
             transaction_max_timeout: minutes(15),
@@ -2488,6 +2496,9 @@ mod tests {
             }),
             ("share_recovery_read_max must be positive", |c| {
                 c.share_recovery_read_max = <ByteSize as ByteSizeExt>::ZERO;
+            }),
+            ("transaction_recovery_read_max must be positive", |c| {
+                c.transaction_recovery_read_max = <ByteSize as ByteSizeExt>::ZERO;
             }),
             (
                 "share_session_cache_max_when_unlimited must be positive",

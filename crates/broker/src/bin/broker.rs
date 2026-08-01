@@ -254,6 +254,8 @@ struct RuntimeArgs {
     share_state_replication_factor: Option<PositiveI16>,
     #[arg(long, env = "CRABKA_TRANSACTION_STATE_NUM_PARTITIONS", value_parser = parse_positive_i32)]
     transaction_state_num_partitions: Option<PositiveI32>,
+    #[arg(long, env = "CRABKA_TRANSACTION_RECOVERY_READ_MAX", value_parser = crabka_units::parse::positive_byte_size)]
+    transaction_recovery_read_max: Option<ByteSize>,
     #[arg(long, env = "CRABKA_TRANSACTION_STATE_REPLICATION_FACTOR", value_parser = parse_positive_i16)]
     transaction_state_replication_factor: Option<PositiveI16>,
     #[arg(long, env = "CRABKA_TRANSACTION_MIN_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
@@ -414,6 +416,7 @@ impl RuntimeArgs {
             transaction_max_timeout,
             audit_tail_read_max,
             future_log_move_read_chunk,
+            transaction_recovery_read_max,
         );
         copy_refined_runtime!(
             self,
@@ -1465,6 +1468,7 @@ mod tests {
                 ("CRABKA_RECORD_DECOMPRESSION_OUTPUT_CEILING", Some("512MiB")),
                 ("CRABKA_LOG_READ_BUFFER_CAP", Some("2MiB")),
                 ("CRABKA_LOG_TIMESTAMP_SCAN_WINDOW", Some("32KiB")),
+                ("CRABKA_TRANSACTION_RECOVERY_READ_MAX", Some("3MiB")),
                 ("CRABKA_BROKER_CLIENT_DISPATCH_QUEUE_CAPACITY", Some("7")),
                 ("CRABKA_BROKER_CLIENT_FRAME_MAX", Some("32KiB")),
             ],
@@ -1496,6 +1500,7 @@ mod tests {
                 );
                 assert!(config.log_config.read_buffer_cap == crabka_units::mebibytes(2));
                 assert!(config.log_config.timestamp_scan_window == crabka_units::kibibytes(32));
+                assert!(config.transaction_recovery_read_max == crabka_units::mebibytes(3));
                 assert!(config.client_dispatch_queue_capacity.get() == 7);
                 assert!(config.client_frame_max.size() == crabka_units::kibibytes(32));
             },

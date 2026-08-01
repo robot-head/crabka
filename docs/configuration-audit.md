@@ -6462,3 +6462,15 @@ wire-format widths, sentinel identities, or model/test bounds. The complete
 log suite, broker CLI tests, Kafka CRD tests, workspace all-target Clippy,
 nightly formatting, generated-CRD parity, and diff hygiene pass. The
 repository-wide hardcoded operational-value audit remains active.
+
+## Transaction Recovery Read Policy
+
+The transaction coordinator's fixed 1 MiB `__transaction_state` recovery read
+budget is now the dimensioned broker setting `transaction_recovery_read_max`.
+The default is unchanged. Deployments can set it through
+`--transaction-recovery-read-max`, `CRABKA_TRANSACTION_RECOVERY_READ_MAX`, the
+broker runtime file, or `spec.brokerTuning.transactionRecoveryReadMax` in the
+Kafka CRD. All external boundaries require a positive whole-byte value, and
+the configured `ByteSize` reaches each recovery read without another default
+or clamp. The repository-wide hardcoded operational-value audit remains
+active.
