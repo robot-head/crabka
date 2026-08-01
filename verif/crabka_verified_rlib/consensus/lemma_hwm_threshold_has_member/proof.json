@@ -3,10 +3,15 @@
   "proofs": {
     "Coma": {
       "vc_lemma_hwm_threshold_has_member": {
-        "tactic": "split_vc",
+        "tactic": "compute_specified",
         "children": [
-          { "prover": "alt-ergo", "time": 0.013 },
-          { "prover": "alt-ergo", "time": 0.013 }
+          {
+            "tactic": "split_vc",
+            "children": [
+              { "prover": "alt-ergo", "time": 0.013 },
+              { "prover": "alt-ergo", "time": 0.013 }
+            ]
+          }
         ]
       }
     }
