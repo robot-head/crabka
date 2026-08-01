@@ -6441,3 +6441,24 @@ default were removed rather than exposed: no runtime code read the setting, so
 changing it could never affect behavior. Historical design documents remain
 unchanged. This completes the traces process CLI/environment boundary; the
 repository-wide hardcoded operational-value audit remains active.
+
+## Log I/O Policy
+
+The log segment reader's former fixed 4 MiB allocation cap and 64 KiB
+timestamp-scan window are broker-wide I/O policy. They now live in
+`LogConfig` as dimensioned `ByteSize` values with behavior-preserving defaults.
+The broker exposes them as `--log-read-buffer-cap` and
+`--log-timestamp-scan-window`, backed by `CRABKA_LOG_READ_BUFFER_CAP` and
+`CRABKA_LOG_TIMESTAMP_SCAN_WINDOW`. Kafka deployments own the same settings
+through `spec.brokerTuning.logReadBufferCap` and
+`spec.brokerTuning.logTimestampScanWindow`; the operator renders them into the
+broker's `[runtime]` TOML.
+
+All deployed input paths reject zero or non-whole-byte values. Direct
+`Segment` callers retain the prior defaults, while `Log` reads and timestamp
+lookups use the active configuration. The remaining `crabka-log` constants are
+Kafka per-topic defaults already represented by `LogConfig`, fixed on-disk and
+wire-format widths, sentinel identities, or model/test bounds. The complete
+log suite, broker CLI tests, Kafka CRD tests, workspace all-target Clippy,
+nightly formatting, generated-CRD parity, and diff hygiene pass. The
+repository-wide hardcoded operational-value audit remains active.
