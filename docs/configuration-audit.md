@@ -6506,3 +6506,19 @@ All 204 Profiles library tests, 31 process tests and 17 runnable differential
 tests pass; four Docker-backed differential tests remain explicitly ignored.
 Workspace all-target Clippy, nightly formatting and diff hygiene pass. The
 repository-wide hardcoded operational-value audit remains active.
+
+## Observability Demo Workload Policy
+
+The standalone demo now exposes its role, input/output topics, Streams
+application ID, consumer group, producer rate, consumer poll timeout and four
+simulated stage durations through `CRABKA_DEMO_*`-backed CLI arguments. The
+rate is a UOM `Frequency`; poll and stage durations are UOM `Time` values.
+Existing bare `CRABKA_DEMO_ORDERS_PER_SEC` integers remain valid hertz inputs.
+Zero still intentionally pauses production or disables stage work, while the
+poll timeout rejects zero and application/group identifiers reject empty
+strings through `refined_type`.
+
+All 91 demo all-target tests and workspace all-target Clippy, nightly
+formatting and diff hygiene pass. A command-metadata test proves every process
+argument has environment backing. The repository-wide hardcoded operational-
+value audit remains active.

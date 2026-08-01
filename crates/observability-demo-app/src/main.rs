@@ -65,7 +65,7 @@ enum Role {
 struct Cli {
     #[command(flatten)]
     profiling: crabka_telemetry::profiling::ProfilingConfig,
-    #[arg(long, value_enum)]
+    #[arg(long, env = "CRABKA_DEMO_ROLE", value_enum)]
     role: Role,
     #[arg(long, env = "CRABKA_DEMO_BOOTSTRAP", default_value = "127.0.0.1:9092")]
     bootstrap: String,
@@ -105,12 +105,46 @@ struct Cli {
         value_parser = parse::positive_time
     )]
     schema_fetch_retry_max_backoff: Option<Time>,
-    #[arg(long, default_value = "orders")]
+    #[arg(long, env = "CRABKA_DEMO_INPUT_TOPIC", default_value = "orders")]
     input_topic: String,
-    #[arg(long, default_value = "order-counts")]
+    #[arg(long, env = "CRABKA_DEMO_OUTPUT_TOPIC", default_value = "order-counts")]
     output_topic: String,
-    #[arg(long, env = "CRABKA_DEMO_ORDERS_PER_SEC", default_value_t = 50)]
-    orders_per_sec: u32,
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_STREAMS_APPLICATION_ID",
+        default_value = "orders-analytics",
+        value_parser = parse_non_empty_string
+    )]
+    streams_application_id: String,
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_GROUP_ID",
+        default_value = "orders-processor",
+        value_parser = parse_non_empty_string
+    )]
+    consumer_group_id: String,
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_ORDERS_PER_SEC",
+        default_value = "50Hz",
+        value_parser = parse_nonnegative_frequency
+    )]
+    orders_per_sec: Frequency,
+    #[arg(
+        long,
+        env = "CRABKA_DEMO_CONSUMER_POLL_TIMEOUT",
+        default_value = "500ms",
+        value_parser = parse::positive_time
+    )]
+    consumer_poll_timeout: Time,
+    #[arg(long, env = "CRABKA_DEMO_VALIDATE_WORK", default_value = "150us", value_parser = parse_nonnegative_time)]
+    validate_work: Time,
+    #[arg(long, env = "CRABKA_DEMO_ENRICH_WORK", default_value = "400us", value_parser = parse_nonnegative_time)]
+    enrich_work: Time,
+    #[arg(long, env = "CRABKA_DEMO_FRAUD_CHECK_WORK", default_value = "200us", value_parser = parse_nonnegative_time)]
+    fraud_check_work: Time,
+    #[arg(long, env = "CRABKA_DEMO_FULFILL_WORK", default_value = "300us", value_parser = parse_nonnegative_time)]
+    fulfill_work: Time,
     /// Classic Consumer best-effort leave-group timeout.
     #[arg(
         long,
@@ -306,6 +340,28 @@ fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
 fn parse_fetch_min(value: &str) -> Result<ByteSize, String> {
     let value = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
     FetchMinBytes::try_from(value).map(FetchMinBytes::size)
+}
+
+fn parse_non_empty_string(value: &str) -> Result<String, String> {
+    refined_type::rule::NonEmptyString::new(value.to_owned())
+        .map(refined_type::Refined::into_value)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_nonnegative_frequency(value: &str) -> Result<Frequency, String> {
+    let value = parse::frequency(value).map_err(|error| error.to_string())?;
+    if value < Frequency::ZERO {
+        return Err("frequency must not be negative".to_owned());
+    }
+    Ok(value)
+}
+
+fn parse_nonnegative_time(value: &str) -> Result<Time, String> {
+    let value = parse::time(value).map_err(|error| error.to_string())?;
+    if value < Time::ZERO {
+        return Err("time must not be negative".to_owned());
+    }
+    Ok(value)
 }
 
 fn client_resource_policy(cli: &Cli) -> (ConnectionDispatchQueueCapacity, ClientFrameMax) {
@@ -896,14 +952,13 @@ async fn run_produce(
             .await?,
     );
 
-    if cli.orders_per_sec == 0 {
+    if cli.orders_per_sec == Frequency::ZERO {
         tracing::warn!("CRABKA_DEMO_ORDERS_PER_SEC=0 — producer paused");
         futures_idle().await;
         return Ok(());
     }
     // The reciprocal of an order rate is the inter-order period.
-    let rate: Frequency = per_sec(cli.orders_per_sec);
-    let period: Time = 1.0 / rate;
+    let period: Time = 1.0 / cli.orders_per_sec;
     let mut tick = tokio::time::interval(period.to_std());
     let mut i: u64 = 0;
     loop {
@@ -1007,7 +1062,7 @@ async fn run_stream(
 ) -> Result<(), BoxError> {
     let app = crabka_client_streams::StreamsApp::builder()
         .bootstrap(cli.bootstrap.clone())
-        .application_id("orders-analytics")
+        .application_id(cli.streams_application_id.clone())
         .schema_registry(cli.registry.clone())
         .cache_config(CacheConfig {
             fetch_retry_policy: schema_fetch_retry_policy,
@@ -1069,7 +1124,7 @@ async fn run_consume(
 
     let mut consumer = Consumer::builder()
         .bootstrap(cli.bootstrap.clone())
-        .group_id("orders-processor")
+        .group_id(cli.consumer_group_id.clone())
         .subscribe([cli.input_topic.clone()])
         .dispatch_queue_capacity(client_dispatch_queue_capacity.get())
         .frame_max(client_frame_max.size())
@@ -1094,9 +1149,9 @@ async fn run_consume(
         .await?;
     tracing::info!(topic = %cli.input_topic, "order processor starting");
     loop {
-        let records = consumer.poll(crabka_units::millis(500)).await?;
+        let records = consumer.poll(cli.consumer_poll_timeout).await?;
         for record in records {
-            process_order_record(&serde, &cli.input_topic, metrics, &record).await;
+            process_order_record(cli, &serde, metrics, &record).await;
         }
     }
 }
@@ -1105,8 +1160,8 @@ async fn run_consume(
 /// producer's trace (from the record's `traceparent` header), and run the
 /// staged processing under it.
 async fn process_order_record(
+    cli: &Cli,
     serde: &OrderSerde,
-    topic: &str,
     metrics: &DemoMetrics,
     record: &ConsumerRecord,
 ) {
@@ -1115,7 +1170,7 @@ async fn process_order_record(
         otel.kind = "consumer",
         otel.name = "orders process",
         messaging.system = "kafka",
-        messaging.source.name = %topic,
+        messaging.source.name = %cli.input_topic,
         messaging.operation = "process",
         messaging.kafka.partition = record.partition,
         messaging.kafka.offset = record.offset,
@@ -1132,14 +1187,14 @@ async fn process_order_record(
             .iter()
             .map(|h| (h.key.as_str(), h.value.as_deref().unwrap_or(&[][..]))),
     );
-    process_order_inner(serde, topic, metrics, record)
+    process_order_inner(cli, serde, metrics, record)
         .instrument(span)
         .await;
 }
 
 async fn process_order_inner(
+    cli: &Cli,
     serde: &OrderSerde,
-    topic: &str,
     metrics: &DemoMetrics,
     record: &ConsumerRecord,
 ) {
@@ -1148,7 +1203,7 @@ async fn process_order_inner(
         tracing::warn!("order record has no value");
         return;
     };
-    let order = match serde.deserialize(topic, value) {
+    let order = match serde.deserialize(&cli.input_topic, value) {
         Ok(order) => order,
         Err(e) => {
             tracing::error!(error = %e, "failed to deserialize order");
@@ -1163,10 +1218,10 @@ async fn process_order_inner(
 
     // Each stage is a child span with simulated work + a per-stage latency
     // metric, so the trace waterfall shows the processing pipeline.
-    stage(metrics, "validate", Duration::from_micros(150)).await;
-    stage(metrics, "enrich", Duration::from_micros(400)).await;
-    stage(metrics, "fraud_check", Duration::from_micros(200)).await;
-    stage(metrics, "fulfill", Duration::from_micros(300)).await;
+    stage(metrics, "validate", cli.validate_work.to_std()).await;
+    stage(metrics, "enrich", cli.enrich_work.to_std()).await;
+    stage(metrics, "fraud_check", cli.fraud_check_work.to_std()).await;
+    stage(metrics, "fulfill", cli.fulfill_work.to_std()).await;
 
     let outcome = classify_outcome(&order);
     span.record("demo.order.outcome", outcome);
@@ -1221,7 +1276,72 @@ async fn futures_idle() {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
+
     use super::*;
+
+    #[test]
+    fn workload_policy_preserves_defaults_and_accepts_units() {
+        let defaults = Cli::try_parse_from(["observability-demo-app", "--role", "consume"])
+            .expect("default CLI");
+        assert2::assert!(defaults.orders_per_sec == per_sec(50));
+        assert2::assert!(defaults.consumer_poll_timeout == millis(500));
+        assert2::assert!(defaults.validate_work == crabka_units::micros(150));
+        assert2::assert!(defaults.enrich_work == crabka_units::micros(400));
+        assert2::assert!(defaults.fraud_check_work == crabka_units::micros(200));
+        assert2::assert!(defaults.fulfill_work == crabka_units::micros(300));
+
+        let custom = Cli::try_parse_from([
+            "observability-demo-app",
+            "--role",
+            "consume",
+            "--orders-per-sec",
+            "120/min",
+            "--consumer-poll-timeout",
+            "2s",
+            "--validate-work",
+            "0",
+            "--enrich-work",
+            "1ms",
+            "--fraud-check-work",
+            "2ms",
+            "--fulfill-work",
+            "3ms",
+        ])
+        .expect("custom CLI");
+        assert2::assert!(custom.orders_per_sec == per_sec(2));
+        assert2::assert!(custom.consumer_poll_timeout == secs(2));
+        assert2::assert!(custom.validate_work == Time::ZERO);
+        assert2::assert!(custom.enrich_work == millis(1));
+        assert2::assert!(custom.fraud_check_work == millis(2));
+        assert2::assert!(custom.fulfill_work == millis(3));
+
+        for option in [
+            "--orders-per-sec=-1Hz",
+            "--consumer-poll-timeout=0",
+            "--validate-work=-1ms",
+            "--streams-application-id=",
+            "--consumer-group-id=",
+        ] {
+            Cli::try_parse_from(["observability-demo-app", "--role", "consume", option])
+                .expect_err(option);
+        }
+    }
+
+    #[test]
+    fn every_process_argument_has_an_environment_binding() {
+        let command = Cli::command();
+        let missing = command
+            .get_arguments()
+            .filter(|argument| argument.get_long().is_some() && argument.get_env().is_none())
+            .filter_map(|argument| argument.get_long().map(str::to_owned))
+            .collect::<Vec<_>>();
+
+        assert2::assert!(
+            missing.is_empty(),
+            "arguments without env bindings: {missing:?}"
+        );
+    }
 
     #[test]
     fn consumer_behavior_uses_defaults_and_independent_overrides() {
@@ -1427,7 +1547,14 @@ mod tests {
             schema_fetch_retry_max_backoff: None,
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
-            orders_per_sec: 50,
+            streams_application_id: "orders-analytics".to_owned(),
+            consumer_group_id: "orders-processor".to_owned(),
+            orders_per_sec: per_sec(50),
+            consumer_poll_timeout: millis(500),
+            validate_work: crabka_units::micros(150),
+            enrich_work: crabka_units::micros(400),
+            fraud_check_work: crabka_units::micros(200),
+            fulfill_work: crabka_units::micros(300),
             consumer_leave_group_timeout: None,
             consumer_subscription_metadata_refresh_interval: None,
             consumer_startup_attempt_timeout: None,
@@ -1514,7 +1641,14 @@ mod tests {
             schema_fetch_retry_max_backoff: None,
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
-            orders_per_sec: 50,
+            streams_application_id: "orders-analytics".to_owned(),
+            consumer_group_id: "orders-processor".to_owned(),
+            orders_per_sec: per_sec(50),
+            consumer_poll_timeout: millis(500),
+            validate_work: crabka_units::micros(150),
+            enrich_work: crabka_units::micros(400),
+            fraud_check_work: crabka_units::micros(200),
+            fulfill_work: crabka_units::micros(300),
             consumer_leave_group_timeout: None,
             consumer_subscription_metadata_refresh_interval: None,
             consumer_startup_attempt_timeout: None,
@@ -1610,7 +1744,14 @@ mod tests {
             schema_fetch_retry_max_backoff: None,
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
-            orders_per_sec: 50,
+            streams_application_id: "orders-analytics".to_owned(),
+            consumer_group_id: "orders-processor".to_owned(),
+            orders_per_sec: per_sec(50),
+            consumer_poll_timeout: millis(500),
+            validate_work: crabka_units::micros(150),
+            enrich_work: crabka_units::micros(400),
+            fraud_check_work: crabka_units::micros(200),
+            fulfill_work: crabka_units::micros(300),
             consumer_leave_group_timeout: None,
             consumer_subscription_metadata_refresh_interval: None,
             consumer_startup_attempt_timeout: None,
@@ -1709,7 +1850,14 @@ mod tests {
             schema_fetch_retry_max_backoff: None,
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
-            orders_per_sec: 50,
+            streams_application_id: "orders-analytics".to_owned(),
+            consumer_group_id: "orders-processor".to_owned(),
+            orders_per_sec: per_sec(50),
+            consumer_poll_timeout: millis(500),
+            validate_work: crabka_units::micros(150),
+            enrich_work: crabka_units::micros(400),
+            fraud_check_work: crabka_units::micros(200),
+            fulfill_work: crabka_units::micros(300),
             consumer_leave_group_timeout: None,
             consumer_subscription_metadata_refresh_interval: None,
             consumer_startup_attempt_timeout: None,
@@ -1770,7 +1918,14 @@ mod tests {
             schema_fetch_retry_max_backoff: None,
             input_topic: "orders".to_owned(),
             output_topic: "order-counts".to_owned(),
-            orders_per_sec: 50,
+            streams_application_id: "orders-analytics".to_owned(),
+            consumer_group_id: "orders-processor".to_owned(),
+            orders_per_sec: per_sec(50),
+            consumer_poll_timeout: millis(500),
+            validate_work: crabka_units::micros(150),
+            enrich_work: crabka_units::micros(400),
+            fraud_check_work: crabka_units::micros(200),
+            fulfill_work: crabka_units::micros(300),
             consumer_leave_group_timeout: None,
             consumer_subscription_metadata_refresh_interval: None,
             consumer_startup_attempt_timeout: None,
