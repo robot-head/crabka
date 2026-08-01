@@ -29,8 +29,13 @@ apko build packaging/apko/creusot-toolchain.yaml \
   --keyring-append "$WORK/melange.rsa.pub"
 
 if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
-  docker load -i creusot-toolchain.tar >/dev/null
-  docker run --rm "$TAG" \
+  LOADED_TAG="$(docker load -i creusot-toolchain.tar | sed -n 's/^Loaded image: //p')"
+  if [ -z "$LOADED_TAG" ]; then
+    echo "Unable to determine the image tag loaded from creusot-toolchain.tar." >&2
+    exit 1
+  fi
+  docker tag "$LOADED_TAG" "$TAG"
+  docker run --rm --pull=never "$TAG" \
     "rustup show active-toolchain | grep -F '$RUST_TOOLCHAIN' && cargo creusot --help >/dev/null"
 else
   echo "Skipping Docker smoke verification: docker is unavailable." >&2
