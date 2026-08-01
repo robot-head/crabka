@@ -13,6 +13,7 @@ use arrow::{
     datatypes::{DataType, Int32Type},
     record_batch::RecordBatch,
 };
+use crabka_units::{ByteSize, Time, convert::TimeExt as _, millis};
 use datafusion::arrow::array::AsArray;
 
 use crate::{
@@ -39,22 +40,6 @@ use crate::{
     store::{MatchCmp, MatchScope, MatchValue, ScanOptions, SpanMatcher, SpanStore},
 };
 
-const DEFAULT_HISTOGRAM_BUCKETS_NS: &[f64] = &[
-    2_000_000.0,
-    4_000_000.0,
-    8_000_000.0,
-    16_000_000.0,
-    32_000_000.0,
-    64_000_000.0,
-    128_000_000.0,
-    256_000_000.0,
-    512_000_000.0,
-    1_024_000_000.0,
-    2_048_000_000.0,
-    4_096_000_000.0,
-    8_192_000_000.0,
-    16_384_000_000.0,
-];
 const BLOCK_ATTR_KEYS: &str = "attr_keys";
 const BLOCK_ATTR_VALUE: &str = "attr_value";
 const BLOCK_ATTR_VALUE_INT: &str = "attr_value_int";
@@ -62,12 +47,14 @@ const BLOCK_ATTR_VALUE_DOUBLE: &str = "attr_value_double";
 const BLOCK_ATTR_VALUE_BOOL: &str = "attr_value_bool";
 const RESOURCE_ATTR_PREFIX: &str = "__resource.";
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct EngineOpts {
     pub default_limit: usize,
     pub default_spss: usize,
     pub max_traces: usize,
     pub max_exemplars: usize,
+    pub compare_max_values_per_attr: usize,
+    pub histogram_buckets: Vec<Time>,
 }
 
 impl Default for EngineOpts {
@@ -77,6 +64,12 @@ impl Default for EngineOpts {
             default_spss: 3,
             max_traces: 1000,
             max_exemplars: 0,
+            compare_max_values_per_attr: 256,
+            histogram_buckets: [
+                2, 4, 8, 16, 32, 64, 128, 256, 512, 1_024, 2_048, 4_096, 8_192, 16_384,
+            ]
+            .map(millis)
+            .into(),
         }
     }
 }
@@ -212,7 +205,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
             search_limit,
             effective_spss,
             q.hints.most_recent,
-            planned.inspected_bytes,
+            planned.inspected,
         )
     }
 
@@ -292,7 +285,7 @@ impl<S: SpanStore> TraceqlEngine<S> {
             UnixNano(end_ns),
             DurationNanos(step_ns),
             &metric,
-            max_exemplars,
+            (max_exemplars, &self.opts.histogram_buckets),
             UnixNano(start_ns),
         )
     }
@@ -344,7 +337,12 @@ impl<S: SpanStore> TraceqlEngine<S> {
         )
         .await?;
         let batches = collect_planned_batches(planned).await?;
-        assemble_compare_response(&batches, &compare, range)
+        assemble_compare_response(
+            &batches,
+            &compare,
+            range,
+            self.opts.compare_max_values_per_attr,
+        )
     }
 
     /// # Errors
@@ -835,8 +833,6 @@ struct CompareRow {
 /// (already-tracked values keep counting); this keeps memory
 /// `O(attrs * cap * buckets)`. The cap is clamped to be at least `top_n` so the
 /// final `top_n` cut in `build_compare_series` is never starved.
-const COMPARE_MAX_VALUES_PER_ATTR: usize = 256;
-
 type CompareCounts = BTreeMap<(CompareGroup, String, String), Vec<u64>>;
 type CompareTotals = BTreeMap<CompareGroup, Vec<u64>>;
 /// `attribute → value → group → per-bucket counts`. `build_compare_series`
@@ -849,6 +845,7 @@ fn assemble_compare_response(
     batches: &[RecordBatch],
     compare: &CompareSpec,
     range: MetricsRange,
+    max_values_per_attr: usize,
 ) -> Result<TraceMetricsResponse> {
     if range.step.0 <= 0 {
         return Err(TraceqlError::Plan("metrics step must be positive".into()));
@@ -859,7 +856,8 @@ fn assemble_compare_response(
     let bucket_count = usize::try_from((range.scan_end.0 - range.scan_start.0) / range.step.0 + 1)
         .map_err(|e| TraceqlError::Plan(e.to_string()))?;
 
-    let (counts, totals) = accumulate_compare_counts(batches, compare, range, bucket_count)?;
+    let (counts, totals) =
+        accumulate_compare_counts(batches, compare, range, bucket_count, max_values_per_attr)?;
     let series = build_compare_series(counts, &totals, compare.top_n, range, bucket_count);
     Ok(TraceMetricsResponse { series })
 }
@@ -875,14 +873,15 @@ fn accumulate_compare_counts(
     compare: &CompareSpec,
     range: MetricsRange,
     bucket_count: usize,
+    max_values_per_attr: usize,
 ) -> Result<(CompareCounts, CompareTotals)> {
     let mut counts: CompareCounts = BTreeMap::new();
     let mut totals: CompareTotals = BTreeMap::new();
     // Distinct values already tracked per (group, attr_key), to enforce
-    // COMPARE_MAX_VALUES_PER_ATTR during accumulation (see the constant docs).
+    // the configured per-attribute cap during accumulation.
     let mut distinct_per_attr: BTreeMap<(CompareGroup, String), usize> = BTreeMap::new();
     // The cap must never fall below top_n or the final cut would be starved.
-    let value_cap = COMPARE_MAX_VALUES_PER_ATTR.max(compare.top_n);
+    let value_cap = max_values_per_attr.max(compare.top_n);
     // Compile every selection regex once, up front, and reuse across all rows.
     let mut regexes: CompareRegexCache = HashMap::new();
     collect_selection_regexes(&compare.selection, &mut regexes);
@@ -1540,7 +1539,7 @@ fn assemble_metrics_response(
     end_ns: UnixNano,
     step_ns: DurationNanos,
     metric: &MetricPlan,
-    max_exemplars: usize,
+    metric_policy: (usize, &[Time]),
     output_start_ns: UnixNano,
 ) -> Result<TraceMetricsResponse> {
     if step_ns.0 <= 0 {
@@ -1594,7 +1593,7 @@ fn assemble_metrics_response(
         buckets.insert(Vec::new(), vec![MetricBucket::default(); bucket_count]);
     }
 
-    let step_seconds = f64_from_i64(step_ns.0) / 1_000_000_000.0;
+    let step = Time::from_nanos(step_ns.0);
     let series = buckets
         .into_iter()
         .map(|(labels, buckets)| {
@@ -1604,8 +1603,8 @@ fn assemble_metrics_response(
                 metric,
                 output_start_ns.0,
                 step_ns.0,
-                step_seconds,
-                max_exemplars,
+                step,
+                metric_policy,
             )
         })
         .collect::<Result<Vec<_>>>()?
@@ -1691,9 +1690,10 @@ fn metric_series_for_group(
     metric: &MetricPlan,
     start_ns: i64,
     step_ns: i64,
-    step_seconds: f64,
-    max_exemplars: usize,
+    step: Time,
+    metric_policy: (usize, &[Time]),
 ) -> Result<Vec<TraceMetricSeries>> {
+    let (max_exemplars, histogram_buckets) = metric_policy;
     let exemplars = metric_exemplars(&buckets, max_exemplars);
     if matches!(metric.function, MetricFunction::QuantileOverTime) {
         return metric
@@ -1719,7 +1719,14 @@ fn metric_series_for_group(
             .collect();
     }
     if matches!(metric.function, MetricFunction::HistogramOverTime) {
-        return histogram_series_for_group(labels, &buckets, start_ns, step_ns, &exemplars);
+        return histogram_series_for_group(
+            labels,
+            &buckets,
+            start_ns,
+            step_ns,
+            &exemplars,
+            histogram_buckets,
+        );
     }
 
     let points = buckets
@@ -1728,7 +1735,7 @@ fn metric_series_for_group(
         .map(|(idx, bucket)| {
             let ts = start_ns + i64::try_from(idx).unwrap_or(i64::MAX) * step_ns;
             let value = match metric.function {
-                MetricFunction::Rate => f64_from_u64(bucket.count)? / step_seconds,
+                MetricFunction::Rate => f64_from_u64(bucket.count)? / step.secs_f64(),
                 MetricFunction::CountOverTime => f64_from_u64(bucket.count)?,
                 MetricFunction::SumOverTime => bucket.sum,
                 MetricFunction::AvgOverTime => bucket.average()?,
@@ -1754,15 +1761,17 @@ fn histogram_series_for_group(
     start_ns: i64,
     step_ns: i64,
     exemplars: &[TraceMetricExemplar],
+    histogram_buckets: &[Time],
 ) -> Result<Vec<TraceMetricSeries>> {
-    let mut out = Vec::with_capacity(DEFAULT_HISTOGRAM_BUCKETS_NS.len() + 3);
-    for le in DEFAULT_HISTOGRAM_BUCKETS_NS {
+    let mut out = Vec::with_capacity(histogram_buckets.len() + 3);
+    for le in histogram_buckets {
+        let le = f64_from_i64(le.nanos_i64());
         let mut labels = labels.clone();
-        labels.insert(0, ("le".into(), quantile_label(*le)));
+        labels.insert(0, ("le".into(), quantile_label(le)));
         out.push(TraceMetricSeries {
             labels,
             points: histogram_points(buckets, start_ns, step_ns, |bucket| {
-                f64_from_usize(bucket.values.iter().filter(|value| **value <= *le).count())
+                f64_from_usize(bucket.values.iter().filter(|value| **value <= le).count())
             })?,
             exemplars: exemplars.to_owned(),
         });
@@ -2116,8 +2125,7 @@ struct TraceAcc {
     root_service_name: String,
     root_trace_name: String,
     start_time_unix_nano: u64,
-    duration_nanos: u64,
-    duration_ms: u64,
+    duration: Time,
     spans: Vec<SpanRef>,
 }
 
@@ -2126,7 +2134,7 @@ pub(crate) fn assemble_search_response(
     limit: usize,
     spss: usize,
     most_recent: bool,
-    inspected_bytes: u64,
+    inspected: ByteSize,
 ) -> Result<SearchResponse> {
     let mut traces: BTreeMap<[u8; 16], TraceAcc> = BTreeMap::new();
     for batch in batches {
@@ -2141,7 +2149,7 @@ pub(crate) fn assemble_search_response(
                 nested_set_right: i32_value(batch, COL_NS_RIGHT, row)?,
                 nested_set_parent: i32_value(batch, COL_PARENT_ID, row)?,
                 start_time_unix_nano: u64_from_i64(i64_value(batch, COL_START, row)?)?,
-                duration_nanos: u64_from_i64(i64_value(batch, COL_DURATION, row)?)?,
+                duration: Time::from_nanos(i64_value(batch, COL_DURATION, row)?),
                 status_code: i32_value(batch, COL_STATUS_CODE, row)?,
                 status_message: string_value(batch, COL_STATUS_MESSAGE, row).unwrap_or_default(),
                 instrumentation_name: string_value(batch, COL_INSTRUMENTATION_NAME, row)
@@ -2155,24 +2163,19 @@ pub(crate) fn assemble_search_response(
             };
             traces
                 .entry(trace_id)
-                .or_insert_with(|| {
-                    let duration_nanos =
-                        u64_from_i64(i64_value(batch, COL_TRACE_DURATION, row).unwrap_or_default())
-                            .unwrap_or_default();
-
-                    TraceAcc {
-                        root_service_name: string_value(batch, COL_ROOT_SERVICE_NAME, row)
-                            .unwrap_or_default(),
-                        root_trace_name: string_value(batch, COL_ROOT_SPAN_NAME, row)
-                            .unwrap_or_default(),
-                        start_time_unix_nano: u64_from_i64(
-                            i64_value(batch, COL_TRACE_START, row).unwrap_or_default(),
-                        )
+                .or_insert_with(|| TraceAcc {
+                    root_service_name: string_value(batch, COL_ROOT_SERVICE_NAME, row)
                         .unwrap_or_default(),
-                        duration_nanos,
-                        duration_ms: duration_nanos / 1_000_000,
-                        spans: Vec::new(),
-                    }
+                    root_trace_name: string_value(batch, COL_ROOT_SPAN_NAME, row)
+                        .unwrap_or_default(),
+                    start_time_unix_nano: u64_from_i64(
+                        i64_value(batch, COL_TRACE_START, row).unwrap_or_default(),
+                    )
+                    .unwrap_or_default(),
+                    duration: Time::from_nanos(
+                        i64_value(batch, COL_TRACE_DURATION, row).unwrap_or_default(),
+                    ),
+                    spans: Vec::new(),
                 })
                 .spans
                 .push(span);
@@ -2190,8 +2193,7 @@ pub(crate) fn assemble_search_response(
                 root_service_name: acc.root_service_name,
                 root_trace_name: acc.root_trace_name,
                 start_time_unix_nano: acc.start_time_unix_nano,
-                duration_nanos: acc.duration_nanos,
-                duration_ms: acc.duration_ms,
+                duration: acc.duration,
                 span_sets: vec![SpanSet { spans, matched }],
             }
         })
@@ -2210,7 +2212,7 @@ pub(crate) fn assemble_search_response(
     Ok(SearchResponse {
         traces: out,
         inspected_traces,
-        inspected_bytes,
+        inspected,
     })
 }
 
@@ -2545,6 +2547,7 @@ mod tests {
         datatypes::{Field as ArrowField, Int32Type, Schema},
     };
     use assert2::{assert, check};
+    use crabka_units::{convert::ByteSizeExt as _, millis, nanos, secs};
     use datafusion::{catalog::MemTable, prelude::SessionContext};
 
     use super::*;
@@ -2567,7 +2570,7 @@ mod tests {
             name: format!("op-{id}"),
             kind: 0,
             start_unix_nano,
-            duration_nanos: 200,
+            duration: nanos(200),
             status_code: 0,
             status_message: String::new(),
             instrumentation_name: "tracer".into(),
@@ -2605,14 +2608,15 @@ mod tests {
         ) -> Result<ScanResult> {
             let schema = self.batch.schema();
             let ctx = SessionContext::new();
-            let inspected_bytes =
-                u64::try_from(self.batch.get_array_memory_size()).unwrap_or(u64::MAX);
+            let inspected = ByteSize::from_bytes(
+                u64::try_from(self.batch.get_array_memory_size()).unwrap_or(u64::MAX),
+            );
             let table = MemTable::try_new(schema, vec![vec![self.batch.clone()]])?;
             ctx.register_table("spans", Arc::new(table))?;
             Ok(ScanResult {
                 ctx,
                 span_table: "spans".into(),
-                inspected_bytes,
+                inspected,
             })
         }
 
@@ -2744,14 +2748,14 @@ mod tests {
 
     #[tokio::test]
     async fn search_reports_inspected_bytes() {
-        // The scan's decoded data size is threaded up to inspected_bytes (non-zero
+        // The scan's decoded data size is threaded up to `inspected` (non-zero
         // for a non-empty store) for the Tempo search `metrics.inspectedBytes`.
         let e = engine();
         let r = e
             .search("t", "{ .svc = \"b\" }", 0, 100_000, 20)
             .await
             .unwrap();
-        assert!(r.inspected_bytes > 0);
+        assert!(r.inspected.bytes_u64() > 0);
     }
 
     #[tokio::test]
@@ -2830,7 +2834,7 @@ mod tests {
     async fn search_inter_brace_and_keeps_nested_selector_predicate() {
         let mut event_span = sp(9, 1, None, "a");
         event_span.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
@@ -3003,7 +3007,7 @@ mod tests {
     async fn search_selector_matches_event_intrinsic() {
         let mut span = sp(9, 1, None, "a");
         span.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
         }];
@@ -3026,7 +3030,7 @@ mod tests {
     async fn search_selector_matches_event_intrinsic_presence() {
         let mut event_span = sp(9, 1, None, "a");
         event_span.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
@@ -3049,7 +3053,7 @@ mod tests {
     async fn search_selector_not_event_intrinsic_excludes_matching_spans() {
         let mut event_span = sp(9, 1, None, "a");
         event_span.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
@@ -3072,7 +3076,7 @@ mod tests {
     async fn search_selector_grouped_not_event_intrinsic() {
         let mut event_span = sp(9, 1, None, "a");
         event_span.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
@@ -3095,13 +3099,13 @@ mod tests {
     async fn search_selector_not_nested_or_excludes_each_branch() {
         let mut miss_span = sp(9, 1, None, "a");
         miss_span.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
         let mut hit_span = sp(9, 2, Some(1), "b");
         hit_span.events = vec![EventRef {
-            time_since_start_nano: 60,
+            time_since_start: nanos(60),
             name: "cache.hit".into(),
             attributes: Vec::new(),
         }];
@@ -3130,19 +3134,19 @@ mod tests {
     async fn search_selector_not_nested_and_uses_disjuncts() {
         let mut miss_users = sp(9, 1, None, "a");
         miss_users.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
         }];
         let mut miss_orders = sp(9, 2, Some(1), "b");
         miss_orders.events = vec![EventRef {
-            time_since_start_nano: 60,
+            time_since_start: nanos(60),
             name: "cache.miss".into(),
             attributes: vec![("cache.key".into(), AttrValue::Str("orders".into()))],
         }];
         let mut hit_users = sp(9, 3, Some(1), "c");
         hit_users.events = vec![EventRef {
-            time_since_start_nano: 70,
+            time_since_start: nanos(70),
             name: "cache.hit".into(),
             attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
         }];
@@ -3174,19 +3178,19 @@ mod tests {
         let mut split_events = sp(9, 1, None, "a");
         split_events.events = vec![
             EventRef {
-                time_since_start_nano: 50,
+                time_since_start: nanos(50),
                 name: "cache.miss".into(),
                 attributes: vec![("cache.key".into(), AttrValue::Str("orders".into()))],
             },
             EventRef {
-                time_since_start_nano: 60,
+                time_since_start: nanos(60),
                 name: "cache.hit".into(),
                 attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
             },
         ];
         let mut same_event = sp(9, 2, Some(1), "b");
         same_event.events = vec![EventRef {
-            time_since_start_nano: 70,
+            time_since_start: nanos(70),
             name: "cache.miss".into(),
             attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
         }];
@@ -3214,7 +3218,7 @@ mod tests {
     async fn search_selector_or_with_nested_event_filters_each_branch() {
         let mut event_span = sp(9, 1, None, "a");
         event_span.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
@@ -3422,13 +3426,13 @@ mod tests {
     async fn mixed_parent_and_event_selector_keeps_parent_predicate() {
         let mut wanted = sp(9, 2, Some(1), "b");
         wanted.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
         let mut wrong_parent = sp(8, 2, Some(1), "b");
         wrong_parent.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
@@ -3738,13 +3742,13 @@ mod tests {
     async fn count_over_time_by_event_name_intrinsic() {
         let mut miss = sp_at(1, 1, None, "api", 0);
         miss.events = vec![EventRef {
-            time_since_start_nano: 50,
+            time_since_start: nanos(50),
             name: "cache.miss".into(),
             attributes: Vec::new(),
         }];
         let mut hit = sp_at(1, 2, None, "api", 10_000);
         hit.events = vec![EventRef {
-            time_since_start_nano: 60,
+            time_since_start: nanos(60),
             name: "cache.hit".into(),
             attributes: Vec::new(),
         }];
@@ -3785,12 +3789,12 @@ mod tests {
         let mut span = sp_at(1, 1, None, "api", 0);
         span.events = vec![
             EventRef {
-                time_since_start_nano: 50,
+                time_since_start: nanos(50),
                 name: "cache.miss".into(),
                 attributes: Vec::new(),
             },
             EventRef {
-                time_since_start_nano: 60,
+                time_since_start: nanos(60),
                 name: "cache.hit".into(),
                 attributes: Vec::new(),
             },
@@ -3832,12 +3836,12 @@ mod tests {
         let mut span = sp_at(1, 1, None, "api", 0);
         span.events = vec![
             EventRef {
-                time_since_start_nano: 50,
+                time_since_start: nanos(50),
                 name: "cache.lookup".into(),
                 attributes: vec![("cache.key".into(), AttrValue::Str("users".into()))],
             },
             EventRef {
-                time_since_start_nano: 60,
+                time_since_start: nanos(60),
                 name: "cache.lookup".into(),
                 attributes: vec![("cache.key".into(), AttrValue::Str("orders".into()))],
             },
@@ -4264,15 +4268,15 @@ mod tests {
             "root",
             vec![
                 InputSpan {
-                    duration_nanos: 100,
+                    duration: nanos(100),
                     ..sp_at(1, 1, None, "api", 0)
                 },
                 InputSpan {
-                    duration_nanos: 300,
+                    duration: nanos(300),
                     ..sp_at(1, 2, None, "api", 10_000)
                 },
                 InputSpan {
-                    duration_nanos: 50,
+                    duration: nanos(50),
                     ..sp_at(1, 3, None, "api", 70_000)
                 },
             ],
@@ -4337,11 +4341,11 @@ mod tests {
             "root",
             vec![
                 InputSpan {
-                    duration_nanos: 100,
+                    duration: nanos(100),
                     ..sp_at(1, 1, None, "api", 0)
                 },
                 InputSpan {
-                    duration_nanos: 300,
+                    duration: nanos(300),
                     ..sp_at(1, 2, None, "api", 50)
                 },
             ],
@@ -4371,23 +4375,23 @@ mod tests {
             "root",
             vec![
                 InputSpan {
-                    duration_nanos: 100,
+                    duration: nanos(100),
                     ..sp_at(1, 1, None, "api", 0)
                 },
                 InputSpan {
-                    duration_nanos: 200,
+                    duration: nanos(200),
                     ..sp_at(1, 2, None, "api", 10_000)
                 },
                 InputSpan {
-                    duration_nanos: 300,
+                    duration: nanos(300),
                     ..sp_at(1, 3, None, "api", 20_000)
                 },
                 InputSpan {
-                    duration_nanos: 400,
+                    duration: nanos(400),
                     ..sp_at(1, 4, None, "api", 30_000)
                 },
                 InputSpan {
-                    duration_nanos: 500,
+                    duration: nanos(500),
                     ..sp_at(1, 5, None, "api", 40_000)
                 },
             ],
@@ -4437,15 +4441,15 @@ mod tests {
             "root",
             vec![
                 InputSpan {
-                    duration_nanos: 1_000_000,
+                    duration: nanos(1_000_000),
                     ..sp_at(1, 1, None, "api", 0)
                 },
                 InputSpan {
-                    duration_nanos: 2_000_000_000,
+                    duration: nanos(2_000_000_000),
                     ..sp_at(1, 2, None, "api", 10_000)
                 },
                 InputSpan {
-                    duration_nanos: 12_000_000_000,
+                    duration: secs(12),
                     ..sp_at(1, 3, None, "api", 20_000)
                 },
             ],
@@ -4490,6 +4494,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn histogram_over_time_uses_configured_buckets() {
+        let mut store = InMemorySpanStore::new();
+        store.push_trace(
+            "t",
+            "a",
+            "root",
+            vec![InputSpan {
+                duration: millis(3),
+                ..sp_at(1, 1, None, "api", 0)
+            }],
+        );
+        let engine = TraceqlEngine::new(
+            Arc::new(store),
+            EngineOpts {
+                histogram_buckets: vec![millis(2)],
+                ..EngineOpts::default()
+            },
+        );
+        let response = engine
+            .query_range(
+                "t",
+                "{} | histogram_over_time(span:duration)",
+                0,
+                60_000,
+                60_000,
+            )
+            .await
+            .unwrap();
+        let finite_buckets = response
+            .series
+            .iter()
+            .filter_map(|series| {
+                series
+                    .labels
+                    .iter()
+                    .find(|(key, value)| key == "le" && value != "+Inf")
+                    .map(|(_, value)| value.as_str())
+            })
+            .collect::<Vec<_>>();
+        check!(finite_buckets == ["2000000"]);
+    }
+
+    #[tokio::test]
     async fn histogram_over_time_without_field_defaults_to_span_duration() {
         let mut s = InMemorySpanStore::new();
         s.push_trace(
@@ -4497,7 +4544,7 @@ mod tests {
             "a",
             "root",
             vec![InputSpan {
-                duration_nanos: 1_000_000,
+                duration: nanos(1_000_000),
                 ..sp_at(1, 1, None, "api", 0)
             }],
         );
@@ -4953,8 +5000,7 @@ mod tests {
     async fn search_response_exposes_exact_span_scalars_and_attrs() {
         // A single trace with two spans carrying distinct, non-uniform scalar
         // values so that trivial replacements (None / Some([0;8]) / Some([1;8]) /
-        // i32 0/1/-1) and the `/ 1_000_000` duration_ms division are all
-        // observable.
+        // i32 0/1/-1) and the nanosecond trace duration are all observable.
         let root = InputSpan {
             trace_id: [9; 16],
             span_id: [10; 8],
@@ -4962,7 +5008,7 @@ mod tests {
             name: "root-op".into(),
             kind: 2,
             start_unix_nano: 0,
-            duration_nanos: 5_000_000,
+            duration: nanos(5_000_000),
             status_code: 0,
             status_message: String::new(),
             instrumentation_name: "tracer".into(),
@@ -4988,8 +5034,7 @@ mod tests {
             .unwrap();
         assert!(r.traces.len() == 1);
         let trace = &r.traces[0];
-        // trace_duration = 5_000_000 ns -> 5 ms (kills `/ -> *` and `/ -> %`).
-        assert!(trace.duration_ms == 5);
+        assert!(trace.duration == millis(5));
 
         let spans = &trace.span_sets[0].spans;
         assert!(spans.len() == 2);
@@ -5514,7 +5559,7 @@ mod tests {
             UnixNano(0),
             DurationNanos(60_000),
             &plan,
-            0,
+            (0, &EngineOpts::default().histogram_buckets),
             UnixNano(0),
         )
         .unwrap();
@@ -5530,7 +5575,7 @@ mod tests {
                 UnixNano(0),
                 DurationNanos(60_000),
                 &plan,
-                0,
+                (0, &EngineOpts::default().histogram_buckets),
                 UnixNano(0),
             )
             .is_err()
@@ -5552,7 +5597,7 @@ mod tests {
             UnixNano(60_000),
             DurationNanos(60_000),
             &plan,
-            0,
+            (0, &EngineOpts::default().histogram_buckets),
             UnixNano(0),
         )
         .unwrap();
@@ -5573,7 +5618,7 @@ mod tests {
             UnixNano(14),
             DurationNanos(2),
             &plan,
-            0,
+            (0, &EngineOpts::default().histogram_buckets),
             UnixNano(10),
         )
         .unwrap();
@@ -5624,7 +5669,7 @@ mod tests {
             name: format!("op-{id}"),
             kind: 0,
             start_unix_nano: start,
-            duration_nanos: 100,
+            duration: nanos(100),
             status_code: status,
             status_message: String::new(),
             instrumentation_name: "tracer".into(),
@@ -6051,7 +6096,8 @@ mod tests {
             end: None,
         };
         let resp =
-            assemble_compare_response(&[compare_block_batch()], &compare, compare_range()).unwrap();
+            assemble_compare_response(&[compare_block_batch()], &compare, compare_range(), 256)
+                .unwrap();
 
         // The lone span falls to baseline (selection is Const(false)).
         for (attr, value) in [
@@ -6089,8 +6135,8 @@ mod tests {
             output_start: UnixNano(0),
             step: DurationNanos(60_000),
         };
-        let resp =
-            assemble_compare_response(&[compare_block_batch()], &compare, equal_range).unwrap();
+        let resp = assemble_compare_response(&[compare_block_batch()], &compare, equal_range, 256)
+            .unwrap();
         assert!(meta_total(&resp, "baseline_total") == 1);
 
         let reversed_range = MetricsRange {
@@ -6100,7 +6146,8 @@ mod tests {
             step: DurationNanos(60_000),
         };
         assert!(
-            assemble_compare_response(&[compare_block_batch()], &compare, reversed_range).is_err()
+            assemble_compare_response(&[compare_block_batch()], &compare, reversed_range, 256)
+                .is_err()
         );
     }
 
@@ -6122,6 +6169,7 @@ mod tests {
             &[compare_start_batch(&[9, 10, 12, 14, 15])],
             &compare,
             range,
+            256,
         )
         .unwrap();
         let baseline_total = resp
@@ -6555,21 +6603,40 @@ mod tests {
 
         // Pre-truncation: distinct span.path values per group are capped.
         let (counts, totals) =
-            accumulate_compare_counts(&[batch], &compare, range, bucket_count).unwrap();
+            accumulate_compare_counts(&[batch], &compare, range, bucket_count, 256).unwrap();
         let distinct_paths = counts
             .keys()
             .filter(|(group, attr, _)| *group == CompareGroup::Selection && attr == "span.path")
             .count();
         assert!(
-            distinct_paths == COMPARE_MAX_VALUES_PER_ATTR,
-            "tracked {distinct_paths} distinct values, expected cap {COMPARE_MAX_VALUES_PER_ATTR}"
+            distinct_paths == 256,
+            "tracked {distinct_paths} distinct values, expected cap 256"
         );
         // All 1000 spans are still counted in the per-group total (the cap only
         // limits tracked distinct VALUES, never the per-group span totals).
         assert!(totals[&CompareGroup::Selection].iter().sum::<u64>() == 1000);
 
+        let (configured_counts, _) = accumulate_compare_counts(
+            &[unique_path_batch(1000)],
+            &compare,
+            range,
+            bucket_count,
+            17,
+        )
+        .unwrap();
+        assert!(
+            configured_counts
+                .keys()
+                .filter(|(group, attr, _)| {
+                    *group == CompareGroup::Selection && attr == "span.path"
+                })
+                .count()
+                == 17
+        );
+
         // Post-truncation: the emitted span.path series obey top_n.
-        let resp = assemble_compare_response(&[unique_path_batch(1000)], &compare, range).unwrap();
+        let resp =
+            assemble_compare_response(&[unique_path_batch(1000)], &compare, range, 256).unwrap();
         let path_series = resp
             .series
             .iter()
@@ -6590,7 +6657,7 @@ mod tests {
         // in the span distribution as `span.__event.exception.type`.
         let mut span = compare_span(1, 0, 2, vec![("http.method", AttrValue::Str("GET".into()))]);
         span.events = vec![EventRef {
-            time_since_start_nano: 10,
+            time_since_start: nanos(10),
             name: "exception".into(),
             attributes: vec![("exception.type".into(), AttrValue::Str("IOError".into()))],
         }];

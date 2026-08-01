@@ -6287,3 +6287,27 @@ CLI default, override, invalid-input, environment-precedence, status-reporting,
 and remote-read body-limit tests pass. No CRD owns this standalone service.
 This closes only the PromQL query runtime-policy slice; the repository-wide
 hardcoded operational-value audit remains active.
+
+## TraceQL Engine Runtime Policy
+
+The standalone traces service now owns TraceQL's result limit, spans per span
+set, search trace ceiling, metric exemplar ceiling, compare cardinality cap,
+and histogram buckets. Each setting has a CLI flag backed by a
+`CRABKA_TRACES_TRACEQL_*` environment variable. Existing defaults remain 20,
+3, 1000, 0, 256, and the 2ms-through-16.384s power-of-two bucket sequence.
+
+Positive counts are validated with `refined_type`; the exemplar ceiling keeps
+zero as its supported disabled value. Histogram bounds are UOM `Time` values
+and must be positive and strictly increasing. One `EngineOpts` path carries
+the resolved policy to search, compare, and range-metrics execution. Existing
+search-trace and exemplar flags remain compatible while gaining environment
+backing.
+
+The parser's omitted compare top-N value, trace and span identifier widths,
+and schema constants remain fixed compatibility invariants. No CRD owns this
+standalone service.
+
+CLI default, override, invalid-input, environment-precedence, histogram, and
+compare-cardinality tests pass. This closes only the TraceQL engine
+runtime-policy slice; the repository-wide hardcoded operational-value audit
+remains active.

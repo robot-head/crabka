@@ -81,6 +81,15 @@ fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
     ClientFrameMax::try_from(value).map(ClientFrameMax::size)
 }
 
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    use refined_type::rule::GreaterUsize;
+
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    GreaterUsize::<0>::new(value)
+        .map(refined_type::Refined::into_value)
+        .map_err(|error| error.to_string())
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "crabka-traces")]
 #[command(about = "Tempo-compatible traces service for Crabka")]
@@ -207,10 +216,44 @@ struct Cli {
     target_bytes_per_job: u64,
     #[arg(long, default_value_t = usize::MAX)]
     max_trace_spans: usize,
-    #[arg(long, default_value_t = 1000)]
+    #[arg(
+        long = "traceql-default-limit",
+        env = "CRABKA_TRACES_TRACEQL_DEFAULT_LIMIT",
+        default_value_t = 20,
+        value_parser = parse_positive_usize
+    )]
+    traceql_default_limit: usize,
+    #[arg(
+        long = "traceql-default-spans-per-span-set",
+        env = "CRABKA_TRACES_TRACEQL_DEFAULT_SPANS_PER_SPAN_SET",
+        default_value_t = 3,
+        value_parser = parse_positive_usize
+    )]
+    traceql_default_spss: usize,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_TRACEQL_MAX_TRACES",
+        default_value_t = 1000,
+        value_parser = parse_positive_usize
+    )]
     max_search_traces: usize,
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, env = "CRABKA_TRACES_TRACEQL_MAX_EXEMPLARS", default_value_t = 0)]
     max_metric_exemplars: usize,
+    #[arg(
+        long = "traceql-compare-max-values-per-attr",
+        env = "CRABKA_TRACES_TRACEQL_COMPARE_MAX_VALUES_PER_ATTR",
+        default_value_t = 256,
+        value_parser = parse_positive_usize
+    )]
+    traceql_compare_max_values_per_attr: usize,
+    #[arg(
+        long = "traceql-histogram-buckets",
+        env = "CRABKA_TRACES_TRACEQL_HISTOGRAM_BUCKETS",
+        default_value = "2ms,4ms,8ms,16ms,32ms,64ms,128ms,256ms,512ms,1024ms,2048ms,4096ms,8192ms,16384ms",
+        value_delimiter = ',',
+        value_parser = parse::positive_time
+    )]
+    traceql_histogram_buckets: Vec<Time>,
     #[arg(long, default_value_t = 10_000)]
     max_spans_per_request: usize,
     #[arg(long, default_value_t = usize::MAX)]
@@ -592,7 +635,7 @@ async fn build_querier_router_with_live(
         live,
         cli.scan_concat_max,
     ));
-    let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
+    let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)?));
     let router = trace_querier::http::router_with_config_and_metrics(
         engine,
         HttpConfig {
@@ -623,7 +666,7 @@ fn build_live_store_router(
         Some(live),
         cli.scan_concat_max,
     ));
-    let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)));
+    let engine = Arc::new(TraceqlEngine::new(store, engine_opts_from_cli(cli)?));
     let tempo_router = trace_querier::http::router_with_config(
         engine,
         HttpConfig {
@@ -703,12 +746,25 @@ fn live_i64_param(uri: &axum::http::Uri, name: &str) -> Result<i64, String> {
         .map_err(|_| format!("invalid query parameter {name}"))
 }
 
-fn engine_opts_from_cli(cli: &Cli) -> EngineOpts {
-    EngineOpts {
+fn engine_opts_from_cli(cli: &Cli) -> std::io::Result<EngineOpts> {
+    if !cli
+        .traceql_histogram_buckets
+        .windows(2)
+        .all(|pair| pair[0] < pair[1])
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "TraceQL histogram buckets must be strictly increasing",
+        ));
+    }
+    Ok(EngineOpts {
+        default_limit: cli.traceql_default_limit,
+        default_spss: cli.traceql_default_spss,
         max_traces: cli.max_search_traces,
         max_exemplars: cli.max_metric_exemplars,
-        ..EngineOpts::default()
-    }
+        compare_max_values_per_attr: cli.traceql_compare_max_values_per_attr,
+        histogram_buckets: cli.traceql_histogram_buckets.clone(),
+    })
 }
 
 struct IndexedLiveSource {
@@ -2094,7 +2150,100 @@ mod tests {
 
         assert2::assert!(matches!(cli.target, Target::Querier));
         assert2::assert!(cli.max_metric_exemplars == 7);
-        check!(engine_opts_from_cli(&cli).max_exemplars == 7);
+        check!(engine_opts_from_cli(&cli).unwrap().max_exemplars == 7);
+    }
+
+    #[test]
+    fn traceql_policy_parses_defaults_overrides_and_boundaries() {
+        let defaults = Cli::try_parse_from(["crabka-traces", "--target", "querier"]).unwrap();
+        check!(engine_opts_from_cli(&defaults).unwrap() == EngineOpts::default());
+
+        let configured = Cli::try_parse_from([
+            "crabka-traces",
+            "--target=querier",
+            "--traceql-default-limit=5",
+            "--traceql-default-spans-per-span-set=7",
+            "--max-search-traces=11",
+            "--max-metric-exemplars=13",
+            "--traceql-compare-max-values-per-attr=17",
+            "--traceql-histogram-buckets=19ms,23ms",
+        ])
+        .unwrap();
+        check!(
+            engine_opts_from_cli(&configured).unwrap()
+                == EngineOpts {
+                    default_limit: 5,
+                    default_spss: 7,
+                    max_traces: 11,
+                    max_exemplars: 13,
+                    compare_max_values_per_attr: 17,
+                    histogram_buckets: vec![crabka_units::millis(19), crabka_units::millis(23)],
+                }
+        );
+
+        for flag in [
+            "--traceql-default-limit=0",
+            "--traceql-default-spans-per-span-set=0",
+            "--max-search-traces=0",
+            "--traceql-compare-max-values-per-attr=0",
+            "--traceql-histogram-buckets=0ms",
+        ] {
+            check!(
+                Cli::try_parse_from(["crabka-traces", "--target=querier", flag]).is_err(),
+                "accepted {flag}"
+            );
+        }
+        let unordered = Cli::try_parse_from([
+            "crabka-traces",
+            "--target=querier",
+            "--traceql-histogram-buckets=23ms,19ms",
+        ])
+        .unwrap();
+        check!(engine_opts_from_cli(&unordered).is_err());
+    }
+
+    #[test]
+    fn traceql_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_TRACEQL_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::traceql_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_TRACES_TRACEQL_DEFAULT_LIMIT", "5")
+                    .env("CRABKA_TRACES_TRACEQL_DEFAULT_SPANS_PER_SPAN_SET", "7")
+                    .env("CRABKA_TRACES_TRACEQL_MAX_TRACES", "11")
+                    .env("CRABKA_TRACES_TRACEQL_MAX_EXEMPLARS", "13")
+                    .env("CRABKA_TRACES_TRACEQL_COMPARE_MAX_VALUES_PER_ATTR", "17")
+                    .env("CRABKA_TRACES_TRACEQL_HISTOGRAM_BUCKETS", "19ms,23ms")
+                    .status()
+                    .expect("child test");
+            check!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-traces", "--target=querier"]).unwrap();
+        check!(engine_opts_from_cli(&from_env).unwrap().default_limit == 5);
+        check!(
+            engine_opts_from_cli(&from_env).unwrap().histogram_buckets
+                == vec![crabka_units::millis(19), crabka_units::millis(23)]
+        );
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target=querier",
+            "--traceql-default-limit=29",
+            "--traceql-histogram-buckets=31ms,37ms",
+        ])
+        .unwrap();
+        check!(engine_opts_from_cli(&from_cli).unwrap().default_limit == 29);
+        check!(
+            engine_opts_from_cli(&from_cli).unwrap().histogram_buckets
+                == vec![crabka_units::millis(31), crabka_units::millis(37)]
+        );
     }
 
     #[test]
