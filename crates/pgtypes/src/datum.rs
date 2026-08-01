@@ -98,6 +98,12 @@ pub mod oids {
     pub const BPCHARARRAY: u32 = 1014;
     /// `character varying(n)[]`.
     pub const VARCHARARRAY: u32 = 1015;
+    /// PostgreSQL `tsvector` and its array type.
+    pub const TSVECTOR: u32 = 3614;
+    pub const TSVECTORARRAY: u32 = 3643;
+    /// PostgreSQL `tsquery` and its array type.
+    pub const TSQUERY: u32 = 3615;
+    pub const TSQUERYARRAY: u32 = 3645;
 }
 
 /// The element type of a SQL array.
@@ -212,6 +218,8 @@ impl ElemType {
             // array of them would need an element oid the array encoder cannot
             // name, so callers report 0A000 rather than mis-encoding.
             ColumnType::Regclass
+            | ColumnType::TsVector
+            | ColumnType::TsQuery
             | ColumnType::Array(_)
             | ColumnType::Record(_)
             | ColumnType::Enum(_)
@@ -412,6 +420,9 @@ pub enum ColumnType {
     /// resolution, which the session/executor layers perform — the pure
     /// datum-parse path only accepts numeric strings).
     Regclass,
+    /// PostgreSQL's normalized full-text document and query types.
+    TsVector,
+    TsQuery,
     /// PostgreSQL `jsonb` (OID 3802) — decomposed JSON. `json` (114) is accepted
     /// on input as an alias but never reported.
     Jsonb,
@@ -473,6 +484,8 @@ impl ColumnType {
             "bytea" => Some(ColumnType::Bytea),
             "uuid" => Some(ColumnType::Uuid),
             "regclass" => Some(ColumnType::Regclass),
+            "tsvector" => Some(ColumnType::TsVector),
+            "tsquery" => Some(ColumnType::TsQuery),
             // `json` is an input alias for `jsonb`: values are stored decomposed
             // and always report OID 3802 (a documented divergence).
             "jsonb" | "json" => Some(ColumnType::Jsonb),
@@ -545,6 +558,8 @@ impl ColumnType {
             ColumnType::Bytea => oids::BYTEA,
             ColumnType::Uuid => oids::UUID,
             ColumnType::Regclass => oids::REGCLASS,
+            ColumnType::TsVector => oids::TSVECTOR,
+            ColumnType::TsQuery => oids::TSQUERY,
             ColumnType::Jsonb => oids::JSONB,
             ColumnType::Array(elem) => elem.array_oid(),
             ColumnType::Record(None) => oids::RECORD,
@@ -575,6 +590,8 @@ impl ColumnType {
             ColumnType::Bytea => "bytea",
             ColumnType::Uuid => "uuid",
             ColumnType::Regclass => "regclass",
+            ColumnType::TsVector => "tsvector",
+            ColumnType::TsQuery => "tsquery",
             ColumnType::Jsonb => "jsonb",
             ColumnType::Array(elem) => elem.array_name(),
             ColumnType::Record(None) => "record",
@@ -603,6 +620,7 @@ impl ColumnType {
             ColumnType::Bytea => -1,
             ColumnType::Uuid => 16,
             ColumnType::Regclass => 4,
+            ColumnType::TsVector | ColumnType::TsQuery => -1,
             // jsonb, arrays and composites are variable-length.
             ColumnType::Jsonb | ColumnType::Array(_) | ColumnType::Record(_) => -1,
             // `pg_type.typlen` of an enum is 4 (the oid of its pg_enum row).
@@ -695,6 +713,9 @@ pub enum Datum {
     /// PostgreSQL `regclass` — a relation's `pg_class` oid plus the name
     /// `regclassout` prints for it.
     Regclass(RegclassValue),
+    /// PostgreSQL full-text document/query values.
+    TsVector(crate::text_search::TsVector),
+    TsQuery(crate::text_search::TsQuery),
 }
 
 /// A `regclass` value: the relation oid, and the relation name that oid
@@ -1038,6 +1059,8 @@ impl PartialEq for Datum {
             (Datum::Enum(a), Datum::Enum(b)) => a == b,
             // The oid is the `regclass` identity; the name is derived from it.
             (Datum::Regclass(a), Datum::Regclass(b)) => a.oid == b.oid,
+            (Datum::TsVector(a), Datum::TsVector(b)) => a == b,
+            (Datum::TsQuery(a), Datum::TsQuery(b)) => a == b,
             _ => false,
         }
     }
@@ -1102,6 +1125,8 @@ impl std::hash::Hash for Datum {
             Datum::Enum(e) => e.hash(state),
             // Hashes the oid alone, matching the `PartialEq` arm above.
             Datum::Regclass(r) => r.oid.hash(state),
+            Datum::TsVector(v) => v.hash(state),
+            Datum::TsQuery(q) => q.hash(state),
         }
     }
 }
@@ -1132,6 +1157,8 @@ impl Datum {
             Datum::Record(r) => Some(r.column_type()),
             Datum::Enum(e) => Some(e.column_type()),
             Datum::Regclass(_) => Some(ColumnType::Regclass),
+            Datum::TsVector(_) => Some(ColumnType::TsVector),
+            Datum::TsQuery(_) => Some(ColumnType::TsQuery),
         }
     }
 

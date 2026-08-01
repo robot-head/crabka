@@ -607,6 +607,8 @@ fn punctuation(bytes: &[u8], i: usize) -> Option<(Token, usize)> {
         b'?' if next_is(b'&') => (Token::KeyExistsAll, 2),
         b'?' => (Token::KeyExists, 1),
         b'&' if next_is(b'&') => (Token::Overlaps, 2),
+        b'<' if next_two_are(b'-', b'>') => (Token::Phrase, 3),
+        b'!' if next_is(b'!') => (Token::TsNot, 2),
         b'!' if next_two_are(b'~', b'*') => (Token::NotTildeCi, 3),
         b'!' if next_is(b'~') => (Token::NotTilde, 2),
         // PostgreSQL accepts `!=` as a spelling of `<>`.

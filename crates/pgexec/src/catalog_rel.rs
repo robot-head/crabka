@@ -56,6 +56,7 @@ pub(crate) const DATABASE_OID: i32 = 5;
 const DEFAULT_TABLESPACE_OID: i32 = 1663;
 /// Oid of the `btree` access method, as in PostgreSQL.
 pub(crate) const BTREE_AM_OID: i32 = 403;
+pub(crate) const GIN_AM_OID: i32 = 2742;
 /// Oid of the `default` collation, as in PostgreSQL.
 pub(crate) const DEFAULT_COLLATION_OID: i32 = 100;
 
@@ -945,7 +946,7 @@ fn pg_am_rows() -> Vec<Vec<Datum>> {
         (BTREE_AM_OID, "btree", "i"),
         (405, "hash", "i"),
         (783, "gist", "i"),
-        (2742, "gin", "i"),
+        (GIN_AM_OID, "gin", "i"),
         (4000, "spgist", "i"),
         (3580, "brin", "i"),
         (2, "heap", "t"),
@@ -2085,7 +2086,7 @@ fn privilege_row(grantee: &str, table: &RelationName, privilege: &str, owned: bo
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_pgcatalog::{ForeignKey, IndexId, IndexPlacement, NewIndex, TableId};
+    use crabka_pgcatalog::{ForeignKey, IndexId, IndexMethod, IndexPlacement, NewIndex, TableId};
     use crabka_pgkv::MemKv;
     use crabka_pgtypes::ArrayValue;
 
@@ -2223,6 +2224,7 @@ mod tests {
                 name: name.to_string(),
                 columns: index_columns.iter().map(|c| (*c).to_string()).collect(),
                 unique: true,
+                method: IndexMethod::Btree,
                 placement: IndexPlacement::Local,
                 constraint,
             },

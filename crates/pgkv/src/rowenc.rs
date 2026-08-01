@@ -41,6 +41,9 @@ mod tag {
     pub const RECORD: u8 = 18;
     /// An enum value (`[19][u32 type oid][u32 len][label]`). Append-only.
     pub const ENUM: u8 = 19;
+    /// Full-text values, stored as their canonical text representations.
+    pub const TSVECTOR: u8 = 20;
+    pub const TSQUERY: u8 = 21;
 }
 
 /// Encode one row using the current storage format.
@@ -176,8 +179,17 @@ fn encode_fields(cols: &[Datum], out: &mut Vec<u8>) {
                 out.extend_from_slice(&len.to_be_bytes());
                 out.extend_from_slice(e.label.as_bytes());
             }
+            Datum::TsVector(vector) => encode_search(tag::TSVECTOR, &vector.to_string(), out),
+            Datum::TsQuery(query) => encode_search(tag::TSQUERY, &query.to_string(), out),
         }
     }
+}
+
+fn encode_search(tag: u8, text: &str, out: &mut Vec<u8>) {
+    out.push(tag);
+    let len = u32::try_from(text.len()).expect("text-search value exceeds 4 GiB");
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(text.as_bytes());
 }
 
 /// Decode row bytes into datum values.
@@ -352,6 +364,14 @@ fn decode_field(cur: &mut &[u8]) -> Result<Datum, KvError> {
                 .type_ref();
             Datum::Enum(crabka_pgtypes::EnumValue { ty, label })
         }
+        tag::TSVECTOR => take_text(cur, "tsvector")?
+            .parse()
+            .map(Datum::TsVector)
+            .map_err(|error| KvError::CorruptRow(format!("corrupt tsvector: {error}")))?,
+        tag::TSQUERY => take_text(cur, "tsquery")?
+            .parse()
+            .map(Datum::TsQuery)
+            .map_err(|error| KvError::CorruptRow(format!("corrupt tsquery: {error}")))?,
         other => return Err(KvError::CorruptRow(format!("unknown field tag {other}"))),
     })
 }

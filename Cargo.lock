@@ -3403,6 +3403,7 @@ dependencies = [
  "jiff",
  "md-5 0.11.0",
  "regex",
+ "rust-stemmers",
  "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.19",

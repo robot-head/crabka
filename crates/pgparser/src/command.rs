@@ -35,6 +35,11 @@ command_identities!(
     (AlterSystem, "ALTER SYSTEM"),
     (AlterTable, "ALTER TABLE"),
     (AlterTablespace, "ALTER TABLESPACE"),
+    (
+        AlterTextSearchConfiguration,
+        "ALTER TEXT SEARCH CONFIGURATION"
+    ),
+    (AlterTextSearchDictionary, "ALTER TEXT SEARCH DICTIONARY"),
     (AlterTextSearchParser, "ALTER TEXT SEARCH PARSER"),
     (AlterTextSearchTemplate, "ALTER TEXT SEARCH TEMPLATE"),
     (AlterType, "ALTER TYPE"),
@@ -73,6 +78,11 @@ command_identities!(
     (CreateTable, "CREATE TABLE"),
     (CreateTableAs, "CREATE TABLE AS"),
     (CreateTablespace, "CREATE TABLESPACE"),
+    (
+        CreateTextSearchConfiguration,
+        "CREATE TEXT SEARCH CONFIGURATION"
+    ),
+    (CreateTextSearchDictionary, "CREATE TEXT SEARCH DICTIONARY"),
     (CreateTextSearchParser, "CREATE TEXT SEARCH PARSER"),
     (CreateTextSearchTemplate, "CREATE TEXT SEARCH TEMPLATE"),
     (CreateTransform, "CREATE TRANSFORM"),
@@ -110,6 +120,11 @@ command_identities!(
     (DropSubscription, "DROP SUBSCRIPTION"),
     (DropTable, "DROP TABLE"),
     (DropTablespace, "DROP TABLESPACE"),
+    (
+        DropTextSearchConfiguration,
+        "DROP TEXT SEARCH CONFIGURATION"
+    ),
+    (DropTextSearchDictionary, "DROP TEXT SEARCH DICTIONARY"),
     (DropTextSearchParser, "DROP TEXT SEARCH PARSER"),
     (DropTextSearchTemplate, "DROP TEXT SEARCH TEMPLATE"),
     (DropTransform, "DROP TRANSFORM"),

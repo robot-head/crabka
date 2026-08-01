@@ -547,6 +547,42 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         refusal: None,
     },
     CommandProbe {
+        command: "CREATE TEXT SEARCH CONFIGURATION",
+        sql: "CREATE TEXT SEARCH CONFIGURATION parser_commands_cfg (COPY = english)",
+        expected_statement: "CreateTextSearchConfiguration",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER TEXT SEARCH CONFIGURATION",
+        sql: "ALTER TEXT SEARCH CONFIGURATION english ADD MAPPING FOR asciiword WITH simple",
+        expected_statement: "AlterTextSearchConfiguration",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP TEXT SEARCH CONFIGURATION",
+        sql: "DROP TEXT SEARCH CONFIGURATION IF EXISTS parser_commands_missing_cfg",
+        expected_statement: "DropTextSearchConfiguration",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "CREATE TEXT SEARCH DICTIONARY",
+        sql: "CREATE TEXT SEARCH DICTIONARY parser_commands_dict (TEMPLATE = simple)",
+        expected_statement: "CreateTextSearchDictionary",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "ALTER TEXT SEARCH DICTIONARY",
+        sql: "ALTER TEXT SEARCH DICTIONARY simple (STOPWORDS = english)",
+        expected_statement: "AlterTextSearchDictionary",
+        refusal: None,
+    },
+    CommandProbe {
+        command: "DROP TEXT SEARCH DICTIONARY",
+        sql: "DROP TEXT SEARCH DICTIONARY IF EXISTS parser_commands_missing_dict",
+        expected_statement: "DropTextSearchDictionary",
+        refusal: None,
+    },
+    CommandProbe {
         command: "CREATE STATISTICS",
         sql: "CREATE STATISTICS parser_commands_stats ON id FROM parser_commands_probe",
         expected_statement: "CompatibilityRefusal",
@@ -881,6 +917,32 @@ fn statement_shape(statement: &Statement) -> &'static str {
             crabka_pgparser::ast::UtilityStatement::SetSessionAuthorization { .. } => {
                 "SetSessionAuthorization"
             }
+            crabka_pgparser::ast::UtilityStatement::TextSearch(ddl) => match ddl {
+                crabka_pgparser::ast::TextSearchDdl::Create { kind, .. } => match kind {
+                    crabka_pgparser::ast::TextSearchObjectKind::Configuration => {
+                        "CreateTextSearchConfiguration"
+                    }
+                    crabka_pgparser::ast::TextSearchObjectKind::Dictionary => {
+                        "CreateTextSearchDictionary"
+                    }
+                },
+                crabka_pgparser::ast::TextSearchDdl::Alter { kind, .. } => match kind {
+                    crabka_pgparser::ast::TextSearchObjectKind::Configuration => {
+                        "AlterTextSearchConfiguration"
+                    }
+                    crabka_pgparser::ast::TextSearchObjectKind::Dictionary => {
+                        "AlterTextSearchDictionary"
+                    }
+                },
+                crabka_pgparser::ast::TextSearchDdl::Drop { kind, .. } => match kind {
+                    crabka_pgparser::ast::TextSearchObjectKind::Configuration => {
+                        "DropTextSearchConfiguration"
+                    }
+                    crabka_pgparser::ast::TextSearchObjectKind::Dictionary => {
+                        "DropTextSearchDictionary"
+                    }
+                },
+            },
         },
         Statement::Set {
             local: false,

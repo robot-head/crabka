@@ -34,6 +34,7 @@ jiff = { workspace = true }
 # The POSIX-ARE-compatible pattern engine behind `~`/`~*`/`!~`/`!~*` and the
 # `regexp_*` functions.
 regex = { workspace = true }
+rust-stemmers = { workspace = true }
 sha2 = { workspace = true }
 md-5 = { workspace = true }
 base64 = { workspace = true }

@@ -124,6 +124,8 @@ pub fn encode_text_in(d: &Datum, style: OutputStyle<'_>) -> Vec<u8> {
         // `regclassout`: the relation name the oid resolved to — already quoted
         // and, for an oid no relation matches, already the bare number.
         Datum::Regclass(r) => r.name.as_bytes().to_vec(),
+        Datum::TsVector(vector) => vector.to_string().into_bytes(),
+        Datum::TsQuery(query) => query.to_string().into_bytes(),
     }
 }
 
@@ -223,6 +225,11 @@ pub fn encode_binary(d: &Datum) -> Vec<u8> {
         Datum::Enum(e) => e.label.clone().into_bytes(),
         // `regclasssend` is `oidsend`: the 4-byte oid, not the name.
         Datum::Regclass(r) => r.oid.to_be_bytes().to_vec(),
+        // Deliberate wire divergence: text-search values use their canonical
+        // UTF-8 representation in binary fields until their internal varlena
+        // layouts are implemented. Their OIDs and text format are exact.
+        Datum::TsVector(vector) => vector.to_string().into_bytes(),
+        Datum::TsQuery(query) => query.to_string().into_bytes(),
     }
 }
 

@@ -1,0 +1,918 @@
+//! PostgreSQL full-text-search scalar functions.
+
+use std::collections::BTreeMap;
+
+use crabka_pgparser::ast::{Expr, FuncArgs, FuncCall};
+use crabka_pgtypes::{
+    ColumnType, Datum, JsonbValue, Lexeme, Position, QueryTerm, TsQuery, TsVector, Weight,
+    text_search::MAX_POSITION,
+};
+use rust_stemmers::{Algorithm, Stemmer};
+
+use crate::{
+    clock::EvalCtx,
+    error::ExecError,
+    func::{checked_args, require_arity, type_error, undefined_function},
+    scope::Scope,
+};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TextSearchFunc {
+    ToTsVector,
+    ToTsQuery,
+    PlainToTsQuery,
+    PhraseToTsQuery,
+    WebsearchToTsQuery,
+    Strip,
+    NumNode,
+    QueryTree,
+    TsQueryPhrase,
+    ArrayToTsVector,
+    SetWeight,
+    TsDelete,
+    TsFilter,
+    TsRank,
+    TsRankCd,
+    TsHeadline,
+    JsonbToTsVector,
+}
+
+fn text_search_func(name: &str) -> Option<TextSearchFunc> {
+    Some(match name {
+        "to_tsvector" => TextSearchFunc::ToTsVector,
+        "to_tsquery" => TextSearchFunc::ToTsQuery,
+        "plainto_tsquery" => TextSearchFunc::PlainToTsQuery,
+        "phraseto_tsquery" => TextSearchFunc::PhraseToTsQuery,
+        "websearch_to_tsquery" => TextSearchFunc::WebsearchToTsQuery,
+        "strip" => TextSearchFunc::Strip,
+        "numnode" => TextSearchFunc::NumNode,
+        "querytree" => TextSearchFunc::QueryTree,
+        "tsquery_phrase" => TextSearchFunc::TsQueryPhrase,
+        "array_to_tsvector" => TextSearchFunc::ArrayToTsVector,
+        "setweight" => TextSearchFunc::SetWeight,
+        "ts_delete" => TextSearchFunc::TsDelete,
+        "ts_filter" => TextSearchFunc::TsFilter,
+        "ts_rank" => TextSearchFunc::TsRank,
+        "ts_rank_cd" => TextSearchFunc::TsRankCd,
+        "ts_headline" => TextSearchFunc::TsHeadline,
+        "jsonb_to_tsvector" => TextSearchFunc::JsonbToTsVector,
+        _ => return None,
+    })
+}
+
+pub(crate) fn is_text_search_func(name: &str) -> bool {
+    text_search_func(name).is_some()
+}
+
+pub(crate) fn text_search_result_type(
+    fc: &FuncCall,
+    _scope: &Scope,
+) -> Result<ColumnType, ExecError> {
+    let function = text_search_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
+    let count = checked_args(fc)?.len();
+    let result = match function {
+        TextSearchFunc::ToTsVector
+        | TextSearchFunc::ToTsQuery
+        | TextSearchFunc::PlainToTsQuery
+        | TextSearchFunc::PhraseToTsQuery
+        | TextSearchFunc::WebsearchToTsQuery => {
+            require_arity(fc, count == 1 || count == 2)?;
+            if function == TextSearchFunc::ToTsVector {
+                ColumnType::TsVector
+            } else {
+                ColumnType::TsQuery
+            }
+        }
+        TextSearchFunc::Strip => {
+            require_arity(fc, count == 1)?;
+            ColumnType::TsVector
+        }
+        TextSearchFunc::NumNode => {
+            require_arity(fc, count == 1)?;
+            ColumnType::Int4
+        }
+        TextSearchFunc::QueryTree => {
+            require_arity(fc, count == 1)?;
+            ColumnType::Text
+        }
+        TextSearchFunc::TsQueryPhrase => {
+            require_arity(fc, count == 2 || count == 3)?;
+            ColumnType::TsQuery
+        }
+        TextSearchFunc::ArrayToTsVector => {
+            require_arity(fc, count == 1)?;
+            ColumnType::TsVector
+        }
+        TextSearchFunc::SetWeight => {
+            require_arity(fc, count == 2 || count == 3)?;
+            ColumnType::TsVector
+        }
+        TextSearchFunc::TsDelete => {
+            require_arity(fc, count == 2)?;
+            ColumnType::TsVector
+        }
+        TextSearchFunc::TsFilter => {
+            require_arity(fc, count == 2)?;
+            ColumnType::TsVector
+        }
+        TextSearchFunc::TsRank | TextSearchFunc::TsRankCd => {
+            require_arity(fc, (2..=4).contains(&count))?;
+            ColumnType::Float4
+        }
+        TextSearchFunc::TsHeadline => {
+            require_arity(fc, (2..=4).contains(&count))?;
+            ColumnType::Text
+        }
+        TextSearchFunc::JsonbToTsVector => {
+            require_arity(fc, count == 2 || count == 3)?;
+            ColumnType::TsVector
+        }
+    };
+    Ok(result)
+}
+
+pub(crate) fn eval_text_search(
+    fc: &FuncCall,
+    _ctx: &EvalCtx,
+    mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
+) -> Result<Datum, ExecError> {
+    let function = text_search_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
+    let args = checked_args(fc)?;
+    let values = args
+        .iter()
+        .map(&mut eval_child)
+        .collect::<Result<Vec<_>, _>>()?;
+    if values.iter().any(Datum::is_null) {
+        return Ok(Datum::Null);
+    }
+
+    match function {
+        TextSearchFunc::ToTsVector => {
+            let (config, text) = config_and_text(fc, &values)?;
+            Ok(Datum::TsVector(to_tsvector(config, text)?))
+        }
+        TextSearchFunc::ToTsQuery => {
+            let (config, text) = config_and_text(fc, &values)?;
+            Ok(Datum::TsQuery(to_tsquery(config, text)?))
+        }
+        TextSearchFunc::PlainToTsQuery => {
+            let (config, text) = config_and_text(fc, &values)?;
+            Ok(Datum::TsQuery(plain_query(config, text, false)?))
+        }
+        TextSearchFunc::PhraseToTsQuery => {
+            let (config, text) = config_and_text(fc, &values)?;
+            Ok(Datum::TsQuery(plain_query(config, text, true)?))
+        }
+        TextSearchFunc::WebsearchToTsQuery => {
+            let (config, text) = config_and_text(fc, &values)?;
+            Ok(Datum::TsQuery(web_query(config, text)?))
+        }
+        TextSearchFunc::Strip => match values.as_slice() {
+            [Datum::TsVector(vector)] => Ok(Datum::TsVector(vector.strip())),
+            [got] => Err(type_error("tsvector", got)),
+            _ => Err(undefined_function(&fc.name)),
+        },
+        TextSearchFunc::NumNode => match values.as_slice() {
+            [Datum::TsQuery(query)] => Ok(Datum::Int4(
+                i32::try_from(query.node_count()).unwrap_or(i32::MAX),
+            )),
+            [got] => Err(type_error("tsquery", got)),
+            _ => Err(undefined_function(&fc.name)),
+        },
+        TextSearchFunc::QueryTree => match values.as_slice() {
+            [Datum::TsQuery(query)] => Ok(Datum::Text(query.to_string())),
+            [got] => Err(type_error("tsquery", got)),
+            _ => Err(undefined_function(&fc.name)),
+        },
+        TextSearchFunc::TsQueryPhrase => query_phrase(fc, &values),
+        TextSearchFunc::ArrayToTsVector => array_to_vector(fc, &values),
+        TextSearchFunc::SetWeight => set_weight(fc, &values),
+        TextSearchFunc::TsDelete => delete_terms(fc, &values),
+        TextSearchFunc::TsFilter => filter_weights(fc, &values),
+        TextSearchFunc::TsRank | TextSearchFunc::TsRankCd => rank(fc, &values),
+        TextSearchFunc::TsHeadline => headline(fc, &values),
+        TextSearchFunc::JsonbToTsVector => jsonb_to_vector(fc, &values),
+    }
+}
+
+fn jsonb_to_vector(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+    let (config, document, filter) = match values {
+        [Datum::Jsonb(document), Datum::Jsonb(filter)] => (default_config()?, document, filter),
+        [
+            Datum::Text(config),
+            Datum::Jsonb(document),
+            Datum::Jsonb(filter),
+        ] => (config.clone(), document, filter),
+        [got, ..] => return Err(type_error("jsonb", got)),
+        _ => return Err(undefined_function(&fc.name)),
+    };
+    let filter = JsonTextFilter::parse(filter)?;
+    let mut pieces = Vec::new();
+    collect_json_text(document, filter, &mut pieces);
+    Ok(Datum::TsVector(vector_from_pieces(&config, &pieces)?))
+}
+
+#[derive(Clone, Copy, Default)]
+struct JsonTextFilter(u8);
+
+impl JsonTextFilter {
+    const STRING: u8 = 1;
+    const NUMERIC: u8 = 2;
+    const BOOLEAN: u8 = 4;
+    const KEY: u8 = 8;
+    const ALL: Self = Self(Self::STRING | Self::NUMERIC | Self::BOOLEAN | Self::KEY);
+
+    fn parse(value: &JsonbValue) -> Result<Self, ExecError> {
+        let items = match value {
+            JsonbValue::Array(items) => items.as_slice(),
+            JsonbValue::String(_) => std::slice::from_ref(value),
+            _ => {
+                return Err(ExecError::InvalidParameterValue(
+                    "wrong type of jsonb filter: string or array expected".into(),
+                ));
+            }
+        };
+        if items.is_empty() {
+            return Ok(Self::default());
+        }
+        let mut filter = Self::default();
+        for item in items {
+            let JsonbValue::String(item) = item else {
+                return Err(ExecError::InvalidParameterValue(
+                    "wrong type of jsonb filter element: string expected".into(),
+                ));
+            };
+            if item == "all" {
+                return Ok(Self::ALL);
+            }
+            match item.as_str() {
+                "string" => filter.0 |= Self::STRING,
+                "numeric" => filter.0 |= Self::NUMERIC,
+                "boolean" => filter.0 |= Self::BOOLEAN,
+                "key" => filter.0 |= Self::KEY,
+                other => {
+                    return Err(ExecError::InvalidParameterValue(format!(
+                        "unrecognized jsonb_to_tsvector filter type: {other}"
+                    )));
+                }
+            }
+        }
+        Ok(filter)
+    }
+
+    const fn contains(self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+}
+
+fn collect_json_text(value: &JsonbValue, filter: JsonTextFilter, out: &mut Vec<String>) {
+    match value {
+        JsonbValue::Object(pairs) => {
+            for (key, value) in pairs {
+                if filter.contains(JsonTextFilter::KEY) {
+                    out.push(key.clone());
+                }
+                collect_json_text(value, filter, out);
+            }
+        }
+        JsonbValue::Array(items) => {
+            for item in items {
+                collect_json_text(item, filter, out);
+            }
+        }
+        JsonbValue::String(value) if filter.contains(JsonTextFilter::STRING) => {
+            out.push(value.clone());
+        }
+        JsonbValue::Number(value) if filter.contains(JsonTextFilter::NUMERIC) => {
+            out.push(crabka_pgtypes::numeric::finite_to_text(value));
+        }
+        JsonbValue::Bool(value) if filter.contains(JsonTextFilter::BOOLEAN) => {
+            out.push(value.to_string());
+        }
+        JsonbValue::Null | JsonbValue::String(_) | JsonbValue::Number(_) | JsonbValue::Bool(_) => {}
+    }
+}
+
+fn vector_from_pieces(config: &str, pieces: &[String]) -> Result<TsVector, ExecError> {
+    let mut lexemes = BTreeMap::<String, Vec<Position>>::new();
+    let mut offset = 0_u16;
+    for piece in pieces {
+        for (text, position) in normalized_terms(config, piece)? {
+            lexemes.entry(text).or_default().push(Position {
+                position: position.saturating_add(offset).min(MAX_POSITION),
+                weight: Weight::D,
+            });
+        }
+        let words = u16::try_from(words(piece).count()).unwrap_or(MAX_POSITION);
+        offset = offset
+            .saturating_add(words)
+            .saturating_add(1)
+            .min(MAX_POSITION);
+    }
+    Ok(TsVector::new(
+        lexemes
+            .into_iter()
+            .map(|(text, positions)| Lexeme { text, positions }),
+    ))
+}
+
+fn config_and_text<'a>(
+    fc: &FuncCall,
+    values: &'a [Datum],
+) -> Result<(&'a str, &'a str), ExecError> {
+    match values {
+        [Datum::Text(text)] => {
+            let config =
+                crate::session::current_setting_runtime("default_text_search_config", false)?
+                    .expect("registered GUC has a value");
+            // The GUC value belongs to the session runtime, so it cannot be
+            // returned with `values`' lifetime. Its only supported default is
+            // English; validate it here and return that stable spelling.
+            let simple = validate_config(&config)?;
+            Ok((if simple { "simple" } else { "english" }, text))
+        }
+        [Datum::Text(config), Datum::Text(text)] => Ok((config, text)),
+        [got] => Err(type_error("text", got)),
+        [_, got] => Err(type_error("text", got)),
+        _ => Err(undefined_function(&fc.name)),
+    }
+}
+
+fn validate_config(config: &str) -> Result<bool, ExecError> {
+    crate::text_search_catalog::config_is_simple(config)
+}
+
+/// Build a searchable vector without an index. Positions count source tokens,
+/// including stop words, as PostgreSQL's parser does.
+pub(crate) fn to_tsvector(config: &str, source: &str) -> Result<TsVector, ExecError> {
+    let terms = normalized_terms(config, source)?;
+    let mut lexemes = BTreeMap::<String, Vec<Position>>::new();
+    for (text, position) in terms {
+        lexemes.entry(text).or_default().push(Position {
+            position,
+            weight: Weight::D,
+        });
+    }
+    Ok(TsVector::new(
+        lexemes
+            .into_iter()
+            .map(|(text, positions)| Lexeme { text, positions }),
+    ))
+}
+
+fn to_tsquery(config: &str, source: &str) -> Result<TsQuery, ExecError> {
+    let query = source.parse::<TsQuery>()?;
+    normalize_query(config, query)
+}
+
+fn normalize_query(config: &str, query: TsQuery) -> Result<TsQuery, ExecError> {
+    let simple = validate_config(config)?;
+    let stemmer = Stemmer::create(Algorithm::English);
+    Ok(match query {
+        TsQuery::Empty => TsQuery::Empty,
+        TsQuery::Term(mut term) => {
+            term.text = normalize_word(&term.text, simple, &stemmer);
+            if !simple && is_stopword(&term.text) {
+                TsQuery::Empty
+            } else {
+                TsQuery::Term(term)
+            }
+        }
+        TsQuery::Not(inner) => TsQuery::Not(Box::new(normalize_query(config, *inner)?)),
+        TsQuery::And(left, right) => TsQuery::And(
+            Box::new(normalize_query(config, *left)?),
+            Box::new(normalize_query(config, *right)?),
+        ),
+        TsQuery::Or(left, right) => TsQuery::Or(
+            Box::new(normalize_query(config, *left)?),
+            Box::new(normalize_query(config, *right)?),
+        ),
+        TsQuery::Phrase(left, right, distance) => TsQuery::Phrase(
+            Box::new(normalize_query(config, *left)?),
+            Box::new(normalize_query(config, *right)?),
+            distance,
+        ),
+    })
+}
+
+fn plain_query(config: &str, source: &str, phrase: bool) -> Result<TsQuery, ExecError> {
+    let terms = normalized_terms(config, source)?;
+    let mut iter = terms.into_iter();
+    let Some((first, mut last_position)) = iter.next() else {
+        return Ok(TsQuery::Empty);
+    };
+    let mut query = term(first);
+    for (text, position) in iter {
+        let right = term(text);
+        query = if phrase {
+            TsQuery::Phrase(
+                Box::new(query),
+                Box::new(right),
+                position.saturating_sub(last_position),
+            )
+        } else {
+            TsQuery::And(Box::new(query), Box::new(right))
+        };
+        last_position = position;
+    }
+    Ok(query)
+}
+
+fn web_query(config: &str, source: &str) -> Result<TsQuery, ExecError> {
+    let mut parts = Vec::<(bool, TsQuery)>::new();
+    let mut rest = source.trim();
+    let mut next_or = false;
+    while !rest.is_empty() {
+        if rest.len() >= 2
+            && rest[..2].eq_ignore_ascii_case("or")
+            && rest[2..].chars().next().is_none_or(char::is_whitespace)
+        {
+            next_or = true;
+            rest = rest[2..].trim_start();
+            continue;
+        }
+        let negative = rest.starts_with('-');
+        if negative {
+            rest = rest[1..].trim_start();
+        }
+        let (piece, tail, phrase) = if let Some(quoted) = rest.strip_prefix('"') {
+            match quoted.find('"') {
+                Some(end) => (&quoted[..end], &quoted[end + 1..], true),
+                None => (quoted, "", true),
+            }
+        } else {
+            let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+            (&rest[..end], &rest[end..], false)
+        };
+        let mut query = plain_query(config, piece, phrase)?;
+        if negative && query != TsQuery::Empty {
+            query = TsQuery::Not(Box::new(query));
+        }
+        if query != TsQuery::Empty {
+            parts.push((next_or, query));
+            next_or = false;
+        }
+        rest = tail.trim_start();
+    }
+    let mut iter = parts.into_iter();
+    let Some((_, mut query)) = iter.next() else {
+        return Ok(TsQuery::Empty);
+    };
+    for (is_or, right) in iter {
+        query = if is_or {
+            TsQuery::Or(Box::new(query), Box::new(right))
+        } else {
+            TsQuery::And(Box::new(query), Box::new(right))
+        };
+    }
+    Ok(query)
+}
+
+fn query_phrase(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+    let (left, right, distance) = match values {
+        [Datum::TsQuery(left), Datum::TsQuery(right)] => (left, right, 1),
+        [
+            Datum::TsQuery(left),
+            Datum::TsQuery(right),
+            Datum::Int4(distance),
+        ] => {
+            let distance = u16::try_from(*distance)
+                .ok()
+                .filter(|d| *d <= 16_384)
+                .ok_or_else(|| {
+                    ExecError::InvalidParameterValue("distance must be between 0 and 16384".into())
+                })?;
+            (left, right, distance)
+        }
+        [got, ..] => return Err(type_error("tsquery", got)),
+        _ => return Err(undefined_function(&fc.name)),
+    };
+    Ok(Datum::TsQuery(TsQuery::Phrase(
+        Box::new(left.clone()),
+        Box::new(right.clone()),
+        distance,
+    )))
+}
+
+fn array_to_vector(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+    let [Datum::Array(array)] = values else {
+        return values.first().map_or_else(
+            || Err(undefined_function(&fc.name)),
+            |got| Err(type_error("text[]", got)),
+        );
+    };
+    let mut entries = Vec::with_capacity(array.elems.len());
+    for value in &array.elems {
+        match value {
+            Datum::Text(text) => entries.push(Lexeme {
+                text: text.clone(),
+                positions: Vec::new(),
+            }),
+            Datum::Null => {
+                return Err(ExecError::InvalidParameterValue(
+                    "text array must not contain nulls".into(),
+                ));
+            }
+            got => return Err(type_error("text", got)),
+        }
+    }
+    Ok(Datum::TsVector(TsVector::new(entries)))
+}
+
+fn set_weight(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+    let (vector, weight, selected) = match values {
+        [Datum::TsVector(vector), Datum::Text(weight)] => (vector, weight, None),
+        [
+            Datum::TsVector(vector),
+            Datum::Text(weight),
+            Datum::Array(selected),
+        ] => (vector, weight, Some(text_array(selected)?)),
+        [got, ..] => return Err(type_error("tsvector", got)),
+        _ => return Err(undefined_function(&fc.name)),
+    };
+    let weight = one_weight(weight)?;
+    Ok(Datum::TsVector(
+        vector.set_weight(weight, selected.as_deref()),
+    ))
+}
+
+fn delete_terms(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+    let (vector, words) = match values {
+        [Datum::TsVector(vector), Datum::Text(word)] => (vector, vec![word.clone()]),
+        [Datum::TsVector(vector), Datum::Array(words)] => (vector, text_array(words)?),
+        [got, ..] => return Err(type_error("tsvector", got)),
+        _ => return Err(undefined_function(&fc.name)),
+    };
+    Ok(Datum::TsVector(vector.delete(&words)))
+}
+
+fn filter_weights(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+    let [Datum::TsVector(vector), Datum::Array(weights)] = values else {
+        return values.first().map_or_else(
+            || Err(undefined_function(&fc.name)),
+            |got| Err(type_error("tsvector", got)),
+        );
+    };
+    let weights = text_array(weights)?
+        .iter()
+        .map(|weight| one_weight(weight))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Datum::TsVector(vector.filter_weights(&weights)))
+}
+
+fn rank(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+    let (vector, query) = match values {
+        [Datum::TsVector(vector), Datum::TsQuery(query)]
+        | [
+            Datum::TsVector(vector),
+            Datum::TsQuery(query),
+            Datum::Int4(_),
+        ] => (vector, query),
+        [
+            Datum::Array(_),
+            Datum::TsVector(vector),
+            Datum::TsQuery(query),
+        ]
+        | [
+            Datum::Array(_),
+            Datum::TsVector(vector),
+            Datum::TsQuery(query),
+            Datum::Int4(_),
+        ] => (vector, query),
+        [got, ..] => return Err(type_error("tsvector", got)),
+        _ => return Err(undefined_function(&fc.name)),
+    };
+    Ok(Datum::Float4(vector.rank(query)))
+}
+
+fn headline(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+    let (config, source, query) = match values {
+        [Datum::Text(source), Datum::TsQuery(query)]
+        | [Datum::Text(source), Datum::TsQuery(query), Datum::Text(_)] => {
+            (default_config()?, source.as_str(), query)
+        }
+        [
+            Datum::Text(config),
+            Datum::Text(source),
+            Datum::TsQuery(query),
+        ]
+        | [
+            Datum::Text(config),
+            Datum::Text(source),
+            Datum::TsQuery(query),
+            Datum::Text(_),
+        ] => (config.clone(), source.as_str(), query),
+        [got, ..] => return Err(type_error("text", got)),
+        _ => return Err(undefined_function(&fc.name)),
+    };
+    let wanted = query.terms();
+    let mut out = String::with_capacity(source.len() + 16);
+    for piece in source.split_inclusive(char::is_whitespace) {
+        let word = piece.trim_matches(|character: char| !character.is_alphanumeric());
+        let normalized = normalized_terms(&config, word)?;
+        if normalized
+            .first()
+            .is_some_and(|(term, _)| wanted.contains(&term.as_str()))
+        {
+            let start = piece.find(word).unwrap_or(0);
+            let end = start + word.len();
+            out.push_str(&piece[..start]);
+            out.push_str("<b>");
+            out.push_str(word);
+            out.push_str("</b>");
+            out.push_str(&piece[end..]);
+        } else {
+            out.push_str(piece);
+        }
+    }
+    Ok(Datum::Text(out))
+}
+
+fn default_config() -> Result<String, ExecError> {
+    crate::session::current_setting_runtime("default_text_search_config", false)?
+        .ok_or_else(|| ExecError::UnrecognizedParameter("default_text_search_config".into()))
+}
+
+/// Evaluate the immutable tsquery spellings accepted by the local GIN planner.
+pub(crate) fn constant_query(expr: &Expr) -> Result<Option<TsQuery>, ExecError> {
+    match expr {
+        Expr::Const {
+            value: Datum::TsQuery(query),
+            ..
+        } => Ok(Some(query.clone())),
+        Expr::StringLiteral(source) => source.parse::<TsQuery>().map(Some).map_err(Into::into),
+        Expr::Cast {
+            expr,
+            ty: ColumnType::TsQuery,
+        } => {
+            let Some(source) = literal_text(expr) else {
+                return Ok(None);
+            };
+            source.parse::<TsQuery>().map(Some).map_err(Into::into)
+        }
+        Expr::Func(call) => constant_query_call(call),
+        _ => Ok(None),
+    }
+}
+
+fn constant_query_call(call: &FuncCall) -> Result<Option<TsQuery>, ExecError> {
+    let FuncArgs::Exprs(args) = &call.args else {
+        return Ok(None);
+    };
+    let Some(function) = text_search_func(&call.name) else {
+        return Ok(None);
+    };
+    if !matches!(
+        function,
+        TextSearchFunc::ToTsQuery
+            | TextSearchFunc::PlainToTsQuery
+            | TextSearchFunc::PhraseToTsQuery
+            | TextSearchFunc::WebsearchToTsQuery
+    ) {
+        return Ok(None);
+    }
+    let (config, source) = match args.as_slice() {
+        [source] => (default_config()?, literal_text(source)),
+        [config, source] => {
+            let Some(config) = literal_text(config) else {
+                return Ok(None);
+            };
+            (config.to_string(), literal_text(source))
+        }
+        _ => return Ok(None),
+    };
+    let Some(source) = source else {
+        return Ok(None);
+    };
+    match function {
+        TextSearchFunc::ToTsQuery => to_tsquery(&config, source).map(Some),
+        TextSearchFunc::PlainToTsQuery => plain_query(&config, source, false).map(Some),
+        TextSearchFunc::PhraseToTsQuery => plain_query(&config, source, true).map(Some),
+        TextSearchFunc::WebsearchToTsQuery => web_query(&config, source).map(Some),
+        _ => Ok(None),
+    }
+}
+
+fn literal_text(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::StringLiteral(text)
+        | Expr::Const {
+            value: Datum::Text(text),
+            ..
+        } => Some(text),
+        Expr::Cast { expr, ty } if ty.is_string() => literal_text(expr),
+        _ => None,
+    }
+}
+
+fn text_array(array: &crabka_pgtypes::ArrayValue) -> Result<Vec<String>, ExecError> {
+    array
+        .elems
+        .iter()
+        .map(|value| match value {
+            Datum::Text(text) => Ok(text.clone()),
+            got => Err(type_error("text", got)),
+        })
+        .collect()
+}
+
+fn one_weight(value: &str) -> Result<Weight, ExecError> {
+    let mut chars = value.chars();
+    chars
+        .next()
+        .filter(|_| chars.next().is_none())
+        .and_then(Weight::parse)
+        .ok_or_else(|| ExecError::InvalidParameterValue("unrecognized weight".into()))
+}
+
+fn normalized_terms(config: &str, source: &str) -> Result<Vec<(String, u16)>, ExecError> {
+    let simple = validate_config(config)?;
+    let stemmer = Stemmer::create(Algorithm::English);
+    Ok(words(source)
+        .enumerate()
+        .filter_map(|(index, word)| {
+            let lower = word.to_lowercase();
+            if !simple && is_stopword(&lower) {
+                return None;
+            }
+            let position = u16::try_from(index + 1)
+                .unwrap_or(MAX_POSITION)
+                .min(MAX_POSITION);
+            Some((normalize_word(&lower, simple, &stemmer), position))
+        })
+        .collect())
+}
+
+fn words(source: &str) -> impl Iterator<Item = &str> {
+    source
+        .split(|character: char| !(character.is_alphanumeric() || character == '_'))
+        .filter(|word| !word.is_empty())
+}
+
+fn normalize_word(word: &str, simple: bool, stemmer: &Stemmer) -> String {
+    let lower = word.to_lowercase();
+    if simple {
+        lower
+    } else {
+        stemmer.stem(&lower).into_owned()
+    }
+}
+
+fn term(text: String) -> TsQuery {
+    TsQuery::Term(QueryTerm {
+        text,
+        weights: Vec::new(),
+        prefix: false,
+    })
+}
+
+fn is_stopword(word: &str) -> bool {
+    matches!(
+        word,
+        "a" | "about"
+            | "after"
+            | "again"
+            | "against"
+            | "all"
+            | "am"
+            | "an"
+            | "and"
+            | "any"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "because"
+            | "been"
+            | "before"
+            | "being"
+            | "below"
+            | "between"
+            | "both"
+            | "but"
+            | "by"
+            | "can"
+            | "did"
+            | "do"
+            | "does"
+            | "doing"
+            | "down"
+            | "during"
+            | "each"
+            | "few"
+            | "for"
+            | "from"
+            | "further"
+            | "had"
+            | "has"
+            | "have"
+            | "having"
+            | "he"
+            | "her"
+            | "here"
+            | "hers"
+            | "herself"
+            | "him"
+            | "himself"
+            | "his"
+            | "how"
+            | "i"
+            | "if"
+            | "in"
+            | "into"
+            | "is"
+            | "it"
+            | "its"
+            | "itself"
+            | "just"
+            | "me"
+            | "more"
+            | "most"
+            | "my"
+            | "myself"
+            | "no"
+            | "nor"
+            | "not"
+            | "now"
+            | "of"
+            | "off"
+            | "on"
+            | "once"
+            | "only"
+            | "or"
+            | "other"
+            | "our"
+            | "ours"
+            | "ourselves"
+            | "out"
+            | "over"
+            | "own"
+            | "same"
+            | "she"
+            | "should"
+            | "so"
+            | "some"
+            | "such"
+            | "than"
+            | "that"
+            | "the"
+            | "their"
+            | "theirs"
+            | "them"
+            | "themselves"
+            | "then"
+            | "there"
+            | "these"
+            | "they"
+            | "this"
+            | "those"
+            | "through"
+            | "to"
+            | "too"
+            | "under"
+            | "until"
+            | "up"
+            | "very"
+            | "was"
+            | "we"
+            | "were"
+            | "what"
+            | "when"
+            | "where"
+            | "which"
+            | "while"
+            | "who"
+            | "whom"
+            | "why"
+            | "will"
+            | "with"
+            | "you"
+            | "your"
+            | "yours"
+            | "yourself"
+            | "yourselves"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn english_vector_stems_and_preserves_positions() {
+        assert_eq!(
+            to_tsvector("english", "The Fat Rats").unwrap().to_string(),
+            "'fat':2 'rat':3"
+        );
+    }
+
+    #[test]
+    fn phrase_query_counts_stopword_positions() {
+        assert_eq!(
+            plain_query("english", "The Cat and Rats", true)
+                .unwrap()
+                .to_string(),
+            "'cat' <2> 'rat'"
+        );
+    }
+}

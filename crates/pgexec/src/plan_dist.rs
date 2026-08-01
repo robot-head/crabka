@@ -255,6 +255,14 @@ pub struct DistributedScanPlan {
     pub partial_aggregate: Option<PartialAggregateSpec>,
     /// Per-range top-K request. `None` leaves ordering to the gateway.
     pub top_k: Option<TopKSpec>,
+    /// Constant `tsvector @@ tsquery` predicate eligible for a local GIN probe.
+    pub text_search: Option<TextSearchPredicate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextSearchPredicate {
+    pub column: usize,
+    pub query: crabka_pgtypes::TsQuery,
 }
 
 impl Default for DistributedScanPlan {
@@ -264,6 +272,7 @@ impl Default for DistributedScanPlan {
             projection: ProjectionPushdown::All,
             partial_aggregate: None,
             top_k: None,
+            text_search: None,
         }
     }
 }
@@ -281,7 +290,44 @@ pub fn plan_scan(
         projection: projection_for_select_items(table, projection),
         partial_aggregate: partial_aggregate_for_select_items(table, projection),
         top_k: None,
+        text_search: text_search_for_filter(table, filter),
     }
+}
+
+fn text_search_for_filter(table: &Table, filter: Option<&Expr>) -> Option<TextSearchPredicate> {
+    let filter = filter?;
+    if let Expr::Binary {
+        op: BinaryOp::And,
+        left,
+        right,
+    } = filter
+    {
+        return text_search_for_filter(table, Some(left))
+            .or_else(|| text_search_for_filter(table, Some(right)));
+    }
+    let Expr::Binary {
+        op: BinaryOp::JsonPathMatch,
+        left,
+        right,
+    } = filter
+    else {
+        return None;
+    };
+    text_search_pair(table, left, right).or_else(|| text_search_pair(table, right, left))
+}
+
+fn text_search_pair(table: &Table, vector: &Expr, query: &Expr) -> Option<TextSearchPredicate> {
+    let Expr::Column { name, .. } = vector else {
+        return None;
+    };
+    let column = table
+        .columns
+        .iter()
+        .position(|candidate| candidate.name == *name && candidate.ty == ColumnType::TsVector)?;
+    let query = crate::text_search_fn::constant_query(query)
+        .ok()
+        .flatten()?;
+    Some(TextSearchPredicate { column, query })
 }
 
 /// Parse a filter into a pushdown predicate, failing when any conjunct is not in

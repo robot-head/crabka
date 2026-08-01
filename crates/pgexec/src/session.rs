@@ -1012,6 +1012,12 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
     guc("client_encoding", "string", "UTF8", parse_client_encoding),
     guc("datestyle", "string", "ISO, MDY", parse_date_style).aliases(&["DateStyle"]),
     guc(
+        "default_text_search_config",
+        "string",
+        "pg_catalog.english",
+        |value, _| Ok(GucValue::Text(value.to_string())),
+    ),
+    guc(
         "extra_float_digits",
         "integer",
         "1",
@@ -2018,6 +2024,7 @@ fn read_only_command_tag(stmt: &Statement) -> &'static str {
 /// undo.
 fn statement_has_effects(stmt: &Statement) -> bool {
     match stmt {
+        Statement::Utility(UtilityStatement::TextSearch(_)) => true,
         Statement::Query(_)
         | Statement::Begin { .. }
         | Statement::Commit { .. }
@@ -2054,6 +2061,7 @@ fn statement_has_effects(stmt: &Statement) -> bool {
 /// bypass the transaction-activity rule.
 fn establishes_transaction_activity(stmt: &Statement) -> bool {
     match stmt {
+        Statement::Utility(UtilityStatement::TextSearch(_)) => true,
         Statement::Query(_)
         | Statement::Insert { .. }
         | Statement::Update { .. }
@@ -2736,6 +2744,12 @@ impl SqlSession {
         // absent type and never a wrong answer.
         if let Err(error) = crate::usertype::hydrate(catalog_kv.as_ref()) {
             tracing::warn!(?error, "could not load user-defined types from the catalog");
+        }
+        if let Err(error) = crate::text_search_catalog::hydrate(catalog_kv.as_ref()) {
+            tracing::warn!(
+                ?error,
+                "could not load text-search objects from the catalog"
+            );
         }
         Self {
             kv,
@@ -4162,6 +4176,10 @@ impl SqlSession {
                 Ok(QueryResult::Command {
                     tag: reset_or_set_tag(*reset),
                 })
+            }
+            UtilityStatement::TextSearch(ddl) => {
+                let tag = crate::text_search_catalog::execute(&*self.catalog_kv, ddl)?;
+                Ok(QueryResult::Command { tag: tag.into() })
             }
         }
     }
@@ -7531,6 +7549,7 @@ impl ParamBinder<'_> {
                     | UnaryOp::IsNotUnknown => Some(ColumnType::Bool),
                     UnaryOp::Plus | UnaryOp::Neg | UnaryOp::BitNot | UnaryOp::Abs => expected,
                     UnaryOp::Sqrt | UnaryOp::Cbrt => Some(ColumnType::Float8),
+                    UnaryOp::TsNot => Some(ColumnType::TsQuery),
                 };
                 self.bind_expr_with_scope_and_ctes(expr, child_expected, scope, ctes)?;
             }
@@ -7723,7 +7742,7 @@ fn binary_param_type(
         },
         // Containment and overlap are same-type operators (jsonb @> jsonb,
         // int[] && int[]), so a parameter adopts its sibling's type.
-        BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps => {
+        BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps | BinaryOp::Phrase => {
             infer_param_context_type(other, scope)
         }
         // `?` tests one key; `?|`/`?&` and the `#>`/`#>>` path operators take a
@@ -8187,6 +8206,8 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::JSON | crabka_pgtypes::oids::JSONB) => {
             Ok(Some(ColumnType::Jsonb))
         }
+        Some(crabka_pgtypes::oids::TSVECTOR) => Ok(Some(ColumnType::TsVector)),
+        Some(crabka_pgtypes::oids::TSQUERY) => Ok(Some(ColumnType::TsQuery)),
         Some(0) | None => Ok(None),
         // Every array OID crabka has an element type for (`_int4`, `_text`, …);
         // `_json` folds onto `jsonb[]` the same way `json` folds onto `jsonb`.
@@ -8302,6 +8323,12 @@ fn decode_binary_value(
                 .map_err(ExecError::into_pg)
         }
         ColumnType::Jsonb => decode_jsonb_binary(value),
+        ColumnType::TsVector | ColumnType::TsQuery => {
+            let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+            decode_text_bound_param(text, ty, time_zone)
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
         ColumnType::Array(elem) => decode_array_binary(value, elem, time_zone),
         // A domain's binary representation is its base type's, so it decodes as
         // the base and picks up its constraints on assignment.
@@ -8714,6 +8741,12 @@ impl SqlSession {
             Ok(_) => return None,
             Err(error) => return Some(Err(error.into())),
         };
+        if crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection)
+            .text_search
+            .is_some()
+        {
+            return None;
+        }
 
         Some(
             async {

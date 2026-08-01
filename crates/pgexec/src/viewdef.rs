@@ -599,6 +599,7 @@ fn unary_text(op: UnaryOp, expr: &Expr, ctx: Ctx<'_>) -> String {
         UnaryOp::IsUnknown => ctx.paren(format!("{} IS UNKNOWN", expr_text(expr, ctx))),
         UnaryOp::IsNotUnknown => ctx.paren(format!("{} IS NOT UNKNOWN", expr_text(expr, ctx))),
         UnaryOp::BitNot => ctx.paren(format!("~ {}", expr_text(expr, ctx))),
+        UnaryOp::TsNot => ctx.paren(format!("!! {}", expr_text(expr, ctx))),
     }
 }
 

@@ -109,6 +109,8 @@ fn column_hash(value: &Datum, seed: u64) -> Result<Option<u64>, ExecError> {
         Datum::Array(_) => return Err(unsupported("array")),
         Datum::Record(_) => return Err(unsupported("record")),
         Datum::Enum(_) => return Err(unsupported("enum")),
+        Datum::TsVector(_) => return Err(unsupported("tsvector")),
+        Datum::TsQuery(_) => return Err(unsupported("tsquery")),
     };
     Ok(Some(hash))
 }

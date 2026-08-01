@@ -14,6 +14,7 @@ pub mod jsonb;
 pub mod numeric;
 pub mod ops;
 pub mod string;
+pub mod text_search;
 pub mod usertype;
 pub mod uuid;
 
@@ -23,3 +24,4 @@ pub use datum::{
 };
 pub use error::TypeError;
 pub use jsonb::JsonbValue;
+pub use text_search::{Lexeme, Position, QueryTerm, TsQuery, TsVector, Weight};

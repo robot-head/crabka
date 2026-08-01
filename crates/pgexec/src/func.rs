@@ -220,6 +220,7 @@ pub(crate) fn is_scalar(name: &str) -> bool {
         || crate::math_fn::is_math_func(name)
         || crate::string_fn::is_string_func(name)
         || crate::regexp_fn::is_regexp_func(name)
+        || crate::text_search_fn::is_text_search_func(name)
 }
 
 /// The call a bare, unparenthesised `name` denotes, when `PostgreSQL` reserves
@@ -289,6 +290,9 @@ pub(crate) fn checked_args(fc: &FuncCall) -> Result<&[Expr], ExecError> {
 /// is true of arithmetic), so an argument-type misuse THERE surfaces at runtime
 /// as 42804 rather than here as 42883. This per-clause difference is documented.
 pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnType, ExecError> {
+    if crate::text_search_fn::is_text_search_func(&fc.name) {
+        return crate::text_search_fn::text_search_result_type(fc, scope);
+    }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::math_func_result_type(fc, scope);
     }
@@ -304,7 +308,9 @@ pub(crate) fn scalar_result_type(fc: &FuncCall, scope: &Scope) -> Result<ColumnT
     match f {
         ScalarFunc::Length => {
             require_arity(fc, n == 1)?;
-            require_text(&args[0], scope)?;
+            if crate::eval::infer_type(&args[0], scope)? != ColumnType::TsVector {
+                require_text(&args[0], scope)?;
+            }
             Ok(ColumnType::Int4)
         }
         ScalarFunc::Upper | ScalarFunc::Lower => {
@@ -610,6 +616,9 @@ pub(crate) fn eval_scalar(
     ctx: &EvalCtx,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Datum, ExecError> {
+    if crate::text_search_fn::is_text_search_func(&fc.name) {
+        return crate::text_search_fn::eval_text_search(fc, ctx, eval_child);
+    }
     if crate::math_fn::is_math_func(&fc.name) {
         return crate::math_fn::eval_math(fc, ctx, eval_child);
     }
@@ -798,7 +807,10 @@ fn eval_eager(
     match f {
         ScalarFunc::Length => {
             require_arity(fc, vals.len() == 1)?;
-            let n = text_arg(&vals[0])?.chars().count();
+            let n = match &vals[0] {
+                Datum::TsVector(vector) => vector.len(),
+                value => text_arg(value)?.chars().count(),
+            };
             i32::try_from(n)
                 .map(Datum::Int4)
                 .map_err(|_| ExecError::Type(crabka_pgtypes::TypeError::Overflow))
@@ -1511,6 +1523,10 @@ fn builtin_format_type(oid: u32) -> Option<(&'static str, TypmodKind)> {
         2951 => ("uuid[]", NoMod),
         3802 => ("jsonb", NoMod),
         3807 => ("jsonb[]", NoMod),
+        3614 => ("tsvector", NoMod),
+        3615 => ("tsquery", NoMod),
+        3643 => ("tsvector[]", NoMod),
+        3645 => ("tsquery[]", NoMod),
         _ => return Option::None,
     })
 }

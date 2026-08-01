@@ -204,6 +204,13 @@ pub enum IndexPlacement {
     Global,
 }
 
+/// Physical access method used by a secondary index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexMethod {
+    Btree,
+    Gin,
+}
+
 /// Constraint backed by an automatically-created index.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexConstraint {
@@ -221,6 +228,7 @@ pub struct Index {
     pub columns: Vec<String>,
     pub unique: bool,
     pub placement: IndexPlacement,
+    pub method: IndexMethod,
     pub constraint: Option<IndexConstraint>,
 }
 
@@ -240,6 +248,7 @@ pub struct NewIndex {
     pub columns: Vec<String>,
     pub unique: bool,
     pub placement: IndexPlacement,
+    pub method: IndexMethod,
     pub constraint: Option<IndexConstraint>,
 }
 
@@ -1671,6 +1680,31 @@ pub fn create_index_ops(
     unique: bool,
     placement: IndexPlacement,
 ) -> Result<(IndexId, Vec<WriteOp>), CatalogError> {
+    create_index_with_method_ops(
+        kv,
+        name,
+        table,
+        columns,
+        unique,
+        placement,
+        IndexMethod::Btree,
+    )
+}
+
+/// Build the write batch for an explicitly selected index access method.
+///
+/// # Errors
+///
+/// Returns duplicate-index, undefined-table/column, or storage/corruption errors.
+pub fn create_index_with_method_ops(
+    kv: &dyn Kv,
+    name: &str,
+    table: &RelationName,
+    columns: Vec<String>,
+    unique: bool,
+    placement: IndexPlacement,
+    method: IndexMethod,
+) -> Result<(IndexId, Vec<WriteOp>), CatalogError> {
     if kv.get(&catalog_index_key(&table.sibling(name)))?.is_some() {
         return Err(CatalogError::DuplicateIndex(name.to_string()));
     }
@@ -1685,6 +1719,7 @@ pub fn create_index_ops(
         columns,
         unique,
         placement,
+        method,
         constraint: None,
     };
     let value = serialize_index(&index);
@@ -1736,6 +1771,7 @@ pub fn create_index_on_table_ops(
         columns,
         unique,
         placement,
+        method: IndexMethod::Btree,
         constraint: None,
     };
     let value = serialize_index(&index);
@@ -1789,6 +1825,7 @@ pub fn create_constraint_index_ops(
         columns: new_index.columns.clone(),
         unique: new_index.unique,
         placement: new_index.placement,
+        method: new_index.method,
         constraint: new_index.constraint,
     };
     let value = serialize_index(&index);
@@ -1883,6 +1920,7 @@ pub fn create_indexes_on_table_ops(
             columns: new_index.columns.clone(),
             unique: new_index.unique,
             placement: new_index.placement,
+            method: new_index.method,
             constraint: new_index.constraint,
         };
         let value = serialize_index(&index);
@@ -3644,6 +3682,7 @@ mod tests {
                 columns: vec!["id".into()],
                 unique: true,
                 placement: IndexPlacement::Local,
+                method: IndexMethod::Btree,
                 constraint: Some(IndexConstraint::PrimaryKey),
             },
         )
@@ -4064,6 +4103,7 @@ mod tests {
             columns: vec!["name".into()],
             unique: true,
             placement: IndexPlacement::Global,
+            method: IndexMethod::Btree,
             constraint: None,
         };
         assert_eq!(
