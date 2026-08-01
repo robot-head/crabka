@@ -6214,3 +6214,24 @@ test remains intentionally ignored. Gres load-test and workspace all-target
 check and strict Clippy, nightly formatting, and diff hygiene pass. This closes
 only the Gres load-test runtime-policy slice; the repository-wide hardcoded
 operational-value audit remains active.
+
+## Gres Substrate WAL Frame Target
+
+Gres now exposes the substrate committer's existing logical WAL frame target
+as `--wal-frame-max-size`, backed by
+`CRABKA_GRES_WAL_FRAME_MAX_SIZE`. The UOM `ByteSize` value defaults to the
+existing `1MiB`, is parsed once into `SubstrateRuntimeConfig`, and reaches
+every single-range, multi-range, live, in-memory, and successor-staging
+`SubstrateCommitter` through its existing `with_max_frame_size` builder.
+
+`GresComputeSpec.walFrameMaxSize` owns the deployed surface. The operator
+validates a finite positive whole-byte value, renders the Gres argument once
+per compute deployment, and the generated Gres CRD exposes an optional string
+field. Omission preserves the existing default. The setting remains a
+chunking target: an indivisible operation may still exceed it.
+
+Gres and operator all-target suites pass, including the real Gres runtime and
+process tests. Workspace strict all-target Clippy, nightly formatting, fresh
+CRD generation parity, and diff hygiene pass. This closes only the substrate
+WAL-frame slice; the repository-wide hardcoded operational-value audit remains
+active.
