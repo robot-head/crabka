@@ -2424,7 +2424,7 @@ fn wal_producer_dns_args(timeout: crabka_client_core::ClientDnsTimeout) -> [Stri
 }
 
 fn wal_producer_args(policy: &EffectiveGresComputePolicy) -> Vec<String> {
-    let mut args = Vec::with_capacity(24);
+    let mut args = Vec::with_capacity(26);
     args.extend(wal_producer_flush_args(policy.wal_producer_flush_timeout));
     args.extend(wal_producer_dns_args(policy.wal_producer_dns_timeout));
     let retry = policy.wal_producer_retry_policy;
@@ -2453,6 +2453,10 @@ fn wal_producer_args(policy: &EffectiveGresComputePolicy) -> Vec<String> {
     args.extend(wal_producer_throughput_args(
         policy.wal_producer_throughput_policy,
     ));
+    args.extend([
+        "--wal-frame-max-size".to_owned(),
+        policy.wal_frame_max_size.human().to_string(),
+    ]);
     args
 }
 
@@ -3683,16 +3687,17 @@ mod tests {
         for (spec, expected) in [
             (
                 crate::crd::gres::GresComputeSpec::default(),
-                ["none", "0s", "16KiB"],
+                ["none", "0s", "16KiB", "1MiB"],
             ),
             (
                 crate::crd::gres::GresComputeSpec {
                     wal_producer_compression: Some(crate::crd::gres::WalProducerCompression::Zstd),
                     wal_producer_linger: Some(crabka_units::millis(18)),
                     wal_producer_batch: Some(crabka_units::bytes(19)),
+                    wal_frame_max_size: Some(crabka_units::bytes(20)),
                     ..crate::crd::gres::GresComputeSpec::default()
                 },
-                ["zstd", "18ms", "19B"],
+                ["zstd", "18ms", "19B", "20B"],
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
@@ -3729,6 +3734,7 @@ mod tests {
                         ["--wal-producer-compression", expected[0]],
                         ["--wal-producer-linger", expected[1]],
                         ["--wal-producer-batch", expected[2]],
+                        ["--wal-frame-max-size", expected[3]],
                     ] {
                         assert!(
                             args.windows(2).filter(|window| *window == pair).count() == 1,

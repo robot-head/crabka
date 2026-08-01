@@ -15,12 +15,12 @@ use crabka_gres_control::{
 use crabka_gres_substrate::{
     DEFAULT_CHECKPOINT_RETAIN, DEFAULT_DURABLE_INSPECTION_FOLD_MAX_RECORDS,
     DEFAULT_DURABLE_INSPECTION_FOLD_MAX_SIZE, DEFAULT_DURABLE_INSPECTION_TIMEOUT,
-    DEFAULT_PART_MAX_SIZE, DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT, DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT,
-    DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT, DEFAULT_WAL_RECOVERY_DNS_TIMEOUT,
-    DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES, DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT,
-    DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX, DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX,
-    DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT, DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT,
-    DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+    DEFAULT_MAX_FRAME_SIZE, DEFAULT_PART_MAX_SIZE, DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT,
+    DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT, DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT,
+    DEFAULT_WAL_RECOVERY_DNS_TIMEOUT, DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+    DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT, DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX,
+    DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX, DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT,
+    DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT, DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
 };
 use crabka_units::{
     ByteSize, Ratio, Time,
@@ -607,6 +607,12 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub wal_producer_batch: Option<ByteSize>,
 
+    /// Target maximum size of one encoded logical WAL frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub wal_frame_max_size: Option<ByteSize>,
+
     /// Replication factor requested when creating a range WAL topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 32_767))]
@@ -671,6 +677,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) wal_producer_dns_timeout: crabka_client_core::ClientDnsTimeout,
     pub(crate) wal_producer_retry_policy: crabka_client_producer::ProducerRetryPolicy,
     pub(crate) wal_producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy,
+    pub(crate) wal_frame_max_size: ByteSize,
     pub(crate) wal_topic_replication_factor: PositiveI32,
     pub(crate) wal_topic_ensure_timeout_ms: PositiveI32,
     pub(crate) wal_admin_connect_timeout_ms: PositiveMillis,
@@ -714,6 +721,8 @@ impl GresComputeSpec {
             "spec.compute.durableInspectionFoldMaxSize",
             durable_inspection_fold_max_size,
         )?;
+        let wal_frame_max_size = self.wal_frame_max_size.unwrap_or(DEFAULT_MAX_FRAME_SIZE);
+        whole_bytes_usize("spec.compute.walFrameMaxSize", wal_frame_max_size)?;
         let schema_fetch_retry_defaults = crabka_schema_serde::SchemaFetchRetryPolicy::default();
         let range_defaults = crabka_gres_ranges::RangeRuntimePolicy::default();
         let range_runtime_policy = crabka_gres_ranges::RangeRuntimePolicy {
@@ -936,6 +945,7 @@ impl GresComputeSpec {
             .map_err(|error| format!("spec.compute.walProducerDnsTimeout: {error}"))?,
             wal_producer_retry_policy: self.effective_wal_producer_retry_policy()?,
             wal_producer_throughput_policy: self.effective_wal_producer_throughput_policy()?,
+            wal_frame_max_size,
             wal_topic_replication_factor: PositiveI32::new(
                 self.wal_topic_replication_factor
                     .unwrap_or(DEFAULT_WAL_TOPIC_REPLICATION_FACTOR),
@@ -2139,6 +2149,42 @@ mod tests {
             );
         }
         assert!(properties["walProducerRetries"]["minimum"].as_f64() == Some(0.0));
+    }
+
+    #[test]
+    fn wal_frame_max_size_has_default_override_schema_and_validation() {
+        assert!(
+            GresComputeSpec::default()
+                .effective_policy()
+                .expect("defaults")
+                .wal_frame_max_size
+                == DEFAULT_MAX_FRAME_SIZE
+        );
+        let spec = GresComputeSpec {
+            wal_frame_max_size: Some(crabka_units::bytes(37)),
+            ..Default::default()
+        };
+        assert!(
+            spec.effective_policy()
+                .expect("override")
+                .wal_frame_max_size
+                == crabka_units::bytes(37)
+        );
+        let json = serde_json::to_value(&spec).expect("serialize");
+        assert!(json["walFrameMaxSize"] == "37B");
+        let crd = serde_json::to_value(Gres::crd()).expect("CRD");
+        assert!(
+            crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
+                ["compute"]["properties"]["walFrameMaxSize"]["type"]
+                == "string"
+        );
+        let error = GresComputeSpec {
+            wal_frame_max_size: Some(ByteSize::ZERO),
+            ..Default::default()
+        }
+        .effective_policy()
+        .expect_err("zero");
+        assert!(error.contains("spec.compute.walFrameMaxSize"));
     }
 
     #[test]

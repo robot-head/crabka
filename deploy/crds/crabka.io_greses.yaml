@@ -359,6 +359,10 @@ spec:
                     description: Timeout for WAL admin requests.
                     nullable: true
                     type: string
+                  walFrameMaxSize:
+                    description: Target maximum size of one encoded logical WAL frame.
+                    nullable: true
+                    type: string
                   walProducerBatch:
                     description: Maximum WAL producer batch size.
                     nullable: true

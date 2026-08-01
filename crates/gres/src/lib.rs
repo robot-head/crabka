@@ -433,6 +433,15 @@ pub struct ServeArgs {
     )]
     pub wal_producer_batch: Option<ByteSize>,
 
+    /// Target maximum size of one encoded logical WAL frame.
+    #[arg(
+        long = "wal-frame-max-size",
+        env = "CRABKA_GRES_WAL_FRAME_MAX_SIZE",
+        value_parser = crabka_units::parse::positive_byte_size,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_frame_max_size: Option<ByteSize>,
+
     /// Substrate mode: comma-separated hosted range ids, for example r0,r2.
     #[arg(long = "host-ranges", requires = "ranges")]
     pub host_ranges: Option<String>,
@@ -913,7 +922,8 @@ fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
         || args.wal_producer_transaction_timeout.is_some()
         || args.wal_producer_compression.is_some()
         || args.wal_producer_linger.is_some()
-        || args.wal_producer_batch.is_some())
+        || args.wal_producer_batch.is_some()
+        || args.wal_frame_max_size.is_some())
         && args.substrate_bootstrap.is_none()
     {
         return invalid_input("WAL recovery options require --substrate-bootstrap");
@@ -1391,6 +1401,8 @@ pub struct SubstrateRuntimeConfig {
     pub producer_retry_policy: crabka_client_producer::ProducerRetryPolicy,
     /// WAL producer batching and compression settings.
     pub producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy,
+    /// Target maximum size of one encoded logical WAL frame.
+    pub wal_frame_max_size: ByteSize,
     /// Optional range-compute placement for distributed mode. Range 0 is always hosted.
     pub host_ranges: Option<Vec<crabka_gres_ranges::RangeId>>,
     /// mTLS client configuration required for remote range routing.
@@ -1601,6 +1613,9 @@ impl SubstrateRuntimeConfig {
             producer_flush_timeout: effective_wal_producer_flush_timeout(args)?,
             producer_retry_policy: effective_wal_producer_retry_policy(args)?,
             producer_throughput_policy: effective_wal_producer_throughput_policy(args)?,
+            wal_frame_max_size: args
+                .wal_frame_max_size
+                .unwrap_or(crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE),
             host_ranges: parse_host_ranges(args.host_ranges.as_deref())?,
             range_rpc: RangeRpcRuntimeConfig::from_args(args)?,
             advertised_endpoint: args.range_listen.clone(),
@@ -4575,6 +4590,7 @@ async fn open_substrate_runtime_with_tenant_record(
         log,
         barrier.generation,
         outcome.next_journal_seq,
+        config.wal_frame_max_size,
         &snapshot_source,
         checkpoint
             .as_ref()
@@ -5336,6 +5352,7 @@ async fn open_live_range_substrate_engine(
         Arc::clone(&writer),
         recovered.generation,
         recovered.next_journal_seq,
+        config.wal_frame_max_size,
         &snapshot_source,
         checkpoint
             .as_ref()
@@ -7303,6 +7320,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     Arc::clone(&writer),
                     generation,
                     restore_plan.replay.next_journal_seq,
+                    self.config.wal_frame_max_size,
                     &snapshot_source,
                     Some(Arc::clone(&checkpoint.stats)),
                     Some(Arc::clone(&checkpoint.planner_stats)
@@ -7818,6 +7836,7 @@ async fn open_live_substrate_runtime(
         writer,
         recovered.generation,
         recovered.next_journal_seq,
+        config.wal_frame_max_size,
         &snapshot_source,
         checkpoint
             .as_ref()
@@ -7842,11 +7861,13 @@ fn recovery_config_with_checkpoint_store(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_replicated_substrate_engine<W>(
     store: &Arc<dyn SubstrateKv>,
     writer: Arc<W>,
     generation: crabka_gres_substrate::WriterGeneration,
     next_journal_seq: u64,
+    wal_frame_max_size: ByteSize,
     snapshot_source: &Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint_stats: Option<Arc<crabka_gres_substrate::CheckpointStats>>,
     checkpoint_planner_stats: Option<Arc<dyn crabka_pgexec::plan_dist::Stats>>,
@@ -7859,6 +7880,7 @@ where
         writer,
         generation,
         next_journal_seq,
+        wal_frame_max_size,
         snapshot_source,
         checkpoint_stats,
         checkpoint_planner_stats,
@@ -7866,11 +7888,13 @@ where
     .map(|(engine, _committer)| engine)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_replicated_substrate_engine_with_committer<W>(
     store: &Arc<dyn SubstrateKv>,
     writer: Arc<W>,
     generation: crabka_gres_substrate::WriterGeneration,
     next_journal_seq: u64,
+    wal_frame_max_size: ByteSize,
     snapshot_source: &Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint_stats: Option<Arc<crabka_gres_substrate::CheckpointStats>>,
     checkpoint_planner_stats: Option<Arc<dyn crabka_pgexec::plan_dist::Stats>>,
@@ -7891,6 +7915,7 @@ where
         generation,
         next_journal_seq,
     )
+    .with_max_frame_size(wal_frame_max_size)
     .with_checkpoint_snapshot_source(Arc::clone(snapshot_source));
     let committer = if let Some(checkpoint_stats) = checkpoint_stats {
         committer.with_checkpoint_stats(checkpoint_stats)
@@ -9321,6 +9346,7 @@ mod tests {
             wal_producer_compression: None,
             wal_producer_linger: None,
             wal_producer_batch: None,
+            wal_frame_max_size: None,
             host_ranges: None,
             timestamp_source: TimestampSourceKind::LogicalTso,
             hlc_max_offset: crabka_units::millis(250),
@@ -10228,7 +10254,7 @@ mod tests {
     #[test]
     fn wal_recovery_read_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_READ_POLICY_CHILD";
-        const VARS: [&str; 23] = [
+        const VARS: [&str; 24] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
@@ -10252,6 +10278,7 @@ mod tests {
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
             "CRABKA_GRES_WAL_PRODUCER_LINGER",
             "CRABKA_GRES_WAL_PRODUCER_BATCH",
+            "CRABKA_GRES_WAL_FRAME_MAX_SIZE",
         ];
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
@@ -10589,7 +10616,7 @@ mod tests {
     #[tokio::test]
     async fn wal_recovery_read_policy_validation_precedes_listener_bind() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_BIND_CHILD";
-        const VARS: [&str; 23] = [
+        const VARS: [&str; 24] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
@@ -10613,6 +10640,7 @@ mod tests {
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
             "CRABKA_GRES_WAL_PRODUCER_LINGER",
             "CRABKA_GRES_WAL_PRODUCER_BATCH",
+            "CRABKA_GRES_WAL_FRAME_MAX_SIZE",
         ];
         if std::env::var_os(CHILD).is_none() {
             let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
@@ -10630,7 +10658,7 @@ mod tests {
         }
 
         let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-        for option in 0..22 {
+        for option in 0..24 {
             let mut args = serve_args(Some("trust"), Vec::new());
             args.listen = occupied.local_addr().expect("address").to_string();
             set_wal_policy_option(&mut args, option);
@@ -10681,6 +10709,7 @@ mod tests {
             20 => args.wal_producer_compression = Some(crabka_client_producer::Compression::Gzip),
             21 => args.wal_producer_linger = Some(Time::ZERO),
             22 => args.wal_producer_batch = Some(crabka_units::bytes(1)),
+            23 => args.wal_frame_max_size = Some(crabka_units::bytes(1)),
             _ => unreachable!("test policy option"),
         }
     }
@@ -11190,7 +11219,7 @@ mod tests {
     #[test]
     fn wal_producer_throughput_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_THROUGHPUT_POLICY_CHILD";
-        const VARS: [&str; 23] = [
+        const VARS: [&str; 24] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
@@ -11214,6 +11243,7 @@ mod tests {
             "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
             "CRABKA_GRES_WAL_PRODUCER_LINGER",
             "CRABKA_GRES_WAL_PRODUCER_BATCH",
+            "CRABKA_GRES_WAL_FRAME_MAX_SIZE",
         ];
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
@@ -11229,7 +11259,10 @@ mod tests {
                     child.env_remove(variable);
                 }
                 if mode == "environment" {
-                    for (variable, value) in VARS[20..].iter().copied().zip(["gzip", "41ms", "42B"])
+                    for (variable, value) in VARS[20..]
+                        .iter()
+                        .copied()
+                        .zip(["gzip", "41ms", "42B", "43B"])
                     {
                         child.env(variable, value);
                     }
@@ -11263,11 +11296,20 @@ mod tests {
             crabka_client_producer::ProducerThroughputPolicy::default()
         };
         assert_eq!(config.producer_throughput_policy, expected);
+        assert_eq!(
+            config.wal_frame_max_size,
+            if std::env::var(CHILD).as_deref() == Ok("environment") {
+                crabka_units::bytes(43)
+            } else {
+                crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE
+            }
+        );
 
         let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
             "--wal-producer-compression=lz4",
             "--wal-producer-linger=51ms",
             "--wal-producer-batch=52B",
+            "--wal-frame-max-size=53B",
         ]))
         .expect("CLI policy");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -11281,6 +11323,7 @@ mod tests {
         )
         .expect("CLI policy");
         assert_eq!(config.producer_throughput_policy, expected);
+        assert_eq!(config.wal_frame_max_size, crabka_units::bytes(53));
     }
 
     #[test]
@@ -11719,6 +11762,7 @@ mod tests {
             producer_flush_timeout: crabka_client_producer::ProducerFlushTimeout::default(),
             producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
             producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
+            wal_frame_max_size: crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE,
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -11812,6 +11856,7 @@ mod tests {
             producer_flush_timeout: crabka_client_producer::ProducerFlushTimeout::default(),
             producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
             producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
+            wal_frame_max_size: crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE,
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -11891,6 +11936,7 @@ mod tests {
             log,
             crabka_gres_substrate::WriterGeneration(0),
             0,
+            crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE,
             &source,
             None,
             None,
@@ -12186,6 +12232,7 @@ mod tests {
             producer_flush_timeout: crabka_client_producer::ProducerFlushTimeout::default(),
             producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
             producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
+            wal_frame_max_size: crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE,
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
@@ -12288,6 +12335,7 @@ mod tests {
             producer_flush_timeout: crabka_client_producer::ProducerFlushTimeout::default(),
             producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
             producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
+            wal_frame_max_size: crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE,
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
