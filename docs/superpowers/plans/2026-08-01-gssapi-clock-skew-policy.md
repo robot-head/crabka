@@ -32,8 +32,8 @@ broker configuration, and lower it to `std::time::Duration` only at SSPI.
 
 ### Task 4: Closure
 
-- [ ] Run affected all-target tests.
-- [ ] Run workspace all-target check and strict warnings-as-errors Clippy.
-- [ ] Run nightly formatting and `git diff --check`.
-- [ ] Update `docs/configuration-audit.md` with the surface and evidence.
-- [ ] Commit closure documents; leave the broader repository goal active.
+- [x] Run affected all-target tests.
+- [x] Run workspace all-target check and strict warnings-as-errors Clippy.
+- [x] Run nightly formatting and `git diff --check`.
+- [x] Update `docs/configuration-audit.md` with the surface and evidence.
+- [x] Commit closure documents; leave the broader repository goal active.

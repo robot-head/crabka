@@ -5055,21 +5055,27 @@ required only to construct the SSPI server context; that path performs no KDC
 network I/O, so making the fallback separately tunable would not change
 runtime behavior.
 
-The remaining deployment policy is the five-minute maximum clock skew used
-when validating incoming Kerberos AP-REQs. The proposed minimal design adds
-`max_time_skew: Time` to the existing `GssapiConfig` and
-`FileGssapiConfig`, preserving five minutes as the default and accepting a
-nonnegative UOM duration. `SspiAcceptor` receives that value explicitly and
-lowers it to `std::time::Duration` only at the SSPI boundary.
+The five-minute maximum clock skew used when validating incoming Kerberos
+AP-REQs is now `max_time_skew: Time` in `GssapiConfig`. The existing broker
+`[gssapi]` TOML block accepts an optional unit-bearing `max_time_skew`; omission
+preserves `5m`, and `0s` is valid. `SspiAcceptor` receives the resolved value
+explicitly and lowers it to `std::time::Duration` only at the SSPI boundary.
 
-The Kafka CRD's existing `ListenerAuthenticationGssapi` object would expose
-the same unit-bearing field and the operator would render it into the existing
-broker-global `[gssapi]` TOML block. No new configuration subtree or
-environment-only library lookup is needed.
+The Kafka CRD's existing `ListenerAuthenticationGssapi` object exposes the
+same value as `maxTimeSkew`. The operator renders it into the existing
+broker-global `[gssapi]` TOML block. Its structural schema declares a string,
+and the existing whole-object GSSAPI listener conflict check covers divergent
+values. No new configuration subtree or environment-only library lookup is
+needed.
 
-This design is pending explicit approval and has not been implemented. All 208
-unit tests and the SCRAM benchmark targets pass; the external-KDC integration
-test remains intentionally ignored. Strict all-target Clippy passes.
+All 208 security unit tests, the explicit acceptor construction test, SCRAM
+benchmark targets, 1,853 broker library tests, and all operator all-target
+tests pass. The external-KDC integration test remains intentionally ignored.
+The broker suite's parallel run exhausted the process file-descriptor limit
+after 1,850 passes; its three `EMFILE` failures all passed when rerun serially.
+Workspace all-target check and strict Clippy, nightly formatting, and diff
+hygiene pass. This closes only the GSSAPI clock-skew slice; the repository-wide
+hardcoded operational-value audit remains active.
 
 ## Replicator Runtime and Topic Policy
 
