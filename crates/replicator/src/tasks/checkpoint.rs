@@ -14,7 +14,7 @@ use crabka_units::{
 use tracing::warn;
 
 use crate::{
-    config::{ClientResourcePolicy, NamingPolicy},
+    config::{ClientResourcePolicy, NamingPolicy, ReplicatorRuntimePolicy},
     error::ReplicatorError,
     ids::{CommittedOffset, PartitionIndex},
     mm2::{Checkpoint, OffsetSync},
@@ -69,15 +69,32 @@ pub async fn run_once_with_policy(
     store: &OffsetSyncStore,
     client_resource_policy: ClientResourcePolicy,
 ) -> Result<(), ReplicatorError> {
+    run_once_with_runtime_policy(
+        params,
+        store,
+        client_resource_policy,
+        &ReplicatorRuntimePolicy::default(),
+    )
+    .await
+}
+
+async fn run_once_with_runtime_policy(
+    params: &CheckpointParams,
+    store: &OffsetSyncStore,
+    client_resource_policy: ClientResourcePolicy,
+    runtime_policy: &ReplicatorRuntimePolicy,
+) -> Result<(), ReplicatorError> {
     let checkpoint_topic = Checkpoint::topic_name(&params.source_alias);
 
     // 1. Ensure the checkpoints topic exists on the target.
-    crate::admin_util::ensure_topic_with_policy(
+    crate::admin_util::ensure_topic_with_runtime_policy(
         &params.target_bootstrap,
         &checkpoint_topic,
         1,
         params.security.clone(),
         client_resource_policy,
+        runtime_policy,
+        runtime_policy.internal_topic_replication_factor,
     )
     .await
     .map_err(|e| ReplicatorError::Client(format!("ensure checkpoints topic: {e}")))?;
@@ -86,9 +103,12 @@ pub async fn run_once_with_policy(
     let mut admin = AdminClient::connect_with_options(
         std::slice::from_ref(&params.source_bootstrap),
         crabka_client_core::ConnectionOptions {
-            dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
-            connect_timeout: crabka_units::secs(5),
-            request_timeout: crabka_units::secs(30),
+            dns_timeout: crabka_client_core::ClientDnsTimeout::new(
+                runtime_policy.client_dns_timeout,
+            )
+            .map_err(ReplicatorError::Client)?,
+            connect_timeout: runtime_policy.client_connect_timeout,
+            request_timeout: runtime_policy.client_request_timeout,
             client_id: "crabka-operator".to_owned(),
             dispatch_queue_capacity: client_resource_policy.dispatch_queue_capacity,
             frame_max: client_resource_policy.frame_max,
@@ -209,6 +229,20 @@ impl CheckpointTask {
         interval: Time,
         client_resource_policy: ClientResourcePolicy,
     ) -> Self {
+        Self::start_with_runtime_policy(
+            params,
+            interval,
+            client_resource_policy,
+            ReplicatorRuntimePolicy::default(),
+        )
+    }
+
+    pub(crate) fn start_with_runtime_policy(
+        params: CheckpointParams,
+        interval: Time,
+        client_resource_policy: ClientResourcePolicy,
+        runtime_policy: ReplicatorRuntimePolicy,
+    ) -> Self {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
         let handle = tokio::spawn(async move {
@@ -217,11 +251,12 @@ impl CheckpointTask {
                 let mut store = OffsetSyncStore::default();
                 let offset_syncs_topic = OffsetSync::topic_name(&params.source_alias);
 
-                match crate::admin_util::read_all_with_policy(
+                match crate::admin_util::read_all_with_runtime_policy(
                     &params.target_bootstrap,
                     &offset_syncs_topic,
                     params.security.clone(),
                     client_resource_policy,
+                    &runtime_policy,
                 )
                 .await
                 {
@@ -242,7 +277,13 @@ impl CheckpointTask {
                     }
                 }
 
-                if let Err(e) = run_once_with_policy(&params, &store, client_resource_policy).await
+                if let Err(e) = run_once_with_runtime_policy(
+                    &params,
+                    &store,
+                    client_resource_policy,
+                    &runtime_policy,
+                )
+                .await
                 {
                     warn!(error = %e, "checkpoint run_once failed");
                 }

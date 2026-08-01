@@ -73,7 +73,9 @@ async fn main() -> anyhow::Result<()> {
     cli.runtime_policy.validate().map_err(anyhow::Error::msg)?;
     config.validate()?;
 
-    let supervisor = FlowSupervisor::run_with_policy(config, client_resource_policy).await?;
+    let supervisor =
+        FlowSupervisor::run_with_runtime_policy(config, client_resource_policy, cli.runtime_policy)
+            .await?;
     tracing::info!("crabka-replicator running; send SIGINT/ctrl-c to stop");
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutdown requested; draining flows");

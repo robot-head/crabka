@@ -7,7 +7,11 @@ use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use tokio::sync::watch;
 use tracing::warn;
 
-use crate::{config::ClientResourcePolicy, error::ReplicatorError, mm2::Heartbeat};
+use crate::{
+    config::{ClientResourcePolicy, ReplicatorRuntimePolicy},
+    error::ReplicatorError,
+    mm2::Heartbeat,
+};
 
 /// Parameters for the [`HeartbeatTask`].
 pub struct HeartbeatParams {
@@ -66,13 +70,28 @@ impl HeartbeatTask {
         p: HeartbeatParams,
         client_resource_policy: ClientResourcePolicy,
     ) -> Result<Self, ReplicatorError> {
+        Self::start_with_runtime_policy(
+            p,
+            client_resource_policy,
+            &ReplicatorRuntimePolicy::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn start_with_runtime_policy(
+        p: HeartbeatParams,
+        client_resource_policy: ClientResourcePolicy,
+        runtime_policy: &ReplicatorRuntimePolicy,
+    ) -> Result<Self, ReplicatorError> {
         // Ensure the heartbeats topic exists before we start producing.
-        crate::admin_util::ensure_topic_with_policy(
+        crate::admin_util::ensure_topic_with_runtime_policy(
             &p.target_bootstrap,
             Heartbeat::TOPIC,
             1,
             p.security.clone(),
             client_resource_policy,
+            runtime_policy,
+            runtime_policy.internal_topic_replication_factor,
         )
         .await
         .map_err(ReplicatorError::Client)?;

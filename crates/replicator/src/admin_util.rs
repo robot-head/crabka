@@ -3,14 +3,14 @@
 //! All functions return `Result<_, String>` and map client errors via
 //! `.map_err(|e| e.to_string())` so callers stay wire-error-agnostic.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::security::ClientSecurity;
 
-use crate::config::ClientResourcePolicy;
+use crate::config::{ClientResourcePolicy, ReplicationFactor, ReplicatorRuntimePolicy};
 
 /// Kafka error code: the topic already exists.
 const TOPIC_ALREADY_EXISTS: i16 = 36;
@@ -54,9 +54,32 @@ pub async fn ensure_topic_with_policy(
     security: Option<ClientSecurity>,
     client_resource_policy: ClientResourcePolicy,
 ) -> Result<(), String> {
+    let runtime_policy = ReplicatorRuntimePolicy::default();
+    ensure_topic_with_runtime_policy(
+        bootstrap,
+        topic,
+        partitions,
+        security,
+        client_resource_policy,
+        &runtime_policy,
+        runtime_policy.data_topic_replication_factor,
+    )
+    .await
+}
+
+/// Ensure a topic using explicit process and replication policy.
+pub(crate) async fn ensure_topic_with_runtime_policy(
+    bootstrap: &str,
+    topic: &str,
+    partitions: i32,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+    runtime_policy: &ReplicatorRuntimePolicy,
+    replication_factor: ReplicationFactor,
+) -> Result<(), String> {
     let mut admin = AdminClient::connect_with_options(
         &[bootstrap.to_string()],
-        admin_options(security, client_resource_policy),
+        admin_options(security, client_resource_policy, runtime_policy)?,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -66,10 +89,10 @@ pub async fn ensure_topic_with_policy(
             &[CreateTopicSpec {
                 name: topic.to_string(),
                 partitions,
-                replicas: 1,
+                replicas: i32::from(replication_factor.get()),
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            runtime_policy.topic_create_timeout,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -88,7 +111,7 @@ pub async fn ensure_topic_with_policy(
     Ok(())
 }
 
-/// Ensure a compacted topic exists with 1 partition and 1 replica.
+/// Ensure a compacted topic exists with one partition and the default replica count.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -118,9 +141,27 @@ pub async fn ensure_compacted_topic_with_policy(
     security: Option<ClientSecurity>,
     client_resource_policy: ClientResourcePolicy,
 ) -> Result<(), String> {
+    let runtime_policy = ReplicatorRuntimePolicy::default();
+    ensure_compacted_topic_with_runtime_policy(
+        bootstrap,
+        topic,
+        security,
+        client_resource_policy,
+        &runtime_policy,
+    )
+    .await
+}
+
+pub(crate) async fn ensure_compacted_topic_with_runtime_policy(
+    bootstrap: &str,
+    topic: &str,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+    runtime_policy: &ReplicatorRuntimePolicy,
+) -> Result<(), String> {
     let mut admin = AdminClient::connect_with_options(
         &[bootstrap.to_string()],
-        admin_options(security, client_resource_policy),
+        admin_options(security, client_resource_policy, runtime_policy)?,
     )
     .await
     .map_err(|e| e.to_string())?;
@@ -133,10 +174,10 @@ pub async fn ensure_compacted_topic_with_policy(
             &[CreateTopicSpec {
                 name: topic.to_string(),
                 partitions: 1,
-                replicas: 1,
+                replicas: i32::from(runtime_policy.internal_topic_replication_factor.get()),
                 configs,
             }],
-            10_000,
+            runtime_policy.topic_create_timeout,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -158,16 +199,17 @@ pub async fn ensure_compacted_topic_with_policy(
 fn admin_options(
     security: Option<ClientSecurity>,
     policy: ClientResourcePolicy,
-) -> crabka_client_core::ConnectionOptions {
-    crabka_client_core::ConnectionOptions {
-        dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
-        connect_timeout: secs(5),
-        request_timeout: secs(30),
+    runtime_policy: &ReplicatorRuntimePolicy,
+) -> Result<crabka_client_core::ConnectionOptions, String> {
+    Ok(crabka_client_core::ConnectionOptions {
+        dns_timeout: crabka_client_core::ClientDnsTimeout::new(runtime_policy.client_dns_timeout)?,
+        connect_timeout: runtime_policy.client_connect_timeout,
+        request_timeout: runtime_policy.client_request_timeout,
         client_id: "crabka-operator".to_owned(),
         dispatch_queue_capacity: policy.dispatch_queue_capacity,
         frame_max: policy.frame_max,
         security: security.map(Box::new),
-    }
+    })
 }
 
 /// Build a drain consumer for the given topic.  Security is threaded through
@@ -209,7 +251,7 @@ async fn build_drain_consumer(
 /// Drain all records from `topic` from the earliest offset, returning
 /// `(key, value)` pairs in order.
 ///
-/// Uses N=3 consecutive empty polls (500 ms each) as the drain sentinel.
+/// Uses the runtime policy's consecutive-empty threshold as the drain sentinel.
 /// Poll errors for a not-yet-existing topic are silently treated as empty.
 pub type RawRecord = (Option<Bytes>, Option<Bytes>);
 
@@ -241,8 +283,24 @@ pub async fn read_all_with_policy(
     security: Option<ClientSecurity>,
     client_resource_policy: ClientResourcePolicy,
 ) -> Result<Vec<RawRecord>, String> {
-    const MAX_EMPTY: usize = 3;
+    let runtime_policy = ReplicatorRuntimePolicy::default();
+    read_all_with_runtime_policy(
+        bootstrap,
+        topic,
+        security,
+        client_resource_policy,
+        &runtime_policy,
+    )
+    .await
+}
 
+pub(crate) async fn read_all_with_runtime_policy(
+    bootstrap: &str,
+    topic: &str,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+    runtime_policy: &ReplicatorRuntimePolicy,
+) -> Result<Vec<RawRecord>, String> {
     let group_id = format!("crabka-replicator-reader-{topic}");
 
     let mut consumer =
@@ -263,11 +321,14 @@ pub async fn read_all_with_policy(
     let mut consecutive_empty = 0usize;
 
     loop {
-        match consumer.poll(Duration::from_millis(500)).await {
+        match consumer
+            .poll(runtime_policy.internal_drain_poll_timeout)
+            .await
+        {
             Ok(batch) => {
                 if batch.is_empty() {
                     consecutive_empty += 1;
-                    if consecutive_empty >= MAX_EMPTY {
+                    if consecutive_empty >= runtime_policy.internal_drain_empty_polls.get() {
                         break;
                     }
                 } else {
@@ -327,7 +388,34 @@ pub async fn read_last_value_for_key_with_policy(
     security: Option<ClientSecurity>,
     client_resource_policy: ClientResourcePolicy,
 ) -> Result<Option<Vec<u8>>, String> {
-    let all = read_all_with_policy(bootstrap, topic, security, client_resource_policy).await?;
+    let runtime_policy = ReplicatorRuntimePolicy::default();
+    read_last_value_for_key_with_runtime_policy(
+        bootstrap,
+        topic,
+        key,
+        security,
+        client_resource_policy,
+        &runtime_policy,
+    )
+    .await
+}
+
+pub(crate) async fn read_last_value_for_key_with_runtime_policy(
+    bootstrap: &str,
+    topic: &str,
+    key: &[u8],
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+    runtime_policy: &ReplicatorRuntimePolicy,
+) -> Result<Option<Vec<u8>>, String> {
+    let all = read_all_with_runtime_policy(
+        bootstrap,
+        topic,
+        security,
+        client_resource_policy,
+        runtime_policy,
+    )
+    .await?;
 
     let matched = if key.is_empty() {
         all.into_iter().last()
@@ -350,6 +438,23 @@ fn is_unknown_topic_error(msg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::prelude::{TimeExt as _, secs};
+
+    #[test]
+    fn create_topics_timeout_reaches_the_wire_as_int32_millis() {
+        // Kafka's `CreateTopics.timeoutMs` is an int32 count of milliseconds, so
+        // the configured extent must cross the seam as 10000 — a seconds-valued
+        // 10 would have the broker give up almost immediately.
+        let policy = crate::config::ReplicatorRuntimePolicy::default();
+        assert2::assert!(policy.topic_create_timeout.millis_i32() == 10_000);
+    }
+
+    #[test]
+    fn drain_poll_timeout_is_half_a_second() {
+        let policy = crate::config::ReplicatorRuntimePolicy::default();
+        assert2::assert!(policy.internal_drain_poll_timeout == crabka_units::millis(500));
+    }
+
     #[test]
     fn unknown_topic_error_matches_each_substring() {
         // Each positive exercises exactly one of the OR'd substrings, so the
@@ -392,6 +497,6 @@ mod tests {
             .await
             .unwrap();
 
-        crate::test_util::await_topic_count(&b, "t", 2, std::time::Duration::from_secs(5)).await;
+        crate::test_util::await_topic_count(&b, "t", 2, secs(5)).await;
     }
 }

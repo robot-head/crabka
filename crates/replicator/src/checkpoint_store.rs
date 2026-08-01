@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use crabka_connect::{CheckpointStore, ConnectError, SourceOffset};
 
-use crate::config::ClientResourcePolicy;
+use crate::config::{ClientResourcePolicy, ReplicatorRuntimePolicy};
 
 /// The internal compacted topic used to store replicator checkpoints.
 const STATE_TOPIC: &str = "crabka-replicator-offsets";
@@ -27,6 +27,7 @@ pub struct InternalTopicCheckpointStore {
     key: String,
     security: Option<crabka_client_core::security::ClientSecurity>,
     client_resource_policy: ClientResourcePolicy,
+    runtime_policy: ReplicatorRuntimePolicy,
 }
 
 impl InternalTopicCheckpointStore {
@@ -63,11 +64,29 @@ impl InternalTopicCheckpointStore {
         security: Option<crabka_client_core::security::ClientSecurity>,
         client_resource_policy: ClientResourcePolicy,
     ) -> Result<Self, ConnectError> {
-        crate::admin_util::ensure_compacted_topic_with_policy(
+        Self::start_with_runtime_policy(
+            target_bootstrap,
+            flow_name,
+            security,
+            client_resource_policy,
+            ReplicatorRuntimePolicy::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn start_with_runtime_policy(
+        target_bootstrap: &str,
+        flow_name: &str,
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        client_resource_policy: ClientResourcePolicy,
+        runtime_policy: ReplicatorRuntimePolicy,
+    ) -> Result<Self, ConnectError> {
+        crate::admin_util::ensure_compacted_topic_with_runtime_policy(
             target_bootstrap,
             STATE_TOPIC,
             security.clone(),
             client_resource_policy,
+            &runtime_policy,
         )
         .await
         .map_err(ConnectError::Offset)?;
@@ -92,6 +111,7 @@ impl InternalTopicCheckpointStore {
             key: flow_name.into(),
             security,
             client_resource_policy,
+            runtime_policy,
         })
     }
 }
@@ -131,12 +151,13 @@ impl CheckpointStore for InternalTopicCheckpointStore {
 
     #[tracing::instrument(level = "info", skip_all, fields(key = %self.key), err)]
     async fn load(&self) -> Result<Option<SourceOffset>, ConnectError> {
-        let latest = crate::admin_util::read_last_value_for_key_with_policy(
+        let latest = crate::admin_util::read_last_value_for_key_with_runtime_policy(
             &self.target_bootstrap,
             &self.topic,
             self.key.as_bytes(),
             self.security.clone(),
             self.client_resource_policy,
+            &self.runtime_policy,
         )
         .await
         .map_err(ConnectError::Offset)?;
