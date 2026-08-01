@@ -25,10 +25,10 @@ broker configuration, and lower it to `std::time::Duration` only at SSPI.
 
 ### Task 3: Kafka listener CRD and operator rendering
 
-- [ ] Add failing CRD schema/serde and rendered-TOML tests.
-- [ ] Add optional `maxTimeSkew` to `ListenerAuthenticationGssapi`.
-- [ ] Render it into the existing broker-global `[gssapi]` block.
-- [ ] Run operator tests and strict all-target Clippy; commit.
+- [x] Add failing CRD schema/serde and rendered-TOML tests.
+- [x] Add optional `maxTimeSkew` to `ListenerAuthenticationGssapi`.
+- [x] Render it into the existing broker-global `[gssapi]` block.
+- [x] Run operator tests and strict all-target Clippy; commit.
 
 ### Task 4: Closure
 

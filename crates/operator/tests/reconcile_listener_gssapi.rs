@@ -90,6 +90,7 @@ fn gssapi_listener(name: &str, port: i32, tls: bool) -> Listener {
                 principal_to_local_rules: vec!["DEFAULT".into()],
                 realm: None,
                 kdc: None,
+                max_time_skew: None,
             },
         )),
         configuration: None,
@@ -618,6 +619,7 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
                 ],
                 realm: Some("EXAMPLE.COM".into()),
                 kdc: Some("tcp://kdc:88".into()),
+                max_time_skew: Some(crabka_units::secs(17)),
             },
         )),
         configuration: None,
@@ -658,6 +660,7 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
     );
     check!(g.realm == Some("EXAMPLE.COM".into()));
     check!(g.kdc == Some("tcp://kdc:88".into()));
+    check!(g.max_time_skew == crabka_units::secs(17));
     check!(g.keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"));
 
     // [inter_broker_credentials] survives as the Gssapi variant with the

@@ -2236,6 +2236,7 @@ mod tests {
             principal_to_local_rules: vec!["DEFAULT".into()],
             realm: None,
             kdc: None,
+            max_time_skew: None,
         }
     }
 
@@ -2273,6 +2274,7 @@ mod tests {
             principal_to_local_rules: vec![],
             realm: None,
             kdc: None,
+            max_time_skew: None,
         };
         let l = gssapi_listener("gss", 9092, false, g);
         assert!(
@@ -3517,6 +3519,9 @@ pub fn render_broker_toml(
         }
         if let Some(kdc) = &g.kdc {
             let _ = writeln!(out, "kdc = \"{}\"", toml_escape(kdc));
+        }
+        if let Some(max_time_skew) = g.max_time_skew {
+            let _ = writeln!(out, "max_time_skew = \"{}\"", max_time_skew.human());
         }
         out.push('\n');
     }
@@ -4811,6 +4816,7 @@ mod toml_rendering_tests {
             principal_to_local_rules: vec!["DEFAULT".into()],
             realm: None,
             kdc: None,
+            max_time_skew: None,
         }
     }
 
@@ -4833,7 +4839,9 @@ mod toml_rendering_tests {
 
     #[test]
     fn render_emits_gssapi_block_and_mechanism() {
-        let l = gssapi_listener("gss", 9092, false, gssapi_cfg_with_service("kafka"));
+        let mut config = gssapi_cfg_with_service("kafka");
+        config.max_time_skew = Some(crabka_units::secs(17));
+        let l = gssapi_listener("gss", 9092, false, config);
         let addrs = addrs_for("gss", 9092);
         let toml = render_broker_toml(
             (0, &[l], &addrs, "gss"),
@@ -4847,6 +4855,7 @@ mod toml_rendering_tests {
             (r#"keytab_path = "/etc/crabka/gssapi-keytab/keytab""#, true),
             (r#"service_name = "kafka""#, true),
             (r#"principal_to_local_rules = ["DEFAULT"]"#, true),
+            (r#"max_time_skew = "17s""#, true),
             (r#"enabled_mechanisms = ["GSSAPI"]"#, true),
             ("[inter_broker_credentials]", false),
         ] {
