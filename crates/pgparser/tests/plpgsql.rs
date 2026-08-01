@@ -101,6 +101,16 @@ fn nested_blocks_may_reuse_declaration_names() {
 }
 
 #[test]
+fn parses_percent_type_declarations() {
+    let block = parse_plpgsql("declare copy value%type; begin null; end").expect("%TYPE");
+    let PlPgSqlDeclaration::Variable { ty, .. } = &block.declarations[0] else {
+        panic!("expected variable declaration");
+    };
+    assert!(ty.resolved.is_none());
+    assert!(ty.name == "value%type");
+}
+
+#[test]
 fn parses_if_case_and_all_loop_sources() {
     let block = parse_plpgsql(
         r"

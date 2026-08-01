@@ -38,6 +38,23 @@ struct Slot {
     not_null: bool,
 }
 
+fn declaration_type(
+    ty: &RoutineType,
+    lookup: impl FnOnce(&str) -> Option<ColumnType>,
+) -> Result<ColumnType, ExecError> {
+    if let Some(ty) = ty.resolved {
+        return Ok(ty);
+    }
+    if let Some(reference) = ty.name.strip_suffix("%type") {
+        return lookup(reference).ok_or_else(|| ExecError::UndefinedColumn(reference.into()));
+    }
+    Ok(if ty.name.eq_ignore_ascii_case("record") {
+        ColumnType::Record(None)
+    } else {
+        ColumnType::Text
+    })
+}
+
 #[derive(Default)]
 struct Frame {
     label: Option<String>,
@@ -1112,13 +1129,7 @@ impl ScalarInterpreter<'_> {
                 not_null,
                 default,
             } => {
-                let ty = ty.resolved.unwrap_or_else(|| {
-                    if ty.name.eq_ignore_ascii_case("record") {
-                        ColumnType::Record(None)
-                    } else {
-                        ColumnType::Text
-                    }
-                });
+                let ty = declaration_type(ty, |name| self.lookup_slot(name).map(|slot| slot.ty))?;
                 let value = default
                     .as_ref()
                     .map(|expr| self.eval(expr))
@@ -2090,13 +2101,7 @@ impl Interpreter<'_> {
                 not_null,
                 default,
             } => {
-                let ty = ty.resolved.unwrap_or_else(|| {
-                    if ty.name.eq_ignore_ascii_case("record") {
-                        ColumnType::Record(None)
-                    } else {
-                        ColumnType::Text
-                    }
-                });
+                let ty = declaration_type(ty, |name| self.lookup_slot(name).map(|slot| slot.ty))?;
                 let value = match default {
                     Some(expr) => {
                         self.session
@@ -4334,5 +4339,22 @@ mod tests {
                 .expect_err("record field cast");
             assert!(error.code == "22P02", "{select}: {error:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn percent_type_uses_parameter_type() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let rows = session
+            .simple_query(
+                "CREATE FUNCTION array_copy(x anyarray) RETURNS anyarray LANGUAGE plpgsql AS $$ \
+                 DECLARE res x%TYPE; BEGIN res := array_fill(x[1], ARRAY[4]); RETURN res; END $$; \
+                 CREATE FUNCTION copy_type(value int4) RETURNS int4 LANGUAGE plpgsql AS $$ \
+                 DECLARE copy value%TYPE; BEGIN copy := value; RETURN copy; END $$; \
+                 SELECT copy_type(7)",
+            )
+            .await
+            .expect("%TYPE function");
+        assert!(first_text(&rows[2..]) == "7");
     }
 }
