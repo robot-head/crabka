@@ -37,6 +37,8 @@ enum TextSearchFunc {
     JsonbToTsVector,
 }
 
+type Catalog<'a> = Option<&'a dyn crabka_pgkv::Kv>;
+
 fn text_search_func(name: &str) -> Option<TextSearchFunc> {
     Some(match name {
         "to_tsvector" => TextSearchFunc::ToTsVector,
@@ -133,7 +135,7 @@ pub(crate) fn text_search_result_type(
 
 pub(crate) fn eval_text_search(
     fc: &FuncCall,
-    _ctx: &EvalCtx,
+    ctx: &EvalCtx,
     mut eval_child: impl FnMut(&Expr) -> Result<Datum, ExecError>,
 ) -> Result<Datum, ExecError> {
     let function = text_search_func(&fc.name).ok_or_else(|| undefined_function(&fc.name))?;
@@ -145,27 +147,28 @@ pub(crate) fn eval_text_search(
     if values.iter().any(Datum::is_null) {
         return Ok(Datum::Null);
     }
+    let catalog = ctx.catalog();
 
     match function {
         TextSearchFunc::ToTsVector => {
-            let (config, text) = config_and_text(fc, &values)?;
-            Ok(Datum::TsVector(to_tsvector(config, text)?))
+            let (config, text) = config_and_text(fc, &values, catalog)?;
+            Ok(Datum::TsVector(to_tsvector(config, text, catalog)?))
         }
         TextSearchFunc::ToTsQuery => {
-            let (config, text) = config_and_text(fc, &values)?;
-            Ok(Datum::TsQuery(to_tsquery(config, text)?))
+            let (config, text) = config_and_text(fc, &values, catalog)?;
+            Ok(Datum::TsQuery(to_tsquery(config, text, catalog)?))
         }
         TextSearchFunc::PlainToTsQuery => {
-            let (config, text) = config_and_text(fc, &values)?;
-            Ok(Datum::TsQuery(plain_query(config, text, false)?))
+            let (config, text) = config_and_text(fc, &values, catalog)?;
+            Ok(Datum::TsQuery(plain_query(config, text, false, catalog)?))
         }
         TextSearchFunc::PhraseToTsQuery => {
-            let (config, text) = config_and_text(fc, &values)?;
-            Ok(Datum::TsQuery(plain_query(config, text, true)?))
+            let (config, text) = config_and_text(fc, &values, catalog)?;
+            Ok(Datum::TsQuery(plain_query(config, text, true, catalog)?))
         }
         TextSearchFunc::WebsearchToTsQuery => {
-            let (config, text) = config_and_text(fc, &values)?;
-            Ok(Datum::TsQuery(web_query(config, text)?))
+            let (config, text) = config_and_text(fc, &values, catalog)?;
+            Ok(Datum::TsQuery(web_query(config, text, catalog)?))
         }
         TextSearchFunc::Strip => match values.as_slice() {
             [Datum::TsVector(vector)] => Ok(Datum::TsVector(vector.strip())),
@@ -180,7 +183,9 @@ pub(crate) fn eval_text_search(
             _ => Err(undefined_function(&fc.name)),
         },
         TextSearchFunc::QueryTree => match values.as_slice() {
-            [Datum::TsQuery(query)] => Ok(Datum::Text(query.to_string())),
+            [Datum::TsQuery(query)] => Ok(Datum::Text(
+                query_tree(query).map_or_else(|| "T".into(), |query| query.to_string()),
+            )),
             [got] => Err(type_error("tsquery", got)),
             _ => Err(undefined_function(&fc.name)),
         },
@@ -190,12 +195,16 @@ pub(crate) fn eval_text_search(
         TextSearchFunc::TsDelete => delete_terms(fc, &values),
         TextSearchFunc::TsFilter => filter_weights(fc, &values),
         TextSearchFunc::TsRank | TextSearchFunc::TsRankCd => rank(fc, &values),
-        TextSearchFunc::TsHeadline => headline(fc, &values),
-        TextSearchFunc::JsonbToTsVector => jsonb_to_vector(fc, &values),
+        TextSearchFunc::TsHeadline => headline(fc, &values, catalog),
+        TextSearchFunc::JsonbToTsVector => jsonb_to_vector(fc, &values, catalog),
     }
 }
 
-fn jsonb_to_vector(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+fn jsonb_to_vector(
+    fc: &FuncCall,
+    values: &[Datum],
+    catalog: Catalog<'_>,
+) -> Result<Datum, ExecError> {
     let (config, document, filter) = match values {
         [Datum::Jsonb(document), Datum::Jsonb(filter)] => (default_config()?, document, filter),
         [
@@ -209,7 +218,9 @@ fn jsonb_to_vector(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> 
     let filter = JsonTextFilter::parse(filter)?;
     let mut pieces = Vec::new();
     collect_json_text(document, filter, &mut pieces);
-    Ok(Datum::TsVector(vector_from_pieces(&config, &pieces)?))
+    Ok(Datum::TsVector(vector_from_pieces(
+        &config, &pieces, catalog,
+    )?))
 }
 
 #[derive(Clone, Copy, Default)]
@@ -293,11 +304,15 @@ fn collect_json_text(value: &JsonbValue, filter: JsonTextFilter, out: &mut Vec<S
     }
 }
 
-fn vector_from_pieces(config: &str, pieces: &[String]) -> Result<TsVector, ExecError> {
+fn vector_from_pieces(
+    config: &str,
+    pieces: &[String],
+    catalog: Catalog<'_>,
+) -> Result<TsVector, ExecError> {
     let mut lexemes = BTreeMap::<String, Vec<Position>>::new();
     let mut offset = 0_u16;
     for piece in pieces {
-        for (text, position) in normalized_terms(config, piece)? {
+        for (text, position) in normalized_terms(config, piece, catalog)? {
             lexemes.entry(text).or_default().push(Position {
                 position: position.saturating_add(offset).min(MAX_POSITION),
                 weight: Weight::D,
@@ -319,6 +334,7 @@ fn vector_from_pieces(config: &str, pieces: &[String]) -> Result<TsVector, ExecE
 fn config_and_text<'a>(
     fc: &FuncCall,
     values: &'a [Datum],
+    catalog: Catalog<'_>,
 ) -> Result<(&'a str, &'a str), ExecError> {
     match values {
         [Datum::Text(text)] => {
@@ -328,7 +344,7 @@ fn config_and_text<'a>(
             // The GUC value belongs to the session runtime, so it cannot be
             // returned with `values`' lifetime. Its only supported default is
             // English; validate it here and return that stable spelling.
-            let simple = validate_config(&config)?;
+            let simple = validate_config(&config, catalog)?;
             Ok((if simple { "simple" } else { "english" }, text))
         }
         [Datum::Text(config), Datum::Text(text)] => Ok((config, text)),
@@ -338,14 +354,18 @@ fn config_and_text<'a>(
     }
 }
 
-fn validate_config(config: &str) -> Result<bool, ExecError> {
-    crate::text_search_catalog::config_is_simple(config)
+fn validate_config(config: &str, catalog: Catalog<'_>) -> Result<bool, ExecError> {
+    crate::text_search_catalog::config_is_simple(catalog, config)
 }
 
 /// Build a searchable vector without an index. Positions count source tokens,
 /// including stop words, as PostgreSQL's parser does.
-pub(crate) fn to_tsvector(config: &str, source: &str) -> Result<TsVector, ExecError> {
-    let terms = normalized_terms(config, source)?;
+pub(crate) fn to_tsvector(
+    config: &str,
+    source: &str,
+    catalog: Catalog<'_>,
+) -> Result<TsVector, ExecError> {
+    let terms = normalized_terms(config, source, catalog)?;
     let mut lexemes = BTreeMap::<String, Vec<Position>>::new();
     for (text, position) in terms {
         lexemes.entry(text).or_default().push(Position {
@@ -360,43 +380,92 @@ pub(crate) fn to_tsvector(config: &str, source: &str) -> Result<TsVector, ExecEr
     ))
 }
 
-fn to_tsquery(config: &str, source: &str) -> Result<TsQuery, ExecError> {
+fn to_tsquery(config: &str, source: &str, catalog: Catalog<'_>) -> Result<TsQuery, ExecError> {
     let query = source.parse::<TsQuery>()?;
-    normalize_query(config, query)
+    normalize_query(config, query, catalog)
 }
 
-fn normalize_query(config: &str, query: TsQuery) -> Result<TsQuery, ExecError> {
-    let simple = validate_config(config)?;
+fn normalize_query(
+    config: &str,
+    query: TsQuery,
+    catalog: Catalog<'_>,
+) -> Result<TsQuery, ExecError> {
+    let simple = validate_config(config, catalog)?;
     let stemmer = Stemmer::create(Algorithm::English);
-    Ok(match query {
+    Ok(normalize_query_inner(query, simple, &stemmer))
+}
+
+fn normalize_query_inner(query: TsQuery, simple: bool, stemmer: &Stemmer) -> TsQuery {
+    match query {
         TsQuery::Empty => TsQuery::Empty,
         TsQuery::Term(mut term) => {
-            term.text = normalize_word(&term.text, simple, &stemmer);
+            term.text = normalize_word(&term.text, simple, stemmer);
             if !simple && is_stopword(&term.text) {
                 TsQuery::Empty
             } else {
                 TsQuery::Term(term)
             }
         }
-        TsQuery::Not(inner) => TsQuery::Not(Box::new(normalize_query(config, *inner)?)),
-        TsQuery::And(left, right) => TsQuery::And(
-            Box::new(normalize_query(config, *left)?),
-            Box::new(normalize_query(config, *right)?),
+        TsQuery::Not(inner) => match normalize_query_inner(*inner, simple, stemmer) {
+            TsQuery::Empty => TsQuery::Empty,
+            query => TsQuery::Not(Box::new(query)),
+        },
+        TsQuery::And(left, right) => combine_nonempty(
+            normalize_query_inner(*left, simple, stemmer),
+            normalize_query_inner(*right, simple, stemmer),
+            |left, right| TsQuery::And(Box::new(left), Box::new(right)),
         ),
-        TsQuery::Or(left, right) => TsQuery::Or(
-            Box::new(normalize_query(config, *left)?),
-            Box::new(normalize_query(config, *right)?),
+        TsQuery::Or(left, right) => combine_nonempty(
+            normalize_query_inner(*left, simple, stemmer),
+            normalize_query_inner(*right, simple, stemmer),
+            |left, right| TsQuery::Or(Box::new(left), Box::new(right)),
         ),
-        TsQuery::Phrase(left, right, distance) => TsQuery::Phrase(
-            Box::new(normalize_query(config, *left)?),
-            Box::new(normalize_query(config, *right)?),
-            distance,
+        TsQuery::Phrase(left, right, distance) => combine_nonempty(
+            normalize_query_inner(*left, simple, stemmer),
+            normalize_query_inner(*right, simple, stemmer),
+            |left, right| TsQuery::Phrase(Box::new(left), Box::new(right), distance),
         ),
-    })
+    }
 }
 
-fn plain_query(config: &str, source: &str, phrase: bool) -> Result<TsQuery, ExecError> {
-    let terms = normalized_terms(config, source)?;
+fn combine_nonempty(
+    left: TsQuery,
+    right: TsQuery,
+    combine: impl FnOnce(TsQuery, TsQuery) -> TsQuery,
+) -> TsQuery {
+    match (left, right) {
+        (TsQuery::Empty, query) | (query, TsQuery::Empty) => query,
+        (left, right) => combine(left, right),
+    }
+}
+
+fn query_tree(query: &TsQuery) -> Option<TsQuery> {
+    match query {
+        TsQuery::Empty | TsQuery::Not(_) => None,
+        TsQuery::Term(_) => Some(query.clone()),
+        TsQuery::And(left, right) => match (query_tree(left), query_tree(right)) {
+            (Some(left), Some(right)) => Some(TsQuery::And(Box::new(left), Box::new(right))),
+            (left, right) => left.or(right),
+        },
+        TsQuery::Or(left, right) => Some(TsQuery::Or(
+            Box::new(query_tree(left)?),
+            Box::new(query_tree(right)?),
+        )),
+        TsQuery::Phrase(left, right, distance) => Some(TsQuery::Phrase(
+            Box::new(query_tree(left)?),
+            Box::new(query_tree(right)?),
+            *distance,
+        )),
+    }
+}
+
+fn plain_query(
+    config: &str,
+    source: &str,
+    phrase: bool,
+    catalog: Catalog<'_>,
+) -> Result<TsQuery, ExecError> {
+    let terms = normalized_terms(config, source, catalog)?;
     let mut iter = terms.into_iter();
     let Some((first, mut last_position)) = iter.next() else {
         return Ok(TsQuery::Empty);
@@ -418,7 +487,7 @@ fn plain_query(config: &str, source: &str, phrase: bool) -> Result<TsQuery, Exec
     Ok(query)
 }
 
-fn web_query(config: &str, source: &str) -> Result<TsQuery, ExecError> {
+fn web_query(config: &str, source: &str, catalog: Catalog<'_>) -> Result<TsQuery, ExecError> {
     let mut parts = Vec::<(bool, TsQuery)>::new();
     let mut rest = source.trim();
     let mut next_or = false;
@@ -444,7 +513,7 @@ fn web_query(config: &str, source: &str) -> Result<TsQuery, ExecError> {
             let end = rest.find(char::is_whitespace).unwrap_or(rest.len());
             (&rest[..end], &rest[end..], false)
         };
-        let mut query = plain_query(config, piece, phrase)?;
+        let mut query = plain_query(config, piece, phrase, catalog)?;
         if negative && query != TsQuery::Empty {
             query = TsQuery::Not(Box::new(query));
         }
@@ -454,18 +523,25 @@ fn web_query(config: &str, source: &str) -> Result<TsQuery, ExecError> {
         }
         rest = tail.trim_start();
     }
-    let mut iter = parts.into_iter();
-    let Some((_, mut query)) = iter.next() else {
-        return Ok(TsQuery::Empty);
-    };
-    for (is_or, right) in iter {
-        query = if is_or {
-            TsQuery::Or(Box::new(query), Box::new(right))
+    let mut groups = Vec::new();
+    let mut group = TsQuery::Empty;
+    for (starts_group, query) in parts {
+        if starts_group && group != TsQuery::Empty {
+            groups.push(group);
+            group = query;
         } else {
-            TsQuery::And(Box::new(query), Box::new(right))
-        };
+            group = combine_nonempty(group, query, |left, right| {
+                TsQuery::And(Box::new(left), Box::new(right))
+            });
+        }
     }
-    Ok(query)
+    if group != TsQuery::Empty {
+        groups.push(group);
+    }
+    Ok(groups
+        .into_iter()
+        .reduce(|left, right| TsQuery::Or(Box::new(left), Box::new(right)))
+        .unwrap_or(TsQuery::Empty))
 }
 
 fn query_phrase(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
@@ -585,7 +661,7 @@ fn rank(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
     Ok(Datum::Float4(vector.rank(query)))
 }
 
-fn headline(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
+fn headline(fc: &FuncCall, values: &[Datum], catalog: Catalog<'_>) -> Result<Datum, ExecError> {
     let (config, source, query) = match values {
         [Datum::Text(source), Datum::TsQuery(query)]
         | [Datum::Text(source), Datum::TsQuery(query), Datum::Text(_)] => {
@@ -609,7 +685,7 @@ fn headline(fc: &FuncCall, values: &[Datum]) -> Result<Datum, ExecError> {
     let mut out = String::with_capacity(source.len() + 16);
     for piece in source.split_inclusive(char::is_whitespace) {
         let word = piece.trim_matches(|character: char| !character.is_alphanumeric());
-        let normalized = normalized_terms(&config, word)?;
+        let normalized = normalized_terms(&config, word, catalog)?;
         if normalized
             .first()
             .is_some_and(|(term, _)| wanted.contains(&term.as_str()))
@@ -685,10 +761,10 @@ fn constant_query_call(call: &FuncCall) -> Result<Option<TsQuery>, ExecError> {
         return Ok(None);
     };
     match function {
-        TextSearchFunc::ToTsQuery => to_tsquery(&config, source).map(Some),
-        TextSearchFunc::PlainToTsQuery => plain_query(&config, source, false).map(Some),
-        TextSearchFunc::PhraseToTsQuery => plain_query(&config, source, true).map(Some),
-        TextSearchFunc::WebsearchToTsQuery => web_query(&config, source).map(Some),
+        TextSearchFunc::ToTsQuery => to_tsquery(&config, source, None).map(Some),
+        TextSearchFunc::PlainToTsQuery => plain_query(&config, source, false, None).map(Some),
+        TextSearchFunc::PhraseToTsQuery => plain_query(&config, source, true, None).map(Some),
+        TextSearchFunc::WebsearchToTsQuery => web_query(&config, source, None).map(Some),
         _ => Ok(None),
     }
 }
@@ -725,8 +801,12 @@ fn one_weight(value: &str) -> Result<Weight, ExecError> {
         .ok_or_else(|| ExecError::InvalidParameterValue("unrecognized weight".into()))
 }
 
-fn normalized_terms(config: &str, source: &str) -> Result<Vec<(String, u16)>, ExecError> {
-    let simple = validate_config(config)?;
+fn normalized_terms(
+    config: &str,
+    source: &str,
+    catalog: Catalog<'_>,
+) -> Result<Vec<(String, u16)>, ExecError> {
+    let simple = validate_config(config, catalog)?;
     let stemmer = Stemmer::create(Algorithm::English);
     Ok(words(source)
         .enumerate()
@@ -901,7 +981,9 @@ mod tests {
     #[test]
     fn english_vector_stems_and_preserves_positions() {
         assert_eq!(
-            to_tsvector("english", "The Fat Rats").unwrap().to_string(),
+            to_tsvector("english", "The Fat Rats", None)
+                .unwrap()
+                .to_string(),
             "'fat':2 'rat':3"
         );
     }
@@ -909,10 +991,34 @@ mod tests {
     #[test]
     fn phrase_query_counts_stopword_positions() {
         assert_eq!(
-            plain_query("english", "The Cat and Rats", true)
+            plain_query("english", "The Cat and Rats", true, None)
                 .unwrap()
                 .to_string(),
             "'cat' <2> 'rat'"
         );
+    }
+
+    #[test]
+    fn query_normalization_prunes_stopwords() {
+        assert_eq!(
+            to_tsquery("english", "cat & the", None)
+                .unwrap()
+                .to_string(),
+            "'cat'"
+        );
+    }
+
+    #[test]
+    fn web_query_groups_and_before_or() {
+        let query = web_query("simple", "fat OR rat dog", None).unwrap();
+        assert_eq!(query.to_string(), "'fat' | 'rat' & 'dog'");
+        assert!(to_tsvector("simple", "fat", None).unwrap().matches(&query));
+    }
+
+    #[test]
+    fn query_tree_removes_unindexable_negation() {
+        let query = "cat & !dog".parse().unwrap();
+        assert_eq!(query_tree(&query).unwrap().to_string(), "'cat'");
+        assert!(query_tree(&"cat | !dog".parse().unwrap()).is_none());
     }
 }

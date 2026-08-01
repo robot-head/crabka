@@ -10,7 +10,7 @@ use bytes::Bytes;
 use crabka_pgcatalog::{Column, ColumnDefault, Sequence, Table, TableId};
 use crabka_pgkv::Kv;
 use crabka_pgparser::ast::{
-    ArraySubscript, Expr, FuncArgs, OrderItem, SelectItem, SelectStmt, Statement,
+    ArraySubscript, Expr, FuncArgs, OrderItem, SelectItem, SelectStmt, Statement, UtilityStatement,
 };
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::{Cell, FieldDescription, QueryResult};
@@ -265,6 +265,10 @@ pub(crate) fn execute_ddl(
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     let resolution = fctx.resolution;
     match stmt {
+        Statement::Utility(UtilityStatement::TextSearch(ddl)) => {
+            let (tag, ops) = crate::text_search_catalog::execute(kv, ddl)?;
+            Ok((command(tag), ops))
+        }
         // P2: SQL routines. Definition, lifecycle and catalog storage live in
         // `routine`; only the DDL routing is here.
         Statement::CreateRoutine(routine) => crate::routine::create(kv, routine, fctx.current_user),
@@ -1602,6 +1606,8 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
             | Datum::Float8(_)
             | Datum::Numeric(_)
             | Datum::Jsonb(_)
+            | Datum::TsVector(_)
+            | Datum::TsQuery(_)
             // Stored as its bare oid, with the relation name re-derived on read.
             | Datum::Regclass(_)
             // An array carries its elements in the row encoding, so an element
@@ -1615,9 +1621,8 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
     // (`crabka_pgcatalog::serde::write_default`), so they are refused at DDL
     // time rather than written and lost.
     Err(ExecError::Unsupported(
-        "defaults for date/time, interval, bytea, composite and enum columns are not persisted \
-         yet"
-        .into(),
+        "defaults for date/time, interval, bytea, composite and enum columns are not persisted yet"
+            .into(),
     ))
 }
 
@@ -9874,12 +9879,14 @@ fn virtual_catalog_rows(
         "pg_class" => pg_class_rows(catalog_kv),
         "pg_attribute" => pg_attribute_rows(catalog_kv),
         "pg_type" => Ok(pg_type_rows()),
-        "pg_ts_config" => Ok(text_search_catalog_rows(
+        "pg_ts_config" => text_search_catalog_rows(
+            catalog_kv,
             crabka_pgparser::ast::TextSearchObjectKind::Configuration,
-        )),
-        "pg_ts_dict" => Ok(text_search_catalog_rows(
+        ),
+        "pg_ts_dict" => text_search_catalog_rows(
+            catalog_kv,
             crabka_pgparser::ast::TextSearchObjectKind::Dictionary,
-        )),
+        ),
         // Zero rows: no built-in type in the exposed scalar slice is a range
         // type. Drivers still LEFT JOIN it in their typeinfo queries.
         "pg_range" => Ok(Vec::new()),
@@ -10508,8 +10515,11 @@ fn pg_type_rows() -> Vec<Vec<Datum>> {
     rows
 }
 
-fn text_search_catalog_rows(kind: crabka_pgparser::ast::TextSearchObjectKind) -> Vec<Vec<Datum>> {
-    crate::text_search_catalog::catalog_rows(kind)
+fn text_search_catalog_rows(
+    kv: &dyn Kv,
+    kind: crabka_pgparser::ast::TextSearchObjectKind,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crate::text_search_catalog::catalog_rows(kv, kind)?
         .into_iter()
         .map(|(name, base)| {
             let mut hash = 2_166_136_261u32;
@@ -10539,7 +10549,7 @@ fn text_search_catalog_rows(kind: crabka_pgparser::ast::TextSearchObjectKind) ->
                 ],
             }
         })
-        .collect()
+        .collect())
 }
 
 /// The `pg_type` rows of the `CREATE TYPE`/`CREATE DOMAIN` types.

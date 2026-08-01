@@ -2745,12 +2745,6 @@ impl SqlSession {
         if let Err(error) = crate::usertype::hydrate(catalog_kv.as_ref()) {
             tracing::warn!(?error, "could not load user-defined types from the catalog");
         }
-        if let Err(error) = crate::text_search_catalog::hydrate(catalog_kv.as_ref()) {
-            tracing::warn!(
-                ?error,
-                "could not load text-search objects from the catalog"
-            );
-        }
         Self {
             kv,
             catalog_kv,
@@ -4177,10 +4171,7 @@ impl SqlSession {
                     tag: reset_or_set_tag(*reset),
                 })
             }
-            UtilityStatement::TextSearch(ddl) => {
-                let tag = crate::text_search_catalog::execute(&*self.catalog_kv, ddl)?;
-                Ok(QueryResult::Command { tag: tag.into() })
-            }
+            UtilityStatement::TextSearch(_) => unreachable!("text-search DDL uses run_ddl"),
         }
     }
 
@@ -4505,7 +4496,8 @@ impl SqlSession {
         | Statement::DropType { .. }
         | Statement::CreateDomain { .. }
         | Statement::AlterDomain { .. }
-        | Statement::DropDomain { .. } => self.run_ddl(stmt).await,
+        | Statement::DropDomain { .. }
+        | Statement::Utility(UtilityStatement::TextSearch(_)) => self.run_ddl(stmt).await,
         Statement::Call { name, args } => self.run_call(name, args).await,
         Statement::DoBlock { language, .. } => Err(crate::routine::do_block(language)),
             Statement::Insert { .. }
@@ -7757,8 +7749,14 @@ fn binary_param_type(
         // `->`/`->>` take either a text key or an integer index; the operand
         // alone cannot say which, so leave the parameter at its default.
         BinaryOp::JsonGet | BinaryOp::JsonGetText => None,
-        // `@?`/`@@` take a jsonpath on the right, which crabka spells `text`.
-        BinaryOp::JsonPathExists | BinaryOp::JsonPathMatch => Some(ColumnType::Text),
+        // `@@` also serves full-text search; a vector sibling resolves the
+        // parameter as the query operand instead of jsonpath text.
+        BinaryOp::JsonPathMatch => match infer_param_context_type(other, scope) {
+            Some(ColumnType::TsVector) => Some(ColumnType::TsQuery),
+            Some(ColumnType::TsQuery) => Some(ColumnType::TsVector),
+            _ => Some(ColumnType::Text),
+        },
+        BinaryOp::JsonPathExists => Some(ColumnType::Text),
         // The regex-match, bitwise, exponent and modulo operators and the
         // boolean connectives resolve a parameter from nothing but its own
         // default.
@@ -7810,7 +7808,7 @@ fn infer_param_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<
             op: UnaryOp::Neg,
             expr,
         } => infer_param_context_type(expr, scope),
-        _ => None,
+        _ => crate::eval::infer_type(expr, scope).ok(),
     }
 }
 
@@ -12954,6 +12952,26 @@ mod listen_notify_session_tests {
             panic!("expected one row set from {sql}");
         };
         rows.len()
+    }
+
+    #[tokio::test]
+    async fn text_search_ddl_uses_the_catalog_committer() {
+        let (engine, committer) = recording_engine();
+        let mut session = session(&engine, 22);
+
+        tag(
+            &mut session,
+            "CREATE TEXT SEARCH CONFIGURATION replicated_cfg (COPY = simple)",
+        )
+        .await;
+
+        let batches = committer.batches();
+        assert!(batches.len() == 1);
+        assert!(batches[0].iter().any(|op| matches!(
+            op,
+            WriteOp::Put { key, .. }
+                if key.ends_with(b"catalog/text-search/c/replicated_cfg")
+        )));
     }
 
     fn notification(process_id: i32, channel: &str, payload: &str) -> Notification {

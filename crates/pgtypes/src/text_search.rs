@@ -298,13 +298,24 @@ fn query_matches(query: &TsQuery, vector: &TsVector) -> (bool, Vec<u16>) {
         TsQuery::And(left, right) => {
             let (left_match, mut positions) = query_matches(left, vector);
             let (right_match, right_positions) = query_matches(right, vector);
-            positions.extend(right_positions);
-            (left_match && right_match, positions)
+            if left_match && right_match {
+                positions.extend(right_positions);
+                (true, positions)
+            } else {
+                (false, Vec::new())
+            }
         }
         TsQuery::Or(left, right) => {
-            let (left_match, mut positions) = query_matches(left, vector);
+            let (left_match, left_positions) = query_matches(left, vector);
             let (right_match, right_positions) = query_matches(right, vector);
-            positions.extend(right_positions);
+            let mut positions = if left_match {
+                left_positions
+            } else {
+                Vec::new()
+            };
+            if right_match {
+                positions.extend(right_positions);
+            }
             (left_match || right_match, positions)
         }
         TsQuery::Phrase(left, right, distance) => {
@@ -705,6 +716,13 @@ mod tests {
         assert!(vector.matches(&"cat:A".parse().expect("weight")));
         assert!(vector.matches(&"cat:*B".parse().expect("prefix")));
         assert!(vector.matches(&"cat & !dog".parse().expect("not")));
+    }
+
+    #[test]
+    fn failed_or_branches_do_not_leak_phrase_positions() {
+        let vector: TsVector = "'a':1 'd':2 'c':10".parse().expect("vector");
+        let query = "((a & b) | c) <-> d".parse().expect("query");
+        assert!(!vector.matches(&query));
     }
 
     #[test]

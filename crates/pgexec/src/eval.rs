@@ -996,6 +996,10 @@ fn coerce_untyped_literal_operands(
                 (BinaryOp::JsonPathMatch, Datum::TsVector(_)) => Some(ColumnType::TsQuery),
                 (BinaryOp::Concat, Datum::TsVector(_)) => Some(ColumnType::TsVector),
                 (BinaryOp::Concat, Datum::TsQuery(_)) => Some(ColumnType::TsQuery),
+                (
+                    BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps,
+                    Datum::TsQuery(_),
+                ) => Some(ColumnType::TsQuery),
                 _ => None,
             };
         }
@@ -1084,7 +1088,7 @@ pub(crate) fn apply_binary(
             if matches!(l, Datum::TsVector(_) | Datum::TsQuery(_) | Datum::Text(_))
                 || matches!(r, Datum::TsVector(_) | Datum::TsQuery(_)) =>
         {
-            apply_text_search_match(l, r)
+            apply_text_search_match(l, r, ctx)
         }
         BinaryOp::JsonPathMatch => json_fn::eval_json_operator(JsonOp::PathMatch, l, r),
         // `@>` / `<@` are defined for BOTH jsonb and arrays.
@@ -1550,7 +1554,7 @@ fn apply_concat(kind: ConcatKind, l: &Datum, r: &Datum, ctx: &EvalCtx) -> Result
     }
 }
 
-fn apply_text_search_match(l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
+fn apply_text_search_match(l: &Datum, r: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
     if l.is_null() || r.is_null() {
         return Ok(Datum::Null);
     }
@@ -1561,7 +1565,7 @@ fn apply_text_search_match(l: &Datum, r: &Datum) -> Result<Datum, ExecError> {
             let config =
                 crate::session::current_setting_runtime("default_text_search_config", false)?
                     .expect("registered GUC has a value");
-            crate::text_search_fn::to_tsvector(&config, text)?.matches(query)
+            crate::text_search_fn::to_tsvector(&config, text, ctx.catalog())?.matches(query)
         }
         _ => return Err(undefined_operator_for(BinaryOp::JsonPathMatch, l, r)),
     };
@@ -2096,10 +2100,10 @@ fn infer_binary_type(
         }
         BinaryOp::Overlaps => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
-            if lt == ColumnType::TsQuery && rt == ColumnType::TsQuery {
+            let (alt, art) = adopt_json_operand_types(op, left, right, lt, rt);
+            if alt == ColumnType::TsQuery && art == ColumnType::TsQuery {
                 return Ok(ColumnType::TsQuery);
             }
-            let (alt, art) = adopt_json_operand_types(op, left, right, lt, rt);
             json_or_array_operator_result_type(op, alt, art)
                 .ok_or_else(|| undefined_operator("&&", lt, rt))
         }

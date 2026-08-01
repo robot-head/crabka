@@ -4849,11 +4849,15 @@ impl Parser {
                 (TextSearchObjectKind::Configuration, "copy" | "parser")
                     | (TextSearchObjectKind::Dictionary, "template")
             ) {
-                base = Some(if option == "parser" && value == "default" {
-                    "simple".into()
-                } else {
-                    value
-                });
+                base = Some(
+                    if option == "parser"
+                        && matches!(value.as_str(), "default" | "pg_catalog.default")
+                    {
+                        "simple".into()
+                    } else {
+                        value
+                    },
+                );
             }
             if !self.eat_comma() {
                 break;

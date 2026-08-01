@@ -614,6 +614,8 @@ pub fn compare(a: &Datum, b: &Datum) -> Result<Option<Ordering>, TypeError> {
         // Placed before the numeric fall-throughs, which would otherwise try to
         // promote these to f64 and fail.
         (Datum::Jsonb(x), Datum::Jsonb(y)) => x.cmp(y),
+        (Datum::TsVector(x), Datum::TsVector(y)) => x.cmp(y),
+        (Datum::TsQuery(x), Datum::TsQuery(y)) => x.cmp(y),
         // SQL arrays compare element-wise, shorter first on a common prefix.
         (Datum::Array(x), Datum::Array(y)) => compare_arrays(x, y)?,
         // `record_cmp`: field by field, left to right.

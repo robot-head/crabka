@@ -1,8 +1,8 @@
 //! Durable SQL-managed text-search configuration/dictionary metadata.
 
-use std::{collections::BTreeMap, sync::LazyLock, sync::RwLock};
+use std::collections::BTreeSet;
 
-use crabka_pgkv::Kv;
+use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgparser::ast::{TextSearchDdl, TextSearchObjectKind};
 
 use crate::error::ExecError;
@@ -11,23 +11,23 @@ const PREFIX: &[u8] = b"\0\0\0\0catalog/text-search/";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Object {
-    kind: TextSearchObjectKind,
     base: String,
 }
 
-static OBJECTS: LazyLock<RwLock<BTreeMap<String, Object>>> =
-    LazyLock::new(|| RwLock::new(BTreeMap::new()));
-
 fn canonical(name: &str) -> String {
-    name.rsplit('.').next().unwrap_or(name).to_ascii_lowercase()
+    name.to_ascii_lowercase()
+}
+
+const fn kind_tag(kind: TextSearchObjectKind) -> u8 {
+    match kind {
+        TextSearchObjectKind::Configuration => b'c',
+        TextSearchObjectKind::Dictionary => b'd',
+    }
 }
 
 fn key(kind: TextSearchObjectKind, name: &str) -> Vec<u8> {
     let mut key = PREFIX.to_vec();
-    key.push(match kind {
-        TextSearchObjectKind::Configuration => b'c',
-        TextSearchObjectKind::Dictionary => b'd',
-    });
+    key.push(kind_tag(kind));
     key.push(b'/');
     key.extend_from_slice(canonical(name).as_bytes());
     key
@@ -42,71 +42,70 @@ fn kind_name(kind: TextSearchObjectKind) -> &'static str {
 
 fn builtin(kind: TextSearchObjectKind, name: &str) -> Option<Object> {
     let name = canonical(name);
-    match (kind, name.as_str()) {
+    let name = name.strip_prefix("pg_catalog.").unwrap_or(&name);
+    match (kind, name) {
         (TextSearchObjectKind::Configuration, "simple") => Some(Object {
-            kind,
             base: "simple".into(),
         }),
         (TextSearchObjectKind::Configuration, "english") => Some(Object {
-            kind,
             base: "english".into(),
         }),
         (TextSearchObjectKind::Dictionary, "simple" | "english_stem") => {
-            Some(Object { kind, base: name })
+            Some(Object { base: name.into() })
         }
         _ => None,
     }
 }
 
-fn find(kind: TextSearchObjectKind, name: &str) -> Option<Object> {
-    builtin(kind, name).or_else(|| {
-        OBJECTS
-            .read()
-            .expect("text-search registry")
-            .get(&canonical(name))
-            .filter(|object| object.kind == kind)
-            .cloned()
-    })
-}
-
-pub(crate) fn config_is_simple(name: &str) -> Result<bool, ExecError> {
-    let Some(object) = find(TextSearchObjectKind::Configuration, name) else {
-        return Err(ExecError::UndefinedObject(format!(
-            "text search configuration \"{name}\" does not exist"
-        )));
-    };
-    Ok(canonical(&object.base) == "simple")
-}
-
-pub(crate) fn hydrate(kv: &dyn Kv) -> Result<(), ExecError> {
-    let mut objects = OBJECTS.write().expect("text-search registry");
-    for (raw_key, value) in kv.scan_prefix(PREFIX)? {
-        let Some(suffix) = raw_key.strip_prefix(PREFIX) else {
-            continue;
-        };
-        let (kind, name) = match suffix.split_first() {
-            Some((b'c', rest)) if rest.starts_with(b"/") => {
-                (TextSearchObjectKind::Configuration, &rest[1..])
-            }
-            Some((b'd', rest)) if rest.starts_with(b"/") => {
-                (TextSearchObjectKind::Dictionary, &rest[1..])
-            }
-            _ => continue,
-        };
-        let name = String::from_utf8(name.to_vec())
-            .map_err(|_| ExecError::Unsupported("corrupt text-search catalog key".into()))?;
-        let base = String::from_utf8(value)
-            .map_err(|_| ExecError::Unsupported("corrupt text-search catalog value".into()))?;
-        objects.insert(name, Object { kind, base });
+fn find(kv: &dyn Kv, kind: TextSearchObjectKind, name: &str) -> Result<Option<Object>, ExecError> {
+    if let Some(object) = builtin(kind, name) {
+        return Ok(Some(object));
     }
-    Ok(())
+    kv.get(&key(kind, name))?
+        .map(|value| {
+            String::from_utf8(value)
+                .map(|base| Object { base })
+                .map_err(|_| ExecError::Unsupported("corrupt text-search catalog value".into()))
+        })
+        .transpose()
 }
 
-pub(crate) fn execute(kv: &dyn Kv, ddl: &TextSearchDdl) -> Result<&'static str, ExecError> {
+pub(crate) fn config_is_simple(kv: Option<&dyn Kv>, name: &str) -> Result<bool, ExecError> {
+    let mut current = canonical(name);
+    let mut seen = BTreeSet::new();
+    loop {
+        if !seen.insert(current.clone()) {
+            return Err(ExecError::Unsupported(
+                "text search configuration COPY cycle".into(),
+            ));
+        }
+        if let Some(object) = builtin(TextSearchObjectKind::Configuration, &current) {
+            let base = canonical(&object.base);
+            return Ok(base.strip_prefix("pg_catalog.").unwrap_or(&base) == "simple");
+        }
+        let Some(kv) = kv else {
+            return Err(ExecError::UndefinedObject(format!(
+                "text search configuration \"{current}\" does not exist"
+            )));
+        };
+        let Some(object) = find(kv, TextSearchObjectKind::Configuration, &current)? else {
+            return Err(ExecError::UndefinedObject(format!(
+                "text search configuration \"{current}\" does not exist"
+            )));
+        };
+        let base = canonical(&object.base);
+        current = base;
+    }
+}
+
+pub(crate) fn execute(
+    kv: &dyn Kv,
+    ddl: &TextSearchDdl,
+) -> Result<(&'static str, Vec<WriteOp>), ExecError> {
     match ddl {
         TextSearchDdl::Create { kind, name, base } => {
             let name = canonical(name);
-            if find(*kind, &name).is_some() {
+            if find(kv, *kind, &name)?.is_some() {
                 return Err(ExecError::DuplicateObject(format!(
                     "{} \"{name}\" already exists",
                     kind_name(*kind)
@@ -114,10 +113,10 @@ pub(crate) fn execute(kv: &dyn Kv, ddl: &TextSearchDdl) -> Result<&'static str, 
             }
             match kind {
                 TextSearchObjectKind::Configuration => {
-                    config_is_simple(base)?;
+                    config_is_simple(Some(kv), base)?;
                 }
                 TextSearchObjectKind::Dictionary => {
-                    if find(TextSearchObjectKind::Dictionary, base).is_none()
+                    if find(kv, TextSearchObjectKind::Dictionary, base)?.is_none()
                         && !matches!(canonical(base).as_str(), "simple" | "snowball")
                     {
                         return Err(ExecError::UndefinedObject(format!(
@@ -126,18 +125,16 @@ pub(crate) fn execute(kv: &dyn Kv, ddl: &TextSearchDdl) -> Result<&'static str, 
                     }
                 }
             }
-            kv.put(key(*kind, &name), base.as_bytes().to_vec())?;
-            OBJECTS.write().expect("text-search registry").insert(
-                name,
-                Object {
-                    kind: *kind,
-                    base: canonical(base),
+            Ok((
+                match kind {
+                    TextSearchObjectKind::Configuration => "CREATE TEXT SEARCH CONFIGURATION",
+                    TextSearchObjectKind::Dictionary => "CREATE TEXT SEARCH DICTIONARY",
                 },
-            );
-            Ok(match kind {
-                TextSearchObjectKind::Configuration => "CREATE TEXT SEARCH CONFIGURATION",
-                TextSearchObjectKind::Dictionary => "CREATE TEXT SEARCH DICTIONARY",
-            })
+                vec![WriteOp::Put {
+                    key: key(*kind, &name),
+                    value: canonical(base).into_bytes(),
+                }],
+            ))
         }
         TextSearchDdl::Alter {
             kind,
@@ -145,7 +142,7 @@ pub(crate) fn execute(kv: &dyn Kv, ddl: &TextSearchDdl) -> Result<&'static str, 
             rename_to,
         } => {
             let old = canonical(name);
-            let Some(object) = find(*kind, &old) else {
+            let Some(object) = find(kv, *kind, &old)? else {
                 return Err(ExecError::UndefinedObject(format!(
                     "{} \"{old}\" does not exist",
                     kind_name(*kind)
@@ -159,22 +156,35 @@ pub(crate) fn execute(kv: &dyn Kv, ddl: &TextSearchDdl) -> Result<&'static str, 
             }
             if let Some(new_name) = rename_to {
                 let new_name = canonical(new_name);
-                if find(*kind, &new_name).is_some() {
+                if find(kv, *kind, &new_name)?.is_some() {
                     return Err(ExecError::DuplicateObject(format!(
                         "{} \"{new_name}\" already exists",
                         kind_name(*kind)
                     )));
                 }
-                kv.put(key(*kind, &new_name), object.base.as_bytes().to_vec())?;
-                kv.delete(&key(*kind, &old))?;
-                let mut objects = OBJECTS.write().expect("text-search registry");
-                objects.remove(&old);
-                objects.insert(new_name, object);
+                return Ok((
+                    match kind {
+                        TextSearchObjectKind::Configuration => "ALTER TEXT SEARCH CONFIGURATION",
+                        TextSearchObjectKind::Dictionary => "ALTER TEXT SEARCH DICTIONARY",
+                    },
+                    vec![
+                        WriteOp::Put {
+                            key: key(*kind, &new_name),
+                            value: object.base.into_bytes(),
+                        },
+                        WriteOp::Delete {
+                            key: key(*kind, &old),
+                        },
+                    ],
+                ));
             }
-            Ok(match kind {
-                TextSearchObjectKind::Configuration => "ALTER TEXT SEARCH CONFIGURATION",
-                TextSearchObjectKind::Dictionary => "ALTER TEXT SEARCH DICTIONARY",
-            })
+            Ok((
+                match kind {
+                    TextSearchObjectKind::Configuration => "ALTER TEXT SEARCH CONFIGURATION",
+                    TextSearchObjectKind::Dictionary => "ALTER TEXT SEARCH DICTIONARY",
+                },
+                Vec::new(),
+            ))
         }
         TextSearchDdl::Drop {
             kind,
@@ -188,29 +198,38 @@ pub(crate) fn execute(kv: &dyn Kv, ddl: &TextSearchDdl) -> Result<&'static str, 
                     kind_name(*kind)
                 )));
             }
-            if find(*kind, &name).is_none() {
+            if find(kv, *kind, &name)?.is_none() {
                 if *if_exists {
-                    return Ok(match kind {
-                        TextSearchObjectKind::Configuration => "DROP TEXT SEARCH CONFIGURATION",
-                        TextSearchObjectKind::Dictionary => "DROP TEXT SEARCH DICTIONARY",
-                    });
+                    return Ok((
+                        match kind {
+                            TextSearchObjectKind::Configuration => "DROP TEXT SEARCH CONFIGURATION",
+                            TextSearchObjectKind::Dictionary => "DROP TEXT SEARCH DICTIONARY",
+                        },
+                        Vec::new(),
+                    ));
                 }
                 return Err(ExecError::UndefinedObject(format!(
                     "{} \"{name}\" does not exist",
                     kind_name(*kind)
                 )));
             }
-            kv.delete(&key(*kind, &name))?;
-            OBJECTS.write().expect("text-search registry").remove(&name);
-            Ok(match kind {
-                TextSearchObjectKind::Configuration => "DROP TEXT SEARCH CONFIGURATION",
-                TextSearchObjectKind::Dictionary => "DROP TEXT SEARCH DICTIONARY",
-            })
+            Ok((
+                match kind {
+                    TextSearchObjectKind::Configuration => "DROP TEXT SEARCH CONFIGURATION",
+                    TextSearchObjectKind::Dictionary => "DROP TEXT SEARCH DICTIONARY",
+                },
+                vec![WriteOp::Delete {
+                    key: key(*kind, &name),
+                }],
+            ))
         }
     }
 }
 
-pub(crate) fn catalog_rows(kind: TextSearchObjectKind) -> Vec<(String, String)> {
+pub(crate) fn catalog_rows(
+    kv: &dyn Kv,
+    kind: TextSearchObjectKind,
+) -> Result<Vec<(String, String)>, ExecError> {
     let builtins: &[(&str, &str)] = match kind {
         TextSearchObjectKind::Configuration => &[("simple", "simple"), ("english", "english")],
         TextSearchObjectKind::Dictionary => {
@@ -221,15 +240,15 @@ pub(crate) fn catalog_rows(kind: TextSearchObjectKind) -> Vec<(String, String)> 
         .iter()
         .map(|(name, base)| ((*name).into(), (*base).into()))
         .collect::<Vec<_>>();
-    rows.extend(
-        OBJECTS
-            .read()
-            .expect("text-search registry")
-            .iter()
-            .filter(|(_, object)| object.kind == kind)
-            .map(|(name, object)| (name.clone(), object.base.clone())),
-    );
+    let prefix = key(kind, "");
+    for (raw_key, value) in kv.scan_prefix(&prefix)? {
+        let name = String::from_utf8(raw_key[prefix.len()..].to_vec())
+            .map_err(|_| ExecError::Unsupported("corrupt text-search catalog key".into()))?;
+        let base = String::from_utf8(value)
+            .map_err(|_| ExecError::Unsupported("corrupt text-search catalog value".into()))?;
+        rows.push((name, base));
+    }
     rows.sort();
     rows.dedup_by(|left, right| left.0 == right.0);
-    rows
+    Ok(rows)
 }

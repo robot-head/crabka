@@ -122,6 +122,60 @@ async fn functions_and_operators_match_postgres_shapes() {
         Some("!'cat'")
     );
     assert_eq!(
+        scalar(&client, "SELECT to_tsquery('english', 'cat & the')")
+            .await
+            .as_deref(),
+        Some("'cat'")
+    );
+    assert_eq!(
+        scalar(
+            &client,
+            "SELECT to_tsvector('simple', 'fat') @@ websearch_to_tsquery('simple', 'fat OR rat dog')",
+        )
+        .await
+        .as_deref(),
+        Some("t")
+    );
+    assert_eq!(
+        scalar(&client, "SELECT querytree('cat & !dog'::tsquery)")
+            .await
+            .as_deref(),
+        Some("'cat'")
+    );
+    assert_eq!(
+        scalar(
+            &client,
+            "SELECT 'cat'::tsvector = 'cat'::tsvector AND 'cat'::tsquery = 'cat'::tsquery",
+        )
+        .await
+        .as_deref(),
+        Some("t")
+    );
+    assert_eq!(
+        scalar(
+            &client,
+            "SELECT 'cat'::tsquery @> 'cat' AND 'cat'::tsquery <@ 'cat'",
+        )
+        .await
+        .as_deref(),
+        Some("t")
+    );
+    assert_eq!(
+        scalar(&client, "SELECT 'cat'::tsquery && 'rat'")
+            .await
+            .as_deref(),
+        Some("'cat' & 'rat'")
+    );
+    assert_eq!(
+        scalar(
+            &client,
+            "PREPARE fulltext AS SELECT to_tsvector('simple', 'cat') @@ $1; EXECUTE fulltext('cat')",
+        )
+        .await
+        .as_deref(),
+        Some("t")
+    );
+    assert_eq!(
         scalar(
             &client,
             "SELECT setweight(to_tsvector('simple', 'cat rat'), 'A')",
@@ -284,6 +338,23 @@ async fn values_round_trip_through_tables_and_report_builtin_oids() {
         .expect("typed row");
     assert_eq!(row.columns()[0].type_().oid(), 3614);
     assert_eq!(row.columns()[1].type_().oid(), 3615);
+
+    client
+        .simple_query(
+            "CREATE TABLE search_defaults (search tsvector DEFAULT ''::tsvector, query tsquery DEFAULT ''::tsquery); \
+             INSERT INTO search_defaults DEFAULT VALUES",
+        )
+        .await
+        .expect("text-search defaults");
+    assert_eq!(
+        scalar(
+            &client,
+            "SELECT search = ''::tsvector AND query = ''::tsquery FROM search_defaults",
+        )
+        .await
+        .as_deref(),
+        Some("t")
+    );
 }
 
 #[tokio::test]
@@ -303,15 +374,25 @@ async fn default_configuration_is_session_settable() {
 
 #[tokio::test]
 async fn configuration_and_dictionary_ddl_is_durable_and_catalog_visible() {
-    let client = connect().await;
+    let engine = SqlEngine::new();
+    let client = connect_to(&engine).await;
     client
         .simple_query(
             "CREATE TEXT SEARCH DICTIONARY my_dict (TEMPLATE = simple); \
              CREATE TEXT SEARCH CONFIGURATION my_english (COPY = english); \
-             ALTER TEXT SEARCH CONFIGURATION my_english ADD MAPPING FOR asciiword WITH my_dict",
+             ALTER TEXT SEARCH CONFIGURATION my_english ADD MAPPING FOR asciiword WITH my_dict; \
+             CREATE TEXT SEARCH CONFIGURATION s1 (COPY = simple); \
+             CREATE TEXT SEARCH CONFIGURATION s2 (COPY = s1); \
+             CREATE TEXT SEARCH CONFIGURATION a.cfg (COPY = simple); \
+             CREATE TEXT SEARCH CONFIGURATION b.cfg (COPY = english); \
+             CREATE TEXT SEARCH CONFIGURATION shared (COPY = simple); \
+             CREATE TEXT SEARCH DICTIONARY shared (TEMPLATE = simple); \
+             CREATE TEXT SEARCH CONFIGURATION parser_cfg (PARSER = pg_catalog.default)",
         )
         .await
         .expect("create text-search objects");
+    drop(client);
+    let client = connect_to(&engine).await;
     assert_eq!(
         scalar(&client, "SELECT to_tsvector('my_english', 'The Rats')")
             .await
@@ -335,6 +416,46 @@ async fn configuration_and_dictionary_ddl_is_durable_and_catalog_visible() {
         .await
         .as_deref(),
         Some("my_dict")
+    );
+    assert_eq!(
+        scalar(&client, "SELECT to_tsvector('s2', 'The Rats')")
+            .await
+            .as_deref(),
+        Some("'rats':2 'the':1")
+    );
+    assert_eq!(
+        scalar(&client, "SELECT to_tsvector('a.cfg', 'The Rats')")
+            .await
+            .as_deref(),
+        Some("'rats':2 'the':1")
+    );
+    assert_eq!(
+        scalar(&client, "SELECT to_tsvector('b.cfg', 'The Rats')")
+            .await
+            .as_deref(),
+        Some("'rat':2")
+    );
+    assert_eq!(
+        scalar(&client, "SELECT to_tsvector('shared', 'The Rats')")
+            .await
+            .as_deref(),
+        Some("'rats':2 'the':1")
+    );
+    assert_eq!(
+        scalar(&client, "SELECT to_tsvector('parser_cfg', 'The Rats')")
+            .await
+            .as_deref(),
+        Some("'rats':2 'the':1")
+    );
+    client
+        .simple_query("DROP TEXT SEARCH CONFIGURATION a.cfg")
+        .await
+        .expect("drop one qualified configuration");
+    assert_eq!(
+        scalar(&client, "SELECT to_tsvector('b.cfg', 'The Rats')")
+            .await
+            .as_deref(),
+        Some("'rat':2")
     );
     client
         .simple_query(
