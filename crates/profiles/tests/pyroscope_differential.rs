@@ -812,6 +812,7 @@ async fn start_crabka_pair(
         relabel: Vec::new(),
         max_decompressed: crabka_units::mebibytes(16),
         max_tracked_tenants: 4096,
+        legacy_decode_limits: crabka_profiles::ingest::LegacyDecodeLimits::default(),
         metrics: crabka_profiles::metrics::ServiceMetrics::new(),
     });
     let distributor_addr =
@@ -2492,6 +2493,7 @@ async fn start_crabka_public(
         relabel: Vec::new(),
         max_decompressed: crabka_units::mebibytes(16),
         max_tracked_tenants: 4096,
+        legacy_decode_limits: crabka_profiles::ingest::LegacyDecodeLimits::default(),
         metrics: crabka_profiles::metrics::ServiceMetrics::new(),
     });
     let distributor_addr =

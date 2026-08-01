@@ -14,7 +14,9 @@ use std::collections::BTreeMap;
 use crabka_blockstore::Labels;
 use crabka_pprof::PprofProfile;
 pub use legacy::{
-    IngestFormat, IngestQuery, decode_ingest_body, decode_ingest_multipart, parse_ingest_query,
+    IngestFormat, IngestQuery, LegacyDecodeLimits, decode_ingest_body,
+    decode_ingest_body_with_limits, decode_ingest_multipart, decode_ingest_multipart_with_limits,
+    parse_ingest_query,
 };
 pub use otlp::decode_otlp;
 pub use push_v1::{decode_push, gunzip};

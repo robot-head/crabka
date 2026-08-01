@@ -30,6 +30,23 @@ pub struct IngestQuery {
     pub until_ms: Option<i64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LegacyDecodeLimits {
+    pub max_nodes: usize,
+    pub max_path_bytes: ByteSize,
+    pub max_trie_depth: usize,
+}
+
+impl Default for LegacyDecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_nodes: 500_000,
+            max_path_bytes: crabka_units::mebibytes(64),
+            max_trie_depth: 4_096,
+        }
+    }
+}
+
 ///
 /// # Errors
 /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
@@ -101,6 +118,27 @@ pub async fn decode_ingest_multipart(
     content_type: &str,
     body: bytes::Bytes,
     max: usize,
+) -> Result<RawProfile, ProfilesError> {
+    decode_ingest_multipart_with_limits(
+        query,
+        content_type,
+        body,
+        max,
+        LegacyDecodeLimits::default(),
+    )
+    .await
+}
+
+/// Decode multipart legacy ingest with explicit expansion limits.
+///
+/// # Errors
+/// Returns an error when the request is invalid or exceeds a configured limit.
+pub async fn decode_ingest_multipart_with_limits(
+    query: &IngestQuery,
+    content_type: &str,
+    body: bytes::Bytes,
+    max: ByteSize,
+    limits: LegacyDecodeLimits,
 ) -> Result<RawProfile, ProfilesError> {
     let boundary =
         multer::parse_boundary(content_type).map_err(|e| ProfilesError::Invalid(e.to_string()))?;
@@ -184,13 +222,13 @@ pub async fn decode_ingest_multipart(
             let raw = folded_bytes.ok_or_else(|| {
                 ProfilesError::Invalid("missing multipart tree `profile` part".to_string())
             })?;
-            tree_to_pprof(&query.name, &query.units, &raw)?
+            tree_to_pprof(&query.name, &query.units, &raw, limits)?
         }
         IngestFormat::Trie => {
             let raw = folded_bytes.ok_or_else(|| {
                 ProfilesError::Invalid("missing multipart trie `profile` part".to_string())
             })?;
-            trie_to_pprof(&query.name, &query.units, &raw)?
+            trie_to_pprof(&query.name, &query.units, &raw, limits)?
         }
         IngestFormat::Speedscope => {
             let raw = folded_bytes.ok_or_else(|| {
@@ -226,13 +264,34 @@ pub async fn decode_ingest_body(
     body: bytes::Bytes,
     max: usize,
 ) -> Result<RawProfile, ProfilesError> {
+    decode_ingest_body_with_limits(
+        query,
+        content_type,
+        body,
+        max,
+        LegacyDecodeLimits::default(),
+    )
+    .await
+}
+
+/// Decode legacy ingest with explicit expansion limits.
+///
+/// # Errors
+/// Returns an error when the request is invalid or exceeds a configured limit.
+pub async fn decode_ingest_body_with_limits(
+    query: &IngestQuery,
+    content_type: Option<&str>,
+    body: bytes::Bytes,
+    max: ByteSize,
+    limits: LegacyDecodeLimits,
+) -> Result<RawProfile, ProfilesError> {
     if let Some(content_type) = content_type
         && content_type
             .split(';')
             .next()
             .is_some_and(|mime| mime.trim().eq_ignore_ascii_case("multipart/form-data"))
     {
-        return decode_ingest_multipart(query, content_type, body, max).await;
+        return decode_ingest_multipart_with_limits(query, content_type, body, max, limits).await;
     }
 
     if body.len() > max {
@@ -246,8 +305,8 @@ pub async fn decode_ingest_body(
         IngestFormat::Lines => {
             lines_to_pprof(&query.name, &query.units, &String::from_utf8_lossy(&body))?
         }
-        IngestFormat::Trie => trie_to_pprof(&query.name, &query.units, &body)?,
-        IngestFormat::Tree => tree_to_pprof(&query.name, &query.units, &body)?,
+        IngestFormat::Trie => trie_to_pprof(&query.name, &query.units, &body, limits)?,
+        IngestFormat::Tree => tree_to_pprof(&query.name, &query.units, &body, limits)?,
         IngestFormat::Speedscope => speedscope_to_pprof(&query.name, &query.units, &body)?,
         IngestFormat::Pprof => {
             return Err(ProfilesError::Invalid(
@@ -546,26 +605,11 @@ fn lines_to_pprof(
     Ok(stacks_to_pprof(name, "samples", sample_unit, stacks))
 }
 
-/// Absolute cap on the number of tree/trie nodes a single payload may expand
-/// into. A malformed or hostile payload can declare child counts that amplify
-/// far beyond the input byte length (each pending entry carries a cloned path),
-/// so we bound the total work independently of `body.len()`.
-const MAX_TREE_NODES: usize = 500_000;
-
-/// Absolute cap on the cumulative bytes of all materialized stack paths/keys.
-/// Path bytes are copied per child during expansion, so a deep-and-wide payload
-/// can amplify path storage far past the input size even when node count is
-/// under control.
-const MAX_TREE_PATH_BYTES: usize = 64 * 1024 * 1024;
-
-/// Hard cap on trie recursion depth (modeled as an explicit work-stack). A
-/// deeply nested payload would otherwise overflow the native stack.
-const MAX_TRIE_DEPTH: usize = 4_096;
-
 fn tree_to_pprof(
     name: &str,
     sample_unit: &str,
     body: &[u8],
+    limits: LegacyDecodeLimits,
 ) -> Result<PprofProfile, ProfilesError> {
     let mut pos = 0;
     let mut pending = vec![Vec::<(String, i32)>::new()];
@@ -575,7 +619,7 @@ fn tree_to_pprof(
 
     while let Some(parent_path) = pending.pop() {
         node_count += 1;
-        if node_count > MAX_TREE_NODES {
+        if node_count > limits.max_nodes {
             return Err(ProfilesError::Decode(
                 "tree profile exceeds node budget".to_string(),
             ));
@@ -632,7 +676,7 @@ fn tree_to_pprof(
                 .fold(0_usize, usize::saturating_add);
             let added = per_child_bytes.saturating_mul(children_len);
             path_bytes = path_bytes.saturating_add(added);
-            if path_bytes > MAX_TREE_PATH_BYTES {
+            if path_bytes > limits.max_path_bytes.bytes_usize() {
                 return Err(ProfilesError::Decode(
                     "tree profile exceeds path-bytes budget".to_string(),
                 ));
@@ -643,7 +687,7 @@ fn tree_to_pprof(
             if node_count
                 .saturating_add(pending.len())
                 .saturating_add(children_len)
-                > MAX_TREE_NODES
+                > limits.max_nodes
             {
                 return Err(ProfilesError::Decode(
                     "tree profile exceeds node budget".to_string(),
@@ -691,6 +735,7 @@ fn trie_to_pprof(
     name: &str,
     sample_unit: &str,
     body: &[u8],
+    limits: LegacyDecodeLimits,
 ) -> Result<PprofProfile, ProfilesError> {
     let mut pos = 0;
     let mut stacks = BTreeMap::<Vec<(String, i32)>, i64>::new();
@@ -727,14 +772,14 @@ fn trie_to_pprof(
             ));
         }
 
-        if work.len() >= MAX_TRIE_DEPTH {
+        if work.len() >= limits.max_trie_depth {
             return Err(ProfilesError::Decode(
                 "trie profile exceeds maximum depth".to_string(),
             ));
         }
 
         node_count += 1;
-        if node_count > MAX_TREE_NODES {
+        if node_count > limits.max_nodes {
             return Err(ProfilesError::Decode(
                 "trie profile exceeds node budget".to_string(),
             ));
@@ -764,7 +809,7 @@ fn trie_to_pprof(
         // Long shared prefixes are copied into every descendant, so a hostile
         // payload can amplify key storage well beyond the input size.
         path_bytes = path_bytes.saturating_add(key.len());
-        if path_bytes > MAX_TREE_PATH_BYTES {
+        if path_bytes > limits.max_path_bytes.bytes_usize() {
             return Err(ProfilesError::Decode(
                 "trie profile exceeds path-bytes budget".to_string(),
             ));
@@ -1484,20 +1529,37 @@ mod tests {
             usize::try_from(children).unwrap(),
         ));
 
-        let err = tree_to_pprof("app", "samples", &body).unwrap_err();
+        let limits = LegacyDecodeLimits::default();
+        let err = tree_to_pprof("app", "samples", &body, limits).unwrap_err();
         assert!(matches!(err, ProfilesError::Decode(_)));
 
         // Sanity: a normal small tree still decodes successfully.
         let ok = b"\x00\x00\x01\x01a\x00\x02\x01b\x01\x00\x01c\x02\x00";
-        assert!(tree_to_pprof("app", "samples", ok).is_ok());
+        assert!(tree_to_pprof("app", "samples", ok, limits).is_ok());
+    }
+
+    #[test]
+    fn tree_decoder_uses_configured_node_budget() {
+        let body = b"\x00\x00\x01\x01a\x01\x00";
+        let limits = LegacyDecodeLimits {
+            max_nodes: 1,
+            ..LegacyDecodeLimits::default()
+        };
+
+        assert!(tree_to_pprof("app", "samples", body, limits).is_err());
+        assert!(tree_to_pprof("app", "samples", body, LegacyDecodeLimits::default()).is_ok());
     }
 
     #[test]
     fn trie_decoder_rejects_deep_payload_past_depth_cap() {
-        // A linear chain of single-child nodes deeper than MAX_TRIE_DEPTH. The
+        // A linear chain of single-child nodes deeper than the configured cap. The
         // old recursive `parse_trie_node` would recurse once per level and blow
         // the native stack; the explicit work-stack must reject past the cap.
-        let depth = MAX_TRIE_DEPTH + 16;
+        let limits = LegacyDecodeLimits {
+            max_trie_depth: 64,
+            ..LegacyDecodeLimits::default()
+        };
+        let depth = limits.max_trie_depth + 16;
         let mut body = Vec::new();
         for _ in 0..depth - 1 {
             // suffix "a", value 0, one child.
@@ -1512,11 +1574,11 @@ mod tests {
         put_tree_varint(&mut body, 1);
         put_tree_varint(&mut body, 0);
 
-        let err = trie_to_pprof("app", "samples", &body).unwrap_err();
+        let err = trie_to_pprof("app", "samples", &body, limits).unwrap_err();
         assert!(matches!(err, ProfilesError::Decode(_)));
 
         // Sanity: a chain comfortably under the cap still decodes.
-        let shallow_depth = 64_usize;
+        let shallow_depth = 32_usize;
         let mut shallow = Vec::new();
         for _ in 0..shallow_depth - 1 {
             put_tree_varint(&mut shallow, 1);
@@ -1528,10 +1590,10 @@ mod tests {
         shallow.push(b'a');
         put_tree_varint(&mut shallow, 1);
         put_tree_varint(&mut shallow, 0);
-        assert!(trie_to_pprof("app", "samples", &shallow).is_ok());
+        assert!(trie_to_pprof("app", "samples", &shallow, limits).is_ok());
 
         // Sanity: the canonical small trie payload still decodes.
         let ok = b"\x00\x00\x01\x02a;\x00\x02\x01b\x01\x00\x01c\x02\x00";
-        assert!(trie_to_pprof("app", "samples", ok).is_ok());
+        assert!(trie_to_pprof("app", "samples", ok, limits).is_ok());
     }
 }

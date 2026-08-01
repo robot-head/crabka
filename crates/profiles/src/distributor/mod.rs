@@ -37,9 +37,9 @@ use crate::{
     error::ProfilesError,
     ids::{IngestBytes, IngestItems},
     ingest::{
-        RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id, decode_ingest_body,
-        decode_otlp, decode_push, enforce_limits, parse_ingest_query, require_service_name,
-        split_sample_types,
+        LegacyDecodeLimits, RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id,
+        decode_ingest_body_with_limits, decode_otlp, decode_push, enforce_limits,
+        parse_ingest_query, require_service_name, split_sample_types,
     },
     limits::{Limits, OverridesProvider},
     metrics::ServiceMetrics,
@@ -117,6 +117,7 @@ pub struct DistributorState {
     pub max_decompressed: ByteSize,
     /// Maximum tenants retained in distributor accounting maps.
     pub max_tracked_tenants: usize,
+    pub legacy_decode_limits: LegacyDecodeLimits,
     /// Prometheus metrics bundle. `record_ingest` is called at each ingest
     /// handler boundary; `record_wal_append_failure` fires at the WAL-append
     /// error site inside [`process_raw`].
@@ -641,7 +642,14 @@ async fn ingest_handler(
         let content_type = headers
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok());
-        let raw = decode_ingest_body(&query, content_type, body, state.max_decompressed).await?;
+        let raw = decode_ingest_body_with_limits(
+            &query,
+            content_type,
+            body,
+            state.max_decompressed,
+            state.legacy_decode_limits,
+        )
+        .await?;
         process_raw(&state, &tenant, vec![raw]).await
     }
     .instrument(ingest_span)
@@ -937,6 +945,7 @@ mod tests {
             relabel: vec![],
             max_decompressed: mebibytes(16),
             max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         })
     }
@@ -1135,6 +1144,7 @@ mod tests {
             }],
             max_decompressed: mebibytes(16),
             max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
         let raws = vec![crate::wire::test_fixtures::raw_profile_cpu()];
@@ -1162,6 +1172,7 @@ mod tests {
             relabel: vec![],
             max_decompressed: mebibytes(16),
             max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1201,6 +1212,7 @@ mod tests {
             relabel: vec![],
             max_decompressed: mebibytes(16),
             max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1235,6 +1247,7 @@ overrides:
             relabel: vec![],
             max_decompressed: mebibytes(16),
             max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1275,6 +1288,7 @@ overrides:
             relabel: vec![],
             max_decompressed: mebibytes(16),
             max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1310,6 +1324,7 @@ overrides:
             relabel: vec![],
             max_decompressed: mebibytes(16),
             max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1345,6 +1360,7 @@ overrides:
             relabel: vec![],
             max_decompressed: mebibytes(16),
             max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1673,6 +1689,7 @@ overrides:
             relabel: vec![],
             max_decompressed: mebibytes(16),
             max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1716,6 +1733,7 @@ overrides:
             relabel: vec![],
             max_decompressed: mebibytes(16),
             max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1779,6 +1797,7 @@ overrides:
             relabel: vec![],
             max_decompressed: mebibytes(16),
             max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 

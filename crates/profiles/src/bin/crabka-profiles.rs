@@ -103,6 +103,27 @@ struct Cli {
     distributor_max_tracked_tenants: usize,
     #[arg(
         long,
+        env = "CRABKA_PROFILES_LEGACY_MAX_NODES",
+        default_value_t = 500_000,
+        value_parser = parse_positive_usize
+    )]
+    legacy_max_nodes: usize,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_LEGACY_MAX_PATH_BYTES",
+        default_value = "64MiB",
+        value_parser = parse_positive_whole_byte_size
+    )]
+    legacy_max_path_bytes: ByteSize,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_LEGACY_MAX_TRIE_DEPTH",
+        default_value_t = 4096,
+        value_parser = parse_positive_usize
+    )]
+    legacy_max_trie_depth: usize,
+    #[arg(
+        long,
         env = "CRABKA_PROFILES_WAL_FETCH_MAX",
         default_value = "2MiB",
         value_parser = parse_consumer_fetch_size
@@ -169,6 +190,20 @@ struct Cli {
         value_parser = parse_positive_usize
     )]
     hot_store_max_records: usize,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_HEATMAP_VALUE_BUCKETS",
+        default_value_t = 32,
+        value_parser = parse_positive_usize
+    )]
+    heatmap_value_buckets: usize,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_HEATMAP_TIME_BUCKETS_MAX",
+        default_value_t = 4096,
+        value_parser = parse_positive_usize
+    )]
+    heatmap_time_buckets_max: usize,
     #[arg(
         long = "query-frontend-shard-width",
         visible_alias = "query-frontend-shard-ms",
@@ -445,6 +480,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 relabel: Vec::<RelabelConfig>::new(),
                 max_decompressed: cli.distributor_request_max,
                 max_tracked_tenants: cli.distributor_max_tracked_tenants,
+                legacy_decode_limits: crabka_profiles::ingest::LegacyDecodeLimits {
+                    max_nodes: cli.legacy_max_nodes,
+                    max_path_bytes: cli.legacy_max_path_bytes,
+                    max_trie_depth: cli.legacy_max_trie_depth,
+                },
                 metrics: metrics.clone(),
             });
             let shutdown = async {
@@ -514,7 +554,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let union = Arc::new(UnionProfileStore::new(Arc::new(hot), cold));
             let state = Arc::new(
-                QuerierState::new_with_overrides(union, overrides).with_metrics(metrics.clone()),
+                QuerierState::new_with_overrides(union, overrides)
+                    .with_heatmap_policy(cli.heatmap_value_buckets, cli.heatmap_time_buckets_max)
+                    .with_metrics(metrics.clone()),
             );
             let shutdown = async {
                 let _ = tokio::signal::ctrl_c().await;
@@ -570,6 +612,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     overrides,
                 )
+                .with_heatmap_policy(cli.heatmap_value_buckets, cli.heatmap_time_buckets_max)
                 .with_metrics(metrics.clone()),
             );
             let shutdown = async {
@@ -864,9 +907,14 @@ mod tests {
         let defaults = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
         assert!(defaults.distributor_request_max == mebibytes(16));
         assert!(defaults.distributor_max_tracked_tenants == 4096);
+        assert!(defaults.legacy_max_nodes == 500_000);
+        assert!(defaults.legacy_max_path_bytes == mebibytes(64));
+        assert!(defaults.legacy_max_trie_depth == 4096);
         assert!(defaults.index_refresh_interval == secs(15));
         assert!(defaults.hot_store_max_age == crabka_units::hours(6));
         assert!(defaults.hot_store_max_records == 1_000_000);
+        assert!(defaults.heatmap_value_buckets == 32);
+        assert!(defaults.heatmap_time_buckets_max == 4096);
         assert!(defaults.query_frontend_shard_width == crabka_units::minutes(15));
 
         let custom = Cli::try_parse_from([
@@ -877,12 +925,22 @@ mod tests {
             "2MiB",
             "--distributor-max-tracked-tenants",
             "32",
+            "--legacy-max-nodes",
+            "100",
+            "--legacy-max-path-bytes",
+            "1MiB",
+            "--legacy-max-trie-depth",
+            "64",
             "--index-refresh-interval",
             "2s",
             "--hot-store-max-age",
             "30m",
             "--hot-store-max-records",
             "500",
+            "--heatmap-value-buckets",
+            "16",
+            "--heatmap-time-buckets-max",
+            "256",
             "--query-frontend-shard-width",
             "1m",
             "--block-builder-flush-max-age",
@@ -893,9 +951,14 @@ mod tests {
         .unwrap();
         assert!(custom.distributor_request_max == mebibytes(2));
         assert!(custom.distributor_max_tracked_tenants == 32);
+        assert!(custom.legacy_max_nodes == 100);
+        assert!(custom.legacy_max_path_bytes == mebibytes(1));
+        assert!(custom.legacy_max_trie_depth == 64);
         assert!(custom.index_refresh_interval == secs(2));
         assert!(custom.hot_store_max_age == crabka_units::minutes(30));
         assert!(custom.hot_store_max_records == 500);
+        assert!(custom.heatmap_value_buckets == 16);
+        assert!(custom.heatmap_time_buckets_max == 256);
         assert!(custom.query_frontend_shard_width == crabka_units::minutes(1));
         assert!(custom.block_builder_flush_max_age == secs(3));
         assert!(custom.compactor_downsample_resolution == Some(crabka_units::minutes(5)));
@@ -906,9 +969,14 @@ mod tests {
         for (flag, invalid) in [
             ("--distributor-request-max", "0B"),
             ("--distributor-max-tracked-tenants", "0"),
+            ("--legacy-max-nodes", "0"),
+            ("--legacy-max-path-bytes", "0B"),
+            ("--legacy-max-trie-depth", "0"),
             ("--index-refresh-interval", "0s"),
             ("--hot-store-max-age", "0s"),
             ("--hot-store-max-records", "0"),
+            ("--heatmap-value-buckets", "0"),
+            ("--heatmap-time-buckets-max", "0"),
             ("--query-frontend-shard-width", "0"),
             ("--block-builder-flush-records", "0"),
             ("--block-builder-flush-max-age", "0"),

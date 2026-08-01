@@ -6485,3 +6485,24 @@ policy object as runtime code. No new setting is needed. The complete
 `gres-ranges` all-target suite, the affected Gres process-test target, workspace
 all-target Clippy, nightly formatting, and diff hygiene pass. The
 repository-wide hardcoded operational-value audit remains active.
+
+## Profiles Runtime Policy Completion
+
+The standalone Profiles roles now expose their remaining deployment policy as
+CLI arguments backed by `CRABKA_PROFILES_*` environment variables. This
+includes WAL topic, consumer groups and index object key; index refresh;
+distributor request and tenant caps; legacy tree/trie expansion budgets; hot
+retention; heatmap buckets; compaction, block-builder and query-frontend
+policy; and all previously CLI-only process arguments.
+
+Time and byte values use UOM inputs, positive counts reject zero through
+`refined_type`, and identity values reject empty strings. The old millisecond
+and nanosecond flags remain visible compatibility aliases. Library constructors
+retain their original defaults. The distributor shares one request limit
+across raw HTTP, Connect and decompression, while querier and distributor state
+carry only their applicable policies.
+
+All 204 Profiles library tests, 31 process tests and 17 runnable differential
+tests pass; four Docker-backed differential tests remain explicitly ignored.
+Workspace all-target Clippy, nightly formatting and diff hygiene pass. The
+repository-wide hardcoded operational-value audit remains active.
