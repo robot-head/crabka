@@ -580,7 +580,7 @@ impl ProductionCrashHarness {
             1,
             crabka_units::bytes(0),
             crabka_units::bytes(24),
-            2,
+            1,
             std::time::Duration::from_secs(1),
         )?;
         let mut service = CheckpointService::new(

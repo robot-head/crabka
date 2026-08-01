@@ -25,11 +25,9 @@ use axum::{
     routing::get,
 };
 use clap::Args;
-use crabka_units::{
-    Frequency, Time,
-    convert::{FrequencyExt as _, TimeExt as _},
-    parse, per_sec, secs,
-};
+#[cfg(unix)]
+use crabka_units::convert::TimeExt as _;
+use crabka_units::{Frequency, Time, convert::FrequencyExt as _, parse, per_sec, secs};
 use refined_type::rule::GreaterI32;
 use serde::Deserialize;
 use thiserror::Error;
@@ -70,6 +68,7 @@ impl ProfilingSampleFrequency {
         Ok(Self { frequency, hertz })
     }
 
+    #[cfg(unix)]
     fn hertz(self) -> i32 {
         self.hertz
     }
@@ -320,6 +319,7 @@ pub fn pprof_router() -> Router {
     pprof_router_unchecked(ProfilingConfig::default())
 }
 
+#[cfg(unix)]
 fn requested_duration(seconds: Option<u64>, default: Time, maximum: Time) -> Time {
     seconds
         .map_or(default, |seconds| {

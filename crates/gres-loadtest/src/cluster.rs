@@ -1279,15 +1279,17 @@ fn write_tls_fixture(dir: &Path) -> anyhow::Result<TlsPaths> {
         1,
     )
     .context("issue range peer certificate")?;
-    let write = |name: &str, bytes: &str| -> anyhow::Result<PathBuf> {
-        let path = dir.join(name);
-        std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
-        Ok(path)
-    };
+    let cert = dir.join("range-server.crt");
+    std::fs::write(&cert, &peer.cert_pem).with_context(|| format!("write {}", cert.display()))?;
+    let key = dir.join("range-server.key");
+    std::fs::write(&key, &peer.key_pem).with_context(|| format!("write {}", key.display()))?;
+    let ca_path = dir.join("range-ca.crt");
+    std::fs::write(&ca_path, &ca.cert_pem)
+        .with_context(|| format!("write {}", ca_path.display()))?;
     Ok(TlsPaths {
-        cert: write("range-server.crt", &peer.cert_pem)?,
-        key: write("range-server.key", &peer.key_pem)?,
-        ca: write("range-ca.crt", &ca.cert_pem)?,
+        cert,
+        key,
+        ca: ca_path,
     })
 }
 
