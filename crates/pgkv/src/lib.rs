@@ -12,6 +12,6 @@ pub mod rowenc;
 pub mod store;
 
 pub use error::KvError;
-pub use fjall_store::{FjallKv, KeyspaceKv};
+pub use fjall_store::{FjallKv, FjallOptions, KeyspaceKv, RotateAfterOps};
 pub use notify_record::{NOTIFY_RECORD_VERSION, NotifyRecord, is_notify_op};
 pub use store::{Kv, KvPair, KvScan, KvSnapshot, MemKv, RestoreKv, SnapshotKv, WriteOp};

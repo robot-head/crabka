@@ -1783,7 +1783,8 @@ async fn complete_post_activation(
                 cache_nonce,
             ))
         });
-        let target_store = open_substrate_range_cache(cache.as_deref(), target.range_id)?;
+        let target_store =
+            open_substrate_range_cache(cache.as_deref(), target.range_id, config.pgkv_options)?;
         let mut recovery = config
             .live_recovery_config(
                 predecessor.resources.recovery_config.tenant.clone(),

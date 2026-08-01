@@ -17,7 +17,7 @@ use crabka_gres_control::{
     TenantName, TenantRecord, decode_tenant_config_record, tenant_config_topic,
 };
 use crabka_pgexec::SqlEngine;
-use crabka_pgkv::{FjallKv, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
+use crabka_pgkv::{FjallKv, FjallOptions, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
 use crabka_pgwire::{
     engine::{
         BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, Notification,
@@ -148,6 +148,23 @@ pub struct ServeArgs {
     /// Substrate mode: local read-model cache directory (default: in-memory).
     #[arg(long, requires = "substrate_bootstrap")]
     pub cache_dir: Option<PathBuf>,
+
+    /// Maximum active memtable size for each on-disk substrate cache.
+    #[arg(
+        long = "pgkv-max-memtable-size",
+        env = "CRABKA_PGKV_MAX_MEMTABLE_SIZE",
+        value_parser = crabka_units::parse::positive_byte_size,
+        requires = "substrate_bootstrap"
+    )]
+    pub pgkv_max_memtable_size: Option<ByteSize>,
+
+    /// Committed operations between requested substrate-cache memtable rotations.
+    #[arg(
+        long = "pgkv-rotate-after-ops",
+        env = "CRABKA_PGKV_ROTATE_AFTER_OPS",
+        requires = "substrate_bootstrap"
+    )]
+    pub pgkv_rotate_after_ops: Option<crabka_pgkv::RotateAfterOps>,
 
     /// In-process memory:// substrate dev/test mode: comma-separated table-start range boundaries, for example 0,100,200.
     #[arg(long, requires = "substrate_bootstrap")]
@@ -1373,6 +1390,8 @@ pub struct SubstrateRuntimeConfig {
     pub tenant: String,
     /// Optional disposable local read-model cache directory.
     pub cache_dir: Option<PathBuf>,
+    /// Memory and flush policy for on-disk substrate caches.
+    pub pgkv_options: FjallOptions,
     /// Optional checkpointing configuration. Absent means full WAL replay.
     pub checkpoints: Option<CheckpointRuntimeConfig>,
     /// Optional Kafka SASL credentials for tenant-owned substrate resources.
@@ -1545,6 +1564,15 @@ impl SubstrateRuntimeConfig {
             "durable inspection fold maximum size",
             durable_inspection_fold_max_size,
         )?;
+        let pgkv_defaults = FjallOptions::default();
+        let pgkv_options = FjallOptions::new(
+            args.pgkv_max_memtable_size
+                .unwrap_or(pgkv_defaults.max_memtable_size()),
+            args.pgkv_rotate_after_ops
+                .unwrap_or(pgkv_defaults.rotate_after_ops())
+                .get(),
+        )
+        .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
 
         Ok(Some(Self {
             client_dispatch_queue_capacity: args.registry.dispatch_queue_capacity(),
@@ -1554,6 +1582,7 @@ impl SubstrateRuntimeConfig {
             bootstrap: bootstrap.to_string(),
             tenant: tenant.to_string(),
             cache_dir: args.cache_dir.clone(),
+            pgkv_options,
             checkpoints: CheckpointRuntimeConfig::from_args(args)?,
             kafka_security: tenant_kafka_security_from_env(tenant),
             ranges,
@@ -4558,7 +4587,7 @@ async fn open_substrate_runtime_with_tenant_record(
         .await;
     }
 
-    let store = open_substrate_cache(config.cache_dir.as_deref())?;
+    let store = open_substrate_cache(config.cache_dir.as_deref(), config.pgkv_options)?;
     if !config.is_in_memory_bootstrap() {
         return open_live_substrate_runtime(config, store, tenant_record).await;
     }
@@ -4746,7 +4775,8 @@ async fn attach_range0_read_barrier(
     // next generation beside it. Anything left over from a previous process is
     // stale by construction and is swept away first.
     range0_follower::remove_other_follower_stores(config.cache_dir.as_deref(), 0);
-    let follower_store = range0_follower::open_follower_store(config.cache_dir.as_deref(), 0)?;
+    let follower_store =
+        range0_follower::open_follower_store(config.cache_dir.as_deref(), 0, config.pgkv_options)?;
     let follower = crabka_gres_substrate::bootstrap_live_range0_follower(
         &follower_config,
         follower_store,
@@ -5115,7 +5145,8 @@ async fn recover_live_multirange_engines(
             range_id,
             local_checkpoint_root(config),
         )?;
-        let store = open_substrate_range_cache(config.cache_dir.as_deref(), range_id)?;
+        let store =
+            open_substrate_range_cache(config.cache_dir.as_deref(), range_id, config.pgkv_options)?;
         let recovered = open_live_range_substrate_engine(
             config,
             recovery_config,
@@ -7220,12 +7251,17 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                         reason: format!("reset disposable successor cache: {error}"),
                     }
                 })?;
-                let target_store =
-                    open_substrate_range_cache(staged_cache_dir.as_deref(), request.target_range)
-                        .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                let target_store = open_substrate_range_cache(
+                    staged_cache_dir.as_deref(),
+                    request.target_range,
+                    self.config.pgkv_options,
+                )
+                .map_err(|error| {
+                    crabka_gres_ranges::RangeTransferError::Runtime {
                         range_id: request.target_range,
                         reason: format!("open empty successor cache: {error}"),
-                    })?;
+                    }
+                })?;
                 let target_recovery = self
                     .config
                     .live_recovery_config(
@@ -7951,24 +7987,27 @@ where
 
 fn open_substrate_cache(
     cache_dir: Option<&std::path::Path>,
+    options: FjallOptions,
 ) -> std::io::Result<Arc<dyn SubstrateKv>> {
     let Some(dir) = cache_dir else {
         return Ok(Arc::new(MemKv::default()));
     };
     std::fs::create_dir_all(dir)?;
-    Ok(Arc::new(FjallKv::open_cache(dir).map_err(|error| {
-        std::io::Error::other(format!("cache dir: {error:?}"))
-    })?))
+    Ok(Arc::new(
+        FjallKv::open_cache_with_options(dir, options)
+            .map_err(|error| std::io::Error::other(format!("cache dir: {error:?}")))?,
+    ))
 }
 
 fn open_substrate_range_cache(
     cache_dir: Option<&std::path::Path>,
     range_id: crabka_gres_ranges::RangeId,
+    options: FjallOptions,
 ) -> std::io::Result<Arc<dyn SubstrateKv>> {
     let Some(dir) = cache_dir else {
         return Ok(Arc::new(MemKv::default()));
     };
-    open_substrate_cache(Some(&dir.join(format!("r{}", range_id.as_u32()))))
+    open_substrate_cache(Some(&dir.join(format!("r{}", range_id.as_u32()))), options)
 }
 
 fn reset_substrate_range_cache(
@@ -9313,6 +9352,8 @@ mod tests {
             substrate_bootstrap: None,
             tenant: None,
             cache_dir: None,
+            pgkv_max_memtable_size: None,
+            pgkv_rotate_after_ops: None,
             ranges: None,
             range0_follower_poll_interval: None,
             range0_follower_rebuild_backoff_floor: None,
@@ -11219,7 +11260,7 @@ mod tests {
     #[test]
     fn wal_producer_throughput_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_THROUGHPUT_POLICY_CHILD";
-        const VARS: [&str; 24] = [
+        const VARS: [&str; 26] = [
             "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
             "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
@@ -11244,6 +11285,8 @@ mod tests {
             "CRABKA_GRES_WAL_PRODUCER_LINGER",
             "CRABKA_GRES_WAL_PRODUCER_BATCH",
             "CRABKA_GRES_WAL_FRAME_MAX_SIZE",
+            "CRABKA_PGKV_MAX_MEMTABLE_SIZE",
+            "CRABKA_PGKV_ROTATE_AFTER_OPS",
         ];
         if std::env::var_os(CHILD).is_none() {
             for mode in ["defaults", "environment"] {
@@ -11262,7 +11305,7 @@ mod tests {
                     for (variable, value) in VARS[20..]
                         .iter()
                         .copied()
-                        .zip(["gzip", "41ms", "42B", "43B"])
+                        .zip(["gzip", "41ms", "42B", "43B", "44B", "45"])
                     {
                         child.env(variable, value);
                     }
@@ -11304,12 +11347,20 @@ mod tests {
                 crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE
             }
         );
+        let expected_pgkv = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            FjallOptions::new(crabka_units::bytes(44), 45).expect("environment policy")
+        } else {
+            FjallOptions::default()
+        };
+        assert_eq!(config.pgkv_options, expected_pgkv);
 
         let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
             "--wal-producer-compression=lz4",
             "--wal-producer-linger=51ms",
             "--wal-producer-batch=52B",
             "--wal-frame-max-size=53B",
+            "--pgkv-max-memtable-size=54B",
+            "--pgkv-rotate-after-ops=55",
         ]))
         .expect("CLI policy");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -11324,6 +11375,30 @@ mod tests {
         .expect("CLI policy");
         assert_eq!(config.producer_throughput_policy, expected);
         assert_eq!(config.wal_frame_max_size, crabka_units::bytes(53));
+        assert_eq!(
+            config.pgkv_options,
+            FjallOptions::new(crabka_units::bytes(54), 55).expect("CLI policy")
+        );
+    }
+
+    #[test]
+    fn pgkv_policy_rejects_invalid_and_local_only_use() {
+        for flag in ["--pgkv-max-memtable-size=0B", "--pgkv-rotate-after-ops=0"] {
+            assert!(
+                <Cli as clap::Parser>::try_parse_from([
+                    "crabka-gres",
+                    "--substrate-bootstrap=memory://",
+                    "--tenant=tenant-a",
+                    flag,
+                ])
+                .is_err(),
+                "accepted {flag}"
+            );
+            assert!(
+                <Cli as clap::Parser>::try_parse_from(["crabka-gres", flag]).is_err(),
+                "accepted local-only {flag}"
+            );
+        }
     }
 
     #[test]
@@ -11745,6 +11820,7 @@ mod tests {
             bootstrap: "127.0.0.1:1".to_string(),
             tenant: "tenant-a".to_string(),
             cache_dir: None,
+            pgkv_options: FjallOptions::default(),
             checkpoints: None,
             kafka_security: None,
             ranges: Some("0,100,200".to_string()),
@@ -11831,6 +11907,7 @@ mod tests {
             bootstrap: "broker-a:9092".to_string(),
             tenant: "tenant-a".to_string(),
             cache_dir: None,
+            pgkv_options: FjallOptions::default(),
             checkpoints: Some(CheckpointRuntimeConfig {
                 object_store: CheckpointObjectStoreConfig::InMemory,
                 frames_threshold: 1,
@@ -12215,6 +12292,7 @@ mod tests {
             bootstrap: "broker-a:9092,broker-b:9092".to_string(),
             tenant: "tenant-a".to_string(),
             cache_dir: None,
+            pgkv_options: FjallOptions::default(),
             checkpoints: None,
             kafka_security: None,
             ranges: None,
@@ -12318,6 +12396,7 @@ mod tests {
             bootstrap: "127.0.0.1:1".to_string(),
             tenant: "tenant-a".to_string(),
             cache_dir: None,
+            pgkv_options: FjallOptions::default(),
             checkpoints: None,
             kafka_security: None,
             ranges: None,

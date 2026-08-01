@@ -239,6 +239,8 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         substrate_bootstrap: None,
         tenant: None,
         cache_dir: None,
+        pgkv_max_memtable_size: None,
+        pgkv_rotate_after_ops: None,
         ranges: None,
         range0_follower_poll_interval: None,
         range0_follower_rebuild_backoff_floor: None,
@@ -429,6 +431,7 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
         bootstrap: bootstrap.clone(),
         tenant: "g6-runtime".to_string(),
         cache_dir: None,
+        pgkv_options: crabka_pgkv::FjallOptions::default(),
         checkpoints: None,
         kafka_security: None,
         ranges: Some("0,5".to_string()),
@@ -513,6 +516,7 @@ async fn live_multirange_substrate_hlc_mode_commits_and_mints_wall_anchored_stam
         bootstrap,
         tenant: "g6-hlc-runtime".to_string(),
         cache_dir: None,
+        pgkv_options: crabka_pgkv::FjallOptions::default(),
         checkpoints: None,
         kafka_security: None,
         ranges: Some("0,5".to_string()),
@@ -683,6 +687,7 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         bootstrap: broker.listen_addr().to_string(),
         tenant: tenant.to_string(),
         cache_dir: None,
+        pgkv_options: crabka_pgkv::FjallOptions::default(),
         checkpoints: Some(crabka_gres::CheckpointRuntimeConfig {
             object_store: crabka_gres::CheckpointObjectStoreConfig::Local {
                 root: checkpoint_dir.path().to_path_buf(),
@@ -1060,6 +1065,7 @@ fn activation_crash_config(
         bootstrap,
         tenant,
         cache_dir: None,
+        pgkv_options: crabka_pgkv::FjallOptions::default(),
         checkpoints: Some(crabka_gres::CheckpointRuntimeConfig {
             object_store: crabka_gres::CheckpointObjectStoreConfig::Local {
                 root: checkpoint_root,
@@ -2628,6 +2634,7 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         bootstrap: broker.listen_addr().to_string(),
         tenant: "runtime-physical-t10".to_string(),
         cache_dir: None,
+        pgkv_options: crabka_pgkv::FjallOptions::default(),
         checkpoints: Some(crabka_gres::CheckpointRuntimeConfig {
             object_store: crabka_gres::CheckpointObjectStoreConfig::Local {
                 root: checkpoint_dir.path().to_path_buf(),
@@ -2815,6 +2822,7 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
         bootstrap: broker.listen_addr().to_string(),
         tenant: "runtime-transfer-pause".to_string(),
         cache_dir: None,
+        pgkv_options: crabka_pgkv::FjallOptions::default(),
         checkpoints: Some(crabka_gres::CheckpointRuntimeConfig {
             object_store: crabka_gres::CheckpointObjectStoreConfig::Local {
                 root: checkpoint_dir.path().to_path_buf(),
@@ -2911,6 +2919,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
         bootstrap: "memory://".to_string(),
         tenant: "runtime-transfer".to_string(),
         cache_dir: None,
+        pgkv_options: crabka_pgkv::FjallOptions::default(),
         checkpoints: None,
         kafka_security: None,
         ranges: None,
@@ -2951,6 +2960,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
             bootstrap: "memory://".to_string(),
             tenant: "runtime-transfer".to_string(),
             cache_dir: None,
+            pgkv_options: crabka_pgkv::FjallOptions::default(),
             checkpoints: None,
             kafka_security: None,
             ranges: None,

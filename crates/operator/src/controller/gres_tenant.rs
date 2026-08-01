@@ -2456,6 +2456,10 @@ fn wal_producer_args(policy: &EffectiveGresComputePolicy) -> Vec<String> {
     args.extend([
         "--wal-frame-max-size".to_owned(),
         policy.wal_frame_max_size.human().to_string(),
+        "--pgkv-max-memtable-size".to_owned(),
+        policy.pgkv_options.max_memtable_size().human().to_string(),
+        "--pgkv-rotate-after-ops".to_owned(),
+        policy.pgkv_options.rotate_after_ops().get().to_string(),
     ]);
     args
 }
@@ -3687,7 +3691,7 @@ mod tests {
         for (spec, expected) in [
             (
                 crate::crd::gres::GresComputeSpec::default(),
-                ["none", "0s", "16KiB", "1MiB"],
+                ["none", "0s", "16KiB", "1MiB", "8MiB", "262144"],
             ),
             (
                 crate::crd::gres::GresComputeSpec {
@@ -3695,9 +3699,11 @@ mod tests {
                     wal_producer_linger: Some(crabka_units::millis(18)),
                     wal_producer_batch: Some(crabka_units::bytes(19)),
                     wal_frame_max_size: Some(crabka_units::bytes(20)),
+                    pgkv_max_memtable_size: Some(crabka_units::bytes(21)),
+                    pgkv_rotate_after_ops: Some(22),
                     ..crate::crd::gres::GresComputeSpec::default()
                 },
-                ["zstd", "18ms", "19B", "20B"],
+                ["zstd", "18ms", "19B", "20B", "21B", "22"],
             ),
         ] {
             let compute_policy = spec.effective_policy().expect("compute policy");
@@ -3735,6 +3741,8 @@ mod tests {
                         ["--wal-producer-linger", expected[1]],
                         ["--wal-producer-batch", expected[2]],
                         ["--wal-frame-max-size", expected[3]],
+                        ["--pgkv-max-memtable-size", expected[4]],
+                        ["--pgkv-rotate-after-ops", expected[5]],
                     ] {
                         assert!(
                             args.windows(2).filter(|window| *window == pair).count() == 1,

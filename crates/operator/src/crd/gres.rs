@@ -613,6 +613,17 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub wal_frame_max_size: Option<ByteSize>,
 
+    /// Maximum active memtable size for each on-disk substrate cache.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub pgkv_max_memtable_size: Option<ByteSize>,
+
+    /// Committed operations between requested substrate-cache memtable rotations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub pgkv_rotate_after_ops: Option<u64>,
+
     /// Replication factor requested when creating a range WAL topic.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = 32_767))]
@@ -678,6 +689,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) wal_producer_retry_policy: crabka_client_producer::ProducerRetryPolicy,
     pub(crate) wal_producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy,
     pub(crate) wal_frame_max_size: ByteSize,
+    pub(crate) pgkv_options: crabka_pgkv::FjallOptions,
     pub(crate) wal_topic_replication_factor: PositiveI32,
     pub(crate) wal_topic_ensure_timeout_ms: PositiveI32,
     pub(crate) wal_admin_connect_timeout_ms: PositiveMillis,
@@ -723,6 +735,14 @@ impl GresComputeSpec {
         )?;
         let wal_frame_max_size = self.wal_frame_max_size.unwrap_or(DEFAULT_MAX_FRAME_SIZE);
         whole_bytes_usize("spec.compute.walFrameMaxSize", wal_frame_max_size)?;
+        let pgkv_defaults = crabka_pgkv::FjallOptions::default();
+        let pgkv_options = crabka_pgkv::FjallOptions::new(
+            self.pgkv_max_memtable_size
+                .unwrap_or(pgkv_defaults.max_memtable_size()),
+            self.pgkv_rotate_after_ops
+                .unwrap_or(pgkv_defaults.rotate_after_ops().get()),
+        )
+        .map_err(|error| format!("spec.compute.pgkv: {error}"))?;
         let schema_fetch_retry_defaults = crabka_schema_serde::SchemaFetchRetryPolicy::default();
         let range_defaults = crabka_gres_ranges::RangeRuntimePolicy::default();
         let range_runtime_policy = crabka_gres_ranges::RangeRuntimePolicy {
@@ -946,6 +966,7 @@ impl GresComputeSpec {
             wal_producer_retry_policy: self.effective_wal_producer_retry_policy()?,
             wal_producer_throughput_policy: self.effective_wal_producer_throughput_policy()?,
             wal_frame_max_size,
+            pgkv_options,
             wal_topic_replication_factor: PositiveI32::new(
                 self.wal_topic_replication_factor
                     .unwrap_or(DEFAULT_WAL_TOPIC_REPLICATION_FACTOR),
@@ -2185,6 +2206,46 @@ mod tests {
         .effective_policy()
         .expect_err("zero");
         assert!(error.contains("spec.compute.walFrameMaxSize"));
+    }
+
+    #[test]
+    fn pgkv_policy_has_defaults_overrides_schema_and_validation() {
+        let defaults = GresComputeSpec::default()
+            .effective_policy()
+            .expect("defaults")
+            .pgkv_options;
+        assert_eq!(defaults, crabka_pgkv::FjallOptions::default());
+
+        let spec = GresComputeSpec {
+            pgkv_max_memtable_size: Some(crabka_units::bytes(37)),
+            pgkv_rotate_after_ops: Some(41),
+            ..Default::default()
+        };
+        let policy = spec.effective_policy().expect("override").pgkv_options;
+        assert_eq!(policy.max_memtable_size(), crabka_units::bytes(37));
+        assert_eq!(policy.rotate_after_ops().get(), 41);
+        let json = serde_json::to_value(&spec).expect("serialize");
+        assert!(json["pgkvMaxMemtableSize"] == "37B");
+        assert!(json["pgkvRotateAfterOps"] == 41);
+
+        let crd = serde_json::to_value(Gres::crd()).expect("CRD");
+        let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"];
+        assert!(properties["pgkvMaxMemtableSize"]["type"] == "string");
+        assert!(properties["pgkvRotateAfterOps"]["minimum"].as_f64() == Some(1.0));
+
+        for invalid in [
+            GresComputeSpec {
+                pgkv_max_memtable_size: Some(ByteSize::ZERO),
+                ..Default::default()
+            },
+            GresComputeSpec {
+                pgkv_rotate_after_ops: Some(0),
+                ..Default::default()
+            },
+        ] {
+            assert!(invalid.effective_policy().is_err());
+        }
     }
 
     #[test]

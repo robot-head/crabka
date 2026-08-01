@@ -6235,3 +6235,31 @@ process tests. Workspace strict all-target Clippy, nightly formatting, fresh
 CRD generation parity, and diff hygiene pass. This closes only the substrate
 WAL-frame slice; the repository-wide hardcoded operational-value audit remains
 active.
+
+## Pgkv Fjall Runtime Policy
+
+Pgkv now exposes one validated `FjallOptions` seam for its active-memtable byte
+cap and committed-operation rotation threshold. The existing `8MiB` and
+`262144` defaults are unchanged. The byte extent remains a UOM `ByteSize`; the
+positive operation count is a `refined_type`-validated `RotateAfterOps`
+newtype. Pgkv's default `open` entry points remain source- and
+behavior-compatible, while explicit-option variants serve process owners.
+
+Gres owns the deployed configuration boundary through
+`--pgkv-max-memtable-size` / `CRABKA_PGKV_MAX_MEMTABLE_SIZE` and
+`--pgkv-rotate-after-ops` / `CRABKA_PGKV_ROTATE_AFTER_OPS`. The resolved policy
+reaches every disposable Fjall cache, including single-range, multi-range,
+split-successor, and range-0 follower rebuild stores. The old library-global,
+silently-fallback environment read is removed, so invalid input now fails at
+startup.
+
+`GresComputeSpec` exposes matching `pgkvMaxMemtableSize` and
+`pgkvRotateAfterOps` fields. The operator validates them, renders both flags
+once per compute deployment, and the generated CRD represents the byte value
+as a human-readable string and the operation count with a minimum of one.
+Fjall's filter/index partitioning and pinning policy remains fixed because it
+is a correctness-preserving implementation choice, not workload policy.
+
+Pgkv boundary tests and targeted Gres/operator CLI, environment, CRD, and
+rendering tests pass. This closes only the Pgkv Fjall runtime-policy slice; the
+repository-wide hardcoded operational-value audit remains active.

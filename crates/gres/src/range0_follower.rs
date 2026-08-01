@@ -17,7 +17,7 @@ use crabka_gres_substrate::{
     LiveCommittedEndSampler, LiveRecoveryConfig, ReadOnlyRange0Follower,
     checkpoint::CheckpointStore,
 };
-use crabka_pgkv::{FjallKv, MemKv, RestoreKv};
+use crabka_pgkv::{FjallKv, FjallOptions, MemKv, RestoreKv};
 
 /// Directory-name prefix of every follower cache generation.
 const FOLLOWER_STORE_PREFIX: &str = "r0-follower";
@@ -36,6 +36,7 @@ const FOLLOWER_STORE_PREFIX: &str = "r0-follower";
 pub(crate) fn open_follower_store(
     cache_dir: Option<&Path>,
     generation: u64,
+    options: FjallOptions,
 ) -> std::io::Result<Arc<dyn RestoreKv>> {
     let Some(parent) = cache_dir else {
         return Ok(Arc::new(MemKv::default()));
@@ -45,9 +46,10 @@ pub(crate) fn open_follower_store(
         std::fs::remove_dir_all(&dir)?;
     }
     std::fs::create_dir_all(&dir)?;
-    Ok(Arc::new(FjallKv::open_cache(&dir).map_err(|error| {
-        std::io::Error::other(format!("range-0 follower cache: {error:?}"))
-    })?))
+    Ok(Arc::new(
+        FjallKv::open_cache_with_options(&dir, options)
+            .map_err(|error| std::io::Error::other(format!("range-0 follower cache: {error:?}")))?,
+    ))
 }
 
 /// Delete every follower cache generation other than `keep`.
@@ -92,6 +94,7 @@ pub(crate) struct Range0FollowerTail {
     end_sampler: Arc<LiveCommittedEndSampler>,
     checkpoints: Option<Arc<dyn CheckpointStore>>,
     cache_dir: Option<PathBuf>,
+    pgkv_options: FjallOptions,
     poll_interval: Duration,
     rebuild_backoff_floor: Duration,
     rebuild_backoff_ceiling: Duration,
@@ -116,6 +119,7 @@ impl Range0FollowerTail {
             end_sampler,
             checkpoints,
             cache_dir: runtime.cache_dir.clone(),
+            pgkv_options: runtime.pgkv_options,
             poll_interval: runtime.range0_follower_poll_interval,
             rebuild_backoff_floor: runtime.range0_follower_rebuild_backoff_floor,
             rebuild_backoff_ceiling: runtime.range0_follower_rebuild_backoff_ceiling,
@@ -211,7 +215,11 @@ impl Range0FollowerTail {
         self.consecutive_rebuilds = self.consecutive_rebuilds.saturating_add(1);
 
         let generation = self.store_generation.saturating_add(1);
-        let fresh_store = match open_follower_store(self.cache_dir.as_deref(), generation) {
+        let fresh_store = match open_follower_store(
+            self.cache_dir.as_deref(),
+            generation,
+            self.pgkv_options,
+        ) {
             Ok(store) => store,
             Err(error) => {
                 tracing::error!(%error, "range-0 follower rebuild could not open a fresh cache");
@@ -288,8 +296,10 @@ mod tests {
     #[test]
     fn each_follower_generation_gets_its_own_directory() {
         let parent = tempfile::tempdir().expect("temp dir");
-        let first = open_follower_store(Some(parent.path()), 0).expect("first generation");
-        let second = open_follower_store(Some(parent.path()), 1).expect("second generation");
+        let first = open_follower_store(Some(parent.path()), 0, FjallOptions::default())
+            .expect("first generation");
+        let second = open_follower_store(Some(parent.path()), 1, FjallOptions::default())
+            .expect("second generation");
 
         // Both stores are open and independent at the same time: a rebuild
         // restores into the new one while the old one still serves reads.
@@ -304,7 +314,7 @@ mod tests {
 
     #[test]
     fn a_cacheless_follower_store_is_in_memory_and_empty() {
-        let store = open_follower_store(None, 3).expect("mem store");
+        let store = open_follower_store(None, 3, FjallOptions::default()).expect("mem store");
 
         assert!(store.get(b"anything").expect("get") == None);
     }

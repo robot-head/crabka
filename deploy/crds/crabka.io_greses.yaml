@@ -237,6 +237,16 @@ spec:
                     description: Tenant lifecycle reconciliation interval.
                     nullable: true
                     type: string
+                  pgkvMaxMemtableSize:
+                    description: Maximum active memtable size for each on-disk substrate cache.
+                    nullable: true
+                    type: string
+                  pgkvRotateAfterOps:
+                    description: Committed operations between requested substrate-cache memtable rotations.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   range0BarrierReplyBudget:
                     description: Whole-reply budget for range-0 barriers.
                     nullable: true
