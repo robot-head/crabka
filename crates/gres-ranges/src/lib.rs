@@ -1,6 +1,7 @@
 //! Typed range-map and routing primitives for Chapter Gres multi-range tenants.
 
 pub mod barrier;
+mod config;
 pub mod control;
 pub mod coordinator;
 pub mod forward;
@@ -25,6 +26,7 @@ pub use transport::{serve_tcp, spawn_loopback};
 
 pub use self::{
     barrier::{BarrierError, Range0Barrier, Range0EndSampler},
+    config::{PositiveU32, PositiveU64, PositiveUsize, RangeRuntimePolicy},
     control::AuthorizedSplitIntent,
     coordinator::{
         LocalCoordinator, LocalCoordinatorError, LocalTransactionRecord, NetCoordinator,

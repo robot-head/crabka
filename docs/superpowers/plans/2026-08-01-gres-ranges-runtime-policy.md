@@ -10,10 +10,10 @@ through existing runtime owners; render identical values from
 
 ### Task 1: Shared validated policy
 
-- [ ] Add failing default and invariant tests.
-- [ ] Add UOM fields and refined positive count/stride newtypes.
-- [ ] Keep fixed/derived protocol values out of configuration.
-- [ ] Run focused tests and strict Clippy; commit.
+- [x] Add failing default and invariant tests.
+- [x] Add UOM fields and refined positive count/stride newtypes.
+- [x] Keep fixed/derived protocol values out of configuration.
+- [x] Run focused tests and strict Clippy; commit.
 
 ### Task 2: Gres CLI and runtime ownership
 

@@ -2920,6 +2920,7 @@ dependencies = [
  "crabka-security",
  "derive_more",
  "proptest",
+ "refined_type",
  "rustls",
  "serde",
  "serde_json",
