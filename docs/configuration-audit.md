@@ -6398,3 +6398,19 @@ existing disable-or-reject-all semantics. CLI, environment precedence,
 legacy-byte, and runtime-wiring tests pass. This closes only the traces byte
 environment slice; absolute timestamps remain pending and the repository-wide
 audit remains active.
+
+## Traces Unix-Time Environment Closure
+
+Compactor start/end bounds and the query-frontend live frontier now use the
+existing `UnixNano` domain newtype. Their primary flags are
+`--compaction-start`, `--compaction-end`, and `--live-frontier`, backed by
+`CRABKA_TRACES_COMPACTION_START`, `CRABKA_TRACES_COMPACTION_END`, and
+`CRABKA_TRACES_LIVE_FRONTIER`. Environment and primary CLI values accept UOM
+time strings interpreted as offsets from the Unix epoch.
+
+The former `-ns` flags remain visible aliases, and bare integer inputs remain
+exact nanoseconds. The compaction defaults remain epoch start through
+`i64::MAX`; an omitted live frontier remains zero at the frontend boundary.
+Legacy-alias, UOM CLI, environment-precedence, and runtime-wiring tests pass.
+This closes the remaining dimensioned traces process arguments; the
+repository-wide hardcoded operational-value audit remains active.

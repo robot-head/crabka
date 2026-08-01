@@ -21,6 +21,7 @@ use crabka_traces::{
     compactor::compact_index_window_with_max_bytes,
     distributor::{self, DistributorState, KafkaSink},
     frontend::{self, FrontendConfig, TraceIndexCatalog},
+    ids::UnixNano,
     livestore,
     metrics::ServiceMetrics,
     metricsgen::{
@@ -150,6 +151,18 @@ fn parse_positive_time_or_nanos_f64(value: &str) -> Result<Time, String> {
             }
         },
     )
+}
+
+fn parse_unix_nano(value: &str) -> Result<UnixNano, String> {
+    if value == "max" {
+        return Ok(UnixNano(i64::MAX));
+    }
+    if let Ok(value) = value.parse::<i64>() {
+        return Ok(UnixNano(value));
+    }
+    parse::time(value)
+        .map(|value| UnixNano(value.nanos_i64()))
+        .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Parser)]
@@ -340,18 +353,35 @@ struct Cli {
     histogram_buckets: Option<Vec<Time>>,
     #[command(flatten)]
     metrics: MetricsFlags,
-    #[arg(long, default_value_t = 0)]
-    compaction_start_ns: i64,
-    #[arg(long, default_value_t = i64::MAX)]
-    compaction_end_ns: i64,
+    #[arg(
+        long = "compaction-start",
+        visible_alias = "compaction-start-ns",
+        env = "CRABKA_TRACES_COMPACTION_START",
+        default_value = "0ns",
+        value_parser = parse_unix_nano
+    )]
+    compaction_start: UnixNano,
+    #[arg(
+        long = "compaction-end",
+        visible_alias = "compaction-end-ns",
+        env = "CRABKA_TRACES_COMPACTION_END",
+        default_value = "max",
+        value_parser = parse_unix_nano
+    )]
+    compaction_end: UnixNano,
     #[arg(
         long,
         env = "CRABKA_TRACES_QUERIER_URL",
         default_value = "http://127.0.0.1:3200"
     )]
     querier_url: String,
-    #[arg(long)]
-    live_frontier_ns: Option<i64>,
+    #[arg(
+        long = "live-frontier",
+        visible_alias = "live-frontier-ns",
+        env = "CRABKA_TRACES_LIVE_FRONTIER",
+        value_parser = parse_unix_nano
+    )]
+    live_frontier: Option<UnixNano>,
     #[arg(long, env = "CRABKA_TRACES_QUERY_QUEUE_DEPTH", default_value_t = 128)]
     query_queue_depth: usize,
     #[arg(
@@ -1041,8 +1071,9 @@ async fn run_query_frontend(
 ///
 /// `--querier-url` is a comma-separated list of querier URLs (with scheme); the
 /// new [`HttpQuerier`] pool takes bare `host:port`, so the scheme/path are
-/// stripped here. `--live-frontier-ns` maps to `hot_frontier_ns` (`None` => `0`,
-/// i.e. the live tier is always probed).
+/// stripped here. `--live-frontier` (and its legacy `--live-frontier-ns`
+/// alias) maps to `hot_frontier_ns` (`None` => `0`, i.e. the live tier is
+/// always probed).
 fn frontend_config_from_cli(
     cli: &Cli,
     listen_addr: SocketAddr,
@@ -1052,7 +1083,7 @@ fn frontend_config_from_cli(
         querier_addrs,
         target_per_job: cli.target_bytes_per_job,
         max_concurrency: cli.query_queue_depth.max(1),
-        hot_frontier_ns: cli.live_frontier_ns.unwrap_or(0),
+        hot_frontier_ns: cli.live_frontier.unwrap_or(UnixNano(0)).0,
         max_trace: max_trace_size(cli.max_trace_spans),
         listen_addr,
         ..FrontendConfig::default()
@@ -1141,8 +1172,8 @@ async fn run_compactor(cli: Cli) -> Result<(), Box<dyn std::error::Error + Send 
         &writer,
         &mut index,
         configured.prefix.as_ref(),
-        cli.compaction_start_ns,
-        cli.compaction_end_ns,
+        cli.compaction_start.0,
+        cli.compaction_end.0,
         cli.block_read_max,
     )
     .await?;
@@ -2864,8 +2895,61 @@ mod tests {
         .unwrap();
 
         assert2::assert!(matches!(cli.target, Target::Compactor));
-        assert2::assert!(cli.compaction_start_ns == 100);
-        assert2::assert!(cli.compaction_end_ns == 200);
+        assert2::assert!(cli.compaction_start == UnixNano(100));
+        assert2::assert!(cli.compaction_end == UnixNano(200));
+    }
+
+    #[test]
+    fn unix_time_policy_reads_uom_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_UNIX_TIME_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::unix_time_policy_reads_uom_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_TRACES_COMPACTION_START", "1s")
+                    .env("CRABKA_TRACES_COMPACTION_END", "2s")
+                    .env("CRABKA_TRACES_LIVE_FRONTIER", "3s")
+                    .status()
+                    .expect("child test");
+            check!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-traces", "--target=compactor"]).unwrap();
+        check!(
+            (
+                from_env.compaction_start,
+                from_env.compaction_end,
+                from_env.live_frontier,
+            ) == (
+                UnixNano(1_000_000_000),
+                UnixNano(2_000_000_000),
+                Some(UnixNano(3_000_000_000)),
+            )
+        );
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target=compactor",
+            "--compaction-start=4s",
+            "--compaction-end=5s",
+            "--live-frontier=6s",
+        ])
+        .unwrap();
+        check!(
+            (
+                from_cli.compaction_start,
+                from_cli.compaction_end,
+                from_cli.live_frontier,
+            ) == (
+                UnixNano(4_000_000_000),
+                UnixNano(5_000_000_000),
+                Some(UnixNano(6_000_000_000)),
+            )
+        );
     }
 
     #[test]
@@ -2915,7 +2999,7 @@ mod tests {
             cli.querier_url.as_str()
                 == "http://querier-a.example:3200,http://querier-b.example:3200"
         );
-        assert2::assert!(cli.live_frontier_ns == Some(60_000_000_000));
+        assert2::assert!(cli.live_frontier == Some(UnixNano(60_000_000_000)));
         assert2::assert!(cli.query_queue_depth == 4);
         assert2::assert!(cli.target_bytes_per_job == ByteSize::from_bytes(4096));
         check!(build_query_frontend_router(&cli).await.is_ok());
