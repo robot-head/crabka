@@ -80,11 +80,11 @@ pub use self::{
     transport::{
         DurableInspectProvenance, DurableRecord, FramedTcpClient, InspectDurableRecordsReq,
         InspectDurableRecordsResp, JoinRangeReq, JoinRangeResp, JoinRangeRow,
-        MAX_DURABLE_INSPECT_BYTES, MAX_DURABLE_INSPECT_RECORDS, RangeControlOperation,
-        RangeControlReq, RangeControlResp, RangeRequest, RangeResponse, RangeService,
-        RangeTlsClientConfig, RangeTlsServerConfig, ScanCursorReq, ScanCursorResp, TransportError,
-        TsoReq, TsoResp, TxnReq, TxnResp, WireErrorKind, WireInDoubtMarker, WireJoinKind,
-        WireJoinStrategy, WireJoinTableInterval, WireRangeKey, serve_tls, serve_tls_with_policy,
+        RangeControlOperation, RangeControlReq, RangeControlResp, RangeRequest, RangeResponse,
+        RangeService, RangeTlsClientConfig, RangeTlsServerConfig, ScanCursorReq, ScanCursorResp,
+        TransportError, TsoReq, TsoResp, TxnReq, TxnResp, WireErrorKind, WireInDoubtMarker,
+        WireJoinKind, WireJoinStrategy, WireJoinTableInterval, WireRangeKey, serve_tls,
+        serve_tls_with_policy,
     },
     tso::{
         BatchedTsoClient, EpochHeartbeat, GrantLease, HeartbeatVerdict, MemoryTsoHorizon,

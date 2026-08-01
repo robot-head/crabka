@@ -173,11 +173,6 @@ pub enum RangeResponse {
     },
 }
 
-/// Maximum records returned by one durable inspection page.
-pub const MAX_DURABLE_INSPECT_RECORDS: u32 = 4_096;
-/// Maximum raw key plus value bytes returned by one durable inspection page.
-pub const MAX_DURABLE_INSPECT_BYTES: u32 = 128 * 1024;
-
 /// Authenticated, generation-fenced durable-record inspection request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -3141,6 +3136,7 @@ mod tests {
 
     #[tokio::test]
     async fn durable_inspection_round_trips_without_exceeding_frame_bound() {
+        let policy = crate::RangeRuntimePolicy::default();
         let request = InspectDurableRecordsReq {
             tenant: "tenant-a".into(),
             range_id: RangeId::new(2),
@@ -3152,8 +3148,8 @@ mod tests {
                 end.push(0xff);
                 end
             },
-            max_records: MAX_DURABLE_INSPECT_RECORDS,
-            max_bytes: MAX_DURABLE_INSPECT_BYTES,
+            max_records: policy.durable_inspect_max_records.get(),
+            max_bytes: u32::try_from(policy.durable_inspect_max_size.bytes_u64()).unwrap(),
             snapshot_offset: None,
             cursor: Some("cursor".into()),
         };

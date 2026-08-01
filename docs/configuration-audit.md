@@ -6474,3 +6474,14 @@ Kafka CRD. All external boundaries require a positive whole-byte value, and
 the configured `ByteSize` reaches each recovery read without another default
 or clamp. The repository-wide hardcoded operational-value audit remains
 active.
+
+## Gres Ranges Durable Inspection Policy Cleanup
+
+The exported `MAX_DURABLE_INSPECT_RECORDS` and
+`MAX_DURABLE_INSPECT_BYTES` constants duplicated the already-configurable
+`RangeRuntimePolicy` defaults and had no production consumers. They are
+removed; tests now obtain the effective record and byte limits from the same
+policy object as runtime code. No new setting is needed. The complete
+`gres-ranges` all-target suite, the affected Gres process-test target, workspace
+all-target Clippy, nightly formatting, and diff hygiene pass. The
+repository-wide hardcoded operational-value audit remains active.

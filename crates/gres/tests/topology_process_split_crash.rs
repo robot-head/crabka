@@ -30,8 +30,17 @@ use crabka_operator::{
         gres_tenant::{RangeRetirementAdmin, reconcile_one_retiring_range_wal},
     },
 };
+use crabka_units::convert::ByteSizeExt as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+
+fn durable_inspect_limits() -> (u32, u32) {
+    let policy = crabka_gres_ranges::RangeRuntimePolicy::default();
+    (
+        policy.durable_inspect_max_records.get(),
+        u32::try_from(policy.durable_inspect_max_size.bytes_u64()).unwrap(),
+    )
+}
 
 #[path = "../../gres-ranges/tests/harness/process.rs"]
 mod process;
@@ -1911,8 +1920,8 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
                 table_id: 50,
                 start_key: start_key.clone(),
                 end_key: end_key.clone(),
-                max_records: crabka_gres_ranges::MAX_DURABLE_INSPECT_RECORDS,
-                max_bytes: crabka_gres_ranges::MAX_DURABLE_INSPECT_BYTES,
+                max_records: durable_inspect_limits().0,
+                max_bytes: durable_inspect_limits().1,
                 snapshot_offset: None,
                 cursor: None,
             })
@@ -2525,8 +2534,8 @@ async fn collect_hash_snapshots(
                     table_id,
                     start_key,
                     end_key,
-                    max_records: crabka_gres_ranges::MAX_DURABLE_INSPECT_RECORDS,
-                    max_bytes: crabka_gres_ranges::MAX_DURABLE_INSPECT_BYTES,
+                    max_records: durable_inspect_limits().0,
+                    max_bytes: durable_inspect_limits().1,
                     snapshot_offset: None,
                     cursor: None,
                 })
@@ -4219,8 +4228,8 @@ async fn authorize_hash_response_recovery(
                     table_id: 50,
                     start_key: start_key.clone(),
                     end_key: end_key.clone(),
-                    max_records: crabka_gres_ranges::MAX_DURABLE_INSPECT_RECORDS,
-                    max_bytes: crabka_gres_ranges::MAX_DURABLE_INSPECT_BYTES,
+                    max_records: durable_inspect_limits().0,
+                    max_bytes: durable_inspect_limits().1,
                     snapshot_offset: None,
                     cursor: None,
                 })
