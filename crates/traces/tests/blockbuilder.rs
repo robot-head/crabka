@@ -21,6 +21,7 @@ use crabka_traces::{
     ids::{MaxOffset, MinOffset, WindowStartNs},
     metrics::ServiceMetrics,
 };
+use crabka_units::{hours, millis, minutes};
 use futures::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -257,7 +258,8 @@ async fn replaying_saved_partition_window_after_restart_is_idempotent() {
     let config = crabka_traces::blockbuilder::BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS,
         flush_max_age: crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE,
@@ -340,10 +342,11 @@ async fn multiple_polls_below_threshold_flush_one_block_per_partition() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
         index_snapshot_retain: crabka_blockstore::IndexSnapshotRetain::default(),
     };
 
@@ -412,10 +415,11 @@ async fn accumulator_flushes_on_record_count_threshold() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 2,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
         index_snapshot_retain: crabka_blockstore::IndexSnapshotRetain::default(),
     };
 
@@ -443,10 +447,11 @@ async fn accumulator_flushes_on_age_for_low_traffic_stream() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
         index_snapshot_retain: crabka_blockstore::IndexSnapshotRetain::default(),
     };
 
@@ -476,10 +481,11 @@ async fn shutdown_drain_flushes_remaining_buffer_without_losing_spans() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
         index_snapshot_retain: crabka_blockstore::IndexSnapshotRetain::default(),
     };
 
@@ -762,7 +768,7 @@ impl ScriptedConsumer {
 impl WalConsumerPoll for ScriptedConsumer {
     async fn poll(
         &mut self,
-        _window: std::time::Duration,
+        _window: crabka_units::Time,
     ) -> Result<Vec<ConsumerRecord>, TracesError> {
         if let Some(batch) = self.batches.pop_front() {
             Ok(batch)
@@ -791,12 +797,13 @@ fn block_builder_config() -> BlockBuilderConfig {
     BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         // Below-threshold counts never trip the count flush; the loop drains on
         // shutdown instead, exercising the drain path the tests target.
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_hours(1),
+        flush_max_age: hours(1),
         index_snapshot_retain: crabka_blockstore::IndexSnapshotRetain::default(),
     }
 }

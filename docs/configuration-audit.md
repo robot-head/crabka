@@ -6325,3 +6325,21 @@ trace ceiling. Unfiltered indexed tag lookup remains uncapped because it does
 not scan matching traces. CLI, environment precedence, zero rejection, and
 configured HTTP behavior tests pass. This closes only the traces autocomplete
 slice; the repository-wide hardcoded operational-value audit remains active.
+
+## Traces Poll Retry Policy
+
+The traces process now exposes the block-builder's empty-poll backoff and the
+metrics-generator's poll batch size and error backoff through
+`--block-builder-empty-poll-backoff`,
+`--metrics-generator-poll-batch-size`, and
+`--metrics-generator-poll-error-backoff`, backed by matching
+`CRABKA_TRACES_*` environment variables. Defaults remain 100ms, 1000 records,
+and 200ms.
+
+Both backoffs are positive UOM `Time` values, and the positive batch size uses
+`refined_type`. The block-builder setting lives in `BlockBuilderConfig`; the
+metrics-generator keeps its source-compatible constructor and receives
+explicit overrides through `with_poll_policy`. CLI defaults, overrides,
+environment precedence, zero rejection, and block-builder loop tests pass.
+This closes only the traces poll-retry slice; the repository-wide hardcoded
+operational-value audit remains active.

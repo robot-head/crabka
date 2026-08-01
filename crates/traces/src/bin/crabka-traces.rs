@@ -148,6 +148,13 @@ struct Cli {
     retention_ns: i64,
     #[arg(long, default_value_t = 5)]
     block_builder_window_secs: i64,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_BLOCK_BUILDER_EMPTY_POLL_BACKOFF",
+        default_value = "100ms",
+        value_parser = parse::positive_time
+    )]
+    block_builder_empty_poll_backoff: Time,
     #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS)]
     block_builder_flush_max_records: usize,
     #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64())]
@@ -277,6 +284,20 @@ struct Cli {
     max_attr_value_len: usize,
     #[arg(long, default_value_t = 10 * 1024 * 1024)]
     max_decompressed_bytes: usize,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_METRICS_GENERATOR_POLL_BATCH_SIZE",
+        default_value_t = 1_000,
+        value_parser = parse_positive_usize
+    )]
+    metrics_generator_poll_batch_size: usize,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_METRICS_GENERATOR_POLL_ERROR_BACKOFF",
+        default_value = "200ms",
+        value_parser = parse::positive_time
+    )]
+    metrics_generator_poll_error_backoff: Time,
     #[arg(long)]
     config: Option<String>,
 }
@@ -480,6 +501,7 @@ async fn run_block_builder(
             object_key_prefix,
             index_key: trace_index_key,
             window: Time::from_secs(cli.block_builder_window_secs),
+            empty_poll_backoff: cli.block_builder_empty_poll_backoff,
             promoted_attrs,
             flush_max_records: cli.block_builder_flush_max_records,
             flush_max_age: Time::from_millis(cli.block_builder_flush_max_age_ms),
@@ -1043,7 +1065,11 @@ async fn run_metrics_generator(
     .await?;
     let source = Arc::new(KafkaSpanSource::new(consumer));
     let sink = Arc::new(PrometheusRemoteWriteSink::new(cfg.remote_write_url.clone()));
-    let service = MetricsGenService::new(cfg, Arc::new(SystemClock), source, sink);
+    let service = MetricsGenService::new(cfg, Arc::new(SystemClock), source, sink)
+        .with_poll_policy(
+            cli.metrics_generator_poll_batch_size,
+            cli.metrics_generator_poll_error_backoff,
+        );
     service.run(shutdown).await;
     Ok(())
 }
@@ -1322,6 +1348,7 @@ mod tests {
     fn block_builder_flush_knobs_default() {
         let cli = Cli::try_parse_from(["crabka-traces", "--target", "block-builder"]).unwrap();
 
+        check!(cli.block_builder_empty_poll_backoff == crabka_units::millis(100));
         assert2::assert!(
             cli.block_builder_flush_max_records
                 == crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS
@@ -1329,6 +1356,43 @@ mod tests {
         assert2::assert!(
             cli.block_builder_flush_max_age_ms
                 == crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64()
+        );
+    }
+
+    #[test]
+    fn block_builder_empty_poll_backoff_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_BLOCK_BUILDER_EMPTY_POLL_BACKOFF_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::block_builder_empty_poll_backoff_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_TRACES_BLOCK_BUILDER_EMPTY_POLL_BACKOFF", "7ms")
+                    .status()
+                    .expect("child test");
+            check!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-traces", "--target=block-builder"]).unwrap();
+        check!(from_env.block_builder_empty_poll_backoff == crabka_units::millis(7));
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target=block-builder",
+            "--block-builder-empty-poll-backoff=11ms",
+        ])
+        .unwrap();
+        check!(from_cli.block_builder_empty_poll_backoff == crabka_units::millis(11));
+        check!(
+            Cli::try_parse_from([
+                "crabka-traces",
+                "--target=block-builder",
+                "--block-builder-empty-poll-backoff=0ms",
+            ])
+            .is_err()
         );
     }
 
@@ -2032,6 +2096,56 @@ mod tests {
                 cli.metrics.enable_messaging_system_latency,
             ) == (true, true, true)
         );
+    }
+
+    #[test]
+    fn metrics_generator_poll_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_METRICS_GENERATOR_POLL_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::metrics_generator_poll_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_TRACES_METRICS_GENERATOR_POLL_BATCH_SIZE", "7")
+                    .env("CRABKA_TRACES_METRICS_GENERATOR_POLL_ERROR_BACKOFF", "11ms")
+                    .status()
+                    .expect("child test");
+            check!(status.success());
+            return;
+        }
+
+        let from_env =
+            Cli::try_parse_from(["crabka-traces", "--target=metrics-generator"]).unwrap();
+        check!(
+            (
+                from_env.metrics_generator_poll_batch_size,
+                from_env.metrics_generator_poll_error_backoff
+            ) == (7, crabka_units::millis(11))
+        );
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target=metrics-generator",
+            "--metrics-generator-poll-batch-size=13",
+            "--metrics-generator-poll-error-backoff=17ms",
+        ])
+        .unwrap();
+        check!(
+            (
+                from_cli.metrics_generator_poll_batch_size,
+                from_cli.metrics_generator_poll_error_backoff
+            ) == (13, crabka_units::millis(17))
+        );
+        for flag in [
+            "--metrics-generator-poll-batch-size=0",
+            "--metrics-generator-poll-error-backoff=0ms",
+        ] {
+            check!(
+                Cli::try_parse_from(["crabka-traces", "--target=metrics-generator", flag]).is_err()
+            );
+        }
     }
 
     #[test]

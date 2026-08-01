@@ -3,9 +3,9 @@
 use std::{
     collections::{BTreeSet, HashMap},
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
+use crabka_units::{Time, convert::TimeExt as _, millis, secs};
 use tokio_util::sync::CancellationToken;
 
 use crate::metricsgen::{
@@ -31,6 +31,8 @@ where
     checkpoint_keys: Mutex<HashMap<String, BTreeSet<Vec<u8>>>>,
     clock: Arc<dyn Clock>,
     cfg: MetricsGenConfig,
+    poll_batch_size: usize,
+    poll_error_backoff: Time,
 }
 
 impl<Src, Snk> MetricsGenService<Src, Snk>
@@ -54,7 +56,16 @@ where
             clock,
             source,
             sink,
+            poll_batch_size: 1_000,
+            poll_error_backoff: millis(200),
         }
+    }
+
+    #[must_use]
+    pub fn with_poll_policy(mut self, batch_size: usize, error_backoff: Time) -> Self {
+        self.poll_batch_size = batch_size;
+        self.poll_error_backoff = error_backoff;
+        self
     }
 
     #[must_use]
@@ -240,8 +251,8 @@ where
     }
 
     pub async fn run(self, shutdown: CancellationToken) {
-        let interval = self.cfg.collection_interval.max(Duration::from_secs(1));
-        let mut ticker = tokio::time::interval(interval);
+        let interval = self.cfg.collection_interval.max(secs(1));
+        let mut ticker = tokio::time::interval(interval.to_std());
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -257,10 +268,10 @@ where
                         tracing::warn!(error = %err, "metrics-generator flush failed");
                     }
                 }
-                poll = self.poll_once(1_000) => {
+                poll = self.poll_once(self.poll_batch_size) => {
                     if let Err(err) = poll {
                         tracing::warn!(error = %err, "metrics-generator poll failed");
-                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        tokio::time::sleep(self.poll_error_backoff.to_std()).await;
                     }
                 }
             }
@@ -273,6 +284,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::check;
+    use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
     use super::*;
     use crate::metricsgen::{
@@ -297,7 +309,7 @@ mod tests {
             status_message: String::new(),
             service_name: "svc".into(),
             attributes: vec![],
-            size_bytes: 10,
+            size: ByteSize::from_bytes(10),
         }
     }
 
@@ -310,6 +322,18 @@ mod tests {
             source,
             sink,
         )
+    }
+
+    #[test]
+    fn poll_policy_preserves_defaults_and_accepts_overrides() {
+        let defaults = service();
+        assert2::assert!(
+            (defaults.poll_batch_size, defaults.poll_error_backoff) == (1_000, millis(200))
+        );
+        let configured = service().with_poll_policy(7, millis(11));
+        assert2::assert!(
+            (configured.poll_batch_size, configured.poll_error_backoff) == (7, millis(11))
+        );
     }
 
     #[tokio::test]
