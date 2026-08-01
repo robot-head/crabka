@@ -11,7 +11,10 @@
 use std::{
     cell::RefCell,
     collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
-    sync::{Arc, LazyLock, Mutex},
+    sync::{
+        Arc, LazyLock, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use crabka_pgkv::{Kv, WriteOp};
@@ -25,17 +28,17 @@ use crabka_pgparser::ast::{
 use crabka_pgtypes::{ColumnType, Datum, ElemType};
 use crabka_pgwire::{
     engine::{
-        BoundParam, CloseTarget, CopyInResponse, ExecuteOutcome, FieldDescription, Notification,
-        PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
+        BoundParam, Cell, CloseTarget, CopyInResponse, ExecuteOutcome, FieldDescription,
+        Notification, PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
     },
     error::{PgError, sqlstate},
 };
-use tokio::sync::{OwnedRwLockReadGuard, mpsc};
+use tokio::sync::{OwnedRwLockReadGuard, mpsc, watch};
 
 use crate::{
     error::ExecError,
     exec::UniqueLocalSerialization,
-    lockmgr::{AdvisoryScope, RowLockManager, SessionLockId, SessionLocks},
+    lockmgr::{AdvisoryScope, LockKey, LockMode, RowLockManager, SessionLockId, SessionLocks},
     notify::{self, NotifyBus, NotifySessionHandle, PreparedPublish},
     procarray::ProcArray,
     seq::SequenceManager,
@@ -2415,6 +2418,10 @@ pub struct SqlSession {
     /// The receiving end of this session's notification queue, taken once by the
     /// wire loop through [`Session::take_notifications`].
     notify_rx: Option<mpsc::Receiver<Notification>>,
+    /// Non-error diagnostics waiting for the wire loop as NoticeResponse
+    /// messages (`RAISE NOTICE`, WARNING, and the other PL/pgSQL levels).
+    notice_tx: mpsc::Sender<PgError>,
+    notice_rx: Option<mpsc::Receiver<PgError>>,
     /// The open transaction's queued notification work. Shared (not owned)
     /// because the per-statement `EvalCtx` hands it to `pg_notify()`.
     notify_pending: Arc<Mutex<NotifyPending>>,
@@ -2453,11 +2460,18 @@ pub struct SqlSession {
     savepoints: Vec<SavepointFrame>,
     /// The authenticated user `SET SESSION AUTHORIZATION DEFAULT` restores.
     authenticated_user: String,
-    /// How many statements with catalog or row effects this session has run.
-    /// A savepoint records the count it was taken at, so `ROLLBACK TO` can tell
-    /// a session-state-only sub-transaction (which it can undo exactly) from one
-    /// that wrote data (which it refuses rather than silently keeping).
-    mutating_statements: u64,
+    plpgsql_call_depth: Arc<AtomicUsize>,
+    /// Blocking expression workers outlive a dropped `JoinHandle`. Keep a
+    /// cancellation/completion pair for each one so protocol cancellation can
+    /// stop every worker before releasing the transaction's locks.
+    active_workers: Vec<ActiveWorker>,
+    next_worker_id: usize,
+    /// True only for the transaction wrapper opened by one autocommit
+    /// statement. A canceled user `BEGIN` must become Failed, not Idle.
+    implicit_transaction: bool,
+    /// The implicit wrapper's xid remains reachable while COMMIT temporarily
+    /// owns its `TxnCtx`, so cancellation can still release it.
+    implicit_xid: Option<u64>,
 }
 
 /// S2: one open SQL cursor. The executor materializes every query, so a cursor
@@ -2492,12 +2506,22 @@ struct SavepointFrame {
     guc: GucState,
     /// The `SET CONSTRAINTS` overrides as of `SAVEPOINT`, restored by
     /// `ROLLBACK TO` exactly as [`SavepointFrame::guc`] is. The pending checks
-    /// themselves are not captured and cannot need to be: every statement that
-    /// queues one modifies rows, and a `ROLLBACK TO` across a row-modifying
-    /// sub-transaction is refused outright.
+    /// themselves are tracked separately by the savepoint undo state.
     deferral: crate::fk::DeferralModes,
-    /// [`SqlSession::mutating_statements`] as of `SAVEPOINT`.
-    mutating_statements: u64,
+    /// First value each local data/index key had when this level touched it.
+    /// Restoring these before-images undoes same-xid in-place rewrites as well
+    /// as newly inserted versions. Sequence/system keys are deliberately absent:
+    /// PostgreSQL sequences are nontransactional.
+    undo: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    /// Catalog-key before-images for transactional DDL inside this level.
+    catalog_undo: BTreeMap<Vec<u8>, Option<Vec<u8>>>,
+    /// Locks held at the boundary. PostgreSQL releases subtransaction locks on
+    /// `ROLLBACK TO` while retaining locks acquired before the savepoint.
+    row_locks: HashMap<LockKey, LockMode>,
+    table_lock_count: usize,
+    advisory_lock_count: usize,
+    /// Transactional LISTEN/NOTIFY work as of `SAVEPOINT`.
+    notify_pending: NotifyPending,
     /// Whether the transaction block was already aborted when the savepoint was
     /// taken — a `ROLLBACK TO` restores the block to that state.
     failed: bool,
@@ -2701,6 +2725,56 @@ struct WriteStatementContext<'a> {
     ctes: &'a crate::cte::CteContext,
 }
 
+struct WriteActorContext {
+    global_snapshot: Snapshot,
+    snapshot: Snapshot,
+    xid: u64,
+    repeatable_read: bool,
+    eval_ctx: crate::clock::EvalCtx,
+    prune_horizon: Option<u64>,
+}
+
+struct LockingActorContext {
+    global_snapshot: Snapshot,
+    snapshot: Snapshot,
+    xid: u64,
+    repeatable_read: bool,
+    eval_ctx: crate::clock::EvalCtx,
+}
+
+struct ActiveWorker {
+    id: usize,
+    cancel: watch::Sender<bool>,
+    finished: watch::Receiver<bool>,
+}
+
+struct WorkerFinished(watch::Sender<bool>);
+
+impl Drop for WorkerFinished {
+    fn drop(&mut self) {
+        let _ = self.0.send(true);
+    }
+}
+
+struct PlPgSqlCallDepthGuard(Arc<AtomicUsize>);
+
+impl PlPgSqlCallDepthGuard {
+    fn enter(depth: Arc<AtomicUsize>) -> Result<Self, ExecError> {
+        depth
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < 64).then_some(current + 1)
+            })
+            .map_err(|_| ExecError::StackDepthExceeded)?;
+        Ok(Self(depth))
+    }
+}
+
+impl Drop for PlPgSqlCallDepthGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
 impl SqlSession {
     pub(crate) fn new(config: SqlSessionConfig) -> Self {
         let SqlSessionConfig {
@@ -2745,6 +2819,7 @@ impl SqlSession {
         if let Err(error) = crate::usertype::hydrate(catalog_kv.as_ref()) {
             tracing::warn!(?error, "could not load user-defined types from the catalog");
         }
+        let (notice_tx, notice_rx) = mpsc::channel(4096);
         Self {
             kv,
             catalog_kv,
@@ -2784,6 +2859,8 @@ impl SqlSession {
             pending_sequences: Arc::new(Mutex::new(crate::seq::PendingSequences::default())),
             notify: None,
             notify_rx: None,
+            notice_tx,
+            notice_rx: Some(notice_rx),
             notify_pending: Arc::new(Mutex::new(NotifyPending::default())),
             notify_reserved: Mutex::new(None),
             deferred_fk: Arc::new(Mutex::new(crate::fk::DeferredConstraints::default())),
@@ -2799,7 +2876,11 @@ impl SqlSession {
             cursors: HashMap::new(),
             savepoints: Vec::new(),
             authenticated_user: "public".into(),
-            mutating_statements: 0,
+            plpgsql_call_depth: Arc::new(AtomicUsize::new(0)),
+            active_workers: Vec::new(),
+            next_worker_id: 0,
+            implicit_transaction: false,
+            implicit_xid: None,
         }
     }
 
@@ -2817,6 +2898,83 @@ impl SqlSession {
             user: self.current_role.clone(),
             backend_id: self.backend_pid,
         }
+    }
+
+    fn register_worker(&mut self) -> (usize, watch::Receiver<bool>, WorkerFinished) {
+        let id = self.next_worker_id;
+        self.next_worker_id = self.next_worker_id.wrapping_add(1);
+        let (cancel, cancel_rx) = watch::channel(false);
+        let (finished_tx, finished) = watch::channel(false);
+        self.active_workers.push(ActiveWorker {
+            id,
+            cancel,
+            finished,
+        });
+        (id, cancel_rx, WorkerFinished(finished_tx))
+    }
+
+    fn worker_finished(&mut self, id: usize) {
+        self.active_workers.retain(|worker| worker.id != id);
+    }
+
+    async fn cancel_active_workers(&mut self) {
+        let workers = std::mem::take(&mut self.active_workers);
+        for worker in &workers {
+            let _ = worker.cancel.send(true);
+        }
+        for mut worker in workers {
+            while !*worker.finished.borrow() && worker.finished.changed().await.is_ok() {}
+        }
+    }
+
+    fn cancel_statement_state(&mut self) {
+        if self.implicit_transaction {
+            self.implicit_transaction = false;
+            self.guc.rollback();
+            self.discard_pending_notifications();
+            // Presumed abort, identical to disconnect cleanup: uncommitted
+            // versions remain invisible while all local resources are released
+            // immediately, without waiting on a durable abort record.
+            self.finish_current_txn(false);
+        } else {
+            self.mark_transaction_failed();
+        }
+        self.plpgsql_call_depth.store(0, Ordering::Release);
+    }
+
+    async fn begin_implicit_transaction(
+        &mut self,
+        read_only: Option<bool>,
+    ) -> Result<(), ExecError> {
+        self.implicit_transaction = true;
+        if let Err(error) = self.begin(None, read_only).await {
+            self.implicit_transaction = false;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn plpgsql_begin_implicit_transaction(&mut self) -> Result<(), ExecError> {
+        self.begin_implicit_transaction(None).await
+    }
+
+    pub(crate) async fn plpgsql_finish_implicit_transaction<T>(
+        &mut self,
+        result: Result<T, ExecError>,
+    ) -> Result<T, ExecError> {
+        let result = match result {
+            Ok(value) if !self.plpgsql_is_idle() => self.commit_cmd(false).await.map(|_| value),
+            Ok(value) => Ok(value),
+            Err(error) => {
+                if !self.plpgsql_is_idle() {
+                    let _ = self.rollback_cmd(false).await;
+                }
+                Err(error)
+            }
+        };
+        self.implicit_transaction = false;
+        self.implicit_xid = None;
+        result
     }
 
     /// Build the per-statement evaluation context. `now` is the transaction-start
@@ -2989,6 +3147,163 @@ impl SqlSession {
     /// on it while idle), so a second call yields `None`.
     pub fn take_notifications(&mut self) -> Option<mpsc::Receiver<Notification>> {
         self.notify_rx.take()
+    }
+
+    /// The receiving end of this session's non-error diagnostic queue.
+    pub fn take_notices(&mut self) -> Option<mpsc::Receiver<PgError>> {
+        self.notice_rx.take()
+    }
+
+    pub(crate) fn plpgsql_is_idle(&self) -> bool {
+        matches!(self.state, TxnState::Idle)
+    }
+
+    pub(crate) fn plpgsql_eval(&self, expr: &Expr) -> Result<(Datum, ColumnType), ExecError> {
+        let scope = crate::scope::Scope::empty();
+        let ctx = self.eval_ctx();
+        crate::routine::with_scalar_runtime(&self.catalog_kv, None, || {
+            let ty = crate::eval::infer_type(expr, &scope)?;
+            let value = crate::eval::eval(expr, &scope, &[], &ctx)?;
+            Ok((value, ty))
+        })
+    }
+
+    pub(crate) fn plpgsql_eval_context(&self) -> crate::clock::EvalCtx {
+        self.eval_ctx()
+    }
+
+    pub(crate) async fn plpgsql_eval_async(
+        &mut self,
+        expr: Expr,
+    ) -> Result<(Datum, ColumnType), ExecError> {
+        let mut contains_subquery = false;
+        crate::grouping::visit_expr(&expr, &mut |node| {
+            contains_subquery |= matches!(
+                node,
+                Expr::ScalarSubquery(_)
+                    | Expr::Exists(_)
+                    | Expr::InSubquery { .. }
+                    | Expr::Quantified { .. }
+            );
+        });
+        if contains_subquery {
+            let statement = Statement::Query(QueryExpr {
+                with: None,
+                body: SetExpr::Query(QueryBody::Select(Box::new(
+                    crabka_pgparser::ast::SelectStmt {
+                        projection: vec![SelectItem::Expr {
+                            expr,
+                            alias: Some("plpgsql_expression".into()),
+                        }],
+                        from: Vec::new(),
+                        filter: None,
+                        distinct: crabka_pgparser::ast::DistinctClause::All,
+                        group_by: Vec::new(),
+                        grouping: None,
+                        having: None,
+                        windows: Vec::new(),
+                        window_calls: Vec::new(),
+                        order_by: Vec::new(),
+                        limit: None,
+                        offset: None,
+                        with_ties: false,
+                        locking: None,
+                    },
+                ))),
+                order_by: Vec::new(),
+                limit: None,
+                offset: None,
+                with_ties: false,
+                locking: None,
+            });
+            let QueryResult::Rows { fields, rows, .. } =
+                Box::pin(self.run_select_inner(&statement)).await?
+            else {
+                unreachable!("SELECT expression always returns rows");
+            };
+            let field = fields.first().expect("SELECT expression has one field");
+            let row = rows.first().expect("SELECT expression has one row");
+            let ty = crate::exec::column_type_from_oid(field.type_oid)?;
+            let value = self.plpgsql_decode_cell(field, row.first().and_then(Option::as_ref))?;
+            return Ok((value, ty));
+        }
+        let catalog = Arc::clone(&self.catalog_kv);
+        let ctx = self.eval_ctx();
+        let (request_tx, request_rx) = mpsc::channel(1);
+        let worker_catalog = Arc::clone(&catalog);
+        let (worker_id, _cancel, finished) = self.register_worker();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _finished = finished;
+            crate::routine::with_scalar_runtime(&worker_catalog, Some(request_tx), || {
+                let scope = crate::scope::Scope::empty();
+                let ty = crate::eval::infer_type(&expr, &scope)?;
+                let value = crate::eval::eval(&expr, &scope, &[], &ctx)?;
+                Ok((value, ty))
+            })
+        });
+        self.drive_scalar_worker(worker_id, worker, request_rx)
+            .await?
+    }
+
+    pub(crate) fn plpgsql_render(&self, value: &Datum) -> String {
+        let ctx = self.eval_ctx();
+        String::from_utf8_lossy(&crabka_pgtypes::encoding::encode_text(
+            value,
+            &ctx.time_zone,
+        ))
+        .into_owned()
+    }
+
+    pub(crate) fn plpgsql_notice(&self, notice: PgError) -> Result<(), ExecError> {
+        // The wire loop drains only between query results, so awaiting a bounded
+        // channel here could deadlock a notice-heavy block. Enqueue without
+        // waiting and report a deterministic resource error if the generous
+        // per-query buffer is exhausted.
+        self.notice_tx.try_send(notice).map_err(|error| {
+            ExecError::ObjectNotInPrerequisiteState(format!(
+                "could not queue PL/pgSQL notice: {error}"
+            ))
+        })
+    }
+
+    pub(crate) fn plpgsql_catalog(&self) -> &dyn Kv {
+        self.catalog_kv.as_ref()
+    }
+
+    pub(crate) fn plpgsql_resolution_scope(&self) -> crate::relname::ResolutionScope {
+        self.resolution_scope()
+    }
+
+    pub(crate) fn plpgsql_bind_params(
+        &mut self,
+        statement: &mut Statement,
+        values: &[(Datum, ColumnType)],
+    ) -> Result<(), ExecError> {
+        let params = values
+            .iter()
+            .map(|(value, ty)| BoundParam {
+                type_oid: Some(ty.oid()),
+                format: 1,
+                value: (!value.is_null())
+                    .then(|| bytes::Bytes::from(crabka_pgtypes::encoding::encode_binary(value))),
+            })
+            .collect::<Vec<_>>();
+        self.bind_extended_statement_params(statement, &params)
+            .map_err(ExecError::Remote)
+    }
+
+    pub(crate) fn plpgsql_decode_cell(
+        &self,
+        field: &FieldDescription,
+        cell: Option<&Cell>,
+    ) -> Result<Datum, ExecError> {
+        let Some(cell) = cell else {
+            return Ok(Datum::Null);
+        };
+        let ty = crate::exec::column_type_from_oid(field.type_oid)?;
+        let text = std::str::from_utf8(&cell.text)
+            .map_err(|error| ExecError::Syntax(format!("invalid UTF-8 query result: {error}")))?;
+        decode_text_bound_param(text, ty, &self.eval_ctx().time_zone).map_err(ExecError::from)
     }
 
     fn pending_notify(&self) -> std::sync::MutexGuard<'_, NotifyPending> {
@@ -3533,14 +3848,29 @@ impl SqlSession {
 
     /// `SAVEPOINT <name>` — push a level. Reusing a name is legal: the new level
     /// hides the older one until it is released or rolled back to.
-    fn savepoint(&mut self, name: &str) -> Result<QueryResult, ExecError> {
+    pub(crate) fn savepoint(&mut self, name: &str) -> Result<QueryResult, ExecError> {
         self.require_transaction_block("SAVEPOINT")?;
         let deferral = self.deferred_constraints().modes().clone();
+        let notify_pending = self.pending_notify().clone();
+        let row_locks = self
+            .local_xid()
+            .map_or_else(HashMap::new, |xid| self.lockmgr.held_locks(xid));
         self.savepoints.push(SavepointFrame {
             name: name.to_string(),
             guc: self.guc.clone(),
             deferral,
-            mutating_statements: self.mutating_statements,
+            undo: BTreeMap::new(),
+            catalog_undo: BTreeMap::new(),
+            row_locks,
+            table_lock_count: self
+                .session_locks
+                .tables
+                .hold_count_for(self.session_lock_id),
+            advisory_lock_count: self
+                .session_locks
+                .advisory
+                .transaction_hold_count(self.session_lock_id),
+            notify_pending,
             failed: matches!(self.state, TxnState::Failed(_)),
         });
         Ok(QueryResult::Command {
@@ -3556,32 +3886,127 @@ impl SqlSession {
             .ok_or_else(|| ExecError::InvalidSavepoint(name.to_string()))
     }
 
+    /// Apply one explicit-transaction local DML batch, recording only the first
+    /// value each open savepoint level needs to restore. Rowid sequences and xid
+    /// metadata are system keys, so they keep PostgreSQL's nontransactional
+    /// sequence behavior.
+    async fn commit_local_data_ops(&mut self, ops: Vec<WriteOp>) -> Result<(), ExecError> {
+        let Some(frame) = self.savepoints.last() else {
+            return self.committer.commit(ops).await;
+        };
+        let mut before = BTreeMap::new();
+        for op in &ops {
+            let key = match op {
+                WriteOp::Put { key, .. }
+                | WriteOp::ConditionalPut { key, .. }
+                | WriteOp::Delete { key } => key,
+            };
+            if frame.undo.contains_key(key) || before.contains_key(key) {
+                continue;
+            }
+            if !matches!(
+                crabka_pgkv::key::classify_key(key),
+                crabka_pgkv::key::KeyClass::PrimaryRow { .. }
+                    | crabka_pgkv::key::KeyClass::PrimaryVersion { .. }
+                    | crabka_pgkv::key::KeyClass::SecondaryIndex { .. }
+            ) {
+                continue;
+            }
+            before.insert(key.clone(), self.kv.get(key)?);
+        }
+
+        self.committer.commit(ops).await?;
+        if let Some(frame) = self.savepoints.last_mut() {
+            frame.undo.extend(before);
+        }
+        Ok(())
+    }
+
     /// `ROLLBACK TO [SAVEPOINT] <name>` — undo the sub-transaction and keep the
     /// savepoint itself, exactly as `PostgreSQL` does. A failed block becomes
     /// usable again.
-    ///
-    /// Divergence: a sub-transaction that wrote rows or catalog state cannot be
-    /// undone here — versions are stamped with the top-level xid, and no
-    /// sub-xid version rewrite exists — so that case fails clear with `0A000`
-    /// rather than silently keeping the writes.
-    fn rollback_to_savepoint(&mut self, name: &str) -> Result<QueryResult, ExecError> {
+    pub(crate) async fn rollback_to_savepoint(
+        &mut self,
+        name: &str,
+    ) -> Result<QueryResult, ExecError> {
         self.require_transaction_block("ROLLBACK TO SAVEPOINT")?;
         let index = self.savepoint_index(name)?;
-        if self.mutating_statements > self.savepoints[index].mutating_statements {
-            return Err(ExecError::Unsupported(
-                "ROLLBACK TO SAVEPOINT cannot undo a sub-transaction that changed rows or catalog \
-                 state; sub-transaction row versions are not tracked separately"
-                    .into(),
-            ));
+
+        // Fold the target and every nested frame from outer to inner. The first
+        // before-image wins: it is the value the key had at the target savepoint.
+        let mut undo = BTreeMap::new();
+        for frame in &self.savepoints[index..] {
+            for (key, value) in &frame.undo {
+                undo.entry(key.clone()).or_insert_with(|| value.clone());
+            }
         }
+        let undo_ops = undo
+            .into_iter()
+            .map(|(key, value)| match value {
+                Some(value) => WriteOp::Put { key, value },
+                None => WriteOp::Delete { key },
+            })
+            .collect::<Vec<_>>();
+        if !undo_ops.is_empty() {
+            self.committer.commit(undo_ops).await?;
+        }
+
+        let mut catalog_undo = BTreeMap::new();
+        for frame in &self.savepoints[index..] {
+            for (key, value) in &frame.catalog_undo {
+                catalog_undo
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        let catalog_undo_ops = catalog_undo
+            .into_iter()
+            .map(|(key, value)| match value {
+                Some(value) => WriteOp::Put { key, value },
+                None => WriteOp::Delete { key },
+            })
+            .collect::<Vec<_>>();
+        if !catalog_undo_ops.is_empty() {
+            if Arc::ptr_eq(&self.kv, &self.catalog_kv) {
+                self.committer.commit(catalog_undo_ops).await?;
+            } else {
+                self.catalog_kv.write_batch(&catalog_undo_ops)?;
+            }
+        }
+
+        let (row_locks, table_lock_count, advisory_lock_count) = {
+            let frame = &self.savepoints[index];
+            (
+                frame.row_locks.clone(),
+                frame.table_lock_count,
+                frame.advisory_lock_count,
+            )
+        };
+        if let Some(xid) = self.local_xid() {
+            self.lockmgr.restore_locks(xid, &row_locks);
+        }
+        self.session_locks
+            .tables
+            .restore_hold_count(self.session_lock_id, table_lock_count);
+        self.session_locks
+            .advisory
+            .restore_transaction_hold_count(self.session_lock_id, advisory_lock_count);
+
         self.savepoints.truncate(index + 1);
-        let frame = &self.savepoints[index];
-        self.guc = frame.guc.clone();
-        // `SET CONSTRAINTS` is a utility statement, so unlike the checks it
-        // governs it *is* rollback-able.
-        self.deferred_constraints()
-            .restore_modes(frame.deferral.clone());
-        let restore_failed = frame.failed;
+        let (guc, deferral, notify_pending, restore_failed) = {
+            let frame = &mut self.savepoints[index];
+            frame.undo.clear();
+            frame.catalog_undo.clear();
+            (
+                frame.guc.clone(),
+                frame.deferral.clone(),
+                frame.notify_pending.clone(),
+                frame.failed,
+            )
+        };
+        self.guc = guc;
+        self.deferred_constraints().restore_modes(deferral);
+        *self.pending_notify() = notify_pending;
         // Every cursor declared inside the sub-transaction being unwound dies
         // with it, `WITH HOLD` included; one declared outside survives with its
         // position intact, even if it was advanced inside.
@@ -3611,10 +4036,20 @@ impl SqlSession {
 
     /// `RELEASE [SAVEPOINT] <name>` — drop the level and everything inside it,
     /// keeping its effects.
-    fn release_savepoint(&mut self, name: &str) -> Result<QueryResult, ExecError> {
+    pub(crate) fn release_savepoint(&mut self, name: &str) -> Result<QueryResult, ExecError> {
         self.require_transaction_block("RELEASE SAVEPOINT")?;
         let index = self.savepoint_index(name)?;
-        self.savepoints.truncate(index);
+        let released = self.savepoints.split_off(index);
+        if let Some(parent) = self.savepoints.last_mut() {
+            for frame in released {
+                for (key, value) in frame.undo {
+                    parent.undo.entry(key).or_insert(value);
+                }
+                for (key, value) in frame.catalog_undo {
+                    parent.catalog_undo.entry(key).or_insert(value);
+                }
+            }
+        }
         // Releasing a level reassigns everything it owned to its parent, so a
         // cursor declared inside it is no longer tied to the released depth.
         for cursor in self.cursors.values_mut() {
@@ -3629,7 +4064,7 @@ impl SqlSession {
 
     /// `DECLARE … CURSOR FOR <query>` — materialize the result now and open a
     /// cursor over it.
-    async fn declare_cursor(
+    pub(crate) async fn declare_cursor(
         &mut self,
         name: &str,
         scroll: Option<bool>,
@@ -3675,7 +4110,7 @@ impl SqlSession {
     }
 
     /// `FETCH`/`MOVE` over an open cursor.
-    fn fetch_cursor(
+    pub(crate) fn fetch_cursor(
         &mut self,
         name: &str,
         direction: FetchDirection,
@@ -3712,7 +4147,7 @@ impl SqlSession {
     }
 
     /// `CLOSE { <name> | ALL }`.
-    fn close_cursor(&mut self, target: &CursorTarget) -> Result<QueryResult, ExecError> {
+    pub(crate) fn close_cursor(&mut self, target: &CursorTarget) -> Result<QueryResult, ExecError> {
         // PostgreSQL tags the two forms differently: `CLOSE CURSOR` for a named
         // cursor, `CLOSE CURSOR ALL` for the whole set.
         let tag = match target {
@@ -3893,16 +4328,10 @@ impl SqlSession {
 
     /// `CALL <procedure>(args)` — run the procedure's body statements in order.
     ///
-    /// `PostgreSQL` reports `CALL` regardless of what the body did, and a
-    /// procedure produces no result rows unless it has `OUT` parameters (which
-    /// this engine does not yet support).
+    /// `PostgreSQL` reports `CALL` regardless of what the body did. A procedure
+    /// with `OUT`/`INOUT` parameters returns their final values as one row.
     async fn run_call(&mut self, name: &str, args: &[Expr]) -> Result<QueryResult, ExecError> {
-        let statements =
-            crate::routine::expand_procedure_call(self.catalog_kv.as_ref(), name, args)?;
-        for statement in &statements {
-            Box::pin(self.run_one(statement)).await?;
-        }
-        Ok(QueryResult::Command { tag: "CALL".into() })
+        crate::plpgsql::execute_call(self, name, args).await
     }
 
     /// Evaluate an `EXECUTE` argument list into wire parameters by projecting it
@@ -4410,7 +4839,7 @@ impl SqlSession {
         )))
     }
 
-    async fn run_one(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+    pub(crate) async fn run_one(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         // Pin the garbage horizon for this autocommit statement's duration.
         // The pin (the ProcArray xmin now) is <= the xmin of any snapshot the
         // statement takes below, so a concurrent pruner/vacuum can never
@@ -4499,7 +4928,9 @@ impl SqlSession {
         | Statement::DropDomain { .. }
         | Statement::Utility(UtilityStatement::TextSearch(_)) => self.run_ddl(stmt).await,
         Statement::Call { name, args } => self.run_call(name, args).await,
-        Statement::DoBlock { language, .. } => Err(crate::routine::do_block(language)),
+        Statement::DoBlock { language, body } => {
+            crate::plpgsql::execute_do(self, language, body).await
+        }
             Statement::Insert { .. }
             | Statement::Update { .. }
             | Statement::Delete { .. }
@@ -4571,7 +5002,7 @@ impl SqlSession {
                 self.queue_notify(channel, payload.as_deref().unwrap_or_default())
             }
             Statement::Savepoint { name } => self.savepoint(name),
-            Statement::RollbackToSavepoint { name } => self.rollback_to_savepoint(name),
+            Statement::RollbackToSavepoint { name } => self.rollback_to_savepoint(name).await,
             Statement::ReleaseSavepoint { name } => self.release_savepoint(name),
             Statement::DeclareCursor {
                 name,
@@ -4616,9 +5047,6 @@ impl SqlSession {
         // block stays Failed (carrying its ctx, so the xid and any row locks it
         // holds stay held) until COMMIT/ROLLBACK releases them. Autocommit errors
         // leave us Idle (the statement was its own transaction).
-        if statement_has_effects(stmt) {
-            self.mutating_statements += 1;
-        }
         if result.is_err() {
             self.mark_transaction_failed();
         } else if establishes_transaction_activity(stmt)
@@ -4748,7 +5176,7 @@ impl SqlSession {
         }
     }
 
-    async fn begin(
+    pub(crate) async fn begin(
         &mut self,
         isolation: Option<IsolationLevel>,
         read_only: Option<bool>,
@@ -4832,7 +5260,7 @@ impl SqlSession {
         })
     }
 
-    async fn commit_cmd(&mut self, chain: bool) -> Result<QueryResult, ExecError> {
+    pub(crate) async fn commit_cmd(&mut self, chain: bool) -> Result<QueryResult, ExecError> {
         let chained = self.chained_isolation("COMMIT AND CHAIN", chain)?;
         let result = self.end_block_commit().await;
         // A plain `COMMIT` returns the session to idle, where the ordinary
@@ -5032,7 +5460,7 @@ impl SqlSession {
         })
     }
 
-    async fn rollback_cmd(&mut self, chain: bool) -> Result<QueryResult, ExecError> {
+    pub(crate) async fn rollback_cmd(&mut self, chain: bool) -> Result<QueryResult, ExecError> {
         let chained = self.chained_isolation("ROLLBACK AND CHAIN", chain)?;
         let result = self.end_block_rollback().await;
         self.open_chained_block(chained, result).await
@@ -5192,6 +5620,27 @@ impl SqlSession {
     }
 
     async fn run_select(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        let owns_transaction = matches!(self.state, TxnState::Idle);
+        if owns_transaction {
+            self.begin_implicit_transaction(None).await?;
+        }
+        let result = self.run_select_inner(stmt).await;
+        if !owns_transaction {
+            return result;
+        }
+        let result = match result {
+            Ok(result) => self.commit_cmd(false).await.map(|_| result),
+            Err(error) => {
+                let _ = self.rollback_cmd(false).await;
+                Err(error)
+            }
+        };
+        self.implicit_transaction = false;
+        self.implicit_xid = None;
+        result
+    }
+
+    async fn run_select_inner(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         let (snapshot, own, gsnap) = self.read_context().await?;
         let read_ts = match &self.state {
             TxnState::InTransaction(context) if context.repeatable_read => {
@@ -5210,63 +5659,133 @@ impl SqlSession {
         // read timestamp for its duration, so concurrent write-path timestamp
         // pruning on this engine cannot reclaim a version it may resolve to.
         let _ts_read_pin = self.ts_gc.pin_read(self.kv.as_ref(), read_ts)?;
-        let statement_scanner = if let Some(own_start_ts) = self.timestamp_own_start_ts {
-            crate::scanner::TimestampedRangeScanner::with_own_transaction(
-                Arc::clone(&self.range_scanner),
-                read_ts,
-                own_start_ts,
-            )
-        } else {
-            crate::scanner::TimestampedRangeScanner::new(Arc::clone(&self.range_scanner), read_ts)
-        };
-        let statement_scanner = statement_scanner
-            .with_join_planner(Arc::clone(&self.join_stats), self.join_strategy_config);
         let ctx = self.eval_ctx();
-        // SP40: the session does not track an authenticated SQL user, so foreign-table
-        // user-mapping lookups resolve against the conventional `"public"` mapping.
-        let fctx = crate::exec::ForeignCtx {
-            scanner: self.foreign_scanner.as_ref(),
-            current_user: &self.current_role,
-            resolution: ctx.resolution(),
-            // A read path evaluates no DDL expression, so it needs no catalog.
-            catalog: None,
-            // A read path creates no relation, so it needs no id.
-            reserved_table_ids: None,
-            own_xid: match &self.state {
-                TxnState::InTransaction(ctx) => ctx.xid,
-                _ => None,
-            },
-        };
-        let ctes = crate::cte::CteContext::empty();
-        let read_ctx = crate::subquery::SubCtx {
-            catalog_kv: &*self.catalog_kv,
-            kv: &*self.kv,
-            global: &*self.catalog_kv,
-            gsnap: &gsnap,
-            snapshot: &snapshot,
-            own,
-            ctes: &ctes,
-            eval_ctx: &ctx,
-            fctx,
-            range_scanner: &statement_scanner,
-        };
         let in_transaction = matches!(self.state, TxnState::InTransaction(_));
-        let (result, mutations) = with_guc_runtime(
-            self.guc.effective_map(),
-            self.guc.settings(),
-            self.prepared_statement_rows(),
-            || {
-                with_session_lock_runtime(
-                    &self.session_locks,
-                    self.session_lock_id,
-                    in_transaction,
-                    || crate::exec::execute_read(&read_ctx, stmt),
+        let own_xid = match &self.state {
+            TxnState::InTransaction(ctx) => ctx.xid,
+            _ => None,
+        };
+        let kv = Arc::clone(&self.kv);
+        let catalog_kv = Arc::clone(&self.catalog_kv);
+        let foreign_scanner = self.foreign_scanner.clone();
+        let range_scanner = Arc::clone(&self.range_scanner);
+        let join_stats = Arc::clone(&self.join_stats);
+        let join_strategy_config = self.join_strategy_config;
+        let own_start_ts = self.timestamp_own_start_ts;
+        let current_role = self.current_role.clone();
+        let resolution = self.resolution_scope();
+        let session_locks = Arc::clone(&self.session_locks);
+        let session_lock_id = self.session_lock_id;
+        let guc_values = self.guc.effective_map();
+        let guc_settings = self.guc.settings();
+        let prepared = self.prepared_statement_rows();
+        let stmt = stmt.clone();
+        let (requests, request_rx) = mpsc::channel(1);
+        let (worker_id, _cancel, finished) = self.register_worker();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _finished = finished;
+            let statement_scanner = if let Some(own_start_ts) = own_start_ts {
+                crate::scanner::TimestampedRangeScanner::with_own_transaction(
+                    Arc::clone(&range_scanner),
+                    read_ts,
+                    own_start_ts,
                 )
-            },
-        );
+            } else {
+                crate::scanner::TimestampedRangeScanner::new(Arc::clone(&range_scanner), read_ts)
+            }
+            .with_join_planner(join_stats, join_strategy_config);
+            let ctes = crate::cte::CteContext::empty();
+            let fctx = crate::exec::ForeignCtx {
+                scanner: foreign_scanner.as_ref(),
+                current_user: &current_role,
+                resolution: &resolution,
+                catalog: None,
+                reserved_table_ids: None,
+                own_xid,
+            };
+            let read_ctx = crate::subquery::SubCtx {
+                catalog_kv: catalog_kv.as_ref(),
+                kv: kv.as_ref(),
+                global: catalog_kv.as_ref(),
+                gsnap: &gsnap,
+                snapshot: &snapshot,
+                own,
+                ctes: &ctes,
+                eval_ctx: &ctx,
+                fctx,
+                range_scanner: &statement_scanner,
+            };
+            with_guc_runtime(guc_values, guc_settings, prepared, || {
+                with_session_lock_runtime(&session_locks, session_lock_id, in_transaction, || {
+                    crate::routine::with_scalar_runtime(&catalog_kv, Some(requests), || {
+                        crate::exec::execute_read(&read_ctx, &stmt)
+                    })
+                })
+            })
+        });
+        let (result, mutations) = self
+            .drive_scalar_worker(worker_id, worker, request_rx)
+            .await?;
         if result.is_ok() {
             self.apply_guc_mutations(mutations)?;
         }
+        result
+    }
+
+    async fn drive_scalar_worker<T: Send + 'static>(
+        &mut self,
+        worker_id: usize,
+        mut worker: tokio::task::JoinHandle<T>,
+        mut requests: mpsc::Receiver<crate::routine::ScalarFunctionRequest>,
+    ) -> Result<T, ExecError> {
+        let result = loop {
+            tokio::select! {
+                result = &mut worker => {
+                    break result.map_err(|error| {
+                        ExecError::ObjectNotInPrerequisiteState(format!(
+                            "PL/pgSQL expression worker failed: {error}"
+                        ))
+                    });
+                }
+                request = requests.recv() => {
+                    let Some(request) = request else {
+                        break worker.await.map_err(|error| {
+                            ExecError::ObjectNotInPrerequisiteState(format!(
+                                "PL/pgSQL expression worker failed: {error}"
+                            ))
+                        });
+                    };
+                    let result = match PlPgSqlCallDepthGuard::enter(Arc::clone(
+                        &self.plpgsql_call_depth,
+                    )) {
+                        Err(error) => Err(error),
+                        Ok(_guard) => match request.kind {
+                            crate::routine::FunctionRequestKind::Scalar => {
+                                crate::plpgsql::execute_scalar_function(
+                                    self,
+                                    &request.routine,
+                                    &request.values,
+                                )
+                                .await
+                                .map(crate::routine::FunctionRequestResult::Scalar)
+                            }
+                            crate::routine::FunctionRequestKind::Table(columns) => {
+                                crate::plpgsql::execute_table_function(
+                                    self,
+                                    &request.routine,
+                                    &request.values,
+                                    columns,
+                                )
+                                .await
+                                .map(crate::routine::FunctionRequestResult::Table)
+                            }
+                        },
+                    };
+                    let _ = request.reply.send(result);
+                }
+            }
+        };
+        self.worker_finished(worker_id);
         result
     }
 
@@ -5298,6 +5817,20 @@ impl SqlSession {
         &mut self,
         s: &crabka_pgparser::ast::SelectStmt,
     ) -> Result<QueryResult, ExecError> {
+        if matches!(self.state, TxnState::Idle) {
+            self.begin_implicit_transaction(Some(false)).await?;
+            let result = Box::pin(self.run_select_locking(s)).await;
+            let result = match result {
+                Ok(result) => self.commit_cmd(false).await.map(|_| result),
+                Err(error) => {
+                    let _ = self.rollback_cmd(false).await;
+                    Err(error)
+                }
+            };
+            self.implicit_transaction = false;
+            self.implicit_xid = None;
+            return result;
+        }
         match &self.state {
             TxnState::InTransaction(_) => {
                 // RC re-snapshots (and re-gates) per statement; RR reuses the
@@ -5337,88 +5870,21 @@ impl SqlSession {
                     ),
                     _ => unreachable!(),
                 };
-                let ctx = self.eval_ctx();
-                let ctes = crate::cte::CteContext::empty();
-                let read_ctx = crate::subquery::SubCtx {
-                    catalog_kv: &*self.catalog_kv,
-                    kv: self.kv.as_ref(),
-                    global: &*self.catalog_kv,
-                    gsnap: &gsnap,
-                    snapshot: &snapshot,
-                    own: Some(xid),
-                    ctes: &ctes,
-                    eval_ctx: &ctx,
-                    fctx: crate::exec::ForeignCtx::none(),
-                    range_scanner: self.range_scanner.as_ref(),
-                };
                 // Errors propagate to run_one which transitions to Failed,
                 // keeping the xid + locks until COMMIT/ROLLBACK.
-                crate::exec::execute_read_locking(
-                    &read_ctx,
-                    &self.procarray,
-                    &self.lockmgr,
-                    repeatable_read,
-                    self.lock_wait_cap,
-                    s,
+                self.execute_locking_select_with_scalar_actor(
+                    s.clone(),
+                    LockingActorContext {
+                        global_snapshot: gsnap,
+                        snapshot,
+                        xid,
+                        repeatable_read,
+                        eval_ctx: self.eval_ctx(),
+                    },
                 )
                 .await
             }
-            TxnState::Idle => {
-                // Autocommit read takes a fresh snapshot → gate before any local
-                // work (xid allocation, snapshot).
-                self.linearizer.ensure_readable().await?;
-                self.ensure_global_readable().await?; // range 0 caught up too
-                // Autocommit: allocate an xid, run the locking SELECT, then
-                // immediately release the locks (implicit txn ends at statement
-                // end — there is no open block to hold them).
-                let xid = self.procarray.begin_write()?;
-                let sharded_lock = self.locking_select_targets_sharded_table(s)?;
-                let sharded_global = if sharded_lock {
-                    Some(self.begin_sharded_global().await?)
-                } else {
-                    None
-                };
-                let snapshot = self.procarray.snapshot();
-                let gsnap = self.global_read_snapshot(None)?;
-                let ctx = self.eval_ctx();
-                let ctes = crate::cte::CteContext::empty();
-                let read_ctx = crate::subquery::SubCtx {
-                    catalog_kv: &*self.catalog_kv,
-                    kv: self.kv.as_ref(),
-                    global: &*self.catalog_kv,
-                    gsnap: &gsnap,
-                    snapshot: &snapshot,
-                    own: Some(xid),
-                    ctes: &ctes,
-                    eval_ctx: &ctx,
-                    fctx: crate::exec::ForeignCtx::none(),
-                    range_scanner: self.range_scanner.as_ref(),
-                };
-                let result = crate::exec::execute_read_locking(
-                    &read_ctx,
-                    &self.procarray,
-                    &self.lockmgr,
-                    false, // autocommit is always READ COMMITTED
-                    self.lock_wait_cap,
-                    s,
-                )
-                .await;
-                // Release regardless of success or error.
-                self.procarray.finish(xid);
-                self.lockmgr.release_all(xid);
-                if let Some(g) = sharded_global {
-                    if result.is_ok() {
-                        self.commit_global_decision(g, XidStatus::Committed).await?;
-                    } else {
-                        let _ = self.abort_current_global().await;
-                    }
-                    self.global_xid = None;
-                    if let Some(gtm) = &self.gtm {
-                        gtm.finish_global(g);
-                    }
-                }
-                result
-            }
+            TxnState::Idle => unreachable!("implicit transaction started above"),
             TxnState::Prepared(_) => unreachable!("guarded in run_one"),
             TxnState::Failed(_) => unreachable!("guarded in run_one"),
         }
@@ -5894,13 +6360,12 @@ impl SqlSession {
                     // One statement per relation, so an entry that cannot be
                     // emptied costs only its own disposition rather than every
                     // other relation's.
-                    let emptied = self
-                        .run_write(&Statement::Truncate {
-                            names: vec![reference],
-                            restart_identity: false,
-                            cascade: false,
-                        })
-                        .await;
+                    let emptied = Box::pin(self.run_write(&Statement::Truncate {
+                        names: vec![reference],
+                        restart_identity: false,
+                        cascade: false,
+                    }))
+                    .await;
                     match emptied {
                         Ok(_) => still_owed.push(entry),
                         Err(error) => failure = failure.or(Some(error)),
@@ -6001,6 +6466,22 @@ impl SqlSession {
             },
         };
         let (result, ops) = crate::exec::execute_ddl(&*self.catalog_kv, stmt, fctx)?;
+        let catalog_before = if self.savepoints.is_empty() {
+            BTreeMap::new()
+        } else {
+            let mut before = BTreeMap::new();
+            for op in &ops {
+                let key = match op {
+                    WriteOp::Put { key, .. }
+                    | WriteOp::ConditionalPut { key, .. }
+                    | WriteOp::Delete { key } => key,
+                };
+                if !before.contains_key(key) {
+                    before.insert(key.clone(), self.catalog_kv.get(key)?);
+                }
+            }
+            before
+        };
         // A data-range session reads schema metadata from range 0. Its committer
         // targets the local data range, so applying a catalog batch through it
         // would create metadata that is neither authoritative nor visible to
@@ -6018,6 +6499,11 @@ impl SqlSession {
         }
         // Both guards borrow `self`, and the bookkeeping below needs it back.
         // The batch has landed, so neither has anything left to protect.
+        if let Some(frame) = self.savepoints.last_mut() {
+            for (key, value) in catalog_before {
+                frame.catalog_undo.entry(key).or_insert(value);
+            }
+        }
         drop(_g);
         drop(_id_guard);
         self.record_on_commit(stmt)?;
@@ -6056,7 +6542,157 @@ impl SqlSession {
         }
     }
 
+    async fn execute_locking_select_with_scalar_actor(
+        &mut self,
+        select: crabka_pgparser::ast::SelectStmt,
+        statement: LockingActorContext,
+    ) -> Result<QueryResult, ExecError> {
+        let catalog_kv = Arc::clone(&self.catalog_kv);
+        let kv = Arc::clone(&self.kv);
+        let procarray = Arc::clone(&self.procarray);
+        let lockmgr = Arc::clone(&self.lockmgr);
+        let range_scanner = Arc::clone(&self.range_scanner);
+        let lock_wait_cap = self.lock_wait_cap;
+        let (request_tx, request_rx) = mpsc::channel(1);
+        let (worker_id, mut cancel, finished) = self.register_worker();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _finished = finished;
+            let LockingActorContext {
+                global_snapshot,
+                snapshot,
+                xid,
+                repeatable_read,
+                eval_ctx,
+            } = statement;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+            let ctes = crate::cte::CteContext::empty();
+            let read_ctx = crate::subquery::SubCtx {
+                catalog_kv: catalog_kv.as_ref(),
+                kv: kv.as_ref(),
+                global: catalog_kv.as_ref(),
+                gsnap: &global_snapshot,
+                snapshot: &snapshot,
+                own: Some(xid),
+                ctes: &ctes,
+                eval_ctx: &eval_ctx,
+                fctx: crate::exec::ForeignCtx::none(),
+                range_scanner: range_scanner.as_ref(),
+            };
+            crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
+                runtime.block_on(async {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.changed() => Err(ExecError::Remote(PgError::error(
+                            sqlstate::QUERY_CANCELED,
+                            "canceling statement due to user request",
+                        ))),
+                        result = crate::exec::execute_read_locking(
+                            &read_ctx,
+                            procarray.as_ref(),
+                            lockmgr.as_ref(),
+                            repeatable_read,
+                            lock_wait_cap,
+                            &select,
+                        ) => result,
+                    }
+                })
+            })
+        });
+        self.drive_scalar_worker(worker_id, worker, request_rx)
+            .await?
+    }
+
+    async fn execute_write_with_scalar_actor(
+        &mut self,
+        stmt: Statement,
+        statement: WriteActorContext,
+    ) -> Result<(QueryResult, Vec<WriteOp>), ExecError> {
+        let catalog_kv = Arc::clone(&self.catalog_kv);
+        let kv = Arc::clone(&self.kv);
+        let procarray = Arc::clone(&self.procarray);
+        let lockmgr = Arc::clone(&self.lockmgr);
+        let seq = Arc::clone(&self.seq);
+        let range_scanner = Arc::clone(&self.range_scanner);
+        let deferred_fk = Arc::clone(&self.deferred_fk);
+        let defer_constraints = matches!(self.state, TxnState::InTransaction(_));
+        let lock_wait_cap = self.lock_wait_cap;
+        let (request_tx, request_rx) = mpsc::channel(1);
+        let (worker_id, mut cancel, finished) = self.register_worker();
+        let worker = tokio::task::spawn_blocking(move || {
+            let _finished = finished;
+            let WriteActorContext {
+                global_snapshot,
+                snapshot,
+                xid,
+                repeatable_read,
+                eval_ctx,
+                prune_horizon,
+            } = statement;
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+            let ctes = crate::cte::CteContext::empty();
+            let write_ctx = crate::exec::WriteContext {
+                catalog_kv: catalog_kv.as_ref(),
+                kv: kv.as_ref(),
+                global: catalog_kv.as_ref(),
+                global_snapshot: &global_snapshot,
+                procarray: procarray.as_ref(),
+                lockmgr: lockmgr.as_ref(),
+                seq: seq.as_ref(),
+                snapshot: &snapshot,
+                xid,
+                repeatable_read,
+                eval_ctx: &eval_ctx,
+                prune_horizon,
+                lock_wait_cap,
+                fctx: crate::exec::ForeignCtx::none(),
+                range_scanner: range_scanner.as_ref(),
+                ctes: &ctes,
+                deferred_fk: defer_constraints.then(|| &*deferred_fk),
+            };
+            crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
+                runtime.block_on(async {
+                    tokio::select! {
+                        biased;
+                        _ = cancel.changed() => Err(ExecError::Remote(PgError::error(
+                            sqlstate::QUERY_CANCELED,
+                            "canceling statement due to user request",
+                        ))),
+                        result = crate::exec::execute_write(&write_ctx, &stmt) => result,
+                    }
+                })
+            })
+        });
+        self.drive_scalar_worker(worker_id, worker, request_rx)
+            .await?
+    }
+
     async fn run_write(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
+        let owns_transaction =
+            matches!(self.state, TxnState::Idle) && !self.statement_targets_sharded_table(stmt)?;
+        if !owns_transaction {
+            return self.run_write_inner(stmt).await;
+        }
+        self.begin_implicit_transaction(None).await?;
+        let result = Box::pin(self.run_write_inner(stmt)).await;
+        let result = match result {
+            Ok(result) => self.commit_cmd(false).await.map(|_| result),
+            Err(error) => {
+                let _ = self.rollback_cmd(false).await;
+                Err(error)
+            }
+        };
+        self.implicit_transaction = false;
+        self.implicit_xid = None;
+        result
+    }
+
+    async fn run_write_inner(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         match &self.state {
             TxnState::InTransaction(_) => {
                 self.ensure_table_write_guard().await;
@@ -6123,17 +6759,19 @@ impl SqlSession {
                 // prune the chains of the rows they write against it, in the
                 // same commit batch as the write itself.
                 let prune_horizon = Some(self.local_prune_horizon()?);
-                let statement_ctes = crate::cte::CteContext::empty();
-                let write_ctx = self.write_context(&WriteStatementContext {
-                    global_snapshot: &gsnap,
-                    snapshot: &snapshot,
-                    xid,
-                    repeatable_read,
-                    eval_ctx: &ctx,
-                    prune_horizon,
-                    ctes: &statement_ctes,
-                });
-                let (result, mut ops) = crate::exec::execute_write(&write_ctx, stmt).await?;
+                let (result, mut ops) = self
+                    .execute_write_with_scalar_actor(
+                        stmt.clone(),
+                        WriteActorContext {
+                            global_snapshot: gsnap,
+                            snapshot,
+                            xid,
+                            repeatable_read,
+                            eval_ctx: ctx,
+                            prune_horizon,
+                        },
+                    )
+                    .await?;
                 // Record the (table_id, rowid)s this write touched (from the version
                 // Puts it built) so the abort-atomicity fence (`effective_global_xid`)
                 // can scan them for an inherited in-doubt `Prepared(-> g_old)` marker.
@@ -6174,7 +6812,7 @@ impl SqlSession {
                     ops.push(self.procarray.next_xid_op());
                 }
                 ops.extend(self.take_pending_sequence_ops());
-                self.committer.commit(ops).await?;
+                self.commit_local_data_ops(ops).await?;
                 if self.global_xid.is_some() {
                     self.procarray.finish(xid); // deregister-at-prepare
                 }
@@ -6221,22 +6859,25 @@ impl SqlSession {
                 // Cache the garbage horizon once per statement (see the
                 // in-transaction branch above).
                 let prune_horizon = Some(self.local_prune_horizon()?);
-                let statement_ctes = crate::cte::CteContext::empty();
-                let write_ctx = self.write_context(&WriteStatementContext {
-                    global_snapshot: &gsnap,
-                    snapshot: &snapshot,
-                    xid,
-                    repeatable_read: false,
-                    eval_ctx: &ctx,
-                    prune_horizon,
-                    ctes: &statement_ctes,
-                });
                 // Reserving the notification permits is part of executing the
                 // statement, not of its epilogue: `execute_write` has evaluated
                 // every `pg_notify()` by now, and a full listener queue has to
                 // fail this statement while it can still be aborted — never
                 // after its row is durable.
-                let outcome = match crate::exec::execute_write(&write_ctx, stmt).await {
+                let outcome = match self
+                    .execute_write_with_scalar_actor(
+                        stmt.clone(),
+                        WriteActorContext {
+                            global_snapshot: gsnap,
+                            snapshot,
+                            xid,
+                            repeatable_read: false,
+                            eval_ctx: ctx,
+                            prune_horizon,
+                        },
+                    )
+                    .await
+                {
                     Ok(written) => self.reserve_autocommit_notifications().map(|()| written),
                     Err(e) => Err(e),
                 };
@@ -6360,7 +7001,7 @@ impl SqlSession {
                     ops.push(self.procarray.next_xid_op());
                 }
                 ops.extend(self.take_pending_sequence_ops());
-                self.committer.commit(ops).await?;
+                self.commit_local_data_ops(ops).await?;
                 Ok(result)
             }
             TxnState::Idle => {
@@ -6474,13 +7115,17 @@ impl SqlSession {
         stmt: &Statement,
     ) -> Result<QueryResult, ExecError> {
         let ctx = self.eval_ctx();
-        let plan = crate::exec::execute_timestamp_write(
-            self.catalog_kv.as_ref(),
-            self.kv.as_ref(),
-            self.seq.as_ref(),
-            stmt,
-            &ctx,
-        )?;
+        // See the timestamp COPY path: session-bearing calls need a mixed-domain
+        // atomic commit before they can safely run here.
+        let plan = crate::routine::with_scalar_runtime(&self.catalog_kv, None, || {
+            crate::exec::execute_timestamp_write(
+                self.catalog_kv.as_ref(),
+                self.kv.as_ref(),
+                self.seq.as_ref(),
+                stmt,
+                &ctx,
+            )
+        })?;
         self.commit_timestamp_write_plan(plan).await
     }
 
@@ -6552,6 +7197,9 @@ impl SqlSession {
         let xid = self.procarray.begin_write()?;
         if let TxnState::InTransaction(c) = &mut self.state {
             c.xid = Some(xid);
+        }
+        if self.implicit_transaction {
+            self.implicit_xid = Some(xid);
         }
         Ok(())
     }
@@ -6844,7 +7492,8 @@ impl SqlSession {
     /// on disconnect) and by the global participant `commit_release`/`abort_release`
     /// (the decision was recorded once, globally, by the coordinator).
     fn finish_current_txn(&mut self, keep_holdable: bool) {
-        if let Some(xid) = self.local_xid() {
+        let implicit_xid = self.implicit_xid.take();
+        if let Some(xid) = self.local_xid().or(implicit_xid) {
             self.procarray.finish(xid);
             self.lockmgr.release_all(xid);
         }
@@ -8714,10 +9363,39 @@ impl SqlSession {
         else {
             return None;
         };
+        // This cursor evaluates projection/filter expressions row-by-row without
+        // the materializing path's subquery resolver or user-routine actor.
+        // Keep those shapes on `run_select` so wire streaming cannot change
+        // their semantics or SQLSTATEs.
+        let requires_materialization = |expr: &Expr| {
+            let mut required = false;
+            crate::grouping::visit_expr(expr, &mut |node| {
+                required |= matches!(
+                    node,
+                    Expr::ScalarSubquery(_)
+                        | Expr::Exists(_)
+                        | Expr::InSubquery { .. }
+                        | Expr::Quantified { .. }
+                ) || matches!(node, Expr::Func(call) if crate::routine::is_user_routine(
+                    self.catalog_kv.as_ref(),
+                    &call.name,
+                ));
+            });
+            required
+        };
+        let projection_requires_materialization = select.projection.iter().any(
+            |item| matches!(item, SelectItem::Expr { expr, .. } if requires_materialization(expr)),
+        );
         if select.distinct.dedups()
             || !select.group_by.is_empty()
             || select.having.is_some()
             || !select.order_by.is_empty()
+            || !select.windows.is_empty()
+            || !select.window_calls.is_empty()
+            || projection_requires_materialization
+            || select.filter.as_ref().is_some_and(requires_materialization)
+            || select.limit.as_ref().is_some_and(requires_materialization)
+            || select.offset.as_ref().is_some_and(requires_materialization)
             || crate::agg::is_aggregate_query(&select)
             // A set-returning function in the select list turns one source row
             // into many, which this one-row-in-one-row-out cursor cannot do.
@@ -9301,6 +9979,10 @@ impl Session for SqlSession {
         self.notify_rx.take()
     }
 
+    fn take_notices(&mut self) -> Option<mpsc::Receiver<PgError>> {
+        self.notice_rx.take()
+    }
+
     async fn begin_copy_in(&mut self, sql: &str) -> Result<Option<CopyInResponse>, PgError> {
         // This is the wire loop's first look at a simple-query string, so a
         // parse failure here is the one the client sees — and PostgreSQL aborts
@@ -9382,6 +10064,11 @@ impl Session for SqlSession {
         self.mark_transaction_failed();
     }
 
+    async fn cancel_current_query(&mut self) {
+        self.cancel_active_workers().await;
+        self.cancel_statement_state();
+    }
+
     fn tx_status(&self) -> TxStatus {
         match self.state {
             TxnState::Idle => TxStatus::Idle,
@@ -9454,12 +10141,13 @@ mod tests {
         },
     };
 
+    use assert2::assert;
     use crabka_pgkv::{Kv, MemKv};
     use crabka_pgwire::engine::{Engine, QueryResult, Session, TxStatus};
 
     use super::{
-        ColumnType, GucState, SqlSession, canonical_guc_value, decode_bound_param, guc_default,
-        guc_vartype,
+        ColumnType, GucState, PgError, RowLockManager, SqlSession, canonical_guc_value,
+        decode_bound_param, guc_default, guc_vartype,
     };
     use crate::{ExecError, SqlEngine};
 
@@ -9946,20 +10634,160 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rollback_to_savepoint_refuses_to_pretend_it_can_undo_a_write() {
+    async fn rollback_to_savepoint_restores_insert_update_and_delete_writes() {
         use assert2::assert;
         let engine = SqlEngine::new();
         let mut s = engine.connect();
-        s.simple_query("CREATE TABLE t (id int4)")
+        s.simple_query("CREATE TABLE t (id int4 PRIMARY KEY, value text)")
             .await
             .expect("ddl");
-        s.simple_query("BEGIN").await.expect("begin");
-        s.simple_query("SAVEPOINT p").await.expect("savepoint");
-        s.simple_query("INSERT INTO t VALUES (1)")
+        s.simple_query("INSERT INTO t VALUES (1, 'before')")
             .await
-            .expect("insert");
-        assert!(sqlstate(&mut s, "ROLLBACK TO p").await == "0A000");
-        s.simple_query("ROLLBACK").await.expect("rollback");
+            .expect("seed");
+        s.simple_query("BEGIN").await.expect("begin");
+        s.simple_query("INSERT INTO t VALUES (2, 'outer')")
+            .await
+            .expect("outer insert");
+        s.simple_query("SAVEPOINT p").await.expect("savepoint");
+        s.simple_query("UPDATE t SET value = 'inside' WHERE id = 1")
+            .await
+            .expect("update");
+        s.simple_query("DELETE FROM t WHERE id = 2")
+            .await
+            .expect("delete");
+        s.simple_query("INSERT INTO t VALUES (3, 'inside')")
+            .await
+            .expect("inner insert");
+        s.simple_query("ROLLBACK TO p").await.expect("rollback to");
+        assert!(
+            rows_or_sqlstate(&mut s, "SELECT id, value FROM t ORDER BY id").await
+                == Ok(vec![
+                    vec!["1".into(), "before".into()],
+                    vec!["2".into(), "outer".into()],
+                ])
+        );
+        s.simple_query("COMMIT").await.expect("commit");
+        assert!(
+            rows_or_sqlstate(&mut s, "SELECT id, value FROM t ORDER BY id").await
+                == Ok(vec![
+                    vec!["1".into(), "before".into()],
+                    vec!["2".into(), "outer".into()],
+                ])
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_to_savepoint_restores_catalog_changes() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for sql in [
+            "BEGIN",
+            "SAVEPOINT catalog_boundary",
+            "CREATE TABLE created_inside (id int4)",
+            "ROLLBACK TO catalog_boundary",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+        assert!(sqlstate(&mut session, "SELECT * FROM created_inside").await == "42P01");
+        session.simple_query("ROLLBACK").await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn rollback_to_savepoint_releases_locks_acquired_inside_it() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE savepoint_locks (id int4); INSERT INTO savepoint_locks VALUES (1)",
+            )
+            .await
+            .expect("seed");
+        session.simple_query("BEGIN").await.expect("begin");
+        session
+            .simple_query("SAVEPOINT lock_boundary")
+            .await
+            .expect("savepoint");
+        session
+            .simple_query("SELECT * FROM savepoint_locks FOR UPDATE")
+            .await
+            .expect("row lock");
+        session
+            .simple_query("LOCK TABLE savepoint_locks IN SHARE MODE")
+            .await
+            .expect("table lock");
+        session
+            .simple_query("SELECT pg_advisory_xact_lock(42)")
+            .await
+            .expect("advisory lock");
+        let xid = session.local_xid().expect("locking read allocated xid");
+        assert!(!session.lockmgr.held_locks(xid).is_empty());
+        assert!(
+            session
+                .session_locks
+                .tables
+                .hold_count_for(session.session_lock_id)
+                == 1
+        );
+        assert!(
+            session
+                .session_locks
+                .advisory
+                .transaction_hold_count(session.session_lock_id)
+                == 1
+        );
+
+        session
+            .simple_query("ROLLBACK TO lock_boundary")
+            .await
+            .expect("rollback to");
+        assert!(session.lockmgr.held_locks(xid).is_empty());
+        assert!(
+            session
+                .session_locks
+                .tables
+                .hold_count_for(session.session_lock_id)
+                == 0
+        );
+        assert!(
+            session
+                .session_locks
+                .advisory
+                .transaction_hold_count(session.session_lock_id)
+                == 0
+        );
+        session.simple_query("ROLLBACK").await.expect("rollback");
+    }
+
+    #[tokio::test]
+    async fn releasing_a_nested_savepoint_keeps_its_before_images_for_the_parent() {
+        use assert2::assert;
+        let engine = SqlEngine::new();
+        let mut s = engine.connect();
+        s.simple_query("CREATE TABLE t (id int4 PRIMARY KEY, value text)")
+            .await
+            .expect("ddl");
+        s.simple_query("INSERT INTO t VALUES (1, 'before')")
+            .await
+            .expect("seed");
+        for sql in [
+            "BEGIN",
+            "SAVEPOINT outer_sp",
+            "UPDATE t SET value = 'outer' WHERE id = 1",
+            "SAVEPOINT inner_sp",
+            "UPDATE t SET value = 'inner' WHERE id = 1",
+            "INSERT INTO t VALUES (2, 'inner')",
+            "RELEASE inner_sp",
+            "ROLLBACK TO outer_sp",
+            "COMMIT",
+        ] {
+            s.simple_query(sql).await.expect(sql);
+        }
+        assert!(
+            rows_or_sqlstate(&mut s, "SELECT id, value FROM t ORDER BY id").await
+                == Ok(vec![vec!["1".into(), "before".into()]])
+        );
     }
 
     #[tokio::test]
@@ -10328,6 +11156,174 @@ mod tests {
             format: 1,
             value: Some(bytes::Bytes::copy_from_slice(value)),
         }
+    }
+
+    async fn install_cancel_fixture(engine: &SqlEngine) {
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE cancel_pl (id int4 PRIMARY KEY, value int4); \
+                 INSERT INTO cancel_pl VALUES (1, 0); \
+                 CREATE FUNCTION cancel_pl_write() RETURNS int4 LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                   UPDATE cancel_pl SET value = value + 1 WHERE id = 1; \
+                   RETURN 1; \
+                 END $$; \
+                 CREATE PROCEDURE cancel_pl_call() LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                   UPDATE cancel_pl SET value = value + 1 WHERE id = 1; \
+                 END $$",
+            )
+            .await
+            .expect("install cancellation fixture");
+    }
+
+    async fn wait_until_blocked(
+        query: &mut (impl std::future::Future<Output = Result<Vec<QueryResult>, PgError>> + Unpin),
+        lockmgr: &RowLockManager,
+        holder: u64,
+    ) {
+        loop {
+            if lockmgr.waiter_queue_len(holder) != 0 {
+                return;
+            }
+            tokio::select! {
+                result = &mut *query => panic!("query completed before it blocked: {result:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn canceling_pl_write_joins_worker_and_aborts_implicit_transaction() {
+        let engine = SqlEngine::new();
+        install_cancel_fixture(&engine).await;
+        let mut blocker = engine.connect();
+        blocker
+            .simple_query("BEGIN; SELECT * FROM cancel_pl WHERE id = 1 FOR UPDATE")
+            .await
+            .expect("hold row lock");
+        let holder = blocker.local_xid().expect("locking select xid");
+
+        let mut target = engine.connect();
+        let lockmgr = Arc::clone(&target.lockmgr);
+        let mut query = Box::pin(target.simple_query("SELECT cancel_pl_write()"));
+        wait_until_blocked(&mut query, lockmgr.as_ref(), holder).await;
+        drop(query);
+
+        target.cancel_current_query().await;
+        assert!(target.tx_status() == TxStatus::Idle);
+        assert!(target.local_xid().is_none());
+        assert!(target.active_workers.is_empty());
+        assert!(target.plpgsql_call_depth.load(Ordering::Acquire) == 0);
+        // Only the blocker may still own a row lock; the canceled worker is
+        // fully gone and cannot acquire one after cleanup.
+        assert!(lockmgr.held_entry_count() == 1);
+
+        let mut reader = engine.connect();
+        let rows = reader
+            .simple_query("SELECT value FROM cancel_pl WHERE id = 1")
+            .await
+            .expect("read unchanged row");
+        assert!(single_text(&rows) == "0");
+
+        blocker.simple_query("ROLLBACK").await.expect("unlock row");
+        assert!(lockmgr.held_entry_count() == 0);
+    }
+
+    #[tokio::test]
+    async fn canceling_top_level_do_and_call_aborts_their_owned_transactions() {
+        let engine = SqlEngine::new();
+        install_cancel_fixture(&engine).await;
+        let mut blocker = engine.connect();
+        blocker
+            .simple_query("BEGIN; SELECT * FROM cancel_pl WHERE id = 1 FOR UPDATE")
+            .await
+            .expect("hold row lock");
+        let holder = blocker.local_xid().expect("locking select xid");
+
+        let mut target = engine.connect();
+        let lockmgr = Arc::clone(&target.lockmgr);
+        for sql in [
+            "DO $$ BEGIN UPDATE cancel_pl SET value = value + 1 WHERE id = 1; END $$",
+            "CALL cancel_pl_call()",
+        ] {
+            let mut query = Box::pin(target.simple_query(sql));
+            wait_until_blocked(&mut query, lockmgr.as_ref(), holder).await;
+            drop(query);
+            target.cancel_current_query().await;
+
+            assert!(target.tx_status() == TxStatus::Idle, "{sql}");
+            assert!(target.local_xid().is_none(), "{sql}");
+            assert!(target.active_workers.is_empty(), "{sql}");
+            assert!(lockmgr.held_entry_count() == 1, "{sql}");
+        }
+
+        let mut reader = engine.connect();
+        let rows = reader
+            .simple_query("SELECT value FROM cancel_pl WHERE id = 1")
+            .await
+            .expect("read unchanged row");
+        assert!(single_text(&rows) == "0");
+        blocker.simple_query("ROLLBACK").await.expect("unlock row");
+        assert!(lockmgr.held_entry_count() == 0);
+    }
+
+    #[tokio::test]
+    async fn canceling_extended_pl_write_marks_user_transaction_failed() {
+        let engine = SqlEngine::new();
+        install_cancel_fixture(&engine).await;
+        let mut blocker = engine.connect();
+        blocker
+            .simple_query("BEGIN; SELECT * FROM cancel_pl WHERE id = 1 FOR UPDATE")
+            .await
+            .expect("hold row lock");
+        let holder = blocker.local_xid().expect("locking select xid");
+
+        let mut target = engine.connect();
+        target
+            .simple_query("BEGIN")
+            .await
+            .expect("user transaction");
+        target
+            .parse("cancel", "SELECT cancel_pl_write()", &[])
+            .await
+            .expect("parse");
+        target
+            .bind("cancel", "cancel", &[], &[])
+            .await
+            .expect("bind");
+        let lockmgr = Arc::clone(&target.lockmgr);
+        let mut execute = Box::pin(target.execute("cancel", 0));
+        loop {
+            if lockmgr.waiter_queue_len(holder) != 0 {
+                break;
+            }
+            tokio::select! {
+                result = &mut execute => panic!("execute completed before it blocked: {result:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+        }
+        drop(execute);
+
+        target.cancel_current_query().await;
+        assert!(target.tx_status() == TxStatus::Failed);
+        assert!(target.local_xid().is_some());
+        assert!(target.active_workers.is_empty());
+        assert!(target.plpgsql_call_depth.load(Ordering::Acquire) == 0);
+
+        target
+            .simple_query("ROLLBACK")
+            .await
+            .expect("abort user transaction");
+        blocker.simple_query("ROLLBACK").await.expect("unlock row");
+        assert!(lockmgr.held_entry_count() == 0);
+        let mut reader = engine.connect();
+        let rows = reader
+            .simple_query("SELECT value FROM cancel_pl WHERE id = 1")
+            .await
+            .expect("read unchanged row");
+        assert!(single_text(&rows) == "0");
     }
 
     #[tokio::test]
@@ -13008,6 +14004,29 @@ mod listen_notify_session_tests {
         let mut rx = session.take_notifications().expect("a receiver");
         tag(&mut session, "NOTIFY self, 'mine'").await;
         assert!(rx.try_recv() == Ok(notification(77, "self", "mine")));
+    }
+
+    #[tokio::test]
+    async fn rollback_to_savepoint_discards_notifications_queued_inside_it() {
+        let engine = SqlEngine::new();
+        let mut listener = session(&engine, 11);
+        let mut notifier = session(&engine, 22);
+        tag(&mut listener, "LISTEN news").await;
+        let mut rx = listener.take_notifications().expect("a receiver");
+
+        for sql in [
+            "BEGIN",
+            "SAVEPOINT p",
+            "NOTIFY news, 'discarded'",
+            "ROLLBACK TO p",
+            "NOTIFY news, 'kept'",
+            "COMMIT",
+        ] {
+            tag(&mut notifier, sql).await;
+        }
+
+        assert!(rx.try_recv() == Ok(notification(22, "news", "kept")));
+        assert!(rx.try_recv() == Err(TryRecvError::Empty));
     }
 
     #[tokio::test]

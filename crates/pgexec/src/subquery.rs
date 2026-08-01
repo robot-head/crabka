@@ -592,12 +592,19 @@ fn resolve_types_in_expr(
                     None => None,
                 },
             };
-            match crate::routine::inline_scalar(catalog_kv, &call)? {
-                Some(inlined) => {
-                    let _guard = crate::routine::enter_inline()?;
-                    resolve_types_in_expr(catalog_kv, resolution, &inlined, ctes)?
+            if let Some(ty) = crate::routine::plpgsql_declared_call_type(catalog_kv, &call)? {
+                Expr::Const {
+                    value: Datum::Null,
+                    ty,
                 }
-                None => Expr::Func(call),
+            } else {
+                match crate::routine::inline_scalar(catalog_kv, &call)? {
+                    Some(inlined) => {
+                        let _guard = crate::routine::enter_inline()?;
+                        resolve_types_in_expr(catalog_kv, resolution, &inlined, ctes)?
+                    }
+                    None => Expr::Func(call),
+                }
             }
         }
         // Everything else (incl. EXISTS / IN / quantified, which infer as bool) is

@@ -724,17 +724,13 @@ const COMMAND_PROBES: &[CommandProbe] = &[
         expected_statement: "Call",
         refusal: None,
     },
-    // `DO` has no inline handler for any language Gres knows: PostgreSQL itself
-    // refuses `LANGUAGE sql` with this exact 0A000, and Gres has no PL/pgSQL
-    // interpreter to run the default language with.
+    // The default language is PL/pgSQL, whose inline interpreter executes the
+    // ordinary empty block used by this parser and behavior probe.
     CommandProbe {
         command: "DO",
-        sql: "DO $$ SELECT 1 $$ LANGUAGE sql",
+        sql: "DO $$ BEGIN NULL; END $$",
         expected_statement: "DoBlock",
-        refusal: Some((
-            "0A000",
-            "language \"sql\" does not support inline code execution",
-        )),
+        refusal: None,
     },
 ];
 

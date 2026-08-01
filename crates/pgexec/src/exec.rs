@@ -8174,6 +8174,18 @@ fn build_table_expr(
             column_aliases,
             ..
         } if crate::routine::expands_as_table(read_ctx.catalog_kv, functions) => {
+            if let Some((columns, rows)) =
+                crate::routine::eval_plpgsql_table_function(&functions[0], ctx)?
+            {
+                return crate::srf::user_function_relation(
+                    &functions[0].name,
+                    columns,
+                    rows,
+                    *with_ordinality,
+                    alias.as_deref(),
+                    column_aliases,
+                );
+            }
             if *with_ordinality {
                 return Err(ExecError::Unsupported(
                     "WITH ORDINALITY over a user-defined function is not supported".into(),
@@ -9469,12 +9481,27 @@ fn build_table_expr_schema_with_ctes(
             alias,
             column_aliases,
             ..
-        } => crate::srf::from_item_schema(
-            functions,
-            *with_ordinality,
-            alias.as_deref(),
-            column_aliases,
-        ),
+        } => {
+            if functions.len() == 1
+                && let Some((_routine, columns)) =
+                    crate::routine::plpgsql_table_function_schema(catalog_kv, &functions[0])?
+            {
+                return crate::srf::user_function_relation(
+                    &functions[0].name,
+                    columns,
+                    Vec::new(),
+                    *with_ordinality,
+                    alias.as_deref(),
+                    column_aliases,
+                );
+            }
+            crate::srf::from_item_schema(
+                functions,
+                *with_ordinality,
+                alias.as_deref(),
+                column_aliases,
+            )
+        }
     }
 }
 
@@ -11890,7 +11917,7 @@ pub(crate) fn rows_result(
     )
 }
 
-fn rows_result_with_tag(
+pub(crate) fn rows_result_with_tag(
     fields: Vec<FieldDescription>,
     projected: &[Vec<Datum>],
     style: crabka_pgtypes::encoding::OutputStyle<'_>,

@@ -82,11 +82,12 @@ impl Failure {
     }
 
     fn of(error: PgError) -> Self {
+        let diagnostics = error.diagnostics.unwrap_or_default();
         Self {
             code: error.code,
             message: error.message,
-            detail: error.detail,
-            hint: error.hint,
+            detail: diagnostics.detail,
+            hint: diagnostics.hint,
         }
     }
 }

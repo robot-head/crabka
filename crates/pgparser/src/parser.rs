@@ -1208,6 +1208,13 @@ impl Parser {
             // call — `left(s, n)` / `right(s, n)` — so route them to `func_call`.
             Token::Keyword(Keyword::Left) => self.keyword_func_call("left"),
             Token::Keyword(Keyword::Right) => self.keyword_func_call("right"),
+            Token::Keyword(_) if self.peek_col_id().is_some() => {
+                let name = self
+                    .peek_col_id()
+                    .expect("guard guarantees a PostgreSQL column identifier");
+                self.bump();
+                self.col_id_expr(name)
+            }
             Token::Param(n) => {
                 self.bump();
                 Ok(Expr::Param(n))
@@ -1298,25 +1305,7 @@ impl Parser {
                 // SP27: `ident (` is a function call; a bare ident is a column.
                 // SP33/F-2: `ident . ident` is either a schema-qualified function
                 // call (`pg_catalog.format_type(...)`) or a table-qualified column.
-                if *self.peek() == Token::LParen {
-                    self.func_call(s)
-                } else if *self.peek() == Token::Dot {
-                    self.bump();
-                    let name = self.expect_ident()?;
-                    if *self.peek() == Token::LParen {
-                        self.func_call(name)
-                    } else {
-                        Ok(Expr::Column {
-                            table: Some(s),
-                            name,
-                        })
-                    }
-                } else {
-                    Ok(Expr::Column {
-                        table: None,
-                        name: s,
-                    })
-                }
+                self.col_id_expr(s)
             }
             other => Err(ParseError::new(
                 format!("unexpected token {other:?}"),
@@ -1875,6 +1864,25 @@ impl Parser {
                 format!("`{name}` is reserved here; use it as a function call `{name}(...)`"),
                 self.peek_pos(),
             ))
+        }
+    }
+
+    fn col_id_expr(&mut self, name: String) -> Result<Expr, ParseError> {
+        if *self.peek() == Token::LParen {
+            return self.func_call(name);
+        }
+        if *self.peek() != Token::Dot {
+            return Ok(Expr::Column { table: None, name });
+        }
+        self.bump();
+        let field = self.expect_col_id()?;
+        if *self.peek() == Token::LParen {
+            self.func_call(field)
+        } else {
+            Ok(Expr::Column {
+                table: Some(name),
+                name: field,
+            })
         }
     }
 
@@ -10598,6 +10606,24 @@ pub fn parse_expression(sql: &str) -> Result<crate::ast::Expr, ParseError> {
     }
 }
 
+/// Parse the type spelling used by a routine parameter or PL/pgSQL variable.
+/// Unknown names are retained for catalog resolution.
+///
+/// # Errors
+///
+/// Returns a parse error when the input is not exactly one type name.
+pub fn parse_routine_type(sql: &str) -> Result<crate::ast::RoutineType, ParseError> {
+    let mut parser = Parser::new(lex(sql)?, sql.to_string());
+    let ty = parser.routine_type()?;
+    if *parser.peek() != Token::Eof {
+        return Err(ParseError::new(
+            "trailing tokens after type name",
+            parser.peek_pos(),
+        ));
+    }
+    Ok(ty)
+}
+
 /// Parse statements and return the parser-owned accepted command identity for
 /// each one. Identity classification is the same mandatory gate used by [`parse`].
 ///
@@ -11167,6 +11193,26 @@ mod tests {
         assert!(parse_expr_for_test("left + 1").is_err());
         // And `LEFT JOIN` still parses as a join (keyword role preserved).
         assert!(parse("SELECT * FROM a LEFT JOIN b ON a.id = b.id").is_ok());
+    }
+
+    #[test]
+    fn unreserved_lexer_keywords_remain_column_identifiers() {
+        use assert2::assert;
+
+        assert!(
+            parse_expr_for_test("data").expect("unqualified DATA")
+                == Expr::Column {
+                    table: None,
+                    name: "data".into(),
+                }
+        );
+        assert!(
+            parse_expr_for_test("schema.data").expect("qualified DATA")
+                == Expr::Column {
+                    table: Some("schema".into()),
+                    name: "data".into(),
+                }
+        );
     }
 
     #[test]

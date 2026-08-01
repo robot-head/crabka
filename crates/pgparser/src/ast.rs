@@ -3195,6 +3195,201 @@ pub struct CreateRoutineStmt {
     pub options: Vec<RoutineOption>,
 }
 
+/// A parsed PL/pgSQL block. Byte ranges are relative to the routine body.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlPgSqlBlock {
+    /// How unqualified names shared by a PL variable and SQL column resolve.
+    pub variable_conflict: PlPgSqlVariableConflict,
+    pub label: Option<String>,
+    pub declarations: Vec<PlPgSqlDeclaration>,
+    pub statements: Vec<PlPgSqlStatement>,
+    pub exceptions: Vec<PlPgSqlExceptionHandler>,
+    pub end_label: Option<String>,
+    pub span: std::ops::Range<usize>,
+}
+
+/// The PL/pgSQL `#variable_conflict` compiler directive.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum PlPgSqlVariableConflict {
+    /// Report SQLSTATE 42702 when both a PL variable and SQL column match.
+    #[default]
+    Error,
+    /// Prefer the PL variable.
+    UseVariable,
+    /// Prefer the SQL column.
+    UseColumn,
+}
+
+/// One entry in a PL/pgSQL `DECLARE` section.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlPgSqlDeclaration {
+    Variable {
+        name: String,
+        ty: RoutineType,
+        constant: bool,
+        not_null: bool,
+        default: Option<Expr>,
+    },
+    Alias {
+        name: String,
+        target: String,
+    },
+    Cursor {
+        name: String,
+        scroll: Option<bool>,
+        arguments: Vec<(String, RoutineType)>,
+        query: Box<Statement>,
+    },
+}
+
+/// An assignable PL/pgSQL datum: a variable, record field, or subscripted value.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlPgSqlTarget {
+    pub path: Vec<String>,
+    pub subscripts: Vec<Expr>,
+}
+
+/// The target list accepted by `INTO` and cursor fetches.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlPgSqlInto {
+    pub strict: bool,
+    pub targets: Vec<PlPgSqlTarget>,
+}
+
+/// One executable PL/pgSQL statement.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlPgSqlStatement {
+    Block(Box<PlPgSqlBlock>),
+    Assign {
+        target: PlPgSqlTarget,
+        value: Expr,
+    },
+    Sql {
+        statement: Box<Statement>,
+        source: String,
+        into: Option<PlPgSqlInto>,
+    },
+    Perform {
+        query: Box<Statement>,
+    },
+    If {
+        branches: Vec<(Expr, Vec<PlPgSqlStatement>)>,
+        else_body: Vec<PlPgSqlStatement>,
+    },
+    Case {
+        operand: Option<Expr>,
+        arms: Vec<(Vec<Expr>, Vec<PlPgSqlStatement>)>,
+        else_body: Option<Vec<PlPgSqlStatement>>,
+    },
+    Loop {
+        label: Option<String>,
+        kind: Box<PlPgSqlLoop>,
+        body: Vec<PlPgSqlStatement>,
+        end_label: Option<String>,
+    },
+    Exit {
+        continuing: bool,
+        label: Option<String>,
+        when: Option<Expr>,
+    },
+    Return(Option<Expr>),
+    ReturnNext(Option<Expr>),
+    ReturnQuery(Box<Statement>),
+    ReturnQueryExecute {
+        query: Expr,
+        using: Vec<Expr>,
+    },
+    Raise(PlPgSqlRaise),
+    Execute {
+        query: Expr,
+        into: Option<PlPgSqlInto>,
+        using: Vec<Expr>,
+    },
+    Open {
+        cursor: String,
+        scroll: Option<bool>,
+        arguments: Vec<Expr>,
+        query: Option<Box<Statement>>,
+        dynamic_query: Option<Expr>,
+        using: Vec<Expr>,
+    },
+    Fetch {
+        cursor: String,
+        direction: String,
+        into: Option<PlPgSqlInto>,
+        move_only: bool,
+    },
+    Close(String),
+    GetDiagnostics {
+        stacked: bool,
+        items: Vec<(PlPgSqlTarget, String)>,
+    },
+    Assert {
+        condition: Expr,
+        message: Option<Expr>,
+    },
+    Transaction {
+        commit: bool,
+        chain: bool,
+    },
+    Null,
+}
+
+/// The source iterated by a PL/pgSQL loop.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlPgSqlLoop {
+    Unconditional,
+    While(Expr),
+    Integer {
+        variable: String,
+        reverse: bool,
+        lower: Expr,
+        upper: Expr,
+        step: Option<Expr>,
+    },
+    Query {
+        targets: Vec<PlPgSqlTarget>,
+        query: Box<Statement>,
+    },
+    Dynamic {
+        targets: Vec<PlPgSqlTarget>,
+        query: Expr,
+        using: Vec<Expr>,
+    },
+    Foreach {
+        target: PlPgSqlTarget,
+        slice: Option<u32>,
+        array: Expr,
+    },
+}
+
+/// One `WHEN` arm of a block's exception section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlPgSqlExceptionHandler {
+    pub conditions: Vec<String>,
+    pub statements: Vec<PlPgSqlStatement>,
+}
+
+/// A `RAISE` statement.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlPgSqlRaise {
+    pub level: PlPgSqlRaiseLevel,
+    pub condition: Option<String>,
+    pub message: Option<String>,
+    pub parameters: Vec<Expr>,
+    pub options: Vec<(String, Expr)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlPgSqlRaiseLevel {
+    Debug,
+    Log,
+    Info,
+    Notice,
+    Warning,
+    Exception,
+}
+
 /// P2: a routine named for a lifecycle statement.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoutineSignature {

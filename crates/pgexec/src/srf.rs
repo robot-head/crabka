@@ -396,12 +396,51 @@ fn qualify(
     alias: Option<&str>,
     column_aliases: &Option<Vec<String>>,
 ) -> Result<Relation, ExecError> {
-    let mut columns: Vec<ColumnBinding> = plans
+    let columns: Vec<ColumnBinding> = plans
         .iter()
         .flat_map(|p| p.columns.iter().cloned())
         .collect();
+    qualify_columns(
+        qualifier_for(plans, alias),
+        columns,
+        rows,
+        with_ordinality,
+        alias,
+        column_aliases,
+    )
+}
+
+pub(crate) fn user_function_relation(
+    function_name: &str,
+    columns: Vec<(String, ColumnType)>,
+    rows: Vec<Vec<Datum>>,
+    with_ordinality: bool,
+    alias: Option<&str>,
+    column_aliases: &Option<Vec<String>>,
+) -> Result<Relation, ExecError> {
+    let columns = columns
+        .into_iter()
+        .map(|(name, ty)| column(&name, ty))
+        .collect();
+    qualify_columns(
+        alias.unwrap_or(function_name).to_string(),
+        columns,
+        rows,
+        with_ordinality,
+        alias,
+        column_aliases,
+    )
+}
+
+fn qualify_columns(
+    qualifier: String,
+    mut columns: Vec<ColumnBinding>,
+    mut rows: Vec<Vec<Datum>>,
+    with_ordinality: bool,
+    alias: Option<&str>,
+    column_aliases: &Option<Vec<String>>,
+) -> Result<Relation, ExecError> {
     let function_columns = columns.len();
-    let mut rows = rows;
     if with_ordinality {
         columns.push(ordinality_column());
         for (index, row) in rows.iter_mut().enumerate() {
@@ -412,7 +451,7 @@ fn qualify(
     if let Some(names) = column_aliases {
         if names.len() > columns.len() {
             return Err(ExecError::DerivedColumnAliasCount {
-                table: qualifier_for(plans, alias),
+                table: qualifier.clone(),
                 expected: columns.len(),
                 got: names.len(),
             });
@@ -425,7 +464,6 @@ fn qualify(
     {
         columns[0].name = alias.to_string();
     }
-    let qualifier = qualifier_for(plans, alias);
     for column in &mut columns {
         column.qualifier = Some(qualifier.clone());
     }

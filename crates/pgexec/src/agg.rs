@@ -672,7 +672,10 @@ fn collect_specs(e: &Expr, scope: &Scope, specs: &mut Vec<AggSpec>) -> Result<()
         // aggregate via the outer scalar/agg traversal; this arm handles such a
         // function wrapping an aggregate (`date_trunc('day', max(ts))`,
         // `to_char(max(ts), 'YYYY')`).
-        Expr::Func(fc) if is_wrapping_scalar_func(&fc.name) => {
+        Expr::Func(fc)
+            if is_wrapping_scalar_func(&fc.name)
+                || crate::routine::is_plpgsql_scalar_runtime(fc) =>
+        {
             if let FuncArgs::Exprs(args) = &fc.args {
                 for a in args {
                     collect_specs(a, scope, specs)?;
@@ -903,7 +906,10 @@ fn validate_grouped(e: &Expr, group_by: &[Expr]) -> Result<(), ExecError> {
         // SP29/SP37/SP38: every argument of a scalar, date/time, formatting, jsonb,
         // or array function must itself be grouped-valid (the call as a whole, if it
         // matches a GROUP BY key, was already accepted above).
-        Expr::Func(fc) if is_wrapping_scalar_func(&fc.name) => {
+        Expr::Func(fc)
+            if is_wrapping_scalar_func(&fc.name)
+                || crate::routine::is_plpgsql_scalar_runtime(fc) =>
+        {
             if let FuncArgs::Exprs(args) = &fc.args {
                 for a in args {
                     validate_grouped(a, group_by)?;
@@ -1164,6 +1170,13 @@ fn eval_grouped_depth(
         }),
         // SP29: a scalar function over grouped/aggregate arguments — evaluate it
         // with the grouped evaluator as its child-eval closure.
+        Expr::Func(fc)
+            if let Some(result) = crate::routine::eval_plpgsql_scalar_with(fc, ctx, |e| {
+                eval_grouped_depth(e, grouped, d)
+            }) =>
+        {
+            result
+        }
         Expr::Func(fc) if crate::func::is_scalar(&fc.name) => {
             crate::func::eval_scalar(fc, ctx, |e| eval_grouped_depth(e, grouped, d))
         }
