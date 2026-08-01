@@ -31,7 +31,7 @@ apko build packaging/apko/creusot-toolchain.yaml \
 if command -v docker >/dev/null && docker info >/dev/null 2>&1; then
   docker load -i creusot-toolchain.tar >/dev/null
   docker run --rm "$TAG" \
-    "rustc --version | grep -F '$RUST_TOOLCHAIN' && cargo creusot --help >/dev/null"
+    "rustup show active-toolchain | grep -F '$RUST_TOOLCHAIN' && cargo creusot --help >/dev/null"
 else
   echo "Skipping Docker smoke verification: docker is unavailable." >&2
 fi

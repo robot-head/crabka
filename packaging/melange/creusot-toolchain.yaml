@@ -61,7 +61,7 @@ pipeline:
       export RUSTUP_TOOLCHAIN="$CRABKA_CREUSOT_RUST_TOOLCHAIN"
 
       # Sanity inside the build env before packaging.
-      rustc --version | grep -F "$CRABKA_CREUSOT_RUST_TOOLCHAIN"
+      rustup show active-toolchain | grep -F "$CRABKA_CREUSOT_RUST_TOOLCHAIN"
       cargo creusot --help
       chmod 755 "$HOME/.opam/opam-init/hooks/sandbox.sh"
 
