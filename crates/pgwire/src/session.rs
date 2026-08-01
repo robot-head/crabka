@@ -13,7 +13,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     engine::{
         BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, Notification, QueryResult,
-        ResultPage, ResultSink, Session, TxStatus,
+        Session, TxStatus,
     },
     error::{PgError, Severity, sqlstate},
     messages::{
@@ -33,12 +33,14 @@ pub enum AuthMode {
     ScramSha256 {
         verifiers: std::collections::HashMap<String, crate::scram::ScramVerifier>,
         mock_secret: [u8; 32],
+        mock_iterations: u32,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     pub auth: AuthMode,
+    pub max_message_len: usize,
     /// `ParameterStatus` values announced at session start. Clients parse
     /// `server_version` and rely on `client_encoding=UTF8`.
     pub server_params: Vec<(String, String)>,
@@ -49,6 +51,7 @@ impl SessionConfig {
     pub fn trust() -> Self {
         Self {
             auth: AuthMode::Trust,
+            max_message_len: crate::messages::frontend::MAX_MESSAGE_LEN,
             server_params: default_server_params(),
         }
     }
@@ -301,7 +304,6 @@ async fn handle_execute<Sess: Session>(
     portal_name: &str,
     max_rows: i32,
     token: CancellationToken,
-    notices: Option<&mut mpsc::Receiver<PgError>>,
     out: &mut BytesMut,
 ) -> Result<Option<CopyInState>, PgError> {
     if max_rows < 0 {
@@ -315,14 +317,12 @@ async fn handle_execute<Sess: Session>(
         // (the pending flag from the extended-batch window) must win even
         // against an engine future that is ready on its first poll.
         biased;
-        () = token.cancelled() => None,
-        r = session.execute(portal_name, max_rows.cast_unsigned()) => Some(r?),
+        () = token.cancelled() => return Err(PgError::error(
+            sqlstate::QUERY_CANCELED,
+            "canceling statement due to user request",
+        )),
+        r = session.execute(portal_name, max_rows.cast_unsigned()) => r?,
     };
-    let Some(outcome) = outcome else {
-        session.cancel_current_query().await;
-        return Err(query_canceled());
-    };
-    write_notices(out, notices);
     if let ExecuteOutcome::CopyIn { response } = outcome {
         write_copy_in_response(out, &response);
         return Ok(Some(CopyInState {
@@ -334,13 +334,6 @@ async fn handle_execute<Sess: Session>(
     }
     encode_execute_outcome(out, outcome)?;
     Ok(None)
-}
-
-fn query_canceled() -> PgError {
-    PgError::error(
-        sqlstate::QUERY_CANCELED,
-        "canceling statement due to user request",
-    )
 }
 
 fn encode_execute_outcome(out: &mut BytesMut, outcome: ExecuteOutcome) -> Result<(), PgError> {
@@ -395,6 +388,7 @@ where
         AuthMode::ScramSha256 {
             verifiers,
             mock_secret,
+            mock_iterations,
         } => {
             let user = startup_params
                 .iter()
@@ -403,14 +397,18 @@ where
                 .unwrap_or_default();
             let verifier = match verifiers.get(user) {
                 Some(v) => v.clone(),
-                None => crate::scram::ScramVerifier::mock(mock_secret, user),
+                None => crate::scram::ScramVerifier::mock_with_iterations(
+                    mock_secret,
+                    user,
+                    *mock_iterations,
+                ),
             };
 
             backend::authentication_sasl(out, &["SCRAM-SHA-256"]);
             stream.write_all(out).await?;
             out.clear();
 
-            let Some(mut body) = read_password(stream, inbuf).await? else {
+            let Some(mut body) = read_password(stream, inbuf, config.max_message_len).await? else {
                 return Ok(false);
             };
             let mechanism = frontend::get_cstr(&mut body).map_err(|_| bad_proto())?;
@@ -431,7 +429,8 @@ where
             stream.write_all(out).await?;
             out.clear();
 
-            let Some(client_final) = read_password(stream, inbuf).await? else {
+            let Some(client_final) = read_password(stream, inbuf, config.max_message_len).await?
+            else {
                 return Ok(false);
             };
             match scram.handle_client_final(&client_final) {
@@ -474,12 +473,16 @@ fn server_nonce() -> String {
 }
 
 /// Reads the next frontend message, expecting Password ('p'); returns its body.
-async fn read_password<S>(stream: &mut S, inbuf: &mut BytesMut) -> std::io::Result<Option<Bytes>>
+async fn read_password<S>(
+    stream: &mut S,
+    inbuf: &mut BytesMut,
+    max_message_len: usize,
+) -> std::io::Result<Option<Bytes>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     loop {
-        match frontend::decode_message(inbuf) {
+        match frontend::decode_message_with_max_len(inbuf, max_message_len) {
             Ok(Some(FrontendMessage::Password(body))) => return Ok(Some(body)),
             // Anything else mid-auth: give up.
             Ok(Some(_)) | Err(_) => return Ok(None),
@@ -492,18 +495,10 @@ where
     }
 }
 
-// ── Asynchronous diagnostics and notifications ─────────────────────────────
-
-fn write_notices(out: &mut BytesMut, notices: Option<&mut mpsc::Receiver<PgError>>) {
-    if let Some(rx) = notices {
-        while let Ok(notice) = rx.try_recv() {
-            backend::notice_response(out, &notice);
-        }
-    }
-}
+// ── Asynchronous notifications ──────────────────────────────────────────────
 
 /// Write the `ReadyForQuery` that closes an exchange, preceded by any pending
-/// `NoticeResponse` and `NotificationResponse` messages.
+/// `NotificationResponse` messages.
 ///
 /// Postgres delivers notifications only between transactions: a session that
 /// is idle *in* a transaction block accumulates them until the block ends, so
@@ -511,10 +506,8 @@ fn write_notices(out: &mut BytesMut, notices: Option<&mut mpsc::Receiver<PgError
 fn write_ready<Sess: Session>(
     out: &mut BytesMut,
     session: &Sess,
-    notices: Option<&mut mpsc::Receiver<PgError>>,
     notifications: Option<&mut mpsc::Receiver<Notification>>,
 ) {
-    write_notices(out, notices);
     let status = session.tx_status();
     if status == TxStatus::Idle
         && let Some(rx) = notifications
@@ -626,403 +619,330 @@ where
     // built with is the one just announced in `BackendKeyData`, so a
     // self-notify reaches the client stamped with its own pid.
     let mut session = engine.connect_with_pid(cancel.pid);
-    // The loop, not the session, owns the asynchronous streams: taking them
-    // once here avoids a second borrow of `session` during protocol handling.
+    // The loop, not the session, owns the notification stream: taking it once
+    // here keeps the idle `select!` free of a second borrow of `session`.
     let mut notifications = session.take_notifications();
-    let mut notices = session.take_notices();
 
-    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
+    write_ready(&mut out, &session, notifications.as_mut());
     stream.write_all(&out).await?;
     out.clear();
 
-    // Always terminate the engine session, regardless of how the protocol loop exits.
-    let outcome: std::io::Result<()> = async {
-        let mut ext = ExtendedState::default();
-        let mut copy_in: Option<CopyInState> = None;
+    let mut ext = ExtendedState::default();
+    let mut copy_in: Option<CopyInState> = None;
 
-        loop {
-            let msg = match frontend::decode_message(&mut inbuf) {
-                Ok(Some(msg)) => msg,
-                Ok(None) => {
-                    if !read_or_notify(
-                        &mut stream,
-                        &mut inbuf,
-                        &mut out,
-                        session.tx_status(),
-                        notifications.as_mut(),
-                    )
-                    .await?
-                    {
-                        return Ok(()); // client went away
-                    }
+    loop {
+        let msg = match frontend::decode_message_with_max_len(&mut inbuf, config.max_message_len) {
+            Ok(Some(msg)) => msg,
+            Ok(None) => {
+                if !read_or_notify(
+                    &mut stream,
+                    &mut inbuf,
+                    &mut out,
+                    session.tx_status(),
+                    notifications.as_mut(),
+                )
+                .await?
+                {
+                    return Ok(()); // client went away
+                }
+                continue;
+            }
+            Err(e) => {
+                backend::error_response(&mut out, &e);
+                stream.write_all(&out).await?;
+                return Ok(()); // protocol errors are fatal
+            }
+        };
+
+        if let Some(state) = &mut copy_in {
+            match msg {
+                FrontendMessage::CopyData(data) => {
+                    state.chunks.push(data);
                     continue;
                 }
-                Err(e) => {
-                    backend::error_response(&mut out, &e);
-                    stream.write_all(&out).await?;
-                    return Ok(()); // protocol errors are fatal
-                }
-            };
-
-            if let Some(state) = &mut copy_in {
-                match msg {
-                    FrontendMessage::CopyData(data) => {
-                        state.chunks.push(data);
-                        continue;
-                    }
-                    FrontendMessage::CopyDone => {
-                        let CopyInState { target, chunks } =
-                            copy_in.take().expect("copy state present");
-                        let extended = matches!(target, CopyInTarget::Portal { .. });
-                        let _statement_activity = activity.begin_statement().await;
-                        let token = cancel.begin_query();
-                        let outcome = tokio::select! {
-                            biased;
-                            () = token.cancelled() => None,
-                            r = async {
-                                match &target {
-                                    CopyInTarget::Statement { sql } => {
-                                        session.copy_in(sql, chunks).await
-                                    }
-                                    CopyInTarget::Portal { name } => {
-                                        session.copy_in_portal(name, chunks).await
-                                    }
-                                }
-                            } => Some(r),
-                        };
-                        let outcome = if let Some(outcome) = outcome {
-                            outcome
-                        } else {
-                            session.cancel_current_query().await;
-                            Err(query_canceled())
-                        };
-                        write_notices(&mut out, notices.as_mut());
-                        match outcome {
-                            Ok(QueryResult::Command { tag }) => {
-                                backend::command_complete(&mut out, &tag);
-                            }
-                            Ok(_) => {
-                                let e = PgError::error(
-                                    sqlstate::PROTOCOL_VIOLATION,
-                                    "COPY returned rows",
-                                );
-                                if extended {
-                                    fail_extended(&mut ext, &mut out, &e);
-                                } else {
-                                    backend::error_response(&mut out, &e);
-                                }
-                            }
-                            Err(e) => {
-                                if extended {
-                                    fail_extended(&mut ext, &mut out, &e);
-                                } else {
-                                    backend::error_response(&mut out, &e);
-                                }
-                            }
-                        }
-                        // Extended protocol: the client's Sync (sent after
-                        // CopyDone) produces ReadyForQuery; simple protocol owes
-                        // it now.
-                        if !extended {
-                            write_ready(
-                                &mut out,
-                                &session,
-                                notices.as_mut(),
-                                notifications.as_mut(),
-                            );
-                        }
-                        stream.write_all(&out).await?;
-                        out.clear();
-                        continue;
-                    }
-                    FrontendMessage::CopyFail(message) => {
-                        let state = copy_in.take().expect("copy state present");
-                        let extended = matches!(state.target, CopyInTarget::Portal { .. });
-                        session.mark_statement_failed();
-                        let e = PgError::error(
-                            sqlstate::QUERY_CANCELED,
-                            format!("COPY failed: {message}"),
-                        );
-                        if extended {
-                            fail_extended(&mut ext, &mut out, &e);
-                        } else {
-                            backend::error_response(&mut out, &e);
-                            write_ready(
-                                &mut out,
-                                &session,
-                                notices.as_mut(),
-                                notifications.as_mut(),
-                            );
-                        }
-                        stream.write_all(&out).await?;
-                        out.clear();
-                        continue;
-                    }
-                    // PostgreSQL ignores Flush and Sync during copy-in mode
-                    // (drivers pipeline Bind/Execute/Sync before streaming data);
-                    // the Sync that matters arrives after CopyDone/CopyFail.
-                    FrontendMessage::Sync | FrontendMessage::Flush => continue,
-                    FrontendMessage::Terminate => return Ok(()),
-                    _ => {
-                        let e = PgError::protocol("unexpected frontend message during COPY");
-                        backend::error_response(&mut out, &e);
-                        stream.write_all(&out).await?;
-                        return Ok(());
-                    }
-                }
-            }
-
-            match msg {
-                FrontendMessage::Terminate => return Ok(()),
-                FrontendMessage::Query { sql } => {
-                    let _statement_activity = activity.begin_statement().await;
+                FrontendMessage::CopyDone => {
+                    let CopyInState { target, chunks } =
+                        copy_in.take().expect("copy state present");
+                    let extended = matches!(target, CopyInTarget::Portal { .. });
+                    activity.touch();
                     let token = cancel.begin_query();
-                    let copy_start = tokio::select! {
-                        biased;
-                        () = token.cancelled() => None,
-                        r = session.begin_copy_in(&sql) => Some(r),
-                    };
-                    let copy_start = if let Some(copy_start) = copy_start {
-                        copy_start
-                    } else {
-                        session.cancel_current_query().await;
-                        Err(query_canceled())
-                    };
-                    match copy_start {
-                        Ok(Some(response)) => {
-                            write_notices(&mut out, notices.as_mut());
-                            write_copy_in_response(&mut out, &response);
-                            stream.write_all(&out).await?;
-                            out.clear();
-                            copy_in = Some(CopyInState {
-                                target: CopyInTarget::Statement { sql },
-                                chunks: Vec::new(),
-                            });
-                            continue;
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            write_notices(&mut out, notices.as_mut());
-                            backend::error_response(&mut out, &e);
-                            write_ready(
-                                &mut out,
-                                &session,
-                                notices.as_mut(),
-                                notifications.as_mut(),
-                            );
-                            stream.write_all(&out).await?;
-                            out.clear();
-                            continue;
-                        }
-                    }
-                    let token = cancel.begin_query();
-                    let mut sink = WireResultSink {
-                        out: &mut out,
-                        notices: notices.as_mut(),
-                    };
                     let outcome = tokio::select! {
-                        // biased + cancellation-first; see handle_execute.
                         biased;
-                        () = token.cancelled() => None,
-                        r = session.simple_query_into(&sql, 1024, &mut sink) => Some(r),
-                    };
-                    let outcome = if let Some(outcome) = outcome {
-                        outcome
-                    } else {
-                        session.cancel_current_query().await;
-                        Err(query_canceled())
+                        () = token.cancelled() => Err(PgError::error(
+                            sqlstate::QUERY_CANCELED,
+                            "canceling statement due to user request",
+                        )),
+                        r = async {
+                            match &target {
+                                CopyInTarget::Statement { sql } => {
+                                    session.copy_in(sql, chunks).await
+                                }
+                                CopyInTarget::Portal { name } => {
+                                    session.copy_in_portal(name, chunks).await
+                                }
+                            }
+                        } => r,
                     };
                     match outcome {
-                        Ok(()) => {}
+                        Ok(QueryResult::Command { tag }) => {
+                            backend::command_complete(&mut out, &tag);
+                        }
+                        Ok(_) => {
+                            let e =
+                                PgError::error(sqlstate::PROTOCOL_VIOLATION, "COPY returned rows");
+                            if extended {
+                                fail_extended(&mut ext, &mut out, &e);
+                            } else {
+                                backend::error_response(&mut out, &e);
+                            }
+                        }
                         Err(e) => {
-                            write_notices(&mut out, notices.as_mut());
-                            backend::error_response(&mut out, &e);
-                            if e.severity == Severity::Fatal {
-                                stream.write_all(&out).await?;
-                                return Ok(());
+                            if extended {
+                                fail_extended(&mut ext, &mut out, &e);
+                            } else {
+                                backend::error_response(&mut out, &e);
                             }
                         }
                     }
-                    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
+                    // Extended protocol: the client's Sync (sent after
+                    // CopyDone) produces ReadyForQuery; simple protocol owes
+                    // it now.
+                    if !extended {
+                        write_ready(&mut out, &session, notifications.as_mut());
+                    }
                     stream.write_all(&out).await?;
                     out.clear();
+                    continue;
                 }
-                FrontendMessage::Sync => {
-                    let result = session.sync().await;
-                    write_notices(&mut out, notices.as_mut());
-                    if let Err(e) = result {
+                FrontendMessage::CopyFail(message) => {
+                    let state = copy_in.take().expect("copy state present");
+                    let extended = matches!(state.target, CopyInTarget::Portal { .. });
+                    session.mark_statement_failed();
+                    let e =
+                        PgError::error(sqlstate::QUERY_CANCELED, format!("COPY failed: {message}"));
+                    if extended {
+                        fail_extended(&mut ext, &mut out, &e);
+                    } else {
                         backend::error_response(&mut out, &e);
-                    }
-                    ext.failed = false;
-                    write_ready(&mut out, &session, notices.as_mut(), notifications.as_mut());
-                    stream.write_all(&out).await?;
-                    out.clear();
-                }
-                // Every arm write_all()s eagerly, so there is never pending response data; Flush has nothing to drain and TcpStream::flush is a no-op.
-                FrontendMessage::Flush => stream.flush().await?,
-                FrontendMessage::Parse {
-                    name,
-                    sql,
-                    param_types,
-                } => {
-                    if ext.failed {
-                        continue;
-                    }
-                    if let Err(e) =
-                        handle_parse(&mut session, name, sql, param_types, &mut out).await
-                    {
-                        fail_extended(&mut ext, &mut out, &e);
+                        write_ready(&mut out, &session, notifications.as_mut());
                     }
                     stream.write_all(&out).await?;
                     out.clear();
+                    continue;
                 }
-                FrontendMessage::Bind {
-                    portal,
-                    statement,
-                    param_formats,
-                    params,
-                    result_formats,
-                } => {
-                    if ext.failed {
-                        continue;
-                    }
-                    if let Err(e) = handle_bind(
-                        &mut session,
-                        portal,
-                        &statement,
-                        &param_formats,
-                        params,
-                        &result_formats,
-                        &mut out,
-                    )
-                    .await
-                    {
-                        fail_extended(&mut ext, &mut out, &e);
-                    }
+                // PostgreSQL ignores Flush and Sync during copy-in mode
+                // (drivers pipeline Bind/Execute/Sync before streaming data);
+                // the Sync that matters arrives after CopyDone/CopyFail.
+                FrontendMessage::Sync | FrontendMessage::Flush => continue,
+                FrontendMessage::Terminate => return Ok(()),
+                _ => {
+                    let e = PgError::protocol("unexpected frontend message during COPY");
+                    backend::error_response(&mut out, &e);
                     stream.write_all(&out).await?;
-                    out.clear();
+                    return Ok(());
                 }
-                FrontendMessage::Describe { kind, name } => {
-                    if ext.failed {
+            }
+        }
+
+        match msg {
+            FrontendMessage::Terminate => return Ok(()),
+            FrontendMessage::Query { sql } => {
+                activity.touch();
+                let token = cancel.begin_query();
+                let copy_start = tokio::select! {
+                    biased;
+                    () = token.cancelled() => Err(PgError::error(
+                        sqlstate::QUERY_CANCELED,
+                        "canceling statement due to user request",
+                    )),
+                    r = session.begin_copy_in(&sql) => r,
+                };
+                match copy_start {
+                    Ok(Some(response)) => {
+                        write_copy_in_response(&mut out, &response);
+                        stream.write_all(&out).await?;
+                        out.clear();
+                        copy_in = Some(CopyInState {
+                            target: CopyInTarget::Statement { sql },
+                            chunks: Vec::new(),
+                        });
                         continue;
                     }
-                    if let Err(e) = handle_describe(&mut session, kind, &name, &mut out).await {
-                        fail_extended(&mut ext, &mut out, &e);
-                    }
-                    stream.write_all(&out).await?;
-                    out.clear();
-                }
-                FrontendMessage::Execute { portal, max_rows } => {
-                    if ext.failed {
+                    Ok(None) => {}
+                    Err(e) => {
+                        backend::error_response(&mut out, &e);
+                        write_ready(&mut out, &session, notifications.as_mut());
+                        stream.write_all(&out).await?;
+                        out.clear();
                         continue;
                     }
-                    let _statement_activity = activity.begin_statement().await;
-                    // Cancel window: between extended messages no engine future runs; the pending flag in CancelRegistry makes a cancel received there fire on the next engine call.
-                    let token = cancel.begin_query();
-                    match handle_execute(
-                        &mut session,
-                        &portal,
-                        max_rows,
-                        token,
-                        notices.as_mut(),
-                        &mut out,
-                    )
-                    .await
-                    {
-                        Ok(Some(copy_start)) => copy_in = Some(copy_start),
-                        Ok(None) => {}
-                        Err(e) => {
-                            write_notices(&mut out, notices.as_mut());
-                            fail_extended(&mut ext, &mut out, &e);
-                        }
-                    }
-                    stream.write_all(&out).await?;
-                    out.clear();
                 }
-                FrontendMessage::Close { kind, name } => {
-                    if ext.failed {
-                        continue;
-                    }
-                    let result = match kind {
-                        b'S' => session.close(CloseTarget::Statement(&name)).await,
-                        b'P' => session.close(CloseTarget::Portal(&name)).await,
-                        _ => {
-                            let e =
-                                PgError::protocol(format!("invalid close kind {:?}", kind as char));
-                            fail_extended(&mut ext, &mut out, &e);
+                let token = cancel.begin_query();
+                let outcome = tokio::select! {
+                    // biased + cancellation-first; see handle_execute.
+                    biased;
+                    () = token.cancelled() => Err(PgError::error(
+                        sqlstate::QUERY_CANCELED,
+                        "canceling statement due to user request",
+                    )),
+                    r = session.simple_query(&sql) => r,
+                };
+                match outcome {
+                    Ok(results) => write_results(&mut out, &results),
+                    Err(e) => {
+                        backend::error_response(&mut out, &e);
+                        if e.severity == Severity::Fatal {
                             stream.write_all(&out).await?;
-                            out.clear();
-                            continue;
+                            return Ok(());
                         }
-                    };
-                    if let Err(e) = result {
+                    }
+                }
+                write_ready(&mut out, &session, notifications.as_mut());
+                stream.write_all(&out).await?;
+                out.clear();
+            }
+            FrontendMessage::Sync => {
+                if let Err(e) = session.sync().await {
+                    backend::error_response(&mut out, &e);
+                }
+                ext.failed = false;
+                write_ready(&mut out, &session, notifications.as_mut());
+                stream.write_all(&out).await?;
+                out.clear();
+            }
+            // Every arm write_all()s eagerly, so there is never pending response data; Flush has nothing to drain and TcpStream::flush is a no-op.
+            FrontendMessage::Flush => stream.flush().await?,
+            FrontendMessage::Parse {
+                name,
+                sql,
+                param_types,
+            } => {
+                if ext.failed {
+                    continue;
+                }
+                if let Err(e) = handle_parse(&mut session, name, sql, param_types, &mut out).await {
+                    fail_extended(&mut ext, &mut out, &e);
+                }
+                stream.write_all(&out).await?;
+                out.clear();
+            }
+            FrontendMessage::Bind {
+                portal,
+                statement,
+                param_formats,
+                params,
+                result_formats,
+            } => {
+                if ext.failed {
+                    continue;
+                }
+                if let Err(e) = handle_bind(
+                    &mut session,
+                    portal,
+                    &statement,
+                    &param_formats,
+                    params,
+                    &result_formats,
+                    &mut out,
+                )
+                .await
+                {
+                    fail_extended(&mut ext, &mut out, &e);
+                }
+                stream.write_all(&out).await?;
+                out.clear();
+            }
+            FrontendMessage::Describe { kind, name } => {
+                if ext.failed {
+                    continue;
+                }
+                if let Err(e) = handle_describe(&mut session, kind, &name, &mut out).await {
+                    fail_extended(&mut ext, &mut out, &e);
+                }
+                stream.write_all(&out).await?;
+                out.clear();
+            }
+            FrontendMessage::Execute { portal, max_rows } => {
+                if ext.failed {
+                    continue;
+                }
+                activity.touch();
+                // Cancel window: between extended messages no engine future runs; the pending flag in CancelRegistry makes a cancel received there fire on the next engine call.
+                let token = cancel.begin_query();
+                match handle_execute(&mut session, &portal, max_rows, token, &mut out).await {
+                    Ok(Some(copy_start)) => copy_in = Some(copy_start),
+                    Ok(None) => {}
+                    Err(e) => {
+                        if e.code == sqlstate::QUERY_CANCELED {
+                            session.mark_statement_failed();
+                        }
+                        fail_extended(&mut ext, &mut out, &e);
+                    }
+                }
+                stream.write_all(&out).await?;
+                out.clear();
+            }
+            FrontendMessage::Close { kind, name } => {
+                if ext.failed {
+                    continue;
+                }
+                let result = match kind {
+                    b'S' => session.close(CloseTarget::Statement(&name)).await,
+                    b'P' => session.close(CloseTarget::Portal(&name)).await,
+                    _ => {
+                        let e = PgError::protocol(format!("invalid close kind {:?}", kind as char));
                         fail_extended(&mut ext, &mut out, &e);
                         stream.write_all(&out).await?;
                         out.clear();
                         continue;
                     }
-                    backend::close_complete(&mut out);
+                };
+                if let Err(e) = result {
+                    fail_extended(&mut ext, &mut out, &e);
                     stream.write_all(&out).await?;
                     out.clear();
+                    continue;
                 }
-                FrontendMessage::Password(_) => {
-                    let e = PgError::protocol("unexpected password message outside authentication");
-                    backend::error_response(&mut out, &e);
-                    stream.write_all(&out).await?;
-                    return Ok(());
-                }
-                FrontendMessage::CopyData(_)
-                | FrontendMessage::CopyDone
-                | FrontendMessage::CopyFail(_) => {
-                    let e = PgError::protocol("COPY message received outside COPY mode");
-                    backend::error_response(&mut out, &e);
-                    stream.write_all(&out).await?;
-                    return Ok(());
-                }
+                backend::close_complete(&mut out);
+                stream.write_all(&out).await?;
+                out.clear();
+            }
+            FrontendMessage::Password(_) => {
+                let e = PgError::protocol("unexpected password message outside authentication");
+                backend::error_response(&mut out, &e);
+                stream.write_all(&out).await?;
+                return Ok(());
+            }
+            FrontendMessage::CopyData(_)
+            | FrontendMessage::CopyDone
+            | FrontendMessage::CopyFail(_) => {
+                let e = PgError::protocol("COPY message received outside COPY mode");
+                backend::error_response(&mut out, &e);
+                stream.write_all(&out).await?;
+                return Ok(());
             }
         }
     }
-    .await;
-    session.terminate().await;
-    outcome
 }
 
-struct WireResultSink<'a> {
-    out: &'a mut BytesMut,
-    notices: Option<&'a mut mpsc::Receiver<PgError>>,
-}
-
-#[async_trait::async_trait]
-impl ResultSink for WireResultSink<'_> {
-    async fn send(&mut self, page: ResultPage) -> Result<(), PgError> {
-        write_notices(self.out, self.notices.as_deref_mut());
-        match page {
-            ResultPage::Rows {
-                fields, rows, tag, ..
-            } => {
-                if let Some(fields) = fields {
-                    backend::row_description(self.out, &fields);
-                }
+/// Simple protocol always sends text format.
+fn write_results(out: &mut BytesMut, results: &[QueryResult]) {
+    for result in results {
+        match result {
+            QueryResult::Rows { fields, rows, tag } => {
+                backend::row_description(out, fields);
                 for row in rows {
-                    let values = row
-                        .into_iter()
-                        .map(|cell| cell.map(|cell| cell.text))
-                        .collect::<Vec<_>>();
-                    backend::data_row(self.out, &values);
+                    let values: Vec<Option<Bytes>> = row
+                        .iter()
+                        .map(|c| c.as_ref().map(|c| c.text.clone()))
+                        .collect();
+                    backend::data_row(out, &values);
                 }
-                if let Some(tag) = tag {
-                    backend::command_complete(self.out, &tag);
-                }
+                backend::command_complete(out, tag);
             }
-            ResultPage::Command { tag, .. } => backend::command_complete(self.out, &tag),
-            ResultPage::Empty { .. } => backend::empty_query_response(self.out),
+            QueryResult::Command { tag } => backend::command_complete(out, tag),
+            QueryResult::Empty => backend::empty_query_response(out),
         }
-        Ok(())
-    }
-
-    async fn send_notice(&mut self, notice: PgError) -> Result<(), PgError> {
-        backend::notice_response(self.out, &notice);
-        Ok(())
     }
 }
 

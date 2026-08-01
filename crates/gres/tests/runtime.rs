@@ -235,6 +235,8 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         tls_key: None,
         auth: Some("trust".to_string()),
         user_creds: Vec::new(),
+        pgwire_max_message_size: crabka_units::mebibytes(64),
+        pgwire_scram_iterations: crabka_pgwire::scram::DEFAULT_ITERATIONS,
         data_dir,
         substrate_bootstrap: None,
         tenant: None,

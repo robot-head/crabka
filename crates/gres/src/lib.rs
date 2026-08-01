@@ -133,6 +133,24 @@ pub struct ServeArgs {
     #[arg(long = "user-cred", value_name = "USER=PASSWORD")]
     pub user_creds: Vec<String>,
 
+    /// Maximum accepted `PostgreSQL` frontend message size.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGWIRE_MAX_MESSAGE_SIZE",
+        default_value = "64MiB",
+        value_parser = parse_positive_whole_byte_size
+    )]
+    pub pgwire_max_message_size: ByteSize,
+
+    /// SCRAM iterations for standalone `--auth scram --user-cred` verifiers.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGWIRE_SCRAM_ITERATIONS",
+        default_value_t = crabka_pgwire::scram::DEFAULT_ITERATIONS,
+        value_parser = parse_positive_u32
+    )]
+    pub pgwire_scram_iterations: u32,
+
     /// Directory for durable storage. Absent → ephemeral in-memory engine.
     #[arg(long, conflicts_with = "substrate_bootstrap")]
     pub data_dir: Option<PathBuf>,
@@ -1331,6 +1349,22 @@ fn parse_fetch_min(value: &str) -> Result<ByteSize, String> {
     let value =
         crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
     crabka_client_core::FetchMinBytes::try_from(value).map(crabka_client_core::FetchMinBytes::size)
+}
+
+fn parse_positive_whole_byte_size(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    whole_bytes_usize("byte size", value)
+        .map(|_| value)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_positive_u32(value: &str) -> Result<u32, String> {
+    use refined_type::rule::GreaterU32;
+
+    GreaterU32::<0>::new(value.parse::<u32>().map_err(|error| error.to_string())?)
+        .map(refined_type::Refined::into_value)
+        .map_err(|error| error.to_string())
 }
 
 /// Timestamp-ordering source selected by `--timestamp-source`.
@@ -8178,15 +8212,20 @@ pub fn build_session_config_from_tenant(
 ) -> std::io::Result<SessionConfig> {
     use std::io::{Error, ErrorKind};
 
-    match (args.auth.as_deref(), tenant_record) {
+    let mut config = match (args.auth.as_deref(), tenant_record) {
         (Some("trust"), _) | (None, None) => Ok(SessionConfig::trust()),
-        (Some("scram"), _) => build_scram_session_config(&args.user_creds),
+        (Some("scram"), _) => {
+            build_scram_session_config(&args.user_creds, args.pgwire_scram_iterations)
+        }
         (None, Some(record)) => build_tenant_scram_session_config(record),
         (other, _) => Err(Error::new(
             ErrorKind::InvalidInput,
             format!("unknown --auth {other:?}: expected \"trust\" or \"scram\""),
         )),
-    }
+    }?;
+    config.max_message_len =
+        whole_bytes_usize("pgwire maximum message size", args.pgwire_max_message_size)?;
+    Ok(config)
 }
 
 fn build_tenant_scram_session_config(record: &TenantRecord) -> std::io::Result<SessionConfig> {
@@ -8210,6 +8249,7 @@ fn build_tenant_scram_session_config(record: &TenantRecord) -> std::io::Result<S
         auth: AuthMode::ScramSha256 {
             verifiers,
             mock_secret,
+            mock_iterations: pg_verifier.iterations,
         },
         ..SessionConfig::trust()
     })
@@ -8225,7 +8265,10 @@ fn sha256_key_array(bytes: Vec<u8>, field: &'static str) -> std::io::Result<[u8;
     })
 }
 
-fn build_scram_session_config(user_creds: &[String]) -> std::io::Result<SessionConfig> {
+fn build_scram_session_config(
+    user_creds: &[String],
+    iterations: u32,
+) -> std::io::Result<SessionConfig> {
     use std::io::{Error, ErrorKind};
 
     if user_creds.is_empty() {
@@ -8249,7 +8292,7 @@ fn build_scram_session_config(user_creds: &[String]) -> std::io::Result<SessionC
         let salt: [u8; crabka_pgwire::scram::SALT_LEN] = rand::rng().random();
         verifiers.insert(
             user.to_string(),
-            crabka_pgwire::scram::ScramVerifier::from_password(password, salt.to_vec(), 4096),
+            crabka_pgwire::scram::ScramVerifier::from_password(password, salt.to_vec(), iterations),
         );
     }
 
@@ -8258,6 +8301,7 @@ fn build_scram_session_config(user_creds: &[String]) -> std::io::Result<SessionC
         auth: AuthMode::ScramSha256 {
             verifiers,
             mock_secret,
+            mock_iterations: iterations,
         },
         ..SessionConfig::trust()
     })
@@ -9348,6 +9392,8 @@ mod tests {
             tls_key: None,
             auth: auth.map(str::to_string),
             user_creds,
+            pgwire_max_message_size: crabka_units::mebibytes(64),
+            pgwire_scram_iterations: crabka_pgwire::scram::DEFAULT_ITERATIONS,
             data_dir: None,
             substrate_bootstrap: None,
             tenant: None,
@@ -9648,6 +9694,69 @@ mod tests {
     fn trust_auth_builds_default_session_config() {
         let config = build_session_config(&serve_args(Some("trust"), Vec::new())).expect("config");
         assert!(matches!(config.auth, AuthMode::Trust));
+        assert_eq!(config.max_message_len, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn standalone_scram_and_message_policy_reach_session_config() {
+        let mut args = serve_args(Some("scram"), vec!["alice=secret".to_owned()]);
+        args.pgwire_max_message_size = crabka_units::bytes(37);
+        args.pgwire_scram_iterations = 41;
+
+        let config = build_session_config(&args).expect("config");
+        assert_eq!(config.max_message_len, 37);
+        let AuthMode::ScramSha256 {
+            verifiers,
+            mock_iterations,
+            ..
+        } = config.auth
+        else {
+            panic!("SCRAM config")
+        };
+        assert_eq!(verifiers["alice"].iterations, 41);
+        assert_eq!(mock_iterations, 41);
+    }
+
+    #[test]
+    fn pgwire_policy_cli_is_validated_and_environment_backed() {
+        let command = <Cli as clap::CommandFactory>::command();
+        for (id, environment) in [
+            (
+                "pgwire_max_message_size",
+                "CRABKA_GRES_PGWIRE_MAX_MESSAGE_SIZE",
+            ),
+            (
+                "pgwire_scram_iterations",
+                "CRABKA_GRES_PGWIRE_SCRAM_ITERATIONS",
+            ),
+        ] {
+            let argument = command
+                .get_arguments()
+                .find(|argument| argument.get_id().as_str() == id)
+                .expect("pgwire argument");
+            assert_eq!(argument.get_env(), Some(std::ffi::OsStr::new(environment)));
+        }
+
+        let configured = Cli::try_parse_from([
+            "crabka-gres",
+            "--pgwire-max-message-size=37B",
+            "--pgwire-scram-iterations=41",
+        ])
+        .expect("configured")
+        .serve;
+        assert!(configured.pgwire_max_message_size == crabka_units::bytes(37));
+        assert_eq!(configured.pgwire_scram_iterations, 41);
+
+        for option in [
+            "--pgwire-max-message-size=0B",
+            "--pgwire-max-message-size=1.5B",
+            "--pgwire-scram-iterations=0",
+        ] {
+            assert!(
+                Cli::try_parse_from(["crabka-gres", option]).is_err(),
+                "{option}"
+            );
+        }
     }
 
     #[test]

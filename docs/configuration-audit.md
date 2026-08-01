@@ -6522,3 +6522,25 @@ All 91 demo all-target tests and workspace all-target Clippy, nightly
 formatting and diff hygiene pass. A command-metadata test proves every process
 argument has environment backing. The repository-wide hardcoded operational-
 value audit remains active.
+
+## Gres Pgwire Policy
+
+Gres now exposes the `PostgreSQL` frontend-message cap as the UOM-backed
+`--pgwire-max-message-size` / `CRABKA_GRES_PGWIRE_MAX_MESSAGE_SIZE` setting.
+Fleet deployments own the same value through
+`Gres.spec.compute.pgwireMaxMessageSize`; the operator renders it into every
+compute pod. The 64-MiB default is preserved, and external inputs reject zero,
+fractional-byte and unrepresentable values.
+
+Standalone `--auth scram --user-cred` mode now exposes its positive iteration
+count through `--pgwire-scram-iterations` and
+`CRABKA_GRES_PGWIRE_SCRAM_ITERATIONS`, preserving 4,096. Tenant-backed auth
+continues to use each stored verifier's iteration count. Unknown-user mock
+verifiers now derive the same applicable iteration policy instead of retaining
+an independent constant.
+
+The configured message cap applies to authentication and regular frontend
+messages through one `SessionConfig` field. All 107 pgwire tests, 229 Gres
+all-target tests, the complete operator all-target suite, generated-CRD parity,
+workspace all-target Clippy, nightly formatting and diff hygiene pass. The
+repository-wide hardcoded operational-value audit remains active.

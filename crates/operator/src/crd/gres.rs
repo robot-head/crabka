@@ -250,6 +250,15 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub client_frame_max: Option<ByteSize>,
 
+    /// Maximum accepted `PostgreSQL` frontend message size.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub pgwire_max_message_size: Option<ByteSize>,
+
     /// Minimum response size for FDW Kafka fetches.
     #[serde(
         default,
@@ -660,6 +669,7 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) client_dispatch_queue_capacity:
         Option<crabka_client_core::ConnectionDispatchQueueCapacity>,
     pub(crate) client_frame_max: Option<crabka_client_core::ClientFrameMax>,
+    pub(crate) pgwire_max_message_size: ByteSize,
     pub(crate) registry_reader_fetch_min: Option<crabka_client_core::FetchMinBytes>,
     pub(crate) fdw_fetch_min: Option<crabka_client_core::FetchMinBytes>,
     pub(crate) wal_recovery_fetch_min: Option<crabka_client_core::FetchMinBytes>,
@@ -733,6 +743,10 @@ impl GresComputeSpec {
             "spec.compute.durableInspectionFoldMaxSize",
             durable_inspection_fold_max_size,
         )?;
+        let pgwire_max_message_size = self
+            .pgwire_max_message_size
+            .unwrap_or_else(|| mebibytes(64));
+        whole_bytes_usize("spec.compute.pgwireMaxMessageSize", pgwire_max_message_size)?;
         let wal_frame_max_size = self.wal_frame_max_size.unwrap_or(DEFAULT_MAX_FRAME_SIZE);
         whole_bytes_usize("spec.compute.walFrameMaxSize", wal_frame_max_size)?;
         let pgkv_defaults = crabka_pgkv::FjallOptions::default();
@@ -846,6 +860,7 @@ impl GresComputeSpec {
                 .map(crabka_client_core::ClientFrameMax::try_from)
                 .transpose()
                 .map_err(|error| format!("spec.compute.clientFrameMax: {error}"))?,
+            pgwire_max_message_size,
             registry_reader_fetch_min: None,
             fdw_fetch_min: self
                 .fdw_fetch_min
@@ -2206,6 +2221,42 @@ mod tests {
         .effective_policy()
         .expect_err("zero");
         assert!(error.contains("spec.compute.walFrameMaxSize"));
+    }
+
+    #[test]
+    fn pgwire_max_message_size_has_default_override_schema_and_validation() {
+        assert!(
+            GresComputeSpec::default()
+                .effective_policy()
+                .expect("defaults")
+                .pgwire_max_message_size
+                == mebibytes(64)
+        );
+        let spec = GresComputeSpec {
+            pgwire_max_message_size: Some(crabka_units::bytes(37)),
+            ..Default::default()
+        };
+        assert!(
+            spec.effective_policy()
+                .expect("override")
+                .pgwire_max_message_size
+                == crabka_units::bytes(37)
+        );
+        let json = serde_json::to_value(&spec).expect("serialize");
+        assert!(json["pgwireMaxMessageSize"] == "37B");
+        let crd = serde_json::to_value(Gres::crd()).expect("CRD");
+        assert!(
+            crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
+                ["compute"]["properties"]["pgwireMaxMessageSize"]["type"]
+                == "string"
+        );
+        let error = GresComputeSpec {
+            pgwire_max_message_size: Some(ByteSize::ZERO),
+            ..Default::default()
+        }
+        .effective_policy()
+        .expect_err("zero");
+        assert!(error.contains("spec.compute.pgwireMaxMessageSize"));
     }
 
     #[test]

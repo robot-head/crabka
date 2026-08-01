@@ -247,6 +247,10 @@ spec:
                     minimum: 1.0
                     nullable: true
                     type: integer
+                  pgwireMaxMessageSize:
+                    description: Maximum accepted `PostgreSQL` frontend message size.
+                    nullable: true
+                    type: string
                   range0BarrierReplyBudget:
                     description: Whole-reply budget for range-0 barriers.
                     nullable: true

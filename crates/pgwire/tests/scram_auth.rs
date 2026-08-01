@@ -26,6 +26,7 @@ fn scram_config() -> SessionConfig {
         auth: AuthMode::ScramSha256 {
             verifiers,
             mock_secret: [42u8; 32],
+            mock_iterations: crabka_pgwire::scram::DEFAULT_ITERATIONS,
         },
         ..SessionConfig::trust()
     }

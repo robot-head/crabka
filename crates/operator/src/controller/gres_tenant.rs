@@ -2228,6 +2228,10 @@ fn render_deployment(
             format!("{}B", value.bytes()),
         ]);
     }
+    args.extend([
+        "--pgwire-max-message-size".to_owned(),
+        compute_policy.pgwire_max_message_size.human().to_string(),
+    ]);
     if let Some(value) = compute_policy.registry_reader_fetch_min {
         args.extend([
             "--registry-reader-fetch-min".to_owned(),
@@ -3222,6 +3226,7 @@ mod tests {
         let mut configured = crate::crd::gres::GresComputeSpec {
             client_dispatch_queue_capacity: Some(7),
             client_frame_max: Some(crabka_units::kibibytes(32)),
+            pgwire_max_message_size: Some(crabka_units::bytes(37)),
             fdw_fetch_min: Some(crabka_units::bytes(2)),
             wal_recovery_fetch_min: Some(crabka_units::bytes(3)),
             ..crate::crd::gres::GresComputeSpec::default()
@@ -3261,6 +3266,7 @@ mod tests {
             for pair in [
                 ["--client-dispatch-queue-capacity", "7"],
                 ["--client-frame-max", "32768B"],
+                ["--pgwire-max-message-size", "37B"],
                 ["--registry-reader-fetch-min", "4B"],
                 ["--fdw-fetch-min", "2B"],
                 ["--wal-recovery-fetch-min", "3B"],
@@ -3299,6 +3305,11 @@ mod tests {
             .args
             .clone()
             .unwrap();
+        assert!(
+            args.windows(2)
+                .any(|window| window == ["--pgwire-max-message-size", "64MiB"]),
+            "got: {args:?}"
+        );
         for absent in [
             "--client-dispatch-queue-capacity",
             "--client-frame-max",
