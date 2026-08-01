@@ -38,9 +38,6 @@ use crate::{
     workload::{self, WorkloadOutcome},
 };
 
-/// Interval between `/proc` resource samples.
-const SAMPLE_INTERVAL: Time = secs(1);
-
 /// Mode string recorded in external-mode reports; the crabka
 /// timestamp-source modes do not apply to an external system.
 pub const EXTERNAL_MODE: &str = "external";
@@ -169,7 +166,13 @@ pub async fn run_scenario(config: RunConfig) -> anyhow::Result<RunReport> {
     drop(work_dir);
 
     let report = assemble_report(&scenario, &mode.to_string(), driven);
-    write_reports(&report, &config.out_dir, &scenario.name, &mode_slug(mode))?;
+    write_reports(
+        &report,
+        &config.out_dir,
+        &scenario.name,
+        &mode_slug(mode),
+        config.runtime_policy,
+    )?;
     Ok(report)
 }
 
@@ -265,7 +268,7 @@ pub async fn run_external_scenario(config: ExternalRunConfig) -> anyhow::Result<
     for process in processes {
         roster.push(process);
     }
-    let sampler = ProcSampler::spawn(roster, SAMPLE_INTERVAL);
+    let sampler = ProcSampler::spawn(roster, runtime_policy.sample_interval);
     let started_unix_ms = window_start_unix_ms(SystemTime::now(), scenario.workload.warmup);
     let outcome = workload::run_with_policy(
         &endpoints,
@@ -286,7 +289,13 @@ pub async fn run_external_scenario(config: ExternalRunConfig) -> anyhow::Result<
             faults: Vec::new(),
         },
     );
-    write_reports(&report, &out_dir, &scenario.name, EXTERNAL_MODE)?;
+    write_reports(
+        &report,
+        &out_dir,
+        &scenario.name,
+        EXTERNAL_MODE,
+        runtime_policy,
+    )?;
     Ok(report)
 }
 
@@ -296,12 +305,16 @@ fn write_reports(
     out_dir: &Path,
     scenario: &str,
     slug: &str,
+    policy: LoadtestRuntimePolicy,
 ) -> anyhow::Result<()> {
     let paths = report_paths(out_dir, scenario, slug);
     let json = serde_json::to_string_pretty(report).context("serialize report JSON")?;
     std::fs::write(&paths.json, json).with_context(|| format!("write {}", paths.json.display()))?;
-    std::fs::write(&paths.markdown, report::render_markdown(report))
-        .with_context(|| format!("write {}", paths.markdown.display()))?;
+    std::fs::write(
+        &paths.markdown,
+        report::render_markdown_with_policy(report, policy),
+    )
+    .with_context(|| format!("write {}", paths.markdown.display()))?;
     tracing::info!(
         json = %paths.json.display(),
         markdown = %paths.markdown.display(),
@@ -399,7 +412,7 @@ async fn drive(
         .collect();
     // The live roster (not a one-shot process list) lets the sampler attach
     // nodes restarted by kill_node faults mid-window under `label#N` entries.
-    let sampler = ProcSampler::spawn(cluster.process_roster(), SAMPLE_INTERVAL);
+    let sampler = ProcSampler::spawn(cluster.process_roster(), policy.sample_interval);
 
     // The fault schedule anchors at the measurement-window start, one warmup
     // from now. This is an approximation: the workload starts its warmup a

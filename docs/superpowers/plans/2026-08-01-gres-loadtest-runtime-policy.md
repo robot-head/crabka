@@ -34,10 +34,10 @@ dimensioned value and `refined_type`-validated newtypes for positive counts.
 
 ### Task 4: Sampling and reports
 
-- [ ] Thread the resource sampling interval through internal and external runs.
-- [ ] Thread fault-window, timeline-cap, and deviation policy through rendering.
-- [ ] Preserve default report-rendering entry points.
-- [ ] Run focused runner/report tests and strict Clippy; commit.
+- [x] Thread the resource sampling interval through internal and external runs.
+- [x] Thread fault-window, timeline-cap, and deviation policy through rendering.
+- [x] Preserve default report-rendering entry points.
+- [x] Run focused runner/report tests and strict Clippy; commit.
 
 ### Task 5: Closure
 
