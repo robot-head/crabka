@@ -51,11 +51,11 @@
 //! under [`RateSpec::Saturate`]. Connection loss triggers
 //! reconnect-with-backoff forever (faults are expected to kill links
 //! mid-run), and a per-operation timeout turns a blackholed link into an
-//! `unavailable` count instead of a hung worker. After `warmup_s` of
-//! unrecorded load, a `duration_s` window records per-class HDR histograms
-//! (1µs..60s, 3 significant figures), commit/failure counters, the error
-//! taxonomy, and a per-second timeline; in-flight operations get a short
-//! grace period to finish before workers are aborted.
+//! `unavailable` count instead of a hung worker. After the workload's
+//! `warmup` of unrecorded load, its `duration` window records per-class HDR
+//! histograms (1µs..60s, 3 significant figures), commit/failure counters,
+//! the error taxonomy, and a per-second timeline; in-flight operations get a
+//! short grace period to finish before workers are aborted.
 
 use std::{
     collections::BTreeMap,
@@ -66,10 +66,10 @@ use std::{
         Arc, Mutex, PoisonError,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
 };
 
 use anyhow::Context as _;
+use crabka_units::{fmt::Human as _, prelude::*};
 use futures::future;
 use hdrhistogram::Histogram;
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
@@ -78,6 +78,7 @@ use tokio_postgres::{Client, NoTls, error::SqlState};
 
 use crate::{
     cluster::SqlEndpoint,
+    config::LoadtestRuntimePolicy,
     report::{ErrorSummary, LatencySummary, SecondSample},
     scenario::{MixSpec, RateSpec, TopologySpec, WorkloadSpec},
 };
@@ -93,24 +94,6 @@ const WORKER_COUNTER_SPAN: u64 = 1_000_000;
 /// Worker ids wrap at this bound so `worker * WORKER_ID_SPAN + counter`
 /// stays within `int4`.
 const WORKER_SLOTS: u32 = 2_000;
-/// Rows covered by one read-only slice predicate.
-const READ_SLICE_ROWS: i64 = 1_024;
-/// Rows per multi-row `INSERT` while seeding the hot table.
-const SEED_BATCH_ROWS: u32 = 500;
-/// Serialization-failure retries before an operation counts as failed.
-const MAX_SERIALIZATION_RETRIES: u32 = 5;
-/// Per-operation timeout; a blackholed link becomes `unavailable`.
-const OP_TIMEOUT: Duration = Duration::from_secs(30);
-/// Timeout for a single connection attempt.
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// Total budget for the schema-preparation connection.
-const STARTUP_DEADLINE: Duration = Duration::from_secs(30);
-/// How long in-flight operations may finish after the window closes.
-const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
-/// First reconnect backoff step (doubles up to [`RECONNECT_BACKOFF_MAX`]).
-const RECONNECT_BACKOFF_MIN: Duration = Duration::from_millis(100);
-/// Reconnect backoff cap.
-const RECONNECT_BACKOFF_MAX: Duration = Duration::from_secs(2);
 
 /// Operation classes the driver issues.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -159,8 +142,8 @@ pub struct WorkloadOutcome {
     pub timeline: Vec<SecondSample>,
     /// Error taxonomy totals.
     pub errors: ErrorSummary,
-    /// Actual measured wall-clock seconds.
-    pub measured_wall_s: f64,
+    /// Actual measured wall-clock extent.
+    pub measured_wall: Time,
 }
 
 /// Creates the workload schema and seed rows through one node.
@@ -177,8 +160,27 @@ pub async fn prepare_schema(
     workload: &WorkloadSpec,
     topology: &TopologySpec,
 ) -> anyhow::Result<()> {
-    let client = connect_with_retry(endpoint).await?;
-    for statement in schema_statements(topology.ranges, workload.hot_rows) {
+    prepare_schema_with_policy(
+        endpoint,
+        workload,
+        topology,
+        LoadtestRuntimePolicy::default(),
+    )
+    .await
+}
+
+/// Creates schema with explicit harness policy.
+///
+/// # Errors
+/// Returns an error if connecting or any DDL/seed statement fails.
+pub async fn prepare_schema_with_policy(
+    endpoint: &SqlEndpoint,
+    workload: &WorkloadSpec,
+    topology: &TopologySpec,
+    policy: LoadtestRuntimePolicy,
+) -> anyhow::Result<()> {
+    let client = connect_with_retry(endpoint, policy).await?;
+    for statement in schema_statements_with_policy(topology.ranges, workload.hot_rows, policy) {
         client
             .simple_query(&statement)
             .await
@@ -193,7 +195,16 @@ pub async fn prepare_schema(
 /// at a time — each in its own implicit transaction — because external
 /// targets (`run --external`) may not accept DDL inside a multi-statement
 /// batch.
+#[cfg(test)]
 fn schema_statements(ranges: u16, hot_rows: u32) -> Vec<String> {
+    schema_statements_with_policy(ranges, hot_rows, LoadtestRuntimePolicy::default())
+}
+
+fn schema_statements_with_policy(
+    ranges: u16,
+    hot_rows: u32,
+    policy: LoadtestRuntimePolicy,
+) -> Vec<String> {
     let mut statements = Vec::new();
     for range in 0..ranges {
         let table_id = range_table_id(range);
@@ -203,7 +214,7 @@ fn schema_statements(ranges: u16, hot_rows: u32) -> Vec<String> {
     let hot_id = hot_table_id(ranges);
     statements.push(format!("DROP TABLE IF EXISTS t{hot_id}"));
     statements.push(format!("CREATE TABLE t{hot_id} (id int4, v int4)"));
-    statements.extend(seed_statements(hot_id, hot_rows));
+    statements.extend(seed_statements_with_policy(hot_id, hot_rows, policy));
     statements
 }
 
@@ -220,8 +231,27 @@ pub async fn run(
     workload: &WorkloadSpec,
     topology: &TopologySpec,
 ) -> anyhow::Result<WorkloadOutcome> {
+    run_with_policy(
+        endpoints,
+        workload,
+        topology,
+        LoadtestRuntimePolicy::default(),
+    )
+    .await
+}
+
+/// Runs a workload with explicit harness policy.
+///
+/// # Errors
+/// Returns an error when no SQL endpoints are available.
+pub async fn run_with_policy(
+    endpoints: &[SqlEndpoint],
+    workload: &WorkloadSpec,
+    topology: &TopologySpec,
+    policy: LoadtestRuntimePolicy,
+) -> anyhow::Result<WorkloadOutcome> {
     anyhow::ensure!(!endpoints.is_empty(), "no SQL endpoints to drive");
-    let context = Arc::new(build_context(workload, topology));
+    let context = Arc::new(build_context(workload, topology, policy));
     let (stop_tx, stop_rx) = watch::channel(false);
     let handles: Vec<_> = (0..workload.connections)
         .map(|worker| {
@@ -229,35 +259,35 @@ pub async fn run(
             tokio::spawn(worker_loop(
                 Arc::clone(&context),
                 worker,
-                ConnectionSlot::new(endpoint),
+                ConnectionSlot::new(endpoint, policy),
                 stop_rx.clone(),
             ))
         })
         .collect();
     drop(stop_rx);
 
-    tokio::time::sleep(Duration::from_secs(workload.warmup_s)).await;
+    tokio::time::sleep(workload.warmup.to_std()).await;
     context.stats.recording.store(true, Ordering::SeqCst);
     let window_start = Instant::now();
     let mut timeline = Vec::new();
-    for t_s in 0..workload.duration_s {
-        tokio::time::sleep_until(window_start + Duration::from_secs(t_s + 1)).await;
+    for elapsed_secs in 0..workload.duration.secs_i64().max(0) {
+        tokio::time::sleep_until(window_start + Time::from_secs(elapsed_secs + 1).to_std()).await;
         let accum = context.stats.drain_second();
         timeline.push(SecondSample {
-            t_s,
+            t: Time::from_secs(elapsed_secs),
             committed: accum.committed,
             errors: accum.errors,
-            mean_latency_ms: mean_latency(&accum),
+            mean_latency: mean_latency(&accum),
         });
     }
-    let measured_wall_s = window_start.elapsed().as_secs_f64();
+    let measured_wall = window_start.elapsed().as_time();
 
     let _ = stop_tx.send(true);
     let abort_handles: Vec<_> = handles
         .iter()
         .map(tokio::task::JoinHandle::abort_handle)
         .collect();
-    if tokio::time::timeout(SHUTDOWN_GRACE, future::join_all(handles))
+    if tokio::time::timeout(policy.shutdown_grace.to_std(), future::join_all(handles))
         .await
         .is_err()
     {
@@ -266,7 +296,7 @@ pub async fn run(
         }
     }
     context.stats.recording.store(false, Ordering::SeqCst);
-    Ok(build_outcome(&context.stats, measured_wall_s, timeline))
+    Ok(build_outcome(&context.stats, measured_wall, timeline))
 }
 
 /// Table layout the operations target.
@@ -288,9 +318,14 @@ struct WorkerContext {
     zipf: ZipfSampler,
     bucket: Option<TokenBucket>,
     stats: Stats,
+    policy: LoadtestRuntimePolicy,
 }
 
-fn build_context(workload: &WorkloadSpec, topology: &TopologySpec) -> WorkerContext {
+fn build_context(
+    workload: &WorkloadSpec,
+    topology: &TopologySpec,
+    policy: LoadtestRuntimePolicy,
+) -> WorkerContext {
     WorkerContext {
         layout: TableLayout {
             ranges: topology.ranges,
@@ -302,9 +337,12 @@ fn build_context(workload: &WorkloadSpec, topology: &TopologySpec) -> WorkerCont
         zipf: ZipfSampler::new(workload.hot_rows.max(1), workload.zipf_exponent),
         bucket: match workload.rate {
             RateSpec::Saturate => None,
-            RateSpec::Fixed { tps } => Some(TokenBucket::new(tps)),
+            RateSpec::Fixed { target_rate } => {
+                Some(TokenBucket::new_with_policy(target_rate, policy))
+            }
         },
-        stats: Stats::new(),
+        stats: Stats::new(policy),
+        policy,
     }
 }
 
@@ -336,11 +374,21 @@ fn insert_id(worker: u32, counter: u64) -> i64 {
 }
 
 /// Batched multi-row seed `INSERT`s for the hot table.
+#[cfg(test)]
 fn seed_statements(table_id: i64, hot_rows: u32) -> Vec<String> {
+    seed_statements_with_policy(table_id, hot_rows, LoadtestRuntimePolicy::default())
+}
+
+fn seed_statements_with_policy(
+    table_id: i64,
+    hot_rows: u32,
+    policy: LoadtestRuntimePolicy,
+) -> Vec<String> {
     let mut statements = Vec::new();
     let mut row = 1_u32;
     while row <= hot_rows {
-        let end = row.saturating_add(SEED_BATCH_ROWS - 1).min(hot_rows);
+        let batch = u32::try_from(policy.seed_batch_rows.get()).expect("validated seed batch");
+        let end = row.saturating_add(batch - 1).min(hot_rows);
         let values: Vec<String> = (row..=end).map(|id| format!("({id}, 0)")).collect();
         statements.push(format!(
             "INSERT INTO t{table_id} VALUES {}",
@@ -361,6 +409,7 @@ enum OpPlan {
 }
 
 /// Builds the SQL for one operation of `class`.
+#[cfg(test)]
 fn build_plan(
     class: OpClass,
     layout: &TableLayout,
@@ -368,6 +417,26 @@ fn build_plan(
     counter: u64,
     zipf: &ZipfSampler,
     rng: &mut SmallRng,
+) -> OpPlan {
+    build_plan_with_policy(
+        class,
+        layout,
+        worker,
+        counter,
+        zipf,
+        rng,
+        LoadtestRuntimePolicy::default(),
+    )
+}
+
+fn build_plan_with_policy(
+    class: OpClass,
+    layout: &TableLayout,
+    worker: u32,
+    counter: u64,
+    zipf: &ZipfSampler,
+    rng: &mut SmallRng,
+    policy: LoadtestRuntimePolicy,
 ) -> OpPlan {
     match class {
         OpClass::CrossShardTxn if layout.ranges > 1 => {
@@ -390,7 +459,8 @@ fn build_plan(
             let table_id = range_table_id(rng.random_range(0..layout.ranges));
             let span = i64::from(layout.connections.min(WORKER_SLOTS)) * WORKER_ID_SPAN;
             let low = rng.random_range(0..span.max(1));
-            let high = low + READ_SLICE_ROWS;
+            let high =
+                low + i64::try_from(policy.read_slice_rows.get()).expect("validated read slice");
             OpPlan::Statement(format!(
                 "SELECT count(*) FROM t{table_id} WHERE id >= {low} AND id < {high}"
             ))
@@ -515,11 +585,17 @@ impl ZipfSampler {
 
 /// Continuously-refilled token bucket shared by all workers; capacity is one
 /// second of tokens, starting empty.
+///
+/// Tokens are dimensionless permits, so the refill is the [`Ratio`] of a
+/// measured extent to the bucket's rate and the wait is the deficit divided
+/// by that same rate — both checked by the compiler rather than by a
+/// hand-written seconds multiply.
 #[derive(Debug)]
 struct TokenBucket {
     state: Mutex<BucketState>,
-    rate_per_s: f64,
+    rate: Frequency,
     capacity: f64,
+    min_wait: Time,
 }
 
 #[derive(Debug)]
@@ -529,15 +605,21 @@ struct BucketState {
 }
 
 impl TokenBucket {
-    fn new(tps: u32) -> Self {
-        let rate_per_s = f64::from(tps.max(1));
+    #[cfg(test)]
+    fn new(target_rate: Frequency) -> Self {
+        Self::new_with_policy(target_rate, LoadtestRuntimePolicy::default())
+    }
+
+    fn new_with_policy(target_rate: Frequency, policy: LoadtestRuntimePolicy) -> Self {
+        let rate = target_rate.max(per_sec(1));
         Self {
             state: Mutex::new(BucketState {
                 tokens: 0.0,
                 last_refill: Instant::now(),
             }),
-            rate_per_s,
-            capacity: rate_per_s,
+            rate,
+            capacity: rate.per_sec_f64(),
+            min_wait: policy.min_pacing_wait,
         }
     }
 
@@ -546,32 +628,45 @@ impl TokenBucket {
             let wait = {
                 let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
                 let now = Instant::now();
-                let elapsed = now.duration_since(state.last_refill).as_secs_f64();
+                let elapsed = now.duration_since(state.last_refill).as_time();
                 state.last_refill = now;
-                state.tokens = (state.tokens + elapsed * self.rate_per_s).min(self.capacity);
+                let earned: Ratio = elapsed * self.rate;
+                state.tokens = (state.tokens + earned.as_f64()).min(self.capacity);
                 if state.tokens >= 1.0 {
                     state.tokens -= 1.0;
                     None
                 } else {
-                    let seconds = ((1.0 - state.tokens) / self.rate_per_s).max(0.000_5);
-                    Some(Duration::from_secs_f64(seconds))
+                    let deficit: Ratio = fraction(1.0 - state.tokens);
+                    let wait: Time = deficit / self.rate;
+                    Some(wait.max(self.min_wait))
                 }
             };
             match wait {
                 None => return,
-                Some(duration) => tokio::time::sleep(duration).await,
+                Some(wait) => tokio::time::sleep(wait.to_std()).await,
             }
         }
     }
 }
 
 /// One second of accumulated progress for the timeline.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct SecondAccum {
     committed: u64,
     errors: u64,
-    latency_sum_ms: f64,
+    latency_sum: Time,
     completions: u64,
+}
+
+impl Default for SecondAccum {
+    fn default() -> Self {
+        Self {
+            committed: 0,
+            errors: 0,
+            latency_sum: Time::ZERO,
+            completions: 0,
+        }
+    }
 }
 
 /// Shared measurement state; every mutation is gated on `recording`.
@@ -588,7 +683,7 @@ struct Stats {
 }
 
 impl Stats {
-    fn new() -> Self {
+    fn new(policy: LoadtestRuntimePolicy) -> Self {
         Self {
             recording: AtomicBool::new(false),
             committed: AtomicU64::new(0),
@@ -597,7 +692,7 @@ impl Stats {
             unavailable: AtomicU64::new(0),
             connection_errors: AtomicU64::new(0),
             other: AtomicU64::new(0),
-            histograms: std::array::from_fn(|_| Mutex::new(new_histogram())),
+            histograms: std::array::from_fn(|_| Mutex::new(new_histogram_with_policy(policy))),
             second: Mutex::new(SecondAccum::default()),
         }
     }
@@ -606,17 +701,16 @@ impl Stats {
         self.recording.load(Ordering::Relaxed)
     }
 
-    fn record_commit(&self, class: OpClass, elapsed: Duration) {
+    fn record_commit(&self, class: OpClass, elapsed: Time) {
         if !self.recording() {
             return;
         }
         self.committed.fetch_add(1, Ordering::Relaxed);
-        let us = u64::try_from(elapsed.as_micros()).unwrap_or(u64::MAX);
-        record_us(&mut lock(&self.histograms[class_index(class)]), us);
+        record_latency(&mut lock(&self.histograms[class_index(class)]), elapsed);
         let mut second = lock(&self.second);
         second.committed += 1;
         second.completions += 1;
-        second.latency_sum_ms += us_to_ms(us);
+        second.latency_sum += elapsed;
     }
 
     /// A transaction that ultimately failed.
@@ -660,7 +754,7 @@ impl Stats {
 
 impl Default for Stats {
     fn default() -> Self {
-        Self::new()
+        Self::new(LoadtestRuntimePolicy::default())
     }
 }
 
@@ -678,20 +772,38 @@ fn class_index(class: OpClass) -> usize {
 }
 
 /// HDR histogram with the workspace-standard latency bounds
-/// (see `crates/bench-driver/src/hist.rs`).
+/// (see `crates/bench-driver/src/hist.rs`). The recorder counts whole
+/// microseconds, which is the unit the bounds convert into.
+#[cfg(test)]
 fn new_histogram() -> Histogram<u64> {
-    Histogram::new_with_bounds(1, 60_000_000, 3).expect("histogram bounds are valid")
+    new_histogram_with_policy(LoadtestRuntimePolicy::default())
 }
 
-/// Records one latency sample in microseconds, clamped into range so a
+fn new_histogram_with_policy(policy: LoadtestRuntimePolicy) -> Histogram<u64> {
+    Histogram::new_with_bounds(
+        histogram_micros(policy.histogram_min),
+        histogram_micros(policy.histogram_max),
+        3,
+    )
+    .expect("histogram bounds are valid")
+}
+
+/// A histogram bound as the whole microseconds `hdrhistogram` counts in.
+fn histogram_micros(bound: Time) -> u64 {
+    u64::try_from(bound.micros_i64()).unwrap_or(u64::MAX).max(1)
+}
+
+/// Records one latency sample, clamped into the histogram's range so a
 /// single outlier cannot blow up the recorder.
-fn record_us(histogram: &mut Histogram<u64>, us: u64) {
-    let value = us.clamp(1, histogram.high());
+fn record_latency(histogram: &mut Histogram<u64>, latency: Time) {
+    let value = histogram_micros(latency).clamp(histogram.low(), histogram.high());
     let _ = histogram.record(value);
 }
 
-fn us_to_ms(us: u64) -> f64 {
-    f64::from(u32::try_from(us).unwrap_or(u32::MAX)) / 1000.0
+/// A histogram reading, which `hdrhistogram` reports in the microseconds it
+/// was fed, as a latency.
+fn micros_reading(micros_count: f64) -> Time {
+    micros(1) * micros_count
 }
 
 fn count_to_f64(count: u64) -> f64 {
@@ -699,28 +811,25 @@ fn count_to_f64(count: u64) -> f64 {
 }
 
 fn summarize(histogram: &Histogram<u64>) -> LatencySummary {
+    let quantile = |q: f64| micros_reading(count_to_f64(histogram.value_at_quantile(q)));
     LatencySummary {
         count: histogram.len(),
-        mean_ms: histogram.mean() / 1000.0,
-        p50_ms: us_to_ms(histogram.value_at_quantile(0.50)),
-        p95_ms: us_to_ms(histogram.value_at_quantile(0.95)),
-        p99_ms: us_to_ms(histogram.value_at_quantile(0.99)),
-        p999_ms: us_to_ms(histogram.value_at_quantile(0.999)),
-        max_ms: us_to_ms(histogram.max()),
+        mean: micros_reading(histogram.mean()),
+        p50: quantile(0.50),
+        p95: quantile(0.95),
+        p99: quantile(0.99),
+        p999: quantile(0.999),
+        max: micros_reading(count_to_f64(histogram.max())),
     }
 }
 
-fn mean_latency(accum: &SecondAccum) -> Option<f64> {
-    if accum.completions == 0 {
-        None
-    } else {
-        Some(accum.latency_sum_ms / count_to_f64(accum.completions))
-    }
+fn mean_latency(accum: &SecondAccum) -> Option<Time> {
+    (accum.completions > 0).then(|| accum.latency_sum / count_to_f64(accum.completions))
 }
 
 fn build_outcome(
     stats: &Stats,
-    measured_wall_s: f64,
+    measured_wall: Time,
     timeline: Vec<SecondSample>,
 ) -> WorkloadOutcome {
     let mut latency_by_class = BTreeMap::new();
@@ -741,7 +850,7 @@ fn build_outcome(
             connection_errors: stats.connection_errors.load(Ordering::Relaxed),
             other: stats.other.load(Ordering::Relaxed),
         },
-        measured_wall_s,
+        measured_wall,
     }
 }
 
@@ -761,22 +870,26 @@ async fn connect(endpoint: &SqlEndpoint) -> Result<Client, tokio_postgres::Error
     Ok(client)
 }
 
-/// Connects to one endpoint, retrying until [`STARTUP_DEADLINE`].
-async fn connect_with_retry(endpoint: &SqlEndpoint) -> anyhow::Result<Client> {
-    let deadline = Instant::now() + STARTUP_DEADLINE;
+/// Connects to one endpoint, retrying within the configured startup budget.
+async fn connect_with_retry(
+    endpoint: &SqlEndpoint,
+    policy: LoadtestRuntimePolicy,
+) -> anyhow::Result<Client> {
+    let deadline = Instant::now() + policy.startup_deadline.to_std();
     loop {
-        let last_error = match tokio::time::timeout(CONNECT_TIMEOUT, connect(endpoint)).await {
-            Ok(Ok(client)) => return Ok(client),
-            Ok(Err(error)) => error.to_string(),
-            Err(_) => "connect timed out".to_owned(),
-        };
+        let last_error =
+            match tokio::time::timeout(policy.connect_timeout.to_std(), connect(endpoint)).await {
+                Ok(Ok(client)) => return Ok(client),
+                Ok(Err(error)) => error.to_string(),
+                Err(_) => "connect timed out".to_owned(),
+            };
         anyhow::ensure!(
             Instant::now() < deadline,
-            "endpoint {} did not accept a connection within {STARTUP_DEADLINE:?} \
-             (last error: {last_error})",
-            endpoint.addr
+            "endpoint {} did not accept a connection within {} (last error: {last_error})",
+            endpoint.addr,
+            policy.startup_deadline.human()
         );
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(policy.startup_retry_delay.to_std()).await;
     }
 }
 
@@ -784,15 +897,17 @@ async fn connect_with_retry(endpoint: &SqlEndpoint) -> anyhow::Result<Client> {
 struct ConnectionSlot {
     endpoint: SqlEndpoint,
     client: Option<Client>,
-    backoff: Duration,
+    backoff: Time,
+    policy: LoadtestRuntimePolicy,
 }
 
 impl ConnectionSlot {
-    fn new(endpoint: SqlEndpoint) -> Self {
+    fn new(endpoint: SqlEndpoint, policy: LoadtestRuntimePolicy) -> Self {
         Self {
             endpoint,
             client: None,
-            backoff: RECONNECT_BACKOFF_MIN,
+            backoff: policy.reconnect_backoff_min,
+            policy,
         }
     }
 
@@ -807,9 +922,14 @@ impl ConnectionSlot {
         stop: &mut watch::Receiver<bool>,
     ) -> Option<&Client> {
         if self.client.is_none() {
-            match tokio::time::timeout(CONNECT_TIMEOUT, connect(&self.endpoint)).await {
+            match tokio::time::timeout(
+                self.policy.connect_timeout.to_std(),
+                connect(&self.endpoint),
+            )
+            .await
+            {
                 Ok(Ok(client)) => {
-                    self.backoff = RECONNECT_BACKOFF_MIN;
+                    self.backoff = self.policy.reconnect_backoff_min;
                     self.client = Some(client);
                 }
                 Ok(Err(error)) => {
@@ -840,7 +960,7 @@ impl ConnectionSlot {
 
     async fn backoff_sleep(&mut self, stop: &mut watch::Receiver<bool>) {
         sleep_with_stop(self.backoff, stop).await;
-        self.backoff = (self.backoff * 2).min(RECONNECT_BACKOFF_MAX);
+        self.backoff = (self.backoff * 2.0).min(self.policy.reconnect_backoff_max);
     }
 
     fn drop_client(&mut self) {
@@ -867,13 +987,14 @@ async fn worker_loop(
         }
         let class = pick_class(&context.mix, rng.random_range(0..context.total_weight));
         counter += 1;
-        let plan = build_plan(
+        let plan = build_plan_with_policy(
             class,
             &context.layout,
             worker,
             counter,
             &context.zipf,
             &mut rng,
+            context.policy,
         );
         let Some(client) = slot
             .ensure_connected(worker, &context.stats, &mut stop)
@@ -882,8 +1003,10 @@ async fn worker_loop(
             continue;
         };
         let started = Instant::now();
-        match run_op(client, &plan, &context.stats, &mut rng).await {
-            OpResult::Committed => context.stats.record_commit(class, started.elapsed()),
+        match run_op(client, &plan, &context.stats, &mut rng, context.policy).await {
+            OpResult::Committed => context
+                .stats
+                .record_commit(class, started.elapsed().as_time()),
             OpResult::Failed { kind, reconnect } => {
                 context.stats.record_failure(kind);
                 if reconnect {
@@ -902,10 +1025,21 @@ enum OpResult {
 }
 
 /// Executes one plan with the per-op timeout and serialization retries.
-async fn run_op(client: &Client, plan: &OpPlan, stats: &Stats, rng: &mut SmallRng) -> OpResult {
+async fn run_op(
+    client: &Client,
+    plan: &OpPlan,
+    stats: &Stats,
+    rng: &mut SmallRng,
+    policy: LoadtestRuntimePolicy,
+) -> OpResult {
     let mut retries = 0_u32;
     loop {
-        match tokio::time::timeout(OP_TIMEOUT, execute_plan(client, plan)).await {
+        match tokio::time::timeout(
+            policy.operation_timeout.to_std(),
+            execute_plan(client, plan),
+        )
+        .await
+        {
             Ok(Ok(())) => return OpResult::Committed,
             Ok(Err(error)) => {
                 let kind = classify(&error);
@@ -915,11 +1049,15 @@ async fn run_op(client: &Client, plan: &OpPlan, stats: &Stats, rng: &mut SmallRn
                 };
                 tracing::debug!(?kind, %error, code, detail, "operation failed");
                 match kind {
-                    FailureKind::Serialization if retries < MAX_SERIALIZATION_RETRIES => {
+                    FailureKind::Serialization
+                        if retries
+                            < u32::try_from(policy.max_serialization_retries.get())
+                                .expect("validated serialization retries") =>
+                    {
                         retries += 1;
                         stats.record_serialization_retry();
-                        let jitter_ms = u64::from(retries) * 2 + rng.random_range(0..3);
-                        tokio::time::sleep(Duration::from_millis(jitter_ms)).await;
+                        let backoff = millis(retries * 2 + rng.random_range(0..3_u32));
+                        tokio::time::sleep(backoff.to_std()).await;
                     }
                     FailureKind::Serialization => {
                         return OpResult::Failed {
@@ -972,9 +1110,9 @@ async fn execute_plan(client: &Client, plan: &OpPlan) -> Result<(), tokio_postgr
     }
 }
 
-async fn sleep_with_stop(duration: Duration, stop: &mut watch::Receiver<bool>) {
+async fn sleep_with_stop(delay: Time, stop: &mut watch::Receiver<bool>) {
     tokio::select! {
-        () = tokio::time::sleep(duration) => {}
+        () = tokio::time::sleep(delay.to_std()) => {}
         _ = stop.changed() => {}
     }
 }
@@ -984,6 +1122,21 @@ mod tests {
     use assert2::{assert, check};
 
     use super::*;
+
+    #[test]
+    fn explicit_policy_controls_seed_read_and_histogram_limits() {
+        let policy = LoadtestRuntimePolicy {
+            seed_batch_rows: crate::config::PositiveUsize::new(2).expect("batch"),
+            read_slice_rows: crate::config::PositiveUsize::new(7).expect("slice"),
+            histogram_min: millis(2),
+            histogram_max: millis(9),
+            ..Default::default()
+        };
+        assert2::assert!(seed_statements_with_policy(1, 5, policy).len() == 3);
+        let histogram = new_histogram_with_policy(policy);
+        assert2::assert!(histogram.low() == 2_000);
+        assert2::assert!(histogram.high() >= 9_000);
+    }
 
     fn rank_counts(sampler: &ZipfSampler, ranks: u32, draws: u32, seed: u64) -> Vec<u32> {
         let mut rng = SmallRng::seed_from_u64(seed);
@@ -1088,7 +1241,7 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn token_bucket_grants_about_rate_per_virtual_second() {
-        let bucket = Arc::new(TokenBucket::new(100));
+        let bucket = Arc::new(TokenBucket::new(per_sec(100)));
         let granted = Arc::new(AtomicU64::new(0));
         let task = tokio::spawn({
             let bucket = Arc::clone(&bucket);
@@ -1100,7 +1253,7 @@ mod tests {
                 }
             }
         });
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        tokio::time::sleep(secs(1).to_std()).await;
         let count = granted.load(Ordering::Relaxed);
         task.abort();
         assert!(
@@ -1110,43 +1263,51 @@ mod tests {
     }
 
     #[test]
-    fn summarize_converts_a_known_distribution_to_milliseconds() {
+    fn summarize_reports_the_recorded_distribution_as_latencies() {
         let mut histogram = new_histogram();
-        for us in [1_000_u64, 2_000, 3_000, 4_000, 5_000] {
-            record_us(&mut histogram, us);
+        for sample in [millis(1), millis(2), millis(3), millis(4), millis(5)] {
+            record_latency(&mut histogram, sample);
         }
         let summary = summarize(&histogram);
         assert!(summary.count == 5);
-        check!(
-            (summary.mean_ms - 3.0).abs() < 0.05,
-            "mean {}",
-            summary.mean_ms
-        );
-        check!(
-            (summary.p50_ms - 3.0).abs() < 0.05,
-            "p50 {}",
-            summary.p50_ms
-        );
-        check!(
-            (summary.p95_ms - 5.0).abs() < 0.05,
-            "p95 {}",
-            summary.p95_ms
-        );
-        check!(
-            (summary.p99_ms - 5.0).abs() < 0.05,
-            "p99 {}",
-            summary.p99_ms
-        );
-        check!(
-            (summary.p999_ms - 5.0).abs() < 0.05,
-            "p999 {}",
-            summary.p999_ms
-        );
-        check!(
-            (summary.max_ms - 5.0).abs() < 0.05,
-            "max {}",
-            summary.max_ms
-        );
+        // The histogram is 3-significant-figure, so every reading lands
+        // within a bucket width of the exact value.
+        let tolerance = micros(50);
+        let cases = [
+            ("mean", summary.mean, millis(3)),
+            ("p50", summary.p50, millis(3)),
+            ("p95", summary.p95, millis(5)),
+            ("p99", summary.p99, millis(5)),
+            ("p99.9", summary.p999, millis(5)),
+            ("max", summary.max, millis(5)),
+        ];
+        for (label, got, expected) in cases {
+            check!(
+                (got - expected).abs() < tolerance,
+                "{label} {}",
+                got.human()
+            );
+        }
+    }
+
+    /// HDR buckets are three-significant-figure wide, so a reading at the
+    /// histogram ceiling lands just above the configured bound.
+    const BUCKET_SLACK: Ratio = percent(1);
+
+    #[test]
+    fn latency_recording_clamps_outliers_into_the_histogram_range() {
+        let mut histogram = new_histogram();
+        record_latency(&mut histogram, nanos(1));
+        record_latency(&mut histogram, hours(1));
+        let summary = summarize(&histogram);
+        assert!(summary.count == 2);
+        // A sub-resolution sample is pulled up to the floor and an
+        // hour-long one pushed down to the ceiling, so neither escapes the
+        // recorder's range.
+        let policy = LoadtestRuntimePolicy::default();
+        check!(summary.p50 >= policy.histogram_min);
+        let ceiling = policy.histogram_max * (1.0 + BUCKET_SLACK.as_f64());
+        check!(summary.max <= ceiling, "max {}", summary.max.human());
     }
 
     #[test]
@@ -1387,7 +1548,11 @@ mod tests {
         let (low, high) = rest.split_once(" AND id < ").expect("two bounds");
         let low: i64 = low.parse().expect("low bound");
         let high: i64 = high.parse().expect("high bound");
-        assert!(high - low == READ_SLICE_ROWS);
+        assert!(
+            high - low
+                == i64::try_from(LoadtestRuntimePolicy::default().read_slice_rows.get())
+                    .expect("validated read slice")
+        );
         assert!(low >= 0);
     }
 
