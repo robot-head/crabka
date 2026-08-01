@@ -1184,6 +1184,20 @@ impl BrokerConfig {
         }
     }
 
+    fn validate_log_io_policy(&self) -> Result<(), BrokerError> {
+        if self.log_config.read_buffer_cap <= crabka_units::bytes(0) {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "log_read_buffer_cap must be positive".into(),
+            ));
+        }
+        if self.log_config.timestamp_scan_window <= crabka_units::bytes(0) {
+            return Err(BrokerError::InvalidRuntimeConfig(
+                "log_timestamp_scan_window must be positive".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// Validate the listener and auth configuration.
     ///
     /// Called by [`crate::Broker::start`] before any side effects so
@@ -1197,6 +1211,7 @@ impl BrokerConfig {
     /// - `inter_broker_listener_name` does not match any listener name.
     /// - A SASL listener is declared while `enabled_sasl_mechanisms` is empty.
     pub fn validate(&self) -> Result<(), BrokerError> {
+        self.validate_log_io_policy()?;
         if self.roles.is_empty() {
             return Err(BrokerError::EmptyRoles);
         }

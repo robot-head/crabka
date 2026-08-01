@@ -380,6 +380,12 @@ pub struct RuntimeFileConfig {
     pub share_session_cache_max_when_unlimited: Option<usize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
     #[schemars(with = "Option<String>")]
+    pub log_read_buffer_cap: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub log_timestamp_scan_window: Option<ByteSize>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
     pub socket_request_max: Option<ByteSize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
     #[schemars(with = "Option<String>")]
@@ -2314,6 +2320,18 @@ impl RuntimeFileConfig {
             runtime,
             share_session_cache_max_when_unlimited,
             cfg.share_session_cache_max_when_unlimited
+        );
+        set_runtime_size_bytes!(
+            runtime,
+            log_read_buffer_cap,
+            cfg.log_config.read_buffer_cap,
+            whole_bytes_usize
+        );
+        set_runtime_size_bytes!(
+            runtime,
+            log_timestamp_scan_window,
+            cfg.log_config.timestamp_scan_window,
+            whole_bytes_usize
         );
         Ok(())
     }

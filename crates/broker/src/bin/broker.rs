@@ -206,6 +206,10 @@ struct RuntimeArgs {
     share_recovery_read_max: Option<ByteSize>,
     #[arg(long, env = "CRABKA_SHARE_SESSION_CACHE_MAX_WHEN_UNLIMITED", value_parser = parse_positive_count)]
     share_session_cache_max_when_unlimited: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_LOG_READ_BUFFER_CAP", value_parser = crabka_units::parse::positive_byte_size)]
+    log_read_buffer_cap: Option<ByteSize>,
+    #[arg(long, env = "CRABKA_LOG_TIMESTAMP_SCAN_WINDOW", value_parser = crabka_units::parse::positive_byte_size)]
+    log_timestamp_scan_window: Option<ByteSize>,
     #[arg(long, env = "CRABKA_SOCKET_REQUEST_MAX", value_parser = crabka_units::parse::positive_byte_size)]
     socket_request_max: Option<ByteSize>,
     #[arg(long, env = "CRABKA_SENDFILE_MIN", value_parser = crabka_units::parse::positive_byte_size)]
@@ -433,6 +437,8 @@ impl RuntimeArgs {
             sendfile_min,
             socket_send_buffer,
             socket_receive_buffer,
+            log_read_buffer_cap,
+            log_timestamp_scan_window,
             acl_max_principal,
             acl_max_resource_name,
             telemetry_max_decompression_ratio,
@@ -1457,6 +1463,8 @@ mod tests {
                 ("CRABKA_RECORD_DECOMPRESSION_MAX_RATIO", Some("50")),
                 ("CRABKA_RECORD_DECOMPRESSION_OUTPUT_FLOOR", Some("8MiB")),
                 ("CRABKA_RECORD_DECOMPRESSION_OUTPUT_CEILING", Some("512MiB")),
+                ("CRABKA_LOG_READ_BUFFER_CAP", Some("2MiB")),
+                ("CRABKA_LOG_TIMESTAMP_SCAN_WINDOW", Some("32KiB")),
                 ("CRABKA_BROKER_CLIENT_DISPATCH_QUEUE_CAPACITY", Some("7")),
                 ("CRABKA_BROKER_CLIENT_FRAME_MAX", Some("32KiB")),
             ],
@@ -1486,6 +1494,8 @@ mod tests {
                     config.record_decompression_policy().unwrap().output_floor()
                         == crabka_units::mebibytes(8)
                 );
+                assert!(config.log_config.read_buffer_cap == crabka_units::mebibytes(2));
+                assert!(config.log_config.timestamp_scan_window == crabka_units::kibibytes(32));
                 assert!(config.client_dispatch_queue_capacity.get() == 7);
                 assert!(config.client_frame_max.size() == crabka_units::kibibytes(32));
             },

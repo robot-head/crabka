@@ -546,6 +546,8 @@ define_broker_tuning! {
     refined #[schemars(range(min = 1))] unclean_recovery_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
     size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] share_recovery_read_max: ByteSize => ();
     refined #[schemars(range(min = 1))] share_session_cache_max_when_unlimited: usize => refined_type::rule::GreaterUsize<0>;
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] log_read_buffer_cap: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] log_timestamp_scan_window: ByteSize => ();
     size_u32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] socket_request_max: ByteSize => ();
     size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] sendfile_min: ByteSize => ();
     size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] socket_send_buffer: ByteSize => ();
@@ -1683,6 +1685,8 @@ mod tests {
             "observerFetchMax",
             "auditTailReadMax",
             "shareRecoveryReadMax",
+            "logReadBufferCap",
+            "logTimestampScanWindow",
             "socketRequestMax",
             "sendfileMin",
             "socketSendBuffer",
@@ -1714,6 +1718,24 @@ mod tests {
             let error = tuning.validate().expect_err("invalid ratio must fail");
             assert!(error.contains(field), "{error}");
         }
+    }
+
+    #[test]
+    fn broker_tuning_log_io_policy_reaches_broker_config() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "logReadBufferCap": "2MiB",
+            "logTimestampScanWindow": "32KiB"
+        }))
+        .expect("deserialize log I/O policy");
+        tuning.validate().expect("validate log I/O policy");
+        let rendered = tuning.render_runtime_toml();
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&rendered).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        assert!(broker.log_config.read_buffer_cap == crabka_units::mebibytes(2));
+        assert!(broker.log_config.timestamp_scan_window == crabka_units::kibibytes(32));
     }
 
     #[test]
