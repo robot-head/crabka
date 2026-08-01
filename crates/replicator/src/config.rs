@@ -1,7 +1,10 @@
 //! Replicator configuration model (clusters / flows / policies).
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, num::NonZeroUsize, str::FromStr};
 
+use clap::Args;
+use crabka_units::{Time, millis, secs};
+use refined_type::rule::GreaterI16;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ReplicatorError;
@@ -11,6 +14,135 @@ use crate::error::ReplicatorError;
 pub struct ClientResourcePolicy {
     pub dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     pub frame_max: crabka_client_core::ClientFrameMax,
+}
+
+type RefinedReplicationFactor = GreaterI16<0>;
+
+/// Positive Kafka replication factor accepted by the replicator.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReplicationFactor(i16);
+
+impl ReplicationFactor {
+    /// Validate a Kafka replication factor.
+    ///
+    /// # Errors
+    /// Returns an error when the value is not positive.
+    pub fn new(value: i16) -> Result<Self, String> {
+        RefinedReplicationFactor::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("replication factor: {error}"))
+    }
+
+    /// Return the Kafka protocol value.
+    #[must_use]
+    pub const fn get(self) -> i16 {
+        self.0
+    }
+}
+
+impl FromStr for ReplicationFactor {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::new(value.parse::<i16>().map_err(|error| error.to_string())?)
+    }
+}
+
+/// Process-owned replicator runtime and topic policy.
+#[derive(Args, Debug, Clone, PartialEq)]
+pub struct ReplicatorRuntimePolicy {
+    #[arg(long, env = "CRABKA_REPLICATOR_TOPIC_CREATE_TIMEOUT", default_value = "10s", value_parser = crabka_units::parse::positive_time)]
+    pub topic_create_timeout: Time,
+    #[arg(long, env = "CRABKA_REPLICATOR_SOURCE_POLL_TIMEOUT", default_value = "500ms", value_parser = crabka_units::parse::positive_time)]
+    pub source_poll_timeout: Time,
+    #[arg(long, env = "CRABKA_REPLICATOR_INTERNAL_DRAIN_POLL_TIMEOUT", default_value = "500ms", value_parser = crabka_units::parse::positive_time)]
+    pub internal_drain_poll_timeout: Time,
+    #[arg(
+        long,
+        env = "CRABKA_REPLICATOR_INTERNAL_DRAIN_EMPTY_POLLS",
+        default_value = "3"
+    )]
+    pub internal_drain_empty_polls: NonZeroUsize,
+    #[arg(long, env = "CRABKA_REPLICATOR_WORKER_BUILD_RETRY_BUDGET", default_value = "30s", value_parser = crabka_units::parse::positive_time)]
+    pub worker_build_retry_budget: Time,
+    #[arg(long, env = "CRABKA_REPLICATOR_WORKER_BUILD_INITIAL_BACKOFF", default_value = "250ms", value_parser = crabka_units::parse::positive_time)]
+    pub worker_build_initial_backoff: Time,
+    #[arg(long, env = "CRABKA_REPLICATOR_WORKER_BUILD_MAX_BACKOFF", default_value = "8s", value_parser = crabka_units::parse::positive_time)]
+    pub worker_build_max_backoff: Time,
+    #[arg(long, env = "CRABKA_REPLICATOR_CONNECT_COMMIT_INTERVAL", default_value = "500ms", value_parser = crabka_units::parse::positive_time)]
+    pub connect_commit_interval: Time,
+    #[arg(
+        long,
+        env = "CRABKA_REPLICATOR_CONNECT_MAX_BATCH_RECORDS",
+        default_value = "500"
+    )]
+    pub connect_max_batch_records: NonZeroUsize,
+    #[arg(long, env = "CRABKA_REPLICATOR_SUPERVISOR_INTERVAL", default_value = "3s", value_parser = crabka_units::parse::positive_time)]
+    pub supervisor_interval: Time,
+    #[arg(long, env = "CRABKA_REPLICATOR_HEARTBEAT_INTERVAL", default_value = "1s", value_parser = crabka_units::parse::positive_time)]
+    pub heartbeat_interval: Time,
+    #[arg(long, env = "CRABKA_REPLICATOR_CHECKPOINT_INTERVAL", default_value = "5s", value_parser = crabka_units::parse::positive_time)]
+    pub checkpoint_interval: Time,
+    #[arg(long, env = "CRABKA_REPLICATOR_CLIENT_DNS_TIMEOUT", default_value = "10s", value_parser = crabka_units::parse::positive_time)]
+    pub client_dns_timeout: Time,
+    #[arg(long, env = "CRABKA_REPLICATOR_CLIENT_CONNECT_TIMEOUT", default_value = "5s", value_parser = crabka_units::parse::positive_time)]
+    pub client_connect_timeout: Time,
+    #[arg(long, env = "CRABKA_REPLICATOR_CLIENT_REQUEST_TIMEOUT", default_value = "30s", value_parser = crabka_units::parse::positive_time)]
+    pub client_request_timeout: Time,
+    #[arg(
+        long,
+        env = "CRABKA_REPLICATOR_DATA_TOPIC_REPLICATION_FACTOR",
+        default_value = "1"
+    )]
+    pub data_topic_replication_factor: ReplicationFactor,
+    #[arg(
+        long,
+        env = "CRABKA_REPLICATOR_INTERNAL_TOPIC_REPLICATION_FACTOR",
+        default_value = "1"
+    )]
+    pub internal_topic_replication_factor: ReplicationFactor,
+}
+
+impl ReplicatorRuntimePolicy {
+    /// Validate relationships between independently parsed policy values.
+    ///
+    /// # Errors
+    /// Returns an error when retry bounds are inconsistent or the DNS timeout
+    /// cannot be represented by the client boundary.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.worker_build_initial_backoff > self.worker_build_max_backoff {
+            return Err("worker build initial backoff exceeds maximum".to_owned());
+        }
+        if self.worker_build_retry_budget < self.worker_build_initial_backoff {
+            return Err("worker build retry budget is below initial backoff".to_owned());
+        }
+        crabka_client_core::ClientDnsTimeout::new(self.client_dns_timeout)?;
+        Ok(())
+    }
+}
+
+impl Default for ReplicatorRuntimePolicy {
+    fn default() -> Self {
+        Self {
+            topic_create_timeout: secs(10),
+            source_poll_timeout: millis(500),
+            internal_drain_poll_timeout: millis(500),
+            internal_drain_empty_polls: NonZeroUsize::new(3).expect("default is positive"),
+            worker_build_retry_budget: secs(30),
+            worker_build_initial_backoff: millis(250),
+            worker_build_max_backoff: secs(8),
+            connect_commit_interval: millis(500),
+            connect_max_batch_records: NonZeroUsize::new(500).expect("default is positive"),
+            supervisor_interval: secs(3),
+            heartbeat_interval: secs(1),
+            checkpoint_interval: secs(5),
+            client_dns_timeout: secs(10),
+            client_connect_timeout: secs(5),
+            client_request_timeout: secs(30),
+            data_topic_replication_factor: ReplicationFactor(1),
+            internal_topic_replication_factor: ReplicationFactor(1),
+        }
+    }
 }
 
 /// Top-level replicator configuration.
@@ -205,5 +337,40 @@ policies:
         let y = YAML.replace("to: eu-west", "to: nowhere");
         let cfg = ReplicatorConfig::from_yaml(&y).unwrap();
         assert2::assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn runtime_policy_defaults_preserve_existing_behavior() {
+        let policy = ReplicatorRuntimePolicy::default();
+        assert2::assert!(policy.topic_create_timeout == secs(10));
+        assert2::assert!(policy.source_poll_timeout == millis(500));
+        assert2::assert!(policy.internal_drain_empty_polls.get() == 3);
+        assert2::assert!(policy.worker_build_retry_budget == secs(30));
+        assert2::assert!(policy.worker_build_initial_backoff == millis(250));
+        assert2::assert!(policy.worker_build_max_backoff == secs(8));
+        assert2::assert!(policy.connect_max_batch_records.get() == 500);
+        assert2::assert!(policy.supervisor_interval == secs(3));
+        assert2::assert!(policy.heartbeat_interval == secs(1));
+        assert2::assert!(policy.checkpoint_interval == secs(5));
+        assert2::assert!(policy.client_dns_timeout == secs(10));
+        assert2::assert!(policy.data_topic_replication_factor.get() == 1);
+        policy.validate().unwrap();
+    }
+
+    #[test]
+    fn runtime_policy_rejects_invalid_relations_and_replication_factors() {
+        let policy = ReplicatorRuntimePolicy {
+            worker_build_initial_backoff: secs(9),
+            ..ReplicatorRuntimePolicy::default()
+        };
+        assert2::assert!(policy.validate().is_err());
+
+        let policy = ReplicatorRuntimePolicy {
+            worker_build_retry_budget: millis(100),
+            ..ReplicatorRuntimePolicy::default()
+        };
+        assert2::assert!(policy.validate().is_err());
+        assert2::assert!("0".parse::<ReplicationFactor>().is_err());
+        assert2::assert!("2".parse::<ReplicationFactor>().unwrap().get() == 2);
     }
 }

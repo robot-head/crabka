@@ -37,6 +37,7 @@ crabka-security = { workspace = true }
 derive_more = { workspace = true }
 qubit-clock = { workspace = true, features = ["tokio"] }
 regex = { workspace = true }
+refined_type = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

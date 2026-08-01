@@ -12,10 +12,10 @@ knob.
 
 ### Task 1: Validated process policy
 
-- [ ] Add failing default, override, environment-precedence, and invalid-value tests.
-- [ ] Add UOM timing/transport fields, positive counts, and refined replication factors.
-- [ ] Validate retry ordering and preserve every existing default.
-- [ ] Run focused tests and strict replicator Clippy; commit.
+- [x] Add failing default, override, environment-precedence, and invalid-value tests.
+- [x] Add UOM timing/transport fields, positive counts, and refined replication factors.
+- [x] Validate retry ordering and preserve every existing default.
+- [x] Run focused tests and strict replicator Clippy; commit.
 
 ### Task 2: Admin, source, and drain policy
 
