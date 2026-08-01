@@ -6625,3 +6625,27 @@ partition Fetch request, as well as the cold-schema registry wait loop.
 All 60 Gres FDW, 154 Gres and 772 operator library tests, generated-CRD parity,
 workspace all-target Clippy, nightly formatting and diff hygiene pass. The
 repository-wide hardcoded operational-value audit remains active.
+
+## Broker Diskless WAL Local Replica Policy
+
+Diskless partitions no longer assume three local durable WAL copies inside
+the quorum constructor. `BrokerConfig` and the broker runtime TOML now own a
+positive `diskless_wal_local_replica_count`, preserving three as the default.
+The broker exposes `--diskless-wal-local-replica-count`, backed by
+`CRABKA_DISKLESS_WAL_LOCAL_REPLICA_COUNT`; `Kafka.spec.broker.tuning` exposes
+the matching `disklessWalLocalReplicaCount` field. CLI and CRD inputs use the
+repository's `refined_type` positive-count boundary.
+
+The resolved count reaches startup recovery, replication reconciliation,
+topic creation, partition growth and transactional first-touch, and controls
+the exact set of local replica directories and quorum voters. Existing quorum
+state still fails closed if a restart changes the voter set.
+
+The adjacent one-second in-process WAL election timeout remains fixed: the
+stored state machine is not currently driven, so exposing the value would
+create a no-op setting. The diskless flusher values remain fixed for the same
+reason recorded earlier: that staged flusher still has no production caller.
+All 1,854 broker library, 18 broker binary and 773 operator library tests,
+operator-to-broker TOML, generated-CRD parity, workspace all-target Clippy,
+nightly formatting and diff hygiene pass. The repository-wide hardcoded
+operational-value audit remains active.

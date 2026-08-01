@@ -57,19 +57,23 @@ impl QuorumWalStore {
         log_dir: &std::path::Path,
         source: Arc<Mutex<Log>>,
         hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
+        replica_count: usize,
     ) -> Result<Self, BrokerError> {
         let config = source
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .config_snapshot();
-        let mut replicas = Vec::with_capacity(3);
+        let mut replicas = Vec::with_capacity(replica_count);
         replicas.push(engine::WalReplica::new(NodeId(0), source.clone()));
         let root = log_dir.join("__diskless_wal_quorum").join(format!(
             "{}-{}",
             sanitize_topic(topic),
             partition.0
         ));
-        for id in [NodeId(1), NodeId(2)] {
+        for id in 1..replica_count {
+            let id = NodeId(u64::try_from(id).map_err(|_| {
+                BrokerError::Replication("diskless WAL replica count exceeds u64".into())
+            })?);
             let replica_dir = root.join(format!("replica-{}", id.0));
             let log = Log::open(&replica_dir, replica_config(&config))?;
             replicas.push(engine::WalReplica::new(id, Arc::new(Mutex::new(log))));
@@ -199,6 +203,29 @@ mod tests {
     use crabka_protocol::records::{Record, RecordBatch};
 
     use super::*;
+
+    #[test]
+    fn partition_quorum_uses_configured_local_replica_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = Arc::new(Mutex::new(
+            Log::open(dir.path().join("source"), LogConfig::default()).unwrap(),
+        ));
+
+        QuorumWalStore::for_partition(
+            "topic",
+            None,
+            PartitionIndex(0),
+            dir.path(),
+            source,
+            None,
+            2,
+        )
+        .unwrap();
+
+        let root = dir.path().join("__diskless_wal_quorum/topic-0");
+        assert!(root.join("replica-1").is_dir());
+        assert!(!root.join("replica-2").exists());
+    }
 
     #[tokio::test]
     async fn quorum_wal_store_commits_on_f_plus_1_and_survives_one_loss() {

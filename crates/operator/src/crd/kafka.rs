@@ -543,6 +543,7 @@ define_broker_tuning! {
     refined #[schemars(range(min = 1))] client_metrics_stale_push_intervals: u32 => refined_type::rule::GreaterU32<0>;
     refined #[schemars(range(min = 1))] client_metrics_otlp_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] coordinator_actor_mailbox_capacity: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] diskless_wal_local_replica_count: usize => refined_type::rule::GreaterUsize<0>;
     refined #[schemars(range(min = 1))] unclean_recovery_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
     size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] share_recovery_read_max: ByteSize => ();
     refined #[schemars(range(min = 1))] share_session_cache_max_when_unlimited: usize => refined_type::rule::GreaterUsize<0>;
@@ -1738,6 +1739,27 @@ mod tests {
             .expect("apply operator TOML to broker");
         assert!(broker.log_config.read_buffer_cap == crabka_units::mebibytes(2));
         assert!(broker.log_config.timestamp_scan_window == crabka_units::kibibytes(32));
+    }
+
+    #[test]
+    fn broker_tuning_diskless_wal_replica_count_reaches_broker_config() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "disklessWalLocalReplicaCount": 5
+        }))
+        .expect("deserialize diskless WAL policy");
+        tuning.validate().expect("validate diskless WAL policy");
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&tuning.render_runtime_toml()).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        assert!(broker.diskless_wal_local_replica_count == 5);
+
+        let invalid: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "disklessWalLocalReplicaCount": 0
+        }))
+        .expect("deserialize invalid diskless WAL policy");
+        assert!(invalid.validate().is_err());
     }
 
     #[test]

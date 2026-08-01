@@ -194,6 +194,11 @@ spec:
                   delegationTokenMaxLifetime:
                     nullable: true
                     type: string
+                  disklessWalLocalReplicaCount:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   futureLogMoveReadChunk:
                     nullable: true
                     type: string

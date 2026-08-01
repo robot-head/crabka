@@ -184,6 +184,9 @@ pub(crate) async fn handle(
                     producer_id_expiration_ms: broker.config.producer_id_expiration_ms,
                     max_produce_group: broker.config.max_produce_group,
                     partition_writer_queue_depth: broker.config.partition_writer_queue_depth,
+                    diskless_wal_local_replica_count: broker
+                        .config
+                        .diskless_wal_local_replica_count,
                     diskless: false,
                     hot_tail: None,
                     wal_shards: None,

@@ -251,6 +251,9 @@ pub(crate) async fn handle(
                         producer_id_expiration_ms: broker.config.producer_id_expiration_ms,
                         max_produce_group: broker.config.max_produce_group,
                         partition_writer_queue_depth: broker.config.partition_writer_queue_depth,
+                        diskless_wal_local_replica_count: broker
+                            .config
+                            .diskless_wal_local_replica_count,
                         node_id,
                         diskless,
                         topic_id,
@@ -369,6 +372,7 @@ struct TopicMaterialization<'a> {
     producer_id_expiration_ms: i64,
     max_produce_group: usize,
     partition_writer_queue_depth: usize,
+    diskless_wal_local_replica_count: usize,
     node_id: crabka_raft::NodeId,
     diskless: bool,
     topic_id: uuid::Uuid,
@@ -400,6 +404,7 @@ async fn materialize_topic(
                 producer_id_expiration_ms: context.producer_id_expiration_ms,
                 max_produce_group: context.max_produce_group,
                 partition_writer_queue_depth: context.partition_writer_queue_depth,
+                diskless_wal_local_replica_count: context.diskless_wal_local_replica_count,
                 diskless: context.diskless,
                 hot_tail: Some(context.hot_tail.clone()),
                 wal_shards: Some(context.wal_shards.clone()),

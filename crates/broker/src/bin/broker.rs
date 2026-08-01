@@ -200,6 +200,8 @@ struct RuntimeArgs {
     client_metrics_otlp_queue_capacity: Option<PositiveCount>,
     #[arg(long, env = "CRABKA_COORDINATOR_ACTOR_MAILBOX_CAPACITY", value_parser = parse_positive_count)]
     coordinator_actor_mailbox_capacity: Option<PositiveCount>,
+    #[arg(long, env = "CRABKA_DISKLESS_WAL_LOCAL_REPLICA_COUNT", value_parser = parse_positive_count)]
+    diskless_wal_local_replica_count: Option<PositiveCount>,
     #[arg(long, env = "CRABKA_UNCLEAN_RECOVERY_QUEUE_CAPACITY", value_parser = parse_positive_count)]
     unclean_recovery_queue_capacity: Option<PositiveCount>,
     #[arg(long, env = "CRABKA_SHARE_RECOVERY_READ_MAX", value_parser = crabka_units::parse::positive_byte_size)]
@@ -395,6 +397,7 @@ impl RuntimeArgs {
             runtime,
             consumer_group_max_size,
             coordinator_actor_mailbox_capacity,
+            diskless_wal_local_replica_count,
             share_session_cache_max_when_unlimited,
             share_state_num_partitions,
             share_state_replication_factor,
@@ -1396,6 +1399,14 @@ mod tests {
                 vec!["crabka-broker", "--client-dispatch-queue-capacity=0"],
                 false,
             ),
+            (
+                vec!["crabka-broker", "--diskless-wal-local-replica-count=0"],
+                false,
+            ),
+            (
+                vec!["crabka-broker", "--diskless-wal-local-replica-count=5"],
+                true,
+            ),
             (vec!["crabka-broker", "--client-frame-max=101MiB"], false),
             (
                 vec![
@@ -1469,6 +1480,7 @@ mod tests {
                 ("CRABKA_LOG_READ_BUFFER_CAP", Some("2MiB")),
                 ("CRABKA_LOG_TIMESTAMP_SCAN_WINDOW", Some("32KiB")),
                 ("CRABKA_TRANSACTION_RECOVERY_READ_MAX", Some("3MiB")),
+                ("CRABKA_DISKLESS_WAL_LOCAL_REPLICA_COUNT", Some("5")),
                 ("CRABKA_BROKER_CLIENT_DISPATCH_QUEUE_CAPACITY", Some("7")),
                 ("CRABKA_BROKER_CLIENT_FRAME_MAX", Some("32KiB")),
             ],
@@ -1501,6 +1513,7 @@ mod tests {
                 assert!(config.log_config.read_buffer_cap == crabka_units::mebibytes(2));
                 assert!(config.log_config.timestamp_scan_window == crabka_units::kibibytes(32));
                 assert!(config.transaction_recovery_read_max == crabka_units::mebibytes(3));
+                assert!(config.diskless_wal_local_replica_count == 5);
                 assert!(config.client_dispatch_queue_capacity.get() == 7);
                 assert!(config.client_frame_max.size() == crabka_units::kibibytes(32));
             },

@@ -373,6 +373,7 @@ pub struct RuntimeFileConfig {
     pub client_metrics_stale_push_intervals: Option<u32>,
     pub client_metrics_otlp_queue_capacity: Option<usize>,
     pub coordinator_actor_mailbox_capacity: Option<usize>,
+    pub diskless_wal_local_replica_count: Option<usize>,
     pub unclean_recovery_queue_capacity: Option<usize>,
     #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
     #[schemars(with = "Option<String>")]
@@ -2307,6 +2308,11 @@ impl RuntimeFileConfig {
             runtime,
             coordinator_actor_mailbox_capacity,
             cfg.coordinator_actor_mailbox_capacity
+        );
+        set_runtime_usize!(
+            runtime,
+            diskless_wal_local_replica_count,
+            cfg.diskless_wal_local_replica_count
         );
         set_runtime_usize!(
             runtime,

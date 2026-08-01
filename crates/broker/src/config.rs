@@ -18,6 +18,9 @@ use crabka_units::{
 
 use crate::BrokerError;
 
+/// Default number of local durable copies in a diskless WAL quorum.
+pub const DEFAULT_DISKLESS_WAL_LOCAL_REPLICA_COUNT: usize = 3;
+
 /// `KRaft` `process.roles`. A node is a metadata-quorum `Controller`, a data
 /// `Broker`, or both. Default is the combined set `[Controller, Broker]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -236,6 +239,8 @@ pub struct BrokerConfig {
     pub client_metrics_stale_push_intervals: u32,
     /// Capacity of each coordinator actor mailbox.
     pub coordinator_actor_mailbox_capacity: usize,
+    /// Number of local durable replicas in each diskless WAL quorum.
+    pub diskless_wal_local_replica_count: usize,
     /// Capacity of the unclean-recovery work queue.
     pub unclean_recovery_queue_capacity: usize,
     /// Maximum bytes read while recovering share state.
@@ -1032,6 +1037,7 @@ impl BrokerConfig {
             offsets_topic_metadata_wait_timeout: secs(30),
             client_metrics_stale_push_intervals: 3,
             coordinator_actor_mailbox_capacity: 64,
+            diskless_wal_local_replica_count: DEFAULT_DISKLESS_WAL_LOCAL_REPLICA_COUNT,
             unclean_recovery_queue_capacity: 256,
             share_recovery_read_max: mebibytes(1),
             share_session_cache_max_when_unlimited: 10_000,
@@ -1728,6 +1734,10 @@ impl BrokerConfig {
                 self.coordinator_actor_mailbox_capacity,
             ),
             (
+                "diskless_wal_local_replica_count",
+                self.diskless_wal_local_replica_count,
+            ),
+            (
                 "unclean_recovery_queue_capacity",
                 self.unclean_recovery_queue_capacity,
             ),
@@ -1936,6 +1946,7 @@ impl Default for BrokerConfig {
             offsets_topic_metadata_wait_timeout: secs(30),
             client_metrics_stale_push_intervals: 3,
             coordinator_actor_mailbox_capacity: 64,
+            diskless_wal_local_replica_count: DEFAULT_DISKLESS_WAL_LOCAL_REPLICA_COUNT,
             unclean_recovery_queue_capacity: 256,
             share_recovery_read_max: mebibytes(1),
             share_session_cache_max_when_unlimited: 10_000,
@@ -2490,6 +2501,9 @@ mod tests {
             ),
             ("coordinator_actor_mailbox_capacity must be positive", |c| {
                 c.coordinator_actor_mailbox_capacity = 0;
+            }),
+            ("diskless_wal_local_replica_count must be positive", |c| {
+                c.diskless_wal_local_replica_count = 0;
             }),
             ("unclean_recovery_queue_capacity must be positive", |c| {
                 c.unclean_recovery_queue_capacity = 0;

@@ -542,6 +542,7 @@ async fn recover_storage_and_groups(
                 producer_id_expiration_ms: config.producer_id_expiration_ms,
                 max_produce_group: config.max_produce_group,
                 partition_writer_queue_depth: config.partition_writer_queue_depth,
+                diskless_wal_local_replica_count: config.diskless_wal_local_replica_count,
                 diskless,
                 hot_tail: Some(Arc::clone(&diskless_runtime.hot_tail)),
                 wal_shards: Some(Arc::clone(&diskless_runtime.wal_shards)),
@@ -1848,6 +1849,7 @@ fn spawn_replicator_supervisor(
             producer_id_expiration_ms: config.producer_id_expiration_ms,
             max_produce_group: config.max_produce_group,
             partition_writer_queue_depth: config.partition_writer_queue_depth,
+            diskless_wal_local_replica_count: config.diskless_wal_local_replica_count,
             metrics: runtime.2.clone(),
             log_dir_ids: storage.log_dir_ids.clone(),
             hot_tail: Arc::clone(&storage.diskless.hot_tail),
@@ -4078,6 +4080,7 @@ fn partition_wal(
     diskless: bool,
     hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
+    replica_count: usize,
 ) -> Result<Option<crate::wal::SharedWal>, BrokerError> {
     let (topic, topic_id, partition_id) = identity;
     if !diskless {
@@ -4090,6 +4093,7 @@ fn partition_wal(
         log_dir,
         log,
         hot_tail,
+        replica_count,
     )?;
     if let (Some(topic_id), Some(registry)) = (topic_id, wal_shards) {
         registry.insert(
@@ -4133,6 +4137,7 @@ pub(crate) fn spawn_partition(
         producer_id_expiration_ms: broker_config.producer_id_expiration_ms,
         max_produce_group: broker_config.max_produce_group,
         partition_writer_queue_depth: broker_config.partition_writer_queue_depth,
+        diskless_wal_local_replica_count: broker_config.diskless_wal_local_replica_count,
         diskless,
         hot_tail: None,
         wal_shards: None,
@@ -4152,6 +4157,7 @@ pub(crate) struct PartitionSpawnConfig {
     pub producer_id_expiration_ms: i64,
     pub max_produce_group: usize,
     pub partition_writer_queue_depth: usize,
+    pub diskless_wal_local_replica_count: usize,
     pub diskless: bool,
     pub hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     pub wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
@@ -4172,6 +4178,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         producer_id_expiration_ms,
         max_produce_group,
         partition_writer_queue_depth,
+        diskless_wal_local_replica_count,
         diskless,
         hot_tail,
         wal_shards,
@@ -4185,6 +4192,7 @@ pub(crate) fn try_spawn_partition_with_sequencer(
         diskless,
         hot_tail,
         wal_shards,
+        diskless_wal_local_replica_count,
     )?;
     let (tx, rx) = tokio::sync::mpsc::channel::<WriterMessage>(partition_writer_queue_depth);
     let notify = Arc::new(tokio::sync::Notify::new());
@@ -4850,6 +4858,7 @@ mod tests {
             producer_id_expiration_ms: 1,
             max_produce_group: crate::config::BrokerConfig::default().max_produce_group,
             partition_writer_queue_depth: 2,
+            diskless_wal_local_replica_count: 3,
             diskless: false,
             hot_tail: None,
             wal_shards: None,
@@ -4905,6 +4914,7 @@ mod tests {
                 false,
                 None,
                 None,
+                3,
             )
             .expect("partition wal")
             .is_none()
@@ -4917,6 +4927,7 @@ mod tests {
                 true,
                 None,
                 None,
+                3,
             )
             .expect("partition wal")
             .is_some()
