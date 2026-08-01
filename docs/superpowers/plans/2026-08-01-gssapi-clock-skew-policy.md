@@ -11,10 +11,10 @@ broker configuration, and lower it to `std::time::Duration` only at SSPI.
 
 ### Task 1: Security boundary
 
-- [ ] Add failing tests for default and explicit acceptor clock skew.
-- [ ] Add `max_time_skew: Time` to `GssapiConfig`.
-- [ ] Pass the dimensioned value into `SspiAcceptor` and SSPI.
-- [ ] Run security tests and strict all-target Clippy; commit.
+- [x] Add failing tests for default and explicit acceptor clock skew.
+- [x] Add `max_time_skew: Time` to `GssapiConfig`.
+- [x] Pass the dimensioned value into `SspiAcceptor` and SSPI.
+- [x] Run security tests and strict all-target Clippy; commit.
 
 ### Task 2: Broker TOML boundary
 

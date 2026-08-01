@@ -10,6 +10,11 @@ pub mod server;
 
 use std::path::PathBuf;
 
+use crabka_units::{Time, minutes};
+
+/// Compatible maximum clock skew for incoming Kerberos AP-REQ validation.
+pub const DEFAULT_GSSAPI_MAX_TIME_SKEW: Time = minutes(5);
+
 /// Broker-side GSSAPI configuration (parallels `OAuthBearer` config).
 #[derive(Debug, Clone)]
 pub struct GssapiConfig {
@@ -23,6 +28,8 @@ pub struct GssapiConfig {
     pub realm: Option<String>,
     /// KDC host:port for the initiate path; falls back to krb5.conf discovery when None.
     pub kdc: Option<String>,
+    /// Maximum tolerated difference between client and broker clocks.
+    pub max_time_skew: Time,
 }
 
 /// Errors from GSS context operations.

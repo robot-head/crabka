@@ -6,6 +6,7 @@
 //! [`sspi::KeytabIdentity`]) to drive the AS/TGS exchange with no password.
 use std::sync::Mutex;
 
+use crabka_units::{Time, convert::TimeExt as _};
 use sspi::{
     BufferType, ClientRequestFlags, CredentialUse, Credentials, CredentialsBuffers,
     DataRepresentation, EncryptionFlags, Kerberos, KerberosConfig, KeytabIdentity, Secret,
@@ -22,9 +23,6 @@ use super::{
 /// Default KDC URL used when `SSPI_KDC_URL` is unset. The accept path does not
 /// hit the network, but `KerberosConfig::new` requires a URL string.
 const DEFAULT_KDC_URL: &str = "tcp://localhost:88";
-
-/// Max clock skew tolerated when validating an incoming AP-REQ.
-const MAX_TIME_SKEW: std::time::Duration = std::time::Duration::from_mins(5);
 
 fn kdc_url_from_env() -> String {
     std::env::var("SSPI_KDC_URL").unwrap_or_else(|_| DEFAULT_KDC_URL.to_string())
@@ -105,7 +103,11 @@ impl SspiAcceptor {
         fields(mechanism = "GSSAPI", service = %service_name),
         err
     )]
-    pub fn new(keytab_path: &str, service_name: &str) -> Result<Self, GssError> {
+    pub fn new(
+        keytab_path: &str,
+        service_name: &str,
+        max_time_skew: Time,
+    ) -> Result<Self, GssError> {
         let bytes = std::fs::read(keytab_path)
             .map_err(|e| GssError::Keytab(format!("reading {keytab_path}: {e}")))?;
         // A keytab may hold keys for several host SPNs of this service (e.g.
@@ -126,7 +128,7 @@ impl SspiAcceptor {
         let mut server_properties = ServerProperties::new(
             &primary_sname,
             None,
-            MAX_TIME_SKEW,
+            max_time_skew.to_std(),
             Some(Secret::new(primary.key)),
         )
         .map_err(ctx_err)?;
