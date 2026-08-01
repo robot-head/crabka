@@ -3262,6 +3262,7 @@ dependencies = [
  "futures",
  "object_store",
  "prost 0.14.4",
+ "refined_type",
  "reqwest 0.13.4",
  "serde",
  "serde_json",

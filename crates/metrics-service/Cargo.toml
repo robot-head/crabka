@@ -36,6 +36,7 @@ crabka-telemetry = { path = "../telemetry", version = "0.3.8" }
 futures = { workspace = true }
 object_store = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
+refined_type = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

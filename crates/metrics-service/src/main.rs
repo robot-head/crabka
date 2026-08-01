@@ -108,6 +108,34 @@ struct Cli {
     )]
     max_concurrent_queries: usize,
     #[arg(
+        long = "query-lookback-delta",
+        env = "CRABKA_METRICS_QUERY_LOOKBACK_DELTA",
+        default_value = "5m",
+        value_parser = parse::positive_time
+    )]
+    query_lookback_delta: Time,
+    #[arg(
+        long = "query-eval-interval",
+        env = "CRABKA_METRICS_QUERY_EVAL_INTERVAL",
+        default_value = "1m",
+        value_parser = parse::positive_time
+    )]
+    query_eval_interval: Time,
+    #[arg(
+        long = "query-max-samples",
+        env = "CRABKA_METRICS_QUERY_MAX_SAMPLES",
+        default_value_t = 50_000_000,
+        value_parser = parse_positive_usize
+    )]
+    query_max_samples: usize,
+    #[arg(
+        long = "remote-read-max-body",
+        env = "CRABKA_METRICS_REMOTE_READ_MAX_BODY",
+        default_value = "64MiB",
+        value_parser = parse_remote_read_max_body
+    )]
+    remote_read_max_body: ByteSize,
+    #[arg(
         long,
         env = "CRABKA_METRICS_QUERY_FRONTEND_CACHE_PREFIX",
         default_value = "metrics-query-cache"
@@ -181,6 +209,33 @@ fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
     ClientFrameMax::try_from(value).map(ClientFrameMax::size)
 }
 
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    use refined_type::rule::GreaterUsize;
+
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    GreaterUsize::<0>::new(value)
+        .map(refined_type::Refined::into_value)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_remote_read_max_body(value: &str) -> Result<ByteSize, String> {
+    let value = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    let bytes = value.bytes_u64();
+    if ByteSize::from_bytes(bytes) == value {
+        Ok(value)
+    } else {
+        Err("remote-read maximum body must be a whole-byte value".to_owned())
+    }
+}
+
+fn query_engine_opts(cli: &Cli) -> EngineOpts {
+    EngineOpts {
+        lookback_delta: cli.query_lookback_delta,
+        eval_interval: cli.query_eval_interval,
+        max_samples: cli.query_max_samples,
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "kebab-case")]
 enum Target {
@@ -242,8 +297,9 @@ async fn run_query_frontend(
     )
     .with_cold_cache_ttl(cli.cold_cache_ttl)
     .with_unbounded_compatibility_lookback(cli.unbounded_compatibility_lookback);
-    let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
+    let mut state = PrometheusApiState::new(Arc::new(metric_store), query_engine_opts(&cli))
         .with_max_concurrent_queries(cli.max_concurrent_queries)
+        .with_remote_read_max_body(cli.remote_read_max_body)
         .with_metrics(metrics)
         .with_query_frontend_cache(
             QueryFrontendOptions {
@@ -292,8 +348,9 @@ async fn run_ruler(
     )
     .with_cold_cache_ttl(cli.cold_cache_ttl)
     .with_unbounded_compatibility_lookback(cli.unbounded_compatibility_lookback);
-    let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
+    let mut state = PrometheusApiState::new(Arc::new(metric_store), query_engine_opts(&cli))
         .with_max_concurrent_queries(cli.max_concurrent_queries)
+        .with_remote_read_max_body(cli.remote_read_max_body)
         .with_metrics(metrics);
     if let Some(overrides) = load_runtime_overrides(cli.runtime_overrides.as_deref())? {
         state = state.with_query_limits(overrides);
@@ -445,8 +502,9 @@ async fn run_querier(
     )
     .with_cold_cache_ttl(cli.cold_cache_ttl)
     .with_unbounded_compatibility_lookback(cli.unbounded_compatibility_lookback);
-    let mut state = PrometheusApiState::new(Arc::new(metric_store), EngineOpts::default())
+    let mut state = PrometheusApiState::new(Arc::new(metric_store), query_engine_opts(&cli))
         .with_max_concurrent_queries(cli.max_concurrent_queries)
+        .with_remote_read_max_body(cli.remote_read_max_body)
         .with_metrics(metrics);
     if let Some(overrides) = load_runtime_overrides(cli.runtime_overrides.as_deref())? {
         state = state.with_query_limits(overrides);
@@ -739,6 +797,89 @@ mod tests {
         .unwrap();
         assert2::assert!(from_cli.cold_cache_ttl == secs(7));
         assert2::assert!(from_cli.unbounded_compatibility_lookback == minutes(20));
+    }
+
+    #[test]
+    fn query_policy_parses_defaults_overrides_and_boundaries() {
+        let defaults =
+            Cli::try_parse_from(["crabka-metrics-service", "--target", "querier"]).unwrap();
+        assert2::assert!(defaults.query_lookback_delta == minutes(5));
+        assert2::assert!(defaults.query_eval_interval == minutes(1));
+        assert2::assert!(defaults.query_max_samples == 50_000_000);
+        assert2::assert!(defaults.remote_read_max_body == mebibytes(64));
+
+        let configured = Cli::try_parse_from([
+            "crabka-metrics-service",
+            "--target",
+            "querier",
+            "--query-lookback-delta=7m",
+            "--query-eval-interval=11s",
+            "--query-max-samples=13",
+            "--remote-read-max-body=17MiB",
+        ])
+        .unwrap();
+        assert2::assert!(query_engine_opts(&configured).lookback_delta == minutes(7));
+        assert2::assert!(query_engine_opts(&configured).eval_interval == secs(11));
+        assert2::assert!(query_engine_opts(&configured).max_samples == 13);
+        assert2::assert!(configured.remote_read_max_body == mebibytes(17));
+
+        for flag in [
+            "--query-lookback-delta=0s",
+            "--query-eval-interval=0s",
+            "--query-max-samples=0",
+            "--remote-read-max-body=0B",
+            "--remote-read-max-body=1.5B",
+        ] {
+            assert2::assert!(
+                Cli::try_parse_from(["crabka-metrics-service", "--target", "querier", flag,])
+                    .is_err(),
+                "accepted {flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn query_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_METRICS_QUERY_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::query_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_METRICS_QUERY_LOOKBACK_DELTA", "7m")
+                    .env("CRABKA_METRICS_QUERY_EVAL_INTERVAL", "11s")
+                    .env("CRABKA_METRICS_QUERY_MAX_SAMPLES", "13")
+                    .env("CRABKA_METRICS_REMOTE_READ_MAX_BODY", "17MiB")
+                    .status()
+                    .expect("child test");
+            assert2::assert!(status.success());
+            return;
+        }
+
+        let from_env =
+            Cli::try_parse_from(["crabka-metrics-service", "--target", "querier"]).unwrap();
+        assert2::assert!(query_engine_opts(&from_env).lookback_delta == minutes(7));
+        assert2::assert!(query_engine_opts(&from_env).eval_interval == secs(11));
+        assert2::assert!(query_engine_opts(&from_env).max_samples == 13);
+        assert2::assert!(from_env.remote_read_max_body == mebibytes(17));
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-metrics-service",
+            "--target",
+            "querier",
+            "--query-lookback-delta=19m",
+            "--query-eval-interval=23s",
+            "--query-max-samples=29",
+            "--remote-read-max-body=31MiB",
+        ])
+        .unwrap();
+        assert2::assert!(query_engine_opts(&from_cli).lookback_delta == minutes(19));
+        assert2::assert!(query_engine_opts(&from_cli).eval_interval == secs(23));
+        assert2::assert!(query_engine_opts(&from_cli).max_samples == 29);
+        assert2::assert!(from_cli.remote_read_max_body == mebibytes(31));
     }
 
     #[test]

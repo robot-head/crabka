@@ -6263,3 +6263,27 @@ is a correctness-preserving implementation choice, not workload policy.
 Pgkv boundary tests and targeted Gres/operator CLI, environment, CRD, and
 rendering tests pass. This closes only the Pgkv Fjall runtime-policy slice; the
 repository-wide hardcoded operational-value audit remains active.
+
+## PromQL Query Runtime Policy
+
+The standalone metrics service now owns PromQL's remaining query defaults and
+remote-read allocation ceiling through `--query-lookback-delta`,
+`--query-eval-interval`, `--query-max-samples`, and
+`--remote-read-max-body`, backed by the corresponding
+`CRABKA_METRICS_QUERY_*` and `CRABKA_METRICS_REMOTE_READ_MAX_BODY`
+environment variables. Existing five-minute, one-minute, 50,000,000-sample,
+and 64-MiB defaults are unchanged.
+
+Times and the body ceiling remain UOM values. The positive sample count is
+validated with `refined_type`, and the body ceiling must be a positive whole
+byte value. One shared `EngineOpts` constructor path reaches querier,
+query-frontend, and ruler targets. `PrometheusApiState` carries the remote-read
+cap to both route prefixes and Snappy decompression, and the Prometheus flags
+endpoint now reports the effective lookback and already-configurable query
+concurrency instead of fixed display values. The 11,000-point Prometheus
+compatibility ceiling remains fixed.
+
+CLI default, override, invalid-input, environment-precedence, status-reporting,
+and remote-read body-limit tests pass. No CRD owns this standalone service.
+This closes only the PromQL query runtime-policy slice; the repository-wide
+hardcoded operational-value audit remains active.

@@ -8,6 +8,7 @@ use axum::{
     http::HeaderMap,
     response::{IntoResponse, Response},
 };
+use crabka_units::fmt::Human as _;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use url::form_urlencoded;
@@ -43,11 +44,13 @@ pub(super) async fn status_config() -> Response {
     }))
 }
 
-pub(super) async fn status_flags() -> Response {
+pub(super) async fn status_flags<S: MetricStore>(
+    State(state): State<Arc<PrometheusApiState<S>>>,
+) -> Response {
     success_data_response(json!({
         "log.level": "info",
-        "query.lookback-delta": "5m",
-        "query.max-concurrency": "20",
+        "query.lookback-delta": state.engine_opts.lookback_delta.human().to_string(),
+        "query.max-concurrency": state.max_concurrent_queries.to_string(),
         "storage.tsdb.retention.time": "15d",
     }))
 }

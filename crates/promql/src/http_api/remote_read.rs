@@ -40,7 +40,7 @@ pub(super) async fn remote_read<S: MetricStore>(
         return error.into_response();
     }
 
-    let decompressed = match snappy_block_decode(&body, 64 * 1024 * 1024) {
+    let decompressed = match snappy_block_decode(&body, state.remote_read_max_body) {
         Ok(decompressed) => decompressed,
         Err(error) => return ApiError::from(error).into_response(),
     };
