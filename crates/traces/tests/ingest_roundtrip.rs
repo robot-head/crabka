@@ -146,7 +146,7 @@ async fn poll_until_records(
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut out = Vec::new();
     while Instant::now() < deadline {
-        out.extend(consumer.poll(Duration::from_millis(250)).await.unwrap());
+        out.extend(consumer.poll(crabka_units::millis(250)).await.unwrap());
         if out.len() >= expected {
             return out;
         }

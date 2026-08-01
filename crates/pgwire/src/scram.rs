@@ -84,6 +84,16 @@ impl ScramVerifier {
     /// Panics only if the SHA-256 HMAC implementation returns a digest with an
     /// unexpected length.
     pub fn mock(server_secret: &[u8; 32], user: &str) -> Self {
+        Self::mock_with_iterations(server_secret, user, DEFAULT_ITERATIONS)
+    }
+
+    #[must_use]
+    /// Derive a deterministic unknown-user verifier using the applicable
+    /// real-verifier iteration policy.
+    ///
+    /// # Panics
+    /// Panics only if SHA-256 HMAC returns a digest with an unexpected length.
+    pub fn mock_with_iterations(server_secret: &[u8; 32], user: &str, iterations: u32) -> Self {
         let salt = hmac(server_secret, format!("mock-salt:{user}").as_bytes())[..SALT_LEN].to_vec();
         let stored_key: [u8; 32] = hmac(server_secret, format!("mock-stored:{user}").as_bytes())
             .try_into()
@@ -93,7 +103,7 @@ impl ScramVerifier {
             .expect("32 bytes");
         Self {
             salt,
-            iterations: DEFAULT_ITERATIONS,
+            iterations,
             stored_key,
             server_key,
         }

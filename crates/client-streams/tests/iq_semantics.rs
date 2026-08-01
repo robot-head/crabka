@@ -13,6 +13,7 @@
 use crabka_client_streams::{
     Consumed, I64Serde, SessionWindows, StringSerde, TimeWindows, dsl::StreamsBuilder,
 };
+use crabka_units::prelude::*;
 
 /// KV count store: `get(present)` returns the count, `get(absent)` is `None`,
 /// `range` is inclusive `[lo, hi]`, `all`/`count` cover every key.
@@ -102,7 +103,7 @@ async fn iq_window_count_read_semantics() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(10))
+        .windowed_by(TimeWindows::of_size(millis(10)))
         .count("wc");
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();
@@ -156,7 +157,7 @@ async fn iq_session_count_read_semantics() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_session(SessionWindows::of_inactivity_gap(60))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(millis(60)))
         .count("sc");
     let built = b.build("app").unwrap();
     let mut d = crabka_client_streams::TopologyTestDriver::new(&built).unwrap();

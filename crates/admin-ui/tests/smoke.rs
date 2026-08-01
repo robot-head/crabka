@@ -26,6 +26,7 @@ use crabka_admin_ui::{
     session::{SessionRecord, SessionStore},
     views::{ReadRouteState, Route, RoutePage, render_page, render_route_html},
 };
+use crabka_units::bytes;
 use tower::ServiceExt as _;
 
 fn smoke_app() -> axum::Router {
@@ -365,24 +366,43 @@ async fn post_mutation_routes_return_bad_request_for_authenticated_malformed_jso
 }
 
 #[tokio::test]
-async fn authenticated_post_mutation_routes_reject_oversized_body_before_deserializing() {
+async fn authenticated_mutation_routes_share_the_configured_body_limit() {
     let sessions = Arc::new(SessionStore::new(Duration::from_mins(1)));
     let session_id = sessions.create_user("alice", "User:alice");
-    let state = AppState::from_parts(Arc::new(AdminUiConfig::default()), sessions);
+    let state = AppState::from_parts(
+        Arc::new(AdminUiConfig {
+            mutation_json_body_limit: bytes(16),
+            ..AdminUiConfig::default()
+        }),
+        sessions,
+    );
     let factory = RecordingAdminSeamFactory::default();
     let app = router_with_factory(state, factory.clone());
     let cookie = format!("{SESSION_COOKIE_NAME}={}", session_id.expose_for_cookie());
-    let oversized_topic_name = "orders".repeat(180_000);
-    let oversized_body =
-        format!(r#"{{"name":"{oversized_topic_name}","partitions":3,"replicas":1,"configs":[]}}"#);
 
-    let response = post_json_from(app, "/topics/create", oversized_body, Some(cookie)).await;
+    for path in [
+        "/topics/create",
+        "/topics/delete",
+        "/topics/partitions",
+        "/topics/configs",
+        "/acls/create",
+        "/acls/delete",
+        "/users/scram/upsert",
+        "/users/scram/delete",
+        "/quotas/upsert",
+        "/quotas/delete",
+        "/log-dirs/move",
+    ] {
+        let response =
+            post_json_from(app.clone(), path, "x".repeat(17), Some(cookie.clone())).await;
 
-    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE, "{path}");
+        let text = response_text(response).await;
+        assert!(text.contains("request body too large"), "{path}: {text}");
+    }
+
     assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
     assert_eq!(factory.total_mutation_calls(), 0);
-    let text = response_text(response).await;
-    assert!(text.contains("request body too large"));
 }
 
 #[tokio::test]

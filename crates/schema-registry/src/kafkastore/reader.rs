@@ -5,23 +5,43 @@
 use std::{
     net::{SocketAddr, ToSocketAddrs},
     sync::Arc,
-    time::Duration,
 };
 
 use crabka_client_core::{
     ClientError, ClientSecurity, Connection, ConnectionOptions, fetch_partition,
 };
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_units::prelude::*;
 use parking_lot::RwLock;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
-use crate::{config::RegistryConfig, kafkastore::record::SchemaRecord, store::StoreState};
+use crate::{
+    config::{RegistryConfig, RegistryRuntimeConfig},
+    kafkastore::record::SchemaRecord,
+    store::StoreState,
+};
 
 /// Shared state + offset watch returned by [`spawn`].
 pub struct StoreReader {
     pub store: Arc<RwLock<StoreState>>,
     pub applied_rx: watch::Receiver<i64>,
+}
+
+/// `PartialEq` but not `Eq`: the quantities store `f64`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ReaderPolicy {
+    retry_backoff: Time,
+    fetch_max_wait: Time,
+    fetch_max: ByteSize,
+}
+
+fn reader_policy(runtime: &RegistryRuntimeConfig) -> ReaderPolicy {
+    ReaderPolicy {
+        retry_backoff: runtime.store_reader_retry_backoff,
+        fetch_max_wait: runtime.store_reader_fetch_max_wait,
+        fetch_max: runtime.store_reader_fetch_max,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,11 +67,11 @@ fn resolve_bootstrap_addr(bootstrap: &str) -> Option<SocketAddr> {
         .find_map(|mut addrs| addrs.next())
 }
 
-async fn sleep_or_cancel(cancel: &CancellationToken, duration: Duration) -> bool {
+async fn sleep_or_cancel(cancel: &CancellationToken, duration: Time) -> bool {
     tokio::select! {
         biased;
         () = cancel.cancelled() => true,
-        () = tokio::time::sleep(duration) => false,
+        () = tokio::time::sleep(duration.to_std()) => false,
     }
 }
 
@@ -109,19 +129,25 @@ pub fn apply_record(store: &RwLock<StoreState>, rec: SchemaRecord) {
 pub fn spawn(
     cfg: &RegistryConfig,
     topic_id: WireUuid,
+    initial_state: StoreState,
     security: Option<ClientSecurity>,
     cancel: CancellationToken,
 ) -> StoreReader {
-    let store = Arc::new(RwLock::new(StoreState::default()));
+    let store = Arc::new(RwLock::new(initial_state));
     let (applied_tx, applied_rx) = watch::channel(-1_i64);
     let topic = cfg.schemas_topic.clone();
     let bootstrap = cfg.bootstrap.clone();
     let client_id = format!("{}-reader", cfg.client_id);
     let store_bg = store.clone();
+    let policy = reader_policy(&cfg.runtime);
+    let dispatch_queue_capacity = cfg.runtime.client_dispatch_queue_capacity;
+    let frame_max = cfg.runtime.client_frame_max;
 
     tokio::spawn(async move {
         let opts = ConnectionOptions {
             client_id,
+            dispatch_queue_capacity,
+            frame_max,
             security: security.map(Box::new),
             ..Default::default()
         };
@@ -129,7 +155,7 @@ pub fn spawn(
         loop {
             let Some(addr) = resolve_bootstrap_addr(&bootstrap) else {
                 tracing::error!(%bootstrap, "store reader: bad bootstrap addr; backing off");
-                if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
+                if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                     return;
                 }
                 continue;
@@ -138,7 +164,7 @@ pub fn spawn(
                 Ok(c) => c,
                 Err(e) => {
                     tracing::warn!(error = %e, "store reader: connect failed; backing off");
-                    if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
+                    if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                         return;
                     }
                     continue;
@@ -152,7 +178,15 @@ pub fn spawn(
                         conn.close();
                         return;
                     }
-                    res = fetch_partition(&conn, &topic, topic_id, 0, next, 500, 1 << 20) => {
+                    res = fetch_partition(
+                        &conn,
+                        &topic,
+                        topic_id,
+                        0,
+                        next,
+                        policy.fetch_max_wait,
+                        policy.fetch_max,
+                    ) => {
                         match res {
                             Ok(records) => {
                                 for r in records {
@@ -177,12 +211,12 @@ pub fn spawn(
                                 );
                                 if action == FetchErrorAction::Reconnect {
                                     conn.close();
-                                    if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
+                                    if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                                         return;
                                     }
                                     break;
                                 }
-                                if sleep_or_cancel(&cancel, Duration::from_millis(250)).await {
+                                if sleep_or_cancel(&cancel, policy.retry_backoff).await {
                                     return;
                                 }
                             }
@@ -198,15 +232,35 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
-    use std::{io, time::Duration};
+    use std::io;
 
     use crabka_client_core::ClientError;
 
     use super::*;
     use crate::{
+        config::RegistryRuntimeConfig,
         ids::{SchemaId, SchemaVersion},
         kafkastore::record::{SchemaKey, SchemaValue},
     };
+
+    #[test]
+    fn reader_policy_uses_configured_runtime() {
+        let runtime = RegistryRuntimeConfig {
+            store_reader_retry_backoff: millis(333),
+            store_reader_fetch_max_wait: millis(777),
+            store_reader_fetch_max: mebibytes(2),
+            ..RegistryRuntimeConfig::default()
+        };
+
+        assert2::check!(
+            reader_policy(&runtime)
+                == ReaderPolicy {
+                    retry_backoff: millis(333),
+                    fetch_max_wait: millis(777),
+                    fetch_max: mebibytes(2),
+                }
+        );
+    }
 
     #[test]
     fn apply_record_folds_schema_and_ignores_noop() {
@@ -241,7 +295,7 @@ mod tests {
             ),
             (
                 "timeout",
-                ClientError::Timeout(Duration::from_millis(1)),
+                ClientError::Timeout(crabka_units::millis(1)),
                 FetchErrorAction::Reconnect,
             ),
             (

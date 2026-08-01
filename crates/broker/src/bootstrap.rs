@@ -13,6 +13,12 @@ use wincode::Deserialize;
 
 use crate::error::BrokerError;
 
+/// Select a configured internal-topic replication factor, bounded by the
+/// registered broker count.
+pub(crate) fn internal_topic_replication_factor(desired: i16, broker_count: usize) -> usize {
+    broker_count.min(usize::try_from(desired).expect("replication factor is positive"))
+}
+
 /// Read this replica's stable directory id from `meta.properties.json`
 /// (written by `crabka format`). KIP-853 identifies each voter by
 /// `(node_id, directory_id)`, so the broker must recover its id across
@@ -104,6 +110,12 @@ mod tests {
     use wincode::Serialize;
 
     use super::*;
+
+    #[test]
+    fn internal_topic_replication_factor_uses_configured_value_and_broker_cap() {
+        assert!(internal_topic_replication_factor(2, 3) == 2);
+        assert!(internal_topic_replication_factor(4, 3) == 3);
+    }
 
     fn write_frame(out: &mut Vec<u8>, rec: &MetadataRecord) {
         let bytes = <SerdeCompat<MetadataRecord>>::serialize(rec).unwrap();

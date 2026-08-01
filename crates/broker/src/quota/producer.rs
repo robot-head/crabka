@@ -1,10 +1,10 @@
 //! Producer-byte quota enforcement with Crabka QoS-tier bucket partitioning.
 
-use std::time::Duration;
-
 use crabka_metadata::MetadataImage;
+use crabka_units::{Time, convert::TimeExt as _};
+use num_traits::cast::ToPrimitive as _;
 
-use super::{QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota};
+use super::{QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota, u64_to_f64};
 
 #[must_use]
 pub fn consume_producer_quota(
@@ -14,7 +14,8 @@ pub fn consume_producer_quota(
     client_id: &str,
     qos_tier: &str,
     bytes: u64,
-) -> Duration {
+    maximum_delay: Time,
+) -> Time {
     consume_configured_quota(
         QuotaConsumption {
             image,
@@ -28,8 +29,9 @@ pub fn consume_producer_quota(
         quota_rate_to_bucket_rate,
         |overage, rate, _| {
             let overage = u64_to_f64(overage);
-            Duration::from_secs_f64(overage / rate)
+            Time::from_secs_f64(overage / rate)
         },
+        maximum_delay,
     )
 }
 
@@ -38,19 +40,14 @@ fn quota_rate_to_bucket_rate(rate: f64) -> Option<u64> {
         return None;
     }
 
-    rate.floor().to_string().parse().ok()
-}
-
-fn u64_to_f64(value: u64) -> f64 {
-    value.to_string().parse().unwrap_or(f64::INFINITY)
+    rate.floor().to_u64()
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use assert2::{assert, check};
     use crabka_metadata::MetadataImage;
+    use crabka_units::{Time, convert::TimeExt, millis, secs};
 
     use super::consume_producer_quota;
     use crate::quota::{QuotaBuckets, test_support::image_with_quota as quota_image};
@@ -67,11 +64,11 @@ mod tests {
         );
         let buckets = QuotaBuckets::new();
 
-        let gold = consume_producer_quota(&img, &buckets, "alice", "app", "gold", 1024);
-        let bulk = consume_producer_quota(&img, &buckets, "alice", "app", "bulk", 64);
+        let gold = consume_producer_quota(&img, &buckets, "alice", "app", "gold", 1024, secs(1));
+        let bulk = consume_producer_quota(&img, &buckets, "alice", "app", "bulk", 64, secs(1));
 
-        check!(gold > Duration::ZERO);
-        check!(bulk == Duration::ZERO);
+        check!(gold > <Time as TimeExt>::ZERO);
+        check!(bulk == <Time as TimeExt>::ZERO);
         check!(buckets.len() == 2);
     }
 
@@ -83,12 +80,13 @@ mod tests {
         );
         let buckets = QuotaBuckets::new();
 
-        let matching = consume_producer_quota(&img, &buckets, "alice", "app", "default", 4096);
+        let matching =
+            consume_producer_quota(&img, &buckets, "alice", "app", "default", 4096, secs(1));
         let other_client =
-            consume_producer_quota(&img, &buckets, "alice", "other", "default", 4096);
+            consume_producer_quota(&img, &buckets, "alice", "other", "default", 4096, secs(1));
 
-        assert!(matching > Duration::ZERO);
-        assert!(other_client == Duration::ZERO);
+        assert!(matching > <Time as TimeExt>::ZERO);
+        assert!(other_client == <Time as TimeExt>::ZERO);
     }
 
     #[test]
@@ -96,8 +94,20 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 1_000.0);
         let buckets = QuotaBuckets::new();
 
-        let delay = consume_producer_quota(&img, &buckets, "alice", "app", "default", 1_250);
+        let delay =
+            consume_producer_quota(&img, &buckets, "alice", "app", "default", 1_250, secs(1));
 
-        assert!(delay == Duration::from_millis(250));
+        assert!(delay == millis(250));
+    }
+
+    #[test]
+    fn producer_quota_uses_configured_maximum_delay() {
+        let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
+        let buckets = QuotaBuckets::new();
+
+        let delay =
+            consume_producer_quota(&img, &buckets, "alice", "app", "default", 100, millis(25));
+
+        assert!(delay == millis(25));
     }
 }

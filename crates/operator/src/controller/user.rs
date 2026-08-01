@@ -16,6 +16,7 @@ use crabka_client_admin::{
     AclEntry, AclEntryFilter, AclOperation, AdminError, DEFAULT_SCRAM_ITERATIONS, PatternType,
     PermissionType, ResourceType, ScramDeletion, ScramUpsertion,
 };
+use crabka_units::{Time, convert::TimeExt as _, fmt::Human as _, minutes};
 use futures::StreamExt as _;
 use k8s_openapi::{
     ByteString,
@@ -73,9 +74,9 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn error_policy(_obj: Arc<KafkaUser>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
+pub fn error_policy(_obj: Arc<KafkaUser>, err: &ReconcileError, ctx: Arc<Context>) -> Action {
     tracing::warn!(error = %err, "user reconcile error, requeueing");
-    Action::requeue(Duration::from_secs(15))
+    common::error_requeue(ctx)
 }
 
 /// Reconcile entry point. Times the pass and records the reconcile
@@ -239,7 +240,7 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(error = %e, %cluster, "AdminClient connect failed");
-            return Ok(Action::requeue(Duration::from_secs(15)));
+            return Ok(common::requeue(ctx.config.controller_error_requeue));
         }
     };
     let mut admin = admin_handle.lock().await;
@@ -261,7 +262,7 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
             if is_transport {
                 ctx.drop_admin_client(cluster).await;
             }
-            return Ok(Action::requeue(Duration::from_secs(15)));
+            return Ok(common::requeue(ctx.config.controller_error_requeue));
         }
     };
     let current: BTreeSet<AclEntry> = current_vec.into_iter().collect();
@@ -275,7 +276,15 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
         if is_transport {
             ctx.drop_admin_client(cluster).await;
         }
-        return user_broker_error(user_api, name, obj, e, "CreateAcls").await;
+        return user_broker_error(
+            user_api,
+            name,
+            obj,
+            e,
+            "CreateAcls",
+            ctx.config.controller_error_requeue,
+        )
+        .await;
     }
     if !deletions.is_empty()
         && let Err(e) = apply_delete_acls(&mut admin, &deletions).await
@@ -285,7 +294,15 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
         if is_transport {
             ctx.drop_admin_client(cluster).await;
         }
-        return user_broker_error(user_api, name, obj, e, "DeleteAcls").await;
+        return user_broker_error(
+            user_api,
+            name,
+            obj,
+            e,
+            "DeleteAcls",
+            ctx.config.controller_error_requeue,
+        )
+        .await;
     }
 
     // 9. Reconcile quotas. `spec.quotas == None` leaves the
@@ -305,7 +322,7 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
                 if is_transport {
                     ctx.drop_admin_client(cluster).await;
                 }
-                return Ok(Action::requeue(Duration::from_secs(15)));
+                return Ok(common::requeue(ctx.config.controller_error_requeue));
             }
         };
         let ops = crabka_client_admin::diff_user_quotas(&current, &desired);
@@ -317,7 +334,15 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
             if is_transport {
                 ctx.drop_admin_client(cluster).await;
             }
-            return user_broker_error(user_api, name, obj, e, "AlterClientQuotas").await;
+            return user_broker_error(
+                user_api,
+                name,
+                obj,
+                e,
+                "AlterClientQuotas",
+                ctx.config.controller_error_requeue,
+            )
+            .await;
         }
         true
     } else {
@@ -371,13 +396,13 @@ async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, Reconcile
     let requeue = match &obj.spec.authentication {
         Authentication::ScramSha512(_)
         | Authentication::ScramSha256(_)
-        | Authentication::TlsExternal => Duration::from_mins(1),
-        Authentication::Tls(_) => Duration::from_hours(6),
+        | Authentication::TlsExternal => ctx.config.controller_drift_requeue,
+        Authentication::Tls(_) => ctx.config.user_tls_drift_requeue,
         Authentication::DelegationToken(_) => unreachable!(
             "delegation-token arm returns early after user_delegation_token::reconcile",
         ),
     };
-    Ok(Action::requeue(requeue))
+    Ok(common::requeue(requeue))
 }
 
 struct PreparedUser {
@@ -440,9 +465,9 @@ async fn prepare_user(obj: &KafkaUser, ctx: &Context) -> Result<UserPreparation,
             },
         )
         .await?;
-        return Ok(UserPreparation::Done(Action::requeue(Duration::from_mins(
-            1,
-        ))));
+        return Ok(UserPreparation::Done(common::requeue(
+            ctx.config.controller_drift_requeue,
+        )));
     };
     if let Err(message) = validate_spec(&obj.spec) {
         patch_status(
@@ -461,9 +486,9 @@ async fn prepare_user(obj: &KafkaUser, ctx: &Context) -> Result<UserPreparation,
             },
         )
         .await?;
-        return Ok(UserPreparation::Done(Action::requeue(Duration::from_mins(
-            5,
-        ))));
+        return Ok(UserPreparation::Done(common::requeue(
+            ctx.config.controller_invalid_requeue,
+        )));
     }
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &namespace);
     let kafka = kafka_api.get_opt(&cluster).await?;
@@ -485,9 +510,9 @@ async fn prepare_user(obj: &KafkaUser, ctx: &Context) -> Result<UserPreparation,
             },
         )
         .await?;
-        return Ok(UserPreparation::Done(Action::requeue(Duration::from_secs(
-            30,
-        ))));
+        return Ok(UserPreparation::Done(common::requeue(
+            ctx.config.controller_dependency_requeue,
+        )));
     };
     Ok(UserPreparation::Ready(Box::new(PreparedUser {
         namespace,
@@ -575,7 +600,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                 Ok(p) => p,
                 Err(e) => {
                     tracing::warn!(error = %e, %name, "ensure_password_secret failed");
-                    return Ok(Action::requeue(Duration::from_secs(15)));
+                    return Ok(common::requeue(ctx.config.controller_error_requeue));
                 }
             };
 
@@ -587,7 +612,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                 Ok(h) => h,
                 Err(e) => {
                     tracing::warn!(error = %e, %cluster, "AdminClient connect failed");
-                    return Ok(Action::requeue(Duration::from_secs(15)));
+                    return Ok(common::requeue(ctx.config.controller_error_requeue));
                 }
             };
             let mut admin = admin_handle.lock().await;
@@ -614,7 +639,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                     if is_transport {
                         ctx.drop_admin_client(&cluster).await;
                     }
-                    return Ok(Action::requeue(Duration::from_secs(15)));
+                    return Ok(common::requeue(ctx.config.controller_error_requeue));
                 }
             };
             if let Some(err) = outcomes.into_iter().find_map(|o| o.error) {
@@ -640,7 +665,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                     },
                 )
                 .await?;
-                return Ok(Action::requeue(Duration::from_secs(15)));
+                return Ok(common::requeue(ctx.config.controller_error_requeue));
             }
             None
         }
@@ -659,7 +684,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                 Ok(o) => o,
                 Err(e) => {
                     tracing::warn!(error = %e, %cluster, "clients CA reconcile failed");
-                    return Ok(Action::requeue(Duration::from_secs(15)));
+                    return Ok(common::requeue(ctx.config.controller_error_requeue));
                 }
             };
             // Sign user certs with the clients CA's active signer (the
@@ -670,7 +695,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                     Ok(s) => s,
                     Err(e) => {
                         tracing::warn!(error = %e, %name, "ensure_user_cert_secret failed");
-                        return Ok(Action::requeue(Duration::from_secs(15)));
+                        return Ok(common::requeue(ctx.config.controller_error_requeue));
                     }
                 };
             if cert_status.issued_new {
@@ -697,7 +722,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
         //
         // The module's `reconcile` returns an `Action` on its own —
         // computed from the live token's `expiry_timestamp_ms` minus
-        // the spec's `renew_before_expiry_ms` — so this arm bypasses
+        // the spec's `renew_before_expiry` — so this arm bypasses
         // the trailing ACL/quota reconciliation block by returning
         // early. (ACLs + quotas for delegation-token users are reached
         // on the next requeue: `reconcile` here returns just the
@@ -708,7 +733,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                 Ok(h) => h,
                 Err(e) => {
                     tracing::warn!(error = %e, %cluster, "AdminClient connect failed");
-                    return Ok(Action::requeue(Duration::from_secs(15)));
+                    return Ok(common::requeue(ctx.config.controller_error_requeue));
                 }
             };
             let secret_writer = KubeSecretWriter {
@@ -725,6 +750,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                 &secret_writer,
                 &user_writer,
                 now_ms,
+                &ctx.config,
             )
             .await?;
             // ACL + quota reconciliation for delegation-token users
@@ -809,6 +835,7 @@ async fn user_broker_error(
     obj: &KafkaUser,
     err: AdminError,
     op: &str,
+    error_requeue: Time,
 ) -> Result<Action, ReconcileError> {
     let detail = match err {
         AdminError::Broker { code, name, .. } => format!("{op}: {name} ({code})"),
@@ -838,7 +865,7 @@ async fn user_broker_error(
         },
     )
     .await?;
-    Ok(Action::requeue(Duration::from_secs(15)))
+    Ok(common::requeue(error_requeue))
 }
 
 /// Build an `AclEntryFilter` that matches exactly one `AclEntry`.
@@ -906,6 +933,22 @@ pub(crate) fn diff_acls(
 }
 
 fn validate_spec(spec: &crate::crd::KafkaUserSpec) -> Result<(), String> {
+    if let Authentication::DelegationToken(auth) = &spec.authentication {
+        if let Some(max_lifetime) = auth.max_lifetime {
+            validate_delegation_token_time(
+                "spec.authentication.maxLifetime",
+                max_lifetime,
+                Time::from_millis(1),
+            )?;
+        }
+        if let Some(renew_before_expiry) = auth.renew_before_expiry {
+            validate_delegation_token_time(
+                "spec.authentication.renewBeforeExpiry",
+                renew_before_expiry,
+                minutes(1),
+            )?;
+        }
+    }
     if let Some(Authorization::Simple(simple)) = &spec.authorization {
         for (i, rule) in simple.acls.iter().enumerate() {
             if rule.operations.is_empty() {
@@ -917,6 +960,18 @@ fn validate_spec(spec: &crate::crd::KafkaUserSpec) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+fn validate_delegation_token_time(path: &str, value: Time, minimum: Time) -> Result<(), String> {
+    let millis = value.millis_i64();
+    if value.secs_f64().is_finite() && value >= minimum && Time::from_millis(millis) == value {
+        Ok(())
+    } else {
+        Err(format!(
+            "{path} must be finite, at least {}, and a whole number of milliseconds",
+            minimum.human()
+        ))
+    }
 }
 
 fn resource_kind_to_admin(k: AclResourceKind) -> ResourceType {
@@ -1356,6 +1411,35 @@ mod tests {
         };
         let err = validate_spec(&spec).unwrap_err();
         assert!(err.contains("resource.name is empty"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_spec_rejects_invalid_delegation_token_times() {
+        for (max_lifetime, renew_before_expiry, path) in [
+            (Some(Time::ZERO), None, "spec.authentication.maxLifetime"),
+            (
+                None,
+                Some(crabka_units::secs(59)),
+                "spec.authentication.renewBeforeExpiry",
+            ),
+            (
+                Some(crabka_units::micros(1_500)),
+                None,
+                "spec.authentication.maxLifetime",
+            ),
+        ] {
+            let spec = crate::crd::KafkaUserSpec {
+                authentication: Authentication::DelegationToken(crate::crd::DelegationTokenAuth {
+                    renewers: Vec::new(),
+                    max_lifetime,
+                    renew_before_expiry,
+                }),
+                authorization: None,
+                quotas: None,
+            };
+            let error = validate_spec(&spec).expect_err("invalid time");
+            assert!(error.contains(path), "got: {error}");
+        }
     }
 
     #[test]

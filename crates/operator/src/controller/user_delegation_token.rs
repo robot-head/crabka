@@ -15,7 +15,7 @@
 //!
 //! - `Create` — no matching token; call `CreateDelegationToken` (act-as).
 //! - `NoOp`   — token healthy and well within its expiry horizon.
-//! - `Renew`  — token within `renew_before_expiry_ms`; call `RenewDelegationToken`.
+//! - `Renew`  — token within `renew_before_expiry`; call `RenewDelegationToken`.
 //! - `Cycle`  — renewer set diverged from spec; expire + create (KIP-48's
 //!   `Renew` cannot mutate the renewer set, so the old token must be
 //!   tombstoned).
@@ -27,16 +27,14 @@
 //! trait pair. Unit tests substitute trivial in-memory mocks; production
 //! wires `kube::Api<Secret>` / `kube::Api<KafkaUser>` adapters.
 
-use std::{
-    collections::{BTreeMap, BTreeSet},
-    time::Duration,
-};
+use std::collections::{BTreeMap, BTreeSet};
 
 use async_trait::async_trait;
 use base64::Engine as _;
 use crabka_client_admin::AdminError;
 use crabka_metadata::DelegationToken;
 use crabka_security::KafkaPrincipal;
+use crabka_units::{Time, convert::TimeExt as _, hours};
 use k8s_openapi::{
     ByteString,
     api::core::v1::Secret,
@@ -50,16 +48,13 @@ use kube::{
 use serde_json::json;
 
 use crate::{
+    config::OperatorConfig,
     controller::common::{FIELD_MANAGER, ReconcileError, condition},
     crd::{DelegationTokenAuth, KafkaCondition, KafkaUser},
 };
 
-/// Default `renew_before_expiry_ms` when the spec omits it (24h).
-pub(crate) const DEFAULT_RENEW_BEFORE_EXPIRY_MS: i64 = 24 * 60 * 60 * 1_000;
-
-/// Transient broker errors trigger a 5-minute requeue backoff per spec
-/// §2.5 (`AUTH_DISABLED`, `AUTHORIZATION_FAILED`, `REQUEST_NOT_ALLOWED`).
-const TRANSIENT_BACKOFF: Duration = Duration::from_mins(5);
+/// Default renewal lead time when the spec omits it.
+pub(crate) const DEFAULT_RENEW_BEFORE_EXPIRY: Time = hours(24);
 
 /// Broker error codes the spec §2.5 table calls out.
 const CODE_INVALID_REQUEST: i16 = 42;
@@ -74,7 +69,7 @@ pub(crate) enum ReconcileDecision {
     Create,
     /// Token exists and is well within its expiry horizon. No-op.
     NoOp,
-    /// Token exists but `expiry_ts - now <= renew_before_expiry_ms` — renew.
+    /// Token exists but `expiry_ts - now <= renew_before_expiry` — renew.
     Renew,
     /// Renewer set has diverged from spec; cycle (expire old + create new).
     Cycle,
@@ -100,9 +95,9 @@ pub(crate) fn decide(
         return ReconcileDecision::Cycle;
     }
     let renew_before = auth
-        .renew_before_expiry_ms
-        .unwrap_or(DEFAULT_RENEW_BEFORE_EXPIRY_MS);
-    if token.expiry_timestamp_ms - now_ms <= renew_before {
+        .renew_before_expiry
+        .unwrap_or(DEFAULT_RENEW_BEFORE_EXPIRY);
+    if Time::from_millis(token.expiry_timestamp_ms - now_ms) <= renew_before {
         ReconcileDecision::Renew
     } else {
         ReconcileDecision::NoOp
@@ -116,13 +111,13 @@ pub(crate) fn decide(
 pub(crate) trait DelegationTokenAdmin: Send + Sync {
     /// KIP-48 act-as: the operator (a super-user) mints a token owned by
     /// `owner_principal_name` (a `User:` principal). `renewers` is the
-    /// list of `"User:<name>"` principal strings. `max_lifetime_ms` of
-    /// `-1` defers to the broker's `delegation.token.max.lifetime.ms`.
+    /// list of `"User:<name>"` principal strings. A `max_lifetime` of
+    /// `None` defers to the broker's `delegation.token.max.lifetime.ms`.
     async fn create_delegation_token_as_owner(
         &self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<DelegationToken, AdminError>;
 
     /// Extend the token's `expiry_timestamp_ms` (clamped by
@@ -222,6 +217,7 @@ pub(crate) async fn reconcile(
     secrets: &dyn SecretWriter,
     users: &dyn KafkaUserStatusWriter,
     now_ms: i64,
+    config: &OperatorConfig,
 ) -> Result<ReconcileOutcome, ReconcileError> {
     let name = obj.metadata.name.clone().unwrap_or_default();
     let owner_principal = format!("User:{name}");
@@ -232,7 +228,9 @@ pub(crate) async fn reconcile(
         .await
     {
         Ok(v) => v,
-        Err(e) => return on_admin_error(obj, &name, e, "DescribeDelegationToken", users).await,
+        Err(e) => {
+            return on_admin_error(obj, &name, e, "DescribeDelegationToken", users, config).await;
+        }
     };
     // Prefer the persisted token_id from status; else fall back to the
     // first match (one-token-per-user is the operator's contract).
@@ -248,30 +246,49 @@ pub(crate) async fn reconcile(
 
     // 2. Drive the decision. Each arm yields the live token + its
     //    expiry-driven requeue cadence.
-    let (token, requeue): (DelegationToken, Duration) = match decision {
+    let (token, requeue): (DelegationToken, Time) = match decision {
         ReconcileDecision::Create => match issue_new_token(&name, auth, admin).await {
             Ok(t) => {
-                let r = compute_requeue(&t, auth, now_ms);
+                let r = compute_requeue(
+                    &t,
+                    auth,
+                    now_ms,
+                    config.delegation_token_min_requeue,
+                    config.delegation_token_max_requeue,
+                );
                 (t, r)
             }
             Err(e) => {
-                return on_admin_error(obj, &name, e, "CreateDelegationToken", users).await;
+                return on_admin_error(obj, &name, e, "CreateDelegationToken", users, config).await;
             }
         },
         ReconcileDecision::NoOp => {
             let t = matching.expect("NoOp implies existing token");
-            let r = compute_requeue(&t, auth, now_ms);
+            let r = compute_requeue(
+                &t,
+                auth,
+                now_ms,
+                config.delegation_token_min_requeue,
+                config.delegation_token_max_requeue,
+            );
             (t, r)
         }
         ReconcileDecision::Renew => {
             let existing_token = matching.expect("Renew implies existing token");
             match admin.renew_delegation_token(&existing_token.hmac).await {
                 Ok(renewed) => {
-                    let r = compute_requeue(&renewed, auth, now_ms);
+                    let r = compute_requeue(
+                        &renewed,
+                        auth,
+                        now_ms,
+                        config.delegation_token_min_requeue,
+                        config.delegation_token_max_requeue,
+                    );
                     (renewed, r)
                 }
                 Err(e) => {
-                    return on_admin_error(obj, &name, e, "RenewDelegationToken", users).await;
+                    return on_admin_error(obj, &name, e, "RenewDelegationToken", users, config)
+                        .await;
                 }
             }
         }
@@ -280,15 +297,22 @@ pub(crate) async fn reconcile(
             // Expire the old, then create the new. KIP-48 has no
             // in-place renewer-set mutation API, so we must cycle.
             if let Err(e) = admin.expire_delegation_token(&existing_token.hmac).await {
-                return on_admin_error(obj, &name, e, "ExpireDelegationToken", users).await;
+                return on_admin_error(obj, &name, e, "ExpireDelegationToken", users, config).await;
             }
             match issue_new_token(&name, auth, admin).await {
                 Ok(t) => {
-                    let r = compute_requeue(&t, auth, now_ms);
+                    let r = compute_requeue(
+                        &t,
+                        auth,
+                        now_ms,
+                        config.delegation_token_min_requeue,
+                        config.delegation_token_max_requeue,
+                    );
                     (t, r)
                 }
                 Err(e) => {
-                    return on_admin_error(obj, &name, e, "CreateDelegationToken", users).await;
+                    return on_admin_error(obj, &name, e, "CreateDelegationToken", users, config)
+                        .await;
                 }
             }
         }
@@ -304,20 +328,19 @@ pub(crate) async fn reconcile(
     users.patch_status(&name, body).await?;
 
     Ok(ReconcileOutcome {
-        action: Action::requeue(requeue),
+        action: Action::requeue(requeue.to_std()),
     })
 }
 
-/// `Create` arm: issue a new token via act-as. `max_lifetime_ms` defaults
-/// to `-1` (broker ceiling) when the spec omits the field.
+/// `Create` arm: issue a new token via act-as. The lifetime falls back to
+/// the broker ceiling when the spec omits the field.
 async fn issue_new_token(
     name: &str,
     auth: &DelegationTokenAuth,
     admin: &dyn DelegationTokenAdmin,
 ) -> Result<DelegationToken, AdminError> {
-    let max_lifetime_ms = auth.max_lifetime_ms.unwrap_or(-1);
     admin
-        .create_delegation_token_as_owner(name, &auth.renewers, max_lifetime_ms)
+        .create_delegation_token_as_owner(name, &auth.renewers, auth.max_lifetime)
         .await
 }
 
@@ -401,21 +424,25 @@ fn user_owner_ref(obj: &KafkaUser) -> Result<OwnerReference, ReconcileError> {
     })
 }
 
-/// Wait until ~`renew_before_expiry_ms` before expiry. Clamped:
-/// - at most 24h (the operator wants to re-check at least once a day),
-/// - at least 1m (prevent a hot loop if the broker hands back an
-///   already-stale `expiry_ts`).
+/// Wait until roughly `renew_before_expiry` before expiry, clamped to
+/// the configured minimum and maximum requeue extents.
+///
+/// `expiry_timestamp_ms` and `now_ms` are instants; their difference (less the
+/// renewal lead time is the extent.
 pub(crate) fn compute_requeue(
     token: &DelegationToken,
     auth: &DelegationTokenAuth,
     now_ms: i64,
-) -> Duration {
+    min_requeue: Time,
+    max_requeue: Time,
+) -> Time {
     let renew_before = auth
-        .renew_before_expiry_ms
-        .unwrap_or(DEFAULT_RENEW_BEFORE_EXPIRY_MS);
-    let until_renew_ms = (token.expiry_timestamp_ms - now_ms - renew_before).max(0);
-    let clamped_ms = until_renew_ms.clamp(60 * 1_000, 24 * 60 * 60 * 1_000); // [1m, 24h]
-    Duration::from_millis(clamped_ms.cast_unsigned())
+        .renew_before_expiry
+        .unwrap_or(DEFAULT_RENEW_BEFORE_EXPIRY);
+    let until_expiry = Time::from_millis(token.expiry_timestamp_ms - now_ms);
+    (until_expiry - renew_before)
+        .max(min_requeue)
+        .min(max_requeue)
 }
 
 /// Compute the `Ready` + `TokenIssued` + `TokenExpiring` conditions.
@@ -439,8 +466,8 @@ pub(crate) fn compute_conditions(
     issued_reason: Option<(&str, &str)>,
 ) -> Vec<KafkaCondition> {
     let renew_before = auth
-        .renew_before_expiry_ms
-        .unwrap_or(DEFAULT_RENEW_BEFORE_EXPIRY_MS);
+        .renew_before_expiry
+        .unwrap_or(DEFAULT_RENEW_BEFORE_EXPIRY);
     let mut out = Vec::with_capacity(3);
     if issued_ok {
         out.push(condition(
@@ -461,13 +488,14 @@ pub(crate) fn compute_conditions(
         out.push(condition("TokenIssued", "False", reason, msg));
     }
 
-    let expiring = token.expiry_timestamp_ms - now_ms < renew_before * 2;
+    let expiring =
+        Time::from_millis(token.expiry_timestamp_ms - now_ms) < renew_before + renew_before;
     if expiring {
         out.push(condition(
             "TokenExpiring",
             "True",
             "WithinRenewalHorizon",
-            "expiry < 2× renewBeforeExpiryMs from now",
+            "expiry < 2× renewBeforeExpiry from now",
         ));
     } else {
         out.push(condition(
@@ -525,28 +553,28 @@ async fn on_admin_error(
     err: AdminError,
     op: &'static str,
     users: &dyn KafkaUserStatusWriter,
+    config: &OperatorConfig,
 ) -> Result<ReconcileOutcome, ReconcileError> {
-    let (reason, message, requeue): (&'static str, String, Duration) = match &err {
+    let (reason, message, requeue): (&'static str, String, Time) = match &err {
         AdminError::Broker { code, .. } if *code == CODE_INVALID_REQUEST => (
             "InvalidSpec",
             format!("{op}: INVALID_REQUEST (42)"),
-            // No automatic recovery — long requeue so a human notices.
-            Duration::from_hours(1),
+            config.delegation_token_invalid_requeue,
         ),
         AdminError::Broker { code, .. } if *code == CODE_DELEGATION_TOKEN_AUTH_DISABLED => (
             "BrokerAuthDisabled",
             format!("{op}: DELEGATION_TOKEN_AUTH_DISABLED (61)"),
-            TRANSIENT_BACKOFF,
+            config.delegation_token_transient_backoff,
         ),
         AdminError::Broker { code, .. } if *code == CODE_DELEGATION_TOKEN_REQUEST_NOT_ALLOWED => (
             "OperatorTokenAuthed",
             format!("{op}: DELEGATION_TOKEN_REQUEST_NOT_ALLOWED (64)"),
-            TRANSIENT_BACKOFF,
+            config.delegation_token_transient_backoff,
         ),
         AdminError::Broker { code, .. } if *code == CODE_DELEGATION_TOKEN_AUTHORIZATION_FAILED => (
             "OperatorNotSuperUser",
             format!("{op}: DELEGATION_TOKEN_AUTHORIZATION_FAILED (65)"),
-            TRANSIENT_BACKOFF,
+            config.delegation_token_transient_backoff,
         ),
         AdminError::Broker {
             code,
@@ -555,9 +583,13 @@ async fn on_admin_error(
         } => (
             "BrokerError",
             format!("{op}: {code_name} ({code})"),
-            TRANSIENT_BACKOFF,
+            config.delegation_token_transient_backoff,
         ),
-        other => ("Transport", format!("{op}: {other}"), TRANSIENT_BACKOFF),
+        other => (
+            "Transport",
+            format!("{op}: {other}"),
+            config.delegation_token_transient_backoff,
+        ),
     };
 
     // Both `Ready` and `TokenIssued` flip to `False` with the same reason —
@@ -570,7 +602,7 @@ async fn on_admin_error(
     let body = build_failure_status_patch(&conds);
     users.patch_status(name, body).await?;
     Ok(ReconcileOutcome {
-        action: Action::requeue(requeue),
+        action: Action::requeue(requeue.to_std()),
     })
 }
 
@@ -605,11 +637,11 @@ impl DelegationTokenAdmin for crate::context::AdminClientHandle {
         &self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<DelegationToken, AdminError> {
         let mut admin = self.lock().await;
         admin
-            .create_delegation_token_as_owner(owner_principal_name, renewers, max_lifetime_ms)
+            .create_delegation_token_as_owner(owner_principal_name, renewers, max_lifetime)
             .await
     }
 
@@ -639,10 +671,25 @@ mod tests {
     use std::sync::Mutex as StdMutex;
 
     use assert2::{assert, check};
+    use clap::Parser;
+    use crabka_units::minutes;
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
     use super::*;
-    use crate::crd::{Authentication, KafkaUserSpec};
+    use crate::{
+        config::OperatorConfig,
+        crd::{Authentication, KafkaUserSpec},
+    };
+
+    #[derive(Parser)]
+    struct TestArgs {
+        #[command(flatten)]
+        config: OperatorConfig,
+    }
+
+    fn config() -> OperatorConfig {
+        TestArgs::parse_from(["test"]).config
+    }
 
     fn kp(t: &str, n: &str) -> KafkaPrincipal {
         KafkaPrincipal {
@@ -663,11 +710,11 @@ mod tests {
         }
     }
 
-    fn auth(renewers: Vec<&str>, renew_before: Option<i64>) -> DelegationTokenAuth {
+    fn auth(renewers: Vec<&str>, renew_before: Option<Time>) -> DelegationTokenAuth {
         DelegationTokenAuth {
             renewers: renewers.into_iter().map(str::to_string).collect(),
-            max_lifetime_ms: None,
-            renew_before_expiry_ms: renew_before,
+            max_lifetime: None,
+            renew_before_expiry: renew_before,
         }
     }
 
@@ -689,7 +736,13 @@ mod tests {
     fn decide_renew_when_inside_renew_threshold() {
         let t = token_with(1000, vec![]);
         // renew_before = 5000 > (1000 - 0). Renew.
-        assert!(decide(&auth(vec![], Some(5000)), Some(&t), 0) == ReconcileDecision::Renew);
+        assert!(
+            decide(
+                &auth(vec![], Some(crabka_units::millis(5_000))),
+                Some(&t),
+                0
+            ) == ReconcileDecision::Renew
+        );
     }
 
     #[test]
@@ -715,12 +768,14 @@ mod tests {
     /// Recorded call against the mock admin client. Tests assert on
     /// this to verify the reconciler called the right RPC with the
     /// right shape.
-    #[derive(Debug, Clone, PartialEq, Eq)]
+    /// Not `Eq`: `Create` carries a `Time`, whose `f64` storage is only
+    /// `PartialEq`.
+    #[derive(Debug, Clone, PartialEq)]
     enum MockCall {
         Create {
             owner: String,
             renewers: Vec<String>,
-            max_lifetime_ms: i64,
+            max_lifetime: Option<Time>,
         },
         Renew {
             hmac: Vec<u8>,
@@ -767,12 +822,12 @@ mod tests {
             &self,
             owner_principal_name: &str,
             renewers: &[String],
-            max_lifetime_ms: i64,
+            max_lifetime: Option<Time>,
         ) -> Result<DelegationToken, AdminError> {
             self.calls.lock().unwrap().push(MockCall::Create {
                 owner: owner_principal_name.into(),
                 renewers: renewers.to_vec(),
-                max_lifetime_ms,
+                max_lifetime,
             });
             if let Some(code) = self.force_broker_error {
                 return Err(AdminError::Broker {
@@ -916,12 +971,13 @@ mod tests {
 
         let auth_cfg = DelegationTokenAuth {
             renewers: vec!["User:bob".into()],
-            max_lifetime_ms: Some(86_400_000),
-            renew_before_expiry_ms: None,
+            max_lifetime: Some(hours(24)),
+            renew_before_expiry: None,
         };
         let obj = user("alice", auth_cfg.clone());
+        let config = config();
 
-        let out = reconcile(&obj, &auth_cfg, &admin, &secrets, &users, 0)
+        let out = reconcile(&obj, &auth_cfg, &admin, &secrets, &users, 0, &config)
             .await
             .expect("reconcile should succeed");
         // Action is requeue (we don't inspect the exact duration; that's
@@ -939,7 +995,7 @@ mod tests {
                     MockCall::Create {
                         owner: "alice".into(),
                         renewers: vec!["User:bob".into()],
-                        max_lifetime_ms: 86_400_000,
+                        max_lifetime: Some(hours(24)),
                     },
                 ],
             "expected Describe+Create, got: {calls:?}",
@@ -1003,12 +1059,13 @@ mod tests {
         // Spec's renew_before is 60s — token (10s away) is inside.
         let auth_cfg = DelegationTokenAuth {
             renewers: vec![],
-            max_lifetime_ms: None,
-            renew_before_expiry_ms: Some(60_000),
+            max_lifetime: None,
+            renew_before_expiry: Some(minutes(1)),
         };
         let obj = user("alice", auth_cfg.clone());
+        let config = config();
 
-        let _ = reconcile(&obj, &auth_cfg, &admin, &secrets, &users, 0)
+        let _ = reconcile(&obj, &auth_cfg, &admin, &secrets, &users, 0, &config)
             .await
             .unwrap();
 
@@ -1041,10 +1098,13 @@ mod tests {
         let users = RecordingStatusWriter::default();
         let auth_cfg = DelegationTokenAuth::default();
         let obj = user("alice", auth_cfg.clone());
+        let mut config = config();
+        config.delegation_token_transient_backoff = crabka_units::millis(1_234);
 
-        let _ = reconcile(&obj, &auth_cfg, &admin, &secrets, &users, 0)
+        let out = reconcile(&obj, &auth_cfg, &admin, &secrets, &users, 0, &config)
             .await
             .unwrap();
+        assert!(out.action == Action::requeue(core::time::Duration::from_millis(1_234)));
 
         // No Secret was applied — failure path skips the write.
         assert!(secrets.applied.lock().unwrap().is_empty());
@@ -1076,10 +1136,13 @@ mod tests {
         let users = RecordingStatusWriter::default();
         let auth_cfg = DelegationTokenAuth::default();
         let obj = user("alice", auth_cfg.clone());
+        let mut config = config();
+        config.delegation_token_invalid_requeue = crabka_units::millis(2_345);
 
-        let _ = reconcile(&obj, &auth_cfg, &admin, &secrets, &users, 0)
+        let out = reconcile(&obj, &auth_cfg, &admin, &secrets, &users, 0, &config)
             .await
             .unwrap();
+        assert!(out.action == Action::requeue(core::time::Duration::from_millis(2_345)));
 
         let patches = users.patches.lock().unwrap();
         let conds = patches[0].1["status"]["conditions"].as_array().unwrap();
@@ -1116,25 +1179,39 @@ mod tests {
     #[test]
     fn compute_requeue_clamps_to_one_minute_minimum() {
         // Token expires "now" with renew_before unset — without a clamp
-        // we'd compute Duration::ZERO and hot-loop the reconciler.
+        // we'd compute a zero extent and hot-loop the reconciler.
         let t = token_with(0, vec![]);
-        let r = compute_requeue(&t, &auth(vec![], None), 0);
-        assert!(r >= Duration::from_mins(1));
+        let r = compute_requeue(&t, &auth(vec![], None), 0, crabka_units::secs(7), hours(24));
+        assert!(r == crabka_units::secs(7));
     }
 
     #[test]
     fn compute_requeue_clamps_to_24h_maximum() {
         // Token expires in a year; without clamp we'd requeue weeks out.
         let t = token_with(365 * 24 * 60 * 60 * 1_000, vec![]);
-        let r = compute_requeue(&t, &auth(vec![], None), 0);
-        assert!(r <= Duration::from_hours(24));
+        let r = compute_requeue(&t, &auth(vec![], None), 0, minutes(1), hours(3));
+        assert!(r == hours(3));
+    }
+
+    #[test]
+    fn compute_requeue_lands_between_the_clamps() {
+        // Expiry 3h out, renewal lead 1h -> re-check in 2h.
+        let t = token_with(3 * 60 * 60 * 1_000, vec![]);
+        let r = compute_requeue(&t, &auth(vec![], Some(hours(1))), 0, minutes(1), hours(24));
+        assert!(r == hours(2));
     }
 
     #[test]
     fn compute_conditions_token_expiring_true_when_close_to_horizon() {
         // expiry - now (1500) < renew_before (1000) * 2 → TokenExpiring=True
         let t = token_with(1500, vec![]);
-        let conds = compute_conditions(&t, &auth(vec![], Some(1000)), 0, true, None);
+        let conds = compute_conditions(
+            &t,
+            &auth(vec![], Some(crabka_units::secs(1))),
+            0,
+            true,
+            None,
+        );
         let expiring = conds.iter().find(|c| c.type_ == "TokenExpiring").unwrap();
         assert!(expiring.status == "True");
         assert!(expiring.reason == "WithinRenewalHorizon");
@@ -1148,7 +1225,13 @@ mod tests {
     fn compute_conditions_token_expiring_false_when_far() {
         // expiry - now (5000) > renew_before (1000) * 2 → TokenExpiring=False
         let t = token_with(5000, vec![]);
-        let conds = compute_conditions(&t, &auth(vec![], Some(1000)), 0, true, None);
+        let conds = compute_conditions(
+            &t,
+            &auth(vec![], Some(crabka_units::secs(1))),
+            0,
+            true,
+            None,
+        );
         let expiring = conds.iter().find(|c| c.type_ == "TokenExpiring").unwrap();
         assert!(expiring.status == "False");
         assert!(expiring.reason == "Healthy");

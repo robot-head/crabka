@@ -83,10 +83,7 @@ async fn seek_before_first_poll_resumes_from_sought_offset() {
     let mut got = Vec::new();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
     while got.len() < 3 && std::time::Instant::now() < deadline {
-        let recs = consumer
-            .poll(std::time::Duration::from_millis(500))
-            .await
-            .unwrap();
+        let recs = consumer.poll(crabka_units::millis(500)).await.unwrap();
         got.extend(recs);
     }
 

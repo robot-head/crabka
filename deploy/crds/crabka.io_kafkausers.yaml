@@ -37,16 +37,14 @@ spec:
                     maximum: 1000000.0
                     minimum: 4096.0
                     type: integer
-                  maxLifetimeMs:
-                    minimum: 1.0
-                    type: integer
+                  maxLifetime:
+                    type: string
                   passwordLength:
                     maximum: 256.0
                     minimum: 16.0
                     type: integer
-                  renewBeforeExpiryMs:
-                    minimum: 60000.0
-                    type: integer
+                  renewBeforeExpiry:
+                    type: string
                   renewalDays:
                     maximum: 3650.0
                     minimum: 1.0
@@ -234,7 +232,7 @@ spec:
                   Current `expiry_timestamp_ms` of the operator-managed
                   delegation token (extended on each successful renew). Compared
                   against `now` to decide when to renew per
-                  `spec.authentication.renewBeforeExpiryMs`.
+                  `spec.authentication.renewBeforeExpiry`.
                 format: int64
                 nullable: true
                 type: integer

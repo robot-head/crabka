@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use assert2::check;
 use bytes::Bytes;
@@ -7,6 +7,7 @@ use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_grpc_gateway::{
     codec::RawCodec, consume::ConsumeSession, produce::ProduceCore, types::GatewayRecord,
 };
+use crabka_units::prelude::*;
 use tempfile::TempDir;
 
 async fn boot() -> (BrokerHandle, String, TempDir) {
@@ -32,7 +33,7 @@ async fn subscribe_receives_then_commits() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();
@@ -74,7 +75,7 @@ async fn subscribe_receives_then_commits() {
 
     let mut got = vec![];
     for _ in 0..20 {
-        let batch = session.poll(Duration::from_millis(500)).await.unwrap();
+        let batch = session.poll(millis(500)).await.unwrap();
         for r in batch {
             got.push(r.value.clone());
         }

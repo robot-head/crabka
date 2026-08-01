@@ -84,8 +84,8 @@ where
         let ks = key_serde.clone();
         let vs = value_serde.clone();
         let store_for_reg = store_name.clone();
-        let size = self.windows.size_ms;
-        let grace = self.windows.grace_ms;
+        let size = self.windows.size;
+        let grace = self.windows.grace;
         let registrar: StoreRegistrarFn = Box::new(move |state, procs| {
             state.topology.add_window_store::<K, VOut, KS, VS>(
                 store_for_reg.clone(),
@@ -110,16 +110,17 @@ where
             merge_id,
             Some(store_name),
             None,
-            TimeWindowedSerde::new(key_serde, self.windows.size_ms),
+            TimeWindowedSerde::new(key_serde, self.windows.size),
             value_serde,
         )
-        .with_window_grace(Some(self.windows.grace_ms))
+        .with_window_grace(Some(self.windows.grace))
     }
 }
 
 #[cfg(test)]
 mod caching_tests {
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use crate::{
         I64Serde, Materialized, Produced, StringSerde, TimeWindows,
@@ -136,7 +137,7 @@ mod caching_tests {
             acc + i64::try_from(v.len()).unwrap_or(i64::MAX)
         })
         .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-        .windowed_by(TimeWindows::of_size(100))
+        .windowed_by(TimeWindows::of_size(millis(100)))
         .aggregate_explicit(
             || 0i64,
             Materialized::with(StringSerde, I64Serde).as_store("cg"),
@@ -144,11 +145,11 @@ mod caching_tests {
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 100), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(100)), I64Serde),
         );
         let built = b.build("app").unwrap();
-        let g =
-            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        let g = pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", kibibytes(1)))
+            .unwrap();
         check!(g.cache_owner.contains_key("cg"));
     }
 
@@ -161,7 +162,7 @@ mod caching_tests {
             acc + i64::try_from(v.len()).unwrap_or(i64::MAX)
         })
         .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-        .windowed_by(TimeWindows::of_size(100))
+        .windowed_by(TimeWindows::of_size(millis(100)))
         .aggregate_explicit(
             || 0i64,
             Materialized::with(StringSerde, I64Serde)
@@ -171,11 +172,11 @@ mod caching_tests {
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 100), I64Serde),
+            Produced::with(TimeWindowedSerde::new(StringSerde, millis(100)), I64Serde),
         );
         let built = b.build("app").unwrap();
-        let g =
-            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        let g = pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", kibibytes(1)))
+            .unwrap();
         check!(!g.cache_owner.contains_key("cg"));
     }
 }

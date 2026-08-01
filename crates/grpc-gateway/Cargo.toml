@@ -30,6 +30,7 @@ crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
 crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
 crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
+crabka-units = { workspace = true }
 arc-swap = { workspace = true }
 prometheus-client = { workspace = true }
 connectrpc-axum.workspace = true
@@ -57,6 +58,7 @@ tokio-util = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 crabka-security = { version = "0.3.9", path = "../security" }
 crabka-client-core = { version = "0.3.9", path = "../client-core" }
+refined_type.workspace = true
 rustls = { workspace = true }
 tokio-rustls = { workspace = true }
 hyper = { version = "1", features = ["server", "http1"] }
@@ -82,6 +84,7 @@ protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
 crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
+temp-env = "0.3"
 # Raw Fetch + v2 RecordBatch decode in tests/outbound.rs to read the DLQ
 # record's `x-crabka-dlq-source` header (the group Consumer drops headers).
 crabka-client-core = { version = "0.3", path = "../client-core" }

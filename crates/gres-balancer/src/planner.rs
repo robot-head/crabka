@@ -1,8 +1,9 @@
 //! Goal-ordered planner.
 
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use crabka_gres_substrate::{RangeStatsProvider, RangeStatsSnapshot};
+use crabka_units::{Time, convert::StdDurationExt as _};
 
 use crate::{
     goals::{
@@ -19,7 +20,10 @@ pub struct Plan {
 }
 
 /// Planner output plus diagnostic goal order.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`: [`TenantMetrics`] carries `f64`-backed quantities,
+/// so equality over `state_after` is not reflexive across the whole domain.
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlanOutput {
     pub plan: Plan,
     pub goals_applied: Vec<String>,
@@ -29,21 +33,24 @@ pub struct PlanOutput {
 }
 
 /// Explicit freshness bound for authoritative range-statistics snapshots.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// `PartialEq` but not `Eq`: the bound is an `f64`-backed quantity, so equality
+/// is not reflexive across the whole domain.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StatsFreshness {
-    max_age: Duration,
+    max_age: Time,
 }
 
 impl StatsFreshness {
     /// Build a policy that accepts samples no older than `max_age`.
     #[must_use]
-    pub const fn new(max_age: Duration) -> Self {
+    pub const fn new(max_age: Time) -> Self {
         Self { max_age }
     }
 
     /// Return the maximum accepted sample age.
     #[must_use]
-    pub const fn max_age(self) -> Duration {
+    pub const fn max_age(self) -> Time {
         self.max_age
     }
 }
@@ -197,7 +204,7 @@ fn validate_snapshot(
     let Ok(age) = now.duration_since(snapshot.sampled_at) else {
         return Some(PlanningDiagnostic::FutureSnapshot);
     };
-    if age > freshness.max_age() {
+    if age.as_time() > freshness.max_age() {
         return Some(PlanningDiagnostic::StaleSnapshot);
     }
     if progress

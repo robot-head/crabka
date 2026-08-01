@@ -284,7 +284,7 @@ pub fn subscribe_inner(
         };
 
         let client_id = format!("{}-sub", state.config.client_id);
-        let mut session = match ConsumeSession::new(&state.config.bootstrap, &start.group_id, &client_id, start.topics, state.config.broker_security.clone(), state.codec.clone()).await {
+        let mut session = match ConsumeSession::new_with_policy(&state.config.bootstrap, &start.group_id, &client_id, start.topics, state.config.broker_security.clone(), state.codec.clone(), &state.config.runtime).await {
             Ok(s) => s,
             Err(e) => { yield Err(ConnectError::new_internal(e.to_string())); return; }
         };
@@ -306,7 +306,7 @@ pub fn subscribe_inner(
                         None => stop = true,
                     }
                 }
-                batch = session.poll(std::time::Duration::from_millis(500)) => {
+                batch = session.poll(state.config.runtime.consumer_poll_timeout) => {
                     match batch {
                         Ok(records) => {
                             for r in records {

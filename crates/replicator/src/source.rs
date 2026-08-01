@@ -1,16 +1,15 @@
 //! Source side: a consumer on the source cluster that emits [`ReplicatedRecord`]s
 //! and snapshots all partition positions as a [`SourceOffset`].
 
-use std::{
-    collections::{BTreeMap, VecDeque},
-    time::Duration,
-};
+use std::collections::{BTreeMap, VecDeque};
 
 use async_trait::async_trait;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_connect::{ConnectError, ConnectRecord, OffsetMap, OffsetValue, Source, SourceOffset};
+use crabka_units::prelude::Time;
 
 use crate::{
+    config::{ClientResourcePolicy, ReplicatorRuntimePolicy},
     ids::{Offset, PartitionIndex, Timestamp},
     record::ReplicatedRecord,
 };
@@ -26,6 +25,7 @@ pub struct SourceConsumer {
     buf: VecDeque<ReplicatedRecord>,
     /// Next-offset-to-read per `"<topic>-<partition>"` key (i.e. `last_offset + 1`).
     positions: BTreeMap<String, i64>,
+    poll_timeout: Time,
 }
 
 /// Split a `"<topic>-<partition>"` checkpoint key back into its parts.
@@ -68,8 +68,52 @@ impl SourceConsumer {
         topics: &[String],
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, ConnectError> {
+        Self::start_with_policy(
+            bootstrap,
+            group_id,
+            topics,
+            security,
+            ClientResourcePolicy::default(),
+        )
+        .await
+    }
+
+    /// Build with the deployment's client resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConnectError`] if the consumer cannot connect.
+    pub async fn start_with_policy(
+        bootstrap: &str,
+        group_id: &str,
+        topics: &[String],
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> Result<Self, ConnectError> {
+        Self::start_with_runtime_policy(
+            bootstrap,
+            group_id,
+            topics,
+            security,
+            client_resource_policy,
+            &ReplicatorRuntimePolicy::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn start_with_runtime_policy(
+        bootstrap: &str,
+        group_id: &str,
+        topics: &[String],
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        client_resource_policy: ClientResourcePolicy,
+        runtime_policy: &ReplicatorRuntimePolicy,
+    ) -> Result<Self, ConnectError> {
         let builder = Consumer::builder()
             .bootstrap(bootstrap)
+            .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+            .frame_max(client_resource_policy.frame_max.size())
+            .request_timeout(runtime_policy.client_request_timeout)
             .group_id(group_id)
             .subscribe(topics.to_vec())
             .auto_offset_reset(AutoOffsetReset::Earliest);
@@ -84,6 +128,7 @@ impl SourceConsumer {
             consumer: Some(consumer),
             buf: VecDeque::new(),
             positions: BTreeMap::new(),
+            poll_timeout: runtime_policy.source_poll_timeout,
         })
     }
 }
@@ -111,7 +156,7 @@ impl Source<(), ReplicatedRecord> for SourceConsumer {
                 .consumer
                 .as_mut()
                 .ok_or_else(|| ConnectError::Backend("source consumer is closed".into()))?
-                .poll(Duration::from_millis(500))
+                .poll(self.poll_timeout)
                 .await
                 .map_err(|e| ConnectError::Backend(e.to_string()))?;
 

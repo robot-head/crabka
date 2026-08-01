@@ -13,7 +13,7 @@
 //! drop them on down-conversion.
 
 use bytes::{Bytes, BytesMut};
-use crabka_compression::CompressionType;
+use crabka_compression::{CompressionType, RecordDecompressionPolicy};
 use crabka_ids::Offset;
 use crabka_protocol::records::{Attributes, Record, RecordBatch, RecordsError};
 
@@ -21,7 +21,8 @@ use crate::{
     error::LegacyRecordsError,
     message::Magic,
     set::{
-        ParsedRecord, decode_message_set, encode_compressed_message_set, encode_flat_message_set,
+        ParsedRecord, decode_message_set_with_policy, encode_compressed_message_set,
+        encode_flat_message_set,
     },
 };
 
@@ -91,8 +92,21 @@ pub fn v2_to_legacy(batch: &RecordBatch, target: Magic) -> Result<Bytes, LegacyR
 /// # Errors
 /// Returns an error if the legacy message set cannot be decoded or its offsets overflow v2 fields.
 pub fn legacy_to_v2(set_bytes: &[u8]) -> Result<RecordBatch, LegacyRecordsError> {
+    legacy_to_v2_with_policy(set_bytes, RecordDecompressionPolicy::default())
+}
+
+/// Up-convert a legacy `MessageSet` using explicit decompression limits.
+///
+/// # Errors
+///
+/// Returns an error if the legacy message set cannot be decoded within the
+/// policy or its offsets overflow v2 fields.
+pub fn legacy_to_v2_with_policy(
+    set_bytes: &[u8],
+    policy: RecordDecompressionPolicy,
+) -> Result<RecordBatch, LegacyRecordsError> {
     let mut cur = set_bytes;
-    let records = decode_message_set(&mut cur, set_bytes.len())?;
+    let records = decode_message_set_with_policy(&mut cur, set_bytes.len(), policy)?;
     if records.is_empty() {
         return Ok(RecordBatch {
             base_offset: 0,
@@ -168,9 +182,12 @@ impl From<RecordsError> for LegacyRecordsError {
 mod tests {
 
     use bytes::Bytes;
+    use crabka_compression::{CompressionError, RecordDecompressionPolicy};
     use crabka_protocol::records::{Record, RecordBatch};
+    use crabka_units::{bytes, fraction};
 
     use super::*;
+    use crate::decode_message_set;
 
     fn v2_batch(codec: CompressionType) -> RecordBatch {
         RecordBatch {
@@ -236,6 +253,29 @@ mod tests {
             }
             assert2::assert!(round == expected);
         }
+    }
+
+    #[test]
+    fn decompression_policy_limits_legacy_upconversion() {
+        let records = vec![ParsedRecord {
+            offset: Offset(0),
+            timestamp: Some(1),
+            key: None,
+            value: Some(Bytes::from(vec![b'x'; 4096])),
+        }];
+        let mut wire = BytesMut::new();
+        encode_compressed_message_set(&records, Magic::V1, CompressionType::Lz4, &mut wire)
+            .unwrap();
+
+        legacy_to_v2(&wire).unwrap();
+
+        let policy = RecordDecompressionPolicy::new(fraction(1.0), bytes(1), bytes(32)).unwrap();
+        assert2::assert!(matches!(
+            legacy_to_v2_with_policy(&wire, policy),
+            Err(LegacyRecordsError::Compression(
+                CompressionError::TooLarge { limit: 32 }
+            ))
+        ));
     }
 
     #[test]

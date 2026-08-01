@@ -39,6 +39,7 @@ use crabka_broker::{Broker, BrokerConfig, NodeId};
 use crabka_client_admin::AdminClient;
 use crabka_client_core::{Connection, ConnectionOptions, fetch_partition};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_units::prelude::*;
 
 /// The broker binds host port 9092 (embedded in [`LISTEN`]) and
 /// cp-schema-registry's Kafka client reaches it via `host.docker.internal:9092`
@@ -96,11 +97,11 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         node_id: NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: Duration::from_secs(5),
-        controller_heartbeat_interval: Duration::from_millis(500),
+        heartbeat_interval: secs(3),
+        heartbeat_timeout: secs(9),
+        replica_lag_time_max: secs(30),
+        controller_election_timeout: secs(5),
+        controller_heartbeat_interval: millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
@@ -324,9 +325,17 @@ async fn capture_schemas_log(topic_id: WireUuid) {
     // Loop fetching until a fetch returns no new records (the writes are done
     // by the time we read, so a single empty fetch means we've drained).
     loop {
-        let records = fetch_partition(&conn, "_schemas", topic_id, 0, next_offset, 1000, 1 << 20)
-            .await
-            .expect("fetch _schemas");
+        let records = fetch_partition(
+            &conn,
+            "_schemas",
+            topic_id,
+            0,
+            next_offset,
+            crabka_units::secs(1),
+            crabka_units::mebibytes(1),
+        )
+        .await
+        .expect("fetch _schemas");
         if records.is_empty() {
             break;
         }

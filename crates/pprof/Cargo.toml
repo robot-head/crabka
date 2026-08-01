@@ -22,10 +22,12 @@ addr2line = { workspace = true }
 arrow = { workspace = true }
 async-trait = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+crabka-units = { workspace = true }
 datafusion = { workspace = true }
 object = { workspace = true }
 prost = { workspace = true }
 regex = { workspace = true }
+refined_type = { workspace = true }
 reqwest = { workspace = true }
 serde = { workspace = true }
 serde-wincode = { workspace = true }

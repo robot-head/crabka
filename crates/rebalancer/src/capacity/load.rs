@@ -60,6 +60,8 @@ pub fn load_from_path(path: &Path) -> Result<BrokerCapacities, CapacityError> {
 mod tests {
     use std::io::Write;
 
+    use crabka_units::prelude::*;
+
     use super::*;
     use crate::capacity::BrokerCapacity;
 
@@ -90,9 +92,9 @@ brokers:
         assert2::assert!(
             *b1 == BrokerCapacity {
                 max_replicas: Some(4096),
-                disk_bytes: Some(1_099_511_627_776),
-                network_in_bytes_per_sec: Some(125_000_000),
-                network_out_bytes_per_sec: Some(125_000_000),
+                disk_bytes: Some(gibibytes(1024)),
+                network_in_bytes_per_sec: Some(bytes_per_sec(125_000_000)),
+                network_out_bytes_per_sec: Some(bytes_per_sec(125_000_000)),
                 cpu_cores: Some(8.0),
             }
         );
@@ -107,6 +109,28 @@ brokers:
             }
         );
         assert2::assert!(c.for_broker(3).is_none());
+    }
+
+    /// The YAML keys carry plain byte counts and the loader is the seam that
+    /// turns them into quantities, so a value that is not a round power of two
+    /// has to survive exactly.
+    #[test]
+    fn plain_byte_counts_parse_into_quantities_exactly() {
+        let f = write_yaml(
+            r"
+version: 1
+brokers:
+  7:
+    disk_bytes: 1500
+    network_in_bytes_per_sec: 1
+    network_out_bytes_per_sec: 999999
+",
+        );
+        let c = load_from_path(f.path()).expect("load");
+        let b = c.for_broker(7).expect("broker 7");
+        assert2::check!(b.disk_bytes == Some(bytes(1500)));
+        assert2::check!(b.network_in_bytes_per_sec == Some(bytes_per_sec(1)));
+        assert2::check!(b.network_out_bytes_per_sec == Some(bytes_per_sec(999_999)));
     }
 
     #[test]
@@ -137,6 +161,35 @@ brokers:
                 network_out_bytes_per_sec: None,
                 cpu_cores: None,
             }
+        );
+    }
+
+    /// The YAML keys stay bare integers counting bytes and bytes/sec, so the
+    /// loader is the conversion seam: a round value must land on the
+    /// equivalent binary-unit quantity, an unround one must survive exactly,
+    /// and unwrapping must give the same integers back.
+    #[test]
+    fn load_parses_raw_integers_into_quantities() {
+        let f = write_yaml(
+            r"
+version: 1
+brokers:
+  7:
+    disk_bytes: 1073741824
+    network_in_bytes_per_sec: 10485760
+    network_out_bytes_per_sec: 1500
+",
+        );
+        let c = load_from_path(f.path()).expect("load");
+        let b = c.for_broker(7).expect("broker 7");
+        assert2::check!(b.disk_bytes == Some(gibibytes(1)));
+        assert2::check!(b.network_in_bytes_per_sec == Some(mebibytes_per_sec(10)));
+        assert2::check!(b.network_out_bytes_per_sec == Some(bytes_per_sec(1500)));
+        assert2::check!(b.disk_bytes.map(ByteSizeExt::bytes_u64) == Some(1_073_741_824));
+        assert2::check!(
+            b.network_in_bytes_per_sec
+                .map(ByteRateExt::bytes_per_sec_i64)
+                == Some(10_485_760)
         );
     }
 

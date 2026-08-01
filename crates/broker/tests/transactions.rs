@@ -180,7 +180,7 @@ async fn commit_then_read_committed_sees_records() {
     let mut seen: Vec<String> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while seen.len() < 3 && std::time::Instant::now() < deadline {
-        for r in consumer.poll(Duration::from_millis(200)).await.unwrap() {
+        for r in consumer.poll(crabka_units::millis(200)).await.unwrap() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
@@ -225,7 +225,7 @@ async fn abort_then_read_committed_skips_records() {
     let mut seen = 0usize;
     let deadline = std::time::Instant::now() + Duration::from_secs(3);
     while std::time::Instant::now() < deadline {
-        let records = consumer.poll(Duration::from_millis(200)).await.unwrap();
+        let records = consumer.poll(crabka_units::millis(200)).await.unwrap();
         seen += records.len();
         if !records.is_empty() {
             break;
@@ -247,7 +247,7 @@ async fn abort_then_read_committed_skips_records() {
     let mut seen2: Vec<String> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while seen2.len() < 3 && std::time::Instant::now() < deadline {
-        for r in consumer_uc.poll(Duration::from_millis(200)).await.unwrap() {
+        for r in consumer_uc.poll(crabka_units::millis(200)).await.unwrap() {
             seen2.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
@@ -320,7 +320,7 @@ async fn interleaved_commit_and_abort() {
     let mut seen: Vec<String> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while seen.len() < 7 && std::time::Instant::now() < deadline {
-        for r in consumer.poll(Duration::from_millis(200)).await.unwrap() {
+        for r in consumer.poll(crabka_units::millis(200)).await.unwrap() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
@@ -438,7 +438,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         while read < 5 && std::time::Instant::now() < deadline {
             for r in input_consumer
-                .poll(Duration::from_millis(200))
+                .poll(crabka_units::millis(200))
                 .await
                 .unwrap()
             {
@@ -484,7 +484,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
     let mut seen = 0usize;
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     while seen < 5 && std::time::Instant::now() < deadline {
-        seen += c2.poll(Duration::from_millis(200)).await.unwrap().len();
+        seen += c2.poll(crabka_units::millis(200)).await.unwrap().len();
     }
     assert!(seen == 5, "expected 5 records on output topic");
 
@@ -569,7 +569,7 @@ async fn sasl_authenticated_transactional_flow_commits() {
     let mut seen: Vec<String> = Vec::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     while seen.len() < 3 && std::time::Instant::now() < deadline {
-        for r in consumer.poll(Duration::from_millis(200)).await.unwrap() {
+        for r in consumer.poll(crabka_units::millis(200)).await.unwrap() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }

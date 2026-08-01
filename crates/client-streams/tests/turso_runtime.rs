@@ -142,10 +142,17 @@ async fn collect_output_keyed(
     let mut next_offset = start_offset;
 
     loop {
-        let records: Vec<FetchedRecord> =
-            fetch_partition(&conn, topic_name, topic_id, 0, next_offset, 500, 1 << 20)
-                .await
-                .unwrap_or_default();
+        let records: Vec<FetchedRecord> = fetch_partition(
+            &conn,
+            topic_name,
+            topic_id,
+            0,
+            next_offset,
+            crabka_units::millis(500),
+            crabka_units::mebibytes(1),
+        )
+        .await
+        .unwrap_or_default();
 
         for r in &records {
             next_offset = r.offset + 1;

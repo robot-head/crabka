@@ -246,6 +246,7 @@ mod tests {
     use std::{collections::VecDeque, marker::PhantomData};
 
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -443,7 +444,7 @@ mod tests {
         let mut stores = StoreRegistry::default();
         let mut a = VersionedBytesStore::<String, String>::in_memory(
             "a".into(),
-            1_000_000,
+            secs(1_000),
             Box::new(StringSerde),
             Box::new(StringSerde),
             "a-cl".into(),
@@ -536,7 +537,7 @@ mod tests {
         let mut stores = StoreRegistry::default();
         let mut b = VersionedBytesStore::<String, String>::in_memory(
             "b".into(),
-            1_000_000,
+            secs(1_000),
             Box::new(StringSerde),
             Box::new(StringSerde),
             "b-cl".into(),

@@ -6,7 +6,7 @@ use crabka_client_admin::{AdminClient, DeleteRecordsOp};
 use crabka_client_producer::{Acks, Producer};
 use crabka_gres_ranges::{RangeId, TenantName};
 use crabka_gres_substrate::{
-    CheckpointPart, CheckpointSnapshotSource, DEFAULT_PART_MAX_BYTES, GroupCommitRequest,
+    CheckpointPart, CheckpointSnapshotSource, DEFAULT_PART_MAX_SIZE, GroupCommitRequest,
     InMemoryWalLog, Manifest, ProducerWalWriter, RecoveryFencer, SubstrateError,
     TransactionalWalWriter, WalFrame, WriterGeneration, apply_frame,
     checkpoint::{
@@ -105,7 +105,7 @@ async fn live_fresh_generation_restores_old_checkpoint_and_fetches_offset_zero()
             &format!("{tenant}/r0"),
             &old,
             snapshot_at(0, 7, 0),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("old-generation checkpoint");
@@ -261,7 +261,15 @@ fn live_service(
     hook: Option<CheckpointFailpoint>,
 ) -> Result<CheckpointService<LiveAdminPruner>, SubstrateError> {
     let mut service = CheckpointService::new(
-        CheckpointConfig::new(namespace.into(), topic.into(), 1, 0, 24, 2)?,
+        CheckpointConfig::new(
+            namespace.into(),
+            topic.into(),
+            1,
+            crabka_units::bytes(0),
+            crabka_units::bytes(24),
+            2,
+            std::time::Duration::from_secs(1),
+        )?,
         kv as Arc<dyn SnapshotKv>,
         objects,
         pruner,
@@ -329,7 +337,7 @@ impl CheckpointWalPruner for LiveAdminPruner {
             .admin
             .lock()
             .await
-            .delete_records(ops, 5_000)
+            .delete_records(ops, crabka_units::secs(5))
             .await
             .map_err(|error| SubstrateError::Checkpoint(error.to_string()))?;
         if let Some(failed) = outcomes.iter().find(|outcome| outcome.error_code != 0) {
@@ -391,8 +399,16 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
             false
         });
         let old_service = CheckpointService::new(
-            CheckpointConfig::new("zombie-race".into(), "wal.g0".into(), 1, 0, 24, 2)
-                .expect("config"),
+            CheckpointConfig::new(
+                "zombie-race".into(),
+                "wal.g0".into(),
+                1,
+                crabka_units::bytes(0),
+                crabka_units::bytes(24),
+                2,
+                std::time::Duration::from_secs(1),
+            )
+            .expect("config"),
             old_kv as Arc<dyn SnapshotKv>,
             objects.clone(),
             pruner.clone(),
@@ -426,8 +442,16 @@ async fn production_zombie_service_cannot_supersede_successor_manifest() {
             .put(b"owner".to_vec(), b"successor".to_vec())
             .expect("successor state");
         let successor_service = CheckpointService::new(
-            CheckpointConfig::new("zombie-race".into(), "wal.g1".into(), 1, 0, 24, 2)
-                .expect("config"),
+            CheckpointConfig::new(
+                "zombie-race".into(),
+                "wal.g1".into(),
+                1,
+                crabka_units::bytes(0),
+                crabka_units::bytes(24),
+                2,
+                std::time::Duration::from_secs(1),
+            )
+            .expect("config"),
             successor_kv as Arc<dyn SnapshotKv>,
             objects.clone(),
             pruner.clone(),
@@ -554,9 +578,10 @@ impl ProductionCrashHarness {
             "tenant-production-crash".into(),
             "wal-production-crash".into(),
             1,
-            0,
-            24,
-            2,
+            crabka_units::bytes(0),
+            crabka_units::bytes(24),
+            1,
+            std::time::Duration::from_secs(1),
         )?;
         let mut service = CheckpointService::new(
             config,
@@ -815,7 +840,7 @@ impl CrashHarness {
             "tenant-a",
             &kv,
             snapshot_at(wal_generation, covered_offset, 1),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint")
@@ -828,7 +853,7 @@ impl CrashHarness {
             "tenant-a",
             &kv,
             snapshot_at(0, covered_offset, 0),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("zombie checkpoint");

@@ -3,13 +3,30 @@
 //! [`RunReport`] is the harness's durable output: written as JSON next to a
 //! rendered Markdown summary. [`render_comparison`] lines up two reports of
 //! the same scenario under different timestamp modes.
+//!
+//! Dimensioned fields are [`crabka_units`] quantities. Values a person reads
+//! off the report — the applied-fault offsets, peak RSS, the headline rates —
+//! serialize in their human form (`"20s"`, `"512MiB"`, `"1000/s"`); values
+//! that get compared or plotted — latency percentiles, the per-second
+//! timeline, CPU totals — serialize as exact integers in a named unit, so a
+//! plotting script never has to parse a suffix.
 
 use std::{
     collections::BTreeMap,
     fmt::{self, Write as _},
 };
 
+use crabka_units::{
+    fmt::Human as _,
+    prelude::*,
+    serde_units::{
+        human::{byte_size, frequency, time},
+        numeric::{millis_i64, nanos_i64, option_nanos_i64, secs_i64},
+    },
+};
 use serde::{Deserialize, Serialize};
+
+use crate::config::LoadtestRuntimePolicy;
 
 /// Complete result of one scenario run.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -24,8 +41,9 @@ pub struct RunReport {
     pub started_unix_ms: u64,
     /// Topology summary.
     pub topology: TopologySummary,
-    /// Measured window length in seconds (excludes warmup).
-    pub duration_s: f64,
+    /// Measured window length (excludes warmup).
+    #[serde(with = "millis_i64")]
+    pub duration: Time,
     /// Aggregate throughput over the measurement window.
     pub throughput: ThroughputSummary,
     /// Latency percentiles per operation class (kebab-case class names).
@@ -58,27 +76,34 @@ pub struct ThroughputSummary {
     pub committed_txn: u64,
     /// Transactions that ultimately failed (after retries).
     pub failed_txn: u64,
-    /// Mean committed transactions per second.
-    pub tps_mean: f64,
+    /// Mean committed transaction rate.
+    #[serde(with = "frequency")]
+    pub mean_rate: Frequency,
 }
 
-/// Latency distribution for one operation class, in milliseconds.
+/// Latency distribution for one operation class.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LatencySummary {
     /// Operations measured.
     pub count: u64,
     /// Mean latency.
-    pub mean_ms: f64,
+    #[serde(with = "nanos_i64")]
+    pub mean: Time,
     /// 50th percentile.
-    pub p50_ms: f64,
+    #[serde(with = "nanos_i64")]
+    pub p50: Time,
     /// 95th percentile.
-    pub p95_ms: f64,
+    #[serde(with = "nanos_i64")]
+    pub p95: Time,
     /// 99th percentile.
-    pub p99_ms: f64,
+    #[serde(with = "nanos_i64")]
+    pub p99: Time,
     /// 99.9th percentile.
-    pub p999_ms: f64,
+    #[serde(with = "nanos_i64")]
+    pub p999: Time,
     /// Maximum observed.
-    pub max_ms: f64,
+    #[serde(with = "nanos_i64")]
+    pub max: Time,
 }
 
 /// Error and retry counts over the measurement window.
@@ -98,14 +123,16 @@ pub struct ErrorSummary {
 /// One second of workload progress.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SecondSample {
-    /// Seconds since the measurement window started.
-    pub t_s: u64,
+    /// Offset from the start of the measurement window.
+    #[serde(with = "secs_i64")]
+    pub t: Time,
     /// Transactions committed during this second.
     pub committed: u64,
     /// Errors observed during this second.
     pub errors: u64,
     /// Mean latency of operations completed this second, if any.
-    pub mean_latency_ms: Option<f64>,
+    #[serde(with = "option_nanos_i64")]
+    pub mean_latency: Option<Time>,
 }
 
 /// Resource usage of one launched process over the measurement window.
@@ -115,47 +142,48 @@ pub struct ProcessResources {
     pub label: String,
     /// OS process id.
     pub pid: u32,
-    /// CPU consumed, in core-seconds (user + system).
-    pub cpu_core_seconds: f64,
-    /// Peak resident set size observed, in bytes.
-    pub max_rss_bytes: u64,
+    /// CPU consumed, as core-time (user + system).
+    #[serde(with = "millis_i64")]
+    pub cpu_time: Time,
+    /// Peak resident set size observed.
+    #[serde(with = "byte_size")]
+    pub max_rss: ByteSize,
 }
 
 /// Cluster-wide efficiency derived from throughput and resources.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct EfficiencySummary {
-    /// Total CPU consumed by broker + nodes, in core-seconds.
-    pub total_cpu_core_seconds: f64,
+    /// Total CPU consumed by broker + nodes, as core-time.
+    #[serde(with = "millis_i64")]
+    pub total_cpu: Time,
     /// Committed transactions per consumed CPU core-second.
-    pub committed_txn_per_cpu_second: f64,
+    #[serde(with = "frequency")]
+    pub committed_txn_per_cpu: Frequency,
 }
 
 /// A fault the scheduler actually applied.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppliedFault {
-    /// Seconds after the measurement window started.
-    pub at_s: u64,
+    /// Offset from the start of the measurement window.
+    #[serde(with = "time")]
+    pub at: Time,
     /// Human-readable description (e.g. `partition range:0 blackhole 10s`).
     pub description: String,
 }
 
-/// Seconds on either side of an applied fault whose timeline rows are always
-/// rendered.
-const FAULT_WINDOW_S: u64 = 5;
-
-/// Maximum number of timeline rows rendered before eliding the rest.
-const TIMELINE_ROW_CAP: usize = 60;
-
-/// Bytes per mebibyte, for human-readable RSS values.
-const BYTES_PER_MIB: f64 = 1_048_576.0;
-
 /// Renders one run as a Markdown summary: headline throughput/efficiency,
 /// per-class latency table, error table, per-process resource table, fault
 /// log, and a compact per-second table of the interesting seconds (those
-/// near an applied fault or whose committed count deviates more than 30%
-/// from the run's median).
+/// near an applied fault or whose committed count deviates more than
+/// the configured threshold from the run's median).
 #[must_use]
 pub fn render_markdown(report: &RunReport) -> String {
+    render_markdown_with_policy(report, LoadtestRuntimePolicy::default())
+}
+
+/// Renders one run using explicit report-selection policy.
+#[must_use]
+pub fn render_markdown_with_policy(report: &RunReport, policy: LoadtestRuntimePolicy) -> String {
     let mut out = String::new();
     push_header(&mut out, report);
     push_headline(&mut out, report);
@@ -163,7 +191,7 @@ pub fn render_markdown(report: &RunReport) -> String {
     push_errors(&mut out, report);
     push_resources(&mut out, report);
     push_faults(&mut out, report);
-    push_timeline(&mut out, report);
+    push_timeline(&mut out, report, policy);
     out
 }
 
@@ -199,7 +227,7 @@ pub fn render_comparison(left: &RunReport, right: &RunReport) -> String {
     out.push('\n');
     let notes = rows
         .iter()
-        .filter_map(|row| row.delta.map(|delta| (delta.abs(), row)))
+        .filter_map(|row| row.delta.map(|delta| (delta.abs().as_f64(), row)))
         .max_by(|a, b| a.0.total_cmp(&b.0))
         .map_or_else(
             || "Notes: no comparable deltas.".to_string(),
@@ -232,7 +260,7 @@ fn push_header(out: &mut String, report: &RunReport) {
         format_args!(
             "Started {} unix ms — duration {} s — topology {} nodes / {} ranges.\n\n",
             report.started_unix_ms,
-            fmt2(report.duration_s),
+            fmt2(report.duration.secs_f64()),
             report.topology.nodes,
             report.topology.ranges,
         ),
@@ -251,16 +279,16 @@ fn push_headline(out: &mut String, report: &RunReport) {
             "| {} | {} | {} | {} | {} | {} |\n\n",
             report.throughput.committed_txn,
             report.throughput.failed_txn,
-            fmt2(report.throughput.tps_mean),
-            fmt2(report.efficiency.total_cpu_core_seconds),
-            fmt2(report.efficiency.committed_txn_per_cpu_second),
-            fmt_mib(peak_rss_bytes(report)),
+            fmt2(report.throughput.mean_rate.per_sec_f64()),
+            fmt2(report.efficiency.total_cpu.secs_f64()),
+            fmt2(report.efficiency.committed_txn_per_cpu.per_sec_f64()),
+            peak_rss(report).human(),
         ),
     );
 }
 
 fn push_latency(out: &mut String, report: &RunReport) {
-    out.push_str("## Latency by class (ms)\n\n");
+    out.push_str("## Latency by class\n\n");
     out.push_str("| Class | Count | Mean | p50 | p95 | p99 | p99.9 | Max |\n");
     out.push_str("| :-- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |\n");
     for (class, latency) in &report.latency_by_class {
@@ -269,12 +297,12 @@ fn push_latency(out: &mut String, report: &RunReport) {
             format_args!(
                 "| {class} | {} | {} | {} | {} | {} | {} | {} |\n",
                 latency.count,
-                fmt2(latency.mean_ms),
-                fmt2(latency.p50_ms),
-                fmt2(latency.p95_ms),
-                fmt2(latency.p99_ms),
-                fmt2(latency.p999_ms),
-                fmt2(latency.max_ms),
+                latency.mean.human(),
+                latency.p50.human(),
+                latency.p95.human(),
+                latency.p99.human(),
+                latency.p999.human(),
+                latency.max.human(),
             ),
         );
     }
@@ -308,8 +336,8 @@ fn push_resources(out: &mut String, report: &RunReport) {
                 "| {} | {} | {} | {} |\n",
                 resources.label,
                 resources.pid,
-                fmt2(resources.cpu_core_seconds),
-                fmt_mib(resources.max_rss_bytes),
+                fmt2(resources.cpu_time.secs_f64()),
+                resources.max_rss.human(),
             ),
         );
     }
@@ -330,43 +358,46 @@ fn push_fault_list(out: &mut String, faults: &[AppliedFault]) {
     for fault in faults {
         push_fmt(
             out,
-            format_args!("- t={}s — {}\n", fault.at_s, fault.description),
+            format_args!("- t={} — {}\n", fault.at.human(), fault.description),
         );
     }
 }
 
-fn push_timeline(out: &mut String, report: &RunReport) {
+fn push_timeline(out: &mut String, report: &RunReport, policy: LoadtestRuntimePolicy) {
     if report.timeline.is_empty() {
         return;
     }
     out.push_str("## Timeline (interesting seconds)\n\n");
-    let interesting = interesting_seconds(report);
+    let interesting = interesting_seconds_with_policy(report, policy);
     if interesting.is_empty() {
         push_fmt(
             out,
             format_args!(
-                "No interesting seconds — committed stayed within 30% of the median across {} \
+                "No interesting seconds — committed stayed within {} of the median across {} \
              samples and no faults applied.\n\n",
+                policy.deviation_threshold.human(),
                 report.timeline.len()
             ),
         );
         return;
     }
-    out.push_str("| t (s) | Committed | Errors | Mean latency (ms) |\n");
+    out.push_str("| t | Committed | Errors | Mean latency |\n");
     out.push_str("| ---: | ---: | ---: | ---: |\n");
-    for sample in interesting.iter().take(TIMELINE_ROW_CAP) {
+    for sample in interesting.iter().take(policy.timeline_row_cap.get()) {
         push_fmt(
             out,
             format_args!(
                 "| {} | {} | {} | {} |\n",
-                sample.t_s,
+                sample.t.human(),
                 sample.committed,
                 sample.errors,
-                fmt_mean_latency(sample.mean_latency_ms),
+                fmt_mean_latency(sample.mean_latency),
             ),
         );
     }
-    let elided = interesting.len().saturating_sub(TIMELINE_ROW_CAP);
+    let elided = interesting
+        .len()
+        .saturating_sub(policy.timeline_row_cap.get());
     if elided > 0 {
         push_fmt(
             out,
@@ -377,9 +408,13 @@ fn push_timeline(out: &mut String, report: &RunReport) {
 }
 
 /// Timeline samples worth rendering: any second within
-/// ±[`FAULT_WINDOW_S`] of an applied fault, plus any second whose committed
-/// count deviates more than 30% from the run's median, in timeline order.
-fn interesting_seconds(report: &RunReport) -> Vec<SecondSample> {
+/// the configured window of an applied fault, plus any second whose committed
+/// count deviates more than the configured threshold from the run's median, in
+/// timeline order.
+fn interesting_seconds_with_policy(
+    report: &RunReport,
+    policy: LoadtestRuntimePolicy,
+) -> Vec<SecondSample> {
     let median = median_committed(&report.timeline);
     report
         .timeline
@@ -389,8 +424,13 @@ fn interesting_seconds(report: &RunReport) -> Vec<SecondSample> {
             let near_fault = report
                 .faults
                 .iter()
-                .any(|fault| fault.at_s.abs_diff(sample.t_s) <= FAULT_WINDOW_S);
-            near_fault || deviates_from_median(sample.committed, median)
+                .any(|fault| (fault.at - sample.t).abs() <= policy.fault_window);
+            near_fault
+                || deviates_from_median_with_threshold(
+                    sample.committed,
+                    median,
+                    policy.deviation_threshold,
+                )
         })
         .collect()
 }
@@ -402,27 +442,38 @@ fn median_committed(timeline: &[SecondSample]) -> u64 {
     counts.get(counts.len() / 2).copied().unwrap_or(0)
 }
 
-/// True when `committed` deviates strictly more than 30% from `median`,
-/// computed in integers to stay exact.
+/// True when `committed` deviates strictly more than the default threshold
+/// from `median`. A zero median makes any non-zero count deviate (the
+/// division is an infinity) and leaves an all-zero run boring (`NaN` compares
+/// false).
+#[cfg(test)]
 fn deviates_from_median(committed: u64, median: u64) -> bool {
-    u128::from(committed.abs_diff(median)) * 10 > u128::from(median) * 3
+    deviates_from_median_with_threshold(
+        committed,
+        median,
+        LoadtestRuntimePolicy::default().deviation_threshold,
+    )
+}
+
+fn deviates_from_median_with_threshold(committed: u64, median: u64, threshold: Ratio) -> bool {
+    fraction(u64_as_f64(committed.abs_diff(median)) / u64_as_f64(median)) > threshold
 }
 
 /// One row of the side-by-side comparison table, values pre-formatted and
-/// the delta kept numeric for the notes line.
+/// the delta kept dimensioned for the notes line.
 struct CompareRow {
     metric: String,
     left: String,
     right: String,
-    delta: Option<f64>,
+    delta: Option<Ratio>,
 }
 
 fn compare_rows(left: &RunReport, right: &RunReport) -> Vec<CompareRow> {
     let mut rows = vec![
-        row_f64(
+        row_rate(
             "Mean TPS",
-            left.throughput.tps_mean,
-            right.throughput.tps_mean,
+            left.throughput.mean_rate,
+            right.throughput.mean_rate,
         ),
         row_u64(
             "Committed txn",
@@ -437,15 +488,15 @@ fn compare_rows(left: &RunReport, right: &RunReport) -> Vec<CompareRow> {
     ];
     for (class, left_latency) in &left.latency_by_class {
         if let Some(right_latency) = right.latency_by_class.get(class) {
-            rows.push(row_f64(
-                format!("{class} p50 (ms)"),
-                left_latency.p50_ms,
-                right_latency.p50_ms,
+            rows.push(row_time(
+                format!("{class} p50"),
+                left_latency.p50,
+                right_latency.p50,
             ));
-            rows.push(row_f64(
-                format!("{class} p99 (ms)"),
-                left_latency.p99_ms,
-                right_latency.p99_ms,
+            rows.push(row_time(
+                format!("{class} p99"),
+                left_latency.p99,
+                right_latency.p99,
             ));
         }
     }
@@ -459,30 +510,44 @@ fn compare_rows(left: &RunReport, right: &RunReport) -> Vec<CompareRow> {
         left.errors.unavailable,
         right.errors.unavailable,
     ));
-    rows.push(row_f64(
+    rows.push(row_cpu(
         "Total CPU core-s",
-        left.efficiency.total_cpu_core_seconds,
-        right.efficiency.total_cpu_core_seconds,
+        left.efficiency.total_cpu,
+        right.efficiency.total_cpu,
     ));
-    rows.push(row_f64(
+    rows.push(row_rate(
         "Committed txn / CPU-s",
-        left.efficiency.committed_txn_per_cpu_second,
-        right.efficiency.committed_txn_per_cpu_second,
+        left.efficiency.committed_txn_per_cpu,
+        right.efficiency.committed_txn_per_cpu,
     ));
-    rows.push(row_mib(
-        "Peak RSS",
-        peak_rss_bytes(left),
-        peak_rss_bytes(right),
-    ));
+    rows.push(row_size("Peak RSS", peak_rss(left), peak_rss(right)));
     rows
 }
 
-fn row_f64(metric: impl Into<String>, left: f64, right: f64) -> CompareRow {
+fn row_rate(metric: impl Into<String>, left: Frequency, right: Frequency) -> CompareRow {
     CompareRow {
         metric: metric.into(),
-        left: fmt2(left),
-        right: fmt2(right),
-        delta: delta_pct(left, right),
+        left: fmt2(left.per_sec_f64()),
+        right: fmt2(right.per_sec_f64()),
+        delta: relative_delta(left.per_sec_f64(), right.per_sec_f64()),
+    }
+}
+
+fn row_cpu(metric: impl Into<String>, left: Time, right: Time) -> CompareRow {
+    CompareRow {
+        metric: metric.into(),
+        left: fmt2(left.secs_f64()),
+        right: fmt2(right.secs_f64()),
+        delta: relative_delta(left.secs_f64(), right.secs_f64()),
+    }
+}
+
+fn row_time(metric: impl Into<String>, left: Time, right: Time) -> CompareRow {
+    CompareRow {
+        metric: metric.into(),
+        left: left.human().to_string(),
+        right: right.human().to_string(),
+        delta: relative_delta(left.secs_f64(), right.secs_f64()),
     }
 }
 
@@ -491,36 +556,33 @@ fn row_u64(metric: impl Into<String>, left: u64, right: u64) -> CompareRow {
         metric: metric.into(),
         left: left.to_string(),
         right: right.to_string(),
-        delta: delta_pct(u64_as_f64(left), u64_as_f64(right)),
+        delta: relative_delta(u64_as_f64(left), u64_as_f64(right)),
     }
 }
 
-fn row_mib(metric: impl Into<String>, left_bytes: u64, right_bytes: u64) -> CompareRow {
+fn row_size(metric: impl Into<String>, left: ByteSize, right: ByteSize) -> CompareRow {
     CompareRow {
         metric: metric.into(),
-        left: fmt_mib(left_bytes),
-        right: fmt_mib(right_bytes),
-        delta: delta_pct(u64_as_f64(left_bytes), u64_as_f64(right_bytes)),
+        left: left.human().to_string(),
+        right: right.human().to_string(),
+        delta: relative_delta(left.bytes_f64(), right.bytes_f64()),
     }
 }
 
-/// Relative delta in percent, `None` when the left value is zero.
-fn delta_pct(left: f64, right: f64) -> Option<f64> {
-    if left == 0.0 {
-        None
-    } else {
-        Some((right - left) / left * 100.0)
-    }
+/// Relative delta as a fraction of the left value, `None` when that value is
+/// zero.
+fn relative_delta(left: f64, right: f64) -> Option<Ratio> {
+    (left != 0.0).then(|| fraction((right - left) / left))
 }
 
-/// Peak resident set size across all sampled processes, in bytes.
-fn peak_rss_bytes(report: &RunReport) -> u64 {
+/// Peak resident set size across all sampled processes.
+fn peak_rss(report: &RunReport) -> ByteSize {
     report
         .resources
         .iter()
-        .map(|resources| resources.max_rss_bytes)
-        .max()
-        .unwrap_or(0)
+        .fold(ByteSize::ZERO, |peak, resources| {
+            peak.max(resources.max_rss)
+        })
 }
 
 /// Formats a value with two decimal places.
@@ -528,20 +590,18 @@ fn fmt2(value: f64) -> String {
     format!("{value:.2}")
 }
 
-/// Formats a byte count as mebibytes with one decimal place.
-fn fmt_mib(bytes: u64) -> String {
-    format!("{:.1} MiB", u64_as_f64(bytes) / BYTES_PER_MIB)
-}
-
-/// Formats a percentage delta with an explicit sign, `n/a` when undefined.
-fn fmt_delta(delta: Option<f64>) -> String {
-    delta.map_or_else(|| "n/a".to_string(), |delta| format!("{delta:+.2}%"))
+/// Formats a relative delta as a signed percentage, `n/a` when undefined.
+fn fmt_delta(delta: Option<Ratio>) -> String {
+    delta.map_or_else(
+        || "n/a".to_string(),
+        |delta| format!("{:+.2}%", delta.percent_f64()),
+    )
 }
 
 /// Formats an optional per-second mean latency, `-` when no operations
 /// completed that second.
-fn fmt_mean_latency(mean_ms: Option<f64>) -> String {
-    mean_ms.map_or_else(|| "-".to_string(), fmt2)
+fn fmt_mean_latency(mean: Option<Time>) -> String {
+    mean.map_or_else(|| "-".to_string(), |mean| mean.human().to_string())
 }
 
 /// Appends formatted text to `out`. Writing into a `String` cannot fail.
@@ -561,17 +621,17 @@ fn u64_as_f64(value: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
 
     use super::*;
 
     fn fixture(mode: &str) -> RunReport {
         let timeline = (0..=120)
-            .map(|t_s| SecondSample {
-                t_s,
-                committed: if t_s == 31 { 10 } else { 100 },
-                errors: if t_s == 31 { 3 } else { 0 },
-                mean_latency_ms: if t_s == 31 { None } else { Some(1.0) },
+            .map(|index| SecondSample {
+                t: Time::from_secs(index),
+                committed: if index == 31 { 10 } else { 100 },
+                errors: if index == 31 { 3 } else { 0 },
+                mean_latency: (index != 31).then(|| millis(1)),
             })
             .collect();
         let mut latency_by_class = BTreeMap::new();
@@ -579,24 +639,24 @@ mod tests {
             "single-shard-insert".to_string(),
             LatencySummary {
                 count: 9000,
-                mean_ms: 1.234,
-                p50_ms: 1.1,
-                p95_ms: 2.5,
-                p99_ms: 3.75,
-                p999_ms: 5.0,
-                max_ms: 9.987,
+                mean: micros(1234),
+                p50: micros(1100),
+                p95: micros(2500),
+                p99: micros(3750),
+                p999: millis(5),
+                max: micros(9987),
             },
         );
         latency_by_class.insert(
             "left-only-scan".to_string(),
             LatencySummary {
                 count: 10,
-                mean_ms: 7.0,
-                p50_ms: 6.0,
-                p95_ms: 8.0,
-                p99_ms: 9.0,
-                p999_ms: 9.5,
-                max_ms: 9.9,
+                mean: millis(7),
+                p50: millis(6),
+                p95: millis(8),
+                p99: millis(9),
+                p999: micros(9500),
+                max: micros(9900),
             },
         );
         RunReport {
@@ -608,11 +668,11 @@ mod tests {
                 nodes: 3,
                 ranges: 8,
             },
-            duration_s: 120.0,
+            duration: secs(120),
             throughput: ThroughputSummary {
                 committed_txn: 12_000,
                 failed_txn: 25,
-                tps_mean: 1000.0,
+                mean_rate: per_sec(1000),
             },
             latency_by_class,
             errors: ErrorSummary {
@@ -626,25 +686,38 @@ mod tests {
                 ProcessResources {
                     label: "broker".to_string(),
                     pid: 100,
-                    cpu_core_seconds: 15.5,
-                    max_rss_bytes: 536_870_912,
+                    cpu_time: millis(15_500),
+                    max_rss: mebibytes(512),
                 },
                 ProcessResources {
                     label: "node0".to_string(),
                     pid: 200,
-                    cpu_core_seconds: 24.5,
-                    max_rss_bytes: 268_435_456,
+                    cpu_time: millis(24_500),
+                    max_rss: mebibytes(256),
                 },
             ],
             efficiency: EfficiencySummary {
-                total_cpu_core_seconds: 40.0,
-                committed_txn_per_cpu_second: 300.0,
+                total_cpu: secs(40),
+                committed_txn_per_cpu: per_sec(300),
             },
             faults: vec![AppliedFault {
-                at_s: 30,
+                at: secs(30),
                 description: "partition range:0 blackhole 10s".to_string(),
             }],
         }
+    }
+
+    #[test]
+    fn explicit_policy_controls_timeline_selection_and_cap() {
+        let policy = LoadtestRuntimePolicy {
+            fault_window: secs(1),
+            timeline_row_cap: crate::config::PositiveUsize::new(1).expect("cap"),
+            deviation_threshold: percent(100),
+            ..Default::default()
+        };
+        let rendered = render_markdown_with_policy(&fixture("logical-tso"), policy);
+        assert!(rendered.contains("more interesting seconds elided"));
+        assert!(!rendered.contains("| 25s |"));
     }
 
     /// The `hlc` counterpart of [`fixture`]: TPS +25% (the largest delta),
@@ -655,7 +728,7 @@ mod tests {
         report.throughput = ThroughputSummary {
             committed_txn: 12_600,
             failed_txn: 20,
-            tps_mean: 1250.0,
+            mean_rate: per_sec(1250),
         };
         report.errors = ErrorSummary {
             serialization_retries: 5,
@@ -664,20 +737,20 @@ mod tests {
             other: 0,
         };
         report.efficiency = EfficiencySummary {
-            total_cpu_core_seconds: 44.0,
-            committed_txn_per_cpu_second: 300.0,
+            total_cpu: secs(44),
+            committed_txn_per_cpu: per_sec(300),
         };
         let mut latency_by_class = BTreeMap::new();
         latency_by_class.insert(
             "single-shard-insert".to_string(),
             LatencySummary {
                 count: 9450,
-                mean_ms: 1.3,
-                p50_ms: 1.21,
-                p95_ms: 2.6,
-                p99_ms: 3.75,
-                p999_ms: 5.2,
-                max_ms: 10.4,
+                mean: micros(1300),
+                p50: micros(1210),
+                p95: micros(2600),
+                p99: micros(3750),
+                p999: micros(5200),
+                max: micros(10_400),
             },
         );
         report.latency_by_class = latency_by_class;
@@ -693,20 +766,18 @@ mod tests {
         assert!(rendered.contains(
             "Started 1753132800000 unix ms — duration 120.00 s — topology 3 nodes / 8 ranges."
         ));
-        assert!(rendered.contains("| 12000 | 25 | 1000.00 | 40.00 | 300.00 | 512.0 MiB |"));
+        assert!(rendered.contains("| 12000 | 25 | 1000.00 | 40.00 | 300.00 | 512MiB |"));
     }
 
     #[test]
     fn markdown_latency_errors_and_resources_rows() {
         let rendered = render_markdown(&fixture("logical-tso"));
-        assert!(
-            rendered.contains(
-                "| single-shard-insert | 9000 | 1.23 | 1.10 | 2.50 | 3.75 | 5.00 | 9.99 |"
-            )
-        );
+        assert!(rendered.contains(
+            "| single-shard-insert | 9000 | 1.234ms | 1.1ms | 2.5ms | 3.75ms | 5ms | 9.987ms |"
+        ));
         assert!(rendered.contains("| 0 | 4 | 1 | 2 |"));
-        assert!(rendered.contains("| broker | 100 | 15.50 | 512.0 MiB |"));
-        assert!(rendered.contains("| node0 | 200 | 24.50 | 256.0 MiB |"));
+        assert!(rendered.contains("| broker | 100 | 15.50 | 512MiB |"));
+        assert!(rendered.contains("| node0 | 200 | 24.50 | 256MiB |"));
     }
 
     #[test]
@@ -714,14 +785,14 @@ mod tests {
         let rendered = render_markdown(&fixture("logical-tso"));
         assert!(rendered.contains("- t=30s — partition range:0 blackhole 10s"));
         // Fault-adjacent seconds (30 ± 5) are shown even at median throughput.
-        assert!(rendered.contains("| 25 | 100 | 0 | 1.00 |"));
-        assert!(rendered.contains("| 28 | 100 | 0 | 1.00 |"));
-        assert!(rendered.contains("| 35 | 100 | 0 | 1.00 |"));
+        assert!(rendered.contains("| 25s | 100 | 0 | 1ms |"));
+        assert!(rendered.contains("| 28s | 100 | 0 | 1ms |"));
+        assert!(rendered.contains("| 35s | 100 | 0 | 1ms |"));
         // The dip second deviates from the median and has no latency samples.
-        assert!(rendered.contains("| 31 | 10 | 3 | - |"));
+        assert!(rendered.contains("| 31s | 10 | 3 | - |"));
         // A boring second far from the fault is excluded, and nothing is
         // elided at 11 interesting seconds.
-        assert!(!rendered.contains("| 90 |"));
+        assert!(!rendered.contains("| 1m30s |"));
         assert!(!rendered.contains("elided"));
     }
 
@@ -730,11 +801,11 @@ mod tests {
         let mut report = fixture("logical-tso");
         report.faults = Vec::new();
         report.timeline = (0..200)
-            .map(|t_s| SecondSample {
-                t_s,
-                committed: if t_s % 2 == 0 { 0 } else { 1000 },
+            .map(|index| SecondSample {
+                t: Time::from_secs(index),
+                committed: if index % 2 == 0 { 0 } else { 1000 },
                 errors: 0,
-                mean_latency_ms: Some(1.0),
+                mean_latency: Some(millis(1)),
             })
             .collect();
         let rendered = render_markdown(&report);
@@ -764,9 +835,9 @@ mod tests {
         assert!(rendered.contains("| Mean TPS | 1000.00 | 1250.00 | +25.00% |"));
         assert!(rendered.contains("| Committed txn | 12000 | 12600 | +5.00% |"));
         assert!(rendered.contains("| Failed txn | 25 | 20 | -20.00% |"));
-        assert!(rendered.contains("| single-shard-insert p50 (ms) | 1.10 | 1.21 | +10.00% |"));
+        assert!(rendered.contains("| single-shard-insert p50 | 1.1ms | 1.21ms | +10.00% |"));
         assert!(rendered.contains("| Serialization retries | 0 | 5 | n/a |"));
-        assert!(rendered.contains("| Peak RSS | 512.0 MiB | 512.0 MiB | +0.00% |"));
+        assert!(rendered.contains("| Peak RSS | 512MiB | 512MiB | +0.00% |"));
         // Classes present in only one run are not compared.
         assert!(!rendered.contains("left-only-scan"));
         assert!(rendered.contains("Notes: largest delta — Mean TPS (+25.00%)."));
@@ -784,19 +855,19 @@ mod tests {
 
     #[test]
     fn format_helpers() {
-        assert!(fmt2(1234.567) == "1234.57");
-        assert!(fmt2(0.0) == "0.00");
-        assert!(fmt_mib(536_870_912) == "512.0 MiB");
-        assert!(fmt_mib(0) == "0.0 MiB");
-        assert!(fmt_delta(None) == "n/a");
-        assert!(fmt_delta(Some(25.0)) == "+25.00%");
-        assert!(fmt_delta(Some(-12.5)) == "-12.50%");
-        assert!(fmt_mean_latency(None) == "-");
-        assert!(fmt_mean_latency(Some(1.234)) == "1.23");
+        check!(fmt2(1234.567) == "1234.57");
+        check!(fmt2(0.0) == "0.00");
+        check!(mebibytes(512).human().to_string() == "512MiB");
+        check!(ByteSize::ZERO.human().to_string() == "0B");
+        check!(fmt_delta(None) == "n/a");
+        check!(fmt_delta(Some(percent(25))) == "+25.00%");
+        check!(fmt_delta(Some(-percent(12) - fraction(0.005))) == "-12.50%");
+        check!(fmt_mean_latency(None) == "-");
+        check!(fmt_mean_latency(Some(micros(1234))) == "1.234ms");
     }
 
     #[test]
-    fn deviation_rule_is_strictly_more_than_30_percent() {
+    fn deviation_rule_is_strictly_more_than_the_threshold() {
         let cases = [
             (100, 100, false),
             (130, 100, false),
@@ -807,7 +878,7 @@ mod tests {
             (0, 0, false),
         ];
         for (committed, median, expected) in cases {
-            assert!(
+            check!(
                 deviates_from_median(committed, median) == expected,
                 "committed: {committed}, median: {median}"
             );
@@ -820,5 +891,38 @@ mod tests {
         let json = serde_json::to_string(&report).expect("serialize");
         let back: RunReport = serde_json::from_str(&json).expect("deserialize");
         assert!(back == report);
+    }
+
+    #[test]
+    fn quantity_fields_encode_in_their_declared_units() {
+        // Human-facing fields carry their unit; compared and plotted fields
+        // are exact integers in a named unit.
+        let report = fixture("logical-tso");
+        let json = serde_json::to_value(&report).expect("serialize");
+        let cases: [(&str, serde_json::Value); 6] = [
+            ("duration (ms)", json["duration"].clone()),
+            (
+                "latency p50 (ns)",
+                json["latency_by_class"]["single-shard-insert"]["p50"].clone(),
+            ),
+            ("timeline t (s)", json["timeline"][30]["t"].clone()),
+            (
+                "timeline mean latency (ns)",
+                json["timeline"][30]["mean_latency"].clone(),
+            ),
+            ("mean rate (human)", json["throughput"]["mean_rate"].clone()),
+            ("peak RSS (human)", json["resources"][0]["max_rss"].clone()),
+        ];
+        let expected: [serde_json::Value; 6] = [
+            serde_json::json!(120_000),
+            serde_json::json!(1_100_000),
+            serde_json::json!(30),
+            serde_json::json!(1_000_000),
+            serde_json::json!("1000/s"),
+            serde_json::json!("512MiB"),
+        ];
+        for ((label, actual), expected) in cases.into_iter().zip(expected) {
+            check!(actual == expected, "{label}");
+        }
     }
 }

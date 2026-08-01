@@ -1,5 +1,6 @@
 //! Storage boundary for `TraceQL` planning and execution.
 
+use crabka_units::ByteSize;
 use datafusion::prelude::SessionContext;
 
 use crate::{
@@ -52,10 +53,10 @@ pub struct SpanMatcher {
 pub struct ScanResult {
     pub ctx: SessionContext,
     pub span_table: String,
-    /// Approximate decoded bytes of the scanned data registered into `ctx` (the
+    /// Approximate decoded size of the scanned data registered into `ctx` (the
     /// data this scan inspected, before query filtering). Threaded up to
-    /// `SearchResponse::inspected_bytes`.
-    pub inspected_bytes: u64,
+    /// `SearchResponse::inspected`.
+    pub inspected: ByteSize,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -139,6 +140,7 @@ pub fn filter_trace_spans_by_time(mut trace: TraceSpans, start_ns: i64, end_ns: 
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::bytes;
     use datafusion::prelude::SessionContext;
 
     use super::*;
@@ -157,7 +159,7 @@ mod tests {
             Ok(ScanResult {
                 ctx: SessionContext::new(),
                 span_table: "spans".into(),
-                inspected_bytes: 0,
+                inspected: bytes(0),
             })
         }
 

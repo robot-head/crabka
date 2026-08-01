@@ -23,6 +23,7 @@ use crabka_pgwire::{
     },
     error::{PgError, sqlstate},
 };
+use crabka_units::convert::TimeExt as _;
 use tokio::sync::{Mutex, RwLock};
 
 use crate::{
@@ -95,6 +96,8 @@ pub struct MultiRangeTenantConfig {
     /// not match across nodes — and ignored under
     /// [`TimestampSourceMode::LogicalTso`].
     pub hlc_wall_offset_ms: i64,
+    /// Distributed range limits and pacing.
+    pub runtime_policy: crate::RangeRuntimePolicy,
     #[doc(hidden)]
     pub commit_fault_for_testing: Option<GatewayCommitFault>,
     #[doc(hidden)]
@@ -196,6 +199,7 @@ impl MultiRangeTenantConfig {
             node_identity: None,
             timestamp_source_mode: TimestampSourceMode::default(),
             hlc_wall_offset_ms: 0,
+            runtime_policy: crate::RangeRuntimePolicy::default(),
             commit_fault_for_testing: None,
             empty_table_split_test_hook: None,
         })
@@ -287,6 +291,13 @@ impl MultiRangeTenantConfig {
         self
     }
 
+    /// Apply distributed range runtime policy.
+    #[must_use]
+    pub fn with_runtime_policy(mut self, policy: crate::RangeRuntimePolicy) -> Self {
+        self.runtime_policy = policy;
+        self
+    }
+
     #[doc(hidden)]
     #[must_use]
     pub fn with_commit_fault_for_testing(mut self, fault: GatewayCommitFault) -> Self {
@@ -362,9 +373,23 @@ impl ReadOnlyRange0Replica {
     /// the exact store to which the follower applies committed frames.
     #[must_use]
     pub fn new(tail: crate::Range0Tail, sampler: Arc<dyn Range0EndSampler>) -> Self {
+        Self::new_with_policy(tail, sampler, &crate::RangeRuntimePolicy::default())
+    }
+
+    /// Bind a follower replica using explicit range runtime policy.
+    #[must_use]
+    pub fn new_with_policy(
+        tail: crate::Range0Tail,
+        sampler: Arc<dyn Range0EndSampler>,
+        policy: &crate::RangeRuntimePolicy,
+    ) -> Self {
         Self {
             catalog_kv: tail.store_handle(),
-            barrier: Arc::new(Range0Barrier::new(tail.clone(), sampler)),
+            barrier: Arc::new(Range0Barrier::with_timeout(
+                tail.clone(),
+                sampler,
+                policy.range0_wait_timeout,
+            )),
             tail,
             refresh_poke: None,
         }
@@ -628,7 +653,7 @@ pub fn in_doubt_markers_for_engine(
     let routing_by_physical = crabka_pgcatalog::list_tables(engine.catalog_kv())
         .map_err(|error| SplitError::Hook(format!("list marker tables: {error}")))?
         .into_iter()
-        .map(|table| (table.id, relation_routing_table_id(&table.name)))
+        .map(|table| (table.id, routing_table_id(&table.name)))
         .collect::<BTreeMap<_, _>>();
     let mut markers = Vec::new();
     for descriptor in engine
@@ -814,13 +839,14 @@ impl MultiRangeTenant {
             .collect();
         let range_scanner: Arc<dyn crabka_pgexec::RangeScanner> =
             match config.range_registry.clone() {
-                Some(registry) => Arc::new(RegistryRangeScanner::new(
+                Some(registry) => Arc::new(RegistryRangeScanner::new_with_policy(
                     registry,
                     config
                         .range_client
                         .clone()
                         .ok_or(TenantError::MissingRangeTls)?,
                     scanner_engines,
+                    config.runtime_policy.join,
                 )),
                 None => Arc::new(InProcessRangeScanner {
                     engines: scanner_engines,
@@ -870,6 +896,7 @@ impl MultiRangeTenant {
             commit_fault_for_testing: config
                 .commit_fault_for_testing
                 .map(|fault| Arc::new(StdMutex::new(Some(fault)))),
+            runtime_policy: config.runtime_policy,
         });
         let gateway = Self {
             inner: Arc::clone(&inner),
@@ -934,6 +961,12 @@ impl MultiRangeTenant {
     #[must_use]
     pub fn range0_replica(&self) -> Option<ReadOnlyRange0Replica> {
         self.inner.range0_replica.clone()
+    }
+
+    /// Runtime policy used by this tenant.
+    #[must_use]
+    pub fn runtime_policy(&self) -> crate::RangeRuntimePolicy {
+        self.inner.runtime_policy
     }
 
     /// Install one foreign scanner on every currently served range engine.
@@ -1053,13 +1086,22 @@ impl MultiRangeTenant {
         transfer.validate_successors(&plan)?;
         transfer.record_topology_activation_intent(&state).await?;
         let checkpoint = transfer
-            .force_checkpoint(transfer_table.predecessor)
+            .force_checkpoint(&state.operation_id, transfer_table.predecessor)
             .await?;
-        transfer
+        if let Err(error) = transfer
             .record_topology_activation_checkpoint(&state.operation_id, &checkpoint)
-            .await?;
+            .await
+        {
+            if let Err(cleanup_error) = transfer
+                .release_checkpoint_pin(&state.operation_id, transfer_table.predecessor)
+                .await
+            {
+                tracing::error!(%cleanup_error, "release checkpoint pin after receipt failure");
+            }
+            return Err(error.into());
+        }
         let barrier = transfer.pause_at_checkpoint(&checkpoint).await?;
-        let pause = TransferPauseGuard::new(transfer, barrier);
+        let pause = TransferPauseGuard::new(transfer, state.operation_id.clone(), barrier);
         self.stage_and_publish_successors(transfer, &serving, &state, &plan, &checkpoint, barrier)
             .await?;
         pause.resume().await?;
@@ -1344,7 +1386,7 @@ impl MultiRangeTenant {
             .ok_or(LocalSqlSplitError::RemoteRange)?;
         let table = crabka_pgcatalog::list_tables(coordinator.catalog_kv())?
             .into_iter()
-            .find(|table| relation_routing_table_id(&table.name) == table_id)
+            .find(|table| routing_table_id(&table.name) == table_id)
             .ok_or(LocalSqlSplitError::MissingTable(table_id))?;
         if table.foreign.is_some() {
             return Err(LocalSqlSplitError::UnsupportedTableKind(table_id));
@@ -1379,7 +1421,7 @@ impl MultiRangeTenant {
                 .map(|table| {
                     (
                         TableId::new(u64::from(table.id)),
-                        relation_routing_table_id(&table.name),
+                        routing_table_id(&table.name),
                     )
                 }),
         )?;
@@ -1416,7 +1458,7 @@ impl MultiRangeTenant {
             .get(&RangeId::COORDINATOR)
             .ok_or(LocalSqlSplitError::RemoteRange)?;
         for table in crabka_pgcatalog::list_tables(coordinator.catalog_kv())? {
-            let catalog_table_id = relation_routing_table_id(&table.name);
+            let catalog_table_id = routing_table_id(&table.name);
             if state
                 .target_map
                 .route_table(catalog_table_id)
@@ -1466,7 +1508,7 @@ impl MultiRangeTenant {
         };
         let table = crabka_pgcatalog::list_tables(coordinator.catalog_kv())?
             .into_iter()
-            .find(|table| relation_routing_table_id(&table.name) == table_id)
+            .find(|table| routing_table_id(&table.name) == table_id)
             .ok_or(LocalSqlSplitError::MissingTable(table_id))?;
         if table.foreign.is_some() {
             return Err(LocalSqlSplitError::UnsupportedTableKind(table_id));
@@ -2209,13 +2251,38 @@ where
     C: TsoHorizonCommitter + 'static,
     H: EpochHeartbeat + 'static,
 {
-    let stride = NonZeroU64::new(1024).expect("stride is non-zero");
-    let oracle = Arc::new(TsoOracle::recover(
+    pgexec_timestamp_oracle_from_horizon_with_policy(
+        committer,
+        heartbeat,
+        epoch,
+        persisted_max_ts,
+        &crate::RangeRuntimePolicy::default(),
+    )
+}
+
+/// Build a pgexec timestamp oracle using explicit range runtime policy.
+/// # Errors
+/// Returns an error when the durable horizon is invalid.
+pub fn pgexec_timestamp_oracle_from_horizon_with_policy<C, H>(
+    committer: C,
+    heartbeat: H,
+    epoch: i16,
+    persisted_max_ts: u64,
+    policy: &crate::RangeRuntimePolicy,
+) -> Result<Arc<dyn crabka_pgexec::TimestampSource>, TsoError>
+where
+    C: TsoHorizonCommitter + 'static,
+    H: EpochHeartbeat + 'static,
+{
+    let stride = NonZeroU64::new(policy.logical_base_persist_stride.get())
+        .ok_or(TsoError::TimestampOverflow)?;
+    let oracle = Arc::new(TsoOracle::recover_with_policy(
         committer,
         heartbeat,
         epoch,
         stride,
         persisted_max_ts,
+        policy,
     )?);
     let rpc: Arc<dyn TsoRpc> =
         Arc::new(BatchedTsoClient::new(Arc::new(InProcessTsoRpc { oracle })));
@@ -2250,28 +2317,43 @@ where
     C: TsoHorizonCommitter + 'static,
     H: EpochHeartbeat + 'static,
 {
-    let stride = NonZeroU64::new(1024).expect("stride is non-zero");
-    let oracle = Arc::new(TsoOracle::recover(
+    tso_rpc_from_horizon_with_policy(
+        committer,
+        heartbeat,
+        epoch,
+        persisted_max_ts,
+        &crate::RangeRuntimePolicy::default(),
+    )
+}
+
+/// Build an in-process TSO endpoint using explicit runtime policy.
+/// # Errors
+/// Returns an error when the durable horizon is invalid.
+pub fn tso_rpc_from_horizon_with_policy<C, H>(
+    committer: C,
+    heartbeat: H,
+    epoch: i16,
+    persisted_max_ts: u64,
+    policy: &crate::RangeRuntimePolicy,
+) -> Result<Arc<dyn TsoRpc>, TsoError>
+where
+    C: TsoHorizonCommitter + 'static,
+    H: EpochHeartbeat + 'static,
+{
+    let stride = NonZeroU64::new(policy.logical_base_persist_stride.get())
+        .ok_or(TsoError::TimestampOverflow)?;
+    let oracle = Arc::new(TsoOracle::recover_with_policy(
         committer,
         heartbeat,
         epoch,
         stride,
         persisted_max_ts,
+        policy,
     )?);
     Ok(Arc::new(BatchedTsoClient::new(Arc::new(InProcessTsoRpc {
         oracle,
     }))))
 }
-
-/// Milliseconds of wall-clock headroom the wall-anchored HLC oracle persists
-/// ahead of its grants.
-///
-/// The horizon advances in whole-millisecond strides of the packed domain: one
-/// persist covers everything the clock can grant during the next stride of
-/// wall time, so the persist rate is bounded by wall time (a handful per
-/// second) independent of grant volume, and a successor's first stamp lands at
-/// most this far ahead of real time after a crash.
-const HLC_HORIZON_STRIDE_MS: u64 = 128;
 
 /// Build the in-process RPC endpoint for a wall-anchored HLC grant oracle
 /// recovered from a durable horizon.
@@ -2281,8 +2363,8 @@ const HLC_HORIZON_STRIDE_MS: u64 = 128;
 /// anchored to `wall` instead of dense logical integers. The oracle seeds its
 /// clock from `persisted_max_ts`, so every grant strictly dominates everything
 /// any predecessor granted even when `wall` reads behind the predecessor's
-/// wall clock, and it persists the horizon [`HLC_HORIZON_STRIDE_MS`] ahead
-/// through the same epoch-gated committer the logical oracle uses.
+/// wall clock, and it persists the configured horizon headroom through the
+/// same epoch-gated committer the logical oracle uses.
 /// # Panics
 ///
 /// Panics if an internal invariant is violated.
@@ -2300,15 +2382,43 @@ where
     C: TsoHorizonCommitter + 'static,
     H: EpochHeartbeat + 'static,
 {
-    let stride = NonZeroU64::new(crabka_pgexec::hlc::pack(HLC_HORIZON_STRIDE_MS, 0))
-        .expect("packed stride is non-zero");
-    let oracle = Arc::new(TsoOracle::recover_hlc(
+    hlc_tso_rpc_from_horizon_with_policy(
+        committer,
+        heartbeat,
+        epoch,
+        persisted_max_ts,
+        wall,
+        &crate::RangeRuntimePolicy::default(),
+    )
+}
+
+/// Build an HLC TSO endpoint using explicit runtime policy.
+/// # Errors
+/// Returns an error when the durable horizon is invalid.
+pub fn hlc_tso_rpc_from_horizon_with_policy<C, H>(
+    committer: C,
+    heartbeat: H,
+    epoch: i16,
+    persisted_max_ts: u64,
+    wall: Arc<dyn crabka_pgexec::WallClock>,
+    policy: &crate::RangeRuntimePolicy,
+) -> Result<Arc<dyn TsoRpc>, TsoError>
+where
+    C: TsoHorizonCommitter + 'static,
+    H: EpochHeartbeat + 'static,
+{
+    let headroom_ms =
+        u64::try_from(policy.hlc_horizon_headroom.millis_i64_trunc()).unwrap_or(u64::MAX);
+    let stride = NonZeroU64::new(crabka_pgexec::hlc::pack(headroom_ms, 0))
+        .ok_or(TsoError::TimestampOverflow)?;
+    let oracle = Arc::new(TsoOracle::recover_hlc_with_policy(
         committer,
         heartbeat,
         epoch,
         stride,
         persisted_max_ts,
         wall,
+        policy,
     )?);
     Ok(Arc::new(BatchedTsoClient::new(Arc::new(InProcessTsoRpc {
         oracle,
@@ -2451,7 +2561,7 @@ impl crabka_pgexec::RangeScanner for InProcessRangeScanner {
                 "sharded scatter scans require a finite statement read timestamp".into(),
             ));
         }
-        let table_id = relation_routing_table_id(&request.table.name);
+        let table_id = routing_table_id(&request.table.name);
         let hash_segments = hash_scan_segments(&self.range_map, request.table, &request)?;
 
         let segments = match hash_segments {
@@ -2508,7 +2618,7 @@ fn hash_scan_segments(
     let Some(ShardingStrategy::Hash(hash)) = table.sharding.as_ref() else {
         return Ok(None);
     };
-    let table_id = relation_routing_table_id(&table.name);
+    let table_id = routing_table_id(&table.name);
     let Some(hash_value) = hash_equality_value(table, hash, &request.predicate) else {
         // Full scan: a hash table partitions across ranges by bucket, so the
         // rowid-sliced `scan_segments` decomposition would hand each range a
@@ -2640,23 +2750,12 @@ impl MultiRangeTenant {
     /// seat the registration on — records why in [`GatewayNotify`] and refuses
     /// the statements rather than accepting them into a queue nothing on this
     /// connection drains.
-    ///
-    /// Every hosted range's session is opened under that same backend pid, as
-    /// the remote ones already are, because a statement can land on any of them
-    /// and `pg_backend_pid()` must answer with the connection's announced id
-    /// whichever one runs it.
     fn open_session(&self, notify_pid: Option<i32>) -> GatewaySession {
         let serving = self.inner.serving.load_full();
         let mut sessions: BTreeMap<RangeId, crabka_pgexec::SqlSession> = serving
             .engines
             .iter()
-            .map(|(range_id, engine)| {
-                let session = match notify_pid {
-                    Some(pid) => engine.connect_with_pid(pid),
-                    None => engine.connect(),
-                };
-                (*range_id, session)
-            })
+            .map(|(range_id, engine)| (*range_id, engine.connect()))
             .collect();
         let (notify, notifications) = match (notify_pid, notify_seat(&sessions)) {
             (None, _) => (GatewayNotify::NoBackendPid, None),
@@ -2785,6 +2884,7 @@ struct TenantInner {
     active_explicit_transactions: AtomicUsize,
     empty_table_split_test_hook: Option<EmptyTableSplitTestHook>,
     commit_fault_for_testing: Option<Arc<StdMutex<Option<GatewayCommitFault>>>>,
+    runtime_policy: crate::RangeRuntimePolicy,
 }
 
 struct PopulatedTransferTable {
@@ -2794,16 +2894,19 @@ struct PopulatedTransferTable {
 /// Owns a successful source pause until the transfer either resumes it or is dropped.
 struct TransferPauseGuard<'a> {
     transfer: &'a dyn RangeTransferCapability,
+    operation_id: String,
     barrier: Option<crate::RangeTransferBarrier>,
 }
 
 impl<'a> TransferPauseGuard<'a> {
     fn new(
         transfer: &'a dyn RangeTransferCapability,
+        operation_id: String,
         barrier: crate::RangeTransferBarrier,
     ) -> Self {
         Self {
             transfer,
+            operation_id,
             barrier: Some(barrier),
         }
     }
@@ -2812,8 +2915,15 @@ impl<'a> TransferPauseGuard<'a> {
         let barrier = self
             .barrier
             .expect("transfer pause guard must hold a barrier");
-        self.transfer.resume(barrier).await?;
+        self.transfer.resume(&self.operation_id, barrier).await?;
         self.barrier = None;
+        if let Err(error) = self
+            .transfer
+            .release_checkpoint_pin(&self.operation_id, barrier.range_id)
+            .await
+        {
+            tracing::error!(%error, "release checkpoint pin after successful transfer resume");
+        }
         Ok(())
     }
 }
@@ -2821,7 +2931,7 @@ impl<'a> TransferPauseGuard<'a> {
 impl Drop for TransferPauseGuard<'_> {
     fn drop(&mut self) {
         if let Some(barrier) = self.barrier {
-            self.transfer.resume_after_drop(barrier);
+            self.transfer.resume_after_drop(&self.operation_id, barrier);
         }
     }
 }
@@ -3563,17 +3673,21 @@ impl GatewaySession {
         // instead of failing a transaction whose decision is already durable;
         // any other error (and lag beyond the deadline) surfaces unchanged
         // and leaves the commit-recovery path to resolve it.
-        const RELEASE_LAG_RETRIES: u32 = 10;
-        const RELEASE_LAG_BACKOFF: std::time::Duration = std::time::Duration::from_millis(200);
+        let retries = self.inner.runtime_policy.decision_release_lag_retries.get();
+        let backoff = self
+            .inner
+            .runtime_policy
+            .decision_release_retry_backoff
+            .to_std();
         let mut attempt = 0;
         loop {
             let result = self
                 .release_on_range_once(range_id, global_xid, commit)
                 .await;
             match result {
-                Err(error) if error.code == "55000" && attempt < RELEASE_LAG_RETRIES => {
+                Err(error) if error.code == "55000" && attempt < retries => {
                     attempt += 1;
-                    tokio::time::sleep(RELEASE_LAG_BACKOFF).await;
+                    tokio::time::sleep(backoff).await;
                 }
                 result => return result,
             }
@@ -4581,12 +4695,11 @@ impl GatewaySession {
             // end sample inside it can stall (for example on an admin
             // connection hang), so the whole local wait shares the follower
             // RPC reply budget to keep committed DDL from blocking forever.
-            let wait = tokio::time::timeout(
-                crate::forward::RANGE0_BARRIER_REPLY_BUDGET,
-                replica.wait_for_latest_catalog(),
-            );
+            let reply_budget = self.inner.runtime_policy.range0_barrier_reply_budget;
+            let wait =
+                tokio::time::timeout(reply_budget.to_std(), replica.wait_for_latest_catalog());
             wait.await
-                .map_err(|_| BarrierError::CatchUpTimeout(crate::forward::RANGE0_BARRIER_REPLY_BUDGET))
+                .map_err(|_| BarrierError::CatchUpTimeout(reply_budget))
                 .and_then(|outcome| outcome)
                 .map_err(|error| {
                     PgError::error(
@@ -5421,7 +5534,9 @@ impl GatewaySession {
             let enlisted = touched.clone();
             for enlisted_range in enlisted {
                 if let Some(session) = self.sessions.get_mut(&enlisted_range) {
-                    session.set_lock_wait_cap(Some(crate::forward::CROSS_RANGE_LOCK_WAIT_CAP));
+                    session.set_lock_wait_cap(Some(
+                        self.inner.runtime_policy.cross_range_lock_wait_cap.to_std(),
+                    ));
                 }
             }
         }
@@ -5484,7 +5599,7 @@ impl GatewaySession {
     /// state in which a wait can be an edge of a cross-engine deadlock cycle.
     /// Single-range and autocommit forwarding keep `None`, preserving exact
     /// engine-local blocking on the remote host.
-    fn cross_range_statement_cap(&self) -> Option<std::time::Duration> {
+    fn cross_range_statement_cap(&self) -> Option<crabka_units::Time> {
         matches!(
             self.transaction,
             GatewayTransaction::Open {
@@ -5492,7 +5607,7 @@ impl GatewaySession {
                 ..
             }
         )
-        .then_some(crate::forward::CROSS_RANGE_LOCK_WAIT_CAP)
+        .then_some(self.inner.runtime_policy.cross_range_lock_wait_cap)
     }
 
     fn release_explicit_transaction(&mut self) {
@@ -5679,7 +5794,7 @@ fn timestamp_insert_write_routes(
     writes: &[crabka_pgexec::TimestampWrite],
 ) -> Result<Vec<RangeId>, PgError> {
     let lower = statement.trim_start().to_ascii_lowercase();
-    let table_id = relation_routing_table_id(&table.name);
+    let table_id = routing_table_id(&table.name);
     let routes = if let Some(ShardingStrategy::Hash(hash)) = table.sharding.as_ref() {
         let spec = HashShardSpec::new(
             table_id,
@@ -6269,9 +6384,10 @@ fn route_table(range_map: &RangeMap, table_id: TableId) -> Result<RangeId, PgErr
 
 fn catalog_table_is_sharded(
     catalog: &crabka_pgexec::SqlEngine,
-    table_name: &crabka_pgcatalog::RelationName,
+    table_name: &str,
 ) -> Result<bool, PgError> {
-    match catalog.table_uses_global_visibility(table_name) {
+    let table_name = crabka_pgcatalog::RelationName::public(table_name);
+    match catalog.table_uses_global_visibility(&table_name) {
         Ok(uses_global_visibility) => Ok(uses_global_visibility),
         Err(ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedTable(_))) => Ok(false),
         Err(error) => Err(error.into_pg()),
@@ -6280,23 +6396,17 @@ fn catalog_table_is_sharded(
 
 fn catalog_table(
     catalog: &crabka_pgexec::SqlEngine,
-    table_name: &crabka_pgcatalog::RelationName,
+    table_name: &str,
 ) -> Result<crabka_pgcatalog::Table, PgError> {
+    let table_name = crabka_pgcatalog::RelationName::public(table_name);
     catalog
-        .catalog_table(table_name)
+        .catalog_table(&table_name)
         .map_err(ExecError::into_pg)
 }
 
-/// A relation named by a statement the gateway is routing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TableRef {
-    /// The relation as the statement scanner read it.
-    ///
-    /// Routing runs on raw statement text with no session attached, so an
-    /// unqualified reference is taken as `public`. A relation in any other
-    /// schema fails to resolve here and falls back to the unsharded route, the
-    /// same path an unknown relation already takes.
-    name: crabka_pgcatalog::RelationName,
+    name: String,
     table_id: TableId,
 }
 
@@ -6323,7 +6433,8 @@ fn reject_unsupported_cross_range_statement(
         return Ok(());
     }
     let all_global_visibility = table_refs.iter().try_fold(true, |all_global, table_ref| {
-        let uses_global = match catalog.table_uses_global_visibility(&table_ref.name) {
+        let table_name = crabka_pgcatalog::RelationName::public(&table_ref.name);
+        let uses_global = match catalog.table_uses_global_visibility(&table_name) {
             Ok(uses_global) => uses_global,
             Err(ExecError::Catalog(crabka_pgcatalog::CatalogError::UndefinedTable(_))) => false,
             Err(error) => return Err(error.into_pg()),
@@ -6359,10 +6470,10 @@ fn table_refs_in_statement(sql: &str) -> Vec<TableRef> {
         if trailing_table_id(table).is_some()
             && !refs
                 .iter()
-                .any(|table_ref: &TableRef| table_ref.name.name == *table)
+                .any(|table_ref: &TableRef| table_ref.name == *table)
         {
             refs.push(TableRef {
-                name: crabka_pgcatalog::RelationName::public(*table),
+                name: (*table).to_string(),
                 table_id: routing_table_id(table),
             });
         }
@@ -6370,19 +6481,9 @@ fn table_refs_in_statement(sql: &str) -> Vec<TableRef> {
     refs
 }
 
-fn routing_table_id(table: &str) -> TableId {
-    trailing_table_id(table).unwrap_or(TableId::ZERO)
-}
-
-/// Routing id for a catalog relation.
-///
-/// The split contract derives the id from the relation name's trailing digits,
-/// and a schema qualifier carries none, so routing reads the *unqualified* name
-/// only. Two relations named `t11` in different schemas therefore route to the
-/// same id — the same collision the convention already accepts between a table
-/// and any other name ending in `11`.
-fn relation_routing_table_id(name: &crabka_pgcatalog::RelationName) -> TableId {
-    routing_table_id(&name.name)
+fn routing_table_id<T: std::fmt::Display + ?Sized>(table: &T) -> TableId {
+    let table = table.to_string();
+    trailing_table_id(&table).unwrap_or(TableId::ZERO)
 }
 
 fn trailing_table_id(table: &str) -> Option<TableId> {
@@ -6709,17 +6810,12 @@ fn parse_leading_u64(value: &str) -> Option<u64> {
 fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
     match value {
         Datum::Bool(value) => Some(vec![u8::from(*value)]),
-        Datum::Int2(value) => Some(value.to_be_bytes().to_vec()),
         Datum::Int4(value) => Some(value.to_be_bytes().to_vec()),
         Datum::Int8(value) => Some(value.to_be_bytes().to_vec()),
         Datum::Text(value) => Some(value.as_bytes().to_vec()),
         Datum::Bytea(value) => Some(value.clone()),
-        // A `regclass` routes on its oid — the same four bytes the write path
-        // hashes — so `WHERE c = 'pp'::regclass` scans the range the row is in.
-        Datum::Regclass(value) => Some(value.oid.to_be_bytes().to_vec()),
-        // The float widths are excluded together: a shard key must have exactly
-        // one byte spelling per value, and `-0.0`/`NaN` do not.
         Datum::Null
+        | Datum::Int2(_)
         | Datum::Float4(_)
         | Datum::Float8(_)
         | Datum::Numeric(_)
@@ -6730,13 +6826,12 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         | Datum::Timestamptz(_)
         | Datum::Interval(_)
         | Datum::Jsonb(_)
-        | Datum::TsVector(_)
-        | Datum::TsQuery(_)
-        // A composite or enum shard key would need its type's identity in the
-        // hash as well as the value, so both are excluded like the floats.
+        | Datum::Array(_)
         | Datum::Record(_)
         | Datum::Enum(_)
-        | Datum::Array(_) => None,
+        | Datum::Regclass(_)
+        | Datum::TsVector(_)
+        | Datum::TsQuery(_) => None,
     }
 }
 

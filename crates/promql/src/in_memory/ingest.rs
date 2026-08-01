@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crabka_blockstore::{Labels, SeriesFingerprint};
 use crabka_metrics::{NativeHistogram, SamplePayload, WalRecord};
+use crabka_units::prelude::*;
 
 use super::{ExemplarRow, FloatRow, HistRow, InMemoryMetricStore, PartitionWatermark, PruneStats};
 use crate::{
@@ -184,13 +185,13 @@ impl InMemoryMetricStore {
         &self.watermarks
     }
 
-    /// Drop every sample older than `now_ms - retention_ms` from each series,
+    /// Drop every sample older than `now_ms - retention` from each series,
     /// removing series that become empty from the queryable index.
     ///
     /// Returns how many samples and series were evicted. Offset watermarks are
     /// left untouched: they track ingestion progress, not retention.
     pub fn prune(&mut self, now_ms: i64) -> PruneStats {
-        let cutoff = now_ms.saturating_sub(self.retention_ms);
+        let cutoff = now_ms.saturating_sub(self.retention.millis_i64());
         let mut stats = PruneStats::default();
 
         // Fingerprints with at least one surviving sample after pruning.

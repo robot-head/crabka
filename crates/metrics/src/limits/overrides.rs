@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crabka_units::{prelude::*, serde_units};
 use serde::Deserialize;
 use thiserror::Error;
 
@@ -63,26 +64,32 @@ struct RuntimeFile {
 
 #[derive(Debug, Default, Deserialize)]
 struct PartialLimits {
-    #[serde(default)]
-    ingestion_rate: Option<f64>,
+    #[serde(default, with = "serde_units::human::option_frequency")]
+    ingestion_rate: Option<Frequency>,
     #[serde(default)]
     ingestion_burst_size: Option<u64>,
     #[serde(default)]
     max_global_series_per_user: Option<u64>,
-    #[serde(default)]
-    max_label_name_length: Option<u64>,
-    #[serde(default)]
-    max_label_value_length: Option<u64>,
+    #[serde(default, with = "serde_units::human::option_byte_size")]
+    max_label_name_length: Option<ByteSize>,
+    #[serde(default, with = "serde_units::human::option_byte_size")]
+    max_label_value_length: Option<ByteSize>,
     #[serde(default)]
     max_samples_per_query: Option<u64>,
     #[serde(default)]
     max_fetched_series_per_query: Option<u64>,
-    #[serde(default)]
-    max_query_lookback_secs: Option<u64>,
-    #[serde(default)]
-    max_query_length_secs: Option<u64>,
-    #[serde(default)]
-    out_of_order_time_window_ms: Option<i64>,
+    #[serde(
+        default,
+        deserialize_with = "super::option_non_negative_time::deserialize"
+    )]
+    max_query_lookback: Option<Time>,
+    #[serde(
+        default,
+        deserialize_with = "super::option_non_negative_time::deserialize"
+    )]
+    max_query_length: Option<Time>,
+    #[serde(default, with = "serde_units::human::option_time")]
+    out_of_order_time_window: Option<Time>,
 }
 
 /// Overlay a sparse per-tenant (or defaults) override on top of `base`.
@@ -115,15 +122,13 @@ fn merge_limits(base: &Limits, partial: &PartialLimits) -> Limits {
         max_fetched_series_per_query: partial
             .max_fetched_series_per_query
             .unwrap_or(base.max_fetched_series_per_query),
-        max_query_lookback_secs: partial
-            .max_query_lookback_secs
-            .unwrap_or(base.max_query_lookback_secs),
-        max_query_length_secs: partial
-            .max_query_length_secs
-            .unwrap_or(base.max_query_length_secs),
-        out_of_order_time_window_ms: partial
-            .out_of_order_time_window_ms
-            .unwrap_or(base.out_of_order_time_window_ms),
+        max_query_lookback: partial
+            .max_query_lookback
+            .unwrap_or(base.max_query_lookback),
+        max_query_length: partial.max_query_length.unwrap_or(base.max_query_length),
+        out_of_order_time_window: partial
+            .out_of_order_time_window
+            .unwrap_or(base.out_of_order_time_window),
     }
 }
 
@@ -133,22 +138,24 @@ mod tests {
 
     use super::*;
 
-    const YAML: &str = r"
+    const YAML: &str = r#"
 overrides:
   tenant-a:
-    ingestion_rate: 500
+    ingestion_rate: "500/s"
     max_global_series_per_user: 1000
   tenant-b:
-    max_label_value_length: 64
+    max_label_value_length: "64B"
   tenant-c:
-    out_of_order_time_window_ms: 1500
-";
+    out_of_order_time_window: "1500ms"
+    max_query_length: "1h"
+    max_query_lookback: "7d"
+"#;
 
     #[test]
     fn tenant_override_merges_over_defaults() {
         let p = OverridesProvider::from_yaml(YAML).unwrap();
         let a = p.for_tenant("tenant-a");
-        check!((a.ingestion_rate - 500.0).abs() < f64::EPSILON);
+        check!(a.ingestion_rate == per_sec(500));
         check!(a.max_global_series_per_user == 1000);
         check!(a.max_label_name_length == Limits::default().max_label_name_length);
     }
@@ -157,20 +164,52 @@ overrides:
     fn partial_override_keeps_other_defaults() {
         let p = OverridesProvider::from_yaml(YAML).unwrap();
         let b = p.for_tenant("tenant-b");
-        assert!(b.max_label_value_length == 64);
-        assert!((b.ingestion_rate - Limits::default().ingestion_rate).abs() < f64::EPSILON);
+        assert!(b.max_label_value_length == bytes(64));
+        assert!(b.ingestion_rate == Limits::default().ingestion_rate);
     }
 
     #[test]
     fn parses_out_of_order_window_override() {
         let p = OverridesProvider::from_yaml(YAML).unwrap();
-        assert!(p.for_tenant("tenant-c").out_of_order_time_window_ms == 1500);
-        assert!(p.for_tenant("tenant-a").out_of_order_time_window_ms == 0);
+        assert!(p.for_tenant("tenant-c").out_of_order_time_window == millis(1500));
+        assert!(p.for_tenant("tenant-a").out_of_order_time_window == Time::ZERO);
+    }
+
+    #[test]
+    fn parses_query_span_cap_overrides() {
+        let p = OverridesProvider::from_yaml(YAML).unwrap();
+        let c = p.for_tenant("tenant-c");
+        check!(c.max_query_length == hours(1));
+        check!(c.max_query_lookback == days(7));
+        check!(p.for_tenant("tenant-a").max_query_length == Time::ZERO);
     }
 
     #[test]
     fn unlisted_tenant_gets_defaults() {
         let p = OverridesProvider::from_yaml(YAML).unwrap();
         assert!(*p.for_tenant("tenant-z") == Limits::default());
+    }
+
+    #[test]
+    fn dimensioned_override_without_a_unit_is_rejected() {
+        // A bare `30` for a window that used to be `_ms` must not be guessed at;
+        // the human encoding demands the unit the type now carries.
+        let error = OverridesProvider::from_yaml(
+            "overrides:\n  tenant-a:\n    out_of_order_time_window: 1500\n",
+        )
+        .unwrap_err();
+
+        assert!(matches!(error, OverridesError::Yaml(_)));
+    }
+
+    /// A negative cap would read as "unlimited" downstream, since the enforcer
+    /// only applies a cap greater than zero. Zero is the documented sentinel.
+    #[test]
+    fn negative_query_span_caps_are_rejected() {
+        const NEGATIVE: &str = "overrides:\n  tenant-a:\n    max_query_length: \"-1s\"\n";
+        const ZERO: &str = "overrides:\n  tenant-a:\n    max_query_length: \"0\"\n";
+
+        assert!(let Err(_) = OverridesProvider::from_yaml(NEGATIVE));
+        assert!(let Ok(_) = OverridesProvider::from_yaml(ZERO));
     }
 }

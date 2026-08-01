@@ -5,23 +5,30 @@
 use std::collections::HashMap;
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64STD};
+use crabka_units::prelude::*;
 use hmac::{Hmac, KeyInit, Mac};
 use jsonpath_rust::{parser::model::JpQuery, query::js_path_process};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 
-use crate::codec::SchemaFormat;
+use crate::{
+    codec::SchemaFormat,
+    config_value::{non_negative_time, positive_byte_size},
+};
 
 /// Raw TOML form (one entry in `[[endpoints]]` per named endpoint).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WebhooksFile {
     #[serde(default)]
     pub endpoints: Vec<WebhookEndpoint>,
 }
 
 /// One named webhook endpoint as written in the TOML config file.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// The dimensioned settings carry their unit: `timestamp_tolerance = "5m"`,
+/// `max_body = "1MiB"`. A bare number is rejected.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct WebhookEndpoint {
     pub name: String,
     pub target_topic: String,
@@ -37,14 +44,24 @@ pub struct WebhookEndpoint {
     pub signature_prefix: Option<String>,
     /// Optional replay guard: header that carries the request timestamp.
     pub timestamp_header: Option<String>,
-    /// Max age of a valid timestamp in seconds (default 300).
-    pub timestamp_tolerance_secs: Option<i64>,
+    /// Max age of a valid timestamp, e.g. `"5m"` (default 5 minutes).
+    #[serde(
+        default,
+        with = "crabka_units::serde_units::human::option_time",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub timestamp_tolerance: Option<Time>,
     /// `header:<Name>` or `json:<JSONPath expr>`. Absent ⇒ no dedup (plain produce).
     pub idempotency_source: Option<String>,
     /// Optional record-key source: `header:<Name>` or `json:<JSONPath expr>`.
     pub key_source: Option<String>,
-    /// Maximum accepted body size in bytes (default 1 MiB).
-    pub max_body_bytes: Option<usize>,
+    /// Maximum accepted body size, e.g. `"1MiB"` (default 1 MiB).
+    #[serde(
+        default,
+        with = "crabka_units::serde_units::human::option_byte_size",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_body: Option<ByteSize>,
     /// Optional Schema Registry subject. When set, the request body is produced
     /// as a STRUCTURED record validated+serialized against this subject's schema
     /// (via the injected codec); a validation failure returns `400`.
@@ -96,10 +113,10 @@ pub struct CompiledWebhook {
     /// Literal prefix stripped before hex/base64 decoding (e.g. `"sha256="`).
     pub signature_prefix: Option<String>,
     pub timestamp_header: Option<String>,
-    pub timestamp_tolerance_secs: i64,
+    pub timestamp_tolerance: Time,
     pub idempotency_source: Option<Source>,
     pub key_source: Option<Source>,
-    pub max_body_bytes: usize,
+    pub max_body: ByteSize,
     /// Schema Registry subject to validate+serialize the request body against.
     /// `None` ⇒ the body is produced raw (no schema validation).
     pub schema_subject: Option<String>,
@@ -157,6 +174,14 @@ impl WebhooksFile {
             // checked even when `schema_subject` is absent so a stray
             // `schema_format` typo still surfaces at load time.
             let schema_format = parse_schema_format(e.schema_format.as_deref(), &ctx)?;
+            let timestamp_tolerance = non_negative_time(
+                "timestamp_tolerance",
+                e.timestamp_tolerance.unwrap_or_else(|| minutes(5)),
+            )
+            .map_err(|error| format!("{ctx}: {error}"))?;
+            let max_body =
+                positive_byte_size("max_body", e.max_body.unwrap_or_else(|| mebibytes(1)))
+                    .map_err(|error| format!("{ctx}: {error}"))?;
 
             out.insert(
                 e.name.clone(),
@@ -171,10 +196,10 @@ impl WebhooksFile {
                     signature_encoding,
                     signature_prefix: e.signature_prefix.clone(),
                     timestamp_header: e.timestamp_header.clone(),
-                    timestamp_tolerance_secs: e.timestamp_tolerance_secs.unwrap_or(300),
+                    timestamp_tolerance,
                     idempotency_source,
                     key_source,
-                    max_body_bytes: e.max_body_bytes.unwrap_or(1024 * 1024),
+                    max_body,
                     schema_subject: e.schema_subject.clone(),
                     schema_format,
                 },
@@ -303,6 +328,7 @@ pub(crate) fn extract_source(
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
     use hmac::{Hmac, KeyInit, Mac};
     use sha2::Sha256;
 
@@ -481,10 +507,10 @@ key_source = "header:X-Delivery"
         assert2::assert!(ep.signature_header.as_deref() == Some("X-Hub-Signature-256"));
         assert2::assert!(ep.signature_prefix.as_deref() == Some("sha256="));
         assert2::assert!(ep.timestamp_header.as_deref() == None);
-        assert2::assert!(ep.timestamp_tolerance_secs == 300);
+        assert2::assert!(ep.timestamp_tolerance == minutes(5));
         assert2::assert!(ep.idempotency_source.is_some());
         assert2::assert!(ep.key_source.is_some());
-        assert2::assert!(ep.max_body_bytes == 1024 * 1024);
+        assert2::assert!(ep.max_body == mebibytes(1));
         assert2::assert!(ep.schema_subject.as_deref() == None);
         assert2::assert!(ep.schema_format == SchemaFormat::Json);
     }
@@ -506,10 +532,10 @@ principal = "svc:stripe-ingest"
         assert2::assert!(ep.signature_header.as_deref() == None);
         assert2::assert!(ep.signature_prefix.as_deref() == None);
         assert2::assert!(ep.timestamp_header.as_deref() == None);
-        assert2::assert!(ep.timestamp_tolerance_secs == 300);
+        assert2::assert!(ep.timestamp_tolerance == minutes(5));
         assert2::assert!(ep.idempotency_source.is_none());
         assert2::assert!(ep.key_source.is_none());
-        assert2::assert!(ep.max_body_bytes == 1024 * 1024);
+        assert2::assert!(ep.max_body == mebibytes(1));
         assert2::assert!(ep.schema_subject.as_deref() == None);
         assert2::assert!(ep.schema_format == SchemaFormat::Json);
     }
@@ -542,6 +568,18 @@ secret = "s"
 signature_header = "X-Sig"
 signature_encoding = "md5"
 "#;
+        let negative_timestamp_tolerance = r#"
+[[endpoints]]
+name = "bad"
+target_topic = "t"
+timestamp_tolerance = "-1s"
+"#;
+        let zero_body_limit = r#"
+[[endpoints]]
+name = "bad"
+target_topic = "t"
+max_body = "0B"
+"#;
         for (_name, input, needle) in [
             (
                 "secret_without_header",
@@ -555,6 +593,12 @@ signature_encoding = "md5"
             ),
             ("invalid_jsonpath", invalid_jsonpath, "JSONPath"),
             ("bad_encoding", bad_encoding, "signature_encoding"),
+            (
+                "negative_timestamp_tolerance",
+                negative_timestamp_tolerance,
+                "timestamp_tolerance",
+            ),
+            ("zero_body_limit", zero_body_limit, "max_body"),
         ] {
             let file: WebhooksFile = toml::from_str(input).expect("parse");
             let error = file.compile().expect_err("case must fail");
@@ -567,6 +611,73 @@ signature_encoding = "md5"
         let file: WebhooksFile = toml::from_str("").expect("parse");
         let compiled = file.compile().expect("compile");
         assert2::assert!(compiled.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Dimensioned config encoding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn dimensioned_settings_are_read_in_their_human_form() {
+        let toml = r#"
+[[endpoints]]
+name = "sized"
+target_topic = "t"
+timestamp_tolerance = "90s"
+max_body = "512KiB"
+"#;
+        let file: WebhooksFile = toml::from_str(toml).expect("parse");
+        let compiled = file.compile().expect("compile");
+        let ep = &compiled["sized"];
+        check!(ep.timestamp_tolerance == secs(90));
+        check!(ep.max_body == kibibytes(512));
+    }
+
+    /// A dimensioned setting must carry its unit: `300` is neither seconds nor
+    /// milliseconds until it says so, and `1048576` is not self-evidently bytes.
+    #[test]
+    fn unitless_dimensioned_settings_are_rejected() {
+        for (_name, field, value) in [
+            ("tolerance", "timestamp_tolerance", "300"),
+            ("body limit", "max_body", "1048576"),
+        ] {
+            let input = format!(
+                r#"
+[[endpoints]]
+name = "unitless"
+target_topic = "t"
+{field} = {value}
+"#
+            );
+            check!(toml::from_str::<WebhooksFile>(&input).is_err());
+        }
+    }
+
+    #[test]
+    fn endpoint_round_trips_through_its_serde_encoding() {
+        let endpoint = WebhookEndpoint {
+            name: "github".to_string(),
+            target_topic: "events".to_string(),
+            principal: None,
+            secret: None,
+            signature_header: None,
+            signature_encoding: None,
+            signature_prefix: None,
+            timestamp_header: Some("X-Ts".to_string()),
+            timestamp_tolerance: Some(minutes(5)),
+            idempotency_source: None,
+            key_source: None,
+            max_body: Some(mebibytes(3)),
+            schema_subject: None,
+            schema_format: None,
+        };
+
+        let encoded = serde_json::to_string(&endpoint).expect("serialize");
+        let decoded: WebhookEndpoint = serde_json::from_str(&encoded).expect("deserialize");
+
+        check!(encoded.contains(r#""timestamp_tolerance":"5m""#));
+        check!(encoded.contains(r#""max_body":"3MiB""#));
+        check!(decoded == endpoint);
     }
 
     // -----------------------------------------------------------------------

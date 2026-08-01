@@ -12,6 +12,7 @@ use crabka_operator::{
     crd::{KafkaCondition, KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus},
     rebalancer_client::ProposalStatus,
 };
+use crabka_units::mebibytes_per_sec;
 use http::{Method, Request};
 use hyper::body::Bytes;
 
@@ -19,9 +20,9 @@ use hyper::body::Bytes;
 mod shared;
 
 use shared::{
-    MockRule, build_ctx, fake_rebalance_body,
+    MockRule, build_ctx, build_ctx_with_config, fake_rebalance_body,
     fake_rebalancer::{FakeRebalancerClient, FakeResp, RebalCall, fake_proposal},
-    json_response,
+    json_response, op_config,
 };
 
 const NS: &str = "kafka";
@@ -132,7 +133,7 @@ async fn approve_executes_and_enters_rebalancing() {
         .await;
 
     let mut kr = with_state(rebalance("demo"), "ProposalReady", Some("p1"));
-    kr.spec.throttle_bytes_per_sec = Some(52_428_800);
+    kr.spec.throttle_bytes_per_sec = Some(mebibytes_per_sec(50));
     let kr = annotate(kr, "approve");
     reconcile(Arc::new(kr), ctx).await.unwrap();
 
@@ -140,7 +141,7 @@ async fn approve_executes_and_enters_rebalancing() {
         fake.calls()
             == vec![RebalCall::ExecuteProposal {
                 id: "p1".into(),
-                throttle: Some(52_428_800),
+                throttle: Some(mebibytes_per_sec(50)),
             }]
     );
 
@@ -249,7 +250,9 @@ async fn missing_endpoint_sets_not_ready() {
 async fn transport_error_leaves_status_untouched() {
     // Zero rules: any kube call would 404 and surface as an unexpected
     // request. The reconcile must short-circuit before patching.
-    let (ctx, state) = build_ctx(NS, vec![]);
+    let mut config = op_config(NS);
+    config.controller_error_requeue = crabka_units::millis(1_234);
+    let (ctx, state) = build_ctx_with_config(NS, vec![], config);
     let fake = Arc::new(
         FakeRebalancerClient::new().with_create(FakeResp::Transport("connection refused".into())),
     );
@@ -257,9 +260,13 @@ async fn transport_error_leaves_status_untouched() {
         .await;
 
     let kr = rebalance("demo");
-    reconcile(Arc::new(kr), ctx).await.unwrap();
+    let action = reconcile(Arc::new(kr), ctx).await.unwrap();
 
     assert!(fake.calls() == vec![RebalCall::CreateProposal(vec![])]);
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(1_234))
+    );
     assert!(
         state.take_observed().is_empty(),
         "transport error must not issue any kube requests"

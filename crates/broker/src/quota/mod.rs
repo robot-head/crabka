@@ -1,8 +1,11 @@
 //! KIP-13 + KIP-124 + KIP-257 client quotas.
 
-use std::time::Duration;
-
 use crabka_metadata::{EntityKey, MetadataImage};
+use crabka_units::{
+    ByteRate, Time,
+    convert::{ByteRateExt as _, TimeExt},
+};
+use num_traits::cast::{NumCast, ToPrimitive as _};
 
 mod buckets;
 mod controller_mutation;
@@ -33,10 +36,11 @@ fn consume_configured_quota(
     request: QuotaConsumption<'_>,
     bucket_entity_key: impl FnOnce(&mut EntityKey),
     initial_rate: impl FnOnce(f64) -> Option<u64>,
-    delay_for_overage: impl FnOnce(u64, f64, u64) -> Duration,
-) -> Duration {
+    delay_for_overage: impl FnOnce(u64, f64, u64) -> Time,
+    maximum_delay: Time,
+) -> Time {
     if request.amount == 0 {
-        return Duration::ZERO;
+        return <Time as TimeExt>::ZERO;
     }
     let Some((mut entity_key, rate)) = lookup::lookup_quota_with_key(
         request.image,
@@ -44,13 +48,13 @@ fn consume_configured_quota(
         request.client_id,
         request.quota_key,
     ) else {
-        return Duration::ZERO;
+        return <Time as TimeExt>::ZERO;
     };
     if !rate.is_finite() || rate <= 0.0 {
-        return Duration::ZERO;
+        return <Time as TimeExt>::ZERO;
     }
     let Some(initial_rate) = initial_rate(rate) else {
-        return Duration::ZERO;
+        return <Time as TimeExt>::ZERO;
     };
     bucket_entity_key(&mut entity_key);
     let bucket = request
@@ -58,23 +62,52 @@ fn consume_configured_quota(
         .get_or_create(request.quota_key, &entity_key, initial_rate);
     let granted = bucket.try_consume(request.amount);
     if granted >= request.amount {
-        return Duration::ZERO;
+        return <Time as TimeExt>::ZERO;
     }
-    delay_for_overage(request.amount - granted, rate, initial_rate).min(Duration::from_secs(1))
+    delay_for_overage(request.amount - granted, rate, initial_rate).min(maximum_delay)
 }
 
+/// A quota delay as Kafka's `throttle_time_ms` wire field.
+///
+/// Truncates toward zero rather than rounding to nearest: the previous
+/// integer-millisecond pipeline reported a 1.6 ms delay as `1`, and
+/// `throttle_time_ms` is a value a client reads back and sleeps on, so the
+/// byte on the wire must not move because the delay is now carried as a
+/// [`Time`]. A delay beyond `i32::MAX` milliseconds saturates.
+#[must_use]
+pub(crate) fn throttle_time_ms(delay: Time) -> i32 {
+    i32::try_from(delay.millis_i64_trunc()).unwrap_or(i32::MAX)
+}
+
+/// A raw quota rate as the [`TokenBucket`](crate::throttle::TokenBucket)'s
+/// [`ByteRate`].
+///
+/// The bucket is byte-dimensioned, but Kafka drives `request_percentage` and
+/// `controller_mutation_rate` through the same token arithmetic, and those are
+/// not byte throughputs. Their raw magnitudes therefore cross into the bucket's
+/// dimension here, in one place, rather than at each call site.
+pub(crate) fn bucket_rate(raw: u64) -> ByteRate {
+    ByteRate::from_bytes_per_sec(i64::try_from(raw).unwrap_or(i64::MAX))
+}
+
+/// A configured rate as a whole token count, truncated toward zero.
+///
+/// Negative and non-finite rates are not throughputs and collapse to `0`, the
+/// bucket's "no limit configured" sentinel; anything past `u64::MAX` saturates.
 pub(crate) fn positive_f64_to_u64(value: f64) -> u64 {
     if !value.is_finite() || value <= 0.0 {
         return 0;
     }
-    value.trunc().to_string().parse().unwrap_or(u64::MAX)
+    value.trunc().to_u64().unwrap_or(u64::MAX)
 }
 
-fn u64_to_f64(value: u64) -> f64 {
-    value
-        .to_string()
-        .parse()
-        .expect("every u64 is a finite f64")
+/// A token count widened for the overage-over-rate division.
+///
+/// Exact below 2^53, which covers every quota magnitude Kafka can express.
+/// `NumCast` never fails for `u64` into `f64`; the fallback keeps the quota path
+/// total rather than panicking on a value that cannot occur.
+pub(crate) fn u64_to_f64(value: u64) -> f64 {
+    NumCast::from(value).unwrap_or(f64::INFINITY)
 }
 
 #[cfg(test)]
@@ -124,8 +157,36 @@ mod tests {
     };
 
     use assert2::{assert, check};
+    use crabka_units::secs;
 
     use super::{test_support::image_with_quota, *};
+
+    /// `throttle_time_ms` truncates, matching the integer-millisecond
+    /// pipeline it replaced: a sub-millisecond delay reports `0`, and a
+    /// 1.6 ms delay reports `1`, not `2`.
+    #[test]
+    fn throttle_time_ms_truncates_toward_zero() {
+        let cases = [
+            (crabka_units::micros(0), 0),
+            (crabka_units::micros(400), 0),
+            (crabka_units::micros(999), 0),
+            (crabka_units::millis(1), 1),
+            (crabka_units::micros(1_600), 1),
+            (crabka_units::micros(1_999), 1),
+            (secs(1), 1_000),
+        ];
+        for (delay, want) in cases {
+            check!(
+                throttle_time_ms(delay) == want,
+                "{delay:?} should report {want}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn throttle_time_ms_saturates_past_i32_milliseconds() {
+        assert!(throttle_time_ms(crabka_units::days(36_500)) == i32::MAX);
+    }
 
     #[test]
     fn quota_rate_conversion_is_checked_and_saturating() {
@@ -134,6 +195,27 @@ mod tests {
         assert!(positive_f64_to_u64(10.9) == 10);
         assert!(positive_f64_to_u64(f64::MAX) == u64::MAX);
         assert!(u64_to_f64(u64::MAX).is_finite());
+    }
+
+    /// The producer path carried its own copy of this widening until the two
+    /// were merged. They agreed on every input, and this pins that they still
+    /// would — bit patterns rather than `==`, so the comparison is exact.
+    #[test]
+    fn widening_agrees_with_the_former_producer_copy() {
+        for value in [0_u64, 1, 1024, 1 << 52, (1_u64 << 53) - 1, u64::MAX] {
+            let former: f64 = value.to_string().parse().unwrap_or(f64::INFINITY);
+            check!(u64_to_f64(value).to_bits() == former.to_bits());
+        }
+    }
+
+    /// Truncating a configured rate agrees with the producer path's former
+    /// floor-and-parse, including the sub-one rates it rejects.
+    #[test]
+    fn rate_truncation_agrees_with_the_former_producer_copy() {
+        for rate in [1.0_f64, 1.9, 1024.0, 9.007_199_254_740_99e15, f64::MAX] {
+            let former: Option<u64> = rate.floor().to_string().parse().ok();
+            check!(rate.floor().to_u64() == former);
+        }
     }
 
     #[test]
@@ -168,12 +250,13 @@ mod tests {
                 let called = Arc::clone(&delay_for_overage_called);
                 move |_, _, _| {
                     called.store(true, Ordering::Relaxed);
-                    Duration::from_secs(1)
+                    secs(1)
                 }
             },
+            secs(1),
         );
 
-        check!(delay == Duration::ZERO);
+        check!(delay == <Time as TimeExt>::ZERO);
         check!(buckets.is_empty());
         check!(!bucket_entity_key_called.load(Ordering::Relaxed));
         check!(!initial_rate_called.load(Ordering::Relaxed));
@@ -204,10 +287,11 @@ mod tests {
                         Some(1)
                     }
                 },
-                |_, _, _| Duration::from_secs(1),
+                |_, _, _| secs(1),
+                secs(1),
             );
 
-            check!(delay == Duration::ZERO);
+            check!(delay == <Time as TimeExt>::ZERO);
             check!(buckets.is_empty());
             assert!(!initial_rate_called.load(Ordering::Relaxed));
         }
@@ -233,10 +317,11 @@ mod tests {
             },
             |_| {},
             |_| None,
-            |_, _, _| Duration::from_secs(1),
+            |_, _, _| secs(1),
+            secs(1),
         );
 
-        check!(delay == Duration::ZERO);
+        check!(delay == <Time as TimeExt>::ZERO);
         assert!(buckets.is_empty());
     }
 
@@ -260,11 +345,12 @@ mod tests {
                 check!(overage == 9);
                 check!((rate - 1.0).abs() < f64::EPSILON);
                 check!(initial_rate == 1);
-                Duration::from_secs(10)
+                secs(10)
             },
+            secs(1),
         );
 
-        check!(delay == Duration::from_secs(1));
+        check!(delay == secs(1));
         assert!(buckets.len() == 1);
     }
 }

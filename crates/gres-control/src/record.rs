@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, fmt, str::FromStr};
 
+use crabka_units::ByteSize;
 use serde::{Deserialize, Serialize};
 
 use crate::ControlError;
@@ -667,7 +668,7 @@ impl fmt::Display for TenantState {
 }
 
 /// Whole-tenant registry snapshot stored as the value for a [`RegistryKey`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TenantRecord {
     /// Monotonic per-tenant version. Higher versions win during compaction replay.
     pub record_version: u64,
@@ -689,8 +690,9 @@ pub struct TenantRecord {
     pub endpoint: Option<String>,
     /// Optional frame threshold for checkpointing.
     pub checkpoint_frames: Option<u64>,
-    /// Optional byte threshold for checkpointing.
-    pub checkpoint_bytes: Option<u64>,
+    /// Optional size threshold for checkpointing.
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    pub checkpoint_size: Option<ByteSize>,
     /// Idle seconds before G-5 suspension. `None` or `0` means never.
     pub idle_seconds: Option<u64>,
     /// WAL topic generation. Controllers bump this after parking and recreating WAL topics.
@@ -703,7 +705,8 @@ pub struct TenantRecord {
     /// Hash-sharding placement metadata and co-location constraints.
     pub hash_placements: Vec<HashPlacement>,
     /// Optional maximum checkpoint size that remains eligible for suspension.
-    pub suspend_max_checkpoint_bytes: Option<u64>,
+    #[serde(default, with = "crabka_units::serde_units::human::option_byte_size")]
+    pub suspend_max_checkpoint_size: Option<ByteSize>,
     /// Final checkpoint manifest that made a suspended tenant safe to park.
     pub final_checkpoint: Option<FinalCheckpoint>,
 }
@@ -1009,13 +1012,13 @@ impl TenantRecord {
             bucket_prefix: None,
             endpoint: None,
             checkpoint_frames: None,
-            checkpoint_bytes: None,
+            checkpoint_size: None,
             idle_seconds: None,
             wal_generation: 0,
             ranges: Vec::new(),
             range_retirements: Vec::new(),
             hash_placements: Vec::new(),
-            suspend_max_checkpoint_bytes: None,
+            suspend_max_checkpoint_size: None,
             final_checkpoint: None,
         };
         record.ensure_valid()?;
@@ -1825,7 +1828,7 @@ impl RegistryKey {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 struct TenantRecordEnvelope {
     format_version: u16,
     record: TenantRecord,
@@ -2463,7 +2466,7 @@ mod tests {
 
     #[test]
     fn decoding_rejects_invalid_deserialized_newtype_values() {
-        let value = br#"{"format_version":1,"record":{"record_version":1,"id":"Tenant-A","name":"tenant-a","state":"active","sql_user":"alice","scram_verifier":"SCRAM-SHA-256$4096:salt$stored:server","wal_replication":1,"bucket_prefix":null,"endpoint":null,"checkpoint_frames":null,"checkpoint_bytes":null,"idle_seconds":null,"wal_generation":0,"ranges":[],"suspend_max_checkpoint_bytes":null,"final_checkpoint":null}}"#;
+        let value = br#"{"format_version":1,"record":{"record_version":1,"id":"Tenant-A","name":"tenant-a","state":"active","sql_user":"alice","scram_verifier":"SCRAM-SHA-256$4096:salt$stored:server","wal_replication":1,"bucket_prefix":null,"endpoint":null,"checkpoint_frames":null,"checkpoint_size":null,"idle_seconds":null,"wal_generation":0,"ranges":[],"suspend_max_checkpoint_size":null,"final_checkpoint":null}}"#;
         assert!(decode_registry_record(value).is_err());
 
         let key = br#"{"keytype":"TENANT","name":"Tenant-A","magic":1}"#;
@@ -2484,7 +2487,7 @@ mod tests {
             lifecycle: RangeLifecycle::default(),
             retirement: None,
         }];
-        input.suspend_max_checkpoint_bytes = Some(1_048_576);
+        input.suspend_max_checkpoint_size = Some(crabka_units::mebibytes(1));
         let (key, value) = encode_registry_record(&input).unwrap();
 
         assert!(RegistryKey::decode(&key).unwrap().name == input.name);

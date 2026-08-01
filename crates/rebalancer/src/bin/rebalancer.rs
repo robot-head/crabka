@@ -1,13 +1,19 @@
 //! `crabka-rebalancer` — Cruise-Control-equivalent partition
 //! rebalancer for Crabka clusters.
 
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc};
 
 use clap::Parser;
+use crabka_client_core::{
+    ClientFrameMax, ConnectionDispatchQueueCapacity, ConnectionOptions,
+    DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+};
 use crabka_rebalancer::{
     api::{GoalRegistry, handlers::AppState},
+    config::{PositiveUsize, RebalancerRuntimePolicy},
     executor::{
-        Execution, ExecutionHandle, ExecutorConfig, ExecutorState, client_impl::LiveClient,
+        Execution, ExecutionHandle, ExecutorConfig, ExecutorState,
+        client_impl::{LiveClient, ReassignmentRequestTimeout},
     },
     goals::GoalContext,
     health::{HealthState, new_registry},
@@ -15,6 +21,13 @@ use crabka_rebalancer::{
     metrics::RebalancerMetrics,
     model::{proposal::ProposalStatus, store::ProposalStore},
 };
+use crabka_units::{
+    ByteRate, ByteSize, Ratio, Time,
+    convert::{ByteRateExt as _, StdDurationExt as _, TimeExt as _},
+    fraction, parse, percent,
+};
+#[cfg(test)]
+use crabka_units::{millis, secs};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -27,12 +40,36 @@ fn should_continue_recovery_load_wait(is_loaded: bool) -> bool {
     !is_loaded
 }
 
-fn recovery_load_timed_out(elapsed: Duration, timeout: Duration) -> bool {
+fn recovery_load_timed_out(elapsed: Time, timeout: Time) -> bool {
     elapsed > timeout
 }
 
-fn detector_enabled(tick_interval_secs: u64) -> bool {
-    tick_interval_secs > 0
+fn detector_enabled(tick_interval: Time) -> bool {
+    tick_interval > Time::ZERO
+}
+
+/// A `--…-secs` CLI argument as a [`Time`] extent.
+///
+/// The flag names carry the unit because they are the operator-facing
+/// contract; the quantity carries it from here on. A value too large for
+/// `i64` seconds saturates rather than wrapping.
+fn arg_secs(value: u64) -> Time {
+    Time::from_secs(i64::try_from(value).unwrap_or(i64::MAX))
+}
+
+/// A `--…-pct` CLI argument given as a whole percentage.
+fn arg_percent(value: u32) -> Ratio {
+    percent(value)
+}
+
+/// A `--…-pct` CLI argument given as a `0.0..=1.0` fraction.
+fn arg_fraction(value: f64) -> Ratio {
+    fraction(value)
+}
+
+/// A `--…-bytes-per-sec` CLI argument as a [`ByteRate`].
+fn arg_bytes_per_sec(value: i64) -> ByteRate {
+    ByteRate::from_bytes_per_sec(value)
 }
 
 fn init_tracing() {
@@ -59,6 +96,8 @@ async fn connect_client(args: &Args) -> anyhow::Result<crabka_client_core::Clien
     Ok(crabka_client_core::Client::builder()
         .bootstrap(args.bootstrap_servers.clone())
         .client_id("crabka-rebalancer")
+        .dispatch_queue_capacity(args.client_dispatch_queue_capacity)
+        .frame_max(args.client_frame_max)
         .build()
         .await?)
 }
@@ -73,6 +112,23 @@ struct Args {
     /// `host:port,host:port,...` of brokers to use for bootstrap.
     #[arg(long, env = "CRABKA_BOOTSTRAP_SERVERS")]
     bootstrap_servers: String,
+    #[arg(
+        long,
+        env = "CRABKA_REBALANCER_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    #[arg(
+        long,
+        env = "CRABKA_REBALANCER_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
+
+    #[command(flatten)]
+    runtime: RebalancerRuntimeOptions,
 
     /// Bind address for the Connect-RPC + operational HTTP server.
     #[arg(
@@ -276,29 +332,154 @@ struct Args {
     /// Maximum movements per `AlterPartitionReassignments` request.
     #[arg(long, env = "CRABKA_REASSIGNMENT_BATCH_SIZE", default_value_t = 200)]
     reassignment_batch_size: usize,
+
+    /// Kafka broker-side timeout for submitting or cancelling partition
+    /// reassignments.
+    #[arg(
+        long,
+        env = "CRABKA_REBALANCER_REASSIGNMENT_REQUEST_TIMEOUT",
+        default_value = "60s",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    reassignment_request_timeout: Time,
+}
+
+#[derive(Debug, clap::Args, Default)]
+struct RebalancerRuntimeOptions {
+    #[arg(long, env = "CRABKA_REBALANCER_RECOVERY_LOAD_POLL_INTERVAL", value_parser = crabka_units::parse::positive_time)]
+    recovery_load_poll_interval: Option<Time>,
+    #[arg(long, env = "CRABKA_REBALANCER_EXECUTOR_DRAIN_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    executor_drain_timeout: Option<Time>,
+    #[arg(long, env = "CRABKA_REBALANCER_INGESTER_JOIN_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    ingester_join_timeout: Option<Time>,
+    #[arg(long, env = "CRABKA_REBALANCER_SCRAPER_HTTP_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    scraper_http_timeout: Option<Time>,
+    #[arg(long, env = "CRABKA_REBALANCER_CANCEL_DRAIN_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    cancel_drain_timeout: Option<Time>,
+    #[arg(long, env = "CRABKA_REBALANCER_CANCEL_DRAIN_POLL_INTERVAL", value_parser = crabka_units::parse::positive_time)]
+    cancel_drain_poll_interval: Option<Time>,
+    #[arg(long, env = "CRABKA_REBALANCER_DETECTOR_HISTORY_CAPACITY")]
+    detector_history_capacity: Option<PositiveUsize>,
+    #[arg(long, env = "CRABKA_REBALANCER_STATE_TOPIC_CREATE_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    state_topic_create_timeout: Option<Time>,
+    #[arg(long, env = "CRABKA_REBALANCER_STATE_LOADER_POLL_INTERVAL", value_parser = crabka_units::parse::positive_time)]
+    state_loader_poll_interval: Option<Time>,
+    #[arg(long, env = "CRABKA_REBALANCER_STATE_LOADER_QUIET_POLLS")]
+    state_loader_quiet_polls: Option<PositiveUsize>,
+    #[arg(long, env = "CRABKA_REBALANCER_STATE_FETCH_MAX", value_parser = crabka_units::parse::positive_byte_size)]
+    state_fetch_max: Option<ByteSize>,
+    #[arg(long, env = "CRABKA_REBALANCER_STATE_PRODUCE_RETRY_ATTEMPTS")]
+    state_produce_retry_attempts: Option<PositiveUsize>,
+    #[arg(long, env = "CRABKA_REBALANCER_STATE_PRODUCE_RETRY_BACKOFF", value_parser = crabka_units::parse::positive_time)]
+    state_produce_retry_backoff: Option<Time>,
+    #[arg(long, env = "CRABKA_REBALANCER_STATE_PRODUCE_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    state_produce_timeout: Option<Time>,
+    #[arg(long, env = "CRABKA_REBALANCER_STATE_TOPIC_MIN_CLEANABLE_DIRTY_RATIO", value_parser = crabka_units::parse::positive_ratio)]
+    state_topic_min_cleanable_dirty_ratio: Option<Ratio>,
+    #[arg(long, env = "CRABKA_REBALANCER_STATE_TOPIC_SEGMENT_INTERVAL", value_parser = crabka_units::parse::positive_time)]
+    state_topic_segment_interval: Option<Time>,
+}
+
+impl RebalancerRuntimeOptions {
+    fn effective_policy(&self) -> anyhow::Result<RebalancerRuntimePolicy> {
+        let defaults = RebalancerRuntimePolicy::default();
+        let policy = RebalancerRuntimePolicy {
+            recovery_load_poll_interval: self
+                .recovery_load_poll_interval
+                .unwrap_or(defaults.recovery_load_poll_interval),
+            executor_drain_timeout: self
+                .executor_drain_timeout
+                .unwrap_or(defaults.executor_drain_timeout),
+            ingester_join_timeout: self
+                .ingester_join_timeout
+                .unwrap_or(defaults.ingester_join_timeout),
+            scraper_http_timeout: self
+                .scraper_http_timeout
+                .unwrap_or(defaults.scraper_http_timeout),
+            cancel_drain_timeout: self
+                .cancel_drain_timeout
+                .unwrap_or(defaults.cancel_drain_timeout),
+            cancel_drain_poll_interval: self
+                .cancel_drain_poll_interval
+                .unwrap_or(defaults.cancel_drain_poll_interval),
+            detector_history_capacity: self
+                .detector_history_capacity
+                .unwrap_or(defaults.detector_history_capacity),
+            state_topic_create_timeout: self
+                .state_topic_create_timeout
+                .unwrap_or(defaults.state_topic_create_timeout),
+            state_loader_poll_interval: self
+                .state_loader_poll_interval
+                .unwrap_or(defaults.state_loader_poll_interval),
+            state_loader_quiet_polls: self
+                .state_loader_quiet_polls
+                .unwrap_or(defaults.state_loader_quiet_polls),
+            state_fetch_max: self.state_fetch_max.unwrap_or(defaults.state_fetch_max),
+            state_produce_retry_attempts: self
+                .state_produce_retry_attempts
+                .unwrap_or(defaults.state_produce_retry_attempts),
+            state_produce_retry_backoff: self
+                .state_produce_retry_backoff
+                .unwrap_or(defaults.state_produce_retry_backoff),
+            state_produce_timeout: self
+                .state_produce_timeout
+                .unwrap_or(defaults.state_produce_timeout),
+            state_topic_min_cleanable_dirty_ratio: self
+                .state_topic_min_cleanable_dirty_ratio
+                .unwrap_or(defaults.state_topic_min_cleanable_dirty_ratio),
+            state_topic_segment_interval: self
+                .state_topic_segment_interval
+                .unwrap_or(defaults.state_topic_segment_interval),
+        };
+        policy.validate().map_err(anyhow::Error::msg)?;
+        Ok(policy)
+    }
 }
 
 struct StateTopicSetup {
     backend: Arc<dyn crabka_rebalancer::state_topic::StateBackend>,
 }
 
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    ConnectionDispatchQueueCapacity::new(value).map(ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value = parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ClientFrameMax::try_from(value).map(ClientFrameMax::size)
+}
+
 async fn start_state_topic(
     args: &Args,
     client: &crabka_client_core::Client,
     shutdown: &CancellationToken,
+    runtime_policy: RebalancerRuntimePolicy,
 ) -> anyhow::Result<StateTopicSetup> {
     let addrs: Vec<String> = args
         .bootstrap_servers
         .split(',')
         .map(|address| address.trim().to_string())
         .collect();
-    let mut admin = crabka_client_admin::AdminClient::connect(&addrs)
-        .await
-        .map_err(|error| anyhow::anyhow!("admin client connect: {error}"))?;
-    crabka_rebalancer::state_topic::topic_admin::ensure_topic(
+    let mut admin = crabka_client_admin::AdminClient::connect_with_options(
+        &addrs,
+        ConnectionOptions {
+            client_id: "crabka-rebalancer".to_owned(),
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::new(
+                args.client_dispatch_queue_capacity,
+            )
+            .expect("validated by clap"),
+            frame_max: ClientFrameMax::try_from(args.client_frame_max).expect("validated by clap"),
+            ..ConnectionOptions::default()
+        },
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("admin client connect: {error}"))?;
+    crabka_rebalancer::state_topic::topic_admin::ensure_topic_with_policy(
         &mut admin,
         &args.state_topic_name,
         args.state_topic_replication,
+        &runtime_policy,
     )
     .await
     .map_err(|error| anyhow::anyhow!("ensure state topic: {error}"))?;
@@ -306,24 +487,27 @@ async fn start_state_topic(
     let client = Arc::new(client.clone());
     let loaded = crabka_rebalancer::state_topic::LoadedState::new();
     let backend: Arc<dyn crabka_rebalancer::state_topic::StateBackend> =
-        Arc::new(crabka_rebalancer::state_topic::StateTopic::new(
+        Arc::new(crabka_rebalancer::state_topic::StateTopic::new_with_policy(
             Arc::clone(&client),
             args.state_topic_name.clone(),
             loaded.clone(),
+            runtime_policy,
         ));
     let state_loader = crabka_rebalancer::state_topic::StateTopicLoader {
         client,
         topic: args.state_topic_name.clone(),
         state: loaded.clone(),
         shutdown: shutdown.clone(),
+        runtime_policy,
     };
     tokio::spawn(state_loader.run());
 
     let warn_state = loaded.clone();
     let timeout_secs = args.state_load_timeout_secs;
+    let load_timeout = arg_secs(timeout_secs);
     let topic = args.state_topic_name.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(timeout_secs)).await;
+        tokio::time::sleep(load_timeout.to_std()).await;
         if should_warn_state_topic_load(warn_state.is_loaded()) {
             warn!(
                 %topic,
@@ -344,14 +528,15 @@ fn spawn_recovery(
     executor_state: ExecutorState,
     client: Arc<dyn crabka_rebalancer::executor::phases::ClientFacade>,
     shutdown: CancellationToken,
-    load_timeout: Duration,
+    load_policy: (Time, Time),
 ) {
     tokio::spawn(async move {
+        let (load_timeout, load_poll_interval) = load_policy;
         let start = std::time::Instant::now();
         while should_continue_recovery_load_wait(state_topic.is_loaded()) {
-            if recovery_load_timed_out(start.elapsed(), load_timeout) {
+            if recovery_load_timed_out(start.elapsed().as_time(), load_timeout) {
                 warn!(
-                    timeout_secs = load_timeout.as_secs(),
+                    timeout_secs = load_timeout.secs_f64(),
                     "state-topic load did not converge within timeout; skipping in-flight recovery"
                 );
                 return;
@@ -359,7 +544,7 @@ fn spawn_recovery(
             if shutdown.is_cancelled() {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
+            tokio::time::sleep(load_poll_interval.to_std()).await;
         }
         let Some(in_flight) = state_topic.loaded() else {
             return;
@@ -399,18 +584,60 @@ fn spawn_recovery(
     });
 }
 
-async fn drain_execution(in_flight_slot: &Mutex<Option<ExecutionHandle>>) {
+async fn drain_execution(in_flight_slot: &Mutex<Option<ExecutionHandle>>, drain_timeout: Time) {
     let Some(handle) = in_flight_slot.lock().await.take() else {
         return;
     };
     info!(proposal_id = %handle.proposal_id, "draining in-flight executor on shutdown");
     handle.cancel.cancel();
-    match tokio::time::timeout(Duration::from_secs(10), handle.task).await {
+    match tokio::time::timeout(drain_timeout.to_std(), handle.task).await {
         Ok(Ok(())) => info!(proposal_id = %handle.proposal_id, "executor drained cleanly"),
         Ok(Err(error)) => warn!(%error, "executor task join error"),
         Err(_) => {
-            warn!(proposal_id = %handle.proposal_id, "executor drain timed out after 10s; aborting");
+            warn!(proposal_id = %handle.proposal_id, timeout_secs = drain_timeout.secs_f64(), "executor drain timed out; aborting");
         }
+    }
+}
+
+async fn finish_shutdown(
+    in_flight_slot: &Mutex<Option<ExecutionHandle>>,
+    ingester_handle: tokio::task::JoinHandle<()>,
+    policy: RebalancerRuntimePolicy,
+) {
+    drain_execution(in_flight_slot, policy.executor_drain_timeout).await;
+    let _ = tokio::time::timeout(policy.ingester_join_timeout.to_std(), ingester_handle).await;
+}
+
+fn scraper_target_source(
+    args: &Args,
+    snapshot: crabka_rebalancer::ingest::SharedSnapshot,
+) -> anyhow::Result<crabka_rebalancer::scraper::TargetSource> {
+    if args.metrics_scrape_targets.trim().is_empty() {
+        info!(
+            metrics_port = args.metrics_port,
+            scrape_interval_secs = args.metrics_scrape_interval_secs,
+            retention_secs = args.metrics_retention_secs,
+            "starting metrics scraper (discovered targets via Metadata)"
+        );
+        Ok(crabka_rebalancer::scraper::TargetSource::Discovered {
+            snapshot,
+            metrics_port: args.metrics_port,
+        })
+    } else {
+        let targets = crabka_rebalancer::scraper::parse_targets(&args.metrics_scrape_targets)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to parse --metrics-scrape-targets `{}`: {error}",
+                    args.metrics_scrape_targets
+                )
+            })?;
+        info!(
+            target_count = targets.len(),
+            scrape_interval_secs = args.metrics_scrape_interval_secs,
+            retention_secs = args.metrics_retention_secs,
+            "starting metrics scraper (static targets)"
+        );
+        Ok(crabka_rebalancer::scraper::TargetSource::Static(targets))
     }
 }
 
@@ -418,26 +645,25 @@ async fn drain_execution(in_flight_slot: &Mutex<Option<ExecutionHandle>>) {
 async fn main() -> anyhow::Result<()> {
     init_tracing();
     let args = Args::parse();
+    let runtime_policy = args.runtime.effective_policy()?;
+    let reassignment_request_timeout =
+        ReassignmentRequestTimeout::new(args.reassignment_request_timeout)
+            .map_err(anyhow::Error::msg)?;
     prepare_data_dir(&args)?;
-
     let client = connect_client(&args).await?;
-
     let snapshot = new_shared_snapshot();
     let shutdown = CancellationToken::new();
-
     let mut registry = new_registry();
     let metrics = RebalancerMetrics::register(&mut registry);
     let detector_metrics = crabka_rebalancer::detector::DetectorMetrics::register(&mut registry);
     let registry = Arc::new(Mutex::new(registry));
-
     let store = Arc::new(ProposalStore::open(
         &args.data_dir,
         args.proposal_ring_buffer_size,
     )?);
-
     let ingester = Ingester::new(
         client.clone(),
-        Duration::from_secs(args.scrape_interval_secs),
+        arg_secs(args.scrape_interval_secs),
         snapshot.clone(),
         shutdown.clone(),
         metrics.clone(),
@@ -446,9 +672,9 @@ async fn main() -> anyhow::Result<()> {
 
     let executor_config = ExecutorConfig {
         data_dir: args.data_dir.clone(),
-        default_throttle_bytes_per_sec: args.default_throttle_bytes_per_sec,
-        poll_interval: Duration::from_secs(args.reassignment_poll_interval_secs),
-        execute_deadline: Duration::from_secs(args.execute_deadline_secs),
+        default_throttle: arg_bytes_per_sec(args.default_throttle_bytes_per_sec),
+        poll_interval: arg_secs(args.reassignment_poll_interval_secs),
+        execute_deadline: arg_secs(args.execute_deadline_secs),
         batch_size: args.reassignment_batch_size,
     };
 
@@ -456,7 +682,7 @@ async fn main() -> anyhow::Result<()> {
 
     let StateTopicSetup {
         backend: state_topic,
-    } = start_state_topic(&args, &client, &shutdown).await?;
+    } = start_state_topic(&args, &client, &shutdown, runtime_policy).await?;
 
     let executor_state = ExecutorState {
         store: store.clone(),
@@ -466,8 +692,9 @@ async fn main() -> anyhow::Result<()> {
         state_topic: state_topic.clone(),
     };
 
-    let live_client: Arc<dyn crabka_rebalancer::executor::phases::ClientFacade> =
-        Arc::new(LiveClient::new(client.clone()));
+    let live_client: Arc<dyn crabka_rebalancer::executor::phases::ClientFacade> = Arc::new(
+        LiveClient::with_reassignment_request_timeout(client.clone(), reassignment_request_timeout),
+    );
 
     spawn_recovery(
         state_topic.clone(),
@@ -476,7 +703,10 @@ async fn main() -> anyhow::Result<()> {
         executor_state.clone(),
         live_client.clone(),
         shutdown.clone(),
-        Duration::from_secs(args.state_load_timeout_secs),
+        (
+            arg_secs(args.state_load_timeout_secs),
+            runtime_policy.recovery_load_poll_interval,
+        ),
     );
 
     // Load broker capacity config (optional).
@@ -508,45 +738,19 @@ async fn main() -> anyhow::Result<()> {
 
     let usage_store = std::sync::Arc::new(crabka_rebalancer::scraper::UsageStore::new(
         crabka_rebalancer::scraper::WindowConfig {
-            scrape_interval: std::time::Duration::from_secs(args.metrics_scrape_interval_secs),
-            retention: std::time::Duration::from_secs(args.metrics_retention_secs),
+            scrape_interval: arg_secs(args.metrics_scrape_interval_secs),
+            retention: arg_secs(args.metrics_retention_secs),
         },
     ));
 
-    let source: crabka_rebalancer::scraper::TargetSource =
-        if args.metrics_scrape_targets.trim().is_empty() {
-            info!(
-                metrics_port = args.metrics_port,
-                scrape_interval_secs = args.metrics_scrape_interval_secs,
-                retention_secs = args.metrics_retention_secs,
-                "starting metrics scraper (discovered targets via Metadata)"
-            );
-            crabka_rebalancer::scraper::TargetSource::Discovered {
-                snapshot: snapshot.clone(),
-                metrics_port: args.metrics_port,
-            }
-        } else {
-            let targets = crabka_rebalancer::scraper::parse_targets(&args.metrics_scrape_targets)
-                .map_err(|e| {
-                anyhow::anyhow!(
-                    "failed to parse --metrics-scrape-targets `{}`: {e}",
-                    args.metrics_scrape_targets
-                )
-            })?;
-            info!(
-                target_count = targets.len(),
-                scrape_interval_secs = args.metrics_scrape_interval_secs,
-                retention_secs = args.metrics_retention_secs,
-                "starting metrics scraper (static targets)"
-            );
-            crabka_rebalancer::scraper::TargetSource::Static(targets)
-        };
+    let source = scraper_target_source(&args, snapshot.clone())?;
 
-    let scraper = crabka_rebalancer::scraper::Scraper::new(
+    let scraper = crabka_rebalancer::scraper::Scraper::new_with_http_timeout(
         source,
-        std::time::Duration::from_secs(args.metrics_scrape_interval_secs),
+        arg_secs(args.metrics_scrape_interval_secs),
         usage_store.clone(),
         shutdown.clone(),
+        runtime_policy.scraper_http_timeout,
     );
     tokio::spawn(scraper.run());
 
@@ -558,27 +762,25 @@ async fn main() -> anyhow::Result<()> {
     )?);
 
     let goal_ctx = GoalContext {
-        imbalance_threshold_pct: args.imbalance_threshold_pct,
+        imbalance_threshold: arg_percent(args.imbalance_threshold_pct),
         max_movements_per_proposal: args.max_movements_per_proposal,
         min_topic_leaders_per_broker: args.min_topic_leaders_per_broker,
         broker_capacities: broker_capacities.clone(),
         broker_usages: usage_store.clone(),
     };
 
-    if detector_enabled(args.detector_tick_interval_secs) {
+    if detector_enabled(arg_secs(args.detector_tick_interval_secs)) {
         let detector_cfg = crabka_rebalancer::detector::DetectorConfig {
-            tick_interval: Duration::from_secs(args.detector_tick_interval_secs),
-            broker_death_threshold: Duration::from_secs(args.detector_broker_death_threshold_secs),
-            under_replicated_threshold: Duration::from_secs(
-                args.detector_under_replicated_threshold_secs,
-            ),
-            disk_pressure_pct: args.detector_disk_pressure_pct,
-            disk_critical_pct: args.detector_disk_critical_pct,
+            tick_interval: arg_secs(args.detector_tick_interval_secs),
+            broker_death_threshold: arg_secs(args.detector_broker_death_threshold_secs),
+            under_replicated_threshold: arg_secs(args.detector_under_replicated_threshold_secs),
+            disk_pressure_threshold: arg_fraction(args.detector_disk_pressure_pct),
+            disk_critical_threshold: arg_fraction(args.detector_disk_critical_pct),
             slow_broker_multiplier: args.detector_slow_broker_multiplier,
             slow_broker_min_cores: args.detector_slow_broker_min_cores,
-            default_mute_window: Duration::from_secs(args.detector_mute_window_secs),
+            default_mute_window: arg_secs(args.detector_mute_window_secs),
             auto_trigger_enabled: args.detector_auto_trigger_enabled,
-            history_capacity: 10,
+            history_capacity: runtime_policy.detector_history_capacity.get(),
         };
         info!(
             tick_secs = args.detector_tick_interval_secs,
@@ -614,6 +816,8 @@ async fn main() -> anyhow::Result<()> {
         client_facade: live_client,
         anomaly_store: anomaly_store.clone(),
         state_topic: state_topic.clone(),
+        cancel_drain_timeout: runtime_policy.cancel_drain_timeout,
+        cancel_drain_poll_interval: runtime_policy.cancel_drain_poll_interval,
     });
 
     let connect_router = crabka_rebalancer::api::router(app_state);
@@ -634,15 +838,178 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
 
-    drain_execution(&in_flight_slot).await;
-
-    let _ = tokio::time::timeout(Duration::from_secs(5), ingester_handle).await;
+    finish_shutdown(&in_flight_slot, ingester_handle, runtime_policy).await;
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    use crabka_units::convert::{ByteRateExt as _, RatioExt as _};
+
     use super::*;
+
+    static ENV_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+
+    #[test]
+    fn client_resource_policy_parses_defaults_and_overrides() {
+        let defaults =
+            Args::try_parse_from(["crabka-rebalancer", "--bootstrap-servers", "127.0.0.1:9092"])
+                .unwrap();
+        assert2::assert!(defaults.client_dispatch_queue_capacity == 64);
+        assert2::assert!(defaults.client_frame_max == crabka_units::mebibytes(100));
+
+        let custom = Args::try_parse_from([
+            "crabka-rebalancer",
+            "--bootstrap-servers",
+            "127.0.0.1:9092",
+            "--client-dispatch-queue-capacity",
+            "7",
+            "--client-frame-max",
+            "32KiB",
+        ])
+        .unwrap();
+        assert2::assert!(custom.client_dispatch_queue_capacity == 7);
+        assert2::assert!(custom.client_frame_max == crabka_units::kibibytes(32));
+
+        for (option, invalid) in [
+            ("--client-dispatch-queue-capacity", "0"),
+            ("--client-frame-max", "101MiB"),
+        ] {
+            assert2::assert!(
+                Args::try_parse_from([
+                    "crabka-rebalancer",
+                    "--bootstrap-servers",
+                    "127.0.0.1:9092",
+                    option,
+                    invalid,
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_policy_parses_overrides_and_rejects_invalid_relations() {
+        let args = Args::try_parse_from([
+            "crabka-rebalancer",
+            "--bootstrap-servers",
+            "127.0.0.1:9092",
+            "--recovery-load-poll-interval",
+            "37ms",
+            "--state-fetch-max",
+            "2MiB",
+            "--state-produce-retry-attempts",
+            "7",
+            "--state-topic-min-cleanable-dirty-ratio",
+            "2%",
+        ])
+        .unwrap();
+        let policy = args.runtime.effective_policy().unwrap();
+        assert2::assert!(policy.recovery_load_poll_interval == millis(37));
+        assert2::assert!(policy.state_fetch_max == crabka_units::mebibytes(2));
+        assert2::assert!(policy.state_produce_retry_attempts.get() == 7);
+        assert2::assert!(policy.state_topic_min_cleanable_dirty_ratio == percent(2));
+
+        let invalid = Args::try_parse_from([
+            "crabka-rebalancer",
+            "--bootstrap-servers",
+            "127.0.0.1:9092",
+            "--cancel-drain-timeout",
+            "1s",
+            "--cancel-drain-poll-interval",
+            "1s",
+        ])
+        .unwrap();
+        assert2::assert!(invalid.runtime.effective_policy().is_err());
+    }
+
+    #[test]
+    fn runtime_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_REBALANCER_RUNTIME_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "tests::runtime_policy_reads_environment_and_prefers_cli",
+                ])
+                .env(CHILD, "1")
+                .env("CRABKA_REBALANCER_RECOVERY_LOAD_POLL_INTERVAL", "37ms")
+                .status()
+                .unwrap();
+            assert2::assert!(status.success());
+            return;
+        }
+
+        let from_env =
+            Args::try_parse_from(["crabka-rebalancer", "--bootstrap-servers", "127.0.0.1:9092"])
+                .unwrap();
+        assert2::assert!(
+            from_env
+                .runtime
+                .effective_policy()
+                .unwrap()
+                .recovery_load_poll_interval
+                == millis(37)
+        );
+        let from_cli = Args::try_parse_from([
+            "crabka-rebalancer",
+            "--bootstrap-servers",
+            "127.0.0.1:9092",
+            "--recovery-load-poll-interval",
+            "41ms",
+        ])
+        .unwrap();
+        assert2::assert!(
+            from_cli
+                .runtime
+                .effective_policy()
+                .unwrap()
+                .recovery_load_poll_interval
+                == millis(41)
+        );
+    }
+
+    #[test]
+    fn client_resource_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_REBALANCER_CLIENT_RESOURCE_POLICY_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::client_resource_policy_reads_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_REBALANCER_CLIENT_DISPATCH_QUEUE_CAPACITY", "7")
+                    .env("CRABKA_REBALANCER_CLIENT_FRAME_MAX", "32KiB")
+                    .status()
+                    .expect("child test");
+            assert2::assert!(status.success());
+            return;
+        }
+
+        let from_env =
+            Args::try_parse_from(["crabka-rebalancer", "--bootstrap-servers", "127.0.0.1:9092"])
+                .unwrap();
+        assert2::assert!(from_env.client_dispatch_queue_capacity == 7);
+        assert2::assert!(from_env.client_frame_max == crabka_units::kibibytes(32));
+
+        let from_cli = Args::try_parse_from([
+            "crabka-rebalancer",
+            "--bootstrap-servers",
+            "127.0.0.1:9092",
+            "--client-dispatch-queue-capacity",
+            "9",
+            "--client-frame-max",
+            "64KiB",
+        ])
+        .unwrap();
+        assert2::assert!(from_cli.client_dispatch_queue_capacity == 9);
+        assert2::assert!(from_cli.client_frame_max == crabka_units::kibibytes(64));
+    }
 
     #[test]
     fn state_topic_load_warning_only_before_loaded() {
@@ -660,18 +1027,151 @@ mod tests {
 
     #[test]
     fn recovery_load_timeout_is_strictly_after_deadline() {
-        let timeout = Duration::from_secs(5);
-        assert2::assert!(!recovery_load_timed_out(Duration::from_secs(5), timeout));
-        assert2::assert!(recovery_load_timed_out(
-            Duration::from_secs(5) + Duration::from_millis(1),
-            timeout
-        ));
+        let timeout = secs(5);
+        assert2::assert!(!recovery_load_timed_out(secs(5), timeout));
+        assert2::assert!(recovery_load_timed_out(secs(5) + millis(1), timeout));
     }
 
     #[test]
     fn detector_is_disabled_only_at_zero_interval() {
-        for (_name, interval, expected) in [("disabled", 0, false), ("enabled", 1, true)] {
+        for (_name, interval, expected) in
+            [("disabled", Time::ZERO, false), ("enabled", secs(1), true)]
+        {
             assert2::assert!(detector_enabled(interval) == expected);
         }
+    }
+
+    #[test]
+    fn arg_secs_reads_the_flag_as_whole_seconds() {
+        for (_name, value, expected) in [
+            ("zero", 0, Time::ZERO),
+            ("scrape default", 10, secs(10)),
+            ("mute window default", 900, secs(900)),
+            ("retention default", 43_200, secs(43_200)),
+        ] {
+            assert2::assert!(arg_secs(value) == expected);
+        }
+    }
+
+    #[test]
+    fn arg_secs_saturates_rather_than_wrapping() {
+        assert2::assert!(arg_secs(u64::MAX) == Time::from_secs(i64::MAX));
+    }
+
+    #[test]
+    fn arg_percent_reads_whole_percentages() {
+        for (_name, value, expected) in [
+            ("zero", 0, Ratio::ZERO),
+            ("imbalance default", 10, fraction(0.1)),
+            ("whole", 100, Ratio::ONE),
+        ] {
+            assert2::assert!(arg_percent(value) == expected);
+        }
+    }
+
+    #[test]
+    fn arg_fraction_reads_unit_interval_values() {
+        for (_name, value, expected) in [
+            ("disk pressure default", 0.85, percent(85)),
+            ("disk critical default", 0.95, percent(95)),
+        ] {
+            assert2::assert!(arg_fraction(value) == expected);
+        }
+    }
+
+    #[test]
+    fn arg_bytes_per_sec_reads_the_throttle_flag() {
+        for (_name, value, expected) in [
+            ("unset", 0, ByteRate::ZERO),
+            (
+                "default throttle",
+                50_000_000,
+                crabka_units::bytes_per_sec(50_000_000),
+            ),
+        ] {
+            assert2::assert!(arg_bytes_per_sec(value) == expected);
+        }
+    }
+
+    #[test]
+    fn reassignment_request_timeout_defaults_and_accepts_cli() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .expect("environment lock");
+        temp_env::with_var(
+            "CRABKA_REBALANCER_REASSIGNMENT_REQUEST_TIMEOUT",
+            None::<&str>,
+            || {
+                let defaults = Args::try_parse_from([
+                    "crabka-rebalancer",
+                    "--bootstrap-servers",
+                    "127.0.0.1:9092",
+                ])
+                .unwrap();
+                assert2::assert!(defaults.reassignment_request_timeout == secs(60));
+            },
+        );
+
+        let custom = Args::try_parse_from([
+            "crabka-rebalancer",
+            "--bootstrap-servers",
+            "127.0.0.1:9092",
+            "--reassignment-request-timeout",
+            "37ms",
+        ])
+        .unwrap();
+        assert2::assert!(custom.reassignment_request_timeout == millis(37));
+    }
+
+    #[test]
+    fn reassignment_request_timeout_rejects_invalid_protocol_values() {
+        assert2::assert!(
+            Args::try_parse_from([
+                "crabka-rebalancer",
+                "--bootstrap-servers",
+                "127.0.0.1:9092",
+                "--reassignment-request-timeout",
+                "0s",
+            ])
+            .is_err()
+        );
+        for value in ["0.5ms", "2147483648ms"] {
+            let args = Args::try_parse_from([
+                "crabka-rebalancer",
+                "--bootstrap-servers",
+                "127.0.0.1:9092",
+                "--reassignment-request-timeout",
+                value,
+            ])
+            .unwrap();
+            assert2::assert!(
+                crabka_rebalancer::executor::client_impl::ReassignmentRequestTimeout::new(
+                    args.reassignment_request_timeout
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn reassignment_request_timeout_reads_environment() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| StdMutex::new(()))
+            .lock()
+            .expect("environment lock");
+        temp_env::with_var(
+            "CRABKA_REBALANCER_REASSIGNMENT_REQUEST_TIMEOUT",
+            Some("41ms"),
+            || {
+                let args = Args::try_parse_from([
+                    "crabka-rebalancer",
+                    "--bootstrap-servers",
+                    "127.0.0.1:9092",
+                ])
+                .unwrap();
+                assert2::assert!(args.reassignment_request_timeout == millis(41));
+            },
+        );
     }
 }

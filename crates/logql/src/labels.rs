@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use crabka_units::convert::ByteSizeExt as _;
 use num_traits::ToPrimitive;
 use regex::Regex;
 
@@ -188,7 +189,7 @@ impl UnwrapExpression {
         match self.conversion {
             UnwrapConversion::Raw => parse_raw_sample_literal(value),
             UnwrapConversion::Bytes => {
-                let bytes = parse_bytes_literal(value)?;
+                let bytes = parse_bytes_literal(value)?.bytes_f64();
                 if bytes.fract() == 0.0 {
                     Some(bytes.to_u64()?.to_string())
                 } else {

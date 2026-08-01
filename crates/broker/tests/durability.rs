@@ -372,7 +372,7 @@ async fn read_committed_under_rf1_unchanged() {
     let mut seen: Vec<String> = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(10);
     while seen.len() < 3 && Instant::now() < deadline {
-        for r in consumer.poll(Duration::from_millis(200)).await.unwrap() {
+        for r in consumer.poll(crabka_units::millis(200)).await.unwrap() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
@@ -395,7 +395,7 @@ async fn acks_all_completes_via_isr_shrink_when_follower_dead() {
     cluster[0].0.wait_until_isr_len("shrink", 0, 3).await;
 
     // Kill broker 3 — its absence forces ISR to shrink within
-    // replica_lag_time_max_ms (2s on CI), unblocking the acks=-1 produce.
+    // replica_lag_time_max (2s on CI), unblocking the acks=-1 produce.
     let dead = cluster.pop().expect("3rd broker");
     dead.0.shutdown().await;
 

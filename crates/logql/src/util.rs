@@ -1,5 +1,7 @@
 use std::fmt;
 
+use crabka_units::{ByteSize, convert::ByteSizeExt};
+
 pub(crate) fn is_ident_start(ch: char) -> bool {
     ch == '_' || ch == ':' || ch == '.' || ch.is_ascii_alphabetic()
 }
@@ -101,7 +103,7 @@ pub(crate) fn format_decimal_ratio(numerator: u128, denominator: u128) -> String
     format!("{whole}.{decimals}")
 }
 
-pub(crate) fn parse_bytes_literal(value: &str) -> Option<f64> {
+pub(crate) fn parse_bytes_literal(value: &str) -> Option<ByteSize> {
     let unit_start = value
         .find(|ch: char| ch.is_ascii_alphabetic())
         .unwrap_or(value.len());
@@ -110,9 +112,14 @@ pub(crate) fn parse_bytes_literal(value: &str) -> Option<f64> {
         return None;
     }
     let multiplier = bytes_unit_multiplier(&value[unit_start..])?;
-    Some(amount * multiplier)
+    Some(ByteSize::from_bytes_f64(amount * multiplier))
 }
 
+/// The size units the `LogQL` grammar itself admits, which is why the table is
+/// here rather than deferred to `crabka_units::parse::byte_size`: Loki matches
+/// them case-sensitively, accepting `KiB`, `kB`, `KB`, and `MB` while rejecting
+/// `kib` and `mb`, and the shared parser is case-insensitive. Reusing it would
+/// widen the query language this crate is a compatible front-end for.
 fn bytes_unit_multiplier(unit: &str) -> Option<f64> {
     match unit {
         "" | "B" => Some(1.0),
@@ -136,6 +143,8 @@ impl fmt::Display for QuotedChar {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::{ByteSize, convert::ByteSizeExt};
+
     use super::{
         QuotedChar, duration_unit, format_decimal_ratio, is_ident_start, parse_bytes_literal,
         parse_prometheus_duration_literal,
@@ -201,13 +210,22 @@ mod tests {
 
     #[test]
     fn bytes_literals_cover_decimal_binary_and_invalid_amounts() {
-        assert_eq!(parse_bytes_literal("0B"), Some(0.0));
-        assert_eq!(parse_bytes_literal("-1B"), None);
-        assert_eq!(parse_bytes_literal("2GB"), Some(2_000_000_000.0));
-        assert_eq!(parse_bytes_literal("3TB"), Some(3_000_000_000_000.0));
-        assert_eq!(parse_bytes_literal("4KiB"), Some(4_096.0));
-        assert_eq!(parse_bytes_literal("5GiB"), Some(5_368_709_120.0));
-        assert_eq!(parse_bytes_literal("6TiB"), Some(6_597_069_766_656.0));
+        use assert2::{assert, check};
+
+        for (literal, expected) in [
+            ("0B", 0.0),
+            ("2GB", 2_000_000_000.0),
+            ("3TB", 3_000_000_000_000.0),
+            ("4KiB", 4_096.0),
+            ("5GiB", 5_368_709_120.0),
+            ("6TiB", 6_597_069_766_656.0),
+        ] {
+            check!(
+                parse_bytes_literal(literal) == Some(ByteSize::from_bytes_f64(expected)),
+                "{literal}"
+            );
+        }
+        assert!(parse_bytes_literal("-1B").is_none());
     }
 
     #[test]

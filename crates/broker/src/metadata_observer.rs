@@ -6,11 +6,15 @@
 //! each record batch through the `crabka_metadata` Kafka-record bridge, and
 //! applying records exactly as the controller state machine would.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crabka_metadata::{MetadataImage, from_kraft_value};
 use crabka_protocol::records::RecordBatch;
 use crabka_raft::{NodeId, OutboundDialer};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use qubit_clock::sleep::AsyncSleeper;
 use tokio::{sync::watch, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -19,6 +23,10 @@ use tracing::{debug, warn};
 /// Static configuration for the observer.
 #[derive(Clone)]
 pub struct ObserverConfig {
+    /// Capacity used by outbound observer connections.
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    /// Maximum frame size used by outbound observer connections.
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     /// Controller-listener voter map `(id, "<host>:<port>")` from
     /// `controller_quorum_voters`. The host is carried verbatim; the dialer
     /// re-resolves it per connect so a rejoining peer's new pod IP is reached.
@@ -30,9 +38,9 @@ pub struct ObserverConfig {
     /// Cluster UUID for the initial empty image.
     pub cluster_id: uuid::Uuid,
     /// Soft cap per fetch.
-    pub max_bytes: u32,
+    pub max_bytes: ByteSize,
     /// Idle poll interval once caught up to the high watermark.
-    pub poll_interval: Duration,
+    pub poll_interval: Time,
     /// Relative sleeper driving the idle poll cadence. Production uses
     /// [`qubit_clock::sleep::SystemSleeper`] (real time); tests inject a
     /// [`qubit_clock::sleep::MockSleeper`] so the poll interval fires on a
@@ -111,13 +119,15 @@ async fn fetch_once(
 ) -> Option<u64> {
     let req = crabka_raft::CrabkaMetadataFetchRequest {
         fetch_offset: i64::try_from(fetch_offset).unwrap_or(i64::MAX),
-        max_bytes: i32::try_from(config.max_bytes).unwrap_or(i32::MAX),
+        max_bytes: config.max_bytes.bytes_i32(),
     };
     let mut body = Vec::with_capacity(12);
     req.encode_v0(&mut body);
 
     let opts = crabka_client_core::ConnectionOptions {
         client_id: config.client_id.clone(),
+        dispatch_queue_capacity: config.client_dispatch_queue_capacity,
+        frame_max: config.client_frame_max,
         ..crabka_client_core::ConnectionOptions::default()
     };
     let conn = match config.dialer.dial(target, addr, opts).await {
@@ -230,7 +240,10 @@ async fn run_loop(
             return;
         }
         if config.voters.is_empty() {
-            config.sleeper.sleep_for_async(config.poll_interval).await;
+            config
+                .sleeper
+                .sleep_for_async(config.poll_interval.to_std())
+                .await;
             continue;
         }
         let (target, addr) = voter_at(&config.voters, target_idx).clone();
@@ -243,7 +256,7 @@ async fn run_loop(
             if new_offset == fetch_offset {
                 tokio::select! {
                     () = shutdown.cancelled() => return,
-                    () = config.sleeper.sleep_for_async(config.poll_interval) => {}
+                    () = config.sleeper.sleep_for_async(config.poll_interval.to_std()) => {}
                 }
             } else {
                 fetch_offset = new_offset;
@@ -252,7 +265,7 @@ async fn run_loop(
             target_idx = target_idx.wrapping_add(1);
             tokio::select! {
                 () = shutdown.cancelled() => return,
-                () = config.sleeper.sleep_for_async(config.poll_interval) => {}
+                () = config.sleeper.sleep_for_async(config.poll_interval.to_std()) => {}
             }
         }
     }
@@ -260,7 +273,10 @@ async fn run_loop(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::{
+        sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     use assert2::assert;
     use bytes::{Bytes, BytesMut};
@@ -274,6 +290,7 @@ mod tests {
         records::{Record, RecordBatch, header::Attributes},
     };
     use crabka_raft::{BootstrapMode, Controller, ControllerConfig};
+    use crabka_units::{mebibytes, millis, minutes};
     use qubit_clock::{
         MockWaiterKind,
         sleep::{MockSleeper, SystemSleeper},
@@ -412,7 +429,7 @@ mod tests {
     }
 
     /// Per-fetch soft byte cap used by every observer fixture (1 MiB).
-    const TEST_MAX_FETCH_BYTES: u32 = 1_048_576;
+    const TEST_MAX_FETCH_BYTES: ByteSize = mebibytes(1);
 
     #[test]
     fn voter_at_wraps_round_robin_by_modulo() {
@@ -462,12 +479,15 @@ mod tests {
     #[tokio::test]
     async fn cancel_drains_background_task() {
         let observer = MetadataObserver::start(ObserverConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             voters: vec![],
             dialer: Arc::new(crabka_raft::PlaintextDialer),
             client_id: "cancel-test".into(),
             cluster_id: Uuid::nil(),
             max_bytes: TEST_MAX_FETCH_BYTES,
-            poll_interval: Duration::from_mins(1),
+            poll_interval: minutes(1),
             sleeper: Arc::new(SystemSleeper::new()),
         });
 
@@ -496,6 +516,9 @@ mod tests {
         let sleeper = MockSleeper::new();
         let timeline = sleeper.timeline();
         let observer = MetadataObserver::start(ObserverConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             voters: vec![(crabka_raft::NodeId(1), mock.addr.to_string())],
             dialer: Arc::new(CountingDialer {
                 dial_count: dial_count.clone(),
@@ -503,7 +526,7 @@ mod tests {
             client_id: "sleep-test".into(),
             cluster_id: Uuid::nil(),
             max_bytes: TEST_MAX_FETCH_BYTES,
-            poll_interval: Duration::from_millis(250),
+            poll_interval: millis(250),
             sleeper: Arc::new(sleeper),
         });
 
@@ -569,6 +592,9 @@ mod tests {
         let client_ids = Arc::new(std::sync::Mutex::new(Vec::new()));
 
         let observer = MetadataObserver::start(ObserverConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             voters: vec![(crabka_raft::NodeId(1), ctrl_addr.to_string())],
             dialer: Arc::new(RecordingDialer {
                 client_ids: client_ids.clone(),
@@ -576,7 +602,7 @@ mod tests {
             client_id: "test-observer".into(),
             cluster_id: Uuid::nil(),
             max_bytes: TEST_MAX_FETCH_BYTES,
-            poll_interval: Duration::from_millis(50),
+            poll_interval: millis(50),
             sleeper: Arc::new(SystemSleeper::new()),
         });
 

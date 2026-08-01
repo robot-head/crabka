@@ -17,6 +17,7 @@ categories = ["database-implementations"]
 workspace = true
 
 [dependencies]
+crabka-units = { workspace = true }
 thiserror = { workspace = true }
 crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }
 crabka-pgkv = { version = "0.3.9", path = "../pgkv" }

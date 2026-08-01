@@ -45,7 +45,10 @@ use crabka_protocol::owned::{
         AlterUserScramCredentialsResponse, AlterUserScramCredentialsResult,
     },
 };
-use crabka_security::SaslMechanism;
+use crabka_security::{
+    SaslMechanism,
+    scram::{MAX_SCRAM_ITERATIONS, MIN_SCRAM_ITERATIONS},
+};
 
 use crate::{
     authorizer::{AuthorizationRequest, AuthorizationResult},
@@ -53,11 +56,6 @@ use crate::{
     codes,
 };
 
-/// Lowest PBKDF2 iteration count accepted for a SCRAM credential (KIP-554);
-/// upsertions below this get `UNACCEPTABLE_CREDENTIAL`.
-const MIN_ITERATIONS: i32 = 4096;
-/// Highest PBKDF2 iteration count accepted by Kafka's SCRAM controller path.
-const MAX_ITERATIONS: i32 = 16_384;
 const DUPLICATE_ALTERATION_MESSAGE: &str =
     "A user credential cannot be altered twice in the same request";
 const EMPTY_USERNAME_MESSAGE: &str = "Username must not be empty";
@@ -406,13 +404,13 @@ fn validate_upsertion(
             message: "unknown mechanism",
         });
     };
-    if upsertion.iterations < MIN_ITERATIONS {
+    if upsertion.iterations < MIN_SCRAM_ITERATIONS {
         return Err(AlterationError {
             code: codes::UNACCEPTABLE_CREDENTIAL,
             message: "iterations < 4096",
         });
     }
-    if upsertion.iterations > MAX_ITERATIONS {
+    if upsertion.iterations > MAX_SCRAM_ITERATIONS {
         return Err(AlterationError {
             code: codes::UNACCEPTABLE_CREDENTIAL,
             message: "iterations > 16384",
@@ -514,7 +512,7 @@ mod tests {
         ScramCredentialUpsertion {
             name: name.into(),
             mechanism: wire_mechanism,
-            iterations: MIN_ITERATIONS,
+            iterations: MIN_SCRAM_ITERATIONS,
             salt: Bytes::from_static(b"salt"),
             salted_password: Bytes::from(vec![7; crabka_security::scram_hash_len(mechanism)]),
             ..Default::default()
@@ -719,7 +717,7 @@ mod tests {
         let rejections = [(
             {
                 let mut u = valid_upsertion("too-few");
-                u.iterations = MIN_ITERATIONS - 1;
+                u.iterations = MIN_SCRAM_ITERATIONS - 1;
                 u
             },
             "iterations < 4096",
@@ -746,7 +744,7 @@ mod tests {
             salt: b"salt".to_vec(),
             stored_key,
             server_key,
-            iterations: u32::try_from(MIN_ITERATIONS).expect("min fits"),
+            iterations: u32::try_from(MIN_SCRAM_ITERATIONS).expect("min fits"),
         })];
         assert!(records == expected_records);
     }
@@ -926,7 +924,7 @@ mod tests {
                     salt: b"salt".to_vec(),
                     stored_key: vec![1; 64],
                     server_key: vec![2; 64],
-                    iterations: u32::try_from(MIN_ITERATIONS).expect("min fits"),
+                    iterations: u32::try_from(MIN_SCRAM_ITERATIONS).expect("min fits"),
                 },
             )])
             .await
@@ -1050,7 +1048,7 @@ mod tests {
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
         let mut invalid_upsertion = valid_upsertion("bob");
-        invalid_upsertion.iterations = MIN_ITERATIONS - 1;
+        invalid_upsertion.iterations = MIN_SCRAM_ITERATIONS - 1;
         let req = AlterUserScramCredentialsRequest {
             deletions: vec![ScramCredentialDeletion {
                 name: "alice".into(),
@@ -1298,7 +1296,7 @@ mod tests {
         let peer: SocketAddr = "127.0.0.1:9092".parse().unwrap();
         let ctx = test_context(&principal, &peer);
         let mut invalid_upsertion = valid_upsertion("bob");
-        invalid_upsertion.iterations = MIN_ITERATIONS - 1;
+        invalid_upsertion.iterations = MIN_SCRAM_ITERATIONS - 1;
         let req = AlterUserScramCredentialsRequest {
             deletions: vec![ScramCredentialDeletion {
                 name: "alice".into(),

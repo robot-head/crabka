@@ -19,6 +19,7 @@ use std::{
 };
 
 use crabka_security::{Jwks, JwksHandle};
+use crabka_units::{Time, convert::TimeExt};
 use qubit_clock::sleep::AsyncSleeper;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -33,8 +34,9 @@ pub(crate) enum FetchError {
     Parse,
 }
 
-/// Fetch and parse a JWKS document from `endpoint` (HTTP or HTTPS). A 10s
-/// timeout caps a hung identity provider; non-2xx responses are errors.
+/// Fetch and parse a JWKS document from `endpoint` (HTTP or HTTPS). The
+/// client's configured timeout caps a hung identity provider; non-2xx
+/// responses are errors.
 /// `ignore_key_use` threads through to the JWKS parser — when
 /// false, `use=enc` keys are filtered out.
 pub(crate) async fn fetch_jwks(
@@ -68,7 +70,9 @@ pub(crate) struct JwksRefresher {
     /// Shared key cell read by the validator; this task `store`s into it.
     pub handle: JwksHandle,
     /// Re-fetch cadence (periodic).
-    pub interval: Duration,
+    pub interval: Time,
+    /// Timeout for each JWKS HTTP request.
+    pub http_timeout: Time,
     /// Cancels the task on broker shutdown.
     pub shutdown: CancellationToken,
     /// Optional PEM path; when
@@ -86,7 +90,7 @@ pub(crate) struct JwksRefresher {
     pub signal_rx: mpsc::Receiver<()>,
     /// Minimum pause between on-demand refreshes. Strimzi
     /// default 1 second. Periodic refresh (`interval`) is unaffected.
-    pub min_on_demand_pause: Duration,
+    pub min_on_demand_pause: Time,
     /// Shared timestamp counter. Refresher updates after each
     /// successful fetch; validators read for cache-expiry check. Shared
     /// (`Arc<AtomicI64>`) with the paired `JwksHandle`.
@@ -116,7 +120,7 @@ impl JwksRefresher {
     /// `last_on_demand_refresh_ms` against `min_on_demand_pause` and drops
     /// the signal silently when within the window.
     pub(crate) async fn run(mut self) {
-        let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
+        let mut builder = reqwest::Client::builder().timeout(self.http_timeout.to_std());
         if let Some(path) = &self.tls_trust {
             match crabka_security::build_client_config_from_pem(path) {
                 Ok(cfg) => {
@@ -160,7 +164,7 @@ impl JwksRefresher {
             tokio::select! {
                 () = &mut tick => {
                     self.refresh_and_swap(&client).await;
-                    tick = sleeper.sleep_for_async(self.interval);
+                    tick = sleeper.sleep_for_async(self.interval.to_std());
                 }
                 // On-demand refresh triggered by validator
                 // signal. Subject to `min_on_demand_pause` rate-limit.
@@ -169,8 +173,7 @@ impl JwksRefresher {
                     let now_ms = current_epoch_ms();
                     let last = self.last_on_demand_refresh_ms.load(Ordering::Relaxed);
                     let elapsed_ms = now_ms.saturating_sub(last);
-                    let pause_ms = i64::try_from(self.min_on_demand_pause.as_millis())
-                        .unwrap_or(i64::MAX);
+                    let pause_ms = self.min_on_demand_pause.millis_i64();
                     if elapsed_ms >= pause_ms {
                         self.last_on_demand_refresh_ms.store(now_ms, Ordering::Relaxed);
                         tracing::debug!(
@@ -233,6 +236,7 @@ mod tests {
     use std::net::SocketAddr;
 
     use assert2::{assert, check};
+    use crabka_units::{hours, millis, minutes, secs};
     use qubit_clock::{
         MockWaiterKind,
         sleep::{AsyncSleepFuture, MockSleeper, SystemSleeper},
@@ -289,7 +293,7 @@ mod tests {
     fn test_refresher(
         endpoint: String,
         handle: JwksHandle,
-        interval: Duration,
+        interval: Time,
         shutdown: CancellationToken,
         tls_trust: Option<PathBuf>,
         sleeper: Arc<dyn AsyncSleeper>,
@@ -299,10 +303,11 @@ mod tests {
             endpoint,
             handle,
             interval,
+            http_timeout: millis(37),
             shutdown,
             tls_trust,
             signal_rx: rx,
-            min_on_demand_pause: Duration::from_secs(1),
+            min_on_demand_pause: secs(1),
             last_successful_fetch_ms: Arc::new(AtomicI64::new(0)),
             last_on_demand_refresh_ms: Arc::new(AtomicI64::new(0)),
             ignore_key_use: false,
@@ -341,7 +346,7 @@ mod tests {
         let refresher = test_refresher(
             format!("http://{addr}/jwks"),
             handle.clone(),
-            Duration::from_millis(50),
+            millis(50),
             shutdown.clone(),
             None,
             Arc::new(SystemSleeper::new()),
@@ -447,7 +452,7 @@ mod tests {
         let refresher = test_refresher(
             format!("https://127.0.0.1:{}/jwks", addr.port()),
             handle.clone(),
-            Duration::from_millis(50),
+            millis(50),
             shutdown.clone(),
             Some(ca_path),
             Arc::new(SystemSleeper::new()),
@@ -483,7 +488,7 @@ mod tests {
 
         let handle = JwksHandle::default();
         let shutdown = CancellationToken::new();
-        let interval = Duration::from_millis(50);
+        let interval = millis(50);
         let sleeper = MockSleeper::new();
         let timeline = sleeper.timeline();
         let refresher = test_refresher(
@@ -517,7 +522,7 @@ mod tests {
                 handle.load().is_empty(),
                 "fetch should fail verification and leave handle empty",
             );
-            timeline.advance(interval);
+            timeline.advance(interval.to_std());
         }
 
         shutdown.cancel();
@@ -574,7 +579,7 @@ mod tests {
         JwksHandle,
     );
 
-    fn make_signal_refresher(endpoint: String, min_on_demand_pause: Duration) -> SignalRefresher {
+    fn make_signal_refresher(endpoint: String, min_on_demand_pause: Time) -> SignalRefresher {
         let (signal_tx, signal_rx) = mpsc::channel::<()>(1);
         let shutdown = CancellationToken::new();
         let last_successful = Arc::new(AtomicI64::new(0));
@@ -587,7 +592,8 @@ mod tests {
         let refresher = JwksRefresher {
             endpoint,
             handle: handle.clone(),
-            interval: Duration::from_hours(1),
+            interval: hours(1),
+            http_timeout: millis(37),
             shutdown: shutdown.clone(),
             tls_trust: None,
             signal_rx,
@@ -614,7 +620,7 @@ mod tests {
         let (addr, srv_shutdown, count) = serve_jwks_counting(JWKS_BODY).await;
         let endpoint = format!("http://{addr}/jwks");
         let (refresher, signal_tx, _last_successful, last_on_demand, shutdown, handle) =
-            make_signal_refresher(endpoint, Duration::from_millis(0));
+            make_signal_refresher(endpoint, <Time as TimeExt>::ZERO);
         let task = tokio::spawn(refresher.run());
 
         // Drive at least one signal refresh.
@@ -650,7 +656,7 @@ mod tests {
         let endpoint = format!("http://{addr}/jwks");
         // 60s pause — second signal MUST be rate-limited.
         let (refresher, signal_tx, _last_successful, last_on_demand, shutdown, _handle) =
-            make_signal_refresher(endpoint, Duration::from_mins(1));
+            make_signal_refresher(endpoint, minutes(1));
         let task = tokio::spawn(refresher.run());
 
         // First signal: fires. Wait on the HTTP counter (the strict
@@ -695,7 +701,7 @@ mod tests {
         let (addr, srv_shutdown, _count) = serve_jwks_counting(JWKS_BODY).await;
         let endpoint = format!("http://{addr}/jwks");
         let (refresher, signal_tx, last_successful, _last_on_demand, shutdown, _handle) =
-            make_signal_refresher(endpoint, Duration::from_millis(0));
+            make_signal_refresher(endpoint, <Time as TimeExt>::ZERO);
         let task = tokio::spawn(refresher.run());
 
         assert!(last_successful.load(Ordering::Relaxed) == 0);
@@ -738,7 +744,7 @@ mod tests {
 
         let endpoint = format!("http://{addr}/jwks");
         let (refresher, signal_tx, last_successful, last_on_demand, shutdown, _handle) =
-            make_signal_refresher(endpoint, Duration::from_millis(0));
+            make_signal_refresher(endpoint, <Time as TimeExt>::ZERO);
         let task = tokio::spawn(refresher.run());
 
         signal_tx.send(()).await.unwrap();
@@ -775,7 +781,7 @@ mod tests {
         let (addr, srv_shutdown, _count) = serve_jwks_counting(ENC_KEY_BODY).await;
         let endpoint = format!("http://{addr}/jwks");
         let (mut refresher, signal_tx, _last_successful, _last_on_demand, shutdown, handle) =
-            make_signal_refresher(endpoint, Duration::from_millis(0));
+            make_signal_refresher(endpoint, <Time as TimeExt>::ZERO);
         refresher.ignore_key_use = true;
         let task = tokio::spawn(refresher.run());
 

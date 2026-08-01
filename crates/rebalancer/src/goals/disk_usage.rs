@@ -2,9 +2,11 @@
 //! = sum over partitions a broker hosts of
 //! `UsageStore::disk_bytes_avg(broker, topic, partition, FiveMin)`.
 //! Greedy hot->cold swap, threshold-driven via
-//! `GoalContext.imbalance_threshold_pct`.
+//! `GoalContext.imbalance_threshold`.
 
 use std::collections::HashMap;
+
+use crabka_units::{Ratio, convert::ByteSizeExt};
 
 use crate::{
     goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
@@ -27,11 +29,12 @@ impl DiskUsage {
         crate::goals::replica_totals(partitions, broker_ids, |broker, topic, partition| {
             ctx.broker_usages
                 .disk_bytes_avg(broker, topic, partition, Window::FiveMin, now_ms)
+                .map(ByteSizeExt::bytes_f64)
         })
     }
 
-    fn imbalance_pct(totals: &HashMap<i32, f64>) -> u32 {
-        crate::goals::imbalance_pct_f64(totals)
+    fn imbalance(totals: &HashMap<i32, f64>) -> Ratio {
+        crate::goals::imbalance_ratio_f64(totals)
     }
 }
 
@@ -56,7 +59,7 @@ impl Goal for DiskUsage {
                 // No usage data anywhere -> no-op.
                 break;
             }
-            if Self::imbalance_pct(&totals) <= ctx.imbalance_threshold_pct {
+            if Self::imbalance(&totals) <= ctx.imbalance_threshold {
                 break;
             }
             let mut by_load: Vec<(i32, f64)> = totals.into_iter().collect();
@@ -88,7 +91,9 @@ impl Goal for DiskUsage {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
+
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -98,7 +103,7 @@ mod tests {
 
     fn ctx_with(store: Arc<UsageStore>) -> GoalContext {
         GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(crate::capacity::BrokerCapacities::default()),
@@ -137,8 +142,8 @@ mod tests {
 
     fn store_with_disk_samples(samples: Vec<(i32, &str, i32, f64)>) -> Arc<UsageStore> {
         let store = UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_hours(1),
+            scrape_interval: secs(30),
+            retention: hours(1),
         });
         // Insert at "now" so the stale-data guard in UsageStore (which
         // compares against the goal's wall-clock `now_ms()`) sees the
@@ -199,9 +204,9 @@ mod tests {
     }
 
     #[test]
-    fn imbalance_pct_uses_difference_times_100_over_total() {
+    fn imbalance_is_spread_over_total() {
         let totals = std::collections::HashMap::from([(1, 300.0), (2, 100.0)]);
-        assert2::assert!(DiskUsage::imbalance_pct(&totals) == 50);
+        assert2::assert!(DiskUsage::imbalance(&totals) == percent(50));
     }
 
     #[test]

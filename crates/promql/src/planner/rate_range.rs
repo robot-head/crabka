@@ -31,6 +31,7 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use crabka_blockstore::{Labels, SeriesFingerprint};
+use crabka_units::prelude::*;
 use datafusion::{
     catalog::MemTable,
     execution::FunctionRegistry,
@@ -118,10 +119,10 @@ pub struct RateRangePlan {
 }
 
 /// Build the leaf table and operator chain that evaluates `f(selector[range])`
-/// at a single eval instant `eval_time_ms` with range width `range_ms`.
+/// at a single eval instant `eval_time_ms` with the given `range` width.
 ///
 /// `samples` are the float samples of the matched series over the exact range
-/// window `(eval_time_ms - range_ms, eval_time_ms]`. Stale-NaN markers must be
+/// window `(eval_time_ms - range, eval_time_ms]`. Stale-NaN markers must be
 /// filtered out by the caller (matching the interpreter's `eval_matrix_selector`
 /// staleness handling) before the values reach the operator chain; genuine NaN
 /// values are carried through unchanged, as the interpreter does.
@@ -133,7 +134,7 @@ pub struct RateRangePlan {
 pub async fn plan_rate_range_selector(
     samples: Vec<LabeledSample>,
     eval_time_ms: i64,
-    range_ms: i64,
+    range: Time,
     kind: RateUdfKind,
 ) -> Result<RateRangePlan> {
     // Collect the distinct label names across all matched series; these become
@@ -192,6 +193,7 @@ pub async fn plan_rate_range_selector(
     // RangeManipulate folds the samples into the single eval step's window
     // (t - range, t]. A single grid step: start == end == eval_time_ms, and any
     // positive interval covers exactly one point.
+    let range_ms = range.millis_i64();
     let range = RangeManipulate::new(
         eval_time_ms,
         eval_time_ms,
@@ -307,7 +309,7 @@ mod tests {
             labeled("a", 180_000, 3.0),
             labeled("a", 240_000, 4.0),
         ];
-        let plan = plan_rate_range_selector(samples, 300_000, 300_000, RateUdfKind::Rate)
+        let plan = plan_rate_range_selector(samples, 300_000, millis(300_000), RateUdfKind::Rate)
             .await
             .unwrap();
         let batches = plan
@@ -350,9 +352,10 @@ mod tests {
             labeled("a", 60_000, 2.0),
             labeled("a", 120_000, 1.0),
         ];
-        let plan = plan_rate_range_selector(samples, 120_000, 120_000, RateUdfKind::Increase)
-            .await
-            .unwrap();
+        let plan =
+            plan_rate_range_selector(samples, 120_000, millis(120_000), RateUdfKind::Increase)
+                .await
+                .unwrap();
         let batches = plan
             .ctx
             .execute_logical_plan(plan.plan)
@@ -377,7 +380,7 @@ mod tests {
         use arrow::array::Array;
 
         let samples = vec![labeled("a", 60_000, 1.0)];
-        let plan = plan_rate_range_selector(samples, 60_000, 60_000, RateUdfKind::Rate)
+        let plan = plan_rate_range_selector(samples, 60_000, millis(60_000), RateUdfKind::Rate)
             .await
             .unwrap();
         let batches = plan

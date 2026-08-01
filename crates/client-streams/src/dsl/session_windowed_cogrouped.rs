@@ -98,8 +98,8 @@ where
         let ks = key_serde.clone();
         let vs = value_serde.clone();
         let store_for_reg = store_name.clone();
-        let gap = self.windows.gap_ms;
-        let grace = self.windows.grace_ms;
+        let gap = self.windows.gap;
+        let grace = self.windows.grace;
         let registrar: StoreRegistrarFn = Box::new(move |state, procs| {
             state.topology.add_session_store::<K, VOut, KS, VS>(
                 store_for_reg.clone(),
@@ -127,13 +127,14 @@ where
             SessionWindowedSerde::new(key_serde),
             value_serde,
         )
-        .with_window_grace(Some(self.windows.grace_ms))
+        .with_window_grace(Some(self.windows.grace))
     }
 }
 
 #[cfg(test)]
 mod caching_tests {
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use crate::{
         I64Serde, Materialized, Produced, SessionWindows, StringSerde,
@@ -150,7 +151,7 @@ mod caching_tests {
             acc + i64::try_from(v.len()).unwrap_or(i64::MAX)
         })
         .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-        .windowed_by_session(SessionWindows::of_inactivity_gap(100))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(millis(100)))
         .aggregate_explicit(
             || 0i64,
             |_k: &String, a: i64, b: i64| a + b,
@@ -162,8 +163,8 @@ mod caching_tests {
             Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
         );
         let built = b.build("app").unwrap();
-        let g =
-            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        let g = pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", kibibytes(1)))
+            .unwrap();
         check!(g.cache_owner.contains_key("cg"));
     }
 
@@ -176,7 +177,7 @@ mod caching_tests {
             acc + i64::try_from(v.len()).unwrap_or(i64::MAX)
         })
         .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-        .windowed_by_session(SessionWindows::of_inactivity_gap(100))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(millis(100)))
         .aggregate_explicit(
             || 0i64,
             |_k: &String, a: i64, b: i64| a + b,
@@ -190,8 +191,8 @@ mod caching_tests {
             Produced::with(SessionWindowedSerde::new(StringSerde), I64Serde),
         );
         let built = b.build("app").unwrap();
-        let g =
-            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        let g = pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", kibibytes(1)))
+            .unwrap();
         check!(!g.cache_owner.contains_key("cg"));
     }
 }

@@ -1,8 +1,32 @@
 //! Tunables for `Log`. Defaults match Apache Kafka 4.2.
 
-use std::time::Duration;
-
 use crabka_compression::CompressionType;
+use crabka_units::prelude::{ByteSize, Time, days, gibibytes, hours, kibibytes, mebibytes};
+
+/// Kafka's `segment.bytes` default: roll the active segment at 1 GiB.
+const DEFAULT_SEGMENT_SIZE: ByteSize = gibibytes(1);
+
+/// Kafka's `segment.ms` default: roll the active segment once its first
+/// record is a week old.
+const DEFAULT_SEGMENT_ROLL_INTERVAL: Time = days(7);
+
+/// Kafka's `retention.ms` default: delete sealed segments a week after their
+/// newest record.
+const DEFAULT_RETENTION: Time = days(7);
+
+/// Kafka's `index.interval.bytes` default: one sparse `.index`/`.timeindex`
+/// entry per 4 KiB of `.log`.
+const DEFAULT_INDEX_INTERVAL: ByteSize = kibibytes(4);
+
+/// Kafka's `delete.retention.ms` default: a tombstone or transaction marker
+/// stays readable for a day after it first becomes compaction-eligible.
+const DEFAULT_DELETE_RETENTION: Time = hours(24);
+
+/// Default upper bound on a single read's initial allocation.
+pub const DEFAULT_READ_BUFFER_CAP: ByteSize = mebibytes(4);
+
+/// Default byte window for timestamp scans between sparse index entries.
+pub const DEFAULT_TIMESTAMP_SCAN_WINDOW: ByteSize = kibibytes(64);
 
 /// Per-topic policy for what to do with old log segments.
 ///
@@ -22,24 +46,35 @@ pub enum CleanupPolicy {
 /// Defaults match Apache Kafka 4.2 (`segment.bytes`, `segment.ms`,
 /// `retention.ms`, `index.interval.bytes`, etc.). The
 /// [`Default`](Self::default) impl is the recommended starting point;
-/// most production deployments will only override `retention_ms` and
-/// `retention_bytes`.
+/// most production deployments will only override [`Self::retention`] and
+/// [`Self::retention_size`].
 #[derive(Debug, Clone, PartialEq)]
 pub struct LogConfig {
-    /// Roll the active segment when it exceeds this many bytes. Kafka default: 1 GiB.
-    pub segment_bytes: u64,
+    /// Cap the initial allocation used by decoded and raw segment reads.
+    pub read_buffer_cap: ByteSize,
 
-    /// Roll the active segment when its first record is older than this. Kafka default: 7 days.
-    pub segment_ms: Duration,
+    /// Read timestamp searches in windows of this size.
+    pub timestamp_scan_window: ByteSize,
 
-    /// Delete sealed segments older than this. `None` = unlimited. Kafka default: 7 days.
-    pub retention_ms: Option<Duration>,
+    /// Roll the active segment once it grows past this. Kafka's
+    /// `segment.bytes`; default 1 GiB.
+    pub segment_size: ByteSize,
 
-    /// Delete oldest sealed segments until the total `.log` size fits. `None` = unlimited.
-    pub retention_bytes: Option<u64>,
+    /// Roll the active segment when its first record is older than this.
+    /// Kafka's `segment.ms`; default 7 days.
+    pub segment_roll_interval: Time,
 
-    /// Write one `.index`/`.timeindex` entry per N bytes of `.log`. Kafka default: 4 KiB.
-    pub index_interval_bytes: u32,
+    /// Delete sealed segments older than this. `None` = unlimited. Kafka's
+    /// `retention.ms`; default 7 days.
+    pub retention: Option<Time>,
+
+    /// Delete oldest sealed segments until the total `.log` size fits.
+    /// `None` = unlimited. Kafka's `retention.bytes`.
+    pub retention_size: Option<ByteSize>,
+
+    /// Write one `.index`/`.timeindex` entry per this much `.log`. Kafka's
+    /// `index.interval.bytes`; default 4 KiB.
+    pub index_interval: ByteSize,
 
     /// fsync after every `append`. Default off; broker manages fsync separately.
     pub flush_on_append: bool,
@@ -66,27 +101,29 @@ pub struct LogConfig {
     pub remote_storage_enable: bool,
 
     /// Local-disk time-retention window for tiered
-    /// partitions (KIP-405). `None` inherits `retention_ms`. Default `None`.
-    pub local_retention_ms: Option<Duration>,
+    /// partitions (KIP-405). `None` inherits [`Self::retention`]. Default `None`.
+    pub local_retention: Option<Time>,
 
     /// Local-disk size budget for tiered partitions (KIP-405).
-    /// `None` inherits `retention_bytes`. Default `None`.
-    pub local_retention_bytes: Option<u64>,
+    /// `None` inherits [`Self::retention_size`]. Default `None`.
+    pub local_retention_size: Option<ByteSize>,
 
     /// KIP-534. After a tombstone or transaction marker first becomes
     /// compaction-eligible, retain it for at least this long before deletion
     /// (the delete-horizon grace window). Default 24h.
-    pub delete_retention_ms: Duration,
+    pub delete_retention: Time,
 }
 
 impl Default for LogConfig {
     fn default() -> Self {
         Self {
-            segment_bytes: 1024 * 1024 * 1024,
-            segment_ms: Duration::from_hours(7 * 24),
-            retention_ms: Some(Duration::from_hours(7 * 24)),
-            retention_bytes: None,
-            index_interval_bytes: 4096,
+            read_buffer_cap: DEFAULT_READ_BUFFER_CAP,
+            timestamp_scan_window: DEFAULT_TIMESTAMP_SCAN_WINDOW,
+            segment_size: DEFAULT_SEGMENT_SIZE,
+            segment_roll_interval: DEFAULT_SEGMENT_ROLL_INTERVAL,
+            retention: Some(DEFAULT_RETENTION),
+            retention_size: None,
+            index_interval: DEFAULT_INDEX_INTERVAL,
             flush_on_append: false,
             validate_on_open: true,
             cleanup_policy: CleanupPolicy::Delete,
@@ -96,15 +133,17 @@ impl Default for LogConfig {
             compression_type: None,
             // Tiered storage is opt-in per topic (Kafka default false).
             remote_storage_enable: false,
-            local_retention_ms: None,
-            local_retention_bytes: None,
-            delete_retention_ms: Duration::from_hours(24),
+            local_retention: None,
+            local_retention_size: None,
+            delete_retention: DEFAULT_DELETE_RETENTION,
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
+
+    use crabka_units::prelude::{ByteSizeExt as _, TimeExt, bytes, secs};
 
     use super::*;
 
@@ -113,21 +152,36 @@ mod tests {
         assert2::assert!(
             LogConfig::default()
                 == LogConfig {
-                    segment_bytes: 1 << 30,
-                    segment_ms: Duration::from_hours(7 * 24),
-                    retention_ms: Some(Duration::from_hours(7 * 24)),
-                    retention_bytes: None,
-                    index_interval_bytes: 4096,
+                    read_buffer_cap: mebibytes(4),
+                    timestamp_scan_window: kibibytes(64),
+                    segment_size: bytes(1 << 30),
+                    segment_roll_interval: days(7),
+                    retention: Some(days(7)),
+                    retention_size: None,
+                    index_interval: bytes(4096),
                     flush_on_append: false,
                     validate_on_open: true,
                     cleanup_policy: CleanupPolicy::Delete,
                     compression_type: None,
                     remote_storage_enable: false,
-                    local_retention_ms: None,
-                    local_retention_bytes: None,
-                    delete_retention_ms: Duration::from_hours(24),
+                    local_retention: None,
+                    local_retention_size: None,
+                    delete_retention: secs(24 * 60 * 60),
                 }
         );
+    }
+
+    #[test]
+    fn defaults_cross_the_raw_seams_as_kafkas_documented_numbers() {
+        // The quantities exist to be handed to `.index` sizing, retention
+        // arithmetic, and Kafka config reporting as plain integers; a
+        // scale slip in a constructor would show up here.
+        let c = LogConfig::default();
+        assert2::check!(c.segment_size.bytes_u64() == 1_073_741_824);
+        assert2::check!(c.index_interval.bytes_u64() == 4_096);
+        assert2::check!(c.segment_roll_interval.millis_i64() == 604_800_000);
+        assert2::check!(c.retention.map(TimeExt::millis_i64) == Some(604_800_000));
+        assert2::check!(c.delete_retention.millis_i64() == 86_400_000);
     }
 
     #[test]
@@ -145,14 +199,7 @@ mod tests {
     #[test]
     fn default_local_retention_is_none() {
         let c = LogConfig::default();
-        assert2::assert!(c.local_retention_ms == None);
-        assert2::assert!(c.local_retention_bytes == None);
-    }
-
-    #[test]
-    fn default_delete_retention_is_24h() {
-        assert2::assert!(
-            LogConfig::default().delete_retention_ms == std::time::Duration::from_hours(24)
-        );
+        assert2::assert!(c.local_retention == None);
+        assert2::assert!(c.local_retention_size == None);
     }
 }

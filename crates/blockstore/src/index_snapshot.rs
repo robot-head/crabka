@@ -1,4 +1,6 @@
 use std::{
+    fmt,
+    str::FromStr,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -6,13 +8,61 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use crabka_units::{ByteSize, mebibytes};
 use futures::StreamExt as _;
 use object_store::{ObjectMeta, ObjectStore, ObjectStoreExt, PutPayload, path::Path};
+use refined_type::rule::GreaterUsize;
 use tracing::instrument;
 
 use crate::error::{BlockStoreError, Result};
 
+pub const DEFAULT_INDEX_SNAPSHOT_MAX: ByteSize = mebibytes(256);
 pub const DEFAULT_INDEX_SNAPSHOT_RETAIN: usize = 8;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IndexSnapshotRetain(usize);
+
+impl IndexSnapshotRetain {
+    /// Validate an index-snapshot retention count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: usize) -> std::result::Result<Self, String> {
+        GreaterUsize::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub const fn into_value(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for IndexSnapshotRetain {
+    fn default() -> Self {
+        Self::new(DEFAULT_INDEX_SNAPSHOT_RETAIN)
+            .expect("default index snapshot retention is positive")
+    }
+}
+
+impl fmt::Display for IndexSnapshotRetain {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for IndexSnapshotRetain {
+    type Err = String;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
 
 static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -49,12 +99,13 @@ pub async fn put_index_snapshot(
     store: &Arc<dyn ObjectStore>,
     key: &str,
     bytes: Vec<u8>,
+    retain: IndexSnapshotRetain,
 ) -> Result<String> {
     let snapshot_key = next_snapshot_key(key)?;
     store
         .put(&Path::from(snapshot_key.clone()), PutPayload::from(bytes))
         .await?;
-    prune_old_index_snapshots(store, key, DEFAULT_INDEX_SNAPSHOT_RETAIN).await?;
+    prune_old_index_snapshots(store, key, retain.into_value()).await?;
     Ok(snapshot_key)
 }
 
@@ -95,7 +146,6 @@ async fn prune_old_index_snapshots(
     key: &str,
     retain: usize,
 ) -> Result<()> {
-    let retain = retain.max(1);
     let objects = list_index_snapshot_objects(store, key).await?;
     let stale = objects.len().saturating_sub(retain);
     for meta in objects.into_iter().take(stale) {
@@ -105,4 +155,31 @@ async fn prune_old_index_snapshots(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crabka_units::{convert::ByteSizeExt as _, mebibytes};
+
+    use super::{DEFAULT_INDEX_SNAPSHOT_MAX, IndexSnapshotRetain};
+
+    #[test]
+    fn index_snapshot_settings_preserve_defaults_and_validate_input() {
+        assert_eq!(DEFAULT_INDEX_SNAPSHOT_MAX.bytes_u64(), 256 * 1024 * 1024);
+        assert_eq!(IndexSnapshotRetain::default().into_value(), 8);
+        assert_eq!(DEFAULT_INDEX_SNAPSHOT_MAX, mebibytes(256));
+        assert_eq!(
+            "1".parse::<IndexSnapshotRetain>()
+                .expect("one retained snapshot is valid")
+                .into_value(),
+            1
+        );
+
+        for invalid in ["0", "not-a-number", "-1", "18446744073709551616"] {
+            assert!(
+                invalid.parse::<IndexSnapshotRetain>().is_err(),
+                "{invalid:?} should be rejected"
+            );
+        }
+    }
 }

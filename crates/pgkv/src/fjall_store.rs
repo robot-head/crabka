@@ -6,17 +6,20 @@
 use std::{
     collections::VecDeque,
     path::Path,
+    str::FromStr,
     sync::{
         Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicU64, Ordering},
     },
 };
 
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use fjall::{
     Iter, KeyspaceCreateOptions, PersistMode, Readable, SingleWriterTxDatabase,
     SingleWriterTxKeyspace, Snapshot,
     config::{PartitioningPolicy, PinningPolicy},
 };
+use refined_type::rule::GreaterU64;
 
 use crate::{Kv, KvError, KvPair, KvSnapshot, RestoreKv, SnapshotKv, WriteOp, store::KvScan};
 
@@ -42,7 +45,7 @@ pub struct KeyspaceKv {
     ops_since_rotate: AtomicU64,
     /// Committed-op rotation threshold for this handle (see
     /// [`DEFAULT_ROTATE_AFTER_OPS`]).
-    rotate_after: u64,
+    rotate_after: RotateAfterOps,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -98,23 +101,87 @@ struct Pending {
 /// version chains independently, so the rotation cap no longer has to fire
 /// early to keep hot-row reads fast, and a low cap under distinct-key insert
 /// load flushes tiny sstables every few tens of milliseconds — a compaction
-/// storm that halves sustained insert throughput. Overridable at process
-/// start via `CRABKA_PGKV_ROTATE_AFTER_OPS` for workload-specific tuning; the
-/// byte cap still bounds absolute memtable size.
+/// storm that halves sustained insert throughput. Callers can override it
+/// through [`FjallOptions`]; the byte cap still bounds absolute memtable size.
 const DEFAULT_ROTATE_AFTER_OPS: u64 = 262_144;
 
-/// Rotation threshold in effect for this process, read once from
-/// `CRABKA_PGKV_ROTATE_AFTER_OPS` (falling back to [`DEFAULT_ROTATE_AFTER_OPS`]
-/// on an absent, empty, unparsable, or zero value).
-fn rotate_threshold() -> u64 {
-    static VALUE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *VALUE.get_or_init(|| {
-        std::env::var("CRABKA_PGKV_ROTATE_AFTER_OPS")
-            .ok()
-            .and_then(|raw| raw.parse::<u64>().ok())
-            .filter(|value| *value > 0)
-            .unwrap_or(DEFAULT_ROTATE_AFTER_OPS)
-    })
+/// Positive committed-operation count between requested memtable rotations.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RotateAfterOps(u64);
+
+impl RotateAfterOps {
+    /// Validate a rotation threshold.
+    ///
+    /// # Errors
+    /// Returns an error when `value` is zero.
+    pub fn new(value: u64) -> Result<Self, String> {
+        GreaterU64::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Return the validated operation count.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl FromStr for RotateAfterOps {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse::<u64>()
+            .map_err(|error| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+/// Fjall memory and flush policy for a Crabka keyspace.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FjallOptions {
+    max_memtable_size: ByteSize,
+    rotate_after_ops: RotateAfterOps,
+}
+
+impl FjallOptions {
+    /// Validate Fjall keyspace policy.
+    ///
+    /// # Errors
+    /// Returns an error unless the memtable cap is a positive whole-byte value
+    /// representable by Fjall, or when the rotation threshold is zero.
+    pub fn new(max_memtable_size: ByteSize, rotate_after_ops: u64) -> Result<Self, String> {
+        let bytes = max_memtable_size.bytes_u64();
+        if bytes == 0 || ByteSize::from_bytes(bytes) != max_memtable_size {
+            return Err("max memtable size must be a positive whole-byte value".to_owned());
+        }
+        Ok(Self {
+            max_memtable_size,
+            rotate_after_ops: RotateAfterOps::new(rotate_after_ops)?,
+        })
+    }
+
+    /// Return the maximum active memtable size.
+    #[must_use]
+    pub const fn max_memtable_size(self) -> ByteSize {
+        self.max_memtable_size
+    }
+
+    /// Return the committed-operation rotation threshold.
+    #[must_use]
+    pub const fn rotate_after_ops(self) -> RotateAfterOps {
+        self.rotate_after_ops
+    }
+}
+
+impl Default for FjallOptions {
+    fn default() -> Self {
+        Self {
+            max_memtable_size: ByteSize::from_bytes(MAX_MEMTABLE_SIZE_BYTES),
+            rotate_after_ops: RotateAfterOps(DEFAULT_ROTATE_AFTER_OPS),
+        }
+    }
 }
 
 /// Hands leadership off when a leader finishes — including by unwinding.
@@ -150,27 +217,29 @@ impl KeyspaceKv {
     /// Wrap an already-open keyspace `ks` belonging to `db`.
     #[must_use]
     pub fn new(db: Arc<SingleWriterTxDatabase>, ks: SingleWriterTxKeyspace) -> Self {
+        Self::with_options(db, ks, LocalPersistMode::SyncAll, FjallOptions::default())
+    }
+
+    fn with_options(
+        db: Arc<SingleWriterTxDatabase>,
+        ks: SingleWriterTxKeyspace,
+        persist_mode: LocalPersistMode,
+        options: FjallOptions,
+    ) -> Self {
         Self {
             db,
             ks,
-            persist_mode: LocalPersistMode::SyncAll,
+            persist_mode,
             group: GroupCommit::default(),
             ops_since_rotate: AtomicU64::new(0),
-            rotate_after: rotate_threshold(),
+            rotate_after: options.rotate_after_ops,
         }
     }
 
     /// Wrap an already-open keyspace without fsyncing each mutation.
     #[must_use]
     pub fn new_cache(db: Arc<SingleWriterTxDatabase>, ks: SingleWriterTxKeyspace) -> Self {
-        Self {
-            db,
-            ks,
-            persist_mode: LocalPersistMode::Buffer,
-            group: GroupCommit::default(),
-            ops_since_rotate: AtomicU64::new(0),
-            rotate_after: rotate_threshold(),
-        }
+        Self::with_options(db, ks, LocalPersistMode::Buffer, FjallOptions::default())
     }
 
     fn sync(&self) -> Result<(), KvError> {
@@ -319,7 +388,7 @@ impl KeyspaceKv {
         let before = self
             .ops_since_rotate
             .fetch_add(staged_ops, Ordering::Relaxed);
-        if before + staged_ops < self.rotate_after {
+        if before + staged_ops < self.rotate_after.get() {
             return;
         }
         self.ops_since_rotate.store(0, Ordering::Relaxed);
@@ -477,7 +546,7 @@ pub struct FjallKv {
 /// entries and tombstones.
 const MAX_MEMTABLE_SIZE_BYTES: u64 = 8 * 1024 * 1024;
 
-fn crabka_keyspace_options() -> KeyspaceCreateOptions {
+fn crabka_keyspace_options(options: FjallOptions) -> KeyspaceCreateOptions {
     // Filter and index blocks must never be monolithic-and-unpinned. Fjall's
     // defaults partition them only from L3 down and pin only L0 filters /
     // L0-L1 indexes, so a mid-size store keeps multi-MB monolithic filter and
@@ -490,7 +559,7 @@ fn crabka_keyspace_options() -> KeyspaceCreateOptions {
     // index; pinning at every level covers any monolithic block a future
     // write path still emits (loaded once per table open, never per op).
     KeyspaceCreateOptions::default()
-        .max_memtable_size(MAX_MEMTABLE_SIZE_BYTES)
+        .max_memtable_size(options.max_memtable_size.bytes_u64())
         .filter_block_partitioning_policy(PartitioningPolicy::all(true))
         .index_block_partitioning_policy(PartitioningPolicy::all(true))
         .filter_block_pinning_policy(PinningPolicy::all(true))
@@ -507,10 +576,23 @@ impl FjallKv {
     ///
     /// Returns [`KvError::Io`] when the database or keyspace cannot be opened.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, KvError> {
+        Self::open_with_options(path, FjallOptions::default())
+    }
+
+    /// Opens a durable `FjallKv` with explicit memory and rotation policy.
+    ///
+    /// # Errors
+    /// Returns [`KvError::Io`] when the database or keyspace cannot be opened.
+    pub fn open_with_options(
+        path: impl AsRef<Path>,
+        options: FjallOptions,
+    ) -> Result<Self, KvError> {
         let db = Arc::new(SingleWriterTxDatabase::builder(path).open().map_err(io)?);
-        let ks = db.keyspace("data", crabka_keyspace_options).map_err(io)?;
+        let ks = db
+            .keyspace("data", || crabka_keyspace_options(options))
+            .map_err(io)?;
         Ok(Self {
-            inner: KeyspaceKv::new(db, ks),
+            inner: KeyspaceKv::with_options(db, ks, LocalPersistMode::SyncAll, options),
         })
     }
 
@@ -524,10 +606,23 @@ impl FjallKv {
     ///
     /// Returns [`KvError::Io`] when the database or keyspace cannot be opened.
     pub fn open_cache(path: impl AsRef<Path>) -> Result<Self, KvError> {
+        Self::open_cache_with_options(path, FjallOptions::default())
+    }
+
+    /// Opens a disposable `FjallKv` cache with explicit memory and rotation policy.
+    ///
+    /// # Errors
+    /// Returns [`KvError::Io`] when the database or keyspace cannot be opened.
+    pub fn open_cache_with_options(
+        path: impl AsRef<Path>,
+        options: FjallOptions,
+    ) -> Result<Self, KvError> {
         let db = Arc::new(SingleWriterTxDatabase::builder(path).open().map_err(io)?);
-        let ks = db.keyspace("data", crabka_keyspace_options).map_err(io)?;
+        let ks = db
+            .keyspace("data", || crabka_keyspace_options(options))
+            .map_err(io)?;
         Ok(Self {
-            inner: KeyspaceKv::new_cache(db, ks),
+            inner: KeyspaceKv::with_options(db, ks, LocalPersistMode::Buffer, options),
         })
     }
 }
@@ -595,6 +690,26 @@ mod tests {
         fn next(&mut self) -> Result<Option<KvPair>, KvError> {
             Ok(self.pairs.next())
         }
+    }
+
+    #[test]
+    fn fjall_options_preserve_defaults_and_validate_boundaries() {
+        let defaults = FjallOptions::default();
+        assert_eq!(defaults.max_memtable_size(), crabka_units::mebibytes(8));
+        assert_eq!(defaults.rotate_after_ops().get(), 262_144);
+
+        let configured = FjallOptions::new(crabka_units::bytes(37), 41).expect("valid options");
+        assert_eq!(configured.max_memtable_size(), crabka_units::bytes(37));
+        assert_eq!(configured.rotate_after_ops().get(), 41);
+        assert!(FjallOptions::new(ByteSize::ZERO, 1).is_err());
+        assert!(
+            FjallOptions::new(
+                ByteSize::new::<crabka_units::uom::si::information::byte>(1.5),
+                1,
+            )
+            .is_err()
+        );
+        assert!(FjallOptions::new(crabka_units::bytes(1), 0).is_err());
     }
 
     struct FailingSnapshot {
@@ -1055,8 +1170,8 @@ mod tests {
         // background-flush regardless of size.
         // Shrink the rotation threshold for this handle so the test crosses
         // it quickly rather than churning the 256k-op default.
-        kv.inner.rotate_after = 512;
-        let final_round: u64 = 2 * kv.inner.rotate_after;
+        kv.inner.rotate_after = RotateAfterOps::new(512).expect("positive threshold");
+        let final_round: u64 = 2 * kv.inner.rotate_after.get();
         for round in 0..=final_round {
             kv.put(b"hot".to_vec(), round.to_le_bytes().to_vec())
                 .expect("put");

@@ -5,11 +5,18 @@ use std::{
 };
 
 use async_trait::async_trait;
+use crabka_units::prelude::*;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 
 use super::{FrontendRangeQuery, QueryShard};
 use crate::{PromqlError, QueryResult};
 
+/// The identity of one cached sub-range result.
+///
+/// The step stays a raw millisecond integer here: the key is a `BTreeMap` key
+/// and an object-store path component, both of which need `Ord`/`Eq` that a
+/// `f64`-backed [`Time`](crabka_units::Time) cannot provide. The conversion is
+/// [`RangeCacheKey::new`].
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(super) struct RangeCacheKey {
     tenant: String,
@@ -27,7 +34,7 @@ impl RangeCacheKey {
             query: query.query.clone(),
             start_ms: query.start_ms,
             end_ms: query.end_ms,
-            step_ms: query.step_ms,
+            step_ms: query.step.millis_i64(),
             shard: query.shard,
         }
     }
@@ -59,16 +66,12 @@ impl Clock for SystemClock {
 
 /// Returns `true` when `inserted_epoch_millis` is older than `ttl` relative to
 /// `now_epoch_millis`. `None` TTL never expires.
-fn entry_is_expired(
-    ttl: Option<std::time::Duration>,
-    inserted_epoch_millis: i64,
-    now_epoch_millis: i64,
-) -> bool {
+fn entry_is_expired(ttl: Option<Time>, inserted_epoch_millis: i64, now_epoch_millis: i64) -> bool {
     let Some(ttl) = ttl else {
         return false;
     };
-    let ttl_millis = i64::try_from(ttl.as_millis()).unwrap_or(i64::MAX);
-    now_epoch_millis.saturating_sub(inserted_epoch_millis) > ttl_millis
+    let age = Time::from_millis(now_epoch_millis.saturating_sub(inserted_epoch_millis));
+    age > ttl
 }
 
 /// In-memory range-result cache for query-frontend fan-out responses.
@@ -83,7 +86,7 @@ fn entry_is_expired(
 /// never expire.
 pub struct QueryFrontendCache {
     pub(super) range_results: Mutex<BTreeMap<RangeCacheKey, (i64, QueryResult)>>,
-    ttl: Option<std::time::Duration>,
+    ttl: Option<Time>,
     clock: Arc<dyn Clock>,
 }
 
@@ -100,7 +103,7 @@ impl Default for QueryFrontendCache {
 impl QueryFrontendCache {
     /// Build a cache that expires entries older than `ttl`.
     #[must_use]
-    pub fn with_ttl(ttl: std::time::Duration) -> Self {
+    pub fn with_ttl(ttl: Time) -> Self {
         Self {
             ttl: Some(ttl),
             ..Self::default()
@@ -196,7 +199,7 @@ struct StoredRangeResult {
 pub struct ObjectStoreQueryFrontendCache {
     store: Arc<dyn ObjectStore>,
     prefix: String,
-    ttl: Option<std::time::Duration>,
+    ttl: Option<Time>,
     clock: Arc<dyn Clock>,
 }
 
@@ -214,7 +217,7 @@ impl ObjectStoreQueryFrontendCache {
 
     /// Expire cached objects older than `ttl`.
     #[must_use]
-    pub fn with_ttl(mut self, ttl: std::time::Duration) -> Self {
+    pub fn with_ttl(mut self, ttl: Time) -> Self {
         self.ttl = Some(ttl);
         self
     }
@@ -331,7 +334,7 @@ fn range_cache_key_object_name(tenant: &str, query: &FrontendRangeQuery) -> Stri
         "/{}-{}-{}-{}-{}",
         query.start_ms,
         query.end_ms,
-        query.step_ms,
+        query.step.millis_i64(),
         query.shard.map_or(0, |shard| shard.index),
         query.shard.map_or(0, |shard| shard.total)
     );

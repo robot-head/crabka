@@ -10,6 +10,10 @@ use std::{
 };
 
 use crabka_metadata::MetadataImage;
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use uuid::Uuid;
 
 use super::config::{self, ALL_METRICS};
@@ -63,7 +67,8 @@ pub(crate) enum PushDecision {
 
 pub(crate) struct ClientMetricsManager {
     instances: Mutex<HashMap<Uuid, ClientInstance>>,
-    telemetry_max_bytes: i32,
+    default_interval: Time,
+    telemetry_max: ByteSize,
 }
 
 /// Compression codecs the broker advertises, in Kafka's fixed order:
@@ -71,15 +76,18 @@ pub(crate) struct ClientMetricsManager {
 pub(crate) const ACCEPTED_COMPRESSION_TYPES: [i8; 4] = [4, 3, 1, 2];
 
 impl ClientMetricsManager {
-    pub(crate) fn new(telemetry_max_bytes: i32) -> Self {
+    pub(crate) fn new(telemetry_max: ByteSize, default_interval: Time) -> Self {
         Self {
             instances: Mutex::new(HashMap::new()),
-            telemetry_max_bytes,
+            default_interval,
+            telemetry_max,
         }
     }
 
+    /// The KIP-714 `PushTelemetry` size ceiling in the `int32` byte form the
+    /// wire response carries.
     pub(crate) fn telemetry_max_bytes(&self) -> i32 {
-        self.telemetry_max_bytes
+        self.telemetry_max.bytes_i32()
     }
 
     pub(crate) fn assign(
@@ -87,7 +95,9 @@ impl ClientMetricsManager {
         image: &MetadataImage,
         attrs: &ClientAttributes,
     ) -> SubscriptionAssignment {
-        let computed = compute_subscription(image, attrs);
+        // `push_interval_ms` is both a wire field and a byte-exact input to the
+        // subscription-id hash, so the interval crosses into milliseconds here.
+        let computed = compute_subscription(image, attrs, self.default_interval.millis_i32());
         let sub_id = subscription_id(&computed, attrs.client_instance_id);
         let now = Instant::now();
         let mut guard = self
@@ -185,7 +195,7 @@ impl ClientMetricsManager {
 
         // 6. Payload oversize → TELEMETRY_TOO_LARGE.
         //    Do NOT update last_push on this path.
-        let max_payload_len = usize::try_from(self.telemetry_max_bytes).unwrap_or(0);
+        let max_payload_len = self.telemetry_max.bytes_usize();
         if payload_len > max_payload_len {
             return PushDecision::Reject {
                 error_code: crate::codes::TELEMETRY_TOO_LARGE,
@@ -224,6 +234,7 @@ impl ClientMetricsManager {
 pub(crate) fn compute_subscription(
     image: &MetadataImage,
     attrs: &ClientAttributes,
+    default_interval_ms: i32,
 ) -> ComputedSubscription {
     let mut matched_metrics: Vec<String> = Vec::new();
     let mut min_interval: Option<i32> = None;
@@ -254,7 +265,7 @@ pub(crate) fn compute_subscription(
                 matched_metrics.push(m);
             }
         }
-        let interval = config::effective_interval_ms(configs);
+        let interval = config::effective_interval_ms(configs, default_interval_ms);
         min_interval = Some(min_interval.map_or(interval, |cur| cur.min(interval)));
     }
 
@@ -265,7 +276,7 @@ pub(crate) fn compute_subscription(
     };
     ComputedSubscription {
         metrics,
-        push_interval_ms: min_interval.unwrap_or(config::DEFAULT_INTERVAL_MS),
+        push_interval_ms: min_interval.unwrap_or(default_interval_ms),
     }
 }
 
@@ -316,6 +327,7 @@ fn uuid_hashcode(id: Uuid) -> i32 {
 mod tests {
     use std::collections::BTreeMap;
 
+    use assert2::{assert, check};
     use crabka_metadata::{ClientMetricsConfigRecord, MetadataImage, MetadataRecord};
     use uuid::Uuid;
 
@@ -350,17 +362,17 @@ mod tests {
     #[test]
     fn no_subscription_means_no_metrics() {
         let img = MetadataImage::new(Uuid::nil());
-        let m = compute_subscription(&img, &attrs());
+        let m = compute_subscription(&img, &attrs(), 12_345);
         assert!(m.metrics.is_empty());
-        assert_eq!(m.push_interval_ms, 300_000);
+        check!(m.push_interval_ms == 12_345);
     }
 
     #[test]
     fn match_all_empty_match_applies() {
         let img = img_with("all", &[("metrics", "*"), ("interval.ms", "60000")]);
-        let m = compute_subscription(&img, &attrs());
-        assert_eq!(m.metrics, vec!["*".to_string()]);
-        assert_eq!(m.push_interval_ms, 60_000);
+        let m = compute_subscription(&img, &attrs(), 300_000);
+        check!(m.metrics == vec!["*".to_string()]);
+        check!(m.push_interval_ms == 60_000);
     }
 
     #[test]
@@ -372,8 +384,8 @@ mod tests {
                 ("match", "client_software_name=apache-kafka-java"),
             ],
         );
-        let m = compute_subscription(&img, &attrs());
-        assert_eq!(m.metrics, vec!["a.".to_string()]);
+        let m = compute_subscription(&img, &attrs(), 300_000);
+        check!(m.metrics == vec!["a.".to_string()]);
 
         let img2 = img_with(
             "py-only",
@@ -382,7 +394,7 @@ mod tests {
                 ("match", "client_software_name=kafka-python"),
             ],
         );
-        let m2 = compute_subscription(&img2, &attrs());
+        let m2 = compute_subscription(&img2, &attrs(), 300_000);
         assert!(
             m2.metrics.is_empty(),
             "java client must not match python selector"
@@ -403,11 +415,11 @@ mod tests {
                 },
             },
         ));
-        let m = compute_subscription(&img, &attrs());
+        let m = compute_subscription(&img, &attrs(), 300_000);
         let mut got = m.metrics.clone();
         got.sort();
-        assert_eq!(got, vec!["a.".to_string(), "b.".to_string()]);
-        assert_eq!(m.push_interval_ms, 30_000);
+        check!(got == vec!["a.".to_string(), "b.".to_string()]);
+        check!(m.push_interval_ms == 30_000);
     }
 
     #[test]
@@ -423,8 +435,8 @@ mod tests {
                 },
             },
         ));
-        let m = compute_subscription(&img, &attrs());
-        assert_eq!(m.metrics, vec!["*".to_string()]);
+        let m = compute_subscription(&img, &attrs(), 300_000);
+        check!(m.metrics == vec!["*".to_string()]);
     }
 
     #[test]
@@ -439,22 +451,22 @@ mod tests {
             metrics: vec!["b.".into(), "a.".into()],
             push_interval_ms: 60_000,
         };
-        assert_eq!(id1, subscription_id(&s1b, a.client_instance_id));
+        check!(id1 == subscription_id(&s1b, a.client_instance_id));
         let s2 = ComputedSubscription {
             metrics: vec!["a.".into(), "b.".into()],
             push_interval_ms: 30_000,
         };
-        assert_ne!(id1, subscription_id(&s2, a.client_instance_id));
+        check!(id1 != subscription_id(&s2, a.client_instance_id));
         let s3 = ComputedSubscription {
             metrics: vec!["a.".into()],
             push_interval_ms: 60_000,
         };
-        assert_ne!(id1, subscription_id(&s3, a.client_instance_id));
+        check!(id1 != subscription_id(&s3, a.client_instance_id));
     }
 
     #[test]
     fn push_throttle_ladder() {
-        let m = ClientMetricsManager::new(1024);
+        let m = ClientMetricsManager::new(crabka_units::kibibytes(1), crabka_units::minutes(5));
         let id = Uuid::from_u128(7);
         let img = img_with("all", &[("metrics", "*"), ("interval.ms", "60000")]);
         let attrs = ClientAttributes {

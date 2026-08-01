@@ -10,6 +10,7 @@ use crabka_traceql::{
     AttrValue, EventRef, LinkRef, ScopedTag, SpanRef, TagScope, TraceSpans, TraceqlError,
     TypedValue,
 };
+use crabka_units::{Time, convert::TimeExt as _};
 use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, any_value::Value as OtlpValue},
     trace::v1::TracesData,
@@ -21,6 +22,12 @@ use super::store::SharedTraceIndex;
 
 pub type Result<T> = std::result::Result<T, TraceqlError>;
 const LIVE_SPAN_BATCHES_PATH: &str = "/api/crabka/live/span-batches";
+
+/// OTLP carries nanosecond fields as `uint64`; saturate rather than wrap when
+/// one exceeds what a `Time` extent can be built from.
+fn time_from_nanos_u64(nanos: u64) -> Time {
+    Time::from_nanos(i64::try_from(nanos).unwrap_or(i64::MAX))
+}
 
 #[async_trait::async_trait]
 pub trait LiveSource: Send + Sync {
@@ -363,9 +370,10 @@ fn trace_spans_from_otlp(trace_id: &[u8; 16], data: TracesData) -> Result<TraceS
                 } else {
                     Some(fixed_8(&span.parent_span_id)?)
                 };
-                let duration_nanos = span
-                    .end_time_unix_nano
-                    .saturating_sub(span.start_time_unix_nano);
+                let duration = time_from_nanos_u64(
+                    span.end_time_unix_nano
+                        .saturating_sub(span.start_time_unix_nano),
+                );
                 if trace.root_trace_name.is_empty() && parent_span_id.is_none() {
                     trace.root_trace_name.clone_from(&span.name);
                 }
@@ -379,7 +387,7 @@ fn trace_spans_from_otlp(trace_id: &[u8; 16], data: TracesData) -> Result<TraceS
                     nested_set_right: 0,
                     nested_set_parent: 0,
                     start_time_unix_nano: span.start_time_unix_nano,
-                    duration_nanos,
+                    duration,
                     status_code: status.code,
                     status_message: status.message,
                     instrumentation_name: instrumentation_name.clone(),
@@ -390,9 +398,11 @@ fn trace_spans_from_otlp(trace_id: &[u8; 16], data: TracesData) -> Result<TraceS
                         .events
                         .into_iter()
                         .map(|event| EventRef {
-                            time_since_start_nano: event
-                                .time_unix_nano
-                                .saturating_sub(span.start_time_unix_nano),
+                            time_since_start: time_from_nanos_u64(
+                                event
+                                    .time_unix_nano
+                                    .saturating_sub(span.start_time_unix_nano),
+                            ),
                             name: event.name,
                             attributes: attrs_from_otlp(&event.attributes),
                         })
@@ -532,6 +542,7 @@ mod tests {
     use arrow::record_batch::RecordBatch;
     use assert2::check;
     use crabka_traceql::{AttrValue, ScopedTag, SpanRef, TagScope, TraceSpans, TypedValue};
+    use crabka_units::nanos;
 
     use super::*;
 
@@ -603,7 +614,7 @@ mod tests {
                 nested_set_right: 2,
                 nested_set_parent: 0,
                 start_time_unix_nano: 2_000,
-                duration_nanos: 50,
+                duration: nanos(50),
                 status_code: 0,
                 status_message: String::new(),
                 instrumentation_name: String::new(),

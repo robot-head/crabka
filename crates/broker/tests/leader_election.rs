@@ -205,7 +205,7 @@ async fn acks_all_completes_after_isr_shrink() {
     dead.0.shutdown().await;
 
     // Produce acks=-1. ISR should shrink to {1,2} within
-    // replica_lag_time_max_ms (2s on CI) + heartbeat_timeout (2s); produce
+    // replica_lag_time_max (2s on CI) + heartbeat_timeout (2s); produce
     // completes after.
     let start = Instant::now();
     let offset = produce_acks(&bootstrap_1, "shrink2", &["a", "b", "c"], -1, 15_000)
@@ -277,11 +277,11 @@ async fn isr_expand_on_catchup() {
             .iter()
             .map(|(id, a)| (crabka_broker::NodeId(*id), a.to_string()))
             .collect(),
-        heartbeat_interval_ms: 200,
-        heartbeat_timeout_ms: 2_000,
-        replica_lag_time_max_ms: 2_000,
-        controller_election_timeout: Duration::from_millis(500),
-        controller_heartbeat_interval: Duration::from_millis(100),
+        heartbeat_interval: crabka_units::millis(200),
+        heartbeat_timeout: crabka_units::millis(2_000),
+        replica_lag_time_max: crabka_units::millis(2_000),
+        controller_election_timeout: crabka_units::millis(500),
+        controller_heartbeat_interval: crabka_units::millis(100),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };

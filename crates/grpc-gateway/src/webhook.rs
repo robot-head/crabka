@@ -22,14 +22,15 @@ use std::{
 use axum::{
     Extension, Json, Router,
     body::Bytes,
-    extract::Path,
-    http::{HeaderMap, StatusCode},
+    extract::{Path, Request},
+    http::StatusCode,
     response::{IntoResponse, Response},
     routing::post,
 };
 use crabka_authz::AuthorizationResult;
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
+use crabka_units::prelude::*;
 use serde::Serialize;
 use serde_json::Value;
 
@@ -87,8 +88,7 @@ pub async fn webhook_handler(
     Extension(state): Extension<Arc<AppState>>,
     Path(name): Path<String>,
     peer: Option<Extension<SocketAddr>>,
-    headers: HeaderMap,
-    body: Bytes,
+    request: Request,
 ) -> Response {
     let _req = metrics().begin_request("webhook_in");
     // 1. Look up the compiled endpoint config.
@@ -97,11 +97,14 @@ pub async fn webhook_handler(
         return StatusCode::NOT_FOUND.into_response();
     };
 
-    // 2. Body size guard.
-    if body.len() > cfg.max_body_bytes {
+    // 2. Collect with the endpoint's configured limit. Using the raw request
+    // avoids Axum's fixed 2 MiB `Bytes` extractor cap overriding this policy.
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
+    let Ok(body) = axum::body::to_bytes(body, cfg.max_body.bytes_usize()).await else {
         metrics().record_webhook_in("too_large");
         return StatusCode::PAYLOAD_TOO_LARGE.into_response();
-    }
+    };
 
     // 3. HMAC signature verification (when configured).
     if let Some(sig_header) = &cfg.signature_header {
@@ -128,9 +131,13 @@ pub async fn webhook_handler(
                 metrics().record_webhook_in("unauthenticated");
                 return StatusCode::UNAUTHORIZED.into_response();
             };
-            let now = now_unix_secs();
-            let skew = (i128::from(now) - i128::from(ts)).abs();
-            if skew > i128::from(cfg.timestamp_tolerance_secs) {
+            // `now` and `ts` are instants (epoch seconds); their difference is
+            // the extent the tolerance bounds.
+            let skew = Time::from_secs(
+                i64::try_from((i128::from(now_unix_secs()) - i128::from(ts)).abs())
+                    .unwrap_or(i64::MAX),
+            );
+            if skew > cfg.timestamp_tolerance {
                 metrics().record_webhook_in("unauthenticated");
                 return StatusCode::UNAUTHORIZED.into_response();
             }
@@ -219,9 +226,9 @@ pub async fn webhook_handler(
 
 /// `POST /v1/produce/{topic}` — generic produce-by-topic endpoint.
 ///
-/// No HMAC or body-size enforcement; respects an optional `Idempotency-Key`
-/// header; uses the injected caller [`Principal`] (from mTLS / bearer auth) or
-/// falls back to ANONYMOUS.
+/// No HMAC; enforces the configured generic-produce body cap, respects an
+/// optional `Idempotency-Key` header, and uses the injected caller
+/// [`Principal`] (from mTLS / bearer auth) or falls back to ANONYMOUS.
 // HTTP request entry (info): one span per generic produce-by-topic call,
 // tagged with the target topic. RED signals recorded via the drop-guard under
 // method="produce_http".
@@ -230,11 +237,17 @@ pub async fn produce_handler(
     Extension(state): Extension<Arc<AppState>>,
     Path(topic): Path<String>,
     peer: Option<Extension<SocketAddr>>,
-    headers: HeaderMap,
     principal: Option<Extension<Principal>>,
-    body: Bytes,
+    request: Request,
 ) -> Response {
     let _req = metrics().begin_request("produce_http");
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
+    let Ok(body) =
+        axum::body::to_bytes(body, state.config.runtime.produce_max_body.bytes_usize()).await
+    else {
+        return StatusCode::PAYLOAD_TOO_LARGE.into_response();
+    };
     // Idempotency key from the standard header if present.
     let idempotency_key: Option<String> = headers
         .get("Idempotency-Key")
@@ -407,10 +420,10 @@ mod tests {
             signature_encoding: SigEncoding::Hex,
             signature_prefix: None,
             timestamp_header: None,
-            timestamp_tolerance_secs: 300,
+            timestamp_tolerance: minutes(5),
             idempotency_source: None,
             key_source: None,
-            max_body_bytes: 1024 * 1024,
+            max_body: mebibytes(1),
             schema_subject: None,
             schema_format: SchemaFormat::Json,
         }
@@ -426,10 +439,10 @@ mod tests {
             signature_encoding: SigEncoding::Hex,
             signature_prefix: None,
             timestamp_header: None,
-            timestamp_tolerance_secs: 300,
+            timestamp_tolerance: minutes(5),
             idempotency_source: None,
             key_source: None,
-            max_body_bytes: 64,
+            max_body: bytes(64),
             schema_subject: None,
             schema_format: SchemaFormat::Json,
         }
@@ -464,7 +477,8 @@ mod tests {
                 client_id: "webhook-test".into(),
                 dedup_topic: "__wh_dedup".into(),
                 dedup_partitions: 4,
-                dedup_window_ms: 3_600_000,
+                dedup_window: hours(1),
+                dedup_ownership_group: "__crabka_grpc_gateway_dedup_owners".into(),
                 dedup_txn_id_prefix: "wh-dedup".into(),
                 advertised_addr: "127.0.0.1:0".into(),
                 membership_topic: "__wh_membership".into(),
@@ -474,6 +488,7 @@ mod tests {
                 webhooks,
                 outbound: Vec::new(),
                 schema_registry_url: None,
+                runtime: crate::config::GatewayRuntimeConfig::default(),
             }),
             authz: Arc::new(GatewayAuthz::new(Arc::new(
                 crabka_authz::AllowAllAuthorizer,
@@ -509,13 +524,29 @@ mod tests {
     async fn body_too_large_returns_413() {
         let state = state_with_webhooks(make_webhook("tiny", unsigned_cfg("t"))).await;
         let app = webhook_router(state);
-        // max_body_bytes for unsigned_cfg is 64; send 65 bytes.
+        // max_body for unsigned_cfg is 64 B; send 65 bytes.
         let body = vec![b'x'; 65];
         let req = Request::post("/v1/webhooks/tiny")
             .body(Body::from(body))
             .unwrap();
         let resp = oneshot(app, req).await;
         assert2::assert!(resp.status() == StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[tokio::test]
+    async fn configured_body_limit_can_exceed_axum_default() {
+        use jsonpath_rust::parser::parse_json_path;
+
+        let mut cfg = unsigned_cfg("t");
+        cfg.max_body = mebibytes(3);
+        cfg.idempotency_source = Some(Source::JsonPath(parse_json_path("$.id").unwrap()));
+        let state = state_with_webhooks(make_webhook("large", cfg)).await;
+        let app = webhook_router(state);
+        let req = Request::post("/v1/webhooks/large")
+            .body(Body::from(vec![b'x'; mebibytes(2).bytes_usize() + 1]))
+            .unwrap();
+        let resp = oneshot(app, req).await;
+        assert2::assert!(resp.status() == StatusCode::BAD_REQUEST);
     }
 
     // -----------------------------------------------------------------------
@@ -550,7 +581,7 @@ mod tests {
     async fn stale_timestamp_returns_401() {
         let mut cfg = signed_cfg("events");
         cfg.timestamp_header = Some("X-Ts".to_string());
-        cfg.timestamp_tolerance_secs = 300;
+        cfg.timestamp_tolerance = minutes(5);
         let state = state_with_webhooks(make_webhook("ts", cfg)).await;
         let app = webhook_router(state);
 
@@ -587,7 +618,7 @@ mod tests {
         use crate::webhook_config::Source;
 
         let mut cfg = unsigned_cfg("t");
-        cfg.max_body_bytes = 1024; // allow larger body for this test
+        cfg.max_body = kibibytes(1); // allow larger body for this test
         // Require idempotency key from a JSON path that won't exist.
         let q = parse_json_path("$.id").unwrap();
         cfg.idempotency_source = Some(Source::JsonPath(q));
@@ -665,7 +696,7 @@ mod tests {
             ),
         ] {
             let mut cfg = unsigned_cfg("orders");
-            cfg.max_body_bytes = 1024;
+            cfg.max_body = kibibytes(1);
             cfg.schema_subject = Some("orders-value".to_string());
             let codec = Arc::new(FailingEncodeCodec(error));
             let state = state_with_webhooks_codec(make_webhook("orders", cfg), codec).await;
@@ -682,9 +713,22 @@ mod tests {
     // -----------------------------------------------------------------------
     // produce_handler
     // -----------------------------------------------------------------------
-    // NOTE: produce_handler tests that call produce require a real broker.
-    // They are covered by integration tests. The needs_json and signature
-    // tests above cover the guard logic without a broker.
+
+    #[tokio::test]
+    async fn generic_produce_honors_configured_body_limit_above_axum_default() {
+        let codec = Arc::new(FailingEncodeCodec(CodecError::Validate));
+        let mut state = state_with_webhooks_codec(HashMap::new(), codec).await;
+        let state_mut = Arc::get_mut(&mut state).unwrap();
+        let mut config = (*state_mut.config).clone();
+        config.runtime.produce_max_body = mebibytes(3);
+        state_mut.config = Arc::new(config);
+        let app = webhook_router(state);
+        let req = Request::post("/v1/produce/orders")
+            .body(Body::from(vec![b'x'; mebibytes(2).bytes_usize() + 1]))
+            .unwrap();
+        let resp = oneshot(app, req).await;
+        assert2::assert!(resp.status() == StatusCode::BAD_REQUEST);
+    }
 
     // -----------------------------------------------------------------------
     // needs_json helper

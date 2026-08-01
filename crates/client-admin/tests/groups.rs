@@ -22,7 +22,7 @@ async fn lists_groups_and_committed_offsets() {
                 replicas: 1,
                 configs: std::collections::BTreeMap::default(),
             }],
-            5000,
+            crabka_units::secs(5),
         )
         .await
         .unwrap();
@@ -55,10 +55,7 @@ async fn lists_groups_and_committed_offsets() {
         .build()
         .await
         .unwrap();
-    let _ = consumer
-        .poll(std::time::Duration::from_secs(2))
-        .await
-        .unwrap();
+    let _ = consumer.poll(crabka_units::secs(2)).await.unwrap();
     consumer.commit_sync().await.unwrap();
 
     let groups = admin.list_groups().await.unwrap();

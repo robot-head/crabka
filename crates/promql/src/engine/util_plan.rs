@@ -295,7 +295,7 @@ impl<S: MetricStore> PromqlEngine<S> {
         if range
             .series
             .iter()
-            .any(|series| range_has_samples(series, range.end_ms, range.range_ms))
+            .any(|series| range_has_samples(series, range.end_ms, range.range))
         {
             return Ok(Some(PlannedInstant::Precomputed(Vec::new())));
         }
@@ -333,7 +333,7 @@ impl<S: MetricStore> PromqlEngine<S> {
         if range
             .series
             .iter()
-            .any(|series| range_has_samples(series, range.end_ms, range.range_ms))
+            .any(|series| range_has_samples(series, range.end_ms, range.range))
         {
             return Ok(Vec::new());
         }

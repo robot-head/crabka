@@ -86,8 +86,10 @@ pub mod swappable;
 
 pub use error::{CodecError, MetadataLogError, SnapshotError};
 pub use kafka_log::{
-    DEFAULT_NUM_PARTITIONS, DEFAULT_REPLICATION, KafkaMetadataEventLog, KafkaMetadataLogConfig,
-    METADATA_TOPIC,
+    DEFAULT_METADATA_EVENT_QUEUE_CAPACITY, DEFAULT_METADATA_FETCH_MAX_BYTES,
+    DEFAULT_METADATA_FETCH_MAX_WAIT, DEFAULT_METADATA_FETCH_RETRY_BACKOFF,
+    DEFAULT_METADATA_TOPIC_CREATE_TIMEOUT, DEFAULT_NUM_PARTITIONS, DEFAULT_REPLICATION,
+    KafkaMetadataEventLog, KafkaMetadataLogConfig, METADATA_TOPIC, MetadataEventQueueCapacity,
 };
 pub use log::{
     AssignmentHandle, InProcessMetadataEventLog, MetadataEventLog, MetadataEventRecord,

@@ -2,12 +2,13 @@
 //! and an `ArcSwap`'d `AclCache` refreshed by polling the broker's `DescribeAcls`.
 
 pub mod auth_layer;
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 pub use auth_layer::{BearerValidator, anonymous, resolve_principal};
 use crabka_authz::{AclCache, Authorizer};
 use crabka_client_admin::AdminClient;
+use crabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 
 pub struct GatewayAuthz {
@@ -39,13 +40,32 @@ impl GatewayAuthz {
     pub async fn run_acl_refresh(
         self: Arc<Self>,
         bootstrap: String,
-        refresh: Duration,
+        refresh: Time,
         shutdown: CancellationToken,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) {
+        self.run_acl_refresh_with_policy(
+            bootstrap,
+            refresh,
+            shutdown,
+            security,
+            crate::config::GatewayRuntimeConfig::default(),
+        )
+        .await;
+    }
+
+    /// Refresh ACLs with the deployment's client resource policy.
+    pub async fn run_acl_refresh_with_policy(
+        self: Arc<Self>,
+        bootstrap: String,
+        refresh: Time,
+        shutdown: CancellationToken,
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        policy: crate::config::GatewayRuntimeConfig,
+    ) {
         let addrs: Vec<String> = bootstrap.split(',').map(|s| s.trim().to_string()).collect();
         loop {
-            match Self::fetch(&addrs, security.clone()).await {
+            match Self::fetch(&addrs, security.clone(), &policy).await {
                 Ok(entries) => self.cache.store(Arc::new(AclCache::new(entries))),
                 Err(e) => {
                     tracing::warn!(error = %e, "ACL refresh failed; keeping prior snapshot");
@@ -53,7 +73,7 @@ impl GatewayAuthz {
             }
             tokio::select! {
                 () = shutdown.cancelled() => return,
-                () = tokio::time::sleep(refresh) => {}
+                () = tokio::time::sleep(refresh.to_std()) => {}
             }
         }
     }
@@ -61,10 +81,22 @@ impl GatewayAuthz {
     async fn fetch(
         addrs: &[String],
         security: Option<crabka_client_core::security::ClientSecurity>,
+        policy: &crate::config::GatewayRuntimeConfig,
     ) -> Result<Vec<crabka_metadata::AclEntry>, crate::error::GatewayError> {
-        let mut admin = AdminClient::connect_secured(addrs, security)
-            .await
-            .map_err(|e| crate::error::GatewayError::Other(format!("acl admin connect: {e}")))?;
+        let mut admin = AdminClient::connect_with_options(
+            addrs,
+            crabka_client_core::ConnectionOptions {
+                dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+                connect_timeout: crabka_units::secs(5),
+                request_timeout: crabka_units::secs(30),
+                client_id: "crabka-operator".to_owned(),
+                dispatch_queue_capacity: policy.client_dispatch_queue_capacity,
+                frame_max: policy.client_frame_max,
+                security: security.map(Box::new),
+            },
+        )
+        .await
+        .map_err(|e| crate::error::GatewayError::Other(format!("acl admin connect: {e}")))?;
         let entries = admin
             .describe_acls(&crabka_client_admin::AclEntryFilter::default())
             .await

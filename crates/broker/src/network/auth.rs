@@ -23,6 +23,7 @@ use crabka_protocol::{
     },
 };
 use crabka_security::{Principal, SaslMechanism, ScramServerExchange};
+use crabka_units::{ByteSize, Time, convert::TimeExt as _, kibibytes};
 
 use crate::{
     codes::{ILLEGAL_SASL_STATE, UNSUPPORTED_SASL_MECHANISM},
@@ -214,7 +215,7 @@ const SASL_AUTHENTICATION_FAILED: i16 = 58;
 /// security-layer offer. 64 KiB matches the JVM broker's default SASL receive
 /// buffer; with confidentiality/integrity disabled it only bounds the size of
 /// the (empty) wrapped payloads, so the exact value is not load-bearing.
-const GSSAPI_MAX_RECV_SIZE: u32 = 0x1_0000;
+const GSSAPI_MAX_RECV: ByteSize = kibibytes(64);
 
 /// Handles `SaslHandshake` (`api_key` 17).
 ///
@@ -611,11 +612,12 @@ pub fn handle_authenticate_gssapi(
         let acceptor = match crabka_security::gssapi::provider::SspiAcceptor::new(
             &keytab,
             &config.service_name,
+            config.max_time_skew,
         ) {
             Ok(a) => a,
             Err(e) => return fail_authenticate(&format!("GSSAPI acceptor init failed: {e}")),
         };
-        let exchange = GssapiServerExchange::new(Box::new(acceptor), GSSAPI_MAX_RECV_SIZE);
+        let exchange = GssapiServerExchange::new(Box::new(acceptor), GSSAPI_MAX_RECV);
         let step = match exchange.step(&req.auth_bytes) {
             Ok(s) => s,
             Err(e) => return fail_authenticate(&format!("GSSAPI accept failed: {e}")),
@@ -766,7 +768,7 @@ pub async fn handle_authenticate_oauthbearer(
     auth: &mut ConnectionAuth,
     validator: &crabka_security::OAuthBearerValidator,
     now_ms: i64,
-    max_session_lifetime_seconds: Option<u32>,
+    max_session_lifetime: Option<Time>,
 ) -> SaslAuthenticateResponse {
     match auth {
         ConnectionAuth::Negotiating {
@@ -787,11 +789,8 @@ pub async fn handle_authenticate_oauthbearer(
                     // we stored the raw token exp here, the broker would
                     // tolerate the connection past the value reported to
                     // the client.
-                    let (session_lifetime_ms, effective_expires_at_ms) = oauth_session_lifetime(
-                        outcome.expires_at_ms,
-                        now_ms,
-                        max_session_lifetime_seconds,
-                    );
+                    let (session_lifetime_ms, effective_expires_at_ms) =
+                        oauth_session_lifetime(outcome.expires_at_ms, now_ms, max_session_lifetime);
                     *auth = ConnectionAuth::Authenticated {
                         principal: outcome.principal,
                         mechanism: mech,
@@ -860,11 +859,8 @@ pub async fn handle_authenticate_oauthbearer(
                     }
                     // Same clamp as the Negotiating-success arm
                     // so re-auth respects the broker cap.
-                    let (session_lifetime_ms, effective_expires_at_ms) = oauth_session_lifetime(
-                        outcome.expires_at_ms,
-                        now_ms,
-                        max_session_lifetime_seconds,
-                    );
+                    let (session_lifetime_ms, effective_expires_at_ms) =
+                        oauth_session_lifetime(outcome.expires_at_ms, now_ms, max_session_lifetime);
                     *auth = ConnectionAuth::Authenticated {
                         principal: outcome.principal,
                         mechanism: prev_mech,
@@ -894,12 +890,11 @@ pub async fn handle_authenticate_oauthbearer(
 fn oauth_session_lifetime(
     expires_at_ms: Option<i64>,
     now_ms: i64,
-    max_session_lifetime_seconds: Option<u32>,
+    max_session_lifetime: Option<Time>,
 ) -> (i64, Option<i64>) {
     let raw_session_ms = expires_at_ms.map_or(0, |expires| (expires - now_ms).max(0));
-    let session_lifetime_ms = max_session_lifetime_seconds.map_or(raw_session_ms, |cap| {
-        raw_session_ms.min(i64::from(cap) * 1000)
-    });
+    let session_lifetime_ms =
+        max_session_lifetime.map_or(raw_session_ms, |cap| raw_session_ms.min(cap.millis_i64()));
     (session_lifetime_ms, Some(now_ms + session_lifetime_ms))
 }
 
@@ -968,6 +963,7 @@ fn fail_authenticate(reason: &str) -> SaslAuthenticateResponse {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::secs;
 
     use super::*;
 
@@ -1116,7 +1112,7 @@ mod tests {
     async fn oauthbearer_invalid_token_returns_error_json_then_fails_on_dummy() {
         let validator = crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
-                allowable_clock_skew_ms: 0,
+                allowable_clock_skew: secs(0),
                 ..Default::default()
             },
         );
@@ -1231,6 +1227,7 @@ mod tests {
             principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
             realm: Some("CRABKA.TEST".to_string()),
             kdc: None,
+            max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
         };
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::Gssapi,
@@ -1271,6 +1268,7 @@ mod tests {
             principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
             realm: Some("OTHER.REALM".to_string()),
             kdc: None,
+            max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
         };
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::Gssapi,
@@ -1297,6 +1295,7 @@ mod tests {
             principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
             realm: Some("CRABKA.TEST".to_string()),
             kdc: None,
+            max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
         };
         let mut auth = ConnectionAuth::Negotiating {
             mechanism: SaslMechanism::Gssapi,
@@ -1358,12 +1357,13 @@ mod tests {
             principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
             realm: Some("CRABKA.TEST".to_string()),
             kdc: None,
+            max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
         };
 
         // Drive the exchange to `AwaitingChoice` up front (mirroring round
         // 1's work), so this test targets `handle_authenticate_gssapi`'s
         // *subsequent round* branch specifically.
-        let exchange = GssapiServerExchange::new(Box::new(FakeAcceptor), 0x1_0000);
+        let exchange = GssapiServerExchange::new(Box::new(FakeAcceptor), kibibytes(64));
         let exchange = match exchange.step(b"AP-REQ").expect("round 1 step") {
             ServerStep::Challenge(_, next) => next,
             ServerStep::Done { .. } => panic!("expected challenge"),
@@ -1406,6 +1406,7 @@ mod tests {
             principal_to_local_rules: vec![crabka_security::gssapi::name::Rule::Default],
             realm: Some("CRABKA.TEST".to_string()),
             kdc: None,
+            max_time_skew: crabka_security::gssapi::DEFAULT_GSSAPI_MAX_TIME_SKEW,
         };
 
         let short = map_gssapi_principal("alice@crabka.test", &config).expect("map principal");
@@ -1673,7 +1674,7 @@ mod tests {
     async fn handle_authenticate_oauthbearer_applies_max_session_lifetime_cap() {
         let validator = crabka_security::OAuthBearerValidator::Unsecured(
             crabka_security::UnsecuredJwsValidator {
-                allowable_clock_skew_ms: 0,
+                allowable_clock_skew: secs(0),
                 ..Default::default()
             },
         );
@@ -1686,9 +1687,9 @@ mod tests {
         // stored expires_at_ms must reflect the clamped value too, not the
         // raw token exp.
         let cases = [
-            (Some(30), 30_000_i64), // cap below the token's 60s exp → clamped
-            (None, 60_000),         // unset cap → raw token exp
-            (Some(600), 60_000),    // cap above exp → no effect
+            (Some(secs(30)), 30_000_i64), // cap below the token's 60s exp → clamped
+            (None, 60_000),               // unset cap → raw token exp
+            (Some(secs(600)), 60_000),    // cap above exp → no effect
         ];
         for (cap, want_lifetime_ms) in cases {
             let mut auth = ConnectionAuth::Negotiating {
@@ -1734,8 +1735,8 @@ mod tests {
             log_dir: std::path::PathBuf,
         ) -> Arc<crabka_raft::ControllerHandle> {
             let cfg = crabka_raft::ControllerConfig {
-                election_timeout: Duration::from_millis(200),
-                heartbeat_interval: Duration::from_millis(50),
+                election_timeout: crabka_units::millis(200),
+                heartbeat_interval: Some(crabka_units::millis(50)),
                 client_id: "test".into(),
                 ..crabka_raft::ControllerConfig::for_tests(crabka_raft::NodeId(1), log_dir)
             };

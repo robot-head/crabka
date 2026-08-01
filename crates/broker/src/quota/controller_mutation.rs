@@ -1,9 +1,8 @@
 //! KIP-599 `controller_mutation_rate` helper. Called from `CreateTopics`,
 //! `CreatePartitions`, `DeleteTopics` handlers after response assembly.
 
-use std::time::Duration;
-
 use crabka_metadata::MetadataImage;
+use crabka_units::{Time, convert::TimeExt};
 
 use super::{
     QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota, positive_f64_to_u64,
@@ -12,8 +11,8 @@ use super::{
 
 /// Consume `mutations` from the `controller_mutation_rate` bucket for
 /// `(principal, client_id)`. Returns the throttle delay to apply
-/// before sending the response. `Duration::ZERO` if no quota
-/// configured, no overage, or `mutations == 0`. Capped at 1 second.
+/// before sending the response. A zero extent if no quota
+/// configured, no overage, or `mutations == 0`. Capped at `maximum_delay`.
 #[must_use]
 pub fn consume_controller_mutation_quota(
     image: &MetadataImage,
@@ -21,7 +20,8 @@ pub fn consume_controller_mutation_quota(
     principal: &str,
     client_id: &str,
     mutations: u64,
-) -> Duration {
+    maximum_delay: Time,
+) -> Time {
     consume_configured_quota(
         QuotaConsumption {
             image,
@@ -33,13 +33,15 @@ pub fn consume_controller_mutation_quota(
         },
         |_| {},
         |rate| Some(positive_f64_to_u64(rate)),
-        |overage, rate, _| Duration::from_secs_f64(u64_to_f64(overage) / rate),
+        |overage, rate, _| Time::from_secs_f64(u64_to_f64(overage) / rate),
+        maximum_delay,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::{millis, secs};
 
     use super::*;
     use crate::quota::test_support::image_with_quota as quota_image;
@@ -52,8 +54,8 @@ mod tests {
     fn zero_mutations_returns_zero_delay() {
         let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
         let buckets = QuotaBuckets::new();
-        let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 0);
-        assert!(delay == Duration::ZERO);
+        let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 0, secs(1));
+        assert!(delay == <Time as TimeExt>::ZERO);
     }
 
     #[test]
@@ -62,8 +64,8 @@ mod tests {
         // 5 mutations consumed → bucket has 5 left → no overage.
         let img = img_with_quota(vec![("user", Some("alice"))], 10.0);
         let buckets = QuotaBuckets::new();
-        let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 5);
-        assert!(delay == Duration::ZERO);
+        let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 5, secs(1));
+        assert!(delay == <Time as TimeExt>::ZERO);
     }
 
     #[test]
@@ -72,7 +74,17 @@ mod tests {
         // → capped at 1s.
         let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
         let buckets = QuotaBuckets::new();
-        let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 100);
-        assert!(delay == Duration::from_secs(1));
+        let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 100, secs(1));
+        assert!(delay == secs(1));
+    }
+
+    #[test]
+    fn overage_uses_configured_maximum_delay() {
+        let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
+        let buckets = QuotaBuckets::new();
+
+        let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 100, millis(25));
+
+        assert!(delay == millis(25));
     }
 }

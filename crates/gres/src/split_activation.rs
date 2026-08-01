@@ -339,6 +339,7 @@ impl LiveMultiRangeTransfer {
                     persisted_max_ts,
                     self.config.timestamp_source_mode,
                     self.config.hlc_wall_offset_ms,
+                    &self.config.range_runtime_policy,
                 )
                 .map_err(|error| {
                     crabka_gres_ranges::RangeTransferError::Runtime {
@@ -942,12 +943,7 @@ pub(super) async fn discover_activation_receipt(
     let tenant = crabka_gres_ranges::TenantName::parse(config.tenant.clone()).map_err(|error| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("tenant: {error}"))
     })?;
-    let recovery = crabka_gres_substrate::LiveRecoveryConfig::new(
-        config.bootstrap.clone(),
-        tenant,
-        RangeId::COORDINATOR,
-        config.kafka_security.clone(),
-    );
+    let recovery = config.live_recovery_config(tenant, RangeId::COORDINATOR);
     crabka_gres_substrate::ensure_live_wal_topic(&recovery)
         .await
         .map_err(|error| std::io::Error::other(format!("activation discovery topic: {error}")))?;
@@ -1787,15 +1783,15 @@ async fn complete_post_activation(
                 cache_nonce,
             ))
         });
-        let target_store = open_substrate_range_cache(cache.as_deref(), target.range_id)?;
-        let mut recovery = crabka_gres_substrate::LiveRecoveryConfig::new(
-            config.bootstrap.clone(),
-            predecessor.resources.recovery_config.tenant.clone(),
-            target.range_id,
-            config.kafka_security.clone(),
-        )
-        .with_wal_generation(target.wal_generation)
-        .with_optional_advertised_endpoint(config.advertised_endpoint.clone());
+        let target_store =
+            open_substrate_range_cache(cache.as_deref(), target.range_id, config.pgkv_options)?;
+        let mut recovery = config
+            .live_recovery_config(
+                predecessor.resources.recovery_config.tenant.clone(),
+                target.range_id,
+            )
+            .with_wal_generation(target.wal_generation)
+            .with_optional_advertised_endpoint(config.advertised_endpoint.clone());
         let recovery_checkpoints = if target.bootstrap_checkpoint.is_some() {
             checkpoint_store.clone()
         } else {

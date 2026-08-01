@@ -12,6 +12,7 @@ use crabka_promql::{
     EngineOpts, InMemoryMetricStore, PrometheusApiState, QueryFrontendOptions,
     RulerAlertStateRecord, RulerGroupStateRecord, prometheus_router,
 };
+use crabka_units::prelude::*;
 use prost::Message;
 use serde_json::Value;
 use snap::raw::{Decoder as SnappyDecoder, Encoder as SnappyEncoder};
@@ -532,7 +533,7 @@ async fn query_range_endpoint_can_use_query_frontend_split_and_merge() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 1,
             },
         ),
@@ -616,7 +617,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_sum() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -654,7 +655,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_avg() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -692,7 +693,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_stdvar() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -743,7 +744,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_topk() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -799,7 +800,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_min() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -836,7 +837,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_max() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -873,7 +874,7 @@ async fn query_range_endpoint_query_frontend_reduces_sharded_group() {
     let state = Arc::new(
         PrometheusApiState::new(Arc::new(store), EngineOpts::default()).with_query_frontend(
             QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: millis(60_000),
                 shard_count: 2,
             },
         ),
@@ -3300,6 +3301,26 @@ async fn query_exemplars_endpoint_rejects_end_before_start() {
 }
 
 #[tokio::test]
+async fn remote_read_endpoint_applies_configured_body_cap() {
+    let state = Arc::new(
+        PrometheusApiState::new(Arc::new(InMemoryMetricStore::new()), EngineOpts::default())
+            .with_remote_read_max_body(bytes(1)),
+    );
+    let response = prometheus_router(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/read")
+                .body(Body::from(vec![0_u8; 2]))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert2::assert!(response.status() == StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[tokio::test]
 async fn remote_read_endpoint_returns_snappy_protobuf_response() {
     let state = Arc::new(PrometheusApiState::new(
         Arc::new(InMemoryMetricStore::new()),
@@ -4753,10 +4774,14 @@ async fn status_buildinfo_endpoint_returns_prometheus_envelope() {
 
 #[tokio::test]
 async fn status_flags_endpoint_returns_prometheus_flag_strings() {
-    let state = Arc::new(PrometheusApiState::new(
-        Arc::new(InMemoryMetricStore::new()),
-        EngineOpts::default(),
-    ));
+    let opts = EngineOpts {
+        lookback_delta: minutes(7),
+        ..EngineOpts::default()
+    };
+    let state = Arc::new(
+        PrometheusApiState::new(Arc::new(InMemoryMetricStore::new()), opts)
+            .with_max_concurrent_queries(11),
+    );
     let app = prometheus_router(state);
 
     let response = app
@@ -4772,7 +4797,8 @@ async fn status_flags_endpoint_returns_prometheus_flag_strings() {
     assert2::assert!(response.status() == StatusCode::OK);
     let body = response_json(response).await;
     assert2::assert!(body["status"].as_str() == Some("success"));
-    assert2::assert!(body["data"]["query.lookback-delta"].as_str() == Some("5m"));
+    assert2::assert!(body["data"]["query.lookback-delta"].as_str() == Some("7m"));
+    assert2::assert!(body["data"]["query.max-concurrency"].as_str() == Some("11"));
     assert2::assert!(body["data"]["log.level"].as_str().is_some());
 }
 

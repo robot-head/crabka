@@ -1,7 +1,8 @@
 //! Error type for `crabka-client-core`.
 
-use std::{net::SocketAddr, time::Duration};
+use std::net::SocketAddr;
 
+use crabka_units::{Time, fmt::Human as _};
 use thiserror::Error;
 
 /// Errors returned by `Client`, `Connection`, and the broker pool.
@@ -18,8 +19,11 @@ pub enum ClientError {
     #[error("connection closed")]
     Disconnected,
 
-    #[error("request timed out after {0:?}")]
-    Timeout(Duration),
+    #[error("invalid client configuration: {0}")]
+    InvalidConfig(String),
+
+    #[error("request timed out after {}", .0.human())]
+    Timeout(Time),
 
     #[error(
         "incompatible version: broker supports {broker_min}..={broker_max}, \
@@ -51,7 +55,7 @@ mod tests {
 
     #[test]
     fn display_is_useful() {
-        let e = ClientError::Timeout(Duration::from_secs(5));
+        let e = ClientError::Timeout(crabka_units::secs(5));
         assert!(e.to_string() == "request timed out after 5s");
     }
 

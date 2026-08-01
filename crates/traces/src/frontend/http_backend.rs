@@ -18,6 +18,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use crabka_units::convert::TimeExt as _;
 use tokio_util::sync::CancellationToken;
 
 use crate::frontend::{
@@ -412,7 +413,7 @@ pub async fn run_query_frontend(
     catalog: TraceIndexCatalog,
     shutdown: CancellationToken,
 ) -> std::io::Result<()> {
-    let backend = HttpQuerier::new(cfg.querier_addrs.clone(), cfg.request_timeout)
+    let backend = HttpQuerier::new(cfg.querier_addrs.clone(), cfg.request_timeout.to_std())
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     let listen_addr = cfg.listen_addr;
     let qf = Arc::new(crate::frontend::QueryFrontend::new(

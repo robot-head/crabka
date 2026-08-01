@@ -7,11 +7,34 @@
 
 use std::sync::OnceLock;
 
+use crabka_units::prelude::*;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
     registry::Registry,
 };
+
+/// Latency histogram bucket boundaries, 1 ms – 5 s: the Go Prometheus defaults
+/// adapted for sub-second Kafka produce round-trips. Shared by the produce-path
+/// and the per-method request histograms.
+const LATENCY_BUCKETS: [Time; 11] = [
+    millis(1),
+    millis(5),
+    millis(10),
+    millis(25),
+    millis(50),
+    millis(100),
+    millis(250),
+    millis(500),
+    secs(1),
+    millis(2_500),
+    secs(5),
+];
+
+/// The bucket boundaries as the seconds `prometheus-client` samples in.
+fn latency_buckets() -> impl Iterator<Item = f64> {
+    LATENCY_BUCKETS.into_iter().map(TimeExt::secs_f64)
+}
 
 /// Label for send/webhook result (`"ok"`, `"error"`, `"unauthorized"`, …).
 #[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
@@ -86,11 +109,7 @@ impl GatewayMetrics {
             sends_total.clone(),
         );
 
-        // Latency buckets cover 1 ms – 5 s, matching the Go Prometheus
-        // defaults adapted for sub-second Kafka produce round-trips.
-        let produce_latency_seconds = Histogram::new([
-            0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
-        ]);
+        let produce_latency_seconds = Histogram::new(latency_buckets());
         registry.register(
             "produce_latency_seconds",
             "End-to-end produce latency in seconds (histogram), from \
@@ -172,12 +191,10 @@ impl GatewayMetrics {
 
         // A Histogram family: `prometheus-client` needs a constructor closure
         // because `Histogram` is not `Default` (each series is seeded with the
-        // same 1 ms – 5 s buckets used for the produce-latency histogram).
+        // same buckets used for the produce-latency histogram).
         let request_duration_seconds =
             Family::<MethodLabel, Histogram>::new_with_constructor(|| {
-                Histogram::new([
-                    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0,
-                ])
+                Histogram::new(latency_buckets())
             });
         registry.register(
             "request_duration_seconds",
@@ -225,9 +242,10 @@ impl GatewayMetrics {
             .inc();
     }
 
-    /// Record an end-to-end produce latency observation (seconds).
-    pub fn observe_produce_latency(&self, secs: f64) {
-        self.produce_latency_seconds.observe(secs);
+    /// Record an end-to-end produce latency observation. Prometheus samples
+    /// are floats, so the extent is converted to seconds here.
+    pub fn observe_produce_latency(&self, latency: Time) {
+        self.produce_latency_seconds.observe(latency.secs_f64());
     }
 
     /// Bump the deduplication-cache hit counter.
@@ -298,14 +316,14 @@ impl GatewayMetrics {
         self.dead_letter_total.inc();
     }
 
-    /// Observe an end-to-end handler latency (seconds) for `method`
-    /// (`"send"`, `"webhook_in"`, `"produce_http"`).
-    pub fn observe_request_duration(&self, method: &str, secs: f64) {
+    /// Observe an end-to-end handler latency for `method` (`"send"`,
+    /// `"webhook_in"`, `"produce_http"`).
+    pub fn observe_request_duration(&self, method: &str, latency: Time) {
         self.request_duration_seconds
             .get_or_create(&MethodLabel {
                 method: method.into(),
             })
-            .observe(secs);
+            .observe(latency.secs_f64());
     }
 
     /// Increment the in-flight-requests gauge (call at handler entry).
@@ -347,7 +365,7 @@ pub struct RequestGuard {
 impl Drop for RequestGuard {
     fn drop(&mut self) {
         self.metrics
-            .observe_request_duration(self.method, self.start.elapsed().as_secs_f64());
+            .observe_request_duration(self.method, self.start.elapsed().as_time());
         self.metrics.dec_inflight();
     }
 }
@@ -440,7 +458,7 @@ mod tests {
         let m = fresh();
 
         m.record_send("ok");
-        m.observe_produce_latency(0.042);
+        m.observe_produce_latency(millis(42));
         m.record_dedup_hit();
         m.record_forward("ok");
         m.record_txn("commit");
@@ -450,7 +468,7 @@ mod tests {
         m.record_webhook_out("delivered");
         m.record_webhook_retry();
         m.record_dead_letter();
-        m.observe_request_duration("send", 0.01);
+        m.observe_request_duration("send", millis(10));
         m.inc_inflight();
 
         let buf = encode(&m);
@@ -481,9 +499,9 @@ mod tests {
     #[test]
     fn request_duration_labelled_per_method_and_inflight_moves() {
         let m = fresh();
-        m.observe_request_duration("send", 0.01);
-        m.observe_request_duration("send", 0.5);
-        m.observe_request_duration("webhook_in", 0.02);
+        m.observe_request_duration("send", millis(10));
+        m.observe_request_duration("send", millis(500));
+        m.observe_request_duration("webhook_in", millis(20));
 
         let buf = encode(&m);
         assert2::assert!(buf.contains("method=\"send\""));
@@ -529,8 +547,8 @@ mod tests {
     #[test]
     fn histogram_observe_appears_in_output() {
         let m = fresh();
-        m.observe_produce_latency(0.01);
-        m.observe_produce_latency(0.5);
+        m.observe_produce_latency(millis(10));
+        m.observe_produce_latency(millis(500));
         let buf = encode(&m);
         assert2::assert!(buf.contains("crabka_gateway_produce_latency_seconds_bucket"));
         assert2::assert!(buf.contains("crabka_gateway_produce_latency_seconds_count"));

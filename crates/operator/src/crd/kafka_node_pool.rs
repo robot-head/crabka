@@ -1,3 +1,4 @@
+use crabka_units::ByteSize;
 use k8s_openapi::api::core::v1::ResourceRequirements;
 use kube::CustomResource;
 use schemars::JsonSchema;
@@ -41,6 +42,20 @@ pub struct KafkaNodePoolSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<ResourceRequirements>,
 
+    /// Kafka client request-dispatch queue capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub client_dispatch_queue_capacity: Option<usize>,
+
+    /// Maximum accepted Kafka client frame size.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub client_frame_max: Option<ByteSize>,
+
     /// Optional pod-level customization applied to every pod in this pool.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<PodTemplate>,
@@ -49,6 +64,30 @@ pub struct KafkaNodePoolSpec {
     /// default). See [`Storage`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<Storage>,
+}
+
+impl KafkaNodePoolSpec {
+    pub(crate) fn client_resource_policy(
+        &self,
+    ) -> Result<
+        (
+            Option<crabka_client_core::ConnectionDispatchQueueCapacity>,
+            Option<crabka_client_core::ClientFrameMax>,
+        ),
+        String,
+    > {
+        let queue = self
+            .client_dispatch_queue_capacity
+            .map(crabka_client_core::ConnectionDispatchQueueCapacity::new)
+            .transpose()
+            .map_err(|error| format!("spec.clientDispatchQueueCapacity: {error}"))?;
+        let frame = self
+            .client_frame_max
+            .map(crabka_client_core::ClientFrameMax::try_from)
+            .transpose()
+            .map_err(|error| format!("spec.clientFrameMax: {error}"))?;
+        Ok((queue, frame))
+    }
 }
 
 const fn default_replicas() -> i32 {
@@ -249,6 +288,8 @@ mod tests {
                 node_id_start: 0,
                 image: None,
                 resources: None,
+                client_dispatch_queue_capacity: None,
+                client_frame_max: None,
                 template: None,
                 storage: None,
             },
@@ -277,10 +318,64 @@ mod tests {
                 node_id_start: 0,
                 image: None,
                 resources: None,
+                client_dispatch_queue_capacity: None,
+                client_frame_max: None,
                 template: None,
                 storage: None,
             }
         );
+    }
+
+    #[test]
+    fn client_policy_round_trips_has_schema_and_validates() {
+        let json = r#"{
+            "roles":["Controller","Broker"],
+            "nodeIdStart":0,
+            "clientDispatchQueueCapacity":7,
+            "clientFrameMax":"32KiB"
+        }"#;
+        let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
+        let (queue, frame) = spec
+            .client_resource_policy()
+            .expect("valid broker client policy");
+        assert!(queue.expect("queue").get() == 7);
+        assert!(frame.expect("frame").size() == crabka_units::kibibytes(32));
+        assert!(
+            serde_json::from_str::<KafkaNodePoolSpec>(&serde_json::to_string(&spec).unwrap())
+                .unwrap()
+                == spec
+        );
+
+        let crd = serde_json::to_value(KafkaNodePool::crd()).expect("serialize CRD");
+        let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"];
+        assert!(properties["clientDispatchQueueCapacity"]["minimum"].as_f64() == Some(1.0));
+        assert!(properties["clientFrameMax"]["type"] == "string");
+
+        for (json, path) in [
+            (
+                r#"{"roles":["Broker"],"nodeIdStart":0,"clientDispatchQueueCapacity":0}"#,
+                "spec.clientDispatchQueueCapacity",
+            ),
+            (
+                r#"{"roles":["Broker"],"nodeIdStart":0,"clientFrameMax":"0B"}"#,
+                "spec.clientFrameMax",
+            ),
+            (
+                r#"{"roles":["Broker"],"nodeIdStart":0,"clientFrameMax":"1.5B"}"#,
+                "spec.clientFrameMax",
+            ),
+            (
+                r#"{"roles":["Broker"],"nodeIdStart":0,"clientFrameMax":"101MiB"}"#,
+                "spec.clientFrameMax",
+            ),
+        ] {
+            let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
+            let error = spec
+                .client_resource_policy()
+                .expect_err("invalid broker client policy");
+            assert!(error.contains(path), "got: {error}");
+        }
     }
 
     #[test]
@@ -326,6 +421,8 @@ mod tests {
                 node_id_start: 0,
                 image: None,
                 resources: None,
+                client_dispatch_queue_capacity: None,
+                client_frame_max: None,
                 template: Some(template),
                 storage: None,
             },
@@ -349,6 +446,8 @@ mod tests {
                 node_id_start: 0,
                 image: None,
                 resources: None,
+                client_dispatch_queue_capacity: None,
+                client_frame_max: None,
                 template: None,
                 storage: Some(Storage::Ephemeral),
             },
@@ -372,6 +471,8 @@ mod tests {
                 node_id_start: 0,
                 image: None,
                 resources: None,
+                client_dispatch_queue_capacity: None,
+                client_frame_max: None,
                 template: None,
                 storage: Some(Storage::PersistentClaim(PersistentClaimSpec {
                     size: "10Gi".into(),
@@ -410,6 +511,8 @@ mod tests {
                 node_id_start: 0,
                 image: None,
                 resources: None,
+                client_dispatch_queue_capacity: None,
+                client_frame_max: None,
                 template: None,
                 storage: Some(Storage::Jbod(JbodSpec {
                     volumes: vec![

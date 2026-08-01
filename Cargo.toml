@@ -47,11 +47,13 @@ promql-parser = { version = "0.10", features = ["ser"] }
 columnar = "0.13"
 bytes = "1"
 num-traits = "0.2.19"
+uom = { version = "0.38", default-features = false, features = ["autoconvert", "f64", "si", "std", "use_serde"] }
 thiserror = "2"
 # Derive boilerplate for domain newtypes (Display/From/Into/Deref/AsRef/
 # Constructor/FromStr and numeric ops) so wrappers over wire/domain primitives
 # stay one-liners. See docs/style_guides/code_style_guide.md#newtypes-for-domain-values.
 derive_more = { version = "2", features = ["display", "from", "into", "deref", "as_ref", "constructor", "from_str", "add", "add_assign", "mul", "sum"] }
+refined_type = "0.6"
 jsonpath-rust = "1.0"
 jfrs = "0.2.5"
 proptest = "1"
@@ -195,6 +197,7 @@ rcgen = { version = "0.14", default-features = false, features = ["pem", "ring",
 sspi = { version = "=0.21.3", default-features = false, features = ["network_client", "ring"] }
 crabka-audit = { path = "crates/audit", version = "0.3.8" }
 crabka-security = { path = "crates/security", version = "0.3.9" }
+crabka-units = { path = "crates/units", version = "0.3.9" }
 kube = { version = "4.0", default-features = false, features = ["client", "runtime", "derive", "rustls-tls"] }
 k8s-openapi = { version = "0.28", default-features = false, features = ["v1_32"] }
 schemars = "1.2"

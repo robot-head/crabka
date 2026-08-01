@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 
 use crabka_security::{KafkaPrincipal, SaslMechanism, ScramCredential};
+use crabka_units::{ByteRate, convert::ByteRateExt};
 use uuid::Uuid;
 
 use crate::{
@@ -256,18 +257,18 @@ impl MetadataImage {
         self.broker_configs.get(&node_id)
     }
 
-    /// Returns the throttle rate in bytes/sec for `node_id` and `kind`.
-    /// Returns `None` if the config key is absent, unparseable, or is `-1`
-    /// (Kafka convention for "disabled / unlimited").
+    /// Returns the KIP-73 throttle rate for `node_id` and `kind`.
+    /// Returns `None` if the config key is absent, unparseable, or negative —
+    /// `-1` is Kafka's convention for "disabled / unlimited".
     #[must_use]
-    pub fn broker_throttle_rate(&self, node_id: NodeId, kind: ThrottleKind) -> Option<u64> {
+    pub fn broker_throttle_rate(&self, node_id: NodeId, kind: ThrottleKind) -> Option<ByteRate> {
         let key = match kind {
             ThrottleKind::Leader => "leader.replication.throttled.rate",
             ThrottleKind::Follower => "follower.replication.throttled.rate",
         };
         let raw = self.broker_config(node_id)?.get(key)?;
         let v: i64 = raw.parse().ok()?;
-        u64::try_from(v).ok()
+        (v >= 0).then(|| ByteRate::from_bytes_per_sec(v))
     }
 
     /// Override map for a single KIP-714 client-metrics subscription.
@@ -996,6 +997,8 @@ impl MetadataImage {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::bytes_per_sec;
+
     use super::*;
 
     /// `record_variant` maps each enum variant to its exact discriminant
@@ -2283,7 +2286,29 @@ mod tests {
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         }));
-        assert2::assert!(img.broker_throttle_rate(NodeId(1), ThrottleKind::Leader) == Some(2048));
+        assert2::assert!(
+            img.broker_throttle_rate(NodeId(1), ThrottleKind::Leader) == Some(bytes_per_sec(2048))
+        );
+    }
+
+    /// The config value is a `String` holding Kafka's `int64` quota, and the
+    /// quantity stores `f64`. Every magnitude below 2^53 round-trips exactly,
+    /// which covers the whole range the config key can express in practice —
+    /// pinned here so the accessor is not quietly lossy at the top end.
+    #[test]
+    fn broker_throttle_rate_round_trips_large_quotas_exactly() {
+        for raw in ["0", "1", "1073741824", "9007199254740992"] {
+            let mut img = MetadataImage::new(uuid::Uuid::nil());
+            img.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                node_id: NodeId(7),
+                config_name: "follower.replication.throttled.rate".into(),
+                config_value: Some(raw.into()),
+            }));
+            let rate = img
+                .broker_throttle_rate(NodeId(7), ThrottleKind::Follower)
+                .expect("configured rate");
+            assert2::check!(rate.bytes_per_sec_i64().to_string() == raw);
+        }
     }
 
     #[test]
@@ -2757,7 +2782,10 @@ mod tests {
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("0".into()),
         }));
-        assert2::assert!(image.broker_throttle_rate(NodeId(3), ThrottleKind::Leader) == Some(0));
+        assert2::assert!(
+            image.broker_throttle_rate(NodeId(3), ThrottleKind::Leader)
+                == Some(<ByteRate as ByteRateExt>::ZERO)
+        );
     }
 
     #[test]

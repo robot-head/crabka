@@ -37,6 +37,7 @@ crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
 crabka-protocol = { version = "0.3.9", path = "../protocol" }
 crabka-security = { version = "0.3.9", path = "../security" }
+crabka-units = { workspace = true }
 derive_more = { workspace = true }
 exponential-backoff = "2.1.0"
 futures = { workspace = true }
@@ -49,6 +50,7 @@ num-traits = { workspace = true }
 # don't need; the report emits self-contained HTML that loads Plotly from CDN).
 plotly = { version = "0.14", default-features = false }
 reqwest = { version = "0.13", default-features = false, features = ["rustls", "json", "query"] }
+refined_type = { workspace = true }
 rustls = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -59,5 +61,12 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+# Runs bench/scenarios/*.yaml as one test process per file, so a scenario that
+# stops parsing names itself.
+datatest-stable = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }
+
+[[test]]
+name = "scenario_files"
+harness = false

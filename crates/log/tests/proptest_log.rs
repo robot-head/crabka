@@ -4,9 +4,14 @@ mod support;
 
 use crabka_ids::Offset;
 use crabka_log::{Log, LogConfig};
+use crabka_units::prelude::{ByteSize, gibibytes};
 use proptest::prelude::*;
 use support::strategies::arb_batches;
 use tempfile::tempdir;
+
+/// A read budget larger than anything these properties generate, so the byte
+/// budget never clips the result.
+const NO_LIMIT: ByteSize = gibibytes(4);
 
 proptest! {
     /// Appending an arbitrary list of batches and then reading the whole
@@ -20,7 +25,7 @@ proptest! {
             expected_record_count += b.records.len();
             log.append(&mut b).unwrap();
         }
-        let out = log.read(Offset(0), usize::MAX).unwrap();
+        let out = log.read(Offset(0), NO_LIMIT).unwrap();
         let actual_record_count: usize = out.batches.iter().map(|b| b.records.len()).sum();
         prop_assert_eq!(actual_record_count, expected_record_count);
     }
@@ -53,6 +58,6 @@ proptest! {
             "log_end_offset {after} > trunc_to {trunc_to}"
         );
         // Reading post-truncation must succeed.
-        let _ = log.read(log.log_start_offset(), usize::MAX).unwrap();
+        let _ = log.read(log.log_start_offset(), NO_LIMIT).unwrap();
     }
 }

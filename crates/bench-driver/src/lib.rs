@@ -1,11 +1,3 @@
-// Benchmark drivers do a lot of `as u64` on Unix nanos / millis where
-// precision loss past i64::MAX is irrelevant; silence pedantic casts
-// at the crate root rather than at each call site. Likewise,
-// `format!(...)` appended to a building Markdown string reads more
-// linearly than the equivalent `write!(out, ...).unwrap()` chain, and
-// the orchestrator function in `workload::run` is intentionally one
-// long top-to-bottom narrative.
-
 //! Load driver + report aggregator for the Crabka vs Strimzi benchmark
 //! harness on Kubernetes.
 //!
@@ -25,11 +17,22 @@
 //!   groups them by scenario name, and emits a side-by-side Markdown
 //!   summary.
 //!
+//! ## Dimensioned values
+//!
+//! Sizes, durations, and rates are [`crabka_units`] quantities throughout, not
+//! bare numbers: a scenario's `msg_size` is a `ByteSize`, its `linger` and
+//! `duration` are a `Time`, and a paced run's `rate` is a `Frequency`. The
+//! operator writes them with units (`512B`, `5ms`, `20000/s`) and the measured
+//! `RunOutput` encodes them as exact integers. See [`scenario`] for the
+//! encoding of each field and [`docs/uom-adoption.md`] for the vocabulary.
+//!
+//! [`docs/uom-adoption.md`]: https://github.com/robot-head/crabka/blob/main/docs/uom-adoption.md
+//!
 //! ## Command-line workflow
 //!
 //! ```text
 //! crabka-bench-driver \
-//!   --scenario bench/scenarios/steady_1p1r.toml \
+//!   --scenario bench/scenarios/small-msg-saturate.yaml \
 //!   --stack crabka \
 //!   --namespace kafka-bench \
 //!   --out runs/crabka-steady.json

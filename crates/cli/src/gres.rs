@@ -2,43 +2,165 @@
 
 use std::{
     io::Read as _,
+    num::NonZeroU16,
     path::{Path, PathBuf},
 };
 
 use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use crabka_client_admin::{
-    AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType, ScramUpsertion,
+    AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType,
+    ScramIterations, ScramUpsertion,
 };
-use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+use crabka_client_core::{
+    ClientFrameMax, ConnectionDispatchQueueCapacity, FetchMinBytes,
+    security::{ClientSecurity, SaslCredentials},
+};
 use crabka_gres_balancer::{
     BalanceOperation, BalancerConfig, ExecutionPolicy, ExecutionReport, Planner, TenantMetrics,
     UnsupportedExecutor, execute_plan,
 };
 use crabka_gres_control::{
-    HashPlacement, PgdogGeneral, PgdogRenderInput, PgdogUser, RangeBoundary, RangeLayoutEntry,
-    RangeLayoutSplit, RangeLifecycle, Registry, SplitOperationPlan, SplitOperationRecord, SqlUser,
+    HashPlacement, PgdogConnectAttempts, PgdogGeneral, PgdogPoolerMode, PgdogRenderInput,
+    PgdogUser, RangeBoundary, RangeLayoutEntry, RangeLayoutSplit, RangeLifecycle, Registry,
+    RegistryPolicy, RegistryReplicationFactor, SplitOperationPlan, SplitOperationRecord, SqlUser,
     TenantEndpoint, TenantId, TenantName, TenantRecord, TenantState, render_pgdog_toml,
     render_users_toml, tenant_config_topic,
 };
 use crabka_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
+use crabka_units::{ByteSize, Time};
 use serde::Serialize;
 
 const EXIT_OK: i32 = 0;
 const EXIT_ERROR: i32 = 1;
-const DEFAULT_WAL_REPLICATION: i32 = 1;
-const DEFAULT_SCRAM_ITERATIONS: u32 = 4096;
 const DEFAULT_BACKEND_PORT: u16 = 5432;
-// Equality routing looks a hash bucket up at rowid 0 and answers for the whole
-// bucket, so cutting a range inside a bucket would leave half its rows on a
-// range the router never consults.
-const HASH_SPLIT_ROWID_ERROR: &str = "ROWID must be 0 for a hash-sharded table split; \
-     a split inside a hash bucket would leave that bucket owned by two ranges and hide half \
-     its rows from equality routing";
 
 #[derive(Args, Debug)]
 pub struct GresArgs {
+    #[command(flatten)]
+    registry: RegistryOptions,
     #[command(subcommand)]
     command: GresCommand,
+}
+
+#[derive(Args, Debug)]
+struct RegistryOptions {
+    #[arg(
+        long = "client-dispatch-queue-capacity",
+        env = "CRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    #[arg(
+        long = "client-frame-max",
+        env = "CRABKA_GRES_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
+    #[arg(
+        long = "registry-reader-fetch-min",
+        env = "CRABKA_GRES_REGISTRY_READER_FETCH_MIN",
+        default_value = "1B",
+        value_parser = parse_fetch_min
+    )]
+    registry_reader_fetch_min: ByteSize,
+    #[arg(
+        long = "registry-replication-factor",
+        env = "CRABKA_GRES_REGISTRY_REPLICATION_FACTOR",
+        default_value = "1"
+    )]
+    replication_factor: RegistryReplicationFactor,
+    #[arg(
+        long = "registry-topic-create-timeout",
+        env = "CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT",
+        default_value = "15s",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    topic_create_timeout: Time,
+    #[arg(
+        long = "registry-reader-retry-backoff",
+        env = "CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF",
+        default_value = "250ms",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    reader_retry_backoff: Time,
+    #[arg(
+        long = "registry-fetch-max-wait",
+        env = "CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT",
+        default_value = "500ms",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    fetch_max_wait: Time,
+    #[arg(
+        long = "registry-fetch-partition-max",
+        env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX",
+        default_value = "1MiB",
+        value_parser = crabka_units::parse::positive_byte_size
+    )]
+    fetch_partition_max: ByteSize,
+    #[arg(
+        long = "registry-producer-dns-timeout",
+        env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    producer_dns_timeout: Option<Time>,
+    #[arg(
+        long = "registry-reader-admin-dns-timeout",
+        env = "CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    reader_admin_dns_timeout: Option<Time>,
+}
+
+impl RegistryOptions {
+    fn policy(&self) -> RegistryPolicy {
+        let defaults = RegistryPolicy::default();
+
+        RegistryPolicy::new(
+            self.replication_factor.into_value(),
+            self.topic_create_timeout,
+            self.reader_retry_backoff,
+            self.fetch_max_wait,
+            self.fetch_partition_max,
+        )
+        .expect("validated registry options")
+        .with_producer_dns_timeout(
+            self.producer_dns_timeout
+                .unwrap_or_else(|| defaults.producer_dns_timeout().time()),
+        )
+        .expect("validated registry producer DNS timeout")
+        .with_reader_admin_dns_timeout(
+            self.reader_admin_dns_timeout
+                .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
+        )
+        .expect("validated registry reader/admin DNS timeout")
+        .with_client_resource_policy(
+            ConnectionDispatchQueueCapacity::new(self.client_dispatch_queue_capacity)
+                .expect("validated client dispatch queue capacity"),
+            ClientFrameMax::try_from(self.client_frame_max)
+                .expect("validated client frame maximum"),
+            FetchMinBytes::try_from(self.registry_reader_fetch_min)
+                .expect("validated registry reader fetch minimum"),
+        )
+    }
+}
+
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    ConnectionDispatchQueueCapacity::new(value).map(ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    ClientFrameMax::try_from(value).map(ClientFrameMax::size)
+}
+
+fn parse_fetch_min(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    FetchMinBytes::try_from(value).map(FetchMinBytes::size)
 }
 
 #[derive(Subcommand, Debug)]
@@ -105,17 +227,20 @@ struct CreateTenantArgs {
     #[arg(long)]
     password_stdin: bool,
     /// WAL topic replication factor for this tenant.
-    #[arg(long, default_value_t = DEFAULT_WAL_REPLICATION)]
-    wal_replication: i32,
+    #[arg(long, env = "CRABKA_GRES_WAL_REPLICATION", default_value = "1")]
+    wal_replication: RegistryReplicationFactor,
+    /// PBKDF2 iteration count for the tenant's Kafka and `PostgreSQL` SCRAM credentials.
+    #[arg(long, env = "CRABKA_GRES_SCRAM_ITERATIONS", default_value = "4096")]
+    scram_iterations: ScramIterations,
     /// Optional object-store prefix for tenant checkpoints.
     #[arg(long)]
     bucket_prefix: Option<String>,
     /// Optional frame threshold for checkpointing.
     #[arg(long)]
     checkpoint_frames: Option<u64>,
-    /// Optional byte threshold for checkpointing.
-    #[arg(long)]
-    checkpoint_bytes: Option<u64>,
+    /// Optional size threshold for checkpointing.
+    #[arg(long, value_parser = crabka_units::parse::positive_byte_size)]
+    checkpoint_size: Option<ByteSize>,
     /// Idle seconds before automatic suspension. Zero means never.
     #[arg(long)]
     idle_seconds: Option<u64>,
@@ -147,23 +272,85 @@ struct BootstrapArgs {
 #[derive(Args, Debug)]
 struct RenderPgdogArgs {
     /// Kafka bootstrap address used for the Gres registry.
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_GRES_PGDOG_BOOTSTRAP")]
     bootstrap: String,
     /// Directory that will receive pgdog.toml and users.toml.
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_GRES_PGDOG_OUT_DIR")]
     out_dir: PathBuf,
     /// Suspended-tenant activator route as host:port.
-    #[arg(long, value_parser = parse_activator)]
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_ACTIVATOR",
+        value_parser = parse_activator
+    )]
     activator: Option<(String, u16)>,
     /// Client-facing `PgDog` listen port.
-    #[arg(long, default_value_t = 6432)]
-    listen_port: u16,
+    #[arg(long, env = "CRABKA_GRES_PGDOG_LISTEN_PORT", default_value = "6432")]
+    listen_port: NonZeroU16,
     /// Client-facing TLS certificate path as visible inside the `PgDog` runtime.
-    #[arg(long, requires = "tls_private_key")]
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_TLS_CERTIFICATE",
+        requires = "tls_private_key"
+    )]
     tls_certificate: Option<PathBuf>,
     /// Client-facing TLS private-key path as visible inside the `PgDog` runtime.
-    #[arg(long, requires = "tls_certificate")]
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_TLS_PRIVATE_KEY",
+        requires = "tls_certificate"
+    )]
     tls_private_key: Option<PathBuf>,
+    /// Client CA path as visible inside the `PgDog` runtime.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_TLS_CLIENT_CA_CERTIFICATE",
+        requires_all = ["tls_certificate", "tls_private_key"]
+    )]
+    tls_client_ca_certificate: Option<PathBuf>,
+    /// Fleet-wide backend connection pooling mode.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_POOLER_MODE",
+        default_value = "transaction",
+        value_parser = parse_pgdog_pooler_mode
+    )]
+    pooler_mode: PgdogPoolerMode,
+    /// Number of backend connection attempts.
+    #[arg(long, env = "CRABKA_GRES_PGDOG_CONNECT_ATTEMPTS", default_value = "3")]
+    connect_attempts: PgdogConnectAttempts,
+    /// Maximum acceptable tenant wake latency.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_COLD_START_CEILING",
+        default_value = "30s",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    cold_start_ceiling: Time,
+    /// Normal pooled-server idle timeout.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_IDLE_TIMEOUT",
+        default_value = "60s",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    idle_timeout: Time,
+    /// Pooled-server idle timeout when at least one tenant may suspend.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT",
+        default_value = "1s",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    suspension_idle_timeout: Time,
+    /// Maximum pooled backend connection lifetime.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGDOG_SERVER_LIFETIME",
+        default_value = "5m",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    server_lifetime: Time,
 }
 
 #[derive(Args, Debug)]
@@ -175,8 +362,7 @@ struct SplitRangeArgs {
     tenant: String,
     /// Table identifier that starts the successor range.
     table: u64,
-    /// Row identifier at the split point. Must be 0 for a hash-sharded table,
-    /// whose ranges may only be cut on a bucket start.
+    /// Row identifier at the split point.
     rowid: u64,
     /// Hash bucket at the split point; required exactly for hash-sharded tables.
     #[arg(long)]
@@ -256,7 +442,9 @@ enum BalanceExecuteMode {
     Validate,
 }
 
-#[derive(Debug, serde::Deserialize, PartialEq, Eq)]
+/// `Eq` is deliberately absent: the balancer's byte thresholds are quantities,
+/// whose `f64` storage is only `PartialEq`.
+#[derive(Debug, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 struct BalanceDryRunInput {
     #[serde(default)]
@@ -282,7 +470,7 @@ struct BalanceApplyOutput {
     report: ExecutionReport,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq)]
 struct RedactedTenantRecord {
     record_version: u64,
     id: String,
@@ -293,7 +481,8 @@ struct RedactedTenantRecord {
     wal_replication: i32,
     bucket_prefix: Option<String>,
     checkpoint_frames: Option<u64>,
-    checkpoint_bytes: Option<u64>,
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    checkpoint_size: Option<ByteSize>,
     idle_seconds: Option<u64>,
     ranges: Vec<RangeLayoutEntry>,
 }
@@ -309,16 +498,19 @@ pub async fn run(args: GresArgs) -> i32 {
 }
 
 async fn run_inner(args: GresArgs) -> Result<(), String> {
+    let policy = args.registry.policy();
     match args.command {
-        GresCommand::CreateTenant(args) => create_tenant(args).await,
-        GresCommand::Describe(args) => describe_tenant(args).await,
-        GresCommand::List(args) => list_tenants(args).await,
-        GresCommand::Suspend(args) => change_tenant_state(args, TenantState::Suspended).await,
-        GresCommand::Resume(args) => change_tenant_state(args, TenantState::Active).await,
-        GresCommand::Split(args) => split_range(args).await,
-        GresCommand::Move(args) => move_range(args).await,
-        GresCommand::Delete(args) => delete_tenant(args).await,
-        GresCommand::RenderPgdog(args) => render_pgdog(args).await,
+        GresCommand::CreateTenant(args) => create_tenant(args, &policy).await,
+        GresCommand::Describe(args) => describe_tenant(args, &policy).await,
+        GresCommand::List(args) => list_tenants(args, &policy).await,
+        GresCommand::Suspend(args) => {
+            change_tenant_state(args, TenantState::Suspended, &policy).await
+        }
+        GresCommand::Resume(args) => change_tenant_state(args, TenantState::Active, &policy).await,
+        GresCommand::Split(args) => split_range(args, &policy).await,
+        GresCommand::Move(args) => move_range(args, &policy).await,
+        GresCommand::Delete(args) => delete_tenant(args, &policy).await,
+        GresCommand::RenderPgdog(args) => render_pgdog(args, &policy).await,
         GresCommand::BalanceDryRun(args) => balance_dry_run(&args),
         GresCommand::BalanceApply(args) => balance_apply(&args),
         GresCommand::ProbeTopicRead(args) => probe_topic_read(&args).await,
@@ -475,9 +667,9 @@ const fn execution_policy_name(policy: ExecutionPolicy) -> &'static str {
     }
 }
 
-async fn split_range(args: SplitRangeArgs) -> Result<(), String> {
+async fn split_range(args: SplitRangeArgs, policy: &RegistryPolicy) -> Result<(), String> {
     let tenant_name = TenantName::try_from(args.tenant.as_str()).map_err(|e| e.to_string())?;
-    let mut registry = connect_registry(&args.bootstrap).await?;
+    let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let record = registry
         .get(tenant_name.as_str())
         .await
@@ -563,9 +755,6 @@ fn split_boundary(
         .find(|placement| placement.table_id == table_id);
     match (placement, bucket) {
         (Some(placement), Some(bucket)) if bucket < placement.bucket_count => {
-            if rowid != 0 {
-                return Err(HASH_SPLIT_ROWID_ERROR.to_string());
-            }
             Ok(RangeBoundary::hash(table_id, bucket, rowid))
         }
         (Some(_), Some(_)) => Err("--bucket must be less than the table hash bucket count".into()),
@@ -575,9 +764,9 @@ fn split_boundary(
     }
 }
 
-async fn move_range(args: MoveRangeArgs) -> Result<(), String> {
+async fn move_range(args: MoveRangeArgs, policy: &RegistryPolicy) -> Result<(), String> {
     let tenant_name = TenantName::try_from(args.tenant.as_str()).map_err(|e| e.to_string())?;
-    let mut registry = connect_registry(&args.bootstrap).await?;
+    let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let record = registry
         .get(tenant_name.as_str())
         .await
@@ -657,9 +846,9 @@ fn build_move_operation(
     .map_err(|e| e.to_string())
 }
 
-async fn create_tenant(args: CreateTenantArgs) -> Result<(), String> {
+async fn create_tenant(args: CreateTenantArgs, policy: &RegistryPolicy) -> Result<(), String> {
     let password = read_password(&args)?;
-    let mut registry = connect_registry(&args.bootstrap).await?;
+    let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let current = registry.get(&args.name).await.map_err(|e| e.to_string())?;
     let expected_record_version = current.as_ref().map(|record| record.record_version);
     let record_version = next_record_version(expected_record_version)?;
@@ -674,10 +863,17 @@ async fn create_tenant(args: CreateTenantArgs) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("tenant {} disappeared after replacement", args.name))?;
     registry
-        .upsert_tenant_config(&record, args.wal_replication)
+        .upsert_tenant_config(&record, args.wal_replication.into_value())
         .await
         .map_err(|e| e.to_string())?;
-    provision_tenant_kafka_access(&args.bootstrap, &record.name, &password).await?;
+    provision_tenant_kafka_access(
+        &args.bootstrap,
+        &record.name,
+        &password,
+        args.scram_iterations,
+        policy,
+    )
+    .await?;
     println!("created tenant {}", record.name);
     Ok(())
 }
@@ -686,6 +882,8 @@ async fn provision_tenant_kafka_access(
     bootstrap: &str,
     tenant: &TenantName,
     password: &str,
+    scram_iterations: ScramIterations,
+    policy: &RegistryPolicy,
 ) -> Result<(), String> {
     let bootstrap_addrs = bootstrap
         .split(',')
@@ -697,16 +895,22 @@ async fn provision_tenant_kafka_access(
         return Err("bootstrap address list must not be empty".to_string());
     }
     let username = tenant_kafka_username(tenant);
-    let mut admin = AdminClient::connect(&bootstrap_addrs)
-        .await
-        .map_err(|e| format!("tenant Kafka admin connect: {e}"))?;
+    let mut admin = AdminClient::connect_with_options(
+        &bootstrap_addrs,
+        crabka_client_core::ConnectionOptions {
+            dispatch_queue_capacity: policy.dispatch_queue_capacity(),
+            frame_max: policy.frame_max(),
+            ..crabka_client_core::ConnectionOptions::default()
+        },
+    )
+    .await
+    .map_err(|e| format!("tenant Kafka admin connect: {e}"))?;
     admin
         .alter_user_scram_credentials_sha512(
             &[ScramUpsertion {
                 username: username.clone(),
                 password: password.to_string(),
-                iterations: i32::try_from(DEFAULT_SCRAM_ITERATIONS)
-                    .map_err(|_| "default SCRAM iterations exceed i32".to_string())?,
+                iterations: scram_iterations.into_value(),
             }],
             &[],
         )
@@ -772,8 +976,8 @@ fn tenant_kafka_username(tenant: &TenantName) -> String {
     format!("gres-{tenant}")
 }
 
-async fn describe_tenant(args: TenantNameArgs) -> Result<(), String> {
-    let mut registry = connect_registry(&args.bootstrap).await?;
+async fn describe_tenant(args: TenantNameArgs, policy: &RegistryPolicy) -> Result<(), String> {
+    let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let tenant = registry
         .get(&args.name)
         .await
@@ -782,15 +986,19 @@ async fn describe_tenant(args: TenantNameArgs) -> Result<(), String> {
     print_json(&redact_tenant(&tenant))
 }
 
-async fn list_tenants(args: BootstrapArgs) -> Result<(), String> {
-    let mut registry = connect_registry(&args.bootstrap).await?;
+async fn list_tenants(args: BootstrapArgs, policy: &RegistryPolicy) -> Result<(), String> {
+    let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let tenants = registry.list().await.map_err(|e| e.to_string())?;
     let redacted = tenants.iter().map(redact_tenant).collect::<Vec<_>>();
     print_json(&redacted)
 }
 
-async fn change_tenant_state(args: TenantNameArgs, state: TenantState) -> Result<(), String> {
-    let mut registry = connect_registry(&args.bootstrap).await?;
+async fn change_tenant_state(
+    args: TenantNameArgs,
+    state: TenantState,
+    policy: &RegistryPolicy,
+) -> Result<(), String> {
+    let mut registry = connect_registry(&args.bootstrap, policy).await?;
     match state {
         TenantState::Suspended => registry.mark_suspended(&args.name).await,
         TenantState::Active => {
@@ -819,8 +1027,8 @@ async fn change_tenant_state(args: TenantNameArgs, state: TenantState) -> Result
     Ok(())
 }
 
-async fn delete_tenant(args: TenantNameArgs) -> Result<(), String> {
-    let mut registry = connect_registry(&args.bootstrap).await?;
+async fn delete_tenant(args: TenantNameArgs, policy: &RegistryPolicy) -> Result<(), String> {
+    let mut registry = connect_registry(&args.bootstrap, policy).await?;
     registry
         .delete(&args.name)
         .await
@@ -829,27 +1037,17 @@ async fn delete_tenant(args: TenantNameArgs) -> Result<(), String> {
     Ok(())
 }
 
-async fn render_pgdog(args: RenderPgdogArgs) -> Result<(), String> {
-    let mut registry = connect_registry(&args.bootstrap).await?;
+async fn render_pgdog(args: RenderPgdogArgs, policy: &RegistryPolicy) -> Result<(), String> {
+    let mut registry = connect_registry(&args.bootstrap, policy).await?;
     let tenants = registry.list().await.map_err(|e| e.to_string())?;
-    render_pgdog_files(
-        &tenants,
-        args.activator,
-        &args.out_dir,
-        args.listen_port,
-        args.tls_certificate.as_deref(),
-        args.tls_private_key.as_deref(),
-    )
+    render_pgdog_files(&tenants, &args)
 }
 
-async fn connect_registry(bootstrap: &str) -> Result<Registry, String> {
-    let mut registry = Registry::connect(bootstrap)
+async fn connect_registry(bootstrap: &str, policy: &RegistryPolicy) -> Result<Registry, String> {
+    let mut registry = Registry::connect_with_policy(bootstrap, policy.clone())
         .await
         .map_err(|e| e.to_string())?;
-    registry
-        .ensure_topic(DEFAULT_WAL_REPLICATION)
-        .await
-        .map_err(|e| e.to_string())?;
+    registry.ensure_topic().await.map_err(|e| e.to_string())?;
     Ok(registry)
 }
 
@@ -861,9 +1059,13 @@ fn build_create_tenant_record(
     let name = TenantName::try_from(args.name.as_str()).map_err(|e| e.to_string())?;
     let id = TenantId::try_from(args.name.as_str()).map_err(|e| e.to_string())?;
     let sql_user = SqlUser::try_from(args.sql_user.as_str()).map_err(|e| e.to_string())?;
-    let verifier = PgScramVerifier::generate(password, DEFAULT_SCRAM_ITERATIONS)
-        .map_err(|e| e.to_string())?
-        .to_string();
+    let verifier = PgScramVerifier::generate(
+        password,
+        u32::try_from(args.scram_iterations.into_value())
+            .expect("validated SCRAM iterations are positive"),
+    )
+    .map_err(|e| e.to_string())?
+    .to_string();
     let ranges = parse_range_layout(&name, args.ranges.as_deref())?;
     let mut record = TenantRecord::new(
         record_version,
@@ -872,12 +1074,12 @@ fn build_create_tenant_record(
         TenantState::Active,
         sql_user,
         verifier,
-        args.wal_replication,
+        args.wal_replication.into_value(),
     )
     .map_err(|e| e.to_string())?;
     record.bucket_prefix.clone_from(&args.bucket_prefix);
     record.checkpoint_frames = args.checkpoint_frames;
-    record.checkpoint_bytes = args.checkpoint_bytes;
+    record.checkpoint_size = args.checkpoint_size;
     record.idle_seconds = args.idle_seconds;
     record.ranges = ranges;
     record.hash_placements.clone_from(&args.hash_placements);
@@ -1048,15 +1250,8 @@ fn read_password(args: &CreateTenantArgs) -> Result<String, String> {
     Ok(password)
 }
 
-fn render_pgdog_files(
-    records: &[TenantRecord],
-    activator: Option<(String, u16)>,
-    out_dir: &Path,
-    listen_port: u16,
-    tls_certificate: Option<&Path>,
-    tls_private_key: Option<&Path>,
-) -> Result<(), String> {
-    std::fs::create_dir_all(out_dir).map_err(|e| format!("create output directory: {e}"))?;
+fn render_pgdog_files(records: &[TenantRecord], args: &RenderPgdogArgs) -> Result<(), String> {
+    std::fs::create_dir_all(&args.out_dir).map_err(|e| format!("create output directory: {e}"))?;
     let endpoints = records.iter().map(tenant_endpoint).collect::<Vec<_>>();
     let users = records
         .iter()
@@ -1066,22 +1261,46 @@ fn render_pgdog_files(
             password: None,
         })
         .collect();
+    let idle_timeout = if records.iter().any(|record| {
+        record.idle_seconds.is_some_and(|seconds| seconds > 0)
+            && (record.state == TenantState::Active || args.activator.is_some())
+    }) {
+        args.suspension_idle_timeout
+    } else {
+        args.idle_timeout
+    };
     let input = PgdogRenderInput {
         tenants: &endpoints,
-        activator,
+        activator: args.activator.clone(),
         general: PgdogGeneral {
-            listen_port,
-            tls_cert_path: tls_certificate.map(|path| path.to_string_lossy().into_owned()),
-            tls_key_path: tls_private_key.map(|path| path.to_string_lossy().into_owned()),
+            listen_port: args.listen_port.get(),
+            tls_cert_path: args
+                .tls_certificate
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            tls_key_path: args
+                .tls_private_key
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            tls_client_ca_path: args
+                .tls_client_ca_certificate
+                .as_deref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            passthrough_auth: true,
+            pooler_mode: args.pooler_mode,
+            cold_start_ceiling: args.cold_start_ceiling,
+            connect_attempts: args.connect_attempts,
+            timeouts: None,
+            idle_timeout,
+            server_lifetime: args.server_lifetime,
             users,
-            ..PgdogGeneral::default()
         },
     };
     let pgdog = render_pgdog_toml(&input).map_err(|e| e.to_string())?;
     let users = render_users_toml(&input).map_err(|e| e.to_string())?;
-    std::fs::write(out_dir.join("pgdog.toml"), pgdog)
+    std::fs::write(args.out_dir.join("pgdog.toml"), pgdog)
         .map_err(|e| format!("write pgdog.toml: {e}"))?;
-    std::fs::write(out_dir.join("users.toml"), users)
+    std::fs::write(args.out_dir.join("users.toml"), users)
         .map_err(|e| format!("write users.toml: {e}"))?;
     Ok(())
 }
@@ -1107,7 +1326,7 @@ fn redact_tenant(record: &TenantRecord) -> RedactedTenantRecord {
         wal_replication: record.wal_replication,
         bucket_prefix: record.bucket_prefix.clone(),
         checkpoint_frames: record.checkpoint_frames,
-        checkpoint_bytes: record.checkpoint_bytes,
+        checkpoint_size: record.checkpoint_size,
         idle_seconds: record.idle_seconds,
         ranges: record.ranges.clone(),
     }
@@ -1145,11 +1364,370 @@ fn parse_activator(value: &str) -> Result<(String, u16), String> {
     Ok((host.to_string(), port))
 }
 
+fn parse_pgdog_pooler_mode(value: &str) -> Result<PgdogPoolerMode, String> {
+    match value {
+        "transaction" => Ok(PgdogPoolerMode::Transaction),
+        "session" => Ok(PgdogPoolerMode::Session),
+        _ => Err("pooler mode must be transaction or session".to_string()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use clap::Parser as _;
+    use crabka_units::convert::TimeExt as _;
 
     use super::*;
+
+    #[derive(clap::Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        gres: GresArgs,
+    }
+
+    fn create_tenant_test_args(extra: impl IntoIterator<Item = &'static str>) -> CreateTenantArgs {
+        let args = [
+            "test",
+            "create-tenant",
+            "--bootstrap=broker:9092",
+            "--name=tenant-a",
+            "--user=alice",
+            "--password-stdin",
+        ]
+        .into_iter()
+        .chain(extra)
+        .collect::<Vec<_>>();
+        let parsed = TestCli::try_parse_from(args).expect("create-tenant arguments");
+        let GresCommand::CreateTenant(args) = parsed.gres.command else {
+            panic!("expected create-tenant command");
+        };
+        args
+    }
+
+    #[test]
+    fn create_tenant_policy_defaults_and_validation() {
+        let defaults = create_tenant_test_args([]);
+        assert!(defaults.wal_replication.into_value() == 1);
+        assert!(defaults.scram_iterations.into_value() == 4_096);
+
+        for option in [
+            "--wal-replication=0",
+            "--wal-replication=32768",
+            "--scram-iterations=4095",
+            "--scram-iterations=16385",
+            "--scram-iterations=not-a-number",
+        ] {
+            let args = [
+                "test",
+                "create-tenant",
+                "--bootstrap=broker:9092",
+                "--name=tenant-a",
+                "--user=alice",
+                "--password-stdin",
+                option,
+            ];
+            assert!(TestCli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn create_tenant_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TEST_CLI_CREATE_TENANT_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "gres::tests::create_tenant_policy_reads_environment_and_prefers_cli",
+                ])
+                .env(CHILD, "1")
+                .env("CRABKA_GRES_WAL_REPLICATION", "2")
+                .env("CRABKA_GRES_SCRAM_ITERATIONS", "8192")
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let environment = create_tenant_test_args([]);
+        assert!(environment.wal_replication.into_value() == 2);
+        assert!(environment.scram_iterations.into_value() == 8_192);
+
+        let cli = create_tenant_test_args(["--wal-replication=3", "--scram-iterations=12288"]);
+        assert!(cli.wal_replication.into_value() == 3);
+        assert!(cli.scram_iterations.into_value() == 12_288);
+    }
+
+    #[test]
+    fn registry_policy_options_use_exact_defaults_and_validation() {
+        let defaults =
+            TestCli::try_parse_from(["test", "list", "--bootstrap=broker:9092"]).expect("defaults");
+        assert!(defaults.gres.registry.policy() == crabka_gres_control::RegistryPolicy::default());
+        for option in [
+            "--registry-replication-factor=0",
+            "--registry-replication-factor=32768",
+            "--registry-topic-create-timeout=0ms",
+            "--registry-reader-retry-backoff=0ms",
+            "--registry-fetch-max-wait=0ms",
+            "--registry-fetch-partition-max=0B",
+            "--registry-producer-dns-timeout=0ms",
+            "--registry-reader-admin-dns-timeout=0ms",
+            "--client-dispatch-queue-capacity=0",
+            "--client-frame-max=101MiB",
+            "--registry-reader-fetch-min=0B",
+        ] {
+            assert!(
+                TestCli::try_parse_from(["test", option, "list", "--bootstrap=broker:9092",])
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn registry_policy_options_read_environment_and_prefer_cli() {
+        const CHILD: &str = "CRABKA_TEST_CLI_REGISTRY_ENV_CHILD";
+        let vars = [
+            ("CRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
+            ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", "15001ms"),
+            ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF", "251ms"),
+            ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT", "501ms"),
+            ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX", "1048577B"),
+            ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
+            ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
+            ("CRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY", "7"),
+            ("CRABKA_GRES_CLIENT_FRAME_MAX", "32KiB"),
+            ("CRABKA_GRES_REGISTRY_READER_FETCH_MIN", "3B"),
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "gres::tests::registry_policy_options_read_environment_and_prefer_cli",
+                ])
+                .env(CHILD, "1")
+                .envs(vars)
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+        let environment =
+            TestCli::try_parse_from(["test", "list", "--bootstrap=broker:9092"]).expect("env");
+        let environment_policy = RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(501),
+            crabka_units::bytes(1_048_577),
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(37))
+        .expect("environment DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(37))
+        .expect("environment reader/admin DNS timeout")
+        .with_client_resource_policy(
+            ConnectionDispatchQueueCapacity::new(7).unwrap(),
+            ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap(),
+            FetchMinBytes::try_from(crabka_units::bytes(3)).unwrap(),
+        );
+        assert!(environment.gres.registry.policy() == environment_policy);
+        let cli = TestCli::try_parse_from([
+            "test",
+            "--registry-replication-factor=3",
+            "--registry-topic-create-timeout=15002ms",
+            "--registry-reader-retry-backoff=252ms",
+            "--registry-fetch-max-wait=502ms",
+            "--registry-fetch-partition-max=1048578B",
+            "--registry-producer-dns-timeout=47ms",
+            "--registry-reader-admin-dns-timeout=47ms",
+            "--client-dispatch-queue-capacity=9",
+            "--client-frame-max=64KiB",
+            "--registry-reader-fetch-min=5B",
+            "list",
+            "--bootstrap=broker:9092",
+        ])
+        .expect("CLI over environment");
+        let cli_policy = RegistryPolicy::new(
+            3,
+            crabka_units::millis(15_002),
+            crabka_units::millis(252),
+            crabka_units::millis(502),
+            crabka_units::bytes(1_048_578),
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(47))
+        .expect("CLI DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(47))
+        .expect("CLI reader/admin DNS timeout")
+        .with_client_resource_policy(
+            ConnectionDispatchQueueCapacity::new(9).unwrap(),
+            ClientFrameMax::try_from(crabka_units::kibibytes(64)).unwrap(),
+            FetchMinBytes::try_from(crabka_units::bytes(5)).unwrap(),
+        );
+        assert!(cli.gres.registry.policy() == cli_policy);
+    }
+
+    #[test]
+    fn render_pgdog_options_use_exact_defaults() {
+        let args = render_pgdog_test_args([
+            "test",
+            "render-pgdog",
+            "--bootstrap=broker:9092",
+            "--out-dir=/tmp/pgdog",
+        ]);
+
+        assert!(args.bootstrap == "broker:9092");
+        assert!(args.out_dir == PathBuf::from("/tmp/pgdog"));
+        assert!(args.activator.is_none());
+        assert!(args.listen_port.get() == 6_432);
+        assert!(args.tls_certificate.is_none());
+        assert!(args.tls_private_key.is_none());
+        assert!(args.tls_client_ca_certificate.is_none());
+        assert!(args.pooler_mode == PgdogPoolerMode::Transaction);
+        assert!(args.connect_attempts.into_value() == 3);
+        assert!(args.cold_start_ceiling.millis_i64() == 30_000);
+        assert!(args.idle_timeout.millis_i64() == 60_000);
+        assert!(args.suspension_idle_timeout.millis_i64() == 1_000);
+        assert!(args.server_lifetime.millis_i64() == 300_000);
+    }
+
+    #[test]
+    fn render_pgdog_options_accept_exact_custom_surface() {
+        let parsed = TestCli::try_parse_from([
+            "test",
+            "render-pgdog",
+            "--bootstrap=cli:9092",
+            "--out-dir=/tmp/cli-pgdog",
+            "--activator=activator:7444",
+            "--listen-port=6543",
+            "--tls-certificate=/tls/cert.pem",
+            "--tls-private-key=/tls/key.pem",
+            "--tls-client-ca-certificate=/tls/ca.pem",
+            "--pooler-mode=session",
+            "--connect-attempts=4",
+            "--cold-start-ceiling=10001ms",
+            "--idle-timeout=60001ms",
+            "--suspension-idle-timeout=1001ms",
+            "--server-lifetime=300001ms",
+        ])
+        .expect("custom render-pgdog options");
+
+        let GresCommand::RenderPgdog(args) = parsed.gres.command else {
+            panic!("expected render-pgdog command");
+        };
+        assert!(args.bootstrap == "cli:9092");
+        assert!(args.out_dir == PathBuf::from("/tmp/cli-pgdog"));
+        assert!(args.activator == Some(("activator".to_string(), 7_444)));
+        assert!(args.listen_port.get() == 6_543);
+        assert!(args.tls_certificate == Some(PathBuf::from("/tls/cert.pem")));
+        assert!(args.tls_private_key == Some(PathBuf::from("/tls/key.pem")));
+        assert!(args.tls_client_ca_certificate == Some(PathBuf::from("/tls/ca.pem")));
+        assert!(args.pooler_mode == PgdogPoolerMode::Session);
+        assert!(args.connect_attempts.into_value() == 4);
+        assert!(args.cold_start_ceiling.millis_i64() == 10_001);
+        assert!(args.idle_timeout.millis_i64() == 60_001);
+        assert!(args.suspension_idle_timeout.millis_i64() == 1_001);
+        assert!(args.server_lifetime.millis_i64() == 300_001);
+    }
+
+    #[test]
+    fn render_pgdog_options_reject_invalid_values_and_tls_relationships() {
+        for options in [
+            &["--listen-port=0"][..],
+            &["--listen-port=65536"],
+            &["--connect-attempts=0"],
+            &["--connect-attempts=65536"],
+            &["--cold-start-ceiling=0ms"],
+            &["--idle-timeout=0ms"],
+            &["--suspension-idle-timeout=0ms"],
+            &["--server-lifetime=0ms"],
+            &["--cold-start-ceiling=inf"],
+            &["--pooler-mode=statement"],
+            &["--tls-certificate=/tls/cert.pem"],
+            &["--tls-private-key=/tls/key.pem"],
+            &["--tls-client-ca-certificate=/tls/ca.pem"],
+        ] {
+            let args = [
+                &[
+                    "test",
+                    "render-pgdog",
+                    "--bootstrap=broker:9092",
+                    "--out-dir=/tmp/pgdog",
+                ][..],
+                options,
+            ]
+            .concat();
+            assert!(TestCli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn render_pgdog_options_read_environment_and_prefer_cli() {
+        const CHILD: &str = "CRABKA_TEST_CLI_PGDOG_ENV_CHILD";
+        let vars = [
+            ("CRABKA_GRES_PGDOG_BOOTSTRAP", "env:9092"),
+            ("CRABKA_GRES_PGDOG_OUT_DIR", "/tmp/env-pgdog"),
+            ("CRABKA_GRES_PGDOG_ACTIVATOR", "env-activator:7443"),
+            ("CRABKA_GRES_PGDOG_LISTEN_PORT", "6542"),
+            ("CRABKA_GRES_PGDOG_TLS_CERTIFICATE", "/env/cert.pem"),
+            ("CRABKA_GRES_PGDOG_TLS_PRIVATE_KEY", "/env/key.pem"),
+            ("CRABKA_GRES_PGDOG_TLS_CLIENT_CA_CERTIFICATE", "/env/ca.pem"),
+            ("CRABKA_GRES_PGDOG_POOLER_MODE", "session"),
+            ("CRABKA_GRES_PGDOG_CONNECT_ATTEMPTS", "5"),
+            ("CRABKA_GRES_PGDOG_COLD_START_CEILING", "30005ms"),
+            ("CRABKA_GRES_PGDOG_IDLE_TIMEOUT", "60005ms"),
+            ("CRABKA_GRES_PGDOG_SUSPENSION_IDLE_TIMEOUT", "1005ms"),
+            ("CRABKA_GRES_PGDOG_SERVER_LIFETIME", "300005ms"),
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "gres::tests::render_pgdog_options_read_environment_and_prefer_cli",
+                ])
+                .env(CHILD, "1")
+                .envs(vars)
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let environment = TestCli::try_parse_from(["test", "render-pgdog"]).expect("environment");
+        let GresCommand::RenderPgdog(environment) = environment.gres.command else {
+            panic!("expected render-pgdog command");
+        };
+        assert!(environment.bootstrap == "env:9092");
+        assert!(environment.out_dir == PathBuf::from("/tmp/env-pgdog"));
+        assert!(environment.activator == Some(("env-activator".to_string(), 7_443)));
+        assert!(environment.listen_port.get() == 6_542);
+        assert!(environment.tls_certificate == Some(PathBuf::from("/env/cert.pem")));
+        assert!(environment.tls_private_key == Some(PathBuf::from("/env/key.pem")));
+        assert!(environment.tls_client_ca_certificate == Some(PathBuf::from("/env/ca.pem")));
+        assert!(environment.pooler_mode == PgdogPoolerMode::Session);
+        assert!(environment.connect_attempts.into_value() == 5);
+        assert!(environment.cold_start_ceiling.millis_i64() == 30_005);
+        assert!(environment.idle_timeout.millis_i64() == 60_005);
+        assert!(environment.suspension_idle_timeout.millis_i64() == 1_005);
+        assert!(environment.server_lifetime.millis_i64() == 300_005);
+
+        let cli = TestCli::try_parse_from([
+            "test",
+            "render-pgdog",
+            "--bootstrap=cli:9092",
+            "--out-dir=/tmp/cli-pgdog",
+            "--listen-port=6543",
+            "--connect-attempts=6",
+        ])
+        .expect("CLI over environment");
+        let GresCommand::RenderPgdog(cli) = cli.gres.command else {
+            panic!("expected render-pgdog command");
+        };
+        assert!(cli.bootstrap == "cli:9092");
+        assert!(cli.out_dir == PathBuf::from("/tmp/cli-pgdog"));
+        assert!(cli.listen_port.get() == 6_543);
+        assert!(cli.connect_attempts.into_value() == 6);
+    }
 
     fn fixture_password() -> String {
         std::process::id().to_string()
@@ -1159,10 +1737,10 @@ mod tests {
         "config": {
             "goals": { "disabledGoals": [] },
             "context": {
-                "sizeCeilingBytes": 1000,
-                "mergeFloorBytes": 100,
+                "sizeCeiling": "1000B",
+                "mergeFloor": "100B",
                 "splitStrideRows": 100,
-                "loadSkewHysteresisPct": 25,
+                "loadSkewHysteresis": "25%",
                 "maxRangesPerCompute": null,
                 "maxOperations": 32,
                 "cooldownEpochs": 2,
@@ -1178,8 +1756,8 @@ mod tests {
                 "tableName": "orders",
                 "isSharded": true,
                 "autoShardDisabled": false,
-                "convertStoreBytesThreshold": 10000,
-                "convertCommitRateThreshold": 10000,
+                "convertStoreThreshold": "10000B",
+                "convertCommitRateThreshold": "10000/s",
                 "hashBucketCount": null
             }],
             "ranges": [{
@@ -1204,10 +1782,10 @@ mod tests {
         "config": {
             "goals": { "disabledGoals": ["range_size"] },
             "context": {
-                "sizeCeilingBytes": 1000,
-                "mergeFloorBytes": 100,
+                "sizeCeiling": "1000B",
+                "mergeFloor": "100B",
                 "splitStrideRows": 100,
-                "loadSkewHysteresisPct": 25,
+                "loadSkewHysteresis": "25%",
                 "maxRangesPerCompute": null,
                 "maxOperations": 32,
                 "cooldownEpochs": 2,
@@ -1223,8 +1801,8 @@ mod tests {
                 "tableName": "orders",
                 "isSharded": true,
                 "autoShardDisabled": false,
-                "convertStoreBytesThreshold": 10000,
-                "convertCommitRateThreshold": 10000,
+                "convertStoreThreshold": "10000B",
+                "convertCommitRateThreshold": "10000/s",
                 "hashBucketCount": null
             }],
             "ranges": [{
@@ -1232,51 +1810,6 @@ mod tests {
                 "tableId": 10,
                 "startKey": { "table_id": 10, "rowid": 0 },
                 "endKey": { "table_id": 10, "rowid": 1000 },
-                "computeId": "c1",
-                "storeBytes": 2500,
-                "checkpointBytes": 0,
-                "commitRate": 0,
-                "scanBytes": 0,
-                "isSharded": true,
-                "coLocationGroup": null,
-                "coLocationBucket": null,
-                "isIndexRange": false
-            }]
-        }]
-    }"#;
-
-    const BALANCE_SNAPSHOT_HASH_SHARDED: &str = r#"{
-        "config": {
-            "goals": { "disabledGoals": [] },
-            "context": {
-                "sizeCeilingBytes": 1000,
-                "mergeFloorBytes": 100,
-                "splitStrideRows": 100,
-                "loadSkewHysteresisPct": 25,
-                "maxRangesPerCompute": null,
-                "maxOperations": 32,
-                "cooldownEpochs": 2,
-                "currentEpoch": 10,
-                "cooldowns": []
-            }
-        },
-        "tenants": [{
-            "tenantName": "tenant-a",
-            "computes": [{ "computeId": "c1" }],
-            "tables": [{
-                "tableId": 10,
-                "tableName": "orders",
-                "isSharded": true,
-                "autoShardDisabled": false,
-                "convertStoreBytesThreshold": 10000,
-                "convertCommitRateThreshold": 10000,
-                "hashBucketCount": 16
-            }],
-            "ranges": [{
-                "rangeId": 1,
-                "tableId": 10,
-                "startKey": { "table_id": 10, "bucket": 0, "rowid": 0 },
-                "endKey": { "table_id": 10, "bucket": 8, "rowid": 0 },
                 "computeId": "c1",
                 "storeBytes": 2500,
                 "checkpointBytes": 0,
@@ -1298,10 +1831,11 @@ mod tests {
             sql_user: "alice".to_string(),
             password_file: None,
             password_stdin: true,
-            wal_replication: 3,
+            wal_replication: RegistryReplicationFactor::new(3).unwrap(),
+            scram_iterations: crabka_client_admin::ScramIterations::new(12_288).unwrap(),
             bucket_prefix: Some("prefix".to_string()),
             checkpoint_frames: Some(10),
-            checkpoint_bytes: Some(20),
+            checkpoint_size: Some(crabka_units::bytes(20)),
             idle_seconds: Some(30),
             ranges: Some("0,100,200".to_string()),
             hash_placements: Vec::new(),
@@ -1314,6 +1848,10 @@ mod tests {
         check!(record.name.as_str() == "tenant-a");
         check!(record.sql_user.as_str() == "alice");
         check!(record.wal_replication == 3);
+        check!(
+            PgScramVerifier::parse(&record.scram_verifier)
+                .is_ok_and(|verifier| verifier.iterations == 12_288)
+        );
         check!(record.bucket_prefix.as_deref() == Some("prefix"));
         check!(record.ranges.len() == 3);
         check!(record.ranges[0].end_key == Some(RangeBoundary::table_start(100)));
@@ -1423,7 +1961,7 @@ mod tests {
     }
 
     #[test]
-    fn split_boundary_requires_a_bucket_aligned_hash_split_point() {
+    fn split_boundary_requires_exact_hash_bucket_contract() {
         let mut record = test_record("tenant-a", TenantState::Active);
         record.hash_placements = vec![crabka_gres_control::HashPlacement {
             table_id: 7,
@@ -1432,15 +1970,10 @@ mod tests {
             co_location_group: None,
         }];
 
-        // A hash-sharded table may only be cut on a bucket start: equality
-        // routing probes a bucket at rowid 0, so a cut inside a bucket would
-        // put the rest of its rows on a range the router never consults.
-        assert!(split_boundary(&record, 7, Some(3), 0) == Ok(RangeBoundary::hash(7, 3, 0)));
-        assert!(split_boundary(&record, 7, Some(3), 9) == Err(HASH_SPLIT_ROWID_ERROR.to_string()));
-        assert!(split_boundary(&record, 7, None, 0).is_err());
-        assert!(split_boundary(&record, 7, Some(8), 0).is_err());
-        assert!(split_boundary(&record, 9, Some(0), 0).is_err());
-        // A row-sharded table stays free to split at any rowid.
+        assert!(split_boundary(&record, 7, Some(3), 9) == Ok(RangeBoundary::hash(7, 3, 9)));
+        assert!(split_boundary(&record, 7, None, 9).is_err());
+        assert!(split_boundary(&record, 7, Some(8), 9).is_err());
+        assert!(split_boundary(&record, 9, Some(0), 9).is_err());
         assert!(split_boundary(&record, 9, None, 9) == Ok(RangeBoundary::new(9, 9)));
     }
 
@@ -1480,8 +2013,11 @@ mod tests {
     fn render_pgdog_writes_pgdog_and_users_files() {
         let dir = tempfile::tempdir().expect("tempdir");
         let records = vec![test_record("tenant-a", TenantState::Active)];
+        let out_dir = format!("--out-dir={}", dir.path().display());
+        let args =
+            render_pgdog_test_args(["test", "render-pgdog", "--bootstrap=broker:9092", &out_dir]);
 
-        render_pgdog_files(&records, None, dir.path(), 6432, None, None).expect("render succeeds");
+        render_pgdog_files(&records, &args).expect("render succeeds");
 
         let pgdog = std::fs::read_to_string(dir.path().join("pgdog.toml")).expect("pgdog file");
         let users = std::fs::read_to_string(dir.path().join("users.toml")).expect("users file");
@@ -1519,6 +2055,119 @@ mod tests {
     }
 
     #[test]
+    fn render_pgdog_writes_exact_custom_configuration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut record = test_record("tenant-a", TenantState::Active);
+        record.idle_seconds = Some(30);
+        let out_dir = format!("--out-dir={}", dir.path().display());
+        let args = render_pgdog_test_args([
+            "test",
+            "render-pgdog",
+            "--bootstrap=broker:9092",
+            &out_dir,
+            "--activator=activator:7444",
+            "--listen-port=6543",
+            "--tls-certificate=/tls/cert.pem",
+            "--tls-private-key=/tls/key.pem",
+            "--tls-client-ca-certificate=/tls/ca.pem",
+            "--pooler-mode=session",
+            "--connect-attempts=4",
+            "--cold-start-ceiling=10001ms",
+            "--idle-timeout=60001ms",
+            "--suspension-idle-timeout=1001ms",
+            "--server-lifetime=300001ms",
+        ]);
+
+        render_pgdog_files(&[record], &args).expect("render succeeds");
+
+        let pgdog = std::fs::read_to_string(dir.path().join("pgdog.toml")).expect("pgdog file");
+        assert!(
+            pgdog
+                == concat!(
+                    "[general]\n",
+                    "port = 6543\n",
+                    "min_pool_size = 0\n",
+                    "pooler_mode = \"session\"\n",
+                    "passthrough_auth = \"enabled\"\n",
+                    "connect_timeout = 2501\n",
+                    "connect_attempts = 4\n",
+                    "checkout_timeout = 10001\n",
+                    "idle_timeout = 1001\n",
+                    "server_lifetime = 300001\n",
+                    "idle_healthcheck_delay = 3155760000000\n",
+                    "tls_certificate = \"/tls/cert.pem\"\n",
+                    "tls_private_key = \"/tls/key.pem\"\n",
+                    "tls_client_ca_certificate = \"/tls/ca.pem\"\n",
+                    "tls_client_required = true\n",
+                    "\n",
+                    "[[databases]]\n",
+                    "name = \"tenant-a\"\n",
+                    "host = \"tenant-a.gres.svc\"\n",
+                    "port = 5432\n",
+                    "pooler_mode = \"session\"\n",
+                )
+        );
+    }
+
+    #[test]
+    fn render_pgdog_does_not_use_suspension_timeout_for_zero_idle_seconds() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut record = test_record("tenant-a", TenantState::Active);
+        record.idle_seconds = Some(0);
+        let out_dir = format!("--out-dir={}", dir.path().display());
+        let args = render_pgdog_test_args([
+            "test",
+            "render-pgdog",
+            "--bootstrap=broker:9092",
+            &out_dir,
+            "--idle-timeout=60001ms",
+            "--suspension-idle-timeout=1001ms",
+        ]);
+
+        render_pgdog_files(&[record], &args).expect("render succeeds");
+
+        let pgdog = std::fs::read_to_string(dir.path().join("pgdog.toml")).expect("pgdog file");
+        assert!(pgdog.contains("idle_timeout = 60001\n"));
+    }
+
+    #[test]
+    fn render_pgdog_uses_only_rendered_tenants_for_suspension_timeout() {
+        let normal_dir = tempfile::tempdir().expect("normal tempdir");
+        let suspension_dir = tempfile::tempdir().expect("suspension tempdir");
+        let mut record = test_record("tenant-a", TenantState::Suspended);
+        record.idle_seconds = Some(30);
+        let out_dir = format!("--out-dir={}", normal_dir.path().display());
+        let mut args = render_pgdog_test_args([
+            "test",
+            "render-pgdog",
+            "--bootstrap=broker:9092",
+            &out_dir,
+            "--idle-timeout=60001ms",
+            "--suspension-idle-timeout=1001ms",
+        ]);
+
+        render_pgdog_files(std::slice::from_ref(&record), &args).expect("normal render succeeds");
+        let pgdog =
+            std::fs::read_to_string(normal_dir.path().join("pgdog.toml")).expect("normal pgdog");
+        assert!(pgdog.contains("idle_timeout = 60001\n"));
+
+        args.activator = Some(("activator".to_string(), 7_444));
+        args.out_dir = suspension_dir.path().to_path_buf();
+        render_pgdog_files(&[record], &args).expect("suspension render succeeds");
+        let pgdog = std::fs::read_to_string(suspension_dir.path().join("pgdog.toml"))
+            .expect("suspension pgdog");
+        assert!(pgdog.contains("idle_timeout = 1001\n"));
+    }
+
+    fn render_pgdog_test_args<const N: usize>(args: [&str; N]) -> RenderPgdogArgs {
+        let parsed = TestCli::try_parse_from(args).expect("render-pgdog args");
+        let GresCommand::RenderPgdog(args) = parsed.gres.command else {
+            panic!("expected render-pgdog command");
+        };
+        args
+    }
+
+    #[test]
     fn trim_password_removes_one_terminal_line_ending_only() {
         let mut password = "secret\n\n".to_string();
 
@@ -1540,25 +2189,6 @@ mod tests {
                     tenant_name: "tenant-a".to_string(),
                     source_range_id: 1,
                     split_at: RangeBoundary::new(10, 500),
-                }]
-        );
-    }
-
-    #[test]
-    fn gres_balance_dry_run_cuts_a_hash_sharded_range_on_a_bucket_start() {
-        let input: BalanceDryRunInput =
-            serde_json::from_str(BALANCE_SNAPSHOT_HASH_SHARDED).unwrap();
-
-        let output = plan_balance_dry_run(&input);
-
-        // Buckets 0..8 halve at bucket 4, and never inside a bucket: equality
-        // routing probes a bucket at rowid 0 and answers for all of its rows.
-        assert!(
-            output.operations
-                == vec![BalanceOperation::Split {
-                    tenant_name: "tenant-a".to_string(),
-                    source_range_id: 1,
-                    split_at: RangeBoundary::hash(10, 4, 0),
                 }]
         );
     }

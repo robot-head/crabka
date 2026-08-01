@@ -89,14 +89,15 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
     cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
         dir: remote_dir.path().to_path_buf(),
     });
-    cfg.remote_log_manager_interval = Duration::from_secs(1);
+    cfg.remote_log_manager_interval = crabka_units::secs(1);
     cfg.remote_log_metadata = RlmmKind::TopicBacked(KafkaRlmmConfig {
         bootstrap: format!("127.0.0.1:{}", listen.port()),
         num_partitions: 1,
         replication: 1,
-        snapshot_interval: Duration::from_hours(1),
+        snapshot_interval: crabka_units::hours(1),
         snapshot_dir: log_dir.path().join("remote-log-metadata"),
         security: None,
+        ..KafkaRlmmConfig::default()
     });
 
     let data_listener = client_listeners.into_iter().next().unwrap();
@@ -114,8 +115,8 @@ async fn await_tiered_config(broker: &BrokerHandle, topic: &str) {
             .partition_log_config_for_test(topic, 0)
             .is_some_and(|config| {
                 config.remote_storage_enable
-                    && config.segment_bytes == 1024
-                    && config.local_retention_bytes == Some(1)
+                    && config.segment_size == crabka_units::kibibytes(1)
+                    && config.local_retention_size == Some(crabka_units::bytes(1))
             })
         {
             return;
@@ -277,8 +278,8 @@ async fn copy_then_fetch_round_trip(
     loop {
         if let Some(cfg) = broker.partition_log_config_for_test(topic, 0)
             && cfg.remote_storage_enable
-            && cfg.segment_bytes == 1024
-            && cfg.local_retention_bytes == Some(1)
+            && cfg.segment_size == crabka_units::kibibytes(1)
+            && cfg.local_retention_size == Some(crabka_units::bytes(1))
         {
             break;
         }
@@ -449,16 +450,17 @@ async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir)
     cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
         dir: remote_dir.path().to_path_buf(),
     });
-    cfg.remote_log_manager_interval = Duration::from_secs(1);
+    cfg.remote_log_manager_interval = crabka_units::secs(1);
     cfg.remote_log_metadata = RlmmKind::TopicBacked(KafkaRlmmConfig {
         // The broker overrides bootstrap + security from the inter-broker
         // listener; the operator value here is the same loopback addr.
         bootstrap: format!("127.0.0.1:{}", listen.port()),
         num_partitions: 1,
         replication: 1,
-        snapshot_interval: Duration::from_hours(1),
+        snapshot_interval: crabka_units::hours(1),
         snapshot_dir: log_dir.path().join("remote-log-metadata"),
         security: None,
+        ..KafkaRlmmConfig::default()
     });
 
     let data_listener = client_listeners.into_iter().next().unwrap();
@@ -506,16 +508,17 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready_case() {
     cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
         dir: remote_dir.path().to_path_buf(),
     });
-    cfg.remote_log_manager_interval = Duration::from_millis(200);
+    cfg.remote_log_manager_interval = crabka_units::millis(200);
     // Dead port: the retry loop can never dial the bootstrap; the SwappableRlmm
     // stays on the NotReadyRlmm stub for the entire test.
     cfg.remote_log_metadata = RlmmKind::TopicBacked(KafkaRlmmConfig {
         bootstrap: "127.0.0.1:1".into(),
         num_partitions: 1,
         replication: 1,
-        snapshot_interval: Duration::from_hours(1),
+        snapshot_interval: crabka_units::hours(1),
         snapshot_dir: log_dir.path().join("rlmm-snap"),
         security: None,
+        ..KafkaRlmmConfig::default()
     });
 
     let data_listener = client_listeners.into_iter().next().unwrap();

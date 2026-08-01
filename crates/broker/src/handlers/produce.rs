@@ -11,6 +11,7 @@
 use std::{sync::Arc, time::Duration};
 
 use bytes::{Bytes, BytesMut};
+use crabka_compression::RecordDecompressionPolicy;
 use crabka_log::{Offset, VerbatimBatch};
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_protocol::{
@@ -27,6 +28,7 @@ use crabka_protocol::{
         count_records_in_v2_batches, produce_framing, validate_one_v2_batch,
     },
 };
+use crabka_units::{Time, convert::TimeExt};
 use tokio::sync::oneshot;
 
 use crate::{
@@ -44,11 +46,6 @@ use crate::{
 /// in-sync replica has it.
 const ACKS_ALL: i16 = -1;
 
-/// Kafka's default `min.insync.replicas` — every partition always has at
-/// least its leader in the ISR, so `1` preserves the legacy
-/// "any-ISR-counts" behavior.
-const DEFAULT_MIN_INSYNC_REPLICAS: i32 = 1;
-
 /// Wire sentinel: "no offset assigned" (`ProduceResponse.INVALID_OFFSET`).
 /// Stamped on partition rows that failed before any append happened.
 const INVALID_OFFSET: i64 = -1;
@@ -58,17 +55,19 @@ const INVALID_OFFSET: i64 = -1;
 const NO_LEADER_ID: i32 = -1;
 
 /// Resolve `min.insync.replicas` for a topic from the metadata image.
-/// Defaults to `1` (Kafka's default — every cluster has at least the
-/// leader in ISR), and silently falls back to the default on malformed
-/// values (the `AlterConfigs` validator already rejected invalid values,
-/// so any non-parseable string here is a corrupt metadata image — safer
-/// to err toward the permissive default than to wedge produce).
-fn topic_min_insync_replicas(image: &crabka_metadata::MetadataImage, topic: &str) -> i32 {
+/// Silently falls back to the broker default on malformed values (the
+/// `AlterConfigs` validator already rejected invalid values, so any
+/// non-parseable string here is a corrupt metadata image).
+fn topic_min_insync_replicas(
+    image: &crabka_metadata::MetadataImage,
+    topic: &str,
+    default_min_insync_replicas: i32,
+) -> i32 {
     image
         .topic_config(topic)
         .and_then(|m| m.get(MIN_INSYNC_REPLICAS))
         .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(DEFAULT_MIN_INSYNC_REPLICAS)
+        .unwrap_or(default_min_insync_replicas)
 }
 
 #[tracing::instrument(
@@ -90,6 +89,7 @@ pub(crate) async fn handle(
     // start so the request throttle can be combined with the byte-rate throttle
     // below (KIP-219).
     let handler_start = std::time::Instant::now();
+    let record_decompression_policy = broker.config.record_decompression_policy()?;
     let partitions = broker.partitions.clone();
     let controller = broker.controller.clone();
     let producer_state = broker.producer_state.clone();
@@ -232,6 +232,8 @@ pub(crate) async fn handle(
                         log_dir_status: &log_dir_status,
                         image: &image,
                         this_node_id: broker.config.node_id,
+                        default_min_insync_replicas: broker.config.default_min_insync_replicas,
+                        record_decompression_policy,
                         metrics: &broker.metrics,
                     },
                 ))
@@ -376,10 +378,10 @@ async fn finish_produce_response(
                 context.client_id,
                 tier,
                 *bytes,
+                broker.config.quota_throttle_max,
             )
         })
-        .max()
-        .unwrap_or(Duration::ZERO);
+        .fold(<Time as TimeExt>::ZERO, Time::max);
     let elapsed_micros = u64::try_from(
         handler_start
             .elapsed()
@@ -393,15 +395,16 @@ async fn finish_produce_response(
         &context.principal.name,
         context.client_id,
         elapsed_micros,
+        broker.config.quota_throttle_max,
     );
     let delay = data_delay.max(request_delay);
     let response = ProduceResponse {
         responses: topic_results,
-        throttle_time_ms: i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
+        throttle_time_ms: crate::quota::throttle_time_ms(delay),
         ..Default::default()
     };
-    if delay > Duration::ZERO {
-        tokio::time::sleep(delay).await;
+    if delay > <Time as TimeExt>::ZERO {
+        tokio::time::sleep(delay.to_std()).await;
     }
     let mut encoded = BytesMut::new();
     if (0..3).contains(&version) {
@@ -440,6 +443,8 @@ struct PartitionServices<'a> {
     log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
     image: &'a Arc<crabka_metadata::MetadataImage>,
     this_node_id: crabka_metadata::NodeId,
+    default_min_insync_replicas: i32,
+    record_decompression_policy: RecordDecompressionPolicy,
     metrics: &'a crate::metrics::BrokerMetrics,
 }
 
@@ -464,6 +469,8 @@ async fn process_partition(
         log_dir_status,
         image,
         this_node_id,
+        default_min_insync_replicas,
+        record_decompression_policy,
         metrics,
     } = services;
     let idx = part_data.index;
@@ -490,7 +497,13 @@ async fn process_partition(
     // the records (decompressing) here, exactly as before. A null /
     // undecodable field returns INVALID_REQUEST / INVALID_RECORD, preserving
     // the prior error-code ordering (before the leadership gate).
-    let prepared = match prepare_batch(part_data.payload, topic_compression, topic_name, metrics) {
+    let prepared = match prepare_batch(
+        part_data.payload,
+        topic_compression,
+        topic_name,
+        metrics,
+        record_decompression_policy,
+    ) {
         Ok(p) => p,
         Err(code) => {
             out.error_code = code;
@@ -532,7 +545,7 @@ async fn process_partition(
         partitions,
         log_dir_status,
         image,
-        this_node_id,
+        (this_node_id, default_min_insync_replicas),
     ) {
         Ok(ready) => ready,
         Err(error) => {
@@ -712,8 +725,9 @@ fn validate_partition_gate(
     partitions: &PartitionRegistry,
     log_dir_status: &crate::log_dir_status::LogDirRegistry,
     image: &crabka_metadata::MetadataImage,
-    this_node_id: crabka_metadata::NodeId,
+    broker_policy: (crabka_metadata::NodeId, i32),
 ) -> Result<(Arc<crate::partition::Partition>, i32), PartitionGateError> {
+    let (this_node_id, default_min_insync_replicas) = broker_policy;
     let Some(record) = image
         .partition(topic_name, partition_index)
         .filter(|_| !topic_name.is_empty())
@@ -749,7 +763,7 @@ fn validate_partition_gate(
     }
     if acks == ACKS_ALL
         && i32::try_from(record.isr.len()).unwrap_or(i32::MAX)
-            < topic_min_insync_replicas(image, topic_name)
+            < topic_min_insync_replicas(image, topic_name, default_min_insync_replicas)
     {
         return Err(PartitionGateError {
             code: codes::NOT_ENOUGH_REPLICAS,
@@ -1176,11 +1190,13 @@ fn prepare_batch(
     topic_compression: Option<crabka_compression::CompressionType>,
     topic_name: &str,
     metrics: &crate::metrics::BrokerMetrics,
+    policy: RecordDecompressionPolicy,
 ) -> Result<PreparedBatch, i16> {
     let bytes = match payload {
         // Legacy / pre-decoded payload: always owned.
         PartitionPayload::Owned(rp) => {
-            return decode_owned_batch(rp, topic_name, metrics).map(PreparedBatch::from_owned);
+            return decode_owned_batch(rp, topic_name, metrics, policy)
+                .map(PreparedBatch::from_owned);
         }
         PartitionPayload::Null => return Err(codes::INVALID_REQUEST),
         PartitionPayload::Slice(b) => b,
@@ -1194,8 +1210,10 @@ fn prepare_batch(
     // up-converts a v1 `MessageSet` carried over a v≥3 produce (older
     // message-format clients) and surfaces INVALID_RECORD on malformed bytes.
     let owned_fallback = |bytes: Bytes| -> Result<PreparedBatch, i16> {
-        match RecordsPayload::from_bytes(bytes) {
-            Ok(rp) => decode_owned_batch(rp, topic_name, metrics).map(PreparedBatch::from_owned),
+        match RecordsPayload::from_bytes_with_policy(bytes, policy) {
+            Ok(rp) => {
+                decode_owned_batch(rp, topic_name, metrics, policy).map(PreparedBatch::from_owned)
+            }
             Err(_) => Err(codes::INVALID_RECORD),
         }
     };
@@ -1255,10 +1273,11 @@ fn decode_owned_batch(
     payload: RecordsPayload,
     topic_name: &str,
     metrics: &crate::metrics::BrokerMetrics,
+    policy: RecordDecompressionPolicy,
 ) -> Result<RecordBatch, i16> {
     match payload {
         RecordsPayload::V2(batches) => batches.into_iter().next().ok_or(codes::INVALID_REQUEST),
-        RecordsPayload::Raw(bytes) => RecordsPayload::from_bytes(bytes)
+        RecordsPayload::Raw(bytes) => RecordsPayload::from_bytes_with_policy(bytes, policy)
             .ok()
             .and_then(|p| match p {
                 RecordsPayload::V2(mut v) => v.drain(..).next(),
@@ -1285,18 +1304,20 @@ fn decode_owned_batch(
             target_os = "dragonfly",
         ))]
         RecordsPayload::FileRegions(_) => Err(codes::INVALID_REQUEST),
-        RecordsPayload::Legacy(bytes) => match crabka_records_legacy::legacy_to_v2(&bytes) {
-            Ok(rb) => {
-                if !topic_name.is_empty() {
-                    metrics.record_produce_message_conversion(topic_name);
+        RecordsPayload::Legacy(bytes) => {
+            match crabka_records_legacy::legacy_to_v2_with_policy(&bytes, policy) {
+                Ok(rb) => {
+                    if !topic_name.is_empty() {
+                        metrics.record_produce_message_conversion(topic_name);
+                    }
+                    Ok(rb)
                 }
-                Ok(rb)
+                Err(e) => {
+                    tracing::warn!(error = %e, "legacy_to_v2 failed");
+                    Err(codes::INVALID_RECORD)
+                }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "legacy_to_v2 failed");
-                Err(codes::INVALID_RECORD)
-            }
-        },
+        }
     }
 }
 
@@ -1332,17 +1353,20 @@ mod tests {
 
     use assert2::{assert, check};
     use bytes::{Bytes, BytesMut};
-    use crabka_compression::CompressionType;
+    use crabka_compression::{CompressionType, RecordDecompressionPolicy};
+    use crabka_ids::Offset;
     use crabka_metadata::{
         MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
     };
-    use crabka_protocol::records::{Record, RecordBatch, RecordsPayload};
+    use crabka_protocol::records::{Attributes, Record, RecordBatch, RecordsPayload};
+    use crabka_units::{Time, bytes, convert::TimeExt, fraction, secs};
     use uuid::Uuid;
 
     use super::{
         FramedPartition, FramedTopic, MIN_INSYNC_REPLICAS, PartitionInput, PartitionPayload,
-        PartitionServices, build_topic_error_response, decode_owned_batch, process_partition,
-        produce_bytes_by_qos_tier, resolve_topic_compression, topic_min_insync_replicas,
+        PartitionServices, build_topic_error_response, decode_owned_batch, prepare_batch,
+        process_partition, produce_bytes_by_qos_tier, resolve_topic_compression,
+        topic_min_insync_replicas,
     };
 
     fn image_with_topic(topic: &str, isr: &[u64]) -> MetadataImage {
@@ -1410,21 +1434,35 @@ mod tests {
     #[test]
     fn topic_min_isr_defaults_to_one_when_unset() {
         let img = image_with_topic("t", &[1, 2, 3]);
-        assert!(topic_min_insync_replicas(&img, "t") == 1);
+        assert!(topic_min_insync_replicas(&img, "t", 1) == 1);
     }
 
     #[test]
     fn topic_min_isr_reads_override_when_set() {
         let mut img = image_with_topic("t", &[1, 2, 3]);
         set_min_isr(&mut img, "t", 3);
-        assert!(topic_min_insync_replicas(&img, "t") == 3);
+        assert!(topic_min_insync_replicas(&img, "t", 1) == 3);
+    }
+
+    #[test]
+    fn topic_min_isr_uses_broker_fallback_unless_valid_override_exists() {
+        let cases = [(None, 2), (Some(3), 3)];
+
+        for (override_value, expected) in cases {
+            let mut img = image_with_topic("t", &[1, 2, 3]);
+            if let Some(value) = override_value {
+                set_min_isr(&mut img, "t", value);
+            }
+
+            assert!(topic_min_insync_replicas(&img, "t", 2) == expected);
+        }
     }
 
     #[test]
     fn topic_min_isr_default_one_on_unknown_topic() {
         let img = MetadataImage::new(Uuid::nil());
         assert!(
-            topic_min_insync_replicas(&img, "ghost") == 1,
+            topic_min_insync_replicas(&img, "ghost", 1) == 1,
             "missing topic_config must default to 1, not crash"
         );
     }
@@ -1439,7 +1477,7 @@ mod tests {
             overrides: o,
         }));
         assert!(
-            topic_min_insync_replicas(&img, "t") == 1,
+            topic_min_insync_replicas(&img, "t", 1) == 1,
             "unparseable value must fall back to permissive default 1"
         );
     }
@@ -1455,7 +1493,7 @@ mod tests {
             topic: "t".into(),
             overrides: o,
         }));
-        assert!(topic_min_insync_replicas(&img, "t") == 1);
+        assert!(topic_min_insync_replicas(&img, "t", 1) == 1);
     }
 
     #[test]
@@ -1581,6 +1619,7 @@ mod tests {
             RecordsPayload::V2(vec![batch]),
             "orders",
             &crate::metrics::BrokerMetrics::new(),
+            RecordDecompressionPolicy::default(),
         )
         .expect("decode owned batch");
 
@@ -1600,9 +1639,68 @@ mod tests {
             RecordsPayload::V2(Vec::new()),
             "orders",
             &crate::metrics::BrokerMetrics::new(),
+            RecordDecompressionPolicy::default(),
         )
         .unwrap_err();
         assert!(err == crate::codes::INVALID_REQUEST);
+    }
+
+    #[test]
+    fn record_decompression_policy_limits_owned_produce_fallbacks() {
+        let policy = RecordDecompressionPolicy::new(fraction(1.0), bytes(1), bytes(32)).unwrap();
+        let metrics = crate::metrics::BrokerMetrics::new();
+
+        let v2 = RecordBatch {
+            attributes: Attributes::default().with_compression(CompressionType::Lz4),
+            records: vec![Record {
+                value: Some(Bytes::from(vec![b'x'; 4096])),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let wire = encode_batch(&v2);
+        let error = prepare_batch(
+            PartitionPayload::Slice(wire.clone()),
+            Some(CompressionType::Zstd),
+            "t",
+            &metrics,
+            policy,
+        )
+        .unwrap_err();
+        assert!(error == crate::codes::INVALID_RECORD);
+        assert!(
+            prepare_batch(
+                PartitionPayload::Slice(wire),
+                Some(CompressionType::Zstd),
+                "t",
+                &metrics,
+                RecordDecompressionPolicy::default(),
+            )
+            .is_ok()
+        );
+
+        let records = vec![crabka_records_legacy::ParsedRecord {
+            offset: Offset(0),
+            timestamp: Some(1),
+            key: None,
+            value: Some(Bytes::from(vec![b'x'; 4096])),
+        }];
+        let mut legacy = BytesMut::new();
+        crabka_records_legacy::encode_compressed_message_set(
+            &records,
+            crabka_records_legacy::Magic::V1,
+            CompressionType::Lz4,
+            &mut legacy,
+        )
+        .unwrap();
+        let error = decode_owned_batch(
+            RecordsPayload::Legacy(legacy.freeze()),
+            "t",
+            &metrics,
+            policy,
+        )
+        .unwrap_err();
+        assert!(error == crate::codes::INVALID_RECORD);
     }
 
     #[tokio::test]
@@ -1629,6 +1727,8 @@ mod tests {
             crabka_audit::NodeId(1),
             Arc::clone(&partitions),
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+            50,
+            crabka_units::mebibytes(1),
         ));
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         let log_dir_status = crate::log_dir_status::LogDirRegistry::default();
@@ -1661,6 +1761,8 @@ mod tests {
                 log_dir_status: &log_dir_status,
                 image: &image,
                 this_node_id: crabka_audit::NodeId(1),
+                default_min_insync_replicas: 1,
+                record_decompression_policy: RecordDecompressionPolicy::default(),
                 metrics: &metrics,
             },
         )
@@ -1715,6 +1817,8 @@ mod tests {
             crabka_audit::NodeId(2),
             Arc::clone(&partitions),
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+            50,
+            crabka_units::mebibytes(1),
         ));
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         let log_dir_status = crate::log_dir_status::LogDirRegistry::default();
@@ -1748,6 +1852,8 @@ mod tests {
                 image: &image,
                 // We are the leader (node 2), but hold no local replica.
                 this_node_id: crabka_audit::NodeId(2),
+                default_min_insync_replicas: 1,
+                record_decompression_policy: RecordDecompressionPolicy::default(),
                 metrics: &metrics,
             },
         )
@@ -1790,6 +1896,8 @@ mod tests {
             crabka_audit::NodeId(1),
             Arc::clone(&partitions),
             Arc::new(crate::producer_id_manager::ProducerIdManager::new()),
+            50,
+            crabka_units::mebibytes(1),
         ));
         let producer_state = Arc::new(crate::producer_state::ProducerState::new());
         let log_dir_status = crate::log_dir_status::LogDirRegistry::default();
@@ -1881,6 +1989,8 @@ mod tests {
                 log_dir_status: &log_dir_status,
                 image: &image,
                 this_node_id: crabka_audit::NodeId(1),
+                default_min_insync_replicas: 1,
+                record_decompression_policy: RecordDecompressionPolicy::default(),
                 metrics: &metrics,
             },
         )
@@ -1914,19 +2024,32 @@ mod tests {
         }));
         let buckets = crate::quota::QuotaBuckets::new();
         // Tuple match → 4096 bytes overage at 1024 B/s → throttle > 0.
-        let delay_match =
-            crate::quota::consume_producer_quota(&img, &buckets, "alice", "app-x", "default", 4096);
+        let delay_match = crate::quota::consume_producer_quota(
+            &img,
+            &buckets,
+            "alice",
+            "app-x",
+            "default",
+            4096,
+            secs(1),
+        );
         assert!(
-            delay_match > std::time::Duration::ZERO,
+            delay_match > <Time as TimeExt>::ZERO,
             "tuple quota match should throttle on overage; got {delay_match:?}"
         );
         // No tuple match for client_id="other"; no (user=alice)-only quota exists.
         let buckets2 = crate::quota::QuotaBuckets::new();
         let delay_other = crate::quota::consume_producer_quota(
-            &img, &buckets2, "alice", "other", "default", 4096,
+            &img,
+            &buckets2,
+            "alice",
+            "other",
+            "default",
+            4096,
+            secs(1),
         );
         assert!(
-            delay_other == std::time::Duration::ZERO,
+            delay_other == <Time as TimeExt>::ZERO,
             "non-matching client_id should not throttle; got {delay_other:?}"
         );
     }
@@ -1940,7 +2063,7 @@ mod tests {
     mod verbatim {
         use assert2::{assert, check};
         use bytes::{Bytes, BytesMut};
-        use crabka_compression::CompressionType;
+        use crabka_compression::{CompressionType, RecordDecompressionPolicy};
         use crabka_protocol::records::{Attributes, Record, RecordBatch, TimestampType};
 
         use super::super::{
@@ -2013,8 +2136,14 @@ mod tests {
             leader_epoch: i32,
         ) -> ProduceData {
             let m = crate::metrics::BrokerMetrics::new();
-            let prepared =
-                prepare_batch(PartitionPayload::Slice(slice), topic_compression, "t", &m).unwrap();
+            let prepared = prepare_batch(
+                PartitionPayload::Slice(slice),
+                topic_compression,
+                "t",
+                &m,
+                RecordDecompressionPolicy::default(),
+            )
+            .unwrap();
             build_produce_data(prepared, leader_epoch)
         }
 
@@ -2048,7 +2177,14 @@ mod tests {
         fn fallback_when_null_field() {
             // A wire-null records field is rejected as INVALID_REQUEST.
             let m = crate::metrics::BrokerMetrics::new();
-            let err = prepare_batch(PartitionPayload::Null, None, "t", &m).unwrap_err();
+            let err = prepare_batch(
+                PartitionPayload::Null,
+                None,
+                "t",
+                &m,
+                RecordDecompressionPolicy::default(),
+            )
+            .unwrap_err();
             assert!(err == crate::codes::INVALID_REQUEST);
         }
 
@@ -2091,8 +2227,14 @@ mod tests {
             // A corrupt CRC also fails the owned `RecordBatch::decode`, so the
             // fallback surfaces INVALID_RECORD (the prior decode-error code).
             let m = crate::metrics::BrokerMetrics::new();
-            let err = prepare_batch(PartitionPayload::Slice(Bytes::from(wire)), None, "t", &m)
-                .unwrap_err();
+            let err = prepare_batch(
+                PartitionPayload::Slice(Bytes::from(wire)),
+                None,
+                "t",
+                &m,
+                RecordDecompressionPolicy::default(),
+            )
+            .unwrap_err();
             assert!(err == crate::codes::INVALID_RECORD);
         }
 
@@ -2193,8 +2335,14 @@ mod tests {
             let wire = encode(&b);
 
             let m = crate::metrics::BrokerMetrics::new();
-            let prepared =
-                prepare_batch(PartitionPayload::Slice(wire.clone()), None, "t", &m).unwrap();
+            let prepared = prepare_batch(
+                PartitionPayload::Slice(wire.clone()),
+                None,
+                "t",
+                &m,
+                RecordDecompressionPolicy::default(),
+            )
+            .unwrap();
             assert!(matches!(prepared.source, PreparedSource::Verbatim(_)));
             check!(prepared.producer_id == 4242);
             check!(prepared.producer_epoch == 9);

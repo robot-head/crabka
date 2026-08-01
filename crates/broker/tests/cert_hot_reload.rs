@@ -156,7 +156,7 @@ async fn reload_tls_swaps_served_cert() {
     // Disable the periodic watcher; this test drives reloads via the
     // explicit `BrokerHandle::reload_tls()` so it doesn't depend on
     // poll-tick timing.
-    cfg.tls_reload_interval = std::time::Duration::ZERO;
+    cfg.tls_reload_interval = <crabka_units::Time as crabka_units::convert::TimeExt>::ZERO;
 
     let handle = Broker::start(cfg).await.expect("broker start");
     let addr = handle.listen_addr();
@@ -224,7 +224,7 @@ async fn periodic_watcher_reloads_on_mtime_change() {
         client_ca_path: None,
         client_auth: ClientAuthMode::Disabled,
     });
-    cfg.tls_reload_interval = std::time::Duration::from_millis(100);
+    cfg.tls_reload_interval = crabka_units::millis(100);
 
     let handle = Broker::start(cfg).await.expect("broker start");
     let addr = handle.listen_addr();

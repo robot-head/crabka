@@ -8,7 +8,9 @@ mod service;
 mod store;
 
 use crabka_gres_ranges::{RangeId, TenantName, checkpoint_prefix as range_checkpoint_prefix};
+use crabka_units::{ByteSize, mebibytes};
 
+pub(crate) use self::runtime::restore_latest_at_or_before;
 #[cfg(feature = "checkpoint-test-hooks")]
 pub use self::service::{CheckpointFailpoint, CheckpointServiceStep};
 pub use self::{
@@ -21,7 +23,7 @@ pub use self::{
     runtime::{
         CheckpointMetadata, CheckpointSnapshot, RestorePlan, RestoreTail, RestoredFrom,
         TableTransferRestore, WalPrunePlan, latest_checkpoint_metadata, plan_prune,
-        restore_filtered_from_manifest_and_replay_tail, restore_latest,
+        reconcile_checkpoint_pins, restore_filtered_from_manifest_and_replay_tail, restore_latest,
         restore_latest_and_replay_tail, restore_latest_filtered,
         restore_latest_filtered_and_replay_tail, restore_latest_table_transfer,
         restore_latest_table_transfer_and_replay_tail,
@@ -35,8 +37,8 @@ pub use self::{
     store::{CheckpointObject, CheckpointStore, InMemoryCheckpointStore, ObjectOpsCheckpointStore},
 };
 
-/// Default checkpoint part target size: 64 MiB.
-pub const DEFAULT_PART_MAX_BYTES: usize = 64 * 1024 * 1024;
+/// Default checkpoint part target size.
+pub const DEFAULT_PART_MAX_SIZE: ByteSize = mebibytes(64);
 
 /// Object prefix that contains all checkpoints for one tenant.
 #[must_use]

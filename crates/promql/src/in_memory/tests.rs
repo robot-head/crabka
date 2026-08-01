@@ -274,7 +274,7 @@ async fn replay_wal_records_populates_queryable_head() {
 
 #[tokio::test]
 async fn bulk_wal_replay_and_retention_are_observable() {
-    assert2::assert!(DEFAULT_RETENTION_MS == 21_600_000);
+    assert2::assert!(DEFAULT_RETENTION == hours(6));
 
     let records = [
         float_record(
@@ -291,10 +291,10 @@ async fn bulk_wal_replay_and_retention_are_observable() {
         ),
     ];
 
-    let mut store = InMemoryMetricStore::with_retention_ms(5_000);
-    assert2::assert!(store.retention_ms() == 5_000);
-    store.set_retention_ms(7_000);
-    assert2::assert!(store.retention_ms() == 7_000);
+    let mut store = InMemoryMetricStore::with_retention(secs(5));
+    assert2::assert!(store.retention() == secs(5));
+    store.set_retention(secs(7));
+    assert2::assert!(store.retention() == secs(7));
     store.apply_wal_records(&records);
 
     let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "up")];
@@ -304,8 +304,8 @@ async fn bulk_wal_replay_and_retention_are_observable() {
         .unwrap();
     assert2::assert!(series.len() == 2);
 
-    let head = WalHead::with_retention_ms(9_000);
-    assert2::assert!(head.retention_ms() == 9_000);
+    let head = WalHead::with_retention(secs(9));
+    assert2::assert!(head.retention() == secs(9));
     head.apply_wal_records(&records);
     let jobs = head
         .label_values("tenant-a", "job", &matchers, 0, 30_000)
@@ -331,7 +331,7 @@ async fn bulk_wal_replay_and_retention_are_observable() {
 #[tokio::test]
 async fn wal_head_delegates_metadata_cardinality_stats_and_blocks() {
     let (mut store, up_api) = store_with_float_and_hist_series();
-    store.set_retention_ms(12_345);
+    store.set_retention(millis(12_345));
     store.push_exemplar(
         "tenant-a",
         up_api.clone(),
@@ -345,7 +345,7 @@ async fn wal_head_delegates_metadata_cardinality_stats_and_blocks() {
     store.record_offset(PartitionIndex(0), Offset(9));
 
     let head = WalHead::from_store(store);
-    check!(head.retention_ms() == 12_345);
+    check!(head.retention() == millis(12_345));
     check!(
         head.watermarks().get(&PartitionIndex(0))
             == Some(&PartitionWatermark {
@@ -621,7 +621,7 @@ async fn query_shard_neq_matcher_excludes_matching_fingerprint_modulo() {
 
 #[tokio::test]
 async fn prune_drops_old_samples() {
-    let mut store = InMemoryMetricStore::with_retention_ms(1_000);
+    let mut store = InMemoryMetricStore::with_retention(secs(1));
     let series = lbls(&[("__name__", "up"), ("job", "api")]);
     // ts 100 and 500 are old; ts 9_500 and 9_900 are within the window.
     store.push_float("t", series.clone(), 100, 1.0);
@@ -656,7 +656,7 @@ async fn prune_drops_old_samples() {
 
 #[tokio::test]
 async fn prune_counts_partial_histogram_and_exemplar_retention() {
-    let mut store = InMemoryMetricStore::with_retention_ms(1_000);
+    let mut store = InMemoryMetricStore::with_retention(secs(1));
     let live = lbls(&[("__name__", "latency_seconds"), ("job", "api")]);
     let stale = lbls(&[("__name__", "latency_seconds"), ("job", "old")]);
     store.push_float("t", live.clone(), 8_999, 1.0);
@@ -701,7 +701,7 @@ async fn prune_counts_partial_histogram_and_exemplar_retention() {
 
 #[tokio::test]
 async fn prune_removes_emptied_series_from_index() {
-    let mut store = InMemoryMetricStore::with_retention_ms(1_000);
+    let mut store = InMemoryMetricStore::with_retention(secs(1));
     let stale = lbls(&[("__name__", "up"), ("job", "old")]);
     let fresh = lbls(&[("__name__", "up"), ("job", "new")]);
     store.push_float("t", stale.clone(), 100, 1.0);

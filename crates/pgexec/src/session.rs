@@ -33,6 +33,7 @@ use crabka_pgwire::{
     },
     error::{PgError, Severity, sqlstate},
 };
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use tokio::sync::{OwnedRwLockReadGuard, mpsc, watch};
 
 use crate::{
@@ -2419,6 +2420,8 @@ pub struct SqlSession {
     range_scanner: Arc<dyn crate::scanner::RangeScanner>,
     join_stats: Arc<dyn crate::plan_dist::Stats>,
     join_strategy_config: crate::plan_dist::PlannerConfig,
+    blocking_query_memory: ByteSize,
+    result_page_max: ByteSize,
     /// Timestamp oracle for sharded timestamp transactions.
     timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampSource>,
     /// Cached durable-timestamp horizon (shared from the engine): the floor a
@@ -2593,6 +2596,8 @@ pub(crate) struct SqlSessionConfig {
     pub range_scanner: Arc<dyn crate::scanner::RangeScanner>,
     pub join_stats: Arc<dyn crate::plan_dist::Stats>,
     pub join_strategy_config: crate::plan_dist::PlannerConfig,
+    pub blocking_query_memory: ByteSize,
+    pub result_page_max: ByteSize,
     pub timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampSource>,
     pub timestamp_horizon: crate::timestamp_txn::TimestampHorizonSource,
     pub local_sequence: Arc<crate::local_sequence::LocalSequence>,
@@ -2851,6 +2856,8 @@ impl SqlSession {
             range_scanner,
             join_stats,
             join_strategy_config,
+            blocking_query_memory,
+            result_page_max,
             timestamp_oracle,
             timestamp_horizon,
             local_sequence,
@@ -2901,6 +2908,8 @@ impl SqlSession {
             range_scanner,
             join_stats,
             join_strategy_config,
+            blocking_query_memory,
+            result_page_max,
             timestamp_oracle,
             timestamp_horizon,
             local_sequence,
@@ -5754,6 +5763,7 @@ impl SqlSession {
         let range_scanner = Arc::clone(&self.range_scanner);
         let join_stats = Arc::clone(&self.join_stats);
         let join_strategy_config = self.join_strategy_config;
+        let blocking_query_memory = self.blocking_query_memory;
         let own_start_ts = self.timestamp_own_start_ts;
         let current_role = self.current_role.clone();
         let resolution = self.resolution_scope();
@@ -5797,6 +5807,7 @@ impl SqlSession {
                 eval_ctx: &ctx,
                 fctx,
                 range_scanner: &statement_scanner,
+                blocking_query_memory,
             };
             with_query_cancel_runtime(Some(cancel.canceled), || {
                 with_guc_runtime(guc_values, guc_settings, prepared, || {
@@ -6642,6 +6653,7 @@ impl SqlSession {
         let procarray = Arc::clone(&self.procarray);
         let lockmgr = Arc::clone(&self.lockmgr);
         let range_scanner = Arc::clone(&self.range_scanner);
+        let blocking_query_memory = self.blocking_query_memory;
         let lock_wait_cap = self.lock_wait_cap;
         let (request_tx, request_rx) = mpsc::channel(1);
         let (worker_id, mut cancel, finished) = self.register_worker();
@@ -6670,6 +6682,7 @@ impl SqlSession {
                 eval_ctx: &eval_ctx,
                 fctx: crate::exec::ForeignCtx::none(),
                 range_scanner: range_scanner.as_ref(),
+                blocking_query_memory,
             };
             crate::routine::with_scalar_runtime(&catalog_kv, Some(request_tx), || {
                 runtime.block_on(async {
@@ -9627,9 +9640,12 @@ impl SqlSession {
                     emitted = emitted.saturating_add(encoded.len());
                     let stopped = remaining == Some(0);
                     let is_last = page.is_last || stopped;
-                    let mut chunks =
-                        into_bounded_row_pages(encoded, page_rows, RESULT_PAGE_MAX_BYTES)
-                            .peekable();
+                    let mut chunks = into_bounded_row_pages(
+                        encoded,
+                        page_rows,
+                        self.result_page_max.bytes_usize(),
+                    )
+                    .peekable();
                     if chunks.peek().is_none() && is_last {
                         sink.send(crabka_pgwire::engine::ResultPage::Rows {
                             result_index,
@@ -9753,7 +9769,8 @@ impl Session for SqlSession {
                         continue;
                     }
                     let mut pages =
-                        into_bounded_row_pages(rows, page_rows, RESULT_PAGE_MAX_BYTES).peekable();
+                        into_bounded_row_pages(rows, page_rows, self.result_page_max.bytes_usize())
+                            .peekable();
                     while let Some(rows) = pages.next() {
                         let rows = rows?;
                         let final_page = pages.peek().is_none();
@@ -10169,7 +10186,7 @@ impl Session for SqlSession {
     }
 }
 
-const RESULT_PAGE_MAX_BYTES: usize = 1 << 20;
+pub(crate) const RESULT_PAGE_MAX: crabka_units::ByteSize = crabka_units::mebibytes(1);
 
 fn into_bounded_row_pages(
     rows: Vec<Vec<Option<crabka_pgwire::engine::Cell>>>,

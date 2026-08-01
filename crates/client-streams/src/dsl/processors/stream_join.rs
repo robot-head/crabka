@@ -11,6 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use crabka_units::prelude::*;
 
 use crate::{
     dsl::processors::outer_join_store::{
@@ -38,8 +39,8 @@ type Marker<T> = PhantomData<fn() -> T>;
 pub(crate) struct KStreamKStreamJoinProcessor<K, VThis, VOther, VO, F> {
     pub own_store: String,
     pub other_store: String,
-    pub fetch_before: i64,
-    pub fetch_after: i64,
+    pub fetch_before: Time,
+    pub fetch_after: Time,
     pub joiner: F,
     pub side_left: bool,
     // ── left/outer (all `None`/`false` for inner) ──────────────────────────────
@@ -48,9 +49,9 @@ pub(crate) struct KStreamKStreamJoinProcessor<K, VThis, VOther, VO, F> {
     pub tracker: Option<Arc<Mutex<TimeTracker>>>,
     pub key_serde: Option<Box<dyn Serde<K>>>,
     pub value_serde: Option<Box<dyn Serde<VThis>>>,
-    pub before_ms: i64,
-    pub after_ms: i64,
-    pub grace_ms: i64,
+    pub before: Time,
+    pub after: Time,
+    pub grace: Time,
     pub _pd: Marker<(K, VThis, VOther, VO)>,
 }
 
@@ -82,7 +83,11 @@ where
                 .get_join_window_store::<K, VOther>(&self.other_store)
                 .expect("other join store not found");
             other
-                .fetch(&key, t - self.fetch_before, t + self.fetch_after)
+                .fetch(
+                    &key,
+                    t - self.fetch_before.millis_i64(),
+                    t + self.fetch_after.millis_i64(),
+                )
                 .await
         };
         let had_match = !matches.is_empty();
@@ -137,7 +142,7 @@ where
         //    fast forward when nothing is pending AND the window is closed.)
         if self.emit_unmatched && !had_match {
             let st = tracker.lock().expect("tracker lock").stream_time;
-            if t + self.fetch_after < st {
+            if t + self.fetch_after.millis_i64() < st {
                 let out = (self.joiner)(&r.value, None);
                 ctx.forward(Record::new(Some(key.clone()), out, t));
             } else {
@@ -161,10 +166,12 @@ where
         //    a side that then goes silent stays unflushed until that side sees another
         //    record (the JVM punctuator would flush it). Documented in the spec.
         let st = tracker.lock().expect("tracker lock").stream_time;
+        // The scan bounds are epoch-millisecond instants, so the window extents
+        // cross into that coordinate space here.
         let lookback = if self.side_left {
-            self.after_ms
+            self.after.millis_i64()
         } else {
-            self.before_ms
+            self.before.millis_i64()
         };
         let zero = Bytes::copy_from_slice(&0i64.to_be_bytes());
         let hi = Bytes::copy_from_slice(&st.saturating_add(1).to_be_bytes());
@@ -177,7 +184,7 @@ where
                 .await
                 .into_iter()
                 .filter(|(k, _)| outer_key_side_left(k) == self.side_left)
-                .filter(|(k, _)| outer_key_ts(k) + lookback + self.grace_ms < st)
+                .filter(|(k, _)| outer_key_ts(k) + lookback + self.grace.millis_i64() < st)
                 .map(|(k, v)| {
                     let (_is_left, raw) = outer_value_decode(&v);
                     let val = value_serde
@@ -253,8 +260,8 @@ mod tests {
         KStreamKStreamJoinProcessor {
             own_store: "this".into(),
             other_store: "other".into(),
-            fetch_before: 10,
-            fetch_after: 10,
+            fetch_before: millis(10),
+            fetch_after: millis(10),
             // inner only ever passes `Some`.
             joiner: |a: &String, b: Option<&String>| {
                 format!("{a}{}", b.cloned().unwrap_or_default())
@@ -265,9 +272,9 @@ mod tests {
             tracker: None,
             key_serde: None,
             value_serde: None,
-            before_ms: 0,
-            after_ms: 0,
-            grace_ms: 0,
+            before: Time::ZERO,
+            after: Time::ZERO,
+            grace: Time::ZERO,
             _pd: PhantomData::<fn() -> (String, String, String, String)>,
         }
     }
@@ -400,8 +407,8 @@ mod tests {
         let mut proc = KStreamKStreamJoinProcessor {
             own_store: "this".into(),
             other_store: "other".into(),
-            fetch_before: 10,
-            fetch_after: 10,
+            fetch_before: millis(10),
+            fetch_after: millis(10),
             joiner: |a: &String, b: Option<&String>| {
                 format!("{a}{}", b.cloned().unwrap_or_default())
             },
@@ -411,9 +418,9 @@ mod tests {
             tracker: Some(Arc::clone(&tracker)),
             key_serde: Some(Box::new(StringSerde)),
             value_serde: Some(Box::new(StringSerde)),
-            before_ms: 10,
-            after_ms: 10,
-            grace_ms: 0,
+            before: millis(10),
+            after: millis(10),
+            grace: Time::ZERO,
             _pd: PhantomData::<fn() -> (String, String, String, String)>,
         };
 

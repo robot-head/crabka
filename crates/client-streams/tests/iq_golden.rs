@@ -18,6 +18,7 @@ use crabka_client_streams::{
     Consumed, I64Serde, SessionWindows, StringSerde, TimeWindows, TopologyTestDriver,
     dsl::StreamsBuilder,
 };
+use crabka_units::prelude::*;
 use serde_json::Value;
 
 /// The captured JVM golden, parsed once per test.
@@ -121,7 +122,8 @@ async fn iq_kv_golden_parity() {
 async fn iq_window_golden_parity() {
     let gold = golden();
     let win = &gold["window"];
-    let size = win["size_ms"].as_i64().expect("size_ms");
+    // The golden fixture keys stay `*_ms`; the value becomes an extent here.
+    let size = Time::from_millis(win["size_ms"].as_i64().expect("size_ms"));
 
     let builder = StreamsBuilder::new();
     builder
@@ -153,7 +155,14 @@ async fn iq_window_golden_parity() {
 
     // Range fetch over [0, size] → ascending (windowStart, count).
     let got = driver
-        .iq_window_fetch("wc", &"k".to_string(), 0, size, &StringSerde, &I64Serde)
+        .iq_window_fetch(
+            "wc",
+            &"k".to_string(),
+            0,
+            size.millis_i64(),
+            &StringSerde,
+            &I64Serde,
+        )
         .await;
     let want: Vec<(i64, i64)> = win["fetch_k_0_1000"]
         .as_array()
@@ -172,7 +181,7 @@ async fn iq_window_golden_parity() {
 async fn iq_session_golden_parity() {
     let gold = golden();
     let sess = &gold["session"];
-    let gap = sess["gap_ms"].as_i64().expect("gap_ms");
+    let gap = Time::from_millis(sess["gap_ms"].as_i64().expect("gap_ms"));
 
     let builder = StreamsBuilder::new();
     builder

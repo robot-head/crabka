@@ -100,6 +100,8 @@ fn kafka_with_oauth_trust(name: &str, ns: &str, trust_certs: Vec<(&str, &str)>) 
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(ns.into());

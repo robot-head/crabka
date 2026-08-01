@@ -1,7 +1,6 @@
 //! Metrics-generator configuration.
 
-use std::time::Duration;
-
+use crabka_units::{Time, secs};
 use serde::{Deserialize, Serialize};
 
 /// Tempo-default latency histogram bucket edges, in nanoseconds.
@@ -26,13 +25,18 @@ pub const DEFAULT_LATENCY_BUCKETS_NS: &[f64] = &[
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MetricsGenConfig {
-    #[serde(rename = "collection_interval_secs", with = "secs")]
-    pub collection_interval: Duration,
+    #[serde(
+        rename = "collection_interval_secs",
+        with = "crabka_units::serde_units::numeric::secs_i64"
+    )]
+    pub collection_interval: Time,
     pub histogram_buckets_ns: Vec<f64>,
-    pub latency_native_schema: i8,
     pub max_exemplars_per_series: usize,
-    #[serde(rename = "edge_ttl_secs", with = "secs")]
-    pub edge_ttl: Duration,
+    #[serde(
+        rename = "edge_ttl_secs",
+        with = "crabka_units::serde_units::numeric::secs_i64"
+    )]
+    pub edge_ttl: Time,
     pub edge_store_max_items: usize,
     pub enable_target_info: bool,
     pub enable_status_message: bool,
@@ -43,11 +47,10 @@ pub struct MetricsGenConfig {
 impl Default for MetricsGenConfig {
     fn default() -> Self {
         Self {
-            collection_interval: Duration::from_secs(15),
+            collection_interval: secs(15),
             histogram_buckets_ns: DEFAULT_LATENCY_BUCKETS_NS.to_vec(),
-            latency_native_schema: 8,
             max_exemplars_per_series: 0,
-            edge_ttl: Duration::from_secs(10),
+            edge_ttl: secs(10),
             edge_store_max_items: 10_000,
             enable_target_info: false,
             enable_status_message: false,
@@ -57,31 +60,8 @@ impl Default for MetricsGenConfig {
     }
 }
 
-mod secs {
-    use std::time::Duration;
-
-    use serde::{Deserialize, Deserializer, Serializer};
-
-    ///
-    /// # Errors
-    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
-    pub fn serialize<S: Serializer>(d: &Duration, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_u64(d.as_secs())
-    }
-
-    ///
-    /// # Errors
-    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Duration, D::Error> {
-        let secs = u64::deserialize(d)?;
-        Ok(Duration::from_secs(secs))
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
 
     #[test]
@@ -89,11 +69,10 @@ mod tests {
         let c = MetricsGenConfig::default();
         assert2::assert!(
             c == MetricsGenConfig {
-                collection_interval: Duration::from_secs(15),
+                collection_interval: secs(15),
                 histogram_buckets_ns: DEFAULT_LATENCY_BUCKETS_NS.to_vec(),
-                latency_native_schema: 8,
                 max_exemplars_per_series: 0,
-                edge_ttl: Duration::from_secs(10),
+                edge_ttl: secs(10),
                 edge_store_max_items: 10_000,
                 enable_target_info: false,
                 enable_status_message: false,
@@ -110,11 +89,10 @@ mod tests {
                 .unwrap();
         assert2::assert!(
             c == MetricsGenConfig {
-                collection_interval: Duration::from_secs(30),
+                collection_interval: secs(30),
                 histogram_buckets_ns: DEFAULT_LATENCY_BUCKETS_NS.to_vec(),
-                latency_native_schema: 8,
                 max_exemplars_per_series: 5,
-                edge_ttl: Duration::from_secs(10),
+                edge_ttl: secs(10),
                 edge_store_max_items: 10_000,
                 enable_target_info: false,
                 enable_status_message: false,

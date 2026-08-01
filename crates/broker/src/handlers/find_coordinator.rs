@@ -138,7 +138,13 @@ pub(crate) async fn handle(
             KEY_TYPE_TRANSACTION => {
                 // Ensure __transaction_state topic exists before we try to
                 // look up partitions in it.
-                if let Err(e) = crate::txn::bootstrap::ensure_topic(&controller).await {
+                if let Err(e) = crate::txn::bootstrap::ensure_topic(
+                    &controller,
+                    broker.config.transaction_state_num_partitions,
+                    broker.config.transaction_state_replication_factor,
+                )
+                .await
+                {
                     tracing::warn!(
                         error = %e,
                         "txn bootstrap failed; replying COORDINATOR_NOT_AVAILABLE"
@@ -157,7 +163,15 @@ pub(crate) async fn handle(
             KEY_TYPE_SHARE => {
                 // Ensure __share_group_state exists before resolving its
                 // partitions' leaders.
-                if let Err(e) = crate::share_coordinator::bootstrap::ensure_topic(&controller).await
+                if let Err(e) = crate::share_coordinator::bootstrap::ensure_topic(
+                    &controller,
+                    broker.config.share_coordinator.state_topic_num_partitions,
+                    broker
+                        .config
+                        .share_coordinator
+                        .state_topic_replication_factor,
+                )
+                .await
                 {
                     tracing::warn!(
                         error = %e,
@@ -195,7 +209,7 @@ pub(crate) async fn handle(
                         group,
                         &topic_uuid,
                         partition,
-                        crate::share_coordinator::bootstrap::NUM_PARTITIONS,
+                        broker.config.share_coordinator.state_topic_num_partitions,
                     );
                     let image = controller.current_image();
                     result.push(resolve_partition_coordinator(
@@ -251,10 +265,7 @@ fn resolve_transaction_keys(
 ) -> Vec<Coordinator> {
     keys.into_iter()
         .map(|key| {
-            let partition = crate::txn::partitioner::partition_for_tid(
-                &key,
-                crate::txn::bootstrap::NUM_PARTITIONS,
-            );
+            let partition = broker.txn_coordinator.partition_for(&key).get();
             resolve_partition_coordinator(
                 broker,
                 &broker.controller.current_image(),
@@ -442,6 +453,7 @@ mod tests {
     use assert2::assert;
 
     use super::*;
+    use crate::test_support::{peer, principal, start_broker_with};
 
     fn deny_authorizer() -> crate::authorizer::SimpleAclAuthorizer {
         crate::authorizer::SimpleAclAuthorizer::new(std::collections::HashSet::new())
@@ -518,5 +530,50 @@ mod tests {
             ..Default::default()
         };
         assert!(local_advertised_for_listener(&config, "external") == "legacy:1000");
+    }
+
+    #[tokio::test]
+    async fn configured_partition_count_controls_txn_topic_and_routing() {
+        let (broker_handle, _dir) = start_broker_with(|config| {
+            config.audit_enabled = false;
+            config.transaction_state_num_partitions = 7;
+            config.transaction_state_replication_factor = 1;
+        })
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+        let principal = principal("admin");
+        let peer = peer();
+        let context = crate::test_support::request_context(&principal, &peer, "admin-client");
+        let version = crabka_protocol::owned::find_coordinator_response::MAX_VERSION;
+        let tid = "my-tid"; // hashes to partition 43 with the old fixed count of 50
+        let request = FindCoordinatorRequest {
+            key_type: KEY_TYPE_TRANSACTION,
+            coordinator_keys: vec![tid.to_string()],
+            ..Default::default()
+        };
+
+        let response = handle(
+            &broker,
+            version,
+            1,
+            &crate::test_support::encode_request(&request, version),
+            &context,
+        )
+        .await
+        .expect("find transaction coordinator");
+        let response: FindCoordinatorResponse =
+            crate::test_support::decode_response(&response, version);
+
+        let image = broker_handle.controller_image_for_test();
+        let topic = image
+            .topic(crate::txn::bootstrap::TOPIC)
+            .expect("transaction-state topic");
+        assert!(topic.partitions == 7);
+        assert!(topic.replication_factor == 1);
+        assert!(image.partitions_of(crate::txn::bootstrap::TOPIC).count() == 7);
+        assert!(response.coordinators.len() == 1);
+        assert!(response.coordinators[0].error_code == codes::NONE);
+        assert!(response.coordinators[0].node_id == broker.config.broker_id);
+        broker_handle.shutdown().await;
     }
 }

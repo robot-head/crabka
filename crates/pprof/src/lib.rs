@@ -41,14 +41,15 @@ pub use samples::{
     COL_FINGERPRINT, COL_TIMESTAMP, PCOL_PROFILE_TYPE, PCOL_SPAN_ID, PCOL_STACKTRACE_ID,
     PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE, PCOL_TRACE_ID, PCOL_VALUE, profile_samples_schema,
 };
-pub use series::{Series, SeriesAgg, fold_bucket, step_bucket_ms, step_ms_from_secs};
+pub use series::{Series, SeriesAgg, fold_bucket, step_bucket_ms, step_from_secs};
 pub use store::{ProfileScan, ProfileStats, ProfileStore};
 pub use symbol_db::{
     FunctionRec, LineRec, LocationRec, MappingRec, MappingSymbolization, RawLocation, SymbolDb,
 };
 pub use symbolizer::{
-    ChainedResolver, DebuginfodResolver, FileSystemResolver, LazySymbolizer, NativeResolver,
-    NativeSymbol, ObjectSymbolResolver, SymbolizeRequest,
+    ChainedResolver, DEFAULT_DEBUGINFOD_CONNECT_TIMEOUT, DEFAULT_DEBUGINFOD_MAX_ARTIFACT_SIZE,
+    DEFAULT_DEBUGINFOD_REQUEST_TIMEOUT, DebuginfodConfig, DebuginfodResolver, FileSystemResolver,
+    LazySymbolizer, NativeResolver, NativeSymbol, ObjectSymbolResolver, SymbolizeRequest,
 };
 pub use tree::{FlameGraph, FlameGraphDiff, Level, Tree};
 pub use union_store::UnionProfileStore;

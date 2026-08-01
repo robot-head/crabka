@@ -18,6 +18,7 @@ unsafe_op_in_unsafe_fn = "warn"
 [dependencies]
 crabka-log = { version = "0.3.9", path = "../log" }
 crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
+crabka-units = { workspace = true }
 bytes = { workspace = true }
 memmap2 = { workspace = true }
 

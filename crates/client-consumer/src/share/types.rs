@@ -36,6 +36,27 @@ pub enum ShareAckMode {
     Explicit,
 }
 
+/// How a `ShareFetch` applies its maximum-record limit.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ShareAcquireMode {
+    /// Acquire complete record batches, which may exceed the requested record
+    /// limit. This preserves the existing Kafka-compatible behavior.
+    #[default]
+    BatchOptimized,
+    /// Stop acquiring when the requested record limit is reached.
+    RecordLimit,
+}
+
+impl ShareAcquireMode {
+    /// The `i8` wire value carried in `ShareFetch` version 2 and later.
+    pub(crate) fn wire(self) -> i8 {
+        match self {
+            ShareAcquireMode::BatchOptimized => 0,
+            ShareAcquireMode::RecordLimit => 1,
+        }
+    }
+}
+
 /// The disposition of an acknowledged record (KIP-932 wire codes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShareAckType {
@@ -78,5 +99,20 @@ mod tests {
     #[test]
     fn ack_mode_default_is_implicit() {
         assert2::assert!(ShareAckMode::default() == ShareAckMode::Implicit);
+    }
+
+    #[test]
+    fn acquire_mode_default_is_batch_optimized() {
+        assert2::assert!(ShareAcquireMode::default() == ShareAcquireMode::BatchOptimized);
+    }
+
+    #[test]
+    fn acquire_mode_wire_codes_match_kafka() {
+        for (mode, expected) in [
+            (ShareAcquireMode::BatchOptimized, 0),
+            (ShareAcquireMode::RecordLimit, 1),
+        ] {
+            assert2::assert!(mode.wire() == expected);
+        }
     }
 }

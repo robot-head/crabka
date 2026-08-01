@@ -2,6 +2,7 @@
 //! authentication, simple ACL authorization, and
 //! optional per-user quotas.
 
+use crabka_units::Time;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -119,18 +120,20 @@ pub struct DelegationTokenAuth {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub renewers: Vec<String>,
 
-    /// Hard upper bound on token lifetime in milliseconds. `None` →
-    /// broker's `delegation_token_max_lifetime_ms` (7d default). Capped
+    /// Hard upper bound on token lifetime. `None` →
+    /// broker's `delegation_token_max_lifetime` (7d default). Capped
     /// by the broker even when explicitly set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub max_lifetime_ms: Option<i64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub max_lifetime: Option<Time>,
 
     /// Renew when `expiry_timestamp_ms - now <= this`. Default 24h.
     /// Minimum 60s.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 60_000))]
-    pub renew_before_expiry_ms: Option<i64>,
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub renew_before_expiry: Option<Time>,
 }
 
 fn authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
@@ -153,8 +156,8 @@ fn authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema 
                 "type": "array",
                 "items": { "type": "string", "pattern": "^User:.+$" },
             },
-            "maxLifetimeMs": { "type": "integer", "minimum": 1 },
-            "renewBeforeExpiryMs": { "type": "integer", "minimum": 60000 },
+            "maxLifetime": { "type": "string" },
+            "renewBeforeExpiry": { "type": "string" },
         },
     })
 }
@@ -384,7 +387,7 @@ pub struct KafkaUserStatus {
     /// Current `expiry_timestamp_ms` of the operator-managed
     /// delegation token (extended on each successful renew). Compared
     /// against `now` to decide when to renew per
-    /// `spec.authentication.renewBeforeExpiryMs`.
+    /// `spec.authentication.renewBeforeExpiry`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delegation_token_expiry_timestamp_ms: Option<i64>,
 
@@ -814,8 +817,8 @@ spec:
   authentication:
     type: delegation-token
     renewers: ["User:bob", "User:carol"]
-    maxLifetimeMs: 86400000
-    renewBeforeExpiryMs: 7200000
+    maxLifetime: 1d
+    renewBeforeExpiry: 2h
 "#;
         let user: KafkaUser = serde_yaml::from_str(yaml).unwrap();
         let Authentication::DelegationToken(dt) = user.spec.authentication else {
@@ -824,8 +827,8 @@ spec:
         assert!(
             dt == DelegationTokenAuth {
                 renewers: vec!["User:bob".to_string(), "User:carol".to_string()],
-                max_lifetime_ms: Some(86_400_000),
-                renew_before_expiry_ms: Some(7_200_000),
+                max_lifetime: Some(crabka_units::days(1)),
+                renew_before_expiry: Some(crabka_units::hours(2)),
             }
         );
     }
@@ -848,9 +851,21 @@ spec:
         assert!(
             dt == DelegationTokenAuth {
                 renewers: vec![],
-                max_lifetime_ms: None,
-                renew_before_expiry_ms: None,
+                max_lifetime: None,
+                renew_before_expiry: None,
             }
         );
+    }
+
+    #[test]
+    fn delegation_token_time_fields_are_uom_strings_in_the_schema() {
+        let crd = serde_json::to_value(KafkaUser::crd()).expect("serialize CRD");
+        let auth = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]
+            ["authentication"]["properties"];
+
+        assert!(auth["maxLifetime"]["type"] == "string");
+        assert!(auth["renewBeforeExpiry"]["type"] == "string");
+        assert!(auth.get("maxLifetimeMs").is_none());
+        assert!(auth.get("renewBeforeExpiryMs").is_none());
     }
 }

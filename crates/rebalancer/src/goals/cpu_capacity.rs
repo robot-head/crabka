@@ -1,22 +1,20 @@
 //! Hard goal: enforce a per-broker `cpu_cores` limit using the
-//! scraped `UsageStore::cpu_micros_rate` summed across the broker's
+//! scraped `UsageStore::cpu_cores_rate` summed across the broker's
 //! hosted partitions (all replica roles — produce work hits the
 //! leader, fetch / replication work hits everyone serving).
 //!
-//! The rate is in microseconds-of-CPU per second; dividing by
-//! `1_000_000` yields the equivalent number of CPU cores in use. The
-//! `cpu_cores` capacity is a fractional core count (`f64`).
+//! Both the measured rate and the `cpu_cores` capacity are core counts,
+//! so the comparison is a plain `f64` one.
 
 use std::collections::HashMap;
+
+use crabka_units::convert::RatioExt;
 
 use crate::{
     goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
     model::{ClusterState, Movement, PartitionView},
     scraper::Window,
 };
-
-/// Conversion factor from `cpu_micros_rate` (micros/sec) to cores.
-const MICROS_PER_CORE_SECOND: f64 = 1_000_000.0;
 
 pub struct CpuCapacity;
 
@@ -33,8 +31,8 @@ impl CpuCapacity {
     ) -> HashMap<i32, f64> {
         crate::goals::replica_totals(partitions, broker_ids, |broker, topic, partition| {
             ctx.broker_usages
-                .cpu_micros_rate(broker, topic, partition, Window::FiveMin, now_ms)
-                .map(|rate_micros| rate_micros / MICROS_PER_CORE_SECOND)
+                .cpu_cores_rate(broker, topic, partition, Window::FiveMin, now_ms)
+                .map(RatioExt::as_f64)
         })
     }
 }
@@ -141,7 +139,9 @@ impl Goal for CpuCapacity {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
+
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -152,7 +152,7 @@ mod tests {
 
     fn ctx_with(caps: BrokerCapacities, store: Arc<UsageStore>) -> GoalContext {
         GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(caps),
@@ -191,8 +191,8 @@ mod tests {
 
     fn store_with_counter_pair(samples: Vec<(i32, &str, i32, f64, f64)>) -> Arc<UsageStore> {
         let store = UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_hours(1),
+            scrape_interval: secs(30),
+            retention: hours(1),
         });
         let now_ms = crate::goals::now_ms();
         let t0 = now_ms - 1000;

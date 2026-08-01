@@ -5,6 +5,7 @@
 use std::{collections::BTreeMap, net::IpAddr};
 
 use crabka_security::{ListenerProtocol, SaslMechanism, ca::SubjectAltName};
+use crabka_units::fmt::Human as _;
 use k8s_openapi::api::{
     core::v1::{Node, Service},
     networking::v1::Ingress,
@@ -1059,6 +1060,8 @@ mod service_rendering_tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
+                gres_registry: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -2233,6 +2236,7 @@ mod tests {
             principal_to_local_rules: vec!["DEFAULT".into()],
             realm: None,
             kdc: None,
+            max_time_skew: None,
         }
     }
 
@@ -2270,6 +2274,7 @@ mod tests {
             principal_to_local_rules: vec![],
             realm: None,
             kdc: None,
+            max_time_skew: None,
         };
         let l = gssapi_listener("gss", 9092, false, g);
         assert!(
@@ -3137,6 +3142,24 @@ fn render_remote_storage(
                 if let Some(rf) = t.replication {
                     let _ = writeln!(out, "replication = {rf}");
                 }
+                if let Some(value) = t.topic_create_timeout {
+                    let _ = writeln!(out, "topic_create_timeout = \"{}\"", value.human());
+                }
+                if let Some(value) = t.fetch_max_wait {
+                    let _ = writeln!(out, "fetch_max_wait = \"{}\"", value.human());
+                }
+                if let Some(value) = t.fetch_max_bytes {
+                    let _ = writeln!(out, "fetch_max_bytes = \"{}\"", value.human());
+                }
+                if let Some(value) = t.fetch_retry_backoff {
+                    let _ = writeln!(out, "fetch_retry_backoff = \"{}\"", value.human());
+                }
+                if let Some(value) = t.event_queue_capacity {
+                    let _ = writeln!(out, "event_queue_capacity = {value}");
+                }
+                if let Some(value) = t.snapshot_interval {
+                    let _ = writeln!(out, "snapshot_interval = \"{}\"", value.human());
+                }
             }
         }
         out.push('\n');
@@ -3218,11 +3241,11 @@ fn render_broker_header(
     let (controller_quorum_voters, controller_server_name) = controller;
     let _ = writeln!(out, "broker_id = {broker_id}");
     let _ = writeln!(out, "log_dir = \"/var/lib/crabka/data\"");
-    let _ = writeln!(out, "heartbeat_interval_ms = 500");
-    let _ = writeln!(out, "heartbeat_timeout_ms = 3000");
-    let _ = writeln!(out, "replica_lag_time_max_ms = 2000");
-    let _ = writeln!(out, "controller_election_timeout_ms = 500");
-    let _ = writeln!(out, "controller_heartbeat_interval_ms = 100");
+    let _ = writeln!(out, "heartbeat_interval = \"500ms\"");
+    let _ = writeln!(out, "heartbeat_timeout = \"3s\"");
+    let _ = writeln!(out, "replica_lag_time_max = \"2s\"");
+    let _ = writeln!(out, "controller_election_timeout = \"500ms\"");
+    let _ = writeln!(out, "controller_heartbeat_interval = \"100ms\"");
     let _ = writeln!(
         out,
         "inter_broker_listener_name = \"{inter_broker_listener_name}\""
@@ -3497,6 +3520,9 @@ pub fn render_broker_toml(
         if let Some(kdc) = &g.kdc {
             let _ = writeln!(out, "kdc = \"{}\"", toml_escape(kdc));
         }
+        if let Some(max_time_skew) = g.max_time_skew {
+            let _ = writeln!(out, "max_time_skew = \"{}\"", max_time_skew.human());
+        }
         out.push('\n');
     }
 
@@ -3581,11 +3607,11 @@ mod toml_rendering_tests {
             toml::from_str(&toml_str).expect("rendered TOML must parse with broker FileConfig");
         check!(parsed.broker_id == Some(0));
         check!(parsed.inter_broker_listener_name.as_deref() == Some("PLAIN"));
-        check!(parsed.heartbeat_interval_ms == Some(500));
-        check!(parsed.heartbeat_timeout_ms == Some(3000));
-        check!(parsed.replica_lag_time_max_ms == Some(2000));
-        check!(parsed.controller_election_timeout_ms == Some(500));
-        check!(parsed.controller_heartbeat_interval_ms == Some(100));
+        check!(parsed.heartbeat_interval == Some(crabka_units::millis(500)));
+        check!(parsed.heartbeat_timeout == Some(crabka_units::secs(3)));
+        check!(parsed.replica_lag_time_max == Some(crabka_units::secs(2)));
+        check!(parsed.controller_election_timeout == Some(crabka_units::millis(500)));
+        check!(parsed.controller_heartbeat_interval == Some(crabka_units::millis(100)));
         check!(parsed.listeners.len() == 1);
         check!(parsed.listeners[0].advertised == "demo-0.svc.local:9092");
     }
@@ -4109,6 +4135,12 @@ mod toml_rendering_tests {
                     bootstrap: "127.0.0.1:9094".into(),
                     num_partitions: Some(8),
                     replication: Some(1),
+                    topic_create_timeout: Some(crabka_units::secs(45)),
+                    fetch_max_wait: Some(crabka_units::millis(750)),
+                    fetch_max_bytes: Some(crabka_units::mebibytes(2)),
+                    fetch_retry_backoff: Some(crabka_units::millis(300)),
+                    event_queue_capacity: Some(2048),
+                    snapshot_interval: Some(crabka_units::secs(90)),
                 }),
             }),
             persistence: None,
@@ -4125,6 +4157,12 @@ mod toml_rendering_tests {
             "bootstrap = \"127.0.0.1:9094\"",
             "num_partitions = 8",
             "replication = 1",
+            "topic_create_timeout = \"45s\"",
+            "fetch_max_wait = \"750ms\"",
+            "fetch_max_bytes = \"2MiB\"",
+            "fetch_retry_backoff = \"300ms\"",
+            "event_queue_capacity = 2048",
+            "snapshot_interval = \"1.5m\"",
         ] {
             assert!(t.contains(needle), "needle {needle:?} missing, got:\n{t}");
         }
@@ -4133,12 +4171,32 @@ mod toml_rendering_tests {
             toml::from_str(&t).expect("rendered TOML must parse with broker FileConfig");
         let km = parsed
             .remote_storage
+            .as_ref()
             .expect("[remote_storage] round-trips")
             .kafka_metadata
+            .as_ref()
             .expect("kafka_metadata round-trips");
         check!(km.bootstrap == "127.0.0.1:9094");
         check!(km.num_partitions == Some(8));
         check!(km.replication == Some(1));
+        check!(km.topic_create_timeout == Some(crabka_units::secs(45)));
+        check!(km.fetch_max_wait == Some(crabka_units::millis(750)));
+        check!(km.fetch_max_bytes == Some(crabka_units::mebibytes(2)));
+        check!(km.fetch_retry_backoff == Some(crabka_units::millis(300)));
+        check!(km.event_queue_capacity == Some(2048));
+        check!(km.snapshot_interval == Some(crabka_units::secs(90)));
+
+        let mut broker = crabka_broker::BrokerConfig::default();
+        parsed.apply_to(&mut broker).expect("apply rendered TOML");
+        let crabka_broker::RlmmKind::TopicBacked(policy) = broker.remote_log_metadata else {
+            panic!("rendered policy must select topic-backed RLMM");
+        };
+        check!(policy.topic_create_timeout == crabka_units::secs(45));
+        check!(policy.fetch_max_wait == crabka_units::millis(750));
+        check!(policy.fetch_max_bytes == crabka_units::mebibytes(2));
+        check!(policy.fetch_retry_backoff == crabka_units::millis(300));
+        check!(policy.event_queue_capacity.capacity() == 2048);
+        check!(policy.snapshot_interval == crabka_units::secs(90));
     }
 
     #[test]
@@ -4758,6 +4816,7 @@ mod toml_rendering_tests {
             principal_to_local_rules: vec!["DEFAULT".into()],
             realm: None,
             kdc: None,
+            max_time_skew: None,
         }
     }
 
@@ -4780,7 +4839,9 @@ mod toml_rendering_tests {
 
     #[test]
     fn render_emits_gssapi_block_and_mechanism() {
-        let l = gssapi_listener("gss", 9092, false, gssapi_cfg_with_service("kafka"));
+        let mut config = gssapi_cfg_with_service("kafka");
+        config.max_time_skew = Some(crabka_units::secs(17));
+        let l = gssapi_listener("gss", 9092, false, config);
         let addrs = addrs_for("gss", 9092);
         let toml = render_broker_toml(
             (0, &[l], &addrs, "gss"),
@@ -4794,6 +4855,7 @@ mod toml_rendering_tests {
             (r#"keytab_path = "/etc/crabka/gssapi-keytab/keytab""#, true),
             (r#"service_name = "kafka""#, true),
             (r#"principal_to_local_rules = ["DEFAULT"]"#, true),
+            (r#"max_time_skew = "17s""#, true),
             (r#"enabled_mechanisms = ["GSSAPI"]"#, true),
             ("[inter_broker_credentials]", false),
         ] {

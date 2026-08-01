@@ -9,6 +9,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use crabka_units::prelude::*;
 use datafusion::{
     arrow::{
         array::{
@@ -321,30 +322,40 @@ impl BlockKey {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+/// One block's manifest entry: its key, the series it holds, and its on-disk size.
+///
+/// No `Eq`: [`ByteSize`] stores `f64`, so it is only `PartialEq`. Descriptors are
+/// held in a `Vec` and matched by `key.object_key()`, never used as a map or set
+/// key, so the derive was unused.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlockDescriptor {
     pub key: BlockKey,
     pub fingerprints: BTreeSet<SeriesFingerprint>,
-    #[serde(default)]
-    pub size_bytes: u64,
+    /// Pinned to the manifest's `size_bytes` integer: the JSON encoding is the
+    /// on-disk log index format and must not move with the in-memory type.
+    #[serde(
+        rename = "size_bytes",
+        with = "crabka_units::serde_units::numeric::bytes_u64"
+    )]
+    pub size: ByteSize,
 }
 
 impl BlockDescriptor {
     #[must_use]
     pub fn new(key: BlockKey, fingerprints: BTreeSet<SeriesFingerprint>) -> Self {
-        Self::new_with_size(key, fingerprints, 0)
+        Self::new_with_size(key, fingerprints, ByteSize::ZERO)
     }
 
     #[must_use]
     pub fn new_with_size(
         key: BlockKey,
         fingerprints: BTreeSet<SeriesFingerprint>,
-        size_bytes: u64,
+        size: ByteSize,
     ) -> Self {
         Self {
             key,
             fingerprints,
-            size_bytes,
+            size,
         }
     }
 }
@@ -399,12 +410,12 @@ pub fn write_log_block(
     let mut writer = ArrowWriter::try_new(File::create(&path)?, schema, None)?;
     writer.write(&batch)?;
     writer.close()?;
-    let size_bytes = fs::metadata(&path)?.len();
+    let size = ByteSize::from_bytes(fs::metadata(&path)?.len());
 
     Ok(BlockDescriptor::new_with_size(
         key.clone(),
         rows.iter().map(|row| row.series_fingerprint).collect(),
-        size_bytes,
+        size,
     ))
 }
 
@@ -434,7 +445,7 @@ pub async fn write_log_block_to_object_store(
     Ok(BlockDescriptor::new_with_size(
         key.clone(),
         rows.iter().map(|row| row.series_fingerprint).collect(),
-        size_bytes,
+        ByteSize::from_bytes(size_bytes),
     ))
 }
 
@@ -1283,7 +1294,8 @@ fn validate_rows(key: &BlockKey, rows: &[LogRow]) -> Result<(), BlockStoreError>
     Ok(())
 }
 
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
+/// No `Eq`: [`BlockDescriptor`] holds a [`ByteSize`], which is only `PartialEq`.
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct BlockIndex {
     blocks: Vec<BlockDescriptor>,
 }
@@ -1784,7 +1796,7 @@ mod tests {
             (descriptor.key.clone(), descriptor.fingerprints.clone())
                 == (key.clone(), BTreeSet::from([api, worker]))
         );
-        check!(descriptor.size_bytes > 0);
+        check!(descriptor.size > ByteSize::ZERO);
         check!(
             loaded_rows
                 == vec![
@@ -1842,7 +1854,7 @@ mod tests {
             .await
             .unwrap();
 
-        check!(descriptor.size_bytes > 0);
+        check!(descriptor.size > ByteSize::ZERO);
         check!(
             loaded_rows
                 == vec![LogRow::new(
@@ -2030,15 +2042,15 @@ mod tests {
         let first = BlockDescriptor::new_with_size(
             BlockKey::new("tenant-a", 0, 20, 29, TimeRange::new(200, 299).unwrap()),
             BTreeSet::from([2]),
-            10,
+            bytes(10),
         );
         let second = BlockDescriptor::new_with_size(
             BlockKey::new("tenant-a", 0, 10, 19, TimeRange::new(100, 199).unwrap()),
             BTreeSet::from([1]),
-            20,
+            bytes(20),
         );
         let replacement_second =
-            BlockDescriptor::new_with_size(second.key.clone(), BTreeSet::from([1, 3]), 30);
+            BlockDescriptor::new_with_size(second.key.clone(), BTreeSet::from([1, 3]), bytes(30));
         let other_tenant = BlockDescriptor::new(
             BlockKey::new("tenant-b", 0, 10, 19, TimeRange::new(100, 199).unwrap()),
             BTreeSet::from([1]),
@@ -2103,6 +2115,47 @@ mod tests {
                 "case {name}"
             );
         }
+    }
+
+    #[test]
+    fn manifest_json_pins_block_size_as_a_whole_byte_integer() {
+        // The manifest is the on-disk log index format. `BlockDescriptor::size`
+        // is a `ByteSize` in memory, but it must still serialise as exactly the
+        // `size_bytes` integer it always did — and read back to the same
+        // quantity.
+        let fingerprint = series_fingerprint(&labels([("service", "api")]));
+        let manifest = LogIndexManifest {
+            format_version: LOG_INDEX_MANIFEST_VERSION,
+            series: vec![ManifestSeries {
+                tenant: "tenant-a".to_string(),
+                fingerprint,
+                labels: labels([("service", "api")]),
+            }],
+            blocks: vec![BlockDescriptor::new_with_size(
+                BlockKey::new("tenant-a", 0, 10, 19, TimeRange::new(100, 199).unwrap()),
+                BTreeSet::from([fingerprint]),
+                kibibytes(3),
+            )],
+        };
+        let expected = format!(
+            concat!(
+                r#"{{"format_version":1,"#,
+                r#""series":[{{"tenant":"tenant-a","fingerprint":{fingerprint},"#,
+                r#""labels":{{"service":"api"}}}}],"#,
+                r#""blocks":[{{"key":{{"tenant":"tenant-a","partition":0,"#,
+                r#""first_offset":10,"last_offset":19,"#,
+                r#""time_range":{{"start_ns":100,"end_ns":199}}}},"#,
+                r#""fingerprints":[{fingerprint}],"size_bytes":3072}}]}}"#,
+            ),
+            fingerprint = fingerprint
+        );
+
+        let encoded = serde_json::to_string(&manifest).unwrap();
+        check!(encoded == expected);
+
+        let decoded: LogIndexManifest = serde_json::from_str(&encoded).unwrap();
+        check!(decoded.blocks == manifest.blocks);
+        check!(decoded.blocks[0].size == kibibytes(3));
     }
 
     #[test]

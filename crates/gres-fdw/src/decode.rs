@@ -2,18 +2,51 @@
 //! the registry cache, and materialize an Avro Value, JSON Value, or Protobuf
 //! `DynamicMessage`.
 
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc};
 
 use crabka_schema_serde::{SchemaCache, SchemaSerdeError};
+use crabka_units::{Time, convert::TimeExt as _, fmt::Human as _, millis, secs};
 use prost_reflect::prost_types::FileDescriptorSet;
 
 use crate::error::KafkaFdwError;
 
-/// Total time the cold-cache schema fetch is allowed to take before giving up.
-const SCHEMA_FETCH_TIMEOUT: Duration = Duration::from_secs(10);
-/// Poll cadence while waiting for the background schema fetch to populate the
-/// cache.
-const SCHEMA_FETCH_POLL: Duration = Duration::from_millis(20);
+/// Cold-cache schema resolution deadline and polling cadence.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FdwDecodePolicy {
+    pub schema_fetch_timeout: Time,
+    pub schema_fetch_poll: Time,
+}
+
+impl Default for FdwDecodePolicy {
+    fn default() -> Self {
+        Self {
+            schema_fetch_timeout: secs(10),
+            schema_fetch_poll: millis(20),
+        }
+    }
+}
+
+impl FdwDecodePolicy {
+    /// Validate positive whole-millisecond values and their ordering.
+    ///
+    /// # Errors
+    /// Returns an error when a value is invalid or polling exceeds the deadline.
+    pub fn validate(self) -> Result<Self, String> {
+        for (name, value) in [
+            ("schema fetch timeout", self.schema_fetch_timeout),
+            ("schema fetch poll", self.schema_fetch_poll),
+        ] {
+            let millis = value.millis_i64();
+            if !value.secs_f64().is_finite() || millis <= 0 || Time::from_millis(millis) != value {
+                return Err(format!("{name} must be positive finite whole milliseconds"));
+            }
+        }
+        if self.schema_fetch_poll > self.schema_fetch_timeout {
+            return Err("schema fetch poll must not exceed its timeout".to_owned());
+        }
+        Ok(self)
+    }
+}
 
 /// Resolve a writer schema by id, awaiting the cache's background fetch.
 ///
@@ -21,23 +54,25 @@ const SCHEMA_FETCH_POLL: Duration = Duration::from_millis(20);
 /// miss it spawns a background fetch and immediately returns
 /// [`SchemaSerdeError::WriterSchemaPending`]. The FDW decode path runs inside
 /// an async scan, so we retry with a bounded backoff until the background
-/// fetch populates the cache (or [`SCHEMA_FETCH_TIMEOUT`] elapses). Any other
+/// fetch populates the cache (or the configured deadline elapses). Any other
 /// error is returned immediately.
 async fn resolve_writer_schema(
     cache: &Arc<SchemaCache>,
     schema_id: u32,
+    policy: FdwDecodePolicy,
 ) -> Result<crabka_schema_serde::cache::WriterSchema, KafkaFdwError> {
-    let deadline = tokio::time::Instant::now() + SCHEMA_FETCH_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + policy.schema_fetch_timeout.to_std();
     loop {
         match cache.writer_schema_with_references(schema_id) {
             Ok(schema) => return Ok(schema),
             Err(SchemaSerdeError::WriterSchemaPending(_)) => {
                 if tokio::time::Instant::now() >= deadline {
                     return Err(KafkaFdwError::Other(format!(
-                        "schema registry: writer schema for id {schema_id} not fetched within {SCHEMA_FETCH_TIMEOUT:?}"
+                        "schema registry: writer schema for id {schema_id} not fetched within {}",
+                        policy.schema_fetch_timeout.human()
                     )));
                 }
-                tokio::time::sleep(SCHEMA_FETCH_POLL).await;
+                tokio::time::sleep(policy.schema_fetch_poll.to_std()).await;
             }
             Err(e) => return Err(KafkaFdwError::Other(format!("schema registry: {e}"))),
         }
@@ -96,9 +131,24 @@ pub enum DecodedValue {
 pub async fn decode_value(
     cache: &Arc<SchemaCache>,
     fmt: Wire,
-    _topic: &str,
+    topic: &str,
     bytes: &[u8],
 ) -> Result<(DecodedValue, Option<apache_avro::Schema>), KafkaFdwError> {
+    decode_value_with_policy(cache, fmt, topic, bytes, FdwDecodePolicy::default()).await
+}
+
+/// Decode under explicit cold-cache schema resolution policy.
+///
+/// # Errors
+/// Returns an error when the envelope, schema or payload cannot be decoded.
+pub async fn decode_value_with_policy(
+    cache: &Arc<SchemaCache>,
+    fmt: Wire,
+    _topic: &str,
+    bytes: &[u8],
+    policy: FdwDecodePolicy,
+) -> Result<(DecodedValue, Option<apache_avro::Schema>), KafkaFdwError> {
+    let policy = policy.validate().map_err(KafkaFdwError::Config)?;
     match fmt {
         Wire::Raw => Ok((DecodedValue::Raw(bytes.to_vec()), None)),
 
@@ -107,7 +157,9 @@ pub async fn decode_value(
                 .map_err(|e| KafkaFdwError::Other(format!("avro wire decode: {e}")))?;
 
             // Fetch (or await) the writer schema by id.
-            let schema_text = resolve_writer_schema(cache, schema_id).await?.schema;
+            let schema_text = resolve_writer_schema(cache, schema_id, policy)
+                .await?
+                .schema;
 
             let schema = apache_avro::Schema::parse_str(&schema_text)
                 .map_err(|e| KafkaFdwError::Other(format!("avro schema parse: {e}")))?;
@@ -137,7 +189,7 @@ pub async fn decode_value(
 
             // Fetch the schema text (a base64-encoded serialised FileDescriptorSet)
             // from the registry by id.
-            let writer_schema = resolve_writer_schema(cache, schema_id).await?;
+            let writer_schema = resolve_writer_schema(cache, schema_id, policy).await?;
 
             let descriptor = build_message_descriptor_for_index_with_references(
                 &writer_schema.schema,
@@ -365,6 +417,21 @@ mod tests {
     use prost_reflect::{DynamicMessage, Value, prost::Message as _};
 
     use super::*;
+
+    #[test]
+    fn decode_policy_preserves_defaults_and_validates_ordering() {
+        let policy = FdwDecodePolicy::default();
+        assert_eq!(policy.schema_fetch_timeout, secs(10));
+        assert_eq!(policy.schema_fetch_poll, millis(20));
+        assert!(
+            FdwDecodePolicy {
+                schema_fetch_timeout: millis(19),
+                ..policy
+            }
+            .validate()
+            .is_err()
+        );
+    }
 
     const MULTI_MESSAGE_SCHEMA: &str = r#"
         syntax = "proto3";

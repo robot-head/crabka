@@ -25,7 +25,7 @@
 //! - on a role transition the now-irrelevant timer is cancelled (a follower has
 //!   no election timer; a leader has no fetch timer and runs the heartbeat);
 //! - a fetch-timer expiry while the leader is still reachable RE-POLLS
-//!   (`SendFetch`), it does not elect; only `FETCH_MISS_LIMIT` consecutive
+//!   (`SendFetch`), it does not elect; only the configured consecutive
 //!   misses feed `Event::FetchTimeout` to start an election;
 //! - the leader re-broadcasts `BeginQuorumEpoch` to voters each heartbeat tick.
 
@@ -37,6 +37,10 @@ use crabka_metadata::{
     MetadataImage, MetadataRecord, VotersRecord, from_kraft_value, to_kraft_values,
 };
 use crabka_protocol::records::{Record, RecordBatch};
+use crabka_units::{
+    fmt::Human as _,
+    prelude::{ByteSize, Time, TimeExt as _},
+};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     time::{Duration, Instant},
@@ -45,6 +49,10 @@ use uuid::Uuid;
 
 use crate::{
     OffsetReservation, SubmitChangeResult,
+    config::{
+        ControllerFetchMissLimit, DEFAULT_METADATA_RAFT_FETCH_MAX,
+        MetadataRaftCommandQueueCapacity, MetadataRaftFetchMax,
+    },
     error::RaftError,
     kraft::{
         action::{Action, TimerKind},
@@ -52,7 +60,7 @@ use crate::{
         event::{Event, LogEnd},
         log::KraftLog,
         role::Role,
-        snapshot_fetch::{SnapshotFetchState, SnapshotFetchStep},
+        snapshot_fetch::{MetadataSnapshotFetchMax, SnapshotFetchState, SnapshotFetchStep},
         transport::{
             Command, Inbound, MetadataFetchSlice, PeerSender, QuorumStateSnapshot, TimerTick,
             api_key, wire,
@@ -61,16 +69,15 @@ use crate::{
     },
 };
 
-/// Consecutive fetch-timer misses a follower tolerates before electing. A
-/// single miss re-polls (the leader may just be slow); a sustained loss of
-/// contact (this many in a row) feeds `Event::FetchTimeout` to elect.
-const FETCH_MISS_LIMIT: u32 = 3;
-
 /// Leader heartbeat interval as a fraction of the election timeout. The leader
 /// re-broadcasts `BeginQuorumEpoch` this often so followers that lost the
 /// initial announcement (or a rejoining old leader) re-attach without waiting
 /// for an election.
 const HEARTBEAT_DIVISOR: u64 = 3;
+
+/// Floor on an observer's metadata-fetch budget: at least the first committed
+/// batch is always emitted so a zero-budget fetch still makes progress.
+const MIN_FETCH_BUDGET: ByteSize = crabka_units::bytes(1);
 
 /// Filename of the node-local durable quorum-state file.
 const QUORUM_STATE_FILE: &str = "quorum-state";
@@ -112,8 +119,11 @@ struct Engine {
     data_dir: PathBuf,
     /// Monotonic clock base: `SimInstant(ms)` is `(now - base).as_millis()`.
     clock_base: Instant,
-    /// Base election timeout in ms (varied per node by the caller for liveness).
-    election_timeout_ms: u64,
+    /// Base election timeout (varied per node by the caller for liveness).
+    election_timeout: Time,
+    heartbeat_interval: Option<Time>,
+    controller_fetch_miss_limit: ControllerFetchMissLimit,
+    metadata_raft_fetch_max: MetadataRaftFetchMax,
     /// Pending timer deadlines as `tokio::time::Instant`s. `None` = disarmed.
     election_at: Option<Instant>,
     fetch_at: Option<Instant>,
@@ -131,6 +141,7 @@ struct Engine {
     /// Snapshot every this many committed records past the last snapshot, then
     /// prune the log below that point. `0` disables snapshotting (KIP-630).
     snapshot_interval_records: u64,
+    metadata_snapshot_fetch_max: MetadataSnapshotFetchMax,
     /// HWM at which the last checkpoint was written (and the log pruned to).
     /// Seeded from the recovered checkpoint on `open`.
     last_snapshot_end_offset: Offset,
@@ -172,11 +183,27 @@ pub struct KraftConfig {
     pub me: NodeId,
     pub cluster_id: Uuid,
     pub initial_state: QuorumState,
-    pub election_timeout_ms: u64,
+    pub election_timeout: Time,
+    pub heartbeat_interval: Option<Time>,
+    pub controller_fetch_miss_limit: ControllerFetchMissLimit,
+    pub metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity,
+    pub metadata_raft_fetch_max: MetadataRaftFetchMax,
     pub peers: Arc<dyn PeerSender>,
     /// Snapshot once committed offset advances this many records past the
     /// last snapshot, then prune the log below it. `0` disables snapshotting.
     pub snapshot_interval_records: u64,
+    /// Validated maximum metadata snapshot size this follower will fetch.
+    pub metadata_snapshot_fetch_max: MetadataSnapshotFetchMax,
+}
+
+/// The configured election timeout as whole milliseconds.
+///
+/// Every deadline derived from the timeout crosses into integers here. The
+/// core's per-(node, epoch) jitter is defined over integer milliseconds
+/// (`election_jitter_ms`), so keeping the base in the same domain leaves every
+/// election deadline bit-identical to the raw-integer arithmetic it replaces.
+fn election_timeout_ms(election_timeout: Time) -> u64 {
+    u64::try_from(election_timeout.millis_i64()).unwrap_or(0)
 }
 
 fn initial_election_at(
@@ -185,7 +212,7 @@ fn initial_election_at(
     clock_base: Instant,
     me: NodeId,
     initial_epoch: Epoch,
-    election_timeout_ms: u64,
+    election_timeout: Time,
 ) -> Option<Instant> {
     match (
         core.is_voter(),
@@ -202,9 +229,9 @@ fn initial_election_at(
             // Same deterministic per-(node, epoch) jitter the core applies to
             // re-election timers, so the first election round is staggered
             // across closely-synchronized voters.
-            let jitter =
-                crate::kraft::core::election_jitter_ms(me, initial_epoch, election_timeout_ms);
-            let delay_ms = election_timeout_ms.saturating_add(jitter);
+            let base_ms = election_timeout_ms(election_timeout);
+            let jitter = crate::kraft::core::election_jitter_ms(me, initial_epoch, base_ms);
+            let delay_ms = base_ms.saturating_add(jitter);
             Some(
                 clock_base
                     .checked_add(Duration::from_millis(delay_ms))
@@ -215,8 +242,14 @@ fn initial_election_at(
     }
 }
 
-fn heartbeat_period(election_timeout_ms: u64) -> Duration {
-    Duration::from_millis(election_timeout_ms.div_euclid(HEARTBEAT_DIVISOR).max(1))
+fn heartbeat_period(election_timeout: Time, configured: Option<Time>) -> Time {
+    if let Some(configured) = configured {
+        return configured;
+    }
+    let period_ms = election_timeout_ms(election_timeout)
+        .div_euclid(HEARTBEAT_DIVISOR)
+        .max(1);
+    Time::from_millis(i64::try_from(period_ms).unwrap_or(i64::MAX))
 }
 
 fn election_timer_starts_election(is_voter: bool, is_leader: bool) -> bool {
@@ -428,12 +461,17 @@ impl KraftController {
             me,
             cluster_id: _,
             initial_state,
-            election_timeout_ms,
+            election_timeout,
+            heartbeat_interval,
+            controller_fetch_miss_limit,
+            metadata_raft_command_queue_capacity,
+            metadata_raft_fetch_max,
             peers,
             snapshot_interval_records,
+            metadata_snapshot_fetch_max,
         } = config;
 
-        let core = QuorumStateMachine::new(me, initial_state, election_timeout_ms);
+        let core = QuorumStateMachine::new(me, initial_state, election_timeout);
         let initial_leader = core.quorum_state().leader_id;
         let initial_was_leader = core.role().is_leader();
         let initial_epoch = core.quorum_state().leader_epoch;
@@ -461,7 +499,7 @@ impl KraftController {
             per_voter_fetch_offset: std::collections::BTreeMap::new(),
         };
         let (quorum_tx, quorum_rx) = watch::channel(initial_snapshot);
-        let (cmd_tx, cmd_rx) = mpsc::channel(256);
+        let (cmd_tx, cmd_rx) = mpsc::channel(metadata_raft_command_queue_capacity.get());
 
         let clock_base = Instant::now();
         // A fresh voter arms its election timer so a bootstrap cluster elects
@@ -472,7 +510,7 @@ impl KraftController {
             clock_base,
             me,
             initial_epoch,
-            election_timeout_ms,
+            election_timeout,
         );
 
         let engine = Engine {
@@ -487,7 +525,10 @@ impl KraftController {
             cmd_tx: cmd_tx.clone(),
             data_dir,
             clock_base,
-            election_timeout_ms,
+            election_timeout,
+            heartbeat_interval,
+            controller_fetch_miss_limit,
+            metadata_raft_fetch_max,
             election_at,
             fetch_at: None,
             fetch_misses: 0,
@@ -495,6 +536,7 @@ impl KraftController {
             was_leader: initial_was_leader,
             held_epoch: initial_epoch,
             snapshot_interval_records,
+            metadata_snapshot_fetch_max,
             last_snapshot_end_offset,
             snapshot_fetch: None,
             installed_snapshot_epoch: None,
@@ -522,17 +564,26 @@ impl KraftController {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(node = me.0, %cluster_id, election_timeout_ms),
+        fields(node = me.0, %cluster_id, election_timeout = %election_timeout.human()),
         err
+    )]
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "recovery inputs are independent and explicit at this low-level boundary"
     )]
     pub fn open(
         data_dir: PathBuf,
         me: NodeId,
         cluster_id: Uuid,
         bootstrap_voters: crabka_metadata::voters::VoterSet,
-        election_timeout_ms: u64,
+        election_timeout: Time,
+        heartbeat_interval: Option<Time>,
+        controller_fetch_miss_limit: ControllerFetchMissLimit,
+        metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity,
+        metadata_raft_fetch_max: MetadataRaftFetchMax,
         peers: Arc<dyn PeerSender>,
         snapshot_interval_records: u64,
+        metadata_snapshot_fetch_max: MetadataSnapshotFetchMax,
     ) -> Result<Self, RaftError> {
         std::fs::create_dir_all(&data_dir).map_err(crabka_log::LogError::Io)?;
         let mut log = KraftLog::open(&data_dir)?;
@@ -555,7 +606,7 @@ impl KraftController {
             // duplicate records fail validate and are skipped). A precise
             // checkpoint-offset cursor.
         }
-        replay_committed(&log, &mut image, Offset(0));
+        replay_committed(&log, &mut image, Offset(0), metadata_raft_fetch_max);
         log.advance_hwm(log.log_end_offset());
 
         // Seed the durable quorum state from the file, falling back to a fresh
@@ -568,9 +619,14 @@ impl KraftController {
                 me,
                 cluster_id,
                 initial_state,
-                election_timeout_ms,
+                election_timeout,
+                heartbeat_interval,
+                controller_fetch_miss_limit,
+                metadata_raft_command_queue_capacity,
+                metadata_raft_fetch_max,
                 peers,
                 snapshot_interval_records,
+                metadata_snapshot_fetch_max,
             },
             log,
             data_dir,
@@ -655,13 +711,13 @@ impl KraftController {
     pub async fn metadata_fetch(
         &self,
         fetch_offset: i64,
-        max_bytes: usize,
+        max_size: ByteSize,
     ) -> Result<MetadataFetchSlice, RaftError> {
         let (reply, rx) = oneshot::channel();
         self.cmd_tx
             .send(Command::MetadataFetch {
                 fetch_offset,
-                max_bytes,
+                max_size,
                 reply,
             })
             .await
@@ -734,8 +790,8 @@ impl Engine {
     /// fire-and-forget (see the module docs).
     async fn run(mut self, mut cmd_rx: mpsc::Receiver<Command>) {
         // Heartbeat ticks the whole time; the loop only acts on it while leader.
-        let hb_period = heartbeat_period(self.election_timeout_ms);
-        let mut heartbeat = tokio::time::interval(hb_period);
+        let hb_period = heartbeat_period(self.election_timeout, self.heartbeat_interval);
+        let mut heartbeat = tokio::time::interval(hb_period.to_std());
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
@@ -798,10 +854,10 @@ impl Engine {
             }
             Command::MetadataFetch {
                 fetch_offset,
-                max_bytes,
+                max_size,
                 reply,
             } => {
-                let _ = reply.send(self.metadata_fetch_slice(fetch_offset, max_bytes));
+                let _ = reply.send(self.metadata_fetch_slice(fetch_offset, max_size));
             }
             #[cfg(test)]
             Command::TestAppendAndCommit { records, reply } => {
@@ -841,11 +897,11 @@ impl Engine {
             TimerTick::Fetch => {
                 // A fetch-timer expiry while we still believe in a reachable
                 // leader RE-POLLS rather than electing; only a sustained loss
-                // (FETCH_MISS_LIMIT consecutive misses) feeds FetchTimeout.
+                // (the configured consecutive-miss limit) feeds FetchTimeout.
                 let leader = self.following_leader();
                 if let Some(leader_id) = leader {
                     self.fetch_misses += 1;
-                    if self.fetch_misses >= FETCH_MISS_LIMIT {
+                    if self.fetch_misses >= self.controller_fetch_miss_limit.get() {
                         self.fetch_misses = 0;
                         self.on_event(Event::FetchTimeout);
                     } else {
@@ -1031,6 +1087,10 @@ impl Engine {
                         epoch,
                     ) {
                         Some(bytes) => {
+                            // KIP-595 `FetchSnapshot` addresses a byte window of
+                            // the on-disk checkpoint. Both fields are slice
+                            // indices straight off the wire, so they clamp to
+                            // `usize` here rather than becoming quantities.
                             let max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
                             let pos = usize::try_from(position.max(0)).unwrap_or(0);
                             let chunk =
@@ -1216,7 +1276,9 @@ impl Engine {
 
     /// Arm the fetch timer one election-timeout out from now (re-poll cadence).
     fn arm_fetch_timer(&mut self) {
-        self.fetch_at = Some(Instant::now() + Duration::from_millis(self.election_timeout_ms));
+        self.fetch_at = Some(
+            Instant::now() + Duration::from_millis(election_timeout_ms(self.election_timeout)),
+        );
     }
 
     /// Convert a core [`SimInstant`] deadline into a `tokio::time::Instant`.
@@ -1433,50 +1495,67 @@ impl Engine {
             self.maybe_snapshot_and_prune();
             return;
         }
-        match self.log.read_decoded(prev_hwm, MAX_APPLY_BYTES) {
-            Ok(batches) => {
-                let mut changed = false;
-                for batch in &batches {
-                    if !batch_base_in_apply_window(batch.base_offset, prev_hwm, applied_hwm) {
-                        continue;
+        let mut cursor = prev_hwm;
+        let mut changed = false;
+        while cursor < applied_hwm {
+            match self
+                .log
+                .read_decoded(cursor, self.metadata_raft_fetch_max.size())
+            {
+                Ok(batches) => {
+                    let next = next_batch_offset(&batches);
+                    if batches.is_empty() {
+                        break;
                     }
-                    // The LeaderChange control batch carries no metadata records;
-                    // never feed it to the metadata decoder.
-                    if batch.attributes.is_control_batch() {
-                        continue;
-                    }
-                    for rec in &batch.records {
-                        let Some(value) = rec.value.as_ref() else {
+                    for batch in &batches {
+                        if !batch_base_in_apply_window(batch.base_offset, prev_hwm, applied_hwm) {
                             continue;
-                        };
-                        match from_kraft_value(value, &self.image) {
-                            Ok(meta) => match self.image.validate(&meta) {
-                                Ok(()) => {
-                                    self.image.apply(&meta);
-                                    changed = true;
-                                }
+                        }
+                        // The LeaderChange control batch carries no metadata records;
+                        // never feed it to the metadata decoder.
+                        if batch.attributes.is_control_batch() {
+                            continue;
+                        }
+                        for rec in &batch.records {
+                            let Some(value) = rec.value.as_ref() else {
+                                continue;
+                            };
+                            match from_kraft_value(value, &self.image) {
+                                Ok(meta) => match self.image.validate(&meta) {
+                                    Ok(()) => {
+                                        self.image.apply(&meta);
+                                        changed = true;
+                                    }
+                                    Err(e) => {
+                                        // Record the first rejection against any
+                                        // waiter that covers this offset so the
+                                        // submitter learns the canonical error.
+                                        self.note_rejection(Offset(batch.base_offset), &e);
+                                        tracing::debug!(
+                                            ?e,
+                                            "kraft: rejected committed record on apply"
+                                        );
+                                    }
+                                },
                                 Err(e) => {
-                                    // Record the first rejection against any
-                                    // waiter that covers this offset so the
-                                    // submitter learns the canonical error.
-                                    self.note_rejection(Offset(batch.base_offset), &e);
-                                    tracing::debug!(
-                                        ?e,
-                                        "kraft: rejected committed record on apply"
-                                    );
+                                    tracing::debug!(?e, "kraft: failed to decode committed record");
                                 }
-                            },
-                            Err(e) => {
-                                tracing::debug!(?e, "kraft: failed to decode committed record");
                             }
                         }
                     }
+                    let Some(next) = next.filter(|next| *next > cursor) else {
+                        break;
+                    };
+                    cursor = next;
                 }
-                if changed {
-                    let _ = self.image_tx.send(Arc::new(self.image.clone()));
+                Err(e) => {
+                    tracing::error!(?e, "kraft: read for apply failed");
+                    break;
                 }
             }
-            Err(e) => tracing::error!(?e, "kraft: read for apply failed"),
+        }
+        if changed {
+            let _ = self.image_tx.send(Arc::new(self.image.clone()));
         }
         self.publish_leader();
         self.try_resolve_waiters();
@@ -1626,14 +1705,17 @@ impl Engine {
     /// HWM and concatenate their verbatim `RecordBatch` bytes (the engine's
     /// records are already Kafka record batches). At least the first batch is
     /// always emitted so the observer makes progress.
-    fn metadata_fetch_slice(&self, fetch_offset: i64, max_bytes: usize) -> MetadataFetchSlice {
+    fn metadata_fetch_slice(&self, fetch_offset: i64, max_size: ByteSize) -> MetadataFetchSlice {
         // `fetch_offset` arrives raw on the observer metadata-fetch wire; wrap it
         // into the `KraftLog` offset domain for the log-bound comparisons/read.
         let fetch_offset = Offset(fetch_offset);
         let high_watermark = self.log.hwm();
         let log_start_offset = self.log.log_start_offset();
         let records = if metadata_fetch_offset_in_committed_window(fetch_offset, high_watermark) {
-            match self.log.read_decoded(fetch_offset, max_bytes.max(1)) {
+            match self
+                .log
+                .read_decoded(fetch_offset, max_size.max(MIN_FETCH_BUDGET))
+            {
                 Ok(batches) => {
                     let committed: Vec<RecordBatch> = batches
                         .into_iter()
@@ -1751,7 +1833,9 @@ impl Engine {
             from: self.me,
             snapshot_id,
             position,
-            max_bytes: i32::try_from(MAX_APPLY_BYTES).unwrap_or(i32::MAX),
+            // KIP-595 `FetchSnapshot.MaxBytes` is an `int32`; the quantity
+            // converts here, at the wire boundary.
+            max_bytes: self.metadata_raft_fetch_max.bytes(),
         }
         .encode();
         self.spawn_send(leader_id, api_key::FETCH_SNAPSHOT, body);
@@ -1768,7 +1852,10 @@ impl Engine {
         if !fetch_offset_has_records(fetch_offset, log_end) {
             return bytes::Bytes::new();
         }
-        let batches = match self.log.read_decoded(fetch_offset, MAX_APPLY_BYTES) {
+        let batches = match self
+            .log
+            .read_decoded(fetch_offset, self.metadata_raft_fetch_max.size())
+        {
             Ok(b) => b,
             Err(e) => {
                 tracing::error!(?e, "kraft: serve_fetch read failed");
@@ -1809,7 +1896,11 @@ impl Engine {
         if let Some(id) = snapshot_id {
             let active_id = self.snapshot_fetch.as_ref().map(|s| s.snapshot_id);
             if should_start_snapshot_fetch(id, self.log.log_end_offset(), active_id) {
-                self.snapshot_fetch = Some(SnapshotFetchState::new(id, leader_id));
+                self.snapshot_fetch = Some(SnapshotFetchState::with_max(
+                    id,
+                    leader_id,
+                    self.metadata_snapshot_fetch_max,
+                ));
                 self.send_fetch_snapshot(leader_id, id, 0);
             }
             self.on_event(Event::ReceiveFetchResponse {
@@ -2051,8 +2142,6 @@ async fn sleep_until_opt(deadline: Option<Instant>) {
     }
 }
 
-const MAX_APPLY_BYTES: usize = 8 * 1024 * 1024;
-
 /// Encode a run of `RecordBatch`es into one contiguous `Bytes` blob (each batch
 /// is self-describing via its `batch_length` header, so they concatenate and
 /// decode back in order — see [`decode_batches`]). Used by the leader's Fetch
@@ -2149,27 +2238,58 @@ fn leader_change_batch(epoch: Epoch, leader_id: NodeId, voter_ids: &[NodeId]) ->
 
 /// Replay committed log batches starting at `from` into `image` (idempotent:
 /// records that fail `validate` are skipped). Used by restart recovery.
-fn replay_committed(log: &KraftLog, image: &mut MetadataImage, from: Offset) {
-    match log.read_decoded(from, MAX_APPLY_BYTES) {
-        Ok(batches) => {
-            for batch in &batches {
-                if batch.attributes.is_control_batch() {
-                    continue;
+fn replay_committed(
+    log: &KraftLog,
+    image: &mut MetadataImage,
+    from: Offset,
+    max: MetadataRaftFetchMax,
+) {
+    let mut cursor = from;
+    let target = log.log_end_offset();
+    while cursor < target {
+        match log.read_decoded(cursor, max.size()) {
+            Ok(batches) => {
+                let next = next_batch_offset(&batches);
+                if batches.is_empty() {
+                    break;
                 }
-                for rec in &batch.records {
-                    let Some(value) = rec.value.as_ref() else {
+                for batch in &batches {
+                    if batch.attributes.is_control_batch() {
                         continue;
-                    };
-                    if let Ok(meta) = from_kraft_value(value, image)
-                        && image.validate(&meta).is_ok()
-                    {
-                        image.apply(&meta);
+                    }
+                    for rec in &batch.records {
+                        let Some(value) = rec.value.as_ref() else {
+                            continue;
+                        };
+                        if let Ok(meta) = from_kraft_value(value, image)
+                            && image.validate(&meta).is_ok()
+                        {
+                            image.apply(&meta);
+                        }
                     }
                 }
+                let Some(next) = next.filter(|next| *next > cursor) else {
+                    break;
+                };
+                cursor = next;
+            }
+            Err(e) => {
+                tracing::error!(?e, "kraft: replay for recovery failed");
+                break;
             }
         }
-        Err(e) => tracing::error!(?e, "kraft: replay for recovery failed"),
     }
+}
+
+fn next_batch_offset(batches: &[RecordBatch]) -> Option<Offset> {
+    batches.last().map(|batch| {
+        Offset(
+            batch
+                .base_offset
+                .saturating_add(i64::from(batch.last_offset_delta))
+                .saturating_add(1),
+        )
+    })
 }
 
 // ---- quorum-state file --------------------------------------------------------
@@ -2354,9 +2474,16 @@ mod tests {
     use std::time::Duration as StdDuration;
 
     use assert2::{assert, check};
+    use crabka_units::prelude::{millis, secs};
 
     use super::*;
     use crate::kraft::transport::NullPeerSender;
+
+    /// Deadline every test-side channel receive is bounded by.
+    const TEST_RECV_TIMEOUT: Time = secs(1);
+
+    /// Default election timeout for engines built by [`build`].
+    const TEST_ELECTION_TIMEOUT: Time = secs(1);
 
     fn voter_set(ids: &[NodeId]) -> crabka_metadata::voters::VoterSet {
         crabka_metadata::voters::VoterSet::from_voters(ids.iter().map(|&id| {
@@ -2370,15 +2497,15 @@ mod tests {
     }
 
     fn build(me: NodeId, ids: &[NodeId]) -> (KraftController, tempfile::TempDir) {
-        build_with_timeout(me, ids, 1000)
+        build_with_timeout(me, ids, TEST_ELECTION_TIMEOUT)
     }
 
     fn build_with_timeout(
         me: NodeId,
         ids: &[NodeId],
-        timeout_ms: u64,
+        election_timeout: Time,
     ) -> (KraftController, tempfile::TempDir) {
-        build_full(me, ids, timeout_ms, 0)
+        build_full(me, ids, election_timeout, 0)
     }
 
     fn build_with_snapshot_interval(
@@ -2386,14 +2513,37 @@ mod tests {
         ids: &[NodeId],
         snapshot_interval_records: u64,
     ) -> (KraftController, tempfile::TempDir) {
-        build_full(me, ids, 1000, snapshot_interval_records)
+        build_full(me, ids, TEST_ELECTION_TIMEOUT, snapshot_interval_records)
     }
 
     fn build_full(
         me: NodeId,
         ids: &[NodeId],
-        timeout_ms: u64,
+        election_timeout: Time,
         snapshot_interval_records: u64,
+    ) -> (KraftController, tempfile::TempDir) {
+        build_full_with_policy(
+            me,
+            ids,
+            election_timeout,
+            snapshot_interval_records,
+            None,
+            ControllerFetchMissLimit::default(),
+            MetadataRaftCommandQueueCapacity::default(),
+            MetadataRaftFetchMax::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_full_with_policy(
+        me: NodeId,
+        ids: &[NodeId],
+        election_timeout: Time,
+        snapshot_interval_records: u64,
+        heartbeat_interval: Option<Time>,
+        controller_fetch_miss_limit: ControllerFetchMissLimit,
+        metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity,
+        metadata_raft_fetch_max: MetadataRaftFetchMax,
     ) -> (KraftController, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let log = KraftLog::open(dir.path()).expect("open log");
@@ -2403,9 +2553,14 @@ mod tests {
                 me,
                 cluster_id: uuid::Uuid::nil(),
                 initial_state: state,
-                election_timeout_ms: timeout_ms,
+                election_timeout,
+                heartbeat_interval,
+                controller_fetch_miss_limit,
+                metadata_raft_command_queue_capacity,
+                metadata_raft_fetch_max,
                 peers: Arc::new(NullPeerSender),
                 snapshot_interval_records,
+                metadata_snapshot_fetch_max: MetadataSnapshotFetchMax::default(),
             },
             log,
             dir.path().to_path_buf(),
@@ -2414,12 +2569,26 @@ mod tests {
     }
 
     fn build_engine_only(me: NodeId, ids: &[NodeId]) -> (Engine, tempfile::TempDir) {
+        build_engine_only_with_policy(
+            me,
+            ids,
+            ControllerFetchMissLimit::default(),
+            MetadataRaftFetchMax::default(),
+        )
+    }
+
+    fn build_engine_only_with_policy(
+        me: NodeId,
+        ids: &[NodeId],
+        controller_fetch_miss_limit: ControllerFetchMissLimit,
+        metadata_raft_fetch_max: MetadataRaftFetchMax,
+    ) -> (Engine, tempfile::TempDir) {
         let dir = tempfile::tempdir().expect("tempdir");
         let log = KraftLog::open(dir.path()).expect("open log");
         let core = QuorumStateMachine::new(
             me,
             QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(ids)),
-            1000,
+            TEST_ELECTION_TIMEOUT,
         );
         let image = MetadataImage::new(uuid::Uuid::nil());
         let (image_tx, _image_rx) = watch::channel(Arc::new(image.clone()));
@@ -2451,7 +2620,10 @@ mod tests {
                 cmd_tx,
                 data_dir: dir.path().to_path_buf(),
                 clock_base,
-                election_timeout_ms: 1000,
+                election_timeout: TEST_ELECTION_TIMEOUT,
+                heartbeat_interval: None,
+                controller_fetch_miss_limit,
+                metadata_raft_fetch_max,
                 election_at: None,
                 fetch_at: None,
                 fetch_misses: 0,
@@ -2459,6 +2631,7 @@ mod tests {
                 was_leader,
                 held_epoch,
                 snapshot_interval_records: 0,
+                metadata_snapshot_fetch_max: MetadataSnapshotFetchMax::default(),
                 last_snapshot_end_offset: Offset(0),
                 snapshot_fetch: None,
                 installed_snapshot_epoch: None,
@@ -2510,7 +2683,7 @@ mod tests {
     async fn recv_peer_send(
         rx: &mut mpsc::UnboundedReceiver<CapturedPeerSend>,
     ) -> CapturedPeerSend {
-        tokio::time::timeout(StdDuration::from_secs(1), rx.recv())
+        tokio::time::timeout(TEST_RECV_TIMEOUT.to_std(), rx.recv())
             .await
             .expect("peer send timed out")
             .expect("peer send channel closed")
@@ -2520,7 +2693,7 @@ mod tests {
         rx: &mut mpsc::UnboundedReceiver<CapturedPeerSend>,
         api_key: i16,
     ) -> CapturedPeerSend {
-        let deadline = tokio::time::Instant::now() + StdDuration::from_secs(1);
+        let deadline = tokio::time::Instant::now() + TEST_RECV_TIMEOUT.to_std();
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             let send = tokio::time::timeout(remaining, rx.recv())
@@ -2548,13 +2721,20 @@ mod tests {
 
     #[test]
     fn initial_election_deadline_matches_startup_role() {
+        /// Base election timeout the staggered startup deadline is derived from.
+        const TIMEOUT: Time = millis(400);
+        /// The same extent in the integer milliseconds the core's jitter uses.
+        const TIMEOUT_MS: u64 = 400;
+
         let base = Instant::now();
         let single = QuorumStateMachine::new(
             NodeId(1),
             QuorumState::bootstrap(uuid::Uuid::nil(), voter_set(&[NodeId(1)])),
-            400,
+            TIMEOUT,
         );
-        assert2::assert!(initial_election_at(&single, None, base, NodeId(1), 0, 400) == Some(base));
+        assert2::assert!(
+            initial_election_at(&single, None, base, NodeId(1), 0, TIMEOUT) == Some(base)
+        );
 
         let known_leader = QuorumStateMachine::new(
             NodeId(1),
@@ -2562,10 +2742,11 @@ mod tests {
                 uuid::Uuid::nil(),
                 voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
             ),
-            400,
+            TIMEOUT,
         );
         assert2::assert!(
-            initial_election_at(&known_leader, Some(NodeId(2)), base, NodeId(1), 0, 400).is_none()
+            initial_election_at(&known_leader, Some(NodeId(2)), base, NodeId(1), 0, TIMEOUT)
+                .is_none()
         );
 
         let non_voter = QuorumStateMachine::new(
@@ -2574,9 +2755,11 @@ mod tests {
                 uuid::Uuid::nil(),
                 voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
             ),
-            400,
+            TIMEOUT,
         );
-        assert2::assert!(initial_election_at(&non_voter, None, base, NodeId(4), 0, 400).is_none());
+        assert2::assert!(
+            initial_election_at(&non_voter, None, base, NodeId(4), 0, TIMEOUT).is_none()
+        );
 
         let multi = QuorumStateMachine::new(
             NodeId(1),
@@ -2584,12 +2767,26 @@ mod tests {
                 uuid::Uuid::nil(),
                 voter_set(&[NodeId(1), NodeId(2), NodeId(3)]),
             ),
-            400,
+            TIMEOUT,
         );
-        let jitter = crate::kraft::core::election_jitter_ms(NodeId(1), 0, 400);
-        let at =
-            initial_election_at(&multi, None, base, NodeId(1), 0, 400).expect("multi voter timer");
-        assert2::assert!(at.duration_since(base) == Duration::from_millis(400 + jitter));
+        // The jitter is integer milliseconds and the deadline is the integer
+        // sum, so the quantity must not shift the deadline by even a nanosecond.
+        let jitter = crate::kraft::core::election_jitter_ms(NodeId(1), 0, TIMEOUT_MS);
+        let at = initial_election_at(&multi, None, base, NodeId(1), 0, TIMEOUT)
+            .expect("multi voter timer");
+        assert2::assert!(at.duration_since(base) == Duration::from_millis(TIMEOUT_MS + jitter));
+    }
+
+    #[test]
+    fn election_timeout_converts_to_whole_milliseconds() {
+        for (_case, timeout, want_ms) in [
+            ("whole second", secs(1), 1_000u64),
+            ("sub-second", millis(250), 250),
+            ("zero", secs(0), 0),
+            ("negative clamps to zero", Time::from_millis(-4), 0),
+        ] {
+            check!(election_timeout_ms(timeout) == want_ms);
+        }
     }
 
     #[test]
@@ -2611,8 +2808,43 @@ mod tests {
             ("floor below three milliseconds", 2, 1),
             ("zero timeout floor", 0, 1),
         ] {
-            assert2::assert!(heartbeat_period(timeout_ms) == Duration::from_millis(want_ms));
+            assert2::assert!(heartbeat_period(millis(timeout_ms), None) == millis(want_ms));
         }
+    }
+
+    #[test]
+    fn configured_heartbeat_overrides_derived_period() {
+        assert2::assert!(heartbeat_period(secs(5), Some(millis(500))) == millis(500));
+    }
+
+    #[test]
+    fn engine_uses_configured_miss_limit_and_fetch_max() {
+        let (engine, _dir) = build_engine_only_with_policy(
+            NodeId(1),
+            &[NodeId(1)],
+            ControllerFetchMissLimit::new(5).expect("positive miss limit"),
+            MetadataRaftFetchMax::try_from(crabka_units::bytes(512))
+                .expect("positive fetch maximum"),
+        );
+
+        check!(engine.controller_fetch_miss_limit.get() == 5);
+        check!(engine.metadata_raft_fetch_max.bytes() == 512);
+    }
+
+    #[tokio::test]
+    async fn spawned_controller_uses_configured_command_queue_capacity() {
+        let (controller, _dir) = build_full_with_policy(
+            NodeId(1),
+            &[NodeId(1)],
+            TEST_ELECTION_TIMEOUT,
+            0,
+            None,
+            ControllerFetchMissLimit::default(),
+            MetadataRaftCommandQueueCapacity::new(7).expect("positive queue capacity"),
+            MetadataRaftFetchMax::default(),
+        );
+
+        check!(controller.cmd_tx.capacity() == 7);
     }
 
     #[test]
@@ -2937,7 +3169,7 @@ mod tests {
         assert2::assert!(engine.log.log_end_offset() == start + 1);
         let batches = engine
             .log
-            .read_decoded(start, MAX_APPLY_BYTES)
+            .read_decoded(start, DEFAULT_METADATA_RAFT_FETCH_MAX)
             .expect("read appended leader-change");
         assert2::assert!(batches.len() == 1);
         let batch = &batches[0];
@@ -3091,9 +3323,63 @@ mod tests {
         assert2::assert!(matches!(rx.try_recv(), Ok(Ok(_))));
 
         let mut recovered = MetadataImage::new(uuid::Uuid::nil());
-        replay_committed(&engine.log, &mut recovered, Offset(0));
+        replay_committed(
+            &engine.log,
+            &mut recovered,
+            Offset(0),
+            MetadataRaftFetchMax::default(),
+        );
 
         assert2::assert!(recovered.topic("replayed").is_some());
+    }
+
+    #[test]
+    fn tiny_fetch_budget_does_not_skip_apply_or_replay_records() {
+        let tiny = MetadataRaftFetchMax::try_from(crabka_units::bytes(1))
+            .expect("one byte still makes progress");
+        let (mut engine, _dir) = build_engine_only_with_policy(
+            NodeId(1),
+            &[NodeId(1)],
+            ControllerFetchMissLimit::default(),
+            tiny,
+        );
+
+        let mut scratch = engine.image.clone();
+        for (name, id) in [("first", 1), ("second", 2)] {
+            let records = topic_record_named(name, id);
+            let mut blobs = Vec::new();
+            for record in &records {
+                blobs.extend(to_kraft_values(record, &scratch).expect("encode metadata"));
+                scratch.apply(record);
+            }
+            let mut batch = metadata_record_batch(1, &blobs);
+            engine.log.append(&mut batch).expect("append metadata");
+        }
+        check!(
+            engine
+                .log
+                .read_decoded(Offset(0), tiny.size())
+                .expect("read first bounded batch")[0]
+                .base_offset
+                == 0
+        );
+        check!(
+            engine
+                .log
+                .read_decoded(Offset(2), tiny.size())
+                .expect("read second bounded batch")[0]
+                .base_offset
+                == 2
+        );
+        engine.advance_and_apply(engine.log.log_end_offset());
+
+        assert2::assert!(engine.image.topic("first").is_some());
+        assert2::assert!(engine.image.topic("second").is_some());
+
+        let mut recovered = MetadataImage::new(uuid::Uuid::nil());
+        replay_committed(&engine.log, &mut recovered, Offset(0), tiny);
+        assert2::assert!(recovered.topic("first").is_some());
+        assert2::assert!(recovered.topic("second").is_some());
     }
 
     #[test]
@@ -3239,18 +3525,18 @@ mod tests {
 
         assert2::assert!(
             engine
-                .metadata_fetch_slice(-1, MAX_APPLY_BYTES)
+                .metadata_fetch_slice(-1, DEFAULT_METADATA_RAFT_FETCH_MAX)
                 .records
                 .is_empty()
         );
         assert2::assert!(
             engine
-                .metadata_fetch_slice(1, MAX_APPLY_BYTES)
+                .metadata_fetch_slice(1, DEFAULT_METADATA_RAFT_FETCH_MAX)
                 .records
                 .is_empty()
         );
 
-        let slice = engine.metadata_fetch_slice(0, MAX_APPLY_BYTES);
+        let slice = engine.metadata_fetch_slice(0, DEFAULT_METADATA_RAFT_FETCH_MAX);
         let decoded = decode_batches(&slice.records).expect("decode fetch slice");
         check!(
             (
@@ -3318,12 +3604,20 @@ mod tests {
 
     #[test]
     fn serve_fetch_records_returns_batches_only_for_offsets_inside_log() {
-        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1)]);
+        let (mut engine, _dir) = build_engine_only_with_policy(
+            NodeId(1),
+            &[NodeId(1)],
+            ControllerFetchMissLimit::default(),
+            MetadataRaftFetchMax::try_from(crabka_units::bytes(1))
+                .expect("one byte still serves the first batch"),
+        );
         let mut batch = one_offset_batch(0, 1, b"a");
+        engine.log.append(&mut batch).expect("append");
+        let mut batch = one_offset_batch(1, 1, b"b");
         engine.log.append(&mut batch).expect("append");
 
         assert2::assert!(engine.serve_fetch_records(Offset(-1)).is_empty());
-        assert2::assert!(engine.serve_fetch_records(Offset(1)).is_empty());
+        assert2::assert!(engine.serve_fetch_records(Offset(2)).is_empty());
         let records = engine.serve_fetch_records(Offset(0));
         let decoded = decode_batches(&records).expect("decode served records");
         assert2::assert!(
@@ -3337,7 +3631,13 @@ mod tests {
 
     #[tokio::test]
     async fn fetch_response_snapshot_hint_starts_once_and_ignores_stale_hint() {
-        let (mut engine, _dir) = build_engine_only(NodeId(1), &[NodeId(1), NodeId(2)]);
+        let (mut engine, _dir) = build_engine_only_with_policy(
+            NodeId(1),
+            &[NodeId(1), NodeId(2)],
+            ControllerFetchMissLimit::default(),
+            MetadataRaftFetchMax::try_from(crabka_units::bytes(512))
+                .expect("positive fetch maximum"),
+        );
         let fetch_snapshot_response = wire::PeerResponse::FetchSnapshot {
             snapshot_id: (11, 3),
             size: 0,
@@ -3363,10 +3663,12 @@ mod tests {
             Some(wire::PeerRequest::FetchSnapshot {
                 snapshot_id,
                 position,
+                max_bytes,
                 ..
             }) => {
                 assert2::assert!(snapshot_id == (11, 3));
                 assert2::assert!(position == 0);
+                assert2::assert!(max_bytes == 512);
             }
             other => panic!("unexpected fetch snapshot request: {other:?}"),
         }
@@ -3552,7 +3854,7 @@ mod tests {
     #[tokio::test]
     async fn injected_vote_sequence_makes_multi_voter_leader_before_timer() {
         let (ctrl, _dir) =
-            build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], 60_000);
+            build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], secs(60));
         elect_leader_with_helper(&ctrl, NodeId(1), NodeId(2)).await;
         ctrl.shutdown().await;
     }
@@ -3612,7 +3914,7 @@ mod tests {
     /// election timeout — no injected event.
     #[tokio::test]
     async fn single_voter_auto_elects_on_election_timeout() {
-        let (ctrl, _dir) = build_with_timeout(NodeId(1), &[NodeId(1)], 80);
+        let (ctrl, _dir) = build_with_timeout(NodeId(1), &[NodeId(1)], millis(80));
         // The election timer is armed at construction; wait for it to fire.
         tokio::time::timeout(
             StdDuration::from_secs(5),
@@ -3630,7 +3932,8 @@ mod tests {
         // Node 1 is a follower in a 3-voter cluster; the NullPeerSender means
         // its fetches fail, but a steady stream of BeginQuorumEpoch heartbeats
         // (which we inject) must keep it attached without electing.
-        let (ctrl, _dir) = build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], 120);
+        let (ctrl, _dir) =
+            build_with_timeout(NodeId(1), &[NodeId(1), NodeId(2), NodeId(3)], millis(120));
         // Attach to leader 2.
         ctrl.inject_event(Event::ReceiveBeginQuorumEpoch {
             leader_id: NodeId(2),
@@ -3641,7 +3944,7 @@ mod tests {
         await_leader(&ctrl, Some(NodeId(2))).await;
 
         // Keep re-announcing leader 2 faster than the fetch watchdog would
-        // accumulate FETCH_MISS_LIMIT misses; the leader must remain 2.
+        // accumulate the configured number of misses; the leader must remain 2.
         for _ in 0..6 {
             tokio::time::sleep(StdDuration::from_millis(40)).await;
             ctrl.inject_event(Event::ReceiveBeginQuorumEpoch {
@@ -3842,9 +4145,15 @@ mod tests {
                     me: NodeId(1),
                     cluster_id,
                     initial_state: QuorumState::bootstrap(cluster_id, voters.clone()),
-                    election_timeout_ms: 1000,
+                    election_timeout: TEST_ELECTION_TIMEOUT,
+                    heartbeat_interval: None,
+                    controller_fetch_miss_limit: ControllerFetchMissLimit::default(),
+                    metadata_raft_command_queue_capacity: MetadataRaftCommandQueueCapacity::default(
+                    ),
+                    metadata_raft_fetch_max: MetadataRaftFetchMax::default(),
                     peers: Arc::new(NullPeerSender),
                     snapshot_interval_records: 0,
+                    metadata_snapshot_fetch_max: MetadataSnapshotFetchMax::default(),
                 },
                 log,
                 data_dir.clone(),
@@ -3867,9 +4176,14 @@ mod tests {
             NodeId(1),
             cluster_id,
             voters,
-            1000,
+            TEST_ELECTION_TIMEOUT,
+            None,
+            ControllerFetchMissLimit::default(),
+            MetadataRaftCommandQueueCapacity::default(),
+            MetadataRaftFetchMax::default(),
             Arc::new(NullPeerSender),
             0,
+            MetadataSnapshotFetchMax::default(),
         )
         .expect("reopen");
         assert2::assert!(ctrl2.current_image().topic("recovered").is_some());

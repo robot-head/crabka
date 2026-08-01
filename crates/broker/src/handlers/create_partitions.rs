@@ -15,6 +15,7 @@ use crabka_protocol::{
     },
 };
 use crabka_raft::{NodeId, RaftError};
+use crabka_units::{Time, convert::TimeExt};
 
 use crate::{
     authorizer::{AuthorizationResult, authorize_topics},
@@ -261,6 +262,12 @@ pub(crate) async fn handle(
                         log_config: &log_config,
                         log_dir_status: &log_dir_status,
                         producer_state: &producer_state,
+                        producer_id_expiration: broker.config.producer_id_expiration,
+                        max_produce_group: broker.config.max_produce_group,
+                        partition_writer_queue_depth: broker.config.partition_writer_queue_depth,
+                        diskless_wal_local_replica_count: broker
+                            .config
+                            .diskless_wal_local_replica_count,
                         node_id,
                         diskless,
                         topic_id: topic_rec.topic_id,
@@ -333,6 +340,10 @@ struct MaterializeContext<'a> {
     log_config: &'a crabka_log::LogConfig,
     log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
     producer_state: &'a std::sync::Arc<crate::producer_state::ProducerState>,
+    producer_id_expiration: Time,
+    max_produce_group: usize,
+    partition_writer_queue_depth: usize,
+    diskless_wal_local_replica_count: usize,
     node_id: NodeId,
     diskless: bool,
     topic_id: uuid::Uuid,
@@ -361,6 +372,10 @@ async fn materialize_new_partitions(
                 log_config: context.log_config,
                 log_dir_status: context.log_dir_status,
                 producer_state: context.producer_state,
+                producer_id_expiration: context.producer_id_expiration,
+                max_produce_group: context.max_produce_group,
+                partition_writer_queue_depth: context.partition_writer_queue_depth,
+                diskless_wal_local_replica_count: context.diskless_wal_local_replica_count,
                 diskless: context.diskless,
                 hot_tail: Some(context.hot_tail.clone()),
                 wal_shards: Some(context.wal_shards.clone()),
@@ -440,13 +455,11 @@ async fn finish_response(
         context.principal.name.as_str(),
         context.client_id,
         mutation_count,
+        broker.config.quota_throttle_max,
     );
-    let resp = create_partitions_response(
-        results,
-        i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
-    );
-    if delay > std::time::Duration::ZERO {
-        tokio::time::sleep(delay).await;
+    let resp = create_partitions_response(results, crate::quota::throttle_time_ms(delay));
+    if delay > <Time as TimeExt>::ZERO {
+        tokio::time::sleep(delay.to_std()).await;
     }
     encode_response(&resp, version)
 }

@@ -7,7 +7,6 @@ use std::{
     future::Future,
     net::SocketAddr,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use axum::{
@@ -24,11 +23,11 @@ use crabka_client_consumer::{Consumer, ConsumerRecord};
 use crabka_client_producer::{Header as ProducerHeader, Producer, ProducerRecord};
 use crabka_ids::{Offset, PartitionIndex};
 use crabka_telemetry::propagation::current_trace_headers;
+use crabka_units::prelude::*;
 pub use ha::{
-    HA_TRACKER_TOPIC, HaDecision, HaElection, HaElectionRecord, HaTracker, ha_decision,
-    ha_election, strip_replica_label,
+    DEFAULT_HA_FAILOVER_TIMEOUT, HA_TRACKER_TOPIC, HaDecision, HaElection, HaElectionRecord,
+    HaTracker, ha_decision, ha_election, strip_replica_label,
 };
-use num_traits::ToPrimitive;
 use opentelemetry_proto::tonic::{
     collector::metrics::v1::{
         ExportMetricsServiceRequest, ExportMetricsServiceResponse,
@@ -56,29 +55,33 @@ use crate::{
 };
 
 const MAX_EXEMPLAR_LABEL_CODEPOINTS: usize = 128;
+pub const DEFAULT_DISTRIBUTOR_MAX_DECOMPRESSED: ByteSize = mebibytes(32);
 
 /// Structural per-request limits enforced before WAL append.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct TenantLimits {
-    pub max_label_name_len: usize,
-    pub max_label_value_len: usize,
+    pub max_label_name_len: ByteSize,
+    pub max_label_value_len: ByteSize,
     pub max_samples_per_series: usize,
     pub max_series_per_request: usize,
-    pub ingestion_rate_samples_per_second: usize,
+    /// Accepted sample rate; a zero rate disables ingestion rate limiting.
+    pub ingestion_rate: Frequency,
+    /// Samples the token bucket may hand out in one burst.
     pub ingestion_burst_size: usize,
-    pub out_of_order_time_window_ms: i64,
+    /// Accepted out-of-order ingest window; a negative extent disables the cap.
+    pub out_of_order_time_window: Time,
 }
 
 impl Default for TenantLimits {
     fn default() -> Self {
         Self {
-            max_label_name_len: 2048,
-            max_label_value_len: 2048,
+            max_label_name_len: kibibytes(2),
+            max_label_value_len: kibibytes(2),
             max_samples_per_series: 10_000,
             max_series_per_request: 100_000,
-            ingestion_rate_samples_per_second: 1_000_000,
+            ingestion_rate: per_sec(1_000_000),
             ingestion_burst_size: 1_000_000,
-            out_of_order_time_window_ms: 0,
+            out_of_order_time_window: Time::ZERO,
         }
     }
 }
@@ -291,10 +294,8 @@ pub fn replay_ha_election_records(
 
 #[async_trait::async_trait]
 pub trait HaElectionConsumerPoll: Send {
-    async fn poll(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Vec<ConsumerRecord>, HaElectionConsumerError>;
+    async fn poll(&mut self, timeout: Time)
+    -> Result<Vec<ConsumerRecord>, HaElectionConsumerError>;
 }
 
 #[async_trait::async_trait]
@@ -306,7 +307,7 @@ pub trait HaElectionConsumerCommit: Send {
 impl HaElectionConsumerPoll for Consumer {
     async fn poll(
         &mut self,
-        timeout: Duration,
+        timeout: Time,
     ) -> Result<Vec<ConsumerRecord>, HaElectionConsumerError> {
         Consumer::poll(self, timeout)
             .await
@@ -329,7 +330,7 @@ pub async fn poll_ha_election_consumer_once<C>(
     consumer: &mut C,
     tracker: &HaTracker,
     ha_topic: &str,
-    timeout: Duration,
+    timeout: Time,
 ) -> Result<HaElectionReplayResult, HaElectionConsumerError>
 where
     C: HaElectionConsumerPoll + HaElectionConsumerCommit + ?Sized,
@@ -357,7 +358,7 @@ pub async fn run_ha_election_consumer_loop<C, Stop>(
     consumer: &mut C,
     tracker: &HaTracker,
     ha_topic: &str,
-    timeout: Duration,
+    timeout: Time,
     mut should_stop: Stop,
 ) -> Result<HaElectionConsumerLoopSummary, HaElectionConsumerError>
 where
@@ -390,7 +391,8 @@ pub struct DistributorState {
     active_series: Mutex<BTreeMap<String, BTreeSet<SeriesFingerprint>>>,
     latest_timestamps: Mutex<BTreeMap<(String, SeriesFingerprint), i64>>,
     limits: TenantLimits,
-    max_decompressed: usize,
+    ha_failover_timeout: Time,
+    max_decompressed: ByteSize,
     metrics: Option<ServiceMetrics>,
 }
 
@@ -407,7 +409,8 @@ impl DistributorState {
             active_series: Mutex::new(BTreeMap::new()),
             latest_timestamps: Mutex::new(BTreeMap::new()),
             limits: TenantLimits::default(),
-            max_decompressed: 32 * 1024 * 1024,
+            ha_failover_timeout: DEFAULT_HA_FAILOVER_TIMEOUT,
+            max_decompressed: DEFAULT_DISTRIBUTOR_MAX_DECOMPRESSED,
             metrics: None,
         }
     }
@@ -431,8 +434,20 @@ impl DistributorState {
     }
 
     #[must_use]
-    pub fn with_max_decompressed(mut self, max_decompressed: usize) -> Self {
+    pub fn with_max_decompressed(mut self, max_decompressed: ByteSize) -> Self {
         self.max_decompressed = max_decompressed;
+        self
+    }
+
+    #[must_use]
+    pub fn with_ha_failover_timeout(mut self, timeout: Time) -> Self {
+        self.ha_failover_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_max_rate_buckets(mut self, cap: usize) -> Self {
+        self.ingest_enforcer = IngestEnforcer::with_max_rate_buckets(cap);
         self
     }
 
@@ -455,7 +470,7 @@ pub fn router(state: Arc<DistributorState>) -> Router {
     // implicit 2 MiB default. A snappy body cannot usefully exceed the
     // decompressed cap, so `max_decompressed` is a sound, configurable ceiling
     // — applied per-route so the tonic gRPC `route_service` keeps its own limit.
-    let max_body = state.max_decompressed;
+    let max_body = state.max_decompressed.bytes_usize();
     Router::new()
         .route(
             "/api/v1/push",
@@ -505,10 +520,10 @@ impl MetricsService for OtlpMetricsService {
         let started = std::time::Instant::now();
         let result = otlp_grpc_export_inner(&self.state, request).await;
         if let Some(metrics) = &self.state.metrics {
-            let secs = started.elapsed().as_secs_f64();
+            let elapsed = started.elapsed().as_time();
             match &result {
-                Ok(items) => metrics.record_ingest(true, 0, *items, secs),
-                Err(_) => metrics.record_ingest(false, 0, 0, secs),
+                Ok(items) => metrics.record_ingest(true, ByteSize::ZERO, *items, elapsed),
+                Err(_) => metrics.record_ingest(false, ByteSize::ZERO, 0, elapsed),
             }
         }
         match result {
@@ -547,14 +562,14 @@ async fn push(
     body: BodyBytes,
 ) -> Response {
     let started = std::time::Instant::now();
-    let bytes = body.len() as u64;
+    let body_size = ByteSize::from_bytes(body.len() as u64);
     // ONE ingest span per request (not per series/sample). `crabka.ingest.series`
     // starts empty and is recorded from inside `push_inner` once the body is
     // decoded; the WAL producer injects this span's trace context into the record
     // headers so the compactor's span joins the same distributed trace.
-    let span = ingest_span(&headers, bytes);
+    let span = ingest_span(&headers, body_size);
     let result = push_inner(&state, &headers, &body).instrument(span).await;
-    record_ingest_outcome(&state, &result, bytes, started.elapsed().as_secs_f64());
+    record_ingest_outcome(&state, &result, body_size, started.elapsed().as_time());
     match result {
         Ok((success, _items)) => success.into_response(),
         Err(error) => error.into_response(),
@@ -563,7 +578,7 @@ async fn push(
 
 /// Build the per-request ingest span. `crabka.ingest.series` is declared empty
 /// here and recorded once the request body is decoded (see `push_inner`).
-fn ingest_span(headers: &HeaderMap, bytes: u64) -> tracing::Span {
+fn ingest_span(headers: &HeaderMap, body_size: ByteSize) -> tracing::Span {
     let tenant = tenant_for_span(headers);
     tracing::info_span!(
         "metrics_ingest",
@@ -572,7 +587,7 @@ fn ingest_span(headers: &HeaderMap, bytes: u64) -> tracing::Span {
         messaging.destination.name = WAL_TOPIC,
         crabka.tenant = %tenant,
         crabka.ingest.series = tracing::field::Empty,
-        crabka.ingest.bytes = bytes,
+        crabka.ingest.bytes = body_size.bytes_u64(),
     )
 }
 
@@ -649,13 +664,13 @@ async fn otlp_push(
     body: BodyBytes,
 ) -> Response {
     let started = std::time::Instant::now();
-    let bytes = body.len() as u64;
+    let body_size = ByteSize::from_bytes(body.len() as u64);
     // ONE ingest span per OTLP HTTP push request; series recorded post-decode.
-    let span = ingest_span(&headers, bytes);
+    let span = ingest_span(&headers, body_size);
     let result = otlp_push_inner(&state, &headers, &body)
         .instrument(span)
         .await;
-    record_ingest_outcome(&state, &result, bytes, started.elapsed().as_secs_f64());
+    record_ingest_outcome(&state, &result, body_size, started.elapsed().as_time());
     match result {
         Ok((success, _items)) => success.into_response(),
         Err(error) => error.into_response(),
@@ -689,20 +704,20 @@ async fn otlp_push_inner(
 }
 
 /// Record an ingest request outcome on the distributor metrics bundle, if one
-/// is configured. `bytes` is the (compressed) request-body length; `items` is
-/// the decoded series count on success and `0` on error.
+/// is configured. `body_size` is the (compressed) request-body length; `items`
+/// is the decoded series count on success and `0` on error.
 fn record_ingest_outcome(
     state: &DistributorState,
     result: &Result<(PushSuccess, u64), PushError>,
-    bytes: u64,
-    secs: f64,
+    body_size: ByteSize,
+    elapsed: Time,
 ) {
     let Some(metrics) = &state.metrics else {
         return;
     };
     match result {
-        Ok((_, items)) => metrics.record_ingest(true, bytes, *items, secs),
-        Err(_) => metrics.record_ingest(false, bytes, 0, secs),
+        Ok((_, items)) => metrics.record_ingest(true, body_size, *items, elapsed),
+        Err(_) => metrics.record_ingest(false, body_size, 0, elapsed),
     }
 }
 
@@ -755,7 +770,10 @@ async fn append_decoded_series(
     // Decide-and-commit the in-memory HA winner atomically so a racing replica
     // cannot also win the same (tenant, cluster); only the durable Kafka persist
     // is left async, after the in-memory winner is already fixed.
-    match state.tracker.elect_now(tenant, series) {
+    match state
+        .tracker
+        .elect_now_with_timeout(tenant, series, state.ha_failover_timeout)
+    {
         HaElection::Accept => {}
         HaElection::Drop => return Ok(false),
         HaElection::Elect(record) | HaElection::Update(record) => {
@@ -797,14 +815,11 @@ impl DistributorState {
 
 fn tenant_limits_to_limits(limits: &TenantLimits) -> Limits {
     Limits {
-        ingestion_rate: limits
-            .ingestion_rate_samples_per_second
-            .to_f64()
-            .unwrap_or(f64::MAX),
+        ingestion_rate: limits.ingestion_rate,
         ingestion_burst_size: u64::try_from(limits.ingestion_burst_size).unwrap_or(u64::MAX),
-        max_label_name_length: u64::try_from(limits.max_label_name_len).unwrap_or(u64::MAX),
-        max_label_value_length: u64::try_from(limits.max_label_value_len).unwrap_or(u64::MAX),
-        out_of_order_time_window_ms: limits.out_of_order_time_window_ms,
+        max_label_name_length: limits.max_label_name_len,
+        max_label_value_length: limits.max_label_value_len,
+        out_of_order_time_window: limits.out_of_order_time_window,
         ..Limits::default()
     }
 }
@@ -890,9 +905,10 @@ fn enforce_out_of_order_window(
     tenant: &str,
     series: &[DecodedSeries],
 ) -> Result<(), PushError> {
-    if limits.out_of_order_time_window_ms < 0 {
+    if limits.out_of_order_time_window < Time::ZERO {
         return Ok(());
     }
+    let window_ms = limits.out_of_order_time_window.millis_i64();
 
     let mut latest = state
         .latest_timestamps
@@ -906,7 +922,7 @@ fn enforce_out_of_order_window(
         let fingerprint = series.labels.fingerprint();
         let key = (tenant.to_string(), fingerprint);
         if let Some(previous_latest) = latest.get(&key).copied() {
-            let oldest_allowed = previous_latest - limits.out_of_order_time_window_ms;
+            let oldest_allowed = previous_latest - window_ms;
             if min_timestamp < oldest_allowed {
                 return Err(PushError::TooOldSample {
                     timestamp_ms: min_timestamp,
@@ -1008,18 +1024,18 @@ pub fn validate(series: &[DecodedSeries], limits: &TenantLimits) -> Result<(), W
             if !is_valid_label_name(name) {
                 return Err(WireError::Invalid(format!("invalid label name `{name}`")));
             }
-            if name.len() > limits.max_label_name_len {
+            let name_limit = limits.max_label_name_len.bytes_usize();
+            if name.len() > name_limit {
                 return Err(WireError::Invalid(format!(
-                    "label name length {} exceeds limit {}",
+                    "label name length {} exceeds limit {name_limit}",
                     name.len(),
-                    limits.max_label_name_len
                 )));
             }
-            if value.len() > limits.max_label_value_len {
+            let value_limit = limits.max_label_value_len.bytes_usize();
+            if value.len() > value_limit {
                 return Err(WireError::Invalid(format!(
-                    "label value length {} exceeds limit {}",
+                    "label value length {} exceeds limit {value_limit}",
                     value.len(),
-                    limits.max_label_value_len
                 )));
             }
         }
@@ -1374,7 +1390,7 @@ mod tests {
     impl HaElectionConsumerPoll for RecordingHaElectionConsumer {
         async fn poll(
             &mut self,
-            _timeout: Duration,
+            _timeout: Time,
         ) -> Result<Vec<ConsumerRecord>, HaElectionConsumerError> {
             Ok(self.batches.remove(0))
         }
@@ -1418,6 +1434,19 @@ mod tests {
     fn test_state() -> (Arc<DistributorState>, Arc<RecordingSink>) {
         let sink = Arc::new(RecordingSink::default());
         (Arc::new(DistributorState::new(sink.clone())), sink)
+    }
+
+    #[test]
+    fn distributor_state_stores_configured_runtime_policy() {
+        let sink = Arc::new(RecordingSink::default());
+        let state = DistributorState::new(sink)
+            .with_ha_failover_timeout(Time::from_millis(-1_000))
+            .with_max_rate_buckets(7)
+            .with_max_decompressed(kibibytes(64));
+
+        check!(state.ha_failover_timeout == Time::from_millis(-1_000));
+        check!(state.ingest_enforcer.max_rate_buckets() == 7);
+        check!(state.max_decompressed == kibibytes(64));
     }
 
     fn snappy(body: &[u8]) -> Vec<u8> {
@@ -1994,7 +2023,7 @@ mod tests {
         let sink = Arc::new(RecordingSink::default());
         let state = Arc::new(
             DistributorState::new(sink.clone()).with_limits(TenantLimits {
-                max_label_name_len: 7,
+                max_label_name_len: bytes(7),
                 ..TenantLimits::default()
             }),
         );
@@ -2022,11 +2051,11 @@ mod tests {
         let state = Arc::new(
             DistributorState::new(sink.clone()).with_overrides(
                 crate::OverridesProvider::from_yaml(
-                    r"
+                    r#"
 overrides:
   tenant-tight:
-    max_label_value_length: 2
-",
+    max_label_value_length: "2B"
+"#,
                 )
                 .unwrap(),
             ),
@@ -2189,7 +2218,7 @@ overrides:
         let sink = Arc::new(RecordingSink::default());
         let state = Arc::new(
             DistributorState::new(sink.clone()).with_limits(TenantLimits {
-                ingestion_rate_samples_per_second: 1,
+                ingestion_rate: per_sec(1),
                 ingestion_burst_size: 1,
                 ..TenantLimits::default()
             }),
@@ -2281,7 +2310,7 @@ defaults:
         let sink = Arc::new(RecordingSink::default());
         let state = Arc::new(
             DistributorState::new(sink.clone()).with_limits(TenantLimits {
-                ingestion_rate_samples_per_second: 1,
+                ingestion_rate: per_sec(1),
                 ingestion_burst_size: 1,
                 ..TenantLimits::default()
             }),
@@ -2326,7 +2355,7 @@ defaults:
         let sink = Arc::new(RecordingSink::default());
         let state = Arc::new(
             DistributorState::new(sink.clone()).with_limits(TenantLimits {
-                out_of_order_time_window_ms: 100,
+                out_of_order_time_window: millis(100),
                 ..TenantLimits::default()
             }),
         );
@@ -2386,13 +2415,13 @@ defaults:
         let state = Arc::new(
             DistributorState::new(sink.clone()).with_overrides(
                 crate::OverridesProvider::from_yaml(
-                    r"
+                    r#"
 defaults:
-  out_of_order_time_window_ms: 0
+  out_of_order_time_window: "0ms"
 overrides:
   tenant-loose:
-    out_of_order_time_window_ms: 100
-",
+    out_of_order_time_window: "100ms"
+"#,
                 )
                 .unwrap(),
             ),
@@ -2437,7 +2466,7 @@ overrides:
         let sink = Arc::new(RecordingSink::default());
         let state = Arc::new(
             DistributorState::new(sink.clone()).with_limits(TenantLimits {
-                out_of_order_time_window_ms: 100,
+                out_of_order_time_window: millis(100),
                 ..TenantLimits::default()
             }),
         );
@@ -3014,14 +3043,10 @@ overrides:
             commit_calls: 0,
         };
 
-        let result = poll_ha_election_consumer_once(
-            &mut consumer,
-            &tracker,
-            HA_TRACKER_TOPIC,
-            Duration::from_millis(1),
-        )
-        .await
-        .unwrap();
+        let result =
+            poll_ha_election_consumer_once(&mut consumer, &tracker, HA_TRACKER_TOPIC, millis(1))
+                .await
+                .unwrap();
 
         assert!(
             result

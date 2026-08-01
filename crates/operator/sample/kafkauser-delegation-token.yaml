@@ -14,7 +14,7 @@ spec:
     #   - User:bob
     # Optional: hard ceiling on token lifetime (ms). Defaults to the
     # broker's delegation.token.max.lifetime.ms (7d).
-    # maxLifetimeMs: 86400000
+    # maxLifetime: 1d
     # Optional: renew when remaining lifetime drops below this many ms
     # (default 24h, min 60s).
-    # renewBeforeExpiryMs: 7200000
+    # renewBeforeExpiry: 2h

@@ -129,8 +129,9 @@ fn start_broker_with_opa_authorizer(
         // wall-clock TTL is enforced by `time_util::now_ms()`; 1 ms
         // means the second call in any same-test sequence is always a
         // cache miss after `tokio::time::sleep(Duration::from_millis(5))`.
-        /* expire_after_ms */
-        1,
+        /* expire_after */
+        crabka_units::millis(1),
+        crabka_units::secs(5),
     )
     .expect("OpaAuthorizer::new must succeed inside a tokio runtime");
     cfg.authorizer = std::sync::Arc::new(opa);

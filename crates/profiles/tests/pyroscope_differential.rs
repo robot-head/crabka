@@ -810,7 +810,9 @@ async fn start_crabka_pair(
         active_series: Mutex::default(),
         ingestion_buckets: Mutex::default(),
         relabel: Vec::new(),
-        max_decompressed: 16 * 1024 * 1024,
+        max_decompressed: crabka_units::mebibytes(16),
+        max_tracked_tenants: 4096,
+        legacy_decode_limits: crabka_profiles::ingest::LegacyDecodeLimits::default(),
         metrics: crabka_profiles::metrics::ServiceMetrics::new(),
     });
     let distributor_addr =
@@ -825,7 +827,7 @@ async fn start_crabka_pair(
     let querier_state = Arc::new(QuerierState::new_with_limits(
         Arc::new(store),
         crabka_profiles::limits::Limits {
-            max_query_length_secs: 0,
+            max_query_length: <crabka_units::Time as crabka_units::convert::TimeExt>::ZERO,
             ..Default::default()
         },
     ));
@@ -2489,7 +2491,9 @@ async fn start_crabka_public(
         active_series: Mutex::default(),
         ingestion_buckets: Mutex::default(),
         relabel: Vec::new(),
-        max_decompressed: 16 * 1024 * 1024,
+        max_decompressed: crabka_units::mebibytes(16),
+        max_tracked_tenants: 4096,
+        legacy_decode_limits: crabka_profiles::ingest::LegacyDecodeLimits::default(),
         metrics: crabka_profiles::metrics::ServiceMetrics::new(),
     });
     let distributor_addr =
@@ -2504,7 +2508,7 @@ async fn start_crabka_public(
     let querier_state = Arc::new(QuerierState::new_with_limits(
         Arc::new(store),
         crabka_profiles::limits::Limits {
-            max_query_length_secs: 0,
+            max_query_length: <crabka_units::Time as crabka_units::convert::TimeExt>::ZERO,
             ..Default::default()
         },
     ));

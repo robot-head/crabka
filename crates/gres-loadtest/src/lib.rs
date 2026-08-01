@@ -17,6 +17,13 @@
 //! sampling covers local processes discovered by listening port (or named
 //! via `--external-pids`).
 //!
+//! Every magnitude the harness handles — run and warmup lengths, fault offsets
+//! and durations, target rates, injected delays, bandwidth caps, measured
+//! latencies, sampled RSS — is a [`crabka_units`] quantity rather than a bare
+//! number, so the scenario YAML and the JSON report carry their units and the
+//! conversions happen only at the seams (`tokio` timers, `/proc` reads, the
+//! `crabka-gres` command line).
+//!
 //! Module map:
 //! - [`scenario`] — the YAML schema and its validation.
 //! - [`cluster`] — broker + node process orchestration and tenant provisioning.
@@ -29,6 +36,7 @@
 //! - [`runner`] — ties the above together for one scenario run.
 
 pub mod cluster;
+pub mod config;
 pub mod external;
 pub mod faults;
 pub mod metrics;

@@ -5,22 +5,20 @@
 //! restarts any worker whose connect runtime has entered
 //! [`RuntimeState::Failed`].
 
-use std::time::Duration;
-
 use crabka_client_admin::AdminClient;
 use crabka_connect::RuntimeState;
+use crabka_units::prelude::TimeExt as _;
 use tokio::{sync::watch, task::JoinHandle};
 
 use crate::{
-    config::{NamingPolicy, PolicyConfig, ReplicatorConfig},
+    config::{
+        ClientResourcePolicy, NamingPolicy, PolicyConfig, ReplicatorConfig, ReplicatorRuntimePolicy,
+    },
     error::ReplicatorError,
     naming::Renamer,
     selector::Selector,
     worker::{FlowWorker, FlowWorkerParams},
 };
-
-/// How often the supervision loop polls each worker's runtime state.
-const SUPERVISE_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Owned, `Clone`-able inputs needed to rebuild a [`FlowWorkerParams`] (and thus
 /// a fresh [`FlowWorker`]) when the supervision loop restarts a failed worker.
@@ -36,9 +34,12 @@ struct RebuildSpec {
     target_alias: String,
     naming: NamingPolicy,
     topics: Vec<String>,
+    source_partition_counts: std::collections::BTreeMap<String, i32>,
     target_zones: Vec<String>,
     policies: Vec<PolicyConfig>,
     group_selector: Selector,
+    client_resource_policy: ClientResourcePolicy,
+    runtime_policy: ReplicatorRuntimePolicy,
 }
 
 /// Build a fresh [`FlowWorkerParams`] from a [`RebuildSpec`]. All security is
@@ -52,11 +53,14 @@ fn make_params(spec: &RebuildSpec) -> FlowWorkerParams {
         target_alias: spec.target_alias.clone(),
         naming: spec.naming,
         topics: spec.topics.clone(),
+        source_partition_counts: spec.source_partition_counts.clone(),
         target_zones: spec.target_zones.clone(),
         policies: spec.policies.clone(),
         group_selector: spec.group_selector.clone(),
         security_source: None,
         security_target: None,
+        client_resource_policy: spec.client_resource_policy,
+        runtime_policy: spec.runtime_policy.clone(),
     }
 }
 
@@ -82,6 +86,16 @@ pub struct FlowSupervisor {
 }
 
 impl FlowSupervisor {
+    /// Start with the default Kafka client resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when configuration validation, metadata discovery, or
+    /// worker startup fails.
+    pub async fn run(config: ReplicatorConfig) -> crate::Result<Self> {
+        Self::run_with_policy(config, ClientResourcePolicy::default()).await
+    }
+
     /// Validate `config`, resolve and start one [`FlowWorker`] per flow, then
     /// spawn a supervision loop that owns the workers and restarts any that
     /// enter [`RuntimeState::Failed`].
@@ -101,7 +115,27 @@ impl FlowSupervisor {
         fields(flows = config.flows.len(), clusters = config.clusters.len()),
         err,
     )]
-    pub async fn run(config: ReplicatorConfig) -> crate::Result<Self> {
+    pub async fn run_with_policy(
+        config: ReplicatorConfig,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> crate::Result<Self> {
+        Self::run_with_runtime_policy(
+            config,
+            client_resource_policy,
+            ReplicatorRuntimePolicy::default(),
+        )
+        .await
+    }
+
+    /// Start using explicit process runtime and topic policy.
+    ///
+    /// # Errors
+    /// Returns an error when config validation, discovery, or worker startup fails.
+    pub async fn run_with_runtime_policy(
+        config: ReplicatorConfig,
+        client_resource_policy: ClientResourcePolicy,
+        runtime_policy: ReplicatorRuntimePolicy,
+    ) -> crate::Result<Self> {
         config.validate()?;
 
         let mut entries: Vec<(RebuildSpec, FlowWorker)> = Vec::with_capacity(config.flows.len());
@@ -114,9 +148,23 @@ impl FlowSupervisor {
             let flow_name = format!("{}__{}", flow.from, flow.to);
 
             // Resolve the concrete topic list from the source cluster's metadata.
-            let mut admin = AdminClient::connect(std::slice::from_ref(&from.bootstrap))
-                .await
-                .map_err(|e| ReplicatorError::Client(e.to_string()))?;
+            let mut admin = AdminClient::connect_with_options(
+                std::slice::from_ref(&from.bootstrap),
+                crabka_client_core::ConnectionOptions {
+                    dns_timeout: crabka_client_core::ClientDnsTimeout::new(
+                        runtime_policy.client_dns_timeout,
+                    )
+                    .map_err(ReplicatorError::Client)?,
+                    connect_timeout: runtime_policy.client_connect_timeout,
+                    request_timeout: runtime_policy.client_request_timeout,
+                    client_id: "crabka-operator".to_owned(),
+                    dispatch_queue_capacity: client_resource_policy.dispatch_queue_capacity,
+                    frame_max: client_resource_policy.frame_max,
+                    security: None,
+                },
+            )
+            .await
+            .map_err(|e| ReplicatorError::Client(e.to_string()))?;
             let md = admin
                 .metadata(&[])
                 .await
@@ -125,14 +173,17 @@ impl FlowSupervisor {
             let topic_sel = Selector::compile(&flow.topics.include, &flow.topics.exclude)?;
             let renamer = Renamer::new(flow.naming, &flow.from);
 
-            let mut topics: Vec<String> = md
+            let source_partition_counts: std::collections::BTreeMap<String, i32> = md
                 .topics
                 .into_iter()
-                .map(|t| t.name)
-                .filter(|name| {
-                    topic_sel.matches(name) && !renamer.is_remote(name) && !is_internal(name)
+                .filter(|topic| {
+                    topic_sel.matches(&topic.name)
+                        && !renamer.is_remote(&topic.name)
+                        && !is_internal(&topic.name)
                 })
+                .map(|topic| (topic.name, topic.partition_count))
                 .collect();
+            let mut topics: Vec<String> = source_partition_counts.keys().cloned().collect();
             topics.sort();
             topics.dedup();
 
@@ -146,9 +197,12 @@ impl FlowSupervisor {
                 target_alias: flow.to.clone(),
                 naming: flow.naming,
                 topics,
+                source_partition_counts,
                 target_zones: to.zones.clone(),
                 policies: config.policies.clone(),
                 group_selector,
+                client_resource_policy,
+                runtime_policy: runtime_policy.clone(),
             };
 
             let worker = Box::pin(FlowWorker::start(make_params(&spec))).await?;
@@ -164,7 +218,7 @@ impl FlowSupervisor {
 
         let (shutdown, mut rx) = watch::channel(false);
         let handle = tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(SUPERVISE_INTERVAL);
+            let mut ticker = tokio::time::interval(runtime_policy.supervisor_interval.to_std());
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 tokio::select! {
@@ -225,6 +279,8 @@ impl FlowSupervisor {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+
+    use crabka_units::secs;
 
     use super::*;
     use crate::config::{
@@ -307,13 +363,7 @@ mod tests {
         };
 
         let sup = FlowSupervisor::run(config).await.unwrap();
-        crate::test_util::await_topic_count(
-            &tb,
-            "us-east.orders",
-            1,
-            std::time::Duration::from_secs(20),
-        )
-        .await;
+        crate::test_util::await_topic_count(&tb, "us-east.orders", 1, secs(20)).await;
         sup.shutdown().await;
         assert2::assert!(crate::test_util::topic_record_count(&tb, "us-east.orders").await >= 1);
         // `noise` was excluded by the selector, so it must never have been

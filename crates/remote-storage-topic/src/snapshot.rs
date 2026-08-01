@@ -19,6 +19,7 @@ use crabka_remote_storage::{
     PartitionDump, RemoteLogSegmentMetadata, RemotePartitionDeleteState, RlmmCacheDump,
     TopicIdPartition,
 };
+use crabka_units::prelude::{ByteSize, ByteSizeExt as _, bytes as byte_size};
 use tracing::instrument;
 
 use crate::{
@@ -32,6 +33,10 @@ pub const SNAPSHOT_FORMAT_VERSION: u16 = 0;
 
 /// Default snapshot file name under the snapshot directory.
 pub const SNAPSHOT_FILE_NAME: &str = "snapshot";
+
+/// Initial encode-buffer reservation. Covers the envelope and a handful of
+/// entries; the buffer grows for anything larger.
+const ENCODE_BUFFER_HINT: ByteSize = byte_size(256);
 
 /// A decoded snapshot: the per-metadata-partition committed offsets and
 /// the cache dump to seed an [`InmemoryRemoteLogMetadataManager`].
@@ -53,7 +58,7 @@ impl Snapshot {
     /// # Panics
     /// Panics if an internal lock is poisoned or validated block metadata is inconsistent with its index.
     pub fn encode(&self) -> Vec<u8> {
-        let mut buf = BytesMut::with_capacity(256);
+        let mut buf = BytesMut::with_capacity(ENCODE_BUFFER_HINT.bytes_usize());
         buf.put_u16(SNAPSHOT_FORMAT_VERSION);
         // Committed offsets.
         write_uvarint(self.committed_offsets.len() as u64, &mut buf);

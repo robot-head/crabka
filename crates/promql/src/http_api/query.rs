@@ -7,12 +7,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crabka_metrics::QueryEnforcer;
+use crabka_units::prelude::*;
 use serde::Deserialize;
 use url::form_urlencoded;
 
 use super::{
     ApiError, PrometheusApiState, acquire_query_permit, apply_result_limit, check_range_resolution,
-    duration_ms, exemplar_key, exemplars_json, optional_timestamp_ms, parse_limit_parameter,
+    duration_param, exemplar_key, exemplars_json, optional_timestamp_ms, parse_limit_parameter,
     record_query_response, required_form_param, selector_matchers, success_data_response,
     success_response, tenant_from_headers, timestamp_ms, unix_now_ms, validate_timestamp_range,
 };
@@ -104,11 +105,7 @@ async fn query_dispatch<S: MetricStore>(
     // covered by `query_duration{route}`.
     let eval_started = std::time::Instant::now();
     let outcome = engine.query_instant(&tenant, &params.query, time_ms).await;
-    state.record_eval(
-        "instant",
-        outcome.is_ok(),
-        eval_started.elapsed().as_secs_f64(),
-    );
+    state.record_eval("instant", outcome.is_ok(), eval_started.elapsed().as_time());
     match outcome {
         Ok(mut result) => {
             apply_result_limit(&mut result, params.limit);
@@ -176,11 +173,11 @@ async fn query_range_dispatch<S: MetricStore>(
     if let Err(error) = validate_timestamp_range(start_ms, end_ms) {
         return error.into_response();
     }
-    let step_ms = match duration_ms(&params.step) {
+    let step = match duration_param(&params.step) {
         Ok(value) => value,
         Err(error) => return error.into_response(),
     };
-    if let Err(error) = check_range_resolution(start_ms, end_ms, step_ms) {
+    if let Err(error) = check_range_resolution(start_ms, end_ms, step) {
         return error.into_response();
     }
     if let Some(limits) = &state.query_limits {
@@ -209,7 +206,7 @@ async fn query_range_dispatch<S: MetricStore>(
                 query: params.query.clone(),
                 start_ms,
                 end_ms,
-                step_ms,
+                step,
                 opts: frontend.opts,
             },
         )
@@ -217,14 +214,10 @@ async fn query_range_dispatch<S: MetricStore>(
     } else {
         state
             .engine_for_tenant(&tenant)
-            .query_range(&tenant, &params.query, start_ms, end_ms, step_ms)
+            .query_range(&tenant, &params.query, start_ms, end_ms, step)
             .await
     };
-    state.record_eval(
-        "range",
-        result.is_ok(),
-        eval_started.elapsed().as_secs_f64(),
-    );
+    state.record_eval("range", result.is_ok(), eval_started.elapsed().as_time());
 
     match result {
         Ok(mut result) => {

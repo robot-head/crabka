@@ -107,6 +107,7 @@ use std::{
 pub use commit::{Committer, LocalCommitter};
 use crabka_pgkv::{FjallKv, Kv, MemKv};
 use crabka_pgwire::engine::Engine;
+use crabka_units::convert::{ByteSizeExt as _, TimeExt as _};
 pub use error::{
     DependentForeignKey, DroppedObject, ExecError, ForeignKeyDependents, ForeignKeyTypeMismatch,
     ForeignKeyViolation, ForeignKeyViolationSide, GucRangeViolation,
@@ -324,6 +325,72 @@ pub(crate) enum PersistMode {
     Replicated,
 }
 
+/// Runtime policy for engine-local queues, durable counter reservations, and
+/// timestamp-version reclamation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RuntimePolicy {
+    pub blocking_query_memory: crabka_units::ByteSize,
+    pub result_page_max: crabka_units::ByteSize,
+    pub join_broadcast_threshold: crabka_units::ByteSize,
+    pub notify_queue_capacity: usize,
+    pub xid_reservation: u64,
+    pub rowid_reservation: u64,
+    pub ts_prune_versions_per_row: usize,
+    pub ts_gc_floor_lag: crabka_units::Time,
+}
+
+impl Default for RuntimePolicy {
+    fn default() -> Self {
+        Self {
+            blocking_query_memory: scanner::BLOCKING_QUERY_MEMORY,
+            result_page_max: session::RESULT_PAGE_MAX,
+            join_broadcast_threshold: crabka_units::ByteSize::from_bytes(
+                plan_dist::PlannerConfig::default().broadcast_threshold_bytes,
+            ),
+            notify_queue_capacity: notify::NOTIFY_QUEUE_CAPACITY,
+            xid_reservation: procarray::DURABLE_XID_BLOCK,
+            rowid_reservation: seq::DURABLE_BLOCK,
+            ts_prune_versions_per_row: ts_gc::TS_PRUNE_ROW_VERSION_CAP,
+            ts_gc_floor_lag: ts_gc::TS_PRUNE_FLOOR_LAG,
+        }
+    }
+}
+
+impl RuntimePolicy {
+    /// Validate the policy before constructing an engine.
+    /// # Errors
+    ///
+    /// Returns an error for zero counts or a GC lag that cannot be represented
+    /// by the engine's whole-millisecond clock.
+    pub fn validate(self) -> Result<Self, ExecError> {
+        let floor_lag_millis = self.ts_gc_floor_lag.millis_i64();
+        let whole_positive_bytes = |value: crabka_units::ByteSize| {
+            let bytes = value.bytes_usize();
+            bytes > 0
+                && value.bytes_f64().is_finite()
+                && u64::try_from(bytes)
+                    .is_ok_and(|bytes| crabka_units::ByteSize::from_bytes(bytes) == value)
+        };
+        if !whole_positive_bytes(self.blocking_query_memory)
+            || !whole_positive_bytes(self.result_page_max)
+            || !whole_positive_bytes(self.join_broadcast_threshold)
+            || self.notify_queue_capacity == 0
+            || self.xid_reservation == 0
+            || self.rowid_reservation == 0
+            || self.ts_prune_versions_per_row == 0
+            || !self.ts_gc_floor_lag.secs_f64().is_finite()
+            || floor_lag_millis < 0
+            || crabka_units::Time::from_millis(floor_lag_millis) != self.ts_gc_floor_lag
+        {
+            return Err(ExecError::Unsupported(
+                "PgExec byte limits and counts must be positive whole values and GC lag must be finite, nonnegative, and whole milliseconds"
+                    .into(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
 /// The SQL engine over a durable (or in-memory) KV store. Catalog, sequences,
 /// the xid counter, and the clog live in the KV store. Writers run concurrently
 /// (SP6): row-level conflicts serialize through the `RowLockManager`, rowid
@@ -404,6 +471,8 @@ pub struct SqlEngine {
     pub(crate) range_scanner: Arc<dyn scanner::RangeScanner>,
     pub(crate) join_stats: Arc<dyn plan_dist::Stats>,
     pub(crate) join_strategy_config: plan_dist::PlannerConfig,
+    pub(crate) blocking_query_memory: crabka_units::ByteSize,
+    pub(crate) result_page_max: crabka_units::ByteSize,
     /// Timestamp oracle backing the sharded timestamp transaction path.
     pub(crate) timestamp_oracle: Arc<dyn timestamp_txn::TimestampSource>,
     /// Cached durable-timestamp horizon over `kv`/`catalog_kv`. Seeded lazily
@@ -714,6 +783,14 @@ impl SqlEngine {
         Self::with_kv(Arc::new(MemKv::new())).expect("in-memory engine never fails to open")
     }
 
+    /// Ephemeral in-memory engine with explicit runtime policy.
+    /// # Errors
+    ///
+    /// Returns an error when the policy is invalid.
+    pub fn new_with_policy(policy: RuntimePolicy) -> Result<Self, ExecError> {
+        Self::with_kv_and_policy(Arc::new(MemKv::new()), policy)
+    }
+
     /// Durable engine backed by a fjall store at `path`.
     /// # Errors
     ///
@@ -722,10 +799,30 @@ impl SqlEngine {
         Self::with_kv(Arc::new(FjallKv::open(path)?))
     }
 
+    /// Durable engine with explicit runtime policy.
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot be opened or the policy is invalid.
+    pub fn open_with_policy(
+        path: impl AsRef<Path>,
+        policy: RuntimePolicy,
+    ) -> Result<Self, ExecError> {
+        Self::with_kv_and_policy(Arc::new(FjallKv::open(path)?), policy)
+    }
+
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
     pub fn with_kv(kv: Arc<dyn Kv>) -> Result<Self, ExecError> {
+        Self::with_kv_and_policy(kv, RuntimePolicy::default())
+    }
+
+    /// Construct an engine over `kv` with explicit runtime policy.
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot be initialized or the policy is invalid.
+    pub fn with_kv_and_policy(kv: Arc<dyn Kv>, policy: RuntimePolicy) -> Result<Self, ExecError> {
+        let policy = policy.validate()?;
         let coordination = coordination_for(&kv);
         let procarray = Arc::new(ProcArray::open(Arc::clone(&kv), PersistMode::Durable)?);
         let sweep_committer = timestamp_txn::HorizonObservingCommitter::wrap(
@@ -768,7 +865,11 @@ impl SqlEngine {
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
             join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&kv))),
-            join_strategy_config: plan_dist::PlannerConfig::default(),
+            join_strategy_config: plan_dist::PlannerConfig {
+                broadcast_threshold_bytes: policy.join_broadcast_threshold.bytes_u64(),
+            },
+            blocking_query_memory: policy.blocking_query_memory,
+            result_page_max: policy.result_page_max,
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampSource::default()),
             timestamp_horizon,
             local_sequence,
@@ -1317,6 +1418,27 @@ impl SqlEngine {
         committer: Arc<dyn crate::commit::Committer>,
         linearizer: Arc<dyn crate::read_gate::Linearizer>,
     ) -> Result<Self, ExecError> {
+        Self::replicated_with_policy(
+            catalog_kv,
+            sm_kv,
+            committer,
+            linearizer,
+            RuntimePolicy::default(),
+        )
+    }
+
+    /// Construct a replicated engine with explicit runtime policy.
+    /// # Errors
+    ///
+    /// Returns an error when replicated state cannot be initialized or the policy is invalid.
+    pub fn replicated_with_policy(
+        catalog_kv: Arc<dyn Kv>,
+        sm_kv: Arc<dyn Kv>,
+        committer: Arc<dyn crate::commit::Committer>,
+        linearizer: Arc<dyn crate::read_gate::Linearizer>,
+        policy: RuntimePolicy,
+    ) -> Result<Self, ExecError> {
+        let policy = policy.validate()?;
         let coordination = coordination_for(&sm_kv);
         let procarray = Arc::new(ProcArray::open(
             Arc::clone(&sm_kv),
@@ -1357,7 +1479,11 @@ impl SqlEngine {
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
             join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&sm_kv))),
-            join_strategy_config: plan_dist::PlannerConfig::default(),
+            join_strategy_config: plan_dist::PlannerConfig {
+                broadcast_threshold_bytes: policy.join_broadcast_threshold.bytes_u64(),
+            },
+            blocking_query_memory: policy.blocking_query_memory,
+            result_page_max: policy.result_page_max,
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampSource::default()),
             timestamp_horizon,
             local_sequence,
@@ -1426,6 +1552,8 @@ impl SqlEngine {
             range_scanner: Arc::clone(&self.range_scanner),
             join_stats: Arc::clone(&self.join_stats),
             join_strategy_config: self.join_strategy_config,
+            blocking_query_memory: self.blocking_query_memory,
+            result_page_max: self.result_page_max,
             timestamp_oracle: Arc::clone(&self.timestamp_oracle),
             timestamp_horizon: self.timestamp_horizon.clone(),
             local_sequence: Arc::clone(&self.local_sequence),
@@ -3143,6 +3271,8 @@ impl Engine for SqlEngine {
             range_scanner: Arc::clone(&self.range_scanner),
             join_stats: Arc::clone(&self.join_stats),
             join_strategy_config: self.join_strategy_config,
+            blocking_query_memory: self.blocking_query_memory,
+            result_page_max: self.result_page_max,
             timestamp_oracle: Arc::clone(&self.timestamp_oracle),
             timestamp_horizon: self.timestamp_horizon.clone(),
             local_sequence: Arc::clone(&self.local_sequence),
@@ -3160,9 +3290,81 @@ impl Engine for SqlEngine {
 mod tests {
     use crabka_pgcatalog::RelationName;
     use crabka_pgwire::engine::Session;
+    use crabka_units::convert::{ByteSizeExt as _, TimeExt as _};
     use tokio::sync::{Barrier, Notify};
 
     use super::*;
+
+    #[test]
+    fn runtime_policy_rejects_zero_counts_and_negative_gc_lag() {
+        let defaults = RuntimePolicy::default();
+        for policy in [
+            RuntimePolicy {
+                blocking_query_memory: crabka_units::ByteSize::ZERO,
+                ..defaults
+            },
+            RuntimePolicy {
+                result_page_max: crabka_units::ByteSize::from_bytes_f64(0.5),
+                ..defaults
+            },
+            RuntimePolicy {
+                join_broadcast_threshold: crabka_units::ByteSize::ZERO,
+                ..defaults
+            },
+            RuntimePolicy {
+                notify_queue_capacity: 0,
+                ..defaults
+            },
+            RuntimePolicy {
+                xid_reservation: 0,
+                ..defaults
+            },
+            RuntimePolicy {
+                rowid_reservation: 0,
+                ..defaults
+            },
+            RuntimePolicy {
+                ts_prune_versions_per_row: 0,
+                ..defaults
+            },
+            RuntimePolicy {
+                ts_gc_floor_lag: crabka_units::Time::from_millis(-1),
+                ..defaults
+            },
+            RuntimePolicy {
+                ts_gc_floor_lag: crabka_units::Time::from_micros(500),
+                ..defaults
+            },
+        ] {
+            assert!(policy.validate().is_err());
+        }
+        assert!(
+            RuntimePolicy {
+                ts_gc_floor_lag: crabka_units::secs(0),
+                ..defaults
+            }
+            .validate()
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn runtime_query_policy_reaches_engine_and_planner() {
+        let policy = RuntimePolicy {
+            blocking_query_memory: crabka_units::bytes(34),
+            result_page_max: crabka_units::bytes(35),
+            join_broadcast_threshold: crabka_units::bytes(36),
+            ..Default::default()
+        };
+        let engine = SqlEngine::new_with_policy(policy).expect("policy");
+
+        assert_eq!(engine.blocking_query_memory, crabka_units::bytes(34));
+        assert_eq!(engine.result_page_max, crabka_units::bytes(35));
+        assert_eq!(engine.join_strategy_config.broadcast_threshold_bytes, 36);
+        let clone = engine.clone_handle();
+        assert_eq!(clone.blocking_query_memory, engine.blocking_query_memory);
+        assert_eq!(clone.result_page_max, engine.result_page_max);
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn in_doubt_globals_lists_undecided_prepared_markers() {

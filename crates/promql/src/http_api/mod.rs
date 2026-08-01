@@ -14,6 +14,7 @@ use axum::{
     routing::{get, post},
 };
 use crabka_metrics::{LimitError, OverridesProvider, wire::WireError};
+use crabka_units::prelude::*;
 use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -51,7 +52,7 @@ use query::{
 use remote_read::remote_read;
 use request::{
     CardinalityParams, DiscoveryParams, apply_limit, apply_result_limit, check_range_resolution,
-    discovery_matchers, discovery_window, duration_ms, enforce_sample_count,
+    discovery_matchers, discovery_window, duration_param, enforce_sample_count,
     enforce_selected_series_limit, optional_timestamp_ms, parse_cardinality_form,
     parse_cardinality_params, parse_discovery_form, parse_discovery_params, parse_limit_parameter,
     required_form_param, selector_matchers, tenant_from_headers, timestamp_ms, unix_now_ms,
@@ -84,6 +85,8 @@ pub struct PrometheusApiState<S: MetricStore> {
     query_frontend: Option<QueryFrontendState>,
     query_limits: Option<OverridesProvider>,
     query_gate: Option<Arc<Semaphore>>,
+    max_concurrent_queries: usize,
+    remote_read_max_body: ByteSize,
     metrics: Option<ServiceMetrics>,
     start_time: SystemTime,
 }
@@ -132,6 +135,8 @@ impl<S: MetricStore> PrometheusApiState<S> {
             query_frontend: None,
             query_limits: None,
             query_gate: None,
+            max_concurrent_queries: 0,
+            remote_read_max_body: mebibytes(64),
             metrics: None,
             start_time: SystemTime::now(),
         }
@@ -145,7 +150,16 @@ impl<S: MetricStore> PrometheusApiState<S> {
 
     #[must_use]
     pub fn with_max_concurrent_queries(mut self, max_concurrent_queries: usize) -> Self {
-        self.query_gate = Some(Arc::new(Semaphore::new(max_concurrent_queries.max(1))));
+        let max_concurrent_queries = max_concurrent_queries.max(1);
+        self.query_gate = Some(Arc::new(Semaphore::new(max_concurrent_queries)));
+        self.max_concurrent_queries = max_concurrent_queries;
+        self
+    }
+
+    /// Set the compressed and decompressed body cap for remote reads.
+    #[must_use]
+    pub fn with_remote_read_max_body(mut self, max_body: ByteSize) -> Self {
+        self.remote_read_max_body = max_body;
         self
     }
 
@@ -157,18 +171,18 @@ impl<S: MetricStore> PrometheusApiState<S> {
 
     /// Record one query request outcome on `route`, if a metrics bundle is
     /// configured. No-op otherwise.
-    fn record_query(&self, route: &str, ok: bool, secs: f64) {
+    fn record_query(&self, route: &str, ok: bool, latency: Time) {
         if let Some(metrics) = &self.metrics {
-            metrics.record_query(route, ok, secs);
+            metrics.record_query(route, ok, latency);
         }
     }
 
     /// Record one `PromQL` engine evaluation (`query_type` = `"instant"` /
     /// `"range"`) — its latency and, when `!ok`, an error increment. No-op when
     /// no metrics bundle is configured.
-    fn record_eval(&self, query_type: &str, ok: bool, secs: f64) {
+    fn record_eval(&self, query_type: &str, ok: bool, latency: Time) {
         if let Some(metrics) = &self.metrics {
-            metrics.record_eval(query_type, ok, secs);
+            metrics.record_eval(query_type, ok, latency);
         }
     }
 
@@ -300,17 +314,9 @@ async fn acquire_query_permit<S: MetricStore>(
     }
 }
 
-/// Maximum accepted `remote_read` request body, in bytes.
-///
-/// Bounds the snappy-compressed protobuf payload before it is buffered, so a
-/// client cannot force an unbounded allocation by streaming a huge body. Matches
-/// the 64 MiB decompressed-size cap [`remote_read`] already passes to
-/// `snappy_block_decode`, since there is no configured `max_decompressed`
-/// override to reuse.
-const REMOTE_READ_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
-
 /// Build routes for the Prometheus API and Mimir's `/prometheus` prefix.
 pub fn prometheus_router<S: MetricStore + 'static>(state: Arc<PrometheusApiState<S>>) -> Router {
+    let remote_read_max_body = state.remote_read_max_body.bytes_usize();
     Router::new()
         .route("/api/v1/query", get(query::<S>).post(query_post::<S>))
         .route(
@@ -323,7 +329,7 @@ pub fn prometheus_router<S: MetricStore + 'static>(state: Arc<PrometheusApiState
         )
         .route(
             "/api/v1/read",
-            post(remote_read::<S>).layer(DefaultBodyLimit::max(REMOTE_READ_MAX_BODY_BYTES)),
+            post(remote_read::<S>).layer(DefaultBodyLimit::max(remote_read_max_body)),
         )
         .route(
             "/api/v1/cardinality/label_names",
@@ -360,7 +366,7 @@ pub fn prometheus_router<S: MetricStore + 'static>(state: Arc<PrometheusApiState
         )
         .route("/api/v1/status/buildinfo", get(build_info))
         .route("/api/v1/status/config", get(status_config))
-        .route("/api/v1/status/flags", get(status_flags))
+        .route("/api/v1/status/flags", get(status_flags::<S>))
         .route("/api/v1/status/runtimeinfo", get(runtime_info::<S>))
         .route("/api/v1/status/tsdb", get(tsdb_status::<S>))
         .route("/api/v1/status/tsdb/blocks", get(tsdb_blocks::<S>))
@@ -379,7 +385,7 @@ pub fn prometheus_router<S: MetricStore + 'static>(state: Arc<PrometheusApiState
         )
         .route(
             "/prometheus/api/v1/read",
-            post(remote_read::<S>).layer(DefaultBodyLimit::max(REMOTE_READ_MAX_BODY_BYTES)),
+            post(remote_read::<S>).layer(DefaultBodyLimit::max(remote_read_max_body)),
         )
         .route(
             "/prometheus/api/v1/cardinality/label_names",
@@ -436,7 +442,7 @@ pub fn prometheus_router<S: MetricStore + 'static>(state: Arc<PrometheusApiState
         )
         .route("/prometheus/api/v1/status/buildinfo", get(build_info))
         .route("/prometheus/api/v1/status/config", get(status_config))
-        .route("/prometheus/api/v1/status/flags", get(status_flags))
+        .route("/prometheus/api/v1/status/flags", get(status_flags::<S>))
         .route(
             "/prometheus/api/v1/status/runtimeinfo",
             get(runtime_info::<S>),
@@ -469,7 +475,7 @@ fn record_query_response<S: MetricStore>(
     started: std::time::Instant,
 ) {
     let ok = !response.status().is_client_error() && !response.status().is_server_error();
-    state.record_query(route, ok, started.elapsed().as_secs_f64());
+    state.record_query(route, ok, started.elapsed().as_time());
 }
 
 #[derive(Debug)]

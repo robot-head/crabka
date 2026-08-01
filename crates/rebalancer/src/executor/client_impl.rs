@@ -16,6 +16,12 @@ use crabka_protocol::owned::{
     list_partition_reassignments_request::ListPartitionReassignmentsRequest,
     list_partition_reassignments_response::ListPartitionReassignmentsResponse,
 };
+use crabka_units::{
+    ByteRate, Time,
+    convert::{ByteRateExt as _, TimeExt as _},
+    secs,
+};
+use refined_type::{Refined, rule::GreaterI32};
 
 use crate::{
     executor::{
@@ -37,6 +43,58 @@ const RATE_KEY_LEADER: &str = "leader.replication.throttled.rate";
 const RATE_KEY_FOLLOWER: &str = "follower.replication.throttled.rate";
 const REPLICAS_KEY_LEADER: &str = "leader.replication.throttled.replicas";
 const REPLICAS_KEY_FOLLOWER: &str = "follower.replication.throttled.replicas";
+
+/// Default Kafka broker-side timeout for submitting or cancelling
+/// reassignments.
+pub const DEFAULT_REASSIGNMENT_REQUEST_TIMEOUT: Time = secs(60);
+
+/// Positive whole-millisecond timeout carried by
+/// `AlterPartitionReassignmentsRequest`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ReassignmentRequestTimeout(i32);
+
+impl ReassignmentRequestTimeout {
+    /// Validate a Kafka protocol timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the value is non-finite, zero, negative,
+    /// fractional in milliseconds, or greater than `i32::MAX` milliseconds.
+    pub fn new(value: Time) -> Result<Self, String> {
+        let milliseconds = value.millis_i64();
+        if !value.secs_f64().is_finite() || Time::from_millis(milliseconds) != value {
+            return Err(
+                "reassignment request timeout must be a whole number of milliseconds".to_string(),
+            );
+        }
+        let milliseconds = i32::try_from(milliseconds).map_err(|_| {
+            "reassignment request timeout must be within 1..=i32::MAX milliseconds".to_string()
+        })?;
+        GreaterI32::<0>::new(milliseconds)
+            .map(Refined::into_value)
+            .map(Self)
+            .map_err(|error| format!("reassignment request timeout: {error}"))
+    }
+
+    /// Return the dimensioned timeout.
+    #[must_use]
+    pub fn time(self) -> Time {
+        Time::from_millis(i64::from(self.0))
+    }
+
+    /// Return the Kafka protocol millisecond value.
+    #[must_use]
+    pub const fn milliseconds(self) -> i32 {
+        self.0
+    }
+}
+
+impl Default for ReassignmentRequestTimeout {
+    fn default() -> Self {
+        Self::new(DEFAULT_REASSIGNMENT_REQUEST_TIMEOUT)
+            .expect("default reassignment request timeout is valid")
+    }
+}
 
 fn check_alter_configs_response(
     resp: &crabka_protocol::owned::incremental_alter_configs_response::IncrementalAlterConfigsResponse,
@@ -102,13 +160,14 @@ fn check_reassign_response(
 fn build_alter_throttle_request(
     op: ConfigOp,
     targets: &ThrottleTargets,
-    throttle_bytes_per_sec: i64,
+    throttle: ByteRate,
 ) -> IncrementalAlterConfigsRequest {
     let op_byte = match op {
         ConfigOp::Set => OP_SET,
         ConfigOp::Delete => OP_DELETE,
     };
-    let rate_str = throttle_bytes_per_sec.to_string();
+    // KIP-73 expresses both rate keys as a decimal bytes-per-second string.
+    let rate_str = throttle.bytes_per_sec_i64().to_string();
     let mut resources: Vec<AlterConfigsResource> = Vec::new();
 
     // Per-broker rate configs.
@@ -197,26 +256,31 @@ fn build_alter_throttle_request(
 
 fn build_submit_reassignments_request(
     movements: &[Movement],
+    timeout: ReassignmentRequestTimeout,
 ) -> AlterPartitionReassignmentsRequest {
     build_reassignments_request(
         movements
             .iter()
             .map(|m| (m.topic.clone(), m.partition, Some(m.new_replicas.clone()))),
+        timeout,
     )
 }
 
 fn build_cancel_reassignments_request(
     partitions: &[(String, i32)],
+    timeout: ReassignmentRequestTimeout,
 ) -> AlterPartitionReassignmentsRequest {
     build_reassignments_request(
         partitions
             .iter()
             .map(|(topic, partition)| (topic.clone(), *partition, None)),
+        timeout,
     )
 }
 
 fn build_reassignments_request(
     partitions: impl IntoIterator<Item = (String, i32, Option<Vec<i32>>)>,
+    timeout: ReassignmentRequestTimeout,
 ) -> AlterPartitionReassignmentsRequest {
     let mut topics_map: BTreeMap<String, Vec<ReassignablePartition>> = BTreeMap::new();
     for (topic, partition, replicas) in partitions {
@@ -238,6 +302,7 @@ fn build_reassignments_request(
         })
         .collect();
     AlterPartitionReassignmentsRequest {
+        timeout_ms: timeout.milliseconds(),
         topics,
         ..Default::default()
     }
@@ -262,12 +327,24 @@ fn filter_in_flight_response(
 
 pub struct LiveClient {
     pub inner: Client,
+    reassignment_request_timeout: ReassignmentRequestTimeout,
 }
 
 impl LiveClient {
     #[must_use]
     pub fn new(inner: Client) -> Self {
-        Self { inner }
+        Self::with_reassignment_request_timeout(inner, ReassignmentRequestTimeout::default())
+    }
+
+    #[must_use]
+    pub fn with_reassignment_request_timeout(
+        inner: Client,
+        reassignment_request_timeout: ReassignmentRequestTimeout,
+    ) -> Self {
+        Self {
+            inner,
+            reassignment_request_timeout,
+        }
     }
 }
 
@@ -277,9 +354,9 @@ impl ClientFacade for LiveClient {
         &self,
         op: ConfigOp,
         targets: &ThrottleTargets,
-        throttle_bytes_per_sec: i64,
+        throttle: ByteRate,
     ) -> Result<(), PhaseError> {
-        let req = build_alter_throttle_request(op, targets, throttle_bytes_per_sec);
+        let req = build_alter_throttle_request(op, targets, throttle);
         let resp = self
             .inner
             .send(req)
@@ -290,7 +367,7 @@ impl ClientFacade for LiveClient {
     }
 
     async fn submit_reassignments(&self, movements: &[Movement]) -> Result<(), PhaseError> {
-        let req = build_submit_reassignments_request(movements);
+        let req = build_submit_reassignments_request(movements, self.reassignment_request_timeout);
         let resp = self
             .inner
             .send(req)
@@ -301,7 +378,7 @@ impl ClientFacade for LiveClient {
     }
 
     async fn cancel_reassignments(&self, partitions: &[(String, i32)]) -> Result<(), PhaseError> {
-        let req = build_cancel_reassignments_request(partitions);
+        let req = build_cancel_reassignments_request(partitions, self.reassignment_request_timeout);
         let resp = self
             .inner
             .send(req)
@@ -328,10 +405,7 @@ impl ClientFacade for LiveClient {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::{BTreeMap, BTreeSet},
-        time::Duration,
-    };
+    use std::collections::{BTreeMap, BTreeSet};
 
     use assert2::check;
     use crabka_protocol::{
@@ -349,8 +423,12 @@ mod tests {
             },
         },
     };
+    use crabka_units::{Time, bytes_per_sec, convert::TimeExt as _, micros, millis};
 
     use super::*;
+
+    /// Connect/request timeout for the deliberately-unreachable test client.
+    const CLIENT_TIMEOUT: Time = millis(50);
 
     fn movement(topic: &str, partition: i32, old: Vec<i32>, new: Vec<i32>) -> Movement {
         Movement {
@@ -424,7 +502,7 @@ mod tests {
 
     #[test]
     fn build_alter_throttle_request_sets_all_resource_fields() {
-        let req = build_alter_throttle_request(ConfigOp::Set, &targets(), 1234);
+        let req = build_alter_throttle_request(ConfigOp::Set, &targets(), bytes_per_sec(1234));
 
         assert2::assert!(
             req == IncrementalAlterConfigsRequest {
@@ -479,7 +557,7 @@ mod tests {
 
     #[test]
     fn build_alter_throttle_delete_request_tombstones_values() {
-        let req = build_alter_throttle_request(ConfigOp::Delete, &targets(), 1234);
+        let req = build_alter_throttle_request(ConfigOp::Delete, &targets(), bytes_per_sec(1234));
         assert2::assert!(req.resources.iter().all(|r| {
             r.configs
                 .iter()
@@ -489,11 +567,14 @@ mod tests {
 
     #[test]
     fn build_submit_reassignments_request_groups_topic_partitions() {
-        let req = build_submit_reassignments_request(&[
-            movement("orders", 1, vec![1], vec![2, 3]),
-            movement("orders", 0, vec![1], vec![4]),
-            movement("payments", 0, vec![2], vec![3]),
-        ]);
+        let req = build_submit_reassignments_request(
+            &[
+                movement("orders", 1, vec![1], vec![2, 3]),
+                movement("orders", 0, vec![1], vec![4]),
+                movement("payments", 0, vec![2], vec![3]),
+            ],
+            ReassignmentRequestTimeout::default(),
+        );
 
         assert2::assert!(
             req == AlterPartitionReassignmentsRequest {
@@ -533,10 +614,10 @@ mod tests {
 
     #[test]
     fn build_cancel_reassignments_request_uses_null_replicas() {
-        let req = build_cancel_reassignments_request(&[
-            ("orders".to_string(), 1),
-            ("payments".to_string(), 0),
-        ]);
+        let req = build_cancel_reassignments_request(
+            &[("orders".to_string(), 1), ("payments".to_string(), 0)],
+            ReassignmentRequestTimeout::default(),
+        );
 
         assert2::assert!(
             req == AlterPartitionReassignmentsRequest {
@@ -565,6 +646,42 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields(vec![]),
             }
         );
+    }
+
+    #[test]
+    fn reassignment_request_timeout_validates_protocol_milliseconds() {
+        let timeout = ReassignmentRequestTimeout::new(millis(37)).unwrap();
+        assert2::assert!(timeout.time() == millis(37));
+        assert2::assert!(timeout.milliseconds() == 37);
+        assert2::assert!(ReassignmentRequestTimeout::default().milliseconds() == 60_000);
+        assert2::assert!(
+            ReassignmentRequestTimeout::new(Time::from_millis(i64::from(i32::MAX)))
+                .unwrap()
+                .milliseconds()
+                == i32::MAX
+        );
+
+        for invalid in [
+            Time::ZERO,
+            Time::from_millis(-1),
+            micros(500),
+            Time::from_secs_f64(f64::NAN),
+            Time::from_secs_f64(f64::INFINITY),
+            Time::from_millis(i64::from(i32::MAX) + 1),
+        ] {
+            assert2::assert!(ReassignmentRequestTimeout::new(invalid).is_err());
+        }
+    }
+
+    #[test]
+    fn reassignment_builders_frame_configured_timeout() {
+        let timeout = ReassignmentRequestTimeout::new(millis(37)).unwrap();
+        let submit =
+            build_submit_reassignments_request(&[movement("orders", 0, vec![1], vec![2])], timeout);
+        let cancel = build_cancel_reassignments_request(&[("orders".to_string(), 0)], timeout);
+
+        assert2::assert!(submit.timeout_ms == 37);
+        assert2::assert!(cancel.timeout_ms == 37);
     }
 
     #[test]
@@ -607,8 +724,8 @@ mod tests {
         let inner = Client::builder()
             .bootstrap("127.0.0.1:1")
             .client_id(format!("rebalancer-live-client-test-{suffix}"))
-            .connect_timeout(Duration::from_millis(50))
-            .request_timeout(Duration::from_millis(50))
+            .connect_timeout(CLIENT_TIMEOUT)
+            .request_timeout(CLIENT_TIMEOUT)
             .build()
             .await
             .expect("client build does not connect");
@@ -621,7 +738,7 @@ mod tests {
 
         assert2::assert!(matches!(
             client
-                .alter_throttle_configs(ConfigOp::Set, &targets(), 1234)
+                .alter_throttle_configs(ConfigOp::Set, &targets(), bytes_per_sec(1234))
                 .await,
             Err(PhaseError::Client(_))
         ));

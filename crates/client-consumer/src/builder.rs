@@ -17,6 +17,19 @@ pub enum AutoOffsetReset {
     None,
 }
 
+impl std::str::FromStr for AutoOffsetReset {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "earliest" => Ok(Self::Earliest),
+            "latest" => Ok(Self::Latest),
+            "none" => Ok(Self::None),
+            _ => Err(format!("invalid auto offset reset: {value}")),
+        }
+    }
+}
+
 /// Controls which records are visible to this consumer.
 ///
 /// Maps to Kafka's `isolation.level` configuration and the `isolation_level`
@@ -32,6 +45,18 @@ pub enum IsolationLevel {
     /// Only records from committed transactions (and non-transactional
     /// records) are visible. Equivalent to `isolation.level=read_committed`.
     ReadCommitted,
+}
+
+impl std::str::FromStr for IsolationLevel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "read-uncommitted" => Ok(Self::ReadUncommitted),
+            "read-committed" => Ok(Self::ReadCommitted),
+            _ => Err(format!("invalid isolation level: {value}")),
+        }
+    }
 }
 
 impl IsolationLevel {
@@ -195,6 +220,37 @@ pub(crate) fn decode_assignment(bytes: &[u8]) -> Vec<(String, i32)> {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn consumer_behavior_values_parse_exact_spellings() {
+        assert2::assert!(matches!(
+            "earliest".parse::<AutoOffsetReset>(),
+            Ok(AutoOffsetReset::Earliest)
+        ));
+        assert2::assert!(matches!(
+            "latest".parse::<AutoOffsetReset>(),
+            Ok(AutoOffsetReset::Latest)
+        ));
+        assert2::assert!(matches!(
+            "none".parse::<AutoOffsetReset>(),
+            Ok(AutoOffsetReset::None)
+        ));
+        assert2::assert!("EARLIEST".parse::<AutoOffsetReset>().is_err());
+        assert2::assert!("unknown".parse::<AutoOffsetReset>().is_err());
+    }
+
+    #[test]
+    fn isolation_level_values_parse_exact_spellings() {
+        assert2::assert!(
+            "read-uncommitted".parse::<IsolationLevel>().unwrap()
+                == IsolationLevel::ReadUncommitted
+        );
+        assert2::assert!(
+            "read-committed".parse::<IsolationLevel>().unwrap() == IsolationLevel::ReadCommitted
+        );
+        assert2::assert!("read_committed".parse::<IsolationLevel>().is_err());
+        assert2::assert!("unknown".parse::<IsolationLevel>().is_err());
+    }
 
     #[test]
     fn isolation_level_wire_values_match_fetch_request_encoding() {

@@ -184,6 +184,8 @@ impl Goal for ReplicaCapacity {
 mod tests {
     use std::sync::Arc;
 
+    use crabka_units::prelude::*;
+
     use super::*;
     use crate::{
         capacity::{BrokerCapacities, BrokerCapacity},
@@ -193,7 +195,7 @@ mod tests {
 
     fn ctx_with(caps: BrokerCapacities) -> GoalContext {
         GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(caps),
@@ -380,7 +382,7 @@ mod tests {
             1,
             BrokerCapacity {
                 max_replicas: None,
-                disk_bytes: Some(1_000),
+                disk_bytes: Some(bytes(1_000)),
                 ..Default::default()
             },
         );

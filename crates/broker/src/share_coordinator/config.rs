@@ -1,11 +1,16 @@
 //! KIP-932 share-coordinator (persister) configuration.
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+use crabka_units::{ByteSize, mebibytes};
+
+/// Not `Eq`: the recovery read budget is a quantity, whose `f64` storage is
+/// only `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ShareCoordinatorConfig {
     pub state_topic_num_partitions: i32,
     pub state_topic_replication_factor: i16,
     pub state_topic_min_isr: i32,
     pub snapshot_update_records_per_snapshot: u32,
+    pub recovery_read_max: ByteSize,
 }
 
 impl Default for ShareCoordinatorConfig {
@@ -15,6 +20,7 @@ impl Default for ShareCoordinatorConfig {
             state_topic_replication_factor: 3,
             state_topic_min_isr: 1,
             snapshot_update_records_per_snapshot: 50,
+            recovery_read_max: mebibytes(1),
         }
     }
 }
@@ -32,6 +38,7 @@ mod tests {
             state_topic_replication_factor: 3,
             state_topic_min_isr: 1,
             snapshot_update_records_per_snapshot: 50,
+            recovery_read_max: mebibytes(1),
         };
         assert!(ShareCoordinatorConfig::default() == expected);
     }

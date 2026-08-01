@@ -16,10 +16,7 @@ use tokio::sync::Mutex;
 
 use crate::{
     consumer::Consumer,
-    coordinator::{
-        COORDINATOR_RETRY_TIMEOUT, find_coordinator, is_retriable_transport_error,
-        with_coordinator_refind,
-    },
+    coordinator::{find_coordinator, is_retriable_transport_error, with_coordinator_refind},
     error::ConsumerError,
     offset_wire::build_commit_topics,
     position::PartitionPosition,
@@ -144,7 +141,7 @@ impl Consumer {
             &self.client,
             &self.group_id,
             &self.coordinator_id,
-            COORDINATOR_RETRY_TIMEOUT,
+            self.retry_policy,
             first_commit_error,
             || {
                 let group_id = self.group_id.clone();
@@ -216,6 +213,7 @@ impl Consumer {
         let positions = Arc::clone(&self.positions);
         let topic_ids = Arc::clone(&self.topic_ids);
         let coordinator_id = Arc::clone(&self.coordinator_id);
+        let retry_policy = self.retry_policy;
         tokio::spawn(async move {
             let Some((_, topics)) = snapshot_commit_topics(&offsets, &positions, &topic_ids).await
             else {
@@ -244,7 +242,7 @@ impl Consumer {
                 Err(_) => false,
             };
             if moved {
-                match find_coordinator(&client, &group_id).await {
+                match find_coordinator(&client, &group_id, retry_policy).await {
                     Ok(id) => {
                         coordinator_id.store(id, Ordering::Relaxed);
                         if let Err(e) = client.broker(id).send(make_req(topics)).await {

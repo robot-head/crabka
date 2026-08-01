@@ -418,8 +418,8 @@ async fn start_broker() -> (BrokerHandle, TempDir, SocketAddr) {
     // and max = issue + 7d as separate values, so Renew can extend the
     // expiry well past its initial value (and the lifecycle test asserts
     // strict-monotonic extension below).
-    cfg.delegation_token_max_lifetime_ms = 7 * 24 * 60 * 60 * 1_000;
-    cfg.delegation_token_default_renew_period_ms = 24 * 60 * 60 * 1_000;
+    cfg.delegation_token_max_lifetime = crabka_units::days(7);
+    cfg.delegation_token_default_renew_period = crabka_units::hours(24);
 
     let handle = Broker::start(cfg).await.expect("broker must start");
     let addr = handle.listen_addr();
@@ -471,8 +471,8 @@ fn start_broker_with_super_users(
         password: (*ib_pw).to_string(),
     });
     cfg.delegation_token_secret_key = Some(SecretBytes::new(b"act-as-master-key".to_vec()));
-    cfg.delegation_token_max_lifetime_ms = 7 * 24 * 60 * 60 * 1_000;
-    cfg.delegation_token_default_renew_period_ms = 24 * 60 * 60 * 1_000;
+    cfg.delegation_token_max_lifetime = crabka_units::days(7);
+    cfg.delegation_token_default_renew_period = crabka_units::hours(24);
 
     Box::pin(async move {
         let handle = Broker::start(cfg).await.expect("broker must start");

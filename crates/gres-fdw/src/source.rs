@@ -9,12 +9,18 @@
 
 use crabka_client_admin::AdminClient;
 use crabka_client_core::{
-    Connection, FetchedHeader, IsolatedFetch, fetch_partition_with_isolation,
+    Connection, DEFAULT_FETCH_RESPONSE_MAX, FetchedHeader, IsolatedFetch,
+    fetch_partition_with_isolation,
 };
 use crabka_pgexec::foreign::ScanBounds;
 use crabka_protocol::{
     owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
     primitives::uuid::Uuid as WireUuid,
+};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes, secs,
 };
 
 use crate::{config::ConnProfile, error::KafkaFdwError};
@@ -127,10 +133,62 @@ const LATEST: i64 = -1;
 const CONSUMER_REPLICA_ID: i32 = -1;
 /// `READ_COMMITTED` isolation level for the Fetch API.
 const READ_COMMITTED: i8 = 1;
-/// Maximum wait time per Fetch RPC (ms).
-const MAX_WAIT_MS: i32 = 5_000;
-/// Maximum bytes per partition per Fetch RPC.
-const PARTITION_MAX_BYTES: i32 = 10 * 1024 * 1024; // 10 MiB
+/// Per-scan broker fetch and connection policy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FdwScanPolicy {
+    pub fetch_max_wait: Time,
+    pub fetch_partition_max: ByteSize,
+    pub connect_timeout: Time,
+    pub request_timeout: Time,
+}
+
+impl Default for FdwScanPolicy {
+    fn default() -> Self {
+        Self {
+            fetch_max_wait: secs(5),
+            fetch_partition_max: mebibytes(10),
+            connect_timeout: secs(10),
+            request_timeout: secs(30),
+        }
+    }
+}
+
+impl FdwScanPolicy {
+    /// Validate protocol-representable positive values.
+    ///
+    /// # Errors
+    /// Returns an error for non-positive, non-finite or unrepresentable values.
+    pub fn validate(self) -> Result<Self, String> {
+        let millis = |name: &str, value: Time| {
+            if !value.secs_f64().is_finite()
+                || value <= Time::ZERO
+                || value.millis_i32() <= 0
+                || Time::from_millis(i64::from(value.millis_i32())) != value
+            {
+                Err(format!(
+                    "{name} must be positive whole milliseconds representable as i32"
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        millis("fetch maximum wait", self.fetch_max_wait)?;
+        millis("connect timeout", self.connect_timeout)?;
+        millis("request timeout", self.request_timeout)?;
+        if !self.fetch_partition_max.bytes_f64().is_finite()
+            || self.fetch_partition_max <= ByteSize::ZERO
+            || self.fetch_partition_max.bytes_i32() <= 0
+            || !u64::try_from(self.fetch_partition_max.bytes_i32())
+                .is_ok_and(|bytes| ByteSize::from_bytes(bytes) == self.fetch_partition_max)
+        {
+            return Err(
+                "fetch partition maximum must be positive whole bytes representable as i32"
+                    .to_owned(),
+            );
+        }
+        Ok(self)
+    }
+}
 
 /// Materialise a bounded snapshot of `topic` into a flat `Vec<RawRecord>`.
 ///
@@ -158,13 +216,69 @@ pub async fn scan_topic(
     topic: &str,
     bounds: &ScanBounds,
 ) -> Result<Vec<RawRecord>, KafkaFdwError> {
+    scan_topic_with_dns_timeout(
+        profile,
+        topic,
+        bounds,
+        crabka_client_core::ClientDnsTimeout::default(),
+    )
+    .await
+}
+
+/// Materialise a bounded snapshot with an explicit broker DNS deadline.
+///
+/// # Errors
+/// Returns [`KafkaFdwError`] on transport failures, unknown topics, or broker
+/// errors.
+pub async fn scan_topic_with_dns_timeout(
+    profile: &ConnProfile,
+    topic: &str,
+    bounds: &ScanBounds,
+    dns_timeout: crabka_client_core::ClientDnsTimeout,
+) -> Result<Vec<RawRecord>, KafkaFdwError> {
+    scan_topic_with_policy(
+        profile,
+        topic,
+        bounds,
+        dns_timeout,
+        crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        crabka_client_core::ClientFrameMax::default(),
+        crabka_client_core::FetchMinBytes::default(),
+        FdwScanPolicy::default(),
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub(crate) async fn scan_topic_with_policy(
+    profile: &ConnProfile,
+    topic: &str,
+    bounds: &ScanBounds,
+    dns_timeout: crabka_client_core::ClientDnsTimeout,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
+    fetch_min: crabka_client_core::FetchMinBytes,
+    policy: FdwScanPolicy,
+) -> Result<Vec<RawRecord>, KafkaFdwError> {
+    let policy = policy.validate().map_err(KafkaFdwError::Config)?;
     // Step 1: ensure the rustcrypto TLS provider is installed.
     crate::provider::install_default_provider();
 
     // Step 2: resolve partition metadata.
-    let mut admin = AdminClient::connect_secured(&profile.bootstrap, profile.security.clone())
-        .await
-        .map_err(|e| KafkaFdwError::Other(format!("admin connect: {e}")))?;
+    let mut admin = AdminClient::connect_with_options(
+        &profile.bootstrap,
+        crabka_client_core::ConnectionOptions {
+            client_id: "crabka-fdw".into(),
+            dns_timeout,
+            connect_timeout: policy.connect_timeout,
+            request_timeout: policy.request_timeout,
+            dispatch_queue_capacity,
+            frame_max,
+            security: profile.security.clone().map(Box::new),
+        },
+    )
+    .await
+    .map_err(|e| KafkaFdwError::Other(format!("admin connect: {e}")))?;
 
     let meta = admin
         .metadata(&[topic])
@@ -219,7 +333,14 @@ pub async fn scan_topic(
     }
 
     // Step 3: open ONE connection and reuse it for ListOffsets + Fetch.
-    let conn = open_connection(profile).await?;
+    let conn = open_connection(
+        profile,
+        dns_timeout,
+        dispatch_queue_capacity,
+        frame_max,
+        policy,
+    )
+    .await?;
 
     // Step 4: ListOffsets — batch earliest + HWM for all partitions in one RPC.
     let list_offsets_req_earliest = ListOffsetsRequest {
@@ -333,8 +454,10 @@ pub async fn scan_topic(
                     topic_id: topic_uuid,
                     partition,
                     fetch_offset: next_offset,
-                    max_wait_ms: MAX_WAIT_MS,
-                    partition_max_bytes: PARTITION_MAX_BYTES,
+                    max_wait: policy.fetch_max_wait,
+                    max: DEFAULT_FETCH_RESPONSE_MAX,
+                    partition_max: policy.fetch_partition_max,
+                    fetch_min,
                     isolation_level: READ_COMMITTED,
                 },
             )
@@ -346,7 +469,7 @@ pub async fn scan_topic(
             })?;
 
             if fetched.is_empty() {
-                // No records at or after `next_offset` within max_wait_ms.
+                // No records at or after `next_offset` within the configured wait.
                 break;
             }
 
@@ -387,6 +510,30 @@ pub async fn scan_topic(
     Ok(records)
 }
 
+/// Resolve the first address within the configured DNS deadline.
+async fn lookup_first<F, I>(
+    host_port: &str,
+    dns_timeout: crabka_client_core::ClientDnsTimeout,
+    lookup: F,
+) -> Result<std::net::SocketAddr, KafkaFdwError>
+where
+    F: std::future::Future<Output = std::io::Result<I>>,
+    I: Iterator<Item = std::net::SocketAddr>,
+{
+    let mut addrs = tokio::time::timeout(dns_timeout.time().to_std(), lookup)
+        .await
+        .map_err(|_| {
+            KafkaFdwError::Other(format!(
+                "DNS lookup {host_port} timed out after {} ms",
+                dns_timeout.milliseconds(),
+            ))
+        })?
+        .map_err(|error| KafkaFdwError::Other(format!("DNS lookup {host_port}: {error}")))?;
+    addrs
+        .next()
+        .ok_or_else(|| KafkaFdwError::Other(format!("no addresses for {host_port}")))
+}
+
 /// Open a single raw [`Connection`] to the first bootstrap address.
 ///
 /// `fetch_partition_with_isolation` requires a `&Connection`, and `Connection`
@@ -394,35 +541,54 @@ pub async fn scan_topic(
 /// connection covers the whole scan. (`Client` exposes neither a fetch method
 /// nor its underlying `Connection`, so there is nothing to be gained by also
 /// building a `Client`.)
-async fn open_connection(profile: &ConnProfile) -> Result<Connection, KafkaFdwError> {
+async fn open_connection(
+    profile: &ConnProfile,
+    dns_timeout: crabka_client_core::ClientDnsTimeout,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
+    policy: FdwScanPolicy,
+) -> Result<Connection, KafkaFdwError> {
     let host_port = profile.bootstrap.first().ok_or_else(|| {
         KafkaFdwError::Config("no bootstrap address in connection profile".to_string())
     })?;
 
-    let mut addrs = tokio::net::lookup_host(host_port)
-        .await
-        .map_err(|e| KafkaFdwError::Other(format!("DNS lookup {host_port}: {e}")))?;
+    let addr = lookup_first(host_port, dns_timeout, tokio::net::lookup_host(host_port)).await?;
 
-    let addr = addrs
-        .next()
-        .ok_or_else(|| KafkaFdwError::Other(format!("no addresses for {host_port}")))?;
+    crabka_client_core::Connection::connect_with_options(
+        addr,
+        connection_options(profile, dispatch_queue_capacity, frame_max, policy),
+    )
+    .await
+    .map_err(|e| KafkaFdwError::Other(format!("connect to {host_port}: {e}")))
+}
 
-    let options = crabka_client_core::ConnectionOptions {
+/// The scan connection's knobs.
+fn connection_options(
+    profile: &ConnProfile,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
+    policy: FdwScanPolicy,
+) -> crabka_client_core::ConnectionOptions {
+    crabka_client_core::ConnectionOptions {
         client_id: "crabka-fdw".to_string(),
-        connect_timeout: std::time::Duration::from_secs(10),
-        request_timeout: std::time::Duration::from_secs(30),
+        connect_timeout: policy.connect_timeout,
+        request_timeout: policy.request_timeout,
+        dispatch_queue_capacity,
+        frame_max,
         security: profile.security.clone().map(Box::new),
-    };
-
-    crabka_client_core::Connection::connect_with_options(addr, options)
-        .await
-        .map_err(|e| KafkaFdwError::Other(format!("connect to {host_port}: {e}")))
+        ..crabka_client_core::ConnectionOptions::default()
+    }
 }
 
 // ── Unit tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use assert2::assert;
+    use crabka_units::millis;
+
     use super::*;
 
     // Helper: `ScanBounds` with per-partition start/end vectors.
@@ -532,6 +698,75 @@ mod tests {
             "start ({}) >= stop ({}) for empty partition",
             plan.start,
             plan.stop
+        );
+    }
+
+    /// Defaults preserve the prior fetch and connection policy.
+    #[test]
+    fn scan_policy_defaults_and_validation() {
+        let policy = FdwScanPolicy::default();
+        assert!(policy.fetch_max_wait == secs(5));
+        assert!(policy.fetch_partition_max == mebibytes(10));
+        assert!((policy.connect_timeout, policy.request_timeout) == (secs(10), secs(30)));
+        assert!(
+            (FdwScanPolicy {
+                fetch_max_wait: Time::ZERO,
+                ..policy
+            })
+            .validate()
+            .is_err()
+        );
+    }
+
+    /// The connection deadlines reach `crabka-client-core` as the durations the
+    /// quantities name.
+    #[test]
+    fn connection_options_carry_the_configured_policy() {
+        let profile = ConnProfile {
+            bootstrap: vec!["b:9092".into()],
+            registry_url: String::new(),
+            security: None,
+            topic: "events".into(),
+            value_format: crate::decode::Wire::Raw,
+            key_format: crate::decode::Wire::Raw,
+        };
+
+        let dispatch =
+            crabka_client_core::ConnectionDispatchQueueCapacity::new(7).expect("positive");
+        let frame_max = crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32))
+            .expect("valid frame max");
+        let policy = FdwScanPolicy {
+            connect_timeout: millis(37),
+            request_timeout: millis(41),
+            ..Default::default()
+        };
+        let options = connection_options(&profile, dispatch, frame_max, policy);
+
+        assert!((options.connect_timeout, options.request_timeout) == (millis(37), millis(41)));
+        assert!(options.dispatch_queue_capacity == dispatch);
+        assert!(options.frame_max == frame_max);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn raw_dns_lookup_stops_at_configured_deadline() {
+        let timeout = crabka_client_core::ClientDnsTimeout::new(Time::from_millis(37))
+            .expect("positive timeout");
+        let started = tokio::time::Instant::now();
+        let pending =
+            std::future::pending::<std::io::Result<std::vec::IntoIter<std::net::SocketAddr>>>();
+
+        let error = lookup_first("broker.example:9092", timeout, pending)
+            .await
+            .expect_err("lookup times out");
+
+        assert_eq!(
+            tokio::time::Instant::now() - started,
+            Duration::from_millis(37)
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("DNS lookup broker.example:9092 timed out after 37 ms")
         );
     }
 }

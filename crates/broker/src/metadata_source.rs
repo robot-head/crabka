@@ -204,6 +204,8 @@ pub struct QuorumForwarder {
     pub(crate) voters: Vec<(NodeId, String)>,
     pub(crate) dialer: Arc<dyn OutboundDialer>,
     pub(crate) client_id: String,
+    pub(crate) client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    pub(crate) client_frame_max: crabka_client_core::ClientFrameMax,
     pub(crate) leader: watch::Receiver<Option<NodeId>>,
 }
 
@@ -216,6 +218,8 @@ impl QuorumForwarder {
     ) -> Result<crabka_raft::CrabkaSubmitChangeResponse, RaftError> {
         let opts = crabka_client_core::ConnectionOptions {
             client_id: self.client_id.clone(),
+            dispatch_queue_capacity: self.client_dispatch_queue_capacity,
+            frame_max: self.client_frame_max,
             ..crabka_client_core::ConnectionOptions::default()
         };
         let conn = self
@@ -423,6 +427,9 @@ mod tests {
     ) -> QuorumForwarder {
         let (_leader_tx, leader_rx) = watch::channel(leader_hint);
         QuorumForwarder {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             voters: vec![(NodeId(1), addr.to_string())],
             dialer: Arc::new(RecordingDialer { client_ids }),
             client_id: "forwarder-client".into(),
@@ -548,12 +555,15 @@ mod tests {
         let cluster_id = Uuid::new_v4();
         let observer = crate::metadata_observer::MetadataObserver::start(
             crate::metadata_observer::ObserverConfig {
+                client_dispatch_queue_capacity:
+                    crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+                client_frame_max: crabka_client_core::ClientFrameMax::default(),
                 voters: vec![],
                 dialer: Arc::new(crabka_raft::PlaintextDialer),
                 client_id: "observer-source-test".into(),
                 cluster_id,
-                max_bytes: 1_048_576,
-                poll_interval: std::time::Duration::from_mins(1),
+                max_bytes: crabka_units::mebibytes(1),
+                poll_interval: crabka_units::minutes(1),
                 sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
             },
         );

@@ -90,6 +90,7 @@ fn gssapi_listener(name: &str, port: i32, tls: bool) -> Listener {
                 principal_to_local_rules: vec!["DEFAULT".into()],
                 realm: None,
                 kdc: None,
+                max_time_skew: None,
             },
         )),
         configuration: None,
@@ -117,6 +118,8 @@ fn kafka_cr(name: &str, namespace: &str, listeners: Vec<Listener>) -> Kafka {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -249,6 +252,8 @@ fn pool_cr(name: &str, namespace: &str, parent: &str, replicas: i32) -> KafkaNod
             node_id_start: 0,
             image: None,
             resources: None,
+            client_dispatch_queue_capacity: None,
+            client_frame_max: None,
             template: None,
             storage: None,
         },
@@ -614,6 +619,7 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
                 ],
                 realm: Some("EXAMPLE.COM".into()),
                 kdc: Some("tcp://kdc:88".into()),
+                max_time_skew: Some(crabka_units::secs(17)),
             },
         )),
         configuration: None,
@@ -654,6 +660,7 @@ async fn rendered_gssapi_toml_round_trips_through_broker_file_config() {
     );
     check!(g.realm == Some("EXAMPLE.COM".into()));
     check!(g.kdc == Some("tcp://kdc:88".into()));
+    check!(g.max_time_skew == crabka_units::secs(17));
     check!(g.keytab_path == std::path::PathBuf::from("/etc/crabka/gssapi-keytab/keytab"));
 
     // [inter_broker_credentials] survives as the Gssapi variant with the

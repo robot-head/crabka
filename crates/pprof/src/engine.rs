@@ -7,6 +7,7 @@ use arrow::{
     datatypes::{Int64Type, UInt64Type},
 };
 use crabka_blockstore::{LabelMatcher, MatchOp};
+use crabka_units::Time;
 
 use crate::{
     FlameGraph, FlameGraphDiff, Frame, Heatmap, LabeledHeatmap, ProfileError, ProfileStore,
@@ -15,7 +16,7 @@ use crate::{
         COL_FINGERPRINT, COL_TIMESTAMP, PCOL_SPAN_ID, PCOL_STACKTRACE_ID,
         PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE, PCOL_VALUE,
     },
-    series::{fold_bucket, step_bucket_ms, step_ms_from_secs},
+    series::{fold_bucket, step_bucket_ms, validated_step},
     tree_to_pprof, tree_to_pprof_with_max_nodes,
 };
 
@@ -350,11 +351,11 @@ impl<S: ProfileStore> FlameEngine<S> {
         &self,
         query: (&str, &str, &str),
         group_by: &[String],
-        step_secs: f64,
+        step: Time,
         agg: SeriesAgg,
         range: (i64, i64),
     ) -> Result<Vec<Series>, ProfileError> {
-        self.select_series_with_stack_trace_selector(query, group_by, step_secs, agg, range, &[])
+        self.select_series_with_stack_trace_selector(query, group_by, step, agg, range, &[])
             .await
     }
 
@@ -364,14 +365,14 @@ impl<S: ProfileStore> FlameEngine<S> {
         &self,
         query: (&str, &str, &str),
         group_by: &[String],
-        step_secs: f64,
+        step: Time,
         agg: SeriesAgg,
         range: (i64, i64),
         call_sites: &[String],
     ) -> Result<Vec<Series>, ProfileError> {
         let (tenant, profile_type, label_selector) = query;
         let (start_ms, end_ms) = range;
-        let step_ms = step_ms_from_secs(step_secs)?;
+        let step = validated_step(step)?;
         let base_matchers = crate::matcher::parse_label_selector(label_selector)?;
         let groups = if group_by.is_empty() {
             vec![Vec::new()]
@@ -394,9 +395,9 @@ impl<S: ProfileStore> FlameEngine<S> {
                 .select(tenant, profile_type, &matchers, start_ms, end_ms)
                 .await?;
             let buckets = if call_sites.is_empty() {
-                series_buckets_from_totals(&scan, step_ms).await?
+                series_buckets_from_totals(&scan, step).await?
             } else {
-                series_buckets_from_stacktrace_selector(&scan, step_ms, call_sites).await?
+                series_buckets_from_stacktrace_selector(&scan, step, call_sites).await?
             };
             if buckets.is_empty() {
                 continue;
@@ -418,14 +419,14 @@ impl<S: ProfileStore> FlameEngine<S> {
         &self,
         query: (&str, &str, &str),
         group_by: &[String],
-        step_secs: f64,
+        step: Time,
         agg: SeriesAgg,
         ranges: &[(i64, i64)],
     ) -> Result<Vec<Series>, ProfileError> {
         self.select_series_with_stack_trace_selector_sharded(
             query,
             group_by,
-            step_secs,
+            step,
             agg,
             ranges,
             &[],
@@ -439,7 +440,7 @@ impl<S: ProfileStore> FlameEngine<S> {
         &self,
         query: (&str, &str, &str),
         group_by: &[String],
-        step_secs: f64,
+        step: Time,
         agg: SeriesAgg,
         ranges: &[(i64, i64)],
         call_sites: &[String],
@@ -455,7 +456,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                 .select_series_with_stack_trace_selector(
                     query,
                     group_by,
-                    step_secs,
+                    step,
                     agg,
                     (start_ms, end_ms),
                     call_sites,
@@ -469,7 +470,7 @@ impl<S: ProfileStore> FlameEngine<S> {
                 .select_series_with_stack_trace_selector(
                     query,
                     group_by,
-                    step_secs,
+                    step,
                     agg,
                     (*start_ms, *end_ms),
                     call_sites,
@@ -938,7 +939,7 @@ fn group_frame_name(labels: &[(String, String)]) -> String {
 
 async fn series_buckets_from_totals(
     scan: &crate::ProfileScan,
-    step_ms: i64,
+    step: Time,
 ) -> Result<BTreeMap<i64, Vec<i64>>, ProfileError> {
     let sql = format!(
         "SELECT {timestamp}, MAX({total}) AS total \
@@ -962,7 +963,7 @@ async fn series_buckets_from_totals(
         let totals = batch.column(1).as_primitive::<Int64Type>();
         for row in 0..batch.num_rows() {
             buckets
-                .entry(step_bucket_ms(timestamps.value(row), step_ms))
+                .entry(step_bucket_ms(timestamps.value(row), step))
                 .or_default()
                 .push(totals.value(row));
         }
@@ -972,7 +973,7 @@ async fn series_buckets_from_totals(
 
 async fn series_buckets_from_stacktrace_selector(
     scan: &crate::ProfileScan,
-    step_ms: i64,
+    step: Time,
     call_sites: &[String],
 ) -> Result<BTreeMap<i64, Vec<i64>>, ProfileError> {
     let sql = format!(
@@ -1019,7 +1020,7 @@ async fn series_buckets_from_stacktrace_selector(
     let mut buckets: BTreeMap<i64, Vec<i64>> = BTreeMap::new();
     for ((timestamp, _fingerprint), value) in per_profile {
         buckets
-            .entry(step_bucket_ms(timestamp, step_ms))
+            .entry(step_bucket_ms(timestamp, step))
             .or_default()
             .push(value);
     }
@@ -1059,6 +1060,7 @@ mod tests {
     use std::sync::Arc;
 
     use assert2::{assert, check};
+    use crabka_units::secs;
 
     use super::*;
     use crate::{FunctionRec, InMemoryProfileStore, LineRec, LocationRec, SeriesAgg};
@@ -1746,7 +1748,7 @@ mod tests {
             .select_series_with_stack_trace_selector(
                 ("tenant-a", PT, r#"{service="api"}"#),
                 &[],
-                15.0,
+                secs(15),
                 SeriesAgg::Sum,
                 (0, 0),
                 &["main".to_string()],
@@ -1768,7 +1770,7 @@ mod tests {
             .select_series_with_stack_trace_selector_sharded(
                 ("tenant-a", PT, r#"{service="api"}"#),
                 &[],
-                60.0,
+                secs(60),
                 SeriesAgg::Average,
                 &[(0, 0), (30_000, 30_000)],
                 &["main".to_string()],
@@ -1877,7 +1879,7 @@ mod tests {
             .select_series(
                 ("tenant-a", PT, "{}"),
                 &["service".to_string()],
-                15.0,
+                secs(15),
                 SeriesAgg::Sum,
                 (0, 60_000),
             )
@@ -1929,7 +1931,7 @@ mod tests {
             .select_series(
                 ("tenant-a", PT, "{}"),
                 &["service".to_string()],
-                15.0,
+                secs(15),
                 SeriesAgg::Sum,
                 (0, 60_000),
             )
@@ -1950,7 +1952,7 @@ mod tests {
             .select_series(
                 ("tenant-a", PT, r#"{service="api"}"#),
                 &[],
-                60.0,
+                secs(60),
                 SeriesAgg::Average,
                 (0, 60_000),
             )
@@ -1971,7 +1973,7 @@ mod tests {
             .select_series_sharded(
                 ("tenant-a", PT, "{}"),
                 &["service".to_string()],
-                15.0,
+                secs(15),
                 SeriesAgg::Sum,
                 &[(0, 10_000), (10_000, 60_000)],
             )

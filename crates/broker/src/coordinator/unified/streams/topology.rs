@@ -337,8 +337,8 @@ fn idx_to_usize(idx: i16) -> usize {
 pub struct InternalTopicSpec {
     pub name: String,
     pub partitions: i32,
-    /// Replication factor as requested by the client; `0` means "fall back to
-    /// the cluster default" (chosen at creation time as `min(brokers, 3)`).
+    /// Replication factor as requested by the client; `0` uses the configured
+    /// cluster default capped by the number of available brokers.
     pub replication_factor: i16,
     pub configs: BTreeMap<String, String>,
 }
@@ -401,9 +401,10 @@ fn add_spec(
 
 /// Create any of `specs` not already present in the controller's metadata,
 /// mirroring `crate::txn::bootstrap::ensure_topic`: round-robin replica
-/// assignment, replication factor `spec.replication_factor` if `> 0` else
-/// `min(brokers, 3)`, plus a `V1TopicConfig` record when the spec carries
-/// configs. `TopicExists` (a concurrent create) is tolerated.
+/// assignment, replication factor `spec.replication_factor` if `> 0` else the
+/// configured default, bounded by the available brokers, plus a
+/// `V1TopicConfig` record when the spec carries configs. `TopicExists` (a
+/// concurrent create) is tolerated.
 ///
 /// Returns the names of topics that are STILL absent from the (freshly
 /// re-read) image after the attempt, so the caller can emit
@@ -416,6 +417,7 @@ fn add_spec(
 pub async fn ensure_internal_topics(
     controller: &Arc<dyn MetadataSource>,
     specs: &[InternalTopicSpec],
+    default_replication_factor: i16,
 ) -> Result<Vec<String>, BrokerError> {
     let image = controller.current_image();
 
@@ -438,13 +440,11 @@ pub async fn ensure_internal_topics(
         }
 
         let k = brokers.len();
-        let rf_usize = if spec.replication_factor > 0 {
-            usize::try_from(spec.replication_factor)
-                .expect("replication_factor non-negative")
-                .min(k)
-        } else {
-            k.min(3)
-        };
+        let rf_usize = streams_topic_replication_factor(
+            spec.replication_factor,
+            default_replication_factor,
+            k,
+        );
         let rf = i16::try_from(rf_usize).expect("rf <= brokers, fits i16");
 
         let mut records: Vec<MetadataRecord> = Vec::new();
@@ -503,6 +503,19 @@ pub async fn ensure_internal_topics(
         .map(|s| s.name.clone())
         .collect();
     Ok(still_missing)
+}
+
+fn streams_topic_replication_factor(
+    spec_replication_factor: i16,
+    default_replication_factor: i16,
+    broker_count: usize,
+) -> usize {
+    let desired = if spec_replication_factor > 0 {
+        spec_replication_factor
+    } else {
+        default_replication_factor
+    };
+    crate::bootstrap::internal_topic_replication_factor(desired, broker_count)
 }
 
 #[cfg(test)]
@@ -858,5 +871,10 @@ mod tests {
         // No entry for subtopology "0" -> unresolved -> no specs.
         let specs = required_internal_topics(&topology, &BTreeMap::new());
         assert!(specs.is_empty());
+    }
+
+    #[test]
+    fn configured_default_replication_factor_applies_when_spec_is_unspecified() {
+        assert!(streams_topic_replication_factor(0, 2, 3) == 2);
     }
 }

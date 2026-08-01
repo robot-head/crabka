@@ -2,6 +2,7 @@
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
+use crabka_units::prelude::*;
 
 use crate::{
     dsl::{
@@ -67,9 +68,11 @@ where
         r: Record<K, V>,
     ) {
         let key = r.key.expect("windowed aggregate requires a non-null key");
-        let size = self.windows.size_ms;
+        // The window bounds below are epoch-millisecond instants, so the size
+        // and grace extents cross into that coordinate space here.
+        let size = self.windows.size.millis_i64();
         self.stream_time = self.stream_time.max(r.timestamp);
-        let window_close_time = self.stream_time - self.windows.grace_ms;
+        let window_close_time = self.stream_time - self.windows.grace.millis_i64();
         // Stash the source record context BEFORE the store borrow so a cached
         // store attaches it to the deduped change it forwards on flush.
         let rc = ctx.record_context().clone();
@@ -136,7 +139,9 @@ where
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>,
         window_close_time: i64,
     ) {
-        let size = self.windows.size_ms;
+        // The window bounds below are epoch-millisecond instants, so the size
+        // and grace extents cross into that coordinate space here.
+        let size = self.windows.size.millis_i64();
         // JVM closes a window strictly: emit once stream-time moves PAST the end
         // (`end < window_close_time`), so a zero-width / boundary window is not
         // finalized at its own stream-time. end = start + size < close ⟺ start <= close-size-1.
@@ -215,9 +220,11 @@ where
         r: Record<K, V>,
     ) {
         let key = r.key.expect("windowed reduce requires a non-null key");
-        let size = self.windows.size_ms;
+        // The window bounds below are epoch-millisecond instants, so the size
+        // and grace extents cross into that coordinate space here.
+        let size = self.windows.size.millis_i64();
         self.stream_time = self.stream_time.max(r.timestamp);
-        let window_close_time = self.stream_time - self.windows.grace_ms;
+        let window_close_time = self.stream_time - self.windows.grace.millis_i64();
         // Stash the source record context for cached writes (see aggregate proc).
         let rc = ctx.record_context().clone();
 
@@ -281,7 +288,9 @@ where
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
         window_close_time: i64,
     ) {
-        let size = self.windows.size_ms;
+        // The window bounds below are epoch-millisecond instants, so the size
+        // and grace extents cross into that coordinate space here.
+        let size = self.windows.size.millis_i64();
         // JVM closes a window strictly: emit once stream-time moves PAST the end
         // (`end < window_close_time`), so a zero-width / boundary window is not
         // finalized at its own stream-time. end = start + size < close ⟺ start <= close-size-1.
@@ -336,7 +345,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
-            10,
+            millis(10),
         )));
 
         let children = [0usize];
@@ -351,7 +360,7 @@ mod tests {
 
         let mut proc = KStreamWindowAggregateProcessor {
             store_name: "w".into(),
-            windows: TimeWindows::of_size(10),
+            windows: TimeWindows::of_size(millis(10)),
             init: || 0i64,
             agg: |_k: &String, _v: &String, a: i64| a + 1,
             emit: crate::dsl::emit::EmitStrategy::on_window_update(),
@@ -422,7 +431,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
-            10,
+            millis(10),
         )));
 
         let children = [0usize];
@@ -437,7 +446,7 @@ mod tests {
 
         let mut proc = KStreamWindowAggregateProcessor {
             store_name: "w".into(),
-            windows: TimeWindows::of_size(10),
+            windows: TimeWindows::of_size(millis(10)),
             init: || 0i64,
             agg: |_k: &String, _v: &String, a: i64| a + 1,
             emit: crate::dsl::emit::EmitStrategy::on_window_close(),
@@ -500,7 +509,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
-            10,
+            millis(10),
         )));
 
         let children = [0usize];
@@ -516,7 +525,7 @@ mod tests {
         // Reducer sums values; the first value in a window seeds the accumulator.
         let mut proc = KStreamWindowReduceProcessor {
             store_name: "w".into(),
-            windows: TimeWindows::of_size(10),
+            windows: TimeWindows::of_size(millis(10)),
             reducer: |a: &i64, b: &i64| a + b,
             emit: crate::dsl::emit::EmitStrategy::on_window_close(),
             stream_time: i64::MIN,
@@ -581,7 +590,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
-            10,
+            millis(10),
         )));
         if cached {
             stores.enable_cache(
@@ -608,7 +617,7 @@ mod tests {
         };
         let mut proc = KStreamWindowAggregateProcessor {
             store_name: "w".into(),
-            windows: TimeWindows::of_size(10),
+            windows: TimeWindows::of_size(millis(10)),
             init: || 0i64,
             agg: |_k: &String, _v: &String, a: i64| a + 1,
             emit: crate::dsl::emit::EmitStrategy::on_window_update(),

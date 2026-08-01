@@ -7,12 +7,22 @@
 
 use std::{sync::Arc, time::Duration};
 
+use crabka_client_core::{
+    ClientDnsTimeout, ClientFrameMax, ConnectionDispatchQueueCapacity, DEFAULT_CLIENT_FRAME_MAX,
+    DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY, DEFAULT_FETCH_MIN, FetchMinBytes,
+};
+use crabka_units::prelude::*;
+use refined_type::rule::{MinMaxI64, MinMaxU128, MinMaxUsize};
 use tokio::{sync::mpsc, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
     error::StreamsClientError,
-    membership::{StreamsEvent, StreamsMembership},
+    membership::{
+        DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
+        DEFAULT_STREAMS_REBALANCE_TIMEOUT, StreamsEvent, StreamsJoinRetryBackoff,
+        StreamsLeaveHeartbeatTimeout, StreamsMembership, StreamsRebalanceTimeout,
+    },
     processor::serde::Serde,
     runtime::{
         eos::{ProcessingGuarantee, TransactionalProducer},
@@ -26,6 +36,228 @@ use crate::{
     store::iq::StoreKind,
     topology::BuiltTopology,
 };
+
+/// Default delay between Client Streams processing polls.
+pub const DEFAULT_STREAMS_POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Default delay between Client Streams commit attempts.
+pub const DEFAULT_STREAMS_COMMIT_INTERVAL: Duration = Duration::from_secs(5);
+/// Default capacity of each Client Streams interactive-query request queue.
+pub const DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY: usize = 64;
+/// Default Client Streams state-store record-cache budget (the JVM default).
+pub const DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES: ByteSize = mebibytes(10);
+
+/// Largest cache budget representable by both the public `i64` API and the
+/// target's internal `usize` cache accounting.
+#[allow(clippy::cast_possible_wrap)]
+pub const MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES: i64 = if usize::BITS >= i64::BITS {
+    i64::MAX
+} else {
+    usize::MAX as i64
+};
+
+/// Target-supported Client Streams state-store record-cache budget.
+///
+/// The validated magnitude is held as the raw `i64` byte count the refinement
+/// bounds are written over, so this stays `Eq` (a [`ByteSize`] stores `f64` and
+/// cannot be); [`size`](Self::size) puts the dimension back on at the seam.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamsStateStoreCacheMaxBytes(i64);
+
+impl StreamsStateStoreCacheMaxBytes {
+    /// Validate a state-store cache budget.
+    ///
+    /// A zero budget disables caching.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for negative values or values that cannot be represented
+    /// by the target's internal cache accounting.
+    pub fn new(value: ByteSize) -> Result<Self, String> {
+        MinMaxI64::<0, MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES>::new(value.bytes_i64())
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("streams state-store cache max bytes: {error}"))
+    }
+
+    /// Return the validated budget.
+    #[must_use]
+    pub fn size(self) -> ByteSize {
+        ByteSize::from_bytes_i64(self.0)
+    }
+}
+
+impl Default for StreamsStateStoreCacheMaxBytes {
+    fn default() -> Self {
+        Self::new(DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES)
+            .expect("default streams state-store cache max bytes is valid")
+    }
+}
+
+/// Tokio-supported capacity shared by the Client Streams interactive-query queues.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamsInteractiveQueryQueueCapacity(usize);
+
+impl StreamsInteractiveQueryQueueCapacity {
+    /// Validate an interactive-query queue capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `value` is within Tokio's supported channel
+    /// capacity range.
+    pub fn new(value: usize) -> Result<Self, String> {
+        MinMaxUsize::<1, { tokio::sync::Semaphore::MAX_PERMITS }>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("streams interactive-query queue capacity: {error}"))
+    }
+
+    /// Return the validated capacity.
+    #[must_use]
+    pub const fn capacity(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for StreamsInteractiveQueryQueueCapacity {
+    fn default() -> Self {
+        Self::new(DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY)
+            .expect("default streams interactive-query queue capacity is valid")
+    }
+}
+
+fn interactive_query_queue_capacities(
+    capacity: StreamsInteractiveQueryQueueCapacity,
+) -> [usize; 2] {
+    [capacity.capacity(); 2]
+}
+
+fn validate_positive_whole_milliseconds(field: &str, value: Duration) -> Result<u64, String> {
+    let milliseconds = MinMaxU128::<1, { u64::MAX as u128 }>::new(value.as_millis())
+        .map_err(|error| format!("{field}: {error}"))?
+        .into_value();
+    let milliseconds = u64::try_from(milliseconds).map_err(|error| format!("{field}: {error}"))?;
+    if Duration::from_millis(milliseconds) != value {
+        return Err(format!("{field} must be a whole number of milliseconds"));
+    }
+    Ok(milliseconds)
+}
+
+/// Positive, whole-millisecond Client Streams processing poll interval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamsPollInterval(Duration);
+
+impl StreamsPollInterval {
+    /// Validate a processing poll interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero, fractional milliseconds, or a value whose
+    /// milliseconds cannot be represented as `u64`.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        validate_positive_whole_milliseconds("streams poll interval", value)?;
+        Ok(Self(value))
+    }
+
+    /// Return the validated duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    /// Return the validated whole milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the validated interval no longer fits in `u64`.
+    #[must_use]
+    pub fn milliseconds(self) -> u64 {
+        u64::try_from(self.0.as_millis()).expect("validated streams poll interval fits u64")
+    }
+}
+
+impl Default for StreamsPollInterval {
+    fn default() -> Self {
+        Self::new(DEFAULT_STREAMS_POLL_INTERVAL).expect("default streams poll interval is valid")
+    }
+}
+
+/// Positive, whole-millisecond Client Streams commit interval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct StreamsCommitInterval(Duration);
+
+impl StreamsCommitInterval {
+    /// Validate a commit interval.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for zero, fractional milliseconds, or a value whose
+    /// milliseconds cannot be represented as `u64`.
+    pub fn new(value: Duration) -> Result<Self, String> {
+        validate_positive_whole_milliseconds("streams commit interval", value)?;
+        Ok(Self(value))
+    }
+
+    /// Return the validated duration.
+    #[must_use]
+    pub const fn duration(self) -> Duration {
+        self.0
+    }
+
+    /// Return the validated whole milliseconds.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the validated interval no longer fits in `u64`.
+    #[must_use]
+    pub fn milliseconds(self) -> u64 {
+        u64::try_from(self.0.as_millis()).expect("validated streams commit interval fits u64")
+    }
+}
+
+impl Default for StreamsCommitInterval {
+    fn default() -> Self {
+        Self::new(DEFAULT_STREAMS_COMMIT_INTERVAL)
+            .expect("default streams commit interval is valid")
+    }
+}
+
+fn validate_runtime_configuration(
+    poll_interval: Duration,
+    commit_interval: Duration,
+    rebalance_timeout: Duration,
+    join_retry_backoff: Duration,
+    leave_heartbeat_timeout: Duration,
+    cache_max_bytes: ByteSize,
+) -> Result<
+    (
+        StreamsPollInterval,
+        StreamsCommitInterval,
+        StreamsRebalanceTimeout,
+        StreamsJoinRetryBackoff,
+        StreamsLeaveHeartbeatTimeout,
+        StreamsStateStoreCacheMaxBytes,
+    ),
+    StreamsClientError,
+> {
+    let poll_interval =
+        StreamsPollInterval::new(poll_interval).map_err(StreamsClientError::Runtime)?;
+    let commit_interval =
+        StreamsCommitInterval::new(commit_interval).map_err(StreamsClientError::Runtime)?;
+    let rebalance_timeout =
+        StreamsRebalanceTimeout::new(rebalance_timeout).map_err(StreamsClientError::Runtime)?;
+    let join_retry_backoff =
+        StreamsJoinRetryBackoff::new(join_retry_backoff).map_err(StreamsClientError::Runtime)?;
+    let leave_heartbeat_timeout = StreamsLeaveHeartbeatTimeout::new(leave_heartbeat_timeout)
+        .map_err(StreamsClientError::Runtime)?;
+    let cache_max_bytes = StreamsStateStoreCacheMaxBytes::new(cache_max_bytes)
+        .map_err(StreamsClientError::Runtime)?;
+    Ok((
+        poll_interval,
+        commit_interval,
+        rebalance_timeout,
+        join_retry_backoff,
+        leave_heartbeat_timeout,
+        cache_max_bytes,
+    ))
+}
 
 /// A managed Kafka Streams runtime: joins a streams group, runs assigned tasks
 /// (fetch → process → produce → commit, at-least-once), and reacts to rebalances.
@@ -58,19 +290,61 @@ impl KafkaStreams {
     )]
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
+    #[allow(clippy::similar_names)]
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into)] application_id: String,
         topology: BuiltTopology,
-        #[builder(default = Duration::from_millis(200))] poll_interval: Duration,
-        #[builder(default = Duration::from_secs(5))] commit_interval: Duration,
+        #[builder(default = DEFAULT_STREAMS_POLL_INTERVAL)] poll_interval: Duration,
+        #[builder(default = DEFAULT_STREAMS_COMMIT_INTERVAL)] commit_interval: Duration,
+        #[builder(default = DEFAULT_STREAMS_REBALANCE_TIMEOUT)] rebalance_timeout: Duration,
+        #[builder(default = DEFAULT_STREAMS_JOIN_RETRY_BACKOFF)] join_retry_backoff: Duration,
+        #[builder(default = DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT)]
+        leave_heartbeat_timeout: Duration,
         #[builder(default)] store_backend: crate::store::backend::StoreBackend,
         #[builder(default)] processing_guarantee: crate::runtime::eos::ProcessingGuarantee,
+        /// Deadline for each Kafka broker DNS lookup owned by this process.
+        #[builder(default)]
+        broker_dns_timeout: ClientDnsTimeout,
+        #[builder(default = DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY)]
+        client_dispatch_queue_capacity: usize,
+        #[builder(default = DEFAULT_CLIENT_FRAME_MAX)] client_frame_max: ByteSize,
+        #[builder(default = DEFAULT_FETCH_MIN)] fetch_min: ByteSize,
         /// Record-cache budget (JVM `statestore.cache.max.bytes`); `0` disables
         /// caching. Threaded onto each task graph at `instantiate`.
-        #[builder(default = 10_485_760)]
-        cache_max_bytes: i64,
+        #[builder(default = DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES)]
+        cache_max_bytes: ByteSize,
+        /// Capacity shared by the v1 and v2 interactive-query request queues.
+        #[builder(default)]
+        interactive_query_queue_capacity: StreamsInteractiveQueryQueueCapacity,
     ) -> Result<Self, StreamsClientError> {
+        let (
+            poll_interval,
+            commit_interval,
+            rebalance_timeout,
+            join_retry_backoff,
+            leave_heartbeat_timeout,
+            cache_max_bytes,
+        ) = validate_runtime_configuration(
+            poll_interval,
+            commit_interval,
+            rebalance_timeout,
+            join_retry_backoff,
+            leave_heartbeat_timeout,
+            cache_max_bytes,
+        )?;
+        let cache_max_bytes = cache_max_bytes.size();
+        let client_dispatch_queue_capacity =
+            ConnectionDispatchQueueCapacity::new(client_dispatch_queue_capacity)
+                .map_err(StreamsClientError::Runtime)?;
+        let client_frame_max =
+            ClientFrameMax::try_from(client_frame_max).map_err(StreamsClientError::Runtime)?;
+        let fetch_min = FetchMinBytes::try_from(fetch_min).map_err(StreamsClientError::Runtime)?;
+        let client_resource_policy = io_broker::ClientResourcePolicy {
+            dispatch_queue_capacity: client_dispatch_queue_capacity,
+            frame_max: client_frame_max,
+            fetch_min,
+        };
         let built = Arc::new(topology);
 
         // Broker I/O. Under EOS-v2 the producer is transactional: the SAME object
@@ -83,8 +357,14 @@ impl KafkaStreams {
         let txn: Option<Arc<dyn TransactionalProducer>>;
         match processing_guarantee {
             ProcessingGuarantee::AtLeastOnce => {
-                let (f, p, s) =
-                    io_broker::build(&bootstrap, &application_id, &application_id).await?;
+                let (f, p, s) = io_broker::build(
+                    &bootstrap,
+                    &application_id,
+                    &application_id,
+                    broker_dns_timeout,
+                    client_resource_policy,
+                )
+                .await?;
                 fetcher = Arc::new(f);
                 producer = p;
                 store = s;
@@ -92,9 +372,15 @@ impl KafkaStreams {
             }
             ProcessingGuarantee::ExactlyOnceV2 => {
                 let txn_id = crate::runtime::eos::transactional_id(&application_id, 0);
-                let (f, txn_producer, s) =
-                    io_broker::build_eos(&bootstrap, &application_id, &application_id, &txn_id)
-                        .await?;
+                let (f, txn_producer, s) = io_broker::build_eos(
+                    &bootstrap,
+                    &application_id,
+                    &application_id,
+                    &txn_id,
+                    broker_dns_timeout,
+                    client_resource_policy,
+                )
+                .await?;
                 fetcher = Arc::new(f);
                 // Two trait-object views of the one transactional producer.
                 producer = Arc::clone(&txn_producer) as Arc<dyn RecordProducer>;
@@ -108,6 +394,12 @@ impl KafkaStreams {
             .bootstrap(bootstrap.clone())
             .group_id(application_id.clone())
             .topology(Arc::clone(&built))
+            .broker_dns_timeout(broker_dns_timeout)
+            .dispatch_queue_capacity(client_dispatch_queue_capacity)
+            .frame_max(client_frame_max)
+            .rebalance_timeout(rebalance_timeout.duration())
+            .join_retry_backoff(join_retry_backoff.duration())
+            .leave_heartbeat_timeout(leave_heartbeat_timeout.duration())
             .build()
             .await?;
         let member_id = membership.member_id().to_string();
@@ -118,8 +410,10 @@ impl KafkaStreams {
         let sd = shutdown.clone();
         let topo_for_thread = Arc::clone(&built);
         let fetcher_for_thread = Arc::clone(&fetcher);
-        let (iq_tx, mut iq_rx) = mpsc::channel::<IqRequest>(64);
-        let (iq2_tx, mut iq2_rx) = mpsc::channel::<Iq2Request>(64);
+        let [iq_capacity, iq2_capacity] =
+            interactive_query_queue_capacities(interactive_query_queue_capacity);
+        let (iq_tx, mut iq_rx) = mpsc::channel::<IqRequest>(iq_capacity);
+        let (iq2_tx, mut iq2_rx) = mpsc::channel::<Iq2Request>(iq2_capacity);
         let is_eos = processing_guarantee == ProcessingGuarantee::ExactlyOnceV2;
         let handle = tokio::spawn(async move {
             let mut thread = StreamThread::new(
@@ -128,8 +422,8 @@ impl KafkaStreams {
                 application_id,
                 cache_max_bytes,
             );
-            let mut poll = tokio::time::interval(poll_interval);
-            let mut commit = tokio::time::interval(commit_interval);
+            let mut poll = tokio::time::interval(poll_interval.duration());
+            let mut commit = tokio::time::interval(commit_interval.duration());
             let tracker = membership.tracker();
             loop {
                 tokio::select! {
@@ -302,5 +596,299 @@ impl KafkaStreams {
         self.shutdown.cancel();
         let _ = self.handle.await;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use assert2::check;
+    use crabka_units::prelude::*;
+
+    use super::{
+        DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES, KafkaStreams,
+        MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES, StreamsCommitInterval,
+        StreamsInteractiveQueryQueueCapacity, StreamsPollInterval, StreamsStateStoreCacheMaxBytes,
+        interactive_query_queue_capacities, validate_runtime_configuration,
+    };
+    use crate::{
+        membership::{DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT},
+        topology::Topology,
+    };
+
+    #[test]
+    fn interactive_query_queue_capacity_uses_default_and_valid_override() {
+        let default = StreamsInteractiveQueryQueueCapacity::default();
+        assert_eq!(default.capacity(), 64);
+
+        let capacity =
+            StreamsInteractiveQueryQueueCapacity::new(37).expect("positive queue capacity");
+        assert_eq!(capacity.capacity(), 37);
+    }
+
+    #[test]
+    fn interactive_query_queue_capacity_rejects_zero() {
+        let error = StreamsInteractiveQueryQueueCapacity::new(0).expect_err("zero queue capacity");
+        assert2::assert!(error.contains("streams interactive-query queue capacity"));
+    }
+
+    #[test]
+    fn interactive_query_queue_capacity_matches_tokio_boundaries() {
+        let maximum =
+            StreamsInteractiveQueryQueueCapacity::new(tokio::sync::Semaphore::MAX_PERMITS)
+                .expect("Tokio maximum queue capacity");
+        assert_eq!(maximum.capacity(), tokio::sync::Semaphore::MAX_PERMITS);
+
+        StreamsInteractiveQueryQueueCapacity::new(tokio::sync::Semaphore::MAX_PERMITS + 1)
+            .expect_err("capacity above Tokio maximum");
+    }
+
+    #[test]
+    fn interactive_query_queues_share_the_configured_capacity() {
+        let capacity =
+            StreamsInteractiveQueryQueueCapacity::new(37).expect("positive queue capacity");
+        assert_eq!(interactive_query_queue_capacities(capacity), [37, 37]);
+    }
+
+    #[test]
+    fn state_store_cache_max_bytes_uses_default_and_valid_overrides() {
+        let default = StreamsStateStoreCacheMaxBytes::default();
+        check!(default.size() == mebibytes(10));
+        check!(
+            StreamsStateStoreCacheMaxBytes::new(ByteSize::ZERO)
+                .expect("zero disables caching")
+                .size()
+                == ByteSize::ZERO
+        );
+        check!(
+            StreamsStateStoreCacheMaxBytes::new(bytes(37))
+                .expect("positive cache budget")
+                .size()
+                == bytes(37)
+        );
+    }
+
+    #[test]
+    fn state_store_cache_max_bytes_rejects_negative_values() {
+        let error = StreamsStateStoreCacheMaxBytes::new(ByteSize::from_bytes_i64(-1))
+            .expect_err("negative cache budget");
+        check!(error.contains("streams state-store cache max bytes"));
+    }
+
+    #[test]
+    fn state_store_cache_max_bytes_matches_target_boundaries() {
+        let maximum = StreamsStateStoreCacheMaxBytes::new(ByteSize::from_bytes_i64(
+            MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
+        ))
+        .expect("target-supported maximum");
+        check!(maximum.size() == ByteSize::from_bytes_i64(MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES));
+
+        if let Some(too_large) = MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES.checked_add(1) {
+            StreamsStateStoreCacheMaxBytes::new(ByteSize::from_bytes_i64(too_large))
+                .expect_err("value above target-supported maximum");
+        }
+    }
+
+    #[test]
+    fn runtime_intervals_use_typed_defaults_and_valid_overrides() {
+        let poll = StreamsPollInterval::default();
+        let commit = StreamsCommitInterval::default();
+        assert2::assert!(poll.milliseconds() == 200);
+        assert2::assert!(commit.milliseconds() == 5_000);
+
+        let poll = StreamsPollInterval::new(Duration::from_millis(37))
+            .expect("positive whole milliseconds");
+        let commit = StreamsCommitInterval::new(Duration::from_millis(41))
+            .expect("positive whole milliseconds");
+        assert2::assert!(poll.duration() == Duration::from_millis(37));
+        assert2::assert!(commit.duration() == Duration::from_millis(41));
+    }
+
+    #[test]
+    fn runtime_intervals_reject_zero_and_fractional_milliseconds() {
+        assert2::assert!(StreamsPollInterval::new(Duration::ZERO).is_err());
+        assert2::assert!(StreamsCommitInterval::new(Duration::ZERO).is_err());
+        assert2::assert!(
+            StreamsPollInterval::new(Duration::from_millis(1) + Duration::from_nanos(1)).is_err()
+        );
+        assert2::assert!(
+            StreamsCommitInterval::new(Duration::from_millis(1) + Duration::from_nanos(1)).is_err()
+        );
+    }
+
+    #[test]
+    fn low_level_runtime_validation_names_the_invalid_field() {
+        let poll_error = validate_runtime_configuration(
+            Duration::ZERO,
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
+            DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
+        )
+        .expect_err("zero poll interval");
+        assert2::assert!(poll_error.to_string().contains("streams poll interval"));
+
+        let commit_error = validate_runtime_configuration(
+            Duration::from_millis(200),
+            Duration::ZERO,
+            Duration::from_secs(30),
+            DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
+            DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
+        )
+        .expect_err("zero commit interval");
+        assert2::assert!(commit_error.to_string().contains("streams commit interval"));
+
+        let rebalance_error = validate_runtime_configuration(
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+            Duration::from_millis(u64::try_from(i32::MAX).expect("i32 max fits u64") + 1),
+            DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
+            DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
+        )
+        .expect_err("rebalance timeout outside Kafka wire range");
+        assert2::assert!(
+            rebalance_error
+                .to_string()
+                .contains("streams rebalance timeout")
+        );
+
+        let join_retry_error = validate_runtime_configuration(
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            Duration::ZERO,
+            DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
+            DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
+        )
+        .expect_err("zero join retry backoff");
+        assert2::assert!(
+            join_retry_error
+                .to_string()
+                .contains("streams join retry backoff")
+        );
+
+        let leave_error = validate_runtime_configuration(
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            Duration::ZERO,
+            DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES,
+        )
+        .expect_err("zero leave heartbeat timeout");
+        assert2::assert!(
+            leave_error
+                .to_string()
+                .contains("streams leave heartbeat timeout")
+        );
+
+        let cache_error = validate_runtime_configuration(
+            Duration::from_millis(200),
+            Duration::from_secs(5),
+            Duration::from_secs(30),
+            DEFAULT_STREAMS_JOIN_RETRY_BACKOFF,
+            DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
+            ByteSize::from_bytes_i64(-1),
+        )
+        .expect_err("negative cache budget");
+        check!(
+            cache_error
+                .to_string()
+                .contains("streams state-store cache max bytes")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_leave_heartbeat_timeout_fails_before_broker_lookup() {
+        let mut topology = Topology::new();
+        let source = topology.add_source::<String, String>("source", ["input"]);
+        topology.add_sink("sink", "output", [&source]);
+        let topology = topology.build("leave-validation").expect("topology");
+
+        let error = KafkaStreams::builder()
+            .bootstrap("invalid.invalid:9092")
+            .application_id("leave-validation")
+            .topology(topology)
+            .leave_heartbeat_timeout(Duration::ZERO)
+            .build()
+            .await
+            .err()
+            .expect("invalid configuration");
+
+        assert2::assert!(
+            error
+                .to_string()
+                .contains("streams leave heartbeat timeout")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_join_retry_backoff_fails_before_broker_lookup() {
+        let mut topology = Topology::new();
+        let source = topology.add_source::<String, String>("source", ["input"]);
+        topology.add_sink("sink", "output", [&source]);
+        let topology = topology.build("join-retry-validation").expect("topology");
+
+        let error = KafkaStreams::builder()
+            .bootstrap("invalid.invalid:9092")
+            .application_id("join-retry-validation")
+            .topology(topology)
+            .join_retry_backoff(Duration::ZERO)
+            .build()
+            .await
+            .err()
+            .expect("invalid configuration");
+
+        assert2::assert!(error.to_string().contains("streams join retry backoff"));
+    }
+
+    #[tokio::test]
+    async fn invalid_state_store_cache_budget_fails_before_broker_lookup() {
+        let mut topology = Topology::new();
+        let source = topology.add_source::<String, String>("source", ["input"]);
+        topology.add_sink("sink", "output", [&source]);
+        let topology = topology.build("cache-budget-validation").expect("topology");
+
+        let error = KafkaStreams::builder()
+            .bootstrap("invalid.invalid:9092")
+            .application_id("cache-budget-validation")
+            .topology(topology)
+            .cache_max_bytes(ByteSize::from_bytes_i64(-1))
+            .build()
+            .await
+            .err()
+            .expect("invalid configuration");
+
+        assert2::assert!(
+            error
+                .to_string()
+                .contains("streams state-store cache max bytes")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_client_resource_policy_fails_before_broker_lookup() {
+        let mut topology = Topology::new();
+        let source = topology.add_source::<String, String>("source", ["input"]);
+        topology.add_sink("sink", "output", [&source]);
+        let topology = topology
+            .build("client-policy-validation")
+            .expect("topology");
+
+        let error = KafkaStreams::builder()
+            .bootstrap("invalid.invalid:9092")
+            .application_id("client-policy-validation")
+            .topology(topology)
+            .client_dispatch_queue_capacity(0)
+            .build()
+            .await
+            .err()
+            .expect("invalid client policy");
+
+        assert2::assert!(error.to_string().contains("client dispatch queue capacity"));
     }
 }

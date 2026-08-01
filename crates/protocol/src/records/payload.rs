@@ -17,6 +17,7 @@
 //! provides the codec when an old client actually appears on the wire.
 
 use bytes::{Buf, BufMut, Bytes};
+use crabka_compression::RecordDecompressionPolicy;
 
 use crate::records::{
     RecordsError, borrowed::RecordBatch as RecordBatchBorrowed, owned::RecordBatch,
@@ -58,11 +59,24 @@ impl RecordsPayload {
     /// # Errors
     /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn from_bytes(bytes: Bytes) -> Result<Self, RecordsError> {
+        Self::from_bytes_with_policy(bytes, RecordDecompressionPolicy::default())
+    }
+
+    /// Construct from raw records bytes with explicit decompression limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying records error for malformed, truncated, corrupt,
+    /// or over-limit v2 input.
+    pub fn from_bytes_with_policy(
+        bytes: Bytes,
+        policy: RecordDecompressionPolicy,
+    ) -> Result<Self, RecordsError> {
         if looks_like_v2(&bytes) {
             let mut cur: &[u8] = &bytes;
             let mut batches = Vec::new();
             while !cur.is_empty() {
-                batches.push(RecordBatch::decode(&mut cur)?);
+                batches.push(RecordBatch::decode_with_policy(&mut cur, policy)?);
             }
             Ok(Self::V2(batches))
         } else {
@@ -399,6 +413,8 @@ fn looks_like_v2(bytes: &[u8]) -> bool {
 mod tests {
 
     use bytes::BytesMut;
+    use crabka_compression::{CompressionError, CompressionType, RecordDecompressionPolicy};
+    use crabka_units::{bytes, fraction};
 
     use super::*;
     use crate::records::{Record, RecordBatch};
@@ -425,6 +441,26 @@ mod tests {
             RecordsPayload::V2(batches) => assert2::assert!(batches == vec![rb]),
             _ => panic!("expected V2"),
         }
+    }
+
+    #[test]
+    fn decompression_policy_limits_payload_decode() {
+        let mut rb = sample_v2();
+        rb.records[0].value = Some(Bytes::from(vec![b'x'; 4096]));
+        rb.attributes = rb.attributes.with_compression(CompressionType::Lz4);
+        let mut wire = BytesMut::new();
+        rb.encode(&mut wire).unwrap();
+        let wire = wire.freeze();
+
+        RecordsPayload::from_bytes(wire.clone()).unwrap();
+
+        let policy = RecordDecompressionPolicy::new(fraction(1.0), bytes(1), bytes(32)).unwrap();
+        assert2::assert!(matches!(
+            RecordsPayload::from_bytes_with_policy(wire, policy),
+            Err(RecordsError::Compression(CompressionError::TooLarge {
+                limit: 32
+            }))
+        ));
     }
 
     #[test]

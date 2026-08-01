@@ -26,6 +26,6 @@ fn main() {
     let addr = spawn(listen.as_str(), upstream, rec).unwrap();
     eprintln!("kafka-tap listening on {addr} -> {upstream}, spooling to {spool}");
     loop {
-        std::thread::sleep(std::time::Duration::from_secs(3600));
+        std::thread::park();
     }
 }

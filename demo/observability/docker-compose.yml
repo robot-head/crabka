@@ -19,7 +19,7 @@ x-otlp-env: &otlp-env
   # serve). 0.05 keeps the per-generation amplification < 1 so the feedback
   # converges while still leaving plenty of demo traces to view.
   CRABKA_OTLP_SAMPLE_RATIO: "0.05"
-  CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS: "15"
+  CRABKA_OTLP_HEARTBEAT_INTERVAL: "${CRABKA_OTLP_HEARTBEAT_INTERVAL:-15s}"
   CRABKA_ADMIN_LISTEN_ADDR: 0.0.0.0:9404
   # Enable jemalloc heap profiling support continuously so heap profiles include
   # long-lived allocations, but sample coarsely (~every 1 MiB) so small demo
@@ -254,7 +254,7 @@ services:
 
   metrics-compactor:
     <<: [*crabka-image, *compactor-res]
-    command: ["crabka-metrics", "--target=compactor", "--object-store-url=s3://crabka-metrics", "--bootstrap=broker:9092", "--compactor-retention-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_MS:-3600000}", "--compactor-retention-sweep-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_MS:-30000}"]
+    command: ["crabka-metrics", "--target=compactor", "--object-store-url=s3://crabka-metrics", "--bootstrap=broker:9092", "--compactor-retention=${CRABKA_METRICS_COMPACTOR_RETENTION:-1h}", "--compactor-retention-sweep-interval=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_INTERVAL:-30s}"]
     environment:
       <<: [*s3-env, *otlp-env]
       OTEL_SERVICE_NAME: metrics-compactor
@@ -265,7 +265,7 @@ services:
   metrics-querier:
     # crabka-metrics-service uses --wal-bootstrap (its own flag name).
     <<: [*crabka-image, *querier-res]
-    command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-metrics", "--manifest-prefix=metrics", "--wal-bootstrap=broker:9092", "--wal-head-retention-ms=${CRABKA_METRICS_QUERIER_WAL_HEAD_RETENTION_MS:-300000}"]
+    command: ["crabka-metrics-service", "--target=querier", "--listen=0.0.0.0:9090", "--object-store-url=s3://crabka-metrics", "--manifest-prefix=metrics", "--wal-bootstrap=broker:9092", "--wal-head-retention=${CRABKA_METRICS_QUERIER_WAL_HEAD_RETENTION:-5m}"]
     environment:
       <<: [*s3-env, *otlp-env]
       OTEL_SERVICE_NAME: metrics-querier
@@ -291,6 +291,10 @@ services:
     command: ["crabka-traces", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-traces", "--block-builder-flush-max-records=${CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_RECORDS:-50000}", "--block-builder-flush-max-age-ms=${CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_AGE_MS:-60000}"]
     environment:
       <<: [*s3-env, *otlp-env]
+      CRABKA_TRACES_INDEX_SNAPSHOT_MAX: "${CRABKA_TRACES_INDEX_SNAPSHOT_MAX:-256MiB}"
+      CRABKA_TRACES_INDEX_SNAPSHOT_RETAIN: "${CRABKA_TRACES_INDEX_SNAPSHOT_RETAIN:-8}"
+      CRABKA_TRACES_WAL_FETCH_MAX: "${CRABKA_TRACES_WAL_FETCH_MAX:-2MiB}"
+      CRABKA_TRACES_WAL_FETCH_PARTITION_MAX: "${CRABKA_TRACES_WAL_FETCH_PARTITION_MAX:-256KiB}"
       OTEL_SERVICE_NAME: traces-block-builder
     depends_on:
       rustfs-setup: { condition: service_completed_successfully }
@@ -301,6 +305,9 @@ services:
     command: ["crabka-traces", "--target=querier", "--listen=0.0.0.0:3200", "--object-store-url=s3://crabka-traces"]
     environment:
       <<: [*s3-env, *otlp-env]
+      CRABKA_TRACES_INDEX_SNAPSHOT_MAX: "${CRABKA_TRACES_INDEX_SNAPSHOT_MAX:-256MiB}"
+      CRABKA_TRACES_BLOCK_READ_MAX: "${CRABKA_TRACES_BLOCK_READ_MAX:-1GiB}"
+      CRABKA_TRACES_SCAN_CONCAT_MAX: "${CRABKA_TRACES_SCAN_CONCAT_MAX:-1.5GB}"
       OTEL_SERVICE_NAME: traces-querier
     ports: ["3200:3200"]
     depends_on:
@@ -366,6 +373,11 @@ services:
     command: ["crabka-profiles", "--target=block-builder", "--bootstrap=broker:9092", "--object-store-url=s3://crabka-profiles", "--block-builder-flush-records=${CRABKA_PROFILES_BLOCK_BUILDER_FLUSH_RECORDS:-4096}", "--block-builder-flush-max-age-ms=${CRABKA_PROFILES_BLOCK_BUILDER_FLUSH_MAX_AGE_MS:-60000}"]
     environment:
       <<: [*s3-env, *otlp-env]
+      CRABKA_PROFILES_INDEX_SNAPSHOT_MAX: "${CRABKA_PROFILES_INDEX_SNAPSHOT_MAX:-256MiB}"
+      CRABKA_PROFILES_INDEX_SNAPSHOT_RETAIN: "${CRABKA_PROFILES_INDEX_SNAPSHOT_RETAIN:-8}"
+      CRABKA_PROFILES_WAL_FETCH_MAX: "${CRABKA_PROFILES_WAL_FETCH_MAX:-2MiB}"
+      CRABKA_PROFILES_WAL_FETCH_PARTITION_MAX: "${CRABKA_PROFILES_WAL_FETCH_PARTITION_MAX:-256KiB}"
+      CRABKA_PROFILES_WAL_POLL_TIMEOUT: "${CRABKA_PROFILES_WAL_POLL_TIMEOUT:-500ms}"
       OTEL_SERVICE_NAME: profiles-block-builder
     depends_on:
       rustfs-setup: { condition: service_completed_successfully }
@@ -381,6 +393,8 @@ services:
     command: ["crabka-profiles", "--target=querier", "--listen=0.0.0.0:4040", "--object-store-url=s3://crabka-profiles", "--bootstrap=broker:9092"]
     environment:
       <<: [*s3-env, *otlp-env]
+      CRABKA_PROFILES_INDEX_SNAPSHOT_MAX: "${CRABKA_PROFILES_INDEX_SNAPSHOT_MAX:-256MiB}"
+      CRABKA_PROFILES_WAL_POLL_TIMEOUT: "${CRABKA_PROFILES_WAL_POLL_TIMEOUT:-500ms}"
       OTEL_SERVICE_NAME: profiles-querier
     ports: ["4040:4040"]
     # The hot WAL-tail consumer (--bootstrap) connects to the broker at startup;
@@ -444,6 +458,8 @@ services:
       OTEL_SERVICE_NAME: demo-produce
       CRABKA_DEMO_BOOTSTRAP: broker:9092
       CRABKA_DEMO_REGISTRY: http://schema-registry:8081
+      CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF: "${CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF:-10ms}"
+      CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF: "${CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF:-1s}"
       CRABKA_DEMO_ORDERS_PER_SEC: "${CRABKA_DEMO_ORDERS_PER_SEC:-50}"
     depends_on:
       topic-setup: { condition: service_completed_successfully }
@@ -455,8 +471,19 @@ services:
     environment:
       <<: *otlp-env
       OTEL_SERVICE_NAME: demo-stream
+      CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT: "${CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT:-10s}"
+      CRABKA_DEMO_STREAMS_FETCH_MIN: "${CRABKA_DEMO_STREAMS_FETCH_MIN:-1B}"
+      CRABKA_DEMO_STREAMS_POLL_INTERVAL: "${CRABKA_DEMO_STREAMS_POLL_INTERVAL:-200ms}"
+      CRABKA_DEMO_STREAMS_COMMIT_INTERVAL: "${CRABKA_DEMO_STREAMS_COMMIT_INTERVAL:-5s}"
+      CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT: "${CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT:-30s}"
+      CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT: "${CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT:-5s}"
+      CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF: "${CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF:-200ms}"
+      CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY: "${CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY:-64}"
+      CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX: "${CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX:-10MiB}"
       CRABKA_DEMO_BOOTSTRAP: broker:9092
       CRABKA_DEMO_REGISTRY: http://schema-registry:8081
+      CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF: "${CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF:-10ms}"
+      CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF: "${CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF:-1s}"
     depends_on:
       topic-setup: { condition: service_completed_successfully }
       schema-registry: { condition: service_healthy }
@@ -469,6 +496,27 @@ services:
       OTEL_SERVICE_NAME: demo-consume
       CRABKA_DEMO_BOOTSTRAP: broker:9092
       CRABKA_DEMO_REGISTRY: http://schema-registry:8081
+      CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF: "${CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF:-10ms}"
+      CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF: "${CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF:-1s}"
+      CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT: "${CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT:-5s}"
+      CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL: "${CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL:-5s}"
+      CRABKA_DEMO_CONSUMER_STARTUP_ATTEMPT_TIMEOUT: "${CRABKA_DEMO_CONSUMER_STARTUP_ATTEMPT_TIMEOUT:-90s}"
+      CRABKA_DEMO_CONSUMER_STARTUP_DEADLINE: "${CRABKA_DEMO_CONSUMER_STARTUP_DEADLINE:-5m}"
+      CRABKA_DEMO_CONSUMER_STARTUP_INITIAL_BACKOFF: "${CRABKA_DEMO_CONSUMER_STARTUP_INITIAL_BACKOFF:-500ms}"
+      CRABKA_DEMO_CONSUMER_STARTUP_MAX_BACKOFF: "${CRABKA_DEMO_CONSUMER_STARTUP_MAX_BACKOFF:-5s}"
+      CRABKA_DEMO_CONSUMER_COORDINATOR_RETRY_TIMEOUT: "${CRABKA_DEMO_CONSUMER_COORDINATOR_RETRY_TIMEOUT:-30s}"
+      CRABKA_DEMO_CONSUMER_COORDINATOR_INITIAL_BACKOFF: "${CRABKA_DEMO_CONSUMER_COORDINATOR_INITIAL_BACKOFF:-100ms}"
+      CRABKA_DEMO_CONSUMER_COORDINATOR_MAX_BACKOFF: "${CRABKA_DEMO_CONSUMER_COORDINATOR_MAX_BACKOFF:-1s}"
+      CRABKA_DEMO_CONSUMER_FETCH_MIN: "${CRABKA_DEMO_CONSUMER_FETCH_MIN:-1B}"
+      CRABKA_DEMO_CONSUMER_FETCH_MAX: "${CRABKA_DEMO_CONSUMER_FETCH_MAX:-50MiB}"
+      CRABKA_DEMO_CONSUMER_FETCH_PARTITION_MAX: "${CRABKA_DEMO_CONSUMER_FETCH_PARTITION_MAX:-1MiB}"
+      CRABKA_DEMO_CONSUMER_SESSION_TIMEOUT: "${CRABKA_DEMO_CONSUMER_SESSION_TIMEOUT:-45s}"
+      CRABKA_DEMO_CONSUMER_REBALANCE_TIMEOUT: "${CRABKA_DEMO_CONSUMER_REBALANCE_TIMEOUT:-1m}"
+      CRABKA_DEMO_CONSUMER_HEARTBEAT_INTERVAL: "${CRABKA_DEMO_CONSUMER_HEARTBEAT_INTERVAL:-3s}"
+      CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT: "${CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT:-30s}"
+      CRABKA_DEMO_CONSUMER_AUTO_OFFSET_RESET: "${CRABKA_DEMO_CONSUMER_AUTO_OFFSET_RESET:-latest}"
+      CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL: "${CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL:-read-uncommitted}"
+      CRABKA_DEMO_CONSUMER_ASSIGNOR: "${CRABKA_DEMO_CONSUMER_ASSIGNOR:-range}"
     depends_on:
       topic-setup: { condition: service_completed_successfully }
       # The traced consumer now deserialises Order via the registry (to enrich

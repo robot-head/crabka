@@ -7,12 +7,17 @@ use std::{
         Arc,
         atomic::{AtomicI32, Ordering},
     },
-    time::Duration,
 };
 
 use bytes::{BufMut, Bytes, BytesMut};
 use crabka_ids::{ApiKey, ApiVersion};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes, secs,
+};
 use dashmap::DashMap;
+use refined_type::rule::{GreaterI64, GreaterUsize};
 use tokio::{
     io::{AsyncRead, AsyncWrite},
     net::TcpStream,
@@ -38,12 +43,146 @@ type Pending = Arc<DashMap<i32, oneshot::Sender<Result<Bytes, ClientError>>>>;
 /// version is flexible (v3+).
 const API_VERSIONS_KEY: i16 = 18;
 
+/// Default deadline for one client DNS lookup.
+pub const DEFAULT_CLIENT_DNS_TIMEOUT: Time = secs(10);
+/// Default deadline for one client TCP connection attempt.
+pub const DEFAULT_CLIENT_CONNECT_TIMEOUT: Time = secs(30);
+/// Default deadline for one client request.
+pub const DEFAULT_CLIENT_REQUEST_TIMEOUT: Time = secs(30);
+/// Default capacity of one connection's pending request dispatch queue.
+pub const DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY: usize = 64;
+/// Fixed security ceiling for accepted client frames.
+pub const MAX_CLIENT_FRAME_BYTES: ByteSize = mebibytes(100);
+/// Default maximum accepted client frame size.
+pub const DEFAULT_CLIENT_FRAME_MAX: ByteSize = MAX_CLIENT_FRAME_BYTES;
+
+/// Positive, whole-millisecond DNS lookup deadline.
+///
+/// Stores the validated millisecond count so policy structs can retain `Eq`
+/// while public configuration boundaries use dimensioned [`Time`] values.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientDnsTimeout(i64);
+
+impl ClientDnsTimeout {
+    /// Validate a DNS lookup deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the duration is non-finite, zero, negative,
+    /// fractional in milliseconds, or cannot be represented as `i64`
+    /// milliseconds.
+    pub fn new(value: Time) -> Result<Self, String> {
+        let milliseconds = GreaterI64::<0>::new(value.millis_i64())
+            .map_err(|error| format!("client DNS timeout: {error}"))?
+            .into_value();
+        if !value.secs_f64().is_finite() || Time::from_millis(milliseconds) != value {
+            return Err("client DNS timeout must be a whole number of milliseconds".to_owned());
+        }
+        Ok(Self(milliseconds))
+    }
+
+    /// Return the validated timeout.
+    #[must_use]
+    pub fn time(self) -> Time {
+        Time::from_millis(self.0)
+    }
+
+    /// Return the validated timeout in milliseconds.
+    #[must_use]
+    pub const fn milliseconds(self) -> i64 {
+        self.0
+    }
+}
+
+impl Default for ClientDnsTimeout {
+    fn default() -> Self {
+        Self::new(DEFAULT_CLIENT_DNS_TIMEOUT).expect("default client DNS timeout is valid")
+    }
+}
+
+/// Positive capacity of one connection's pending request dispatch queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ConnectionDispatchQueueCapacity(usize);
+
+impl ConnectionDispatchQueueCapacity {
+    /// Validate a dispatch queue capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: usize) -> Result<Self, String> {
+        GreaterUsize::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("client dispatch queue capacity: {error}"))
+    }
+
+    /// Return the validated capacity.
+    #[must_use]
+    pub const fn get(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for ConnectionDispatchQueueCapacity {
+    fn default() -> Self {
+        Self::new(DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY)
+            .expect("default client dispatch queue capacity is valid")
+    }
+}
+
+/// Positive whole-byte accepted-frame limit bounded by the fixed security ceiling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ClientFrameMax(usize);
+
+impl ClientFrameMax {
+    /// Return the validated byte count.
+    #[must_use]
+    pub const fn bytes(self) -> usize {
+        self.0
+    }
+
+    /// Return the validated limit as a dimensioned quantity.
+    #[must_use]
+    pub fn size(self) -> ByteSize {
+        ByteSize::from_bytes(u64::try_from(self.0).unwrap_or(u64::MAX))
+    }
+}
+
+impl TryFrom<ByteSize> for ClientFrameMax {
+    type Error = String;
+
+    fn try_from(value: ByteSize) -> Result<Self, Self::Error> {
+        let bytes = value.bytes_f64();
+        if !bytes.is_finite()
+            || bytes.fract() != 0.0
+            || !(1.0..=MAX_CLIENT_FRAME_BYTES.bytes_f64()).contains(&bytes)
+        {
+            return Err(
+                "client frame max must be a positive whole-byte value no greater than 100MiB"
+                    .to_owned(),
+            );
+        }
+        usize::try_from(value.bytes_u64())
+            .map(Self)
+            .map_err(|_| "client frame max does not fit usize".to_owned())
+    }
+}
+
+impl Default for ClientFrameMax {
+    fn default() -> Self {
+        Self::try_from(DEFAULT_CLIENT_FRAME_MAX).expect("default client frame max is valid")
+    }
+}
+
 /// Connect-time + per-request configuration knobs.
 #[derive(Debug, Clone)]
 pub struct ConnectionOptions {
     pub client_id: String,
-    pub connect_timeout: Duration,
-    pub request_timeout: Duration,
+    pub dns_timeout: ClientDnsTimeout,
+    pub connect_timeout: Time,
+    pub request_timeout: Time,
+    pub dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    pub frame_max: ClientFrameMax,
     /// Client-side TLS/SASL policy. `None` = plaintext (default).
     ///
     /// Boxed so `ConnectionOptions` stays small: it is cloned widely and
@@ -57,8 +196,11 @@ impl Default for ConnectionOptions {
     fn default() -> Self {
         Self {
             client_id: "crabka".into(),
-            connect_timeout: Duration::from_secs(30),
-            request_timeout: Duration::from_secs(30),
+            dns_timeout: ClientDnsTimeout::default(),
+            connect_timeout: DEFAULT_CLIENT_CONNECT_TIMEOUT,
+            request_timeout: DEFAULT_CLIENT_REQUEST_TIMEOUT,
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::default(),
+            frame_max: ClientFrameMax::default(),
             security: None,
         }
     }
@@ -94,10 +236,11 @@ impl Connection {
         addr: SocketAddr,
         options: ConnectionOptions,
     ) -> Result<Self, ClientError> {
-        let stream = tokio::time::timeout(options.connect_timeout, TcpStream::connect(addr))
-            .await
-            .map_err(|_| ClientError::Timeout(options.connect_timeout))?
-            .map_err(|source| ClientError::Connect { addr, source })?;
+        let stream =
+            tokio::time::timeout(options.connect_timeout.to_std(), TcpStream::connect(addr))
+                .await
+                .map_err(|_| ClientError::Timeout(options.connect_timeout))?
+                .map_err(|source| ClientError::Connect { addr, source })?;
 
         stream.set_nodelay(true).ok();
 
@@ -150,7 +293,7 @@ impl Connection {
         options: ConnectionOptions,
         security: &crate::security::ClientSecurity,
     ) -> Result<Self, ClientError> {
-        let tcp = tokio::time::timeout(options.connect_timeout, TcpStream::connect(addr))
+        let tcp = tokio::time::timeout(options.connect_timeout.to_std(), TcpStream::connect(addr))
             .await
             .map_err(|_| ClientError::Timeout(options.connect_timeout))?
             .map_err(|source| ClientError::Connect { addr, source })?;
@@ -189,9 +332,15 @@ impl Connection {
             // the principal matches the broker's advertised hostname.
             let target = addr.ip().to_string();
             let server_name = security.sasl_handshake_host(Some(target.as_str()));
-            crate::sasl::outbound_sasl(&mut *stream, creds, server_name)
-                .await
-                .map_err(|e| ClientError::Io(std::io::Error::other(e.to_string())))?;
+            crate::sasl::outbound_sasl(
+                &mut *stream,
+                creds,
+                server_name,
+                &options.client_id,
+                options.frame_max,
+            )
+            .await
+            .map_err(|e| ClientError::Io(std::io::Error::other(e.to_string())))?;
         }
 
         Self::from_stream(stream, options).await
@@ -214,12 +363,18 @@ impl Connection {
         stream: Box<dyn ClientDuplex>,
         options: ConnectionOptions,
     ) -> Result<Self, ClientError> {
-        let (writer_tx, writer_rx) = mpsc::channel::<DispatchItem>(64);
+        let (writer_tx, writer_rx) =
+            mpsc::channel::<DispatchItem>(options.dispatch_queue_capacity.get());
         let shutdown = CancellationToken::new();
         let pending: Pending = Arc::new(DashMap::new());
 
-        let (reader_handle, writer_handle) =
-            spawn_io_tasks(stream, writer_rx, shutdown.clone(), Arc::clone(&pending));
+        let (reader_handle, writer_handle) = spawn_io_tasks(
+            stream,
+            writer_rx,
+            shutdown.clone(),
+            Arc::clone(&pending),
+            options.frame_max,
+        );
 
         let mut conn = Self {
             inner: Arc::new(ConnectionInner {
@@ -392,7 +547,7 @@ impl Connection {
             .await
             .map_err(|_| ClientError::Disconnected)?;
 
-        match tokio::time::timeout(self.inner.options.request_timeout, rx).await {
+        match tokio::time::timeout(self.inner.options.request_timeout.to_std(), rx).await {
             Ok(Ok(Ok(bytes))) => Ok(bytes),
             Ok(Ok(Err(err))) => Err(err),
             Ok(Err(_recv_closed)) => Err(ClientError::Disconnected),
@@ -430,13 +585,15 @@ fn spawn_io_tasks(
     mut writer_rx: mpsc::Receiver<DispatchItem>,
     shutdown: CancellationToken,
     pending: Pending,
+    frame_max: ClientFrameMax,
 ) -> (JoinHandle<()>, JoinHandle<()>) {
     use futures_util::{SinkExt, StreamExt};
     use tokio_util::codec::{FramedRead, FramedWrite};
 
     let (read_half, write_half) = tokio::io::split(stream);
-    let mut framed_read = FramedRead::new(read_half, crate::transport::codec());
-    let mut framed_write = FramedWrite::new(write_half, crate::transport::codec());
+    let mut framed_read = FramedRead::new(read_half, crate::transport::codec_with_max(frame_max));
+    let mut framed_write =
+        FramedWrite::new(write_half, crate::transport::codec_with_max(frame_max));
 
     // WRITER: drains the dispatch channel, flushing each frame in receive
     // order. Owns only the write half, so a not-yet-writable socket can never
@@ -565,7 +722,7 @@ async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, Client
         .await
         .map_err(|_| ClientError::Disconnected)?;
 
-    let body_bytes = tokio::time::timeout(conn.inner.options.connect_timeout, rx)
+    let body_bytes = tokio::time::timeout(conn.inner.options.connect_timeout.to_std(), rx)
         .await
         .map_err(|_| ClientError::Timeout(conn.inner.options.connect_timeout))?
         .map_err(|_| ClientError::Disconnected)??;
@@ -586,6 +743,60 @@ async fn fetch_api_versions(conn: &Connection) -> Result<ApiVersionTable, Client
         .iter()
         .map(|k| (k.api_key, k.min_version, k.max_version));
     Ok(ApiVersionTable::from_entries(entries))
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+    use crabka_units::{
+        ByteSize, bytes, convert::ByteSizeExt as _, kibibytes, mebibytes, micros, millis,
+    };
+
+    use super::*;
+
+    #[test]
+    fn client_dns_timeout_validates_and_preserves_milliseconds() {
+        let timeout = ClientDnsTimeout::new(millis(37)).expect("positive timeout");
+        assert!(timeout.time() == millis(37));
+        assert!(timeout.milliseconds() == 37);
+        assert!(ClientDnsTimeout::new(Time::ZERO).is_err());
+        assert!(ClientDnsTimeout::new(micros(1)).is_err());
+        assert!(ClientDnsTimeout::new(millis(1) + micros(1)).is_err());
+    }
+
+    #[test]
+    fn connection_options_own_named_defaults() {
+        let options = ConnectionOptions::default();
+        assert!(DEFAULT_CLIENT_DNS_TIMEOUT == secs(10));
+        assert!(DEFAULT_CLIENT_CONNECT_TIMEOUT == secs(30));
+        assert!(DEFAULT_CLIENT_REQUEST_TIMEOUT == secs(30));
+        assert!(options.dns_timeout == ClientDnsTimeout::default());
+        assert!(options.dns_timeout.time() == DEFAULT_CLIENT_DNS_TIMEOUT);
+        assert!(options.connect_timeout == DEFAULT_CLIENT_CONNECT_TIMEOUT);
+        assert!(options.request_timeout == DEFAULT_CLIENT_REQUEST_TIMEOUT);
+    }
+
+    #[test]
+    fn connection_resource_defaults_preserve_existing_values() {
+        assert!(
+            ConnectionDispatchQueueCapacity::default().get()
+                == DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY
+        );
+        assert!(ConnectionDispatchQueueCapacity::default().get() == 64);
+        assert!(ClientFrameMax::default().size() == mebibytes(100));
+        assert!(MAX_CLIENT_FRAME_BYTES == mebibytes(100));
+    }
+
+    #[test]
+    fn connection_resource_policy_validates_boundaries() {
+        assert!(ConnectionDispatchQueueCapacity::new(0).is_err());
+        assert!(ConnectionDispatchQueueCapacity::new(7).unwrap().get() == 7);
+
+        assert!(ClientFrameMax::try_from(bytes(0)).is_err());
+        assert!(ClientFrameMax::try_from(ByteSize::from_bytes_f64(1.5)).is_err());
+        assert!(ClientFrameMax::try_from(mebibytes(100) + bytes(1)).is_err());
+        assert!(ClientFrameMax::try_from(kibibytes(32)).unwrap().size() == kibibytes(32));
+    }
 }
 
 #[cfg(test)]
@@ -680,7 +891,7 @@ mod secured_tests {
 
 #[cfg(test)]
 mod io_task_tests {
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use crabka_protocol::{Encode, owned::api_versions_response::ApiVersionsResponse};
     use tokio::{
@@ -727,8 +938,8 @@ mod io_task_tests {
 
         let stream = TcpStream::connect(addr).await.unwrap();
         let opts = ConnectionOptions {
-            request_timeout: Duration::from_secs(5),
-            connect_timeout: Duration::from_secs(5),
+            request_timeout: secs(5),
+            connect_timeout: secs(5),
             ..Default::default()
         };
         let conn = Connection::from_stream(Box::new(stream), opts)

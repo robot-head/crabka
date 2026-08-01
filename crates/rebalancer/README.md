@@ -27,6 +27,7 @@ use crabka_rebalancer::goals::{GoalContext, leader_distribution::LeaderDistribut
 use crabka_rebalancer::model::{BrokerView, ClusterState, PartitionView};
 use crabka_rebalancer::optimizer;
 use crabka_rebalancer::scraper::UsageStore;
+use crabka_units::percent;
 
 # fn run() -> Result<(), Box<dyn std::error::Error>> {
 let state = ClusterState {
@@ -46,7 +47,7 @@ let state = ClusterState {
     in_flight_reassignments: Vec::new(),
 };
 let ctx = GoalContext {
-    imbalance_threshold_pct: 10,
+    imbalance_threshold: percent(10),
     max_movements_per_proposal: 100,
     min_topic_leaders_per_broker: 0,
     broker_capacities: Arc::new(BrokerCapacities::default()),

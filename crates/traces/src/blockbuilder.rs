@@ -3,16 +3,20 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
-    time::Duration,
 };
 
 use arrow::compute::concat_batches;
 use crabka_blockstore::{
-    BlockMeta, BlockWriter, PromotedSpanAttr, SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom,
-    SummaryColumns, TraceBlockStats, TraceIndex, span_block_decl,
+    BlockMeta, BlockWriter, IndexSnapshotRetain, PromotedSpanAttr, SCOL_START_NANO, SCOL_TRACE_ID,
+    ShardedTraceBloom, SummaryColumns, TraceBlockStats, TraceIndex, span_block_decl,
     span_block_schema_with_promoted_attrs,
 };
 use crabka_client_consumer::{Consumer, ConsumerRecord};
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
+    secs,
+};
 use object_store::ObjectStore;
 use tokio::{sync::Mutex, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -38,7 +42,7 @@ const TRACEPARENT_HEADER: &str = "traceparent";
 /// [`decode_consumer_records`] consumes so the loop body is unchanged.
 #[async_trait::async_trait]
 pub trait WalConsumerPoll: Send {
-    async fn poll(&mut self, window: Duration) -> Result<Vec<ConsumerRecord>, TracesError>;
+    async fn poll(&mut self, window: Time) -> Result<Vec<ConsumerRecord>, TracesError>;
 }
 
 /// Minimal WAL-consumer commit surface the block-builder loop drives.
@@ -53,7 +57,7 @@ pub trait WalConsumerCommit: Send {
 
 #[async_trait::async_trait]
 impl WalConsumerPoll for Consumer {
-    async fn poll(&mut self, window: Duration) -> Result<Vec<ConsumerRecord>, TracesError> {
+    async fn poll(&mut self, window: Time) -> Result<Vec<ConsumerRecord>, TracesError> {
         Consumer::poll(self, window)
             .await
             .map_err(|err| TracesError::Wal(err.to_string()))
@@ -88,19 +92,23 @@ pub const DEFAULT_FLUSH_MAX_RECORDS: usize = 50_000;
 /// `flush_max_records` cap still batches bursty traffic into larger blocks
 /// (the proliferation case). Deployments that attach a querier live tier can
 /// raise it to batch more aggressively without a freshness cost.
-pub const DEFAULT_FLUSH_MAX_AGE: Duration = Duration::from_secs(10);
+pub const DEFAULT_FLUSH_MAX_AGE: Time = secs(10);
 
 /// Runtime settings for the block-builder loop.
 #[derive(Clone, Debug)]
 pub struct BlockBuilderConfig {
     pub object_key_prefix: String,
     pub index_key: String,
-    pub window: Duration,
+    /// How long each WAL poll waits for records.
+    pub window: Time,
+    /// Backoff after an empty WAL poll to prevent a transport-error busy loop.
+    pub empty_poll_backoff: Time,
     pub promoted_attrs: Vec<PromotedSpanAttr>,
     /// Flush the accumulated buffer once this many span records are buffered.
     pub flush_max_records: usize,
     /// Flush the accumulated buffer once the oldest buffered record reaches this age.
-    pub flush_max_age: Duration,
+    pub flush_max_age: Time,
+    pub index_snapshot_retain: IndexSnapshotRetain,
 }
 
 struct BlockBuildOptions<'a> {
@@ -186,7 +194,7 @@ impl FlushAccumulator {
             return true;
         }
         match self.oldest_record_at {
-            Some(oldest) => now.saturating_duration_since(oldest) >= config.flush_max_age,
+            Some(oldest) => now.saturating_duration_since(oldest).as_time() >= config.flush_max_age,
             None => false,
         }
     }
@@ -469,7 +477,7 @@ where
                 // Docker DNS) `poll` returns `Ok(vec![])` immediately — without
                 // this backoff the loop would busy-spin a core. A short sleep
                 // bounds that to a trickle.
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(config.empty_poll_backoff.to_std()).await;
             } else {
                 accumulator.merge(windows, Instant::now());
             }
@@ -606,7 +614,11 @@ pub async fn flush_partition_windows(
         }
     }
     index
-        .save_latest_snapshot(&object_store, &config.index_key)
+        .save_latest_snapshot_with_retain(
+            &object_store,
+            &config.index_key,
+            config.index_snapshot_retain,
+        )
         .await
         .map(|_| blocks_written)
         .map_err(|err| TracesError::Block(err.to_string()))

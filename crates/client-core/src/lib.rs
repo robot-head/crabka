@@ -67,11 +67,17 @@ mod version;
 mod mock;
 
 pub use client::{BrokerHandle, Client};
-pub use connection::{ClientDuplex, Connection, ConnectionOptions};
+pub use connection::{
+    ClientDnsTimeout, ClientDuplex, ClientFrameMax, Connection, ConnectionDispatchQueueCapacity,
+    ConnectionOptions, DEFAULT_CLIENT_CONNECT_TIMEOUT, DEFAULT_CLIENT_DNS_TIMEOUT,
+    DEFAULT_CLIENT_FRAME_MAX, DEFAULT_CLIENT_REQUEST_TIMEOUT,
+    DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY, MAX_CLIENT_FRAME_BYTES,
+};
 pub use error::ClientError;
 pub use fetch::{
-    FetchPartitionResult, FetchedHeader, FetchedRecord, IsolatedFetch, fetch_partition,
-    fetch_partition_with_isolation, fetch_partition_with_isolation_progress,
+    DEFAULT_FETCH_MIN, DEFAULT_FETCH_RESPONSE_MAX, FetchMinBytes, FetchPartitionResult,
+    FetchedHeader, FetchedRecord, IsolatedFetch, fetch_partition, fetch_partition_with_isolation,
+    fetch_partition_with_isolation_progress,
 };
 #[cfg(any(test, feature = "mock"))]
 pub use mock::MockBroker;

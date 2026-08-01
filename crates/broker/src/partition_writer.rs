@@ -14,6 +14,7 @@ use std::{
 use arc_swap::ArcSwap;
 use crabka_ids::PartitionIndex;
 use crabka_log::{Log, Offset};
+use crabka_units::Time;
 use tokio::{
     runtime::{Handle, RuntimeFlavor},
     sync::{Notify, mpsc},
@@ -25,20 +26,6 @@ use crate::{
     producer_state::ProducerState,
     replica_state::ReplicaState,
 };
-
-/// Inactivity window after which an idempotent / transactional producer's
-/// in-memory entry is considered expired and excluded from the
-/// `RETAIN_EMPTY` active-producer snapshot fed to compaction. Mirrors
-/// Kafka's `producer.id.expiration.ms` default (24h). Hard-coded for now;
-/// can be wired to a broker config (`producer.id.expiration.ms`) later.
-const PRODUCER_ID_EXPIRATION_MS: i64 = 86_400_000;
-
-/// Upper bound on how many queued `Produce` jobs the writer folds into a single
-/// group commit (one lock acquisition + one `spawn_blocking`). Caps worst-case
-/// memory and per-group latency if a producer floods faster than the writer
-/// drains; in practice the group is bounded by the channel backlog and is 1
-/// under light load.
-const MAX_PRODUCE_GROUP: usize = 1024;
 
 /// Inspect a `BrokerError` returned by a partition-writer mutation
 /// (`append`, `append_at`, `truncate_to`, `reset_to`, `compact`,
@@ -204,7 +191,7 @@ pub(crate) async fn run_produce_append_batch_at(
 
 async fn handle_produce(
     identity: (&str, PartitionIndex),
-    first: ProduceJob,
+    group: (ProduceJob, usize),
     rx: &mut mpsc::Receiver<WriterMessage>,
     pending: &mut Option<WriterMessage>,
     storage: (&Arc<Mutex<Log>>, &Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
@@ -218,11 +205,12 @@ async fn handle_produce(
         Option<&Arc<dyn crate::wal::OffsetSequencer>>,
     ),
 ) {
+    let (first, max_produce_group) = group;
     let (wal, sequencer) = diskless;
     let (log, log_dir, log_dir_status) = storage;
     let (append_notify, replica_state, hw_advance_notify) = signals;
     let mut jobs = vec![first];
-    while jobs.len() < MAX_PRODUCE_GROUP {
+    while jobs.len() < max_produce_group {
         match rx.try_recv() {
             Ok(WriterMessage::Produce(job)) => jobs.push(job),
             Ok(other) => {
@@ -316,10 +304,26 @@ async fn handle_produce(
     }
 }
 
+async fn active_producers_for_compaction(
+    producer_state: &ProducerState,
+    topic: &str,
+    partition: PartitionIndex,
+    now_ms: i64,
+    producer_id_expiration: Time,
+) -> std::collections::HashMap<crabka_log::ProducerId, Offset> {
+    producer_state
+        .active_snapshot(topic, partition, now_ms, producer_id_expiration)
+        .await
+        .into_iter()
+        .map(|(producer_id, offset)| (crabka_log::ProducerId(producer_id), Offset(offset)))
+        .collect()
+}
+
 async fn handle_compact(
     identity: (&str, PartitionIndex),
     storage: (&Arc<Mutex<Log>>, &Arc<ArcSwap<PathBuf>>, &LogDirRegistry),
     producer_state: &ProducerState,
+    producer_id_expiration: Time,
     ack: tokio::sync::oneshot::Sender<Result<(), crate::error::BrokerError>>,
 ) {
     let (topic, partition) = identity;
@@ -330,12 +334,14 @@ async fn handle_compact(
         .map_or(0, |duration| {
             i64::try_from(duration.as_millis()).unwrap_or(i64::MAX)
         });
-    let active_producers = producer_state
-        .active_snapshot(topic, partition, now_ms, PRODUCER_ID_EXPIRATION_MS)
-        .await
-        .into_iter()
-        .map(|(producer_id, offset)| (crabka_log::ProducerId(producer_id), Offset(offset)))
-        .collect();
+    let active_producers = active_producers_for_compaction(
+        producer_state,
+        topic,
+        partition,
+        now_ms,
+        producer_id_expiration,
+    )
+    .await;
     let context = crabka_log::CompactionContext {
         now,
         active_producers,
@@ -494,7 +500,19 @@ pub async fn run(
         Option<crate::wal::SharedWal>,
     ),
 ) {
-    run_with_sequencer(identity, storage, rx, signals, services, None).await;
+    run_with_sequencer(
+        identity,
+        storage,
+        rx,
+        signals,
+        services,
+        (
+            crate::config::BrokerConfig::default().producer_id_expiration,
+            crate::config::BrokerConfig::default().max_produce_group,
+        ),
+        None,
+    )
+    .await;
 }
 
 pub async fn run_with_sequencer(
@@ -511,12 +529,14 @@ pub async fn run_with_sequencer(
         Arc<ProducerState>,
         Option<crate::wal::SharedWal>,
     ),
+    limits: (Time, usize),
     sequencer: Option<Arc<dyn crate::wal::OffsetSequencer>>,
 ) {
     let (topic, partition) = identity;
     let (log, log_dir) = storage;
     let (append_notify, replica_state, hw_advance_notify) = signals;
     let (log_dir_status, producer_state, wal) = services;
+    let (producer_id_expiration, max_produce_group) = limits;
     // `pending` holds a non-Produce message that was pulled off the channel
     // while group-draining Produce jobs (see the Produce arm). It is handled on
     // the next iteration so control messages are never reordered ahead of the
@@ -534,7 +554,7 @@ pub async fn run_with_sequencer(
             WriterMessage::Produce(first) => {
                 handle_produce(
                     (&topic, partition),
-                    first,
+                    (first, max_produce_group),
                     &mut rx,
                     &mut pending,
                     (&log, &log_dir, &log_dir_status),
@@ -578,6 +598,7 @@ pub async fn run_with_sequencer(
                     (&topic, partition),
                     (&log, &log_dir, &log_dir_status),
                     &producer_state,
+                    producer_id_expiration,
                     ack,
                 )
                 .await;
@@ -700,6 +721,7 @@ mod tests {
     use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
     use crabka_protocol::records::{Record, RecordBatch};
+    use crabka_units::millis;
     use tempfile::tempdir;
     use tokio::sync::oneshot;
 
@@ -808,6 +830,42 @@ mod tests {
             log.append(&mut sample_batch(records)).expect("append");
         }
         log
+    }
+
+    #[tokio::test]
+    async fn nondefault_ttl_controls_producer_compaction_snapshot() {
+        let state = ProducerState::new();
+        state
+            .commit("t", PartitionIndex(0), (7, 0), (0, 0), (12, 0))
+            .await;
+        let last_activity_ms = state.snapshot("t", PartitionIndex(0)).await[0]
+            .1
+            .last_activity_ms;
+
+        let expired = active_producers_for_compaction(
+            &state,
+            "t",
+            PartitionIndex(0),
+            last_activity_ms + 2,
+            millis(1),
+        )
+        .await;
+        let active = active_producers_for_compaction(
+            &state,
+            "t",
+            PartitionIndex(0),
+            last_activity_ms + 2,
+            millis(2),
+        )
+        .await;
+
+        assert!(expired.is_empty());
+        assert!(
+            active
+                == [(crabka_log::ProducerId(7), Offset(12))]
+                    .into_iter()
+                    .collect()
+        );
     }
 
     #[test]
@@ -934,6 +992,10 @@ mod tests {
                 Arc::new(ProducerState::new()),
                 wal,
             ),
+            (
+                crate::config::BrokerConfig::default().producer_id_expiration,
+                crate::config::BrokerConfig::default().max_produce_group,
+            ),
             Some(test_sequencer()),
         ));
 
@@ -1010,6 +1072,10 @@ mod tests {
                     Arc::new(ProducerState::new()),
                     wal,
                 ),
+                (
+                    crate::config::BrokerConfig::default().producer_id_expiration,
+                    crate::config::BrokerConfig::default().max_produce_group,
+                ),
                 Some(test_sequencer()),
             ));
 
@@ -1038,58 +1104,60 @@ mod tests {
 
     #[tokio::test]
     async fn writer_groups_queued_produces_up_to_configured_cap() {
+        const MAX_GROUP: usize = 2;
+
         let dir = tempdir().expect("tempdir");
         let log = Arc::new(Mutex::new(
             Log::open(dir.path(), LogConfig::default()).expect("open log"),
         ));
-        let (tx, rx) = mpsc::channel(MAX_PRODUCE_GROUP);
-        let notify = Arc::new(Notify::new());
+        let (sync_started_tx, sync_started_rx) = oneshot::channel();
+        let (_release_sync_tx, release_sync_rx) = oneshot::channel();
+        let wal: crate::wal::SharedWal =
+            Arc::new(GatedWal::new(log.clone(), sync_started_tx, release_sync_rx));
+        let (tx, rx) = mpsc::channel(3);
 
-        let mut acks = Vec::with_capacity(MAX_PRODUCE_GROUP);
-        for _ in 0..MAX_PRODUCE_GROUP {
-            let (ack, ack_rx) = oneshot::channel();
+        for _ in 0..3 {
+            let (ack, _ack_rx) = oneshot::channel();
             tx.send(WriterMessage::Produce(ProduceJob {
                 data: ProduceData::Owned(sample_batch(1)),
                 ack,
             }))
             .await
             .expect("queue produce");
-            acks.push(ack_rx);
         }
 
-        let writer = tokio::spawn(run_writer!(
-            "t".to_string(),
-            PartitionIndex(0),
-            log.clone(),
-            Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+        let writer = tokio::spawn(run_with_sequencer(
+            ("t".to_string(), PartitionIndex(0)),
+            (
+                log.clone(),
+                Arc::new(ArcSwap::from_pointee(dir.path().to_path_buf())),
+            ),
             rx,
-            notify,
-            Arc::new(tokio::sync::Mutex::new(
-                crate::replica_state::ReplicaState::new(),
-            )),
-            Arc::new(Notify::new()),
-            crate::log_dir_status::LogDirRegistry::default(),
-            Arc::new(ProducerState::new()),
-            None,
+            (
+                Arc::new(Notify::new()),
+                Arc::new(tokio::sync::Mutex::new(
+                    crate::replica_state::ReplicaState::new(),
+                )),
+                Arc::new(Notify::new()),
+            ),
+            (
+                crate::log_dir_status::LogDirRegistry::default(),
+                Arc::new(ProducerState::new()),
+                Some(wal),
+            ),
+            (
+                crate::config::BrokerConfig::default().producer_id_expiration,
+                MAX_GROUP,
+            ),
+            Some(test_sequencer()),
         ));
 
-        let mut acks = acks.into_iter();
-        let first = acks.next().expect("first ack");
-        assert!(first.await.expect("ack 0").expect("append 0 ok") == 0);
-        for (idx, mut ack) in acks.enumerate() {
-            let assigned = ack
-                .try_recv()
-                .expect("same group ack is ready")
-                .expect("append ok");
-            assert!(assigned == i64::try_from(idx + 1).unwrap());
-        }
-        assert!(
-            log.lock().unwrap().log_end_offset()
-                == Offset(i64::try_from(MAX_PRODUCE_GROUP).unwrap())
-        );
+        sync_started_rx.await.expect("first group reached WAL sync");
+        assert!(log.lock().unwrap().log_end_offset() == Offset(2));
 
+        writer.abort();
+        let _ = writer.await;
         drop(tx);
-        writer.await.expect("writer join");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1188,7 +1256,7 @@ mod tests {
         let r = log
             .lock()
             .unwrap()
-            .read_raw(Offset(0), Offset(1), 10 * 1024 * 1024)
+            .read_raw(Offset(0), Offset(1), crabka_units::mebibytes(10))
             .unwrap();
         assert!(&r.bytes[21..] == &wire[21..], "CRC-covered region verbatim");
         assert!(&r.bytes[17..21] == &wire[17..21], "CRC unchanged");
@@ -1228,7 +1296,7 @@ mod tests {
         let read = log
             .lock()
             .unwrap()
-            .read(Offset(0), 10 * 1024 * 1024)
+            .read(Offset(0), crabka_units::mebibytes(10))
             .unwrap();
         assert!(read.batches.len() == 1);
         check!(read.batches[0].attributes.compression() == CompressionType::Lz4);
@@ -1555,7 +1623,7 @@ mod tests {
         ));
 
         let new_cfg = LogConfig {
-            retention_ms: Some(std::time::Duration::from_mins(2)),
+            retention: Some(crabka_units::minutes(2)),
             ..LogConfig::default()
         };
         let (ack, ack_rx) = tokio::sync::oneshot::channel();
@@ -1568,7 +1636,7 @@ mod tests {
         ack_rx.await.expect("ack");
 
         let observed = log.lock().expect("lock").config_snapshot();
-        assert!(observed.retention_ms == new_cfg.retention_ms);
+        assert!(observed.retention == new_cfg.retention);
 
         drop(tx);
         writer.await.expect("writer join");

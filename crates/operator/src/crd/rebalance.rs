@@ -10,6 +10,7 @@
 //! (`Ready` / `NotReady`). `refresh` recomputes; `stop` cancels a running
 //! execution.
 
+use crabka_units::ByteRate;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -39,9 +40,13 @@ pub struct KafkaRebalanceSpec {
     /// Replication throttle (bytes/sec) applied while the proposal
     /// executes (KIP-73). When omitted the rebalancer falls back to its
     /// own `--default-throttle-bytes-per-sec`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(range(min = 1))]
-    pub throttle_bytes_per_sec: Option<i64>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::numeric::option_bytes_per_sec_i64"
+    )]
+    #[schemars(with = "Option<i64>", range(min = 1))]
+    pub throttle_bytes_per_sec: Option<ByteRate>,
 
     /// Connect-RPC base URL of the `crabka-rebalancer` service, e.g.
     /// `http://my-cluster-rebalancer.kafka.svc:9300`. When omitted the
@@ -107,6 +112,7 @@ pub struct KafkaRebalanceStatus {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::{bytes_per_sec, mebibytes_per_sec};
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -135,7 +141,7 @@ mod tests {
             "demo-rebalance",
             KafkaRebalanceSpec {
                 goals: Some(vec!["RackAware".into(), "ReplicaDistribution".into()]),
-                throttle_bytes_per_sec: Some(10_000_000),
+                throttle_bytes_per_sec: Some(bytes_per_sec(10_000_000)),
                 endpoint: Some("http://r.kafka.svc:9300".into()),
             },
         );
@@ -177,6 +183,47 @@ mod tests {
         check!(!j.contains("sessionId"), "got: {j}");
         check!(!j.contains("optimizationResult"), "got: {j}");
         check!(j.contains("\"observedGeneration\":3"), "got: {j}");
+    }
+
+    #[test]
+    fn throttle_round_trips_as_a_bare_integer() {
+        // The CRD field is a `ByteRate`, but `throttleBytesPerSec` must stay a
+        // plain JSON integer in bytes/sec — never the base-unit float `uom`
+        // stores, and never a human string.
+        for (rate, encoded) in [
+            (bytes_per_sec(10_000_000), "10000000"),
+            (mebibytes_per_sec(50), "52428800"),
+        ] {
+            let spec = KafkaRebalanceSpec {
+                goals: None,
+                throttle_bytes_per_sec: Some(rate),
+                endpoint: None,
+            };
+            let json = serde_json::to_string(&spec).unwrap();
+            assert!(
+                json == format!("{{\"throttleBytesPerSec\":{encoded}}}"),
+                "got: {json}"
+            );
+            let back: KafkaRebalanceSpec = serde_json::from_str(&json).unwrap();
+            assert!(back == spec);
+        }
+    }
+
+    #[test]
+    fn throttle_schema_stays_a_positive_integer() {
+        let crd = KafkaRebalance::crd();
+        let schema = crd.spec.versions[0]
+            .schema
+            .as_ref()
+            .and_then(|v| v.open_api_v3_schema.as_ref())
+            .and_then(|s| s.properties.as_ref())
+            .and_then(|p| p.get("spec"))
+            .and_then(|s| s.properties.as_ref())
+            .and_then(|p| p.get("throttleBytesPerSec"))
+            .expect("throttleBytesPerSec schema");
+        check!(schema.type_.as_deref() == Some("integer"));
+        check!(schema.format.as_deref() == Some("int64"));
+        check!(schema.minimum == Some(1.0));
     }
 
     #[test]

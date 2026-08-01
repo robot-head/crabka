@@ -3,6 +3,7 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use crabka_units::{Ratio, fraction};
 use num_traits::ToPrimitive;
 
 use crate::{
@@ -19,27 +20,32 @@ pub fn now_ms() -> i64 {
     crate::time::now_ms()
 }
 
-pub(crate) fn imbalance_pct_usize(counts: &HashMap<i32, usize>) -> u32 {
+/// Spread of a per-broker count, as a fraction of the cluster total:
+/// `(max - min) / total`. An empty or all-zero distribution is perfectly
+/// balanced.
+pub(crate) fn imbalance_ratio_usize(counts: &HashMap<i32, usize>) -> Ratio {
     let values: Vec<usize> = counts.values().copied().collect();
     let total: usize = values.iter().sum();
-    if total == 0 {
-        return 0;
-    }
     let max = *values.iter().max().unwrap_or(&0);
     let min = *values.iter().min().unwrap_or(&0);
-    u32::try_from((max - min) * 100 / total).unwrap_or(u32::MAX)
+    let spread = (max - min).to_f64().unwrap_or_default();
+    match total.to_f64() {
+        Some(total) if total > 0.0 => fraction(spread / total),
+        _ => fraction(0.0),
+    }
 }
 
-pub(crate) fn imbalance_pct_f64(totals: &HashMap<i32, f64>) -> u32 {
+/// Same spread, over per-broker totals that are already floats (summed
+/// byte counts, rates, or core counts).
+pub(crate) fn imbalance_ratio_f64(totals: &HashMap<i32, f64>) -> Ratio {
     let vals: Vec<f64> = totals.values().copied().collect();
     let total: f64 = vals.iter().sum();
     if total <= 0.0 {
-        return 0;
+        return fraction(0.0);
     }
     let max = vals.iter().fold(0.0f64, |a, b| a.max(*b));
     let min = vals.iter().fold(f64::INFINITY, |a, b| a.min(*b));
-    let pct = ((max - min) * 100.0 / total).clamp(0.0, f64::from(u32::MAX));
-    pct.to_u32().unwrap_or(u32::MAX)
+    fraction((max - min) / total)
 }
 
 pub(crate) fn replica_totals(
@@ -186,9 +192,9 @@ pub enum GoalPriority {
 
 #[derive(Debug, Clone)]
 pub struct GoalContext {
-    /// `(max - min) * 100 / total` must exceed this percentage for a
-    /// soft goal to act. Hard goals ignore the threshold.
-    pub imbalance_threshold_pct: u32,
+    /// `(max - min) / total` must exceed this fraction for a soft goal
+    /// to act. Hard goals ignore the threshold.
+    pub imbalance_threshold: Ratio,
     /// Safety cap on the total number of movements a single proposal
     /// can produce. Truncation drops soft-goal movements first.
     pub max_movements_per_proposal: usize,
@@ -236,6 +242,7 @@ pub trait Goal: Send + Sync {
 
 #[cfg(test)]
 pub mod tests {
+    use crabka_units::prelude::*;
 
     use super::*;
 
@@ -265,5 +272,67 @@ pub mod tests {
     fn priority_ordering_hard_before_soft() {
         assert2::assert!(matches!(GoalPriority::Hard, GoalPriority::Hard));
         assert2::assert!(GoalPriority::Hard != GoalPriority::Soft);
+    }
+
+    /// Both spread helpers hand back a dimensionless fraction of the
+    /// cluster total, not a percentage point count.
+    #[test]
+    fn imbalance_ratio_usize_is_spread_over_total() {
+        let cases = [
+            ("empty", vec![], fraction(0.0)),
+            ("all zero", vec![(1, 0), (2, 0)], fraction(0.0)),
+            ("balanced", vec![(1, 5), (2, 5)], fraction(0.0)),
+            ("three to one", vec![(1, 3), (2, 1)], percent(50)),
+            ("one broker", vec![(1, 4)], fraction(0.0)),
+        ];
+        for (name, counts, expected) in cases {
+            let counts: HashMap<i32, usize> = counts.into_iter().collect();
+            assert2::check!(imbalance_ratio_usize(&counts) == expected, "{}", name);
+        }
+    }
+
+    /// A spread between two whole percentage points still counts against the
+    /// threshold.
+    ///
+    /// The spread used to be compared as a truncated integer percentage, so a
+    /// 10.9% imbalance read as 10 and sat exactly on a 10% threshold without
+    /// tripping it — the goal declared the cluster balanced and moved nothing.
+    /// Comparing `Ratio` to `Ratio` keeps the fraction, so it now trips. Goals
+    /// treat the threshold as inclusive (`imbalance <= threshold` is balanced),
+    /// which the boundary case below pins.
+    #[test]
+    fn fractional_spread_is_not_rounded_away_at_the_threshold() {
+        let threshold = percent(10);
+
+        // Spread is (max - min) over the cluster total, so these three brokers
+        // sum to 1000 and differ by 109: a 10.9% imbalance.
+        let just_over: HashMap<i32, f64> =
+            [(1, 400.0), (2, 291.0), (3, 309.0)].into_iter().collect();
+        assert2::check!(imbalance_ratio_f64(&just_over) > threshold);
+
+        let exactly_at: HashMap<i32, f64> =
+            [(1, 400.0), (2, 300.0), (3, 300.0)].into_iter().collect();
+        assert2::check!(imbalance_ratio_f64(&exactly_at) == threshold);
+        // The predicate the goals actually evaluate: at the threshold exactly,
+        // the cluster still reads as balanced.
+        assert2::check!(imbalance_ratio_f64(&exactly_at) <= threshold);
+
+        let just_under: HashMap<i32, f64> =
+            [(1, 399.0), (2, 300.0), (3, 301.0)].into_iter().collect();
+        assert2::check!(imbalance_ratio_f64(&just_under) < threshold);
+    }
+
+    #[test]
+    fn imbalance_ratio_f64_is_spread_over_total() {
+        let cases = [
+            ("empty", vec![], fraction(0.0)),
+            ("all zero", vec![(1, 0.0), (2, 0.0)], fraction(0.0)),
+            ("three to one", vec![(1, 300.0), (2, 100.0)], percent(50)),
+            ("eighth", vec![(1, 500.0), (2, 300.0)], percent(25)),
+        ];
+        for (name, totals, expected) in cases {
+            let totals: HashMap<i32, f64> = totals.into_iter().collect();
+            assert2::check!(imbalance_ratio_f64(&totals) == expected, "{}", name);
+        }
     }
 }

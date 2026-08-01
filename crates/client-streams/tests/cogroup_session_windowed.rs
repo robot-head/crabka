@@ -3,6 +3,7 @@ use crabka_client_streams::{
     Consumed, I64Serde, Materialized, Produced, SessionWindowedSerde, SessionWindows, StringSerde,
     dsl::StreamsBuilder,
 };
+use crabka_units::prelude::*;
 
 fn assert_matches_fixture(wire: &crabka_client_streams::topology::WireTopology, fixture: &str) {
     let path = format!("tests/testdata/golden/dsl/{fixture}.topology.json");
@@ -21,7 +22,7 @@ fn cogroup_session_matches_jvm() {
     let g2 = b.stream::<String, String>(["in2"]).group_by_key();
     g1.cogroup::<i64, _>(|_k, v: &String, acc| acc + i64::try_from(v.len()).unwrap_or(i64::MAX))
         .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-        .windowed_by_session(SessionWindows::of_inactivity_gap(100))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(millis(100)))
         .aggregate_explicit(
             || 0i64,
             |_k, a, b| a + b,
@@ -57,7 +58,7 @@ fn cogroup_session_matches_jvm_behavior() {
     let g2 = b.stream::<String, String>(["in2"]).group_by_key();
     g1.cogroup::<i64, _>(|_k, v: &String, acc| acc + i64::try_from(v.len()).unwrap_or(i64::MAX))
         .cogroup(g2, |_k, _v: &String, acc| acc + 1)
-        .windowed_by_session(SessionWindows::of_inactivity_gap(100))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(millis(100)))
         .aggregate_explicit(
             || 0i64,
             |_k, a, b| a + b,

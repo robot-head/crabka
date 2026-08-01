@@ -174,7 +174,7 @@ impl StreamsBuilder {
         let versioned_cfg = materialized.versioned;
         // Surface the versioned history-retention on the returned KTable handle
         // (read by KIP-914 join routing), independent of the thunk's move.
-        let versioned_retention = versioned_cfg.map(|v| v.history_retention_ms);
+        let versioned_retention = versioned_cfg.map(|v| v.history_retention);
         let crate::dsl::config::Materialized {
             key_serde,
             value_serde,
@@ -216,7 +216,7 @@ impl StreamsBuilder {
                                     store_for_thunk.clone(),
                                     key_serde_for_lower,
                                     value_serde_for_lower,
-                                    vc.history_retention_ms,
+                                    vc.history_retention,
                                     [h.name().to_string()],
                                     changelog_topic,
                                 );
@@ -228,7 +228,7 @@ impl StreamsBuilder {
                                     store_for_thunk.clone(),
                                     key_serde_for_lower,
                                     value_serde_for_lower,
-                                    vc.history_retention_ms,
+                                    vc.history_retention,
                                     [h.name().to_string()],
                                 );
                         }

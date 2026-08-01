@@ -3,8 +3,8 @@
 use std::sync::Arc;
 
 use crabka_pprof::{
-    ChainedResolver, DebuginfodResolver, FileSystemResolver, NativeResolver, NativeSymbol,
-    SymbolizeRequest,
+    ChainedResolver, DebuginfodConfig, DebuginfodResolver, FileSystemResolver, NativeResolver,
+    NativeSymbol, SymbolizeRequest,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -26,9 +26,23 @@ impl NativeResolver for AddressFallbackResolver {
 pub fn native_resolver_from_debuginfod_urls(
     urls: Vec<String>,
 ) -> Result<ChainedResolver, crate::ProfilesError> {
+    native_resolver_from_debuginfod_config(urls, DebuginfodConfig::default())
+}
+
+/// Build the native resolver chain with explicit debuginfod resource policy.
+///
+/// # Errors
+///
+/// Returns an error when a configured debuginfod URL is invalid or its HTTP
+/// client cannot be built.
+pub fn native_resolver_from_debuginfod_config(
+    urls: Vec<String>,
+    config: DebuginfodConfig,
+) -> Result<ChainedResolver, crate::ProfilesError> {
     let mut resolvers: Vec<Arc<dyn NativeResolver>> = vec![Arc::new(FileSystemResolver::default())];
     if !urls.is_empty() {
-        let debuginfod = DebuginfodResolver::new(urls).map_err(crate::ProfilesError::Block)?;
+        let debuginfod =
+            DebuginfodResolver::with_config(urls, config).map_err(crate::ProfilesError::Block)?;
         resolvers.push(Arc::new(debuginfod));
     }
     resolvers.push(Arc::new(AddressFallbackResolver));
@@ -39,7 +53,19 @@ pub fn native_resolver_from_debuginfod_urls(
 /// # Errors
 /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn run(debuginfod_urls: Vec<String>) -> Result<(), crate::ProfilesError> {
-    let _resolver = native_resolver_from_debuginfod_urls(debuginfod_urls.clone())?;
+    run_with_config(debuginfod_urls, DebuginfodConfig::default()).await
+}
+
+/// Run the symbolizer role with explicit debuginfod resource policy.
+///
+/// # Errors
+///
+/// Returns an error when resolver setup or signal handling fails.
+pub async fn run_with_config(
+    debuginfod_urls: Vec<String>,
+    config: DebuginfodConfig,
+) -> Result<(), crate::ProfilesError> {
+    let _resolver = native_resolver_from_debuginfod_config(debuginfod_urls.clone(), config)?;
     tracing::info!(
         debuginfod_urls = ?debuginfod_urls,
         "profiles symbolizer ready; DWARF/debuginfod resolver integration is loaded"
@@ -61,6 +87,8 @@ fn build_label(request: &SymbolizeRequest) -> String {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_pprof::DebuginfodConfig;
+    use crabka_units::{mebibytes, millis, secs};
 
     use super::*;
 
@@ -81,6 +109,14 @@ mod tests {
     #[test]
     fn symbolizer_builds_local_plus_debuginfod_resolver() {
         native_resolver_from_debuginfod_urls(vec!["http://127.0.0.1:1".to_string()]).unwrap();
+    }
+
+    #[test]
+    fn symbolizer_accepts_explicit_debuginfod_config() {
+        let config = DebuginfodConfig::new(mebibytes(64), millis(250), secs(3)).unwrap();
+
+        native_resolver_from_debuginfod_config(vec!["http://127.0.0.1:1".to_string()], config)
+            .unwrap();
     }
 
     #[test]

@@ -24,11 +24,11 @@ use std::sync::Arc;
 
 use assert2::{assert, check};
 use crabka_operator::{
-    controller::kafka::reconcile,
+    controller::{common::ReconcileError, kafka::reconcile},
     crd::{
-        ConfigMapKeyRef, ExternalLoggingSource, Kafka, KafkaSpec, Listener, ListenerAuthentication,
-        ListenerType, Logging, LoggingType, MetricsConfig, NetworkPolicySpec, PodMonitorSpec,
-        ServiceMonitorSpec,
+        BrokerTuning, ConfigMapKeyRef, ExternalLoggingSource, Kafka, KafkaSpec, Listener,
+        ListenerAuthentication, ListenerType, Logging, LoggingType, MetricsConfig,
+        NetworkPolicySpec, PodMonitorSpec, ServiceMonitorSpec,
     },
 };
 use http::{Method, Response};
@@ -63,6 +63,8 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -91,6 +93,8 @@ fn kafka_cr_with_metrics(name: &str, namespace: &str, metrics: Option<MetricsCon
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -123,6 +127,8 @@ fn kafka_cr_with_network_policy(
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -157,6 +163,8 @@ fn kafka_cr_with_config(
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -373,10 +381,18 @@ async fn kafka_applies_service_configmap_secret_no_statefulset() {
     // status branch is identical, but a present pool makes the
     // "no StatefulSet" assertion meaningful).
     let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
-    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let state = MockState::new(happy_path_rules("demo", "y", &items));
+    let mut ctx = fixture_ctx(mock_client(&state, "y"), "y");
+    Arc::get_mut(&mut ctx.config)
+        .expect("fixture owns operator config")
+        .controller_dependency_requeue = crabka_units::millis(1_234);
     let kafka = kafka_cr("demo", "y");
 
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
+    let action = reconcile(Arc::new(kafka), Arc::new(ctx)).await.unwrap();
+    assert!(
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(1_234))
+    );
 
     let observed = state.take_observed();
     let methods_and_uris: Vec<(Method, String)> = observed
@@ -628,6 +644,8 @@ fn kafka_cr_with_versions(
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -656,6 +674,8 @@ fn kafka_cr_with_logging(name: &str, namespace: &str, logging: Option<Logging>) 
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -837,6 +857,191 @@ fn configmap_data<B: AsRef<[u8]>>(observed: &[http::Request<B>]) -> serde_json::
     let body: serde_json::Value =
         serde_json::from_slice(cm_patch.body().as_ref()).expect("configmap PATCH body is JSON");
     body["data"].clone()
+}
+
+#[tokio::test]
+async fn broker_tuning_renders_runtime_toml_in_declaration_order() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let mut kafka = kafka_cr("demo", "y");
+    kafka.spec.broker_tuning = Some(BrokerTuning {
+        cleaner_interval: Some(crabka_units::secs(7)),
+        isr_scan_interval: Some(crabka_units::millis(800)),
+        opa_http_timeout: Some(crabka_units::millis(2_500)),
+        auto_join_voter_request_timeout: Some(crabka_units::secs(4)),
+        replication_fetch_max: Some(crabka_units::mebibytes(2)),
+        replication_fetch_max_wait: Some(crabka_units::millis(750)),
+        replication_fetch_min: Some(crabka_units::bytes(2)),
+        share_state_replication_factor: Some(2),
+        transaction_state_replication_factor: Some(3),
+        streams_internal_topic_replication_factor: Some(2),
+        ..BrokerTuning::default()
+    });
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let data = configmap_data(&observed);
+    let toml = data["broker-0.toml"].as_str().expect("broker TOML");
+    let expected = "[runtime]\n\
+cleaner_interval = \"7s\"\n\
+isr_scan_interval = \"800ms\"\n\
+opa_http_timeout = \"2.5s\"\n\
+auto_join_voter_request_timeout = \"4s\"\n\
+replication_fetch_max = \"2MiB\"\n\
+replication_fetch_max_wait = \"750ms\"\n\
+replication_fetch_min = \"2B\"\n\
+share_state_replication_factor = 2\n\
+transaction_state_replication_factor = 3\n\
+streams_internal_topic_replication_factor = 2\n";
+    assert!(toml.contains(expected), "rendered TOML:\n{toml}");
+    assert!(state.remaining_rules() == 0);
+}
+
+#[tokio::test]
+async fn empty_broker_tuning_omits_runtime_section() {
+    let items = vec![fake_pool_list_item("brokers", "y", "demo", 1, 1)];
+    let (ctx, state) = build_ctx("y", happy_path_rules("demo", "y", &items));
+    let mut kafka = kafka_cr("demo", "y");
+    kafka.spec.broker_tuning = Some(BrokerTuning::default());
+
+    reconcile(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    let data = configmap_data(&observed);
+    let toml = data["broker-0.toml"].as_str().expect("broker TOML");
+    assert!(!toml.contains("[runtime]"), "rendered TOML:\n{toml}");
+    assert!(state.remaining_rules() == 0);
+}
+
+#[test]
+fn broker_tuning_rejects_zero_with_camel_case_path() {
+    let tuning = BrokerTuning {
+        cleaner_interval: Some(crabka_units::millis(0)),
+        ..BrokerTuning::default()
+    };
+
+    let error = tuning.validate().expect_err("zero interval must fail");
+    assert!(error.contains("spec.brokerTuning.cleanerInterval"));
+}
+
+#[test]
+fn broker_tuning_rejects_voter_timeout_above_wire_limit() {
+    let tuning = BrokerTuning {
+        auto_join_voter_request_timeout: Some(crabka_units::millis(2_147_483_648)),
+        ..BrokerTuning::default()
+    };
+
+    let error = tuning
+        .validate()
+        .expect_err("timeout above i32 wire limit must fail");
+    assert!(error.contains("spec.brokerTuning.autoJoinVoterRequestTimeout"));
+}
+
+#[test]
+fn broker_tuning_rejects_fractional_protocol_milliseconds() {
+    let tuning = BrokerTuning {
+        replication_fetch_max_wait: Some(crabka_units::micros(1_500)),
+        ..BrokerTuning::default()
+    };
+
+    let error = tuning
+        .validate()
+        .expect_err("fractional protocol milliseconds must fail");
+    assert!(error.contains("spec.brokerTuning.replicationFetchMaxWait"));
+}
+
+#[test]
+fn broker_tuning_rejects_zero_streams_internal_topic_replication_factor() {
+    let tuning = BrokerTuning {
+        streams_internal_topic_replication_factor: Some(0),
+        ..BrokerTuning::default()
+    };
+
+    let error = tuning
+        .validate()
+        .expect_err("zero streams replication factor must fail");
+    assert!(error.contains("spec.brokerTuning.streamsInternalTopicReplicationFactor"));
+}
+
+#[test]
+fn broker_tuning_rejects_initial_backoff_above_cap() {
+    let tuning = BrokerTuning {
+        replication_reconnect_initial_delay: Some(crabka_units::millis(500)),
+        replication_reconnect_delay_cap: Some(crabka_units::millis(100)),
+        ..BrokerTuning::default()
+    };
+
+    let error = tuning
+        .validate()
+        .expect_err("initial reconnect delay above cap must fail");
+    assert!(error.contains("spec.brokerTuning.replicationReconnectInitialDelay"));
+    assert!(error.contains("spec.brokerTuning.replicationReconnectDelayCap"));
+}
+
+#[tokio::test]
+async fn invalid_broker_tuning_sets_condition_and_skips_configmap() {
+    let rules = vec![
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/services/demo-broker-headless".into(),
+            response: json_response(200, &fake_service_body("demo-broker-headless", "y")),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/kafkas/demo/status".into(),
+            response: json_response(200, &fake_kafka_body("demo", "y")),
+        },
+        MockRule {
+            method: Method::PATCH,
+            path_substr: "/kafkas/demo/status".into(),
+            response: json_response(200, &fake_kafka_body("demo", "y")),
+        },
+    ];
+    let (ctx, state) = build_ctx("y", rules);
+    let mut kafka = kafka_cr("demo", "y");
+    kafka.spec.broker_tuning = Some(BrokerTuning {
+        cleaner_interval: Some(crabka_units::millis(0)),
+        ..BrokerTuning::default()
+    });
+
+    let error = reconcile(Arc::new(kafka), ctx)
+        .await
+        .expect_err("invalid broker tuning must block reconciliation");
+    assert!(
+        matches!(error, ReconcileError::KafkaConfigInvalid(_)),
+        "error = {error:?}"
+    );
+
+    let observed = state.take_observed();
+    assert!(
+        observed
+            .iter()
+            .all(|request| !request.uri().to_string().contains("/configmaps/"))
+    );
+    let status = observed
+        .iter()
+        .find(|request| {
+            request.method() == Method::PATCH
+                && request.uri().to_string().contains("/kafkas/demo/status")
+        })
+        .expect("status patch");
+    let body: serde_json::Value =
+        serde_json::from_slice(status.body().as_ref()).expect("status JSON");
+    let condition = body["status"]["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .find(|condition| condition["type"] == "KafkaConfigValid")
+        .expect("KafkaConfigValid condition");
+    assert!(condition["reason"] == "KafkaConfigInvalid");
+    assert!(
+        condition["message"]
+            .as_str()
+            .expect("message")
+            .contains("spec.brokerTuning.cleanerInterval")
+    );
+    assert!(state.remaining_rules() == 0);
 }
 
 /// A valid cluster echoes `kafkaVersion`, finalizes

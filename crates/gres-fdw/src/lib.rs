@@ -20,9 +20,12 @@ pub mod source;
 pub mod types;
 
 pub use config::{ConnProfile, ServerProfile, resolve, resolve_server};
-pub use decode::{DecodedValue, Wire, decode_value};
+pub use crabka_schema_serde::SchemaFetchRetryPolicy;
+pub use decode::{DecodedValue, FdwDecodePolicy, Wire, decode_value, decode_value_with_policy};
 pub use error::KafkaFdwError;
-pub use source::{FetchPlan, RawRecord, plan_fetch, scan_topic};
+pub use source::{
+    FdwScanPolicy, FetchPlan, RawRecord, plan_fetch, scan_topic, scan_topic_with_dns_timeout,
+};
 pub use types::{
     avro_schema_to_columns, json_schema_to_columns, project, protobuf_message_to_columns,
 };
@@ -39,13 +42,98 @@ pub use types::{
 #[derive(Debug, Default)]
 pub struct KafkaFdw {
     default_bootstrap: Option<String>,
+    broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
+    fetch_min: crabka_client_core::FetchMinBytes,
+    scan_policy: FdwScanPolicy,
+    decode_policy: FdwDecodePolicy,
+    schema_fetch_retry_policy: SchemaFetchRetryPolicy,
 }
 
 impl KafkaFdw {
     /// Construct a scanner with an optional default bootstrap address list.
     #[must_use]
     pub fn with_defaults(default_bootstrap: Option<String>) -> Self {
-        Self { default_bootstrap }
+        Self {
+            default_bootstrap,
+            broker_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+            dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            frame_max: crabka_client_core::ClientFrameMax::default(),
+            fetch_min: crabka_client_core::FetchMinBytes::default(),
+            scan_policy: FdwScanPolicy::default(),
+            decode_policy: FdwDecodePolicy::default(),
+            schema_fetch_retry_policy: SchemaFetchRetryPolicy::default(),
+        }
+    }
+
+    /// Override the broker DNS lookup deadline for this scanner.
+    #[must_use]
+    pub fn with_broker_dns_timeout(
+        mut self,
+        timeout: crabka_client_core::ClientDnsTimeout,
+    ) -> Self {
+        self.broker_dns_timeout = timeout;
+        self
+    }
+
+    /// Return the broker DNS lookup deadline for this scanner.
+    #[must_use]
+    pub fn broker_dns_timeout(&self) -> crabka_client_core::ClientDnsTimeout {
+        self.broker_dns_timeout
+    }
+
+    /// Override client connection and fetch resource policy.
+    #[must_use]
+    pub fn with_client_resource_policy(
+        mut self,
+        dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+        frame_max: crabka_client_core::ClientFrameMax,
+        fetch_min: crabka_client_core::FetchMinBytes,
+    ) -> Self {
+        self.dispatch_queue_capacity = dispatch_queue_capacity;
+        self.frame_max = frame_max;
+        self.fetch_min = fetch_min;
+        self
+    }
+
+    /// Override per-scan broker fetch and connection policy.
+    #[must_use]
+    pub fn with_scan_policy(mut self, policy: FdwScanPolicy) -> Self {
+        self.scan_policy = policy;
+        self
+    }
+
+    /// Return per-scan broker fetch and connection policy.
+    #[must_use]
+    pub fn scan_policy(&self) -> FdwScanPolicy {
+        self.scan_policy
+    }
+
+    /// Override cold-cache schema resolution policy.
+    #[must_use]
+    pub fn with_decode_policy(mut self, policy: FdwDecodePolicy) -> Self {
+        self.decode_policy = policy;
+        self
+    }
+
+    /// Return cold-cache schema resolution policy.
+    #[must_use]
+    pub fn decode_policy(&self) -> FdwDecodePolicy {
+        self.decode_policy
+    }
+
+    /// Override the retry range for transient schema fetch failures.
+    #[must_use]
+    pub fn with_schema_fetch_retry_policy(mut self, policy: SchemaFetchRetryPolicy) -> Self {
+        self.schema_fetch_retry_policy = policy;
+        self
+    }
+
+    /// Return the retry range for transient schema fetch failures.
+    #[must_use]
+    pub fn schema_fetch_retry_policy(&self) -> SchemaFetchRetryPolicy {
+        self.schema_fetch_retry_policy
     }
 
     /// Return the configured default bootstrap, when this scanner has one.
@@ -63,10 +151,16 @@ fn to_exec_err(err: &KafkaFdwError) -> ExecError {
 }
 
 /// Build a [`SchemaCache`] for one scan from the profile's registry URL.
-fn build_cache(profile: &ConnProfile) -> Arc<SchemaCache> {
+fn build_cache(
+    profile: &ConnProfile,
+    fetch_retry_policy: SchemaFetchRetryPolicy,
+) -> Arc<SchemaCache> {
     SchemaCache::new(
         RegistryClient::new(profile.registry_url.clone()),
-        CacheConfig::default(),
+        CacheConfig {
+            fetch_retry_policy,
+            ..CacheConfig::default()
+        },
     )
 }
 
@@ -89,17 +183,26 @@ impl ForeignScanner for KafkaFdw {
 
         let profile = config::resolve(server, mapping, &foreign.options, self.default_bootstrap())
             .map_err(|err| to_exec_err(&err))?;
-        let cache = build_cache(&profile);
+        let cache = build_cache(&profile, self.schema_fetch_retry_policy);
 
         // Drive the async fetch + decode on the current multi-thread runtime
         // without blocking its worker pool (`block_in_place` moves this task to
         // a blocking thread).
         tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(async {
-                let raws = source::scan_topic(&profile, &profile.topic, bounds)
-                    .await
-                    .map_err(|err| to_exec_err(&err))?;
-                scan::assemble_rows(table, &raws, &profile, &cache)
+                let raws = source::scan_topic_with_policy(
+                    &profile,
+                    &profile.topic,
+                    bounds,
+                    self.broker_dns_timeout,
+                    self.dispatch_queue_capacity,
+                    self.frame_max,
+                    self.fetch_min,
+                    self.scan_policy,
+                )
+                .await
+                .map_err(|err| to_exec_err(&err))?;
+                scan::assemble_rows_with_policy(table, &raws, &profile, &cache, self.decode_policy)
                     .await
                     .map_err(|err| to_exec_err(&err))
             })
@@ -126,12 +229,19 @@ impl ForeignScanner for KafkaFdw {
             tokio::runtime::Handle::current().block_on(async {
                 // Enumerate every topic via the admin metadata RPC (empty topic
                 // list = all topics, per Kafka semantics).
-                let mut admin =
-                    AdminClient::connect_secured(&profile.bootstrap, profile.security.clone())
-                        .await
-                        .map_err(|e| {
-                            ExecError::Unsupported(format!("import: admin connect: {e}"))
-                        })?;
+                let mut options = crabka_client_core::ConnectionOptions {
+                    client_id: "crabka-fdw".into(),
+                    dns_timeout: self.broker_dns_timeout,
+                    dispatch_queue_capacity: self.dispatch_queue_capacity,
+                    frame_max: self.frame_max,
+                    security: profile.security.clone().map(Box::new),
+                    ..crabka_client_core::ConnectionOptions::default()
+                };
+                options.connect_timeout = crabka_units::secs(5);
+                options.request_timeout = crabka_units::secs(30);
+                let mut admin = AdminClient::connect_with_options(&profile.bootstrap, options)
+                    .await
+                    .map_err(|e| ExecError::Unsupported(format!("import: admin connect: {e}")))?;
                 let meta = admin.metadata(&[]).await.map_err(|e| {
                     ExecError::Unsupported(format!("import: list topics metadata: {e}"))
                 })?;
@@ -271,4 +381,53 @@ async fn fetch_value_columns(
     }
 
     Ok(None)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn schema_fetch_retry_policy_reaches_per_scan_cache() {
+        let policy = crabka_schema_serde::SchemaFetchRetryPolicy::new(
+            crabka_units::millis(37),
+            crabka_units::millis(91),
+        )
+        .unwrap();
+        let fdw = KafkaFdw::with_defaults(Some("broker:9092".into()))
+            .with_schema_fetch_retry_policy(policy);
+        assert_eq!(fdw.schema_fetch_retry_policy(), policy);
+
+        let profile = ConnProfile {
+            bootstrap: vec!["broker:9092".to_string()],
+            registry_url: "http://registry:8081".to_string(),
+            security: None,
+            topic: "orders".to_string(),
+            value_format: Wire::Raw,
+            key_format: Wire::Raw,
+        };
+        let cache = build_cache(&profile, policy);
+        assert_eq!(cache.fetch_retry_policy(), policy);
+    }
+
+    #[test]
+    fn fdw_carries_typed_broker_dns_timeout() {
+        let timeout = crabka_client_core::ClientDnsTimeout::new(crabka_units::millis(37))
+            .expect("positive timeout");
+        let dispatch =
+            crabka_client_core::ConnectionDispatchQueueCapacity::new(7).expect("positive");
+        let frame_max = crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32))
+            .expect("valid frame max");
+        let fetch_min = crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(9))
+            .expect("valid fetch min");
+        let fdw = KafkaFdw::with_defaults(Some("broker:9092".into()))
+            .with_broker_dns_timeout(timeout)
+            .with_client_resource_policy(dispatch, frame_max, fetch_min);
+
+        assert_eq!(fdw.default_bootstrap(), Some("broker:9092"));
+        assert_eq!(fdw.broker_dns_timeout(), timeout);
+        assert_eq!(fdw.dispatch_queue_capacity, dispatch);
+        assert_eq!(fdw.frame_max, frame_max);
+        assert_eq!(fdw.fetch_min, fetch_min);
+    }
 }

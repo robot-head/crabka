@@ -1,5 +1,5 @@
 //! Per-leader-partition ISR maintenance. Compares each follower's
-//! last-fetch time vs `replica_lag_time_max_ms` and proposes
+//! last-fetch time vs `replica_lag_time_max` and proposes
 //! `AlterPartition` shrink/expand to the controller leader.
 
 #![allow(dead_code)]
@@ -12,14 +12,11 @@ use std::{
 use crabka_ids::LeaderEpoch;
 use crabka_protocol::owned::alter_partition_request::AlterPartitionRequest;
 use crabka_raft::NodeId;
+use crabka_units::{Time, convert::TimeExt as _};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 use crate::{partition::Partition, partition_registry::PartitionRegistry};
-
-/// Cadence of the ISR maintenance scan: every leader partition's follower
-/// lag is re-evaluated once per tick.
-const ISR_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 
 /// KIP-903 sentinel for an unknown broker epoch. Stamped when the metadata
 /// image has no epoch for a broker; tells the controller to skip the
@@ -27,10 +24,13 @@ const ISR_SCAN_INTERVAL: Duration = Duration::from_secs(1);
 const UNKNOWN_BROKER_EPOCH: i64 = -1;
 
 pub(crate) struct Config {
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub node_id: NodeId,
+    pub scan_interval: Time,
     pub partitions: Arc<PartitionRegistry>,
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
-    pub replica_lag_time_max: Duration,
+    pub replica_lag_time_max: Time,
     pub broker_id: i32,
     pub shutdown: CancellationToken,
     /// Bumped on each proposed shrink / expand.
@@ -38,7 +38,7 @@ pub(crate) struct Config {
 }
 
 pub(crate) async fn run(cfg: Config) {
-    let mut tick = tokio::time::interval(ISR_SCAN_INTERVAL);
+    let mut tick = tokio::time::interval(cfg.scan_interval.to_std());
     // Reused across ticks to avoid re-allocating the snapshot Vec each second.
     // Holds cheap `Arc<Partition>` clones (no String allocation, no second
     // registry lookup). Cleared and refilled each tick.
@@ -61,7 +61,8 @@ pub(crate) async fn run(cfg: Config) {
             {
                 continue;
             }
-            let Some(proposal) = compute_proposal(&part, cfg.replica_lag_time_max).await else {
+            let Some(proposal) = compute_proposal(&part, cfg.replica_lag_time_max.to_std()).await
+            else {
                 continue;
             };
             // Classify the proposal as shrink/expand using the ISRs captured
@@ -87,6 +88,7 @@ pub(crate) async fn run(cfg: Config) {
                 part.index.get(),
                 proposal.new_isr,
                 proposal.leader_epoch.0,
+                (cfg.client_dispatch_queue_capacity, cfg.client_frame_max),
             )
             .await
             {
@@ -163,6 +165,10 @@ async fn send_alter_partition(
     partition: i32,
     new_isr: Vec<NodeId>,
     leader_epoch: i32,
+    client_resource_policy: (
+        crabka_client_core::ConnectionDispatchQueueCapacity,
+        crabka_client_core::ClientFrameMax,
+    ),
 ) -> Result<(), String> {
     let image = controller.current_image();
     let leader_id = *controller.watch_leader().borrow();
@@ -178,7 +184,15 @@ async fn send_alter_partition(
         build_alter_partition_request(&image, broker_id, topic, partition, &new_isr, leader_epoch);
     let mut last_err = String::new();
     for (target_id, addr) in targets {
-        match send_alter_partition_to(broker_id, &addr, req.clone()).await {
+        match send_alter_partition_to(
+            broker_id,
+            &addr,
+            req.clone(),
+            client_resource_policy.0,
+            client_resource_policy.1,
+        )
+        .await
+        {
             Ok(()) => {
                 debug!(
                     topic = topic,
@@ -312,10 +326,14 @@ async fn send_alter_partition_to(
     broker_id: i32,
     addr: &str,
     req: AlterPartitionRequest,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
 ) -> Result<(), AlterPartitionSendError> {
     let client = crabka_client_core::Client::builder()
         .bootstrap(addr.to_string())
         .client_id(format!("crabka-broker-{broker_id}-isr"))
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await
         .map_err(|e| AlterPartitionSendError::Transport(format!("connect: {e}")))?;
@@ -360,6 +378,7 @@ mod tests {
     use crabka_ids::PartitionIndex;
     use crabka_log::Offset;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
+    use crabka_units::{millis, secs};
     use tempfile::tempdir;
     use tokio::sync::watch;
 
@@ -630,10 +649,14 @@ mod tests {
         let metrics = crate::metrics::BrokerMetrics::default();
         let shutdown = CancellationToken::new();
         let task = tokio::spawn(run(Config {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             node_id: NodeId(1),
+            scan_interval: millis(7),
             partitions,
             controller,
-            replica_lag_time_max: Duration::from_secs(5),
+            replica_lag_time_max: secs(5),
             broker_id: 1,
             shutdown: shutdown.clone(),
             metrics: metrics.clone(),
@@ -721,9 +744,20 @@ mod tests {
             TestMetadataSource::new(MetadataImage::new(uuid::Uuid::nil()), None),
         );
 
-        let err = send_alter_partition(&controller, 1, "orders", 0, vec![NodeId(1)], 3)
-            .await
-            .expect_err("missing controller leader should reject the send");
+        let err = send_alter_partition(
+            &controller,
+            1,
+            "orders",
+            0,
+            vec![NodeId(1)],
+            3,
+            (
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+                crabka_client_core::ClientFrameMax::default(),
+            ),
+        )
+        .await
+        .expect_err("missing controller leader should reject the send");
 
         assert_eq!(err, "no controller leader");
     }
@@ -734,9 +768,15 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         drop(listener);
 
-        let err = send_alter_partition_to(1, &addr.to_string(), AlterPartitionRequest::default())
-            .await
-            .expect_err("closed local port should fail as transport");
+        let err = send_alter_partition_to(
+            1,
+            &addr.to_string(),
+            AlterPartitionRequest::default(),
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            crabka_client_core::ClientFrameMax::default(),
+        )
+        .await
+        .expect_err("closed local port should fail as transport");
 
         assert!(matches!(err, AlterPartitionSendError::Transport(_)));
     }

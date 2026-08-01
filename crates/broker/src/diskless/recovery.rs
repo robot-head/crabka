@@ -5,6 +5,7 @@ use std::sync::Arc;
 use crabka_ids::{Offset, PartitionIndex};
 use crabka_log::{Log, LogConfig};
 use crabka_protocol::records::RecordBatch;
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
 use crate::{error::BrokerError, producer_state::ProducerState};
 
@@ -43,8 +44,13 @@ pub(crate) async fn rebuild_producer_state(
     log: &Log,
     producer_state: &Arc<ProducerState>,
 ) -> Result<(), BrokerError> {
+    // The rebuild replays every batch in the log, so the read is uncapped.
     let raw = log
-        .read_raw(log.log_start_offset(), log.log_end_offset(), usize::MAX)
+        .read_raw(
+            log.log_start_offset(),
+            log.log_end_offset(),
+            ByteSize::from_bytes(u64::MAX),
+        )
         .map_err(BrokerError::from)?;
     let mut cur: &[u8] = &raw.bytes;
     while !cur.is_empty() {

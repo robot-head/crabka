@@ -1,5 +1,5 @@
 //! Sliding-window aggregation processor (KIP-450): inclusive, data-defined
-//! windows of size `time_difference_ms`. Ports JVM
+//! windows of size `time_difference`. Ports JVM
 //! `KStreamSlidingWindowAggregate`. Supports both emit-on-update (the default)
 //! and emit-on-close (KIP-825) forwarding strategies.
 //!
@@ -19,7 +19,7 @@
 //!
 //! **Emission gate (emit-on-update)**: a window is only forwarded when
 //! `window_end >= window_close_time` where
-//! `window_close_time = stream_time - grace_ms`. Windows that fall entirely
+//! `window_close_time = stream_time - grace`. Windows that fall entirely
 //! before `window_close_time` are updated in the store but not forwarded (they
 //! are already "expired").
 //!
@@ -32,6 +32,7 @@
 use std::marker::PhantomData;
 
 use async_trait::async_trait;
+use crabka_units::prelude::*;
 
 use crate::{
     dsl::{
@@ -56,7 +57,7 @@ type Marker<T> = PhantomData<fn() -> T>;
 /// windows whose range overlaps `t` are updated in place.
 ///
 /// Stream-time tracks the maximum observed record timestamp; records whose own
-/// window (`[t, t+W]`) ends before `stream_time - grace_ms` are silently dropped.
+/// window (`[t, t+W]`) ends before `stream_time - grace` are silently dropped.
 #[allow(dead_code)]
 pub(crate) struct KStreamSlidingWindowAggregateProcessor<K, V, VA, I, A> {
     pub store_name: String,
@@ -97,11 +98,11 @@ where
         r: Record<K, V>,
     ) {
         let key = r.key.expect("sliding aggregate requires a non-null key");
-        let w = self.windows.time_difference_ms;
+        let w = self.windows.time_difference.millis_i64();
         let t = r.timestamp;
         self.stream_time = self.stream_time.max(t);
         // windowCloseTime = observedStreamTime - gracePeriodMs  (JVM naming)
-        let close_time = self.stream_time - self.windows.grace_ms;
+        let close_time = self.stream_time - self.windows.grace.millis_i64();
 
         // Drop records whose own window ends before the close time.
         // JVM: `if (windowEnd < windowCloseTime) { return; }`
@@ -534,13 +535,13 @@ where
     /// Forward each window whose `end <= window_close_time` and `end >
     /// last_emitted_close` as a final `Change`, ascending by window start, then
     /// advance the watermark. Sliding windows have `end = start +
-    /// time_difference_ms`.
+    /// time_difference`.
     async fn emit_closed_windows(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>,
         window_close_time: i64,
     ) {
-        let w = self.windows.time_difference_ms;
+        let w = self.windows.time_difference.millis_i64();
         // Strict close (JVM): emit once stream-time moves PAST the end
         // (`end < window_close_time`). end = start + w < close ⟺ start <= close-w-1.
         let start_to = window_close_time - w - 1;
@@ -617,10 +618,10 @@ where
         r: Record<K, V>,
     ) {
         let key = r.key.expect("sliding reduce requires a non-null key");
-        let w = self.windows.time_difference_ms;
+        let w = self.windows.time_difference.millis_i64();
         let t = r.timestamp;
         self.stream_time = self.stream_time.max(t);
-        let close_time = self.stream_time - self.windows.grace_ms;
+        let close_time = self.stream_time - self.windows.grace.millis_i64();
 
         let record_window_end = t + w;
         if record_window_end < close_time {
@@ -1026,13 +1027,13 @@ where
     /// Forward each window whose `end <= window_close_time` and `end >
     /// last_emitted_close` as a final `Change`, ascending by window start, then
     /// advance the watermark. Sliding windows have `end = start +
-    /// time_difference_ms`.
+    /// time_difference`.
     async fn emit_closed_windows(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
         window_close_time: i64,
     ) {
-        let w = self.windows.time_difference_ms;
+        let w = self.windows.time_difference.millis_i64();
         // Strict close (JVM): emit once stream-time moves PAST the end
         // (`end < window_close_time`). end = start + w < close ⟺ start <= close-w-1.
         let start_to = window_close_time - w - 1;
@@ -1141,7 +1142,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(I64Serde),
             "app-w-changelog".into(),
-            10,
+            millis(10),
         )));
         s
     }
@@ -1149,7 +1150,7 @@ mod tests {
     fn count_proc() -> CountProcessor {
         KStreamSlidingWindowAggregateProcessor {
             store_name: "w".into(),
-            windows: SlidingWindows::of_time_difference_with_no_grace(10),
+            windows: SlidingWindows::of_time_difference_with_no_grace(millis(10)),
             init: (|| 0i64) as fn() -> i64,
             agg: (|_k: &String, _v: &String, a: i64| a + 1) as fn(&String, &String, i64) -> i64,
             stream_time: i64::MIN,
@@ -1236,7 +1237,7 @@ mod tests {
     /// until a far-future record forces them closed.
     fn count_proc_close() -> CountProcessor {
         let mut p = count_proc();
-        p.windows = SlidingWindows::of_time_difference_and_grace(10, 100);
+        p.windows = SlidingWindows::of_time_difference_and_grace(millis(10), millis(100));
         p.emit = crate::dsl::emit::EmitStrategy::on_window_close();
         p
     }
@@ -1338,7 +1339,7 @@ mod tests {
             Box::new(StringSerde),
             Box::new(StringSerde),
             "app-w-changelog".into(),
-            10,
+            millis(10),
         )));
         s
     }
@@ -1347,7 +1348,7 @@ mod tests {
     -> KStreamSlidingWindowReduceProcessor<String, String, fn(&String, &String) -> String> {
         KStreamSlidingWindowReduceProcessor {
             store_name: "w".into(),
-            windows: SlidingWindows::of_time_difference_with_no_grace(10),
+            windows: SlidingWindows::of_time_difference_with_no_grace(millis(10)),
             reducer: (|a: &String, v: &String| format!("{a}|{v}"))
                 as fn(&String, &String) -> String,
             stream_time: i64::MIN,
@@ -1488,7 +1489,7 @@ mod tests {
     fn reduce_proc_close()
     -> KStreamSlidingWindowReduceProcessor<String, String, fn(&String, &String) -> String> {
         let mut p = reduce_proc();
-        p.windows = SlidingWindows::of_time_difference_and_grace(10, 100);
+        p.windows = SlidingWindows::of_time_difference_and_grace(millis(10), millis(100));
         p.emit = crate::dsl::emit::EmitStrategy::on_window_close();
         p
     }

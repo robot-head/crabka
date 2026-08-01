@@ -201,7 +201,7 @@ mod tests {
         // the coordinator can persist the seeded entry.
         let tid = "txn-list-pid-filter";
         let coord = &broker.txn_coordinator;
-        let p = crate::txn::coordinator::TxnCoordinator::partition_for(tid);
+        let p = coord.partition_for(tid);
         let part_dir =
             crate::log_dir::partition_dir(dir.path(), crate::txn::bootstrap::TOPIC, p.get());
         std::fs::create_dir_all(&part_dir).unwrap();

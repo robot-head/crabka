@@ -161,11 +161,15 @@ pub enum BrokerError {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
 
-    #[error("invalid leader_imbalance_check_interval_secs = {value}: must be >= 1")]
+    #[error("invalid leader_imbalance_check_interval = {value}: must be >= 1")]
     InvalidLeaderRebalanceInterval { value: u64 },
 
-    #[error("invalid leader_imbalance_per_broker_percentage = {value}: must be <= 100")]
-    InvalidLeaderRebalanceThreshold { value: u32 },
+    #[error("invalid leader_imbalance_per_broker_percentage = {percent}: must be <= 100")]
+    InvalidLeaderRebalanceThreshold { percent: f64 },
+
+    /// Runtime tuning contains an invalid scalar or field relation.
+    #[error("invalid runtime configuration: {0}")]
+    InvalidRuntimeConfig(String),
 
     #[error("controlled shutdown did not complete within {0:?}")]
     ShutdownTimeout(std::time::Duration),

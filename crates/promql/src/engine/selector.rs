@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, time::SystemTime};
 
 use crabka_blockstore::{LabelMatcher, Labels, MatchOp};
+use crabka_units::prelude::*;
 use num_traits::ToPrimitive;
 use promql_parser::{
     label as prom_label,
@@ -170,7 +171,7 @@ pub(super) fn apply_selector_time_modifier(
     bounds: Option<AtModifierBounds>,
 ) -> Result<i64> {
     let base_time_ms = selector_at_ms(time_ms, at, bounds)?;
-    apply_offset_delta(base_time_ms, selector_offset_ms(offset)?)
+    apply_offset_delta(base_time_ms, selector_offset(offset)?)
 }
 
 #[derive(Clone, Copy)]
@@ -218,23 +219,22 @@ fn duration_to_i64_ms(duration: std::time::Duration) -> Result<i64> {
         .map_err(|_| PromqlError::Plan("@ modifier timestamp is too large".to_string()))
 }
 
-fn selector_offset_ms(offset: Option<&Offset>) -> Result<i64> {
+/// The signed extent an `offset` modifier shifts a selector's evaluation instant
+/// by. `offset 5m` looks 5 minutes further back, so it is a negative extent.
+fn selector_offset(offset: Option<&Offset>) -> Result<Time> {
     let Some(offset) = offset else {
-        return Ok(0);
+        return Ok(Time::ZERO);
     };
     let (duration, sign) = match offset {
-        Offset::Pos(duration) => (*duration, -1_i64),
-        Offset::Neg(duration) => (*duration, 1_i64),
+        Offset::Pos(duration) => (*duration, -1.0),
+        Offset::Neg(duration) => (*duration, 1.0),
     };
-    let duration_ms = duration_ms(duration)?;
-    duration_ms
-        .checked_mul(sign)
-        .ok_or_else(|| PromqlError::Plan("offset duration is too large".to_string()))
+    Ok(selector_duration(duration)? * sign)
 }
 
-fn apply_offset_delta(time_ms: i64, offset_ms: i64) -> Result<i64> {
+fn apply_offset_delta(time_ms: i64, offset: Time) -> Result<i64> {
     time_ms
-        .checked_add(offset_ms)
+        .checked_add(offset.millis_i64())
         .ok_or_else(|| PromqlError::Plan("offset evaluation time overflow".to_string()))
 }
 
@@ -242,7 +242,15 @@ pub(super) fn timestamp_seconds(timestamp_ms: i64) -> f64 {
     timestamp_ms.to_f64().unwrap_or(f64::MAX) / 1000.0
 }
 
-pub(super) fn duration_ms(duration: std::time::Duration) -> Result<i64> {
+/// A `PromQL` duration literal (`5m`, `1h`, the `[…]` of a matrix selector) as a
+/// time extent.
+///
+/// The `i64`-millisecond round trip is the range check, not a unit conversion:
+/// a literal wider than [`i64::MAX`] milliseconds is rejected here rather than
+/// silently losing precision downstream, where the extent is applied to
+/// millisecond instants.
+pub(super) fn selector_duration(duration: std::time::Duration) -> Result<Time> {
     i64::try_from(duration.as_millis())
+        .map(Time::from_millis)
         .map_err(|_| PromqlError::Plan("range selector duration is too large".to_string()))
 }

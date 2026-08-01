@@ -17,6 +17,7 @@ use std::{
 };
 
 use bytes::Bytes;
+use crabka_units::prelude::*;
 
 use crate::{
     dsl::{
@@ -725,13 +726,13 @@ where
     }
 
     /// `join` with [`Joined`] config (KIP-923 grace path). Identical to
-    /// [`join_table`](Self::join_table) when `joined.grace_ms` is `None`. When a
+    /// [`join_table`](Self::join_table) when `joined.grace` is `None`. When a
     /// grace period is set, the join buffers each stream record into a
     /// `JoinGraceBufferStore` and drains it as-of its own timestamp once the grace
     /// horizon passes — so out-of-order stream records join against the table
     /// version that was current at the record's own timestamp. Grace **requires**
-    /// the table to be versioned ([`Materialized::as_versioned`]); `grace_ms` must
-    /// be strictly less than the table's `history_retention_ms`.
+    /// the table to be versioned ([`Materialized::as_versioned`]); `grace` must
+    /// be strictly less than the table's `history_retention`.
     ///
     /// [`Materialized::as_versioned`]: crate::dsl::config::Materialized::as_versioned
     #[must_use]
@@ -753,14 +754,15 @@ where
         F: Fn(&V, &VT) -> VO + Clone + Send + Sync + 'static,
     {
         let lf = move |v: &V, opt: Option<&VT>| joiner(v, opt.expect("inner join hit"));
-        let grace_ms = join_config.grace_ms;
+        let configured_grace = join_config.grace;
         drop(join_config);
-        let grace = self.build_grace_lowering::<VT, VO, _, VTS>(table, lf.clone(), false, grace_ms);
+        let grace =
+            self.build_grace_lowering::<VT, VO, _, VTS>(table, lf.clone(), false, configured_grace);
         self.join_table_impl::<VT, VO, _, VTS>(table, lf, false, grace)
     }
 
     /// `leftJoin` with [`Joined`] config (KIP-923 grace path). Like
-    /// [`left_join_table`](Self::left_join_table) but, when `joined.grace_ms` is
+    /// [`left_join_table`](Self::left_join_table) but, when `joined.grace` is
     /// set, wires the grace buffer + as-of drain (see
     /// [`join_table_with`](Self::join_table_with)). On a table miss at drain time
     /// the joiner receives `None`.
@@ -780,18 +782,22 @@ where
         V: Sync,
         F: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
     {
-        let grace_ms = join_config.grace_ms;
+        let configured_grace = join_config.grace;
         drop(join_config);
-        let grace =
-            self.build_grace_lowering::<VT, VO, _, VTS>(table, joiner.clone(), true, grace_ms);
+        let grace = self.build_grace_lowering::<VT, VO, _, VTS>(
+            table,
+            joiner.clone(),
+            true,
+            configured_grace,
+        );
         self.join_table_impl::<VT, VO, _, VTS>(table, joiner, true, grace)
     }
 
     /// Build the [`GraceLowering`] closure for a KIP-923 grace join, or `None` when
-    /// `joined.grace_ms` is unset. This method holds the `Serde`/`Sync` bounds the
+    /// `joined.grace` is unset. This method holds the `Serde`/`Sync` bounds the
     /// grace buffer store + processor require (which the type-erased
     /// [`join_table_impl`](Self::join_table_impl) does not), and validates the
-    /// versioned-table + `grace_ms < history_retention_ms` preconditions up front.
+    /// versioned-table + `grace < history_retention` preconditions up front.
     ///
     /// The returned closure, run once inside the impl's lowering thunk, rebuilds the
     /// typed stream parent handle, registers the grace processor + its
@@ -803,7 +809,7 @@ where
         table: &KTable<K, VT, KS, VTS>,
         left_form: LF,
         emit_on_miss: bool,
-        grace_ms: Option<i64>,
+        grace: Option<Time>,
     ) -> Option<GraceLowering<K, VO>>
     where
         VT: Any + Send + Sync + Clone,
@@ -814,16 +820,13 @@ where
         V: Sync,
         LF: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
     {
-        let grace_ms = grace_ms?;
+        let grace = grace?;
         // KIP-923 grace requires a versioned table (the drain does as-of lookups)
-        // and `grace_ms` strictly below the table's history retention.
+        // and `grace` strictly below the table's history retention.
         let retention = table
-            .versioned_retention_ms
+            .versioned_retention
             .expect("grace requires a versioned table");
-        assert!(
-            grace_ms < retention,
-            "grace_ms must be < history_retention_ms"
-        );
+        assert!(grace < retention, "grace must be < history_retention");
 
         let key_serde = self.key_serde.clone();
         let value_serde = self.value_serde.clone();
@@ -845,7 +848,7 @@ where
                     move || crate::dsl::processors::join_grace::KStreamKTableJoinGraceProcessor {
                         table_store: store_for_proc.clone(),
                         buffer_store: buffer_for_proc.clone(),
-                        grace_ms,
+                        grace,
                         joiner: lf.clone(),
                         emit_on_miss,
                         observed_stream_time: i64::MIN,
@@ -907,7 +910,7 @@ where
         // join processor (KIP-914): the lookup is `get_as_of(key, streamRec.ts)`
         // instead of latest `get`. The `table` handle is not available inside the
         // lowering thunk, so capture this flag here.
-        let table_versioned = table.versioned_retention_ms.is_some();
+        let table_versioned = table.versioned_retention.is_some();
         // The stream-side copartition member is this stream's single source topic
         // (key unchanged → still copartitioned with that topic). `None` if the
         // stream has no single source topic (multi-topic source, prior merge, …).
@@ -1282,7 +1285,7 @@ where
         let parent_id = self.node;
         let other_parent_id = other.node;
 
-        let (before, after, grace) = (windows.before_ms, windows.after_ms, windows.grace_ms);
+        let (before, after, grace) = (windows.before, windows.after, windows.grace);
 
         let mut g = self.builder.borrow_mut();
         let StreamJoinGraph {
@@ -1363,9 +1366,9 @@ where
                         value_serde: outer_store_for_proc
                             .as_ref()
                             .map(|_| Box::new(vs_for_proc_inner.clone()) as Box<dyn Serde<V>>),
-                        before_ms: before,
-                        after_ms: after,
-                        grace_ms: grace,
+                        before,
+                        after,
+                        grace,
                         _pd: PhantomData,
                     },
                     [parent],
@@ -1447,9 +1450,9 @@ where
                         value_serde: outer_store_for_proc
                             .as_ref()
                             .map(|_| Box::new(vs_for_proc_inner.clone()) as Box<dyn Serde<V2>>),
-                        before_ms: before,
-                        after_ms: after,
-                        grace_ms: grace,
+                        before,
+                        after,
+                        grace,
                         _pd: PhantomData,
                     },
                     [parent],
@@ -2070,6 +2073,7 @@ where
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use crate::dsl::builder::StreamsBuilder;
 
@@ -2121,12 +2125,12 @@ mod tests {
         let t = b.table_explicit::<StringSerde, I64Serde>(
             "t",
             Consumed::with(StringSerde, I64Serde),
-            Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+            Materialized::with(StringSerde, I64Serde).as_versioned("vt", millis(600_000)),
         );
         s.join_table_with(
             &t,
             |a: &i64, c: &i64| a + c,
-            Joined::with_grace_period(60_000),
+            Joined::with_grace_period(millis(60_000)),
         )
         .to_explicit("out", Produced::with(StringSerde, I64Serde));
         drop(s);
@@ -2162,12 +2166,12 @@ mod tests {
         let _ = s.join_table_with(
             &t,
             |a: &i64, c: &i64| a + c,
-            Joined::with_grace_period(1000),
+            Joined::with_grace_period(millis(1000)),
         );
     }
 
     #[test]
-    #[should_panic(expected = "grace_ms must be < history_retention_ms")]
+    #[should_panic(expected = "grace must be < history_retention")]
     fn grace_geq_retention_panics() {
         use crate::{
             dsl::config::{Joined, Materialized},
@@ -2179,12 +2183,12 @@ mod tests {
         let t = b.table_explicit::<StringSerde, I64Serde>(
             "t",
             Consumed::with(StringSerde, I64Serde),
-            Materialized::with(StringSerde, I64Serde).as_versioned("vt", 1000),
+            Materialized::with(StringSerde, I64Serde).as_versioned("vt", millis(1000)),
         );
         let _ = s.join_table_with(
             &t,
             |a: &i64, c: &i64| a + c,
-            Joined::with_grace_period(1000),
+            Joined::with_grace_period(millis(1000)),
         );
     }
 }
@@ -2192,6 +2196,7 @@ mod tests {
 #[cfg(test)]
 mod to_table_caching_tests {
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use crate::{
         I64Serde, Materialized, Produced, StringSerde, dsl::StreamsBuilder,
@@ -2210,7 +2215,8 @@ mod to_table_caching_tests {
             .to_explicit("out", Produced::with(StringSerde, I64Serde));
         let built = b.build("app").unwrap();
         let mut g =
-            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", kibibytes(1)))
+                .unwrap();
         check!(g.cache_owner.contains_key("t"));
         pollster::block_on(g.init_processors()).unwrap();
 
@@ -2242,8 +2248,8 @@ mod to_table_caching_tests {
             .to_stream()
             .to_explicit("out", Produced::with(StringSerde, I64Serde));
         let built = b.build("app").unwrap();
-        let g =
-            pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", 1024)).unwrap();
+        let g = pollster::block_on(built.instantiate(&StoreBackend::InMemory, "app", kibibytes(1)))
+            .unwrap();
         check!(!g.cache_owner.contains_key("t"));
     }
 }

@@ -29,6 +29,7 @@ use crabka_promql::{
     RulerShard, RulerStateSink, RulerWalError, ScanResult, TsdbBlock, WalHead,
     evaluate_and_persist_ruler_rule_set_for_shard_due_for_eval, prometheus_router,
 };
+use crabka_units::prelude::*;
 use futures::TryStreamExt;
 pub use ids::{Offset, PartitionIndex};
 use object_store::{ObjectStore, ObjectStoreExt, path::Path};
@@ -309,10 +310,7 @@ fn wal_record_max_timestamp_ms(record: &WalRecord) -> Option<i64> {
 
 #[async_trait::async_trait]
 pub trait WalHeadConsumerPoll: Send {
-    async fn poll(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Vec<ConsumerRecord>, WalHeadConsumerError>;
+    async fn poll(&mut self, timeout: Time) -> Result<Vec<ConsumerRecord>, WalHeadConsumerError>;
 }
 
 #[async_trait::async_trait]
@@ -322,10 +320,7 @@ pub trait WalHeadConsumerCommit: Send {
 
 #[async_trait::async_trait]
 impl WalHeadConsumerPoll for Consumer {
-    async fn poll(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Vec<ConsumerRecord>, WalHeadConsumerError> {
+    async fn poll(&mut self, timeout: Time) -> Result<Vec<ConsumerRecord>, WalHeadConsumerError> {
         Consumer::poll(self, timeout)
             .await
             .map_err(|error| WalHeadConsumerError::Poll(error.to_string()))
@@ -355,7 +350,7 @@ pub async fn poll_wal_head_consumer_once<C>(
     consumer: &mut C,
     head: &WalHead,
     wal_topic: &str,
-    timeout: Duration,
+    timeout: Time,
 ) -> Result<WalHeadReplayResult, WalHeadConsumerError>
 where
     C: WalHeadConsumerPoll + WalHeadConsumerCommit + ?Sized,
@@ -394,7 +389,7 @@ pub async fn poll_ruler_state_consumer_once<S, C>(
     consumer: &mut C,
     state: &PrometheusApiState<S>,
     state_topic: &str,
-    timeout: Duration,
+    timeout: Time,
 ) -> Result<WalHeadReplayResult, RulerStateConsumerError>
 where
     S: MetricStore,
@@ -433,7 +428,7 @@ pub async fn run_ruler_state_consumer_loop<S, C, Stop>(
     consumer: &mut C,
     state: &PrometheusApiState<S>,
     state_topic: &str,
-    timeout: Duration,
+    timeout: Time,
     mut should_stop: Stop,
 ) -> Result<WalHeadConsumerLoopSummary, RulerStateConsumerError>
 where
@@ -463,7 +458,7 @@ pub async fn run_wal_head_consumer_loop<C, Stop>(
     consumer: &mut C,
     head: &WalHead,
     wal_topic: &str,
-    timeout: Duration,
+    timeout: Time,
     mut should_stop: Stop,
 ) -> Result<WalHeadConsumerLoopSummary, WalHeadConsumerError>
 where
@@ -852,7 +847,7 @@ pub async fn run_ruler_evaluation_loop<S, W, A, R, Stop>(
     sinks: (W, A, R),
     tenant: String,
     shard: RulerShard,
-    interval: Duration,
+    interval: Time,
     mut should_stop: Stop,
 ) -> Result<(), crabka_promql::PromqlError>
 where
@@ -881,7 +876,7 @@ where
         if should_stop() {
             break;
         }
-        tokio::time::sleep(interval).await;
+        tokio::time::sleep(interval.to_std()).await;
     }
     Ok(())
 }
@@ -952,6 +947,8 @@ pub struct RefreshingMetricBlockStore {
     manifest_cache: Arc<tokio::sync::RwLock<BTreeMap<String, CompactionIndexManifest>>>,
     cold_cache: Arc<tokio::sync::RwLock<Option<CachedMetricBlockStore>>>,
     cold_refresh: tokio::sync::Mutex<()>,
+    cold_cache_ttl: Time,
+    unbounded_compatibility_lookback: Time,
 }
 
 struct CachedMetricBlockStore {
@@ -963,15 +960,17 @@ struct CachedMetricBlockStore {
 
 /// Lookback substituted for an unbounded (`i64::MIN..i64::MAX`) query range so
 /// metadata-style requests don't force a full cold-manifest scan.
-const UNBOUNDED_COMPATIBILITY_LOOKBACK: Duration = Duration::from_hours(1);
+pub const DEFAULT_UNBOUNDED_COMPATIBILITY_LOOKBACK: Time = hours(1);
 
 /// How long a cached cold-block store snapshot is served before manifests are
 /// re-listed from the object store.
-const COLD_CACHE_TTL: Duration = Duration::from_secs(30);
+pub const DEFAULT_COLD_CACHE_TTL: Time = secs(30);
 
 impl CachedMetricBlockStore {
-    fn covers(&self, start_ms: i64, end_ms: i64, ttl: Duration) -> bool {
-        self.cached_at.elapsed() < ttl && self.start_ms <= start_ms && self.end_ms >= end_ms
+    fn covers(&self, start_ms: i64, end_ms: i64, ttl: Time) -> bool {
+        self.cached_at.elapsed().as_time() < ttl
+            && self.start_ms <= start_ms
+            && self.end_ms >= end_ms
     }
 }
 
@@ -991,7 +990,21 @@ impl RefreshingMetricBlockStore {
             manifest_cache: Arc::new(tokio::sync::RwLock::new(BTreeMap::new())),
             cold_cache: Arc::new(tokio::sync::RwLock::new(None)),
             cold_refresh: tokio::sync::Mutex::new(()),
+            cold_cache_ttl: DEFAULT_COLD_CACHE_TTL,
+            unbounded_compatibility_lookback: DEFAULT_UNBOUNDED_COMPATIBILITY_LOOKBACK,
         }
+    }
+
+    #[must_use]
+    pub fn with_cold_cache_ttl(mut self, ttl: Time) -> Self {
+        self.cold_cache_ttl = ttl;
+        self
+    }
+
+    #[must_use]
+    pub fn with_unbounded_compatibility_lookback(mut self, lookback: Time) -> Self {
+        self.unbounded_compatibility_lookback = lookback;
+        self
     }
 
     #[tracing::instrument(
@@ -1006,12 +1019,17 @@ impl RefreshingMetricBlockStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<MergedMetricStore<MetricBlockStore, WalHead>, MetricsServiceError> {
-        let (start_ms, end_ms) = normalize_refresh_range(start_ms, end_ms);
+        let (start_ms, end_ms) = normalize_refresh_range(
+            start_ms,
+            end_ms,
+            self.unbounded_compatibility_lookback,
+            unix_time_ms(),
+        );
 
         {
             let guard = self.cold_cache.read().await;
             if let Some(entry) = guard.as_ref()
-                && entry.covers(start_ms, end_ms, COLD_CACHE_TTL)
+                && entry.covers(start_ms, end_ms, self.cold_cache_ttl)
             {
                 return Ok(MergedMetricStore::new(
                     entry.cold.clone(),
@@ -1024,7 +1042,7 @@ impl RefreshingMetricBlockStore {
         {
             let guard = self.cold_cache.read().await;
             if let Some(entry) = guard.as_ref()
-                && entry.covers(start_ms, end_ms, COLD_CACHE_TTL)
+                && entry.covers(start_ms, end_ms, self.cold_cache_ttl)
             {
                 return Ok(MergedMetricStore::new(
                     entry.cold.clone(),
@@ -1058,12 +1076,9 @@ impl RefreshingMetricBlockStore {
     }
 }
 
-fn normalize_refresh_range(start_ms: i64, end_ms: i64) -> (i64, i64) {
+fn normalize_refresh_range(start_ms: i64, end_ms: i64, lookback: Time, now_ms: i64) -> (i64, i64) {
     if start_ms == i64::MIN && end_ms == i64::MAX {
-        return (
-            unix_time_ms().saturating_sub(duration_ms(UNBOUNDED_COMPATIBILITY_LOOKBACK)),
-            i64::MAX,
-        );
+        return (now_ms.saturating_sub(lookback.millis_i64()), i64::MAX);
     }
     (start_ms, end_ms)
 }
@@ -1474,6 +1489,7 @@ mod tests {
     use bytes::Bytes;
     use crabka_client_consumer::ConsumerRecord;
     use crabka_promql::{AlertmanagerSink, MetricStore};
+    use crabka_units::prelude::*;
     use futures::{StreamExt, stream::BoxStream};
     use object_store::{
         CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -1490,7 +1506,7 @@ mod tests {
     impl super::WalHeadConsumerPoll for RecordingWalHeadConsumer {
         async fn poll(
             &mut self,
-            _timeout: std::time::Duration,
+            _timeout: Time,
         ) -> Result<Vec<ConsumerRecord>, super::WalHeadConsumerError> {
             Ok(self.batches.remove(0))
         }
@@ -1526,11 +1542,11 @@ mod tests {
         inner: Arc<InMemory>,
         list_calls: Arc<AtomicUsize>,
         get_calls: Arc<AtomicUsize>,
-        list_delay: std::time::Duration,
+        list_delay: Time,
     }
 
     impl CountingObjectStore {
-        fn new(list_calls: Arc<AtomicUsize>, list_delay: std::time::Duration) -> Self {
+        fn new(list_calls: Arc<AtomicUsize>, list_delay: Time) -> Self {
             Self {
                 inner: Arc::new(InMemory::new()),
                 list_calls,
@@ -1597,7 +1613,7 @@ mod tests {
             prefix: Option<&Path>,
         ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
             self.list_calls.fetch_add(1, Ordering::SeqCst);
-            let delay = self.list_delay;
+            let delay = self.list_delay.to_std();
             Box::pin(self.inner.list(prefix).then(move |item| async move {
                 tokio::time::sleep(delay).await;
                 item
@@ -1690,6 +1706,61 @@ mod tests {
         assert2::assert!(body["data"]["result"][0]["value"][1].as_str() == Some("1"));
     }
 
+    #[test]
+    fn refreshing_blockstore_policy_defaults_and_overrides() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let defaults = super::RefreshingMetricBlockStore::new(
+            Arc::clone(&object_store),
+            url::Url::parse("memory:///").unwrap(),
+            "metrics",
+            crabka_promql::WalHead::new(),
+        );
+        check!(defaults.cold_cache_ttl == super::DEFAULT_COLD_CACHE_TTL);
+        check!(
+            defaults.unbounded_compatibility_lookback
+                == super::DEFAULT_UNBOUNDED_COMPATIBILITY_LOOKBACK
+        );
+
+        let configured = super::RefreshingMetricBlockStore::new(
+            object_store,
+            url::Url::parse("memory:///").unwrap(),
+            "metrics",
+            crabka_promql::WalHead::new(),
+        )
+        .with_cold_cache_ttl(secs(5))
+        .with_unbounded_compatibility_lookback(minutes(10));
+        check!(configured.cold_cache_ttl == secs(5));
+        check!(configured.unbounded_compatibility_lookback == minutes(10));
+    }
+
+    #[test]
+    fn configured_lookback_normalizes_only_unbounded_range() {
+        check!(
+            super::normalize_refresh_range(i64::MIN, i64::MAX, minutes(10), 1_000_000)
+                == (400_000, i64::MAX)
+        );
+        check!(super::normalize_refresh_range(100, 200, minutes(10), 1_000_000) == (100, 200));
+    }
+
+    #[test]
+    fn configured_cold_cache_ttl_controls_freshness() {
+        let object_store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let cold = crabka_promql::MetricBlockStore::new(crabka_blockstore::BlockStore::new(
+            object_store,
+            url::Url::parse("memory:///").unwrap(),
+        ));
+        let cached = super::CachedMetricBlockStore {
+            cached_at: std::time::Instant::now()
+                .checked_sub(std::time::Duration::from_secs(2))
+                .expect("two seconds before now is representable"),
+            start_ms: 0,
+            end_ms: 100,
+            cold,
+        };
+        check!(cached.covers(0, 100, secs(3)));
+        check!(!cached.covers(0, 100, secs(1)));
+    }
+
     #[tokio::test]
     async fn query_frontend_router_serves_split_range_query() {
         let mut store = crabka_promql::InMemoryMetricStore::new();
@@ -1703,7 +1774,7 @@ mod tests {
         let response = super::query_frontend_prometheus_router_for_store(
             store,
             crabka_promql::QueryFrontendOptions {
-                split_interval_ms: 60_000,
+                split_interval: minutes(1),
                 shard_count: 1,
             },
         )
@@ -2116,7 +2187,7 @@ rules:
             &mut consumer,
             &state,
             super::RULER_STATE_TOPIC,
-            std::time::Duration::from_millis(1),
+            millis(1),
         )
         .await
         .unwrap();
@@ -2267,11 +2338,9 @@ rules:
     #[tokio::test]
     async fn refreshing_blockstore_singleflights_concurrent_cold_cache_loads() {
         let list_calls = Arc::new(AtomicUsize::new(0));
-        let object_store: std::sync::Arc<dyn ObjectStore> =
-            std::sync::Arc::new(CountingObjectStore::new(
-                Arc::clone(&list_calls),
-                std::time::Duration::from_millis(25),
-            ));
+        let object_store: std::sync::Arc<dyn ObjectStore> = std::sync::Arc::new(
+            CountingObjectStore::new(Arc::clone(&list_calls), millis(25)),
+        );
         let base = url::Url::parse("memory:///").unwrap();
         let writer_store = crabka_blockstore::BlockStore::new(object_store.clone(), base.clone());
         let mut labels = crabka_blockstore::Labels::new();
@@ -2443,7 +2512,7 @@ rules:
         let list_calls = Arc::new(AtomicUsize::new(0));
         let object_store = Arc::new(CountingObjectStore::new(
             Arc::clone(&list_calls),
-            std::time::Duration::ZERO,
+            Time::ZERO,
         ));
         let get_calls = Arc::clone(&object_store.get_calls);
         let object_store: std::sync::Arc<dyn ObjectStore> = object_store;
@@ -2741,7 +2810,7 @@ rules:
 
     #[tokio::test]
     async fn replay_wal_head_records_prunes_outside_head_retention() {
-        let head = crabka_promql::WalHead::with_retention_ms(1_000);
+        let head = crabka_promql::WalHead::with_retention(secs(1));
         let record = |job: &str, timestamp_ms: i64| crabka_metrics::WalRecord {
             tenant: "tenant-a".to_string(),
             labels: vec![
@@ -2840,7 +2909,7 @@ rules:
             &mut consumer,
             &head,
             crabka_metrics::WAL_TOPIC,
-            std::time::Duration::from_millis(1),
+            millis(1),
         )
         .await
         .unwrap();
@@ -2869,7 +2938,7 @@ rules:
             &mut consumer,
             &head,
             crabka_metrics::WAL_TOPIC,
-            std::time::Duration::from_millis(1),
+            millis(1),
         )
         .await
         .unwrap();
@@ -2914,7 +2983,7 @@ rules:
             &mut consumer,
             &head,
             crabka_metrics::WAL_TOPIC,
-            std::time::Duration::from_millis(1),
+            millis(1),
             |summary| summary.polls == 2,
         )
         .await

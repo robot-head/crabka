@@ -4,6 +4,7 @@
 //! primary, the rest forward writes. Associated with a managed `Kafka` via
 //! the `crabka.io/cluster` label (mirrors `KafkaTopic`).
 
+use crabka_units::{ByteSize, Time};
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -50,6 +51,19 @@ pub struct SchemaRegistrySpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group_id: Option<String>,
 
+    /// Schema Registry runtime policy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<SchemaRegistryRuntime>,
+
+    /// Kafka client id used by the registry. Default `crabka-schema-registry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(min = 1))]
+    pub client_id: Option<String>,
+
+    /// Kubernetes probe timing overrides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_checks: Option<SchemaRegistryHealthChecks>,
+
     /// SR → broker client security (SASL / TLS). Maps to `--kafka-*` flags.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kafka_client: Option<SchemaRegistryKafkaClient>,
@@ -69,6 +83,109 @@ pub struct SchemaRegistrySpec {
     /// Pod resource requirements.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resources: Option<k8s_openapi::api::core::v1::ResourceRequirements>,
+}
+
+/// Schema Registry broker interaction and store-default policy.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SchemaRegistryRuntime {
+    /// Kafka client request-dispatch queue capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub client_dispatch_queue_capacity: Option<usize>,
+    /// Maximum accepted Kafka client frame size.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub client_frame_max: Option<ByteSize>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub election_session_timeout: Option<Time>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub election_rebalance_timeout: Option<Time>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub election_heartbeat_interval: Option<Time>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub election_reconnect_backoff: Option<Time>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub store_reader_retry_backoff: Option<Time>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub store_reader_fetch_max_wait: Option<Time>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub store_reader_fetch_max: Option<ByteSize>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub schemas_topic_create_timeout: Option<Time>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_byte_size"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub forward_max_body: Option<ByteSize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_compatibility_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_mode: Option<String>,
+}
+
+/// Kubernetes readiness and liveness probe timing.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SchemaRegistryHealthChecks {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub readiness_initial_delay_seconds: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub readiness_period_seconds: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 0))]
+    pub liveness_initial_delay_seconds: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub liveness_period_seconds: Option<i32>,
 }
 
 /// Reference to a cert-manager `Issuer` or `ClusterIssuer`.
@@ -163,9 +280,14 @@ pub struct BearerAuthn {
     /// `principalClaim` for JWKS paths.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jwks_principal_claim: Option<String>,
-    /// JWKS key-set refresh interval in milliseconds. Default 60 000.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub jwks_refresh_ms: Option<i64>,
+    /// JWKS key-set refresh interval. Default `1m`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub jwks_refresh: Option<Time>,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
@@ -183,9 +305,14 @@ pub struct SchemaRegistryAuthz {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub super_users: Vec<String>,
-    /// ACL-cache refresh interval (seconds). Default 30.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub acl_refresh_seconds: Option<i64>,
+    /// ACL-cache refresh interval. Default `30s`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub acl_refresh: Option<Time>,
 }
 
 /// SR → broker client security. Maps to the binary's `--kafka-*` flags.
@@ -239,4 +366,31 @@ pub struct SchemaRegistryStatus {
     /// In-cluster REST URL clients use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::{assert, check};
+    use kube::CustomResourceExt as _;
+
+    use super::*;
+
+    #[test]
+    fn client_policy_round_trips_and_has_schema() {
+        let runtime = SchemaRegistryRuntime {
+            client_dispatch_queue_capacity: Some(7),
+            client_frame_max: Some(crabka_units::kibibytes(32)),
+            ..SchemaRegistryRuntime::default()
+        };
+        let json = serde_json::to_value(&runtime).unwrap();
+        check!(json["clientDispatchQueueCapacity"] == 7);
+        check!(json["clientFrameMax"] == "32KiB");
+        assert!(serde_json::from_value::<SchemaRegistryRuntime>(json).unwrap() == runtime);
+
+        let crd = serde_json::to_value(SchemaRegistry::crd()).unwrap();
+        let properties = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["runtime"]["properties"];
+        check!(properties["clientDispatchQueueCapacity"]["minimum"].as_f64() == Some(1.0));
+        check!(properties["clientFrameMax"]["type"] == "string");
+    }
 }

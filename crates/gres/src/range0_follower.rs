@@ -17,16 +17,8 @@ use crabka_gres_substrate::{
     LiveCommittedEndSampler, LiveRecoveryConfig, ReadOnlyRange0Follower,
     checkpoint::CheckpointStore,
 };
-use crabka_pgkv::{FjallKv, MemKv, RestoreKv};
+use crabka_pgkv::{FjallKv, FjallOptions, MemKv, RestoreKv};
 
-/// Idle cadence of the tail poll. A read barrier pokes the loop awake, so this
-/// only bounds how stale an unpoked follower gets.
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
-/// Delay before a rebuild that immediately follows another one. A trim landing
-/// between two rebuilds is legitimate; a tight rebuild loop is not.
-const REBUILD_BACKOFF_FLOOR: Duration = Duration::from_millis(250);
-/// Ceiling for the doubling rebuild backoff.
-const REBUILD_BACKOFF_CEILING: Duration = Duration::from_secs(30);
 /// Directory-name prefix of every follower cache generation.
 const FOLLOWER_STORE_PREFIX: &str = "r0-follower";
 
@@ -44,6 +36,7 @@ const FOLLOWER_STORE_PREFIX: &str = "r0-follower";
 pub(crate) fn open_follower_store(
     cache_dir: Option<&Path>,
     generation: u64,
+    options: FjallOptions,
 ) -> std::io::Result<Arc<dyn RestoreKv>> {
     let Some(parent) = cache_dir else {
         return Ok(Arc::new(MemKv::default()));
@@ -53,9 +46,10 @@ pub(crate) fn open_follower_store(
         std::fs::remove_dir_all(&dir)?;
     }
     std::fs::create_dir_all(&dir)?;
-    Ok(Arc::new(FjallKv::open_cache(&dir).map_err(|error| {
-        std::io::Error::other(format!("range-0 follower cache: {error:?}"))
-    })?))
+    Ok(Arc::new(
+        FjallKv::open_cache_with_options(&dir, options)
+            .map_err(|error| std::io::Error::other(format!("range-0 follower cache: {error:?}")))?,
+    ))
 }
 
 /// Delete every follower cache generation other than `keep`.
@@ -100,6 +94,10 @@ pub(crate) struct Range0FollowerTail {
     end_sampler: Arc<LiveCommittedEndSampler>,
     checkpoints: Option<Arc<dyn CheckpointStore>>,
     cache_dir: Option<PathBuf>,
+    pgkv_options: FjallOptions,
+    poll_interval: Duration,
+    rebuild_backoff_floor: Duration,
+    rebuild_backoff_ceiling: Duration,
     refresh_poke: Arc<tokio::sync::Notify>,
     store_generation: u64,
     rebuilds: u64,
@@ -107,12 +105,12 @@ pub(crate) struct Range0FollowerTail {
 }
 
 impl Range0FollowerTail {
-    pub(crate) const fn new(
+    pub(crate) fn new(
         follower: ReadOnlyRange0Follower,
         config: LiveRecoveryConfig,
         end_sampler: Arc<LiveCommittedEndSampler>,
         checkpoints: Option<Arc<dyn CheckpointStore>>,
-        cache_dir: Option<PathBuf>,
+        runtime: &crate::SubstrateRuntimeConfig,
         refresh_poke: Arc<tokio::sync::Notify>,
     ) -> Self {
         Self {
@@ -120,7 +118,11 @@ impl Range0FollowerTail {
             config,
             end_sampler,
             checkpoints,
-            cache_dir,
+            cache_dir: runtime.cache_dir.clone(),
+            pgkv_options: runtime.pgkv_options,
+            poll_interval: runtime.range0_follower_poll_interval,
+            rebuild_backoff_floor: runtime.range0_follower_rebuild_backoff_floor,
+            rebuild_backoff_ceiling: runtime.range0_follower_rebuild_backoff_ceiling,
             refresh_poke,
             store_generation: 0,
             rebuilds: 0,
@@ -134,10 +136,7 @@ impl Range0FollowerTail {
             self.poll_once().await;
             // A catalog barrier pokes the refresh so waiters catch up
             // immediately instead of on the next periodic tick.
-            tokio::select! {
-                () = self.refresh_poke.notified() => {}
-                () = tokio::time::sleep(POLL_INTERVAL) => {}
-            }
+            wait_for_refresh(&self.refresh_poke, self.poll_interval).await;
         }
     }
 
@@ -200,7 +199,11 @@ impl Range0FollowerTail {
 
     async fn rebuild_from_checkpoint(&mut self, applied: i64) {
         if self.consecutive_rebuilds > 0 {
-            let backoff = rebuild_backoff(self.consecutive_rebuilds);
+            let backoff = rebuild_backoff(
+                self.consecutive_rebuilds,
+                self.rebuild_backoff_floor,
+                self.rebuild_backoff_ceiling,
+            );
             tracing::warn!(
                 consecutive_rebuilds = self.consecutive_rebuilds,
                 backoff_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX),
@@ -212,7 +215,11 @@ impl Range0FollowerTail {
         self.consecutive_rebuilds = self.consecutive_rebuilds.saturating_add(1);
 
         let generation = self.store_generation.saturating_add(1);
-        let fresh_store = match open_follower_store(self.cache_dir.as_deref(), generation) {
+        let fresh_store = match open_follower_store(
+            self.cache_dir.as_deref(),
+            generation,
+            self.pgkv_options,
+        ) {
             Ok(store) => store,
             Err(error) => {
                 tracing::error!(%error, "range-0 follower rebuild could not open a fresh cache");
@@ -255,12 +262,18 @@ impl Range0FollowerTail {
     }
 }
 
+pub(crate) async fn wait_for_refresh(refresh_poke: &tokio::sync::Notify, poll_interval: Duration) {
+    tokio::select! {
+        () = refresh_poke.notified() => {}
+        () = tokio::time::sleep(poll_interval) => {}
+    }
+}
+
 /// Doubling backoff for consecutive rebuilds, floored and capped.
-fn rebuild_backoff(consecutive_rebuilds: u32) -> Duration {
-    let doublings = consecutive_rebuilds.saturating_sub(1).min(16);
-    REBUILD_BACKOFF_FLOOR
-        .saturating_mul(1_u32 << doublings)
-        .min(REBUILD_BACKOFF_CEILING)
+fn rebuild_backoff(consecutive_rebuilds: u32, floor: Duration, ceiling: Duration) -> Duration {
+    floor
+        .saturating_mul(2_u32.saturating_pow(consecutive_rebuilds.saturating_sub(1)))
+        .min(ceiling)
 }
 
 #[cfg(test)]
@@ -271,17 +284,22 @@ mod tests {
 
     #[test]
     fn rebuild_backoff_starts_at_the_floor_doubles_and_caps() {
-        assert!(rebuild_backoff(1) == REBUILD_BACKOFF_FLOOR);
-        assert!(rebuild_backoff(2) == REBUILD_BACKOFF_FLOOR * 2);
-        assert!(rebuild_backoff(3) == REBUILD_BACKOFF_FLOOR * 4);
-        assert!(rebuild_backoff(u32::MAX) == REBUILD_BACKOFF_CEILING);
+        let floor = Duration::from_millis(3);
+        let ceiling = Duration::from_millis(10);
+
+        assert!(rebuild_backoff(1, floor, ceiling) == floor);
+        assert!(rebuild_backoff(2, floor, ceiling) == floor * 2);
+        assert!(rebuild_backoff(3, floor, ceiling) == ceiling);
+        assert!(rebuild_backoff(u32::MAX, floor, ceiling) == ceiling);
     }
 
     #[test]
     fn each_follower_generation_gets_its_own_directory() {
         let parent = tempfile::tempdir().expect("temp dir");
-        let first = open_follower_store(Some(parent.path()), 0).expect("first generation");
-        let second = open_follower_store(Some(parent.path()), 1).expect("second generation");
+        let first = open_follower_store(Some(parent.path()), 0, FjallOptions::default())
+            .expect("first generation");
+        let second = open_follower_store(Some(parent.path()), 1, FjallOptions::default())
+            .expect("second generation");
 
         // Both stores are open and independent at the same time: a rebuild
         // restores into the new one while the old one still serves reads.
@@ -296,7 +314,7 @@ mod tests {
 
     #[test]
     fn a_cacheless_follower_store_is_in_memory_and_empty() {
-        let store = open_follower_store(None, 3).expect("mem store");
+        let store = open_follower_store(None, 3, FjallOptions::default()).expect("mem store");
 
         assert!(store.get(b"anything").expect("get") == None);
     }

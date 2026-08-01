@@ -13,6 +13,26 @@
 # Env vars:
 #   BENCH_DRIVER_IMAGE   image ref for the driver Job (default crabka-bench-driver:e2e)
 #   BENCH_NAMESPACE      target namespace for the Kafka CR (default 'default')
+#   BENCH_PROMETHEUS_REQUEST_TIMEOUT
+#                        Prometheus HTTP request timeout (default 15s)
+#   BENCH_PRODUCER_REQUEST_TIMEOUT
+#                        producer request timeout (default 2s)
+#   BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT
+#                        producer final-drain timeout (default 10s)
+#   BENCH_CONSUMER_REQUEST_TIMEOUT
+#                        consumer request timeout (default 5s for crabka, 30s for kafka)
+#   BENCH_CONSUMER_BUILD_ATTEMPTS
+#                        consumer build attempts (default 6)
+#   BENCH_CONSUMER_BUILD_INITIAL_BACKOFF
+#                        initial consumer build retry backoff (default 100ms)
+#   BENCH_CONSUMER_BUILD_MAX_BACKOFF
+#                        maximum consumer build retry backoff (default 2s)
+#   BENCH_CONSUMER_POLL_TIMEOUT
+#                        consumer poll timeout (default 50ms)
+#   BENCH_CONSUMER_POLL_ERROR_BACKOFF
+#                        sleep after consumer poll errors (default 100ms)
+#   BENCH_SAMPLE_INTERVAL
+#                        time-series sample interval (default 2s)
 #   BENCH_RESULTS_DIR    where to write the per-run JSON (default bench/results)
 #   BENCH_RUN_TAG        optional filename suffix (e.g. "-run07") for repeated
 #                        runs; set by run-matrix.sh so a 10× pass keeps all
@@ -36,6 +56,20 @@ fi
 : "${BENCH_TLS:=}"
 
 : "${BENCH_DRIVER_IMAGE:=crabka-bench-driver:e2e}"
+: "${BENCH_PROMETHEUS_REQUEST_TIMEOUT:=15s}"
+: "${BENCH_PRODUCER_REQUEST_TIMEOUT:=2s}"
+: "${BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT:=10s}"
+: "${BENCH_CONSUMER_BUILD_ATTEMPTS:=6}"
+: "${BENCH_CONSUMER_BUILD_INITIAL_BACKOFF:=100ms}"
+: "${BENCH_CONSUMER_BUILD_MAX_BACKOFF:=2s}"
+: "${BENCH_CONSUMER_POLL_TIMEOUT:=50ms}"
+: "${BENCH_CONSUMER_POLL_ERROR_BACKOFF:=100ms}"
+: "${BENCH_SAMPLE_INTERVAL:=2s}"
+if [[ "$STACK" == "crabka" ]]; then
+  : "${BENCH_CONSUMER_REQUEST_TIMEOUT:=5s}"
+else
+  : "${BENCH_CONSUMER_REQUEST_TIMEOUT:=30s}"
+fi
 : "${BENCH_RESULTS_DIR:=$REPO_ROOT/bench/results}"
 
 mkdir -p "$BENCH_RESULTS_DIR"
@@ -45,8 +79,8 @@ SCEN_PATH="$REPO_ROOT/bench/scenarios/${SCENARIO}.yaml"
 
 BENCH_PARTITIONS=$(scenario_field "$SCEN_PATH" partitions)
 BENCH_REPLICATION_FACTOR=$(scenario_field "$SCEN_PATH" replication_factor)
-BENCH_DURATION_S=$(scenario_field "$SCEN_PATH" duration_s)
-BENCH_WARMUP_S=$(scenario_field "$SCEN_PATH" warmup_s)
+BENCH_DURATION_S=$(scenario_seconds "$SCEN_PATH" duration)
+BENCH_WARMUP_S=$(scenario_seconds "$SCEN_PATH" warmup)
 : "${BENCH_PARTITIONS:=6}"
 : "${BENCH_REPLICATION_FACTOR:=1}"
 : "${BENCH_DURATION_S:=60}"
@@ -87,9 +121,10 @@ elapsed=$(wait_kafka_ready "$STACK" 600)
 T_READY=$(date +%s%N)
 # This WSL `date` ignores the %3N width spec and emits 19-digit epoch
 # *nanoseconds*, so the T_READY-T0 delta is in ns — convert to ms for the
-# report's startup_ms field. (`%s%N` is unambiguous: epoch seconds + 9-digit ns.)
+# report's `startup` field, which is encoded as whole milliseconds.
+# (`%s%N` is unambiguous: epoch seconds + 9-digit ns.)
 STARTUP_MS=$(( (T_READY - T0) / 1000000 ))
-log "[$STACK/$SCENARIO/$TOPOLOGY] Kafka Ready in ${elapsed}s (startup_ms=$STARTUP_MS)"
+log "[$STACK/$SCENARIO/$TOPOLOGY] Kafka Ready in ${elapsed}s (startup=${STARTUP_MS}ms)"
 
 log "[$STACK/$SCENARIO/$TOPOLOGY] applying KafkaTopic (partitions=$BENCH_PARTITIONS rf=$BENCH_REPLICATION_FACTOR)"
 envsubst < "$TOPIC_PATH" | kubectl apply -f -
@@ -114,6 +149,16 @@ export BENCH_SCENARIO_NAME="$SCENARIO"
 export BENCH_BOOTSTRAP
 export BENCH_BROKER_COUNT
 export BENCH_DRIVER_IMAGE
+export BENCH_PROMETHEUS_REQUEST_TIMEOUT
+export BENCH_PRODUCER_REQUEST_TIMEOUT
+export BENCH_PRODUCER_FINAL_DRAIN_TIMEOUT
+export BENCH_CONSUMER_REQUEST_TIMEOUT
+export BENCH_CONSUMER_BUILD_ATTEMPTS
+export BENCH_CONSUMER_BUILD_INITIAL_BACKOFF
+export BENCH_CONSUMER_BUILD_MAX_BACKOFF
+export BENCH_CONSUMER_POLL_TIMEOUT
+export BENCH_CONSUMER_POLL_ERROR_BACKOFF
+export BENCH_SAMPLE_INTERVAL
 
 # TLS data-path knobs consumed by the job-template envsubst. All three are
 # always exported (with inert defaults on the plaintext path) so envsubst never
@@ -152,7 +197,7 @@ python3 - "$out_json" "$STARTUP_MS" <<'PY'
 import json, sys, pathlib
 p = pathlib.Path(sys.argv[1])
 data = json.loads(p.read_text())
-data["startup_ms"] = int(sys.argv[2])
+data["startup"] = int(sys.argv[2])
 p.write_text(json.dumps(data, indent=2))
 PY
 

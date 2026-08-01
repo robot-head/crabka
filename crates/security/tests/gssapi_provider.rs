@@ -24,15 +24,22 @@
 //! path end-to-end against a real KDC.
 
 use crabka_security::gssapi::{
-    AcceptStep, GssAcceptor, GssInitiator, InitStep,
+    AcceptStep, DEFAULT_GSSAPI_MAX_TIME_SKEW, GssAcceptor, GssInitiator, InitStep,
     provider::{SspiAcceptor, SspiInitiator},
 };
+use crabka_units::secs;
 
 const KEYTAB_PATH: &str = "tests/fixtures/kdc/kafka.keytab";
 const SERVICE_NAME: &str = "kafka";
 const TARGET_SPN: &str = "kafka/localhost";
 const CLIENT_PRINCIPAL: &str = "alice@CRABKA.TEST";
 const CLIENT_KEYTAB_PATH: &str = "tests/fixtures/kdc/alice.keytab";
+
+#[test]
+fn acceptor_builds_with_explicit_clock_skew() {
+    SspiAcceptor::new(KEYTAB_PATH, SERVICE_NAME, secs(7)).expect("build acceptor");
+    assert_eq!(DEFAULT_GSSAPI_MAX_TIME_SKEW, secs(300));
+}
 
 #[test]
 #[ignore = "requires the MIT KDC fixture (docker compose up) + exported KRB5_CONFIG/SSPI_KDC_URL"]
@@ -49,7 +56,8 @@ fn full_gssapi_handshake_and_wrap_roundtrip() {
         return;
     };
 
-    let mut acceptor = SspiAcceptor::new(KEYTAB_PATH, SERVICE_NAME).expect("build acceptor");
+    let mut acceptor = SspiAcceptor::new(KEYTAB_PATH, SERVICE_NAME, DEFAULT_GSSAPI_MAX_TIME_SKEW)
+        .expect("build acceptor");
     let mut initiator =
         SspiInitiator::new(CLIENT_KEYTAB_PATH, CLIENT_PRINCIPAL, TARGET_SPN, &kdc_url)
             .expect("build initiator");

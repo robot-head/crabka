@@ -13,6 +13,7 @@ use crabka_protocol::{
         create_acls_response::{AclCreationResult, CreateAclsResponse},
     },
 };
+use crabka_units::convert::ByteSizeExt as _;
 
 use super::acl_wire::{
     CLUSTER_RESOURCE_NAME, operation_concrete, pattern_type_concrete, permission_concrete,
@@ -24,10 +25,6 @@ use crate::{
     codes,
 };
 
-/// Maximum accepted length (bytes) of an ACL principal string.
-const MAX_PRINCIPAL_LEN: usize = 256;
-/// Maximum accepted length (bytes) of an ACL resource name.
-const MAX_RESOURCE_NAME_LEN: usize = 256;
 /// Kafka principal-type prefix; the only principal type Crabka accepts.
 const USER_PRINCIPAL_PREFIX: &str = "User:";
 
@@ -70,7 +67,11 @@ pub(crate) async fn handle(
     let mut to_submit: Vec<(usize, MetadataRecord)> = Vec::with_capacity(req.creations.len());
 
     for c in &req.creations {
-        match validate(c) {
+        match validate(
+            c,
+            broker.config.acl_max_principal.bytes_usize(),
+            broker.config.acl_max_resource_name.bytes_usize(),
+        ) {
             Ok(entry) => {
                 let idx = results.len();
                 results.push(AclCreationResult::default());
@@ -161,6 +162,8 @@ fn audit_created_acls(
 
 fn validate(
     c: &crabka_protocol::owned::create_acls_request::AclCreation,
+    max_principal_bytes: usize,
+    max_resource_name_bytes: usize,
 ) -> Result<AclEntry, (i16, &'static str)> {
     let resource_type = resource_type_concrete(c.resource_type)
         .map_err(|_| (codes::INVALID_REQUEST, "bad resource_type"))?;
@@ -174,7 +177,7 @@ fn validate(
     if c.resource_name.is_empty() {
         return Err((codes::INVALID_REQUEST, "empty resource_name"));
     }
-    if c.resource_name.len() > MAX_RESOURCE_NAME_LEN {
+    if c.resource_name.len() > max_resource_name_bytes {
         return Err((codes::INVALID_REQUEST, "resource_name too long"));
     }
     if c.resource_name.contains('\0') {
@@ -183,7 +186,7 @@ fn validate(
     if !c.principal.starts_with(USER_PRINCIPAL_PREFIX) {
         return Err((codes::INVALID_REQUEST, "principal must start with User:"));
     }
-    if c.principal.len() > MAX_PRINCIPAL_LEN {
+    if c.principal.len() > max_principal_bytes {
         return Err((codes::INVALID_REQUEST, "principal too long"));
     }
     if c.host.is_empty() {
@@ -218,7 +221,7 @@ mod tests {
     use super::*;
     use crate::{
         broker::BrokerHandle,
-        test_support::{DenyAll, peer, principal},
+        test_support::{DenyAll, peer, principal, start_broker_with},
     };
 
     const VERSION: i16 = 3;
@@ -264,28 +267,82 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn validate_accepts_exact_length_boundaries_and_rejects_above_them() {
-        let resource_name = "r".repeat(MAX_RESOURCE_NAME_LEN);
-        let principal_name = format!("User:{}", "a".repeat(MAX_PRINCIPAL_LEN - "User:".len()));
-        let c = creation(&resource_name, &principal_name, OPERATION_READ);
+    fn validate(c: &AclCreation) -> Result<AclEntry, (i16, &'static str)> {
+        super::validate(c, usize::MAX, usize::MAX)
+    }
 
-        let entry = validate(&c).expect("exact boundary lengths are valid");
-        assert!(entry.resource_name == resource_name);
-        assert!(entry.principal == principal_name);
+    #[tokio::test]
+    async fn handle_honors_configured_acl_input_limits() {
+        const PRINCIPAL_LIMIT: usize = 10;
+        const RESOURCE_NAME_LIMIT: usize = 8;
 
-        let mut too_long_resource = c.clone();
-        too_long_resource.resource_name = "r".repeat(MAX_RESOURCE_NAME_LEN + 1);
-        let err = validate(&too_long_resource).unwrap_err();
-        assert!(err.0 == codes::INVALID_REQUEST);
-        assert!(err.1 == "resource_name too long");
+        fn limit(characters: usize) -> crabka_units::ByteSize {
+            crabka_units::ByteSize::from_bytes(
+                u64::try_from(characters).expect("test limit fits u64"),
+            )
+        }
 
-        let mut too_long_principal = c;
-        too_long_principal.principal =
-            format!("User:{}", "a".repeat(MAX_PRINCIPAL_LEN + 1 - "User:".len()));
-        let err = validate(&too_long_principal).unwrap_err();
-        assert!(err.0 == codes::INVALID_REQUEST);
-        assert!(err.1 == "principal too long");
+        let (broker_handle, _dir) = start_broker_with(|config| {
+            config.acl_max_principal = limit(PRINCIPAL_LIMIT);
+            config.acl_max_resource_name = limit(RESOURCE_NAME_LIMIT);
+            config.audit_enabled = false;
+        })
+        .await;
+        let broker = broker_handle.broker_arc_for_test();
+        let p = principal("admin");
+        let peer = peer();
+        let ctx = test_context(&p, &peer);
+        let cases = [
+            (
+                "r".repeat(RESOURCE_NAME_LIMIT),
+                "User:a".to_string(),
+                codes::NONE,
+                None,
+            ),
+            (
+                "r".repeat(RESOURCE_NAME_LIMIT + 1),
+                "User:a".to_string(),
+                codes::INVALID_REQUEST,
+                Some("resource_name too long"),
+            ),
+            (
+                "r".to_string(),
+                format!(
+                    "User:{}",
+                    "a".repeat(PRINCIPAL_LIMIT - USER_PRINCIPAL_PREFIX.len())
+                ),
+                codes::NONE,
+                None,
+            ),
+            (
+                "r".to_string(),
+                format!(
+                    "User:{}",
+                    "a".repeat(PRINCIPAL_LIMIT + 1 - USER_PRINCIPAL_PREFIX.len())
+                ),
+                codes::INVALID_REQUEST,
+                Some("principal too long"),
+            ),
+        ];
+        let req = request(
+            cases
+                .iter()
+                .map(|(resource_name, principal, _, _)| {
+                    creation(resource_name, principal, OPERATION_READ)
+                })
+                .collect(),
+        );
+
+        let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
+        let resp = decode_response(&resp);
+
+        for (result, (_, _, expected_code, expected_message)) in resp.results.iter().zip(&cases) {
+            assert!(
+                (result.error_code, result.error_message.as_deref())
+                    == (*expected_code, *expected_message)
+            );
+        }
+        broker_handle.shutdown().await;
     }
 
     #[test]

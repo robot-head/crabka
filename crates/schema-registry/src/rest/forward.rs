@@ -9,6 +9,7 @@ use axum::{
     middleware::Next,
     response::{IntoResponse, Response},
 };
+use crabka_units::prelude::*;
 use tokio::sync::watch;
 
 use crate::election::PrimaryState;
@@ -20,6 +21,8 @@ pub struct ForwardState {
     pub primary: watch::Receiver<PrimaryState>,
     pub http: reqwest::Client,
     pub node_id: String,
+    /// Largest forwarded request body this node buffers before replaying it.
+    pub forward_max_body: ByteSize,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -74,7 +77,8 @@ async fn proxy(fwd: &ForwardState, primary_url: &str, req: Request) -> Response 
     let (parts, body) = req.into_parts();
     let path_q = parts.uri.path_and_query().map_or("", |p| p.as_str());
     let url = format!("{primary_url}{path_q}");
-    let Ok(bytes) = axum::body::to_bytes(body, 16 * 1024 * 1024).await else {
+    // `to_bytes` takes a raw `usize` cap.
+    let Ok(bytes) = axum::body::to_bytes(body, fwd.forward_max_body.bytes_usize()).await else {
         return (StatusCode::BAD_REQUEST, "body read failed").into_response();
     };
     let method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes())
@@ -180,5 +184,25 @@ mod tests {
         ] {
             assert2::assert!(decide(&method, forwarded, &state) == expected);
         }
+    }
+
+    #[tokio::test]
+    async fn forwarding_body_limit_uses_configured_value() {
+        let (_primary_tx, primary) = watch::channel(secondary("http://unused"));
+        let fwd = ForwardState {
+            primary,
+            http: reqwest::Client::new(),
+            node_id: "secondary".into(),
+            forward_max_body: bytes(3),
+        };
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/")
+            .body(Body::from("four"))
+            .unwrap();
+
+        let response = proxy(&fwd, "http://unused", request).await;
+
+        assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
     }
 }

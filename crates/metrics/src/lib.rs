@@ -47,7 +47,8 @@ pub use histogram::{
     encode_native_histograms,
 };
 pub use limits::{
-    IngestEnforcer, LimitError, Limits, OverridesError, OverridesProvider, QueryEnforcer,
+    DEFAULT_MAX_RATE_BUCKETS, IngestEnforcer, LimitError, Limits, OverridesError,
+    OverridesProvider, QueryEnforcer,
 };
 pub use metadata::{MetadataIndex, MetricMetadata};
 pub use otlp::{

@@ -339,6 +339,7 @@ mod tests {
     use std::collections::VecDeque;
 
     use assert2::check;
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -367,7 +368,7 @@ mod tests {
         let mut stores = StoreRegistry::default();
         stores.insert(Box::new(VersionedBytesStore::<String, i64>::in_memory(
             "vtbl".into(),
-            1_000_000,
+            secs(1_000),
             Box::new(StringSerde),
             Box::new(I64Serde),
             "vtbl-changelog".into(),

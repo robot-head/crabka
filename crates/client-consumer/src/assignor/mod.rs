@@ -17,6 +17,18 @@ pub enum Assignor {
     CooperativeSticky,
 }
 
+impl std::str::FromStr for Assignor {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "range" => Ok(Self::Range),
+            "cooperative-sticky" => Ok(Self::CooperativeSticky),
+            _ => Err(format!("invalid assignor: {value}")),
+        }
+    }
+}
+
 impl Assignor {
     pub(crate) fn protocol_name(self) -> &'static str {
         match self {
@@ -36,6 +48,16 @@ impl Assignor {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn assignor_values_parse_exact_spellings() {
+        assert2::assert!("range".parse::<Assignor>().unwrap() == Assignor::Range);
+        assert2::assert!(
+            "cooperative-sticky".parse::<Assignor>().unwrap() == Assignor::CooperativeSticky
+        );
+        assert2::assert!("cooperative_sticky".parse::<Assignor>().is_err());
+        assert2::assert!("unknown".parse::<Assignor>().is_err());
+    }
 
     #[test]
     fn assignor_protocol_names_match_kafka_protocols() {

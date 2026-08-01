@@ -12,6 +12,7 @@ use axum::{
 };
 use crabka_blockstore::{LabelMatcher, Labels};
 use crabka_metrics::{Limits, OverridesProvider};
+use crabka_units::prelude::*;
 use tower::ServiceExt;
 
 use super::*;
@@ -208,7 +209,7 @@ fn expand_alert_template_substitutions() {
 #[tokio::test]
 async fn query_range_rejects_ranges_over_tenant_limit() {
     let limits = Limits {
-        max_query_length_secs: 60,
+        max_query_length: minutes(1),
         ..Limits::default()
     };
     let state = Arc::new(

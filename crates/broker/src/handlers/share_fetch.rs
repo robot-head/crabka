@@ -33,6 +33,7 @@ use crabka_protocol::{
     },
     records::RecordsPayload,
 };
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use tokio::sync::Notify;
 
 use crate::{
@@ -514,7 +515,7 @@ async fn read_acquired_bytes(
     if limit_offset <= fetch_offset {
         return Ok(None);
     }
-    let read_max = usize::try_from(max_bytes.max(0)).unwrap_or(0);
+    let read_max = ByteSize::from_bytes_i64(i64::from(max_bytes.max(0)));
     let log = part.log.clone();
     let join = tokio::task::spawn_blocking(move || {
         let log = log.lock().expect("log mutex poisoned");

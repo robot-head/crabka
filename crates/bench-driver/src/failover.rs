@@ -9,7 +9,10 @@
 //! name-sort for backwards-compatible smoke runs.
 
 use anyhow::{Context, Result, anyhow};
-use crabka_client_core::{Client as KafkaClient, security::ClientSecurity};
+use crabka_client_core::{
+    Client as KafkaClient, ClientFrameMax, ConnectionDispatchQueueCapacity,
+    security::ClientSecurity,
+};
 use crabka_protocol::owned::metadata_response::MetadataResponse;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
@@ -38,10 +41,14 @@ pub async fn partition0_leader_from_metadata(
     bootstrap: &str,
     topic: &str,
     security: Option<ClientSecurity>,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
 ) -> Result<i32> {
     let client = KafkaClient::builder()
         .bootstrap(bootstrap.to_string())
         .client_id("bench-failover-targeter")
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .maybe_security(security)
         .build()
         .await

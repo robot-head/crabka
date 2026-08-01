@@ -1,0 +1,36 @@
+[package]
+name = "crabka-units"
+publish = false
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+# The Creusot proof toolchain (see .creusot-version) ships a rustc that trails
+# the workspace pin, and `cargo creusot --replay` refuses to build a package
+# whose `rust-version` is newer than it. This crate is verified there, so its
+# MSRV is pinned to what that toolchain provides rather than inherited.
+rust-version = "1.97.0"
+description = "Dimensioned quantities (byte counts, byte rates, durations) for Crabka, built on `uom`"
+repository = "https://github.com/robot-head/crabka"
+homepage = "https://github.com/robot-head/crabka"
+documentation = "https://docs.rs/crabka-units"
+keywords = ["kafka", "units", "uom", "dimensional-analysis", "crabka"]
+categories = ["data-structures"]
+readme = "README.md"
+
+[lints]
+workspace = true
+
+# A pure value-type leaf crate, like `crabka-ids`: no IO, no async, no crypto, so
+# every crate — including the observability stack and the WASM playground — can
+# name a byte count or a timeout without pulling in a runtime.
+[dependencies]
+num-traits = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+uom = { workspace = true }
+
+[dev-dependencies]
+assert2 = { workspace = true }
+proptest = { workspace = true }
+serde_json = { workspace = true }

@@ -39,6 +39,7 @@ pub(crate) fn join_relations(
     kind: JoinKind,
     constraint: &JoinConstraint,
     ctx: &crate::clock::EvalCtx,
+    blocking_query_memory: crabka_units::ByteSize,
 ) -> Result<Relation, ExecError> {
     use std::cmp::Ordering;
 
@@ -132,7 +133,12 @@ pub(crate) fn join_relations(
                     if matches(l, r)? {
                         let mut row = l.clone();
                         row.extend(r.iter().cloned());
-                        push_bounded_join_row(&mut rows, &mut result_bytes, row)?;
+                        push_bounded_join_row(
+                            &mut rows,
+                            &mut result_bytes,
+                            row,
+                            blocking_query_memory,
+                        )?;
                     }
                 }
             }
@@ -151,13 +157,23 @@ pub(crate) fn join_relations(
                         right_matched[ri] = true;
                         let mut row = l.clone();
                         row.extend(r.iter().cloned());
-                        push_bounded_join_row(&mut rows, &mut result_bytes, row)?;
+                        push_bounded_join_row(
+                            &mut rows,
+                            &mut result_bytes,
+                            row,
+                            blocking_query_memory,
+                        )?;
                     }
                 }
                 if !any && want_left {
                     let mut row = l.clone();
                     row.extend(vec![Datum::Null; rw]);
-                    push_bounded_join_row(&mut rows, &mut result_bytes, row)?;
+                    push_bounded_join_row(
+                        &mut rows,
+                        &mut result_bytes,
+                        row,
+                        blocking_query_memory,
+                    )?;
                 }
             }
             if want_right {
@@ -165,7 +181,12 @@ pub(crate) fn join_relations(
                     if !right_matched[ri] {
                         let mut row = vec![Datum::Null; lw];
                         row.extend(r.iter().cloned());
-                        push_bounded_join_row(&mut rows, &mut result_bytes, row)?;
+                        push_bounded_join_row(
+                            &mut rows,
+                            &mut result_bytes,
+                            row,
+                            blocking_query_memory,
+                        )?;
                     }
                 }
             }
@@ -394,9 +415,10 @@ fn push_bounded_join_row(
     rows: &mut Vec<Vec<Datum>>,
     used: &mut usize,
     row: Vec<Datum>,
+    blocking_query_memory: crabka_units::ByteSize,
 ) -> Result<(), ExecError> {
     let bytes = crate::scanner::datum_row_bytes(&row);
-    if used.saturating_add(bytes) > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+    if crate::scanner::exceeds_query_memory(used.saturating_add(bytes), blocking_query_memory) {
         return Err(crate::scanner::memory_budget_exceeded());
     }
     *used += bytes;
@@ -500,6 +522,23 @@ mod tests {
     /// no temporal ON predicate, so the zone never affects the result.
     fn tctx() -> crate::clock::EvalCtx {
         crate::clock::EvalCtx::test_default()
+    }
+
+    fn join_relations(
+        left: Relation,
+        right: Relation,
+        kind: JoinKind,
+        constraint: &JoinConstraint,
+        ctx: &crate::clock::EvalCtx,
+    ) -> Result<Relation, ExecError> {
+        super::join_relations(
+            left,
+            right,
+            kind,
+            constraint,
+            ctx,
+            crate::scanner::BLOCKING_QUERY_MEMORY,
+        )
     }
 
     fn rel(qual: &str, cols: &[&str], rows: Vec<Vec<i32>>) -> Relation {

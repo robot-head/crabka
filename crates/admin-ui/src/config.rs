@@ -1,10 +1,87 @@
 //! Runtime configuration for one admin UI instance.
 
-use std::{net::SocketAddr, path::PathBuf};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    time::{Duration, Instant},
+};
 
+use clap::Parser;
 use crabka_client_core::security::TlsConnectorConfig;
 use crabka_security::ListenerProtocol;
+use crabka_units::{parse, prelude::*};
 use thiserror::Error;
+
+/// Default maximum size of an authenticated mutation JSON body.
+pub const DEFAULT_MUTATION_JSON_BODY_LIMIT: ByteSize = mebibytes(1);
+
+/// Default server-side lifetime for an authenticated admin UI session.
+pub const DEFAULT_SESSION_TTL: Time = hours(8);
+
+/// Default Kafka request timeout for admin UI topic mutations.
+pub const DEFAULT_TOPIC_MUTATION_TIMEOUT: Time = secs(30);
+
+fn parse_body_limit(input: &str) -> Result<ByteSize, String> {
+    let value = parse::positive_byte_size(input).map_err(|error| error.to_string())?;
+    let lowered = value.bytes_usize();
+    if u64::try_from(lowered).is_ok_and(|bytes| ByteSize::from_bytes(bytes) == value) {
+        Ok(value)
+    } else {
+        Err("body limit must be a whole byte count representable by usize".to_string())
+    }
+}
+
+fn parse_session_ttl(input: &str) -> Result<Time, String> {
+    let value = parse::positive_time(input).map_err(|error| error.to_string())?;
+    let duration =
+        Duration::try_from_secs_f64(value.secs_f64()).map_err(|error| error.to_string())?;
+    Instant::now()
+        .checked_add(duration)
+        .map(|_| value)
+        .ok_or_else(|| "session TTL exceeds the platform monotonic clock".to_string())
+}
+
+fn parse_topic_mutation_timeout(input: &str) -> Result<Time, String> {
+    let value = parse::positive_time(input).map_err(|error| error.to_string())?;
+    let millis = value.secs_f64() * 1_000.0;
+    if millis.fract() == 0.0 && millis <= f64::from(i32::MAX) {
+        Ok(value)
+    } else {
+        Err("topic mutation timeout must be a whole i32 millisecond count".to_string())
+    }
+}
+
+/// Command-line and environment inputs owned by the admin UI runtime.
+#[derive(Debug, Clone, Parser)]
+#[command(name = "crabka-admin-ui")]
+pub struct AdminUiRuntimeArgs {
+    /// Maximum authenticated mutation JSON body size.
+    #[arg(
+        long,
+        env = "CRABKA_ADMIN_UI_MUTATION_JSON_BODY_LIMIT",
+        default_value = "1MiB",
+        value_parser = parse_body_limit
+    )]
+    pub mutation_json_body_limit: ByteSize,
+
+    /// Server-side lifetime for an authenticated session.
+    #[arg(
+        long,
+        env = "CRABKA_ADMIN_UI_SESSION_TTL",
+        default_value = "8h",
+        value_parser = parse_session_ttl
+    )]
+    pub session_ttl: Time,
+
+    /// Kafka request timeout for topic mutations.
+    #[arg(
+        long,
+        env = "CRABKA_ADMIN_UI_TOPIC_MUTATION_TIMEOUT",
+        default_value = "30s",
+        value_parser = parse_topic_mutation_timeout
+    )]
+    pub topic_mutation_timeout: Time,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrokerSecurityConfig {
@@ -16,13 +93,15 @@ pub enum BrokerSecurityConfig {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AdminUiConfig {
     pub listen_addr: SocketAddr,
     pub cluster_name: String,
     pub bootstrap_addrs: Vec<String>,
     pub security: BrokerSecurityConfig,
-    pub session_ttl_seconds: u64,
+    pub session_ttl: Time,
+    pub mutation_json_body_limit: ByteSize,
+    pub topic_mutation_timeout: Time,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -50,7 +129,9 @@ impl Default for AdminUiConfig {
             cluster_name: "local".to_string(),
             bootstrap_addrs: Vec::new(),
             security: BrokerSecurityConfig::SaslPlaintext,
-            session_ttl_seconds: 8 * 60 * 60,
+            session_ttl: DEFAULT_SESSION_TTL,
+            mutation_json_body_limit: DEFAULT_MUTATION_JSON_BODY_LIMIT,
+            topic_mutation_timeout: DEFAULT_TOPIC_MUTATION_TIMEOUT,
         }
     }
 }

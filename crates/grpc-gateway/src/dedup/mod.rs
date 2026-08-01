@@ -7,16 +7,22 @@ pub mod topic;
 /// Deterministic FNV-1a-64 over the key, modulo partition count. Stable
 /// across processes/restarts (unlike `DefaultHasher`'s per-run state), so a
 /// given key always maps to the same dedup partition.
+///
+/// # Panics
+///
+/// Panics when `partitions` is zero. Process configuration validates this
+/// invariant before constructing the engine.
 #[must_use]
 pub fn partition_for(key: &str, partitions: u32) -> u32 {
+    assert2::assert!(partitions > 0);
+    assert2::assert!(i32::try_from(partitions).is_ok());
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for b in key.as_bytes() {
         hash ^= u64::from(*b);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    // `hash % partitions` is < `partitions` (a u32), so it always fits in
-    // u32; the `unwrap_or` fallback is unreachable.
-    u32::try_from(hash % u64::from(partitions.max(1))).unwrap_or(0)
+    // `hash % partitions` is < `partitions` (a u32), so it always fits in u32.
+    u32::try_from(hash % u64::from(partitions)).expect("partition modulo fits in u32")
 }
 
 use std::sync::Arc;
@@ -47,9 +53,16 @@ pub struct DedupEngine {
     slots: Vec<TxnSlot>,
     store: Arc<DedupStore>,
     security: Option<crabka_client_core::security::ClientSecurity>,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
 }
 
 impl DedupEngine {
+    /// Construct a dedup engine for a validated non-zero partition count.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `partitions` is zero.
     #[must_use]
     pub fn new(
         bootstrap: &str,
@@ -60,16 +73,46 @@ impl DedupEngine {
         store: Arc<DedupStore>,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Self {
-        let slots = (0..partitions.max(1)).map(|_| Mutex::new(None)).collect();
+        Self::new_with_policy(
+            bootstrap,
+            client_id,
+            txn_id_prefix,
+            dedup_topic,
+            partitions,
+            store,
+            (security, &crate::config::GatewayRuntimeConfig::default()),
+        )
+    }
+
+    /// Construct with the deployment's client resource policy.
+    #[must_use]
+    pub fn new_with_policy(
+        bootstrap: &str,
+        client_id: &str,
+        txn_id_prefix: &str,
+        dedup_topic: String,
+        partitions: u32,
+        store: Arc<DedupStore>,
+        client_policy: (
+            Option<crabka_client_core::security::ClientSecurity>,
+            &crate::config::GatewayRuntimeConfig,
+        ),
+    ) -> Self {
+        let (security, policy) = client_policy;
+        assert2::assert!(partitions > 0);
+        assert2::assert!(i32::try_from(partitions).is_ok());
+        let slots = (0..partitions).map(|_| Mutex::new(None)).collect();
         Self {
             bootstrap: bootstrap.to_string(),
             client_id: client_id.to_string(),
             txn_id_prefix: txn_id_prefix.to_string(),
             dedup_topic,
-            partitions: partitions.max(1),
+            partitions,
             slots,
             store,
             security,
+            dispatch_queue_capacity: policy.client_dispatch_queue_capacity,
+            frame_max: policy.client_frame_max,
         }
     }
 
@@ -89,6 +132,8 @@ impl DedupEngine {
     /// the partition's transactional producer and writes the data record +
     /// claim atomically, then updates the local map.
     #[tracing::instrument(skip_all)]
+    /// # Panics
+    /// Panics if the validated partition count cannot be represented locally.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn dedup_produce(
@@ -117,7 +162,9 @@ impl DedupEngine {
             });
         }
 
-        let mut slot = self.slots[usize::try_from(p).unwrap_or(0)].lock().await;
+        let mut slot = self.slots[usize::try_from(p).expect("u32 partition fits usize")]
+            .lock()
+            .await;
 
         // Re-check under the lock (another task may have just claimed it).
         if let Some(c) = self.store.get(key) {
@@ -165,6 +212,8 @@ impl DedupEngine {
             let producer = Producer::builder()
                 .bootstrap(self.bootstrap.clone())
                 .client_id(format!("{}-dedup-{}", self.client_id, p))
+                .dispatch_queue_capacity(self.dispatch_queue_capacity.get())
+                .frame_max(self.frame_max.size())
                 .enable_idempotence(true)
                 .acks(Acks::All)
                 .transactional_id(txn_id)
@@ -196,7 +245,7 @@ impl DedupEngine {
             };
             let claim_rec = ProducerRecord {
                 topic: self.dedup_topic.clone(),
-                partition: Some(i32::try_from(p).unwrap_or(0)),
+                partition: Some(i32::try_from(p).expect("validated partition fits i32")),
                 key: Some(Bytes::from(key.as_bytes().to_vec())),
                 value: Some(Bytes::from(serde_json::to_vec(&claim)?)),
                 headers: vec![],
@@ -234,5 +283,47 @@ impl DedupEngine {
             offset: Offset(meta.offset),
             deduplicated: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use assert2::assert;
+
+    use super::{DedupEngine, partition_for, store::DedupStore};
+
+    #[test]
+    fn partition_for_rejects_zero_partitions() {
+        assert!(std::panic::catch_unwind(|| partition_for("key", 0)).is_err());
+    }
+
+    #[test]
+    fn partition_for_rejects_counts_kafka_cannot_represent() {
+        assert!(
+            std::panic::catch_unwind(|| {
+                let _ = partition_for("key", i32::MAX.cast_unsigned() + 1);
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn dedup_engine_rejects_zero_partitions() {
+        assert!(
+            std::panic::catch_unwind(|| {
+                DedupEngine::new(
+                    "localhost:9092",
+                    "test",
+                    "test-txn",
+                    "dedup".into(),
+                    0,
+                    Arc::new(DedupStore::new(1)),
+                    None,
+                )
+            })
+            .is_err()
+        );
     }
 }

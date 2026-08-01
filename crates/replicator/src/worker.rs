@@ -3,16 +3,21 @@
 //! background tasks, with build-retry resilience and clean shutdown.
 
 use std::{
+    collections::BTreeMap,
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use crabka_connect::{ConnectorRuntime, RuntimeState};
+use crabka_units::{
+    fmt::Human as _,
+    prelude::{Time, TimeExt as _},
+};
 use tracing::warn;
 
 use crate::{
     checkpoint_store::InternalTopicCheckpointStore,
-    config::{NamingPolicy, PolicyConfig},
+    config::{ClientResourcePolicy, NamingPolicy, PolicyConfig, ReplicatorRuntimePolicy},
     record::ReplicatedRecord,
     selector::Selector,
     sink::{SinkParams, TargetSink},
@@ -22,13 +27,6 @@ use crate::{
         heartbeat::{HeartbeatParams, HeartbeatTask},
     },
 };
-
-/// Maximum wall-clock time to keep retrying the pipeline build before giving up.
-const MAX_BUILD_ELAPSED: Duration = Duration::from_secs(30);
-/// Initial backoff between build attempts; doubles each retry up to [`MAX_BACKOFF`].
-const INITIAL_BACKOFF: Duration = Duration::from_millis(250);
-/// Cap on the per-retry backoff interval.
-const MAX_BACKOFF: Duration = Duration::from_secs(8);
 
 /// Parameters to start a [`FlowWorker`]. The supervisor resolves selectors into
 /// a concrete topic list and passes the per-flow cluster addresses, aliases,
@@ -49,6 +47,8 @@ pub struct FlowWorkerParams {
     pub naming: NamingPolicy,
     /// Already-resolved source topic list (supervisor resolves selectors).
     pub topics: Vec<String>,
+    /// Source partition count by selected topic.
+    pub source_partition_counts: BTreeMap<String, i32>,
     /// Compliance zones of the target cluster (used for residency checks).
     pub target_zones: Vec<String>,
     /// Residency policies to enforce on the sink.
@@ -59,6 +59,10 @@ pub struct FlowWorkerParams {
     pub security_source: Option<crabka_client_core::security::ClientSecurity>,
     /// Optional TLS/SASL security for the target cluster.
     pub security_target: Option<crabka_client_core::security::ClientSecurity>,
+    /// Process-owned Kafka client resource policy.
+    pub client_resource_policy: ClientResourcePolicy,
+    /// Process-owned runtime and topic policy.
+    pub runtime_policy: ReplicatorRuntimePolicy,
 }
 
 /// One directional replication flow: the running connect runtime plus the
@@ -82,8 +86,8 @@ fn now_ms() -> i64 {
 
 /// Compute the next build-retry backoff: double the current interval, capped at
 /// [`MAX_BACKOFF`].
-fn next_backoff(current: Duration) -> Duration {
-    (current * 2).min(MAX_BACKOFF)
+fn next_backoff(current: Time, maximum: Time) -> Time {
+    (current * 2.0).min(maximum)
 }
 
 impl FlowWorker {
@@ -106,25 +110,25 @@ impl FlowWorker {
         err,
     )]
     pub async fn start(p: FlowWorkerParams) -> crate::Result<Self> {
-        let mut backoff = INITIAL_BACKOFF;
-        let mut elapsed = Duration::ZERO;
+        let mut backoff = p.runtime_policy.worker_build_initial_backoff;
+        let mut elapsed = Time::ZERO;
 
         loop {
             match Self::build(&p).await {
                 Ok(worker) => return Ok(worker),
                 Err(e) => {
-                    if elapsed >= MAX_BUILD_ELAPSED {
+                    if elapsed >= p.runtime_policy.worker_build_retry_budget {
                         return Err(e);
                     }
                     warn!(
                         flow = %p.flow_name,
                         error = %e,
-                        backoff_ms = backoff.as_millis(),
+                        backoff = %backoff.human(),
                         "flow worker build failed; retrying after backoff"
                     );
-                    tokio::time::sleep(backoff).await;
+                    tokio::time::sleep(backoff.to_std()).await;
                     elapsed += backoff;
-                    backoff = next_backoff(backoff);
+                    backoff = next_backoff(backoff, p.runtime_policy.worker_build_max_backoff);
                 }
             }
         }
@@ -142,28 +146,37 @@ impl FlowWorker {
         let group_id = format!("crabka-replicator-{}", p.flow_name);
         tracing::Span::current().record("group_id", group_id.as_str());
 
-        let source = SourceConsumer::start(
+        let source = SourceConsumer::start_with_runtime_policy(
             &p.source_bootstrap,
             &group_id,
             &p.topics,
             p.security_source.clone(),
+            p.client_resource_policy,
+            &p.runtime_policy,
         )
         .await?;
 
-        let sink = TargetSink::start(SinkParams {
-            target_bootstrap: p.target_bootstrap.clone(),
-            source_alias: p.source_alias.clone(),
-            naming: p.naming,
-            target_zones: p.target_zones.clone(),
-            policies: p.policies.clone(),
-            security: p.security_target.clone(),
-        })
+        let sink = TargetSink::start_with_runtime_policy(
+            SinkParams {
+                target_bootstrap: p.target_bootstrap.clone(),
+                source_alias: p.source_alias.clone(),
+                naming: p.naming,
+                target_zones: p.target_zones.clone(),
+                policies: p.policies.clone(),
+                security: p.security_target.clone(),
+                source_partition_counts: p.source_partition_counts.clone(),
+            },
+            p.client_resource_policy,
+            p.runtime_policy.clone(),
+        )
         .await?;
 
-        let store = InternalTopicCheckpointStore::start(
+        let store = InternalTopicCheckpointStore::start_with_runtime_policy(
             &p.target_bootstrap,
             &p.flow_name,
             p.security_target.clone(),
+            p.client_resource_policy,
+            p.runtime_policy.clone(),
         )
         .await?;
 
@@ -171,22 +184,26 @@ impl FlowWorker {
             .add_source(source)
             .add_sink(sink)
             .checkpoint_store(Arc::new(store))
-            .commit_interval(Duration::from_millis(500))
-            .max_batch(500)
+            .commit_interval(p.runtime_policy.connect_commit_interval.to_std())
+            .max_batch(p.runtime_policy.connect_max_batch_records.get())
             .run();
 
-        let heartbeat = HeartbeatTask::start(HeartbeatParams {
-            target_bootstrap: p.target_bootstrap.clone(),
-            source_alias: p.source_alias.clone(),
-            target_alias: p.target_alias.clone(),
-            interval: Duration::from_secs(1),
-            now_ms,
-            sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
-            security: p.security_target.clone(),
-        })
+        let heartbeat = HeartbeatTask::start_with_runtime_policy(
+            HeartbeatParams {
+                target_bootstrap: p.target_bootstrap.clone(),
+                source_alias: p.source_alias.clone(),
+                target_alias: p.target_alias.clone(),
+                interval: p.runtime_policy.heartbeat_interval,
+                now_ms,
+                sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
+                security: p.security_target.clone(),
+            },
+            p.client_resource_policy,
+            &p.runtime_policy,
+        )
         .await?;
 
-        let checkpoint = CheckpointTask::start(
+        let checkpoint = CheckpointTask::start_with_runtime_policy(
             CheckpointParams {
                 source_bootstrap: p.source_bootstrap.clone(),
                 target_bootstrap: p.target_bootstrap.clone(),
@@ -195,7 +212,9 @@ impl FlowWorker {
                 group_selector: p.group_selector.clone(),
                 security: p.security_target.clone(),
             },
-            Duration::from_secs(5),
+            p.runtime_policy.checkpoint_interval,
+            p.client_resource_policy,
+            p.runtime_policy.clone(),
         );
 
         Ok(Self {
@@ -227,6 +246,8 @@ impl FlowWorker {
 #[cfg(test)]
 mod tests {
 
+    use crabka_units::{millis, secs};
+
     use super::*;
 
     #[test]
@@ -239,11 +260,31 @@ mod tests {
     #[test]
     fn next_backoff_doubles_and_caps() {
         // Doubling: 250ms -> 500ms (the `*2`→`/2` mutant gives 125ms).
-        assert2::assert!(
-            super::next_backoff(Duration::from_millis(250)) == Duration::from_millis(500)
-        );
+        assert2::assert!(super::next_backoff(millis(250), secs(8)) == millis(500));
         // Cap: never exceeds MAX_BACKOFF even when already at the cap.
-        assert2::assert!(super::next_backoff(MAX_BACKOFF) == MAX_BACKOFF);
+        assert2::assert!(super::next_backoff(secs(8), secs(8)) == secs(8));
+        // The cap binds before the doubling would overshoot it: 8s doubled is
+        // 16s, so a 5s backoff must land on the 8s cap, not 10s.
+        assert2::assert!(super::next_backoff(secs(5), secs(8)) == secs(8));
+    }
+
+    #[test]
+    fn backoff_constants_convert_to_std_durations() {
+        // The retry loop sleeps on `Duration`; the seam must preserve the
+        // configured extents exactly.
+        let policy = crate::config::ReplicatorRuntimePolicy::default();
+        assert2::check!(
+            policy.worker_build_initial_backoff.to_std() == std::time::Duration::from_millis(250)
+        );
+        assert2::check!(
+            policy.worker_build_max_backoff.to_std() == std::time::Duration::from_secs(8)
+        );
+        assert2::check!(
+            policy.worker_build_retry_budget.to_std() == std::time::Duration::from_secs(30)
+        );
+        assert2::check!(
+            policy.connect_commit_interval.to_std() == std::time::Duration::from_millis(500)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -263,7 +304,7 @@ mod tests {
         let sb = source.listen_addr().to_string();
         let tb = target.listen_addr().to_string();
 
-        crate::test_util::create_topic(&sb, "orders", 1).await;
+        crate::test_util::create_topic(&sb, "orders", 3).await;
         crate::test_util::produce(&sb, "orders", b"k", b"v").await;
 
         let worker = Box::pin(FlowWorker::start(FlowWorkerParams {
@@ -274,22 +315,25 @@ mod tests {
             target_alias: "eu-west".into(),
             naming: crate::config::NamingPolicy::Default,
             topics: vec!["orders".to_string()],
+            source_partition_counts: [("orders".to_string(), 3)].into(),
             target_zones: vec!["us".into()],
             policies: vec![],
             group_selector: crate::selector::Selector::compile(&[], &[]).unwrap(),
             security_source: None,
             security_target: None,
+            client_resource_policy: ClientResourcePolicy::default(),
+            runtime_policy: crate::config::ReplicatorRuntimePolicy::default(),
         }))
         .await
         .unwrap();
 
-        crate::test_util::await_topic_count(
-            &tb,
-            "us-east.orders",
-            1,
-            std::time::Duration::from_secs(15),
-        )
-        .await;
+        crate::test_util::await_topic_count(&tb, "us-east.orders", 1, secs(15)).await;
+
+        let mut admin = crabka_client_admin::AdminClient::connect(std::slice::from_ref(&tb))
+            .await
+            .unwrap();
+        let metadata = admin.metadata(&["us-east.orders"]).await.unwrap();
+        assert2::assert!(metadata.topics[0].partition_count == 3);
 
         worker.shutdown().await;
         assert2::assert!(crate::test_util::topic_record_count(&tb, "us-east.orders").await >= 1);

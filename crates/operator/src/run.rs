@@ -27,6 +27,7 @@ use crate::{
 /// the `tokio::select!` arms are logged but not propagated, since this is
 /// supervisor glue and the e2e test is the contract.
 pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
+    config.validate().map_err(anyhow::Error::msg)?;
     telemetry::init_tracing(&config.log_filter);
     let (registry, metrics) = telemetry::new_registry_with_metrics();
     let registry = Arc::new(Mutex::new(registry));
@@ -45,6 +46,8 @@ pub async fn run(config: OperatorConfig) -> anyhow::Result<()> {
         &config.operator_namespace,
         &config.lease_name,
         &config.pod_name,
+        config.leader_lease_duration,
+        config.leader_retry_interval,
     )
     .await?;
 

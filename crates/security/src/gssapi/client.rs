@@ -1,6 +1,8 @@
+use crabka_units::ByteSize;
+
 use super::{
     GssError, GssInitiator, InitStep,
-    security_layer::{SecurityLayer, decode_offer_layers},
+    security_layer::{SecurityLayer, decode_offer_layers, encode_choice},
 };
 
 /// Result of feeding one server token to the initiate exchange.
@@ -27,20 +29,20 @@ pub enum ClientExchangeError {
 
 struct Establishing {
     initiator: Box<dyn GssInitiator>,
-    max_recv_size: u32,
+    max_recv: ByteSize,
     authzid: Option<String>,
 }
 
 struct AwaitingOffer {
     initiator: Box<dyn GssInitiator>,
-    max_recv_size: u32,
+    max_recv: ByteSize,
     authzid: Option<String>,
 }
 
 impl std::fmt::Debug for Establishing {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Establishing")
-            .field("max_recv_size", &self.max_recv_size)
+            .field("max_recv", &self.max_recv)
             .finish_non_exhaustive()
     }
 }
@@ -48,7 +50,7 @@ impl std::fmt::Debug for Establishing {
 impl std::fmt::Debug for AwaitingOffer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("AwaitingOffer")
-            .field("max_recv_size", &self.max_recv_size)
+            .field("max_recv", &self.max_recv)
             .finish_non_exhaustive()
     }
 }
@@ -71,7 +73,7 @@ impl Establishing {
                     t.unwrap_or_default(),
                     AwaitingOffer {
                         initiator: self.initiator,
-                        max_recv_size: self.max_recv_size,
+                        max_recv: self.max_recv,
                         authzid: self.authzid,
                     },
                 ))
@@ -88,11 +90,7 @@ impl AwaitingOffer {
             return Err(ClientExchangeError::NoCommonLayer);
         }
         // Reply: select auth, our max recv size, optional authzid.
-        let s = self.max_recv_size.to_be_bytes();
-        let mut reply = vec![SecurityLayer::AUTH.0, s[1], s[2], s[3]];
-        if let Some(z) = &self.authzid {
-            reply.extend_from_slice(z.as_bytes());
-        }
+        let reply = encode_choice(SecurityLayer::AUTH, self.max_recv, self.authzid.as_deref());
         let wrapped = self.initiator.wrap(&reply, false)?;
         Ok(wrapped)
     }
@@ -128,12 +126,12 @@ impl GssapiClientExchange {
     #[must_use]
     pub fn new(
         initiator: Box<dyn GssInitiator>,
-        max_recv_size: u32,
+        max_recv: ByteSize,
         authzid: Option<String>,
     ) -> Self {
         Self::Establishing(Establishing {
             initiator,
-            max_recv_size,
+            max_recv,
             authzid,
         })
     }
@@ -170,6 +168,8 @@ impl GssapiClientExchange {
 #[cfg(test)]
 mod tests {
 
+    use crabka_units::kibibytes;
+
     use super::*;
     use crate::gssapi::{GssError, GssInitiator, InitStep};
 
@@ -195,7 +195,8 @@ mod tests {
 
     #[test]
     fn produces_first_token_then_replies_to_offer() {
-        let ex = GssapiClientExchange::new(Box::new(FakeInitiator { done: false }), 0x1_0000, None);
+        let ex =
+            GssapiClientExchange::new(Box::new(FakeInitiator { done: false }), kibibytes(64), None);
 
         // First call: no server token yet -> client AP-REQ.
         let first = ex.step(None).unwrap();
@@ -223,12 +224,12 @@ mod tests {
     #[test]
     fn debug_includes_observable_phase_and_max_receive_size() {
         let establishing =
-            GssapiClientExchange::new(Box::new(FakeInitiator { done: false }), 0x1_0000, None);
+            GssapiClientExchange::new(Box::new(FakeInitiator { done: false }), kibibytes(64), None);
         let rendered = format!("{establishing:?}");
         for part in [
             "GssapiClientExchange::Establishing",
             "Establishing",
-            "max_recv_size",
+            "max_recv",
         ] {
             assert2::assert!(rendered.contains(part));
         }
@@ -247,7 +248,7 @@ mod tests {
         for part in [
             "GssapiClientExchange::AwaitingOffer",
             "AwaitingOffer",
-            "max_recv_size",
+            "max_recv",
         ] {
             assert2::assert!(rendered.contains(part));
         }
@@ -255,7 +256,8 @@ mod tests {
 
     #[test]
     fn rejects_offer_without_auth_layer_even_when_other_layers_present() {
-        let ex = GssapiClientExchange::new(Box::new(FakeInitiator { done: false }), 0x1_0000, None);
+        let ex =
+            GssapiClientExchange::new(Box::new(FakeInitiator { done: false }), kibibytes(64), None);
 
         let ex = match ex.step(None).unwrap() {
             ClientStep::Token(_, next) => next,

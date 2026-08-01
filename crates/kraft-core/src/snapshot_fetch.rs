@@ -6,6 +6,8 @@
 //! engine restarts cleanly against the current leader.
 
 use bytes::{Bytes, BytesMut};
+use crabka_units::prelude::{ByteSize, ByteSizeExt as _, gibibytes};
+use refined_type::rule::MinMaxU64;
 
 use crate::types::NodeId;
 
@@ -20,7 +22,47 @@ pub type SnapshotId = (i64, i32);
 /// legitimate cluster reaches it, while it caps the memory a peer the follower
 /// believes is the leader can force it to allocate (denial-of-service finding
 /// M-3). A peer declaring (or streaming) more than this aborts the transfer.
-const MAX_SNAPSHOT_BYTES: usize = 1024 * 1024 * 1024;
+pub const METADATA_SNAPSHOT_FETCH_HARD_MAX: ByteSize = gibibytes(1);
+
+const METADATA_SNAPSHOT_FETCH_HARD_MAX_BYTES: u64 = 1_073_741_824;
+type RefinedMetadataSnapshotFetchBytes = MinMaxU64<1, METADATA_SNAPSHOT_FETCH_HARD_MAX_BYTES>;
+
+/// Validated deployment limit for one metadata snapshot fetch.
+///
+/// Operators may lower this limit, but the fixed 1 GiB security ceiling cannot
+/// be raised through configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MetadataSnapshotFetchMax(u64);
+
+impl MetadataSnapshotFetchMax {
+    /// Validate a positive whole-byte limit at or below the security ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for fractional, non-finite, zero, or over-ceiling
+    /// quantities.
+    pub fn new(value: ByteSize) -> Result<Self, String> {
+        let raw_bytes = value.bytes_f64();
+        if !raw_bytes.is_finite() || raw_bytes.fract() != 0.0 {
+            return Err("metadata snapshot fetch maximum must be a whole number of bytes".into());
+        }
+        RefinedMetadataSnapshotFetchBytes::new(value.bytes_u64())
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Return the validated limit as a dimensioned quantity.
+    #[must_use]
+    pub fn byte_size(self) -> ByteSize {
+        ByteSize::from_bytes(self.0)
+    }
+}
+
+impl Default for MetadataSnapshotFetchMax {
+    fn default() -> Self {
+        Self(METADATA_SNAPSHOT_FETCH_HARD_MAX_BYTES)
+    }
+}
 
 /// In-flight reassembly of one snapshot from one leader.
 #[derive(Debug)]
@@ -29,6 +71,7 @@ pub struct SnapshotFetchState {
     pub leader_id: NodeId,
     buf: BytesMut,
     size: Option<i64>,
+    max_size: MetadataSnapshotFetchMax,
 }
 
 /// What the engine should do after feeding a chunk in.
@@ -46,11 +89,22 @@ pub enum SnapshotFetchStep {
 impl SnapshotFetchState {
     #[must_use]
     pub fn new(snapshot_id: SnapshotId, leader_id: NodeId) -> Self {
+        Self::with_max(snapshot_id, leader_id, MetadataSnapshotFetchMax::default())
+    }
+
+    /// Start reassembly with a validated deployment-specific maximum.
+    #[must_use]
+    pub fn with_max(
+        snapshot_id: SnapshotId,
+        leader_id: NodeId,
+        max_size: MetadataSnapshotFetchMax,
+    ) -> Self {
         Self {
             snapshot_id,
             leader_id,
             buf: BytesMut::new(),
             size: None,
+            max_size,
         }
     }
 
@@ -69,13 +123,13 @@ impl SnapshotFetchState {
         position: i64,
         chunk: &[u8],
     ) -> SnapshotFetchStep {
-        // `size < 0` is rejected first, so the `as u64` cast below is exact and
-        // never wraps; the declared total must also stay under the hard cap so a
-        // hostile leader cannot make us reassemble unbounded bytes (finding M-3).
+        // A negative declared total is rejected outright; the declared total must
+        // also stay under the hard cap so a hostile leader cannot make us
+        // reassemble unbounded bytes (finding M-3).
         if id != self.snapshot_id
             || position != self.next_position()
             || size < 0
-            || size.cast_unsigned() > MAX_SNAPSHOT_BYTES as u64
+            || size > self.max_size.byte_size().bytes_i64()
         {
             return SnapshotFetchStep::Restart;
         }
@@ -106,8 +160,31 @@ impl SnapshotFetchState {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::prelude::bytes;
 
     use super::*;
+
+    #[test]
+    fn snapshot_fetch_max_accepts_only_whole_bytes_within_the_security_ceiling() {
+        assert2::assert!(MetadataSnapshotFetchMax::new(bytes(1)).is_ok());
+        assert2::assert!(MetadataSnapshotFetchMax::new(gibibytes(1)).is_ok());
+        assert2::assert!(MetadataSnapshotFetchMax::new(ByteSize::from_bytes_f64(0.5)).is_err());
+        assert2::assert!(MetadataSnapshotFetchMax::new(bytes(0)).is_err());
+        assert2::assert!(MetadataSnapshotFetchMax::new(bytes(1_073_741_825)).is_err());
+    }
+
+    #[test]
+    fn configured_snapshot_fetch_max_may_lower_but_not_raise_the_ceiling() {
+        let max = MetadataSnapshotFetchMax::new(bytes(3)).expect("valid configured maximum");
+        let mut oversized = SnapshotFetchState::with_max((10, 1), NodeId(2), max);
+        assert2::assert!(oversized.on_chunk((10, 1), 4, 0, b"abc") == SnapshotFetchStep::Restart);
+
+        let mut exact = SnapshotFetchState::with_max((10, 1), NodeId(2), max);
+        assert2::assert!(
+            exact.on_chunk((10, 1), 3, 0, b"abc")
+                == SnapshotFetchStep::Complete(Bytes::from_static(b"abc"))
+        );
+    }
 
     #[test]
     fn assembles_in_order_chunks_to_complete() {
@@ -148,10 +225,18 @@ mod tests {
     #[test]
     fn declared_size_over_cap_restarts() {
         let mut s = SnapshotFetchState::new((10, 1), NodeId(2));
-        let too_big = i64::try_from(MAX_SNAPSHOT_BYTES).unwrap() + 1;
+        let too_big = METADATA_SNAPSHOT_FETCH_HARD_MAX.bytes_i64() + 1;
         let step = s.on_chunk((10, 1), too_big, 0, b"abc");
         assert2::assert!(step == SnapshotFetchStep::Restart);
         assert2::assert!(s.next_position() == 0);
+    }
+
+    #[test]
+    fn reassembly_cap_is_exactly_one_gibibyte() {
+        // The cap bounds the memory a peer claiming to be the leader can force
+        // this follower to allocate, so its magnitude is the security property
+        // (finding M-3) — not just that some cap exists.
+        assert2::assert!(METADATA_SNAPSHOT_FETCH_HARD_MAX.bytes_i64() == 1_073_741_824);
     }
 
     #[test]

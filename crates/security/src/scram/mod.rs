@@ -1,5 +1,7 @@
 //! SCRAM (RFC 5802) — supports SHA-256 and SHA-512.
 
+use std::{fmt, str::FromStr};
+
 mod client;
 mod pg_verifier;
 mod server;
@@ -7,11 +9,64 @@ mod server;
 pub use client::ScramClientExchange;
 use hmac::{Hmac, KeyInit, Mac};
 pub use pg_verifier::{PgScramVerifier, ScramError};
+use refined_type::rule::MinMaxI32;
 use ring::rand::{SecureRandom, SystemRandom};
 pub use server::{ScramServerExchange, StepResult};
 use sha2::{Digest, Sha256, Sha512};
 
 use crate::SaslMechanism;
+
+/// Default PBKDF2 iteration count for new Kafka SCRAM credentials.
+pub const DEFAULT_SCRAM_ITERATIONS: i32 = 8192;
+/// Minimum PBKDF2 iteration count accepted by the broker.
+pub const MIN_SCRAM_ITERATIONS: i32 = 4096;
+/// Maximum PBKDF2 iteration count accepted by the broker.
+pub const MAX_SCRAM_ITERATIONS: i32 = 16_384;
+
+/// Broker-valid PBKDF2 iteration count for a SCRAM credential.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ScramIterations(i32);
+
+impl ScramIterations {
+    /// Validate a SCRAM iteration count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `value` is accepted by the broker.
+    pub fn new(value: i32) -> Result<Self, String> {
+        MinMaxI32::<MIN_SCRAM_ITERATIONS, MAX_SCRAM_ITERATIONS>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    #[must_use]
+    pub const fn into_value(self) -> i32 {
+        self.0
+    }
+}
+
+impl Default for ScramIterations {
+    fn default() -> Self {
+        Self::new(DEFAULT_SCRAM_ITERATIONS).expect("default SCRAM iterations are broker-valid")
+    }
+}
+
+impl fmt::Display for ScramIterations {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
+    }
+}
+
+impl FromStr for ScramIterations {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScramCredential {

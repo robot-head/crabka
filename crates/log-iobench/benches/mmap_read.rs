@@ -39,14 +39,18 @@ use std::{
 use bytes::Bytes;
 use crabka_log::{Log, LogConfig, Offset};
 use crabka_protocol::records::{Record, RecordBatch};
+use crabka_units::prelude::{ByteSize, ByteSizeExt as _, kibibytes, mebibytes};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use memmap2::Mmap;
 use tempfile::TempDir;
 
 /// One Kafka-default fetch chunk.
-const READ_LEN: usize = 1024 * 1024;
+const READ_LEN: ByteSize = mebibytes(1);
 /// A small scattered read, where mmap's random-access edge would show.
-const SMALL_READ_LEN: usize = 16 * 1024;
+const SMALL_READ_LEN: ByteSize = kibibytes(16);
+/// Segment size for the fixture log: big enough that a [`READ_LEN`] read stays
+/// inside one sealed segment, small enough to accumulate several of them.
+const SEGMENT_SIZE: ByteSize = mebibytes(8);
 
 fn make_batch(n: i32, payload_size: usize) -> RecordBatch {
     let mut b = RecordBatch {
@@ -72,7 +76,7 @@ fn build_log() -> (TempDir, Log, PathBuf, u64) {
     // 8 MiB segments so a 1 MiB read stays inside one sealed segment and we
     // accumulate several sealed files to choose from.
     let config = LogConfig {
-        segment_bytes: 8 * 1024 * 1024,
+        segment_size: SEGMENT_SIZE,
         ..LogConfig::default()
     };
     let mut log = Log::open(dir.path(), config).unwrap();
@@ -95,7 +99,7 @@ fn build_log() -> (TempDir, Log, PathBuf, u64) {
         .next()
         .expect("at least one sealed segment");
     let size = std::fs::metadata(&chosen).unwrap().len();
-    assert2::assert!(size >= READ_LEN as u64);
+    assert2::assert!(size >= READ_LEN.bytes_u64());
     (dir, log, chosen, size)
 }
 
@@ -124,9 +128,11 @@ fn bench_segment_io(c: &mut Criterion) {
     // mapped bytes are stable for the lifetime of `mmap`.
     let mmap = unsafe { Mmap::map(&file).unwrap() };
 
-    for &(label, len) in &[("1MiB", READ_LEN), ("16KiB", SMALL_READ_LEN)] {
+    for &(label, read_size) in &[("1MiB", READ_LEN), ("16KiB", SMALL_READ_LEN)] {
+        // Raw file offsets and buffer capacities from here down.
+        let len = read_size.bytes_usize();
         // Read from a mid-file, len-bounded offset.
-        let start: u64 = (size / 2).min(size - len as u64);
+        let start: u64 = (size / 2).min(size - read_size.bytes_u64());
         let start_usize = start as usize;
 
         let mut group = c.benchmark_group(format!("segment_io/{label}"));

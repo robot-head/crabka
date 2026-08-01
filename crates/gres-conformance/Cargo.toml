@@ -34,6 +34,7 @@ name = "crabka-gres-driver-golden-replay"
 path = "src/bin/driver_golden_replay.rs"
 
 [dependencies]
+crabka-units = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 tokio-postgres = { workspace = true }
 native-tls = { workspace = true }

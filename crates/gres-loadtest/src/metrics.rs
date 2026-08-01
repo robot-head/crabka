@@ -11,8 +11,9 @@
 //! A process that disappears (killed by a fault) keeps its last observed
 //! totals under its own entry.
 
-use std::{fs, time::Duration};
+use std::fs;
 
+use crabka_units::prelude::*;
 use tokio::{
     sync::oneshot,
     task::JoinHandle,
@@ -49,11 +50,12 @@ impl ProcSampler {
     ///
     /// Panics if called outside a Tokio runtime, or if `interval` is zero.
     #[must_use]
-    pub fn spawn(roster: ProcessRoster, interval: Duration) -> Self {
+    pub fn spawn(roster: ProcessRoster, interval: Time) -> Self {
         let mut tracked: Vec<Tracked> = Vec::new();
         attach_and_sample(&roster, &mut tracked);
         let (stop_tx, mut stop_rx) = oneshot::channel();
         let task = tokio::spawn(async move {
+            let interval = interval.to_std();
             let mut ticker = interval_at(Instant::now() + interval, interval);
             ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
             loop {
@@ -107,9 +109,9 @@ fn attach_and_sample(roster: &ProcessRoster, tracked: &mut Vec<Tracked>) {
 #[derive(Debug)]
 struct Tracked {
     info: ProcessInfo,
-    ticks_per_second: u64,
+    tick_rate: Frequency,
     cpu: Option<CpuWindow>,
-    max_rss_bytes: u64,
+    max_rss: ByteSize,
 }
 
 /// First and last observed cumulative CPU totals, in clock ticks.
@@ -123,9 +125,9 @@ impl Tracked {
     fn new(info: ProcessInfo) -> Self {
         Self {
             info,
-            ticks_per_second: clock_ticks_per_second(),
+            tick_rate: clock_tick_rate(),
             cpu: None,
-            max_rss_bytes: 0,
+            max_rss: ByteSize::ZERO,
         }
     }
 
@@ -148,24 +150,24 @@ impl Tracked {
             }
         }
         if let Ok(status) = fs::read_to_string(format!("/proc/{pid}/status"))
-            && let Some(rss_bytes) = parse_vm_rss_bytes(&status)
+            && let Some(rss) = parse_vm_rss(&status)
         {
-            self.max_rss_bytes = self.max_rss_bytes.max(rss_bytes);
+            self.max_rss = self.max_rss.max(rss);
         }
     }
 
     fn into_resources(self) -> ProcessResources {
-        let cpu_core_seconds = self.cpu.map_or(0.0, |window| {
-            ticks_to_seconds(
+        let cpu_time = self.cpu.map_or(Time::ZERO, |window| {
+            ticks_to_time(
                 window.last_ticks.saturating_sub(window.first_ticks),
-                self.ticks_per_second,
+                self.tick_rate,
             )
         });
         ProcessResources {
             label: self.info.label,
             pid: self.info.pid,
-            cpu_core_seconds,
-            max_rss_bytes: self.max_rss_bytes,
+            cpu_time,
+            max_rss: self.max_rss,
         }
     }
 }
@@ -196,37 +198,39 @@ fn parse_proc_stat(line: &str) -> Option<ProcStat> {
     })
 }
 
-/// Parses the `VmRSS:` line (kB) out of `/proc/<pid>/status` content,
-/// returning bytes. Kernel threads have no `VmRSS` line.
-fn parse_vm_rss_bytes(status: &str) -> Option<u64> {
+/// Parses the `VmRSS:` line out of `/proc/<pid>/status` content. The kernel
+/// labels it `kB` but counts kibibytes; kernel threads have no `VmRSS` line.
+fn parse_vm_rss(status: &str) -> Option<ByteSize> {
     let line = status.lines().find(|line| line.starts_with("VmRSS:"))?;
-    let kilobytes: u64 = line
+    let count: u64 = line
         .strip_prefix("VmRSS:")?
         .split_ascii_whitespace()
         .next()?
         .parse()
         .ok()?;
-    kilobytes.checked_mul(1024)
+    Some(kibibytes(1) * u64_as_f64(count))
 }
 
-/// Converts a clock-tick count to seconds. A zero `ticks_per_second`
-/// (impossible on Linux, but cheap to guard) is treated as 1.
 /// The kernel's clock-tick rate for `/proc` CPU fields.
 #[cfg(target_os = "linux")]
-fn clock_ticks_per_second() -> u64 {
-    rustix::param::clock_ticks_per_second()
+fn clock_tick_rate() -> Frequency {
+    Frequency::from_per_sec(u64_as_f64(rustix::param::clock_ticks_per_second()))
 }
 
 /// Off Linux there is no `/proc` to sample — reads fail and every process
-/// reports zeros — so the divisor is never observable; any nonzero constant
+/// reports zeros — so the rate is never observable; any nonzero constant
 /// keeps the arithmetic well-defined.
 #[cfg(not(target_os = "linux"))]
-fn clock_ticks_per_second() -> u64 {
-    100
+fn clock_tick_rate() -> Frequency {
+    per_sec(100)
 }
 
-fn ticks_to_seconds(ticks: u64, ticks_per_second: u64) -> f64 {
-    u64_as_f64(ticks) / u64_as_f64(ticks_per_second.max(1))
+/// The CPU time `ticks` of a clock running at `tick_rate` represent. A
+/// non-positive rate (impossible on Linux, but cheap to guard) yields no
+/// elapsed time rather than an infinity, because [`FrequencyExt::period`]
+/// reports a zero period for it.
+fn ticks_to_time(ticks: u64, tick_rate: Frequency) -> Time {
+    tick_rate.period() * u64_as_f64(ticks)
 }
 
 /// Lossless-for-practical-values `u64` → `f64` conversion built from exact
@@ -240,7 +244,8 @@ fn u64_as_f64(value: u64) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+    use assert2::{assert, check};
+    use crabka_units::fmt::Human as _;
 
     use super::*;
 
@@ -277,35 +282,37 @@ mod tests {
     }
 
     #[test]
-    fn parse_vm_rss_bytes_reads_kilobytes() {
+    fn parse_vm_rss_reads_kibibytes() {
         let realistic = "Name:\tcrabka-gres\nUmask:\t0022\nState:\tS (sleeping)\n\
                          VmPeak:\t  204800 kB\nVmHWM:\t   12345 kB\nVmRSS:\t    5348 kB\n\
                          RssAnon:\t    4000 kB\n";
         let cases = [
-            (realistic, Some(5348 * 1024)),
+            (realistic, Some(kibibytes(5348))),
             ("Name:\tkthreadd\nState:\tS (sleeping)\n", None),
             ("VmRSS:\tlots kB\n", None),
             ("", None),
         ];
         for (status, expected) in cases {
-            assert!(parse_vm_rss_bytes(status) == expected, "status: {status:?}");
+            check!(parse_vm_rss(status) == expected, "status: {status:?}");
         }
     }
 
     #[test]
-    fn ticks_to_seconds_divides_by_clock_rate() {
-        // (ticks, ticks per second, expected seconds); a zero rate clamps to 1.
+    fn ticks_scale_by_the_clock_period() {
+        // (ticks, tick rate, expected CPU time); a non-positive rate has no
+        // period, so it reports no elapsed time rather than an infinity.
         let cases = [
-            (0, 100, 0.0),
-            (150, 100, 1.5),
-            (1, 1000, 0.001),
-            (100, 0, 100.0),
+            (0, per_sec(100), Time::ZERO),
+            (150, per_sec(100), millis(1500)),
+            (1, per_sec(1000), millis(1)),
+            (100, Frequency::ZERO, Time::ZERO),
         ];
         for (ticks, rate, expected) in cases {
-            let got = ticks_to_seconds(ticks, rate);
-            assert!(
-                (got - expected).abs() < 1e-9,
-                "ticks: {ticks}, rate: {rate}"
+            let got = ticks_to_time(ticks, rate);
+            check!(
+                (got - expected).abs() < nanos(1),
+                "ticks: {ticks}, rate: {}",
+                rate.human()
             );
         }
     }
@@ -319,13 +326,14 @@ mod tests {
         roster
     }
 
-    /// Burns CPU on the current thread for roughly `duration`. Only the
+    /// Burns CPU on the current thread for roughly `budget`. Only the
     /// Linux-gated self-sampling tests need it.
     #[cfg(target_os = "linux")]
-    fn burn_cpu(duration: Duration) {
+    fn burn_cpu(budget: Time) {
         let start = std::time::Instant::now();
+        let budget = budget.to_std();
         let mut spin: u64 = 0;
-        while start.elapsed() < duration {
+        while start.elapsed() < budget {
             spin = spin.wrapping_add(1);
         }
         std::hint::black_box(spin);
@@ -341,16 +349,16 @@ mod tests {
                 label: "self".to_string(),
                 pid: std::process::id(),
             }]),
-            Duration::from_millis(50),
+            millis(50),
         );
         // Burn CPU so the window's utime delta is at least a few clock ticks.
-        burn_cpu(Duration::from_millis(200));
+        burn_cpu(millis(200));
         let resources = sampler.stop().await;
         assert!(resources.len() == 1);
         assert!(resources[0].label == "self");
         assert!(resources[0].pid == std::process::id());
-        assert!(resources[0].cpu_core_seconds > 0.0);
-        assert!(resources[0].max_rss_bytes > 0);
+        check!(resources[0].cpu_time > Time::ZERO);
+        check!(resources[0].max_rss > ByteSize::ZERO);
     }
 
     // Asserts nonzero readings from the live-attached entry, so `/proc` is
@@ -362,17 +370,17 @@ mod tests {
             label: "self".to_string(),
             pid: std::process::id(),
         }]);
-        let sampler = ProcSampler::spawn(roster.clone(), Duration::from_millis(20));
+        let sampler = ProcSampler::spawn(roster.clone(), millis(20));
         // Let at least one tick pass before the roster grows, as it would
         // when a fault restarts a node mid-window.
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        tokio::time::sleep(millis(50).to_std()).await;
         roster.push(ProcessInfo {
             label: "self#2".to_string(),
             pid: std::process::id(),
         });
-        burn_cpu(Duration::from_millis(100));
+        burn_cpu(millis(100));
         // Leave the sampler a few ticks to attach and sample the new entry.
-        tokio::time::sleep(Duration::from_millis(60)).await;
+        tokio::time::sleep(millis(60).to_std()).await;
         let resources = sampler.stop().await;
         assert!(resources.len() == 2);
         assert!(resources[0].label == "self");
@@ -380,8 +388,8 @@ mod tests {
         assert!(resources[1].pid == std::process::id());
         // The late entry's window starts at attach: sampled, non-negative,
         // and its RSS was observed.
-        assert!(resources[1].cpu_core_seconds >= 0.0);
-        assert!(resources[1].max_rss_bytes > 0);
+        check!(resources[1].cpu_time >= Time::ZERO);
+        check!(resources[1].max_rss > ByteSize::ZERO);
     }
 
     #[tokio::test]
@@ -397,22 +405,22 @@ mod tests {
                     pid: 999_999_998,
                 },
             ]),
-            Duration::from_millis(10),
+            millis(10),
         );
-        tokio::time::sleep(Duration::from_millis(30)).await;
+        tokio::time::sleep(millis(30).to_std()).await;
         let resources = sampler.stop().await;
         let expected = vec![
             ProcessResources {
                 label: "ghost-b".to_string(),
                 pid: 999_999_999,
-                cpu_core_seconds: 0.0,
-                max_rss_bytes: 0,
+                cpu_time: Time::ZERO,
+                max_rss: ByteSize::ZERO,
             },
             ProcessResources {
                 label: "ghost-a".to_string(),
                 pid: 999_999_998,
-                cpu_core_seconds: 0.0,
-                max_rss_bytes: 0,
+                cpu_time: Time::ZERO,
+                max_rss: ByteSize::ZERO,
             },
         ];
         assert!(resources == expected);

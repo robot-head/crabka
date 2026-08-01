@@ -49,9 +49,10 @@ mod error;
 mod message;
 mod set;
 
-pub use bridge::{legacy_to_v2, parsed_from_v2, v2_to_legacy};
+pub use bridge::{legacy_to_v2, legacy_to_v2_with_policy, parsed_from_v2, v2_to_legacy};
 pub use error::LegacyRecordsError;
 pub use message::{Magic, Message, attrs, attrs_with_compression, compression_from_attrs};
 pub use set::{
-    ParsedRecord, decode_message_set, encode_compressed_message_set, encode_flat_message_set,
+    ParsedRecord, decode_message_set, decode_message_set_with_policy,
+    encode_compressed_message_set, encode_flat_message_set,
 };

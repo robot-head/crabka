@@ -26,6 +26,8 @@ pub struct StreamsGroupConfig {
     pub enable: bool,
     pub session_timeout: Duration,
     pub heartbeat_interval: Duration,
+    /// Default replication factor when an internal-topic spec leaves it unset.
+    pub internal_topic_replication_factor: i16,
     pub min_session_timeout: Duration,
     pub max_session_timeout: Duration,
     pub min_heartbeat_interval: Duration,
@@ -46,6 +48,7 @@ pub struct StreamsGroupConfig {
     pub task_offset_interval: Duration,
     /// Server-side assignor selection.
     pub assignor: StreamsAssignorKind,
+    pub actor_mailbox_capacity: usize,
 }
 
 impl Default for StreamsGroupConfig {
@@ -54,6 +57,7 @@ impl Default for StreamsGroupConfig {
             enable: true,
             session_timeout: Duration::from_secs(45),
             heartbeat_interval: Duration::from_secs(5),
+            internal_topic_replication_factor: 3,
             min_session_timeout: Duration::from_secs(45),
             max_session_timeout: Duration::from_mins(1),
             min_heartbeat_interval: Duration::from_secs(5),
@@ -67,6 +71,7 @@ impl Default for StreamsGroupConfig {
             acceptable_recovery_lag: 10_000,
             task_offset_interval: Duration::from_secs(30),
             assignor: StreamsAssignorKind::Auto,
+            actor_mailbox_capacity: 64,
         }
     }
 }
@@ -85,6 +90,7 @@ mod tests {
                     enable: true,
                     session_timeout: Duration::from_secs(45),
                     heartbeat_interval: Duration::from_secs(5),
+                    internal_topic_replication_factor: 3,
                     min_session_timeout: Duration::from_secs(45),
                     max_session_timeout: Duration::from_mins(1),
                     min_heartbeat_interval: Duration::from_secs(5),
@@ -96,6 +102,7 @@ mod tests {
                     acceptable_recovery_lag: 10_000,
                     task_offset_interval: Duration::from_secs(30),
                     assignor: StreamsAssignorKind::Auto,
+                    actor_mailbox_capacity: 64,
                 }
         );
     }

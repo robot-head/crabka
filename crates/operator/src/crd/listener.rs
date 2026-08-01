@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use crabka_units::Time;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -126,7 +127,7 @@ pub struct BrokerOverride {
 /// The `schema_with` workaround avoids a kube-rs 3.x `StructuralSchemaRewriter`
 /// panic when `oneOf` branches share a `type` discriminator with differing `enum`
 /// values — same pattern as `Authentication` in `user.rs`.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(tag = "type")]
 #[schemars(schema_with = "listener_authentication_schema")]
 pub enum ListenerAuthentication {
@@ -355,7 +356,7 @@ pub struct OauthClientSecretRef {
 /// broker-global `[gssapi]` TOML block and appends `GSSAPI` to the
 /// listener's `sasl_mechanisms`. `[gssapi]` is broker-global, so all
 /// GSSAPI listeners on a cluster must agree.
-#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct ListenerAuthenticationGssapi {
     /// Secret (same namespace as the `Kafka` CR) holding the service
@@ -374,6 +375,14 @@ pub struct ListenerAuthenticationGssapi {
     /// back to krb5.conf discovery when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub kdc: Option<String>,
+    /// Maximum tolerated difference between client and broker clocks.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub max_time_skew: Option<Time>,
 }
 
 /// Reference to a Secret (same namespace as the `Kafka` CR) holding a
@@ -453,6 +462,7 @@ fn listener_authentication_schema(_: &mut schemars::SchemaGenerator) -> schemars
             },
             "realm": { "type": "string", "minLength": 1 },
             "kdc": { "type": "string", "minLength": 1 },
+            "maxTimeSkew": { "type": "string", "minLength": 1 },
         },
     })
 }
@@ -1418,6 +1428,28 @@ mod tests {
     use assert2::assert;
 
     use super::*;
+
+    #[test]
+    fn gssapi_clock_skew_round_trips_as_unit_bearing_string() {
+        let listener: Listener = serde_json::from_value(serde_json::json!({
+            "name": "gss",
+            "port": 9092,
+            "type": "internal",
+            "authentication": {
+                "type": "gssapi",
+                "keytabSecretRef": { "secretName": "kt", "key": "keytab" },
+                "maxTimeSkew": "17s"
+            }
+        }))
+        .unwrap();
+        let ListenerAuthentication::Gssapi(gssapi) = listener.authentication.unwrap() else {
+            panic!("expected gssapi authentication");
+        };
+        assert!(gssapi.max_time_skew == Some(crabka_units::secs(17)));
+
+        let schema = serde_json::to_string(&schemars::schema_for!(Listener)).unwrap();
+        assert!(schema.contains("maxTimeSkew"));
+    }
 
     #[test]
     fn internal_listener_round_trips_through_json() {

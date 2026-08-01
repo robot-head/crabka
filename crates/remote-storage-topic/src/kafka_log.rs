@@ -31,17 +31,21 @@
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{Arc, Mutex as StdMutex},
-    time::Duration,
 };
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
-use crabka_client_core::Client;
+use crabka_client_core::{
+    Client, ClientFrameMax, ConnectionDispatchQueueCapacity, ConnectionOptions,
+};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use crabka_protocol::{
     owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
     primitives::uuid::Uuid as WireUuid,
+};
+use crabka_units::prelude::{
+    ByteSize, ByteSizeExt as _, Time, TimeExt as _, mebibytes, millis, secs,
 };
 use futures_util::stream::{StreamExt, unfold};
 use tokio::sync::mpsc;
@@ -67,6 +71,56 @@ pub const DEFAULT_NUM_PARTITIONS: i32 = 50;
 /// Apache Kafka's `remote.log.metadata.topic.replication.factor`.
 pub const DEFAULT_REPLICATION: i32 = 3;
 
+/// How long `CreateTopics` may take to provision `__remote_log_metadata`
+/// before the broker gives up on the round-trip.
+pub const DEFAULT_METADATA_TOPIC_CREATE_TIMEOUT: Time = secs(30);
+
+/// `max_wait_ms` for the per-partition metadata `Fetch`. Long enough that an
+/// idle partition costs one RPC per interval rather than a spin, short enough
+/// that cancellation on reassignment is prompt.
+pub const DEFAULT_METADATA_FETCH_MAX_WAIT: Time = millis(500);
+
+/// Per-partition budget for the metadata `Fetch`. Metadata events are small,
+/// so one mebibyte is many thousands of them per round-trip.
+pub const DEFAULT_METADATA_FETCH_MAX_BYTES: ByteSize = mebibytes(1);
+
+/// Pause before retrying a failed metadata `Fetch`, so a broker that is down
+/// does not turn the fetch loop into a busy spin.
+pub const DEFAULT_METADATA_FETCH_RETRY_BACKOFF: Time = millis(200);
+
+/// Default capacity of the shared metadata-event delivery queue.
+pub const DEFAULT_METADATA_EVENT_QUEUE_CAPACITY: usize = 1024;
+
+/// Positive capacity of the shared metadata-event delivery queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MetadataEventQueueCapacity(usize);
+
+impl MetadataEventQueueCapacity {
+    /// Validate a metadata-event queue capacity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: usize) -> Result<Self, String> {
+        refined_type::rule::GreaterUsize::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| format!("metadata event queue capacity: {error}"))
+    }
+
+    /// Return the validated channel capacity.
+    #[must_use]
+    pub const fn capacity(self) -> usize {
+        self.0
+    }
+}
+
+impl Default for MetadataEventQueueCapacity {
+    fn default() -> Self {
+        Self::new(DEFAULT_METADATA_EVENT_QUEUE_CAPACITY)
+            .expect("default metadata event queue capacity is positive")
+    }
+}
+
 /// Construction-time configuration for [`KafkaMetadataEventLog`].
 #[derive(Debug, Clone)]
 pub struct KafkaMetadataLogConfig {
@@ -90,6 +144,20 @@ pub struct KafkaMetadataLogConfig {
     /// the admin client, and every per-partition fetch connection.
     /// `None` = plaintext loopback (default).
     pub security: Option<crabka_client_core::security::ClientSecurity>,
+    /// Timeout for provisioning the internal topic.
+    pub topic_create_timeout: Time,
+    /// Maximum wait for each per-partition metadata fetch.
+    pub fetch_max_wait: Time,
+    /// Maximum bytes returned by each per-partition metadata fetch.
+    pub fetch_max_bytes: ByteSize,
+    /// Backoff after a failed metadata fetch.
+    pub fetch_retry_backoff: Time,
+    /// Capacity of the shared metadata-event delivery queue.
+    pub event_queue_capacity: MetadataEventQueueCapacity,
+    /// Capacity of every outbound Kafka connection's dispatch queue.
+    pub dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    /// Maximum frame size for every outbound Kafka connection.
+    pub frame_max: ClientFrameMax,
 }
 
 impl KafkaMetadataLogConfig {
@@ -103,8 +171,67 @@ impl KafkaMetadataLogConfig {
             replication: DEFAULT_REPLICATION,
             client_id: "crabka-rlmm".to_string(),
             security: None,
+            topic_create_timeout: DEFAULT_METADATA_TOPIC_CREATE_TIMEOUT,
+            fetch_max_wait: DEFAULT_METADATA_FETCH_MAX_WAIT,
+            fetch_max_bytes: DEFAULT_METADATA_FETCH_MAX_BYTES,
+            fetch_retry_backoff: DEFAULT_METADATA_FETCH_RETRY_BACKOFF,
+            event_queue_capacity: MetadataEventQueueCapacity::default(),
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::default(),
+            frame_max: ClientFrameMax::default(),
         }
     }
+
+    /// Validate values that cross into the Kafka wire client.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for non-positive, non-finite, fractional, or
+    /// out-of-range wire values.
+    pub fn validate(&self) -> Result<(), String> {
+        validate_positive_whole_millis_i32("topic_create_timeout", self.topic_create_timeout)?;
+        validate_positive_whole_millis_i32("fetch_max_wait", self.fetch_max_wait)?;
+        validate_positive_whole_bytes_i32("fetch_max_bytes", self.fetch_max_bytes)?;
+        validate_positive_duration("fetch_retry_backoff", self.fetch_retry_backoff)
+    }
+}
+
+fn validate_positive_whole_millis_i32(name: &str, value: Time) -> Result<(), String> {
+    let millis = value.millis_i64();
+    if !value.secs_f64().is_finite() || Time::from_millis(millis) != value {
+        return Err(format!(
+            "{name} must be a positive whole number of milliseconds within 1..=i32::MAX"
+        ));
+    }
+    let millis = i32::try_from(millis).map_err(|_| {
+        format!("{name} must be a positive whole number of milliseconds within 1..=i32::MAX")
+    })?;
+    refined_type::rule::GreaterI32::<0>::new(millis)
+        .map(|_| ())
+        .map_err(|error| format!("{name}: {error}"))
+}
+
+fn validate_positive_whole_bytes_i32(name: &str, value: ByteSize) -> Result<(), String> {
+    let bytes = value.bytes_i64();
+    if !value.bytes_f64().is_finite() || ByteSize::from_bytes_i64(bytes) != value {
+        return Err(format!(
+            "{name} must be a positive whole number of bytes within 1..=i32::MAX"
+        ));
+    }
+    let bytes = i32::try_from(bytes).map_err(|_| {
+        format!("{name} must be a positive whole number of bytes within 1..=i32::MAX")
+    })?;
+    refined_type::rule::GreaterI32::<0>::new(bytes)
+        .map(|_| ())
+        .map_err(|error| format!("{name}: {error}"))
+}
+
+fn validate_positive_duration(name: &str, value: Time) -> Result<(), String> {
+    let duration = std::time::Duration::try_from_secs_f64(value.secs_f64())
+        .map_err(|error| format!("{name}: {error}"))?;
+    if duration.is_zero() {
+        return Err(format!("{name} must be positive"));
+    }
+    Ok(())
 }
 
 /// Production [`MetadataEventLog`] backed by an internal Kafka topic.
@@ -117,6 +244,12 @@ pub struct KafkaMetadataEventLog {
     bootstrap: String,
     client_id: String,
     security: Option<crabka_client_core::security::ClientSecurity>,
+    fetch_max_wait: Time,
+    fetch_max_bytes: ByteSize,
+    fetch_retry_backoff: Time,
+    event_queue_capacity: MetadataEventQueueCapacity,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
     subscriptions: tokio::sync::Mutex<Vec<Arc<ConsumerState>>>,
 }
 
@@ -130,6 +263,9 @@ impl KafkaMetadataEventLog {
     /// client construction failures.
     #[instrument(skip_all, fields(topic = %cfg.topic, bootstrap = %cfg.bootstrap), err)]
     pub async fn start(cfg: KafkaMetadataLogConfig) -> Result<Arc<Self>, MetadataLogError> {
+        cfg.validate()
+            .map_err(|error| MetadataLogError::Other(format!("invalid config: {error}")))?;
+
         // 1. Provision the topic, learn its partition count and id. The
         //    manual Fetch path needs the topic Uuid (Fetch v≥13 carries
         //    topic_id, not the name).
@@ -140,6 +276,8 @@ impl KafkaMetadataEventLog {
         let producer = Producer::builder()
             .bootstrap(cfg.bootstrap.clone())
             .client_id(format!("{}-producer", cfg.client_id))
+            .dispatch_queue_capacity(cfg.dispatch_queue_capacity.get())
+            .frame_max(cfg.frame_max.size())
             .acks(Acks::All)
             .enable_idempotence(true)
             .maybe_security(cfg.security.clone())
@@ -151,6 +289,8 @@ impl KafkaMetadataEventLog {
         let client = Client::builder()
             .bootstrap(cfg.bootstrap.clone())
             .client_id(format!("{}-client", cfg.client_id))
+            .dispatch_queue_capacity(cfg.dispatch_queue_capacity.get())
+            .frame_max(cfg.frame_max.size())
             .maybe_security(cfg.security.clone())
             .build()
             .await
@@ -165,6 +305,12 @@ impl KafkaMetadataEventLog {
             bootstrap: cfg.bootstrap,
             client_id: cfg.client_id,
             security: cfg.security,
+            fetch_max_wait: cfg.fetch_max_wait,
+            fetch_max_bytes: cfg.fetch_max_bytes,
+            fetch_retry_backoff: cfg.fetch_retry_backoff,
+            event_queue_capacity: cfg.event_queue_capacity,
+            dispatch_queue_capacity: cfg.dispatch_queue_capacity,
+            frame_max: cfg.frame_max,
             subscriptions: tokio::sync::Mutex::new(Vec::new()),
         }))
     }
@@ -197,6 +343,11 @@ struct ConsumerState {
     topic: String,
     topic_id: WireUuid,
     tx: mpsc::Sender<MetadataEventRecord>,
+    fetch_max_wait: Time,
+    fetch_max_bytes: ByteSize,
+    fetch_retry_backoff: Time,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
     /// partition -> cancel token for its fetch task.
     tasks: StdMutex<HashMap<i32, CancellationToken>>,
 }
@@ -300,7 +451,7 @@ impl MetadataEventLog for KafkaMetadataEventLog {
         &self,
         assignment: Vec<PartitionStart>,
     ) -> (MetadataEventStream, Arc<dyn AssignmentHandle>) {
-        let (tx, rx) = mpsc::channel::<MetadataEventRecord>(1024);
+        let (tx, rx) = metadata_event_channel(self.event_queue_capacity);
         let state = Arc::new(ConsumerState {
             bootstrap: self.bootstrap.clone(),
             client_id: format!("{}-consumer", self.client_id),
@@ -308,6 +459,11 @@ impl MetadataEventLog for KafkaMetadataEventLog {
             topic: self.topic.clone(),
             topic_id: self.topic_id,
             tx,
+            fetch_max_wait: self.fetch_max_wait,
+            fetch_max_bytes: self.fetch_max_bytes,
+            fetch_retry_backoff: self.fetch_retry_backoff,
+            dispatch_queue_capacity: self.dispatch_queue_capacity,
+            frame_max: self.frame_max,
             tasks: StdMutex::new(HashMap::new()),
         });
         for ps in assignment {
@@ -376,16 +532,33 @@ impl MetadataEventLog for KafkaMetadataEventLog {
     }
 }
 
+fn metadata_event_channel(
+    capacity: MetadataEventQueueCapacity,
+) -> (
+    mpsc::Sender<MetadataEventRecord>,
+    mpsc::Receiver<MetadataEventRecord>,
+) {
+    mpsc::channel(capacity.capacity())
+}
+
 /// Provision the topic if missing and return `(partition_count,
 /// topic_id)`. An existing topic's count and id win; a freshly-created
 /// topic's id is re-read with a second metadata round-trip (the
 /// `CreateTopics` outcome does not reliably carry it).
 #[instrument(skip_all, fields(topic = %cfg.topic), err)]
 async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), MetadataLogError> {
-    let mut admin =
-        AdminClient::connect_secured(std::slice::from_ref(&cfg.bootstrap), cfg.security.clone())
-            .await
-            .map_err(|e| MetadataLogError::Other(format!("admin connect failed: {e}")))?;
+    let mut admin = AdminClient::connect_with_options(
+        std::slice::from_ref(&cfg.bootstrap),
+        ConnectionOptions {
+            client_id: format!("{}-admin", cfg.client_id),
+            dispatch_queue_capacity: cfg.dispatch_queue_capacity,
+            frame_max: cfg.frame_max,
+            security: cfg.security.clone().map(Box::new),
+            ..ConnectionOptions::default()
+        },
+    )
+    .await
+    .map_err(|e| MetadataLogError::Other(format!("admin connect failed: {e}")))?;
 
     let topic_ref = cfg.topic.as_str();
     let meta = admin
@@ -417,7 +590,7 @@ async fn ensure_topic(cfg: &KafkaMetadataLogConfig) -> Result<(i32, WireUuid), M
         configs,
     };
     let outcomes = admin
-        .create_topics(&[spec], 30_000)
+        .create_topics(&[spec], cfg.topic_create_timeout)
         .await
         .map_err(|e| MetadataLogError::Other(format!("create_topics failed: {e}")))?;
     let outcome = outcomes
@@ -490,7 +663,7 @@ async fn partition_fetch_loop(
 ) {
     use std::net::ToSocketAddrs;
 
-    use crabka_client_core::{Connection, ConnectionOptions, fetch_partition};
+    use crabka_client_core::{Connection, fetch_partition};
 
     // Dedicated connection for this partition's fetch loop. Resolve the
     // bootstrap address; on failure, warn and exit. The partition then
@@ -508,6 +681,8 @@ async fn partition_fetch_loop(
     };
     let opts = ConnectionOptions {
         client_id: state.client_id.clone(),
+        dispatch_queue_capacity: state.dispatch_queue_capacity,
+        frame_max: state.frame_max,
         security: state.security.clone().map(Box::new),
         ..Default::default()
     };
@@ -533,8 +708,8 @@ async fn partition_fetch_loop(
                 state.topic_id,
                 partition,
                 next_offset,
-                500,
-                1 << 20,
+                state.fetch_max_wait,
+                state.fetch_max_bytes,
             ) => {
                 match res {
                     Ok(records) => {
@@ -567,7 +742,7 @@ async fn partition_fetch_loop(
                     }
                     Err(e) => {
                         warn!(error = %e, partition, "metadata consumer: fetch failed; retrying");
-                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        tokio::time::sleep(state.fetch_retry_backoff.to_std()).await;
                     }
                 }
             }
@@ -582,6 +757,7 @@ fn usize_count(n: i32) -> Result<usize, MetadataLogError> {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::convert::{ByteSizeExt as _, TimeExt as _};
 
     use super::*;
 
@@ -593,6 +769,167 @@ mod tests {
         check!(cfg.replication == 3);
         check!(cfg.bootstrap == "127.0.0.1:9092");
         check!(cfg.security.is_none());
+        check!(cfg.topic_create_timeout == secs(30));
+        check!(cfg.fetch_max_wait == millis(500));
+        check!(cfg.fetch_max_bytes == mebibytes(1));
+        check!(cfg.fetch_retry_backoff == millis(200));
+        check!(cfg.event_queue_capacity.capacity() == 1024);
+        cfg.validate().unwrap();
+    }
+
+    #[test]
+    fn config_accepts_custom_transport_policy() {
+        let cfg = KafkaMetadataLogConfig {
+            topic_create_timeout: secs(45),
+            fetch_max_wait: millis(750),
+            fetch_max_bytes: mebibytes(2),
+            fetch_retry_backoff: millis(300),
+            event_queue_capacity: MetadataEventQueueCapacity::new(2048).unwrap(),
+            ..KafkaMetadataLogConfig::new("127.0.0.1:9092")
+        };
+
+        cfg.validate().unwrap();
+        check!(cfg.topic_create_timeout == secs(45));
+        check!(cfg.fetch_max_wait == millis(750));
+        check!(cfg.fetch_max_bytes == mebibytes(2));
+        check!(cfg.fetch_retry_backoff == millis(300));
+        check!(cfg.event_queue_capacity.capacity() == 2048);
+    }
+
+    #[test]
+    fn config_rejects_invalid_transport_policy() {
+        fn configured(
+            configure: impl FnOnce(&mut KafkaMetadataLogConfig),
+        ) -> KafkaMetadataLogConfig {
+            let mut cfg = KafkaMetadataLogConfig::new("127.0.0.1:9092");
+            configure(&mut cfg);
+            cfg
+        }
+
+        let cases = [
+            (
+                "topic_create_timeout",
+                configured(|cfg| cfg.topic_create_timeout = Time::ZERO),
+            ),
+            (
+                "topic_create_timeout",
+                configured(|cfg| cfg.topic_create_timeout = Time::from_micros(500)),
+            ),
+            (
+                "topic_create_timeout",
+                configured(|cfg| {
+                    cfg.topic_create_timeout = Time::from_secs_f64(f64::INFINITY);
+                }),
+            ),
+            (
+                "topic_create_timeout",
+                configured(|cfg| {
+                    cfg.topic_create_timeout = Time::from_millis(i64::from(i32::MAX) + 1);
+                }),
+            ),
+            (
+                "fetch_max_wait",
+                configured(|cfg| cfg.fetch_max_wait = Time::ZERO),
+            ),
+            (
+                "fetch_max_wait",
+                configured(|cfg| cfg.fetch_max_wait = Time::from_micros(500)),
+            ),
+            (
+                "fetch_max_wait",
+                configured(|cfg| cfg.fetch_max_wait = Time::from_secs_f64(f64::INFINITY)),
+            ),
+            (
+                "fetch_max_wait",
+                configured(|cfg| {
+                    cfg.fetch_max_wait = Time::from_millis(i64::from(i32::MAX) + 1);
+                }),
+            ),
+            (
+                "fetch_max_bytes",
+                configured(|cfg| cfg.fetch_max_bytes = ByteSize::ZERO),
+            ),
+            (
+                "fetch_max_bytes",
+                configured(|cfg| cfg.fetch_max_bytes = ByteSize::from_bytes_f64(0.5)),
+            ),
+            (
+                "fetch_max_bytes",
+                configured(|cfg| {
+                    cfg.fetch_max_bytes = ByteSize::from_bytes_f64(f64::INFINITY);
+                }),
+            ),
+            (
+                "fetch_max_bytes",
+                configured(|cfg| {
+                    cfg.fetch_max_bytes = ByteSize::from_bytes_i64(i64::from(i32::MAX) + 1);
+                }),
+            ),
+            (
+                "fetch_retry_backoff",
+                configured(|cfg| cfg.fetch_retry_backoff = Time::ZERO),
+            ),
+            (
+                "fetch_retry_backoff",
+                configured(|cfg| {
+                    cfg.fetch_retry_backoff = Time::from_secs_f64(f64::INFINITY);
+                }),
+            ),
+        ];
+
+        for (field, cfg) in cases {
+            let error = cfg.validate().expect_err("invalid policy must fail");
+            assert!(error.contains(field), "field={field}, error={error}");
+        }
+    }
+
+    #[test]
+    fn metadata_event_queue_capacity_rejects_zero() {
+        assert!(MetadataEventQueueCapacity::new(0).is_err());
+        check!(MetadataEventQueueCapacity::new(1).unwrap().capacity() == 1);
+    }
+
+    #[test]
+    fn metadata_event_channel_uses_configured_capacity() {
+        let (tx, _rx) = metadata_event_channel(MetadataEventQueueCapacity::new(2048).unwrap());
+        check!(tx.max_capacity() == 2048);
+    }
+
+    #[tokio::test]
+    async fn start_rejects_invalid_policy_before_connecting() {
+        let cfg = KafkaMetadataLogConfig {
+            topic_create_timeout: Time::ZERO,
+            ..KafkaMetadataLogConfig::new("not a socket address")
+        };
+
+        let Err(error) = KafkaMetadataEventLog::start(cfg).await else {
+            panic!("invalid policy must fail before network I/O");
+        };
+        assert!(error.to_string().contains("topic_create_timeout"));
+    }
+
+    /// The metadata client's tunables are quantities but reach Kafka as raw
+    /// `int32` milliseconds and bytes. Pin the wire images: a wrong scale here
+    /// is invisible in the types and would show up only as a metadata consumer
+    /// that spins (too short a `max_wait`) or truncates batches.
+    #[test]
+    fn client_tunables_convert_to_their_kafka_wire_images() {
+        let cfg = KafkaMetadataLogConfig::new("127.0.0.1:9092");
+        check!(cfg.topic_create_timeout.millis_i32() == 30_000);
+        check!(cfg.fetch_max_wait.millis_i32() == 500);
+        check!(cfg.fetch_max_bytes.bytes_i32() == 1 << 20);
+        check!(cfg.fetch_retry_backoff.to_std() == std::time::Duration::from_millis(200));
+    }
+
+    #[test]
+    fn config_carries_client_resource_policy() {
+        let cfg = KafkaMetadataLogConfig {
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::new(7).unwrap(),
+            frame_max: ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap(),
+            ..KafkaMetadataLogConfig::new("127.0.0.1:9092")
+        };
+        check!(cfg.dispatch_queue_capacity.get() == 7);
+        check!(cfg.frame_max.size() == crabka_units::kibibytes(32));
     }
 
     #[test]
@@ -614,6 +951,7 @@ mod tests {
                 }),
                 sasl_host: None,
             }),
+            ..KafkaMetadataLogConfig::new("127.0.0.1:9092")
         };
         assert!(cfg.security.is_some());
     }
@@ -628,8 +966,16 @@ mod tests {
             topic: METADATA_TOPIC.into(),
             topic_id: WireUuid::ZERO,
             tx,
+            fetch_max_wait: millis(750),
+            fetch_max_bytes: mebibytes(2),
+            fetch_retry_backoff: millis(300),
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::default(),
+            frame_max: ClientFrameMax::default(),
             tasks: StdMutex::new(HashMap::new()),
         });
+        check!(state.fetch_max_wait == millis(750));
+        check!(state.fetch_max_bytes == mebibytes(2));
+        check!(state.fetch_retry_backoff == millis(300));
         let handle = KafkaAssignmentHandle {
             state: Arc::clone(&state),
         };

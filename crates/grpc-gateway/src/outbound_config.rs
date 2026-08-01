@@ -2,11 +2,14 @@
 //! the target URL's scheme/host is checked against an allow-list (SSRF guard)
 //! and any filter `JSONPath` is parsed once.
 
+use crabka_units::prelude::*;
 use jsonpath_rust::parser::model::JpQuery;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+use crate::config_value::{PositiveU32, positive_time};
 
 /// Top-level structure of the outbound webhook TOML config file.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OutboundFile {
     #[serde(default)]
     pub subscriptions: Vec<OutboundSubscription>,
@@ -17,7 +20,7 @@ pub struct OutboundFile {
 }
 
 /// One entry in `[[allowed_targets]]`: an exact `scheme` + `host` pair.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AllowedTarget {
     /// URL scheme, e.g. `"https"` (recommended) or `"http"`.
     pub scheme: String,
@@ -26,11 +29,16 @@ pub struct AllowedTarget {
 }
 
 /// One outbound subscription as written in `[[subscriptions]]`.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// The delivery-policy durations carry their unit: `base_backoff = "500ms"`,
+/// `max_backoff = "30s"`, `request_timeout = "10s"`. A bare number is rejected.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct OutboundSubscription {
     /// Unique name; used as the consumer-group suffix
     /// (`__crabka_grpc_wh_{name}`).
     pub name: String,
+    /// Consumer group override. Defaults to `__crabka_grpc_wh_{name}`.
+    pub group_id: Option<String>,
     /// Topics this subscription tails.
     pub source_topics: Vec<String>,
     /// URL to POST each record to. Must match an entry in `allowed_targets`.
@@ -41,21 +49,30 @@ pub struct OutboundSubscription {
     /// Topic to produce exhausted records to (dead-letter queue). If absent,
     /// exhausted records are logged and dropped after `max_attempts`.
     pub dead_letter_topic: Option<String>,
-    /// Maximum delivery attempts per record (clamped to ≥ 1). Default 5.
+    /// Maximum delivery attempts per record. Must be greater than zero. Default 5.
     #[serde(default = "default_max_attempts")]
     pub max_attempts: u32,
-    /// Base exponential-backoff delay in milliseconds (clamped to ≥ 1).
-    /// Default 500 ms.
-    #[serde(default = "default_base_backoff_ms")]
-    pub base_backoff_ms: u64,
-    /// Maximum backoff cap in milliseconds (clamped to ≥ `base_backoff_ms`).
-    /// Default 30 000 ms.
-    #[serde(default = "default_max_backoff_ms")]
-    pub max_backoff_ms: u64,
-    /// Per-request HTTP timeout in milliseconds (clamped to ≥ 1).
-    /// Default 10 000 ms.
-    #[serde(default = "default_timeout_ms")]
-    pub request_timeout_ms: u64,
+    /// Base exponential-backoff delay, e.g. `"500ms"`. Must be greater than
+    /// zero. Default 500 ms.
+    #[serde(
+        default = "default_base_backoff",
+        with = "crabka_units::serde_units::human::time"
+    )]
+    pub base_backoff: Time,
+    /// Maximum backoff cap, e.g. `"30s"`. Must be at least `base_backoff`.
+    /// Default 30 s.
+    #[serde(
+        default = "default_max_backoff",
+        with = "crabka_units::serde_units::human::time"
+    )]
+    pub max_backoff: Time,
+    /// Per-request HTTP timeout, e.g. `"10s"`. Must be greater than zero.
+    /// Default 10 s.
+    #[serde(
+        default = "default_request_timeout",
+        with = "crabka_units::serde_units::human::time"
+    )]
+    pub request_timeout: Time,
     /// Optional delivery filter:
     /// - `json:<JSONPath>` — record delivered iff the path yields a non-null/
     ///   non-false value.
@@ -76,14 +93,14 @@ pub struct OutboundSubscription {
 fn default_max_attempts() -> u32 {
     5
 }
-fn default_base_backoff_ms() -> u64 {
-    500
+fn default_base_backoff() -> Time {
+    millis(500)
 }
-fn default_max_backoff_ms() -> u64 {
-    30_000
+fn default_max_backoff() -> Time {
+    secs(30)
 }
-fn default_timeout_ms() -> u64 {
-    10_000
+fn default_request_timeout() -> Time {
+    secs(10)
 }
 
 /// Validated and compiled form of [`OutboundSubscription`] — the runtime form.
@@ -93,20 +110,17 @@ fn default_timeout_ms() -> u64 {
 #[derive(Debug, Clone)]
 pub struct CompiledSubscription {
     pub name: String,
+    pub group_id: String,
     pub source_topics: Vec<String>,
     /// Validated (parseable, scheme+host allowed) target URL string.
     pub target_url: String,
     /// HMAC-SHA256 signing key bytes, or `None` when signing is disabled.
     pub signing_secret: Option<Vec<u8>>,
     pub dead_letter_topic: Option<String>,
-    /// Clamped to ≥ 1.
     pub max_attempts: u32,
-    /// Clamped to ≥ 1.
-    pub base_backoff_ms: u64,
-    /// Clamped to ≥ `base_backoff_ms`.
-    pub max_backoff_ms: u64,
-    /// Clamped to ≥ 1.
-    pub request_timeout_ms: u64,
+    pub base_backoff: Time,
+    pub max_backoff: Time,
+    pub request_timeout: Time,
     /// Compiled `JSONPath` filter, or `None` (deliver all records).
     pub filter: Option<JpQuery>,
     /// Static extra headers as `(name, value)` pairs.
@@ -136,6 +150,26 @@ impl OutboundFile {
         let mut out = Vec::new();
         for s in &self.subscriptions {
             let ctx = format!("[outbound {}]", s.name);
+            let group_id = match &s.group_id {
+                Some(value) => refined_type::rule::NonEmptyString::new(value.clone())
+                    .map_err(|error| format!("{ctx}: group_id: {error}"))?
+                    .into_value(),
+                None => format!("__crabka_grpc_wh_{}", s.name),
+            };
+            let max_attempts = PositiveU32::new(s.max_attempts)
+                .map_err(|error| format!("{ctx}: max_attempts: {error}"))?
+                .into_value();
+            let base_backoff = positive_time("base_backoff", s.base_backoff)
+                .map_err(|error| format!("{ctx}: {error}"))?;
+            let max_backoff = positive_time("max_backoff", s.max_backoff)
+                .map_err(|error| format!("{ctx}: {error}"))?;
+            let request_timeout = positive_time("request_timeout", s.request_timeout)
+                .map_err(|error| format!("{ctx}: {error}"))?;
+            if max_backoff < base_backoff {
+                return Err(format!(
+                    "{ctx}: max_backoff must be greater than or equal to base_backoff"
+                ));
+            }
 
             // Parse and SSRF-check the target URL.
             let url = reqwest::Url::parse(&s.target_url)
@@ -169,14 +203,15 @@ impl OutboundFile {
 
             out.push(CompiledSubscription {
                 name: s.name.clone(),
+                group_id,
                 source_topics: s.source_topics.clone(),
                 target_url: s.target_url.clone(),
                 signing_secret: s.signing_secret.as_ref().map(|x| x.clone().into_bytes()),
                 dead_letter_topic: s.dead_letter_topic.clone(),
-                max_attempts: s.max_attempts.max(1),
-                base_backoff_ms: s.base_backoff_ms.max(1),
-                max_backoff_ms: s.max_backoff_ms.max(s.base_backoff_ms),
-                request_timeout_ms: s.request_timeout_ms.max(1),
+                max_attempts,
+                base_backoff,
+                max_backoff,
+                request_timeout,
                 filter,
                 headers: s
                     .headers
@@ -196,6 +231,8 @@ impl OutboundFile {
 
 #[cfg(test)]
 mod tests {
+    use assert2::check;
+
     use super::*;
 
     const VALID_TOML: &str = r#"
@@ -218,6 +255,7 @@ filter         = "json:$.type"
         let sub = &compiled[0];
         assert2::assert!(compiled.len() == 1);
         assert2::assert!(sub.name.as_str() == "my-sub");
+        assert2::assert!(sub.group_id.as_str() == "__crabka_grpc_wh_my-sub");
         assert2::assert!(
             sub.source_topics
                 .iter()
@@ -230,11 +268,33 @@ filter         = "json:$.type"
         assert2::assert!(sub.filter.is_some());
         assert2::assert!(sub.dead_letter_topic.as_deref() == None);
         assert2::assert!(sub.max_attempts == 5);
-        assert2::assert!(sub.base_backoff_ms == 500);
-        assert2::assert!(sub.max_backoff_ms == 30_000);
-        assert2::assert!(sub.request_timeout_ms == 10_000);
+        assert2::assert!(sub.base_backoff == millis(500));
+        assert2::assert!(sub.max_backoff == secs(30));
+        assert2::assert!(sub.request_timeout == secs(10));
         assert2::assert!(sub.headers.is_empty());
         assert2::assert!(!sub.decode_to_json);
+    }
+
+    #[test]
+    fn configured_group_id_reaches_compiled_subscription() {
+        let input = VALID_TOML.replace(
+            "name          = \"my-sub\"",
+            "name          = \"my-sub\"\ngroup_id      = \"deliver-custom\"",
+        );
+        let file: OutboundFile = toml::from_str(&input).expect("parse TOML");
+        let compiled = file.compile().expect("compile");
+        assert2::assert!(compiled[0].group_id.as_str() == "deliver-custom");
+    }
+
+    #[test]
+    fn explicitly_empty_group_id_is_rejected() {
+        let input = VALID_TOML.replace(
+            "name          = \"my-sub\"",
+            "name          = \"my-sub\"\ngroup_id      = \"\"",
+        );
+        let file: OutboundFile = toml::from_str(&input).expect("parse TOML");
+        let error = file.compile().expect_err("empty group_id");
+        assert2::assert!(error.contains("group_id"));
     }
 
     #[test]
@@ -307,25 +367,35 @@ filter        = "json:$.type"
     }
 
     #[test]
-    fn clamp_max_attempts_minimum_one() {
-        let toml = r#"
+    fn rejects_non_positive_delivery_policy() {
+        let cases = [
+            ("max_attempts", "max_attempts = 0"),
+            ("base_backoff", r#"base_backoff = "0ms""#),
+            ("max_backoff", r#"max_backoff = "0s""#),
+            ("request_timeout", r#"request_timeout = "0s""#),
+        ];
+        for (field, value) in cases {
+            let input = format!(
+                r#"
 [[allowed_targets]]
 scheme = "https"
 host   = "hooks.example.com"
 
 [[subscriptions]]
-name          = "clamp"
+name          = "invalid"
 source_topics = ["t"]
 target_url    = "https://hooks.example.com/deliver"
-max_attempts  = 0
-"#;
-        let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
-        let compiled = file.compile().expect("compile");
-        assert2::assert!(compiled[0].max_attempts == 1);
+{value}
+"#
+            );
+            let file: OutboundFile = toml::from_str(&input).expect("parse TOML");
+            let error = file.compile().expect_err("zero must be rejected");
+            assert2::assert!(error.contains(field));
+        }
     }
 
     #[test]
-    fn max_backoff_clamped_to_base_when_smaller() {
+    fn max_backoff_smaller_than_base_is_rejected() {
         let toml = r#"
 [[allowed_targets]]
 scheme = "https"
@@ -335,12 +405,12 @@ host   = "hooks.example.com"
 name              = "backoff"
 source_topics     = ["t"]
 target_url        = "https://hooks.example.com/deliver"
-base_backoff_ms   = 1000
-max_backoff_ms    = 100
+base_backoff      = "1s"
+max_backoff       = "100ms"
 "#;
         let file: OutboundFile = toml::from_str(toml).expect("parse TOML");
-        let compiled = file.compile().expect("compile");
-        assert2::assert!(compiled[0].max_backoff_ms == 1000);
+        let error = file.compile().expect_err("invalid backoff relationship");
+        assert2::assert!(error.contains("max_backoff"));
     }
 
     #[test]
@@ -348,5 +418,63 @@ max_backoff_ms    = 100
         let file: OutboundFile = toml::from_str("").expect("parse empty TOML");
         let compiled = file.compile().expect("compile empty");
         assert2::assert!(compiled.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // Dimensioned config encoding
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn delivery_policy_is_read_in_its_human_form() {
+        let input = VALID_TOML.replace(
+            "filter         = \"json:$.type\"",
+            "base_backoff = \"250ms\"\nmax_backoff = \"1m\"\nrequest_timeout = \"2.5s\"",
+        );
+        let file: OutboundFile = toml::from_str(&input).expect("parse TOML");
+        let compiled = file.compile().expect("compile");
+
+        check!(compiled[0].base_backoff == millis(250));
+        check!(compiled[0].max_backoff == minutes(1));
+        check!(compiled[0].request_timeout == millis(2_500));
+    }
+
+    /// A duration must carry its unit: `500` is neither milliseconds nor
+    /// seconds until it says so.
+    #[test]
+    fn unitless_delivery_policy_is_rejected() {
+        for field in ["base_backoff", "max_backoff", "request_timeout"] {
+            let input = VALID_TOML.replace(
+                "filter         = \"json:$.type\"",
+                &format!("{field} = 500"),
+            );
+            check!(toml::from_str::<OutboundFile>(&input).is_err());
+        }
+    }
+
+    #[test]
+    fn subscription_round_trips_through_its_serde_encoding() {
+        let subscription = OutboundSubscription {
+            name: "round-trip".to_string(),
+            group_id: None,
+            source_topics: vec!["events".to_string()],
+            target_url: "https://hooks.example.com/deliver".to_string(),
+            signing_secret: None,
+            dead_letter_topic: None,
+            max_attempts: 5,
+            base_backoff: millis(500),
+            max_backoff: secs(30),
+            request_timeout: secs(10),
+            filter: None,
+            headers: std::collections::HashMap::new(),
+            decode_to_json: false,
+        };
+
+        let encoded = serde_json::to_string(&subscription).expect("serialize");
+        let decoded: OutboundSubscription = serde_json::from_str(&encoded).expect("deserialize");
+
+        check!(encoded.contains(r#""base_backoff":"500ms""#));
+        check!(encoded.contains(r#""max_backoff":"30s""#));
+        check!(encoded.contains(r#""request_timeout":"10s""#));
+        check!(decoded == subscription);
     }
 }

@@ -97,6 +97,7 @@ mod tests {
 
     use assert2::assert;
     use crabka_log::{Log, LogConfig, Offset};
+    use crabka_units::mebibytes;
 
     use super::*;
 
@@ -145,7 +146,7 @@ mod tests {
         .expect("write audit record");
 
         let out = partition
-            .read_log(Offset(0), 1 << 20)
+            .read_log(Offset(0), mebibytes(1))
             .expect("read audit partition");
         let records: Vec<_> = out.batches.iter().flat_map(|b| &b.records).collect();
 

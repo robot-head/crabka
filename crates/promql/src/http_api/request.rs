@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::http::HeaderMap;
 use crabka_blockstore::LabelMatcher;
 use crabka_metrics::{QueryEnforcer, validate_tenant};
+use crabka_units::prelude::*;
 use num_traits::ToPrimitive;
 use promql_parser::parser::Expr;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -62,14 +63,18 @@ pub(super) fn timestamp_ms(value: &str) -> Result<i64, ApiError> {
         .map_err(|()| ApiError::bad_data("invalid timestamp"))
 }
 
-pub(super) fn duration_ms(value: &str) -> Result<i64, ApiError> {
-    let step_ms = seconds_to_ms(value)
+/// A Prometheus query-API duration parameter (`step`, a lookback) as an extent.
+///
+/// Accepts both encodings the API allows: a bare (possibly fractional) second
+/// count, and a Prometheus duration string such as `5m` or `1h30m`.
+pub(super) fn duration_param(value: &str) -> Result<Time, ApiError> {
+    let millis = seconds_to_ms(value)
         .or_else(|()| prometheus_duration_ms(value).ok_or(()))
         .map_err(|()| ApiError::bad_data("invalid duration"))?;
-    if step_ms <= 0 {
+    if millis <= 0 {
         return Err(ApiError::bad_data("duration must be positive"));
     }
-    Ok(step_ms)
+    Ok(Time::from_millis(millis))
 }
 
 pub(super) fn validate_timestamp_range(start_ms: i64, end_ms: i64) -> Result<(), ApiError> {
@@ -88,13 +93,14 @@ pub(super) fn validate_timestamp_range(start_ms: i64, end_ms: i64) -> Result<(),
 /// `(end - start) / step > maxResolution` (integer division, where
 /// `maxResolution` is [`MAX_RESOLUTION_POINTS`]). The error message and the
 /// comma-formatted bound are matched byte-for-byte so Prometheus/Grafana clients
-/// that string-match on it behave identically. `step_ms` is already validated
-/// positive by [`duration_ms`].
+/// that string-match on it behave identically. `step` is already validated
+/// positive by [`duration_param`].
 pub(super) fn check_range_resolution(
     start_ms: i64,
     end_ms: i64,
-    step_ms: i64,
+    step: Time,
 ) -> Result<(), ApiError> {
+    let step_ms = step.millis_i64();
     if step_ms <= 0 {
         return Ok(());
     }

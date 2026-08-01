@@ -175,6 +175,7 @@ impl<'a> WriteContext<'a> {
             eval_ctx: self.eval_ctx,
             fctx: self.fctx,
             range_scanner: self.range_scanner,
+            blocking_query_memory: crate::scanner::BLOCKING_QUERY_MEMORY,
         }
     }
 }
@@ -7317,7 +7318,14 @@ fn append_from_item(
 ) -> Result<Relation, ExecError> {
     if !is_lateral_item(te, &acc.scope) {
         let next = build_table_expr(read_ctx, te, None, None)?;
-        return join_relations(acc, next, kind, constraint, read_ctx.eval_ctx);
+        return join_relations(
+            acc,
+            next,
+            kind,
+            constraint,
+            read_ctx.eval_ctx,
+            read_ctx.blocking_query_memory,
+        );
     }
     lateral_join(read_ctx, acc, te, kind, constraint)
 }
@@ -7380,7 +7388,14 @@ fn lateral_join(
         }
         // Nothing was correlated, so the item is an ordinary relation.
         let right = build_table_expr(read_ctx, &specialized, None, None)?;
-        return join_relations(acc, right, kind, constraint, ctx);
+        return join_relations(
+            acc,
+            right,
+            kind,
+            constraint,
+            ctx,
+            read_ctx.blocking_query_memory,
+        );
     }
     let mut rows: Vec<Vec<Datum>> = Vec::new();
     let mut scope: Option<Scope> = None;
@@ -7392,11 +7407,18 @@ fn lateral_join(
             scope: acc.scope.clone(),
             rows: vec![outer_row.clone()],
         };
-        let joined = join_relations(one, right, kind, constraint, ctx)?;
+        let joined = join_relations(
+            one,
+            right,
+            kind,
+            constraint,
+            ctx,
+            read_ctx.blocking_query_memory,
+        )?;
         for row in &joined.rows {
             bytes = bytes.saturating_add(crate::scanner::datum_row_bytes(row));
         }
-        if bytes > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+        if crate::scanner::exceeds_query_memory(bytes, read_ctx.blocking_query_memory) {
             return Err(crate::scanner::memory_budget_exceeded());
         }
         rows.extend(joined.rows);
@@ -7420,6 +7442,7 @@ fn lateral_join(
                 kind,
                 constraint,
                 ctx,
+                read_ctx.blocking_query_memory,
             )?
             .scope
         }
@@ -8106,7 +8129,7 @@ fn build_table_expr(
             let rows = match crate::scanner::collect_cursor_bounded(
                 range_scanner,
                 scan_request,
-                crate::scanner::BLOCKING_QUERY_MEMORY_BYTES,
+                crate::scanner::BLOCKING_QUERY_MEMORY,
             ) {
                 Ok(rows) => rows,
                 Err(error) if should_retry_without_scan_pushdown(&error, distributed_plan) => {
@@ -8127,7 +8150,7 @@ fn build_table_expr(
                             partial_aggregate: None,
                             top_k: None,
                         },
-                        crate::scanner::BLOCKING_QUERY_MEMORY_BYTES,
+                        crate::scanner::BLOCKING_QUERY_MEMORY,
                     )?
                 }
                 Err(error) => return Err(error),
@@ -8469,10 +8492,12 @@ fn try_distributed_inner_equi_join(
         strategy,
         left: JoinTableInterval {
             table_id: u64::from(left_table.id),
+            table_name: left_table.name.to_string(),
             interval: RowInterval::ALL,
         },
         right: JoinTableInterval {
             table_id: u64::from(right_table.id),
+            table_name: right_table.name.to_string(),
             interval: RowInterval::ALL,
         },
         broadcast_rows: matches!(
@@ -8764,7 +8789,7 @@ fn try_execute_local_streaming_aggregate(
             top_k: None,
         },
         plan.specs(),
-        crate::scanner::BLOCKING_QUERY_MEMORY_BYTES,
+        crate::scanner::BLOCKING_QUERY_MEMORY,
     )?;
     let rows = match &plan {
         StreamingAggregatePlan::Scalar { calls, specs } => {
@@ -9359,6 +9384,7 @@ pub(crate) fn build_from_schema_with_ctes(
             crabka_pgparser::ast::JoinKind::Cross,
             &crabka_pgparser::ast::JoinConstraint::None,
             &crate::clock::EvalCtx::test_default(),
+            crate::scanner::BLOCKING_QUERY_MEMORY,
         )?;
     }
     Ok(acc)
@@ -9450,6 +9476,7 @@ fn build_table_expr_schema_with_ctes(
                 *kind,
                 constraint,
                 &crate::clock::EvalCtx::test_default(),
+                crate::scanner::BLOCKING_QUERY_MEMORY,
             )
         }
         TableExpr::Derived {
@@ -11689,7 +11716,10 @@ fn key_source_rows(
         }
         let bytes = crate::scanner::datum_row_bytes(&values)
             .saturating_add(crate::scanner::datum_row_bytes(&row));
-        if keyed_bytes.saturating_add(bytes) > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+        if crate::scanner::exceeds_query_memory(
+            keyed_bytes.saturating_add(bytes),
+            crate::scanner::BLOCKING_QUERY_MEMORY,
+        ) {
             return Err(crate::scanner::memory_budget_exceeded());
         }
         keyed_bytes += bytes;
@@ -11861,7 +11891,7 @@ fn ensure_blocking_rows_fit(rows: &[Vec<Datum>]) -> Result<(), ExecError> {
     let bytes = rows.iter().fold(0usize, |bytes, row| {
         bytes.saturating_add(crate::scanner::datum_row_bytes(row))
     });
-    if bytes > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+    if crate::scanner::exceeds_query_memory(bytes, crate::scanner::BLOCKING_QUERY_MEMORY) {
         return Err(crate::scanner::memory_budget_exceeded());
     }
     Ok(())

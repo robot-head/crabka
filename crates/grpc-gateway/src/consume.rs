@@ -2,9 +2,10 @@
 //! offsets. The streaming/poll wire (later plan) drives this. Records are
 //! decoded through the codec on the way out.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
+use crabka_units::prelude::*;
 
 use crate::{
     codec::{RecordCodec, SchemaMeta},
@@ -43,9 +44,35 @@ impl ConsumeSession {
         security: Option<crabka_client_core::security::ClientSecurity>,
         codec: Arc<dyn RecordCodec>,
     ) -> Result<Self, GatewayError> {
+        Self::new_with_policy(
+            bootstrap,
+            group_id,
+            client_id,
+            topics,
+            security,
+            codec,
+            &crate::config::GatewayRuntimeConfig::default(),
+        )
+        .await
+    }
+
+    /// Build a consume session with the deployment's client resource policy.
+    /// # Errors
+    /// Returns an error when client construction fails.
+    pub async fn new_with_policy(
+        bootstrap: &str,
+        group_id: &str,
+        client_id: &str,
+        topics: Vec<String>,
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        codec: Arc<dyn RecordCodec>,
+        policy: &crate::config::GatewayRuntimeConfig,
+    ) -> Result<Self, GatewayError> {
         let consumer = Consumer::builder()
             .bootstrap(bootstrap.to_string())
             .client_id(client_id.to_string())
+            .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+            .frame_max(policy.client_frame_max.size())
             .group_id(group_id.to_string())
             .subscribe(topics)
             .isolation_level(IsolationLevel::ReadCommitted)
@@ -66,7 +93,7 @@ impl ConsumeSession {
     /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn poll(
         &mut self,
-        timeout: Duration,
+        timeout: Time,
     ) -> Result<Vec<DecodedConsumerRecord>, GatewayError> {
         let batch = self
             .consumer

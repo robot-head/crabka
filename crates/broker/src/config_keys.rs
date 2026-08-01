@@ -23,9 +23,16 @@
 // modules land they appear unused to the compiler.
 #![allow(dead_code)]
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use crabka_log::LogConfig;
+use crabka_units::{
+    ByteSize, Time,
+    convert::{
+        ByteSizeExt as _, TimeExt as _,
+        wire::{opt_size_from_bytes_i64, opt_time_from_millis_i64},
+    },
+};
 
 pub(crate) const RETENTION_MS: &str = "retention.ms";
 pub(crate) const RETENTION_BYTES: &str = "retention.bytes";
@@ -270,50 +277,30 @@ pub(crate) fn apply_to_log_config(
         match k.as_str() {
             RETENTION_MS => {
                 if let Ok(ms) = v.parse::<i64>() {
-                    out.retention_ms = if ms < 0 {
-                        None
-                    } else {
-                        Some(Duration::from_millis(
-                            u64::try_from(ms).expect("validated non-negative above"),
-                        ))
-                    };
+                    out.retention = opt_time_from_millis_i64(ms);
                 }
             }
             RETENTION_BYTES => {
                 if let Ok(b) = v.parse::<i64>() {
-                    out.retention_bytes = if b < 0 {
-                        None
-                    } else {
-                        Some(u64::try_from(b).expect("validated non-negative above"))
-                    };
+                    out.retention_size = opt_size_from_bytes_i64(b);
                 }
             }
             LOCAL_RETENTION_MS => {
                 if let Ok(ms) = v.parse::<i64>() {
                     // -2 (inherit) and -1 (unlimited)
                     // both collapse to `None` — the greenfield simplification noted
-                    // in the spec. >=0 maps to `Some(Duration::from_millis(n))`.
-                    out.local_retention_ms = if ms < 0 {
-                        None
-                    } else {
-                        Some(Duration::from_millis(
-                            u64::try_from(ms).expect("validated non-negative above"),
-                        ))
-                    };
+                    // in the spec. >=0 maps to `Some(Time)`.
+                    out.local_retention = opt_time_from_millis_i64(ms);
                 }
             }
             LOCAL_RETENTION_BYTES => {
                 if let Ok(b) = v.parse::<i64>() {
-                    out.local_retention_bytes = if b < 0 {
-                        None
-                    } else {
-                        Some(u64::try_from(b).expect("validated non-negative above"))
-                    };
+                    out.local_retention_size = opt_size_from_bytes_i64(b);
                 }
             }
             SEGMENT_BYTES => {
                 if let Ok(b) = v.parse::<u64>() {
-                    out.segment_bytes = b;
+                    out.segment_size = ByteSize::from_bytes(b);
                 }
             }
             CLEANUP_POLICY => {
@@ -335,9 +322,7 @@ pub(crate) fn apply_to_log_config(
                 if let Ok(ms) = v.parse::<i64>()
                     && ms >= 0
                 {
-                    out.delete_retention_ms = Duration::from_millis(
-                        u64::try_from(ms).expect("validated non-negative above"),
-                    );
+                    out.delete_retention = Time::from_millis(ms);
                 }
             }
             // The remaining keys are recognized but no broker behavior is
@@ -525,6 +510,7 @@ mod doc_tests {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::{bytes, mebibytes, millis, minutes};
 
     use super::*;
 
@@ -740,7 +726,7 @@ mod tests {
         o.insert(RETENTION_MS.into(), "60000".into());
         let base = LogConfig::default();
         let out = apply_to_log_config(&o, &base);
-        assert!(out.retention_ms == Some(Duration::from_mins(1)));
+        assert!(out.retention == Some(minutes(1)));
     }
 
     #[test]
@@ -748,7 +734,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(RETENTION_MS.into(), "-1".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_ms == None);
+        assert!(out.retention == None);
     }
 
     #[test]
@@ -756,7 +742,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(RETENTION_MS.into(), "0".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_ms == Some(Duration::from_millis(0)));
+        assert!(out.retention == Some(millis(0)));
     }
 
     #[test]
@@ -764,7 +750,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(RETENTION_BYTES.into(), "1048576".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_bytes == Some(1_048_576));
+        assert!(out.retention_size == Some(mebibytes(1)));
     }
 
     #[test]
@@ -772,7 +758,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(RETENTION_BYTES.into(), "-1".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_bytes == None);
+        assert!(out.retention_size == None);
     }
 
     #[test]
@@ -780,7 +766,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(RETENTION_BYTES.into(), "0".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_bytes == Some(0));
+        assert!(out.retention_size == Some(bytes(0)));
     }
 
     #[test]
@@ -788,17 +774,17 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(SEGMENT_BYTES.into(), "1048576".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.segment_bytes == 1_048_576);
+        assert!(out.segment_size == mebibytes(1));
     }
 
     #[test]
     fn apply_empty_overrides_preserves_base() {
         let base = LogConfig {
-            retention_ms: Some(Duration::from_millis(12345)),
+            retention: Some(millis(12_345)),
             ..LogConfig::default()
         };
         let out = apply_to_log_config(&BTreeMap::new(), &base);
-        assert!(out.retention_ms == base.retention_ms);
+        assert!(out.retention == base.retention);
     }
 
     #[test]
@@ -847,12 +833,12 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_MS.into(), "-2".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_ms == None);
+        assert!(out.local_retention == None);
 
         let mut unlimited = BTreeMap::new();
         unlimited.insert(LOCAL_RETENTION_MS.into(), "-1".into());
         let out = apply_to_log_config(&unlimited, &LogConfig::default());
-        assert!(out.local_retention_ms == None);
+        assert!(out.local_retention == None);
     }
 
     #[test]
@@ -860,7 +846,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_MS.into(), "0".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_ms == Some(Duration::from_millis(0)));
+        assert!(out.local_retention == Some(millis(0)));
     }
 
     #[test]
@@ -868,7 +854,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_MS.into(), "60000".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_ms == Some(Duration::from_mins(1)));
+        assert!(out.local_retention == Some(minutes(1)));
     }
 
     #[test]
@@ -876,7 +862,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_BYTES.into(), "1048576".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_bytes == Some(1_048_576));
+        assert!(out.local_retention_size == Some(mebibytes(1)));
     }
 
     #[test]
@@ -884,7 +870,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_BYTES.into(), "-2".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_bytes == None);
+        assert!(out.local_retention_size == None);
     }
 
     #[test]
@@ -892,7 +878,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(LOCAL_RETENTION_BYTES.into(), "0".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_bytes == Some(0));
+        assert!(out.local_retention_size == Some(bytes(0)));
     }
 
     #[test]
@@ -916,7 +902,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(DELETE_RETENTION_MS.into(), "12345".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.delete_retention_ms == std::time::Duration::from_millis(12345));
+        assert!(out.delete_retention == millis(12_345));
     }
 
     #[test]

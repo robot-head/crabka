@@ -28,6 +28,9 @@ mod tests {
         HashPlacement, InMemoryRegistryStore, RangeBoundary, RangeLayoutEntry, SqlUser, TenantId,
         TenantName, TenantRecord, TenantRegistryStore, TenantState,
     };
+    use crabka_units::{
+        Frequency, bytes, convert::FrequencyExt as _, gibibytes, mebibytes, minutes, percent,
+    };
 
     use super::*;
 
@@ -55,8 +58,8 @@ mod tests {
             table_name: "orders".to_string(),
             is_sharded: true,
             auto_shard_disabled: false,
-            convert_store_bytes_threshold: 10_000,
-            convert_commit_rate_threshold: 10_000,
+            convert_store_threshold: bytes(10_000),
+            convert_commit_rate_threshold: Frequency::from_per_sec_u64(10_000),
             hash_bucket_count: None,
         }
     }
@@ -115,10 +118,10 @@ mod tests {
 
     fn context() -> GoalContext {
         GoalContext {
-            size_ceiling_bytes: 1_000,
-            merge_floor_bytes: 200,
+            size_ceiling: bytes(1_000),
+            merge_floor: bytes(200),
             split_stride_rows: 100,
-            load_skew_hysteresis_pct: 25,
+            load_skew_hysteresis: percent(25),
             max_ranges_per_compute: Some(3),
             max_operations: 32,
             cooldown_epochs: 2,
@@ -138,7 +141,7 @@ mod tests {
     }
 
     fn snapshot_freshness() -> StatsFreshness {
-        StatsFreshness::new(std::time::Duration::from_mins(1))
+        StatsFreshness::new(minutes(1))
     }
 
     fn authoritative_snapshot(
@@ -158,6 +161,42 @@ mod tests {
                 replication_lag_bytes: None,
             }],
         }
+    }
+
+    #[test]
+    fn balancer_config_json_uses_human_dimensioned_thresholds() {
+        let config = BalancerConfig {
+            goals: GoalToggles::default(),
+            context: context(),
+        };
+        let json = serde_json::to_string(&config).expect("serialize config");
+        let parsed: BalancerConfig = serde_json::from_str(&json).expect("deserialize config");
+
+        check!(json.contains(r#""sizeCeiling":"1000B""#));
+        check!(json.contains(r#""mergeFloor":"200B""#));
+        check!(json.contains(r#""loadSkewHysteresis":"25%""#));
+        check!(parsed == config);
+    }
+
+    #[test]
+    fn default_goal_context_serializes_human_thresholds() {
+        let defaults = GoalContext::default();
+        let json = serde_json::to_value(&defaults).expect("serialize context");
+
+        check!(json["sizeCeiling"] == "1GiB");
+        check!(json["mergeFloor"] == "64MiB");
+        check!(defaults.size_ceiling == gibibytes(1));
+        check!(defaults.merge_floor == mebibytes(64));
+    }
+
+    #[test]
+    fn table_policy_json_uses_human_dimensioned_thresholds() {
+        let json = serde_json::to_string(&table()).expect("serialize table policy");
+        let parsed: TablePolicy = serde_json::from_str(&json).expect("deserialize table policy");
+
+        check!(json.contains(r#""convertStoreThreshold":"10000B""#));
+        check!(json.contains(r#""convertCommitRateThreshold":"10000/s""#));
+        check!(parsed == table());
     }
 
     #[test]
@@ -1212,7 +1251,7 @@ mod tests {
     fn conversion_goal_honors_threshold_and_disable_knob() {
         let mut active = table();
         active.is_sharded = false;
-        active.convert_store_bytes_threshold = 1_000;
+        active.convert_store_threshold = bytes(1_000);
         let mut disabled = active.clone();
         disabled.table_id = 11;
         disabled.table_name = "audit".to_string();
@@ -1256,7 +1295,7 @@ mod tests {
         ])];
 
         let ctx = GoalContext {
-            load_skew_hysteresis_pct: 60,
+            load_skew_hysteresis: percent(60),
             ..context()
         };
         let output_a = planner().plan(&fleet_a, &ctx);
@@ -1288,7 +1327,7 @@ mod tests {
             range(5, "c3", 500, 20),
         ])];
         let ctx = GoalContext {
-            load_skew_hysteresis_pct: 25,
+            load_skew_hysteresis: percent(25),
             max_operations: 1,
             ..context()
         };

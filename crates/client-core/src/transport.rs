@@ -12,20 +12,24 @@ use tokio::{
 };
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-/// Maximum frame size we'll accept (matches Kafka's default
-/// `socket.request.max.bytes` = 100 MiB).
-pub const MAX_FRAME_BYTES: usize = 100 * 1024 * 1024;
+use crate::ClientFrameMax;
 
-/// Build a length-delimited codec configured for Kafka's wire framing.
+/// Build a Kafka wire codec with a validated accepted-frame limit.
 #[must_use]
-pub fn codec() -> LengthDelimitedCodec {
+pub fn codec_with_max(max: ClientFrameMax) -> LengthDelimitedCodec {
     LengthDelimitedCodec::builder()
         .length_field_offset(0)
         .length_field_length(4)
         .length_field_type::<u32>()
-        .max_frame_length(MAX_FRAME_BYTES)
+        .max_frame_length(max.bytes())
         .big_endian()
         .new_codec()
+}
+
+/// Build a length-delimited codec configured for Kafka's wire framing.
+#[must_use]
+pub fn codec() -> LengthDelimitedCodec {
+    codec_with_max(ClientFrameMax::default())
 }
 
 /// Wrap a `TcpStream` with the Kafka length-delimited codec.
@@ -63,6 +67,7 @@ mod tests {
         io::AsyncWriteExt,
         net::{TcpListener, TcpStream},
     };
+    use tokio_util::codec::Decoder;
 
     use super::*;
 
@@ -116,7 +121,7 @@ mod tests {
 
     #[test]
     fn max_frame_bytes_matches_kafka_default() {
-        assert!(MAX_FRAME_BYTES == 100 * 1024 * 1024);
+        assert!(ClientFrameMax::default().bytes() == 100 * 1024 * 1024);
     }
 
     #[tokio::test]
@@ -132,5 +137,26 @@ mod tests {
         framed.send(payload).await.unwrap();
 
         assert!(server_task.await.unwrap() == 9 * 1024 * 1024);
+    }
+
+    #[test]
+    fn configured_codec_rejects_a_frame_over_its_limit() {
+        let max = ClientFrameMax::try_from(crabka_units::bytes(8)).unwrap();
+        let mut codec = codec_with_max(max);
+        let mut input = BytesMut::from(&[0, 0, 0, 9, 0, 1, 2, 3, 4, 5, 6, 7, 8][..]);
+
+        let error = codec
+            .decode(&mut input)
+            .expect_err("nine-byte frame exceeds eight-byte max");
+        assert!(error.to_string().contains("frame size too big"));
+    }
+
+    #[test]
+    fn configured_codec_accepts_the_exact_limit() {
+        let max = ClientFrameMax::try_from(crabka_units::bytes(8)).unwrap();
+        let mut codec = codec_with_max(max);
+        let mut input = BytesMut::from(&[0, 0, 0, 8, 0, 1, 2, 3, 4, 5, 6, 7][..]);
+
+        assert!(codec.decode(&mut input).unwrap().unwrap().len() == 8);
     }
 }

@@ -12,7 +12,6 @@ pub(crate) const KEY_METRICS: &str = "metrics";
 pub(crate) const KEY_INTERVAL_MS: &str = "interval.ms";
 pub(crate) const KEY_MATCH: &str = "match";
 
-pub(crate) const DEFAULT_INTERVAL_MS: i32 = 300_000;
 pub(crate) const MIN_INTERVAL_MS: i64 = 100;
 pub(crate) const MAX_INTERVAL_MS: i64 = 3_600_000;
 pub(crate) const ALL_METRICS: &str = "*";
@@ -75,11 +74,14 @@ pub(crate) fn is_recognized(key: &str) -> bool {
 }
 
 /// Effective push interval for a subscription's override map (default when unset).
-pub(crate) fn effective_interval_ms(configs: &BTreeMap<String, String>) -> i32 {
+pub(crate) fn effective_interval_ms(
+    configs: &BTreeMap<String, String>,
+    default_interval_ms: i32,
+) -> i32 {
     configs
         .get(KEY_INTERVAL_MS)
         .and_then(|v| v.parse::<i32>().ok())
-        .unwrap_or(DEFAULT_INTERVAL_MS)
+        .unwrap_or(default_interval_ms)
 }
 
 /// Parse the `metrics` value into prefixes. `"*"` collapses to `["*"]`;
@@ -120,6 +122,8 @@ pub(crate) fn parse_match_rules(value: &str) -> Result<Vec<MatchRule>, String> {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
+
     use super::*;
 
     #[test]
@@ -174,25 +178,22 @@ mod tests {
     #[test]
     fn effective_interval_defaults_and_clamps() {
         let mut m = std::collections::BTreeMap::new();
-        assert_eq!(effective_interval_ms(&m), DEFAULT_INTERVAL_MS);
+        check!(effective_interval_ms(&m, 12_345) == 12_345);
         m.insert("interval.ms".to_string(), "60000".to_string());
-        assert_eq!(effective_interval_ms(&m), 60_000);
+        check!(effective_interval_ms(&m, 12_345) == 60_000);
     }
 
     #[test]
     fn parse_match_rules_roundtrip() {
         let rules = parse_match_rules("client_id=svc-.*,client_software_name=java").unwrap();
-        assert_eq!(rules.len(), 2);
+        check!(rules.len() == 2);
         assert!(rules.iter().any(|r| r.selector == MatchSelector::Id));
     }
 
     #[test]
     fn parse_metrics_collapses_star() {
-        assert_eq!(parse_metrics("*"), vec!["*".to_string()]);
-        assert_eq!(parse_metrics(""), Vec::<String>::new());
-        assert_eq!(
-            parse_metrics("a.,b."),
-            vec!["a.".to_string(), "b.".to_string()]
-        );
+        check!(parse_metrics("*") == vec!["*".to_string()]);
+        check!(parse_metrics("") == Vec::<String>::new());
+        check!(parse_metrics("a.,b.") == vec!["a.".to_string(), "b.".to_string()]);
     }
 }

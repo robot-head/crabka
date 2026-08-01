@@ -16,8 +16,9 @@
 //! `approve` (→ `ExecuteProposal`) does. This keeps a human (or `GitOps`
 //! approval) in the loop before any partition data moves.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
+use crabka_units::Time;
 use futures::StreamExt as _;
 use kube::{
     Resource, ResourceExt as _,
@@ -41,10 +42,6 @@ use crate::{
 const ANNOTATION: &str = "crabka.io/rebalance";
 /// Default Connect-RPC port the rebalancer binds (`--listen-addr`).
 const REBALANCER_PORT: u16 = 9300;
-
-const POLL_INTERVAL: Duration = Duration::from_secs(10);
-const IDLE_INTERVAL: Duration = Duration::from_mins(5);
-const TRANSPORT_RETRY: Duration = Duration::from_secs(15);
 
 /// The rebalance lifecycle state. Surfaced as the active condition's
 /// `type` in the CRD status.
@@ -161,7 +158,7 @@ struct Outcome {
     state: RebalanceState,
     reason: String,
     message: String,
-    requeue: Duration,
+    requeue: Time,
     /// Set when a fresh proposal id should be recorded (`CreateProposal`).
     new_session: Option<String>,
     /// Set when a fresh optimization result should be recorded.
@@ -172,7 +169,7 @@ struct Outcome {
 }
 
 impl Outcome {
-    fn from_create(p: &RebalancerProposal) -> Self {
+    fn from_create(p: &RebalancerProposal, idle_interval: Time) -> Self {
         if p.status == ProposalStatus::Computed {
             Self {
                 state: RebalanceState::ProposalReady,
@@ -181,7 +178,7 @@ impl Outcome {
                     "proposal {} computed: {} replica / {} leader movements",
                     p.id, p.summary.replica_movements, p.summary.leader_movements
                 ),
-                requeue: IDLE_INTERVAL,
+                requeue: idle_interval,
                 new_session: Some(p.id.clone()),
                 new_optimization: Some(optimization_result_from(p)),
                 advance_generation: true,
@@ -191,7 +188,7 @@ impl Outcome {
                 state: RebalanceState::NotReady,
                 reason: "UnexpectedProposalStatus".into(),
                 message: format!("CreateProposal returned non-Computed status for {}", p.id),
-                requeue: IDLE_INTERVAL,
+                requeue: idle_interval,
                 new_session: Some(p.id.clone()),
                 new_optimization: None,
                 advance_generation: false,
@@ -200,19 +197,23 @@ impl Outcome {
     }
 
     /// Map an `ExecuteProposal` / `GetProposal` (poll) result onto a state.
-    fn from_execute_or_poll(p: &RebalancerProposal) -> Self {
+    fn from_execute_or_poll(
+        p: &RebalancerProposal,
+        poll_interval: Time,
+        idle_interval: Time,
+    ) -> Self {
         match p.status {
             ProposalStatus::Executing | ProposalStatus::Computed => Self::transient(
                 RebalanceState::Rebalancing,
                 "Rebalancing",
                 format!("executing proposal {}", p.id),
-                POLL_INTERVAL,
+                poll_interval,
             ),
             ProposalStatus::Completed => Self::transient(
                 RebalanceState::Ready,
                 "Ready",
                 format!("proposal {} completed", p.id),
-                IDLE_INTERVAL,
+                idle_interval,
             ),
             ProposalStatus::Failed => Self::transient(
                 RebalanceState::NotReady,
@@ -220,45 +221,45 @@ impl Outcome {
                 p.failure_reason
                     .clone()
                     .unwrap_or_else(|| format!("proposal {} failed", p.id)),
-                IDLE_INTERVAL,
+                idle_interval,
             ),
             ProposalStatus::Cancelled => Self::transient(
                 RebalanceState::Stopped,
                 "Stopped",
                 format!("proposal {} cancelled", p.id),
-                IDLE_INTERVAL,
+                idle_interval,
             ),
             ProposalStatus::Unspecified => Self::transient(
                 RebalanceState::NotReady,
                 "UnexpectedProposalStatus",
                 format!("proposal {} reported an unknown status", p.id),
-                IDLE_INTERVAL,
+                idle_interval,
             ),
         }
     }
 
-    fn from_cancel(p: &RebalancerProposal) -> Self {
+    fn from_cancel(p: &RebalancerProposal, idle_interval: Time) -> Self {
         Self::transient(
             RebalanceState::Stopped,
             "Stopped",
             format!("execution of proposal {} cancelled", p.id),
-            IDLE_INTERVAL,
+            idle_interval,
         )
     }
 
     /// An RPC-level error from the rebalancer (`failed_precondition`,
     /// `not_found`, …). Surfaces as `NotReady`.
-    fn from_rpc_error(e: &RebalancerError) -> Self {
+    fn from_rpc_error(e: &RebalancerError, idle_interval: Time) -> Self {
         Self::transient(
             RebalanceState::NotReady,
             "RebalancerError",
             e.to_string(),
-            IDLE_INTERVAL,
+            idle_interval,
         )
     }
 
     /// A status with no proposal-id / optimization changes.
-    fn transient(state: RebalanceState, reason: &str, message: String, requeue: Duration) -> Self {
+    fn transient(state: RebalanceState, reason: &str, message: String, requeue: Time) -> Self {
         Self {
             state,
             reason: reason.into(),
@@ -449,9 +450,9 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn error_policy(_obj: Arc<KafkaRebalance>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
+pub fn error_policy(_obj: Arc<KafkaRebalance>, err: &ReconcileError, ctx: Arc<Context>) -> Action {
     tracing::warn!(error = %err, "rebalance reconcile error, requeueing");
-    Action::requeue(TRANSPORT_RETRY)
+    common::error_requeue(ctx)
 }
 
 /// Reconcile entry point. Times the pass and records the reconcile
@@ -501,11 +502,11 @@ async fn reconcile_inner(
                     "MissingEndpoint",
                     "spec.endpoint is unset and no crabka.io/cluster label is present to derive it"
                         .into(),
-                    IDLE_INTERVAL,
+                    ctx.config.rebalancer_idle_interval,
                 ),
             )
             .await?;
-            return Ok(Action::requeue(IDLE_INTERVAL));
+            return Ok(common::requeue(ctx.config.rebalancer_idle_interval));
         }
         Err(invalid) => {
             tracing::warn!(error = %invalid.message, "rejecting spec.endpoint (SSRF guard)");
@@ -517,11 +518,11 @@ async fn reconcile_inner(
                     RebalanceState::NotReady,
                     "InvalidEndpoint",
                     invalid.message,
-                    IDLE_INTERVAL,
+                    ctx.config.rebalancer_idle_interval,
                 ),
             )
             .await?;
-            return Ok(Action::requeue(IDLE_INTERVAL));
+            return Ok(common::requeue(ctx.config.rebalancer_idle_interval));
         }
     };
 
@@ -537,7 +538,7 @@ async fn reconcile_inner(
         if command.is_some() {
             remove_command_annotation(&api, &name).await?;
         }
-        return Ok(Action::requeue(IDLE_INTERVAL));
+        return Ok(common::requeue(ctx.config.rebalancer_idle_interval));
     }
 
     // 4. Issue the RPC.
@@ -548,28 +549,37 @@ async fn reconcile_inner(
             client
                 .create_proposal(&goals)
                 .await
-                .map(|p| Outcome::from_create(&p))
+                .map(|p| Outcome::from_create(&p, ctx.config.rebalancer_idle_interval))
         }
         RebalanceAction::Execute => {
             let id = session.clone().unwrap_or_default();
             client
                 .execute_proposal(&id, obj.spec.throttle_bytes_per_sec)
                 .await
-                .map(|p| Outcome::from_execute_or_poll(&p))
+                .map(|p| {
+                    Outcome::from_execute_or_poll(
+                        &p,
+                        ctx.config.rebalancer_poll_interval,
+                        ctx.config.rebalancer_idle_interval,
+                    )
+                })
         }
         RebalanceAction::PollExecution => {
             let id = session.clone().unwrap_or_default();
-            client
-                .get_proposal(&id)
-                .await
-                .map(|p| Outcome::from_execute_or_poll(&p))
+            client.get_proposal(&id).await.map(|p| {
+                Outcome::from_execute_or_poll(
+                    &p,
+                    ctx.config.rebalancer_poll_interval,
+                    ctx.config.rebalancer_idle_interval,
+                )
+            })
         }
         RebalanceAction::Cancel => {
             let id = session.clone().unwrap_or_default();
             client
                 .cancel_execution(&id)
                 .await
-                .map(|p| Outcome::from_cancel(&p))
+                .map(|p| Outcome::from_cancel(&p, ctx.config.rebalancer_idle_interval))
         }
         RebalanceAction::Idle => unreachable!("Idle handled above"),
     };
@@ -581,9 +591,9 @@ async fn reconcile_inner(
         Err(RebalancerError::Transport(msg)) => {
             tracing::warn!(error = %msg, %endpoint, "rebalancer unreachable; retrying");
             ctx.drop_rebalancer_client(&endpoint).await;
-            return Ok(Action::requeue(TRANSPORT_RETRY));
+            return Ok(common::requeue(ctx.config.controller_error_requeue));
         }
-        Err(e) => Outcome::from_rpc_error(&e),
+        Err(e) => Outcome::from_rpc_error(&e, ctx.config.rebalancer_idle_interval),
     };
 
     // 6. A command drove this pass (or was a no-op alongside it): consume
@@ -596,7 +606,7 @@ async fn reconcile_inner(
     //    when the outcome didn't produce new ones.
     let requeue = outcome.requeue;
     write_status(&api, &name, &obj, &outcome).await?;
-    Ok(Action::requeue(requeue))
+    Ok(common::requeue(requeue))
 }
 
 /// Merge-patch the status. Carries forward `sessionId` /
@@ -670,6 +680,7 @@ async fn remove_command_annotation(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::{minutes, secs};
 
     use super::*;
     use crate::{
@@ -795,13 +806,13 @@ mod tests {
 
     #[test]
     fn create_computed_becomes_proposal_ready() {
-        let o = Outcome::from_create(&proposal("p1", ProposalStatus::Computed));
+        let o = Outcome::from_create(&proposal("p1", ProposalStatus::Computed), minutes(5));
         assert!(
             o == Outcome {
                 state: RebalanceState::ProposalReady,
                 reason: "ProposalReady".into(),
                 message: "proposal p1 computed: 3 replica / 1 leader movements".into(),
-                requeue: Duration::from_mins(5),
+                requeue: minutes(5),
                 new_session: Some("p1".into()),
                 new_optimization: Some(OptimizationResult {
                     replica_movements: ReplicaMovementCount(3),
@@ -819,14 +830,18 @@ mod tests {
 
     #[test]
     fn poll_executing_stays_rebalancing_with_short_requeue() {
-        let o = Outcome::from_execute_or_poll(&proposal("p", ProposalStatus::Executing));
+        let o = Outcome::from_execute_or_poll(
+            &proposal("p", ProposalStatus::Executing),
+            secs(10),
+            minutes(5),
+        );
         // `new_session: None` — poll must not rewrite the session.
         assert!(
             o == Outcome {
                 state: RebalanceState::Rebalancing,
                 reason: "Rebalancing".into(),
                 message: "executing proposal p".into(),
-                requeue: Duration::from_secs(10),
+                requeue: secs(10),
                 new_session: None,
                 new_optimization: None,
                 advance_generation: false,
@@ -836,7 +851,11 @@ mod tests {
 
     #[test]
     fn poll_completed_becomes_ready() {
-        let o = Outcome::from_execute_or_poll(&proposal("p", ProposalStatus::Completed));
+        let o = Outcome::from_execute_or_poll(
+            &proposal("p", ProposalStatus::Completed),
+            secs(10),
+            minutes(5),
+        );
         assert!(o.state == RebalanceState::Ready);
     }
 
@@ -844,14 +863,14 @@ mod tests {
     fn poll_failed_becomes_not_ready_with_reason() {
         let mut p = proposal("p", ProposalStatus::Failed);
         p.failure_reason = Some("broker 2 down".into());
-        let o = Outcome::from_execute_or_poll(&p);
+        let o = Outcome::from_execute_or_poll(&p, secs(10), minutes(5));
         assert!(o.state == RebalanceState::NotReady);
         assert!(o.message == "broker 2 down");
     }
 
     #[test]
     fn cancel_becomes_stopped() {
-        let o = Outcome::from_cancel(&proposal("p", ProposalStatus::Cancelled));
+        let o = Outcome::from_cancel(&proposal("p", ProposalStatus::Cancelled), minutes(5));
         assert!(o.state == RebalanceState::Stopped);
     }
 

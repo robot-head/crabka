@@ -8,6 +8,7 @@ use std::{
 use crabka_client_admin::DeleteRecordsOp;
 use crabka_object_store::{ObjectOps, ObjectStoreClient, ObjectStoreConfig, build_object_store};
 use crabka_pgkv::{KvSnapshot, SnapshotKv};
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use tokio::{
     sync::{Mutex as AsyncMutex, mpsc, oneshot},
     task::JoinHandle,
@@ -45,7 +46,7 @@ pub type CheckpointFailpoint = Arc<dyn Fn(CheckpointServiceStep) -> bool + Send 
 pub const DEFAULT_CHECKPOINT_RETAIN: usize = 2;
 
 /// Checkpointer thresholds and object layout knobs.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CheckpointConfig {
     /// Tenant whose store is checkpointed.
     pub tenant: String,
@@ -54,9 +55,9 @@ pub struct CheckpointConfig {
     /// Checkpoint after at least this many committed frames. Zero disables it.
     pub frames_threshold: u64,
     /// Checkpoint after at least this many committed payload bytes. Zero disables it.
-    pub bytes_threshold: u64,
+    pub bytes_threshold: ByteSize,
     /// Target checkpoint part size.
-    pub part_max_bytes: usize,
+    pub part_max_size: ByteSize,
     /// Number of newest checkpoint directories to retain.
     pub retain_checkpoints: usize,
     /// Background wake-up interval used by [`CheckpointService::spawn_with_source`]
@@ -74,18 +75,19 @@ impl CheckpointConfig {
         tenant: String,
         topic: String,
         frames_threshold: u64,
-        bytes_threshold: u64,
-        part_max_bytes: usize,
+        bytes_threshold: ByteSize,
+        part_max_size: ByteSize,
         retain_checkpoints: usize,
+        poll_interval: Duration,
     ) -> Result<Self, SubstrateError> {
         let config = Self {
             tenant,
             topic,
             frames_threshold,
             bytes_threshold,
-            part_max_bytes,
+            part_max_size,
             retain_checkpoints,
-            poll_interval: Duration::from_secs(1),
+            poll_interval,
         };
         config.validate()?;
         Ok(config)
@@ -107,12 +109,12 @@ impl CheckpointConfig {
                 "checkpoint WAL topic must not be empty".into(),
             ));
         }
-        if self.frames_threshold == 0 && self.bytes_threshold == 0 {
+        if self.frames_threshold == 0 && self.bytes_threshold == ByteSize::ZERO {
             return Err(SubstrateError::Checkpoint(
                 "at least one checkpoint threshold must be non-zero".into(),
             ));
         }
-        if self.part_max_bytes < 8 {
+        if self.part_max_size < crabka_units::bytes(8) {
             return Err(SubstrateError::Checkpoint(
                 "checkpoint part_max_bytes must fit one empty key/value pair".into(),
             ));
@@ -120,6 +122,11 @@ impl CheckpointConfig {
         if self.retain_checkpoints == 0 {
             return Err(SubstrateError::Checkpoint(
                 "checkpoint retain_checkpoints must be greater than zero".into(),
+            ));
+        }
+        if self.poll_interval.is_zero() {
+            return Err(SubstrateError::Checkpoint(
+                "checkpoint poll_interval must be greater than zero".into(),
             ));
         }
         Ok(())
@@ -334,7 +341,9 @@ where
         if self.config.frames_threshold != 0 && frames >= self.config.frames_threshold {
             return Some(CheckpointTrigger::Frames);
         }
-        if self.config.bytes_threshold != 0 && bytes >= self.config.bytes_threshold {
+        if self.config.bytes_threshold != ByteSize::ZERO
+            && ByteSize::from_bytes(bytes) >= self.config.bytes_threshold
+        {
             return Some(CheckpointTrigger::Bytes);
         }
         None
@@ -363,7 +372,7 @@ where
             &self.config.tenant,
             self.kv.as_ref(),
             snapshot,
-            self.config.part_max_bytes,
+            self.config.part_max_size,
         )
         .await?;
         #[cfg(feature = "checkpoint-test-hooks")]
@@ -374,7 +383,7 @@ where
                     &self.config.tenant,
                     self.kv.as_ref(),
                     snapshot,
-                    self.config.part_max_bytes,
+                    self.config.part_max_size,
                     failpoint,
                 )
                 .await?
@@ -385,7 +394,7 @@ where
                     &self.config.tenant,
                     self.kv.as_ref(),
                     snapshot,
-                    self.config.part_max_bytes,
+                    self.config.part_max_size,
                 )
                 .await?
             }
@@ -450,7 +459,7 @@ where
             &self.config.tenant,
             kv_snapshot,
             snapshot,
-            self.config.part_max_bytes,
+            self.config.part_max_size,
         )
         .await?;
         #[cfg(feature = "checkpoint-test-hooks")]
@@ -461,7 +470,7 @@ where
                     &self.config.tenant,
                     kv_snapshot,
                     snapshot,
-                    self.config.part_max_bytes,
+                    self.config.part_max_size,
                     failpoint,
                 )
                 .await?
@@ -472,7 +481,7 @@ where
                     &self.config.tenant,
                     kv_snapshot,
                     snapshot,
-                    self.config.part_max_bytes,
+                    self.config.part_max_size,
                 )
                 .await?
             }
@@ -579,24 +588,8 @@ where
                 tokio::select! {
                     command = receiver.recv() => {
                         let Some(command) = command else { break };
-                        match command {
-                            CheckpointCommand::Run {
-                                snapshot,
-                                trigger,
-                                reply,
-                            } => {
-                                let result = self.checkpoint(snapshot, trigger).await;
-                                let _ignored = reply.send(result);
-                            }
-                            CheckpointCommand::RunFromSource {
-                                source,
-                                trigger,
-                                reply,
-                            } => {
-                                let result = self.checkpoint_from_source(&source, trigger).await;
-                                let _ignored = reply.send(result);
-                            }
-                            CheckpointCommand::Shutdown => break,
+                        if !self.run_command(command).await {
+                            break;
                         }
                     }
                     _instant = poll.tick(), if threshold_source.is_some() => {
@@ -618,6 +611,55 @@ where
             }
         });
         CheckpointHandle { commands, task }
+    }
+
+    async fn run_command(&self, command: CheckpointCommand) -> bool {
+        match command {
+            CheckpointCommand::Run {
+                snapshot,
+                trigger,
+                reply,
+            } => {
+                let result = self.checkpoint(snapshot, trigger).await;
+                let _ignored = reply.send(result);
+            }
+            CheckpointCommand::RunFromSource {
+                source,
+                trigger,
+                pin_operation,
+                reply,
+            } => {
+                let result = self.checkpoint_from_source(&source, trigger).await;
+                let result = match (result, pin_operation) {
+                    (Ok(run), Some(operation_id)) => super::runtime::pin_checkpoint(
+                        self.store.as_ref(),
+                        &self.config.tenant,
+                        &operation_id,
+                        &run.metadata.manifest_key,
+                        run.manifest.wal_generation,
+                        run.manifest.covered_offset,
+                    )
+                    .await
+                    .map(|()| run),
+                    (result, _) => result,
+                };
+                let _ignored = reply.send(result);
+            }
+            CheckpointCommand::ReleasePin {
+                operation_id,
+                reply,
+            } => {
+                let result = super::runtime::unpin_checkpoint(
+                    self.store.as_ref(),
+                    &self.config.tenant,
+                    &operation_id,
+                )
+                .await;
+                let _ignored = reply.send(result);
+            }
+            CheckpointCommand::Shutdown => return false,
+        }
+        true
     }
 }
 
@@ -646,7 +688,12 @@ enum CheckpointCommand {
     RunFromSource {
         source: Arc<CheckpointSnapshotSource>,
         trigger: CheckpointTrigger,
+        pin_operation: Option<String>,
         reply: oneshot::Sender<Result<CheckpointRun, SubstrateError>>,
+    },
+    ReleasePin {
+        operation_id: String,
+        reply: oneshot::Sender<Result<(), SubstrateError>>,
     },
     Shutdown,
 }
@@ -677,6 +724,50 @@ impl CheckpointHandle {
             .send(CheckpointCommand::RunFromSource {
                 source,
                 trigger,
+                pin_operation: None,
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?;
+        wait.await
+            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?
+    }
+
+    /// Atomically checkpoint and durably pin its WAL/object boundary for an operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when checkpointing or writing the pin fails.
+    pub async fn checkpoint_from_source_pinned(
+        &self,
+        source: Arc<CheckpointSnapshotSource>,
+        trigger: CheckpointTrigger,
+        operation_id: String,
+    ) -> Result<CheckpointRun, SubstrateError> {
+        let (reply, wait) = oneshot::channel();
+        self.commands
+            .send(CheckpointCommand::RunFromSource {
+                source,
+                trigger,
+                pin_operation: Some(operation_id),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?;
+        wait.await
+            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?
+    }
+
+    /// Release an operation's durable checkpoint pin.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the service stopped or the marker cannot be deleted.
+    pub async fn release_pin(&self, operation_id: String) -> Result<(), SubstrateError> {
+        let (reply, wait) = oneshot::channel();
+        self.commands
+            .send(CheckpointCommand::ReleasePin {
+                operation_id,
                 reply,
             })
             .await
@@ -730,13 +821,14 @@ mod tests {
 
     use super::*;
     use crate::{
-        checkpoint::{DEFAULT_PART_MAX_BYTES, InMemoryCheckpointStore},
+        checkpoint::{DEFAULT_PART_MAX_SIZE, InMemoryCheckpointStore},
         writer::WriterGeneration,
     };
 
     #[derive(Default)]
     struct FakePruner {
         fail: AtomicBool,
+        attempted: Notify,
         calls: std::sync::Mutex<Vec<Vec<DeleteRecordsOp>>>,
         pruned: Notify,
     }
@@ -756,6 +848,7 @@ mod tests {
     #[async_trait::async_trait]
     impl CheckpointWalPruner for FakePruner {
         async fn delete_records(&self, ops: &[DeleteRecordsOp]) -> Result<(), SubstrateError> {
+            self.attempted.notify_one();
             if self.fail.load(Ordering::SeqCst) {
                 return Err(SubstrateError::Unavailable("delete records failed".into()));
             }
@@ -804,7 +897,7 @@ mod tests {
         let stats = Arc::new(CheckpointStats::default());
         let service = Arc::new(
             CheckpointService::new(
-                polling(config(2, 0)),
+                polling(config(2, ByteSize::ZERO)),
                 kv,
                 store,
                 pruner.clone(),
@@ -834,7 +927,7 @@ mod tests {
         let stats = Arc::new(CheckpointStats::default());
         let service = Arc::new(
             CheckpointService::new(
-                polling(config(0, 64)),
+                polling(config(0, crabka_units::bytes(64))),
                 kv,
                 store,
                 pruner.clone(),
@@ -862,7 +955,7 @@ mod tests {
         let stats = Arc::new(CheckpointStats::default());
         let service = Arc::new(
             CheckpointService::new(
-                polling(config(1, 0)),
+                polling(config(1, ByteSize::ZERO)),
                 kv,
                 store,
                 pruner.clone(),
@@ -889,13 +982,29 @@ mod tests {
             "tenant".into(),
             "topic".into(),
             0,
-            0,
-            DEFAULT_PART_MAX_BYTES,
+            ByteSize::ZERO,
+            DEFAULT_PART_MAX_SIZE,
             DEFAULT_CHECKPOINT_RETAIN,
+            Duration::from_secs(1),
         )
         .expect_err("both thresholds zero must be rejected");
 
         assert!(matches!(error, SubstrateError::Checkpoint(_)));
+    }
+
+    #[test]
+    fn checkpoint_config_rejects_zero_poll_interval() {
+        let result = CheckpointConfig::new(
+            "tenant".into(),
+            "topic".into(),
+            1,
+            ByteSize::ZERO,
+            DEFAULT_PART_MAX_SIZE,
+            DEFAULT_CHECKPOINT_RETAIN,
+            Duration::ZERO,
+        );
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -905,8 +1014,9 @@ mod tests {
         let pruner = Arc::new(FakePruner::default());
         pruner.fail.store(true, Ordering::SeqCst);
         let stats = Arc::new(CheckpointStats::default());
-        let service = CheckpointService::new(config(1, 0), kv, store, pruner, stats.clone())
-            .expect("service");
+        let service =
+            CheckpointService::new(config(1, ByteSize::ZERO), kv, store, pruner, stats.clone())
+                .expect("service");
         stats.record_committed(1, 7);
 
         let result = service
@@ -925,8 +1035,14 @@ mod tests {
         let pruner = Arc::new(BlockingPruner::default());
         let stats = Arc::new(CheckpointStats::default());
         let service = Arc::new(
-            CheckpointService::new(config(0, 10), kv, store, pruner.clone(), stats.clone())
-                .expect("service"),
+            CheckpointService::new(
+                config(0, crabka_units::bytes(10)),
+                kv,
+                store,
+                pruner.clone(),
+                stats.clone(),
+            )
+            .expect("service"),
         );
         stats.record_committed(1, 10);
 
@@ -956,7 +1072,7 @@ mod tests {
         let stats = Arc::new(CheckpointStats::default());
         let service = Arc::new(
             CheckpointService::new(
-                config(2, 0),
+                config(2, ByteSize::ZERO),
                 kv,
                 store,
                 Arc::new(YieldingPruner),
@@ -992,6 +1108,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pinned_force_checkpoint_survives_more_than_retention_until_release() {
+        let kv: Arc<dyn SnapshotKv> = Arc::new(MemKv::default());
+        let store = InMemoryCheckpointStore::shared();
+        let pruner = Arc::new(FakePruner::default());
+        let stats = Arc::new(CheckpointStats::default());
+        let mut config = config(1, ByteSize::ZERO);
+        config.retain_checkpoints = 1;
+        let service = Arc::new(
+            CheckpointService::new(config, kv, store.clone(), pruner.clone(), stats)
+                .expect("service"),
+        );
+        let source = Arc::new(CheckpointSnapshotSource::new(
+            1,
+            2,
+            crate::writer::WriterGeneration(0),
+        ));
+        let handle = service.spawn();
+        let pinned = handle
+            .checkpoint_from_source_pinned(source, CheckpointTrigger::Manual, "split-a".to_owned())
+            .await
+            .expect("pinned checkpoint");
+
+        for offset in 2..=4 {
+            handle
+                .checkpoint(snapshot(offset), CheckpointTrigger::Manual)
+                .await
+                .expect("later checkpoint");
+        }
+
+        assert!(store.get(&pinned.metadata.manifest_key).await.is_ok());
+        assert!(pruner.calls.lock().expect("lock").last().expect("prune")[0].offset == 2);
+
+        handle
+            .release_pin("split-a".to_owned())
+            .await
+            .expect("release pin");
+        handle
+            .checkpoint(snapshot(5), CheckpointTrigger::Manual)
+            .await
+            .expect("checkpoint after release");
+        assert!(store.get(&pinned.metadata.manifest_key).await.is_err());
+        assert!(pruner.calls.lock().expect("lock").last().expect("prune")[0].offset == 6);
+        handle.shutdown().await.expect("shutdown");
+    }
+
+    #[tokio::test]
     async fn verified_checkpoint_publication_changes_next_join_plan() {
         use crabka_pgexec::plan_dist::{
             CombinedStats, JoinInputs, JoinStrategy, PlannerConfig, plan_join, plan_join_for_tables,
@@ -1010,7 +1172,7 @@ mod tests {
         let kv: Arc<dyn SnapshotKv> = concrete_kv.clone();
         let store: Arc<dyn CheckpointStore> = InMemoryCheckpointStore::shared();
         let service = CheckpointService::new(
-            config(1, 0),
+            config(1, ByteSize::ZERO),
             kv,
             Arc::clone(&store),
             Arc::new(FakePruner::default()),
@@ -1046,7 +1208,7 @@ mod tests {
         );
 
         let restarted = CheckpointService::new(
-            config(1, 0),
+            config(1, ByteSize::ZERO),
             Arc::new(MemKv::default()),
             Arc::clone(&store),
             Arc::new(FakePruner::default()),
@@ -1144,14 +1306,15 @@ mod tests {
         ))
     }
 
-    fn config(frames_threshold: u64, bytes_threshold: u64) -> CheckpointConfig {
+    fn config(frames_threshold: u64, bytes_threshold: ByteSize) -> CheckpointConfig {
         CheckpointConfig::new(
             "tenant".into(),
             "topic".into(),
             frames_threshold,
             bytes_threshold,
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
             DEFAULT_CHECKPOINT_RETAIN,
+            Duration::from_secs(1),
         )
         .expect("config")
     }

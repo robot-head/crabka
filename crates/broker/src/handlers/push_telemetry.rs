@@ -11,6 +11,10 @@ use crabka_protocol::{
         push_telemetry_response::PushTelemetryResponse,
     },
 };
+use crabka_units::{
+    ByteSize, Ratio,
+    convert::{ByteSizeExt as _, RatioExt as _},
+};
 use uuid::Uuid;
 
 use crate::{
@@ -21,13 +25,16 @@ use crate::{
     handlers::context::TelemetryContext,
 };
 
-/// Max allowed decompressed:compressed expansion ratio for a client-metrics
-/// payload (decompression-bomb guard).
-const MAX_DECOMPRESSION_RATIO: usize = 100;
-/// Floor on the decompressed-output bound, so tiny pushes still decompress.
-const DECOMPRESSED_OUTPUT_FLOOR: usize = 16 * 1024 * 1024;
-/// Hard ceiling on decompressed client-metrics output.
-const DECOMPRESSED_OUTPUT_CEILING: usize = 1024 * 1024 * 1024;
+fn decompressed_output_bound(
+    compressed_len: ByteSize,
+    ratio: Ratio,
+    floor: ByteSize,
+    ceiling: ByteSize,
+) -> ByteSize {
+    ByteSize::from_bytes_f64(compressed_len.bytes_f64() * ratio.as_f64())
+        .max(floor)
+        .min(ceiling)
+}
 
 #[tracing::instrument(
     name = "handle_push_telemetry",
@@ -74,11 +81,12 @@ pub(crate) fn handle(
             let ct = codec.expect("authorize_push guarantees a supported codec on Accept");
             // Bound decompressed output to guard against a decompression bomb
             // in the client-metrics payload.
-            let max_output = req
-                .metrics
-                .len()
-                .saturating_mul(MAX_DECOMPRESSION_RATIO)
-                .clamp(DECOMPRESSED_OUTPUT_FLOOR, DECOMPRESSED_OUTPUT_CEILING);
+            let max_output = decompressed_output_bound(
+                ByteSize::from_bytes(u64::try_from(req.metrics.len()).unwrap_or(u64::MAX)),
+                broker.config.telemetry_max_decompression_ratio,
+                broker.config.telemetry_decompressed_output_floor,
+                broker.config.telemetry_decompressed_output_ceiling,
+            );
             match crabka_compression::decompress(ct, &req.metrics, max_output) {
                 Ok(raw) => match otlp::decode_metrics(&raw) {
                     Ok(md) => {
@@ -184,6 +192,7 @@ mod tests {
     use bytes::Bytes;
     use crabka_compression::CompressionType;
     use crabka_protocol::{owned::push_telemetry_response, primitives::uuid::Uuid as ProtoUuid};
+    use crabka_units::{bytes, fraction, gibibytes};
     use opentelemetry_proto::tonic::metrics::v1::{
         Gauge, Histogram, HistogramDataPoint, Metric, MetricsData, NumberDataPoint,
         ResourceMetrics, ScopeMetrics, Sum, metric, number_data_point,
@@ -219,6 +228,35 @@ mod tests {
 
     async fn start_broker() -> (crate::broker::BrokerHandle, tempfile::TempDir) {
         crate::test_support::start_broker_with(|_cfg| {}).await
+    }
+
+    #[test]
+    fn decompressed_output_bound_uses_runtime_policy() {
+        let cases = [
+            ("ratio", bytes(10), 7, bytes(1), bytes(1_000), bytes(70)),
+            ("floor", bytes(10), 2, bytes(50), bytes(1_000), bytes(50)),
+            ("ceiling", bytes(10), 100, bytes(1), bytes(500), bytes(500)),
+            (
+                "ceiling clamps a very large product",
+                gibibytes(4),
+                1_000_000,
+                bytes(1),
+                gibibytes(1),
+                gibibytes(1),
+            ),
+        ];
+
+        for (name, compressed_len, ratio, floor, ceiling, expected) in cases {
+            assert!(
+                decompressed_output_bound(
+                    compressed_len,
+                    fraction(f64::from(ratio)),
+                    floor,
+                    ceiling
+                ) == expected,
+                "{name}"
+            );
+        }
     }
 
     #[tokio::test]

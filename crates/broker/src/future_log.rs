@@ -18,11 +18,11 @@
 use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
-    time::Duration,
 };
 
 use crabka_ids::PartitionIndex;
 use crabka_log::{Log, LogConfig, Offset};
+use crabka_units::{ByteSize, Time, convert::TimeExt as _};
 use dashmap::DashMap;
 use tokio::{sync::oneshot, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
@@ -106,13 +106,11 @@ impl From<std::io::Error> for MoveError {
     }
 }
 
-/// Maximum bytes pulled from the source log per replication iteration.
-/// Picked to fit comfortably inside a single batch hand-off while still
-/// making progress on large segments.
-const MOVE_READ_CHUNK_BYTES: usize = 1 << 20; // 1 MiB
-
-/// Backoff between failed catch-up attempts in the replicator loop.
-const MOVE_RETRY_BACKOFF: Duration = Duration::from_millis(50);
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MovePolicy {
+    pub retry_backoff: Time,
+    pub read_chunk: ByteSize,
+}
 
 /// Start (or no-op-confirm) a move of `(topic, partition)` to
 /// `target_log_dir`. Returns immediately after spawning the replicator
@@ -121,15 +119,16 @@ const MOVE_RETRY_BACKOFF: Duration = Duration::from_millis(50);
 /// Idempotency: if a move with the same target is already in flight,
 /// returns `Ok(())` without spawning a second task. A move with a
 /// *different* target returns `Err(MoveError::AlreadyMoving)`.
-pub fn start_move(
+pub(crate) fn start_move(
     partitions: &Arc<PartitionRegistry>,
     future_logs: &Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
     all_log_dirs: &[PathBuf],
     log_config: &LogConfig,
-    topic: &str,
-    partition: PartitionIndex,
+    topic_partition: (&str, PartitionIndex),
     target_log_dir: &Path,
+    policy: MovePolicy,
 ) -> Result<(), MoveError> {
+    let (topic, partition) = topic_partition;
     // (1) Validate the target is a configured log.dir. Path comparison
     //     is canonical-form to side-step trailing-slash / `.` quirks.
     let target_canon = canonicalize_or_self(target_log_dir);
@@ -176,6 +175,7 @@ pub fn start_move(
         topic: topic.to_string(),
         partition,
         part,
+        policy,
     });
     Ok(())
 }
@@ -185,13 +185,14 @@ pub fn start_move(
 /// whose corresponding partition exists). Re-opens the future log
 /// and re-spawns the replicator, picking up at whatever offset the
 /// future log already holds.
-pub fn resume_move(
+pub(crate) fn resume_move(
     partitions: &Arc<PartitionRegistry>,
     future_logs: &Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
     target_log_dir: &Path,
     log_config: &LogConfig,
     topic: &str,
     partition: PartitionIndex,
+    policy: MovePolicy,
 ) -> Result<(), MoveError> {
     let part = partitions
         .get(topic, partition)
@@ -207,6 +208,7 @@ pub fn resume_move(
         topic: topic.to_string(),
         partition,
         part,
+        policy,
     });
     Ok(())
 }
@@ -223,6 +225,7 @@ struct MoveTask {
     topic: String,
     partition: PartitionIndex,
     part: Arc<Partition>,
+    policy: MovePolicy,
 }
 
 fn spawn_move(task: MoveTask) {
@@ -240,6 +243,7 @@ fn spawn_move(task: MoveTask) {
         future_logs: task.future_logs.clone(),
         topic: task.topic.clone(),
         partition: task.partition,
+        policy: task.policy,
     }));
     let state = Arc::new(FutureLogState {
         target_log_dir: task.target_log_dir,
@@ -264,6 +268,7 @@ struct ReplicatorTask {
     future_logs: Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
     topic: String,
     partition: PartitionIndex,
+    policy: MovePolicy,
 }
 
 async fn replicator_loop(task: ReplicatorTask) {
@@ -278,6 +283,7 @@ async fn replicator_loop(task: ReplicatorTask) {
         future_logs,
         topic,
         partition,
+        policy,
     } = task;
     debug!(
         topic = %topic, partition = partition.get(),
@@ -290,7 +296,7 @@ async fn replicator_loop(task: ReplicatorTask) {
         }
         // Read whatever is missing from the future log up to the
         // source's current LEO.
-        let advance = match catch_up(&part, &future_log) {
+        let advance = match catch_up(&part, &future_log, policy.read_chunk) {
             Ok(v) => v,
             Err(e) => {
                 warn!(
@@ -300,7 +306,7 @@ async fn replicator_loop(task: ReplicatorTask) {
                 );
                 tokio::select! {
                     () = cancel.cancelled() => break,
-                    () = tokio::time::sleep(MOVE_RETRY_BACKOFF) => continue,
+                    () = tokio::time::sleep(policy.retry_backoff.to_std()) => continue,
                 }
             }
         };
@@ -365,7 +371,7 @@ async fn replicator_loop(task: ReplicatorTask) {
 }
 
 /// One catch-up iteration: read whatever the future log is missing,
-/// up to `MOVE_READ_CHUNK_BYTES`, and append it. Returns whether the
+/// up to `read_chunk`, and append it. Returns whether the
 /// future log was caught up at the end of the iteration (i.e. nothing
 /// was read AND `future.LEO >= source.LEO`).
 struct CatchUpProgress {
@@ -375,6 +381,7 @@ struct CatchUpProgress {
 fn catch_up(
     part: &Arc<Partition>,
     future_log: &Arc<Mutex<Log>>,
+    read_chunk: ByteSize,
 ) -> Result<CatchUpProgress, BrokerError> {
     // Snapshot offsets cheaply; the partition log mutex is dropped
     // immediately after each helper.
@@ -395,7 +402,7 @@ fn catch_up(
             .log
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        log.read(future_leo, MOVE_READ_CHUNK_BYTES)?
+        log.read(future_leo, read_chunk)?
     };
     if read.batches.is_empty() {
         // Source advanced its log_start past `future_leo` (retention
@@ -429,14 +436,30 @@ fn canonicalize_or_self(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use assert2::assert;
+    use crabka_units::{kibibytes, mebibytes, millis};
     use tempfile::tempdir;
 
     use super::*;
 
+    fn test_policy() -> MovePolicy {
+        MovePolicy {
+            retry_backoff: millis(5),
+            read_chunk: mebibytes(1),
+        }
+    }
+
     #[test]
-    fn move_read_chunk_size_is_one_mib() {
-        assert!(MOVE_READ_CHUNK_BYTES == 1024 * 1024);
+    fn move_policy_preserves_nondefault_values() {
+        let policy = MovePolicy {
+            retry_backoff: millis(7),
+            read_chunk: kibibytes(4),
+        };
+
+        assert!(policy.retry_backoff == millis(7));
+        assert!(policy.read_chunk == kibibytes(4));
     }
 
     #[test]
@@ -453,9 +476,9 @@ mod tests {
             &future_logs,
             &log_dirs,
             &LogConfig::default(),
-            "t",
-            PartitionIndex(0),
+            ("t", PartitionIndex(0)),
             bogus.path(),
+            test_policy(),
         )
         .expect_err("expected LogDirNotFound");
         assert!(matches!(err, MoveError::LogDirNotFound));
@@ -471,9 +494,9 @@ mod tests {
             &future_logs,
             &[dir.path().to_path_buf()],
             &LogConfig::default(),
-            "t",
-            PartitionIndex(0),
+            ("t", PartitionIndex(0)),
             dir.path(),
+            test_policy(),
         )
         .expect_err("expected ReplicaNotAvailable");
         assert!(matches!(err, MoveError::ReplicaNotAvailable));
@@ -576,9 +599,9 @@ mod tests {
             &future_logs,
             &log_dirs,
             &LogConfig::default(),
-            "t",
-            PartitionIndex(0),
+            ("t", PartitionIndex(0)),
             primary.path(),
+            test_policy(),
         )
         .expect("noop should succeed");
         assert!(
@@ -600,6 +623,7 @@ mod tests {
             &LogConfig::default(),
             "missing",
             PartitionIndex(0),
+            test_policy(),
         )
         .expect_err("missing partition must reject resume");
 
@@ -627,6 +651,7 @@ mod tests {
             &LogConfig::default(),
             "t",
             PartitionIndex(0),
+            test_policy(),
         )
         .expect("resume should spawn a future-log move");
 
@@ -671,6 +696,7 @@ mod tests {
             &LogConfig::default(),
             "t",
             PartitionIndex(0),
+            test_policy(),
         )
         .expect("resume should spawn a future-log move");
 
@@ -727,9 +753,9 @@ mod tests {
             &future_logs,
             &log_dirs,
             &LogConfig::default(),
-            "t",
-            PartitionIndex(0),
+            ("t", PartitionIndex(0)),
             extra.path(),
+            test_policy(),
         )
         .expect("same-target alter must be idempotent");
         assert!(future_logs.len() == 1);
@@ -774,9 +800,9 @@ mod tests {
             &future_logs,
             &log_dirs,
             &LogConfig::default(),
-            "t",
-            PartitionIndex(0),
+            ("t", PartitionIndex(0)),
             third.path(),
+            test_policy(),
         )
         .expect_err("conflicting-target alter must reject");
         assert!(matches!(err, MoveError::AlreadyMoving));

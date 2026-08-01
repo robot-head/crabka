@@ -20,7 +20,7 @@
 //! coordinator or openraft membership directly. All the lockstep safety lives
 //! on the leader.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use crabka_protocol::{
@@ -30,12 +30,9 @@ use crabka_protocol::{
         add_raft_voter_response::AddRaftVoterResponse,
     },
 };
+use crabka_units::{Time, convert::TimeExt as _};
 
 use crate::codes;
-
-/// Backoff between join attempts so a failed dial / not-yet-caught-up reply
-/// doesn't hot-spin the loop.
-const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Everything the auto-join driver needs, pulled out of `BrokerConfig` +
 /// `Broker` so the loop can be spawned *before* the full `Broker` Arc exists.
@@ -44,6 +41,8 @@ const RETRY_BACKOFF: Duration = Duration::from_millis(500);
 /// + promotion — so the two must run concurrently.
 pub(crate) struct AutoJoinParams {
     pub auto_join: bool,
+    pub retry_backoff: Time,
+    pub voter_request_timeout: Time,
     pub node_id: crabka_raft::NodeId,
     pub directory_id: uuid::Uuid,
     pub cluster_id: Option<uuid::Uuid>,
@@ -51,6 +50,7 @@ pub(crate) struct AutoJoinParams {
     /// Protocol of the bootstrap server's data-plane listener (the
     /// inter-broker listener protocol) — `AddRaftVoter` is served there.
     pub listener_protocol: crabka_security::ListenerProtocol,
+    pub inter_broker_server_name: String,
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
 }
@@ -86,6 +86,16 @@ pub(crate) async fn run(params: AutoJoinParams) {
     let listener = controller_listener(bound);
 
     let protocol = params.listener_protocol;
+    let server_name = params.inter_broker_server_name;
+    let retry_backoff = params.retry_backoff;
+    let Ok(voter_request_timeout_ms) = i32::try_from(params.voter_request_timeout.millis_i64())
+    else {
+        tracing::error!(
+            timeout = ?params.voter_request_timeout,
+            "auto-join voter request timeout exceeds Kafka wire limit"
+        );
+        return;
+    };
     let client = params.inter_broker_client;
     let controller = params.controller;
     let cluster_id = params.cluster_id;
@@ -101,10 +111,15 @@ pub(crate) async fn run(params: AutoJoinParams) {
         let target = select_bootstrap_server(&bootstrap_servers, next_server);
         next_server = next_server.wrapping_add(1);
 
-        let req =
-            build_add_raft_voter_request(cluster_id, voter_id, directory_id, listener.clone());
+        let req = build_add_raft_voter_request(
+            cluster_id,
+            voter_id,
+            directory_id,
+            listener.clone(),
+            voter_request_timeout_ms,
+        );
 
-        match send_add_raft_voter(&client, protocol, target, &req).await {
+        match send_add_raft_voter(&client, protocol, &server_name, target, &req).await {
             Ok(resp) => {
                 let _: JoinOutcome = log_join_outcome(self_id, target, &resp);
             }
@@ -118,7 +133,7 @@ pub(crate) async fn run(params: AutoJoinParams) {
             }
         }
 
-        tokio::time::sleep(RETRY_BACKOFF).await;
+        tokio::time::sleep(retry_backoff.to_std()).await;
     }
 }
 
@@ -143,10 +158,11 @@ fn build_add_raft_voter_request(
     voter_id: i32,
     directory_id: crabka_protocol::primitives::uuid::Uuid,
     listener: Listener,
+    timeout_ms: i32,
 ) -> AddRaftVoterRequest {
     AddRaftVoterRequest {
         cluster_id: cluster_id.map(|u| u.to_string()),
-        timeout_ms: 30_000,
+        timeout_ms,
         voter_id,
         voter_directory_id: directory_id,
         listeners: vec![listener],
@@ -235,6 +251,7 @@ fn log_join_outcome(
 async fn send_add_raft_voter(
     client: &crate::network::client::InterBrokerClient,
     protocol: crabka_security::ListenerProtocol,
+    server_name: &str,
     target: std::net::SocketAddr,
     req: &AddRaftVoterRequest,
 ) -> Result<AddRaftVoterResponse, String> {
@@ -250,7 +267,7 @@ async fn send_add_raft_voter(
             &target.ip().to_string(),
             target.port(),
             protocol,
-            "localhost",
+            server_name,
             opts,
         )
         .await
@@ -268,12 +285,9 @@ async fn send_add_raft_voter(
 }
 
 fn auto_join_connection_options() -> crabka_client_core::ConnectionOptions {
-    let default = crabka_client_core::ConnectionOptions::default();
     crabka_client_core::ConnectionOptions {
         client_id: "crabka-auto-join".to_string(),
-        connect_timeout: default.connect_timeout,
-        request_timeout: default.request_timeout,
-        security: default.security,
+        ..Default::default()
     }
 }
 
@@ -283,8 +297,10 @@ mod tests {
         collections::BTreeSet,
         net::SocketAddr,
         sync::atomic::{AtomicUsize, Ordering},
+        time::Duration,
     };
 
+    use assert2::assert;
     use crabka_metadata::{
         KRaftVersionRange, MetadataImage, MetadataRecord, Voter, VoterEndpoint, VoterSet,
         VotersRecord,
@@ -293,6 +309,7 @@ mod tests {
         AddVoter, Node, NodeId, QuorumState, RaftError, ReconfigOutcome, RemoveVoter,
         SnapshotRange, UpdateVoter,
     };
+    use crabka_units::{millis, secs};
     use tokio::sync::watch;
 
     use super::*;
@@ -417,17 +434,24 @@ mod tests {
             7,
             crabka_protocol::primitives::uuid::Uuid(*dir.as_bytes()),
             listener,
+            1_234,
         );
 
         let cluster_id_string = cluster_id.to_string();
-        assert_eq!(req.cluster_id.as_deref(), Some(cluster_id_string.as_str()));
-        assert_eq!(req.timeout_ms, 30_000);
-        assert_eq!(req.voter_id, 7);
-        assert_eq!(req.voter_directory_id.0, *dir.as_bytes());
-        assert_eq!(req.listeners.len(), 1);
-        assert_eq!(req.listeners[0].name, "CONTROLLER");
-        assert_eq!(req.listeners[0].host, "127.0.0.1");
-        assert_eq!(req.listeners[0].port, 19093);
+        assert!(matches!(
+            (
+                req.cluster_id.as_deref(),
+                req.timeout_ms,
+                req.voter_id,
+                req.voter_directory_id.0,
+                req.listeners.len(),
+                req.listeners[0].name.as_str(),
+                req.listeners[0].host.as_str(),
+                req.listeners[0].port,
+            ),
+            (Some(id), 1_234, 7, directory_id, 1, "CONTROLLER", "127.0.0.1", 19093)
+                if id == cluster_id_string && directory_id == *dir.as_bytes()
+        ));
         assert!(req.ack_when_committed);
     }
 
@@ -439,6 +463,7 @@ mod tests {
             7,
             crabka_protocol::primitives::uuid::Uuid(*uuid::Uuid::from_u128(7).as_bytes()),
             listener,
+            30_000,
         );
         let version = add_raft_voter_request::MAX_VERSION;
         let mut bytes = BytesMut::new();
@@ -500,6 +525,7 @@ mod tests {
         let err = send_add_raft_voter(
             &client,
             crabka_security::ListenerProtocol::Plaintext,
+            "broker.internal",
             target,
             &req,
         )
@@ -523,12 +549,15 @@ mod tests {
 
         let params = AutoJoinParams {
             auto_join: false,
+            retry_backoff: millis(7),
+            voter_request_timeout: secs(30),
             node_id: crabka_raft::NodeId(999),
             directory_id: uuid::Uuid::from_u128(1),
             cluster_id: None,
             // Unroutable: would hang the loop if `run` ignored auto_join=false.
             bootstrap_servers: vec!["127.0.0.1:1".parse().unwrap()],
             listener_protocol: crabka_security::ListenerProtocol::Plaintext,
+            inter_broker_server_name: "broker.internal".to_string(),
             controller: broker.controller_for_test(),
             inter_broker_client: broker.inter_broker_client_for_test(),
         };
@@ -549,11 +578,14 @@ mod tests {
         });
         let params = AutoJoinParams {
             auto_join: true,
+            retry_backoff: millis(7),
+            voter_request_timeout: secs(30),
             node_id: crabka_raft::NodeId(7),
             directory_id: uuid::Uuid::from_u128(7),
             cluster_id: None,
             bootstrap_servers: vec!["127.0.0.1:1".parse().unwrap()],
             listener_protocol: crabka_security::ListenerProtocol::Plaintext,
+            inter_broker_server_name: "broker.internal".to_string(),
             controller: source.clone(),
             inter_broker_client: Arc::new(crate::network::client::InterBrokerClient::new(
                 None, None,

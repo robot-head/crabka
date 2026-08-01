@@ -29,6 +29,10 @@ use crabka_traces::frontend::{
     job::{BlockMetaInfo, RowGroupInfo, TraceIndexCatalog},
     server::router_with_backend,
 };
+use crabka_units::{
+    ByteSize,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use http_body_util::BodyExt as _;
 use serde_json::{Value, json};
 use tokio::{sync::Barrier, time::timeout};
@@ -38,7 +42,8 @@ use tower::ServiceExt as _;
 /// list of querier URLs (with scheme, comma-form allowed) + a pre-resolved block
 /// catalog and frontend config.
 fn build_router(querier_urls: &str, cfg: FrontendConfig, catalog: TraceIndexCatalog) -> Router {
-    let backend = HttpQuerier::new(parse_addrs(querier_urls), cfg.request_timeout).unwrap();
+    let backend =
+        HttpQuerier::new(parse_addrs(querier_urls), cfg.request_timeout.to_std()).unwrap();
     let qf = Arc::new(QueryFrontend::new(
         Arc::new(backend),
         Arc::new(catalog),
@@ -71,10 +76,10 @@ fn single_block_catalog() -> TraceIndexCatalog {
         block_id: "blocks/a.parquet".to_string(),
         start_ns: 0,
         end_ns: 10_000_000_000,
-        size_bytes: 100,
+        size: ByteSize::from_bytes(100),
         row_groups: vec![RowGroupInfo {
             index: 0,
-            compressed_bytes: 100,
+            compressed: ByteSize::from_bytes(100),
         }],
     };
     TraceIndexCatalog::new(BTreeMap::from([("tenant-a".to_string(), vec![block])]))
@@ -478,22 +483,22 @@ async fn forwards_backend_row_group_job_to_querier() {
     let upstream = spawn(app).await;
     let cfg = FrontendConfig {
         hot_frontier_ns: i64::MAX,
-        target_bytes_per_job: 100,
+        target_per_job: ByteSize::from_bytes(100),
         ..FrontendConfig::default()
     };
     let block = BlockMetaInfo {
         block_id: "blocks/a.parquet".to_string(),
         start_ns: 0,
         end_ns: 10_000_000_000,
-        size_bytes: 100,
+        size: ByteSize::from_bytes(100),
         row_groups: vec![
             RowGroupInfo {
                 index: 0,
-                compressed_bytes: 40,
+                compressed: ByteSize::from_bytes(40),
             },
             RowGroupInfo {
                 index: 1,
-                compressed_bytes: 60,
+                compressed: ByteSize::from_bytes(60),
             },
         ],
     };
@@ -530,7 +535,7 @@ async fn uses_tenant_specific_backend_row_group_jobs() {
     let upstream = spawn(app).await;
     let cfg = FrontendConfig {
         hot_frontier_ns: i64::MAX,
-        target_bytes_per_job: 100,
+        target_per_job: ByteSize::from_bytes(100),
         ..FrontendConfig::default()
     };
     let catalog = TraceIndexCatalog::new(BTreeMap::from([
@@ -540,10 +545,10 @@ async fn uses_tenant_specific_backend_row_group_jobs() {
                 block_id: "blocks/tenant-a.parquet".to_string(),
                 start_ns: 0,
                 end_ns: 10_000_000_000,
-                size_bytes: 100,
+                size: ByteSize::from_bytes(100),
                 row_groups: vec![RowGroupInfo {
                     index: 0,
-                    compressed_bytes: 100,
+                    compressed: ByteSize::from_bytes(100),
                 }],
             }],
         ),
@@ -553,10 +558,10 @@ async fn uses_tenant_specific_backend_row_group_jobs() {
                 block_id: "blocks/tenant-b.parquet".to_string(),
                 start_ns: 0,
                 end_ns: 10_000_000_000,
-                size_bytes: 100,
+                size: ByteSize::from_bytes(100),
                 row_groups: vec![RowGroupInfo {
                     index: 2,
-                    compressed_bytes: 100,
+                    compressed: ByteSize::from_bytes(100),
                 }],
             }],
         ),

@@ -16,16 +16,17 @@ use crabka_traces::frontend::{
         TraceEnvelopeJson,
     },
 };
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
 fn block(id: &str, start: i64, end: i64) -> BlockMetaInfo {
     BlockMetaInfo {
         block_id: id.to_string(),
         start_ns: start,
         end_ns: end,
-        size_bytes: 100,
+        size: ByteSize::from_bytes(100),
         row_groups: vec![RowGroupInfo {
             index: 0,
-            compressed_bytes: 100,
+            compressed: ByteSize::from_bytes(100),
         }],
     }
 }
@@ -74,7 +75,7 @@ async fn trace_split_across_queriers_reassembles() {
     backend.stub_trace(trace_partial(body(&["02", "03"])));
     let cfg = FrontendConfig {
         hot_frontier_ns: i64::MAX,
-        max_trace_bytes: 1_000_000,
+        max_trace: ByteSize::from_bytes(1_000_000),
         max_concurrency: 1,
         ..FrontendConfig::default()
     };
@@ -97,7 +98,7 @@ async fn oversized_trace_is_partial() {
     backend.stub_trace(trace_partial(body(&["01", "02", "03"])));
     let cfg = FrontendConfig {
         hot_frontier_ns: i64::MAX,
-        max_trace_bytes: 1,
+        max_trace: ByteSize::from_bytes(1),
         max_concurrency: 1,
         ..FrontendConfig::default()
     };

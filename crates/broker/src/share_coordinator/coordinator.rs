@@ -67,10 +67,6 @@ pub(crate) type ShareStateSummary = (StateEpoch, LeaderEpoch, Offset, i32);
 /// share-partition leader to initialize delivery from scratch (KIP-932).
 pub(crate) const UNINITIALIZED_START_OFFSET: i64 = -1;
 
-/// Read-chunk budget in bytes per `read_log` call while replaying
-/// `__share_group_state` partitions during recovery.
-const RECOVERY_READ_MAX_BYTES: usize = 1 << 20;
-
 /// Per-broker share-state coordinator. Constructed in `Broker::start` and
 /// shared via `Arc` with the share-state wire handlers.
 pub(crate) struct ShareCoordinator {
@@ -122,10 +118,19 @@ impl ShareCoordinator {
     #[cfg(test)]
     pub(crate) async fn lead_all_partitions_for_test(&self) {
         let mut set = HashSet::new();
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..self.config.state_topic_num_partitions {
             set.insert(PartitionIndex(p));
         }
         *self.leader_partitions.write().await = set;
+    }
+
+    #[must_use]
+    pub(crate) fn state_topic_num_partitions(&self) -> i32 {
+        self.config.state_topic_num_partitions
+    }
+
+    pub(crate) fn state_topic_replication_factor(&self) -> i16 {
+        self.config.state_topic_replication_factor
     }
 
     /// Returns the `__share_group_state` partition index responsible for the
@@ -462,6 +467,8 @@ impl ShareCoordinator {
             .copied()
             .collect();
 
+        let read_max = self.config.recovery_read_max;
+
         for p in local_partitions {
             let Some(part) = self.partitions.get(bootstrap::TOPIC, p) else {
                 continue;
@@ -469,7 +476,7 @@ impl ShareCoordinator {
 
             let mut offset = part.log_start_offset();
             loop {
-                let out = match part.read_log(offset, RECOVERY_READ_MAX_BYTES) {
+                let out = match part.read_log(offset, read_max) {
                     Ok(o) => o,
                     Err(e) => {
                         warn!(
@@ -611,7 +618,7 @@ mod tests {
     /// 50 `__share_group_state` partitions opened locally.
     fn coordinator(dir: &Path) -> (ShareCoordinator, Arc<PartitionRegistry>) {
         let reg = Arc::new(PartitionRegistry::new());
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..ShareCoordinatorConfig::default().state_topic_num_partitions {
             open_state_partition(&reg, dir, p);
         }
         let coord = ShareCoordinator::new(
@@ -624,10 +631,92 @@ mod tests {
 
     async fn lead_all(coord: &ShareCoordinator) {
         let mut set = HashSet::new();
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..coord.config.state_topic_num_partitions {
             set.insert(PartitionIndex(p));
         }
         *coord.leader_partitions.write().await = set;
+    }
+
+    #[tokio::test]
+    async fn recover_honors_nondefault_read_bound() {
+        let dir = tempdir().unwrap();
+        let registry = Arc::new(PartitionRegistry::new());
+        open_state_partition(&registry, dir.path(), 0);
+        let partition = registry
+            .get(bootstrap::TOPIC, PartitionIndex(0))
+            .expect("state partition open");
+        let topic_id = uuid::Uuid::from_bytes([42; 16]);
+        let key = ShareStateKey {
+            record_type: KEY_SHARE_SNAPSHOT,
+            group_id: "bounded".to_string(),
+            topic_id,
+            partition: 0,
+        };
+        let snapshot = ShareSnapshotValue {
+            snapshot_epoch: 0,
+            state_epoch: 3,
+            leader_epoch: 4,
+            start_offset: Offset(5),
+            delivery_complete_count: 6,
+            state_batches: vec![],
+        };
+        let mut batch = RecordBatch::default();
+        batch.records.push(Record {
+            key: Some(encode_state_key(&key)),
+            value: Some(snapshot.encode()),
+            ..Record::default()
+        });
+        batch.records.push(Record {
+            value: Some(Bytes::from(vec![0; 2_048])),
+            ..Record::default()
+        });
+        batch.last_offset_delta = 1;
+        partition.produce_batch(batch).await.unwrap();
+
+        let image = MetadataImage::from_records(
+            uuid::Uuid::nil(),
+            &[
+                crabka_metadata::MetadataRecord::V1Topic(crabka_metadata::TopicRecord {
+                    name: bootstrap::TOPIC.to_string(),
+                    topic_id: uuid::Uuid::from_bytes([43; 16]),
+                    partitions: 1,
+                    replication_factor: 1,
+                }),
+                crabka_metadata::MetadataRecord::V1Partition(crabka_metadata::PartitionRecord {
+                    topic: bootstrap::TOPIC.to_string(),
+                    partition: 0,
+                    leader: crabka_metadata::NodeId(1),
+                    replicas: vec![crabka_metadata::NodeId(1)],
+                    isr: vec![crabka_metadata::NodeId(1)],
+                    leader_epoch: crabka_metadata::LeaderEpoch(0),
+                    adding_replicas: vec![],
+                    removing_replicas: vec![],
+                    directories: vec![],
+                    partition_epoch: 0,
+                }),
+            ],
+        );
+        let bounded = ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            Arc::clone(&registry),
+            ShareCoordinatorConfig {
+                recovery_read_max: crabka_units::bytes(700),
+                ..ShareCoordinatorConfig::default()
+            },
+        );
+        bounded.recover(&image).await.unwrap();
+        assert!(bounded.read("bounded", topic_id, 0).await.is_none());
+
+        let unbounded = ShareCoordinator::new(
+            crabka_audit::NodeId(1),
+            registry,
+            ShareCoordinatorConfig {
+                recovery_read_max: crabka_units::kibibytes(4),
+                ..ShareCoordinatorConfig::default()
+            },
+        );
+        unbounded.recover(&image).await.unwrap();
+        assert!(unbounded.read_summary("bounded", topic_id, 0).await == Some((3, 4, Offset(5), 6)));
     }
 
     #[tokio::test]
@@ -736,7 +825,7 @@ mod tests {
     async fn snapshot_fold_after_threshold_resets_counter() {
         let dir = tempdir().unwrap();
         let reg = Arc::new(PartitionRegistry::new());
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..ShareCoordinatorConfig::default().state_topic_num_partitions {
             open_state_partition(&reg, dir.path(), p);
         }
         // Small threshold so a few writes trigger a fold.
@@ -775,7 +864,7 @@ mod tests {
     async fn write_persists_and_recovers() {
         let dir = tempdir().unwrap();
         let reg = Arc::new(PartitionRegistry::new());
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..ShareCoordinatorConfig::default().state_topic_num_partitions {
             open_state_partition(&reg, dir.path(), p);
         }
         let tid = uuid::Uuid::from_bytes([10; 16]);
@@ -1002,7 +1091,7 @@ mod tests {
     async fn snapshot_fold_prunes_log_prefix() {
         let dir = tempdir().unwrap();
         let reg = Arc::new(PartitionRegistry::new());
-        for p in 0..bootstrap::NUM_PARTITIONS {
+        for p in 0..ShareCoordinatorConfig::default().state_topic_num_partitions {
             open_state_partition(&reg, dir.path(), p);
         }
         // Fold after 2 updates so a snapshot lands a few records in.

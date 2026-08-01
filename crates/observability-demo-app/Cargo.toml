@@ -20,15 +20,18 @@ heap-profiling = ["crabka-telemetry/heap-profiling"]
 
 [dependencies]
 assert2 = { workspace = true }
+crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-client-streams = { version = "0.3.9", path = "../client-streams" }
 crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
 crabka-client-consumer = { version = "0.3.9", path = "../client-consumer" }
 crabka-schema-serde = { version = "0.3.9", path = "../schema-serde", features = ["protobuf"] }
 crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
+crabka-units = { workspace = true }
 axum = { workspace = true }
 bytes = { workspace = true }
 clap = { workspace = true, features = ["derive", "env"] }
 prometheus-client = { workspace = true }
+refined_type = { workspace = true }
 prost = { workspace = true }
 prost-reflect = { workspace = true, features = ["derive"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "signal", "sync"] }

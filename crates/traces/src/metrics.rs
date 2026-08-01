@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use crabka_units::prelude::*;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, histogram::Histogram},
@@ -159,16 +160,21 @@ impl ServiceMetrics {
     /// produce failure); the WAL/produce-specific failure counter is bumped
     /// separately via [`Self::record_wal_append_failure`] only at the actual
     /// produce error site so a 4xx client error does not inflate it.
-    pub fn record_ingest(&self, ok: bool, bytes: u64, items: u64, secs: f64) {
+    ///
+    /// `body` is the request-body size and `elapsed` the handler latency; both
+    /// are converted to the raw units the Prometheus instruments hold here, so
+    /// callers never spell out `_bytes`/`_secs` themselves. `items` is a plain
+    /// span count — dimensionless, so it stays an integer.
+    pub fn record_ingest(&self, ok: bool, body: ByteSize, items: u64, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.ingest_requests
             .get_or_create(&StatusLabel {
                 status: status.into(),
             })
             .inc();
-        self.ingest_bytes.inc_by(bytes);
+        self.ingest_bytes.inc_by(body.bytes_u64());
         self.ingest_items.inc_by(items);
-        self.ingest_duration.observe(secs);
+        self.ingest_duration.observe(elapsed.secs_f64());
     }
 
     /// Bump the WAL/produce append-failure counter. Called only when the
@@ -271,8 +277,8 @@ mod tests {
     #[tokio::test]
     async fn registry_has_traces_prefix_and_all_metrics() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, 1_024, 7, 0.01);
-        m.record_ingest(false, 0, 0, 0.002);
+        m.record_ingest(true, kibibytes(1), 7, millis(10));
+        m.record_ingest(false, ByteSize::ZERO, 0, millis(2));
         m.record_wal_append_failure();
         m.record_ingest_spans("tenant-a", 7);
         m.record_block_flushed();
@@ -305,8 +311,8 @@ mod tests {
     #[test]
     fn ingest_counters_accumulate() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, 100, 3, 0.01);
-        m.record_ingest(true, 50, 2, 0.01);
+        m.record_ingest(true, bytes(100), 3, millis(10));
+        m.record_ingest(true, bytes(50), 2, millis(10));
         assert2::assert!(m.ingest_bytes.get() == 150);
         assert2::assert!(m.ingest_items.get() == 5);
         assert2::assert!(
@@ -323,11 +329,30 @@ mod tests {
     fn wal_append_failure_is_separate_from_request_outcome() {
         let m = ServiceMetrics::new();
         // A 4xx client error: error outcome, but NOT a WAL failure.
-        m.record_ingest(false, 0, 0, 0.001);
+        m.record_ingest(false, ByteSize::ZERO, 0, Time::ZERO);
         assert2::assert!(m.wal_append_failures.get() == 0);
         // A produce failure: bump explicitly at the WAL error site.
         m.record_wal_append_failure();
         assert2::assert!(m.wal_append_failures.get() == 1);
+    }
+
+    #[tokio::test]
+    async fn dimensioned_arguments_export_in_prometheus_base_units() {
+        // The instruments hold raw bytes and raw seconds; the quantity seam must
+        // scale a `ByteSize`/`Time` into exactly those units, not pass the
+        // caller's magnitude through unscaled.
+        let m = ServiceMetrics::new();
+        m.record_ingest(true, mebibytes(2), 1, millis(250));
+
+        let mut buf = String::new();
+        let r = m.registry.lock().await;
+        prometheus_client::encoding::text::encode(&mut buf, &r).unwrap();
+        for needle in [
+            "crabka_traces_ingest_bytes_total 2097152",
+            "crabka_traces_ingest_duration_seconds_sum 0.25",
+        ] {
+            assert2::assert!(buf.contains(needle));
+        }
     }
 
     #[test]
@@ -387,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn metrics_route_returns_openmetrics() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, 42, 1, 0.01);
+        m.record_ingest(true, bytes(42), 1, millis(10));
         let app = metrics_router(m.registry);
         let resp = app
             .oneshot(

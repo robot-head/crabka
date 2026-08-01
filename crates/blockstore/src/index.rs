@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use crabka_units::prelude::*;
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -25,7 +26,7 @@ use crate::{
 /// object is `head()`ed first and rejected when larger than this cap, mirroring
 /// the `max_decompressed` output cap used by the profiles gunzip path. Defaults
 /// to 256 MiB, comfortably above a realistic single-tenant-fleet index.
-pub const MAX_INDEX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
+pub const MAX_INDEX_SNAPSHOT_BYTES: ByteSize = mebibytes(256);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct BlockEntry {
@@ -499,10 +500,12 @@ impl Index {
     async fn load_with_cap(
         store: &Arc<dyn ObjectStore>,
         object_key: &str,
-        max_bytes: usize,
+        max_bytes: ByteSize,
     ) -> Result<Self> {
         let path = Path::from(object_key);
-        let bytes = match crabka_object_store::read_capped(store, &path, max_bytes as u64).await {
+        let bytes = match crabka_object_store::read_capped(store, &path, max_bytes.bytes_u64())
+            .await
+        {
             Ok(bytes) => bytes,
             Err(error) => {
                 return Err(match error {
@@ -736,7 +739,8 @@ mod tests {
 
     #[test]
     fn snapshot_size_cap_is_256_mib() {
-        assert2::assert!(MAX_INDEX_SNAPSHOT_BYTES == 256 * 1024 * 1024);
+        assert2::assert!(MAX_INDEX_SNAPSHOT_BYTES == mebibytes(256));
+        assert2::assert!(MAX_INDEX_SNAPSHOT_BYTES.bytes_u64() == 256 * 1024 * 1024);
     }
 
     #[test]
@@ -1554,7 +1558,7 @@ mod tests {
             .size;
         assert2::assert!(size > 1);
 
-        let got = Index::load_with_cap(&store, "index/snapshot.json", 1).await;
+        let got = Index::load_with_cap(&store, "index/snapshot.json", bytes(1)).await;
         let Err(BlockStoreError::InvalidBlock(msg)) = got else {
             panic!("expected InvalidBlock for oversized index snapshot");
         };
@@ -1565,13 +1569,10 @@ mod tests {
         );
 
         // A cap at/above the real size still loads.
-        let loaded = Index::load_with_cap(
-            &store,
-            "index/snapshot.json",
-            usize::try_from(size).unwrap(),
-        )
-        .await
-        .unwrap();
+        let loaded =
+            Index::load_with_cap(&store, "index/snapshot.json", ByteSize::from_bytes(size))
+                .await
+                .unwrap();
         assert2::assert!(loaded.block_count("t") == idx.block_count("t"));
     }
 
@@ -1591,6 +1592,6 @@ mod tests {
         let Err(BlockStoreError::ObjectStore(msg)) = got else {
             panic!("expected ObjectStore error for missing index snapshot");
         };
-        assert_eq!(msg, expected);
+        assert2::assert!(msg == expected);
     }
 }

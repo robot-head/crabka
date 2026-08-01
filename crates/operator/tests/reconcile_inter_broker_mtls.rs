@@ -42,6 +42,8 @@ fn kafka_cr(name: &str, namespace: &str) -> Kafka {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         },
     );
     k.metadata.namespace = Some(namespace.into());
@@ -220,6 +222,8 @@ fn pool_cr_labeled(
             node_id_start: 0,
             image: None,
             resources: None,
+            client_dispatch_queue_capacity: None,
+            client_frame_max: None,
             template: None,
             storage: None,
         },

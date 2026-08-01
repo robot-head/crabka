@@ -7,8 +7,12 @@
 //! SSA / merge-patch wrappers, and the labels / owner-ref helpers are
 //! shared verbatim.
 
-use std::{collections::BTreeMap, fmt::Debug, future::Future, pin::Pin};
+use std::{collections::BTreeMap, fmt::Debug, future::Future, pin::Pin, sync::Arc};
 
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
+};
 use k8s_openapi::{
     ByteString,
     api::{
@@ -44,6 +48,37 @@ pub(crate) const DEFAULT_BROKER_IMAGE: &str = concat!(
     "ghcr.io/robot-head/crabka-broker:",
     env!("CARGO_PKG_VERSION")
 );
+
+pub(super) fn error_requeue(ctx: Arc<Context>) -> Action {
+    let delay = ctx.config.controller_error_requeue;
+    drop(ctx);
+    requeue(delay)
+}
+
+pub(crate) fn requeue(delay: Time) -> Action {
+    Action::requeue(delay.to_std())
+}
+
+/// A millisecond count held as `u64` — a `refined_type` newtype such as
+/// `crabka_gres_control`'s `PositiveMillis` — as a time extent.
+/// [`TimeExt::from_millis`] takes an `i64`, so a value past `i64::MAX`
+/// milliseconds saturates rather than wrapping negative.
+pub(crate) fn time_from_millis_u64(millis: u64) -> Time {
+    Time::from_millis(i64::try_from(millis).unwrap_or(i64::MAX))
+}
+
+/// A time extent back in whole milliseconds as `u64`, for arithmetic against
+/// the epoch-millisecond instants the Gres status fields carry. A negative
+/// extent clamps to zero.
+pub(crate) fn millis_u64(extent: Time) -> u64 {
+    u64::try_from(extent.millis_i64()).unwrap_or_default()
+}
+
+/// A time extent back in whole seconds as `u64`, for the `refined_type` rules
+/// that guard `…Secs` CRD fields. A negative extent clamps to zero.
+pub(crate) fn secs_u64(extent: Time) -> u64 {
+    u64::try_from(extent.secs_i64()).unwrap_or_default()
+}
 
 /// Reconcile-error surface shared by both reconcilers.
 #[derive(Debug, thiserror::Error)]
@@ -130,6 +165,12 @@ pub enum ReconcileError {
     /// so the broker pod never boots with broken OTLP env vars.
     #[error("tracing: {0}")]
     TracingInvalid(String),
+    #[error("broker tuning: {0}")]
+    KafkaConfigInvalid(String),
+    #[error("schema registry tuning: {0}")]
+    SchemaRegistryConfigInvalid(String),
+    #[error("gateway tuning: {0}")]
+    GatewayConfigInvalid(String),
     #[error("gres control: {0}")]
     GresControl(#[from] crabka_gres_control::ControlError),
     #[error("producer error: {0}")]
@@ -196,7 +237,7 @@ where
         crate::telemetry::ReconcileResult::Error
     };
     ctx.metrics
-        .record_reconcile(kind, outcome, started.elapsed().as_secs_f64());
+        .record_reconcile(kind, outcome, started.elapsed().as_time());
     result
 }
 
@@ -436,7 +477,7 @@ pub(crate) fn render_configmap(
     let controller_server_name = format!("{name}-broker-headless.{ns}.svc.cluster.local");
     for (broker_id, addrs) in addresses_per_broker {
         let tls_for_broker = tls_per_broker.and_then(|m| m.get(broker_id));
-        let toml = crate::controller::listeners::render_broker_toml(
+        let mut toml = crate::controller::listeners::render_broker_toml(
             (*broker_id, listeners, addrs, inter_broker_listener_name),
             (&server_properties, tls_for_broker, clients_ca_path),
             (
@@ -447,6 +488,9 @@ pub(crate) fn render_configmap(
             tiered_storage,
             (&controller_quorum_voters, &controller_server_name),
         );
+        if let Some(tuning) = &owner.spec.broker_tuning {
+            toml.push_str(&tuning.render_runtime_toml());
+        }
         data.insert(format!("broker-{broker_id}.toml"), toml);
     }
 
@@ -628,6 +672,9 @@ pub fn config_hash(content: &str) -> String {
 /// `RUST_LOG` on restart, so a *value* change (not just on/off) must roll the
 /// cluster. `None` (logging unset, or external resolution failed) contributes
 /// an empty segment, preserving the empty-hash collapse.
+///
+/// Nonempty `broker_tuning` contributes its deterministic rendered `[runtime]`
+/// TOML. Absent and all-`None` tuning contribute an empty segment.
 #[must_use]
 pub fn combined_config_hash(
     spec: &crate::crd::KafkaSpec,
@@ -661,8 +708,14 @@ pub fn combined_config_hash(
     let ca_part = cluster_ca_cert_pem.unwrap_or("");
     let metadata_part = metadata_version_pin.unwrap_or("");
     let logging_part = logging_filter.unwrap_or("");
+    let runtime_part = spec
+        .broker_tuning
+        .as_ref()
+        .map(crate::crd::BrokerTuning::render_runtime_toml)
+        .unwrap_or_default();
     // Hash-collapse compatibility: when listeners, metricsConfig, the CA cert,
-    // an explicit metadataVersion pin, and logging are all absent, the hash
+    // an explicit metadataVersion pin, logging, and rendered runtime tuning
+    // are all absent, the hash
     // collapses to `config_hash(config_part)` — byte-identical to the
     // bare config hash for the same `spec.config`. This is what makes an
     // in-place upgrade from a config-only cluster not trigger a hash-driven roll (the
@@ -672,17 +725,19 @@ pub fn combined_config_hash(
         && ca_part.is_empty()
         && metadata_part.is_empty()
         && logging_part.is_empty()
+        && runtime_part.is_empty()
     {
         return config_hash(&config_part);
     }
     let mut buf = String::with_capacity(
         config_part.len()
-            + 5
+            + 6
             + intent.len()
             + metrics_part.len()
             + ca_part.len()
             + metadata_part.len()
-            + logging_part.len(),
+            + logging_part.len()
+            + runtime_part.len(),
     );
     buf.push_str(&config_part);
     buf.push('\x1F'); // ASCII unit separator
@@ -695,6 +750,8 @@ pub fn combined_config_hash(
     buf.push_str(metadata_part);
     buf.push('\x1F');
     buf.push_str(logging_part);
+    buf.push('\x1F');
+    buf.push_str(&runtime_part);
     config_hash(&buf)
 }
 
@@ -927,6 +984,8 @@ mod config_hash_tests {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         };
         let h = combined_config_hash(&spec_a, None, None, None);
         let h_again = combined_config_hash(&spec_a, None, None, None);
@@ -954,6 +1013,47 @@ mod config_hash_tests {
     }
 
     #[test]
+    fn combined_hash_tracks_nonempty_broker_tuning_only() {
+        use crate::crd::{BrokerTuning, KafkaSpec};
+
+        let mut spec = KafkaSpec {
+            kafka_version: "0.1.1".into(),
+            metadata_version: None,
+            config: None,
+            listeners: vec![],
+            inter_broker_listener_name: None,
+            metrics_config: None,
+            network_policy: None,
+            cluster_ca: None,
+            clients_ca: None,
+            logging: None,
+            delegation_token: None,
+            authorization: None,
+            tiered_storage: None,
+            inter_broker_kerberos: None,
+            krb5_conf_secret_ref: None,
+            tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
+        };
+        let absent = combined_config_hash(&spec, None, None, None);
+
+        spec.broker_tuning = Some(BrokerTuning::default());
+        let empty = combined_config_hash(&spec, None, None, None);
+        assert!(empty == absent, "empty tuning must preserve hash collapse");
+
+        spec.broker_tuning = Some(BrokerTuning {
+            auto_join_voter_request_timeout: Some(crabka_units::secs(7)),
+            ..BrokerTuning::default()
+        });
+        let nonempty = combined_config_hash(&spec, None, None, None);
+        assert!(
+            nonempty != absent,
+            "rendered runtime tuning must roll broker pods"
+        );
+    }
+
+    #[test]
     fn combined_hash_flips_when_metrics_config_toggles() {
         use crate::crd::{KafkaSpec, MetricsConfig, PodMonitorSpec};
 
@@ -974,6 +1074,8 @@ mod config_hash_tests {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         };
         let h_off = combined_config_hash(&spec_off, None, None, None);
 
@@ -1023,6 +1125,8 @@ mod config_hash_tests {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         };
         let h_none = combined_config_hash(&spec, None, None, None);
         let h_a = combined_config_hash(
@@ -1064,6 +1168,8 @@ mod config_hash_tests {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
         let h2 = combined_config_hash(&spec, Some("ca-pem"), None, None);
@@ -1096,6 +1202,8 @@ mod config_hash_tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
+                gres_registry: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -1153,6 +1261,8 @@ mod config_hash_tests {
             inter_broker_kerberos: None,
             krb5_conf_secret_ref: None,
             tracing: None,
+            broker_tuning: None,
+            gres_registry: None,
         };
         // No explicit pin => hash collapse preserved (== config_hash of
         // the empty config part).
@@ -1196,6 +1306,8 @@ mod config_hash_tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
+                gres_registry: None,
             },
         );
         k.meta_mut().namespace = Some("default".into());
@@ -1404,6 +1516,8 @@ mod cluster_object_tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
+                gres_registry: None,
             },
         );
         k.metadata.namespace = Some("default".into());

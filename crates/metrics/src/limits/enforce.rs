@@ -5,6 +5,7 @@ use std::sync::{
 
 use crabka_blockstore::Labels;
 use crabka_throttle::TokenBucket;
+use crabka_units::prelude::*;
 use dashmap::DashMap;
 use num_traits::ToPrimitive;
 
@@ -15,7 +16,7 @@ use super::{LimitError, Limits};
 /// unbounded set of tenant strings (e.g. from a misbehaving or hostile client)
 /// would grow memory without limit; once this many tenants are tracked, the
 /// least-recently-touched bucket is evicted to make room.
-const DEFAULT_MAX_RATE_BUCKETS: usize = 100_000;
+pub const DEFAULT_MAX_RATE_BUCKETS: usize = 100_000;
 
 /// Per-tenant ingestion-rate token bucket with a monotonic last-touch stamp
 /// used for least-recently-used eviction once `max_rate_buckets` is reached.
@@ -60,6 +61,11 @@ impl IngestEnforcer {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) const fn max_rate_buckets(&self) -> usize {
+        self.max_rate_buckets
+    }
+
     /// Next value of the monotonic logical clock used to stamp bucket touches.
     fn next_touch_stamp(&self) -> u64 {
         self.touch_clock.fetch_add(1, Ordering::Relaxed)
@@ -94,32 +100,33 @@ impl IngestEnforcer {
         tenant: &str,
         n_samples: u64,
     ) -> Result<(), LimitError> {
-        // Only a finite, strictly-positive rate of `0.0` disables the limit
+        // Only a finite, strictly-positive rate of zero disables the limit
         // (Mimir's `ingestion_rate: 0` sentinel). A non-finite rate (NaN/Inf)
-        // never reaches the unlimited path: NaN would slip past `== 0.0`, and
+        // never reaches the unlimited path: NaN would slip past `== 0`, and
         // Inf is treated as effectively unbounded throughput, both of which we
         // collapse to "rate limiting disabled" rather than the integer-bucket
         // path, which cannot represent them.
-        if !limits.ingestion_rate.is_finite() || limits.ingestion_rate <= 0.0 {
+        let configured = limits.ingestion_rate.per_sec_f64();
+        if !configured.is_finite() || configured <= 0.0 {
             return Ok(());
         }
 
         // A configured positive rate must never round down to `0`, which the
         // token bucket interprets as the unlimited sentinel. Round to nearest
         // but clamp to at least one sample/sec so e.g. `0.4` still throttles.
-        let rate = limits
-            .ingestion_rate
-            .round()
-            .to_u64()
-            .unwrap_or(u64::MAX)
-            .max(1);
+        let rate = configured.round().to_i64().unwrap_or(i64::MAX).max(1);
         let stamp = self.next_touch_stamp();
         let entry = self
             .sample_rate_buckets
             .entry(tenant.to_string())
             .or_insert_with(|| {
                 let bucket = Arc::new(TokenBucket::new());
-                bucket.set_rate_with_burst(rate, limits.ingestion_burst_size);
+                // One token is one sample here, so this goes through the
+                // bucket's event-rate pair rather than its byte-rate pair.
+                bucket.set_event_rate_with_burst(
+                    Frequency::from_per_sec_u64(u64::try_from(rate).unwrap_or(u64::MAX)),
+                    limits.ingestion_burst_size,
+                );
                 RateBucket {
                     bucket,
                     last_touch: AtomicU64::new(stamp),
@@ -137,7 +144,7 @@ impl IngestEnforcer {
             Ok(())
         } else {
             Err(LimitError::IngestionRateExceeded {
-                rate: limits.ingestion_rate,
+                rate: configured,
                 observed: n_samples.to_f64().unwrap_or(f64::MAX),
             })
         }
@@ -170,18 +177,18 @@ impl IngestEnforcer {
     /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn check_labels(limits: &Limits, labels: &Labels) -> Result<(), LimitError> {
         for (name, value) in labels.iter() {
-            let name_len = u64::try_from(name.len()).unwrap_or(u64::MAX);
+            let name_len = ByteSize::from_bytes(u64::try_from(name.len()).unwrap_or(u64::MAX));
             if name_len > limits.max_label_name_length {
                 return Err(LimitError::LabelNameTooLong {
-                    limit: limits.max_label_name_length,
-                    observed: name_len,
+                    limit: limits.max_label_name_length.bytes_u64(),
+                    observed: name_len.bytes_u64(),
                 });
             }
-            let value_len = u64::try_from(value.len()).unwrap_or(u64::MAX);
+            let value_len = ByteSize::from_bytes(u64::try_from(value.len()).unwrap_or(u64::MAX));
             if value_len > limits.max_label_value_length {
                 return Err(LimitError::LabelValueTooLong {
-                    limit: limits.max_label_value_length,
-                    observed: value_len,
+                    limit: limits.max_label_value_length.bytes_u64(),
+                    observed: value_len.bytes_u64(),
                 });
             }
         }
@@ -201,24 +208,24 @@ impl QueryEnforcer {
         end_ms: i64,
         now_ms: i64,
     ) -> Result<(), LimitError> {
-        if limits.max_query_length_secs != 0 {
-            let span_ms = duration_ms(start_ms, end_ms);
-            let limit_ms = limits.max_query_length_secs.saturating_mul(1000);
-            if span_ms > limit_ms {
+        let length_cap = limits.max_query_length;
+        if length_cap > Time::ZERO {
+            let span = extent_between(start_ms, end_ms);
+            if span > length_cap {
                 return Err(LimitError::QueryRangeTooLong {
-                    limit_secs: limits.max_query_length_secs,
-                    observed_secs: millis_to_secs_ceil(span_ms),
+                    limit_secs: secs_ceil(length_cap),
+                    observed_secs: secs_ceil(span),
                 });
             }
         }
 
-        if limits.max_query_lookback_secs != 0 {
-            let lookback_ms = duration_ms(start_ms, now_ms);
-            let limit_ms = limits.max_query_lookback_secs.saturating_mul(1000);
-            if lookback_ms > limit_ms {
+        let lookback_cap = limits.max_query_lookback;
+        if lookback_cap > Time::ZERO {
+            let lookback = extent_between(start_ms, now_ms);
+            if lookback > lookback_cap {
                 return Err(LimitError::QueryLookbackExceeded {
-                    limit_secs: limits.max_query_lookback_secs,
-                    observed_secs: millis_to_secs_ceil(lookback_ms),
+                    limit_secs: secs_ceil(lookback_cap),
+                    observed_secs: secs_ceil(lookback),
                 });
             }
         }
@@ -255,12 +262,15 @@ impl QueryEnforcer {
     }
 }
 
-fn duration_ms(start_ms: i64, end_ms: i64) -> u64 {
-    u64::try_from(end_ms.saturating_sub(start_ms).max(0)).unwrap_or(u64::MAX)
+/// The extent between two epoch-millisecond instants, clamped at zero so a
+/// reversed range reads as "no span" rather than a negative one.
+fn extent_between(start_ms: i64, end_ms: i64) -> Time {
+    Time::from_millis(end_ms.saturating_sub(start_ms).max(0))
 }
 
-fn millis_to_secs_ceil(ms: u64) -> u64 {
-    ms.saturating_add(999) / 1000
+/// An extent in whole seconds, rounded up — the unit the limit errors report.
+fn secs_ceil(extent: Time) -> u64 {
+    extent.secs_f64().ceil().to_u64().unwrap_or(u64::MAX)
 }
 
 #[cfg(test)]
@@ -271,7 +281,7 @@ mod tests {
     use super::*;
     use crate::limits::Limits;
 
-    fn limits_with(series: u64, name_len: u64, val_len: u64) -> Limits {
+    fn limits_with(series: u64, name_len: ByteSize, val_len: ByteSize) -> Limits {
         Limits {
             max_global_series_per_user: series,
             max_label_name_length: name_len,
@@ -291,7 +301,7 @@ mod tests {
     #[test]
     fn active_series_cap_rejects_over_limit() {
         let e = IngestEnforcer::new();
-        let l = limits_with(100, 1024, 2048);
+        let l = limits_with(100, kibibytes(1), kibibytes(2));
         assert!(e.check_active_series(&l, "t", 1, 99).is_ok());
         assert!(e.check_active_series(&l, "t", 1, 100).is_err());
     }
@@ -299,13 +309,13 @@ mod tests {
     #[test]
     fn zero_series_cap_is_unlimited() {
         let e = IngestEnforcer::new();
-        let l = limits_with(0, 1024, 2048);
+        let l = limits_with(0, kibibytes(1), kibibytes(2));
         assert!(e.check_active_series(&l, "t", 1_000_000, 5_000_000).is_ok());
     }
 
     #[test]
     fn label_length_caps_enforced() {
-        let l = limits_with(0, 4, 4);
+        let l = limits_with(0, bytes(4), bytes(4));
         let ok = labels(&[("ab", "cd")]);
         let bad_name = labels(&[("toolong", "x")]);
         let bad_val = labels(&[("a", "toolong")]);
@@ -324,7 +334,7 @@ mod tests {
     fn ingestion_rate_bucket_eventually_rejects() {
         let e = IngestEnforcer::new();
         let l = Limits {
-            ingestion_rate: 100.0,
+            ingestion_rate: per_sec(100),
             ingestion_burst_size: 100,
             ..Limits::default()
         };
@@ -338,7 +348,7 @@ mod tests {
         // (rate-0) sentinel; it clamps to >= 1 sample/sec and still throttles.
         let e = IngestEnforcer::new();
         let l = Limits {
-            ingestion_rate: 0.4,
+            ingestion_rate: Frequency::from_per_sec(0.4),
             ingestion_burst_size: 1,
             ..Limits::default()
         };
@@ -350,7 +360,7 @@ mod tests {
     fn zero_rate_is_unlimited() {
         let e = IngestEnforcer::new();
         let l = Limits {
-            ingestion_rate: 0.0,
+            ingestion_rate: Frequency::ZERO,
             ingestion_burst_size: 0,
             ..Limits::default()
         };
@@ -363,14 +373,14 @@ mod tests {
         // NaN must not slip past `== 0.0` into the unlimited path, and is
         // treated as "limiting disabled" rather than reaching the int bucket.
         let nan = Limits {
-            ingestion_rate: f64::NAN,
+            ingestion_rate: Frequency::from_per_sec(f64::NAN),
             ingestion_burst_size: 0,
             ..Limits::default()
         };
         assert!(e.check_sample_rate(&nan, "nan", 1_000_000).is_ok());
         // +Inf is unbounded throughput, also disabled rather than int-bucketed.
         let inf = Limits {
-            ingestion_rate: f64::INFINITY,
+            ingestion_rate: Frequency::from_per_sec(f64::INFINITY),
             ingestion_burst_size: 0,
             ..Limits::default()
         };
@@ -384,7 +394,7 @@ mod tests {
         let cap = 8;
         let e = IngestEnforcer::with_max_rate_buckets(cap);
         let l = Limits {
-            ingestion_rate: 100.0,
+            ingestion_rate: per_sec(100),
             ingestion_burst_size: 100,
             ..Limits::default()
         };
@@ -397,10 +407,15 @@ mod tests {
     }
 
     #[test]
+    fn default_rate_bucket_cap_is_preserved() {
+        check!(DEFAULT_MAX_RATE_BUCKETS == 100_000);
+    }
+
+    #[test]
     fn ingestion_burst_is_independent_of_rate() {
         let e = IngestEnforcer::new();
         let l = Limits {
-            ingestion_rate: 100.0,
+            ingestion_rate: per_sec(100),
             ingestion_burst_size: 1000,
             ..Limits::default()
         };
@@ -412,8 +427,8 @@ mod tests {
     #[test]
     fn query_range_and_lookback_caps() {
         let l = Limits {
-            max_query_length_secs: 3600,
-            max_query_lookback_secs: 86_400,
+            max_query_length: hours(1),
+            max_query_lookback: days(1),
             ..Limits::default()
         };
         let now = 1_000_000_000_000_i64;

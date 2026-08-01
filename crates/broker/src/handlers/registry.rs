@@ -2,6 +2,7 @@
 
 use bytes::Bytes;
 use crabka_protocol::api_key::ApiKey;
+use crabka_units::convert::TimeExt as _;
 use futures_util::future::BoxFuture;
 
 use crate::{
@@ -599,8 +600,11 @@ fn create_delegation_token_adapter<'a>(
             &req,
             auth,
             broker.config.delegation_token_secret_key.as_ref(),
-            broker.config.delegation_token_max_lifetime_ms,
-            broker.config.delegation_token_default_renew_period_ms,
+            broker.config.delegation_token_max_lifetime.millis_i64(),
+            broker
+                .config
+                .delegation_token_default_renew_period
+                .millis_i64(),
             &*broker.controller,
             &broker.config.super_users,
         )
@@ -629,7 +633,10 @@ fn renew_delegation_token_adapter<'a>(
             &req,
             auth,
             broker.config.delegation_token_secret_key.as_ref(),
-            broker.config.delegation_token_default_renew_period_ms,
+            broker
+                .config
+                .delegation_token_default_renew_period
+                .millis_i64(),
             &*broker.controller,
             &broker.config.super_users,
         )

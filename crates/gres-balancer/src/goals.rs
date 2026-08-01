@@ -6,6 +6,11 @@ use std::{
 };
 
 use crabka_gres_control::RangeBoundary;
+use crabka_units::{
+    ByteSize, Frequency, Ratio,
+    convert::{ByteSizeExt as _, FrequencyExt as _},
+    gibibytes, mebibytes, percent,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::model::{BalanceOperation, OperationKind, RangeMetrics, TenantMetrics};
@@ -19,13 +24,23 @@ pub enum GoalPriority {
 }
 
 /// Configuration and recent-operation memory used by goals.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `PartialEq` but not `Eq`: the two size thresholds and the skew hysteresis are
+/// `f64`-backed quantities, so equality is not reflexive across the whole
+/// domain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoalContext {
-    pub size_ceiling_bytes: u64,
-    pub merge_floor_bytes: u64,
+    /// Split any range stored above this size.
+    #[serde(with = "crabka_units::serde_units::human::byte_size")]
+    pub size_ceiling: ByteSize,
+    /// Merge adjacent ranges whose combined size stays below this floor.
+    #[serde(with = "crabka_units::serde_units::human::byte_size")]
+    pub merge_floor: ByteSize,
     pub split_stride_rows: u64,
-    pub load_skew_hysteresis_pct: u32,
+    /// Leave load skew alone while it stays within this margin.
+    #[serde(with = "crabka_units::serde_units::human::ratio")]
+    pub load_skew_hysteresis: Ratio,
     pub max_ranges_per_compute: Option<usize>,
     pub max_operations: usize,
     pub cooldown_epochs: u64,
@@ -48,10 +63,10 @@ impl GoalContext {
 impl Default for GoalContext {
     fn default() -> Self {
         Self {
-            size_ceiling_bytes: 1_073_741_824,
-            merge_floor_bytes: 67_108_864,
+            size_ceiling: gibibytes(1),
+            merge_floor: mebibytes(64),
             split_stride_rows: 1_000_000,
-            load_skew_hysteresis_pct: 25,
+            load_skew_hysteresis: percent(25),
             max_ranges_per_compute: None,
             max_operations: 32,
             cooldown_epochs: 2,
@@ -89,7 +104,9 @@ impl GoalToggles {
 }
 
 /// Complete dry-run balancer configuration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+///
+/// `PartialEq` but not `Eq`, following [`GoalContext`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct BalancerConfig {
     #[serde(default)]
@@ -242,7 +259,7 @@ impl Goal for LoadSkewGoal {
         let mut operations = Vec::new();
         for tenant in tenants {
             let totals = load_by_compute(tenant);
-            if skew_pct(&totals) <= ctx.load_skew_hysteresis_pct {
+            if percent(skew_pct(&totals)) <= ctx.load_skew_hysteresis {
                 continue;
             }
             let Some((hot_compute, _)) = totals.iter().max_by_key(|(_, total)| *total) else {
@@ -306,8 +323,8 @@ impl Goal for ConversionGoal {
                 let Some(totals) = totals else {
                     continue;
                 };
-                if totals.0 < table.convert_store_bytes_threshold
-                    && totals.1 < table.convert_commit_rate_threshold
+                if ByteSize::from_bytes(totals.0) < table.convert_store_threshold
+                    && Frequency::from_per_sec_u64(totals.1) < table.convert_commit_rate_threshold
                 {
                     continue;
                 }
@@ -329,7 +346,7 @@ fn split_oversized_ranges(tenant: &TenantMetrics, ctx: &GoalContext) -> Vec<Bala
         .filter(|range| {
             range
                 .store_bytes
-                .is_some_and(|bytes| bytes > ctx.size_ceiling_bytes)
+                .is_some_and(|bytes| ByteSize::from_bytes(bytes) > ctx.size_ceiling)
         })
         .filter(|range| !ctx.is_in_cooldown(range.range_id, OperationKind::Split))
         .filter_map(|range| {
@@ -370,7 +387,7 @@ fn merge_tiny_adjacent_ranges(tenant: &TenantMetrics, ctx: &GoalContext) -> Vec<
             else {
                 return None;
             };
-            if left_bytes.saturating_add(right_bytes) >= ctx.merge_floor_bytes {
+            if ByteSize::from_bytes(left_bytes.saturating_add(right_bytes)) >= ctx.merge_floor {
                 return None;
             }
             if ctx.is_in_cooldown(left.range_id, OperationKind::Merge)

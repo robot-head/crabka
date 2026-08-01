@@ -106,12 +106,12 @@
 //! change. Leader election runs on the controller:
 //! `heartbeat::controller_state::ControllerLivenessState` tracks
 //! per-broker `last_heartbeat`; a 1s ticker times out brokers at
-//! `heartbeat_timeout_ms` and calls `leader_election::on_broker_dead`
+//! `heartbeat_timeout` and calls `leader_election::on_broker_dead`
 //! which scans partitions of the dead broker, picks the first alive
 //! ISR replica, and bumps `leader_epoch`. ISR shrink/expand is
 //! leader-driven by `isr_maintenance` — proposes `AlterPartition`
 //! whenever a follower's last-fetch time exceeds
-//! `replica_lag_time_max_ms`.
+//! `replica_lag_time_max`.
 //!
 //! Together with the HW + acks=all work above, the bulletproof-EOS promise is complete:
 //! `acks=all` produces survive arbitrary single-broker failures with
@@ -126,10 +126,11 @@
 /// `pread`s + `write_all`s there and `WriteOp` carries only the `Inline` variant.
 ///
 /// One macro per crate keeps the predicate identical across every sendfile-gated
-/// item (`SENDFILE_MIN_BYTES`, the `WriteOp::File` drain helpers, the
-/// `tcp_for_sendfile` trait method, the sendfile resolver, etc.), so the cfg set
-/// can't drift. The single per-OS syscall *inside* `sendfile_region` is gated
-/// separately (Linux `rustix` vs Apple/BSD `nix`), not by this macro.
+/// item (the `WriteOp::File` drain helpers, the `tcp_for_sendfile` trait method,
+/// the sendfile resolver, etc.), so the cfg set can't drift. File-region
+/// eligibility uses the broker's configured `sendfile_min_bytes` threshold.
+/// The single per-OS syscall *inside* `sendfile_region` is gated separately
+/// (Linux `rustix` vs Apple/BSD `nix`), not by this macro.
 macro_rules! sendfile_cfg {
     ($($item:item)*) => {
         $(
@@ -166,6 +167,7 @@ mod client_server_failover_model;
 pub mod codes;
 pub mod config;
 pub(crate) mod config_keys;
+pub mod config_value;
 pub mod coordinator;
 /// Compositional end-to-end data-path verification model (produce → replicate →
 /// commit → fetch across clean + unclean failover); wraps the real HWM/ISR,

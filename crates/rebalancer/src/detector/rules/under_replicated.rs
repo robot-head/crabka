@@ -5,6 +5,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crabka_units::convert::TimeExt as _;
+
 use super::{Rule, RuleCtx, RuleHit, sustained_memo};
 use crate::detector::{AnomalyKey, AnomalyKind, AnomalySeverity};
 
@@ -50,7 +52,7 @@ impl Rule for UnderReplicatedPartitions {
             *topic_under.entry(p.topic.clone()).or_insert(0) += 1;
         }
 
-        let secs = ctx.cfg.under_replicated_threshold.as_secs();
+        let secs = ctx.cfg.under_replicated_threshold.secs_i64();
         let mut hits: Vec<RuleHit> = Vec::new();
         for p in &now_under {
             // Sustained check: in the oldest memo within the threshold,
@@ -101,7 +103,8 @@ impl Rule for UnderReplicatedPartitions {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -147,7 +150,7 @@ mod tests {
         }
     }
 
-    fn cfg(threshold: Duration) -> DetectorConfig {
+    fn cfg(threshold: Time) -> DetectorConfig {
         DetectorConfig {
             under_replicated_threshold: threshold,
             ..DetectorConfig::default()
@@ -174,7 +177,7 @@ mod tests {
 
     #[test]
     fn transient_no_fire() {
-        let cfg = cfg(Duration::from_mins(2));
+        let cfg = cfg(minutes(2));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let snap = state(vec![part_under("t", 0, vec![1, 2, 3], vec![1, 2])], 1_000);
@@ -188,7 +191,7 @@ mod tests {
     fn sustained_fires() {
         // cutoff = 200_000 - 120_000 = 80_000; push a memo at the cutoff
         // so oldest_since(cutoff) returns a memo whose snapshot_at_ms <= cutoff.
-        let cfg = cfg(Duration::from_mins(2));
+        let cfg = cfg(minutes(2));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let old = state(vec![part_under("t", 0, vec![1, 2, 3], vec![1, 2])], 0);
@@ -208,7 +211,7 @@ mod tests {
     #[test]
     fn severity_warning_when_only_one_of_many_under() {
         // 4-partition topic, 1 under-replicated → 25%, below 50%, warning.
-        let cfg = cfg(Duration::from_mins(2));
+        let cfg = cfg(minutes(2));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let parts = vec![
@@ -233,7 +236,7 @@ mod tests {
 
     #[test]
     fn severity_warning_when_exactly_half_of_topic_is_under_replicated() {
-        let cfg = cfg(Duration::from_mins(2));
+        let cfg = cfg(minutes(2));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let parts = vec![
@@ -263,7 +266,7 @@ mod tests {
 
     #[test]
     fn hits_are_sorted_by_topic_then_partition() {
-        let cfg = cfg(Duration::from_mins(2));
+        let cfg = cfg(minutes(2));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let parts = vec![
@@ -307,7 +310,7 @@ mod tests {
     fn skip_in_flight_reassignment() {
         // Under-replicated *and* sustained, but partition is being
         // reassigned → suppress.
-        let cfg = cfg(Duration::from_mins(2));
+        let cfg = cfg(minutes(2));
         let usages = UsageStore::default();
         let capacities = BrokerCapacities::default();
         let old = state(vec![part_under("t", 0, vec![1, 2, 3], vec![1, 2])], 0);

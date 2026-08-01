@@ -7,6 +7,7 @@ use crabka_traces::metricsgen::{
     MetricsGenConfig, MetricsGenService, MockClock, MockRemoteWriteSink, MockSpanSource, SpanKind,
     SpanRecord, StatusCode,
 };
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 
 fn span(
     service: &str,
@@ -29,7 +30,7 @@ fn span(
         status_message: String::new(),
         service_name: service.into(),
         attributes: Vec::new(),
-        size_bytes: 200,
+        size: ByteSize::from_bytes(200),
     }
 }
 

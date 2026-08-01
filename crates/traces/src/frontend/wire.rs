@@ -13,6 +13,10 @@
 //! mirror (`TraceByIdResponseJson`) shaped to the querier's v2 body.
 
 use crabka_traceql::{AttrValue, SpanRef, SpanSet, TraceResult};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt, TimeExt as _},
+};
 use serde::{Deserialize, Serialize};
 
 /// The `/api/search` response: matched traces + the job-accounting metrics.
@@ -36,9 +40,18 @@ pub struct TraceJson {
     pub root_trace_name: String,
     /// Nanos since epoch, **string-encoded** (Tempo quirk).
     pub start_time_unix_nano: String,
-    /// Whole milliseconds, integer.
-    #[serde(default)]
-    pub duration_ms: u64,
+    /// How long the trace ran. Rendered as `durationMs`, a whole-millisecond
+    /// integer — the encoding Tempo's search response uses.
+    ///
+    /// Truncated rather than rounded, because Tempo integer-divides its
+    /// nanosecond duration and reporting a millisecond more than Tempo does for
+    /// the same span would show up as a diff in the differential suite.
+    #[serde(
+        rename = "durationMs",
+        default,
+        with = "crabka_units::serde_units::numeric::millis_i64_trunc"
+    )]
+    pub duration: Time,
     #[serde(default)]
     pub span_sets: Vec<SpanSetJson>,
 }
@@ -59,6 +72,9 @@ pub struct SpanJson {
     #[serde(rename = "spanID")]
     pub span_id: String,
     pub start_time_unix_nano: String,
+    /// Nanos, **string-encoded** (Tempo quirk), so this mirrors the wire field
+    /// verbatim rather than holding a `Time`; the projections either side of it
+    /// convert.
     pub duration_nanos: String,
     #[serde(default)]
     pub attributes: Vec<KeyValueJson>,
@@ -212,7 +228,7 @@ impl From<&SpanRef> for SpanJson {
         SpanJson {
             span_id: hex8(&s.span_id),
             start_time_unix_nano: s.start_time_unix_nano.to_string(),
-            duration_nanos: s.duration_nanos.to_string(),
+            duration_nanos: s.duration.nanos_i64().to_string(),
             attributes: s
                 .attributes
                 .iter()
@@ -241,7 +257,7 @@ impl From<&TraceResult> for TraceJson {
             root_service_name: t.root_service_name.clone(),
             root_trace_name: t.root_trace_name.clone(),
             start_time_unix_nano: t.start_time_unix_nano.to_string(),
-            duration_ms: t.duration_ms,
+            duration: t.duration,
             span_sets: t.span_sets.iter().map(SpanSetJson::from).collect(),
         }
     }
@@ -258,7 +274,7 @@ impl From<&SpanJson> for SpanRef {
             nested_set_right: 0,
             nested_set_parent: 0,
             start_time_unix_nano: s.start_time_unix_nano.parse().unwrap_or(0),
-            duration_nanos: s.duration_nanos.parse().unwrap_or(0),
+            duration: Time::from_nanos(s.duration_nanos.parse().unwrap_or(0)),
             status_code: 0,
             status_message: String::new(),
             instrumentation_name: String::new(),
@@ -291,8 +307,7 @@ impl From<&TraceJson> for TraceResult {
             root_service_name: t.root_service_name.clone(),
             root_trace_name: t.root_trace_name.clone(),
             start_time_unix_nano: t.start_time_unix_nano.parse().unwrap_or(0),
-            duration_nanos: t.duration_ms.saturating_mul(1_000_000),
-            duration_ms: t.duration_ms,
+            duration: t.duration,
             span_sets: t.span_sets.iter().map(SpanSet::from).collect(),
         }
     }
@@ -379,10 +394,12 @@ impl TraceByIdResponseJson {
             .sum()
     }
 
-    /// Cheap byte-size estimate of the assembled trace (serialized length).
+    /// Cheap size estimate of the assembled trace (serialized length).
     #[must_use]
-    pub fn approx_size_bytes(&self) -> u64 {
-        serde_json::to_vec(&self.trace).map_or(0, |v| v.len() as u64)
+    pub fn approx_size(&self) -> ByteSize {
+        serde_json::to_vec(&self.trace).map_or(<ByteSize as ByteSizeExt>::ZERO, |v| {
+            ByteSize::from_bytes(u64::try_from(v.len()).unwrap_or(u64::MAX))
+        })
     }
 
     /// True when this body carries no spans (a querier that did not hold the
@@ -395,6 +412,7 @@ impl TraceByIdResponseJson {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::{millis, nanos};
 
     use super::*;
 
@@ -406,7 +424,7 @@ mod tests {
                 root_service_name: "checkout".to_string(),
                 root_trace_name: "POST /pay".to_string(),
                 start_time_unix_nano: "1700000000000000000".to_string(),
-                duration_ms: 42,
+                duration: millis(42),
                 span_sets: vec![SpanSetJson {
                     spans: vec![SpanJson {
                         span_id: "0b".repeat(8),
@@ -491,7 +509,7 @@ mod tests {
                     root_service_name: "svc".to_string(),
                     root_trace_name: "GET /".to_string(),
                     start_time_unix_nano: "5".to_string(),
-                    duration_ms: 12,
+                    duration: millis(12),
                     span_sets: vec![SpanSetJson {
                         spans: vec![SpanJson {
                             span_id: "cd".repeat(8),
@@ -573,7 +591,7 @@ mod tests {
             nested_set_right: 0,
             nested_set_parent: 0,
             start_time_unix_nano: 1234,
-            duration_nanos: 56,
+            duration: nanos(56),
             status_code: 0,
             status_message: String::new(),
             instrumentation_name: String::new(),
@@ -588,8 +606,7 @@ mod tests {
             root_service_name: "svc".into(),
             root_trace_name: "GET /".into(),
             start_time_unix_nano: 1234,
-            duration_nanos: 5_000_000,
-            duration_ms: 5,
+            duration: millis(5),
             span_sets: vec![SpanSet {
                 spans: vec![span],
                 matched: 1,
@@ -603,8 +620,7 @@ mod tests {
                 root_service_name: "svc".into(),
                 root_trace_name: "GET /".into(),
                 start_time_unix_nano: 1234,
-                duration_nanos: 5_000_000,
-                duration_ms: 5,
+                duration: millis(5),
                 span_sets: vec![SpanSet {
                     spans: vec![SpanRef {
                         span_id: [7; 8],
@@ -615,7 +631,7 @@ mod tests {
                         nested_set_right: 0,
                         nested_set_parent: 0,
                         start_time_unix_nano: 1234,
-                        duration_nanos: 56,
+                        duration: nanos(56),
                         status_code: 0,
                         status_message: String::new(),
                         instrumentation_name: String::new(),

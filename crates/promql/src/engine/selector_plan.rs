@@ -1,8 +1,10 @@
+use crabka_units::prelude::*;
 use promql_parser::parser::{MatrixSelector, VectorSelector};
 
 use super::{
     InstantShape, OuterRangeFn, PlannedInstant, PromqlEngine, RangeEval, apply_outer_range_fn,
-    apply_selector_time_modifier, current_at_modifier_bounds, duration_ms, label_matcher_sets,
+    apply_selector_time_modifier, current_at_modifier_bounds, label_matcher_sets,
+    selector_duration,
 };
 use crate::{
     error::Result,
@@ -43,7 +45,7 @@ impl<S: MetricStore> PromqlEngine<S> {
             selector.offset.as_ref(),
             current_at_modifier_bounds(),
         )?;
-        let start_ms = eval_time_ms.saturating_sub(self.opts.lookback_delta_ms);
+        let start_ms = eval_time_ms.saturating_sub(self.opts.lookback_delta.millis_i64());
         let matcher_sets = label_matcher_sets(selector);
         let labels_by_fp = self
             .labels_by_fingerprint_sets(tenant, &matcher_sets, start_ms, eval_time_ms)
@@ -79,8 +81,7 @@ impl<S: MetricStore> PromqlEngine<S> {
             ctx,
             plan,
             labels_by_fp,
-        } = plan_instant_vector_selector(samples, eval_time_ms, self.opts.lookback_delta_ms)
-            .await?;
+        } = plan_instant_vector_selector(samples, eval_time_ms, self.opts.lookback_delta).await?;
         Ok(PlannedInstant::operator(
             ctx,
             plan,
@@ -104,7 +105,7 @@ impl<S: MetricStore> PromqlEngine<S> {
             selector.offset.as_ref(),
             current_at_modifier_bounds(),
         )?;
-        let start_ms = eval_time_ms.saturating_sub(self.opts.lookback_delta_ms);
+        let start_ms = eval_time_ms.saturating_sub(self.opts.lookback_delta.millis_i64());
         let matcher_sets = label_matcher_sets(selector);
         let hist_rows = self
             .scan_histogram_row_sets(tenant, &matcher_sets, start_ms, eval_time_ms)
@@ -126,14 +127,14 @@ impl<S: MetricStore> PromqlEngine<S> {
         selector: &MatrixSelector,
         time_ms: i64,
     ) -> Result<bool> {
-        let range_ms = duration_ms(selector.range)?;
+        let range = selector_duration(selector.range)?;
         let eval_end_ms = apply_selector_time_modifier(
             time_ms,
             selector.vs.at.as_ref(),
             selector.vs.offset.as_ref(),
             None,
         )?;
-        let range_start_ms = eval_end_ms.saturating_sub(range_ms);
+        let range_start_ms = eval_end_ms.saturating_sub(range.millis_i64());
         let matcher_sets = label_matcher_sets(&selector.vs);
         let hist_rows = self
             .scan_histogram_row_sets(tenant, &matcher_sets, range_start_ms, eval_end_ms)
@@ -150,7 +151,7 @@ impl<S: MetricStore> PromqlEngine<S> {
     /// path, which scans `(eval_time - lookback, eval_time]` and selects a single
     /// sample. This matches Prometheus matrix-selector semantics and the
     /// interpreter's `range_function_sample_from_series`. The window's range
-    /// width feeds the UDF as `range_ms`; the eval instant feeds it as the scalar
+    /// width feeds the UDF as its range extent; the eval instant feeds it as the scalar
     /// `timestamp` column, from which the UDF re-derives `range_start = t - range`.
     pub(super) async fn plan_rate_range(
         &self,
@@ -159,14 +160,14 @@ impl<S: MetricStore> PromqlEngine<S> {
         time_ms: i64,
         kind: RateUdfKind,
     ) -> Result<PlannedInstant> {
-        let range_ms = duration_ms(selector.range)?;
+        let range = selector_duration(selector.range)?;
         let eval_end_ms = apply_selector_time_modifier(
             time_ms,
             selector.vs.at.as_ref(),
             selector.vs.offset.as_ref(),
             None,
         )?;
-        let range_start_ms = eval_end_ms.saturating_sub(range_ms);
+        let range_start_ms = eval_end_ms.saturating_sub(range.millis_i64());
         let matcher_sets = label_matcher_sets(&selector.vs);
         let labels_by_fp = self
             .labels_by_fingerprint_sets(tenant, &matcher_sets, range_start_ms, eval_end_ms)
@@ -202,7 +203,7 @@ impl<S: MetricStore> PromqlEngine<S> {
             ctx,
             plan,
             labels_by_fp,
-        } = plan_rate_range_selector(samples, eval_end_ms, range_ms, kind).await?;
+        } = plan_rate_range_selector(samples, eval_end_ms, range, kind).await?;
         Ok(PlannedInstant::operator(
             ctx,
             plan,
@@ -226,14 +227,14 @@ impl<S: MetricStore> PromqlEngine<S> {
         family: OverTimeFamily,
         phi: f64,
     ) -> Result<PlannedInstant> {
-        let range_ms = duration_ms(selector.range)?;
+        let range = selector_duration(selector.range)?;
         let eval_end_ms = apply_selector_time_modifier(
             time_ms,
             selector.vs.at.as_ref(),
             selector.vs.offset.as_ref(),
             None,
         )?;
-        let range_start_ms = eval_end_ms.saturating_sub(range_ms);
+        let range_start_ms = eval_end_ms.saturating_sub(range.millis_i64());
         let matcher_sets = label_matcher_sets(&selector.vs);
         let labels_by_fp = self
             .labels_by_fingerprint_sets(tenant, &matcher_sets, range_start_ms, eval_end_ms)
@@ -268,7 +269,7 @@ impl<S: MetricStore> PromqlEngine<S> {
             ctx,
             plan,
             labels_by_fp,
-        } = plan_over_time_range_selector(samples, eval_end_ms, range_ms, family, phi).await?;
+        } = plan_over_time_range_selector(samples, eval_end_ms, range, family, phi).await?;
         Ok(PlannedInstant::operator(
             ctx,
             plan,
@@ -308,7 +309,7 @@ impl<S: MetricStore> PromqlEngine<S> {
         time_ms: i64,
         outer: OuterRangeFn,
     ) -> Result<PlannedInstant> {
-        let range_ms = duration_ms(selector.range)?;
+        let range = selector_duration(selector.range)?;
         let end_ms = apply_selector_time_modifier(
             time_ms,
             selector.vs.at.as_ref(),
@@ -321,7 +322,7 @@ impl<S: MetricStore> PromqlEngine<S> {
         let range = RangeEval {
             series,
             end_ms,
-            range_ms,
+            range,
             modifier: None,
         };
         Ok(PlannedInstant::Precomputed(apply_outer_range_fn(

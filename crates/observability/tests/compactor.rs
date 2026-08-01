@@ -32,6 +32,7 @@ use crabka_observability::{
     run_compactor_once, run_compactor_until_idle, run_compactor_until_shutdown, serve_service,
     serve_service_listener, write_compaction_frontier_to_object_store,
 };
+use crabka_units::{Time, bytes, millis};
 use futures_util::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -477,7 +478,7 @@ async fn compactor_polls_kafka_wal_batch_then_commits_after_object_store_write()
         &mut label_index,
         &mut block_index,
         &mut consumer,
-        Duration::from_millis(1),
+        millis(1),
     )
     .await
     .unwrap()
@@ -522,7 +523,7 @@ async fn compactor_does_not_commit_polled_batch_when_decode_fails() {
         &mut label_index,
         &mut block_index,
         &mut consumer,
-        Duration::from_millis(1),
+        millis(1),
     )
     .await
     .unwrap_err();
@@ -1183,7 +1184,7 @@ async fn compactor_runtime_appends_shard_without_loading_historical_shards() {
     old_blocks.insert(crabka_blockstore::BlockDescriptor::new_with_size(
         old_key,
         BTreeSet::from([old_fingerprint]),
-        1,
+        bytes(1),
     ));
     write_tenant_log_index_shards_to_object_store(
         &store,
@@ -1972,7 +1973,7 @@ impl RecordingWalConsumer {
 
 #[async_trait]
 impl LogWalConsumer for RecordingWalConsumer {
-    async fn poll(&mut self, _timeout: Duration) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
+    async fn poll(&mut self, _timeout: Time) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
         if self.batches.is_empty() {
             Ok(Vec::new())
         } else {
@@ -2079,11 +2080,12 @@ fn compactor_config(index_prefix: &str) -> ServiceConfig {
         index_prefix: Some(index_prefix.to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
+        ..ServiceConfig::default()
     }
 }

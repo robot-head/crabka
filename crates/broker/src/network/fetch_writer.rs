@@ -47,17 +47,8 @@ use tokio::io::{AsyncWrite, AsyncWriteExt};
 
 use crate::{
     error::BrokerError,
-    network::{codec::MAX_FRAME_BYTES, response_header_len, response_header_v1},
+    network::{codec, response_header_len, response_header_v1},
 };
-
-crate::sendfile_cfg! {
-    /// Records runs at or above this size on a plaintext connection take the
-    /// `sendfile` path; smaller/fragmented runs stay on C's vectored write (the
-    /// sendfile syscall + scatter-gather setup overhead can lose to a single
-    /// `write_all` for tiny payloads). 32 KiB matches the design's lower bound.
-    /// Compiled on the SENDFILE alias (Linux + Apple + FreeBSD/DragonFly).
-    pub const SENDFILE_MIN_BYTES: usize = 32 * 1024;
-}
 
 /// One ordered segment of the fetch response wire frame.
 #[derive(Debug)]
@@ -329,6 +320,7 @@ pub fn build_fetch_plan<F>(
     version: i16,
     correlation_id: i32,
     body_flexible: bool,
+    max_frame_bytes: usize,
     mut resolve_records: F,
 ) -> Result<Vec<WriteOp>, BrokerError>
 where
@@ -347,17 +339,13 @@ where
     let proto_plan = fetch_response_write_plan(resp, version)?;
     let body_len: usize = proto_plan.iter().map(FetchWriteOp::len).sum();
     let frame_body_len = header_len + body_len;
-    if frame_body_len >= MAX_FRAME_BYTES {
-        return Err(BrokerError::Io(std::io::Error::other(
-            "fetch response exceeds max frame size",
-        )));
-    }
+    codec::validate_frame_length(frame_body_len, max_frame_bytes)?;
 
     let mut ops: Vec<WriteOp> = Vec::with_capacity(proto_plan.len() + 1);
 
     // First inline op: 4-byte frame length + correlation header.
     let mut head = BytesMut::with_capacity(4 + header_len);
-    head.put_u32(u32::try_from(frame_body_len).expect("checked < MAX_FRAME_BYTES"));
+    head.put_u32(u32::try_from(frame_body_len).expect("checked against configured frame maximum"));
     head.put_i32(correlation_id);
     if header_v1 {
         head.put_u8(0); // empty response-header tagged fields
@@ -821,6 +809,8 @@ mod tests {
 
     use super::*;
 
+    const DEFAULT_MAX_FRAME_BYTES: usize = 100 * 1024 * 1024;
+
     fn raw_batch(base: i64) -> Bytes {
         let rb = RecordBatch {
             base_offset: base,
@@ -911,6 +901,7 @@ mod tests {
                 version,
                 correlation_id,
                 body_flexible,
+                DEFAULT_MAX_FRAME_BYTES,
                 resolve_records_inline,
             )
             .unwrap();
@@ -959,8 +950,15 @@ mod tests {
         // following it (header + body). Off-by-one here corrupts every frame.
         for version in [4i16, 12, 18] {
             let resp = sample_response(version);
-            let ops =
-                build_fetch_plan(&resp, version, 1, version >= 12, resolve_records_inline).unwrap();
+            let ops = build_fetch_plan(
+                &resp,
+                version,
+                1,
+                version >= 12,
+                DEFAULT_MAX_FRAME_BYTES,
+                resolve_records_inline,
+            )
+            .unwrap();
             // First op is [u32 len][header]; the declared length must equal the
             // sum of the remaining bytes of op0 (the header) + all later ops.
             let head = inline_bytes(&ops[0]);
@@ -969,6 +967,41 @@ mod tests {
             let tail_len: usize = ops[1..].iter().map(WriteOp::len).sum();
             assert_eq!(declared, header_after_len + tail_len);
         }
+    }
+
+    #[test]
+    fn build_fetch_plan_honors_nondefault_max_frame_length() {
+        let response = sample_response(12);
+        let unconstrained =
+            build_fetch_plan(&response, 12, 1, true, usize::MAX, resolve_records_inline)
+                .expect("unconstrained plan");
+        let head = inline_bytes(&unconstrained[0]);
+        let frame_body_len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+
+        assert!(
+            build_fetch_plan(
+                &response,
+                12,
+                1,
+                true,
+                frame_body_len,
+                resolve_records_inline,
+            )
+            .is_ok(),
+            "a frame equal to the configured maximum must be accepted"
+        );
+        assert!(
+            build_fetch_plan(
+                &response,
+                12,
+                1,
+                true,
+                frame_body_len - 1,
+                resolve_records_inline,
+            )
+            .is_err(),
+            "a frame above the configured maximum must be rejected"
+        );
     }
 
     // ─── Increment D/E (cross-platform sendfile) tests ────────────────────
@@ -1048,14 +1081,21 @@ mod tests {
                 let mut file_resp = raw_resp.clone();
                 file_resp.responses[0].partitions[0].records = Some(file_payload);
 
-                let raw_ops =
-                    build_fetch_plan(&raw_resp, version, 9, version >= 12, resolve_records_inline)
-                        .unwrap();
+                let raw_ops = build_fetch_plan(
+                    &raw_resp,
+                    version,
+                    9,
+                    version >= 12,
+                    DEFAULT_MAX_FRAME_BYTES,
+                    resolve_records_inline,
+                )
+                .unwrap();
                 let file_ops = build_fetch_plan(
                     &file_resp,
                     version,
                     9,
                     version >= 12,
+                    DEFAULT_MAX_FRAME_BYTES,
                     resolve_records_sendfile,
                 )
                 .unwrap();

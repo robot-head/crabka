@@ -29,6 +29,7 @@ bytes.workspace = true
 num-traits.workspace = true
 crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
+crabka-units = { workspace = true }
 connectrpc-axum.workspace = true
 prost.workspace = true
 pbjson.workspace = true
@@ -50,6 +51,7 @@ serde_yaml.workspace = true
 async-trait.workspace = true
 parking_lot.workspace = true
 reqwest = { version = "0.13", default-features = false, features = ["json"] }
+refined_type = { workspace = true }
 
 [build-dependencies]
 connectrpc-axum-build = { workspace = true }
@@ -59,4 +61,5 @@ protoc-bin-vendored = { workspace = true }
 crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
 mutants = { workspace = true }
 tempfile.workspace = true
+temp-env = "0.3"
 tower.workspace = true

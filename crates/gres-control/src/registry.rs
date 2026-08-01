@@ -1,19 +1,30 @@
 //! Registry store abstractions and Kafka-backed registry client.
 
+#[cfg(test)]
+use std::time::Duration;
 use std::{
     collections::BTreeMap,
-    net::{SocketAddr, ToSocketAddrs},
+    net::SocketAddr,
+    str::FromStr,
     sync::{Arc, Mutex as StdMutex, RwLock},
-    time::Duration,
 };
 
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_core::{
-    Connection, ConnectionOptions, IsolatedFetch, fetch_partition_with_isolation_progress,
+    ClientDnsTimeout, ClientFrameMax, Connection, ConnectionDispatchQueueCapacity,
+    ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX, FetchMinBytes, IsolatedFetch,
+    fetch_partition_with_isolation_progress,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, Transaction};
 use crabka_protocol::primitives::uuid::Uuid as WireUuid;
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
+#[cfg(test)]
+use crabka_units::{bytes, millis};
+use refined_type::rule::{GreaterU64, MinMaxI32};
 use tokio::sync::{Mutex, watch};
 
 use crate::{
@@ -27,10 +38,296 @@ use crate::{
 };
 
 const TOPIC_ALREADY_EXISTS: i16 = 36;
-const FETCH_MAX_WAIT_MS: i32 = 500;
-const FETCH_PARTITION_MAX_BYTES: i32 = 1 << 20;
 const READ_COMMITTED: i8 = 1;
 const REGISTRY_TRANSACTIONAL_ID: &str = "__gres_tenants.writer";
+
+/// A Kafka replication factor representable on the protocol wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RegistryReplicationFactor(i32);
+
+impl RegistryReplicationFactor {
+    /// Validate a replication factor.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless `value` is in `1..=32767`.
+    pub fn new(value: i32) -> Result<Self, String> {
+        MinMaxI32::<1, 32_767>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Return the validated value.
+    #[must_use]
+    pub const fn into_value(self) -> i32 {
+        self.0
+    }
+}
+
+impl FromStr for RegistryReplicationFactor {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+/// A positive value representable as a protocol `i32`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PositiveI32(i32);
+
+impl PositiveI32 {
+    /// Validate a positive protocol value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is not positive.
+    pub fn new(value: i32) -> Result<Self, String> {
+        MinMaxI32::<1, { i32::MAX }>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Return the validated value.
+    #[must_use]
+    pub const fn into_value(self) -> i32 {
+        self.0
+    }
+}
+
+impl FromStr for PositiveI32 {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+/// A positive millisecond count.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PositiveMillis(u64);
+
+impl PositiveMillis {
+    /// Validate a positive millisecond count.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `value` is zero.
+    pub fn new(value: u64) -> Result<Self, String> {
+        GreaterU64::<0>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    /// Return the validated value.
+    #[must_use]
+    pub const fn into_value(self) -> u64 {
+        self.0
+    }
+}
+
+impl FromStr for PositiveMillis {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+/// Shared creation and reader policy for the Gres tenant registry topic.
+///
+/// Not `Eq`: the timeout and size fields are `f64`-backed quantities.
+#[derive(Clone, Debug, PartialEq)]
+pub struct RegistryPolicy {
+    replication_factor: i32,
+    topic_create_timeout: Time,
+    reader_retry_backoff: Time,
+    fetch_max_wait: Time,
+    fetch_partition_max: ByteSize,
+    producer_dns_timeout: ClientDnsTimeout,
+    reader_admin_dns_timeout: ClientDnsTimeout,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
+    reader_fetch_min: FetchMinBytes,
+}
+
+impl RegistryPolicy {
+    /// Validate and construct a registry policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any value is outside its supported range.
+    pub fn new(
+        replication_factor: i32,
+        topic_create_timeout: Time,
+        reader_retry_backoff: Time,
+        fetch_max_wait: Time,
+        fetch_partition_max: ByteSize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            replication_factor: RegistryReplicationFactor::new(replication_factor)?.into_value(),
+            topic_create_timeout: whole_millis_i32("topic_create_timeout", topic_create_timeout)?,
+            reader_retry_backoff: whole_millis_i64("reader_retry_backoff", reader_retry_backoff)?,
+            fetch_max_wait: whole_millis_i32("fetch_max_wait", fetch_max_wait)?,
+            fetch_partition_max: whole_bytes_i32("fetch_partition_max", fetch_partition_max)?,
+            producer_dns_timeout: ClientDnsTimeout::default(),
+            reader_admin_dns_timeout: ClientDnsTimeout::default(),
+            dispatch_queue_capacity: ConnectionDispatchQueueCapacity::default(),
+            frame_max: ClientFrameMax::default(),
+            reader_fetch_min: FetchMinBytes::default(),
+        })
+    }
+
+    /// Registry topic replication factor.
+    #[must_use]
+    pub const fn replication_factor(&self) -> i32 {
+        self.replication_factor
+    }
+
+    /// Kafka topic-creation timeout.
+    #[must_use]
+    pub const fn topic_create_timeout(&self) -> Time {
+        self.topic_create_timeout
+    }
+
+    /// Delay after a registry reader failure.
+    #[must_use]
+    pub const fn reader_retry_backoff(&self) -> Time {
+        self.reader_retry_backoff
+    }
+
+    /// Maximum time a registry fetch waits for data.
+    #[must_use]
+    pub const fn fetch_max_wait(&self) -> Time {
+        self.fetch_max_wait
+    }
+
+    /// Maximum bytes fetched from the registry partition.
+    #[must_use]
+    pub const fn fetch_partition_max(&self) -> ByteSize {
+        self.fetch_partition_max
+    }
+
+    /// DNS lookup deadline used by the registry producer.
+    #[must_use]
+    pub const fn producer_dns_timeout(&self) -> ClientDnsTimeout {
+        self.producer_dns_timeout
+    }
+
+    /// Validate and replace the registry producer DNS lookup deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the timeout is not a positive whole millisecond.
+    #[must_use = "the validated policy must be used"]
+    pub fn with_producer_dns_timeout(mut self, timeout: Time) -> Result<Self, String> {
+        self.producer_dns_timeout =
+            ClientDnsTimeout::new(whole_millis_i64("producer_dns_timeout", timeout)?)?;
+        Ok(self)
+    }
+
+    /// DNS lookup deadline used by registry reader and admin paths.
+    #[must_use]
+    pub const fn reader_admin_dns_timeout(&self) -> ClientDnsTimeout {
+        self.reader_admin_dns_timeout
+    }
+
+    /// Validate and replace the registry reader/admin DNS lookup deadline.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the timeout is not a positive whole millisecond.
+    #[must_use = "the validated policy must be used"]
+    pub fn with_reader_admin_dns_timeout(mut self, timeout: Time) -> Result<Self, String> {
+        self.reader_admin_dns_timeout =
+            ClientDnsTimeout::new(whole_millis_i64("reader_admin_dns_timeout", timeout)?)?;
+        Ok(self)
+    }
+
+    /// Override registry client connection and reader fetch policy.
+    #[must_use]
+    pub fn with_client_resource_policy(
+        mut self,
+        dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+        frame_max: ClientFrameMax,
+        reader_fetch_min: FetchMinBytes,
+    ) -> Self {
+        self.dispatch_queue_capacity = dispatch_queue_capacity;
+        self.frame_max = frame_max;
+        self.reader_fetch_min = reader_fetch_min;
+        self
+    }
+
+    #[must_use]
+    pub const fn dispatch_queue_capacity(&self) -> ConnectionDispatchQueueCapacity {
+        self.dispatch_queue_capacity
+    }
+
+    #[must_use]
+    pub const fn frame_max(&self) -> ClientFrameMax {
+        self.frame_max
+    }
+
+    #[must_use]
+    pub const fn reader_fetch_min(&self) -> FetchMinBytes {
+        self.reader_fetch_min
+    }
+}
+
+impl Default for RegistryPolicy {
+    fn default() -> Self {
+        Self::new(
+            1,
+            crabka_units::secs(15),
+            crabka_units::millis(250),
+            crabka_units::millis(500),
+            crabka_units::mebibytes(1),
+        )
+        .expect("default registry policy is valid")
+    }
+}
+
+fn whole_millis_i64(name: &str, value: Time) -> Result<Time, String> {
+    let millis = value.millis_i64();
+    if value.secs_f64().is_finite() && millis > 0 && Time::from_millis(millis) == value {
+        Ok(value)
+    } else {
+        Err(format!(
+            "{name} must be a positive whole number of milliseconds"
+        ))
+    }
+}
+
+fn whole_bytes_i32(name: &str, value: ByteSize) -> Result<ByteSize, String> {
+    let bytes = value.bytes_f64();
+    if bytes.is_finite() && bytes > 0.0 && bytes.fract() == 0.0 && bytes <= f64::from(i32::MAX) {
+        Ok(value)
+    } else {
+        Err(format!(
+            "{name} must be a positive whole number of bytes within the i32 range"
+        ))
+    }
+}
+
+fn whole_millis_i32(name: &str, value: Time) -> Result<Time, String> {
+    let value = whole_millis_i64(name, value)?;
+    PositiveI32::new(
+        value
+            .millis_i64()
+            .try_into()
+            .map_err(|error: std::num::TryFromIntError| format!("{name}: {error}"))?,
+    )?;
+    Ok(value)
+}
 
 /// Pure tenant-registry store seam for operator and CLI code.
 pub trait TenantRegistryStore {
@@ -454,6 +751,7 @@ pub fn fold(
 /// Kafka-backed registry facade over `__gres_tenants`.
 pub struct Registry {
     bootstrap: String,
+    policy: RegistryPolicy,
     producer: Producer,
     tenants: Arc<RwLock<BTreeMap<String, TenantRecord>>>,
     split_operations: Arc<RwLock<BTreeMap<(String, String), SplitOperationRecord>>>,
@@ -481,9 +779,23 @@ impl Registry {
     ///
     /// Returns an error when the requested operation cannot be completed.
     pub async fn connect(bootstrap: &str) -> Result<Self, ControlError> {
+        Self::connect_with_policy(bootstrap, RegistryPolicy::default()).await
+    }
+
+    /// Connect registry resources using an explicit shared topic policy.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
+    pub async fn connect_with_policy(
+        bootstrap: &str,
+        policy: RegistryPolicy,
+    ) -> Result<Self, ControlError> {
         let producer = Producer::builder()
             .bootstrap(bootstrap.to_string())
             .client_id("crabka-gres-control-writer")
+            .dns_timeout(policy.producer_dns_timeout().time())
+            .dispatch_queue_capacity(policy.dispatch_queue_capacity.get())
+            .frame_max(policy.frame_max.size())
             .enable_idempotence(true)
             .acks(Acks::All)
             .transactional_id(REGISTRY_TRANSACTIONAL_ID)
@@ -492,6 +804,7 @@ impl Registry {
         let (applied_tx, applied_rx) = watch::channel(-1_i64);
         Ok(Self {
             bootstrap: bootstrap.to_string(),
+            policy,
             producer,
             tenants: Arc::new(RwLock::new(BTreeMap::new())),
             split_operations: Arc::new(RwLock::new(BTreeMap::new())),
@@ -502,12 +815,18 @@ impl Registry {
         })
     }
 
+    /// Return the effective shared registry policy.
+    #[must_use]
+    pub const fn policy(&self) -> &RegistryPolicy {
+        &self.policy
+    }
+
     /// Ensure `__gres_tenants` exists as a compacted, one-partition topic.
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
-    pub async fn ensure_topic(&mut self, replicas: i32) -> Result<(), ControlError> {
-        let topic_id = ensure_registry_topic(&self.bootstrap, replicas).await?;
+    pub async fn ensure_topic(&mut self) -> Result<(), ControlError> {
+        let topic_id = ensure_registry_topic(&self.bootstrap, &self.policy).await?;
         if self.reader.is_some() {
             return Ok(());
         }
@@ -517,6 +836,7 @@ impl Registry {
             Arc::clone(&self.tenants),
             Arc::clone(&self.split_operations),
             self.applied_tx.clone(),
+            self.policy.clone(),
         ));
         Ok(())
     }
@@ -722,7 +1042,8 @@ impl Registry {
         replicas: i32,
     ) -> Result<(), ControlError> {
         let topic = tenant_config_topic(&record.name);
-        ensure_compacted_single_partition_topic(&self.bootstrap, &topic, replicas).await?;
+        ensure_compacted_single_partition_topic(&self.bootstrap, &topic, replicas, &self.policy)
+            .await?;
         let value = encode_tenant_config_record(record)?;
         let rx = self
             .producer
@@ -1032,20 +1353,29 @@ impl Registry {
 
     async fn refresh(&self) -> Result<(), ControlError> {
         let bootstrap_addrs = split_bootstrap(&self.bootstrap);
-        let mut admin = AdminClient::connect(&bootstrap_addrs).await?;
+        let mut admin = AdminClient::connect_with_options(
+            &bootstrap_addrs,
+            registry_admin_options(&self.policy),
+        )
+        .await?;
         let metadata = admin.metadata(&[TENANT_REGISTRY_TOPIC]).await?;
         let entry = metadata
             .topics
             .into_iter()
             .find(|topic| topic.name == TENANT_REGISTRY_TOPIC)
             .ok_or_else(|| ControlError::TopicMissing(TENANT_REGISTRY_TOPIC.to_string()))?;
-        let Some(addr) = resolve_bootstrap_addr(&self.bootstrap) else {
+        let Some(addr) =
+            resolve_bootstrap_addr(&self.bootstrap, self.policy.reader_admin_dns_timeout()).await
+        else {
             return Err(ControlError::TopicMissing(
                 TENANT_REGISTRY_TOPIC.to_string(),
             ));
         };
         let opts = ConnectionOptions {
+            dns_timeout: self.policy.reader_admin_dns_timeout(),
             client_id: "crabka-gres-control-refresh".to_string(),
+            dispatch_queue_capacity: self.policy.dispatch_queue_capacity,
+            frame_max: self.policy.frame_max,
             ..Default::default()
         };
         let conn = Connection::connect_with_options(addr, opts).await?;
@@ -1054,15 +1384,7 @@ impl Registry {
         loop {
             let result = fetch_partition_with_isolation_progress(
                 &conn,
-                IsolatedFetch {
-                    topic: TENANT_REGISTRY_TOPIC,
-                    topic_id,
-                    partition: 0,
-                    fetch_offset: next_offset,
-                    max_wait_ms: FETCH_MAX_WAIT_MS,
-                    partition_max_bytes: FETCH_PARTITION_MAX_BYTES,
-                    isolation_level: READ_COMMITTED,
-                },
+                registry_fetch(next_offset, topic_id, &self.policy),
             )
             .await?;
             let Some(progress) = result.next_offset else {
@@ -1349,31 +1671,45 @@ fn is_merge_already_applied(current: &TenantRecord, merge: &RangeLayoutMerge) ->
     left.endpoint == merge.merged_endpoint && left.wal_generation >= merge.merged_wal_generation
 }
 
-async fn ensure_registry_topic(bootstrap: &str, replicas: i32) -> Result<WireUuid, ControlError> {
-    ensure_compacted_single_partition_topic(bootstrap, TENANT_REGISTRY_TOPIC, replicas).await
+async fn ensure_registry_topic(
+    bootstrap: &str,
+    policy: &RegistryPolicy,
+) -> Result<WireUuid, ControlError> {
+    let entry = ensure_compacted_single_partition_topic(
+        bootstrap,
+        TENANT_REGISTRY_TOPIC,
+        policy.replication_factor,
+        policy,
+    )
+    .await?;
+    validate_registry_replication(entry.replication_factor, policy.replication_factor)?;
+    Ok(entry.topic_id.map_or(WireUuid::ZERO, to_wire_uuid))
+}
+
+fn validate_registry_replication(observed: i32, configured: i32) -> Result<(), ControlError> {
+    if observed != 0 && observed != configured {
+        return Err(ControlError::invalid_field(
+            "registry replication factor",
+            format!("configured {configured}, but existing topic has {observed}"),
+        ));
+    }
+    Ok(())
 }
 
 async fn ensure_compacted_single_partition_topic(
     bootstrap: &str,
     topic: &str,
     replicas: i32,
-) -> Result<WireUuid, ControlError> {
+    policy: &RegistryPolicy,
+) -> Result<crabka_client_admin::TopicMetadataEntry, ControlError> {
     let bootstrap_addrs = split_bootstrap(bootstrap);
-    let mut admin = AdminClient::connect(&bootstrap_addrs).await?;
-    let spec = CreateTopicSpec {
-        name: topic.to_string(),
-        partitions: 1,
-        replicas,
-        configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
-    };
-    let outcomes = admin.create_topics(&[spec], 15_000).await?;
+    let mut admin =
+        AdminClient::connect_with_options(&bootstrap_addrs, registry_admin_options(policy)).await?;
+    let (spec, timeout) = compacted_topic_request(topic, replicas, policy);
+    let outcomes = admin.create_topics(&[spec], timeout).await?;
     if let Some(outcome) = outcomes.into_iter().next() {
         match outcome.error {
-            None => {
-                if let Some(id) = outcome.topic_id {
-                    return Ok(to_wire_uuid(id));
-                }
-            }
+            None => {}
             Some(error) if error.code == TOPIC_ALREADY_EXISTS => {}
             Some(error) => {
                 return Err(ControlError::TopicCreateFailed {
@@ -1385,12 +1721,56 @@ async fn ensure_compacted_single_partition_topic(
         }
     }
     let metadata = admin.metadata(&[topic]).await?;
-    let entry = metadata
+    metadata
         .topics
         .into_iter()
         .find(|entry| entry.name == topic)
-        .ok_or_else(|| ControlError::TopicMissing(topic.to_string()))?;
-    Ok(entry.topic_id.map_or(WireUuid::ZERO, to_wire_uuid))
+        .ok_or_else(|| ControlError::TopicMissing(topic.to_string()))
+}
+
+fn compacted_topic_request(
+    topic: &str,
+    replicas: i32,
+    policy: &RegistryPolicy,
+) -> (CreateTopicSpec, Time) {
+    (
+        CreateTopicSpec {
+            name: topic.to_string(),
+            partitions: 1,
+            replicas,
+            configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
+        },
+        policy.topic_create_timeout,
+    )
+}
+
+fn registry_fetch(
+    fetch_offset: i64,
+    topic_id: WireUuid,
+    policy: &RegistryPolicy,
+) -> IsolatedFetch<'static> {
+    IsolatedFetch {
+        topic: TENANT_REGISTRY_TOPIC,
+        topic_id,
+        partition: 0,
+        fetch_offset,
+        max_wait: policy.fetch_max_wait,
+        max: DEFAULT_FETCH_RESPONSE_MAX,
+        partition_max: policy.fetch_partition_max,
+        fetch_min: policy.reader_fetch_min,
+        isolation_level: READ_COMMITTED,
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ReaderFailure {
+    ResolveBootstrap,
+    Connect,
+    Fetch,
+}
+
+const fn reader_retry_delay(policy: &RegistryPolicy, _failure: ReaderFailure) -> Time {
+    policy.reader_retry_backoff
 }
 
 fn spawn_reader(
@@ -1399,39 +1779,43 @@ fn spawn_reader(
     tenants: Arc<RwLock<BTreeMap<String, TenantRecord>>>,
     split_operations: Arc<RwLock<BTreeMap<(String, String), SplitOperationRecord>>>,
     applied_tx: watch::Sender<i64>,
+    policy: RegistryPolicy,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut next_offset = 0_i64;
         loop {
-            let Some(addr) = resolve_bootstrap_addr(&bootstrap) else {
+            let Some(addr) =
+                resolve_bootstrap_addr(&bootstrap, policy.reader_admin_dns_timeout()).await
+            else {
                 tracing::error!(%bootstrap, "gres control registry reader: bad bootstrap address");
-                tokio::time::sleep(Duration::from_millis(250)).await;
+                tokio::time::sleep(
+                    reader_retry_delay(&policy, ReaderFailure::ResolveBootstrap).to_std(),
+                )
+                .await;
                 continue;
             };
             let opts = ConnectionOptions {
+                dns_timeout: policy.reader_admin_dns_timeout(),
                 client_id: "crabka-gres-control-reader".to_string(),
+                dispatch_queue_capacity: policy.dispatch_queue_capacity,
+                frame_max: policy.frame_max,
                 ..Default::default()
             };
             let conn = match Connection::connect_with_options(addr, opts).await {
                 Ok(conn) => conn,
                 Err(error) => {
                     tracing::warn!(%error, "gres control registry reader: connect failed");
-                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    tokio::time::sleep(
+                        reader_retry_delay(&policy, ReaderFailure::Connect).to_std(),
+                    )
+                    .await;
                     continue;
                 }
             };
             loop {
                 match fetch_partition_with_isolation_progress(
                     &conn,
-                    IsolatedFetch {
-                        topic: TENANT_REGISTRY_TOPIC,
-                        topic_id,
-                        partition: 0,
-                        fetch_offset: next_offset,
-                        max_wait_ms: FETCH_MAX_WAIT_MS,
-                        partition_max_bytes: FETCH_PARTITION_MAX_BYTES,
-                        isolation_level: READ_COMMITTED,
-                    },
+                    registry_fetch(next_offset, topic_id, &policy),
                 )
                 .await
                 {
@@ -1464,7 +1848,10 @@ fn spawn_reader(
                     Err(error) => {
                         tracing::warn!(%error, "gres control registry reader: fetch failed");
                         conn.close();
-                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        tokio::time::sleep(
+                            reader_retry_delay(&policy, ReaderFailure::Fetch).to_std(),
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -1482,11 +1869,37 @@ fn split_bootstrap(bootstrap: &str) -> Vec<String> {
         .collect()
 }
 
-fn resolve_bootstrap_addr(bootstrap: &str) -> Option<SocketAddr> {
-    bootstrap
+fn registry_admin_options(policy: &RegistryPolicy) -> ConnectionOptions {
+    ConnectionOptions {
+        dns_timeout: policy.reader_admin_dns_timeout(),
+        connect_timeout: crabka_units::secs(5),
+        request_timeout: crabka_units::secs(30),
+        client_id: "crabka-operator".to_string(),
+        dispatch_queue_capacity: policy.dispatch_queue_capacity,
+        frame_max: policy.frame_max,
+        security: None,
+    }
+}
+
+async fn resolve_bootstrap_addr(
+    bootstrap: &str,
+    dns_timeout: ClientDnsTimeout,
+) -> Option<SocketAddr> {
+    for entry in bootstrap
         .split(',')
-        .filter_map(|entry| entry.trim().to_socket_addrs().ok())
-        .find_map(|mut addrs| addrs.next())
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+    {
+        let Ok(Ok(mut addrs)) =
+            tokio::time::timeout(dns_timeout.time().to_std(), tokio::net::lookup_host(entry)).await
+        else {
+            continue;
+        };
+        if let Some(addr) = addrs.next() {
+            return Some(addr);
+        }
+    }
+    None
 }
 
 fn to_wire_uuid(id: uuid::Uuid) -> WireUuid {
@@ -1541,6 +1954,221 @@ mod tests {
         RangeBoundary, RangeLifecycle, SplitOperationPhase, SqlUser, TenantId, TenantState,
         decode_tenant_config_record,
     };
+
+    #[test]
+    fn registry_policy_defaults_and_validated_scalars_are_exact() {
+        let policy = RegistryPolicy::default();
+
+        assert!(policy.replication_factor == 1);
+        assert!(policy.topic_create_timeout == crabka_units::secs(15));
+        assert!(policy.reader_retry_backoff == crabka_units::millis(250));
+        assert!(policy.fetch_max_wait == crabka_units::millis(500));
+        assert!(policy.fetch_partition_max == crabka_units::mebibytes(1));
+        assert!("1".parse::<RegistryReplicationFactor>().is_ok());
+        assert!("32767".parse::<RegistryReplicationFactor>().is_ok());
+        assert!("0".parse::<RegistryReplicationFactor>().is_err());
+        assert!("32768".parse::<RegistryReplicationFactor>().is_err());
+        assert!("0".parse::<PositiveI32>().is_err());
+        assert!("2147483648".parse::<PositiveI32>().is_err());
+        assert!("0".parse::<PositiveMillis>().is_err());
+        assert!(
+            RegistryPolicy::new(
+                0,
+                millis(15_000),
+                millis(250),
+                millis(500),
+                crabka_units::mebibytes(1),
+            )
+            .is_err()
+        );
+        assert!(
+            RegistryPolicy::new(
+                32_768,
+                millis(15_000),
+                millis(250),
+                millis(500),
+                crabka_units::mebibytes(1),
+            )
+            .is_err()
+        );
+        assert!(
+            RegistryPolicy::new(
+                1,
+                millis(0),
+                millis(250),
+                millis(500),
+                crabka_units::mebibytes(1),
+            )
+            .is_err()
+        );
+        assert!(
+            RegistryPolicy::new(
+                1,
+                millis(15_000),
+                millis(0),
+                millis(500),
+                crabka_units::mebibytes(1),
+            )
+            .is_err()
+        );
+        assert!(
+            RegistryPolicy::new(
+                1,
+                millis(15_000),
+                millis(250),
+                millis(0),
+                crabka_units::mebibytes(1),
+            )
+            .is_err()
+        );
+        assert!(
+            RegistryPolicy::new(1, millis(15_000), millis(250), millis(500), bytes(0)).is_err()
+        );
+        assert!(
+            RegistryPolicy::new(
+                1,
+                millis(15_000),
+                millis(250),
+                millis(500),
+                ByteSize::from_bytes_f64(1.5),
+            )
+            .is_err()
+        );
+        assert!(
+            RegistryPolicy::new(
+                1,
+                millis(15_000),
+                millis(250),
+                millis(500),
+                ByteSize::from_bytes_f64(f64::from(i32::MAX) + 1.0),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn registry_policy_dns_timeout_defaults_and_replaces_exactly() {
+        let defaults = RegistryPolicy::default();
+        assert!(defaults.producer_dns_timeout() == crabka_client_core::ClientDnsTimeout::default());
+
+        let policy = defaults
+            .with_producer_dns_timeout(millis(37))
+            .expect("valid DNS timeout");
+        assert!(policy.producer_dns_timeout().milliseconds() == 37);
+        assert!(
+            RegistryPolicy::default()
+                .with_producer_dns_timeout(millis(0))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn registry_client_resource_policy_defaults_and_replaces_exactly() {
+        let dispatch = ConnectionDispatchQueueCapacity::new(7).unwrap();
+        let frame_max = ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap();
+        let fetch_min = FetchMinBytes::try_from(bytes(9)).unwrap();
+        let policy =
+            RegistryPolicy::default().with_client_resource_policy(dispatch, frame_max, fetch_min);
+
+        assert!(policy.dispatch_queue_capacity == dispatch);
+        assert!(policy.frame_max == frame_max);
+        assert!(policy.reader_fetch_min == fetch_min);
+        let admin = registry_admin_options(&policy);
+        assert!(admin.dispatch_queue_capacity == dispatch);
+        assert!(admin.frame_max == frame_max);
+        assert!(registry_fetch(0, WireUuid::ZERO, &policy).fetch_min == fetch_min);
+    }
+
+    #[test]
+    fn registry_reader_admin_dns_defaults_and_replaces_exactly() {
+        let defaults = RegistryPolicy::default();
+        assert!(
+            defaults.reader_admin_dns_timeout() == crabka_client_core::ClientDnsTimeout::default()
+        );
+
+        let policy = defaults
+            .with_reader_admin_dns_timeout(millis(37))
+            .expect("valid DNS timeout");
+        assert!(policy.reader_admin_dns_timeout().milliseconds() == 37);
+        assert!(
+            RegistryPolicy::default()
+                .with_reader_admin_dns_timeout(millis(0))
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_bootstrap_resolver_accepts_typed_deadline() {
+        let timeout = ClientDnsTimeout::new(millis(37)).expect("positive timeout");
+        let addr = resolve_bootstrap_addr("127.0.0.1:9092", timeout)
+            .await
+            .expect("literal address");
+        assert!(addr.port() == 9092);
+    }
+
+    #[test]
+    fn checkpoint_scalars_enforce_runtime_boundaries() {
+        use crate::{CheckpointPartBytes, PositiveUsize};
+
+        assert!("8".parse::<CheckpointPartBytes>().is_ok());
+        assert!("7".parse::<CheckpointPartBytes>().is_err());
+        assert!("1".parse::<PositiveUsize>().is_ok());
+        assert!("0".parse::<PositiveUsize>().is_err());
+    }
+
+    #[test]
+    fn registry_policy_reaches_topic_and_fetch_requests() {
+        let policy =
+            RegistryPolicy::new(7, millis(12_345), millis(678), millis(901), bytes(234_567))
+                .unwrap();
+
+        let (registry_spec, timeout) =
+            compacted_topic_request(TENANT_REGISTRY_TOPIC, policy.replication_factor(), &policy);
+        let (tenant_spec, tenant_timeout) = compacted_topic_request("tenant-config", 3, &policy);
+        assert!(registry_spec.replicas == 7);
+        assert!(tenant_spec.replicas == 3);
+        assert!(timeout == crabka_units::millis(12_345));
+        assert!(tenant_timeout == crabka_units::millis(12_345));
+        let fetch = registry_fetch(42, WireUuid::ZERO, &policy);
+        assert!(fetch.max_wait == crabka_units::millis(901));
+        assert!(fetch.partition_max == crabka_units::bytes(234_567));
+        assert!(policy.reader_retry_backoff == crabka_units::millis(678));
+    }
+
+    #[test]
+    fn registry_policy_reaches_every_reader_failure_backoff() {
+        let policy = RegistryPolicy::new(
+            1,
+            millis(15_000),
+            millis(678),
+            millis(500),
+            crabka_units::mebibytes(1),
+        )
+        .unwrap();
+
+        for failure in [
+            ReaderFailure::ResolveBootstrap,
+            ReaderFailure::Connect,
+            ReaderFailure::Fetch,
+        ] {
+            assert!(reader_retry_delay(&policy, failure) == crabka_units::millis(678));
+        }
+    }
+
+    #[test]
+    fn registry_topic_rejects_immutable_replication_mismatch() {
+        assert!(validate_registry_replication(0, 2).is_ok());
+        assert!(validate_registry_replication(2, 2).is_ok());
+        let error = validate_registry_replication(1, 2)
+            .expect_err("immutable registry replication mismatch");
+        assert!(matches!(
+            error,
+            ControlError::InvalidField {
+                field: "registry replication factor",
+                ..
+            }
+        ));
+    }
 
     fn tenant_name(name: &str) -> TenantName {
         TenantName::try_from(name).unwrap()
@@ -1807,10 +2435,14 @@ mod tests {
             .await
             .expect("broker start");
         let bootstrap = broker.listen_addr().to_string();
-        let mut registry = Registry::connect(&bootstrap)
+        let policy =
+            RegistryPolicy::new(1, millis(12_345), millis(678), millis(901), bytes(234_567))
+                .unwrap();
+        let mut registry = Registry::connect_with_policy(&bootstrap, policy.clone())
             .await
             .expect("registry connect");
-        registry.ensure_topic(1).await.expect("registry topic");
+        assert!(registry.policy() == &policy);
+        registry.ensure_topic().await.expect("registry topic");
 
         registry
             .producer
@@ -1844,7 +2476,7 @@ mod tests {
         let mut registry = Registry::connect(&bootstrap)
             .await
             .expect("registry connect");
-        registry.ensure_topic(1).await.expect("registry topic");
+        registry.ensure_topic().await.expect("registry topic");
 
         let reader = registry
             .reader
@@ -1882,7 +2514,7 @@ mod tests {
         let mut first = Registry::connect(&bootstrap)
             .await
             .expect("registry connect");
-        first.ensure_topic(1).await.expect("registry topic");
+        first.ensure_topic().await.expect("registry topic");
         first
             .begin_split_operation(&operation)
             .await
@@ -1897,7 +2529,7 @@ mod tests {
             .await
             .expect("reconnect registry");
         reopened
-            .ensure_topic(1)
+            .ensure_topic()
             .await
             .expect("existing registry topic");
         let loaded = reopened

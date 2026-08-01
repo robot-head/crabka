@@ -3,12 +3,14 @@
 //! All functions return `Result<_, String>` and map client errors via
 //! `.map_err(|e| e.to_string())` so callers stay wire-error-agnostic.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::collections::BTreeMap;
 
 use bytes::Bytes;
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::security::ClientSecurity;
+
+use crate::config::{ClientResourcePolicy, ReplicationFactor, ReplicatorRuntimePolicy};
 
 /// Kafka error code: the topic already exists.
 const TOPIC_ALREADY_EXISTS: i16 = 36;
@@ -29,19 +31,68 @@ pub async fn ensure_topic(
     partitions: i32,
     security: Option<ClientSecurity>,
 ) -> Result<(), String> {
-    let mut admin = AdminClient::connect_secured(&[bootstrap.to_string()], security)
-        .await
-        .map_err(|e| e.to_string())?;
+    ensure_topic_with_policy(
+        bootstrap,
+        topic,
+        partitions,
+        security,
+        ClientResourcePolicy::default(),
+    )
+    .await
+}
+
+/// Ensure a topic using the deployment's client resource policy.
+///
+/// # Errors
+///
+/// Returns an error when configuration is invalid, protocol encoding fails,
+/// the broker rejects the request, or transport I/O fails.
+pub async fn ensure_topic_with_policy(
+    bootstrap: &str,
+    topic: &str,
+    partitions: i32,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+) -> Result<(), String> {
+    let runtime_policy = ReplicatorRuntimePolicy::default();
+    ensure_topic_with_runtime_policy(
+        bootstrap,
+        topic,
+        partitions,
+        security,
+        client_resource_policy,
+        &runtime_policy,
+        runtime_policy.data_topic_replication_factor,
+    )
+    .await
+}
+
+/// Ensure a topic using explicit process and replication policy.
+pub(crate) async fn ensure_topic_with_runtime_policy(
+    bootstrap: &str,
+    topic: &str,
+    partitions: i32,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+    runtime_policy: &ReplicatorRuntimePolicy,
+    replication_factor: ReplicationFactor,
+) -> Result<(), String> {
+    let mut admin = AdminClient::connect_with_options(
+        &[bootstrap.to_string()],
+        admin_options(security, client_resource_policy, runtime_policy)?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let outcomes = admin
         .create_topics(
             &[CreateTopicSpec {
                 name: topic.to_string(),
                 partitions,
-                replicas: 1,
+                replicas: i32::from(replication_factor.get()),
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            runtime_policy.topic_create_timeout,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -60,7 +111,7 @@ pub async fn ensure_topic(
     Ok(())
 }
 
-/// Ensure a compacted topic exists with 1 partition and 1 replica.
+/// Ensure a compacted topic exists with one partition and the default replica count.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -74,9 +125,46 @@ pub async fn ensure_compacted_topic(
     topic: &str,
     security: Option<ClientSecurity>,
 ) -> Result<(), String> {
-    let mut admin = AdminClient::connect_secured(&[bootstrap.to_string()], security)
+    ensure_compacted_topic_with_policy(bootstrap, topic, security, ClientResourcePolicy::default())
         .await
-        .map_err(|e| e.to_string())?;
+}
+
+/// Ensure a compacted topic using the deployment's client resource policy.
+///
+/// # Errors
+///
+/// Returns an error when configuration is invalid, protocol encoding fails,
+/// the broker rejects the request, or transport I/O fails.
+pub async fn ensure_compacted_topic_with_policy(
+    bootstrap: &str,
+    topic: &str,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+) -> Result<(), String> {
+    let runtime_policy = ReplicatorRuntimePolicy::default();
+    ensure_compacted_topic_with_runtime_policy(
+        bootstrap,
+        topic,
+        security,
+        client_resource_policy,
+        &runtime_policy,
+    )
+    .await
+}
+
+pub(crate) async fn ensure_compacted_topic_with_runtime_policy(
+    bootstrap: &str,
+    topic: &str,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+    runtime_policy: &ReplicatorRuntimePolicy,
+) -> Result<(), String> {
+    let mut admin = AdminClient::connect_with_options(
+        &[bootstrap.to_string()],
+        admin_options(security, client_resource_policy, runtime_policy)?,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
 
     let mut configs = BTreeMap::new();
     configs.insert("cleanup.policy".to_string(), "compact".to_string());
@@ -86,10 +174,10 @@ pub async fn ensure_compacted_topic(
             &[CreateTopicSpec {
                 name: topic.to_string(),
                 partitions: 1,
-                replicas: 1,
+                replicas: i32::from(runtime_policy.internal_topic_replication_factor.get()),
                 configs,
             }],
-            10_000,
+            runtime_policy.topic_create_timeout,
         )
         .await
         .map_err(|e| e.to_string())?;
@@ -108,6 +196,22 @@ pub async fn ensure_compacted_topic(
     Ok(())
 }
 
+fn admin_options(
+    security: Option<ClientSecurity>,
+    policy: ClientResourcePolicy,
+    runtime_policy: &ReplicatorRuntimePolicy,
+) -> Result<crabka_client_core::ConnectionOptions, String> {
+    Ok(crabka_client_core::ConnectionOptions {
+        dns_timeout: crabka_client_core::ClientDnsTimeout::new(runtime_policy.client_dns_timeout)?,
+        connect_timeout: runtime_policy.client_connect_timeout,
+        request_timeout: runtime_policy.client_request_timeout,
+        client_id: "crabka-operator".to_owned(),
+        dispatch_queue_capacity: policy.dispatch_queue_capacity,
+        frame_max: policy.frame_max,
+        security: security.map(Box::new),
+    })
+}
+
 /// Build a drain consumer for the given topic.  Security is threaded through
 /// conditionally — `bon` wraps bare `T` setters in `Some`, so passing `None`
 /// means simply omitting the `.security()` call.
@@ -116,12 +220,15 @@ async fn build_drain_consumer(
     group_id: String,
     topic: &str,
     security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
 ) -> Result<Consumer, crabka_client_consumer::ConsumerError> {
     if let Some(sec) = security {
         Consumer::builder()
             .bootstrap(bootstrap)
             .group_id(group_id)
             .client_id("crabka-replicator-util")
+            .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+            .frame_max(client_resource_policy.frame_max.size())
             .subscribe(vec![topic.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .security(sec)
@@ -132,6 +239,8 @@ async fn build_drain_consumer(
             .bootstrap(bootstrap)
             .group_id(group_id)
             .client_id("crabka-replicator-util")
+            .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+            .frame_max(client_resource_policy.frame_max.size())
             .subscribe(vec![topic.to_string()])
             .auto_offset_reset(AutoOffsetReset::Earliest)
             .build()
@@ -142,7 +251,7 @@ async fn build_drain_consumer(
 /// Drain all records from `topic` from the earliest offset, returning
 /// `(key, value)` pairs in order.
 ///
-/// Uses N=3 consecutive empty polls (500 ms each) as the drain sentinel.
+/// Uses the runtime policy's consecutive-empty threshold as the drain sentinel.
 /// Poll errors for a not-yet-existing topic are silently treated as empty.
 pub type RawRecord = (Option<Bytes>, Option<Bytes>);
 
@@ -159,30 +268,67 @@ pub async fn read_all(
     topic: &str,
     security: Option<ClientSecurity>,
 ) -> Result<Vec<RawRecord>, String> {
-    const MAX_EMPTY: usize = 3;
+    read_all_with_policy(bootstrap, topic, security, ClientResourcePolicy::default()).await
+}
 
+/// Drain a topic using the deployment's client resource policy.
+///
+/// # Errors
+///
+/// Returns an error when configuration is invalid, protocol encoding fails,
+/// the broker rejects the request, or transport I/O fails.
+pub async fn read_all_with_policy(
+    bootstrap: &str,
+    topic: &str,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+) -> Result<Vec<RawRecord>, String> {
+    let runtime_policy = ReplicatorRuntimePolicy::default();
+    read_all_with_runtime_policy(
+        bootstrap,
+        topic,
+        security,
+        client_resource_policy,
+        &runtime_policy,
+    )
+    .await
+}
+
+pub(crate) async fn read_all_with_runtime_policy(
+    bootstrap: &str,
+    topic: &str,
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+    runtime_policy: &ReplicatorRuntimePolicy,
+) -> Result<Vec<RawRecord>, String> {
     let group_id = format!("crabka-replicator-reader-{topic}");
 
-    let mut consumer = match build_drain_consumer(bootstrap, group_id, topic, security).await {
-        Ok(c) => c,
-        Err(e) => {
-            let msg = e.to_string();
-            if is_unknown_topic_error(&msg) {
-                return Ok(Vec::new());
+    let mut consumer =
+        match build_drain_consumer(bootstrap, group_id, topic, security, client_resource_policy)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                let msg = e.to_string();
+                if is_unknown_topic_error(&msg) {
+                    return Ok(Vec::new());
+                }
+                return Err(msg);
             }
-            return Err(msg);
-        }
-    };
+        };
 
     let mut records = Vec::new();
     let mut consecutive_empty = 0usize;
 
     loop {
-        match consumer.poll(Duration::from_millis(500)).await {
+        match consumer
+            .poll(runtime_policy.internal_drain_poll_timeout)
+            .await
+        {
             Ok(batch) => {
                 if batch.is_empty() {
                     consecutive_empty += 1;
-                    if consecutive_empty >= MAX_EMPTY {
+                    if consecutive_empty >= runtime_policy.internal_drain_empty_polls.get() {
                         break;
                     }
                 } else {
@@ -219,7 +365,57 @@ pub async fn read_last_value_for_key(
     key: &[u8],
     security: Option<ClientSecurity>,
 ) -> Result<Option<Vec<u8>>, String> {
-    let all = read_all(bootstrap, topic, security).await?;
+    read_last_value_for_key_with_policy(
+        bootstrap,
+        topic,
+        key,
+        security,
+        ClientResourcePolicy::default(),
+    )
+    .await
+}
+
+/// Read a key using the deployment's client resource policy.
+///
+/// # Errors
+///
+/// Returns an error when configuration is invalid, protocol encoding fails,
+/// the broker rejects the request, or transport I/O fails.
+pub async fn read_last_value_for_key_with_policy(
+    bootstrap: &str,
+    topic: &str,
+    key: &[u8],
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+) -> Result<Option<Vec<u8>>, String> {
+    let runtime_policy = ReplicatorRuntimePolicy::default();
+    read_last_value_for_key_with_runtime_policy(
+        bootstrap,
+        topic,
+        key,
+        security,
+        client_resource_policy,
+        &runtime_policy,
+    )
+    .await
+}
+
+pub(crate) async fn read_last_value_for_key_with_runtime_policy(
+    bootstrap: &str,
+    topic: &str,
+    key: &[u8],
+    security: Option<ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
+    runtime_policy: &ReplicatorRuntimePolicy,
+) -> Result<Option<Vec<u8>>, String> {
+    let all = read_all_with_runtime_policy(
+        bootstrap,
+        topic,
+        security,
+        client_resource_policy,
+        runtime_policy,
+    )
+    .await?;
 
     let matched = if key.is_empty() {
         all.into_iter().last()
@@ -242,6 +438,23 @@ fn is_unknown_topic_error(msg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::prelude::{TimeExt as _, secs};
+
+    #[test]
+    fn create_topics_timeout_reaches_the_wire_as_int32_millis() {
+        // Kafka's `CreateTopics.timeoutMs` is an int32 count of milliseconds, so
+        // the configured extent must cross the seam as 10000 — a seconds-valued
+        // 10 would have the broker give up almost immediately.
+        let policy = crate::config::ReplicatorRuntimePolicy::default();
+        assert2::assert!(policy.topic_create_timeout.millis_i32() == 10_000);
+    }
+
+    #[test]
+    fn drain_poll_timeout_is_half_a_second() {
+        let policy = crate::config::ReplicatorRuntimePolicy::default();
+        assert2::assert!(policy.internal_drain_poll_timeout == crabka_units::millis(500));
+    }
+
     #[test]
     fn unknown_topic_error_matches_each_substring() {
         // Each positive exercises exactly one of the OR'd substrings, so the
@@ -284,6 +497,6 @@ mod tests {
             .await
             .unwrap();
 
-        crate::test_util::await_topic_count(&b, "t", 2, std::time::Duration::from_secs(5)).await;
+        crate::test_util::await_topic_count(&b, "t", 2, secs(5)).await;
     }
 }

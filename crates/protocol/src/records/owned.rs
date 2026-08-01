@@ -1,6 +1,8 @@
 //! Owned `RecordBatch`, `Record`, and `RecordHeader` types.
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
+use crabka_compression::RecordDecompressionPolicy;
+use crabka_units::{ByteSize, convert::ByteSizeExt as _};
 use zerocopy::FromBytes as _;
 
 use crate::{
@@ -441,6 +443,24 @@ impl RecordBatch {
     /// # Panics
     /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, RecordsError> {
+        Self::decode_with_policy(buf, RecordDecompressionPolicy::default())
+    }
+
+    /// Decode a complete v2 record batch with explicit decompression limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns the underlying records error for malformed, truncated, corrupt,
+    /// or over-limit input.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a value previously validated by the protocol type no longer
+    /// satisfies its field-range invariant.
+    pub fn decode_with_policy<B: Buf>(
+        buf: &mut B,
+        policy: RecordDecompressionPolicy,
+    ) -> Result<Self, RecordsError> {
         // batch_length field semantics: bytes after itself.
         // Header tail = partition_leader_epoch(4) + magic(1) + crc(4) +
         //   attributes(2) + last_offset_delta(4) + base_timestamp(8) +
@@ -501,17 +521,11 @@ impl RecordBatch {
         let body_for_records: Bytes = if codec == crabka_compression::CompressionType::None {
             Bytes::from(body)
         } else {
-            // Bound decompressed output: generous vs. legit ratios, but finite.
-            // A small compressed batch must not be able to expand to gigabytes
-            // and OOM the broker (decompression bomb).
-            const DECOMPRESS_MIN_CAP: usize = 16 * 1024 * 1024; // 16 MiB floor (small inputs)
-            const DECOMPRESS_MAX_RATIO: usize = 100; // ≤100x the compressed size
-            const DECOMPRESS_ABSOLUTE_CEILING: usize = 1024 * 1024 * 1024; // 1 GiB hard ceiling
-            let max_output = body
-                .len()
-                .saturating_mul(DECOMPRESS_MAX_RATIO)
-                .clamp(DECOMPRESS_MIN_CAP, DECOMPRESS_ABSOLUTE_CEILING);
-            crabka_compression::decompress(codec, &body, max_output)?
+            crabka_compression::decompress(
+                codec,
+                &body,
+                policy.output_limit(ByteSize::from_bytes(body.len() as u64)),
+            )?
         };
 
         // Parse records.
@@ -643,7 +657,8 @@ impl RecordBatch {
 #[cfg(test)]
 mod batch_tests {
     use assert2::check;
-    use crabka_compression::CompressionType;
+    use crabka_compression::{CompressionError, CompressionType, RecordDecompressionPolicy};
+    use crabka_units::{bytes, fraction};
 
     use super::*;
 
@@ -771,6 +786,27 @@ mod batch_tests {
             let decoded = RecordBatch::decode(&mut cur).unwrap();
             assert2::assert!((decoded, cur.is_empty()) == (batch, true));
         }
+    }
+
+    #[test]
+    fn decompression_policy_limits_owned_decode() {
+        let mut batch = fixture_single_record_batch();
+        batch.records[0].value = Some(Bytes::from(vec![b'x'; 4096]));
+        batch.attributes = batch.attributes.with_compression(CompressionType::Lz4);
+        let mut wire = BytesMut::new();
+        batch.encode(&mut wire).unwrap();
+
+        let mut default_cur = &wire[..];
+        RecordBatch::decode(&mut default_cur).unwrap();
+
+        let policy = RecordDecompressionPolicy::new(fraction(1.0), bytes(1), bytes(32)).unwrap();
+        let mut limited_cur = &wire[..];
+        assert2::assert!(matches!(
+            RecordBatch::decode_with_policy(&mut limited_cur, policy),
+            Err(RecordsError::Compression(CompressionError::TooLarge {
+                limit: 32
+            }))
+        ));
     }
 
     #[test]

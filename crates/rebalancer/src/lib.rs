@@ -47,7 +47,7 @@
 //!     in_flight_reassignments: Vec::new(),
 //! };
 //! let ctx = GoalContext {
-//!     imbalance_threshold_pct: 10,
+//!     imbalance_threshold: crabka_units::percent(10),
 //!     max_movements_per_proposal: 100,
 //!     min_topic_leaders_per_broker: 0,
 //!     broker_capacities: Arc::new(BrokerCapacities::default()),
@@ -72,6 +72,7 @@ pub mod pb {
 
 pub mod api;
 pub mod capacity;
+pub mod config;
 pub mod detector;
 pub mod executor;
 pub mod goals;

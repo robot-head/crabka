@@ -1,7 +1,7 @@
 use std::{
     collections::{BTreeMap, HashMap},
     net::{SocketAddr, ToSocketAddrs},
-    num::{NonZeroU64, NonZeroUsize},
+    num::NonZeroU64,
     path::PathBuf,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -9,10 +9,15 @@ use std::{
 
 use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_gres_control::{
-    FinalCheckpoint, TenantName, TenantRecord, decode_tenant_config_record, tenant_config_topic,
+    CheckpointPartBytes, DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT,
+    DEFAULT_CHECKPOINT_FRAMES, DEFAULT_CHECKPOINT_POLL_INTERVAL,
+    DEFAULT_IDLE_SUSPEND_POLL_INTERVAL, DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL,
+    DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING, DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR,
+    FinalCheckpoint, PositiveI32, PositiveUsize, RegistryPolicy, RegistryReplicationFactor,
+    TenantName, TenantRecord, decode_tenant_config_record, tenant_config_topic,
 };
 use crabka_pgexec::SqlEngine;
-use crabka_pgkv::{FjallKv, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
+use crabka_pgkv::{FjallKv, FjallOptions, Kv, KvScan, MemKv, RestoreKv, SnapshotKv};
 use crabka_pgwire::{
     engine::{
         BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, Notification,
@@ -23,7 +28,14 @@ use crabka_pgwire::{
 use crabka_security::{
     ClientAuthMode, ListenerProtocol, SaslMechanism, TlsConfig, scram::PgScramVerifier,
 };
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, StdDurationExt as _, TimeExt as _},
+    fmt::Human as _,
+    millis, secs,
+};
 use rand::RngExt as _;
+use refined_type::rule::GreaterI32;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
@@ -31,49 +43,6 @@ mod live_range_control;
 mod range0_follower;
 mod split_activation;
 use split_activation::{PendingLiveTopology, PreparedLiveTopology, StagedLiveRangeSuccessor};
-
-const DEFAULT_CHECKPOINT_FRAMES_THRESHOLD: u64 = 10_000;
-const DEFAULT_CHECKPOINT_BYTES_THRESHOLD: u64 = 64 * 1024 * 1024;
-const DEFAULT_CHECKPOINT_RETAIN_NEWEST: usize = 2;
-const CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS: i32 = 30_000;
-const TENANT_CONFIG_FETCH_MAX_WAIT_MS: i32 = 500;
-const TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES: i32 = 1 << 20;
-const IDLE_MONITOR_POLL_INTERVAL: Duration = Duration::from_secs(1);
-/// Relaxed cadence of the LOCAL (mem / --data-dir) vacuum loop: one bounded
-/// `SqlEngine::vacuum_step` this often while the sweep is keeping up with the
-/// write rate. Write paths prune the rows they touch opportunistically; the
-/// stepped sweep catches cold garbage (aborted inserts,
-/// deleted-then-never-touched rows). Each step examines a budgeted slice of
-/// one table and resumes from a cursor; under backlog or foreground idleness
-/// the [`VacuumPacer`] shortens this interval down to zero (consecutive
-/// bounded steps) so the sweep cursor can lap the keyspace at sustained load
-/// instead of falling permanently behind.
-const LOCAL_VACUUM_IDLE_INTERVAL: Duration = Duration::from_secs(2);
-/// Shortest non-zero sleep the pacer backs off to after running hot; the
-/// interval doubles from here toward [`LOCAL_VACUUM_IDLE_INTERVAL`] while
-/// steps keep finding nothing to do.
-const LOCAL_VACUUM_BACKOFF_FLOOR: Duration = Duration::from_millis(25);
-/// Outstanding settle-work units (committed version Puts the sweep has not
-/// yet retired) above which the loop runs steps back-to-back. One default
-/// step budget (`VACUUM_STEP_KEY_BUDGET`): sustained write load trips it
-/// within a couple of steps, while a settled store's trickle never does.
-const LOCAL_VACUUM_HOT_DEBT: u64 = 8_192;
-/// Upper bound for the adaptive per-step key budget (4x the pgexec default).
-/// Budgets grow toward this only while back-to-back steps stay fast, so one
-/// step never grows into a foreground stall.
-const LOCAL_VACUUM_MAX_KEY_BUDGET: usize = 4 * crabka_pgexec::VACUUM_STEP_KEY_BUDGET;
-/// A hot step faster than this doubles the next step's key budget (the
-/// per-step fixed costs — catalog listing, horizon computation — dominate,
-/// so bigger steps reclaim more per unit of time).
-const LOCAL_VACUUM_STEP_FAST: Duration = Duration::from_millis(3);
-/// A hot step slower than this halves the next step's key budget back toward
-/// the default, keeping every step at low-single-digit milliseconds.
-const LOCAL_VACUUM_STEP_SLOW: Duration = Duration::from_millis(12);
-/// The foreground counts as idle for vacuum pacing once no session has run a
-/// statement for this long (and no write committed since the last step);
-/// idle drain then runs steps back-to-back until a full cycle proves the
-/// store clean.
-const LOCAL_VACUUM_IDLE_AFTER: Duration = Duration::from_secs(1);
 
 trait SubstrateKv: SnapshotKv + RestoreKv {}
 
@@ -88,9 +57,66 @@ pub struct Cli {
     pub serve: ServeArgs,
 }
 
+#[cfg(test)]
+impl Cli {
+    fn try_parse_from<I, T>(itr: I) -> Result<Self, clap::Error>
+    where
+        I: IntoIterator<Item = T>,
+        T: Into<std::ffi::OsString> + Clone,
+    {
+        let mut command = <Self as clap::CommandFactory>::command();
+        for argument in [
+            "wal_recovery_fetch_max_wait",
+            "wal_recovery_fetch_partition_max",
+            "wal_recovery_fetch_response_max",
+            "wal_recovery_empty_fetch_retries",
+            "wal_recovery_dns_timeout",
+            "wal_recovery_connect_timeout",
+            "wal_recovery_request_timeout",
+            "wal_topic_replication_factor",
+            "wal_topic_ensure_timeout",
+            "wal_admin_connect_timeout",
+            "wal_admin_request_timeout",
+            "wal_producer_flush_timeout",
+            "wal_producer_dns_timeout",
+            "fdw_broker_dns_timeout",
+            "wal_producer_request_timeout",
+            "wal_producer_retries",
+            "wal_producer_retry_backoff",
+            "wal_producer_routing_retry_budget",
+            "wal_producer_init_retry_timeout",
+            "wal_producer_init_max_backoff",
+            "wal_producer_transaction_timeout",
+            "wal_producer_compression",
+            "wal_producer_linger",
+            "wal_producer_batch",
+        ] {
+            command = command.mut_arg(argument, |arg| arg.env(None::<&str>));
+        }
+        let matches = command.try_get_matches_from(itr)?;
+        <Self as clap::FromArgMatches>::from_arg_matches(&matches)
+    }
+}
+
 /// Arguments for the default serve mode (no subcommand).
 #[derive(clap::Args, Debug, Clone)]
 pub struct ServeArgs {
+    /// Shared Gres registry policy.
+    #[command(flatten)]
+    pub registry: RegistryOptions,
+
+    /// Local-engine vacuum pacing policy.
+    #[command(flatten)]
+    pub local_vacuum: LocalVacuumOptions,
+
+    /// Distributed range runtime limits and pacing.
+    #[command(flatten)]
+    pub range_runtime: Box<RangeRuntimeOptions>,
+
+    /// SQL executor runtime limits and persistence pacing.
+    #[command(flatten)]
+    pub pgexec_runtime: Box<PgExecRuntimeOptions>,
+
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:5433")]
     pub listen: String,
@@ -111,6 +137,24 @@ pub struct ServeArgs {
     #[arg(long = "user-cred", value_name = "USER=PASSWORD")]
     pub user_creds: Vec<String>,
 
+    /// Maximum accepted `PostgreSQL` frontend message size.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGWIRE_MAX_MESSAGE_SIZE",
+        default_value = "64MiB",
+        value_parser = parse_positive_whole_byte_size
+    )]
+    pub pgwire_max_message_size: ByteSize,
+
+    /// SCRAM iterations for standalone `--auth scram --user-cred` verifiers.
+    #[arg(
+        long,
+        env = "CRABKA_GRES_PGWIRE_SCRAM_ITERATIONS",
+        default_value_t = crabka_pgwire::scram::DEFAULT_ITERATIONS,
+        value_parser = parse_positive_u32
+    )]
+    pub pgwire_scram_iterations: u32,
+
     /// Directory for durable storage. Absent → ephemeral in-memory engine.
     #[arg(long, conflicts_with = "substrate_bootstrap")]
     pub data_dir: Option<PathBuf>,
@@ -127,9 +171,315 @@ pub struct ServeArgs {
     #[arg(long, requires = "substrate_bootstrap")]
     pub cache_dir: Option<PathBuf>,
 
+    /// Maximum active memtable size for each on-disk substrate cache.
+    #[arg(
+        long = "pgkv-max-memtable-size",
+        env = "CRABKA_PGKV_MAX_MEMTABLE_SIZE",
+        value_parser = crabka_units::parse::positive_byte_size,
+        requires = "substrate_bootstrap"
+    )]
+    pub pgkv_max_memtable_size: Option<ByteSize>,
+
+    /// Committed operations between requested substrate-cache memtable rotations.
+    #[arg(
+        long = "pgkv-rotate-after-ops",
+        env = "CRABKA_PGKV_ROTATE_AFTER_OPS",
+        requires = "substrate_bootstrap"
+    )]
+    pub pgkv_rotate_after_ops: Option<crabka_pgkv::RotateAfterOps>,
+
     /// In-process memory:// substrate dev/test mode: comma-separated table-start range boundaries, for example 0,100,200.
     #[arg(long, requires = "substrate_bootstrap")]
     pub ranges: Option<String>,
+
+    /// Periodic range-0 follower refresh cadence in multi-range substrate mode.
+    #[arg(
+        long = "range0-follower-poll-interval",
+        env = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "ranges"
+    )]
+    pub range0_follower_poll_interval: Option<Time>,
+
+    /// Initial delay before retrying consecutive range-0 follower rebuilds.
+    #[arg(
+        long = "range0-follower-rebuild-backoff-floor",
+        env = "CRABKA_GRES_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "ranges"
+    )]
+    pub range0_follower_rebuild_backoff_floor: Option<Time>,
+
+    /// Maximum delay between consecutive range-0 follower rebuilds.
+    #[arg(
+        long = "range0-follower-rebuild-backoff-ceiling",
+        env = "CRABKA_GRES_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "ranges"
+    )]
+    pub range0_follower_rebuild_backoff_ceiling: Option<Time>,
+
+    /// Deadline for one durable record inspection.
+    #[arg(
+        long = "durable-inspection-timeout",
+        env = "CRABKA_GRES_DURABLE_INSPECTION_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "ranges"
+    )]
+    pub durable_inspection_timeout: Option<Time>,
+
+    /// Maximum records materialized by one durable inspection.
+    #[arg(
+        long = "durable-inspection-fold-max-records",
+        env = "CRABKA_GRES_DURABLE_INSPECTION_FOLD_MAX_RECORDS",
+        requires = "ranges"
+    )]
+    pub durable_inspection_fold_max_records: Option<PositiveUsize>,
+
+    /// Maximum data materialized by one durable inspection.
+    #[arg(
+        long = "durable-inspection-fold-max-size",
+        env = "CRABKA_GRES_DURABLE_INSPECTION_FOLD_MAX_SIZE",
+        value_parser = crabka_units::parse::positive_byte_size,
+        requires = "ranges"
+    )]
+    pub durable_inspection_fold_max_size: Option<ByteSize>,
+
+    /// Broker long-poll wait for committed-WAL recovery fetches.
+    #[arg(
+        long = "wal-recovery-fetch-max-wait",
+        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_fetch_max_wait: Option<Time>,
+
+    /// Per-partition byte limit for committed-WAL recovery fetches.
+    #[arg(
+        long = "wal-recovery-fetch-partition-max",
+        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
+        value_parser = crabka_units::parse::positive_byte_size,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_fetch_partition_max: Option<ByteSize>,
+
+    /// Whole-response byte limit for committed-WAL recovery fetches.
+    #[arg(
+        long = "wal-recovery-fetch-response-max",
+        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
+        value_parser = crabka_units::parse::positive_byte_size,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_fetch_response_max: Option<ByteSize>,
+
+    /// Consecutive empty-fetch retries after the initial recovery fetch.
+    #[arg(
+        long = "wal-recovery-empty-fetch-retries",
+        env = "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_empty_fetch_retries: Option<PositiveUsize>,
+
+    /// Timeout for resolving raw WAL recovery broker hostnames.
+    #[arg(
+        long = "wal-recovery-dns-timeout",
+        env = "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_dns_timeout: Option<Time>,
+
+    /// Timeout for establishing raw WAL recovery broker connections.
+    #[arg(
+        long = "wal-recovery-connect-timeout",
+        env = "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_connect_timeout: Option<Time>,
+
+    /// Timeout for raw WAL recovery broker requests.
+    #[arg(
+        long = "wal-recovery-request-timeout",
+        env = "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_recovery_request_timeout: Option<Time>,
+
+    /// Replication factor requested when creating range WAL topics.
+    #[arg(
+        long = "wal-topic-replication-factor",
+        env = "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_topic_replication_factor: Option<PositiveI32>,
+
+    /// Timeout for ensuring range WAL topics.
+    #[arg(
+        long = "wal-topic-ensure-timeout",
+        env = "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_topic_ensure_timeout: Option<Time>,
+
+    /// Timeout for establishing WAL admin broker connections.
+    #[arg(
+        long = "wal-admin-connect-timeout",
+        env = "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_admin_connect_timeout: Option<Time>,
+
+    /// Timeout for WAL admin broker requests.
+    #[arg(
+        long = "wal-admin-request-timeout",
+        env = "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_admin_request_timeout: Option<Time>,
+
+    /// Deadline for flushing all buffered and in-flight WAL records.
+    #[arg(
+        long = "wal-producer-flush-timeout",
+        env = "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_flush_timeout: Option<Time>,
+
+    /// Timeout for resolving WAL producer broker hostnames.
+    #[arg(
+        long = "wal-producer-dns-timeout",
+        env = "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_dns_timeout: Option<Time>,
+
+    /// Timeout for resolving Kafka broker hostnames used by the FDW.
+    #[arg(
+        long = "fdw-broker-dns-timeout",
+        env = "CRABKA_GRES_FDW_BROKER_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    pub fdw_broker_dns_timeout: Option<Time>,
+
+    /// Initial delay before retrying a transient Schema Registry fetch failure.
+    #[arg(
+        long = "schema-fetch-retry-initial-backoff",
+        env = "CRABKA_GRES_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    pub schema_fetch_retry_initial_backoff: Option<Time>,
+
+    /// Maximum delay between transient Schema Registry fetch retries.
+    #[arg(
+        long = "schema-fetch-retry-max-backoff",
+        env = "CRABKA_GRES_SCHEMA_FETCH_RETRY_MAX_BACKOFF",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    pub schema_fetch_retry_max_backoff: Option<Time>,
+
+    /// Timeout for WAL producer broker requests.
+    #[arg(
+        long = "wal-producer-request-timeout",
+        env = "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_request_timeout: Option<Time>,
+
+    /// WAL producer retries after a batch's initial send.
+    #[arg(
+        long = "wal-producer-retries",
+        env = "CRABKA_GRES_WAL_PRODUCER_RETRIES",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_retries: Option<NonNegativeI32>,
+
+    /// WAL producer retry and producer-ID initial backoff.
+    #[arg(
+        long = "wal-producer-retry-backoff",
+        env = "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_retry_backoff: Option<Time>,
+
+    /// Wall-clock routing retry budget for each WAL producer batch.
+    #[arg(
+        long = "wal-producer-routing-retry-budget",
+        env = "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_routing_retry_budget: Option<Time>,
+
+    /// Producer-ID initialization retry timeout.
+    #[arg(
+        long = "wal-producer-init-retry-timeout",
+        env = "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_init_retry_timeout: Option<Time>,
+
+    /// Producer-ID initialization retry backoff cap.
+    #[arg(
+        long = "wal-producer-init-max-backoff",
+        env = "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_init_max_backoff: Option<Time>,
+
+    /// Transaction timeout sent by the WAL producer.
+    #[arg(
+        long = "wal-producer-transaction-timeout",
+        env = "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_transaction_timeout: Option<Time>,
+
+    /// Compression used for WAL producer record batches.
+    #[arg(
+        long = "wal-producer-compression",
+        env = "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_compression: Option<crabka_client_producer::Compression>,
+
+    /// WAL producer linger.
+    #[arg(
+        long = "wal-producer-linger",
+        env = "CRABKA_GRES_WAL_PRODUCER_LINGER",
+        value_parser = crabka_units::parse::non_negative_time,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_linger: Option<Time>,
+
+    /// Maximum uncompressed WAL producer batch size.
+    #[arg(
+        long = "wal-producer-batch",
+        env = "CRABKA_GRES_WAL_PRODUCER_BATCH",
+        value_parser = crabka_units::parse::positive_byte_size,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_producer_batch: Option<ByteSize>,
+
+    /// Target maximum size of one encoded logical WAL frame.
+    #[arg(
+        long = "wal-frame-max-size",
+        env = "CRABKA_GRES_WAL_FRAME_MAX_SIZE",
+        value_parser = crabka_units::parse::positive_byte_size,
+        requires = "substrate_bootstrap"
+    )]
+    pub wal_frame_max_size: Option<ByteSize>,
 
     /// Substrate mode: comma-separated hosted range ids, for example r0,r2.
     #[arg(long = "host-ranges", requires = "ranges")]
@@ -140,20 +490,25 @@ pub struct ServeArgs {
     #[arg(long = "timestamp-source", value_enum, default_value = "logical-tso")]
     pub timestamp_source: TimestampSourceKind,
 
-    /// Maximum tolerated clock offset in milliseconds for --timestamp-source
-    /// hlc; sizes the read uncertainty window.
-    #[arg(long = "hlc-max-offset-ms", default_value_t = 250)]
-    pub hlc_max_offset_ms: u64,
+    /// Maximum tolerated clock offset for --timestamp-source hlc; sizes the
+    /// read uncertainty window.
+    #[arg(
+        long = "hlc-max-offset",
+        default_value = "250ms",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    pub hlc_max_offset: Time,
 
     /// Fault-injection knob for load and chaos testing only, not for
     /// production use: skew this process's HLC wall-clock reads by a signed
-    /// millisecond offset. Only meaningful with --timestamp-source hlc.
+    /// duration. Only meaningful with --timestamp-source hlc.
     #[arg(
-        long = "hlc-wall-offset-ms",
-        default_value_t = 0,
+        long = "hlc-wall-offset",
+        default_value = "0ms",
+        value_parser = crabka_units::parse::time,
         allow_negative_numbers = true
     )]
-    pub hlc_wall_offset_ms: i64,
+    pub hlc_wall_offset: Time,
 
     /// Range-compute RPC address for hosted ranges. Required by deployments
     /// whose registry layout routes any range to this process.
@@ -228,20 +583,1073 @@ pub struct ServeArgs {
     pub checkpoint_gcs_application_credentials_path: Option<String>,
 
     /// Checkpoint after at least this many WAL frames since the previous manifest.
-    #[arg(long = "checkpoint-frames")]
+    #[arg(long = "checkpoint-frames", env = "CRABKA_GRES_CHECKPOINT_FRAMES")]
     pub checkpoint_frames: Option<NonZeroU64>,
 
-    /// Checkpoint after at least this many WAL bytes since the previous manifest.
-    #[arg(long = "checkpoint-bytes")]
-    pub checkpoint_bytes: Option<NonZeroU64>,
+    /// Checkpoint after at least this much WAL since the previous manifest.
+    #[arg(
+        long = "checkpoint-size",
+        env = "CRABKA_GRES_CHECKPOINT_SIZE",
+        value_parser = crabka_units::parse::positive_byte_size
+    )]
+    pub checkpoint_size: Option<ByteSize>,
 
-    /// Target maximum bytes per checkpoint part object.
-    #[arg(long = "checkpoint-part-bytes")]
-    pub checkpoint_part_bytes: Option<NonZeroUsize>,
+    /// Target maximum size per checkpoint part object.
+    #[arg(
+        long = "checkpoint-part-size",
+        env = "CRABKA_GRES_CHECKPOINT_PART_SIZE",
+        value_parser = crabka_units::parse::positive_byte_size
+    )]
+    pub checkpoint_part_size: Option<ByteSize>,
 
     /// Number of newest checkpoint directories to retain after pruning.
-    #[arg(long = "checkpoint-retain")]
-    pub checkpoint_retain: Option<NonZeroUsize>,
+    #[arg(long = "checkpoint-retain", env = "CRABKA_GRES_CHECKPOINT_RETAIN")]
+    pub checkpoint_retain: Option<PositiveUsize>,
+
+    /// Kafka `DeleteRecords` timeout used after a durable checkpoint.
+    #[arg(
+        long = "checkpoint-delete-records-timeout",
+        env = "CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    pub checkpoint_delete_records_timeout: Option<Time>,
+
+    /// Background checkpoint threshold polling interval.
+    #[arg(
+        long = "checkpoint-poll-interval",
+        env = "CRABKA_GRES_CHECKPOINT_POLL_INTERVAL",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    pub checkpoint_poll_interval: Option<Time>,
+
+    /// Idle-tenant suspension polling interval.
+    #[arg(
+        long = "idle-suspend-poll-interval",
+        env = "CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    pub idle_suspend_poll_interval: Option<Time>,
+}
+
+/// Optional CLI overrides for distributed range runtime policy.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct RangeRuntimeOptions {
+    /// Maximum distributed join key columns.
+    #[arg(
+        long = "range-join-key-columns",
+        env = "CRABKA_GRES_RANGE_JOIN_KEY_COLUMNS"
+    )]
+    pub join_key_columns: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Maximum distributed join projection columns.
+    #[arg(
+        long = "range-join-projection-columns",
+        env = "CRABKA_GRES_RANGE_JOIN_PROJECTION_COLUMNS"
+    )]
+    pub join_projection_columns: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Maximum predicates per distributed join side.
+    #[arg(
+        long = "range-join-predicates",
+        env = "CRABKA_GRES_RANGE_JOIN_PREDICATES"
+    )]
+    pub join_predicates: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Maximum active XIDs in each distributed join snapshot.
+    #[arg(
+        long = "range-join-snapshot-xids",
+        env = "CRABKA_GRES_RANGE_JOIN_SNAPSHOT_XIDS"
+    )]
+    pub join_snapshot_xids: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Maximum materialized broadcast rows.
+    #[arg(
+        long = "range-join-broadcast-rows",
+        env = "CRABKA_GRES_RANGE_JOIN_BROADCAST_ROWS"
+    )]
+    pub join_broadcast_rows: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Maximum encoded distributed join row size.
+    #[arg(long = "range-join-row-max", env = "CRABKA_GRES_RANGE_JOIN_ROW_MAX", value_parser = parse_positive_whole_byte_size)]
+    pub join_row_max: Option<ByteSize>,
+    /// Maximum distributed join result rows.
+    #[arg(
+        long = "range-join-result-rows",
+        env = "CRABKA_GRES_RANGE_JOIN_RESULT_ROWS"
+    )]
+    pub join_result_rows: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Maximum encoded range RPC frame size.
+    #[arg(long = "range-rpc-frame-max", env = "CRABKA_GRES_RANGE_RPC_FRAME_MAX", value_parser = crabka_units::parse::positive_byte_size)]
+    pub rpc_frame_max: Option<ByteSize>,
+    /// Deadline for one range RPC request.
+    #[arg(long = "range-rpc-request-timeout", env = "CRABKA_GRES_RANGE_RPC_REQUEST_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    pub rpc_request_timeout: Option<Time>,
+    /// Server connection idle timeout.
+    #[arg(long = "range-rpc-server-idle-timeout", env = "CRABKA_GRES_RANGE_RPC_SERVER_IDLE_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    pub rpc_server_idle_timeout: Option<Time>,
+    /// Client pool connection idle TTL.
+    #[arg(long = "range-rpc-pool-idle-ttl", env = "CRABKA_GRES_RANGE_RPC_POOL_IDLE_TTL", value_parser = crabka_units::parse::positive_time)]
+    pub rpc_pool_idle_ttl: Option<Time>,
+    /// Maximum idle connections retained per endpoint.
+    #[arg(
+        long = "range-rpc-pool-max-idle-per-endpoint",
+        env = "CRABKA_GRES_RANGE_RPC_POOL_MAX_IDLE_PER_ENDPOINT"
+    )]
+    pub rpc_pool_max_idle_per_endpoint: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Hosted remote-session idle retention.
+    #[arg(long = "range-remote-session-idle", env = "CRABKA_GRES_RANGE_REMOTE_SESSION_IDLE", value_parser = crabka_units::parse::positive_time)]
+    pub remote_session_idle: Option<Time>,
+    /// Maximum hosted remote sessions.
+    #[arg(
+        long = "range-remote-session-max",
+        env = "CRABKA_GRES_RANGE_REMOTE_SESSION_MAX"
+    )]
+    pub remote_session_max: Option<crabka_gres_ranges::PositiveUsize>,
+    /// Range-0 catch-up wait timeout.
+    #[arg(long = "range0-wait-timeout", env = "CRABKA_GRES_RANGE0_WAIT_TIMEOUT", value_parser = crabka_units::parse::positive_time)]
+    pub range0_wait_timeout: Option<Time>,
+    /// Whole-reply budget for range-0 barriers.
+    #[arg(long = "range0-barrier-reply-budget", env = "CRABKA_GRES_RANGE0_BARRIER_REPLY_BUDGET", value_parser = crabka_units::parse::positive_time)]
+    pub range0_barrier_reply_budget: Option<Time>,
+    /// Lock-wait cap for cross-range transactions.
+    #[arg(long = "range-cross-range-lock-wait-cap", env = "CRABKA_GRES_RANGE_CROSS_RANGE_LOCK_WAIT_CAP", value_parser = crabka_units::parse::positive_time)]
+    pub cross_range_lock_wait_cap: Option<Time>,
+    /// Durable-inspection record ceiling.
+    #[arg(
+        long = "range-durable-inspect-max-records",
+        env = "CRABKA_GRES_RANGE_DURABLE_INSPECT_MAX_RECORDS"
+    )]
+    pub durable_inspect_max_records: Option<crabka_gres_ranges::PositiveU32>,
+    /// Durable-inspection byte ceiling.
+    #[arg(long = "range-durable-inspect-max-size", env = "CRABKA_GRES_RANGE_DURABLE_INSPECT_MAX_SIZE", value_parser = crabka_units::parse::positive_byte_size)]
+    pub durable_inspect_max_size: Option<ByteSize>,
+    /// Decision-release lag retry count.
+    #[arg(
+        long = "range-decision-release-lag-retries",
+        env = "CRABKA_GRES_RANGE_DECISION_RELEASE_LAG_RETRIES"
+    )]
+    pub decision_release_lag_retries: Option<crabka_gres_ranges::PositiveU32>,
+    /// Decision-release retry backoff.
+    #[arg(long = "range-decision-release-retry-backoff", env = "CRABKA_GRES_RANGE_DECISION_RELEASE_RETRY_BACKOFF", value_parser = crabka_units::parse::positive_time)]
+    pub decision_release_retry_backoff: Option<Time>,
+    /// Timestamp-oracle heartbeat cadence.
+    #[arg(long = "range-tso-heartbeat-interval", env = "CRABKA_GRES_RANGE_TSO_HEARTBEAT_INTERVAL", value_parser = crabka_units::parse::positive_time)]
+    pub tso_heartbeat_interval: Option<Time>,
+    /// Minimum interval between logical horizon persists.
+    #[arg(long = "range-logical-min-persist-interval", env = "CRABKA_GRES_RANGE_LOGICAL_MIN_PERSIST_INTERVAL", value_parser = crabka_units::parse::positive_time)]
+    pub logical_min_persist_interval: Option<Time>,
+    /// Initial logical horizon persistence stride.
+    #[arg(
+        long = "range-logical-base-persist-stride",
+        env = "CRABKA_GRES_RANGE_LOGICAL_BASE_PERSIST_STRIDE"
+    )]
+    pub logical_base_persist_stride: Option<crabka_gres_ranges::PositiveU64>,
+    /// Maximum adaptive logical horizon persistence stride.
+    #[arg(
+        long = "range-logical-max-persist-stride",
+        env = "CRABKA_GRES_RANGE_LOGICAL_MAX_PERSIST_STRIDE"
+    )]
+    pub logical_max_persist_stride: Option<crabka_gres_ranges::PositiveU64>,
+    /// Wall-clock headroom persisted by the HLC oracle.
+    #[arg(long = "range-hlc-horizon-headroom", env = "CRABKA_GRES_RANGE_HLC_HORIZON_HEADROOM", value_parser = crabka_units::parse::positive_time)]
+    pub hlc_horizon_headroom: Option<Time>,
+}
+
+/// Optional CLI overrides for SQL executor runtime policy.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct PgExecRuntimeOptions {
+    /// Memory retained by one blocking query operator.
+    #[arg(long = "pgexec-blocking-query-memory", env = "CRABKA_GRES_PGEXEC_BLOCKING_QUERY_MEMORY", value_parser = parse_positive_whole_byte_size)]
+    pub blocking_query_memory: Option<ByteSize>,
+    /// Maximum encoded size of one result page.
+    #[arg(long = "pgexec-result-page-max", env = "CRABKA_GRES_PGEXEC_RESULT_PAGE_MAX", value_parser = parse_positive_whole_byte_size)]
+    pub result_page_max: Option<ByteSize>,
+    /// Largest estimated join input eligible for broadcast.
+    #[arg(long = "pgexec-join-broadcast-threshold", env = "CRABKA_GRES_PGEXEC_JOIN_BROADCAST_THRESHOLD", value_parser = parse_positive_whole_byte_size)]
+    pub join_broadcast_threshold: Option<ByteSize>,
+    /// Per-session LISTEN/NOTIFY queue capacity.
+    #[arg(
+        long = "pgexec-notify-queue-capacity",
+        env = "CRABKA_GRES_PGEXEC_NOTIFY_QUEUE_CAPACITY"
+    )]
+    pub notify_queue_capacity: Option<PositiveUsize>,
+    /// Durable XID reservation size.
+    #[arg(
+        long = "pgexec-xid-reservation",
+        env = "CRABKA_GRES_PGEXEC_XID_RESERVATION"
+    )]
+    pub xid_reservation: Option<crabka_gres_ranges::PositiveU64>,
+    /// Durable internal row-ID reservation size.
+    #[arg(
+        long = "pgexec-rowid-reservation",
+        env = "CRABKA_GRES_PGEXEC_ROWID_RESERVATION"
+    )]
+    pub rowid_reservation: Option<crabka_gres_ranges::PositiveU64>,
+    /// Maximum timestamp versions pruned per written row.
+    #[arg(
+        long = "pgexec-ts-prune-versions-per-row",
+        env = "CRABKA_GRES_PGEXEC_TS_PRUNE_VERSIONS_PER_ROW"
+    )]
+    pub ts_prune_versions_per_row: Option<PositiveUsize>,
+    /// Lag retained behind the timestamp GC floor.
+    #[arg(long = "pgexec-ts-gc-floor-lag", env = "CRABKA_GRES_PGEXEC_TS_GC_FLOOR_LAG", value_parser = parse_pgexec_gc_floor_lag)]
+    pub ts_gc_floor_lag: Option<Time>,
+}
+
+fn parse_pgexec_gc_floor_lag(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::non_negative_time(value).map_err(|error| error.to_string())?;
+    crabka_pgexec::RuntimePolicy {
+        ts_gc_floor_lag: value,
+        ..Default::default()
+    }
+    .validate()
+    .map(|policy| policy.ts_gc_floor_lag)
+    .map_err(|error| format!("{error:?}"))
+}
+
+impl PgExecRuntimeOptions {
+    fn effective_policy(&self) -> crabka_pgexec::RuntimePolicy {
+        let defaults = crabka_pgexec::RuntimePolicy::default();
+        crabka_pgexec::RuntimePolicy {
+            blocking_query_memory: self
+                .blocking_query_memory
+                .unwrap_or(defaults.blocking_query_memory),
+            result_page_max: self.result_page_max.unwrap_or(defaults.result_page_max),
+            join_broadcast_threshold: self
+                .join_broadcast_threshold
+                .unwrap_or(defaults.join_broadcast_threshold),
+            notify_queue_capacity: self
+                .notify_queue_capacity
+                .map_or(defaults.notify_queue_capacity, PositiveUsize::into_value),
+            xid_reservation: self.xid_reservation.map_or(
+                defaults.xid_reservation,
+                crabka_gres_ranges::PositiveU64::get,
+            ),
+            rowid_reservation: self.rowid_reservation.map_or(
+                defaults.rowid_reservation,
+                crabka_gres_ranges::PositiveU64::get,
+            ),
+            ts_prune_versions_per_row: self.ts_prune_versions_per_row.map_or(
+                defaults.ts_prune_versions_per_row,
+                PositiveUsize::into_value,
+            ),
+            ts_gc_floor_lag: self.ts_gc_floor_lag.unwrap_or(defaults.ts_gc_floor_lag),
+        }
+    }
+}
+
+impl RangeRuntimeOptions {
+    fn effective_policy(&self) -> std::io::Result<crabka_gres_ranges::RangeRuntimePolicy> {
+        let defaults = crabka_gres_ranges::RangeRuntimePolicy::default();
+        let policy = crabka_gres_ranges::RangeRuntimePolicy {
+            join: crabka_pgexec::scanner::JoinPolicy {
+                key_columns: self.join_key_columns.map_or(
+                    defaults.join.key_columns,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+                projection_columns: self.join_projection_columns.map_or(
+                    defaults.join.projection_columns,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+                predicates: self.join_predicates.map_or(
+                    defaults.join.predicates,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+                snapshot_xids: self.join_snapshot_xids.map_or(
+                    defaults.join.snapshot_xids,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+                broadcast_rows: self.join_broadcast_rows.map_or(
+                    defaults.join.broadcast_rows,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+                row_bytes: self.join_row_max.map_or(
+                    defaults.join.row_bytes,
+                    crabka_units::convert::ByteSizeExt::bytes_usize,
+                ),
+                result_rows: self.join_result_rows.map_or(
+                    defaults.join.result_rows,
+                    crabka_gres_ranges::PositiveUsize::get,
+                ),
+            },
+            rpc_frame_max: self.rpc_frame_max.unwrap_or(defaults.rpc_frame_max),
+            rpc_request_timeout: self
+                .rpc_request_timeout
+                .unwrap_or(defaults.rpc_request_timeout),
+            rpc_server_idle_timeout: self
+                .rpc_server_idle_timeout
+                .unwrap_or(defaults.rpc_server_idle_timeout),
+            rpc_pool_idle_ttl: self.rpc_pool_idle_ttl.unwrap_or(defaults.rpc_pool_idle_ttl),
+            rpc_pool_max_idle_per_endpoint: self
+                .rpc_pool_max_idle_per_endpoint
+                .unwrap_or(defaults.rpc_pool_max_idle_per_endpoint),
+            remote_session_idle: self
+                .remote_session_idle
+                .unwrap_or(defaults.remote_session_idle),
+            remote_session_max: self
+                .remote_session_max
+                .unwrap_or(defaults.remote_session_max),
+            range0_wait_timeout: self
+                .range0_wait_timeout
+                .unwrap_or(defaults.range0_wait_timeout),
+            range0_barrier_reply_budget: self
+                .range0_barrier_reply_budget
+                .unwrap_or(defaults.range0_barrier_reply_budget),
+            cross_range_lock_wait_cap: self
+                .cross_range_lock_wait_cap
+                .unwrap_or(defaults.cross_range_lock_wait_cap),
+            durable_inspect_max_records: self
+                .durable_inspect_max_records
+                .unwrap_or(defaults.durable_inspect_max_records),
+            durable_inspect_max_size: self
+                .durable_inspect_max_size
+                .unwrap_or(defaults.durable_inspect_max_size),
+            decision_release_lag_retries: self
+                .decision_release_lag_retries
+                .unwrap_or(defaults.decision_release_lag_retries),
+            decision_release_retry_backoff: self
+                .decision_release_retry_backoff
+                .unwrap_or(defaults.decision_release_retry_backoff),
+            tso_heartbeat_interval: self
+                .tso_heartbeat_interval
+                .unwrap_or(defaults.tso_heartbeat_interval),
+            logical_min_persist_interval: self
+                .logical_min_persist_interval
+                .unwrap_or(defaults.logical_min_persist_interval),
+            logical_base_persist_stride: self
+                .logical_base_persist_stride
+                .unwrap_or(defaults.logical_base_persist_stride),
+            logical_max_persist_stride: self
+                .logical_max_persist_stride
+                .unwrap_or(defaults.logical_max_persist_stride),
+            hlc_horizon_headroom: self
+                .hlc_horizon_headroom
+                .unwrap_or(defaults.hlc_horizon_headroom),
+        };
+        policy
+            .validate()
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        Ok(policy)
+    }
+}
+
+/// Optional local-engine vacuum pacing overrides.
+#[derive(clap::Args, Debug, Clone, Copy, Default, PartialEq)]
+pub struct LocalVacuumOptions {
+    #[arg(
+        long = "local-vacuum-idle-interval",
+        env = "CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    idle_interval: Option<Time>,
+    #[arg(
+        long = "local-vacuum-backoff-floor",
+        env = "CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    backoff_floor: Option<Time>,
+    #[arg(
+        long = "local-vacuum-hot-debt",
+        env = "CRABKA_GRES_LOCAL_VACUUM_HOT_DEBT"
+    )]
+    hot_debt: Option<NonZeroU64>,
+    #[arg(
+        long = "local-vacuum-key-budget",
+        env = "CRABKA_GRES_LOCAL_VACUUM_KEY_BUDGET"
+    )]
+    key_budget: Option<PositiveUsize>,
+    #[arg(
+        long = "local-vacuum-max-key-budget",
+        env = "CRABKA_GRES_LOCAL_VACUUM_MAX_KEY_BUDGET"
+    )]
+    max_key_budget: Option<PositiveUsize>,
+    #[arg(
+        long = "local-vacuum-step-fast",
+        env = "CRABKA_GRES_LOCAL_VACUUM_STEP_FAST",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    step_fast: Option<Time>,
+    #[arg(
+        long = "local-vacuum-step-slow",
+        env = "CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    step_slow: Option<Time>,
+    #[arg(
+        long = "local-vacuum-idle-after",
+        env = "CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    idle_after: Option<Time>,
+}
+
+/// Pacing knobs for the local vacuum loop.
+///
+/// `Eq` is deliberately absent: the intervals are quantities, whose `f64`
+/// storage is only `PartialEq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct LocalVacuumPolicy {
+    idle_interval: Time,
+    backoff_floor: Time,
+    hot_debt: u64,
+    key_budget: usize,
+    max_key_budget: usize,
+    step_fast: Time,
+    step_slow: Time,
+    idle_after: Time,
+}
+
+const DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL: Time = secs(2);
+const DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR: Time = millis(25);
+const DEFAULT_LOCAL_VACUUM_STEP_FAST: Time = millis(3);
+const DEFAULT_LOCAL_VACUUM_STEP_SLOW: Time = millis(12);
+const DEFAULT_LOCAL_VACUUM_IDLE_AFTER: Time = secs(1);
+
+fn local_vacuum_policy(args: &ServeArgs) -> std::io::Result<Option<LocalVacuumPolicy>> {
+    let options = args.local_vacuum;
+    let requested = options != LocalVacuumOptions::default();
+    if args.substrate_bootstrap.is_some() {
+        return if requested {
+            invalid_input("local vacuum options are incompatible with --substrate-bootstrap")
+        } else {
+            Ok(None)
+        };
+    }
+
+    let key_budget = options.key_budget.map_or(
+        crabka_pgexec::VACUUM_STEP_KEY_BUDGET,
+        PositiveUsize::into_value,
+    );
+    let max_key_budget = match options.max_key_budget {
+        Some(value) => value.into_value(),
+        None => key_budget.checked_mul(4).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "local vacuum default maximum key budget overflows usize",
+            )
+        })?,
+    };
+    let hot_debt = match options.hot_debt {
+        Some(value) => value.get(),
+        None => u64::try_from(key_budget).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "local vacuum key budget does not fit u64 debt accounting",
+            )
+        })?,
+    };
+    let idle_interval = options
+        .idle_interval
+        .unwrap_or(DEFAULT_LOCAL_VACUUM_IDLE_INTERVAL);
+    let backoff_floor = options
+        .backoff_floor
+        .unwrap_or(DEFAULT_LOCAL_VACUUM_BACKOFF_FLOOR);
+    let step_fast = options.step_fast.unwrap_or(DEFAULT_LOCAL_VACUUM_STEP_FAST);
+    let step_slow = options.step_slow.unwrap_or(DEFAULT_LOCAL_VACUUM_STEP_SLOW);
+    let idle_after = options
+        .idle_after
+        .unwrap_or(DEFAULT_LOCAL_VACUUM_IDLE_AFTER);
+    if backoff_floor > idle_interval {
+        return invalid_input("local vacuum backoff floor exceeds idle interval");
+    }
+    if key_budget > max_key_budget {
+        return invalid_input("local vacuum key budget exceeds maximum key budget");
+    }
+    if step_fast >= step_slow {
+        return invalid_input("local vacuum fast threshold must be below slow threshold");
+    }
+    Ok(Some(LocalVacuumPolicy {
+        idle_interval,
+        backoff_floor,
+        hot_debt,
+        key_budget,
+        max_key_budget,
+        step_fast,
+        step_slow,
+        idle_after,
+    }))
+}
+
+fn validate_multirange_operational_policy(args: &ServeArgs) -> std::io::Result<()> {
+    if args.range0_follower_poll_interval.is_some() && args.ranges.is_none() {
+        return invalid_input("--range0-follower-poll-interval requires --ranges");
+    }
+    if (args.range0_follower_rebuild_backoff_floor.is_some()
+        || args.range0_follower_rebuild_backoff_ceiling.is_some()
+        || args.durable_inspection_timeout.is_some()
+        || args.durable_inspection_fold_max_records.is_some()
+        || args.durable_inspection_fold_max_size.is_some())
+        && args.ranges.is_none()
+    {
+        return invalid_input("multi-range operational options require --ranges");
+    }
+    let floor = args
+        .range0_follower_rebuild_backoff_floor
+        .unwrap_or(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR);
+    let ceiling = args
+        .range0_follower_rebuild_backoff_ceiling
+        .unwrap_or(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING);
+    if floor > ceiling {
+        return invalid_input("range-0 follower rebuild backoff floor exceeds ceiling");
+    }
+    Ok(())
+}
+
+fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
+    if (args.wal_recovery_fetch_max_wait.is_some()
+        || args.wal_recovery_fetch_partition_max.is_some()
+        || args.wal_recovery_fetch_response_max.is_some()
+        || args.wal_recovery_empty_fetch_retries.is_some()
+        || args.wal_recovery_dns_timeout.is_some()
+        || args.wal_recovery_connect_timeout.is_some()
+        || args.wal_recovery_request_timeout.is_some()
+        || args.wal_topic_replication_factor.is_some()
+        || args.wal_topic_ensure_timeout.is_some()
+        || args.wal_admin_connect_timeout.is_some()
+        || args.wal_admin_request_timeout.is_some()
+        || args.wal_producer_flush_timeout.is_some()
+        || args.wal_producer_dns_timeout.is_some()
+        || args.wal_producer_request_timeout.is_some()
+        || args.wal_producer_retries.is_some()
+        || args.wal_producer_retry_backoff.is_some()
+        || args.wal_producer_routing_retry_budget.is_some()
+        || args.wal_producer_init_retry_timeout.is_some()
+        || args.wal_producer_init_max_backoff.is_some()
+        || args.wal_producer_transaction_timeout.is_some()
+        || args.wal_producer_compression.is_some()
+        || args.wal_producer_linger.is_some()
+        || args.wal_producer_batch.is_some()
+        || args.wal_frame_max_size.is_some())
+        && args.substrate_bootstrap.is_none()
+    {
+        return invalid_input("WAL recovery options require --substrate-bootstrap");
+    }
+    effective_wal_admin_policy(args)?;
+    effective_wal_producer_flush_timeout(args)?;
+    effective_wal_producer_dns_timeout(args)?;
+    effective_fdw_broker_dns_timeout(args)?;
+    effective_schema_fetch_retry_policy(args)?;
+    args.registry
+        .fdw_decode_policy()
+        .validate()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    effective_wal_producer_retry_policy(args)?;
+    effective_wal_producer_throughput_policy(args)?;
+    Ok(())
+}
+
+fn effective_wal_admin_policy(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_gres_substrate::WalAdminPolicy> {
+    crabka_gres_substrate::WalAdminPolicy::new(
+        args.wal_topic_replication_factor.map_or(
+            crabka_gres_substrate::DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+            PositiveI32::into_value,
+        ),
+        args.wal_topic_ensure_timeout
+            .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT),
+        args.wal_admin_connect_timeout
+            .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT),
+        args.wal_admin_request_timeout
+            .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+}
+
+fn effective_wal_producer_flush_timeout(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_client_producer::ProducerFlushTimeout> {
+    crabka_client_producer::ProducerFlushTimeout::new(
+        args.wal_producer_flush_timeout
+            .unwrap_or_else(|| {
+                Time::from_std(crabka_client_producer::ProducerFlushTimeout::default().duration())
+            })
+            .to_std(),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+}
+
+fn effective_wal_producer_dns_timeout(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_client_core::ClientDnsTimeout> {
+    args.wal_producer_dns_timeout.map_or_else(
+        || Ok(crabka_client_core::ClientDnsTimeout::default()),
+        |timeout| {
+            crabka_client_core::ClientDnsTimeout::new(timeout)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        },
+    )
+}
+
+fn effective_fdw_broker_dns_timeout(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_client_core::ClientDnsTimeout> {
+    args.fdw_broker_dns_timeout.map_or_else(
+        || Ok(crabka_client_core::ClientDnsTimeout::default()),
+        |timeout| {
+            crabka_client_core::ClientDnsTimeout::new(timeout)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+        },
+    )
+}
+
+fn effective_schema_fetch_retry_policy(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_gres_fdw::SchemaFetchRetryPolicy> {
+    let defaults = crabka_gres_fdw::SchemaFetchRetryPolicy::default();
+    crabka_gres_fdw::SchemaFetchRetryPolicy::new(
+        args.schema_fetch_retry_initial_backoff
+            .unwrap_or_else(|| defaults.initial_backoff()),
+        args.schema_fetch_retry_max_backoff
+            .unwrap_or_else(|| defaults.max_backoff()),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+}
+
+fn effective_wal_producer_retry_policy(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_client_producer::ProducerRetryPolicy> {
+    let defaults = crabka_client_producer::ProducerRetryPolicy::default();
+    crabka_client_producer::ProducerRetryPolicy::new(
+        args.wal_producer_request_timeout
+            .unwrap_or_else(|| Time::from_std(defaults.request_timeout()))
+            .to_std(),
+        args.wal_producer_retries
+            .map_or(defaults.retries(), NonNegativeI32::into_value),
+        args.wal_producer_retry_backoff
+            .unwrap_or_else(|| Time::from_std(defaults.retry_backoff()))
+            .to_std(),
+        args.wal_producer_routing_retry_budget
+            .unwrap_or_else(|| Time::from_std(defaults.routing_retry_budget()))
+            .to_std(),
+        args.wal_producer_init_retry_timeout
+            .unwrap_or_else(|| Time::from_std(defaults.init_retry_timeout()))
+            .to_std(),
+        args.wal_producer_init_max_backoff
+            .unwrap_or_else(|| Time::from_std(defaults.init_max_backoff()))
+            .to_std(),
+        args.wal_producer_transaction_timeout
+            .unwrap_or_else(|| Time::from_std(defaults.transaction_timeout()))
+            .to_std(),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+}
+
+fn effective_wal_producer_throughput_policy(
+    args: &ServeArgs,
+) -> std::io::Result<crabka_client_producer::ProducerThroughputPolicy> {
+    let defaults = crabka_client_producer::ProducerThroughputPolicy::default();
+    crabka_client_producer::ProducerThroughputPolicy::new(
+        args.wal_producer_compression
+            .unwrap_or(defaults.compression()),
+        args.wal_producer_linger
+            .unwrap_or_else(|| Time::from_std(defaults.linger()))
+            .to_std(),
+        whole_bytes_usize(
+            "WAL producer batch",
+            args.wal_producer_batch.unwrap_or_else(|| {
+                ByteSize::from_bytes(
+                    u64::try_from(defaults.batch_bytes()).expect("producer batch fits u64"),
+                )
+            }),
+        )?,
+        defaults.max_in_flight(),
+    )
+    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
+}
+
+/// A time extent back in whole milliseconds as `u64`, for the `refined_type`
+/// validators and `Duration` constructors that still take a raw count. A
+/// negative extent clamps to zero.
+#[cfg(test)]
+fn millis_u64(extent: Time) -> u64 {
+    u64::try_from(extent.millis_i64()).unwrap_or_default()
+}
+
+fn whole_millis_u64(name: &str, value: Time) -> std::io::Result<u64> {
+    let millis = value.millis_i64();
+    if value.secs_f64().is_finite()
+        && millis > 0
+        && Time::from_millis(millis) == value
+        && let Ok(millis) = u64::try_from(millis)
+    {
+        Ok(millis)
+    } else {
+        invalid_input(format!(
+            "{name} must be finite, positive, and a whole number of milliseconds"
+        ))
+    }
+}
+
+fn whole_bytes_u64(name: &str, value: ByteSize) -> std::io::Result<u64> {
+    let bytes = value.bytes_u64();
+    if bytes > 0 && ByteSize::from_bytes(bytes) == value {
+        Ok(bytes)
+    } else {
+        invalid_input(format!(
+            "{name} must be a finite, positive whole number of bytes"
+        ))
+    }
+}
+
+fn whole_bytes_usize(name: &str, value: ByteSize) -> std::io::Result<usize> {
+    usize::try_from(whole_bytes_u64(name, value)?).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{name} exceeds usize::MAX bytes"),
+        )
+    })
+}
+
+fn whole_millis_i32(name: &str, value: Time) -> std::io::Result<i32> {
+    let millis = whole_millis_u64(name, value)?;
+    i32::try_from(millis).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("{name} must be within 1ms..=2147483647ms"),
+        )
+    })
+}
+
+fn whole_millis_i64(name: &str, value: Time) -> std::io::Result<i64> {
+    let millis = value.millis_i64();
+    if value.secs_f64().is_finite() && Time::from_millis(millis) == value {
+        Ok(millis)
+    } else {
+        invalid_input(format!(
+            "{name} must be finite and a whole number of milliseconds"
+        ))
+    }
+}
+
+/// A nonnegative producer retry count representable on the protocol wire.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct NonNegativeI32(i32);
+
+impl NonNegativeI32 {
+    fn new(value: i32) -> Result<Self, String> {
+        GreaterI32::<-1>::new(value)
+            .map(|value| Self(value.into_value()))
+            .map_err(|error| error.to_string())
+    }
+
+    const fn into_value(self) -> i32 {
+        self.0
+    }
+}
+
+impl std::str::FromStr for NonNegativeI32 {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .parse()
+            .map_err(|error: std::num::ParseIntError| error.to_string())
+            .and_then(Self::new)
+    }
+}
+
+/// Validated Gres registry options shared by compute registry clients.
+#[derive(clap::Args, Debug, Clone)]
+pub struct RegistryOptions {
+    #[arg(
+        long = "client-dispatch-queue-capacity",
+        env = "CRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY",
+        default_value_t = crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+        value_parser = parse_client_dispatch_queue_capacity
+    )]
+    client_dispatch_queue_capacity: usize,
+    #[arg(
+        long = "client-frame-max",
+        env = "CRABKA_GRES_CLIENT_FRAME_MAX",
+        default_value = "100MiB",
+        value_parser = parse_client_frame_max
+    )]
+    client_frame_max: ByteSize,
+    #[arg(
+        long = "fdw-fetch-min",
+        env = "CRABKA_GRES_FDW_FETCH_MIN",
+        value_parser = parse_fetch_min,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_fetch_min: Option<ByteSize>,
+    #[arg(
+        long = "fdw-fetch-max-wait",
+        env = "CRABKA_GRES_FDW_FETCH_MAX_WAIT",
+        default_value = "5s",
+        value_parser = parse_fdw_fetch_max_wait,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_fetch_max_wait: Time,
+    #[arg(
+        long = "fdw-fetch-partition-max",
+        env = "CRABKA_GRES_FDW_FETCH_PARTITION_MAX",
+        default_value = "10MiB",
+        value_parser = parse_fdw_fetch_partition_max,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_fetch_partition_max: ByteSize,
+    #[arg(
+        long = "fdw-connect-timeout",
+        env = "CRABKA_GRES_FDW_CONNECT_TIMEOUT",
+        default_value = "10s",
+        value_parser = parse_fdw_connect_timeout,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_connect_timeout: Time,
+    #[arg(
+        long = "fdw-request-timeout",
+        env = "CRABKA_GRES_FDW_REQUEST_TIMEOUT",
+        default_value = "30s",
+        value_parser = parse_fdw_request_timeout,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_request_timeout: Time,
+    #[arg(
+        long = "fdw-schema-fetch-timeout",
+        env = "CRABKA_GRES_FDW_SCHEMA_FETCH_TIMEOUT",
+        default_value = "10s",
+        value_parser = parse_fdw_schema_fetch_timeout,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_schema_fetch_timeout: Time,
+    #[arg(
+        long = "fdw-schema-fetch-poll",
+        env = "CRABKA_GRES_FDW_SCHEMA_FETCH_POLL",
+        default_value = "20ms",
+        value_parser = parse_fdw_schema_fetch_poll,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_schema_fetch_poll: Time,
+    #[arg(
+        long = "wal-recovery-fetch-min",
+        env = "CRABKA_GRES_WAL_RECOVERY_FETCH_MIN",
+        value_parser = parse_fetch_min,
+        requires = "substrate_bootstrap"
+    )]
+    wal_recovery_fetch_min: Option<ByteSize>,
+    #[arg(
+        long = "registry-reader-fetch-min",
+        env = "CRABKA_GRES_REGISTRY_READER_FETCH_MIN",
+        default_value = "1B",
+        value_parser = parse_fetch_min
+    )]
+    registry_reader_fetch_min: ByteSize,
+    #[arg(
+        long = "registry-replication-factor",
+        env = "CRABKA_GRES_REGISTRY_REPLICATION_FACTOR",
+        default_value = "1"
+    )]
+    replication_factor: RegistryReplicationFactor,
+    #[arg(
+        long = "registry-topic-create-timeout",
+        env = "CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT",
+        default_value = "15s",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    topic_create_timeout: Time,
+    #[arg(
+        long = "registry-reader-retry-backoff",
+        env = "CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF",
+        default_value = "250ms",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    reader_retry_backoff: Time,
+    #[arg(
+        long = "registry-fetch-max-wait",
+        env = "CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT",
+        default_value = "500ms",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    fetch_max_wait: Time,
+    #[arg(
+        long = "registry-fetch-partition-max",
+        env = "CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX",
+        default_value = "1MiB",
+        value_parser = crabka_units::parse::positive_byte_size
+    )]
+    fetch_partition_max: ByteSize,
+    #[arg(
+        long = "registry-producer-dns-timeout",
+        env = "CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    producer_dns_timeout: Option<Time>,
+    #[arg(
+        long = "registry-reader-admin-dns-timeout",
+        env = "CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT",
+        value_parser = crabka_units::parse::positive_time
+    )]
+    reader_admin_dns_timeout: Option<Time>,
+}
+
+impl RegistryOptions {
+    fn dispatch_queue_capacity(&self) -> crabka_client_core::ConnectionDispatchQueueCapacity {
+        crabka_client_core::ConnectionDispatchQueueCapacity::new(
+            self.client_dispatch_queue_capacity,
+        )
+        .expect("validated Gres client dispatch queue capacity")
+    }
+
+    fn frame_max(&self) -> crabka_client_core::ClientFrameMax {
+        crabka_client_core::ClientFrameMax::try_from(self.client_frame_max)
+            .expect("validated Gres client frame maximum")
+    }
+
+    fn fdw_fetch_min(&self) -> crabka_client_core::FetchMinBytes {
+        crabka_client_core::FetchMinBytes::try_from(
+            self.fdw_fetch_min.unwrap_or(crabka_units::bytes(1)),
+        )
+        .expect("validated Gres FDW fetch minimum")
+    }
+
+    fn fdw_scan_policy(&self) -> crabka_gres_fdw::FdwScanPolicy {
+        crabka_gres_fdw::FdwScanPolicy {
+            fetch_max_wait: self.fdw_fetch_max_wait,
+            fetch_partition_max: self.fdw_fetch_partition_max,
+            connect_timeout: self.fdw_connect_timeout,
+            request_timeout: self.fdw_request_timeout,
+        }
+    }
+
+    fn fdw_decode_policy(&self) -> crabka_gres_fdw::FdwDecodePolicy {
+        crabka_gres_fdw::FdwDecodePolicy {
+            schema_fetch_timeout: self.fdw_schema_fetch_timeout,
+            schema_fetch_poll: self.fdw_schema_fetch_poll,
+        }
+    }
+
+    fn wal_recovery_fetch_min(&self) -> crabka_client_core::FetchMinBytes {
+        crabka_client_core::FetchMinBytes::try_from(
+            self.wal_recovery_fetch_min
+                .unwrap_or(crabka_units::bytes(1)),
+        )
+        .expect("validated Gres WAL recovery fetch minimum")
+    }
+
+    fn registry_reader_fetch_min(&self) -> crabka_client_core::FetchMinBytes {
+        crabka_client_core::FetchMinBytes::try_from(self.registry_reader_fetch_min)
+            .expect("validated Gres registry reader fetch minimum")
+    }
+
+    fn policy(&self) -> RegistryPolicy {
+        let defaults = RegistryPolicy::default();
+
+        RegistryPolicy::new(
+            self.replication_factor.into_value(),
+            self.topic_create_timeout,
+            self.reader_retry_backoff,
+            self.fetch_max_wait,
+            self.fetch_partition_max,
+        )
+        .expect("validated registry options")
+        .with_producer_dns_timeout(
+            self.producer_dns_timeout
+                .unwrap_or_else(|| defaults.producer_dns_timeout().time()),
+        )
+        .expect("validated registry producer DNS timeout")
+        .with_reader_admin_dns_timeout(
+            self.reader_admin_dns_timeout
+                .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
+        )
+        .expect("validated registry reader/admin DNS timeout")
+        .with_client_resource_policy(
+            self.dispatch_queue_capacity(),
+            self.frame_max(),
+            self.registry_reader_fetch_min(),
+        )
+    }
+}
+
+fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
+    let value = value.parse::<usize>().map_err(|error| error.to_string())?;
+    crabka_client_core::ConnectionDispatchQueueCapacity::new(value)
+        .map(crabka_client_core::ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_fdw_fetch_max_wait(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::positive_time(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwScanPolicy {
+        fetch_max_wait: value,
+        ..Default::default()
+    }
+    .validate()
+    .map(|policy| policy.fetch_max_wait)
+}
+
+fn parse_fdw_fetch_partition_max(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwScanPolicy {
+        fetch_partition_max: value,
+        ..Default::default()
+    }
+    .validate()
+    .map(|policy| policy.fetch_partition_max)
+}
+
+fn parse_fdw_connect_timeout(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::positive_time(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwScanPolicy {
+        connect_timeout: value,
+        ..Default::default()
+    }
+    .validate()
+    .map(|policy| policy.connect_timeout)
+}
+
+fn parse_fdw_request_timeout(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::positive_time(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwScanPolicy {
+        request_timeout: value,
+        ..Default::default()
+    }
+    .validate()
+    .map(|policy| policy.request_timeout)
+}
+
+fn parse_fdw_schema_fetch_timeout(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::positive_time(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwDecodePolicy {
+        schema_fetch_timeout: value,
+        schema_fetch_poll: value,
+    }
+    .validate()
+    .map(|policy| policy.schema_fetch_timeout)
+}
+
+fn parse_fdw_schema_fetch_poll(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::positive_time(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwDecodePolicy {
+        schema_fetch_timeout: value,
+        schema_fetch_poll: value,
+    }
+    .validate()
+    .map(|policy| policy.schema_fetch_poll)
+}
+
+fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    crabka_client_core::ClientFrameMax::try_from(value)
+        .map(crabka_client_core::ClientFrameMax::size)
+}
+
+fn parse_fetch_min(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    crabka_client_core::FetchMinBytes::try_from(value).map(crabka_client_core::FetchMinBytes::size)
+}
+
+fn parse_positive_whole_byte_size(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    whole_bytes_usize("byte size", value)
+        .map(|_| value)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_positive_u32(value: &str) -> Result<u32, String> {
+    use refined_type::rule::GreaterU32;
+
+    GreaterU32::<0>::new(value.parse::<u32>().map_err(|error| error.to_string())?)
+        .map(refined_type::Refined::into_value)
+        .map_err(|error| error.to_string())
 }
 
 /// Timestamp-ordering source selected by `--timestamp-source`.
@@ -287,18 +1695,52 @@ pub enum CheckpointStoreKind {
 /// Parsed substrate runtime settings.
 #[derive(Debug, Clone)]
 pub struct SubstrateRuntimeConfig {
+    /// Capacity shared by every outbound Kafka client owned by this process.
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    /// Maximum frame size shared by every outbound Kafka client.
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
+    /// Minimum bytes requested by FDW fetches.
+    pub fdw_fetch_min: crabka_client_core::FetchMinBytes,
+    /// Minimum bytes requested by WAL recovery fetches.
+    pub wal_recovery_fetch_min: crabka_client_core::FetchMinBytes,
     /// Bootstrap address supplied by the CLI.
     pub bootstrap: String,
     /// Tenant that owns the WAL topic.
     pub tenant: String,
     /// Optional disposable local read-model cache directory.
     pub cache_dir: Option<PathBuf>,
+    /// Memory and flush policy for on-disk substrate caches.
+    pub pgkv_options: FjallOptions,
     /// Optional checkpointing configuration. Absent means full WAL replay.
     pub checkpoints: Option<CheckpointRuntimeConfig>,
     /// Optional Kafka SASL credentials for tenant-owned substrate resources.
     pub kafka_security: Option<ClientSecurity>,
     /// Optional in-process multi-range table-start boundaries.
     pub ranges: Option<String>,
+    /// Periodic refresh cadence for a remote range-0 follower.
+    pub range0_follower_poll_interval: Duration,
+    /// Initial delay before retrying consecutive range-0 follower rebuilds.
+    pub range0_follower_rebuild_backoff_floor: Duration,
+    /// Maximum delay between consecutive range-0 follower rebuilds.
+    pub range0_follower_rebuild_backoff_ceiling: Duration,
+    /// Deadline for one durable record inspection.
+    pub durable_inspection_timeout: Duration,
+    /// Resource ceilings for one durable record inspection.
+    pub durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits,
+    /// Committed-WAL recovery read limits.
+    pub recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy,
+    /// WAL topic creation and admin connection settings.
+    pub wal_admin_policy: crabka_gres_substrate::WalAdminPolicy,
+    /// Timeout for resolving WAL producer broker hostnames.
+    pub producer_dns_timeout: crabka_client_core::ClientDnsTimeout,
+    /// Deadline for flushing all buffered and in-flight WAL records.
+    pub producer_flush_timeout: crabka_client_producer::ProducerFlushTimeout,
+    /// WAL producer retry and transaction timing.
+    pub producer_retry_policy: crabka_client_producer::ProducerRetryPolicy,
+    /// WAL producer batching and compression settings.
+    pub producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy,
+    /// Target maximum size of one encoded logical WAL frame.
+    pub wal_frame_max_size: ByteSize,
     /// Optional range-compute placement for distributed mode. Range 0 is always hosted.
     pub host_ranges: Option<Vec<crabka_gres_ranges::RangeId>>,
     /// mTLS client configuration required for remote range routing.
@@ -309,6 +1751,12 @@ pub struct SubstrateRuntimeConfig {
     pub timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode,
     /// Testing-only signed HLC wall-clock skew in milliseconds for this node.
     pub hlc_wall_offset_ms: i64,
+    /// Shared Gres registry policy.
+    pub registry_policy: RegistryPolicy,
+    /// Distributed range execution limits and pacing.
+    pub range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy,
+    /// SQL executor runtime limits and persistence pacing.
+    pub pgexec_runtime_policy: crabka_pgexec::RuntimePolicy,
 }
 
 /// Validated TLS-only range RPC configuration.
@@ -321,18 +1769,25 @@ pub struct RangeRpcRuntimeConfig {
 }
 
 /// Validated substrate checkpointing settings.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is deliberately absent: the part-size target is a quantity, whose
+/// `f64` storage is only `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CheckpointRuntimeConfig {
     /// Object-store connection settings for checkpoint objects.
     pub object_store: CheckpointObjectStoreConfig,
     /// WAL frames since the last manifest that trigger a checkpoint.
     pub frames_threshold: u64,
     /// WAL bytes since the last manifest that trigger a checkpoint.
-    pub bytes_threshold: u64,
-    /// Target checkpoint part object size in bytes.
-    pub part_max_bytes: usize,
+    pub bytes_threshold: ByteSize,
+    /// Target checkpoint part object size.
+    pub part_max_size: ByteSize,
     /// Number of newest checkpoint directories retained after prune planning.
     pub retain_newest: usize,
+    /// Kafka `DeleteRecords` timeout after a durable manifest.
+    pub delete_records_timeout: Time,
+    /// Background checkpoint threshold polling interval.
+    pub poll_interval: Duration,
 }
 
 /// Validated object-store settings used by checkpointing.
@@ -386,6 +1841,9 @@ impl SubstrateRuntimeConfig {
     pub fn from_args(args: &ServeArgs) -> std::io::Result<Option<Self>> {
         use std::io::{Error, ErrorKind};
 
+        validate_multirange_operational_policy(args)?;
+        validate_wal_recovery_read_policy(args)?;
+
         let Some(bootstrap) = args.substrate_bootstrap.as_deref() else {
             if checkpointing_was_requested(args) {
                 return Err(Error::new(
@@ -420,24 +1878,133 @@ impl SubstrateRuntimeConfig {
             ));
         }
         let ranges = trimmed_optional(args.ranges.as_ref(), "--ranges")?;
+        let durable_inspection_fold_max_size = args
+            .durable_inspection_fold_max_size
+            .unwrap_or(crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_FOLD_MAX_SIZE);
+        whole_bytes_usize(
+            "durable inspection fold maximum size",
+            durable_inspection_fold_max_size,
+        )?;
+        let pgkv_defaults = FjallOptions::default();
+        let pgkv_options = FjallOptions::new(
+            args.pgkv_max_memtable_size
+                .unwrap_or(pgkv_defaults.max_memtable_size()),
+            args.pgkv_rotate_after_ops
+                .unwrap_or(pgkv_defaults.rotate_after_ops())
+                .get(),
+        )
+        .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
 
         Ok(Some(Self {
+            client_dispatch_queue_capacity: args.registry.dispatch_queue_capacity(),
+            client_frame_max: args.registry.frame_max(),
+            fdw_fetch_min: args.registry.fdw_fetch_min(),
+            wal_recovery_fetch_min: args.registry.wal_recovery_fetch_min(),
             bootstrap: bootstrap.to_string(),
             tenant: tenant.to_string(),
             cache_dir: args.cache_dir.clone(),
+            pgkv_options,
             checkpoints: CheckpointRuntimeConfig::from_args(args)?,
             kafka_security: tenant_kafka_security_from_env(tenant),
             ranges,
+            range0_follower_poll_interval: args
+                .range0_follower_poll_interval
+                .unwrap_or(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL)
+                .to_std(),
+            range0_follower_rebuild_backoff_floor: args
+                .range0_follower_rebuild_backoff_floor
+                .unwrap_or(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR)
+                .to_std(),
+            range0_follower_rebuild_backoff_ceiling: args
+                .range0_follower_rebuild_backoff_ceiling
+                .unwrap_or(DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING)
+                .to_std(),
+            durable_inspection_timeout: args
+                .durable_inspection_timeout
+                .unwrap_or(crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT)
+                .to_std(),
+            durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits {
+                max_records: args.durable_inspection_fold_max_records.map_or(
+                    crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_FOLD_MAX_RECORDS,
+                    PositiveUsize::into_value,
+                ),
+                max_size: durable_inspection_fold_max_size,
+            },
+            recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::new(
+                args.wal_recovery_fetch_max_wait
+                    .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT),
+                args.wal_recovery_fetch_partition_max
+                    .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX),
+                args.wal_recovery_fetch_response_max
+                    .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX),
+                args.wal_recovery_empty_fetch_retries.map_or(
+                    crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+                    PositiveUsize::into_value,
+                ),
+            )
+            .and_then(|policy| {
+                policy.with_dns_timeout(
+                    args.wal_recovery_dns_timeout
+                        .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT),
+                )
+            })
+            .and_then(|policy| {
+                let connect_timeout = args
+                    .wal_recovery_connect_timeout
+                    .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT);
+                let request_timeout = args
+                    .wal_recovery_request_timeout
+                    .unwrap_or(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT);
+                policy.with_timeouts(connect_timeout, request_timeout)
+            })
+            .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?,
+            wal_admin_policy: effective_wal_admin_policy(args)?,
+            producer_dns_timeout: effective_wal_producer_dns_timeout(args)?,
+            producer_flush_timeout: effective_wal_producer_flush_timeout(args)?,
+            producer_retry_policy: effective_wal_producer_retry_policy(args)?,
+            producer_throughput_policy: effective_wal_producer_throughput_policy(args)?,
+            wal_frame_max_size: args
+                .wal_frame_max_size
+                .unwrap_or(crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE),
             host_ranges: parse_host_ranges(args.host_ranges.as_deref())?,
             range_rpc: RangeRpcRuntimeConfig::from_args(args)?,
             advertised_endpoint: args.range_listen.clone(),
-            timestamp_source_mode: args.timestamp_source.to_mode(args.hlc_max_offset_ms),
-            hlc_wall_offset_ms: args.hlc_wall_offset_ms,
+            timestamp_source_mode: args
+                .timestamp_source
+                .to_mode(whole_millis_u64("HLC maximum offset", args.hlc_max_offset)?),
+            hlc_wall_offset_ms: whole_millis_i64("HLC wall offset", args.hlc_wall_offset)?,
+            registry_policy: args.registry.policy(),
+            range_runtime_policy: args.range_runtime.effective_policy()?,
+            pgexec_runtime_policy: args.pgexec_runtime.effective_policy(),
         }))
     }
 
     fn is_in_memory_bootstrap(&self) -> bool {
         is_in_memory_bootstrap(&self.bootstrap)
+    }
+
+    fn live_recovery_config(
+        &self,
+        tenant: crabka_gres_ranges::TenantName,
+        range: crabka_gres_ranges::RangeId,
+    ) -> crabka_gres_substrate::LiveRecoveryConfig {
+        crabka_gres_substrate::LiveRecoveryConfig::new(
+            self.bootstrap.clone(),
+            tenant,
+            range,
+            self.kafka_security.clone(),
+        )
+        .with_read_policy(self.recovery_read_policy)
+        .with_wal_admin_policy(self.wal_admin_policy)
+        .with_producer_dns_timeout(self.producer_dns_timeout)
+        .with_producer_flush_timeout(self.producer_flush_timeout)
+        .with_producer_retry_policy(self.producer_retry_policy)
+        .with_producer_throughput_policy(self.producer_throughput_policy)
+        .with_client_resource_policy(
+            self.client_dispatch_queue_capacity,
+            self.client_frame_max,
+            self.wal_recovery_fetch_min,
+        )
     }
 }
 
@@ -512,11 +2079,17 @@ impl RangeRpcRuntimeConfig {
         }))
     }
 
-    fn client(&self) -> std::io::Result<crabka_gres_ranges::FramedTcpClient> {
-        crabka_gres_ranges::FramedTcpClient::with_tls(crabka_gres_ranges::RangeTlsClientConfig {
-            tls: self.tls.clone(),
-            server_name: self.server_name.clone(),
-        })
+    fn client(
+        &self,
+        policy: &crabka_gres_ranges::RangeRuntimePolicy,
+    ) -> std::io::Result<crabka_gres_ranges::FramedTcpClient> {
+        crabka_gres_ranges::FramedTcpClient::with_tls_and_policy(
+            crabka_gres_ranges::RangeTlsClientConfig {
+                tls: self.tls.clone(),
+                server_name: self.server_name.clone(),
+            },
+            policy,
+        )
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
     }
 
@@ -540,25 +2113,33 @@ impl CheckpointRuntimeConfig {
         }
 
         let object_store = CheckpointObjectStoreConfig::from_args(args)?;
-        let part_max_bytes = args.checkpoint_part_bytes.map_or(
-            crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
-            NonZeroUsize::get,
-        );
-        if part_max_bytes < 8 {
-            return invalid_input("--checkpoint-part-bytes must be at least 8");
-        }
+        let part_max_size = CheckpointPartBytes::new(whole_bytes_usize(
+            "checkpoint part size",
+            args.checkpoint_part_size
+                .unwrap_or(crabka_gres_substrate::DEFAULT_PART_MAX_SIZE),
+        )?)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
+        .into_value();
         Ok(Some(Self {
             object_store,
             frames_threshold: args
                 .checkpoint_frames
-                .map_or(DEFAULT_CHECKPOINT_FRAMES_THRESHOLD, NonZeroU64::get),
-            bytes_threshold: args
-                .checkpoint_bytes
-                .map_or(DEFAULT_CHECKPOINT_BYTES_THRESHOLD, NonZeroU64::get),
-            part_max_bytes,
-            retain_newest: args
-                .checkpoint_retain
-                .map_or(DEFAULT_CHECKPOINT_RETAIN_NEWEST, NonZeroUsize::get),
+                .map_or(DEFAULT_CHECKPOINT_FRAMES, NonZeroU64::get),
+            bytes_threshold: args.checkpoint_size.unwrap_or(DEFAULT_CHECKPOINT_BYTES),
+            part_max_size,
+            retain_newest: args.checkpoint_retain.map_or(
+                crabka_gres_substrate::DEFAULT_CHECKPOINT_RETAIN,
+                PositiveUsize::into_value,
+            ),
+            delete_records_timeout: Time::from_millis(i64::from(whole_millis_i32(
+                "checkpoint DeleteRecords timeout",
+                args.checkpoint_delete_records_timeout
+                    .unwrap_or(DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT),
+            )?)),
+            poll_interval: args
+                .checkpoint_poll_interval
+                .unwrap_or(DEFAULT_CHECKPOINT_POLL_INTERVAL)
+                .to_std(),
         }))
     }
 }
@@ -783,9 +2364,11 @@ impl GresRuntime {
     }
 
     fn multi(engine: crabka_gres_ranges::MultiRangeTenant) -> Self {
-        let mut range_service =
-            crabka_gres_ranges::HostedRangeService::new(engine.hosted_range_engines())
-                .with_ddl_gate(engine.schema_gate());
+        let mut range_service = crabka_gres_ranges::HostedRangeService::new_with_policy(
+            engine.hosted_range_engines(),
+            engine.runtime_policy(),
+        )
+        .with_ddl_gate(engine.schema_gate());
         if let Some((registry, client)) = engine.timestamp_primary_remote() {
             range_service = range_service.with_timestamp_primary_remote(registry, client);
         }
@@ -1215,7 +2798,10 @@ impl Session for RuntimeSession {
 }
 
 /// Result of one self-suspend monitor iteration.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// Not `Eq`: the size-gate outcome carries quantities, whose `f64` storage is
+/// only `PartialEq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SuspendMonitorOutcome {
     /// The tenant is not configured for idle suspension.
     Disabled,
@@ -1228,7 +2814,7 @@ pub enum SuspendMonitorOutcome {
     /// A session raced with admission close, so this attempt was aborted.
     RacedSession { count: usize },
     /// Checkpoint size gate was exceeded, so the tenant remains warm.
-    CheckpointTooLarge { bytes: u64, max_bytes: u64 },
+    CheckpointTooLarge { size: ByteSize, max: ByteSize },
     /// A final checkpoint was durable and the registry was marked suspended.
     Suspended,
 }
@@ -1248,7 +2834,7 @@ pub trait SuspendRegistry: Send {
 #[async_trait::async_trait]
 pub trait FinalCheckpointer: Send + Sync {
     /// Return the latest checkpoint size estimate used by the suspend size gate.
-    async fn latest_checkpoint_bytes(&self) -> std::io::Result<u64>;
+    async fn latest_checkpoint_size(&self) -> std::io::Result<ByteSize>;
 
     /// Force and await a durable final checkpoint manifest.
     async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint>;
@@ -1273,14 +2859,17 @@ impl SuspendRegistry for LiveSuspendRegistry {
 }
 
 /// Configuration for substrate idle self-suspension.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Eq` is deliberately absent: the idle window and the size gate are
+/// quantities, whose `f64` storage is only `PartialEq`.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SuspendPolicy {
     /// Tenant name written to the registry.
     pub tenant: String,
     /// Idle window before suspend. Zero disables self-suspend.
-    pub idle_window: Duration,
+    pub idle_window: Time,
     /// Optional checkpoint size gate.
-    pub suspend_max_checkpoint_bytes: Option<u64>,
+    pub suspend_max_checkpoint: Option<ByteSize>,
 }
 
 impl SuspendPolicy {
@@ -1293,8 +2882,8 @@ impl SuspendPolicy {
 
         Some(Self {
             tenant: record.name.as_str().to_string(),
-            idle_window: Duration::from_secs(idle_seconds),
-            suspend_max_checkpoint_bytes: record.suspend_max_checkpoint_bytes,
+            idle_window: Time::from_secs(i64::try_from(idle_seconds).unwrap_or(i64::MAX)),
+            suspend_max_checkpoint: record.suspend_max_checkpoint_size,
         })
     }
 }
@@ -1309,7 +2898,7 @@ pub async fn try_suspend_idle_tenant(
     checkpointer: &dyn FinalCheckpointer,
     registry: &mut dyn SuspendRegistry,
 ) -> std::io::Result<SuspendMonitorOutcome> {
-    if policy.idle_window.is_zero() {
+    if policy.idle_window <= Time::ZERO {
         return Ok(SuspendMonitorOutcome::Disabled);
     }
 
@@ -1336,21 +2925,18 @@ pub async fn try_suspend_idle_tenant(
         });
     }
 
-    let checkpoint_bytes = checkpointer.latest_checkpoint_bytes().await?;
-    if let Some(max_bytes) = policy.suspend_max_checkpoint_bytes
-        && checkpoint_bytes > max_bytes
+    let size = checkpointer.latest_checkpoint_size().await?;
+    if let Some(max) = policy.suspend_max_checkpoint
+        && size > max
     {
         activity.reopen_after_suspend_abort();
         tracing::info!(
             tenant = %policy.tenant,
-            checkpoint_bytes,
-            max_bytes,
+            size = %size.human(),
+            max = %max.human(),
             "skip idle suspend because checkpoint exceeds configured size gate"
         );
-        return Ok(SuspendMonitorOutcome::CheckpointTooLarge {
-            bytes: checkpoint_bytes,
-            max_bytes,
-        });
+        return Ok(SuspendMonitorOutcome::CheckpointTooLarge { size, max });
     }
 
     let checkpoint = checkpointer.force_final_checkpoint().await?;
@@ -1359,12 +2945,18 @@ pub async fn try_suspend_idle_tenant(
     Ok(SuspendMonitorOutcome::Suspended)
 }
 
-fn idle_window_elapsed(last_activity_unix_millis: u64, idle_window: Duration) -> bool {
+/// Whether `idle_window` has elapsed since the last recorded activity.
+///
+/// The window is truncated, not rounded, on the way to milliseconds: it is
+/// compared against a delta of two epoch-millisecond instants, so rounding a
+/// sub-millisecond remainder up would hold the tenant warm for a whole extra
+/// millisecond that the operator never asked for.
+fn idle_window_elapsed(last_activity_unix_millis: u64, idle_window: Time) -> bool {
     let Some(now) = current_unix_millis() else {
         return false;
     };
     let idle_millis = now.saturating_sub(last_activity_unix_millis);
-    idle_millis >= u64::try_from(idle_window.as_millis()).unwrap_or(u64::MAX)
+    idle_millis >= u64::try_from(idle_window.millis_i64_trunc()).unwrap_or(u64::MAX)
 }
 
 fn current_unix_millis() -> Option<u64> {
@@ -1378,6 +2970,7 @@ fn current_unix_millis() -> Option<u64> {
 struct GresCheckpointWalPruner {
     bootstrap: CheckpointPruneBackend,
     security: Option<ClientSecurity>,
+    delete_records_timeout: Time,
 }
 
 enum CheckpointPruneBackend {
@@ -1386,14 +2979,19 @@ enum CheckpointPruneBackend {
 }
 
 impl GresCheckpointWalPruner {
-    fn in_memory() -> Self {
+    fn in_memory(delete_records_timeout: Time) -> Self {
         Self {
             bootstrap: CheckpointPruneBackend::InMemory,
             security: None,
+            delete_records_timeout,
         }
     }
 
-    fn kafka(bootstrap: &str, security: Option<ClientSecurity>) -> std::io::Result<Self> {
+    fn kafka(
+        bootstrap: &str,
+        security: Option<ClientSecurity>,
+        delete_records_timeout: Time,
+    ) -> std::io::Result<Self> {
         let bootstrap_addrs: Vec<_> = bootstrap
             .split(',')
             .map(str::trim)
@@ -1406,6 +3004,7 @@ impl GresCheckpointWalPruner {
         Ok(Self {
             bootstrap: CheckpointPruneBackend::Kafka { bootstrap_addrs },
             security,
+            delete_records_timeout,
         })
     }
 }
@@ -1434,7 +3033,7 @@ impl crabka_gres_substrate::CheckpointWalPruner for GresCheckpointWalPruner {
             ))
         })?;
         let outcomes = admin
-            .delete_records(ops, CHECKPOINT_DELETE_RECORDS_TIMEOUT_MS)
+            .delete_records(ops, self.delete_records_timeout)
             .await
             .map_err(|error| {
                 crabka_gres_substrate::SubstrateError::Unavailable(format!(
@@ -1465,9 +3064,12 @@ fn checkpointing_was_requested(args: &ServeArgs) -> bool {
         || args.checkpoint_gcs_service_account_key.is_some()
         || args.checkpoint_gcs_application_credentials_path.is_some()
         || args.checkpoint_frames.is_some()
-        || args.checkpoint_bytes.is_some()
-        || args.checkpoint_part_bytes.is_some()
+        || args.checkpoint_size.is_some()
+        || args.checkpoint_part_size.is_some()
         || args.checkpoint_retain.is_some()
+        || args.checkpoint_delete_records_timeout.is_some()
+        || args.checkpoint_poll_interval.is_some()
+        || args.idle_suspend_poll_interval.is_some()
 }
 
 fn infer_checkpoint_store_kind(args: &ServeArgs) -> std::io::Result<CheckpointStoreKind> {
@@ -1640,6 +3242,9 @@ pub fn tls_acceptor(
 ///
 /// Returns an error when the requested operation cannot be completed.
 pub async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
+    validate_multirange_operational_policy(&args)?;
+    validate_wal_recovery_read_policy(&args)?;
+    local_vacuum_policy(&args)?;
     let listener = TcpListener::bind(&args.listen).await?;
     tracing::info!(listen = %listener.local_addr()?, "crabka-gres listening");
     Box::pin(serve_listener(listener, args)).await
@@ -1662,162 +3267,202 @@ pub async fn serve_listener(listener: TcpListener, args: ServeArgs) -> std::io::
 /// # Errors
 ///
 /// Returns an error when the requested operation cannot be completed.
-pub async fn serve_listener_with_tenant_config_loader(
+pub fn serve_listener_with_tenant_config_loader(
     listener: TcpListener,
     args: ServeArgs,
     tenant_config_loader: &impl TenantConfigLoader,
-) -> std::io::Result<()> {
-    let sql_addr = listener.local_addr()?;
-    let tls = match (&args.tls_cert, &args.tls_key) {
-        (Some(cert), Some(key)) => Some(tls_acceptor(cert, key)?),
-        _ => None,
-    };
+) -> impl std::future::Future<Output = std::io::Result<()>> + '_ {
+    Box::pin(async move {
+        validate_multirange_operational_policy(&args)?;
+        validate_wal_recovery_read_policy(&args)?;
+        let local_vacuum_policy = local_vacuum_policy(&args)?;
+        let sql_addr = listener.local_addr()?;
+        let tls = match (&args.tls_cert, &args.tls_key) {
+            (Some(cert), Some(key)) => Some(tls_acceptor(cert, key)?),
+            _ => None,
+        };
 
-    let mut tenant_record = load_substrate_tenant_record(&args, tenant_config_loader).await?;
-    let tenant_security_enabled = tenant_record
-        .as_ref()
-        .is_some_and(|record| tenant_kafka_security_from_env(record.name.as_str()).is_some());
-    let mut lifecycle_registry = None;
-    if let (Some(record), Some(bootstrap)) = (
-        tenant_record.as_ref(),
-        lifecycle_registry_bootstrap(args.substrate_bootstrap.as_deref(), tenant_security_enabled),
-    ) {
-        let mut registry = crabka_gres_control::Registry::connect(bootstrap)
+        let mut tenant_record = load_substrate_tenant_record(&args, tenant_config_loader).await?;
+        let tenant_security_enabled = tenant_record
+            .as_ref()
+            .is_some_and(|record| tenant_kafka_security_from_env(record.name.as_str()).is_some());
+        let mut lifecycle_registry = None;
+        if let (Some(record), Some(bootstrap)) = (
+            tenant_record.as_ref(),
+            lifecycle_registry_bootstrap(
+                args.substrate_bootstrap.as_deref(),
+                tenant_security_enabled,
+            ),
+        ) {
+            let mut registry = crabka_gres_control::Registry::connect_with_policy(
+                bootstrap,
+                args.registry.policy(),
+            )
             .await
             .map_err(|error| std::io::Error::other(format!("tenant registry connect: {error}")))?;
-        registry
-            .ensure_topic(1)
-            .await
-            .map_err(|error| std::io::Error::other(format!("tenant registry ensure: {error}")))?;
-        tenant_record = registry
-            .get(record.name.as_str())
-            .await
-            .map_err(|error| std::io::Error::other(format!("tenant registry read: {error}")))?;
-        lifecycle_registry = Some(registry);
-    }
-    let effective_args = apply_tenant_runtime_defaults(args, tenant_record.as_ref())?;
-    let (early_range_service, early_range_server) =
-        match bind_early_range_transport(&effective_args).await? {
-            Some((service, server)) => (Some(service), Some(server)),
-            None => (None, None),
-        };
-    let mut runtime = Box::pin(open_runtime_with_tenant_record(
-        &effective_args,
-        tenant_record.as_ref(),
-        early_range_service,
-    ))
-    .await?;
-    register_kafka_scanner_with_default_bootstrap(
-        &mut runtime.engine,
-        kafka_scanner_default_bootstrap(&effective_args),
-    );
-    let session_config = build_session_config_from_tenant(&effective_args, tenant_record.as_ref())?;
-
-    let range_service = runtime.range_service();
-    let (engine, checkpoint_runtime, _range_transfer_keepalive) = runtime.into_parts();
-    let activity = Arc::new(crabka_pgwire::server::ActivityTracker::new());
-    let shutdown = CancellationToken::new();
-    // Periodic dead-version sweep for the single-range LOCAL engine (mem or
-    // --data-dir). Substrate/replicated engines refuse local pruning
-    // (`supports_local_vacuum` is false there) and rely on checkpoint-time GC.
-    // The loop runs on a child token whose drop guard lives on THIS future's
-    // stack: whether serving returns or is aborted, the sweep task stops and
-    // releases its engine handle (and with it a --data-dir store lock).
-    let _vacuum_guard = if let RuntimeEngine::Single(sql_engine) = &engine
-        && sql_engine.supports_local_vacuum()
-    {
-        let vacuum_token = shutdown.child_token();
-        tokio::spawn(run_local_vacuum_loop(
-            sql_engine.clone_handle(),
-            Arc::clone(&activity),
-            vacuum_token.clone(),
-        ));
-        Some(vacuum_token.drop_guard())
-    } else {
-        None
-    };
-    let serve = crabka_pgwire::server::serve_tls_with_activity_until(
-        listener,
-        Arc::new(engine),
-        Arc::new(session_config),
-        tls,
-        Arc::clone(&activity),
-        shutdown.clone(),
-    );
-
-    let range_server = if let Some(server) = early_range_server {
-        if range_service.is_none() {
-            // Dropping the guard aborts the warming serve task before the
-            // startup error is reported.
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "--range-listen requires a multi-range runtime",
-            ));
+            registry.ensure_topic().await.map_err(|error| {
+                std::io::Error::other(format!("tenant registry ensure: {error}"))
+            })?;
+            tenant_record = registry
+                .get(record.name.as_str())
+                .await
+                .map_err(|error| std::io::Error::other(format!("tenant registry read: {error}")))?;
+            lifecycle_registry = Some(registry);
         }
-        Some(server.release())
-    } else {
-        start_range_service(&effective_args, range_service).await?
-    };
-    let checkpointer = live_final_checkpointer(checkpoint_runtime);
-    let registry = mark_active_after_recovery(tenant_record.as_ref(), lifecycle_registry).await?;
-    let suspend = if let Some(policy) = SuspendPolicy::from_tenant_record(tenant_record.as_ref()) {
-        match (registry, checkpointer) {
-            (Some(registry), Some(checkpointer)) => Some((
+        let effective_args = apply_tenant_runtime_defaults(args, tenant_record.as_ref())?;
+        let (early_range_service, early_range_server) =
+            match bind_early_range_transport(&effective_args).await? {
+                Some((service, server)) => (Some(service), Some(server)),
+                None => (None, None),
+            };
+        let mut runtime = Box::pin(open_runtime_with_tenant_record(
+            &effective_args,
+            tenant_record.as_ref(),
+            early_range_service,
+        ))
+        .await?;
+        register_kafka_scanner_with_default_bootstrap_and_policy(
+            &mut runtime.engine,
+            kafka_scanner_default_bootstrap(&effective_args),
+            effective_fdw_broker_dns_timeout(&effective_args)?,
+            effective_schema_fetch_retry_policy(&effective_args)?,
+            effective_args.registry.dispatch_queue_capacity(),
+            effective_args.registry.frame_max(),
+            effective_args.registry.fdw_fetch_min(),
+            effective_args.registry.fdw_scan_policy(),
+            effective_args.registry.fdw_decode_policy(),
+        );
+        let session_config =
+            build_session_config_from_tenant(&effective_args, tenant_record.as_ref())?;
+
+        let range_service = runtime.range_service();
+        let (engine, checkpoint_runtime, _range_transfer_keepalive) = runtime.into_parts();
+        let activity = Arc::new(crabka_pgwire::server::ActivityTracker::new());
+        let shutdown = CancellationToken::new();
+        // Periodic dead-version sweep for the single-range LOCAL engine (mem or
+        // --data-dir). Substrate/replicated engines refuse local pruning
+        // (`supports_local_vacuum` is false there) and rely on checkpoint-time GC.
+        // The loop runs on a child token whose drop guard lives on THIS future's
+        // stack: whether serving returns or is aborted, the sweep task stops and
+        // releases its engine handle (and with it a --data-dir store lock).
+        let _vacuum_guard = if let RuntimeEngine::Single(sql_engine) = &engine
+            && let Some(policy) =
+                local_vacuum_spawn_policy(local_vacuum_policy, sql_engine.supports_local_vacuum())
+        {
+            let vacuum_token = shutdown.child_token();
+            tokio::spawn(run_local_vacuum_loop(
+                sql_engine.clone_handle(),
+                Arc::clone(&activity),
+                vacuum_token.clone(),
                 policy,
-                Box::new(LiveSuspendRegistry { registry }) as Box<dyn SuspendRegistry>,
-                checkpointer,
-            )),
-            (None, _) => {
-                tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled without live registry bootstrap");
-                None
-            }
-            (_, None) => {
-                tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled: final checkpoint snapshot seam unavailable");
-                None
-            }
-        }
-    } else {
-        None
-    };
+            ));
+            Some(vacuum_token.drop_guard())
+        } else {
+            None
+        };
+        let serve = crabka_pgwire::server::serve_tls_with_activity_until(
+            listener,
+            Arc::new(engine),
+            Arc::new(session_config),
+            tls,
+            Arc::clone(&activity),
+            shutdown.clone(),
+        );
 
-    // Publish Active only after every potentially blocking runtime component is
-    // initialized. The activator treats Active as permission to connect, so an
-    // earlier write can leave its held startup queued on a bound-but-unpolled
-    // listener while initialization stalls.
-    tracing::info!(listen = %sql_addr, "crabka-gres ready to accept sessions");
-    let range_addr = range_server
-        .as_ref()
-        .map_or_else(|| "-".to_string(), |(_, address)| address.to_string());
-    println!("CRABKA_GRES_READY {sql_addr} {range_addr}");
-    let serve_result = if let Some((policy, registry, checkpointer)) = suspend {
-        tokio::select! {
-            result = serve => result,
-            result = run_suspend_monitor(policy, activity, checkpointer, registry, shutdown) => result,
+        let range_server = if let Some(server) = early_range_server {
+            if range_service.is_none() {
+                // Dropping the guard aborts the warming serve task before the
+                // startup error is reported.
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "--range-listen requires a multi-range runtime",
+                ));
+            }
+            Some(server.release())
+        } else {
+            start_range_service(&effective_args, range_service).await?
+        };
+        let checkpointer = live_final_checkpointer(checkpoint_runtime);
+        let registry =
+            mark_active_after_recovery(tenant_record.as_ref(), lifecycle_registry).await?;
+        let suspend = if let Some(policy) =
+            SuspendPolicy::from_tenant_record(tenant_record.as_ref())
+        {
+            match (registry, checkpointer) {
+                (Some(registry), Some(checkpointer)) => Some((
+                    policy,
+                    Box::new(LiveSuspendRegistry { registry }) as Box<dyn SuspendRegistry>,
+                    checkpointer,
+                )),
+                (None, _) => {
+                    tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled without live registry bootstrap");
+                    None
+                }
+                (_, None) => {
+                    tracing::warn!(tenant = %policy.tenant, "substrate idle suspend disabled: final checkpoint snapshot seam unavailable");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        // Publish Active only after every potentially blocking runtime component is
+        // initialized. The activator treats Active as permission to connect, so an
+        // earlier write can leave its held startup queued on a bound-but-unpolled
+        // listener while initialization stalls.
+        tracing::info!(listen = %sql_addr, "crabka-gres ready to accept sessions");
+        let range_addr = range_server
+            .as_ref()
+            .map_or_else(|| "-".to_string(), |(_, address)| address.to_string());
+        println!("CRABKA_GRES_READY {sql_addr} {range_addr}");
+        let serve_result = if let Some((policy, registry, checkpointer)) = suspend {
+            tokio::select! {
+                result = serve => result,
+                result = run_suspend_monitor(
+                    policy,
+                    activity,
+                    checkpointer,
+                    registry,
+                    shutdown,
+                    effective_args
+                        .idle_suspend_poll_interval
+                        .unwrap_or(DEFAULT_IDLE_SUSPEND_POLL_INTERVAL)
+                        .to_std(),
+                ) => result,
+            }
+        } else {
+            serve.await
+        };
+        if let Some((server, _)) = range_server {
+            server.abort();
+            let _ = server.await;
         }
-    } else {
-        serve.await
-    };
-    if let Some((server, _)) = range_server {
-        server.abort();
-        let _ = server.await;
-    }
-    serve_result
+        serve_result
+    })
+}
+
+fn local_vacuum_spawn_policy(
+    policy: Option<LocalVacuumPolicy>,
+    supports_local_vacuum: bool,
+) -> Option<LocalVacuumPolicy> {
+    policy.filter(|_| supports_local_vacuum)
 }
 
 /// One pacing decision for the local vacuum loop: how long to sleep before
 /// the next bounded step and how many version keys that step may examine.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 struct VacuumPace {
-    interval: Duration,
+    interval: Time,
     key_budget: usize,
 }
 
 impl VacuumPace {
     /// The relaxed cadence: one default-budget step every couple of seconds.
-    const fn idle() -> Self {
+    const fn idle(policy: LocalVacuumPolicy) -> Self {
         Self {
-            interval: LOCAL_VACUUM_IDLE_INTERVAL,
-            key_budget: crabka_pgexec::VACUUM_STEP_KEY_BUDGET,
+            interval: policy.idle_interval,
+            key_budget: policy.key_budget,
         }
     }
 }
@@ -1839,19 +3484,19 @@ struct VacuumStepObservation {
     cycle_completed: bool,
     /// Whether the foreground looked idle across this step: no write
     /// committed since the previous step and no session ran any statement
-    /// within [`LOCAL_VACUUM_IDLE_AFTER`].
+    /// within [`LocalVacuumPolicy::idle_after`].
     foreground_idle: bool,
-    /// Wall-clock duration of the step itself (excluding the sleep).
-    step_elapsed: Duration,
+    /// Wall-clock extent of the step itself (excluding the sleep).
+    step_elapsed: Time,
 }
 
 /// Adaptive pacing for the local vacuum loop.
 ///
 /// The controller keeps a debt ledger in settle-work units: committed
 /// version Puts add debt, retired sweep work repays it. Debt above
-/// [`LOCAL_VACUUM_HOT_DEBT`] means the sweep is behind the write rate, so
+/// [`LocalVacuumPolicy::hot_debt`] means the sweep is behind the write rate, so
 /// steps run back-to-back (zero interval) until it catches up; once caught
-/// up, the interval doubles from [`LOCAL_VACUUM_BACKOFF_FLOOR`] toward the
+/// up, the interval doubles from [`LocalVacuumPolicy::backoff_floor`] toward the
 /// idle cadence. A completed cycle that swept nothing proves the whole
 /// keyspace clean, which zeroes leftover debt — writes whose garbage the
 /// write path already pruned, or pinned work a later cycle retires — so
@@ -1859,10 +3504,11 @@ struct VacuumStepObservation {
 /// foreground goes idle before the store is proven clean, steps run
 /// back-to-back regardless of debt: reclaim capacity is spent while it is
 /// free instead of after throughput has already decayed. Step budgets grow
-/// toward [`LOCAL_VACUUM_MAX_KEY_BUDGET`] only while hot steps stay fast and
+/// toward [`LocalVacuumPolicy::max_key_budget`] only while hot steps stay fast and
 /// shrink as soon as they slow, so an individual step never becomes a
 /// foreground stall.
 struct VacuumPacer {
+    policy: LocalVacuumPolicy,
     /// Outstanding settle-work units (saturating at zero).
     debt: u64,
     /// Whether the in-progress sweep cycle has physically changed anything.
@@ -1877,12 +3523,13 @@ impl VacuumPacer {
     /// Start at the relaxed cadence with the store not yet proven clean, so
     /// a store recovered with pre-existing garbage drains on the first idle
     /// window instead of waiting for a write to trip the debt ledger.
-    const fn new() -> Self {
+    const fn new(policy: LocalVacuumPolicy) -> Self {
         Self {
+            policy,
             debt: 0,
             cycle_dirty: false,
             store_settled: false,
-            pace: VacuumPace::idle(),
+            pace: VacuumPace::idle(policy),
         }
     }
 
@@ -1910,27 +3557,35 @@ impl VacuumPacer {
         let hot = if observation.foreground_idle {
             !self.store_settled
         } else {
-            self.debt > LOCAL_VACUUM_HOT_DEBT
+            self.debt > self.policy.hot_debt
         };
         let interval = if hot {
-            Duration::ZERO
+            Time::ZERO
         } else if self.store_settled {
             // Proven clean: park at the idle cadence outright instead of
             // ramping — there is nothing left the ramp could discover.
-            LOCAL_VACUUM_IDLE_INTERVAL
+            self.policy.idle_interval
         } else {
-            (self.pace.interval * 2).clamp(LOCAL_VACUUM_BACKOFF_FLOOR, LOCAL_VACUUM_IDLE_INTERVAL)
+            // `Ord::clamp` is unavailable on an `f64`-backed quantity, so the
+            // clamp is spelled out; `local_vacuum_policy` has already rejected
+            // a floor above the idle interval, so the order is the same.
+            (self.pace.interval * 2.0)
+                .max(self.policy.backoff_floor)
+                .min(self.policy.idle_interval)
         };
         let key_budget = if hot {
-            if observation.step_elapsed <= LOCAL_VACUUM_STEP_FAST {
-                (self.pace.key_budget * 2).min(LOCAL_VACUUM_MAX_KEY_BUDGET)
-            } else if observation.step_elapsed >= LOCAL_VACUUM_STEP_SLOW {
-                (self.pace.key_budget / 2).max(crabka_pgexec::VACUUM_STEP_KEY_BUDGET)
+            if observation.step_elapsed <= self.policy.step_fast {
+                self.pace
+                    .key_budget
+                    .saturating_mul(2)
+                    .min(self.policy.max_key_budget)
+            } else if observation.step_elapsed >= self.policy.step_slow {
+                (self.pace.key_budget / 2).max(self.policy.key_budget)
             } else {
                 self.pace.key_budget
             }
         } else {
-            crabka_pgexec::VACUUM_STEP_KEY_BUDGET
+            self.policy.key_budget
         };
         self.pace = VacuumPace {
             interval,
@@ -1938,6 +3593,15 @@ impl VacuumPacer {
         };
         self.pace
     }
+}
+
+fn local_vacuum_maintenance_due(
+    swept_anything: bool,
+    next_interval: Time,
+    elapsed_since_maintain: Time,
+    policy: LocalVacuumPolicy,
+) -> bool {
+    swept_anything && (next_interval > Time::ZERO || elapsed_since_maintain >= policy.idle_interval)
 }
 
 /// Run bounded dead-MVCC-version sweep steps on the LOCAL serving engine
@@ -1950,21 +3614,22 @@ async fn run_local_vacuum_loop(
     engine: SqlEngine,
     activity: Arc<crabka_pgwire::server::ActivityTracker>,
     shutdown: CancellationToken,
+    policy: LocalVacuumPolicy,
 ) {
-    let mut pacer = VacuumPacer::new();
+    let mut pacer = VacuumPacer::new(policy);
     let mut last_version_puts = engine.committed_version_puts();
     let mut last_maintain = std::time::Instant::now();
     loop {
         let pace = pacer.pace();
         tokio::select! {
             () = shutdown.cancelled() => return,
-            () = tokio::time::sleep(pace.interval) => {}
+            () = tokio::time::sleep(pace.interval.to_std()) => {}
         }
         let _maintenance = activity.begin_maintenance().await;
         let step_started = std::time::Instant::now();
         match engine.vacuum_step_budgeted(pace.key_budget).await {
             Ok(step) => {
-                let step_elapsed = step_started.elapsed();
+                let step_elapsed = step_started.elapsed().as_time();
                 let stats = step.stats;
                 let swept_anything = stats.versions_pruned
                     + stats.index_entries_pruned
@@ -1976,10 +3641,7 @@ async fn run_local_vacuum_loop(
                 let writes_since_step = version_puts.saturating_sub(last_version_puts);
                 last_version_puts = version_puts;
                 let foreground_idle = writes_since_step == 0
-                    && idle_window_elapsed(
-                        activity.last_activity_unix_millis(),
-                        LOCAL_VACUUM_IDLE_AFTER,
-                    );
+                    && idle_window_elapsed(activity.last_activity_unix_millis(), policy.idle_after);
                 let next = pacer.observe(&VacuumStepObservation {
                     writes_since_step,
                     versions_settled: stats.versions_pruned
@@ -1998,10 +3660,12 @@ async fn run_local_vacuum_loop(
                 // the burst's final step) so fast consecutive steps do not
                 // spray tiny sstables. Idle steps (settled tables skipped,
                 // nothing found) never rotate.
-                if swept_anything
-                    && (next.interval > Duration::ZERO
-                        || last_maintain.elapsed() >= LOCAL_VACUUM_IDLE_INTERVAL)
-                {
+                if local_vacuum_maintenance_due(
+                    swept_anything,
+                    next.interval,
+                    last_maintain.elapsed().as_time(),
+                    policy,
+                ) {
                     last_maintain = std::time::Instant::now();
                     if let Err(error) = engine.kv_handle().maintain() {
                         tracing::warn!(?error, "post-vacuum store maintenance failed");
@@ -2016,8 +3680,8 @@ async fn run_local_vacuum_loop(
                     writes_since_step,
                     debt = pacer.debt,
                     foreground_idle,
-                    step_elapsed = ?step_elapsed,
-                    next_interval = ?next.interval,
+                    step_elapsed = %step_elapsed.human(),
+                    next_interval = %next.interval.human(),
                     next_key_budget = next.key_budget,
                     "local vacuum step"
                 );
@@ -2034,6 +3698,107 @@ mod vacuum_pacing_tests {
 
     use super::*;
 
+    const fn default_policy() -> LocalVacuumPolicy {
+        LocalVacuumPolicy {
+            idle_interval: secs(2),
+            backoff_floor: millis(25),
+            hot_debt: VACUUM_STEP_KEY_BUDGET as u64,
+            key_budget: VACUUM_STEP_KEY_BUDGET,
+            max_key_budget: VACUUM_STEP_KEY_BUDGET * 4,
+            step_fast: millis(3),
+            step_slow: millis(12),
+            idle_after: secs(1),
+        }
+    }
+
+    #[test]
+    fn effective_defaults_pin_local_vacuum_policy() {
+        const CHILD: &str = "CRABKA_TEST_GRES_LOCAL_VACUUM_DEFAULTS_CHILD";
+        const VARIABLES: [&str; 8] = [
+            "CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL",
+            "CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR",
+            "CRABKA_GRES_LOCAL_VACUUM_HOT_DEBT",
+            "CRABKA_GRES_LOCAL_VACUUM_KEY_BUDGET",
+            "CRABKA_GRES_LOCAL_VACUUM_MAX_KEY_BUDGET",
+            "CRABKA_GRES_LOCAL_VACUUM_STEP_FAST",
+            "CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW",
+            "CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
+            child
+                .args([
+                    "--exact",
+                    "vacuum_pacing_tests::effective_defaults_pin_local_vacuum_policy",
+                ])
+                .env(CHILD, "1");
+            for variable in VARIABLES {
+                child.env_remove(variable);
+            }
+            assert!(child.status().expect("defaults child test").success());
+            return;
+        }
+
+        assert_eq!(
+            local_vacuum_policy(
+                &Cli::try_parse_from(["crabka-gres"])
+                    .expect("defaults")
+                    .serve,
+            )
+            .expect("valid defaults"),
+            Some(default_policy())
+        );
+    }
+
+    #[test]
+    fn derived_maximum_key_budget_rejects_overflow() {
+        let args = Cli::try_parse_from([
+            "crabka-gres",
+            "--local-vacuum-key-budget",
+            &usize::MAX.to_string(),
+        ])
+        .expect("scalar-valid arguments")
+        .serve;
+
+        let error = local_vacuum_policy(&args).expect_err("derived maximum overflow");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            "local vacuum default maximum key budget overflows usize"
+        );
+    }
+
+    #[test]
+    fn runtime_spawn_decision_requires_local_policy_and_engine_support() {
+        let policy = default_policy();
+
+        assert_eq!(local_vacuum_spawn_policy(Some(policy), true), Some(policy));
+        assert_eq!(local_vacuum_spawn_policy(Some(policy), false), None);
+        assert_eq!(local_vacuum_spawn_policy(None, true), None);
+    }
+
+    #[test]
+    fn custom_idle_interval_controls_maintenance_rotation() {
+        let policy = LocalVacuumPolicy {
+            idle_interval: millis(40),
+            ..default_policy()
+        };
+
+        assert!(!local_vacuum_maintenance_due(
+            true,
+            Time::ZERO,
+            millis(39),
+            policy,
+        ));
+        assert!(local_vacuum_maintenance_due(
+            true,
+            Time::ZERO,
+            millis(40),
+            policy,
+        ));
+    }
+
     /// Observation template: a busy, fast, mid-cycle step that swept nothing.
     const fn quiet_busy_step() -> VacuumStepObservation {
         VacuumStepObservation {
@@ -2042,13 +3807,73 @@ mod vacuum_pacing_tests {
             swept_anything: false,
             cycle_completed: false,
             foreground_idle: false,
-            step_elapsed: Duration::from_millis(1),
+            step_elapsed: millis(1),
         }
     }
 
     #[test]
+    fn custom_policy_controls_every_local_vacuum_decision() {
+        let policy = LocalVacuumPolicy {
+            idle_interval: millis(90),
+            backoff_floor: millis(7),
+            hot_debt: 20,
+            key_budget: 10,
+            max_key_budget: 40,
+            step_fast: millis(2),
+            step_slow: millis(8),
+            idle_after: millis(30),
+        };
+        let mut pacer = VacuumPacer::new(policy);
+        assert_eq!(
+            pacer.pace(),
+            VacuumPace {
+                interval: policy.idle_interval,
+                key_budget: 10
+            }
+        );
+
+        let hot_fast = VacuumStepObservation {
+            writes_since_step: 21,
+            step_elapsed: millis(2),
+            ..quiet_busy_step()
+        };
+        assert!(pacer.observe(&hot_fast).key_budget == 20);
+        pacer.pace.key_budget = 40;
+        assert!(pacer.observe(&hot_fast).key_budget == 40);
+
+        let hot_slow = VacuumStepObservation {
+            step_elapsed: millis(8),
+            ..hot_fast
+        };
+        assert!(pacer.observe(&hot_slow).key_budget == 20);
+
+        let caught_up = VacuumStepObservation {
+            writes_since_step: 0,
+            versions_settled: 100,
+            step_elapsed: millis(4),
+            ..quiet_busy_step()
+        };
+        assert!(pacer.observe(&caught_up).interval == policy.backoff_floor);
+        let mut previous = policy.backoff_floor;
+        loop {
+            let pace = pacer.observe(&quiet_busy_step());
+            assert!(pace.interval == (previous * 2.0).min(policy.idle_interval));
+            previous = pace.interval;
+            if pace.interval == policy.idle_interval {
+                break;
+            }
+        }
+
+        let now = current_unix_millis().expect("system clock");
+        let last_activity = now.saturating_sub(20);
+        assert!(idle_window_elapsed(last_activity, millis(10)));
+        assert!(!idle_window_elapsed(last_activity, policy.idle_after));
+    }
+
+    #[test]
     fn write_backlog_drives_the_interval_to_zero_and_repayment_backs_off() {
-        let mut pacer = VacuumPacer::new();
+        let policy = default_policy();
+        let mut pacer = VacuumPacer::new(policy);
         // Writes outpace sweeping: once outstanding work passes the hot
         // threshold the loop stops sleeping entirely.
         let behind = VacuumStepObservation {
@@ -2057,9 +3882,9 @@ mod vacuum_pacing_tests {
             swept_anything: true,
             ..quiet_busy_step()
         };
-        assert!(pacer.observe(&behind).interval == LOCAL_VACUUM_IDLE_INTERVAL); // debt 3 500
-        assert!(pacer.observe(&behind).interval == LOCAL_VACUUM_IDLE_INTERVAL); // debt 7 000
-        assert!(pacer.observe(&behind).interval == Duration::ZERO); // debt 10 500
+        assert!(pacer.observe(&behind).interval == policy.idle_interval); // debt 3 500
+        assert!(pacer.observe(&behind).interval == policy.idle_interval); // debt 7 000
+        assert!(pacer.observe(&behind).interval == Time::ZERO); // debt 10 500
         // Sweeping catches up: the interval backs off multiplicatively toward
         // the idle cadence instead of snapping straight to it.
         let repaying = VacuumStepObservation {
@@ -2069,14 +3894,14 @@ mod vacuum_pacing_tests {
             ..quiet_busy_step()
         };
         let caught_up = pacer.observe(&repaying);
-        assert!(caught_up.interval == LOCAL_VACUUM_BACKOFF_FLOOR);
+        assert!(caught_up.interval == policy.backoff_floor);
         assert!(caught_up.key_budget == VACUUM_STEP_KEY_BUDGET);
         let mut previous = caught_up.interval;
         loop {
             let pace = pacer.observe(&quiet_busy_step());
-            assert!(pace.interval == (previous * 2).min(LOCAL_VACUUM_IDLE_INTERVAL));
+            assert!(pace.interval == (previous * 2.0).min(policy.idle_interval));
             previous = pace.interval;
-            if pace.interval == LOCAL_VACUUM_IDLE_INTERVAL {
+            if pace.interval == policy.idle_interval {
                 break;
             }
         }
@@ -2084,75 +3909,70 @@ mod vacuum_pacing_tests {
 
     #[test]
     fn hot_step_budgets_track_step_latency_within_bounds() {
+        let policy = default_policy();
         // (previous budget, observed step latency) → next hot step's budget.
         let cases = [
             // Fast steps double the budget…
             (
                 VACUUM_STEP_KEY_BUDGET,
-                LOCAL_VACUUM_STEP_FAST,
+                policy.step_fast,
                 2 * VACUUM_STEP_KEY_BUDGET,
             ),
             // …but never past the cap…
-            (
-                LOCAL_VACUUM_MAX_KEY_BUDGET,
-                Duration::from_millis(1),
-                LOCAL_VACUUM_MAX_KEY_BUDGET,
-            ),
+            (policy.max_key_budget, millis(1), policy.max_key_budget),
             // …mid-range latency keeps the budget…
             (
                 2 * VACUUM_STEP_KEY_BUDGET,
-                Duration::from_millis(5),
+                millis(5),
                 2 * VACUUM_STEP_KEY_BUDGET,
             ),
             // …slow steps halve it…
             (
                 2 * VACUUM_STEP_KEY_BUDGET,
-                LOCAL_VACUUM_STEP_SLOW,
+                policy.step_slow,
                 VACUUM_STEP_KEY_BUDGET,
             ),
             // …but never below the pgexec default.
-            (
-                VACUUM_STEP_KEY_BUDGET,
-                Duration::from_millis(50),
-                VACUUM_STEP_KEY_BUDGET,
-            ),
+            (VACUUM_STEP_KEY_BUDGET, millis(50), VACUUM_STEP_KEY_BUDGET),
         ];
         for (previous_budget, step_elapsed, expected) in cases {
-            let mut pacer = VacuumPacer::new();
-            pacer.debt = 2 * LOCAL_VACUUM_HOT_DEBT;
+            let mut pacer = VacuumPacer::new(policy);
+            pacer.debt = 2 * policy.hot_debt;
             pacer.pace.key_budget = previous_budget;
             let pace = pacer.observe(&VacuumStepObservation {
                 step_elapsed,
                 ..quiet_busy_step()
             });
-            assert!(pace.interval == Duration::ZERO);
+            assert!(pace.interval == Time::ZERO);
             assert!(
                 pace.key_budget == expected,
-                "previous {previous_budget}, elapsed {step_elapsed:?}"
+                "previous {previous_budget}, elapsed {}",
+                step_elapsed.human()
             );
         }
     }
 
     #[test]
     fn idle_foreground_drains_until_a_clean_cycle_proves_the_store_settled() {
-        let mut pacer = VacuumPacer::new();
+        let policy = default_policy();
+        let mut pacer = VacuumPacer::new(policy);
         let idle_dirty = VacuumStepObservation {
             writes_since_step: 0,
             versions_settled: 300,
             swept_anything: true,
             cycle_completed: false,
             foreground_idle: true,
-            step_elapsed: Duration::from_millis(1),
+            step_elapsed: millis(1),
         };
         // Zero debt, but the store is not proven clean: drain back-to-back.
-        assert!(pacer.observe(&idle_dirty).interval == Duration::ZERO);
+        assert!(pacer.observe(&idle_dirty).interval == Time::ZERO);
         // A cycle that still swept something completes: keep draining (the
         // proving lap has not happened yet).
         let dirty_lap_end = VacuumStepObservation {
             cycle_completed: true,
             ..idle_dirty
         };
-        assert!(pacer.observe(&dirty_lap_end).interval == Duration::ZERO);
+        assert!(pacer.observe(&dirty_lap_end).interval == Time::ZERO);
         // A full lap that swept nothing parks the loop at the idle cadence
         // with the default budget, where it stays while nothing happens.
         let clean_lap = VacuumStepObservation {
@@ -2161,20 +3981,21 @@ mod vacuum_pacing_tests {
             cycle_completed: true,
             ..idle_dirty
         };
-        assert!(pacer.observe(&clean_lap) == VacuumPace::idle());
-        assert!(pacer.observe(&clean_lap) == VacuumPace::idle());
+        assert!(pacer.observe(&clean_lap) == VacuumPace::idle(policy));
+        assert!(pacer.observe(&clean_lap) == VacuumPace::idle(policy));
     }
 
     #[test]
     fn a_clean_cycle_zeroes_debt_the_write_path_already_repaid() {
-        let mut pacer = VacuumPacer::new();
+        let policy = default_policy();
+        let mut pacer = VacuumPacer::new(policy);
         // Load whose garbage the write path prunes itself: debt builds even
         // though sweeps find nothing.
         let phantom = VacuumStepObservation {
             writes_since_step: 20_000,
             ..quiet_busy_step()
         };
-        assert!(pacer.observe(&phantom).interval == Duration::ZERO);
+        assert!(pacer.observe(&phantom).interval == Time::ZERO);
         // The hot lap completes without sweeping anything: the ledger resets
         // instead of pinning the loop at full speed forever.
         let clean_lap = VacuumStepObservation {
@@ -2182,34 +4003,35 @@ mod vacuum_pacing_tests {
             cycle_completed: true,
             ..quiet_busy_step()
         };
-        assert!(pacer.observe(&clean_lap).interval == LOCAL_VACUUM_BACKOFF_FLOOR);
+        assert!(pacer.observe(&clean_lap).interval == policy.backoff_floor);
         assert!(pacer.debt == 0);
     }
 
     #[test]
     fn a_write_after_settling_reopens_idle_drain() {
-        let mut pacer = VacuumPacer::new();
+        let policy = default_policy();
+        let mut pacer = VacuumPacer::new(policy);
         let clean_idle_lap = VacuumStepObservation {
             writes_since_step: 0,
             versions_settled: 0,
             swept_anything: false,
             cycle_completed: true,
             foreground_idle: true,
-            step_elapsed: Duration::from_millis(1),
+            step_elapsed: millis(1),
         };
-        assert!(pacer.observe(&clean_idle_lap).interval == LOCAL_VACUUM_IDLE_INTERVAL);
+        assert!(pacer.observe(&clean_idle_lap).interval == policy.idle_interval);
         // A small write lands: the store is no longer proven clean, so the
         // next idle window drains again even though debt stays tiny.
         let small_write = VacuumStepObservation {
             writes_since_step: 5,
             ..quiet_busy_step()
         };
-        assert!(pacer.observe(&small_write).interval == LOCAL_VACUUM_IDLE_INTERVAL);
+        assert!(pacer.observe(&small_write).interval == policy.idle_interval);
         let idle_unproven = VacuumStepObservation {
             cycle_completed: false,
             ..clean_idle_lap
         };
-        assert!(pacer.observe(&idle_unproven).interval == Duration::ZERO);
+        assert!(pacer.observe(&idle_unproven).interval == Time::ZERO);
     }
 }
 
@@ -2272,7 +4094,10 @@ async fn bind_early_range_transport(
         return Ok(None);
     }
     let dynamic = Arc::new(DynamicLiveRangeService::new(
-        crabka_gres_ranges::HostedRangeService::new(BTreeMap::new()),
+        crabka_gres_ranges::HostedRangeService::new_with_policy(
+            BTreeMap::new(),
+            config.range_runtime_policy,
+        ),
     ));
     let server = start_range_service(
         args,
@@ -2301,9 +4126,9 @@ async fn start_range_service(
             "--range-listen requires a multi-range runtime",
         )
     })?;
-    let config = SubstrateRuntimeConfig::from_args(args)?
-        .and_then(|config| config.range_rpc)
+    let runtime = SubstrateRuntimeConfig::from_args(args)?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "--range-listen requires --range-tls-cert, --range-tls-key, --range-tls-ca, --range-tls-server-name, and --range-allowed-principal"))?;
+    let config = runtime.range_rpc.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "--range-listen requires --range-tls-cert, --range-tls-key, --range-tls-ca, --range-tls-server-name, and --range-allowed-principal"))?;
     let tenant = args.tenant.clone().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -2318,7 +4143,14 @@ async fn start_range_service(
     tracing::info!(range_listen = %address, "crabka-gres range compute listening");
     Ok(Some((
         tokio::spawn(async move {
-            if let Err(error) = crabka_gres_ranges::serve_tls(listener, service, tls).await {
+            if let Err(error) = crabka_gres_ranges::serve_tls_with_policy(
+                listener,
+                service,
+                tls,
+                runtime.range_runtime_policy,
+            )
+            .await
+            {
                 tracing::warn!(%error, "range compute server stopped");
             }
         }),
@@ -2332,9 +4164,10 @@ async fn run_suspend_monitor(
     checkpointer: Box<dyn FinalCheckpointer>,
     mut registry: Box<dyn SuspendRegistry>,
     shutdown: CancellationToken,
+    poll_interval: Duration,
 ) -> std::io::Result<()> {
     loop {
-        tokio::time::sleep(IDLE_MONITOR_POLL_INTERVAL).await;
+        tokio::time::sleep(poll_interval).await;
         match try_suspend_idle_tenant(
             &policy,
             activity.as_ref(),
@@ -2347,8 +4180,13 @@ async fn run_suspend_monitor(
                 shutdown.cancel();
                 return Ok(());
             }
-            SuspendMonitorOutcome::CheckpointTooLarge { bytes, max_bytes } => {
-                tracing::info!(tenant = %policy.tenant, bytes, max_bytes, "tenant remains warm after suspend size-gate skip");
+            SuspendMonitorOutcome::CheckpointTooLarge { size, max } => {
+                tracing::info!(
+                    tenant = %policy.tenant,
+                    size = %size.human(),
+                    max = %max.human(),
+                    "tenant remains warm after suspend size-gate skip"
+                );
             }
             SuspendMonitorOutcome::Disabled
             | SuspendMonitorOutcome::OpenSessions { .. }
@@ -2432,6 +4270,7 @@ pub trait TenantConfigLoader: Sync {
         bootstrap: &str,
         tenant: &TenantName,
         security: Option<ClientSecurity>,
+        policy: &RegistryPolicy,
     ) -> std::io::Result<Option<TenantRecord>>;
 }
 
@@ -2449,8 +4288,9 @@ impl TenantConfigLoader for LiveTenantConfigLoader {
         bootstrap: &str,
         tenant: &TenantName,
         security: Option<ClientSecurity>,
+        policy: &RegistryPolicy,
     ) -> std::io::Result<Option<TenantRecord>> {
-        load_live_tenant_config(bootstrap, tenant, security).await
+        load_live_tenant_config(bootstrap, tenant, security, policy).await
     }
 }
 
@@ -2458,6 +4298,7 @@ struct LiveRangeRegistrySource {
     bootstrap: String,
     tenant: TenantName,
     security: Option<ClientSecurity>,
+    policy: RegistryPolicy,
 }
 
 struct MustActivateRangeRegistrySource {
@@ -2470,6 +4311,7 @@ struct MustActivateRangeRegistrySource {
 struct LiveSplitIntentAuthority {
     bootstrap: String,
     tenant: crabka_gres_control::TenantName,
+    policy: RegistryPolicy,
 }
 
 /// Build the production registry-backed split authority for integration verification.
@@ -2478,8 +4320,13 @@ struct LiveSplitIntentAuthority {
 pub fn live_split_intent_authority(
     bootstrap: String,
     tenant: crabka_gres_control::TenantName,
+    policy: RegistryPolicy,
 ) -> Arc<dyn crabka_gres_ranges::control::SplitIntentAuthority> {
-    Arc::new(LiveSplitIntentAuthority { bootstrap, tenant })
+    Arc::new(LiveSplitIntentAuthority {
+        bootstrap,
+        tenant,
+        policy,
+    })
 }
 
 #[cfg(test)]
@@ -2564,9 +4411,12 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
         if request.tenant != self.tenant.as_str() {
             return Ok(None);
         }
-        let mut registry = crabka_gres_control::Registry::connect(&self.bootstrap)
-            .await
-            .map_err(|error| format!("connect split intent registry: {error}"))?;
+        let mut registry = crabka_gres_control::Registry::connect_with_policy(
+            &self.bootstrap,
+            self.policy.clone(),
+        )
+        .await
+        .map_err(|error| format!("connect split intent registry: {error}"))?;
         let operation = registry
             .load_split_operation(self.tenant.as_str(), &request.operation_id)
             .await
@@ -2622,15 +4472,20 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
 #[async_trait::async_trait]
 impl crabka_gres_ranges::registry::RangeRegistrySource for LiveRangeRegistrySource {
     async fn load_current(&self) -> Result<TenantRecord, crabka_gres_ranges::RegistryError> {
-        load_live_tenant_config(&self.bootstrap, &self.tenant, self.security.clone())
-            .await
-            .map_err(|error| crabka_gres_ranges::RegistryError::Authoritative(error.to_string()))?
-            .ok_or_else(|| {
-                crabka_gres_ranges::RegistryError::Authoritative(format!(
-                    "tenant {} is absent from the control registry",
-                    self.tenant
-                ))
-            })
+        load_live_tenant_config(
+            &self.bootstrap,
+            &self.tenant,
+            self.security.clone(),
+            &self.policy,
+        )
+        .await
+        .map_err(|error| crabka_gres_ranges::RegistryError::Authoritative(error.to_string()))?
+        .ok_or_else(|| {
+            crabka_gres_ranges::RegistryError::Authoritative(format!(
+                "tenant {} is absent from the control registry",
+                self.tenant
+            ))
+        })
     }
 }
 
@@ -2691,8 +4546,9 @@ async fn load_substrate_tenant_record(
     let tenant = TenantName::try_from(tenant)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     let security = tenant_kafka_security_from_env(tenant.as_str());
+    let policy = args.registry.policy();
     let record = tenant_config_loader
-        .load_tenant_config(bootstrap, &tenant, security)
+        .load_tenant_config(bootstrap, &tenant, security, &policy)
         .await?;
     let Some(record) = record else {
         // In-memory bootstraps carry no tenant record; the runtime serves
@@ -2719,17 +4575,21 @@ fn apply_tenant_runtime_defaults(
     mut args: ServeArgs,
     tenant_record: Option<&TenantRecord>,
 ) -> std::io::Result<ServeArgs> {
+    let checkpointing_requested = checkpointing_was_requested(&args);
     let Some(record) = tenant_record else {
         return Ok(args);
     };
+    if !checkpointing_requested {
+        return Ok(args);
+    }
     if args.checkpoint_prefix.is_none() {
         args.checkpoint_prefix.clone_from(&record.bucket_prefix);
     }
     if args.checkpoint_frames.is_none() {
         args.checkpoint_frames = nonzero_u64(record.checkpoint_frames, "checkpoint_frames")?;
     }
-    if args.checkpoint_bytes.is_none() {
-        args.checkpoint_bytes = nonzero_u64(record.checkpoint_bytes, "checkpoint_bytes")?;
+    if args.checkpoint_size.is_none() {
+        args.checkpoint_size = record.checkpoint_size;
     }
     Ok(args)
 }
@@ -2752,6 +4612,7 @@ async fn load_live_tenant_config(
     bootstrap: &str,
     tenant: &TenantName,
     security: Option<ClientSecurity>,
+    policy: &RegistryPolicy,
 ) -> std::io::Result<Option<TenantRecord>> {
     // The in-process substrate seam has no broker to dial and no config
     // topic to read; startup falls back to CLI-provided defaults.
@@ -2804,8 +4665,8 @@ async fn load_live_tenant_config(
             topic_id,
             0,
             next_offset,
-            TENANT_CONFIG_FETCH_MAX_WAIT_MS,
-            TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES,
+            policy.fetch_max_wait(),
+            policy.fetch_partition_max(),
         )
         .await
         .map_err(|error| std::io::Error::other(format!("tenant config fetch: {error}")))?;
@@ -2835,6 +4696,7 @@ async fn load_live_split_operation(
     tenant: &str,
     operation_id: &str,
     security: Option<ClientSecurity>,
+    policy: &RegistryPolicy,
 ) -> std::io::Result<Option<crabka_gres_control::SplitOperationRecord>> {
     const TOPIC: &str = crabka_gres_control::TENANT_REGISTRY_TOPIC;
     const KEY_PREFIX: &[u8] = b"\0gres-split-operation\0";
@@ -2880,15 +4742,7 @@ async fn load_live_split_operation(
     loop {
         let result = crabka_client_core::fetch_partition_with_isolation_progress(
             &conn,
-            crabka_client_core::IsolatedFetch {
-                topic: TOPIC,
-                topic_id,
-                partition: 0,
-                fetch_offset: next_offset,
-                max_wait_ms: TENANT_CONFIG_FETCH_MAX_WAIT_MS,
-                partition_max_bytes: TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES,
-                isolation_level: 1,
-            },
+            live_split_operation_fetch(policy, TOPIC, topic_id, next_offset),
         )
         .await
         .map_err(|error| std::io::Error::other(format!("activation registry fetch: {error}")))?;
@@ -2908,6 +4762,25 @@ async fn load_live_split_operation(
             return Ok(latest);
         };
         next_offset = progress;
+    }
+}
+
+fn live_split_operation_fetch<'a>(
+    policy: &RegistryPolicy,
+    topic: &'a str,
+    topic_id: crabka_protocol::primitives::uuid::Uuid,
+    fetch_offset: i64,
+) -> crabka_client_core::IsolatedFetch<'a> {
+    crabka_client_core::IsolatedFetch {
+        topic,
+        topic_id,
+        partition: 0,
+        fetch_offset,
+        max_wait: policy.fetch_max_wait(),
+        max: crabka_client_core::DEFAULT_FETCH_RESPONSE_MAX,
+        partition_max: policy.fetch_partition_max(),
+        fetch_min: crabka_client_core::FetchMinBytes::default(),
+        isolation_level: 1,
     }
 }
 
@@ -2985,13 +4858,15 @@ async fn open_runtime_with_tenant_record(
         .await;
     }
 
+    let policy = args.pgexec_runtime.effective_policy();
     let engine = match args.data_dir.as_deref() {
         Some(dir) => {
             std::fs::create_dir_all(dir)?;
-            SqlEngine::open(dir)
+            SqlEngine::open_with_policy(dir, policy)
                 .map_err(|err| std::io::Error::other(format!("opening data dir: {err:?}")))
         }
-        None => Ok(SqlEngine::new()),
+        None => SqlEngine::new_with_policy(policy)
+            .map_err(|err| std::io::Error::other(format!("opening in-memory engine: {err:?}"))),
     }?;
     Ok(GresRuntime::new(engine))
 }
@@ -3039,7 +4914,7 @@ async fn open_substrate_runtime_with_tenant_record(
         .await;
     }
 
-    let store = open_substrate_cache(config.cache_dir.as_deref())?;
+    let store = open_substrate_cache(config.cache_dir.as_deref(), config.pgkv_options)?;
     if !config.is_in_memory_bootstrap() {
         return open_live_substrate_runtime(config, store, tenant_record).await;
     }
@@ -3061,7 +4936,7 @@ async fn open_substrate_runtime_with_tenant_record(
         crabka_gres_substrate::wal_topic(&config.tenant),
         format!("{}/r0", config.tenant),
         None,
-        || Ok(GresCheckpointWalPruner::in_memory()),
+        |timeout| Ok(GresCheckpointWalPruner::in_memory(timeout)),
     )?;
     if let Some(checkpoint) = &checkpoint {
         seed_checkpoint_planner_stats(checkpoint).await?;
@@ -3071,6 +4946,7 @@ async fn open_substrate_runtime_with_tenant_record(
         log,
         barrier.generation,
         outcome.next_journal_seq,
+        config.wal_frame_max_size,
         &snapshot_source,
         checkpoint
             .as_ref()
@@ -3078,6 +4954,7 @@ async fn open_substrate_runtime_with_tenant_record(
         checkpoint.as_ref().map(|checkpoint| {
             Arc::clone(&checkpoint.planner_stats) as Arc<dyn crabka_pgexec::plan_dist::Stats>
         }),
+        config.pgexec_runtime_policy,
     )?;
     Ok(match checkpoint {
         Some(checkpoint) => GresRuntime::with_checkpoint_runtime(engine, checkpoint),
@@ -3158,7 +5035,8 @@ fn multirange_tenant_config(
         crabka_gres_ranges::MultiRangeTenantConfig::from_boundaries(tenant, boundaries)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
             .with_timestamp_source_mode(config.timestamp_source_mode)
-            .with_hlc_wall_offset_ms(config.hlc_wall_offset_ms);
+            .with_hlc_wall_offset_ms(config.hlc_wall_offset_ms)
+            .with_runtime_policy(config.range_runtime_policy);
     if let Some(record) = tenant_record {
         tenant_config.range_map = range_map_from_tenant_layout(
             tenant_config.tenant.clone(),
@@ -3192,11 +5070,12 @@ fn multirange_tenant_config(
                     |error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error),
                 )?,
                 security: config.kafka_security.clone(),
+                policy: config.registry_policy.clone(),
             }));
         }
         if let Some(range_rpc) = &config.range_rpc {
             tenant_config = tenant_config
-                .with_range_client(range_rpc.client()?)
+                .with_range_client(range_rpc.client(&config.range_runtime_policy)?)
                 .with_range_registry(registry);
         } else if remote_ranges_are_configured(config, record) {
             return invalid_input(
@@ -3214,18 +5093,18 @@ async fn attach_range0_read_barrier(
     tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
     checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
 ) -> std::io::Result<crabka_gres_ranges::MultiRangeTenantConfig> {
-    let follower_config = crabka_gres_substrate::LiveRecoveryConfig::new(
-        config.bootstrap.clone(),
-        tenant_config.tenant.clone(),
-        crabka_gres_ranges::RangeId::COORDINATOR,
-        config.kafka_security.clone(),
-    )
-    .with_optional_advertised_endpoint(config.advertised_endpoint.clone());
+    let follower_config = config
+        .live_recovery_config(
+            tenant_config.tenant.clone(),
+            crabka_gres_ranges::RangeId::COORDINATOR,
+        )
+        .with_optional_advertised_endpoint(config.advertised_endpoint.clone());
     // Generation 0 of the follower cache; a rebuild after a WAL trim opens the
     // next generation beside it. Anything left over from a previous process is
     // stale by construction and is swept away first.
     range0_follower::remove_other_follower_stores(config.cache_dir.as_deref(), 0);
-    let follower_store = range0_follower::open_follower_store(config.cache_dir.as_deref(), 0)?;
+    let follower_store =
+        range0_follower::open_follower_store(config.cache_dir.as_deref(), 0, config.pgkv_options)?;
     let follower = crabka_gres_substrate::bootstrap_live_range0_follower(
         &follower_config,
         follower_store,
@@ -3245,8 +5124,12 @@ async fn attach_range0_read_barrier(
     ));
     let catalog_refresh_poke = Arc::new(tokio::sync::Notify::new());
     let tenant_config = tenant_config.with_read_only_range0_replica(
-        crabka_gres_ranges::ReadOnlyRange0Replica::new(tail, sampler)
-            .with_catalog_refresh_poke(Arc::clone(&catalog_refresh_poke)),
+        crabka_gres_ranges::ReadOnlyRange0Replica::new_with_policy(
+            tail,
+            sampler,
+            &config.range_runtime_policy,
+        )
+        .with_catalog_refresh_poke(Arc::clone(&catalog_refresh_poke)),
     );
     tokio::spawn(
         range0_follower::Range0FollowerTail::new(
@@ -3254,7 +5137,7 @@ async fn attach_range0_read_barrier(
             follower_config,
             end_sampler,
             checkpoint_store,
-            config.cache_dir.clone(),
+            config,
             catalog_refresh_poke,
         )
         .run(),
@@ -3302,6 +5185,13 @@ async fn open_multirange_runtime(
         split_activation::discover_activation_receipt(config, checkpoint_store.as_deref())
             .await
             .map_err(|error| std::io::Error::other(format!("substrate recovery: {error}")))?;
+    reconcile_startup_checkpoint_pins(
+        config,
+        &tenant_config,
+        checkpoint_store.as_deref(),
+        activation_receipt.as_ref(),
+    )
+    .await?;
     let timestamp_primary_aliases = activation_receipt
         .as_ref()
         .map(split_activation::ActivationDiscovery::timestamp_primary_aliases)
@@ -3314,6 +5204,7 @@ async fn open_multirange_runtime(
             &discovery.receipt.tenant,
             &discovery.receipt.operation_id,
             config.kafka_security.clone(),
+            &config.registry_policy,
         )
         .await?
         .ok_or_else(|| std::io::Error::other("activation operation is absent"))?;
@@ -3355,13 +5246,14 @@ async fn open_multirange_runtime(
         early_tso_service,
     )
     .await?;
-    let (recovered_map, paused_control_recovery) = split_activation::reconcile_before_readiness(
-        config,
-        &mut engines,
-        checkpoint_store,
-        activation_receipt,
-    )
-    .await?;
+    let (recovered_map, paused_control_recovery) =
+        Box::pin(split_activation::reconcile_before_readiness(
+            config,
+            &mut engines,
+            checkpoint_store,
+            activation_receipt,
+        ))
+        .await?;
     if let Some(recovered_map) = recovered_map {
         tenant_config.range_map = recovered_map;
         if let Some(hosted) = &mut tenant_config.hosted_ranges {
@@ -3409,6 +5301,77 @@ async fn open_multirange_runtime(
         early_service,
     )
     .await
+}
+
+async fn reconcile_startup_checkpoint_pins(
+    config: &SubstrateRuntimeConfig,
+    tenant_config: &crabka_gres_ranges::MultiRangeTenantConfig,
+    store: Option<&dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
+    activation: Option<&split_activation::ActivationDiscovery>,
+) -> std::io::Result<()> {
+    let Some(store) = store else {
+        return Ok(());
+    };
+    let mut ranges = tenant_config
+        .range_map
+        .ranges()
+        .iter()
+        .map(|range| range.range_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    if let Some(activation) = activation {
+        ranges.extend(
+            activation
+                .receipt
+                .split
+                .current_map
+                .ranges()
+                .iter()
+                .map(|range| range.range_id),
+        );
+        ranges.extend(
+            activation
+                .receipt
+                .split
+                .target_map
+                .ranges()
+                .iter()
+                .map(|range| range.range_id),
+        );
+    }
+    for range_id in ranges {
+        let namespace = format!("{}/r{}", config.tenant, range_id.as_u32());
+        let active = activation.and_then(|activation| {
+            if !activation_requires_source_checkpoint_pin(activation.receipt.phase) {
+                return None;
+            }
+            let checkpoint = activation.receipt.source_checkpoint.as_ref()?;
+            (checkpoint.range_id == range_id).then_some((
+                activation.receipt.operation_id.as_str(),
+                checkpoint.manifest_key.as_str(),
+                checkpoint.covered_offset,
+            ))
+        });
+        crabka_gres_substrate::reconcile_checkpoint_pins(store, &namespace, active)
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "reconcile checkpoint pins for r{range_id}: {error}"
+                ))
+            })?;
+    }
+    Ok(())
+}
+
+const fn activation_requires_source_checkpoint_pin(
+    phase: crabka_gres_ranges::control::TopologyActivationPhase,
+) -> bool {
+    matches!(
+        phase,
+        crabka_gres_ranges::control::TopologyActivationPhase::SourceCheckpoint
+            | crabka_gres_ranges::control::TopologyActivationPhase::MustActivate
+            | crabka_gres_ranges::control::TopologyActivationPhase::WriterActivated
+            | crabka_gres_ranges::control::TopologyActivationPhase::CheckpointDurable
+    )
 }
 
 fn range_map_from_tenant_layout(
@@ -3483,6 +5446,7 @@ fn must_activate_range_registry(
                             std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
                         })?,
                     security: config.kafka_security.clone(),
+                    policy: config.registry_policy.clone(),
                 },
                 current_layout,
                 source_record_version,
@@ -3509,7 +5473,8 @@ async fn recover_live_multirange_engines(
             range_id,
             local_checkpoint_root(config),
         )?;
-        let store = open_substrate_range_cache(config.cache_dir.as_deref(), range_id)?;
+        let store =
+            open_substrate_range_cache(config.cache_dir.as_deref(), range_id, config.pgkv_options)?;
         let recovered = open_live_range_substrate_engine(
             config,
             recovery_config,
@@ -3532,10 +5497,14 @@ async fn recover_live_multirange_engines(
                     horizon,
                     tenant_config.timestamp_source_mode,
                     tenant_config.hlc_wall_offset_ms,
+                    &tenant_config.runtime_policy,
                 )?;
                 early.replace(
-                    crabka_gres_ranges::HostedRangeService::new(BTreeMap::new())
-                        .with_tso(Arc::clone(&tso_rpc)),
+                    crabka_gres_ranges::HostedRangeService::new_with_policy(
+                        BTreeMap::new(),
+                        tenant_config.runtime_policy,
+                    )
+                    .with_tso(Arc::clone(&tso_rpc)),
                 );
                 tracing::info!("range-0 timestamp oracle serving before full multirange recovery");
                 range0_tso = Some(tso_rpc);
@@ -3556,12 +5525,19 @@ fn build_range0_tso_rpc(
     tso_horizon: &crabka_gres_substrate::SubstrateTsoHorizon,
     mode: crabka_gres_ranges::TimestampSourceMode,
     hlc_wall_offset_ms: i64,
+    policy: &crabka_gres_ranges::RangeRuntimePolicy,
 ) -> std::io::Result<Arc<dyn crabka_gres_ranges::TsoRpc>> {
     let persisted_max_ts = tso_horizon
         .load_max_ts()
         .map_err(|error| std::io::Error::other(format!("range-0 TSO horizon: {error}")))?;
-    mode_tso_rpc_from_horizon(tso_horizon, persisted_max_ts, mode, hlc_wall_offset_ms)
-        .map_err(|error| std::io::Error::other(format!("range-0 TSO oracle: {error}")))
+    mode_tso_rpc_from_horizon(
+        tso_horizon,
+        persisted_max_ts,
+        mode,
+        hlc_wall_offset_ms,
+        policy,
+    )
+    .map_err(|error| std::io::Error::other(format!("range-0 TSO oracle: {error}")))
 }
 
 /// Build the mode-appropriate range-0 grant oracle from an already-loaded
@@ -3582,23 +5558,26 @@ fn mode_tso_rpc_from_horizon(
     persisted_max_ts: u64,
     mode: crabka_gres_ranges::TimestampSourceMode,
     hlc_wall_offset_ms: i64,
+    policy: &crabka_gres_ranges::RangeRuntimePolicy,
 ) -> Result<Arc<dyn crabka_gres_ranges::TsoRpc>, crabka_gres_ranges::TsoError> {
     match mode {
         crabka_gres_ranges::TimestampSourceMode::LogicalTso => {
-            crabka_gres_ranges::tso_rpc_from_horizon(
+            crabka_gres_ranges::tso_rpc_from_horizon_with_policy(
                 tso_horizon.clone(),
                 tso_horizon.clone(),
                 tso_horizon.epoch(),
                 persisted_max_ts,
+                policy,
             )
         }
         crabka_gres_ranges::TimestampSourceMode::Hlc { .. } => {
-            crabka_gres_ranges::hlc_tso_rpc_from_horizon(
+            crabka_gres_ranges::hlc_tso_rpc_from_horizon_with_policy(
                 tso_horizon.clone(),
                 tso_horizon.clone(),
                 tso_horizon.epoch(),
                 persisted_max_ts,
                 crabka_gres_ranges::hlc_wall_clock(hlc_wall_offset_ms),
+                policy,
             )
         }
     }
@@ -3631,20 +5610,16 @@ fn live_multirange_recovery_configs(
                     .is_none_or(|ranges| ranges.contains(&spec.range_id))
         })
         .map(|spec| {
-            crabka_gres_substrate::LiveRecoveryConfig::new(
-                config.bootstrap.clone(),
-                tenant_config.tenant.clone(),
-                spec.range_id,
-                config.kafka_security.clone(),
-            )
-            .with_wal_generation(
-                activation
-                    .and_then(|discovery| {
-                        discovery.recovery_generations.get(&spec.range_id).copied()
-                    })
-                    .unwrap_or(0),
-            )
-            .with_optional_advertised_endpoint(config.advertised_endpoint.clone())
+            config
+                .live_recovery_config(tenant_config.tenant.clone(), spec.range_id)
+                .with_wal_generation(
+                    activation
+                        .and_then(|discovery| {
+                            discovery.recovery_generations.get(&spec.range_id).copied()
+                        })
+                        .unwrap_or(0),
+                )
+                .with_optional_advertised_endpoint(config.advertised_endpoint.clone())
         })
         .collect::<Vec<_>>();
     // Recover range 0 ahead of its siblings so the timestamp oracle can start
@@ -3677,14 +5652,10 @@ fn single_range_live_wal_selection(
             .find(|range| range.range_id == crabka_gres_ranges::RangeId::COORDINATOR.as_u32())
             .map_or(record.wal_generation, |range| range.wal_generation)
     });
-    let recovery_config = crabka_gres_substrate::LiveRecoveryConfig::new(
-        config.bootstrap.clone(),
-        tenant,
-        crabka_gres_ranges::RangeId::COORDINATOR,
-        config.kafka_security.clone(),
-    )
-    .with_wal_generation(wal_generation)
-    .with_optional_advertised_endpoint(config.advertised_endpoint.clone());
+    let recovery_config = config
+        .live_recovery_config(tenant, crabka_gres_ranges::RangeId::COORDINATOR)
+        .with_wal_generation(wal_generation)
+        .with_optional_advertised_endpoint(config.advertised_endpoint.clone());
     let topic = recovery_config.wal_topic();
     Ok(SingleRangeLiveWalSelection {
         checkpoint_namespace: recovery_config.checkpoint_namespace(),
@@ -3740,6 +5711,7 @@ async fn open_live_range_substrate_engine(
         Arc::clone(&writer),
         recovered.generation,
         recovered.next_journal_seq,
+        config.wal_frame_max_size,
         &snapshot_source,
         checkpoint
             .as_ref()
@@ -3747,6 +5719,7 @@ async fn open_live_range_substrate_engine(
         checkpoint.as_ref().map(|runtime| {
             Arc::clone(&runtime.planner_stats) as Arc<dyn crabka_pgexec::plan_dist::Stats>
         }),
+        config.pgexec_runtime_policy,
     )?;
     let tso_horizon = if range_id == crabka_gres_ranges::RangeId::COORDINATOR {
         let tso_store: Arc<dyn Kv> = store.clone();
@@ -4009,6 +5982,7 @@ async fn start_live_multirange_tenant(
             &tso_horizon,
             tenant_config.timestamp_source_mode,
             tenant_config.hlc_wall_offset_ms,
+            &tenant_config.runtime_policy,
         )?),
         (None, None) => None,
     };
@@ -4090,9 +6064,12 @@ fn assembled_hosted_service(
     gateway: &crabka_gres_ranges::MultiRangeTenant,
     timestamp_primary_aliases: &BTreeMap<crabka_gres_ranges::RangeId, crabka_gres_ranges::RangeId>,
 ) -> crabka_gres_ranges::HostedRangeService {
-    let mut service = crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
-        .with_timestamp_primary_aliases(timestamp_primary_aliases.clone())
-        .with_ddl_gate(gateway.schema_gate());
+    let mut service = crabka_gres_ranges::HostedRangeService::new_with_policy(
+        gateway.hosted_range_engines(),
+        gateway.runtime_policy(),
+    )
+    .with_timestamp_primary_aliases(timestamp_primary_aliases.clone())
+    .with_ddl_gate(gateway.schema_gate());
     if let Some(replica) = gateway.range0_replica() {
         service = service.with_catalog_follower(replica.barrier());
     }
@@ -4207,6 +6184,7 @@ async fn open_live_multirange_tenant(
         bootstrap: config.bootstrap.clone(),
         tenant: crabka_gres_control::TenantName::try_from(config.tenant.as_str())
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?,
+        policy: config.registry_policy.clone(),
     });
     let mut control = crabka_gres_ranges::control::GenerationFencedRangeControl::new(
         config.tenant.clone(),
@@ -4490,12 +6468,9 @@ impl crabka_gres_ranges::DurableRecordInspector for LiveMultiRangeTransfer {
             transfer: self,
             range_id: request.range_id,
         };
-        let fold = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+        let fold = tokio::time::timeout(self.config.durable_inspection_timeout, async {
             let projection = crabka_gres_substrate::FoldProjection::All;
-            let limits = crabka_gres_substrate::FoldLimits {
-                max_records: 1_000_000,
-                max_bytes: 256 * 1024 * 1024,
-            };
+            let limits = self.config.durable_inspection_fold_limits;
             match snapshot_offset {
                 Some(sample) => {
                     crabka_gres_substrate::committed_fold_snapshot_live_at(
@@ -4870,6 +6845,34 @@ impl LiveMultiRangeTransfer {
         }
     }
 
+    async fn release_checkpoint_pin(
+        &self,
+        operation_id: &str,
+        range_id: crabka_gres_ranges::RangeId,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        let resources = self
+            .retired
+            .lock()
+            .map_err(|_| range_pause_lock_error(range_id))?
+            .get(&range_id)
+            .cloned()
+            .map_or_else(|| self.range(range_id), Ok)?;
+        let checkpoint = resources.checkpoint.ok_or_else(|| {
+            crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id,
+                reason: "checkpoint runtime is unavailable for pin release".into(),
+            }
+        })?;
+        checkpoint
+            .handle
+            .release_pin(operation_id.to_owned())
+            .await
+            .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id,
+                reason: format!("release checkpoint pin: {error}"),
+            })
+    }
+
     async fn retire_predecessor(
         &self,
         operation_id: &str,
@@ -4887,7 +6890,8 @@ impl LiveMultiRangeTransfer {
             .retired
             .lock()
             .map_err(|_| range_pause_lock_error(range_id))?
-            .remove(&range_id);
+            .get(&range_id)
+            .cloned();
         let Some(resources) = resources else {
             use crabka_gres_ranges::control::{
                 RangeZeroTopologyActivationStore, TopologyActivationPhase,
@@ -5308,6 +7312,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
 
     async fn force_checkpoint(
         &self,
+        operation_id: &str,
         range_id: crabka_gres_ranges::RangeId,
     ) -> Result<crabka_gres_ranges::CheckpointManifest, crabka_gres_ranges::RangeTransferError>
     {
@@ -5320,9 +7325,10 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
         })?;
         let run = checkpoint
             .handle
-            .checkpoint_from_source(
+            .checkpoint_from_source_pinned(
                 Arc::clone(&checkpoint.snapshot_source),
                 crabka_gres_substrate::CheckpointTrigger::Manual,
+                operation_id.to_owned(),
             )
             .await
             .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
@@ -5419,12 +7425,25 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
 
     async fn resume(
         &self,
+        _operation_id: &str,
         barrier: crabka_gres_ranges::RangeTransferBarrier,
     ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
         self.release_pause(barrier)
     }
 
-    fn resume_after_drop(&self, barrier: crabka_gres_ranges::RangeTransferBarrier) {
+    async fn release_checkpoint_pin(
+        &self,
+        operation_id: &str,
+        range_id: crabka_gres_ranges::RangeId,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        LiveMultiRangeTransfer::release_checkpoint_pin(self, operation_id, range_id).await
+    }
+
+    fn resume_after_drop(
+        &self,
+        _operation_id: &str,
+        barrier: crabka_gres_ranges::RangeTransferBarrier,
+    ) {
         let irreversible_operation = self
             .pending
             .lock()
@@ -5561,21 +7580,26 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                         reason: format!("reset disposable successor cache: {error}"),
                     }
                 })?;
-                let target_store =
-                    open_substrate_range_cache(staged_cache_dir.as_deref(), request.target_range)
-                        .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                let target_store = open_substrate_range_cache(
+                    staged_cache_dir.as_deref(),
+                    request.target_range,
+                    self.config.pgkv_options,
+                )
+                .map_err(|error| {
+                    crabka_gres_ranges::RangeTransferError::Runtime {
                         range_id: request.target_range,
                         reason: format!("open empty successor cache: {error}"),
-                    })?;
-                let target_recovery = crabka_gres_substrate::LiveRecoveryConfig::new(
-                    self.config.bootstrap.clone(),
-                    source.recovery_config.tenant.clone(),
-                    request.target_range,
-                    self.config.kafka_security.clone(),
-                )
-                .with_wal_generation(request.wal_generation)
-                .with_optional_advertised_endpoint(self.config.advertised_endpoint.clone())
-                .with_checkpoints(Arc::clone(&source_checkpoint.store));
+                    }
+                })?;
+                let target_recovery = self
+                    .config
+                    .live_recovery_config(
+                        source.recovery_config.tenant.clone(),
+                        request.target_range,
+                    )
+                    .with_wal_generation(request.wal_generation)
+                    .with_optional_advertised_endpoint(self.config.advertised_endpoint.clone())
+                    .with_checkpoints(Arc::clone(&source_checkpoint.store));
                 crabka_gres_substrate::ensure_live_wal_topic(&target_recovery)
                     .await
                     .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
@@ -5661,10 +7685,12 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     Arc::clone(&writer),
                     generation,
                     restore_plan.replay.next_journal_seq,
+                    self.config.wal_frame_max_size,
                     &snapshot_source,
                     Some(Arc::clone(&checkpoint.stats)),
                     Some(Arc::clone(&checkpoint.planner_stats)
                         as Arc<dyn crabka_pgexec::plan_dist::Stats>),
+                    self.config.pgexec_runtime_policy,
                 )
                 .map_err(|error| {
                     crabka_gres_ranges::RangeTransferError::Runtime {
@@ -5696,6 +7722,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                         persisted_max_ts,
                         self.config.timestamp_source_mode,
                         self.config.hlc_wall_offset_ms,
+                        &self.config.range_runtime_policy,
                     )
                     .map_err(|error| {
                         crabka_gres_ranges::RangeTransferError::Runtime {
@@ -5968,7 +7995,7 @@ fn committed_tail_sha256(tail: &[crabka_gres_ranges::CommittedTailRecord]) -> St
 
 #[async_trait::async_trait]
 impl FinalCheckpointer for StartedCheckpointRuntime {
-    async fn latest_checkpoint_bytes(&self) -> std::io::Result<u64> {
+    async fn latest_checkpoint_size(&self) -> std::io::Result<ByteSize> {
         let snapshot = self.snapshot_source.snapshot();
         let metadata = crabka_gres_substrate::latest_checkpoint_metadata(
             self.store.as_ref(),
@@ -5978,10 +8005,12 @@ impl FinalCheckpointer for StartedCheckpointRuntime {
         )
         .await
         .map_err(|error| std::io::Error::other(format!("latest checkpoint metadata: {error}")))?;
-        Ok(remember_latest_checkpoint_bytes(
+        // The cache is an `AtomicU64`, which cannot hold a quantity, so it stays
+        // raw bytes and the conversion happens here in the accessor.
+        Ok(ByteSize::from_bytes(remember_latest_checkpoint_bytes(
             &self.latest_checkpoint_bytes,
             metadata.map(|metadata| metadata.total_bytes),
-        ))
+        )))
     }
 
     async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint> {
@@ -6019,7 +8048,7 @@ fn build_checkpoint_runtime(
     wal_topic: String,
     checkpoint_namespace: String,
     checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
-    pruner: impl FnOnce() -> std::io::Result<GresCheckpointWalPruner>,
+    pruner: impl FnOnce(Time) -> std::io::Result<GresCheckpointWalPruner>,
 ) -> std::io::Result<Option<StartedCheckpointRuntime>> {
     let Some(checkpoint_config) = &config.checkpoints else {
         return Ok(None);
@@ -6028,21 +8057,14 @@ fn build_checkpoint_runtime(
         Some(store) => store,
         None => build_checkpoint_store(checkpoint_config)?,
     };
-    let service_config = crabka_gres_substrate::CheckpointConfig::new(
-        checkpoint_namespace.clone(),
-        wal_topic,
-        checkpoint_config.frames_threshold,
-        checkpoint_config.bytes_threshold,
-        checkpoint_config.part_max_bytes,
-        checkpoint_config.retain_newest,
-    )
-    .map_err(|error| std::io::Error::other(format!("checkpoint config: {error}")))?;
+    let service_config =
+        checkpoint_service_config(checkpoint_config, checkpoint_namespace.clone(), wal_topic)?;
     let stats = Arc::new(crabka_gres_substrate::CheckpointStats::default());
     let service = crabka_gres_substrate::CheckpointService::new(
         service_config,
         store,
         Arc::clone(&checkpoint_store),
-        Arc::new(pruner()?),
+        Arc::new(pruner(checkpoint_config.delete_records_timeout)?),
         Arc::clone(&stats),
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint service: {error}")))?;
@@ -6079,15 +8101,8 @@ fn build_range_checkpoint_runtime(
     // CheckpointService derives object paths from this identity.  Encoding the range as a
     // path component yields `gres/<tenant>/r<range>/ckpt/`, never a shared tenant manifest set.
     let namespace = format!("{}/r{}", config.tenant, range_id.as_u32());
-    let service_config = crabka_gres_substrate::CheckpointConfig::new(
-        namespace.clone(),
-        wal_topic,
-        checkpoint_config.frames_threshold,
-        checkpoint_config.bytes_threshold,
-        checkpoint_config.part_max_bytes,
-        checkpoint_config.retain_newest,
-    )
-    .map_err(|error| std::io::Error::other(format!("checkpoint config: {error}")))?;
+    let service_config =
+        checkpoint_service_config(checkpoint_config, namespace.clone(), wal_topic)?;
     let stats = Arc::new(crabka_gres_substrate::CheckpointStats::default());
     let service = crabka_gres_substrate::CheckpointService::new(
         service_config,
@@ -6096,6 +8111,7 @@ fn build_range_checkpoint_runtime(
         Arc::new(GresCheckpointWalPruner::kafka(
             &config.bootstrap,
             config.kafka_security.clone(),
+            checkpoint_config.delete_records_timeout,
         )?),
         Arc::clone(&stats),
     )
@@ -6113,6 +8129,23 @@ fn build_range_checkpoint_runtime(
         tenant: namespace,
         latest_checkpoint_bytes: std::sync::atomic::AtomicU64::new(0),
     }))
+}
+
+fn checkpoint_service_config(
+    config: &CheckpointRuntimeConfig,
+    checkpoint_namespace: String,
+    wal_topic: String,
+) -> std::io::Result<crabka_gres_substrate::CheckpointConfig> {
+    crabka_gres_substrate::CheckpointConfig::new(
+        checkpoint_namespace,
+        wal_topic,
+        config.frames_threshold,
+        config.bytes_threshold,
+        config.part_max_size,
+        config.retain_newest,
+        config.poll_interval,
+    )
+    .map_err(|error| std::io::Error::other(format!("checkpoint config: {error}")))
 }
 
 async fn open_live_substrate_runtime(
@@ -6153,7 +8186,13 @@ async fn open_live_substrate_runtime(
         wal_selection.checkpoint_topic,
         wal_selection.checkpoint_namespace,
         checkpoint_store,
-        || GresCheckpointWalPruner::kafka(&config.bootstrap, config.kafka_security.clone()),
+        |timeout| {
+            GresCheckpointWalPruner::kafka(
+                &config.bootstrap,
+                config.kafka_security.clone(),
+                timeout,
+            )
+        },
     )?;
     if let Some(checkpoint) = &checkpoint {
         seed_checkpoint_planner_stats(checkpoint).await?;
@@ -6163,6 +8202,7 @@ async fn open_live_substrate_runtime(
         writer,
         recovered.generation,
         recovered.next_journal_seq,
+        config.wal_frame_max_size,
         &snapshot_source,
         checkpoint
             .as_ref()
@@ -6170,6 +8210,7 @@ async fn open_live_substrate_runtime(
         checkpoint.as_ref().map(|checkpoint| {
             Arc::clone(&checkpoint.planner_stats) as Arc<dyn crabka_pgexec::plan_dist::Stats>
         }),
+        config.pgexec_runtime_policy,
     )?;
     Ok(match checkpoint {
         Some(checkpoint) => GresRuntime::with_checkpoint_runtime(engine, checkpoint),
@@ -6187,14 +8228,17 @@ fn recovery_config_with_checkpoint_store(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_replicated_substrate_engine<W>(
     store: &Arc<dyn SubstrateKv>,
     writer: Arc<W>,
     generation: crabka_gres_substrate::WriterGeneration,
     next_journal_seq: u64,
+    wal_frame_max_size: ByteSize,
     snapshot_source: &Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint_stats: Option<Arc<crabka_gres_substrate::CheckpointStats>>,
     checkpoint_planner_stats: Option<Arc<dyn crabka_pgexec::plan_dist::Stats>>,
+    pgexec_runtime_policy: crabka_pgexec::RuntimePolicy,
 ) -> std::io::Result<SqlEngine>
 where
     W: crabka_gres_substrate::TransactionalWalWriter + crabka_gres_substrate::FenceLease + 'static,
@@ -6204,21 +8248,26 @@ where
         writer,
         generation,
         next_journal_seq,
+        wal_frame_max_size,
         snapshot_source,
         checkpoint_stats,
         checkpoint_planner_stats,
+        pgexec_runtime_policy,
     )
     .map(|(engine, _committer)| engine)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_replicated_substrate_engine_with_committer<W>(
     store: &Arc<dyn SubstrateKv>,
     writer: Arc<W>,
     generation: crabka_gres_substrate::WriterGeneration,
     next_journal_seq: u64,
+    wal_frame_max_size: ByteSize,
     snapshot_source: &Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint_stats: Option<Arc<crabka_gres_substrate::CheckpointStats>>,
     checkpoint_planner_stats: Option<Arc<dyn crabka_pgexec::plan_dist::Stats>>,
+    pgexec_runtime_policy: crabka_pgexec::RuntimePolicy,
 ) -> std::io::Result<(SqlEngine, Arc<crabka_gres_substrate::SubstrateCommitter<W>>)>
 where
     W: crabka_gres_substrate::TransactionalWalWriter + crabka_gres_substrate::FenceLease + 'static,
@@ -6236,6 +8285,7 @@ where
         generation,
         next_journal_seq,
     )
+    .with_max_frame_size(wal_frame_max_size)
     .with_checkpoint_snapshot_source(Arc::clone(snapshot_source));
     let committer = if let Some(checkpoint_stats) = checkpoint_stats {
         committer.with_checkpoint_stats(checkpoint_stats)
@@ -6244,11 +8294,12 @@ where
     };
     let committer = Arc::new(committer);
     let linearizer = crabka_gres_substrate::SubstrateLinearizer::new(writer, generation);
-    let mut engine = SqlEngine::replicated(
+    let mut engine = SqlEngine::replicated_with_policy(
         engine_read_store,
         engine_write_store,
         committer.clone(),
         Arc::new(linearizer),
+        pgexec_runtime_policy,
     )
     .map_err(|error| std::io::Error::other(format!("engine: {error:?}")))?;
     if let Some(checkpoint_stats) = checkpoint_planner_stats {
@@ -6271,24 +8322,27 @@ where
 
 fn open_substrate_cache(
     cache_dir: Option<&std::path::Path>,
+    options: FjallOptions,
 ) -> std::io::Result<Arc<dyn SubstrateKv>> {
     let Some(dir) = cache_dir else {
         return Ok(Arc::new(MemKv::default()));
     };
     std::fs::create_dir_all(dir)?;
-    Ok(Arc::new(FjallKv::open_cache(dir).map_err(|error| {
-        std::io::Error::other(format!("cache dir: {error:?}"))
-    })?))
+    Ok(Arc::new(
+        FjallKv::open_cache_with_options(dir, options)
+            .map_err(|error| std::io::Error::other(format!("cache dir: {error:?}")))?,
+    ))
 }
 
 fn open_substrate_range_cache(
     cache_dir: Option<&std::path::Path>,
     range_id: crabka_gres_ranges::RangeId,
+    options: FjallOptions,
 ) -> std::io::Result<Arc<dyn SubstrateKv>> {
     let Some(dir) = cache_dir else {
         return Ok(Arc::new(MemKv::default()));
     };
-    open_substrate_cache(Some(&dir.join(format!("r{}", range_id.as_u32()))))
+    open_substrate_cache(Some(&dir.join(format!("r{}", range_id.as_u32()))), options)
 }
 
 fn reset_substrate_range_cache(
@@ -6372,16 +8426,79 @@ fn local_checkpoint_root(config: &SubstrateRuntimeConfig) -> Option<&std::path::
 
 /// Register Crabka's Kafka foreign-data scanner with the SQL engine.
 pub fn register_kafka_scanner(engine: &mut SqlEngine) {
-    engine.set_foreign_scanner(Arc::new(crabka_gres_fdw::KafkaFdw::with_defaults(None)));
+    engine.set_foreign_scanner(Arc::new(kafka_scanner(
+        None,
+        crabka_client_core::ClientDnsTimeout::default(),
+        crabka_gres_fdw::SchemaFetchRetryPolicy::default(),
+        crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        crabka_client_core::ClientFrameMax::default(),
+        crabka_client_core::FetchMinBytes::default(),
+        crabka_gres_fdw::FdwScanPolicy::default(),
+        crabka_gres_fdw::FdwDecodePolicy::default(),
+    )));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn kafka_scanner(
+    default_bootstrap: Option<String>,
+    broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
+    schema_fetch_retry_policy: crabka_gres_fdw::SchemaFetchRetryPolicy,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
+    fetch_min: crabka_client_core::FetchMinBytes,
+    scan_policy: crabka_gres_fdw::FdwScanPolicy,
+    decode_policy: crabka_gres_fdw::FdwDecodePolicy,
+) -> crabka_gres_fdw::KafkaFdw {
+    crabka_gres_fdw::KafkaFdw::with_defaults(default_bootstrap)
+        .with_broker_dns_timeout(broker_dns_timeout)
+        .with_schema_fetch_retry_policy(schema_fetch_retry_policy)
+        .with_client_resource_policy(dispatch_queue_capacity, frame_max, fetch_min)
+        .with_scan_policy(scan_policy)
+        .with_decode_policy(decode_policy)
 }
 
 /// Register Crabka's Kafka foreign-data scanner with an optional default bootstrap.
 pub fn register_kafka_scanner_with_default_bootstrap(
     engine: &mut RuntimeEngine,
     default_bootstrap: Option<String>,
+    broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
+    schema_fetch_retry_policy: crabka_gres_fdw::SchemaFetchRetryPolicy,
 ) {
-    let scanner: Arc<dyn crabka_pgexec::foreign::ForeignScanner> =
-        Arc::new(crabka_gres_fdw::KafkaFdw::with_defaults(default_bootstrap));
+    register_kafka_scanner_with_default_bootstrap_and_policy(
+        engine,
+        default_bootstrap,
+        broker_dns_timeout,
+        schema_fetch_retry_policy,
+        crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        crabka_client_core::ClientFrameMax::default(),
+        crabka_client_core::FetchMinBytes::default(),
+        crabka_gres_fdw::FdwScanPolicy::default(),
+        crabka_gres_fdw::FdwDecodePolicy::default(),
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn register_kafka_scanner_with_default_bootstrap_and_policy(
+    engine: &mut RuntimeEngine,
+    default_bootstrap: Option<String>,
+    broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
+    schema_fetch_retry_policy: crabka_gres_fdw::SchemaFetchRetryPolicy,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
+    fetch_min: crabka_client_core::FetchMinBytes,
+    scan_policy: crabka_gres_fdw::FdwScanPolicy,
+    decode_policy: crabka_gres_fdw::FdwDecodePolicy,
+) {
+    let scanner: Arc<dyn crabka_pgexec::foreign::ForeignScanner> = Arc::new(kafka_scanner(
+        default_bootstrap,
+        broker_dns_timeout,
+        schema_fetch_retry_policy,
+        dispatch_queue_capacity,
+        frame_max,
+        fetch_min,
+        scan_policy,
+        decode_policy,
+    ));
     match engine {
         RuntimeEngine::Single(engine) => engine.set_foreign_scanner(scanner),
         RuntimeEngine::Multi(tenant) => tenant.set_foreign_scanner(&scanner),
@@ -6410,15 +8527,20 @@ pub fn build_session_config_from_tenant(
 ) -> std::io::Result<SessionConfig> {
     use std::io::{Error, ErrorKind};
 
-    match (args.auth.as_deref(), tenant_record) {
+    let mut config = match (args.auth.as_deref(), tenant_record) {
         (Some("trust"), _) | (None, None) => Ok(SessionConfig::trust()),
-        (Some("scram"), _) => build_scram_session_config(&args.user_creds),
+        (Some("scram"), _) => {
+            build_scram_session_config(&args.user_creds, args.pgwire_scram_iterations)
+        }
         (None, Some(record)) => build_tenant_scram_session_config(record),
         (other, _) => Err(Error::new(
             ErrorKind::InvalidInput,
             format!("unknown --auth {other:?}: expected \"trust\" or \"scram\""),
         )),
-    }
+    }?;
+    config.max_message_len =
+        whole_bytes_usize("pgwire maximum message size", args.pgwire_max_message_size)?;
+    Ok(config)
 }
 
 fn build_tenant_scram_session_config(record: &TenantRecord) -> std::io::Result<SessionConfig> {
@@ -6442,6 +8564,7 @@ fn build_tenant_scram_session_config(record: &TenantRecord) -> std::io::Result<S
         auth: AuthMode::ScramSha256 {
             verifiers,
             mock_secret,
+            mock_iterations: pg_verifier.iterations,
         },
         ..SessionConfig::trust()
     })
@@ -6457,7 +8580,10 @@ fn sha256_key_array(bytes: Vec<u8>, field: &'static str) -> std::io::Result<[u8;
     })
 }
 
-fn build_scram_session_config(user_creds: &[String]) -> std::io::Result<SessionConfig> {
+fn build_scram_session_config(
+    user_creds: &[String],
+    iterations: u32,
+) -> std::io::Result<SessionConfig> {
     use std::io::{Error, ErrorKind};
 
     if user_creds.is_empty() {
@@ -6481,7 +8607,7 @@ fn build_scram_session_config(user_creds: &[String]) -> std::io::Result<SessionC
         let salt: [u8; crabka_pgwire::scram::SALT_LEN] = rand::rng().random();
         verifiers.insert(
             user.to_string(),
-            crabka_pgwire::scram::ScramVerifier::from_password(password, salt.to_vec(), 4096),
+            crabka_pgwire::scram::ScramVerifier::from_password(password, salt.to_vec(), iterations),
         );
     }
 
@@ -6490,6 +8616,7 @@ fn build_scram_session_config(user_creds: &[String]) -> std::io::Result<SessionC
         auth: AuthMode::ScramSha256 {
             verifiers,
             mock_secret,
+            mock_iterations: iterations,
         },
         ..SessionConfig::trust()
     })
@@ -6499,7 +8626,8 @@ fn build_scram_session_config(user_creds: &[String]) -> std::io::Result<SessionC
 mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
-    use clap::{CommandFactory as _, Parser as _};
+    use assert2::assert;
+    use clap::CommandFactory as _;
 
     use super::*;
 
@@ -6514,6 +8642,589 @@ mod tests {
             crabka_gres_ranges::GatewayCommitFault::AfterTimestampPrewriteBeforeDecision
         );
         assert!(parse_test_commit_fault("unknown_timestamp_fault").is_err());
+    }
+
+    #[test]
+    fn registry_policy_options_use_validated_defaults() {
+        let defaults = Cli::try_parse_from(["crabka-gres"]).expect("defaults");
+        assert!(defaults.serve.registry.policy() == crabka_gres_control::RegistryPolicy::default());
+        for option in [
+            "--client-dispatch-queue-capacity=0",
+            "--client-frame-max=101MiB",
+            "--registry-reader-fetch-min=0B",
+            "--registry-replication-factor=0",
+            "--registry-replication-factor=32768",
+            "--registry-topic-create-timeout=0ms",
+            "--registry-reader-retry-backoff=0ms",
+            "--registry-fetch-max-wait=0ms",
+            "--registry-fetch-partition-max=0B",
+            "--registry-producer-dns-timeout=0ms",
+            "--registry-reader-admin-dns-timeout=0ms",
+        ] {
+            assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
+        }
+    }
+
+    #[test]
+    fn client_resource_policy_parses_defaults_overrides_and_role_restrictions() {
+        let defaults = Cli::try_parse_from(["crabka-gres"]).expect("defaults");
+        assert!(defaults.serve.registry.dispatch_queue_capacity().get() == 64);
+        assert!(defaults.serve.registry.frame_max().size() == crabka_units::mebibytes(100));
+        assert!(defaults.serve.registry.fdw_fetch_min().bytes() == 1);
+        assert!(defaults.serve.registry.wal_recovery_fetch_min().bytes() == 1);
+        assert!(defaults.serve.registry.registry_reader_fetch_min().bytes() == 1);
+
+        let custom = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--client-dispatch-queue-capacity=7",
+            "--client-frame-max=32KiB",
+            "--fdw-fetch-min=2B",
+            "--wal-recovery-fetch-min=3B",
+            "--registry-reader-fetch-min=4B",
+        ])
+        .expect("custom policy");
+        assert!(custom.serve.registry.dispatch_queue_capacity().get() == 7);
+        assert!(custom.serve.registry.frame_max().size() == crabka_units::kibibytes(32));
+        assert!(custom.serve.registry.fdw_fetch_min().bytes() == 2);
+        assert!(custom.serve.registry.wal_recovery_fetch_min().bytes() == 3);
+        assert!(custom.serve.registry.registry_reader_fetch_min().bytes() == 4);
+        let substrate = SubstrateRuntimeConfig::from_args(&custom.serve)
+            .expect("valid substrate policy")
+            .expect("substrate enabled");
+        assert!(substrate.client_dispatch_queue_capacity.get() == 7);
+        assert!(substrate.client_frame_max.size() == crabka_units::kibibytes(32));
+        assert!(substrate.fdw_fetch_min.bytes() == 2);
+        assert!(substrate.wal_recovery_fetch_min.bytes() == 3);
+
+        for role_specific in ["--fdw-fetch-min=2B", "--wal-recovery-fetch-min=3B"] {
+            assert!(Cli::try_parse_from(["crabka-gres", role_specific]).is_err());
+        }
+    }
+
+    #[test]
+    fn client_resource_policy_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TEST_GRES_CLIENT_RESOURCE_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "tests::client_resource_policy_reads_environment_and_prefers_cli",
+                ])
+                .env(CHILD, "1")
+                .env("CRABKA_GRES_CLIENT_DISPATCH_QUEUE_CAPACITY", "7")
+                .env("CRABKA_GRES_CLIENT_FRAME_MAX", "32KiB")
+                .env("CRABKA_GRES_FDW_FETCH_MIN", "2B")
+                .env("CRABKA_GRES_WAL_RECOVERY_FETCH_MIN", "3B")
+                .env("CRABKA_GRES_REGISTRY_READER_FETCH_MIN", "4B")
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let environment = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+        ])
+        .expect("environment policy");
+        assert!(environment.serve.registry.dispatch_queue_capacity().get() == 7);
+        assert!(environment.serve.registry.frame_max().size() == crabka_units::kibibytes(32));
+        assert!(environment.serve.registry.fdw_fetch_min().bytes() == 2);
+        assert!(environment.serve.registry.wal_recovery_fetch_min().bytes() == 3);
+        assert!(
+            environment
+                .serve
+                .registry
+                .registry_reader_fetch_min()
+                .bytes()
+                == 4
+        );
+
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--client-dispatch-queue-capacity=9",
+            "--client-frame-max=64KiB",
+            "--fdw-fetch-min=5B",
+            "--wal-recovery-fetch-min=6B",
+            "--registry-reader-fetch-min=7B",
+        ])
+        .expect("CLI policy");
+        assert!(cli.serve.registry.dispatch_queue_capacity().get() == 9);
+        assert!(cli.serve.registry.frame_max().size() == crabka_units::kibibytes(64));
+        assert!(cli.serve.registry.fdw_fetch_min().bytes() == 5);
+        assert!(cli.serve.registry.wal_recovery_fetch_min().bytes() == 6);
+        assert!(cli.serve.registry.registry_reader_fetch_min().bytes() == 7);
+    }
+
+    #[test]
+    fn registry_policy_options_read_environment_and_prefer_cli() {
+        const CHILD: &str = "CRABKA_TEST_GRES_REGISTRY_ENV_CHILD";
+        let vars = [
+            ("CRABKA_GRES_REGISTRY_REPLICATION_FACTOR", "2"),
+            ("CRABKA_GRES_REGISTRY_TOPIC_CREATE_TIMEOUT", "15001ms"),
+            ("CRABKA_GRES_REGISTRY_READER_RETRY_BACKOFF", "251ms"),
+            ("CRABKA_GRES_REGISTRY_FETCH_MAX_WAIT", "501ms"),
+            ("CRABKA_GRES_REGISTRY_FETCH_PARTITION_MAX", "1048577B"),
+            ("CRABKA_GRES_REGISTRY_PRODUCER_DNS_TIMEOUT", "37ms"),
+            ("CRABKA_GRES_REGISTRY_READER_ADMIN_DNS_TIMEOUT", "37ms"),
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "tests::registry_policy_options_read_environment_and_prefer_cli",
+                ])
+                .env(CHILD, "1")
+                .envs(vars)
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+        let environment = Cli::try_parse_from(["crabka-gres"]).expect("environment policy");
+        let environment_policy = crabka_gres_control::RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(501),
+            crabka_units::bytes(1_048_577),
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(37))
+        .expect("environment DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(37))
+        .expect("environment reader/admin DNS timeout");
+        assert!(environment.serve.registry.policy() == environment_policy);
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--registry-replication-factor=3",
+            "--registry-topic-create-timeout=15002ms",
+            "--registry-reader-retry-backoff=252ms",
+            "--registry-fetch-max-wait=502ms",
+            "--registry-fetch-partition-max=1048578B",
+            "--registry-producer-dns-timeout=47ms",
+            "--registry-reader-admin-dns-timeout=47ms",
+        ])
+        .expect("CLI policy");
+        let cli_policy = crabka_gres_control::RegistryPolicy::new(
+            3,
+            crabka_units::millis(15_002),
+            crabka_units::millis(252),
+            crabka_units::millis(502),
+            crabka_units::bytes(1_048_578),
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(47))
+        .expect("CLI DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(47))
+        .expect("CLI reader/admin DNS timeout");
+        assert!(cli.serve.registry.policy() == cli_policy);
+    }
+
+    #[test]
+    fn local_vacuum_options_are_absent_by_default_and_cli_overrides_environment() {
+        const CHILD: &str = "CRABKA_TEST_GRES_LOCAL_VACUUM_ENV_CHILD";
+        let variables = [
+            ("CRABKA_GRES_LOCAL_VACUUM_IDLE_INTERVAL", "11ms"),
+            ("CRABKA_GRES_LOCAL_VACUUM_BACKOFF_FLOOR", "12ms"),
+            ("CRABKA_GRES_LOCAL_VACUUM_HOT_DEBT", "13"),
+            ("CRABKA_GRES_LOCAL_VACUUM_KEY_BUDGET", "14"),
+            ("CRABKA_GRES_LOCAL_VACUUM_MAX_KEY_BUDGET", "15"),
+            ("CRABKA_GRES_LOCAL_VACUUM_STEP_FAST", "16ms"),
+            ("CRABKA_GRES_LOCAL_VACUUM_STEP_SLOW", "17ms"),
+            ("CRABKA_GRES_LOCAL_VACUUM_IDLE_AFTER", "18ms"),
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let mut defaults =
+                std::process::Command::new(std::env::current_exe().expect("test exe"));
+            defaults
+                .args([
+                    "--exact",
+                    "tests::local_vacuum_options_are_absent_by_default_and_cli_overrides_environment",
+                ])
+                .env(CHILD, "absent");
+            for (name, _) in variables {
+                defaults.env_remove(name);
+            }
+            assert!(defaults.status().expect("defaults child test").success());
+
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "tests::local_vacuum_options_are_absent_by_default_and_cli_overrides_environment",
+                ])
+                .env(CHILD, "configured")
+                .envs(variables)
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        if std::env::var(CHILD).as_deref() == Ok("absent") {
+            let defaults = Cli::try_parse_from(["crabka-gres"])
+                .expect("defaults")
+                .serve;
+            assert_eq!(defaults.local_vacuum, LocalVacuumOptions::default());
+            return;
+        }
+
+        let environment = Cli::try_parse_from(["crabka-gres"])
+            .expect("environment policy")
+            .serve
+            .local_vacuum;
+        assert_eq!(
+            environment
+                .idle_interval
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(11)
+        );
+        assert_eq!(
+            environment
+                .backoff_floor
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(12)
+        );
+        assert_eq!(environment.hot_debt.map(NonZeroU64::get), Some(13));
+        assert_eq!(
+            environment.key_budget.map(PositiveUsize::into_value),
+            Some(14)
+        );
+        assert_eq!(
+            environment.max_key_budget.map(PositiveUsize::into_value),
+            Some(15)
+        );
+        assert_eq!(
+            environment
+                .step_fast
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(16)
+        );
+        assert_eq!(
+            environment
+                .step_slow
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(17)
+        );
+        assert_eq!(
+            environment
+                .idle_after
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(18)
+        );
+
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--local-vacuum-idle-interval",
+            "21ms",
+            "--local-vacuum-backoff-floor",
+            "22ms",
+            "--local-vacuum-hot-debt",
+            "23",
+            "--local-vacuum-key-budget",
+            "24",
+            "--local-vacuum-max-key-budget",
+            "25",
+            "--local-vacuum-step-fast",
+            "26ms",
+            "--local-vacuum-step-slow",
+            "27ms",
+            "--local-vacuum-idle-after",
+            "28ms",
+        ])
+        .expect("CLI policy")
+        .serve
+        .local_vacuum;
+        assert_eq!(
+            cli.idle_interval
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(21)
+        );
+        assert_eq!(
+            cli.backoff_floor
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(22)
+        );
+        assert_eq!(cli.hot_debt.map(NonZeroU64::get), Some(23));
+        assert_eq!(cli.key_budget.map(PositiveUsize::into_value), Some(24));
+        assert_eq!(cli.max_key_budget.map(PositiveUsize::into_value), Some(25));
+        assert_eq!(
+            cli.step_fast
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(26)
+        );
+        assert_eq!(
+            cli.step_slow
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(27)
+        );
+        assert_eq!(
+            cli.idle_after
+                .map(crabka_units::convert::TimeExt::millis_i64),
+            Some(28)
+        );
+    }
+
+    #[test]
+    fn local_vacuum_policy_rejects_invalid_relationships_and_substrate_noops() {
+        for option in [
+            "--local-vacuum-idle-interval=0ms",
+            "--local-vacuum-backoff-floor=0ms",
+            "--local-vacuum-hot-debt=0",
+            "--local-vacuum-key-budget=0",
+            "--local-vacuum-max-key-budget=0",
+            "--local-vacuum-step-fast=0ms",
+            "--local-vacuum-step-slow=0ms",
+            "--local-vacuum-idle-after=0ms",
+        ] {
+            assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
+        }
+
+        for arguments in [
+            [
+                "--local-vacuum-idle-interval",
+                "10ms",
+                "--local-vacuum-backoff-floor",
+                "11ms",
+            ]
+            .as_slice(),
+            [
+                "--local-vacuum-key-budget",
+                "10",
+                "--local-vacuum-max-key-budget",
+                "9",
+            ]
+            .as_slice(),
+            [
+                "--local-vacuum-step-fast",
+                "10ms",
+                "--local-vacuum-step-slow",
+                "10ms",
+            ]
+            .as_slice(),
+        ] {
+            let args = Cli::try_parse_from(
+                std::iter::once("crabka-gres").chain(arguments.iter().copied()),
+            )
+            .expect("scalar-valid arguments")
+            .serve;
+            assert!(local_vacuum_policy(&args).is_err());
+        }
+
+        for option in [
+            "--local-vacuum-idle-interval=1ms",
+            "--local-vacuum-backoff-floor=1ms",
+            "--local-vacuum-hot-debt=1",
+            "--local-vacuum-key-budget=1",
+            "--local-vacuum-max-key-budget=1",
+            "--local-vacuum-step-fast=1ms",
+            "--local-vacuum-step-slow=1ms",
+            "--local-vacuum-idle-after=1ms",
+        ] {
+            let args = Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                option,
+            ])
+            .expect("scalar-valid arguments")
+            .serve;
+            assert!(local_vacuum_policy(&args).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn local_vacuum_validation_precedes_listener_bind() {
+        let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let mut args = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--local-vacuum-hot-debt=1",
+        ])
+        .expect("scalar-valid arguments")
+        .serve;
+        args.listen = occupied.local_addr().expect("address").to_string();
+
+        let error = run_serve(args).await.expect_err("invalid local policy");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            "local vacuum options are incompatible with --substrate-bootstrap"
+        );
+    }
+
+    #[tokio::test]
+    async fn range0_follower_poll_validation_precedes_listener_bind() {
+        const CHILD: &str = "CRABKA_TEST_GRES_RANGE0_FOLLOWER_POLL_BIND_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "tests::range0_follower_poll_validation_precedes_listener_bind",
+                ])
+                .env(CHILD, "1")
+                .env_remove("CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL")
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let mut args = Cli::try_parse_from(["crabka-gres"])
+            .expect("defaults")
+            .serve;
+        args.listen = occupied.local_addr().expect("address").to_string();
+        args.range0_follower_poll_interval = Some(crabka_units::millis(1));
+
+        let error = run_serve(args).await.expect_err("invalid range-0 policy");
+
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            "--range0-follower-poll-interval requires --ranges"
+        );
+    }
+
+    #[test]
+    fn checkpoint_lifecycle_options_use_validated_defaults() {
+        let args = Cli::try_parse_from(["crabka-gres"])
+            .expect("defaults")
+            .serve;
+
+        assert!(args.checkpoint_frames.is_none());
+        assert!(args.checkpoint_size.is_none());
+        assert!(args.checkpoint_part_size.is_none());
+        assert!(args.checkpoint_retain.is_none());
+        assert!(args.checkpoint_delete_records_timeout.is_none());
+        assert!(args.checkpoint_poll_interval.is_none());
+        assert!(args.idle_suspend_poll_interval.is_none());
+        assert!(
+            SubstrateRuntimeConfig::from_args(&args)
+                .expect("standalone defaults")
+                .is_none()
+        );
+
+        for option in [
+            "--checkpoint-part-size=0B",
+            "--checkpoint-retain=0",
+            "--checkpoint-delete-records-timeout=0ms",
+            "--checkpoint-poll-interval=0ms",
+            "--idle-suspend-poll-interval=0ms",
+        ] {
+            assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
+        }
+
+        let oversized = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--checkpoint-store=in-memory",
+            "--checkpoint-delete-records-timeout=2147483648ms",
+        ])
+        .expect("valid UOM value");
+        assert!(SubstrateRuntimeConfig::from_args(&oversized.serve).is_err());
+    }
+
+    #[test]
+    fn checkpoint_lifecycle_options_read_environment_and_prefer_cli() {
+        const CHILD: &str = "CRABKA_TEST_GRES_CHECKPOINT_ENV_CHILD";
+        let vars = [
+            ("CRABKA_GRES_CHECKPOINT_FRAMES", "11"),
+            ("CRABKA_GRES_CHECKPOINT_SIZE", "12B"),
+            ("CRABKA_GRES_CHECKPOINT_PART_SIZE", "13B"),
+            ("CRABKA_GRES_CHECKPOINT_RETAIN", "14"),
+            ("CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT", "15ms"),
+            ("CRABKA_GRES_CHECKPOINT_POLL_INTERVAL", "16ms"),
+            ("CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL", "17ms"),
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+                .args([
+                    "--exact",
+                    "tests::checkpoint_lifecycle_options_read_environment_and_prefer_cli",
+                ])
+                .env(CHILD, "1")
+                .envs(vars)
+                .status()
+                .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let environment = Cli::try_parse_from(["crabka-gres"])
+            .expect("environment checkpoint policy")
+            .serve;
+        assert!(environment.checkpoint_frames.map(NonZeroU64::get) == Some(11));
+        assert!(environment.checkpoint_size == Some(crabka_units::bytes(12)));
+        assert!(
+            environment
+                .checkpoint_part_size
+                .map(crabka_units::convert::ByteSizeExt::bytes_usize)
+                == Some(13)
+        );
+        assert!(environment.checkpoint_retain.map(PositiveUsize::into_value) == Some(14));
+        assert!(
+            environment
+                .checkpoint_delete_records_timeout
+                .map(crabka_units::convert::TimeExt::millis_i64)
+                == Some(15)
+        );
+        assert!(
+            environment
+                .checkpoint_poll_interval
+                .map(crabka_units::convert::TimeExt::millis_i64)
+                == Some(16)
+        );
+        assert!(
+            environment
+                .idle_suspend_poll_interval
+                .map(crabka_units::convert::TimeExt::millis_i64)
+                == Some(17)
+        );
+
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--checkpoint-frames=21",
+            "--checkpoint-size=22B",
+            "--checkpoint-part-size=23B",
+            "--checkpoint-retain=24",
+            "--checkpoint-delete-records-timeout=25ms",
+            "--checkpoint-poll-interval=26ms",
+            "--idle-suspend-poll-interval=27ms",
+        ])
+        .expect("CLI checkpoint policy")
+        .serve;
+        assert!(cli.checkpoint_frames.map(NonZeroU64::get) == Some(21));
+        assert!(cli.checkpoint_size == Some(crabka_units::bytes(22)));
+        assert!(
+            cli.checkpoint_part_size
+                .map(crabka_units::convert::ByteSizeExt::bytes_usize)
+                == Some(23)
+        );
+        assert!(cli.checkpoint_retain.map(PositiveUsize::into_value) == Some(24));
+        assert!(
+            cli.checkpoint_delete_records_timeout
+                .map(crabka_units::convert::TimeExt::millis_i64)
+                == Some(25)
+        );
+        assert!(
+            cli.checkpoint_poll_interval
+                .map(crabka_units::convert::TimeExt::millis_i64)
+                == Some(26)
+        );
+        assert!(
+            cli.idle_suspend_poll_interval
+                .map(crabka_units::convert::TimeExt::millis_i64)
+                == Some(27)
+        );
     }
 
     #[tokio::test]
@@ -6938,8 +9649,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl FinalCheckpointer for FakeCheckpointer {
-        async fn latest_checkpoint_bytes(&self) -> std::io::Result<u64> {
-            Ok(self.bytes.load(Ordering::SeqCst))
+        async fn latest_checkpoint_size(&self) -> std::io::Result<ByteSize> {
+            Ok(ByteSize::from_bytes(self.bytes.load(Ordering::SeqCst)))
         }
 
         async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint> {
@@ -6974,20 +9685,81 @@ mod tests {
 
     fn serve_args(auth: Option<&str>, user_creds: Vec<String>) -> ServeArgs {
         ServeArgs {
+            registry: RegistryOptions {
+                client_dispatch_queue_capacity:
+                    crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+                client_frame_max: crabka_units::mebibytes(100),
+                fdw_fetch_min: None,
+                fdw_fetch_max_wait: crabka_units::secs(5),
+                fdw_fetch_partition_max: crabka_units::mebibytes(10),
+                fdw_connect_timeout: crabka_units::secs(10),
+                fdw_request_timeout: crabka_units::secs(30),
+                fdw_schema_fetch_timeout: crabka_units::secs(10),
+                fdw_schema_fetch_poll: crabka_units::millis(20),
+                wal_recovery_fetch_min: None,
+                registry_reader_fetch_min: crabka_units::bytes(1),
+                replication_factor: RegistryReplicationFactor::new(1).expect("default"),
+                topic_create_timeout: crabka_units::millis(15_000),
+                reader_retry_backoff: crabka_units::millis(250),
+                fetch_max_wait: crabka_units::millis(500),
+                fetch_partition_max: crabka_units::mebibytes(1),
+                producer_dns_timeout: None,
+                reader_admin_dns_timeout: None,
+            },
+            local_vacuum: LocalVacuumOptions::default(),
+            range_runtime: Box::default(),
+            pgexec_runtime: Box::default(),
             listen: "127.0.0.1:0".to_string(),
             tls_cert: None,
             tls_key: None,
             auth: auth.map(str::to_string),
             user_creds,
+            pgwire_max_message_size: crabka_units::mebibytes(64),
+            pgwire_scram_iterations: crabka_pgwire::scram::DEFAULT_ITERATIONS,
             data_dir: None,
             substrate_bootstrap: None,
             tenant: None,
             cache_dir: None,
+            pgkv_max_memtable_size: None,
+            pgkv_rotate_after_ops: None,
             ranges: None,
+            range0_follower_poll_interval: None,
+            range0_follower_rebuild_backoff_floor: None,
+            range0_follower_rebuild_backoff_ceiling: None,
+            durable_inspection_timeout: None,
+            durable_inspection_fold_max_records: None,
+            durable_inspection_fold_max_size: None,
+            wal_recovery_fetch_max_wait: None,
+            wal_recovery_fetch_partition_max: None,
+            wal_recovery_fetch_response_max: None,
+            wal_recovery_empty_fetch_retries: None,
+            wal_recovery_dns_timeout: None,
+            wal_recovery_connect_timeout: None,
+            wal_recovery_request_timeout: None,
+            wal_topic_replication_factor: None,
+            wal_topic_ensure_timeout: None,
+            wal_admin_connect_timeout: None,
+            wal_admin_request_timeout: None,
+            wal_producer_flush_timeout: None,
+            wal_producer_dns_timeout: None,
+            fdw_broker_dns_timeout: None,
+            schema_fetch_retry_initial_backoff: None,
+            schema_fetch_retry_max_backoff: None,
+            wal_producer_request_timeout: None,
+            wal_producer_retries: None,
+            wal_producer_retry_backoff: None,
+            wal_producer_routing_retry_budget: None,
+            wal_producer_init_retry_timeout: None,
+            wal_producer_init_max_backoff: None,
+            wal_producer_transaction_timeout: None,
+            wal_producer_compression: None,
+            wal_producer_linger: None,
+            wal_producer_batch: None,
+            wal_frame_max_size: None,
             host_ranges: None,
             timestamp_source: TimestampSourceKind::LogicalTso,
-            hlc_max_offset_ms: 250,
-            hlc_wall_offset_ms: 0,
+            hlc_max_offset: crabka_units::millis(250),
+            hlc_wall_offset: Time::ZERO,
             range_listen: None,
             range_tls_cert: None,
             range_tls_key: None,
@@ -7008,9 +9780,12 @@ mod tests {
             checkpoint_gcs_service_account_key: None,
             checkpoint_gcs_application_credentials_path: None,
             checkpoint_frames: None,
-            checkpoint_bytes: None,
-            checkpoint_part_bytes: None,
+            checkpoint_size: None,
+            checkpoint_part_size: None,
             checkpoint_retain: None,
+            checkpoint_delete_records_timeout: None,
+            checkpoint_poll_interval: None,
+            idle_suspend_poll_interval: None,
         }
     }
 
@@ -7019,6 +9794,27 @@ mod tests {
             substrate_bootstrap: Some("memory://".to_string()),
             tenant: Some("tenant-a".to_string()),
             ..serve_args(Some("trust"), Vec::new())
+        }
+    }
+
+    #[test]
+    fn source_checkpoint_pin_is_kept_only_while_activation_needs_it() {
+        use crabka_gres_ranges::control::TopologyActivationPhase;
+
+        for phase in [
+            TopologyActivationPhase::Prepared,
+            TopologyActivationPhase::TopologyCommitted,
+            TopologyActivationPhase::Aborted,
+        ] {
+            assert!(!activation_requires_source_checkpoint_pin(phase));
+        }
+        for phase in [
+            TopologyActivationPhase::SourceCheckpoint,
+            TopologyActivationPhase::MustActivate,
+            TopologyActivationPhase::WriterActivated,
+            TopologyActivationPhase::CheckpointDurable,
+        ] {
+            assert!(activation_requires_source_checkpoint_pin(phase));
         }
     }
 
@@ -7081,8 +9877,8 @@ mod tests {
     fn suspend_policy() -> SuspendPolicy {
         SuspendPolicy {
             tenant: "tenant-a".to_string(),
-            idle_window: Duration::from_millis(1),
-            suspend_max_checkpoint_bytes: Some(100),
+            idle_window: millis(1),
+            suspend_max_checkpoint: Some(crabka_units::bytes(100)),
         }
     }
 
@@ -7168,12 +9964,12 @@ mod tests {
         .await
         .expect("check");
 
-        assert_eq!(
-            outcome,
-            SuspendMonitorOutcome::CheckpointTooLarge {
-                bytes: 101,
-                max_bytes: 100,
-            }
+        assert!(
+            outcome
+                == SuspendMonitorOutcome::CheckpointTooLarge {
+                    size: crabka_units::bytes(101),
+                    max: crabka_units::bytes(100),
+                }
         );
         assert_eq!(checkpointer.checkpoints.load(Ordering::SeqCst), 0);
         assert!(!registry.marked.load(Ordering::SeqCst));
@@ -7189,6 +9985,7 @@ mod tests {
             _bootstrap: &str,
             _tenant: &TenantName,
             _security: Option<ClientSecurity>,
+            _policy: &RegistryPolicy,
         ) -> std::io::Result<Option<TenantRecord>> {
             Ok(None)
         }
@@ -7197,6 +9994,7 @@ mod tests {
     #[derive(Default)]
     struct RecordingTenantConfigLoader {
         calls: AtomicUsize,
+        policy: std::sync::Mutex<Option<RegistryPolicy>>,
     }
 
     #[async_trait::async_trait]
@@ -7206,8 +10004,10 @@ mod tests {
             _bootstrap: &str,
             _tenant: &TenantName,
             _security: Option<ClientSecurity>,
+            policy: &RegistryPolicy,
         ) -> std::io::Result<Option<TenantRecord>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
+            *self.policy.lock().expect("policy lock") = Some(policy.clone());
             Ok(None)
         }
     }
@@ -7216,6 +10016,69 @@ mod tests {
     fn trust_auth_builds_default_session_config() {
         let config = build_session_config(&serve_args(Some("trust"), Vec::new())).expect("config");
         assert!(matches!(config.auth, AuthMode::Trust));
+        assert_eq!(config.max_message_len, 64 * 1024 * 1024);
+    }
+
+    #[test]
+    fn standalone_scram_and_message_policy_reach_session_config() {
+        let mut args = serve_args(Some("scram"), vec!["alice=secret".to_owned()]);
+        args.pgwire_max_message_size = crabka_units::bytes(37);
+        args.pgwire_scram_iterations = 41;
+
+        let config = build_session_config(&args).expect("config");
+        assert_eq!(config.max_message_len, 37);
+        let AuthMode::ScramSha256 {
+            verifiers,
+            mock_iterations,
+            ..
+        } = config.auth
+        else {
+            panic!("SCRAM config")
+        };
+        assert_eq!(verifiers["alice"].iterations, 41);
+        assert_eq!(mock_iterations, 41);
+    }
+
+    #[test]
+    fn pgwire_policy_cli_is_validated_and_environment_backed() {
+        let command = <Cli as clap::CommandFactory>::command();
+        for (id, environment) in [
+            (
+                "pgwire_max_message_size",
+                "CRABKA_GRES_PGWIRE_MAX_MESSAGE_SIZE",
+            ),
+            (
+                "pgwire_scram_iterations",
+                "CRABKA_GRES_PGWIRE_SCRAM_ITERATIONS",
+            ),
+        ] {
+            let argument = command
+                .get_arguments()
+                .find(|argument| argument.get_id().as_str() == id)
+                .expect("pgwire argument");
+            assert_eq!(argument.get_env(), Some(std::ffi::OsStr::new(environment)));
+        }
+
+        let configured = Cli::try_parse_from([
+            "crabka-gres",
+            "--pgwire-max-message-size=37B",
+            "--pgwire-scram-iterations=41",
+        ])
+        .expect("configured")
+        .serve;
+        assert!(configured.pgwire_max_message_size == crabka_units::bytes(37));
+        assert_eq!(configured.pgwire_scram_iterations, 41);
+
+        for option in [
+            "--pgwire-max-message-size=0B",
+            "--pgwire-max-message-size=1.5B",
+            "--pgwire-scram-iterations=0",
+        ] {
+            assert!(
+                Cli::try_parse_from(["crabka-gres", option]).is_err(),
+                "{option}"
+            );
+        }
     }
 
     #[test]
@@ -7280,7 +10143,29 @@ mod tests {
     async fn memory_substrate_missing_tenant_config_is_tolerated() {
         use assert2::assert;
 
-        let args = substrate_args();
+        let mut args = substrate_args();
+        args.registry = RegistryOptions {
+            client_dispatch_queue_capacity:
+                crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
+            client_frame_max: crabka_units::mebibytes(100),
+            fdw_fetch_min: None,
+            fdw_fetch_max_wait: crabka_units::secs(5),
+            fdw_fetch_partition_max: crabka_units::mebibytes(10),
+            fdw_connect_timeout: crabka_units::secs(10),
+            fdw_request_timeout: crabka_units::secs(30),
+            fdw_schema_fetch_timeout: crabka_units::secs(10),
+            fdw_schema_fetch_poll: crabka_units::millis(20),
+            wal_recovery_fetch_min: None,
+            registry_reader_fetch_min: crabka_units::bytes(1),
+            replication_factor: RegistryReplicationFactor::new(2).expect("replication factor"),
+            topic_create_timeout: crabka_units::millis(15_001),
+            reader_retry_backoff: crabka_units::millis(251),
+            fetch_max_wait: crabka_units::millis(777),
+            fetch_partition_max: crabka_units::bytes(2_000_000),
+            producer_dns_timeout: None,
+            reader_admin_dns_timeout: None,
+        };
+        let expected_policy = args.registry.policy();
         let loader = RecordingTenantConfigLoader::default();
 
         let record = load_substrate_tenant_record(&args, &loader)
@@ -7288,7 +10173,32 @@ mod tests {
             .expect("in-memory bootstrap tolerates a missing tenant record");
 
         assert!(loader.calls.load(Ordering::SeqCst) == 1);
+        assert!(
+            loader.policy.lock().expect("policy lock").as_ref() == Some(&expected_policy),
+            "serve registry policy must reach the tenant config loader"
+        );
         assert!(record.is_none());
+    }
+
+    #[test]
+    fn split_operation_fetch_uses_registry_policy_limits() {
+        let policy = RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(777),
+            crabka_units::bytes(2_000_000),
+        )
+        .expect("registry policy");
+        let fetch = live_split_operation_fetch(
+            &policy,
+            "topic",
+            crabka_protocol::primitives::uuid::Uuid([0; 16]),
+            42,
+        );
+
+        assert!(fetch.max_wait == millis(777));
+        assert!(fetch.partition_max == crabka_units::bytes(2_000_000));
     }
 
     #[tokio::test]
@@ -7298,7 +10208,7 @@ mod tests {
         let tenant = TenantName::try_from("tenant-a").expect("tenant name");
         for bootstrap in ["memory://", "in-memory://"] {
             let record = LiveTenantConfigLoader
-                .load_tenant_config(bootstrap, &tenant, None)
+                .load_tenant_config(bootstrap, &tenant, None, &RegistryPolicy::default())
                 .await
                 .expect("in-memory bootstrap must not dial a broker");
             assert!(
@@ -7313,22 +10223,105 @@ mod tests {
         let mut record = tenant_record();
         record.bucket_prefix = Some("from-record".to_string());
         record.checkpoint_frames = Some(77);
-        record.checkpoint_bytes = Some(88);
+        record.checkpoint_size = Some(crabka_units::bytes(88));
         let mut args = substrate_args();
         args.checkpoint_store = Some(CheckpointStoreKind::InMemory);
 
         let applied = apply_tenant_runtime_defaults(args.clone(), Some(&record)).expect("defaults");
         assert_eq!(applied.checkpoint_prefix.as_deref(), Some("from-record"));
         assert_eq!(applied.checkpoint_frames.map(NonZeroU64::get), Some(77));
-        assert_eq!(applied.checkpoint_bytes.map(NonZeroU64::get), Some(88));
+        assert_eq!(applied.checkpoint_size, Some(crabka_units::bytes(88)));
 
         args.checkpoint_prefix = Some("cli".to_string());
         args.checkpoint_frames = Some(NonZeroU64::new(7).expect("nonzero"));
-        args.checkpoint_bytes = Some(NonZeroU64::new(8).expect("nonzero"));
+        args.checkpoint_size = Some(crabka_units::bytes(8));
         let applied = apply_tenant_runtime_defaults(args, Some(&record)).expect("overrides");
         assert_eq!(applied.checkpoint_prefix.as_deref(), Some("cli"));
         assert_eq!(applied.checkpoint_frames.map(NonZeroU64::get), Some(7));
-        assert_eq!(applied.checkpoint_bytes.map(NonZeroU64::get), Some(8));
+        assert_eq!(applied.checkpoint_size, Some(crabka_units::bytes(8)));
+    }
+
+    #[test]
+    fn tenant_checkpoint_fields_do_not_activate_checkpointing() {
+        let mut record = tenant_record();
+        record.bucket_prefix = Some("from-record".to_string());
+        record.checkpoint_frames = Some(77);
+        record.checkpoint_size = Some(crabka_units::bytes(88));
+        let applied =
+            apply_tenant_runtime_defaults(substrate_args(), Some(&record)).expect("defaults");
+
+        assert!(applied.checkpoint_prefix.is_none());
+        assert!(applied.checkpoint_frames.is_none());
+        assert!(applied.checkpoint_size.is_none());
+        assert!(
+            SubstrateRuntimeConfig::from_args(&applied)
+                .expect("substrate config")
+                .expect("substrate config")
+                .checkpoints
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn checkpoint_threshold_defaults_apply_only_after_tenant_hydration() {
+        let mut args = substrate_args();
+        args.checkpoint_store = Some(CheckpointStoreKind::InMemory);
+        let defaults = CheckpointRuntimeConfig::from_args(&args)
+            .expect("checkpoint defaults")
+            .expect("checkpoint config");
+        assert!(defaults.frames_threshold == DEFAULT_CHECKPOINT_FRAMES);
+        assert!(defaults.bytes_threshold == DEFAULT_CHECKPOINT_BYTES);
+        assert!(defaults.delete_records_timeout == DEFAULT_CHECKPOINT_DELETE_RECORDS_TIMEOUT);
+        assert!(defaults.poll_interval == DEFAULT_CHECKPOINT_POLL_INTERVAL.to_std());
+
+        let mut record = tenant_record();
+        record.checkpoint_frames = Some(77);
+        record.checkpoint_size = Some(crabka_units::bytes(88));
+        let hydrated = apply_tenant_runtime_defaults(args.clone(), Some(&record))
+            .expect("tenant checkpoint policy");
+        let from_record = CheckpointRuntimeConfig::from_args(&hydrated)
+            .expect("record checkpoint policy")
+            .expect("checkpoint config");
+        assert!(from_record.frames_threshold == 77);
+        assert!(from_record.bytes_threshold == crabka_units::bytes(88));
+
+        args.checkpoint_frames = Some(NonZeroU64::new(7).expect("nonzero"));
+        args.checkpoint_size = Some(crabka_units::bytes(8));
+        let explicit =
+            apply_tenant_runtime_defaults(args, Some(&record)).expect("explicit checkpoint policy");
+        let from_explicit = CheckpointRuntimeConfig::from_args(&explicit)
+            .expect("explicit checkpoint policy")
+            .expect("checkpoint config");
+        assert!(from_explicit.frames_threshold == 7);
+        assert!(from_explicit.bytes_threshold == crabka_units::bytes(8));
+    }
+
+    #[test]
+    fn checkpoint_runtime_policy_reaches_service_and_pruner_consumers() {
+        let args = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--checkpoint-store=in-memory",
+            "--checkpoint-delete-records-timeout=1234ms",
+            "--checkpoint-poll-interval=5678ms",
+        ])
+        .expect("checkpoint policy")
+        .serve;
+        let runtime = SubstrateRuntimeConfig::from_args(&args)
+            .expect("substrate config")
+            .expect("substrate config");
+        let checkpoint = runtime.checkpoints.expect("checkpoint config");
+        let service = checkpoint_service_config(
+            &checkpoint,
+            "tenant-a/r0".to_owned(),
+            "__gres_wal.tenant-a.r0".to_owned(),
+        )
+        .expect("service config");
+        let pruner = GresCheckpointWalPruner::in_memory(checkpoint.delete_records_timeout);
+
+        assert!(service.poll_interval == Duration::from_millis(5_678));
+        assert!(pruner.delete_records_timeout == crabka_units::millis(1_234));
     }
 
     #[test]
@@ -7349,12 +10342,12 @@ mod tests {
         assert!(help.contains("--ranges"));
         assert!(help.contains("--host-ranges"));
         assert!(help.contains("--timestamp-source"));
-        assert!(help.contains("--hlc-max-offset-ms"));
-        assert!(help.contains("--hlc-wall-offset-ms"));
+        assert!(help.contains("--hlc-max-offset"));
+        assert!(help.contains("--hlc-wall-offset"));
         assert!(help.contains("--checkpoint-bucket"));
         assert!(help.contains("--checkpoint-store"));
         assert!(help.contains("--checkpoint-frames"));
-        assert!(help.contains("--checkpoint-bytes"));
+        assert!(help.contains("--checkpoint-size"));
         assert!(help.contains("--checkpoint-retain"));
         assert!(help.contains("--auth"));
         assert!(help.contains("--tls-cert"));
@@ -7411,6 +10404,46 @@ mod tests {
     }
 
     #[test]
+    fn range_runtime_policy_parses_overrides_and_rejects_invalid_relations() {
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--range-rpc-frame-max=2MiB",
+            "--range-rpc-request-timeout=9s",
+            "--range-rpc-pool-idle-ttl=3s",
+            "--range-rpc-server-idle-timeout=8s",
+            "--range-logical-base-persist-stride=7",
+            "--range-logical-max-persist-stride=11",
+            "--range-join-key-columns=3",
+            "--range-join-projection-columns=4",
+            "--range-join-predicates=5",
+            "--range-join-snapshot-xids=6",
+            "--range-join-broadcast-rows=7",
+            "--range-join-row-max=8KiB",
+            "--range-join-result-rows=9",
+        ])
+        .unwrap();
+        let policy = cli.serve.range_runtime.effective_policy().unwrap();
+        assert2::assert!(policy.rpc_frame_max == crabka_units::mebibytes(2));
+        assert2::assert!(policy.rpc_request_timeout == crabka_units::secs(9));
+        assert2::assert!(policy.logical_base_persist_stride.get() == 7);
+        assert2::assert!(policy.join.key_columns == 3);
+        assert2::assert!(policy.join.projection_columns == 4);
+        assert2::assert!(policy.join.predicates == 5);
+        assert2::assert!(policy.join.snapshot_xids == 6);
+        assert2::assert!(policy.join.broadcast_rows == 7);
+        assert2::assert!(policy.join.row_bytes == 8192);
+        assert2::assert!(policy.join.result_rows == 9);
+
+        let invalid = Cli::try_parse_from([
+            "crabka-gres",
+            "--range-rpc-pool-idle-ttl=8s",
+            "--range-rpc-server-idle-timeout=8s",
+        ])
+        .unwrap();
+        assert2::assert!(invalid.serve.range_runtime.effective_policy().is_err());
+    }
+
+    #[test]
     fn timestamp_source_hlc_flags_reach_the_tenant_config() {
         use assert2::assert;
 
@@ -7424,10 +10457,9 @@ mod tests {
             "0,100",
             "--timestamp-source",
             "hlc",
-            "--hlc-max-offset-ms",
-            "500",
-            "--hlc-wall-offset-ms",
-            "-200",
+            "--hlc-max-offset",
+            "500ms",
+            "--hlc-wall-offset=-200ms",
         ])
         .expect("hlc timestamp-source flags parse");
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
@@ -7459,8 +10491,8 @@ mod tests {
         ])
         .expect("substrate options parse");
         assert!(cli.serve.timestamp_source == TimestampSourceKind::LogicalTso);
-        assert!(cli.serve.hlc_max_offset_ms == 250);
-        assert!(cli.serve.hlc_wall_offset_ms == 0);
+        assert!(cli.serve.hlc_max_offset == crabka_units::millis(250));
+        assert!(cli.serve.hlc_wall_offset == Time::ZERO);
         let config = SubstrateRuntimeConfig::from_args(&cli.serve)
             .expect("valid config")
             .expect("substrate config");
@@ -7473,6 +10505,1557 @@ mod tests {
                 == crabka_gres_ranges::TimestampSourceMode::LogicalTso
         );
         assert!(tenant_config.hlc_wall_offset_ms == 0);
+    }
+
+    #[test]
+    fn range0_follower_poll_interval_uses_default_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_RANGE0_FOLLOWER_POLL_CHILD";
+        const ENV: &str = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL";
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--ranges=0,10",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            for (mode, value) in [("default", None), ("environment", Some("17ms"))] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::range0_follower_poll_interval_uses_default_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode);
+                match value {
+                    Some(value) => {
+                        child.env(ENV, value);
+                    }
+                    None => {
+                        child.env_remove(ENV);
+                    }
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            17
+        } else {
+            u64::try_from(DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.millis_i64()).unwrap_or_default()
+        };
+        let parsed = Cli::try_parse_from(base).expect("policy").serve;
+        assert_eq!(
+            SubstrateRuntimeConfig::from_args(&parsed)
+                .expect("valid config")
+                .expect("substrate config")
+                .range0_follower_poll_interval,
+            Duration::from_millis(expected)
+        );
+
+        let cli = Cli::try_parse_from(
+            base.into_iter()
+                .chain(["--range0-follower-poll-interval=19ms"]),
+        )
+        .expect("CLI policy")
+        .serve;
+        assert_eq!(
+            SubstrateRuntimeConfig::from_args(&cli)
+                .expect("valid config")
+                .expect("substrate config")
+                .range0_follower_poll_interval,
+            Duration::from_millis(19)
+        );
+    }
+
+    #[test]
+    fn range0_follower_poll_interval_rejects_zero_and_non_multirange_use() {
+        const CHILD: &str = "CRABKA_TEST_GRES_RANGE0_FOLLOWER_POLL_REJECTION_CHILD";
+        const ENV: &str = "CRABKA_GRES_RANGE0_FOLLOWER_POLL_INTERVAL";
+        if std::env::var_os(CHILD).is_none() {
+            for (mode, value) in [
+                ("scrubbed", None),
+                ("environment_without_ranges", Some("1")),
+            ] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::range0_follower_poll_interval_rejects_zero_and_non_multirange_use",
+                    ])
+                    .env(CHILD, mode)
+                    .env_remove(ENV);
+                if let Some(value) = value {
+                    child.env(ENV, value);
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        if std::env::var(CHILD).as_deref() == Ok("environment_without_ranges") {
+            assert!(
+                Cli::try_parse_from([
+                    "crabka-gres",
+                    "--substrate-bootstrap=memory://",
+                    "--tenant=tenant-a",
+                ])
+                .is_err()
+            );
+            return;
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--ranges=0,10",
+                "--range0-follower-poll-interval=0ms",
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--range0-follower-poll-interval=1ms",
+            ])
+            .is_err()
+        );
+
+        let mut programmatic = Cli::try_parse_from(["crabka-gres"])
+            .expect("defaults")
+            .serve;
+        programmatic.range0_follower_poll_interval = Some(crabka_units::millis(1));
+        let error = SubstrateRuntimeConfig::from_args(&programmatic)
+            .expect_err("programmatic non-multirange configuration");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn multirange_operational_policy_uses_defaults_overrides_and_ordering() {
+        let command = <Cli as clap::CommandFactory>::command();
+        for (id, environment) in [
+            (
+                "range0_follower_rebuild_backoff_floor",
+                "CRABKA_GRES_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR",
+            ),
+            (
+                "range0_follower_rebuild_backoff_ceiling",
+                "CRABKA_GRES_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING",
+            ),
+            (
+                "durable_inspection_timeout",
+                "CRABKA_GRES_DURABLE_INSPECTION_TIMEOUT",
+            ),
+            (
+                "durable_inspection_fold_max_records",
+                "CRABKA_GRES_DURABLE_INSPECTION_FOLD_MAX_RECORDS",
+            ),
+            (
+                "durable_inspection_fold_max_size",
+                "CRABKA_GRES_DURABLE_INSPECTION_FOLD_MAX_SIZE",
+            ),
+        ] {
+            let argument = command
+                .get_arguments()
+                .find(|argument| argument.get_id().as_str() == id)
+                .expect("policy argument");
+            assert_eq!(argument.get_env(), Some(std::ffi::OsStr::new(environment)));
+        }
+
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--ranges=0,10",
+        ];
+        let defaults =
+            SubstrateRuntimeConfig::from_args(&Cli::try_parse_from(base).expect("defaults").serve)
+                .expect("valid defaults")
+                .expect("substrate config");
+        assert_eq!(
+            defaults.range0_follower_rebuild_backoff_floor,
+            Duration::from_millis(250)
+        );
+        assert_eq!(
+            defaults.range0_follower_rebuild_backoff_ceiling,
+            Duration::from_secs(30)
+        );
+        assert_eq!(defaults.durable_inspection_timeout, Duration::from_secs(4));
+        assert_eq!(
+            defaults.durable_inspection_fold_limits.max_records,
+            1_000_000
+        );
+        assert_eq!(
+            defaults.durable_inspection_fold_limits.max_size,
+            crabka_units::mebibytes(256)
+        );
+
+        let configured = SubstrateRuntimeConfig::from_args(
+            &Cli::try_parse_from(base.into_iter().chain([
+                "--range0-follower-rebuild-backoff-floor=11ms",
+                "--range0-follower-rebuild-backoff-ceiling=13ms",
+                "--durable-inspection-timeout=17ms",
+                "--durable-inspection-fold-max-records=19",
+                "--durable-inspection-fold-max-size=23B",
+            ]))
+            .expect("configured policy")
+            .serve,
+        )
+        .expect("valid configured policy")
+        .expect("substrate config");
+        assert_eq!(
+            configured.range0_follower_rebuild_backoff_floor,
+            Duration::from_millis(11)
+        );
+        assert_eq!(
+            configured.range0_follower_rebuild_backoff_ceiling,
+            Duration::from_millis(13)
+        );
+        assert_eq!(
+            configured.durable_inspection_timeout,
+            Duration::from_millis(17)
+        );
+        assert_eq!(configured.durable_inspection_fold_limits.max_records, 19);
+        assert_eq!(
+            configured.durable_inspection_fold_limits.max_size,
+            crabka_units::bytes(23)
+        );
+
+        let inverted = Cli::try_parse_from(base.into_iter().chain([
+            "--range0-follower-rebuild-backoff-floor=2ms",
+            "--range0-follower-rebuild-backoff-ceiling=1ms",
+        ]))
+        .expect("syntactically valid policy")
+        .serve;
+        let error = SubstrateRuntimeConfig::from_args(&inverted)
+            .expect_err("inverted rebuild backoff must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("range-0 follower rebuild backoff floor exceeds ceiling"),
+            "got: {error}"
+        );
+    }
+
+    #[test]
+    fn wal_recovery_read_policy_uses_defaults_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_READ_POLICY_CHILD";
+        const VARS: [&str; 24] = [
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_RETRIES",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH",
+            "CRABKA_GRES_WAL_FRAME_MAX_SIZE",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::wal_recovery_read_policy_uses_defaults_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode);
+                for variable in VARS {
+                    child.env_remove(variable);
+                }
+                if mode == "environment" {
+                    for (variable, value) in VARS.into_iter().zip([
+                        "17ms", "18B", "19B", "20", "21ms", "22ms", "23ms", "24", "25ms", "26ms",
+                        "27ms", "28ms", "29ms", "30ms", "31", "32ms", "33ms", "34ms", "35ms",
+                        "36ms", "none", "37ms", "38B",
+                    ]) {
+                        child.env(variable, value);
+                    }
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+        ];
+        let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            (17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27)
+        } else {
+            (
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_MAX_WAIT.millis_i32(),
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_PARTITION_MAX.bytes_i32(),
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_FETCH_RESPONSE_MAX.bytes_i32(),
+                crabka_gres_substrate::DEFAULT_WAL_RECOVERY_EMPTY_FETCH_RETRIES,
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_DNS_TIMEOUT),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_CONNECT_TIMEOUT),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_RECOVERY_REQUEST_TIMEOUT),
+                crabka_gres_substrate::DEFAULT_WAL_TOPIC_REPLICATION_FACTOR,
+                crabka_gres_substrate::DEFAULT_WAL_TOPIC_ENSURE_TIMEOUT.millis_i32(),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_ADMIN_CONNECT_TIMEOUT),
+                millis_u64(crabka_gres_substrate::DEFAULT_WAL_ADMIN_REQUEST_TIMEOUT),
+            )
+        };
+        let config = SubstrateRuntimeConfig::from_args(
+            &<Cli as clap::Parser>::try_parse_from(base)
+                .expect("policy")
+                .serve,
+        )
+        .expect("valid config")
+        .expect("substrate config");
+        let policy = config.recovery_read_policy;
+        assert!(policy.fetch_max_wait().millis_i32() == expected.0);
+        assert!(policy.fetch_partition_max().bytes_i32() == expected.1);
+        assert!(policy.fetch_response_max().bytes_i32() == expected.2);
+        assert!(policy.empty_fetch_retries() == expected.3);
+        assert!(millis_u64(policy.dns_timeout()) == expected.4);
+        assert!(millis_u64(policy.connect_timeout()) == expected.5);
+        assert!(millis_u64(policy.request_timeout()) == expected.6);
+        let admin = config.wal_admin_policy;
+        assert!(admin.replication_factor() == expected.7);
+        assert!(admin.topic_ensure_timeout().millis_i32() == expected.8);
+        assert!(millis_u64(admin.connect_timeout()) == expected.9);
+        assert!(millis_u64(admin.request_timeout()) == expected.10);
+
+        let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
+            "--wal-recovery-fetch-max-wait=27ms",
+            "--wal-recovery-fetch-partition-max=28B",
+            "--wal-recovery-fetch-response-max=29B",
+            "--wal-recovery-empty-fetch-retries=30",
+            "--wal-recovery-dns-timeout=30ms",
+            "--wal-recovery-connect-timeout=31ms",
+            "--wal-recovery-request-timeout=32ms",
+            "--wal-topic-replication-factor=33",
+            "--wal-topic-ensure-timeout=34ms",
+            "--wal-admin-connect-timeout=35ms",
+            "--wal-admin-request-timeout=36ms",
+        ]))
+        .expect("CLI policy");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+        let policy = config.recovery_read_policy;
+        assert!(policy.fetch_max_wait() == millis(27));
+        assert!(policy.fetch_partition_max() == crabka_units::bytes(28));
+        assert!(policy.fetch_response_max() == crabka_units::bytes(29));
+        assert!(policy.empty_fetch_retries() == 30);
+        assert!(policy.dns_timeout() == millis(30));
+        assert!(policy.connect_timeout() == millis(31));
+        assert!(policy.request_timeout() == millis(32));
+        let admin = config.wal_admin_policy;
+        assert!(admin.replication_factor() == 33);
+        assert!(admin.topic_ensure_timeout() == millis(34));
+        assert!(admin.connect_timeout() == millis(35));
+        assert!(admin.request_timeout() == millis(36));
+    }
+
+    #[test]
+    fn wal_recovery_hostile_environment_does_not_leak_into_parser_tests() {
+        let status = std::process::Command::new(std::env::current_exe().expect("test exe"))
+            .args([
+                "--exact",
+                "tests::registry_policy_options_use_validated_defaults",
+            ])
+            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT", "17ms")
+            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX", "18B")
+            .env("CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX", "19B")
+            .env("CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES", "20")
+            .env("CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT", "21ms")
+            .env("CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT", "21ms")
+            .env("CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT", "22ms")
+            .env("CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR", "23")
+            .env("CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT", "24ms")
+            .env("CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT", "25ms")
+            .env("CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT", "26ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT", "27ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT", "27ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT", "27ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_RETRIES", "28")
+            .env("CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF", "29ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET", "30ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT", "31ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF", "32ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT", "33ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_COMPRESSION", "gzip")
+            .env("CRABKA_GRES_WAL_PRODUCER_LINGER", "34ms")
+            .env("CRABKA_GRES_WAL_PRODUCER_BATCH", "35B")
+            .status()
+            .expect("child test");
+
+        assert!(status.success());
+    }
+
+    #[test]
+    fn wal_recovery_read_policy_rejects_zero_and_inert_use() {
+        for option in [
+            "--wal-recovery-fetch-max-wait=0ms",
+            "--wal-recovery-fetch-partition-max=0B",
+            "--wal-recovery-fetch-response-max=0B",
+            "--wal-recovery-empty-fetch-retries=0",
+            "--wal-recovery-dns-timeout=0ms",
+            "--wal-recovery-connect-timeout=0ms",
+            "--wal-recovery-request-timeout=0ms",
+            "--wal-topic-replication-factor=0",
+            "--wal-topic-ensure-timeout=0ms",
+            "--wal-admin-connect-timeout=0ms",
+            "--wal-admin-request-timeout=0ms",
+            "--wal-producer-flush-timeout=0ms",
+            "--wal-producer-dns-timeout=0ms",
+            "--wal-producer-request-timeout=0ms",
+            "--wal-producer-retry-backoff=0ms",
+            "--wal-producer-routing-retry-budget=0ms",
+            "--wal-producer-init-retry-timeout=0ms",
+            "--wal-producer-init-max-backoff=0ms",
+            "--wal-producer-transaction-timeout=0ms",
+        ] {
+            assert!(
+                Cli::try_parse_from([
+                    "crabka-gres",
+                    "--substrate-bootstrap=memory://",
+                    "--tenant=tenant-a",
+                    option,
+                ])
+                .is_err()
+            );
+        }
+        for option in [
+            "--wal-recovery-dns-timeout=1ms",
+            "--wal-recovery-connect-timeout=1ms",
+            "--wal-recovery-request-timeout=1ms",
+            "--wal-topic-replication-factor=1",
+            "--wal-topic-ensure-timeout=1ms",
+            "--wal-admin-connect-timeout=1ms",
+            "--wal-admin-request-timeout=1ms",
+            "--wal-producer-flush-timeout=1ms",
+            "--wal-producer-dns-timeout=1ms",
+            "--wal-producer-request-timeout=1ms",
+            "--wal-producer-retries=0",
+            "--wal-producer-retry-backoff=1ms",
+            "--wal-producer-routing-retry-budget=1ms",
+            "--wal-producer-init-retry-timeout=1ms",
+            "--wal-producer-init-max-backoff=1ms",
+            "--wal-producer-transaction-timeout=1ms",
+            "--wal-producer-compression=gzip",
+            "--wal-producer-linger=0ms",
+            "--wal-producer-batch=1B",
+        ] {
+            assert!(Cli::try_parse_from(["crabka-gres", option]).is_err());
+        }
+        let oversized_replication = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-topic-replication-factor=32768",
+        ])
+        .expect("positive parser value");
+        let error = SubstrateRuntimeConfig::from_args(&oversized_replication.serve)
+            .expect_err("replication factor exceeds protocol maximum");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        for (option, field) in [
+            (
+                "--wal-producer-flush-timeout=2147483648ms",
+                "producer flush timeout",
+            ),
+            (
+                "--wal-producer-request-timeout=2147483648ms",
+                "request timeout",
+            ),
+            (
+                "--wal-producer-retry-backoff=2147483648ms",
+                "producer retry backoff",
+            ),
+            (
+                "--wal-producer-routing-retry-budget=2147483648ms",
+                "routing retry budget",
+            ),
+            (
+                "--wal-producer-init-retry-timeout=2147483648ms",
+                "producer-ID initialization retry timeout",
+            ),
+            (
+                "--wal-producer-init-max-backoff=2147483648ms",
+                "producer-ID initialization maximum backoff",
+            ),
+            (
+                "--wal-producer-transaction-timeout=2147483648ms",
+                "transaction timeout",
+            ),
+        ] {
+            let args = Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                option,
+            ])
+            .expect("positive parser value")
+            .serve;
+            let error = SubstrateRuntimeConfig::from_args(&args)
+                .expect_err("producer duration exceeds supported maximum");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(field), "{error}");
+        }
+        let args = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-retry-backoff=2ms",
+            "--wal-producer-init-max-backoff=1ms",
+        ])
+        .expect("positive parser values")
+        .serve;
+        assert!(
+            SubstrateRuntimeConfig::from_args(&args)
+                .expect_err("initial backoff exceeds cap")
+                .to_string()
+                .contains("backoff")
+        );
+        assert!(
+            Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--wal-producer-batch=0B",
+            ])
+            .is_err()
+        );
+        for (option, field) in [
+            ("--wal-producer-linger=2147483648ms", "linger"),
+            ("--wal-producer-batch=2147483648B", "batch"),
+        ] {
+            let args = Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                option,
+            ])
+            .expect("parser value")
+            .serve;
+            let error = SubstrateRuntimeConfig::from_args(&args)
+                .expect_err("throughput value exceeds supported range");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains(field), "{error}");
+        }
+        assert!(
+            Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--wal-producer-compression=brotli",
+            ])
+            .is_err()
+        );
+        let args = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-retries=0",
+        ])
+        .expect("zero retries")
+        .serve;
+        assert_eq!(
+            SubstrateRuntimeConfig::from_args(&args)
+                .expect("zero retries are valid")
+                .expect("substrate config")
+                .producer_retry_policy
+                .retries(),
+            0
+        );
+
+        assert!(
+            Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--wal-producer-retries=-1",
+            ])
+            .is_err()
+        );
+        for option in 0..23 {
+            let mut programmatic = serve_args(Some("trust"), Vec::new());
+            set_wal_policy_option(&mut programmatic, option);
+            let error = SubstrateRuntimeConfig::from_args(&programmatic)
+                .expect_err("inert recovery policy");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+    }
+
+    #[tokio::test]
+    async fn wal_recovery_read_policy_validation_precedes_listener_bind() {
+        const CHILD: &str = "CRABKA_TEST_GRES_WAL_RECOVERY_BIND_CHILD";
+        const VARS: [&str; 24] = [
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_RETRIES",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH",
+            "CRABKA_GRES_WAL_FRAME_MAX_SIZE",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            let mut child = std::process::Command::new(std::env::current_exe().expect("test exe"));
+            child
+                .args([
+                    "--exact",
+                    "tests::wal_recovery_read_policy_validation_precedes_listener_bind",
+                ])
+                .env(CHILD, "1");
+            for variable in VARS {
+                child.env_remove(variable);
+            }
+            assert!(child.status().expect("child test").success());
+            return;
+        }
+
+        let occupied = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        for option in 0..24 {
+            let mut args = serve_args(Some("trust"), Vec::new());
+            args.listen = occupied.local_addr().expect("address").to_string();
+            set_wal_policy_option(&mut args, option);
+            let error = run_serve(args).await.expect_err("invalid recovery policy");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        }
+
+        let mut args = substrate_args();
+        args.listen = occupied.local_addr().expect("address").to_string();
+        args.wal_topic_replication_factor =
+            Some(PositiveI32::new(32_768).expect("positive parser value"));
+        let error = run_serve(args)
+            .await
+            .expect_err("invalid replication factor before bind");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+
+        let mut args = substrate_args();
+        args.listen = occupied.local_addr().expect("address").to_string();
+        args.wal_producer_batch = Some(crabka_units::bytes(0));
+        let error = run_serve(args)
+            .await
+            .expect_err("invalid producer throughput before bind");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    fn set_wal_policy_option(args: &mut ServeArgs, option: usize) {
+        match option {
+            0 => args.wal_recovery_fetch_max_wait = Some(crabka_units::millis(1)),
+            1 => args.wal_recovery_fetch_partition_max = Some(crabka_units::bytes(1)),
+            2 => args.wal_recovery_fetch_response_max = Some(crabka_units::bytes(1)),
+            3 => args.wal_recovery_empty_fetch_retries = PositiveUsize::new(1).ok(),
+            4 => args.wal_recovery_dns_timeout = Some(crabka_units::millis(1)),
+            5 => args.wal_recovery_connect_timeout = Some(crabka_units::millis(1)),
+            6 => args.wal_recovery_request_timeout = Some(crabka_units::millis(1)),
+            7 => args.wal_topic_replication_factor = PositiveI32::new(1).ok(),
+            8 => args.wal_topic_ensure_timeout = Some(crabka_units::millis(1)),
+            9 => args.wal_admin_connect_timeout = Some(crabka_units::millis(1)),
+            10 => args.wal_admin_request_timeout = Some(crabka_units::millis(1)),
+            11 => args.wal_producer_flush_timeout = Some(crabka_units::millis(1)),
+            12 => args.wal_producer_dns_timeout = Some(crabka_units::millis(1)),
+            13 => args.wal_producer_request_timeout = Some(crabka_units::millis(1)),
+            14 => args.wal_producer_retries = NonNegativeI32::new(0).ok(),
+            15 => args.wal_producer_retry_backoff = Some(crabka_units::millis(1)),
+            16 => args.wal_producer_routing_retry_budget = Some(crabka_units::millis(1)),
+            17 => args.wal_producer_init_retry_timeout = Some(crabka_units::millis(1)),
+            18 => args.wal_producer_init_max_backoff = Some(crabka_units::millis(1)),
+            19 => args.wal_producer_transaction_timeout = Some(crabka_units::millis(1)),
+            20 => args.wal_producer_compression = Some(crabka_client_producer::Compression::Gzip),
+            21 => args.wal_producer_linger = Some(Time::ZERO),
+            22 => args.wal_producer_batch = Some(crabka_units::bytes(1)),
+            23 => args.wal_frame_max_size = Some(crabka_units::bytes(1)),
+            _ => unreachable!("test policy option"),
+        }
+    }
+
+    #[test]
+    fn wal_recovery_read_policy_reaches_shared_recovery_config_helper() {
+        let policy = crabka_gres_substrate::RecoveryReadPolicy::new(
+            crabka_units::millis(31),
+            crabka_units::bytes(32),
+            crabka_units::bytes(33),
+            34,
+        )
+        .expect("distinctive policy")
+        .with_dns_timeout(crabka_units::millis(37))
+        .expect("distinctive DNS timeout")
+        .with_timeouts(crabka_units::millis(35), crabka_units::millis(36))
+        .expect("distinctive timeouts");
+        let mut config = SubstrateRuntimeConfig::from_args(&substrate_args())
+            .expect("config")
+            .expect("substrate config");
+        config.recovery_read_policy = policy;
+        let tenant = crabka_gres_ranges::TenantName::parse("tenant-a".to_string()).expect("tenant");
+
+        let recovery =
+            config.live_recovery_config(tenant.clone(), crabka_gres_ranges::RangeId::new(7));
+
+        assert_eq!(recovery.read_policy(), policy);
+        let admin = crabka_gres_substrate::WalAdminPolicy::new(
+            41,
+            crabka_units::millis(42),
+            crabka_units::millis(43),
+            crabka_units::millis(44),
+        )
+        .expect("distinctive policy");
+        config.wal_admin_policy = admin;
+        let recovery = config.live_recovery_config(tenant, crabka_gres_ranges::RangeId::new(7));
+        assert_eq!(recovery.wal_admin_policy(), admin);
+        assert_eq!(
+            include_str!("lib.rs")
+                .split_once("\n#[cfg(test)]\nmod vacuum_pacing_tests {")
+                .expect("test module boundary")
+                .0
+                .matches("LiveRecoveryConfig::new(")
+                .count(),
+            1
+        );
+        assert_eq!(
+            include_str!("split_activation.rs")
+                .matches("LiveRecoveryConfig::new(")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn wal_producer_retry_policy_accepts_distinctive_values_and_reaches_recovery() {
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-request-timeout=31ms",
+            "--wal-producer-retries=32",
+            "--wal-producer-retry-backoff=33ms",
+            "--wal-producer-routing-retry-budget=34ms",
+            "--wal-producer-init-retry-timeout=35ms",
+            "--wal-producer-init-max-backoff=36ms",
+            "--wal-producer-transaction-timeout=37ms",
+        ])
+        .expect("WAL producer policy");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+        let policy = config.producer_retry_policy;
+
+        assert_eq!(policy.request_timeout(), Duration::from_millis(31));
+        assert_eq!(policy.retries(), 32);
+        assert_eq!(policy.retry_backoff(), Duration::from_millis(33));
+        assert_eq!(policy.routing_retry_budget(), Duration::from_millis(34));
+        assert_eq!(policy.init_retry_timeout(), Duration::from_millis(35));
+        assert_eq!(policy.init_max_backoff(), Duration::from_millis(36));
+        assert_eq!(policy.transaction_timeout(), Duration::from_millis(37));
+
+        let tenant = crabka_gres_ranges::TenantName::parse("tenant-a").expect("tenant");
+        assert_eq!(
+            config
+                .live_recovery_config(tenant, crabka_gres_ranges::RangeId::new(7))
+                .producer_retry_policy(),
+            policy
+        );
+    }
+
+    #[test]
+    fn wal_producer_flush_timeout_uses_defaults_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_FLUSH_TIMEOUT_CHILD";
+        const ENV: &str = "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT";
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::wal_producer_flush_timeout_uses_defaults_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode)
+                    .env_remove(ENV);
+                if mode == "environment" {
+                    child.env(ENV, "41ms");
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+        ];
+        let config = SubstrateRuntimeConfig::from_args(
+            &<Cli as clap::Parser>::try_parse_from(base)
+                .expect("flush timeout")
+                .serve,
+        )
+        .expect("valid config")
+        .expect("substrate config");
+        let expected_ms = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            41
+        } else {
+            50_000
+        };
+        assert_eq!(
+            config.producer_flush_timeout.duration(),
+            Duration::from_millis(expected_ms)
+        );
+
+        let cli = <Cli as clap::Parser>::try_parse_from(
+            base.into_iter()
+                .chain(["--wal-producer-flush-timeout=51ms"]),
+        )
+        .expect("CLI flush timeout");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+        assert_eq!(
+            config.producer_flush_timeout.duration(),
+            Duration::from_millis(51)
+        );
+
+        let tenant = crabka_gres_ranges::TenantName::parse("tenant-a").expect("tenant");
+        assert_eq!(
+            config
+                .live_recovery_config(tenant, crabka_gres_ranges::RangeId::new(7))
+                .producer_flush_timeout(),
+            config.producer_flush_timeout
+        );
+    }
+
+    #[test]
+    fn wal_producer_dns_timeout_uses_defaults_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_DNS_TIMEOUT_CHILD";
+        const ENV: &str = "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT";
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::wal_producer_dns_timeout_uses_defaults_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode)
+                    .env_remove(ENV);
+                if mode == "environment" {
+                    child.env(ENV, "27ms");
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+        ];
+        let config = SubstrateRuntimeConfig::from_args(
+            &<Cli as clap::Parser>::try_parse_from(base)
+                .expect("DNS timeout")
+                .serve,
+        )
+        .expect("valid config")
+        .expect("substrate config");
+        let expected_ms = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            27
+        } else {
+            crabka_client_core::ClientDnsTimeout::default().milliseconds()
+        };
+        assert_eq!(config.producer_dns_timeout.milliseconds(), expected_ms);
+
+        let cli = <Cli as clap::Parser>::try_parse_from(
+            base.into_iter().chain(["--wal-producer-dns-timeout=37ms"]),
+        )
+        .expect("CLI DNS timeout");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+        assert_eq!(config.producer_dns_timeout.milliseconds(), 37);
+
+        let tenant = crabka_gres_ranges::TenantName::parse("tenant-a").expect("tenant");
+        assert_eq!(
+            config
+                .live_recovery_config(tenant, crabka_gres_ranges::RangeId::new(7))
+                .producer_dns_timeout(),
+            config.producer_dns_timeout
+        );
+    }
+
+    #[test]
+    fn wal_producer_dns_timeout_rejects_zero_and_local_only_use() {
+        Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=k:9092",
+            "--tenant=t",
+            "--wal-producer-dns-timeout=0ms",
+        ])
+        .expect_err("zero DNS timeout");
+
+        Cli::try_parse_from(["crabka-gres", "--wal-producer-dns-timeout=1ms"])
+            .expect_err("substrate bootstrap required");
+
+        let mut programmatic = serve_args(Some("trust"), Vec::new());
+        programmatic.wal_producer_dns_timeout = Some(crabka_units::millis(1));
+        let error = SubstrateRuntimeConfig::from_args(&programmatic)
+            .expect_err("programmatic DNS timeout without substrate");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[test]
+    fn fdw_broker_dns_timeout_uses_default_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_FDW_BROKER_DNS_TIMEOUT_CHILD";
+        const ENV: &str = "CRABKA_GRES_FDW_BROKER_DNS_TIMEOUT";
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::fdw_broker_dns_timeout_uses_default_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode)
+                    .env_remove(ENV);
+                if mode == "environment" {
+                    child.env(ENV, "27ms");
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let args = <Cli as clap::Parser>::try_parse_from(["crabka-gres"])
+            .expect("default FDW DNS timeout")
+            .serve;
+        let expected_ms = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            27
+        } else {
+            crabka_client_core::ClientDnsTimeout::default().milliseconds()
+        };
+        assert_eq!(
+            effective_fdw_broker_dns_timeout(&args)
+                .expect("valid FDW DNS timeout")
+                .milliseconds(),
+            expected_ms
+        );
+
+        let args =
+            <Cli as clap::Parser>::try_parse_from(["crabka-gres", "--fdw-broker-dns-timeout=37ms"])
+                .expect("CLI FDW DNS timeout")
+                .serve;
+        assert_eq!(
+            effective_fdw_broker_dns_timeout(&args)
+                .expect("valid FDW DNS timeout")
+                .milliseconds(),
+            37
+        );
+    }
+
+    #[test]
+    fn fdw_broker_dns_timeout_rejects_zero_but_allows_local_mode() {
+        Cli::try_parse_from(["crabka-gres", "--fdw-broker-dns-timeout=0ms"])
+            .expect_err("zero DNS timeout");
+        Cli::try_parse_from(["crabka-gres", "--fdw-broker-dns-timeout=1ms"])
+            .expect("local FDW policy");
+    }
+
+    #[test]
+    fn schema_fetch_retry_uses_default_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_SCHEMA_FETCH_RETRY_CHILD";
+        const INITIAL_ENV: &str = "CRABKA_GRES_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF";
+        const MAX_ENV: &str = "CRABKA_GRES_SCHEMA_FETCH_RETRY_MAX_BACKOFF";
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::schema_fetch_retry_uses_default_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode)
+                    .env_remove(INITIAL_ENV)
+                    .env_remove(MAX_ENV);
+                if mode == "environment" {
+                    child.env(INITIAL_ENV, "37ms").env(MAX_ENV, "91ms");
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let args = <Cli as clap::Parser>::try_parse_from(["crabka-gres"])
+            .expect("schema fetch retry defaults")
+            .serve;
+        let policy =
+            effective_schema_fetch_retry_policy(&args).expect("valid schema fetch retry policy");
+        let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            (crabka_units::millis(37), crabka_units::millis(91))
+        } else {
+            (crabka_units::millis(10), crabka_units::secs(1))
+        };
+        assert_eq!((policy.initial_backoff(), policy.max_backoff()), expected);
+
+        let args = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--schema-fetch-retry-initial-backoff=41ms",
+            "--schema-fetch-retry-max-backoff=97ms",
+        ])
+        .expect("CLI schema fetch retry")
+        .serve;
+        let policy =
+            effective_schema_fetch_retry_policy(&args).expect("valid CLI schema fetch retry");
+        assert_eq!(policy.initial_backoff(), crabka_units::millis(41));
+        assert_eq!(policy.max_backoff(), crabka_units::millis(97));
+    }
+
+    #[test]
+    fn schema_fetch_retry_rejects_zero_and_inverted_ranges() {
+        for flag in [
+            "--schema-fetch-retry-initial-backoff=0ms",
+            "--schema-fetch-retry-max-backoff=0ms",
+        ] {
+            Cli::try_parse_from(["crabka-gres", flag]).expect_err("zero retry bound");
+        }
+
+        let args = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--schema-fetch-retry-initial-backoff=91ms",
+            "--schema-fetch-retry-max-backoff=37ms",
+        ])
+        .expect("positive bounds")
+        .serve;
+        let error = effective_schema_fetch_retry_policy(&args).expect_err("inverted retry range");
+        assert!(error.to_string().contains("91ms"));
+        assert!(error.to_string().contains("37ms"));
+    }
+
+    #[test]
+    fn schema_fetch_retry_reaches_registered_scanner() {
+        let args = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--schema-fetch-retry-initial-backoff=37ms",
+            "--schema-fetch-retry-max-backoff=91ms",
+        ])
+        .expect("substrate schema fetch retry")
+        .serve;
+        let policy =
+            effective_schema_fetch_retry_policy(&args).expect("valid schema fetch retry policy");
+        let scanner = kafka_scanner(
+            kafka_scanner_default_bootstrap(&args),
+            effective_fdw_broker_dns_timeout(&args).expect("valid FDW DNS timeout"),
+            policy,
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            crabka_client_core::ClientFrameMax::default(),
+            crabka_client_core::FetchMinBytes::default(),
+            args.registry.fdw_scan_policy(),
+            args.registry.fdw_decode_policy(),
+        );
+
+        assert_eq!(scanner.schema_fetch_retry_policy(), policy);
+    }
+
+    #[test]
+    fn substrate_fdw_broker_dns_timeout_reaches_registered_scanner() {
+        let args = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--fdw-broker-dns-timeout=37ms",
+            "--fdw-fetch-max-wait=41ms",
+            "--fdw-fetch-partition-max=43B",
+            "--fdw-connect-timeout=47ms",
+            "--fdw-request-timeout=53ms",
+            "--fdw-schema-fetch-timeout=59ms",
+            "--fdw-schema-fetch-poll=17ms",
+        ])
+        .expect("substrate FDW DNS timeout")
+        .serve;
+
+        let scanner = kafka_scanner(
+            kafka_scanner_default_bootstrap(&args),
+            effective_fdw_broker_dns_timeout(&args).expect("valid FDW DNS timeout"),
+            crabka_gres_fdw::SchemaFetchRetryPolicy::default(),
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            crabka_client_core::ClientFrameMax::default(),
+            crabka_client_core::FetchMinBytes::default(),
+            args.registry.fdw_scan_policy(),
+            args.registry.fdw_decode_policy(),
+        );
+
+        assert_eq!(scanner.default_bootstrap(), Some("memory://"));
+        assert_eq!(scanner.broker_dns_timeout().milliseconds(), 37);
+        assert_eq!(
+            scanner.scan_policy(),
+            crabka_gres_fdw::FdwScanPolicy {
+                fetch_max_wait: crabka_units::millis(41),
+                fetch_partition_max: crabka_units::bytes(43),
+                connect_timeout: crabka_units::millis(47),
+                request_timeout: crabka_units::millis(53),
+            }
+        );
+        assert_eq!(
+            scanner.decode_policy(),
+            crabka_gres_fdw::FdwDecodePolicy {
+                schema_fetch_timeout: crabka_units::millis(59),
+                schema_fetch_poll: crabka_units::millis(17),
+            }
+        );
+
+        assert!(
+            <Cli as clap::Parser>::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--fdw-fetch-max-wait=0ms",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn wal_producer_flush_timeout_rejects_invalid_and_local_only_use() {
+        assert!(
+            <Cli as clap::Parser>::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--wal-producer-flush-timeout=0ms",
+            ])
+            .is_err()
+        );
+        let oversized = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-flush-timeout=2147483648ms",
+        ])
+        .expect("positive parser value");
+        assert!(SubstrateRuntimeConfig::from_args(&oversized.serve).is_err());
+
+        let maximum = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-flush-timeout=2147483647ms",
+        ])
+        .expect("maximum protocol timeout");
+        assert_eq!(
+            SubstrateRuntimeConfig::from_args(&maximum.serve)
+                .expect("valid config")
+                .expect("substrate config")
+                .producer_flush_timeout
+                .milliseconds(),
+            2_147_483_647
+        );
+
+        let fractional = <Cli as clap::Parser>::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-flush-timeout=1.5ms",
+        ])
+        .expect("fractional UOM value");
+        assert!(SubstrateRuntimeConfig::from_args(&fractional.serve).is_err());
+
+        assert!(
+            <Cli as clap::Parser>::try_parse_from([
+                "crabka-gres",
+                "--wal-producer-flush-timeout=1ms",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn wal_producer_throughput_policy_accepts_distinctive_values_and_reaches_recovery() {
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--wal-producer-compression=zstd",
+            "--wal-producer-linger=38ms",
+            "--wal-producer-batch=39B",
+        ])
+        .expect("WAL producer throughput policy");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+        let policy = config.producer_throughput_policy;
+
+        assert_eq!(
+            policy.compression(),
+            crabka_client_producer::Compression::Zstd
+        );
+        assert_eq!(policy.linger(), Duration::from_millis(38));
+        assert_eq!(policy.batch_bytes(), 39);
+        assert_eq!(
+            policy.max_in_flight(),
+            crabka_client_producer::DEFAULT_PRODUCER_MAX_IN_FLIGHT
+        );
+
+        let tenant = crabka_gres_ranges::TenantName::parse("tenant-a").expect("tenant");
+        assert_eq!(
+            config
+                .live_recovery_config(tenant, crabka_gres_ranges::RangeId::new(7))
+                .producer_throughput_policy(),
+            policy
+        );
+    }
+
+    #[test]
+    fn pgexec_runtime_policy_parses_and_reaches_substrate_config() {
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--pgexec-notify-queue-capacity=37",
+            "--pgexec-blocking-query-memory=34B",
+            "--pgexec-result-page-max=35B",
+            "--pgexec-join-broadcast-threshold=36B",
+            "--pgexec-xid-reservation=38",
+            "--pgexec-rowid-reservation=39",
+            "--pgexec-ts-prune-versions-per-row=40",
+            "--pgexec-ts-gc-floor-lag=41ms",
+        ])
+        .expect("PgExec runtime policy");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+
+        assert!(
+            config.pgexec_runtime_policy
+                == crabka_pgexec::RuntimePolicy {
+                    blocking_query_memory: crabka_units::bytes(34),
+                    result_page_max: crabka_units::bytes(35),
+                    join_broadcast_threshold: crabka_units::bytes(36),
+                    notify_queue_capacity: 37,
+                    xid_reservation: 38,
+                    rowid_reservation: 39,
+                    ts_prune_versions_per_row: 40,
+                    ts_gc_floor_lag: crabka_units::millis(41),
+                }
+        );
+        assert!(Cli::try_parse_from(["crabka-gres", "--pgexec-notify-queue-capacity=0"]).is_err());
+        assert!(Cli::try_parse_from(["crabka-gres", "--pgexec-ts-gc-floor-lag=-1ms"]).is_err());
+        assert!(Cli::try_parse_from(["crabka-gres", "--pgexec-ts-gc-floor-lag=0.5ms"]).is_err());
+    }
+
+    #[test]
+    fn wal_producer_throughput_policy_uses_defaults_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_THROUGHPUT_POLICY_CHILD";
+        const VARS: [&str; 26] = [
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_RETRIES",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH",
+            "CRABKA_GRES_WAL_FRAME_MAX_SIZE",
+            "CRABKA_PGKV_MAX_MEMTABLE_SIZE",
+            "CRABKA_PGKV_ROTATE_AFTER_OPS",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::wal_producer_throughput_policy_uses_defaults_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode);
+                for variable in VARS {
+                    child.env_remove(variable);
+                }
+                if mode == "environment" {
+                    for (variable, value) in VARS[20..]
+                        .iter()
+                        .copied()
+                        .zip(["gzip", "41ms", "42B", "43B", "44B", "45"])
+                    {
+                        child.env(variable, value);
+                    }
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+        ];
+        let config = SubstrateRuntimeConfig::from_args(
+            &<Cli as clap::Parser>::try_parse_from(base)
+                .expect("policy")
+                .serve,
+        )
+        .expect("valid config")
+        .expect("substrate config");
+        let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            crabka_client_producer::ProducerThroughputPolicy::new(
+                crabka_client_producer::Compression::Gzip,
+                Duration::from_millis(41),
+                42,
+                crabka_client_producer::DEFAULT_PRODUCER_MAX_IN_FLIGHT,
+            )
+            .expect("environment policy")
+        } else {
+            crabka_client_producer::ProducerThroughputPolicy::default()
+        };
+        assert_eq!(config.producer_throughput_policy, expected);
+        assert_eq!(
+            config.wal_frame_max_size,
+            if std::env::var(CHILD).as_deref() == Ok("environment") {
+                crabka_units::bytes(43)
+            } else {
+                crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE
+            }
+        );
+        let expected_pgkv = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            FjallOptions::new(crabka_units::bytes(44), 45).expect("environment policy")
+        } else {
+            FjallOptions::default()
+        };
+        assert_eq!(config.pgkv_options, expected_pgkv);
+
+        let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
+            "--wal-producer-compression=lz4",
+            "--wal-producer-linger=51ms",
+            "--wal-producer-batch=52B",
+            "--wal-frame-max-size=53B",
+            "--pgkv-max-memtable-size=54B",
+            "--pgkv-rotate-after-ops=55",
+        ]))
+        .expect("CLI policy");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+        let expected = crabka_client_producer::ProducerThroughputPolicy::new(
+            crabka_client_producer::Compression::Lz4,
+            Duration::from_millis(51),
+            52,
+            crabka_client_producer::DEFAULT_PRODUCER_MAX_IN_FLIGHT,
+        )
+        .expect("CLI policy");
+        assert_eq!(config.producer_throughput_policy, expected);
+        assert_eq!(config.wal_frame_max_size, crabka_units::bytes(53));
+        assert_eq!(
+            config.pgkv_options,
+            FjallOptions::new(crabka_units::bytes(54), 55).expect("CLI policy")
+        );
+    }
+
+    #[test]
+    fn pgkv_policy_rejects_invalid_and_local_only_use() {
+        for flag in ["--pgkv-max-memtable-size=0B", "--pgkv-rotate-after-ops=0"] {
+            assert!(
+                <Cli as clap::Parser>::try_parse_from([
+                    "crabka-gres",
+                    "--substrate-bootstrap=memory://",
+                    "--tenant=tenant-a",
+                    flag,
+                ])
+                .is_err(),
+                "accepted {flag}"
+            );
+            assert!(
+                <Cli as clap::Parser>::try_parse_from(["crabka-gres", flag]).is_err(),
+                "accepted local-only {flag}"
+            );
+        }
+    }
+
+    #[test]
+    fn wal_producer_retry_policy_uses_defaults_environment_and_cli_precedence() {
+        const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_POLICY_CHILD";
+        const VARS: [&str; 23] = [
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_PARTITION_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_FETCH_RESPONSE_MAX",
+            "CRABKA_GRES_WAL_RECOVERY_EMPTY_FETCH_RETRIES",
+            "CRABKA_GRES_WAL_RECOVERY_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_RECOVERY_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_TOPIC_REPLICATION_FACTOR",
+            "CRABKA_GRES_WAL_TOPIC_ENSURE_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_CONNECT_TIMEOUT",
+            "CRABKA_GRES_WAL_ADMIN_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_FLUSH_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_DNS_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_REQUEST_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_RETRIES",
+            "CRABKA_GRES_WAL_PRODUCER_RETRY_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_ROUTING_RETRY_BUDGET",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_RETRY_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_INIT_MAX_BACKOFF",
+            "CRABKA_GRES_WAL_PRODUCER_TRANSACTION_TIMEOUT",
+            "CRABKA_GRES_WAL_PRODUCER_COMPRESSION",
+            "CRABKA_GRES_WAL_PRODUCER_LINGER",
+            "CRABKA_GRES_WAL_PRODUCER_BATCH",
+        ];
+        if std::env::var_os(CHILD).is_none() {
+            for mode in ["defaults", "environment"] {
+                let mut child =
+                    std::process::Command::new(std::env::current_exe().expect("test exe"));
+                child
+                    .args([
+                        "--exact",
+                        "tests::wal_producer_retry_policy_uses_defaults_environment_and_cli_precedence",
+                    ])
+                    .env(CHILD, mode)
+                    .env("CRABKA_GRES_WAL_RECOVERY_FETCH_MAX_WAIT", "0ms");
+                for variable in VARS {
+                    child.env_remove(variable);
+                }
+                if mode == "environment" {
+                    for (variable, value) in VARS[13..20]
+                        .iter()
+                        .copied()
+                        .zip(["41ms", "42", "43ms", "44ms", "45ms", "46ms", "47ms"])
+                    {
+                        child.env(variable, value);
+                    }
+                }
+                assert!(child.status().expect("child test").success());
+            }
+            return;
+        }
+
+        let base = [
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+        ];
+        let config = SubstrateRuntimeConfig::from_args(
+            &<Cli as clap::Parser>::try_parse_from(base)
+                .expect("policy")
+                .serve,
+        )
+        .expect("valid config")
+        .expect("substrate config");
+        let expected = if std::env::var(CHILD).as_deref() == Ok("environment") {
+            crabka_client_producer::ProducerRetryPolicy::new(
+                Duration::from_millis(41),
+                42,
+                Duration::from_millis(43),
+                Duration::from_millis(44),
+                Duration::from_millis(45),
+                Duration::from_millis(46),
+                Duration::from_millis(47),
+            )
+            .expect("environment policy")
+        } else {
+            crabka_client_producer::ProducerRetryPolicy::default()
+        };
+        assert_eq!(config.producer_retry_policy, expected);
+
+        let cli = <Cli as clap::Parser>::try_parse_from(base.into_iter().chain([
+            "--wal-producer-request-timeout=51ms",
+            "--wal-producer-retries=52",
+            "--wal-producer-retry-backoff=53ms",
+            "--wal-producer-routing-retry-budget=54ms",
+            "--wal-producer-init-retry-timeout=55ms",
+            "--wal-producer-init-max-backoff=56ms",
+            "--wal-producer-transaction-timeout=57ms",
+        ]))
+        .expect("CLI policy");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+        let expected = crabka_client_producer::ProducerRetryPolicy::new(
+            Duration::from_millis(51),
+            52,
+            Duration::from_millis(53),
+            Duration::from_millis(54),
+            Duration::from_millis(55),
+            Duration::from_millis(56),
+            Duration::from_millis(57),
+        )
+        .expect("CLI policy");
+        assert_eq!(config.producer_retry_policy, expected);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn configured_range0_follower_poll_and_poke_control_refresh() {
+        let poke = Arc::new(tokio::sync::Notify::new());
+        let periodic_poke = Arc::clone(&poke);
+        let periodic = tokio::spawn(async move {
+            range0_follower::wait_for_refresh(&periodic_poke, Duration::from_millis(7)).await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(6)).await;
+        assert!(!periodic.is_finished());
+        tokio::time::advance(Duration::from_millis(1)).await;
+        periodic.await.expect("periodic wake");
+
+        let notified_poke = Arc::clone(&poke);
+        let notified = tokio::spawn(async move {
+            range0_follower::wait_for_refresh(&notified_poke, Duration::from_mins(1)).await;
+        });
+        tokio::task::yield_now().await;
+        poke.notify_one();
+        notified.await.expect("notification wake");
     }
 
     #[test]
@@ -7491,8 +12074,8 @@ mod tests {
             "dev/gres",
             "--checkpoint-frames",
             "100",
-            "--checkpoint-bytes",
-            "1048576",
+            "--checkpoint-size",
+            "1MiB",
             "--checkpoint-retain",
             "3",
         ])
@@ -7502,18 +12085,12 @@ mod tests {
             .expect("valid config")
             .expect("substrate config");
 
-        assert_eq!(
-            config.checkpoints.as_ref().map(|cfg| cfg.frames_threshold),
-            Some(100)
+        assert!(config.checkpoints.as_ref().map(|cfg| cfg.frames_threshold) == Some(100));
+        assert!(
+            config.checkpoints.as_ref().map(|cfg| cfg.bytes_threshold)
+                == Some(crabka_units::mebibytes(1))
         );
-        assert_eq!(
-            config.checkpoints.as_ref().map(|cfg| cfg.bytes_threshold),
-            Some(1_048_576)
-        );
-        assert_eq!(
-            config.checkpoints.as_ref().map(|cfg| cfg.retain_newest),
-            Some(3)
-        );
+        assert!(config.checkpoints.as_ref().map(|cfg| cfg.retain_newest) == Some(3));
         assert!(matches!(
             config.checkpoints.expect("checkpoint config").object_store,
             CheckpointObjectStoreConfig::S3 { ref bucket, ref region, ref prefix, .. }
@@ -7523,13 +12100,25 @@ mod tests {
 
     #[test]
     fn checkpoint_options_without_object_store_are_rejected() {
-        let mut args = substrate_args();
-        args.checkpoint_frames = Some(NonZeroU64::new(10).expect("nonzero"));
+        for option in [
+            "--checkpoint-frames=10",
+            "--checkpoint-delete-records-timeout=25ms",
+            "--checkpoint-poll-interval=26ms",
+            "--idle-suspend-poll-interval=27ms",
+        ] {
+            let args = Cli::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                option,
+            ])
+            .expect("checkpoint option")
+            .serve;
+            let error = SubstrateRuntimeConfig::from_args(&args).expect_err("missing object store");
 
-        let error = SubstrateRuntimeConfig::from_args(&args).expect_err("missing object store");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert!(error.to_string().contains("checkpoint thresholds require"));
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(error.to_string().contains("checkpoint thresholds require"));
+        }
     }
 
     #[test]
@@ -7557,6 +12146,70 @@ mod tests {
             config.to_string(),
             "checkpoint options require --substrate-bootstrap"
         );
+    }
+
+    #[test]
+    fn checkpoint_lifecycle_cli_options_require_substrate_mode() {
+        for option in [
+            "--checkpoint-delete-records-timeout=25ms",
+            "--checkpoint-poll-interval=26ms",
+            "--idle-suspend-poll-interval=27ms",
+        ] {
+            let args = Cli::try_parse_from(["crabka-gres", option])
+                .expect("checkpoint lifecycle option")
+                .serve;
+            let error = SubstrateRuntimeConfig::from_args(&args).expect_err("substrate required");
+
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert_eq!(
+                error.to_string(),
+                "checkpoint options require --substrate-bootstrap"
+            );
+        }
+    }
+
+    #[test]
+    fn checkpoint_lifecycle_environment_options_require_substrate_mode() {
+        const CHILD: &str = "CRABKA_TEST_GRES_CHECKPOINT_REQUIRED_ENV_CHILD";
+        const VARIABLES: [&str; 3] = [
+            "CRABKA_GRES_CHECKPOINT_DELETE_RECORDS_TIMEOUT",
+            "CRABKA_GRES_CHECKPOINT_POLL_INTERVAL",
+            "CRABKA_GRES_IDLE_SUSPEND_POLL_INTERVAL",
+        ];
+
+        if let Ok(variable) = std::env::var(CHILD) {
+            let args = Cli::try_parse_from(["crabka-gres"])
+                .expect("checkpoint lifecycle environment option")
+                .serve;
+            let error = SubstrateRuntimeConfig::from_args(&args).expect_err("substrate required");
+
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput, "{variable}");
+            assert_eq!(
+                error.to_string(),
+                "checkpoint options require --substrate-bootstrap",
+                "{variable}"
+            );
+            return;
+        }
+
+        for variable in VARIABLES {
+            let mut command =
+                std::process::Command::new(std::env::current_exe().expect("test executable"));
+            command
+                .args([
+                    "--exact",
+                    "tests::checkpoint_lifecycle_environment_options_require_substrate_mode",
+                ])
+                .env(CHILD, variable);
+            for other in VARIABLES {
+                command.env_remove(other);
+            }
+            command.env(variable, "25ms");
+            assert!(
+                command.status().expect("child test").success(),
+                "{variable}"
+            );
+        }
     }
 
     #[test]
@@ -7617,21 +12270,6 @@ mod tests {
         let runtime = open_substrate_runtime(&config).await.expect("runtime");
 
         assert!(runtime.has_checkpoint_handle());
-    }
-
-    #[test]
-    fn checkpoint_part_bytes_rejects_too_small_values() {
-        let mut args = substrate_args();
-        args.checkpoint_store = Some(CheckpointStoreKind::InMemory);
-        args.checkpoint_part_bytes = Some(NonZeroUsize::new(7).expect("nonzero"));
-
-        let error = SubstrateRuntimeConfig::from_args(&args).expect_err("part too small");
-
-        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
-        assert_eq!(
-            error.to_string(),
-            "--checkpoint-part-bytes must be at least 8"
-        );
     }
 
     #[test]
@@ -7699,17 +12337,41 @@ mod tests {
     #[tokio::test]
     async fn live_substrate_multirange_uses_broker_recovery_not_local_engines() {
         let config = SubstrateRuntimeConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
+            fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+            wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
             bootstrap: "127.0.0.1:1".to_string(),
             tenant: "tenant-a".to_string(),
             cache_dir: None,
+            pgkv_options: FjallOptions::default(),
             checkpoints: None,
             kafka_security: None,
             ranges: Some("0,100,200".to_string()),
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
+            range0_follower_rebuild_backoff_floor: DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR
+                .to_std(),
+            range0_follower_rebuild_backoff_ceiling:
+                DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+            durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+                .to_std(),
+            durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
+            recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+            wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
+            producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+            producer_flush_timeout: crabka_client_producer::ProducerFlushTimeout::default(),
+            producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+            producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
+            wal_frame_max_size: crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE,
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
+            registry_policy: RegistryPolicy::default(),
+            range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+            pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
         };
 
         let Err(error) = open_substrate_runtime(&config).await else {
@@ -7763,23 +12425,49 @@ mod tests {
     #[tokio::test]
     async fn single_range_checkpoint_runtime_writes_to_the_range_zero_namespace() {
         let config = SubstrateRuntimeConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
+            fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+            wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
             bootstrap: "broker-a:9092".to_string(),
             tenant: "tenant-a".to_string(),
             cache_dir: None,
+            pgkv_options: FjallOptions::default(),
             checkpoints: Some(CheckpointRuntimeConfig {
                 object_store: CheckpointObjectStoreConfig::InMemory,
                 frames_threshold: 1,
-                bytes_threshold: 1,
-                part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
+                bytes_threshold: crabka_units::bytes(1),
+                part_max_size: crabka_gres_substrate::DEFAULT_PART_MAX_SIZE,
                 retain_newest: 2,
+                delete_records_timeout: crabka_units::secs(30),
+                poll_interval: Duration::from_secs(1),
             }),
             kafka_security: None,
             ranges: None,
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
+            range0_follower_rebuild_backoff_floor: DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR
+                .to_std(),
+            range0_follower_rebuild_backoff_ceiling:
+                DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+            durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+                .to_std(),
+            durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
+            recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+            wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
+            producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+            producer_flush_timeout: crabka_client_producer::ProducerFlushTimeout::default(),
+            producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+            producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
+            wal_frame_max_size: crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE,
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
+            registry_policy: RegistryPolicy::default(),
+            range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+            pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
         };
         let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
         let kv = Arc::new(MemKv::default());
@@ -7801,7 +12489,7 @@ mod tests {
             wal_selection.checkpoint_topic,
             wal_selection.checkpoint_namespace,
             Some(Arc::clone(&checkpoint_store)),
-            || Ok(GresCheckpointWalPruner::in_memory()),
+            |timeout| Ok(GresCheckpointWalPruner::in_memory(timeout)),
         )
         .expect("checkpoint runtime")
         .expect("checkpoint runtime enabled");
@@ -7823,12 +12511,12 @@ mod tests {
                 .iter()
                 .any(|object| object.key == checkpoint.manifest_key)
         );
-        assert_eq!(
+        assert!(
             checkpoint_runtime
-                .latest_checkpoint_bytes()
+                .latest_checkpoint_size()
                 .await
-                .expect("range-zero checkpoint metadata"),
-            checkpoint.total_bytes
+                .expect("range-zero checkpoint metadata")
+                == ByteSize::from_bytes(checkpoint.total_bytes)
         );
         checkpoint_runtime
             .handle
@@ -7852,9 +12540,11 @@ mod tests {
             log,
             crabka_gres_substrate::WriterGeneration(0),
             0,
+            crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE,
             &source,
             None,
             None,
+            crabka_pgexec::RuntimePolicy::default(),
         )
         .expect("substrate engine");
 
@@ -8122,17 +12812,41 @@ mod tests {
     #[test]
     fn live_single_range_wal_selection_matches_recovery_writer_and_checkpoint_topics() {
         let config = SubstrateRuntimeConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
+            fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+            wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
             bootstrap: "broker-a:9092,broker-b:9092".to_string(),
             tenant: "tenant-a".to_string(),
             cache_dir: None,
+            pgkv_options: FjallOptions::default(),
             checkpoints: None,
             kafka_security: None,
             ranges: None,
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
+            range0_follower_rebuild_backoff_floor: DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR
+                .to_std(),
+            range0_follower_rebuild_backoff_ceiling:
+                DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+            durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+                .to_std(),
+            durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
+            recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+            wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
+            producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+            producer_flush_timeout: crabka_client_producer::ProducerFlushTimeout::default(),
+            producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+            producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
+            wal_frame_max_size: crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE,
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
+            registry_policy: RegistryPolicy::default(),
+            range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+            pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
         };
 
         let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
@@ -8203,17 +12917,41 @@ mod tests {
     #[tokio::test]
     async fn substrate_runtime_selects_live_adapter_and_reports_broker_errors() {
         let config = SubstrateRuntimeConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
+            fdw_fetch_min: crabka_client_core::FetchMinBytes::default(),
+            wal_recovery_fetch_min: crabka_client_core::FetchMinBytes::default(),
             bootstrap: "127.0.0.1:1".to_string(),
             tenant: "tenant-a".to_string(),
             cache_dir: None,
+            pgkv_options: FjallOptions::default(),
             checkpoints: None,
             kafka_security: None,
             ranges: None,
+            range0_follower_poll_interval: DEFAULT_RANGE0_FOLLOWER_POLL_INTERVAL.to_std(),
+            range0_follower_rebuild_backoff_floor: DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_FLOOR
+                .to_std(),
+            range0_follower_rebuild_backoff_ceiling:
+                DEFAULT_RANGE0_FOLLOWER_REBUILD_BACKOFF_CEILING.to_std(),
+            durable_inspection_timeout: crabka_gres_substrate::DEFAULT_DURABLE_INSPECTION_TIMEOUT
+                .to_std(),
+            durable_inspection_fold_limits: crabka_gres_substrate::FoldLimits::default(),
+            recovery_read_policy: crabka_gres_substrate::RecoveryReadPolicy::default(),
+            wal_admin_policy: crabka_gres_substrate::WalAdminPolicy::default(),
+            producer_dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+            producer_flush_timeout: crabka_client_producer::ProducerFlushTimeout::default(),
+            producer_retry_policy: crabka_client_producer::ProducerRetryPolicy::default(),
+            producer_throughput_policy: crabka_client_producer::ProducerThroughputPolicy::default(),
+            wal_frame_max_size: crabka_gres_substrate::DEFAULT_MAX_FRAME_SIZE,
             host_ranges: None,
             range_rpc: None,
             advertised_endpoint: None,
             timestamp_source_mode: crabka_gres_ranges::TimestampSourceMode::LogicalTso,
             hlc_wall_offset_ms: 0,
+            registry_policy: RegistryPolicy::default(),
+            range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+            pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
         };
 
         let Err(error) = open_substrate_engine(&config).await else {

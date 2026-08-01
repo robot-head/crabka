@@ -20,6 +20,48 @@ spec:
           spec:
             description: Gres fleet specification.
             properties:
+              activator:
+                description: Wake activator deployment and runtime policy.
+                nullable: true
+                properties:
+                  clientDispatchQueueCapacity:
+                    description: Kafka client request-dispatch queue capacity.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientFrameMax:
+                    description: Maximum accepted Kafka client frame size.
+                    nullable: true
+                    type: string
+                  coldStartTimeout:
+                    description: Maximum duration to hold one cold-starting connection.
+                    nullable: true
+                    type: string
+                  image:
+                    description: |-
+                      Container image override. When absent the operator uses its global
+                      activator image override or compiled default.
+                    minLength: 1
+                    nullable: true
+                    type: string
+                  readinessProbePeriodSeconds:
+                    description: Activator readiness probe period in seconds.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  registryPoll:
+                    description: Registry readiness polling interval.
+                    nullable: true
+                    type: string
+                  replicas:
+                    description: Number of activator replicas.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                type: object
               balancer:
                 description: |-
                   Dry-run Gres balancer planning knobs. Live execution is intentionally
@@ -87,10 +129,10 @@ spec:
                   thresholds:
                     default:
                       cooldownEpochs: 2
-                      loadSkewHysteresisPct: 25
+                      loadSkewHysteresis: 25%
                       maxOperations: 32
-                      mergeFloorBytes: 67108864
-                      sizeCeilingBytes: 1073741824
+                      mergeFloor: 64MiB
+                      sizeCeiling: 1GiB
                       splitStrideRows: 1000000
                     description: Threshold and cooldown knobs used by future live planner input.
                     properties:
@@ -99,11 +141,9 @@ spec:
                         format: uint64
                         minimum: 0.0
                         type: integer
-                      loadSkewHysteresisPct:
-                        description: Load skew percentage tolerated before move planning.
-                        format: uint32
-                        minimum: 0.0
-                        type: integer
+                      loadSkewHysteresis:
+                        description: Load skew tolerated before move planning.
+                        type: string
                       maxOperations:
                         description: Maximum operations in one dry-run plan.
                         format: uint
@@ -115,16 +155,12 @@ spec:
                         minimum: 0.0
                         nullable: true
                         type: integer
-                      mergeFloorBytes:
-                        description: Merge adjacent ranges below this combined byte size.
-                        format: uint64
-                        minimum: 0.0
-                        type: integer
-                      sizeCeilingBytes:
-                        description: Split ranges larger than this many bytes.
-                        format: uint64
-                        minimum: 0.0
-                        type: integer
+                      mergeFloor:
+                        description: Merge adjacent ranges below this combined size.
+                        type: string
+                      sizeCeiling:
+                        description: Split ranges larger than this size.
+                        type: string
                       splitStrideRows:
                         description: Row stride used when a range has no upper bound.
                         format: uint64
@@ -132,12 +168,421 @@ spec:
                         type: integer
                     required:
                     - cooldownEpochs
-                    - loadSkewHysteresisPct
+                    - loadSkewHysteresis
                     - maxOperations
-                    - mergeFloorBytes
-                    - sizeCeilingBytes
+                    - mergeFloor
+                    - sizeCeiling
                     - splitStrideRows
                     type: object
+                type: object
+              compute:
+                description: Tenant compute workload policy.
+                nullable: true
+                properties:
+                  checkpointDeleteRecordsTimeout:
+                    description: Kafka `DeleteRecords` timeout.
+                    nullable: true
+                    type: string
+                  checkpointPartSize:
+                    description: Maximum checkpoint object part size.
+                    nullable: true
+                    type: string
+                  checkpointPollInterval:
+                    description: Checkpoint threshold polling interval.
+                    nullable: true
+                    type: string
+                  checkpointRetain:
+                    description: Number of checkpoint manifests to retain.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientDispatchQueueCapacity:
+                    description: Kafka client request-dispatch queue capacity.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientFrameMax:
+                    description: Maximum accepted Kafka client frame size.
+                    nullable: true
+                    type: string
+                  durableInspectionFoldMaxRecords:
+                    description: Maximum records materialized by one durable inspection.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  durableInspectionFoldMaxSize:
+                    description: Maximum data materialized by one durable inspection.
+                    nullable: true
+                    type: string
+                  durableInspectionTimeout:
+                    description: Deadline for one durable record inspection.
+                    nullable: true
+                    type: string
+                  fdwBrokerDnsTimeout:
+                    description: Timeout for resolving Kafka broker hostnames used by the FDW.
+                    nullable: true
+                    type: string
+                  fdwConnectTimeout:
+                    description: FDW broker TCP connection timeout.
+                    nullable: true
+                    type: string
+                  fdwFetchMaxWait:
+                    description: Maximum time a broker may hold one FDW fetch.
+                    nullable: true
+                    type: string
+                  fdwFetchMin:
+                    description: Minimum response size for FDW Kafka fetches.
+                    nullable: true
+                    type: string
+                  fdwFetchPartitionMax:
+                    description: Maximum bytes returned for one FDW partition fetch.
+                    nullable: true
+                    type: string
+                  fdwRequestTimeout:
+                    description: FDW broker request timeout.
+                    nullable: true
+                    type: string
+                  fdwSchemaFetchPoll:
+                    description: Poll cadence while awaiting a cold FDW writer schema.
+                    nullable: true
+                    type: string
+                  fdwSchemaFetchTimeout:
+                    description: Total deadline for resolving a cold FDW writer schema.
+                    nullable: true
+                    type: string
+                  idleSuspendPollInterval:
+                    description: Idle-suspend polling interval.
+                    nullable: true
+                    type: string
+                  lifecycleRequeue:
+                    description: Tenant lifecycle reconciliation interval.
+                    nullable: true
+                    type: string
+                  pgexecBlockingQueryMemory:
+                    description: Memory retained by one blocking query operator.
+                    nullable: true
+                    type: string
+                  pgexecJoinBroadcastThreshold:
+                    description: Largest estimated join input eligible for broadcast.
+                    nullable: true
+                    type: string
+                  pgexecNotifyQueueCapacity:
+                    description: Per-session LISTEN/NOTIFY queue capacity.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  pgexecResultPageMax:
+                    description: Maximum encoded size of one result page.
+                    nullable: true
+                    type: string
+                  pgexecRowidReservation:
+                    description: Durable internal row-ID reservation size.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  pgexecTsGcFloorLag:
+                    description: Lag retained behind the timestamp GC floor.
+                    nullable: true
+                    type: string
+                  pgexecTsPruneVersionsPerRow:
+                    description: Maximum timestamp versions pruned per written row.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  pgexecXidReservation:
+                    description: Durable XID reservation size.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  pgkvMaxMemtableSize:
+                    description: Maximum active memtable size for each on-disk substrate cache.
+                    nullable: true
+                    type: string
+                  pgkvRotateAfterOps:
+                    description: Committed operations between requested substrate-cache memtable rotations.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  pgwireMaxMessageSize:
+                    description: Maximum accepted `PostgreSQL` frontend message size.
+                    nullable: true
+                    type: string
+                  range0BarrierReplyBudget:
+                    description: Whole-reply budget for range-0 barriers.
+                    nullable: true
+                    type: string
+                  range0FollowerPollInterval:
+                    description: Periodic range-0 follower refresh cadence.
+                    nullable: true
+                    type: string
+                  range0FollowerRebuildBackoffCeiling:
+                    description: Maximum delay between consecutive range-0 follower rebuilds.
+                    nullable: true
+                    type: string
+                  range0FollowerRebuildBackoffFloor:
+                    description: Initial delay before retrying consecutive range-0 follower rebuilds.
+                    nullable: true
+                    type: string
+                  range0WaitTimeout:
+                    description: Range-0 catch-up wait timeout.
+                    nullable: true
+                    type: string
+                  rangeCrossRangeLockWaitCap:
+                    description: Lock-wait cap for cross-range transactions.
+                    nullable: true
+                    type: string
+                  rangeDecisionReleaseLagRetries:
+                    description: Decision-release lag retry count.
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeDecisionReleaseRetryBackoff:
+                    description: Decision-release retry backoff.
+                    nullable: true
+                    type: string
+                  rangeDurableInspectMaxRecords:
+                    description: Durable range-inspection record ceiling.
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeDurableInspectMaxSize:
+                    description: Durable range-inspection byte ceiling.
+                    nullable: true
+                    type: string
+                  rangeHlcHorizonHeadroom:
+                    description: Wall-clock headroom persisted by the HLC oracle.
+                    nullable: true
+                    type: string
+                  rangeJoinBroadcastRows:
+                    description: Maximum materialized broadcast rows.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeJoinKeyColumns:
+                    description: Maximum distributed join key columns.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeJoinPredicates:
+                    description: Maximum predicates per distributed join side.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeJoinProjectionColumns:
+                    description: Maximum distributed join projection columns.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeJoinResultRows:
+                    description: Maximum distributed join result rows.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeJoinRowMax:
+                    description: Maximum encoded distributed join row size.
+                    nullable: true
+                    type: string
+                  rangeJoinSnapshotXids:
+                    description: Maximum active XIDs in each distributed join snapshot.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeLogicalBasePersistStride:
+                    description: Initial logical horizon persistence stride.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeLogicalMaxPersistStride:
+                    description: Maximum adaptive logical horizon persistence stride.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeLogicalMinPersistInterval:
+                    description: Minimum interval between logical horizon persists.
+                    nullable: true
+                    type: string
+                  rangeRemoteSessionIdle:
+                    description: Hosted remote-session idle retention.
+                    nullable: true
+                    type: string
+                  rangeRemoteSessionMax:
+                    description: Maximum hosted remote sessions.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeRpcFrameMax:
+                    description: Maximum encoded range RPC frame size.
+                    nullable: true
+                    type: string
+                  rangeRpcPoolIdleTtl:
+                    description: Range RPC client-pool idle connection lifetime.
+                    nullable: true
+                    type: string
+                  rangeRpcPoolMaxIdlePerEndpoint:
+                    description: Maximum idle range RPC connections retained per endpoint.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  rangeRpcRequestTimeout:
+                    description: Deadline for one range RPC request.
+                    nullable: true
+                    type: string
+                  rangeRpcServerIdleTimeout:
+                    description: Range RPC server connection idle timeout.
+                    nullable: true
+                    type: string
+                  rangeTsoHeartbeatInterval:
+                    description: Timestamp-oracle heartbeat cadence.
+                    nullable: true
+                    type: string
+                  readinessProbePeriodSeconds:
+                    description: Compute readiness probe period in seconds.
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  schemaFetchRetryInitialBackoff:
+                    description: Initial delay before retrying a transient Schema Registry fetch failure.
+                    nullable: true
+                    type: string
+                  schemaFetchRetryMaxBackoff:
+                    description: Maximum delay between transient Schema Registry fetch retries.
+                    nullable: true
+                    type: string
+                  walAdminConnectTimeout:
+                    description: Timeout for opening WAL admin connections.
+                    nullable: true
+                    type: string
+                  walAdminRequestTimeout:
+                    description: Timeout for WAL admin requests.
+                    nullable: true
+                    type: string
+                  walFrameMaxSize:
+                    description: Target maximum size of one encoded logical WAL frame.
+                    nullable: true
+                    type: string
+                  walProducerBatch:
+                    description: Maximum WAL producer batch size.
+                    nullable: true
+                    type: string
+                  walProducerCompression:
+                    description: WAL producer compression codec.
+                    enum:
+                    - none
+                    - gzip
+                    - snappy
+                    - lz4
+                    - zstd
+                    - null
+                    nullable: true
+                    type: string
+                  walProducerDnsTimeout:
+                    description: Timeout for resolving WAL producer broker hostnames.
+                    nullable: true
+                    type: string
+                  walProducerFlushTimeout:
+                    description: Deadline for flushing all buffered and in-flight WAL records.
+                    nullable: true
+                    type: string
+                  walProducerInitMaxBackoff:
+                    description: WAL producer-ID initialization backoff cap.
+                    nullable: true
+                    type: string
+                  walProducerInitRetryTimeout:
+                    description: WAL producer-ID initialization retry timeout.
+                    nullable: true
+                    type: string
+                  walProducerLinger:
+                    description: Delay before sending a partial WAL producer batch.
+                    nullable: true
+                    type: string
+                  walProducerRequestTimeout:
+                    description: Timeout for WAL producer broker requests.
+                    nullable: true
+                    type: string
+                  walProducerRetries:
+                    description: WAL producer retries after the initial batch send.
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  walProducerRetryBackoff:
+                    description: WAL producer retry and producer-ID initial backoff.
+                    nullable: true
+                    type: string
+                  walProducerRoutingRetryBudget:
+                    description: Per-batch WAL producer routing retry budget.
+                    nullable: true
+                    type: string
+                  walProducerTransactionTimeout:
+                    description: WAL producer transaction timeout.
+                    nullable: true
+                    type: string
+                  walRecoveryConnectTimeout:
+                    description: Timeout for opening committed-WAL recovery broker connections.
+                    nullable: true
+                    type: string
+                  walRecoveryDnsTimeout:
+                    description: Timeout for resolving committed-WAL recovery broker hostnames.
+                    nullable: true
+                    type: string
+                  walRecoveryEmptyFetchRetries:
+                    description: Consecutive empty-fetch retries after the first empty recovery fetch.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  walRecoveryFetchMaxWait:
+                    description: Kafka broker long-poll wait for committed-WAL recovery fetches.
+                    nullable: true
+                    type: string
+                  walRecoveryFetchMin:
+                    description: Minimum response size for committed-WAL recovery fetches.
+                    nullable: true
+                    type: string
+                  walRecoveryFetchPartitionMax:
+                    description: Per-partition size limit for committed-WAL recovery fetches.
+                    nullable: true
+                    type: string
+                  walRecoveryFetchResponseMax:
+                    description: Whole-response size limit for committed-WAL recovery fetches.
+                    nullable: true
+                    type: string
+                  walRecoveryRequestTimeout:
+                    description: Timeout for committed-WAL recovery broker requests.
+                    nullable: true
+                    type: string
+                  walTopicEnsureTimeout:
+                    description: Timeout for ensuring a range WAL topic.
+                    nullable: true
+                    type: string
+                  walTopicReplicationFactor:
+                    description: Replication factor requested when creating a range WAL topic.
+                    format: int32
+                    maximum: 32767.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                 type: object
               defaults:
                 description: |-
@@ -145,30 +590,33 @@ spec:
                   they set `spec.overrides`.
                 nullable: true
                 properties:
-                  checkpointBytes:
-                    description: Checkpoint after this many bytes when set.
-                    format: uint64
-                    minimum: 0.0
-                    nullable: true
-                    type: integer
                   checkpointFrames:
                     description: Checkpoint after this many frames when set.
                     format: uint64
                     minimum: 0.0
                     nullable: true
                     type: integer
+                  checkpointSize:
+                    description: Checkpoint after this much WAL when set.
+                    nullable: true
+                    type: string
                   idleSeconds:
                     description: Idle timeout in seconds; unset means never suspend by idleness.
                     format: uint64
                     minimum: 0.0
                     nullable: true
                     type: integer
-                  suspendMaxCheckpointBytes:
-                    description: Keep the tenant warm when its latest checkpoint exceeds this size.
-                    format: uint64
-                    minimum: 0.0
+                  scramIterations:
+                    description: PBKDF2 iteration count for tenant Kafka and `PostgreSQL` SCRAM credentials.
+                    format: int32
+                    maximum: 16384.0
+                    minimum: 4096.0
                     nullable: true
                     type: integer
+                  suspendMaxCheckpointSize:
+                    description: Keep the tenant warm when its latest checkpoint exceeds this size.
+                    nullable: true
+                    type: string
                   walReplication:
                     description: Replication factor for tenant WAL topics.
                     format: int32
@@ -194,6 +642,21 @@ spec:
                     - key
                     - name
                     type: object
+                  connectAttempts:
+                    description: Number of backend connection attempts.
+                    format: uint16
+                    maximum: 65535.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  directBootstrapGrace:
+                    description: Direct-route credential retention grace.
+                    nullable: true
+                    type: string
+                  idleTimeout:
+                    description: Idle pooled-server disconnect window.
+                    nullable: true
+                    type: string
                   image:
                     description: |-
                       Container image override. When absent the operator uses
@@ -206,12 +669,33 @@ spec:
                     maximum: 65535.0
                     minimum: 1.0
                     type: integer
+                  poolerMode:
+                    description: Pooling modes accepted by the Gres CRD.
+                    enum:
+                    - transaction
+                    - session
+                    nullable: true
+                    type: string
+                  readinessProbePeriodSeconds:
+                    description: '`PgDog` readiness probe period in seconds.'
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   replicas:
                     description: Number of `PgDog` replicas.
                     format: int32
                     maximum: 1000.0
                     minimum: 0.0
                     type: integer
+                  serverLifetime:
+                    description: Maximum lifetime for pooled backend connections.
+                    nullable: true
+                    type: string
+                  suspensionIdleTimeout:
+                    description: Idle timeout used while at least one tenant can suspend.
+                    nullable: true
+                    type: string
                   tlsSecretRef:
                     description: Optional TLS Secret mounted by the future `PgDog` controller.
                     nullable: true

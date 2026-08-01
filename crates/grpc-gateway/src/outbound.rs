@@ -12,13 +12,14 @@
 
 use std::{
     sync::Arc,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64STD};
 use bytes::Bytes;
 use crabka_client_consumer::{Assignor, AutoOffsetReset, Consumer, ConsumerRecord, IsolationLevel};
 use crabka_client_producer::{Header, Producer, ProducerRecord};
+use crabka_units::prelude::*;
 use jsonpath_rust::{parser::model::JpQuery, query::js_path_process};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -60,19 +61,53 @@ pub async fn run_subscription(
     client_id: String,
     producer: Arc<Producer>,
     shutdown: CancellationToken,
-    security: Option<crabka_client_core::security::ClientSecurity>,
+    consumer_policy: (Option<crabka_client_core::security::ClientSecurity>, Time),
     codec: Arc<dyn RecordCodec>,
 ) -> Result<(), GatewayError> {
+    run_subscription_with_policy(
+        sub,
+        bootstrap,
+        client_id,
+        producer,
+        shutdown,
+        (
+            consumer_policy.0,
+            consumer_policy.1,
+            crate::config::GatewayRuntimeConfig::default(),
+        ),
+        codec,
+    )
+    .await
+}
+
+/// Run a subscription with the deployment's client resource policy.
+/// # Errors
+/// Returns an error when consumer or delivery setup fails.
+pub async fn run_subscription_with_policy(
+    sub: CompiledSubscription,
+    bootstrap: String,
+    client_id: String,
+    producer: Arc<Producer>,
+    shutdown: CancellationToken,
+    consumer_policy: (
+        Option<crabka_client_core::security::ClientSecurity>,
+        Time,
+        crate::config::GatewayRuntimeConfig,
+    ),
+    codec: Arc<dyn RecordCodec>,
+) -> Result<(), GatewayError> {
+    let (security, poll_timeout, policy) = consumer_policy;
     let http = reqwest::Client::builder()
-        .timeout(Duration::from_millis(sub.request_timeout_ms))
+        .timeout(sub.request_timeout.to_std())
         .build()
         .map_err(|e| GatewayError::Other(format!("build outbound http client: {e}")))?;
 
-    let group = format!("__crabka_grpc_wh_{}", sub.name);
     let mut consumer = Consumer::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
-        .group_id(group)
+        .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+        .frame_max(policy.client_frame_max.size())
+        .group_id(sub.group_id.clone())
         .subscribe(sub.source_topics.clone())
         .isolation_level(IsolationLevel::ReadCommitted)
         .auto_offset_reset(AutoOffsetReset::Earliest)
@@ -88,7 +123,7 @@ pub async fn run_subscription(
     loop {
         let batch = tokio::select! {
             () = shutdown.cancelled() => break,
-            b = consumer.poll(Duration::from_millis(500)) => match b {
+            b = consumer.poll(poll_timeout) => match b {
                 Ok(b) => b,
                 Err(e) => {
                     poll_err = Some(e.into());
@@ -237,11 +272,9 @@ async fn deliver_one(
             return;
         }
         metrics().record_webhook_retry();
-        tokio::time::sleep(backoff_with_jitter(
-            attempt,
-            sub.base_backoff_ms,
-            sub.max_backoff_ms,
-        ))
+        tokio::time::sleep(
+            backoff_with_jitter(attempt, sub.base_backoff, sub.max_backoff).to_std(),
+        )
         .await;
     }
 }
@@ -333,14 +366,20 @@ fn passes_filter(q: &JpQuery, rec: &ConsumerRecord) -> bool {
 
 /// Full-ish jitter exponential backoff (no `rand` dep): the deterministic
 /// component is `min(base * 2^(attempt-1), max) / 2`, plus a jitter in
-/// `0..=half` seeded from the current sub-second nanos. `attempt` is 1-based.
-fn backoff_with_jitter(attempt: u32, base_ms: u64, max_ms: u64) -> Duration {
-    let exp = base_ms
-        .saturating_mul(2u64.saturating_pow(attempt - 1))
-        .min(max_ms);
-    let half = exp / 2;
-    let jitter = nanos() % (half + 1);
-    Duration::from_millis(half + jitter)
+/// `0..=half`. `attempt` is 1-based.
+fn backoff_with_jitter(attempt: u32, base: Time, max: Time) -> Time {
+    // `saturating_pow` clamps the doubling so a large `attempt` cannot overflow
+    // before the cap applies.
+    let doubled = base * f64::from(2u32.saturating_pow(attempt - 1));
+    let capped = if doubled > max { max } else { doubled };
+    let half = capped * 0.5;
+    half + half * jitter().as_f64()
+}
+
+/// Pseudo-random jitter in `0..1` (no `rand` dep): the current sub-second nanos
+/// expressed as a fraction of one second.
+fn jitter() -> Ratio {
+    fraction(Time::from_nanos(i64::from(subsec_nanos())).secs_f64())
 }
 
 /// Dead-letter an exhausted record. When a DLQ topic is configured, produce the
@@ -416,11 +455,11 @@ fn now_unix_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
-/// Pseudo-random jitter source: the current sub-second nanos (no `rand` dep).
-fn nanos() -> u64 {
+/// The wall clock's current sub-second nanos — the jitter seed.
+fn subsec_nanos() -> u32 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_or(0, |d| u64::from(d.subsec_nanos()))
+        .map_or(0, |d| d.subsec_nanos())
 }
 
 /// Standard-base64 encode (the envelope key/value encoding).
@@ -471,14 +510,15 @@ mod tests {
     fn sub_with_decode(decode_to_json: bool) -> CompiledSubscription {
         CompiledSubscription {
             name: "dec".into(),
+            group_id: "__crabka_grpc_wh_dec".into(),
             source_topics: vec!["events".into()],
             target_url: "https://hooks.example.com/x".into(),
             signing_secret: None,
             dead_letter_topic: None,
             max_attempts: 1,
-            base_backoff_ms: 1,
-            max_backoff_ms: 1,
-            request_timeout_ms: 1,
+            base_backoff: millis(1),
+            max_backoff: millis(1),
+            request_timeout: millis(1),
             filter: None,
             headers: vec![],
             decode_to_json,
@@ -550,20 +590,21 @@ mod tests {
 
     #[test]
     fn backoff_grows_and_caps_at_max() {
-        // attempt 1: exp = min(100, 1000) = 100, range [50, 100].
-        let d1 = backoff_with_jitter(1, 100, 1000);
-        assert2::assert!(d1.as_millis() >= 50 && d1.as_millis() <= 100);
-        // attempt 10 saturates the cap: exp = min(100 * 2^9, 1000) = 1000,
-        // range [500, 1000]; must not panic on the large shift.
-        let d10 = backoff_with_jitter(10, 100, 1000);
-        assert2::assert!(d10.as_millis() >= 500 && d10.as_millis() <= 1000);
+        // attempt 1: exp = min(100ms, 1s) = 100ms, range [50ms, 100ms].
+        let first = backoff_with_jitter(1, millis(100), secs(1));
+        assert2::assert!(first >= millis(50) && first <= millis(100));
+        // attempt 10 saturates the cap: exp = min(100ms * 2^9, 1s) = 1s,
+        // range [500ms, 1s]; must not panic on the large doubling.
+        let tenth = backoff_with_jitter(10, millis(100), secs(1));
+        assert2::assert!(tenth >= millis(500) && tenth <= secs(1));
     }
 
     #[test]
     fn backoff_does_not_overflow_on_high_attempt() {
-        // 2^(u32::MAX - 1) overflows a u64 shift; saturating_pow must clamp.
-        let d = backoff_with_jitter(u32::MAX, 500, 30_000);
-        assert2::assert!(d.as_millis() >= 15_000 && d.as_millis() <= 30_000);
+        // 2^(u32::MAX - 1) overflows an integer shift; saturating_pow clamps it
+        // and the cap then applies.
+        let backoff = backoff_with_jitter(u32::MAX, millis(500), secs(30));
+        assert2::assert!(backoff >= secs(15) && backoff <= secs(30));
     }
 
     // -----------------------------------------------------------------------

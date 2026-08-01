@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use crabka_blockstore::SeriesFingerprint;
+use crabka_units::prelude::*;
 use futures::{FutureExt, future::BoxFuture};
 use promql_parser::parser::{Call, Expr, VectorSelector};
 
@@ -384,7 +385,7 @@ impl<S: MetricStore> PromqlEngine<S> {
             selector.offset.as_ref(),
             None,
         )?;
-        let start_ms = eval_time_ms.saturating_sub(self.opts.lookback_delta_ms);
+        let start_ms = eval_time_ms.saturating_sub(self.opts.lookback_delta.millis_i64());
         let matcher_sets = label_matcher_sets(selector);
         let labels_by_fp = self
             .labels_by_fingerprint_sets(tenant, &matcher_sets, start_ms, eval_time_ms)

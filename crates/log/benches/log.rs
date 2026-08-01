@@ -20,8 +20,13 @@ use bytes::Bytes;
 use crabka_ids::{LeaderEpoch, Offset, ProducerId};
 use crabka_log::{Log, LogConfig, VerbatimBatch};
 use crabka_protocol::records::{Record, RecordBatch};
+use crabka_units::prelude::{ByteSize, gibibytes, kibibytes, mebibytes};
 use criterion::{Criterion, black_box, criterion_group, criterion_main};
 use tempfile::tempdir;
+
+/// A read budget larger than the whole benchmark log, so the "unbounded"
+/// case never clips.
+const UNBOUNDED: ByteSize = gibibytes(4);
 
 fn make_batch(n: i32, payload_size: usize) -> RecordBatch {
     let mut b = RecordBatch {
@@ -270,14 +275,14 @@ fn bench_read(c: &mut Criterion) {
 
     group.bench_function("from_start_1MiB", |b| {
         b.iter(|| {
-            let out = log.read(black_box(Offset(0)), 1024 * 1024).unwrap();
+            let out = log.read(black_box(Offset(0)), mebibytes(1)).unwrap();
             black_box(out);
         });
     });
 
     group.bench_function("from_start_unbounded", |b| {
         b.iter(|| {
-            let out = log.read(black_box(Offset(0)), usize::MAX).unwrap();
+            let out = log.read(black_box(Offset(0)), UNBOUNDED).unwrap();
             black_box(out);
         });
     });
@@ -285,7 +290,7 @@ fn bench_read(c: &mut Criterion) {
     group.bench_function("from_middle_1MiB", |b| {
         let mid = Offset(end.0 / 2);
         b.iter(|| {
-            let out = log.read(black_box(mid), 1024 * 1024).unwrap();
+            let out = log.read(black_box(mid), mebibytes(1)).unwrap();
             black_box(out);
         });
     });
@@ -293,14 +298,14 @@ fn bench_read(c: &mut Criterion) {
     group.bench_function("from_end_minus_100_1MiB", |b| {
         let near_end = (end - 100).max(Offset(0));
         b.iter(|| {
-            let out = log.read(black_box(near_end), 1024 * 1024).unwrap();
+            let out = log.read(black_box(near_end), mebibytes(1)).unwrap();
             black_box(out);
         });
     });
 
     group.bench_function("past_end_returns_empty", |b| {
         b.iter(|| {
-            let out = log.read(black_box(end), 1024 * 1024).unwrap();
+            let out = log.read(black_box(end), mebibytes(1)).unwrap();
             black_box(out);
         });
     });
@@ -319,7 +324,7 @@ fn bench_open(c: &mut Criterion) {
         let dir = tempdir().unwrap();
         {
             let config = LogConfig {
-                segment_bytes: 1024,
+                segment_size: kibibytes(1),
                 ..LogConfig::default()
             };
             let mut log = Log::open(dir.path(), config).unwrap();

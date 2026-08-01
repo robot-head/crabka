@@ -1,13 +1,19 @@
 //! Heartbeat task: periodically writes MM2 Heartbeat records to the target.
 
-use std::time::Duration;
-
 use bytes::Bytes;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_units::{
+    fmt::Human as _,
+    prelude::{Time, TimeExt as _},
+};
 use tokio::sync::watch;
 use tracing::warn;
 
-use crate::{error::ReplicatorError, mm2::Heartbeat};
+use crate::{
+    config::{ClientResourcePolicy, ReplicatorRuntimePolicy},
+    error::ReplicatorError,
+    mm2::Heartbeat,
+};
 
 /// Parameters for the [`HeartbeatTask`].
 pub struct HeartbeatParams {
@@ -18,7 +24,7 @@ pub struct HeartbeatParams {
     /// Alias of the target cluster written into each heartbeat record.
     pub target_alias: String,
     /// How often to emit a heartbeat record.
-    pub interval: Duration,
+    pub interval: Time,
     /// Injectable clock: returns the current time in milliseconds since epoch.
     pub now_ms: fn() -> i64,
     /// Injectable async sleeper that paces the heartbeat interval. Production
@@ -49,22 +55,51 @@ impl HeartbeatTask {
     #[tracing::instrument(
         level = "info",
         skip_all,
-        fields(source = %p.source_alias, target = %p.target_alias, interval_ms = p.interval.as_millis()),
+        fields(source = %p.source_alias, target = %p.target_alias, interval = %p.interval.human()),
         err,
     )]
     pub async fn start(p: HeartbeatParams) -> Result<Self, ReplicatorError> {
+        Self::start_with_policy(p, ClientResourcePolicy::default()).await
+    }
+
+    /// Start with the deployment's client resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ReplicatorError::Client`] if topic creation or producer
+    /// construction fails.
+    pub async fn start_with_policy(
+        p: HeartbeatParams,
+        client_resource_policy: ClientResourcePolicy,
+    ) -> Result<Self, ReplicatorError> {
+        Self::start_with_runtime_policy(
+            p,
+            client_resource_policy,
+            &ReplicatorRuntimePolicy::default(),
+        )
+        .await
+    }
+
+    pub(crate) async fn start_with_runtime_policy(
+        p: HeartbeatParams,
+        client_resource_policy: ClientResourcePolicy,
+        runtime_policy: &ReplicatorRuntimePolicy,
+    ) -> Result<Self, ReplicatorError> {
         // Ensure the heartbeats topic exists before we start producing.
-        crate::admin_util::ensure_topic(
+        crate::admin_util::ensure_topic_with_runtime_policy(
             &p.target_bootstrap,
             Heartbeat::TOPIC,
             1,
             p.security.clone(),
+            client_resource_policy,
+            runtime_policy,
+            runtime_policy.internal_topic_replication_factor,
         )
         .await
         .map_err(ReplicatorError::Client)?;
 
         // Build the producer once — reused for every heartbeat.
-        let producer = build_producer(&p.target_bootstrap, p.security)
+        let producer = build_producer(&p.target_bootstrap, p.security, client_resource_policy)
             .await
             .map_err(|e| ReplicatorError::Client(e.to_string()))?;
 
@@ -84,7 +119,7 @@ impl HeartbeatTask {
             // `tokio::time::interval` with `MissedTickBehavior::Delay`. Unlike
             // `interval` it has no immediate zeroth tick, so the first heartbeat
             // lands one interval in (which is what we want anyway).
-            let mut tick = sleeper.sleep_for_async(interval);
+            let mut tick = sleeper.sleep_for_async(interval.to_std());
 
             loop {
                 tokio::select! {
@@ -120,7 +155,7 @@ impl HeartbeatTask {
                         }
 
                         // Re-arm the interval for the next tick.
-                        tick = sleeper.sleep_for_async(interval);
+                        tick = sleeper.sleep_for_async(interval.to_std());
                     }
                     Ok(()) = shutdown_rx.changed() => {
                         if *shutdown_rx.borrow() {
@@ -151,9 +186,12 @@ impl HeartbeatTask {
 async fn build_producer(
     bootstrap: &str,
     security: Option<crabka_client_core::security::ClientSecurity>,
+    client_resource_policy: ClientResourcePolicy,
 ) -> Result<Producer, crabka_client_producer::ProducerError> {
     let builder = Producer::builder()
         .bootstrap(bootstrap)
+        .dispatch_queue_capacity(client_resource_policy.dispatch_queue_capacity.get())
+        .frame_max(client_resource_policy.frame_max.size())
         .enable_idempotence(false)
         .acks(Acks::All);
     match security {
@@ -166,12 +204,15 @@ async fn build_producer(
 mod tests {
     use std::sync::Arc;
 
+    use crabka_units::prelude::{millis, secs};
     use qubit_clock::{MockTime, MockWaiterKind};
 
     use super::*;
 
     /// Number of heartbeat intervals to fire on the mock timeline.
     const TICKS: usize = 3;
+    /// Heartbeat cadence the mock timeline is advanced by, one tick at a time.
+    const INTERVAL: Time = millis(100);
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn emits_heartbeat() {
@@ -192,7 +233,7 @@ mod tests {
             target_bootstrap: target.clone(),
             source_alias: "us-east".into(),
             target_alias: "eu-west".into(),
-            interval: Duration::from_millis(100),
+            interval: INTERVAL,
             now_ms: || 123,
             sleeper: Arc::new(mock.sleeper()),
             security: None,
@@ -214,21 +255,15 @@ mod tests {
         for n in 1..=TICKS {
             let timeline = mock.timeline();
             let parked = tokio::task::spawn_blocking(move || {
-                timeline.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, Duration::from_secs(5))
+                timeline.wait_for_blocked_waiters(MockWaiterKind::Sleep, 1, secs(5).to_std())
             })
             .await
             .unwrap();
             assert2::assert!(parked);
 
-            mock.advance(Duration::from_millis(100));
+            mock.advance(INTERVAL.to_std());
 
-            crate::test_util::await_topic_count(
-                &target,
-                Heartbeat::TOPIC,
-                n,
-                Duration::from_secs(10),
-            )
-            .await;
+            crate::test_util::await_topic_count(&target, Heartbeat::TOPIC, n, secs(10)).await;
         }
 
         h.shutdown().await;

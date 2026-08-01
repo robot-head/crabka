@@ -35,6 +35,7 @@ use crabka_grpc_gateway::{
 use crabka_security::ca::{
     SubjectAltName, generate_clients_ca, issue_broker_cert, issue_user_cert,
 };
+use crabka_units::prelude::*;
 use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 
@@ -102,7 +103,7 @@ fn tls_settings(certs: &Certs, client_auth: ClientAuthMode) -> TlsSettings {
         trust_roots_path: Some(certs.ca.clone()),
         client_ca_path: Some(certs.ca.clone()),
         client_auth,
-        reload_interval_secs: 3600,
+        reload_interval: hours(1),
     }
 }
 
@@ -204,7 +205,8 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             client_id: client.into(),
             dedup_topic: DEDUP.into(),
             dedup_partitions: N,
-            dedup_window_ms: 3_600_000,
+            dedup_window: hours(1),
+            dedup_ownership_group: OWNERS_GROUP.into(),
             dedup_txn_id_prefix: format!("crabka-grpc-dedup-{client}"),
             advertised_addr: addr.clone(),
             membership_topic: MEMBERSHIP.into(),
@@ -215,6 +217,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             webhooks: std::collections::HashMap::new(),
             outbound: Vec::new(),
             schema_registry_url: None,
+            runtime: crabka_grpc_gateway::config::GatewayRuntimeConfig::default(),
         }),
         authz: Arc::new(crabka_grpc_gateway::authz::GatewayAuthz::new(Arc::new(
             crabka_authz::AllowAllAuthorizer,
@@ -229,7 +232,7 @@ async fn spawn_gateway_tls(bootstrap: &str, client: &str, settings: TlsSettings)
             .merge(forward::forward_router(state.clone()));
         let dynamic = serve::build_and_watch_tls(
             settings.to_security(),
-            settings.reload_interval_secs,
+            settings.reload_interval,
             token.clone(),
         )
         .unwrap();
@@ -281,7 +284,7 @@ async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
         .unwrap();
     let mut n = 0;
     for _ in 0..10 {
-        let batch = consumer.poll(Duration::from_millis(500)).await.unwrap();
+        let batch = consumer.poll(crabka_units::millis(500)).await.unwrap();
         for r in batch {
             if r.value.as_deref() == Some(key_filter.as_bytes()) {
                 n += 1;
@@ -299,12 +302,30 @@ async fn count_in_user_topic(bootstrap: &str, key_filter: &str) -> usize {
 async fn server_tls_handshake_and_health() {
     install_provider();
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
-        .await
-        .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        DEDUP,
+        N,
+        hours(1),
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    ensure_membership_topic(
+        &bootstrap,
+        MEMBERSHIP,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
 
     let certs_dir = TempDir::new().unwrap();
     let certs = gen_certs(certs_dir.path());
@@ -343,12 +364,30 @@ async fn server_tls_handshake_and_health() {
 async fn mtls_required_rejects_no_client_cert() {
     install_provider();
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
-        .await
-        .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        DEDUP,
+        N,
+        hours(1),
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    ensure_membership_topic(
+        &bootstrap,
+        MEMBERSHIP,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
 
     let certs_dir = TempDir::new().unwrap();
     let certs = gen_certs(certs_dir.path());
@@ -388,12 +427,30 @@ async fn mtls_required_rejects_no_client_cert() {
 async fn tls_forward_between_two_gateways() {
     install_provider();
     let (broker, bootstrap, _dir) = boot().await;
-    ensure_dedup_topic(&bootstrap, DEDUP, N, 3_600_000, 1, None)
-        .await
-        .unwrap();
-    ensure_membership_topic(&bootstrap, MEMBERSHIP, 1, None)
-        .await
-        .unwrap();
+    ensure_dedup_topic(
+        &bootstrap,
+        DEDUP,
+        N,
+        hours(1),
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
+    ensure_membership_topic(
+        &bootstrap,
+        MEMBERSHIP,
+        &crabka_grpc_gateway::dedup::topic::InternalTopicPolicy {
+            replication_factor: 1,
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .unwrap();
     let mut admin = AdminClient::connect(std::slice::from_ref(&bootstrap))
         .await
         .unwrap();
@@ -405,7 +462,7 @@ async fn tls_forward_between_two_gateways() {
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            10_000,
+            crabka_units::secs(10),
         )
         .await
         .unwrap();

@@ -49,6 +49,10 @@ pub(crate) fn handle(
     let future_logs = broker.future_logs.clone();
     let all_log_dirs = broker.config.all_log_dirs();
     let log_config = broker.config.log_config.clone();
+    let move_policy = future_log::MovePolicy {
+        retry_backoff: broker.config.future_log_move_retry_backoff,
+        read_chunk: broker.config.future_log_move_read_chunk,
+    };
     Box::pin(async move {
         let mut cur: &[u8] = &req_bytes;
         let req = AlterReplicaLogDirsRequest::decode(&mut cur, version)?;
@@ -68,9 +72,9 @@ pub(crate) fn handle(
                         &future_logs,
                         &all_log_dirs,
                         &log_config,
-                        &topic.name,
-                        crabka_ids::PartitionIndex(partition_index),
+                        (&topic.name, crabka_ids::PartitionIndex(partition_index)),
                         &target_path,
+                        move_policy,
                     ) {
                         Ok(()) => codes::NONE,
                         Err(MoveError::LogDirNotFound) => codes::LOG_DIR_NOT_FOUND,

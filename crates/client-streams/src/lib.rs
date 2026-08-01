@@ -257,7 +257,7 @@
 //! [`KGroupedStream::windowed_by_sliding`] produces a
 //! [`SlidingWindowedKGroupedStream`] with `count`/`reduce`/`aggregate`. Sliding
 //! windows are **data-defined** inclusive windows of fixed size
-//! `time_difference_ms`: a record at time `t` falls into every window
+//! `time_difference`: a record at time `t` falls into every window
 //! `[ws, ws + time_difference]` with `ws ∈ [t - time_difference, t]`. Unlike
 //! tumbling/hopping windows there is no epoch alignment; the aggregator
 //! discovers affected windows by scanning the window store and emits on update.
@@ -452,11 +452,12 @@
 //!
 //! ```
 //! use crabka_client_streams::{BufferConfig, StreamsBuilder, Suppressed, TimeWindows};
+//! use crabka_units::prelude::*;
 //!
 //! let b = StreamsBuilder::new();
 //! b.stream::<String, String>(["clicks"])
 //!     .group_by_key()
-//!     .windowed_by(TimeWindows::of_size(60_000).grace(10_000))
+//!     .windowed_by(TimeWindows::of_size(minutes(1)).grace(secs(10)))
 //!     .count("click-counts")
 //!     .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
 //!     .to_stream()
@@ -484,6 +485,7 @@
 //!     format::avro::AvroSerde,
 //!     set_default_registry,
 //! };
+//! use crabka_units::prelude::*;
 //! use serde::{Deserialize, Serialize};
 //!
 //! #[derive(Clone, Serialize, Deserialize, AvroSchema)]
@@ -513,7 +515,7 @@
 //! let b = StreamsBuilder::new();
 //! b.stream::<String, Order>(["orders"]) // keyed by region
 //!     .group_by_key()
-//!     .windowed_by(TimeWindows::of_size(60_000).grace(10_000))
+//!     .windowed_by(TimeWindows::of_size(minutes(1)).grace(secs(10)))
 //!     .aggregate(
 //!         || Revenue {
 //!             order_count: 0,
@@ -883,7 +885,7 @@
 //!
 //! ## Versioned tables (KIP-889)
 //!
-//! `builder.table(..., Materialized::as_versioned(name, history_retention_ms))`
+//! `builder.table(..., Materialized::as_versioned(name, history_retention))`
 //! materializes a table into a versioned key-value store, so out-of-order
 //! records are recorded as historical versions without clobbering the latest,
 //! and point-in-time reads are available via `get_as_of`.
@@ -902,6 +904,7 @@ pub mod topology;
 
 #[doc(hidden)]
 pub use async_trait::async_trait as __async_trait;
+pub use crabka_client_core::ClientDnsTimeout;
 pub use dsl::{
     BranchedStream, BufferConfig, CogroupedKStream, GlobalKTable, Grouped, JoinWindows, Joined,
     KGroupedStream, KStream, KTable, Materialized, Repartitioned, SessionWindowedCogroupedStream,
@@ -912,8 +915,10 @@ pub use dsl::{
 };
 pub use error::StreamsClientError;
 pub use membership::{
-    SchemaPrewarm, StreamsAssignment, StreamsEvent, StreamsMembership, StreamsStatus,
-    TaskAssignment, TaskOffsetTracker, TopicPartition,
+    DEFAULT_STREAMS_JOIN_RETRY_BACKOFF, DEFAULT_STREAMS_LEAVE_HEARTBEAT_TIMEOUT,
+    DEFAULT_STREAMS_REBALANCE_TIMEOUT, SchemaPrewarm, StreamsAssignment, StreamsEvent,
+    StreamsJoinRetryBackoff, StreamsLeaveHeartbeatTimeout, StreamsMembership,
+    StreamsRebalanceTimeout, StreamsStatus, TaskAssignment, TaskOffsetTracker, TopicPartition,
 };
 pub use processor::{
     BytesSerde, Cancellable, Consumed, DefaultSerde, FixedKeyProcessor, FixedKeyProcessorContext,
@@ -922,7 +927,11 @@ pub use processor::{
     RecordContext, Serde, SerdeError, StringSerde, schema_serde::SchemaSerde,
 };
 pub use runtime::{
-    KafkaStreams, ReadOnlyKeyValueStore, ReadOnlySessionStore, ReadOnlyWindowStore,
+    DEFAULT_STREAMS_COMMIT_INTERVAL, DEFAULT_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY,
+    DEFAULT_STREAMS_POLL_INTERVAL, DEFAULT_STREAMS_STATE_STORE_CACHE_MAX_BYTES, KafkaStreams,
+    MAX_STREAMS_STATE_STORE_CACHE_MAX_BYTES, ReadOnlyKeyValueStore, ReadOnlySessionStore,
+    ReadOnlyWindowStore, StreamsCommitInterval, StreamsInteractiveQueryQueueCapacity,
+    StreamsPollInterval, StreamsStateStoreCacheMaxBytes,
     eos::ProcessingGuarantee,
     iq::IqError,
     iqv2::{

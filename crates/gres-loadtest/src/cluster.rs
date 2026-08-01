@@ -15,7 +15,7 @@
 //! 4. Spawn one `crabka-gres` child per node with `--host-ranges` for its
 //!    round-robin range subset (range `r` → node `r % nodes`), the
 //!    timestamp-source flags for the scenario mode, and per-node
-//!    `--hlc-wall-offset-ms` skew. Parse `CRABKA_GRES_READY <sql> <range>`
+//!    `--hlc-wall-offset` skew. Parse `CRABKA_GRES_READY <sql> <range>`
 //!    from stdout for the OS-assigned ports, then point the proxies at them.
 //!
 //! Schema DDL needs no special phase: any node's gateway routes DDL to
@@ -35,15 +35,15 @@ use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{Arc, Mutex, MutexGuard, PoisonError},
-    time::Duration,
 };
 
 use anyhow::{Context as _, anyhow, bail, ensure};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_gres_control::{
-    RangeBoundary, RangeLayoutEntry, RangeLifecycle, Registry, SqlUser, TenantId, TenantName,
-    TenantRecord, TenantState,
+    RangeBoundary, RangeLayoutEntry, RangeLifecycle, Registry, RegistryPolicy, SqlUser, TenantId,
+    TenantName, TenantRecord, TenantState,
 };
+use crabka_units::{fmt::Human as _, prelude::*};
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader},
     net::{TcpListener, TcpStream},
@@ -53,6 +53,7 @@ use tokio::{
 };
 
 use crate::{
+    config::LoadtestRuntimePolicy,
     proxy::ChaosProxy,
     scenario::{ModeSpec, TopologySpec},
 };
@@ -81,13 +82,6 @@ const BROKER_CLUSTER_ID: &str = "00000000-0000-0000-0000-000000000001";
 const TLS_SERVER_NAME: &str = "crabka-dev";
 /// Subject DN authorized for range and operator-control RPCs.
 const TLS_PRINCIPAL: &str = "CN=loadtest-range";
-/// Overall bound for a child process to report ready (debug builds replaying
-/// WAL are slow).
-const LAUNCH_TIMEOUT: Duration = Duration::from_mins(2);
-/// Bound for a `SIGKILL`ed child to be reaped.
-const KILL_TIMEOUT: Duration = Duration::from_secs(10);
-/// Lines of a child's log included in launch/teardown error messages.
-const LOG_TAIL_LINES: usize = 40;
 
 /// Paths to the binaries the cluster launches.
 #[derive(Debug, Clone)]
@@ -138,6 +132,10 @@ pub struct ClusterOptions {
     pub work_dir: PathBuf,
     /// Binaries to launch.
     pub binaries: Binaries,
+    /// Shared registry policy used by provisioning and spawned computes.
+    pub registry_policy: RegistryPolicy,
+    /// Harness-owned process and proxy policy.
+    pub runtime_policy: LoadtestRuntimePolicy,
 }
 
 /// Connection parameters for a node's SQL front door (via its chaos proxy).
@@ -203,6 +201,7 @@ pub struct Cluster {
     nodes: Vec<NodeSlot>,
     roster: ProcessRoster,
     sql_password: String,
+    runtime_policy: LoadtestRuntimePolicy,
 }
 
 impl Cluster {
@@ -218,6 +217,8 @@ impl Cluster {
             mode,
             work_dir,
             binaries,
+            registry_policy,
+            runtime_policy,
         } = options;
         ensure!(topology.nodes >= 1, "topology needs at least one node");
         ensure!(topology.ranges >= 1, "topology needs at least one range");
@@ -259,15 +260,18 @@ impl Cluster {
             &log_dir,
             broker_port,
             allocation.as_ref().map(|cpus| cpus.broker.as_str()),
+            &runtime_policy,
         )
         .await?;
         let kafka_bootstrap = format!("127.0.0.1:{broker_port}");
         tracing::info!(bootstrap = %kafka_bootstrap, "broker ready");
 
-        let range_proxies = spawn_proxies(topology.ranges)
+        let range_proxies = spawn_proxies(topology.ranges, runtime_policy)
             .await
             .context("range proxies")?;
-        let sql_proxies = spawn_proxies(topology.nodes).await.context("sql proxies")?;
+        let sql_proxies = spawn_proxies(topology.nodes, runtime_policy)
+            .await
+            .context("sql proxies")?;
         let tls = write_tls_fixture(&work_dir)?;
         let range_endpoints: Vec<SocketAddr> = range_proxies.iter().map(ChaosProxy::addr).collect();
         let sql_password = generate_sql_password();
@@ -276,6 +280,8 @@ impl Cluster {
             topology.ranges,
             &range_endpoints,
             &sql_password,
+            &registry_policy,
+            &runtime_policy,
         )
         .await?;
         tracing::info!(
@@ -292,6 +298,7 @@ impl Cluster {
             log_dir: &log_dir,
             tls: &tls,
             cpu_allocation: allocation.as_ref(),
+            registry_policy: &registry_policy,
         };
         let node_specs: Vec<NodeSpec> = (0..topology.nodes)
             .map(|node| node_spec(node, &context))
@@ -326,9 +333,10 @@ impl Cluster {
             nodes,
             roster,
             sql_password,
+            runtime_policy,
         };
         for index in 0..cluster.nodes.len() {
-            wait_node_ready(&mut cluster.nodes[index]).await?;
+            wait_node_ready(&mut cluster.nodes[index], &cluster.runtime_policy).await?;
         }
         for node in 0..cluster.topology.nodes {
             cluster.point_proxies_at(node);
@@ -424,8 +432,18 @@ impl Cluster {
             bail!("node {node} is already down");
         };
         let label = self.nodes[index].spec.label.clone();
-        kill_child(&label, &mut process.child, process.pid).await?;
-        let _ = tokio::time::timeout(Duration::from_secs(5), &mut process.log_task).await;
+        kill_child(
+            &label,
+            &mut process.child,
+            process.pid,
+            &self.runtime_policy,
+        )
+        .await?;
+        let _ = tokio::time::timeout(
+            self.runtime_policy.log_drain_timeout.to_std(),
+            &mut process.log_task,
+        )
+        .await;
         tracing::info!(node, "node killed");
         Ok(())
     }
@@ -457,7 +475,7 @@ impl Cluster {
             label: incarnation_label(&self.nodes[index].spec.label, self.nodes[index].incarnation),
             pid,
         });
-        wait_node_ready(&mut self.nodes[index]).await?;
+        wait_node_ready(&mut self.nodes[index], &self.runtime_policy).await?;
         self.point_proxies_at(node);
         tracing::info!(node, "node restarted");
         Ok(())
@@ -476,12 +494,30 @@ impl Cluster {
                 continue;
             };
             let label = self.nodes[index].spec.label.clone();
-            if let Err(error) = kill_child(&label, &mut process.child, process.pid).await {
+            if let Err(error) = kill_child(
+                &label,
+                &mut process.child,
+                process.pid,
+                &self.runtime_policy,
+            )
+            .await
+            {
                 failures.push(format!("{error:#}"));
             }
-            let _ = tokio::time::timeout(Duration::from_secs(5), &mut process.log_task).await;
+            let _ = tokio::time::timeout(
+                self.runtime_policy.log_drain_timeout.to_std(),
+                &mut process.log_task,
+            )
+            .await;
         }
-        if let Err(error) = kill_child("broker", &mut self.broker.child, self.broker.pid).await {
+        if let Err(error) = kill_child(
+            "broker",
+            &mut self.broker.child,
+            self.broker.pid,
+            &self.runtime_policy,
+        )
+        .await
+        {
             failures.push(format!("{error:#}"));
         }
         if failures.is_empty() {
@@ -543,6 +579,7 @@ struct NodeSpec {
     /// `taskset -c` CPU list pinning this node, when the topology asks for
     /// fixed-capacity nodes.
     cpuset: Option<String>,
+    registry_policy: RegistryPolicy,
 }
 
 /// Default CPUs pinned to the broker when `cpus_per_node` pinning is
@@ -675,6 +712,7 @@ struct SpecContext<'a> {
     log_dir: &'a Path,
     tls: &'a TlsPaths,
     cpu_allocation: Option<&'a CpuAllocation>,
+    registry_policy: &'a RegistryPolicy,
 }
 
 /// The SQL endpoint clients use for a given listener address.
@@ -739,19 +777,18 @@ fn range_layout(ranges: u16, endpoints: &[SocketAddr]) -> Vec<RangeLayoutEntry> 
 
 /// Timestamp-source CLI flags for `mode`, plus the node's HLC wall-clock
 /// skew when nonzero.
-fn timestamp_args(mode: ModeSpec, skew_ms: i64) -> Vec<String> {
+fn timestamp_args(mode: ModeSpec, skew: Time) -> Vec<String> {
     let mut args = match mode {
         ModeSpec::LogicalTso => vec!["--timestamp-source".to_owned(), "logical-tso".to_owned()],
-        ModeSpec::Hlc { max_offset_ms } => vec![
+        ModeSpec::Hlc { max_offset } => vec![
             "--timestamp-source".to_owned(),
             "hlc".to_owned(),
-            "--hlc-max-offset-ms".to_owned(),
-            max_offset_ms.to_string(),
+            "--hlc-max-offset".to_owned(),
+            max_offset.human().to_string(),
         ],
     };
-    if skew_ms != 0 {
-        args.push("--hlc-wall-offset-ms".to_owned());
-        args.push(skew_ms.to_string());
+    if skew != Time::ZERO {
+        args.push(format!("--hlc-wall-offset={}", skew.human()));
     }
     args
 }
@@ -782,10 +819,10 @@ fn node_spec(node: u16, context: &SpecContext<'_>) -> NodeSpec {
         checkpoints_enabled_for(node),
         context
             .topology
-            .clock_skew_ms
+            .clock_skew
             .get(&node)
             .copied()
-            .unwrap_or(0),
+            .unwrap_or(Time::ZERO),
         context
             .cpu_allocation
             .map(|allocation| allocation.nodes[usize::from(node)].clone()),
@@ -798,7 +835,7 @@ fn build_spec(
     label: &str,
     host_ranges: String,
     with_checkpoints: bool,
-    skew_ms: i64,
+    skew: Time,
     cpuset: Option<String>,
     context: &SpecContext<'_>,
 ) -> NodeSpec {
@@ -841,14 +878,40 @@ fn build_spec(
             context.work_dir.join("checkpoints").display().to_string(),
         ]);
     }
-    args.extend(timestamp_args(context.mode, skew_ms));
+    args.extend(timestamp_args(context.mode, skew));
     NodeSpec {
         label: label.to_owned(),
         args,
         cache_dir,
         log_path: context.log_dir.join(format!("{label}.log")),
         cpuset,
+        registry_policy: context.registry_policy.clone(),
     }
+}
+
+fn registry_policy_args(policy: &RegistryPolicy) -> [String; 20] {
+    [
+        "--registry-replication-factor".to_owned(),
+        policy.replication_factor().to_string(),
+        "--registry-topic-create-timeout".to_owned(),
+        policy.topic_create_timeout().human().to_string(),
+        "--registry-reader-retry-backoff".to_owned(),
+        policy.reader_retry_backoff().human().to_string(),
+        "--registry-fetch-max-wait".to_owned(),
+        policy.fetch_max_wait().human().to_string(),
+        "--registry-fetch-partition-max".to_owned(),
+        policy.fetch_partition_max().human().to_string(),
+        "--registry-producer-dns-timeout".to_owned(),
+        policy.producer_dns_timeout().time().human().to_string(),
+        "--registry-reader-admin-dns-timeout".to_owned(),
+        policy.reader_admin_dns_timeout().time().human().to_string(),
+        "--client-dispatch-queue-capacity".to_owned(),
+        policy.dispatch_queue_capacity().get().to_string(),
+        "--client-frame-max".to_owned(),
+        policy.frame_max().size().human().to_string(),
+        "--registry-reader-fetch-min".to_owned(),
+        policy.reader_fetch_min().size().human().to_string(),
+    ]
 }
 
 /// Spawns one `crabka-gres` child in its own process group, capturing
@@ -859,6 +922,7 @@ fn spawn_node(gres_binary: &Path, spec: &NodeSpec) -> anyhow::Result<NodeProcess
     let mut command = pinned_command(gres_binary, spec.cpuset.as_deref());
     command
         .args(&spec.args)
+        .args(registry_policy_args(&spec.registry_policy))
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr))
         .kill_on_drop(true);
@@ -887,7 +951,10 @@ fn spawn_node(gres_binary: &Path, spec: &NodeSpec) -> anyhow::Result<NodeProcess
 
 /// Waits for a spawned node to print `CRABKA_GRES_READY` and records its
 /// OS-assigned SQL and range addresses on the slot.
-async fn wait_node_ready(slot: &mut NodeSlot) -> anyhow::Result<()> {
+async fn wait_node_ready(
+    slot: &mut NodeSlot,
+    policy: &LoadtestRuntimePolicy,
+) -> anyhow::Result<()> {
     let label = slot.spec.label.clone();
     let log_path = slot.spec.log_path.clone();
     let receiver = slot
@@ -897,25 +964,25 @@ async fn wait_node_ready(slot: &mut NodeSlot) -> anyhow::Result<()> {
         .ready
         .take()
         .with_context(|| format!("{label} readiness already consumed"))?;
-    let ready = tokio::time::timeout(LAUNCH_TIMEOUT, receiver)
+    let ready = tokio::time::timeout(policy.launch_timeout.to_std(), receiver)
         .await
         .map_err(|_| {
             anyhow!(
-                "{label} did not report CRABKA_GRES_READY within {LAUNCH_TIMEOUT:?}; \
-                 log tail:\n{}",
-                log_tail(&log_path)
+                "{label} did not report CRABKA_GRES_READY within {}; log tail:\n{}",
+                policy.launch_timeout.human(),
+                log_tail(&log_path, policy.log_tail_lines.get())
             )
         })?
         .map_err(|_| {
             anyhow!(
                 "{label} exited before reporting ready; log tail:\n{}",
-                log_tail(&log_path)
+                log_tail(&log_path, policy.log_tail_lines.get())
             )
         })?;
     let range_addr = ready.range.ok_or_else(|| {
         anyhow!(
             "{label} reported no range listener; log tail:\n{}",
-            log_tail(&log_path)
+            log_tail(&log_path, policy.log_tail_lines.get())
         )
     })?;
     let process = slot
@@ -968,11 +1035,14 @@ fn parse_ready_line(payload: &str) -> Option<NodeReady> {
 
 /// Spawns `count` chaos proxies pointing at a refusing placeholder backend;
 /// they are repointed once nodes report ready.
-async fn spawn_proxies(count: u16) -> anyhow::Result<Vec<ChaosProxy>> {
+async fn spawn_proxies(
+    count: u16,
+    policy: LoadtestRuntimePolicy,
+) -> anyhow::Result<Vec<ChaosProxy>> {
     let mut proxies = Vec::with_capacity(usize::from(count));
     for _ in 0..count {
         proxies.push(
-            ChaosProxy::spawn(placeholder_addr())
+            ChaosProxy::spawn_with_policy(placeholder_addr(), policy)
                 .await
                 .context("spawn chaos proxy")?,
         );
@@ -1031,6 +1101,7 @@ async fn start_broker(
     log_dir: &Path,
     broker_port: u16,
     cpuset: Option<&str>,
+    policy: &LoadtestRuntimePolicy,
 ) -> anyhow::Result<BrokerProcess> {
     let broker_data = work_dir.join("broker-data");
     let config_path = work_dir.join("broker.toml");
@@ -1078,7 +1149,7 @@ super_users = ["ANONYMOUS"]
         .with_context(|| format!("spawn {}", broker_binary.display()))?;
     let pid = child.id().context("broker pid")?;
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, broker_port));
-    wait_for_broker(addr, &log_path, &mut child).await?;
+    wait_for_broker(addr, &log_path, &mut child, policy).await?;
     Ok(BrokerProcess { child, pid })
 }
 
@@ -1087,8 +1158,9 @@ async fn wait_for_broker(
     addr: SocketAddr,
     log_path: &Path,
     child: &mut Child,
+    policy: &LoadtestRuntimePolicy,
 ) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + LAUNCH_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + policy.launch_timeout.to_std();
     loop {
         if TcpStream::connect(addr).await.is_ok() {
             return Ok(());
@@ -1096,16 +1168,17 @@ async fn wait_for_broker(
         if let Some(status) = child.try_wait().context("poll broker status")? {
             bail!(
                 "crabka-broker exited with {status} before listening on {addr}; log tail:\n{}",
-                log_tail(log_path)
+                log_tail(log_path, policy.log_tail_lines.get())
             );
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
-                "crabka-broker did not listen on {addr} within {LAUNCH_TIMEOUT:?}; log tail:\n{}",
-                log_tail(log_path)
+                "crabka-broker did not listen on {addr} within {}; log tail:\n{}",
+                policy.launch_timeout.human(),
+                log_tail(log_path, policy.log_tail_lines.get())
             );
         }
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(policy.broker_poll_interval.to_std()).await;
     }
 }
 
@@ -1116,10 +1189,19 @@ async fn provision_tenant(
     ranges: u16,
     range_endpoints: &[SocketAddr],
     sql_password: &str,
+    registry_policy: &RegistryPolicy,
+    runtime_policy: &LoadtestRuntimePolicy,
 ) -> anyhow::Result<()> {
-    let mut admin = AdminClient::connect(&[bootstrap.to_owned()])
-        .await
-        .context("connect admin client")?;
+    let mut admin = AdminClient::connect_with_options(
+        &[bootstrap.to_owned()],
+        crabka_client_core::ConnectionOptions {
+            dispatch_queue_capacity: registry_policy.dispatch_queue_capacity(),
+            frame_max: registry_policy.frame_max(),
+            ..crabka_client_core::ConnectionOptions::default()
+        },
+    )
+    .await
+    .context("connect admin client")?;
     let topics = (0..ranges)
         .map(|range| CreateTopicSpec {
             name: format!("__gres_wal.{TENANT}.r{range}"),
@@ -1129,7 +1211,7 @@ async fn provision_tenant(
         })
         .collect::<Vec<_>>();
     let outcomes = admin
-        .create_topics(&topics, 30_000)
+        .create_topics(&topics, runtime_policy.topic_create_timeout)
         .await
         .context("create WAL topics")?;
     ensure!(
@@ -1137,10 +1219,10 @@ async fn provision_tenant(
         "WAL topic creation failed: {outcomes:?}"
     );
     let record = tenant_record(ranges, range_endpoints, sql_password)?;
-    let mut registry = Registry::connect(bootstrap)
+    let mut registry = Registry::connect_with_policy(bootstrap, registry_policy.clone())
         .await
         .context("connect registry")?;
-    registry.ensure_topic(1).await.context("registry topic")?;
+    registry.ensure_topic().await.context("registry topic")?;
     registry.upsert(&record).await.context("registry record")?;
     registry
         .upsert_tenant_config(&record, 1)
@@ -1197,15 +1279,17 @@ fn write_tls_fixture(dir: &Path) -> anyhow::Result<TlsPaths> {
         1,
     )
     .context("issue range peer certificate")?;
-    let write = |name: &str, bytes: &str| -> anyhow::Result<PathBuf> {
-        let path = dir.join(name);
-        std::fs::write(&path, bytes).with_context(|| format!("write {}", path.display()))?;
-        Ok(path)
-    };
+    let cert = dir.join("range-server.crt");
+    std::fs::write(&cert, &peer.cert_pem).with_context(|| format!("write {}", cert.display()))?;
+    let key = dir.join("range-server.key");
+    std::fs::write(&key, &peer.key_pem).with_context(|| format!("write {}", key.display()))?;
+    let ca_path = dir.join("range-ca.crt");
+    std::fs::write(&ca_path, &ca.cert_pem)
+        .with_context(|| format!("write {}", ca_path.display()))?;
     Ok(TlsPaths {
-        cert: write("range-server.crt", &peer.cert_pem)?,
-        key: write("range-server.key", &peer.key_pem)?,
-        ca: write("range-ca.crt", &ca.cert_pem)?,
+        cert,
+        key,
+        ca: ca_path,
     })
 }
 
@@ -1226,7 +1310,12 @@ async fn pick_free_ports() -> anyhow::Result<(u16, u16)> {
 
 /// SIGKILLs `child` (whole process group on Unix) and waits for it to be
 /// reaped. Succeeds if the child already exited on its own.
-async fn kill_child(label: &str, child: &mut Child, pid: u32) -> anyhow::Result<()> {
+async fn kill_child(
+    label: &str,
+    child: &mut Child,
+    pid: u32,
+    policy: &LoadtestRuntimePolicy,
+) -> anyhow::Result<()> {
     if child
         .try_wait()
         .with_context(|| format!("poll {label} status"))?
@@ -1235,9 +1324,14 @@ async fn kill_child(label: &str, child: &mut Child, pid: u32) -> anyhow::Result<
         kill_process_group(pid);
         let _ = child.start_kill();
     }
-    tokio::time::timeout(KILL_TIMEOUT, child.wait())
+    tokio::time::timeout(policy.kill_timeout.to_std(), child.wait())
         .await
-        .map_err(|_| anyhow!("{label} did not exit within {KILL_TIMEOUT:?} of SIGKILL"))?
+        .map_err(|_| {
+            anyhow!(
+                "{label} did not exit within {} of SIGKILL",
+                policy.kill_timeout.human()
+            )
+        })?
         .with_context(|| format!("wait for {label} to exit"))?;
     Ok(())
 }
@@ -1256,12 +1350,12 @@ fn kill_process_group(process_group: u32) {
 #[cfg(not(unix))]
 fn kill_process_group(_process_group: u32) {}
 
-/// The last [`LOG_TAIL_LINES`] lines of a child's log, for error messages.
-fn log_tail(path: &Path) -> String {
+/// The last `line_cap` lines of a child's log, for error messages.
+fn log_tail(path: &Path, line_cap: usize) -> String {
     match std::fs::read_to_string(path) {
         Ok(contents) => {
             let lines: Vec<&str> = contents.lines().collect();
-            let start = lines.len().saturating_sub(LOG_TAIL_LINES);
+            let start = lines.len().saturating_sub(line_cap);
             lines[start..].join("\n")
         }
         Err(error) => format!("<read {} failed: {error}>", path.display()),
@@ -1480,12 +1574,13 @@ mod tests {
         let topology = TopologySpec {
             nodes: 2,
             ranges: 2,
-            clock_skew_ms: BTreeMap::new(),
+            clock_skew: BTreeMap::new(),
             cpus_per_node: Some(3),
             broker_cpus: None,
         };
         let allocation = cpu_allocation(2, 3, 2, 16).expect("fits");
         let tls = test_tls();
+        let registry_policy = RegistryPolicy::default();
         let context = SpecContext {
             topology: &topology,
             mode: ModeSpec::LogicalTso,
@@ -1494,6 +1589,7 @@ mod tests {
             log_dir: Path::new("/work/logs"),
             tls: &tls,
             cpu_allocation: Some(&allocation),
+            registry_policy: &registry_policy,
         };
         assert!(node_spec(0, &context).cpuset.as_deref() == Some("2-4"));
         assert!(node_spec(1, &context).cpuset.as_deref() == Some("5-7"));
@@ -1504,11 +1600,28 @@ mod tests {
         let topology = TopologySpec {
             nodes: 3,
             ranges: 4,
-            clock_skew_ms: BTreeMap::new(),
+            clock_skew: BTreeMap::new(),
             cpus_per_node: None,
             broker_cpus: None,
         };
         let tls = test_tls();
+        let policy = RegistryPolicy::new(
+            3,
+            crabka_units::millis(15_002),
+            crabka_units::millis(252),
+            crabka_units::millis(502),
+            crabka_units::bytes(1_048_578),
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(37))
+        .expect("DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(37))
+        .expect("reader/admin DNS timeout")
+        .with_client_resource_policy(
+            crabka_client_core::ConnectionDispatchQueueCapacity::new(7).unwrap(),
+            crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap(),
+            crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(3)).unwrap(),
+        );
         let context = SpecContext {
             topology: &topology,
             mode: ModeSpec::LogicalTso,
@@ -1517,13 +1630,27 @@ mod tests {
             log_dir: Path::new("/work/logs"),
             tls: &tls,
             cpu_allocation: None,
+            registry_policy: &policy,
         };
         let node0 = node_spec(0, &context);
+        let mut spawned_args = node0.args.clone();
+        spawned_args.extend(registry_policy_args(&node0.registry_policy));
+        assert!(node0.registry_policy == *context.registry_policy);
         assert!(node0.label == "node0");
         assert!(arg_value(&node0.args, "--ranges") == Some("0,1000000,2000000,3000000"));
         assert!(arg_value(&node0.args, "--host-ranges") == Some("r0,r3"));
         assert!(arg_value(&node0.args, "--tenant") == Some(TENANT));
         assert!(arg_value(&node0.args, "--substrate-bootstrap") == Some("127.0.0.1:19092"));
+        assert!(arg_value(&spawned_args, "--registry-replication-factor") == Some("3"));
+        assert!(arg_value(&spawned_args, "--registry-topic-create-timeout") == Some("15.002s"));
+        assert!(arg_value(&spawned_args, "--registry-reader-retry-backoff") == Some("252ms"));
+        assert!(arg_value(&spawned_args, "--registry-fetch-max-wait") == Some("502ms"));
+        assert!(arg_value(&spawned_args, "--registry-fetch-partition-max") == Some("1048578B"));
+        assert!(arg_value(&spawned_args, "--registry-producer-dns-timeout") == Some("37ms"));
+        assert!(arg_value(&spawned_args, "--registry-reader-admin-dns-timeout",) == Some("37ms"));
+        assert!(arg_value(&spawned_args, "--client-dispatch-queue-capacity") == Some("7"));
+        assert!(arg_value(&spawned_args, "--client-frame-max") == Some("32KiB"));
+        assert!(arg_value(&spawned_args, "--registry-reader-fetch-min") == Some("3B"));
     }
 
     #[test]
@@ -1531,31 +1658,45 @@ mod tests {
         let topology = TopologySpec {
             nodes: 2,
             ranges: 2,
-            clock_skew_ms: BTreeMap::from([(1, 250)]),
+            clock_skew: BTreeMap::from([(1, millis(250))]),
             cpus_per_node: None,
             broker_cpus: None,
         };
         let tls = test_tls();
+        let registry_policy = RegistryPolicy::default();
         let context = SpecContext {
             topology: &topology,
-            mode: ModeSpec::Hlc { max_offset_ms: 300 },
+            mode: ModeSpec::Hlc {
+                max_offset: millis(300),
+            },
             kafka_bootstrap: "127.0.0.1:19092",
             work_dir: Path::new("/work"),
             log_dir: Path::new("/work/logs"),
             tls: &tls,
             cpu_allocation: None,
+            registry_policy: &registry_policy,
         };
         let node0 = node_spec(0, &context);
         assert!(arg_value(&node0.args, "--checkpoint-store") == Some("local"));
         // Thresholds stay at the runtime defaults: a per-frame threshold would
         // make the measured workload checkpoint-bound.
         assert!(arg_value(&node0.args, "--checkpoint-frames") == None);
-        assert!(arg_value(&node0.args, "--hlc-max-offset-ms") == Some("300"));
-        assert!(arg_value(&node0.args, "--hlc-wall-offset-ms") == None);
+        assert!(arg_value(&node0.args, "--hlc-max-offset") == Some("300ms"));
+        assert!(
+            !node0
+                .args
+                .iter()
+                .any(|arg| arg.starts_with("--hlc-wall-offset="))
+        );
 
         let node1 = node_spec(1, &context);
         assert!(!node1.args.iter().any(|arg| arg == "--checkpoint-store"));
-        assert!(arg_value(&node1.args, "--hlc-wall-offset-ms") == Some("250"));
+        assert!(
+            node1
+                .args
+                .iter()
+                .any(|arg| arg == "--hlc-wall-offset=250ms")
+        );
     }
 
     #[test]
@@ -1592,46 +1733,51 @@ mod tests {
 
     #[test]
     fn timestamp_args_cover_modes_and_skew() {
-        let cases: [(ModeSpec, i64, &[&str]); 4] = [
+        let cases: [(ModeSpec, Time, &[&str]); 4] = [
             (
                 ModeSpec::LogicalTso,
-                0,
+                Time::ZERO,
                 &["--timestamp-source", "logical-tso"],
             ),
             (
-                ModeSpec::Hlc { max_offset_ms: 250 },
-                0,
-                &["--timestamp-source", "hlc", "--hlc-max-offset-ms", "250"],
+                ModeSpec::Hlc {
+                    max_offset: millis(250),
+                },
+                Time::ZERO,
+                &["--timestamp-source", "hlc", "--hlc-max-offset", "250ms"],
             ),
             (
-                ModeSpec::Hlc { max_offset_ms: 300 },
-                -100,
+                ModeSpec::Hlc {
+                    max_offset: millis(300),
+                },
+                -millis(100),
                 &[
                     "--timestamp-source",
                     "hlc",
-                    "--hlc-max-offset-ms",
-                    "300",
-                    "--hlc-wall-offset-ms",
-                    "-100",
+                    "--hlc-max-offset",
+                    "300ms",
+                    "--hlc-wall-offset=-100ms",
                 ],
             ),
             (
-                ModeSpec::Hlc { max_offset_ms: 250 },
-                400,
+                ModeSpec::Hlc {
+                    max_offset: millis(250),
+                },
+                millis(400),
                 &[
                     "--timestamp-source",
                     "hlc",
-                    "--hlc-max-offset-ms",
-                    "250",
-                    "--hlc-wall-offset-ms",
-                    "400",
+                    "--hlc-max-offset",
+                    "250ms",
+                    "--hlc-wall-offset=400ms",
                 ],
             ),
         ];
         for (mode, skew, expected) in cases {
             assert!(
                 timestamp_args(mode, skew) == expected,
-                "mode {mode} skew {skew}"
+                "mode {mode} skew {}",
+                skew.human()
             );
         }
     }
@@ -1697,16 +1843,18 @@ mod tests {
         let binaries = Binaries::resolve().expect("resolve binaries");
         let work_dir = tempfile::tempdir().expect("work dir");
         let options = ClusterOptions {
+            runtime_policy: LoadtestRuntimePolicy::default(),
             topology: TopologySpec {
                 nodes: 2,
                 ranges: 2,
-                clock_skew_ms: BTreeMap::new(),
+                clock_skew: BTreeMap::new(),
                 cpus_per_node: None,
                 broker_cpus: None,
             },
             mode: ModeSpec::LogicalTso,
             work_dir: work_dir.path().to_path_buf(),
             binaries,
+            registry_policy: RegistryPolicy::default(),
         };
         let mut cluster = Cluster::launch(options).await.expect("launch cluster");
         assert!(cluster.node_count() == 2);

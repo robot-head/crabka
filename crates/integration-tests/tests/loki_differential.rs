@@ -145,12 +145,13 @@ fn service_config(role: Role, bootstrap: &str, topic: &str, data_root: &TempDir)
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
+        ..ServiceConfig::default()
     }
 }
 
@@ -172,12 +173,13 @@ async fn compactor_router_for_status() -> axum::Router {
         index_prefix: Some("observability/logs".to_string()),
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
+        ..ServiceConfig::default()
     };
     build_service_router(&config, ServiceDependencies::default(), None)
         .await
@@ -5728,12 +5730,13 @@ async fn real_loki_and_crabka_return_same_negative_protobuf_timestamp_push_respo
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
+        ..ServiceConfig::default()
     };
     let distributor = build_service_router(
         &config,

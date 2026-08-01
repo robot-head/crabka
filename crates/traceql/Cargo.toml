@@ -20,6 +20,7 @@ workspace = true
 
 [dependencies]
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
+crabka-units = { workspace = true }
 arrow = { workspace = true }
 datafusion = { workspace = true }
 async-trait = { workspace = true }

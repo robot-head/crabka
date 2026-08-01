@@ -186,3 +186,25 @@ scenario_field() {
       exit
     }' "$path"
 }
+
+# scenario_seconds SCENARIO_PATH FIELD
+#   A scenario duration as whole seconds. The scenario keys carry their unit
+#   (`duration: 180s`), so the suffix has to be read rather than assumed —
+#   reading the bare number would silently mistake `30m` for 30 seconds.
+#   Empty (missing key or unrecognised unit) so the caller's default applies.
+scenario_seconds() {
+  local raw
+  raw="$(scenario_field "$1" "$2")"
+  [[ -n "$raw" ]] || return 0
+  awk -v v="$raw" '
+    BEGIN {
+      if (match(v, /^[0-9]+(\.[0-9]+)?/) == 0) { exit }
+      n = substr(v, 1, RLENGTH) + 0
+      unit = substr(v, RLENGTH + 1)
+      gsub(/[ \t]/, "", unit)
+      if (unit == "s" || unit == "") { printf "%d", n }
+      else if (unit == "m") { printf "%d", n * 60 }
+      else if (unit == "h") { printf "%d", n * 3600 }
+      else if (unit == "ms") { printf "%d", (n + 999) / 1000 }
+    }'
+}

@@ -7,6 +7,7 @@
 //! is `Clone` and can be shared between the ingester tick and the RPC
 //! handlers without further wrapping.
 
+use crabka_units::{Time, convert::TimeExt as _};
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, gauge::Gauge, histogram::Histogram},
@@ -158,9 +159,9 @@ impl RebalancerMetrics {
             .inc();
     }
 
-    /// Observe an `optimizer::optimize` latency (seconds).
-    pub fn observe_rebalance_duration(&self, secs: f64) {
-        self.rebalance_duration_seconds.observe(secs);
+    /// Observe an `optimizer::optimize` latency.
+    pub fn observe_rebalance_duration(&self, elapsed: Time) {
+        self.rebalance_duration_seconds.observe(elapsed.secs_f64());
     }
 
     /// Set the pending-reassignments gauge to `n`.
@@ -171,6 +172,7 @@ impl RebalancerMetrics {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::millis;
 
     use super::*;
     use crate::health::new_registry;
@@ -214,7 +216,7 @@ mod tests {
         m.record_rebalance("ok");
         m.record_rebalance("ok");
         m.record_rebalance("no_movements");
-        m.observe_rebalance_duration(0.012);
+        m.observe_rebalance_duration(millis(12));
         m.set_pending_reassignments(4);
 
         // Counter family accumulates per-label.

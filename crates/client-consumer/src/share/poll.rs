@@ -24,7 +24,7 @@
 //! `ShareFetch` / `ShareAcknowledge` (sequence 0 → 1 → 2 → …). Getting this wrong
 //! makes the broker drop the session (`INVALID_SHARE_SESSION_EPOCH`).
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use crabka_protocol::{
     owned::{
@@ -38,20 +38,16 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 
 use super::{
     consumer::ShareConsumer,
-    types::{ShareAckMode, ShareAckType, ShareConsumerRecord},
+    types::{ShareAckMode, ShareAckType, ShareAcquireMode, ShareConsumerRecord},
 };
 use crate::error::ConsumerError;
-
-/// `partition_max_bytes` / `max_bytes` budget for a `ShareFetch` (mirrors the
-/// classic consumer's 50 MiB fetch budget).
-const MAX_BYTES: i32 = 52_428_800;
-/// Per-partition byte budget.
-const PARTITION_MAX_BYTES: i32 = 1_048_576;
-/// Cap on records returned per fetch.
-const MAX_RECORDS: i32 = 500;
 
 fn build_share_fetch_topics(
     assignment: &[(WireUuid, String, i32)],
@@ -72,7 +68,6 @@ fn build_share_fetch_topics(
                 .map(
                     |(partition_index, acknowledgement_batches)| FetchPartition {
                         partition_index,
-                        partition_max_bytes: PARTITION_MAX_BYTES,
                         acknowledgement_batches,
                         ..Default::default()
                     },
@@ -83,22 +78,31 @@ fn build_share_fetch_topics(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_share_fetch_request(
     group_id: String,
     member_id: String,
     share_session_epoch: i32,
-    timeout: Duration,
+    timeout: Time,
+    min: ByteSize,
+    max: ByteSize,
+    max_records: i32,
+    acquire_mode: ShareAcquireMode,
     topics: Vec<FetchTopic>,
 ) -> ShareFetchRequest {
     ShareFetchRequest {
         group_id: Some(group_id),
         member_id: Some(member_id),
         share_session_epoch,
-        max_wait_ms: i32::try_from(timeout.as_millis()).unwrap_or(i32::MAX),
-        min_bytes: 1,
-        max_bytes: MAX_BYTES,
-        max_records: MAX_RECORDS,
-        batch_size: MAX_RECORDS,
+        // Truncate rather than round, and floor at zero: `max_wait_ms` is a
+        // wire field, so a fractional millisecond must not round up past the
+        // caller's budget and an elapsed budget must not go negative.
+        max_wait_ms: i32::try_from(timeout.millis_i64_trunc().max(0)).unwrap_or(i32::MAX),
+        min_bytes: min.bytes_i32(),
+        max_bytes: max.bytes_i32(),
+        max_records,
+        batch_size: max_records,
+        share_acquire_mode: acquire_mode.wire(),
         topics,
         ..Default::default()
     }
@@ -159,7 +163,7 @@ impl ShareConsumer {
             group_id = %self.group_id,
             member_id = %self.member_id,
             session_epoch = self.share_session_epoch,
-            timeout_ms = timeout.as_millis(),
+            timeout_ms = timeout.millis_i64_trunc(),
             assigned_partitions = tracing::field::Empty,
             records = tracing::field::Empty,
         ),
@@ -167,16 +171,13 @@ impl ShareConsumer {
     )]
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
-    pub async fn poll(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Vec<ShareConsumerRecord>, ConsumerError> {
+    pub async fn poll(&mut self, timeout: Time) -> Result<Vec<ShareConsumerRecord>, ConsumerError> {
         // Snapshot the live assignment; with nothing assigned there is nothing
         // to fetch — sleep out the timeout and return empty (matches classic).
         let assignment = self.assignment.lock().await.clone();
         tracing::Span::current().record("assigned_partitions", assignment.len());
         if assignment.is_empty() {
-            tokio::time::sleep(timeout).await;
+            tokio::time::sleep(timeout.to_std()).await;
             return Ok(Vec::new());
         }
 
@@ -195,6 +196,10 @@ impl ShareConsumer {
                 self.member_id.clone(),
                 self.share_session_epoch,
                 timeout,
+                self.fetch_min,
+                self.fetch_max,
+                self.fetch_max_records,
+                self.acquire_mode,
                 topics,
             ))
             .await?;
@@ -565,6 +570,10 @@ mod tests {
             assignment: Arc::new(Mutex::new(vec![(id(7), "topic-a".into(), 2)])),
             topic_names: Arc::new(Mutex::new(HashMap::new())),
             share_session_epoch: 4,
+            fetch_min: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MIN,
+            fetch_max: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MAX,
+            fetch_max_records: crate::share::DEFAULT_SHARE_CONSUMER_FETCH_MAX_RECORDS,
+            acquire_mode: ShareAcquireMode::BatchOptimized,
             ack_mode,
             pending_acks: Vec::new(),
             prev_delivered: Vec::new(),
@@ -579,7 +588,7 @@ mod tests {
     }
 
     #[test]
-    fn share_fetch_request_preserves_wire_fields_and_timeout_bounds() {
+    fn share_fetch_request_preserves_acquire_mode_limits_and_timeout_bounds() {
         let topic = FetchTopic {
             topic_id: id(7),
             partitions: vec![FetchPartition {
@@ -595,7 +604,11 @@ mod tests {
             "group-a".into(),
             "member-a".into(),
             4,
-            Duration::from_millis(250),
+            crabka_units::millis(250),
+            crabka_units::bytes(7),
+            crabka_units::bytes(65_536),
+            37,
+            ShareAcquireMode::RecordLimit,
             vec![topic.clone()],
         );
 
@@ -605,11 +618,11 @@ mod tests {
                 member_id: Some("member-a".into()),
                 share_session_epoch: 4,
                 max_wait_ms: 250,
-                min_bytes: 1,
-                max_bytes: 52_428_800,
-                max_records: 500,
-                batch_size: 500,
-                share_acquire_mode: 0,
+                min_bytes: 7,
+                max_bytes: 65_536,
+                max_records: 37,
+                batch_size: 37,
+                share_acquire_mode: 1,
                 is_renew_ack: false,
                 topics: vec![topic],
                 forgotten_topics_data: Vec::new(),
@@ -621,10 +634,62 @@ mod tests {
             "group-a".into(),
             "member-a".into(),
             4,
-            Duration::from_millis(u64::from(u32::MAX)),
+            Time::from_millis(i64::from(u32::MAX)),
+            crabka_units::bytes(7),
+            crabka_units::bytes(65_536),
+            37,
+            ShareAcquireMode::BatchOptimized,
             Vec::new(),
         );
-        assert2::assert!(saturated.max_wait_ms == i32::MAX);
+        assert2::assert!((saturated.max_wait_ms, saturated.share_acquire_mode) == (i32::MAX, 0));
+
+        // A sub-millisecond remainder truncates: rounding 250.9 ms up to 251
+        // would hold the broker's Fetch open past the caller's budget.
+        let fractional = build_share_fetch_request(
+            "group-a".into(),
+            "member-a".into(),
+            4,
+            crabka_units::micros(250_900),
+            crabka_units::bytes(7),
+            crabka_units::bytes(65_536),
+            37,
+            ShareAcquireMode::BatchOptimized,
+            Vec::new(),
+        );
+        assert2::assert!(fractional.max_wait_ms == 250);
+    }
+
+    #[test]
+    fn share_fetch_request_encodes_default_sizes_as_their_exact_wire_integers() {
+        let req = build_share_fetch_request(
+            "group-a".into(),
+            "member-a".into(),
+            0,
+            crabka_units::millis(500),
+            crabka_units::bytes(1),
+            crabka_units::mebibytes(50),
+            500,
+            ShareAcquireMode::BatchOptimized,
+            Vec::new(),
+        );
+
+        assert2::assert!(
+            req == ShareFetchRequest {
+                group_id: Some("group-a".into()),
+                member_id: Some("member-a".into()),
+                share_session_epoch: 0,
+                max_wait_ms: 500,
+                min_bytes: 1,
+                max_bytes: 52_428_800,
+                max_records: 500,
+                batch_size: 500,
+                share_acquire_mode: 0,
+                is_renew_ack: false,
+                topics: Vec::new(),
+                forgotten_topics_data: Vec::new(),
+                unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+            }
+        );
     }
 
     #[test]
@@ -658,7 +723,7 @@ mod tests {
             (
                 part.partition_max_bytes,
                 part.acknowledgement_batches.as_slice()
-            ) == (PARTITION_MAX_BYTES, &[ack][..])
+            ) == (0, &[ack][..])
         );
         let empty = topic
             .partitions

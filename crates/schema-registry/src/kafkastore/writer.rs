@@ -22,6 +22,8 @@ impl SchemaWriter {
         let producer = Producer::builder()
             .bootstrap(cfg.bootstrap.clone())
             .client_id(format!("{}-writer", cfg.client_id))
+            .dispatch_queue_capacity(cfg.runtime.client_dispatch_queue_capacity.get())
+            .frame_max(cfg.runtime.client_frame_max.size())
             .enable_idempotence(true)
             .acks(Acks::All)
             .maybe_security(security)

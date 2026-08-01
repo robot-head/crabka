@@ -1,6 +1,7 @@
 //! DSL golden frame: the wire `Topology` the DSL lowers to must byte-match the
 //! captured JVM 4.x fixture for the same logical pipeline.
 use crabka_client_streams::{Consumed, Produced, StringSerde, dsl::StreamsBuilder};
+use crabka_units::prelude::*;
 
 fn assert_matches_fixture(wire: &crabka_client_streams::topology::WireTopology, fixture: &str) {
     let path = format!("tests/testdata/golden/dsl/{fixture}.topology.json");
@@ -37,12 +38,15 @@ fn windowed_count_matches_jvm() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(60_000))
+        .windowed_by(TimeWindows::of_size(millis(60_000)))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+            Produced::with(
+                TimeWindowedSerde::new(StringSerde, millis(60_000)),
+                I64Serde,
+            ),
         );
     let wire = b.build_optimized("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "windowed_count");
@@ -66,7 +70,7 @@ fn stream_stream_join_matches_jvm() {
     left.join(
         &right,
         |a: &String, c: &String| format!("{a}{c}"),
-        JoinWindows::of(60_000),
+        JoinWindows::of(millis(60_000)),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
     .to("out");
@@ -101,7 +105,7 @@ fn stream_stream_outer_join_matches_jvm() {
                 c.cloned().unwrap_or_default()
             )
         },
-        JoinWindows::of(60_000),
+        JoinWindows::of(millis(60_000)),
         StreamJoined::with(StringSerde, StringSerde, StringSerde),
     )
     .to("out");
@@ -125,7 +129,7 @@ fn session_count_matches_jvm() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_session(SessionWindows::of_inactivity_gap(60_000))
+        .windowed_by_session(SessionWindows::of_inactivity_gap(millis(60_000)))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .to_stream()
         .to_explicit(
@@ -149,7 +153,7 @@ fn suppress_until_window_closes_matches_jvm() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(60_000))
+        .windowed_by(TimeWindows::of_size(millis(60_000)))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(
             Suppressed::until_window_closes(BufferConfig::unbounded()).with_logging_disabled(),
@@ -157,7 +161,10 @@ fn suppress_until_window_closes_matches_jvm() {
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+            Produced::with(
+                TimeWindowedSerde::new(StringSerde, millis(60_000)),
+                I64Serde,
+            ),
         );
     let wire = b.build_optimized("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "suppress_until_window_closes");
@@ -177,13 +184,16 @@ fn suppress_until_window_closes_logged_matches_jvm() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by(TimeWindows::of_size(60_000))
+        .windowed_by(TimeWindows::of_size(millis(60_000)))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .suppress(Suppressed::until_window_closes(BufferConfig::unbounded()))
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+            Produced::with(
+                TimeWindowedSerde::new(StringSerde, millis(60_000)),
+                I64Serde,
+            ),
         );
     let wire = b.build_optimized("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "suppress_until_window_closes_logged");
@@ -445,12 +455,17 @@ fn sliding_window_count_matches_jvm() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(60_000))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(millis(
+            60_000,
+        )))
         .count_explicit(Materialized::with(StringSerde, I64Serde))
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+            Produced::with(
+                TimeWindowedSerde::new(StringSerde, millis(60_000)),
+                I64Serde,
+            ),
         );
     let wire = b.build_optimized("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "sliding_window_count");
@@ -464,7 +479,9 @@ fn sliding_window_aggregate_matches_jvm() {
     let b = StreamsBuilder::new();
     b.stream::<String, String>(["in"])
         .group_by_key()
-        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(60_000))
+        .windowed_by_sliding(SlidingWindows::of_time_difference_with_no_grace(millis(
+            60_000,
+        )))
         .aggregate_explicit(
             || 0i64,
             |_k: &String, _v: &String, a: i64| a + 1,
@@ -473,7 +490,10 @@ fn sliding_window_aggregate_matches_jvm() {
         .to_stream()
         .to_explicit(
             "out",
-            Produced::with(TimeWindowedSerde::new(StringSerde, 60_000), I64Serde),
+            Produced::with(
+                TimeWindowedSerde::new(StringSerde, millis(60_000)),
+                I64Serde,
+            ),
         );
     let wire = b.build_optimized("app").unwrap().to_wire();
     assert_matches_fixture(&wire, "sliding_window_aggregate");
@@ -515,7 +535,7 @@ fn versioned_table_matches_jvm() {
     b.table_explicit(
         "in",
         Consumed::with(StringSerde, I64Serde),
-        Materialized::with(StringSerde, I64Serde).as_versioned("vt", 600_000),
+        Materialized::with(StringSerde, I64Serde).as_versioned("vt", millis(600_000)),
     )
     .to_stream()
     .to_explicit("out", Produced::with(StringSerde, I64Serde));

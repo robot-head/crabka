@@ -103,6 +103,8 @@ impl MetricsGenerator {
 mod tests {
     use std::sync::Arc;
 
+    use crabka_units::{ByteSize, convert::ByteSizeExt as _};
+
     use super::*;
     use crate::metricsgen::{
         clock::MockClock,
@@ -130,7 +132,7 @@ mod tests {
             status_message: String::new(),
             service_name: service.into(),
             attributes: vec![],
-            size_bytes: 10,
+            size: ByteSize::from_bytes(10),
         }
     }
 

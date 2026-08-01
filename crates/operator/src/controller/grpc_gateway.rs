@@ -27,9 +27,15 @@
 //! broker-client cert with the cluster CA would be rejected by the broker's
 //! `client_ca_path`; the child-KafkaUser path sidesteps that by construction.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
 use crabka_security::ca::{SubjectAltName, issue_broker_cert};
+use crabka_units::{
+    ByteSize, Ratio, Time,
+    convert::{ByteSizeExt, RatioExt as _, TimeExt},
+    fmt::Human as _,
+    hours, millis, minutes, secs,
+};
 use futures::StreamExt as _;
 use k8s_openapi::{
     ByteString,
@@ -55,8 +61,8 @@ use crate::{
     controller::{
         cluster_ca::{cluster_ca_cert_name, cluster_ca_key_name, renew_if_expiring},
         common::{
-            self, ReconcileError, apply_object, condition, owner_ref, parent_version_gate,
-            patch_status, read_pem_key,
+            self, ReconcileError, apply_object, condition, millis_u64, owner_ref,
+            parent_version_gate, patch_status, read_pem_key, secs_u64,
         },
     },
     crd::{
@@ -99,6 +105,17 @@ const CONFIG_DIR: &str = "/etc/crabka-gw/config";
 // ---------------------------------------------------------------------------
 
 /// The operator-issued serving-cert Secret: `<gw>-serving`.
+/// Dedup window the gateway assumes when the CR leaves `window` unset.
+const DEFAULT_DEDUP_WINDOW: Time = hours(24);
+
+/// ACL refresh cadence the gateway assumes when `aclRefresh` is unset.
+const DEFAULT_ACL_REFRESH: Time = minutes(1);
+
+/// Outbound-subscription retry backoff bounds the gateway assumes when the CR
+/// leaves them unset; only used to check `maxBackoffMs >= baseBackoffMs`.
+const DEFAULT_BASE_BACKOFF: Time = millis(500);
+const DEFAULT_MAX_BACKOFF: Time = secs(30);
+
 fn serving_secret_name(gw_name: &str) -> String {
     format!("{gw_name}-serving")
 }
@@ -240,6 +257,19 @@ fn deployment(
                 "limits": { "cpu": "1000m", "memory": "512Mi" }
             })
         });
+    let health = gw.spec.health_checks.as_ref();
+    let readiness_initial_delay_seconds = health
+        .and_then(|checks| checks.readiness_initial_delay_seconds)
+        .unwrap_or(2);
+    let readiness_period_seconds = health
+        .and_then(|checks| checks.readiness_period_seconds)
+        .unwrap_or(5);
+    let liveness_initial_delay_seconds = health
+        .and_then(|checks| checks.liveness_initial_delay_seconds)
+        .unwrap_or(10);
+    let liveness_period_seconds = health
+        .and_then(|checks| checks.liveness_period_seconds)
+        .unwrap_or(10);
 
     let container = json!({
         "name": "gateway",
@@ -251,13 +281,13 @@ fn deployment(
         "volumeMounts": volume_mounts,
         "readinessProbe": {
             "httpGet": { "path": "/readyz", "port": GATEWAY_PORT },
-            "initialDelaySeconds": 2,
-            "periodSeconds": 5
+            "initialDelaySeconds": readiness_initial_delay_seconds,
+            "periodSeconds": readiness_period_seconds
         },
         "livenessProbe": {
             "httpGet": { "path": "/healthz", "port": GATEWAY_PORT },
-            "initialDelaySeconds": 10,
-            "periodSeconds": 10
+            "initialDelaySeconds": liveness_initial_delay_seconds,
+            "periodSeconds": liveness_period_seconds
         },
         "securityContext": {
             "allowPrivilegeEscalation": false,
@@ -325,13 +355,14 @@ fn gateway_args(
                 .unwrap_or(8)
         ),
         format!(
-            "--dedup-window-ms={}",
+            "--dedup-window={}",
             gateway
                 .spec
                 .dedup
                 .as_ref()
-                .and_then(|value| value.window_ms)
-                .unwrap_or(86_400_000)
+                .and_then(|value| value.window)
+                .unwrap_or(DEFAULT_DEDUP_WINDOW)
+                .human()
         ),
         format!(
             "--dedup-txn-id-prefix={}",
@@ -341,6 +372,15 @@ fn gateway_args(
                 .as_ref()
                 .and_then(|value| value.txn_id_prefix.as_deref())
                 .unwrap_or(gateway_name)
+        ),
+        format!(
+            "--dedup-ownership-group={}",
+            gateway
+                .spec
+                .dedup
+                .as_ref()
+                .and_then(|value| value.ownership_group.as_deref())
+                .map_or_else(|| format!("{gateway_name}-dedup-owners"), ToOwned::to_owned)
         ),
         format!("--tls-cert={SERVING_DIR}/tls.crt"),
         format!("--tls-key={SERVING_DIR}/tls.key"),
@@ -372,8 +412,11 @@ fn gateway_args(
                 .unwrap_or_default()
         ),
         format!(
-            "--acl-refresh-secs={}",
-            authz.and_then(|value| value.acl_refresh_secs).unwrap_or(60)
+            "--acl-refresh-interval={}",
+            authz
+                .and_then(|value| value.acl_refresh)
+                .unwrap_or(DEFAULT_ACL_REFRESH)
+                .human()
         ),
         format!(
             "--bearer={}",
@@ -390,6 +433,78 @@ fn gateway_args(
         format!("--webhooks-config={CONFIG_DIR}/webhooks.toml"),
         format!("--outbound-webhooks-config={CONFIG_DIR}/outbound.toml"),
     ];
+    if let Some(value) = gateway.spec.membership_topic.as_deref() {
+        args.push(format!("--membership-topic={value}"));
+    }
+    if let Some(value) = gateway
+        .spec
+        .tls
+        .as_ref()
+        .and_then(|tls| tls.reload_interval)
+    {
+        args.push(format!("--tls-reload-interval={}", value.human()));
+    }
+    if let Some(value) = bearer.and_then(|bearer| bearer.allowable_clock_skew) {
+        args.push(format!("--bearer-allowable-clock-skew={}", value.human()));
+    }
+    if let Some(tuning) = &gateway.spec.tuning {
+        // Two arms: one for the fields that are still bare numbers, one that
+        // renders a quantity back into the raw unit the gateway's flag expects.
+        macro_rules! push {
+            ($field:ident) => {
+                if let Some(value) = tuning.$field {
+                    args.push(format!(
+                        "--{}={value}",
+                        stringify!($field).replace('_', "-")
+                    ));
+                }
+            };
+            (quantity $field:ident) => {
+                if let Some(value) = tuning.$field {
+                    args.push(format!(
+                        "--{}={}",
+                        stringify!($field).replace('_', "-"),
+                        value.human()
+                    ));
+                }
+            };
+        }
+        push!(internal_topic_replication_factor);
+        push!(internal_topic_allow_replication_fallback);
+        push!(quantity internal_topic_create_timeout);
+        push!(quantity internal_topic_segment);
+        if let Some(value) = tuning.internal_topic_min_cleanable_dirty_ratio {
+            args.push(format!(
+                "--internal-topic-min-cleanable-dirty-ratio={}",
+                value.human()
+            ));
+        }
+        push!(quantity consumer_poll_timeout);
+        push!(ownership_warmup_empty_polls);
+        push!(quantity readiness_poll_interval);
+        push!(quantity produce_max_body);
+        push!(quantity forward_max_body);
+        if let Some(value) = tuning.client_dispatch_queue_capacity {
+            args.push(format!("--client-dispatch-queue-capacity={value}"));
+        }
+        if let Some(value) = tuning.client_frame_max {
+            args.push(format!("--client-frame-max={}B", value.bytes_u64()));
+        }
+    }
+    if let Some(registry) = &gateway.spec.schema_registry {
+        if let Some(value) = registry.url.as_deref() {
+            args.push(format!("--schema-registry-url={value}"));
+        }
+        if let Some(value) = registry.latest_cache_ttl {
+            args.push(format!(
+                "--schema-registry-latest-cache-ttl={}",
+                value.human()
+            ));
+        }
+        if let Some(value) = registry.frame_raw {
+            args.push(format!("--schema-registry-frame-raw={value}"));
+        }
+    }
     args.sort_unstable();
     args
 }
@@ -505,8 +620,8 @@ fn render_webhooks_toml(
             if let Some(v) = &w.timestamp_header {
                 e.insert("timestamp_header".into(), json!(v));
             }
-            if let Some(v) = w.timestamp_tolerance_secs {
-                e.insert("timestamp_tolerance_secs".into(), json!(v));
+            if let Some(v) = w.timestamp_tolerance {
+                e.insert("timestamp_tolerance".into(), json!(v.human().to_string()));
             }
             if let Some(v) = &w.idempotency_source {
                 e.insert("idempotency_source".into(), json!(v));
@@ -514,8 +629,14 @@ fn render_webhooks_toml(
             if let Some(v) = &w.key_source {
                 e.insert("key_source".into(), json!(v));
             }
-            if let Some(v) = w.max_body_bytes {
-                e.insert("max_body_bytes".into(), json!(v));
+            if let Some(v) = w.max_body {
+                e.insert("max_body".into(), json!(v.human().to_string()));
+            }
+            if let Some(v) = &w.schema_subject {
+                e.insert("schema_subject".into(), json!(v));
+            }
+            if let Some(v) = &w.schema_format {
+                e.insert("schema_format".into(), json!(v));
             }
             serde_json::Value::Object(e)
         })
@@ -548,14 +669,20 @@ fn render_outbound_toml(
             if let Some(v) = s.max_attempts {
                 e.insert("max_attempts".into(), json!(v));
             }
-            if let Some(v) = s.base_backoff_ms {
-                e.insert("base_backoff_ms".into(), json!(v));
+            if let Some(v) = s.base_backoff {
+                e.insert("base_backoff".into(), json!(v.human().to_string()));
             }
-            if let Some(v) = s.max_backoff_ms {
-                e.insert("max_backoff_ms".into(), json!(v));
+            if let Some(v) = s.max_backoff {
+                e.insert("max_backoff".into(), json!(v.human().to_string()));
             }
-            if let Some(v) = s.request_timeout_ms {
-                e.insert("request_timeout_ms".into(), json!(v));
+            if let Some(v) = s.request_timeout {
+                e.insert("request_timeout".into(), json!(v.human().to_string()));
+            }
+            if let Some(v) = &s.group_id {
+                e.insert("group_id".into(), json!(v));
+            }
+            if let Some(v) = s.decode_to_json {
+                e.insert("decode_to_json".into(), json!(v));
             }
             if let Some(v) = &s.filter {
                 e.insert("filter".into(), json!(v));
@@ -586,8 +713,10 @@ fn derive_allowed_targets(gw: &KafkaGrpcGateway) -> Vec<serde_json::Value> {
         }
     };
     for s in &gw.spec.outbound_subscriptions {
-        if let Ok(url) = reqwest_url_parse(&s.target_url) {
-            push(url.0, url.1);
+        if let Ok(url) = reqwest::Url::parse(&s.target_url)
+            && let Some(host) = url.host_str()
+        {
+            push(url.scheme().to_ascii_lowercase(), host.to_string());
         }
     }
     for a in &gw.spec.allowed_targets {
@@ -596,25 +725,6 @@ fn derive_allowed_targets(gw: &KafkaGrpcGateway) -> Vec<serde_json::Value> {
     out.into_iter()
         .map(|(scheme, host)| json!({ "scheme": scheme, "host": host }))
         .collect()
-}
-
-/// Minimal `scheme`/`host` extraction from a target URL, without pulling in the
-/// `reqwest`/`url` crate (not an operator dependency). Returns
-/// `(scheme, host)`; the host excludes any port (the gateway's SSRF check
-/// matches host only).
-fn reqwest_url_parse(target: &str) -> Result<(String, String), ()> {
-    let (scheme, rest) = target.split_once("://").ok_or(())?;
-    if scheme.is_empty() {
-        return Err(());
-    }
-    // Strip path/query, then any userinfo, then any port.
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host_port = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = host_port.rsplit_once(':').map_or(host_port, |(h, _)| h);
-    if host.is_empty() {
-        return Err(());
-    }
-    Ok((scheme.to_ascii_lowercase(), host.to_string()))
 }
 
 /// Render the child `KafkaUser` (`<gw>-broker`): `authentication: tls`, broad
@@ -697,7 +807,7 @@ async fn ensure_serving_cert(
     let now = OffsetDateTime::now_utc();
     if let Some(existing) = secret_api.get_opt(&secret_name).await?
         && let Some(cert_pem) = read_pem_key(&existing, "tls.crt")
-        && !renew_if_expiring(&cert_pem, 30, now).unwrap_or(true)
+        && !renew_if_expiring(&cert_pem, crabka_units::days(30), now).unwrap_or(true)
     {
         return Ok(());
     }
@@ -913,6 +1023,412 @@ fn resolve_broker_endpoint(parent: &Kafka, namespace: &str) -> Option<(String, S
 // Status helpers
 // ---------------------------------------------------------------------------
 
+fn validate_internal_topic_dirty_ratio(value: Option<Ratio>) -> Result<(), String> {
+    if value.is_some_and(|value| {
+        !value.as_f64().is_finite()
+            || value < <Ratio as crabka_units::convert::RatioExt>::ZERO
+            || value > <Ratio as crabka_units::convert::RatioExt>::ONE
+    }) {
+        return Err(
+            "spec.tuning.internalTopicMinCleanableDirtyRatio: must be between 0% and 100%".into(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_protocol_millis_i32(value: Option<Time>, path: &str) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let millis = value.millis_i64();
+    if !value.secs_f64().is_finite() || Time::from_millis(millis) != value {
+        return Err(format!(
+            "{path}: must be a positive whole number of milliseconds within 1..=i32::MAX"
+        ));
+    }
+    let millis = i32::try_from(millis).map_err(|_| {
+        format!("{path}: must be a positive whole number of milliseconds within 1..=i32::MAX")
+    })?;
+    refined_type::rule::GreaterI32::<0>::new(millis)
+        .map(|_| ())
+        .map_err(|_| {
+            format!("{path}: must be a positive whole number of milliseconds within 1..=i32::MAX")
+        })
+}
+
+// f64 represents every integer below 2^53; at this value adjacent inputs can
+// collapse before validation sees the UOM quantity.
+const FIRST_AMBIGUOUS_F64_MILLIS: i64 = 9_007_199_254_740_992;
+
+fn validate_protocol_millis_i64(value: Option<Time>, path: &str) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let millis = value.millis_i64();
+    if millis >= FIRST_AMBIGUOUS_F64_MILLIS {
+        return Err(format!(
+            "{path}: must be below {FIRST_AMBIGUOUS_F64_MILLIS}ms because UOM quantities use f64"
+        ));
+    }
+    if !value.secs_f64().is_finite() || Time::from_millis(millis) != value {
+        return Err(format!(
+            "{path}: must be a positive whole number of milliseconds within 1..=i64::MAX"
+        ));
+    }
+    refined_type::rule::GreaterI64::<0>::new(millis)
+        .map(|_| ())
+        .map_err(|_| {
+            format!("{path}: must be a positive whole number of milliseconds within 1..=i64::MAX")
+        })
+}
+
+fn validate_config(spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec) -> Result<(), String> {
+    macro_rules! validate {
+        ($value:expr, $rule:ty, $path:literal) => {
+            if let Some(value) = $value {
+                <$rule>::new(value).map_err(|error| format!("{}: {error}", $path))?;
+            }
+        };
+    }
+    macro_rules! nonempty {
+        ($value:expr, $path:literal) => {
+            if let Some(value) = $value {
+                refined_type::rule::NonEmptyString::new(value.to_owned())
+                    .map_err(|error| format!("{}: {error}", $path))?;
+            }
+        };
+    }
+
+    validate!(
+        spec.replicas,
+        refined_type::rule::GreaterI32<0>,
+        "spec.replicas"
+    );
+    nonempty!(spec.image.as_deref(), "spec.image");
+    nonempty!(spec.membership_topic.as_deref(), "spec.membershipTopic");
+
+    if let Some(tuning) = &spec.tuning {
+        tuning
+            .client_dispatch_queue_capacity
+            .map(crabka_client_core::ConnectionDispatchQueueCapacity::new)
+            .transpose()
+            .map_err(|error| format!("spec.tuning.clientDispatchQueueCapacity: {error}"))?;
+        tuning
+            .client_frame_max
+            .map(crabka_client_core::ClientFrameMax::try_from)
+            .transpose()
+            .map_err(|error| format!("spec.tuning.clientFrameMax: {error}"))?;
+        validate!(
+            tuning.internal_topic_replication_factor,
+            refined_type::rule::GreaterI16<0>,
+            "spec.tuning.internalTopicReplicationFactor"
+        );
+        validate_protocol_millis_i32(
+            tuning.internal_topic_create_timeout,
+            "spec.tuning.internalTopicCreateTimeout",
+        )?;
+        validate_protocol_millis_i64(
+            tuning.internal_topic_segment,
+            "spec.tuning.internalTopicSegment",
+        )?;
+        validate_internal_topic_dirty_ratio(tuning.internal_topic_min_cleanable_dirty_ratio)?;
+        validate!(
+            tuning.consumer_poll_timeout.map(millis_u64),
+            refined_type::rule::GreaterU64<0>,
+            "spec.tuning.consumerPollTimeout"
+        );
+        validate!(
+            tuning.ownership_warmup_empty_polls,
+            refined_type::rule::GreaterU32<0>,
+            "spec.tuning.ownershipWarmupEmptyPolls"
+        );
+        validate!(
+            tuning.readiness_poll_interval.map(millis_u64),
+            refined_type::rule::GreaterU64<0>,
+            "spec.tuning.readinessPollInterval"
+        );
+        validate_produce_max_body(tuning.produce_max_body)?;
+        validate_forward_max_body(tuning.forward_max_body)?;
+    }
+    if let Some(registry) = &spec.schema_registry {
+        nonempty!(registry.url.as_deref(), "spec.schemaRegistry.url");
+        if let Some(url) = registry.url.as_deref() {
+            reqwest::Url::parse(url)
+                .map_err(|error| format!("spec.schemaRegistry.url: {error}"))?;
+        }
+        validate!(
+            registry.latest_cache_ttl.map(millis_u64),
+            refined_type::rule::GreaterU64<0>,
+            "spec.schemaRegistry.latestCacheTtl"
+        );
+    }
+    validate_health_checks(spec.health_checks.as_ref())?;
+    if let Some(dedup) = &spec.dedup {
+        nonempty!(dedup.topic.as_deref(), "spec.dedup.topic");
+        validate!(
+            dedup.partitions,
+            refined_type::rule::MinMaxU32<1, 2_147_483_647>,
+            "spec.dedup.partitions"
+        );
+        validate_protocol_millis_i64(dedup.window, "spec.dedup.window")?;
+        nonempty!(dedup.txn_id_prefix.as_deref(), "spec.dedup.txnIdPrefix");
+        nonempty!(
+            dedup.ownership_group.as_deref(),
+            "spec.dedup.ownershipGroup"
+        );
+    }
+    if let Some(tls) = &spec.tls {
+        if let Some(mode) = tls.client_auth.as_deref()
+            && !matches!(mode, "disabled" | "optional" | "required")
+        {
+            return Err("spec.tls.clientAuth must be disabled, optional, or required".into());
+        }
+        validate!(
+            tls.validity_days,
+            refined_type::rule::GreaterU32<0>,
+            "spec.tls.validityDays"
+        );
+        validate!(
+            tls.reload_interval.map(secs_u64),
+            refined_type::rule::GreaterU64<0>,
+            "spec.tls.reloadInterval"
+        );
+    }
+    if let Some(authz) = &spec.authz {
+        if let Some(mode) = authz.mode.as_deref()
+            && !matches!(mode, "off" | "simple")
+        {
+            return Err("spec.authz.mode must be off or simple".into());
+        }
+        validate!(
+            authz.acl_refresh.map(secs_u64),
+            refined_type::rule::GreaterU64<0>,
+            "spec.authz.aclRefresh"
+        );
+        for user in &authz.super_users {
+            refined_type::rule::NonEmptyString::new(user.clone())
+                .map_err(|error| format!("spec.authz.superUsers: {error}"))?;
+        }
+        if let Some(bearer) = &authz.bearer {
+            if let Some(mode) = bearer.mode.as_deref()
+                && !matches!(mode, "off" | "unsecured")
+            {
+                return Err("spec.authz.bearer.mode must be off or unsecured".into());
+            }
+            nonempty!(
+                bearer.principal_claim.as_deref(),
+                "spec.authz.bearer.principalClaim"
+            );
+            validate!(
+                bearer.allowable_clock_skew.map(TimeExt::millis_i64),
+                refined_type::rule::GreaterEqualI64<0>,
+                "spec.authz.bearer.allowableClockSkew"
+            );
+        }
+    }
+    for webhook in &spec.webhooks {
+        refined_type::rule::NonEmptyString::new(webhook.name.clone())
+            .map_err(|error| format!("spec.webhooks.name: {error}"))?;
+        refined_type::rule::NonEmptyString::new(webhook.target_topic.clone())
+            .map_err(|error| format!("spec.webhooks.targetTopic: {error}"))?;
+        if let Some(encoding) = webhook.signature_encoding.as_deref()
+            && !matches!(encoding, "hex" | "base64")
+        {
+            return Err("spec.webhooks.signatureEncoding must be hex or base64".into());
+        }
+        if webhook.secret_ref.is_some() != webhook.signature_header.is_some() {
+            return Err("spec.webhooks.secretRef and signatureHeader must be set together".into());
+        }
+        if let Some(value) = webhook.idempotency_source.as_deref() {
+            validate_webhook_source(value, "spec.webhooks.idempotencySource")?;
+        }
+        if let Some(value) = webhook.key_source.as_deref() {
+            validate_webhook_source(value, "spec.webhooks.keySource")?;
+        }
+        validate!(
+            webhook.timestamp_tolerance.map(TimeExt::secs_i64),
+            refined_type::rule::GreaterEqualI64<0>,
+            "spec.webhooks.timestampTolerance"
+        );
+        validate!(
+            webhook.max_body.map(ByteSizeExt::bytes_u64),
+            refined_type::rule::GreaterU64<0>,
+            "spec.webhooks.maxBody"
+        );
+        nonempty!(
+            webhook.schema_subject.as_deref(),
+            "spec.webhooks.schemaSubject"
+        );
+        if let Some(format) = webhook.schema_format.as_deref()
+            && !matches!(format, "avro" | "json" | "protobuf")
+        {
+            return Err("spec.webhooks.schemaFormat must be avro, json, or protobuf".into());
+        }
+    }
+    validate_outbound_config(spec)?;
+    if let Some(telemetry) = &spec.telemetry {
+        nonempty!(
+            telemetry.otlp_endpoint.as_deref(),
+            "spec.telemetry.otlpEndpoint"
+        );
+        if let Some(protocol) = telemetry.otlp_protocol.as_deref()
+            && !matches!(protocol, "grpc" | "http")
+        {
+            return Err("spec.telemetry.otlpProtocol must be grpc or http".into());
+        }
+        if let Some(ratio) = telemetry.sample_ratio
+            && (!ratio.is_finite() || !(0.0..=1.0).contains(&ratio))
+        {
+            return Err("spec.telemetry.sampleRatio must be finite and between 0 and 1".into());
+        }
+    }
+    Ok(())
+}
+
+fn validate_produce_max_body(value: Option<ByteSize>) -> Result<(), String> {
+    if let Some(value) = value.map(ByteSizeExt::bytes_u64) {
+        refined_type::rule::GreaterU64::<0>::new(value)
+            .map_err(|error| format!("spec.tuning.produceMaxBody: {error}"))?;
+    }
+    Ok(())
+}
+
+fn validate_forward_max_body(value: Option<ByteSize>) -> Result<(), String> {
+    if let Some(value) = value.map(ByteSizeExt::bytes_u64) {
+        refined_type::rule::GreaterU64::<0>::new(value)
+            .map_err(|error| format!("spec.tuning.forwardMaxBody: {error}"))?;
+    }
+    Ok(())
+}
+
+fn validate_health_checks(
+    health: Option<&crate::crd::grpc_gateway::GatewayHealthChecks>,
+) -> Result<(), String> {
+    let Some(health) = health else {
+        return Ok(());
+    };
+    for (value, path, permits_zero) in [
+        (
+            health.readiness_initial_delay_seconds,
+            "spec.healthChecks.readinessInitialDelaySeconds",
+            true,
+        ),
+        (
+            health.readiness_period_seconds,
+            "spec.healthChecks.readinessPeriodSeconds",
+            false,
+        ),
+        (
+            health.liveness_initial_delay_seconds,
+            "spec.healthChecks.livenessInitialDelaySeconds",
+            true,
+        ),
+        (
+            health.liveness_period_seconds,
+            "spec.healthChecks.livenessPeriodSeconds",
+            false,
+        ),
+    ] {
+        if let Some(value) = value {
+            if permits_zero {
+                refined_type::rule::GreaterEqualI32::<0>::new(value)
+                    .map_err(|error| format!("{path}: {error}"))?;
+            } else {
+                refined_type::rule::GreaterI32::<0>::new(value)
+                    .map_err(|error| format!("{path}: {error}"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_webhook_source(value: &str, path: &str) -> Result<(), String> {
+    if value.strip_prefix("header:").is_some() {
+        return Ok(());
+    }
+    let Some(json_path) = value.strip_prefix("json:") else {
+        return Err(format!("{path}: must start with 'header:' or 'json:'"));
+    };
+    jsonpath_rust::parser::parse_json_path(json_path)
+        .map(|_| ())
+        .map_err(|error| format!("{path}: invalid JSONPath {json_path:?}: {error}"))
+}
+
+fn validate_outbound_config(
+    spec: &crate::crd::grpc_gateway::KafkaGrpcGatewaySpec,
+) -> Result<(), String> {
+    macro_rules! validate {
+        ($value:expr, $rule:ty, $path:literal) => {
+            if let Some(value) = $value {
+                <$rule>::new(value).map_err(|error| format!("{}: {error}", $path))?;
+            }
+        };
+    }
+
+    for subscription in &spec.outbound_subscriptions {
+        refined_type::rule::NonEmptyString::new(subscription.name.clone())
+            .map_err(|error| format!("spec.outboundSubscriptions.name: {error}"))?;
+        refined_type::rule::NonEmptyString::new(subscription.target_url.clone())
+            .map_err(|error| format!("spec.outboundSubscriptions.targetUrl: {error}"))?;
+        let url = reqwest::Url::parse(&subscription.target_url).map_err(|error| {
+            format!("spec.outboundSubscriptions.targetUrl: invalid URL: {error}")
+        })?;
+        url.host_str()
+            .ok_or_else(|| "spec.outboundSubscriptions.targetUrl: URL has no host".to_string())?;
+        for topic in &subscription.source_topics {
+            refined_type::rule::NonEmptyString::new(topic.clone())
+                .map_err(|error| format!("spec.outboundSubscriptions.sourceTopics: {error}"))?;
+        }
+        validate!(
+            subscription.max_attempts,
+            refined_type::rule::GreaterU32<0>,
+            "spec.outboundSubscriptions.maxAttempts"
+        );
+        validate!(
+            subscription.base_backoff.map(millis_u64),
+            refined_type::rule::GreaterU64<0>,
+            "spec.outboundSubscriptions.baseBackoff"
+        );
+        validate!(
+            subscription.max_backoff.map(millis_u64),
+            refined_type::rule::GreaterU64<0>,
+            "spec.outboundSubscriptions.maxBackoff"
+        );
+        validate!(
+            subscription.request_timeout.map(millis_u64),
+            refined_type::rule::GreaterU64<0>,
+            "spec.outboundSubscriptions.requestTimeout"
+        );
+        if let Some(group_id) = &subscription.group_id {
+            refined_type::rule::NonEmptyString::new(group_id.clone())
+                .map_err(|error| format!("spec.outboundSubscriptions.groupId: {error}"))?;
+        }
+        if subscription.max_backoff.unwrap_or(DEFAULT_MAX_BACKOFF)
+            < subscription.base_backoff.unwrap_or(DEFAULT_BASE_BACKOFF)
+        {
+            return Err(
+                "spec.outboundSubscriptions.maxBackoff must be at least baseBackoff".into(),
+            );
+        }
+        if let Some(filter) = subscription.filter.as_deref() {
+            let Some(json_path) = filter.strip_prefix("json:") else {
+                return Err("spec.outboundSubscriptions.filter must start with 'json:'".into());
+            };
+            jsonpath_rust::parser::parse_json_path(json_path).map_err(|error| {
+                format!("spec.outboundSubscriptions.filter: invalid JSONPath: {error}")
+            })?;
+        }
+    }
+    for target in &spec.allowed_targets {
+        if !matches!(target.scheme.as_str(), "http" | "https") {
+            return Err("spec.allowedTargets.scheme must be http or https".into());
+        }
+        refined_type::rule::NonEmptyString::new(target.host.clone())
+            .map_err(|error| format!("spec.allowedTargets.host: {error}"))?;
+    }
+    Ok(())
+}
+
 /// Patch a single-condition status onto the gateway (preserving the
 /// observed-generation echo).
 #[tracing::instrument(level = "info", skip_all, fields(name = %name, conditions = conditions.len()), err)]
@@ -975,6 +1491,12 @@ async fn reconcile_inner(
     let gw_api: Api<KafkaGrpcGateway> = Api::namespaced(ctx.client.clone(), &ns);
     let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), &ns);
 
+    if let Err(why) = validate_config(&gw.spec) {
+        let ready = condition("Ready", "False", "GatewayConfigInvalid", &why);
+        patch_conditions(&gw_api, &name, observed_generation, vec![ready]).await?;
+        return Err(ReconcileError::GatewayConfigInvalid(why));
+    }
+
     // (1) Parse the `crabka.io/cluster` label → fetch the parent Kafka.
     let Some(parent_name) = gw
         .meta()
@@ -989,7 +1511,7 @@ async fn reconcile_inner(
             "metadata.labels.\"crabka.io/cluster\" is required to link a gateway to its parent Kafka",
         );
         patch_conditions(&gw_api, &name, observed_generation, vec![cond]).await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     };
 
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
@@ -1001,7 +1523,7 @@ async fn reconcile_inner(
             &format!("Kafka '{parent_name}' not found in namespace '{ns}'"),
         );
         patch_conditions(&gw_api, &name, observed_generation, vec![cond]).await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     };
 
     // (2) Version gate (copy of the pool's logic).
@@ -1014,7 +1536,7 @@ async fn reconcile_inner(
             vec![cond, version_valid],
         )
         .await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     }
 
     // (3) SSA the child KafkaUser; GET its issued Secret. If absent, the
@@ -1040,7 +1562,7 @@ async fn reconcile_inner(
             "waiting for the gateway's broker-mTLS client cert",
         );
         patch_conditions(&gw_api, &name, observed_generation, vec![ready, cond]).await?;
-        return Ok(Action::requeue(Duration::from_secs(15)));
+        return Ok(common::requeue(ctx.config.controller_error_requeue));
     }
 
     // (4) Issue / renew the serving cert.
@@ -1077,7 +1599,7 @@ async fn reconcile_inner(
             ),
         );
         patch_conditions(&gw_api, &name, observed_generation, vec![ready, degraded]).await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     };
 
     // Image: spec override > operator default (--default-gateway-image) > built-in default.
@@ -1136,17 +1658,17 @@ async fn reconcile_inner(
     };
     patch_status::<KafkaGrpcGateway, KafkaGrpcGatewayStatus>(&gw_api, &name, status).await?;
 
-    Ok(Action::requeue(Duration::from_secs(30)))
+    Ok(common::requeue(ctx.config.controller_dependency_requeue))
 }
 
 /// Requeue on transient error.
 pub fn error_policy(
     _obj: Arc<KafkaGrpcGateway>,
     err: &ReconcileError,
-    _ctx: Arc<Context>,
+    ctx: Arc<Context>,
 ) -> Action {
     tracing::warn!(error = %err, "gateway reconcile error, requeueing");
-    Action::requeue(Duration::from_secs(15))
+    common::error_requeue(ctx)
 }
 
 /// Run the `KafkaGrpcGateway` controller forever. Owns the Deployment, Service,
@@ -1194,13 +1716,14 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use assert2::{assert, check};
+    use crabka_units::{millis, secs};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 
     use super::*;
     use crate::crd::grpc_gateway::{
-        AllowedTargetSpec, DedupSpec, GatewayAuthzSpec, GatewayBearerSpec, GatewayTlsSpec,
-        InboundWebhookSpec, KafkaGrpcGatewaySpec, OutboundSubscriptionSpec, SecretKeyRef,
-        TelemetrySpec,
+        AllowedTargetSpec, DedupSpec, GatewayAuthzSpec, GatewayBearerSpec, GatewayHealthChecks,
+        GatewaySchemaRegistrySpec, GatewayTlsSpec, GatewayTuning, InboundWebhookSpec,
+        KafkaGrpcGatewaySpec, OutboundSubscriptionSpec, SecretKeyRef, TelemetrySpec,
     };
 
     fn empty_spec() -> KafkaGrpcGatewaySpec {
@@ -1209,6 +1732,10 @@ mod tests {
             image: None,
             resources: None,
             dedup: None,
+            membership_topic: None,
+            tuning: None,
+            schema_registry: None,
+            health_checks: None,
             tls: None,
             authz: None,
             webhooks: vec![],
@@ -1396,6 +1923,32 @@ mod tests {
     }
 
     #[test]
+    fn deployment_probe_timing_uses_health_checks() {
+        let mut gw = gateway_fixture("gw", "demo");
+        gw.spec.health_checks = Some(GatewayHealthChecks {
+            readiness_initial_delay_seconds: Some(3),
+            readiness_period_seconds: Some(6),
+            liveness_initial_delay_seconds: Some(11),
+            liveness_period_seconds: Some(12),
+        });
+        let mut container = deployment(&gw, "demo", "img:1", "boot:9092", "sni")
+            .unwrap()
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .containers
+            .remove(0);
+        let readiness = container.readiness_probe.take().unwrap();
+        let liveness = container.liveness_probe.take().unwrap();
+        assert!(readiness.initial_delay_seconds == Some(3));
+        assert!(readiness.period_seconds == Some(6));
+        assert!(liveness.initial_delay_seconds == Some(11));
+        assert!(liveness.period_seconds == Some(12));
+    }
+
+    #[test]
     fn deployment_telemetry_env_present_when_configured() {
         let mut gw = gateway_fixture("gw", "demo");
         gw.spec.telemetry = Some(TelemetrySpec {
@@ -1495,10 +2048,12 @@ mod tests {
             signature_encoding: None,
             signature_prefix: Some("sha256=".into()),
             timestamp_header: None,
-            timestamp_tolerance_secs: None,
+            timestamp_tolerance: None,
             idempotency_source: Some("header:X-Idempotency-Key".into()),
             key_source: None,
-            max_body_bytes: None,
+            max_body: None,
+            schema_subject: None,
+            schema_format: None,
             secret_ref: Some(SecretKeyRef {
                 name: "orders-secret".into(),
                 key: "hmac".into(),
@@ -1510,9 +2065,11 @@ mod tests {
             target_url: "https://hooks.example.com/deliver".into(),
             dead_letter_topic: Some("dlq".into()),
             max_attempts: Some(5),
-            base_backoff_ms: None,
-            max_backoff_ms: None,
-            request_timeout_ms: None,
+            base_backoff: None,
+            max_backoff: None,
+            request_timeout: None,
+            group_id: None,
+            decode_to_json: None,
             filter: Some("json:$.type".into()),
             headers: BTreeMap::from([("X-Tenant".to_string(), "acme".to_string())]),
             signing_secret_ref: Some(SecretKeyRef {
@@ -1574,9 +2131,11 @@ mod tests {
             target_url: "https://h.example.com/x".into(),
             dead_letter_topic: None,
             max_attempts: None,
-            base_backoff_ms: None,
-            max_backoff_ms: None,
-            request_timeout_ms: None,
+            base_backoff: None,
+            max_backoff: None,
+            request_timeout: None,
+            group_id: None,
+            decode_to_json: None,
             filter: None,
             headers: BTreeMap::new(),
             signing_secret_ref: None,
@@ -1603,9 +2162,11 @@ mod tests {
             target_url: "https://a.example.com:8443/x".into(),
             dead_letter_topic: None,
             max_attempts: None,
-            base_backoff_ms: None,
-            max_backoff_ms: None,
-            request_timeout_ms: None,
+            base_backoff: None,
+            max_backoff: None,
+            request_timeout: None,
+            group_id: None,
+            decode_to_json: None,
             filter: None,
             headers: BTreeMap::new(),
             signing_secret_ref: None,
@@ -1622,25 +2183,6 @@ mod tests {
         // Port stripped from the subscription host.
         assert!(hosts.contains("a.example.com"), "{hosts:?}");
         assert!(hosts.contains("b.example.com"), "{hosts:?}");
-    }
-
-    #[test]
-    fn reqwest_url_parse_strips_port_and_path() {
-        for (input, scheme, host) in [
-            (
-                "https://h.example.com:8443/a/b?x=1",
-                "https",
-                "h.example.com",
-            ),
-            ("http://h.example.com", "http", "h.example.com"),
-            ("https://user@h.example.com/x", "https", "h.example.com"),
-        ] {
-            assert!(
-                reqwest_url_parse(input) == Ok((scheme.into(), host.into())),
-                "case {input}"
-            );
-        }
-        assert!(reqwest_url_parse("not-a-url").is_err());
     }
 
     #[test]
@@ -1664,6 +2206,8 @@ mod tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
+                gres_registry: None,
             },
         );
         parent.metadata.namespace = Some("default".into());
@@ -1685,21 +2229,24 @@ mod tests {
         gw.spec.authz = Some(GatewayAuthzSpec {
             mode: Some("simple".into()),
             super_users: vec!["User:admin".into(), "User:ops".into()],
-            acl_refresh_secs: Some(42),
+            acl_refresh: Some(secs(42)),
             bearer: Some(GatewayBearerSpec {
                 mode: Some("unsecured".into()),
                 principal_claim: Some("email".into()),
+                allowable_clock_skew: None,
             }),
         });
         gw.spec.dedup = Some(DedupSpec {
             topic: Some("gw-dedup".into()),
             partitions: Some(16),
-            window_ms: Some(123),
+            window: Some(millis(123)),
             txn_id_prefix: Some("pfx".into()),
+            ownership_group: None,
         });
         gw.spec.tls = Some(GatewayTlsSpec {
             client_auth: Some("optional".into()),
             validity_days: Some(90),
+            reload_interval: None,
         });
         let dep = deployment(&gw, "demo", "img:1", "boot:9092", "sni").unwrap();
         let args = dep
@@ -1716,17 +2263,349 @@ mod tests {
         for want in [
             "--authz=simple",
             "--authz-super-users=User:admin,User:ops",
-            "--acl-refresh-secs=42",
+            "--acl-refresh-interval=42s",
             "--bearer=unsecured",
             "--bearer-principal-claim=email",
             "--dedup-topic=gw-dedup",
             "--dedup-partitions=16",
-            "--dedup-window-ms=123",
+            "--dedup-window=123ms",
             "--dedup-txn-id-prefix=pfx",
             "--tls-client-auth=optional",
         ] {
             assert!(joined.contains(want), "missing {want}; args: {joined}");
         }
+    }
+
+    #[test]
+    fn omitted_runtime_fields_preserve_operator_defaults() {
+        let gw = gateway_fixture("gw", "demo");
+        let args = gateway_args(&gw, "gw", "boot:9092", "sni");
+        for want in [
+            "--dedup-window=1d",
+            "--acl-refresh-interval=1m",
+            "--dedup-ownership-group=gw-dedup-owners",
+        ] {
+            assert!(
+                args.iter().any(|arg| arg == want),
+                "missing {want}: {args:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn configured_client_policy_renders_once() {
+        let mut gw = gateway_fixture("gw", "demo");
+        gw.spec.tuning = Some(
+            serde_json::from_value(serde_json::json!({
+                "clientDispatchQueueCapacity": 7,
+                "clientFrameMax": "32KiB"
+            }))
+            .unwrap(),
+        );
+        let args = gateway_args(&gw, "gw", "boot:9092", "sni");
+        check!(
+            args.iter()
+                .filter(|arg| *arg == "--client-dispatch-queue-capacity=7")
+                .count()
+                == 1
+        );
+        check!(
+            args.iter()
+                .filter(|arg| *arg == "--client-frame-max=32768B")
+                .count()
+                == 1
+        );
+
+        let omitted = gateway_args(&gateway_fixture("gw", "demo"), "gw", "boot:9092", "sni");
+        check!(
+            omitted.iter().all(|arg| {
+                !arg.starts_with("--client-dispatch-queue-capacity=")
+                    && !arg.starts_with("--client-frame-max=")
+            }),
+            "got: {omitted:?}"
+        );
+    }
+
+    #[test]
+    fn client_policy_rejects_invalid_boundaries() {
+        for (tuning, path) in [
+            (
+                serde_json::json!({"clientDispatchQueueCapacity": 0}),
+                "spec.tuning.clientDispatchQueueCapacity",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "0B"}),
+                "spec.tuning.clientFrameMax",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "1.5B"}),
+                "spec.tuning.clientFrameMax",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "101MiB"}),
+                "spec.tuning.clientFrameMax",
+            ),
+        ] {
+            let mut gw = gateway_fixture("gw", "demo");
+            gw.spec.tuning = Some(serde_json::from_value(tuning).unwrap());
+            let error = validate_config(&gw.spec).expect_err("reject invalid policy");
+            assert!(error.contains(path), "got: {error}");
+        }
+    }
+
+    #[test]
+    fn runtime_values_render_to_flags_and_existing_toml_paths() {
+        let mut gw = gateway_fixture("gw", "demo");
+        gw.spec.membership_topic = Some("members-custom".into());
+        gw.spec.tuning = Some(GatewayTuning {
+            client_dispatch_queue_capacity: None,
+            client_frame_max: None,
+            internal_topic_replication_factor: Some(2),
+            internal_topic_allow_replication_fallback: Some(false),
+            internal_topic_create_timeout: Some(millis(7_001)),
+            internal_topic_segment: Some(millis(22_001)),
+            internal_topic_min_cleanable_dirty_ratio: Some(crabka_units::fraction(0.025)),
+            consumer_poll_timeout: Some(millis(501)),
+            ownership_warmup_empty_polls: Some(3),
+            readiness_poll_interval: Some(millis(251)),
+            produce_max_body: Some(crabka_units::bytes(3_145_728)),
+            forward_max_body: Some(crabka_units::bytes(3_145_727)),
+        });
+        gw.spec.schema_registry = Some(GatewaySchemaRegistrySpec {
+            url: Some("http://registry:8081".into()),
+            latest_cache_ttl: Some(millis(5_001)),
+            frame_raw: Some(true),
+        });
+        gw.spec.dedup = Some(DedupSpec {
+            ownership_group: Some("owners-custom".into()),
+            ..Default::default()
+        });
+        gw.spec.tls = Some(GatewayTlsSpec {
+            reload_interval: Some(secs(31)),
+            ..Default::default()
+        });
+        gw.spec.authz = Some(GatewayAuthzSpec {
+            bearer: Some(GatewayBearerSpec {
+                allowable_clock_skew: Some(millis(31_001)),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        gw.spec.webhooks = vec![InboundWebhookSpec {
+            name: "orders".into(),
+            target_topic: "orders".into(),
+            principal: None,
+            signature_header: None,
+            signature_encoding: None,
+            signature_prefix: None,
+            timestamp_header: None,
+            timestamp_tolerance: None,
+            idempotency_source: None,
+            key_source: None,
+            max_body: None,
+            schema_subject: Some("orders-value".into()),
+            schema_format: Some("avro".into()),
+            secret_ref: None,
+        }];
+        gw.spec.outbound_subscriptions = vec![OutboundSubscriptionSpec {
+            name: "deliver".into(),
+            source_topics: vec!["orders".into()],
+            target_url: "https://example.com/hook".into(),
+            dead_letter_topic: None,
+            max_attempts: None,
+            base_backoff: None,
+            max_backoff: None,
+            request_timeout: None,
+            group_id: Some("deliver-custom".into()),
+            decode_to_json: Some(true),
+            filter: None,
+            headers: BTreeMap::new(),
+            signing_secret_ref: None,
+        }];
+
+        let args = gateway_args(&gw, "gw", "boot:9092", "sni");
+        for want in [
+            "--membership-topic=members-custom",
+            "--internal-topic-replication-factor=2",
+            "--internal-topic-allow-replication-fallback=false",
+            "--internal-topic-create-timeout=7.001s",
+            "--internal-topic-segment=22.001s",
+            "--internal-topic-min-cleanable-dirty-ratio=2.5%",
+            "--consumer-poll-timeout=501ms",
+            "--ownership-warmup-empty-polls=3",
+            "--readiness-poll-interval=251ms",
+            "--produce-max-body=3MiB",
+            "--forward-max-body=3145727B",
+            "--schema-registry-url=http://registry:8081",
+            "--schema-registry-latest-cache-ttl=5.001s",
+            "--schema-registry-frame-raw=true",
+            "--dedup-ownership-group=owners-custom",
+            "--tls-reload-interval=31s",
+            "--bearer-allowable-clock-skew=31.001s",
+        ] {
+            assert!(
+                args.iter().any(|arg| arg == want),
+                "missing {want}: {args:?}"
+            );
+        }
+        assert!(
+            args.windows(2).all(|pair| pair[0] <= pair[1]),
+            "args must remain sorted: {args:?}"
+        );
+
+        let secret = config_secret(&gw, &BTreeMap::new(), &BTreeMap::new()).unwrap();
+        let data = secret.data.unwrap();
+        let webhooks = String::from_utf8(data["webhooks.toml"].0.clone()).unwrap();
+        assert!(webhooks.contains("schema_subject = \"orders-value\""));
+        assert!(webhooks.contains("schema_format = \"avro\""));
+        let outbound = String::from_utf8(data["outbound.toml"].0.clone()).unwrap();
+        assert!(outbound.contains("group_id = \"deliver-custom\""));
+        assert!(outbound.contains("decode_to_json = true"));
+    }
+
+    /// The gateway's own CLI parsers require an explicit unit and reject a bare
+    /// number, so every dimensioned argument the operator emits has to read back
+    /// as the exact quantity that went in.
+    #[test]
+    fn dimensioned_args_round_trip_through_the_unit_parsers() {
+        let mut gw = gateway_fixture("gw", "demo");
+        gw.spec.dedup = Some(crate::crd::grpc_gateway::DedupSpec {
+            window: Some(hours(1)),
+            ..Default::default()
+        });
+        gw.spec.tuning = Some(crate::crd::grpc_gateway::GatewayTuning {
+            internal_topic_create_timeout: Some(secs(10)),
+            internal_topic_segment: Some(minutes(1)),
+            internal_topic_min_cleanable_dirty_ratio: Some(crabka_units::percent(1)),
+            consumer_poll_timeout: Some(millis(500)),
+            readiness_poll_interval: Some(millis(250)),
+            produce_max_body: Some(crabka_units::mebibytes(2)),
+            forward_max_body: Some(crabka_units::mebibytes(2)),
+            ..Default::default()
+        });
+
+        let args = gateway_args(&gw, "gw", "boot:9092", "sni");
+        let value_of = |flag: &str| -> String {
+            args.iter()
+                .find_map(|arg| arg.strip_prefix(&format!("{flag}=")))
+                .unwrap_or_else(|| panic!("missing {flag} in {args:?}"))
+                .to_string()
+        };
+
+        for (flag, want) in [
+            ("--dedup-window", hours(1)),
+            ("--internal-topic-create-timeout", secs(10)),
+            ("--internal-topic-segment", minutes(1)),
+            ("--consumer-poll-timeout", millis(500)),
+            ("--readiness-poll-interval", millis(250)),
+        ] {
+            let raw = value_of(flag);
+            check!(
+                crabka_units::parse::time(&raw) == Ok(want),
+                "case {flag} = {raw}"
+            );
+        }
+        for (flag, want) in [
+            ("--produce-max-body", crabka_units::mebibytes(2)),
+            ("--forward-max-body", crabka_units::mebibytes(2)),
+        ] {
+            let raw = value_of(flag);
+            check!(
+                crabka_units::parse::byte_size(&raw) == Ok(want),
+                "case {flag} = {raw}"
+            );
+        }
+        let raw = value_of("--internal-topic-min-cleanable-dirty-ratio");
+        check!(
+            crabka_units::parse::ratio(&raw) == Ok(crabka_units::percent(1)),
+            "case dirty ratio = {raw}"
+        );
+    }
+
+    #[test]
+    fn runtime_validation_rejects_scalar_domain_and_relation_errors() {
+        let cases = [
+            serde_json::json!({"replicas": 0}),
+            serde_json::json!({"tuning": {"internalTopicReplicationFactor": 0}}),
+            serde_json::json!({"tuning": {"internalTopicMinCleanableDirtyRatio": "100.01%"}}),
+            serde_json::json!({"schemaRegistry": {"latestCacheTtl": "0s"}}),
+            serde_json::json!({"tuning": {"produceMaxBody": "0B"}}),
+            serde_json::json!({"tuning": {"forwardMaxBody": "0B"}}),
+            serde_json::json!({"healthChecks": {"readinessInitialDelaySeconds": -1}}),
+            serde_json::json!({"healthChecks": {"livenessPeriodSeconds": 0}}),
+            serde_json::json!({"dedup": {"partitions": 0}}),
+            serde_json::json!({"tls": {"clientAuth": "sometimes"}}),
+            serde_json::json!({"authz": {"mode": "maybe"}}),
+            serde_json::json!({"outboundSubscriptions": [{
+                "name": "s", "sourceTopics": ["t"], "targetUrl": "https://example.com",
+                "baseBackoff": "2ms", "maxBackoff": "1ms"
+            }]}),
+        ];
+        for value in cases {
+            let spec: KafkaGrpcGatewaySpec = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate_config(&spec).is_err(), "accepted invalid {value}");
+        }
+        let mut spec = empty_spec();
+        spec.telemetry = Some(TelemetrySpec {
+            sample_ratio: Some(f64::NAN),
+            ..Default::default()
+        });
+        assert!(validate_config(&spec).is_err());
+    }
+
+    #[test]
+    fn protocol_runtime_validation_rejects_lossy_lowering() {
+        for value in [
+            serde_json::json!({"dedup": {"window": "0.5ms"}}),
+            serde_json::json!({"tuning": {"internalTopicSegment": "0.5ms"}}),
+            serde_json::json!({"tuning": {"internalTopicCreateTimeout": "0.5ms"}}),
+            serde_json::json!({
+                "tuning": {"internalTopicCreateTimeout": "2147483648ms"}
+            }),
+            serde_json::json!({"dedup": {"window": "9223372036854775808ms"}}),
+            serde_json::json!({
+                "tuning": {"internalTopicSegment": "9223372036854775808ms"}
+            }),
+            serde_json::json!({"dedup": {"window": "9007199254740992.5ms"}}),
+            serde_json::json!({
+                "tuning": {"internalTopicSegment": "9007199254740992.5ms"}
+            }),
+            serde_json::json!({"dedup": {"window": "9007199254740993ms"}}),
+            serde_json::json!({
+                "tuning": {"internalTopicSegment": "9007199254740993ms"}
+            }),
+            serde_json::json!({"dedup": {"window": "9007199254740992ms"}}),
+            serde_json::json!({
+                "tuning": {"internalTopicSegment": "9007199254740992ms"}
+            }),
+        ] {
+            let spec: KafkaGrpcGatewaySpec = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate_config(&spec).is_err(), "accepted invalid {value}");
+        }
+
+        for value in [
+            serde_json::json!({}),
+            serde_json::json!({
+                "dedup": {"window": "9007199254740991ms"},
+                "tuning": {
+                    "internalTopicSegment": "9007199254740991ms",
+                    "internalTopicCreateTimeout": "2147483647ms"
+                }
+            }),
+        ] {
+            let spec: KafkaGrpcGatewaySpec = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate_config(&spec).is_ok(), "rejected valid {value}");
+        }
+
+        let ambiguous: KafkaGrpcGatewaySpec = serde_json::from_value(serde_json::json!({
+            "dedup": {"window": "9007199254740992ms"}
+        }))
+        .unwrap();
+        assert!(
+            validate_config(&ambiguous)
+                .expect_err("ambiguous UOM quantity must be rejected")
+                .contains("below 9007199254740992ms because UOM quantities use f64")
+        );
     }
 
     // ── resolve_broker_endpoint ───────────────────────────────
@@ -1760,6 +2639,8 @@ mod tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
+                gres_registry: None,
             },
         );
         parent.metadata.namespace = Some("default".into());

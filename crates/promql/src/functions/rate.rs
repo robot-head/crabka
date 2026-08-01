@@ -34,6 +34,7 @@ use arrow::{
     array::{Array, ArrayRef, DictionaryArray, Float64Builder, Int64Array},
     datatypes::{DataType, Int64Type},
 };
+use crabka_units::prelude::*;
 use datafusion::{
     common::{DataFusionError, Result as DfResult},
     logical_expr::{
@@ -71,22 +72,23 @@ impl RateFamily {
         }
     }
 
-    /// Evaluate one window. `eval_ts` is `range_end_ms`; `range_ms` is the
+    /// Evaluate one window. `eval_ts` is `range_end_ms`; `range` is the
     /// selector width. Returns `None` where Prometheus yields no value.
     fn eval_window(
         self,
         timestamps: &[i64],
         values: &[f64],
         eval_ts: i64,
-        range_ms: i64,
+        range: Time,
     ) -> Option<f64> {
+        let range_ms = range.millis_i64();
         match self {
             Self::Rate => extrapolated_rate(
                 timestamps,
                 values,
                 eval_ts - range_ms,
                 eval_ts,
-                range_ms,
+                range,
                 RangeKind::Rate,
             ),
             Self::Increase => extrapolated_rate(
@@ -94,7 +96,7 @@ impl RateFamily {
                 values,
                 eval_ts - range_ms,
                 eval_ts,
-                range_ms,
+                range,
                 RangeKind::Increase,
             ),
             Self::Delta => extrapolated_rate(
@@ -102,7 +104,7 @@ impl RateFamily {
                 values,
                 eval_ts - range_ms,
                 eval_ts,
-                range_ms,
+                range,
                 RangeKind::Delta,
             ),
             Self::Irate => instant_delta(timestamps, values, InstantKind::Irate),
@@ -207,7 +209,7 @@ impl ScalarUDFImpl for RateUdf {
         let value_range = decode_range_column(&value_range, "value_range", name)?;
 
         // 4. range_ms scalar (the range-selector width).
-        let range_ms = scalar_i64(&args.args[3], "range_ms", name)?;
+        let range = Time::from_millis(scalar_i64(&args.args[3], "range_ms", name)?);
 
         if timestamp_range.len() != rows || value_range.len() != rows || eval_ts.len() != rows {
             return Err(DataFusionError::Execution(format!(
@@ -231,7 +233,7 @@ impl ScalarUDFImpl for RateUdf {
                 ))
             })?;
             let eval = eval_ts.value(row);
-            match self.family.eval_window(timestamps, values, eval, range_ms) {
+            match self.family.eval_window(timestamps, values, eval, range) {
                 // A genuinely-computed value (including a legitimately-NaN result)
                 // is kept as a non-null float so it propagates through downstream
                 // aggregates exactly as the interpreter propagates it.

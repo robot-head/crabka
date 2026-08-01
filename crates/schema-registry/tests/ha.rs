@@ -19,6 +19,7 @@ fn cfg(bootstrap: &str, port: i32) -> RegistryConfig {
         advertised_url: format!("http://127.0.0.1:{port}"),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
+        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: SecurityConfig::default(),
     }
 }
@@ -82,6 +83,7 @@ async fn start_node(bootstrap: &str) -> Node {
         primary: primary.clone(),
         http: reqwest::Client::new(),
         node_id: c.advertised_url.clone(),
+        forward_max_body: c.runtime.forward_max_body,
     };
     let app: Router = rest::router_with_forwarding(
         AppState {

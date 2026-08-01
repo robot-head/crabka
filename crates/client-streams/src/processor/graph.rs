@@ -5,6 +5,8 @@
 
 use std::collections::VecDeque;
 
+use crabka_units::prelude::*;
+
 use super::{
     erased::{Dispatch, ErasedRecord, OutputRecord, ProcessorError},
     node::ErasedNode,
@@ -47,14 +49,15 @@ pub(crate) struct Graph {
     /// first fire from. Init `0`. Read by [`Graph::punctuate_wall_clock`].
     pub wall_clock: i64,
     /// Total record-cache budget for this graph's stores (JVM
-    /// `statestore.cache.max.bytes`). `0` disables caching (emit-on-update),
-    /// matching the JVM `TopologyTestDriver` default. Threaded from
-    /// [`StreamsApp`](crate::StreamsApp) → [`KafkaStreams`](crate::KafkaStreams) →
-    /// `instantiate`. Read via [`Graph::cache_max_bytes`].
+    /// `statestore.cache.max.bytes`). A zero budget disables caching
+    /// (emit-on-update), matching the JVM `TopologyTestDriver` default. Threaded
+    /// from [`StreamsApp`](crate::StreamsApp) →
+    /// [`KafkaStreams`](crate::KafkaStreams) → `instantiate`. Read via
+    /// [`Graph::cache_max_bytes`].
     // Config-only for now; the record cache that consumes this budget lands in a
     // later task, so the field/accessor are read only by tests until then.
     #[allow(dead_code)]
-    pub cache_max_bytes: i64,
+    pub cache_max_bytes: ByteSize,
     /// Store name → owning node index, for `flush_caches` to root each cached
     /// store's forwarded changes at the node that materializes it. Empty in
     /// production until build-time population lands (sub-task 3b-ii); filled
@@ -75,9 +78,9 @@ pub(crate) struct Graph {
 
 impl Graph {
     /// The record-cache budget threaded into this graph (JVM
-    /// `statestore.cache.max.bytes`); `0` means caching disabled.
+    /// `statestore.cache.max.bytes`); a zero budget means caching disabled.
     #[allow(dead_code)] // consumed by the record cache in a later task; tests assert it now
-    pub(crate) fn cache_max_bytes(&self) -> i64 {
+    pub(crate) fn cache_max_bytes(&self) -> ByteSize {
         self.cache_max_bytes
     }
 
@@ -279,7 +282,9 @@ impl Graph {
             }
             let next = self.schedules[i].next_time;
             if now >= next {
-                let interval = self.schedules[i].interval_ms;
+                // The schedule timeline is in epoch milliseconds, so the interval
+                // extent crosses into that coordinate space here.
+                let interval = self.schedules[i].interval.millis_i64();
                 self.fire_schedule(i, now).await?; // value = now, fire AT MOST ONCE
                 // Resync: if we fell more than one interval behind, jump to
                 // `now + interval`; else advance by one interval. Saturating to
@@ -487,9 +492,9 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
-            cache_max_bytes: 0,
+            cache_max_bytes: ByteSize::ZERO,
             cache_owner: std::collections::HashMap::new(),
-            cache: crate::store::cache::thread::ThreadCache::new(0),
+            cache: crate::store::cache::thread::ThreadCache::new(ByteSize::ZERO),
         };
         graph.pipe("in", Some(b"k"), b"hi", 7).await.unwrap();
         let out = graph.take_output();
@@ -510,9 +515,9 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
-            cache_max_bytes: 0,
+            cache_max_bytes: ByteSize::ZERO,
             cache_owner: std::collections::HashMap::new(),
-            cache: crate::store::cache::thread::ThreadCache::new(0),
+            cache: crate::store::cache::thread::ThreadCache::new(ByteSize::ZERO),
         };
         graph.pipe("nope", None, b"x", 0).await.unwrap();
         check!(graph.take_output().is_empty());
@@ -586,9 +591,9 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
-            cache_max_bytes: 0,
+            cache_max_bytes: ByteSize::ZERO,
             cache_owner: std::collections::HashMap::new(),
-            cache: crate::store::cache::thread::ThreadCache::new(0),
+            cache: crate::store::cache::thread::ThreadCache::new(ByteSize::ZERO),
         };
 
         // pipe "in"/"a" twice — counter should accumulate to 2
@@ -671,9 +676,9 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
-            cache_max_bytes: 0,
+            cache_max_bytes: ByteSize::ZERO,
             cache_owner: std::collections::HashMap::new(),
-            cache: crate::store::cache::thread::ThreadCache::new(0),
+            cache: crate::store::cache::thread::ThreadCache::new(ByteSize::ZERO),
         };
 
         // init schedules the punctuator: stream base i64::MIN -> next = MIN + 10.
@@ -764,9 +769,9 @@ mod tests {
             schedules: Vec::new(),
             stream_time: i64::MIN,
             wall_clock: 0,
-            cache_max_bytes: 1024,
+            cache_max_bytes: kibibytes(1),
             cache_owner: std::collections::HashMap::new(),
-            cache: crate::store::cache::thread::ThreadCache::new(0),
+            cache: crate::store::cache::thread::ThreadCache::new(ByteSize::ZERO),
         };
         // node 0 owns "store".
         graph.cache_owner.insert("store".into(), 0);

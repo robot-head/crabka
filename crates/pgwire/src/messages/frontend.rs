@@ -162,6 +162,22 @@ pub enum FrontendMessage {
 /// Panics only on a platform where a positive protocol `i32` length cannot be
 /// represented as `usize`.
 pub fn decode_message(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, PgError> {
+    decode_message_with_max_len(buf, MAX_MESSAGE_LEN)
+}
+
+/// Decode one regular frontend message with an explicit length cap.
+///
+/// # Errors
+/// Returns a protocol error for malformed lengths, tags, fields, payloads, or
+/// messages exceeding `max_message_len`.
+///
+/// # Panics
+/// Panics only on a platform where a positive protocol `i32` length cannot be
+/// represented as `usize`.
+pub fn decode_message_with_max_len(
+    buf: &mut BytesMut,
+    max_message_len: usize,
+) -> Result<Option<FrontendMessage>, PgError> {
     if buf.len() < 5 {
         return Ok(None);
     }
@@ -174,7 +190,7 @@ pub fn decode_message(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, PgE
         )));
     }
     let len = usize::try_from(len).expect("positive message length fits in usize");
-    if len > MAX_MESSAGE_LEN {
+    if len > max_message_len {
         return Err(PgError::protocol(format!(
             "invalid message length {len} for tag {}",
             tag as char
@@ -467,6 +483,12 @@ mod tests {
         let mut partial = BytesMut::from(&full[..4]);
         assert_eq!(decode_message(&mut partial).expect("ok"), None);
         assert_eq!(partial.len(), 4, "no bytes consumed");
+    }
+
+    #[test]
+    fn configured_message_limit_is_enforced() {
+        let mut buf = tagged(b'Q', b"SELECT 1\0");
+        assert!(decode_message_with_max_len(&mut buf, 4).is_err());
     }
 
     #[test]

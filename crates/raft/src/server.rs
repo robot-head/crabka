@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_ids::{ApiKey, ApiVersion};
+use crabka_units::prelude::{ByteSize, ByteSizeExt as _};
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
@@ -473,8 +474,10 @@ async fn dispatch_metadata_fetch(
     let mut cur = body;
     let req = CrabkaMetadataFetchRequest::decode_v0(&mut cur)?;
     let fetch_offset = req.fetch_offset.max(0);
-    let max_bytes = usize::try_from(req.max_bytes.max(0)).unwrap_or(0);
-    let slice = engine.metadata_fetch(fetch_offset, max_bytes).await?;
+    // The decoded `int32` enters the domain here; the codec itself stays raw so
+    // the request stays byte-exact. A negative budget clamps to zero, as before.
+    let max_size = ByteSize::from_bytes_i64(i64::from(req.max_bytes.max(0)));
+    let slice = engine.metadata_fetch(fetch_offset, max_size).await?;
     let leader_hint: i64 = engine
         .quorum_state()
         .await
@@ -628,10 +631,18 @@ mod tests {
     use bytes::{BufMut, Bytes};
     use crabka_metadata::{MetadataRecord, NodeId, TopicRecord};
     use crabka_protocol::Decode;
+    use crabka_units::prelude::{Time, TimeExt as _, millis, secs};
     use tokio::io::AsyncWriteExt;
     use uuid::Uuid;
 
     use super::*;
+
+    /// Election timeout for the in-test engines: short, so a single voter wins
+    /// immediately.
+    const TEST_ELECTION_TIMEOUT: Time = millis(50);
+
+    /// How long a test waits for a leader to appear.
+    const TEST_LEADER_DEADLINE: Time = secs(5);
 
     fn length_prefixed(frame: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(frame.len() + 4);
@@ -703,9 +714,14 @@ mod tests {
             NodeId(me),
             Uuid::nil(),
             crabka_metadata::VoterSet::from_voters(voters),
-            50,
+            TEST_ELECTION_TIMEOUT,
+            None,
+            crate::ControllerFetchMissLimit::default(),
+            crate::MetadataRaftCommandQueueCapacity::default(),
+            crate::MetadataRaftFetchMax::default(),
             std::sync::Arc::new(crate::kraft::NullPeerSender),
             0,
+            crabka_kraft_core::snapshot_fetch::MetadataSnapshotFetchMax::default(),
         )
         .expect("open engine");
         (ctrl, dir)
@@ -720,13 +736,10 @@ mod tests {
 
     async fn wait_for_leader(engine: &KraftController) {
         let mut rx = engine.watch_leader();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            rx.wait_for(Option::is_some),
-        )
-        .await
-        .expect("leader elected")
-        .expect("leader channel open");
+        tokio::time::timeout(TEST_LEADER_DEADLINE.to_std(), rx.wait_for(Option::is_some))
+            .await
+            .expect("leader elected")
+            .expect("leader channel open");
     }
 
     fn topic_record(name: &str) -> MetadataRecord {

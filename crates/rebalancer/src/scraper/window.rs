@@ -13,27 +13,30 @@
 //! network partition) doesn't keep producing stable results from its
 //! last few samples forever.
 
-use std::{
-    collections::{HashMap, VecDeque},
-    time::Duration,
-};
+use std::collections::{HashMap, VecDeque};
 
+use crabka_units::prelude::*;
 use num_traits::ToPrimitive;
 use parking_lot::RwLock;
 
 use crate::scraper::parse::{MetricKind, ParsedSample};
 
+/// CPU microseconds spent per wall-clock second by one fully-busy core. The
+/// broker's CPU counter is in microseconds, so this is the one place the
+/// micros-per-second rate becomes a core count.
+const MICROS_PER_CORE_SECOND: f64 = 1e6;
+
 #[derive(Debug, Clone, Copy)]
 pub struct WindowConfig {
-    pub scrape_interval: Duration,
-    pub retention: Duration,
+    pub scrape_interval: Time,
+    pub retention: Time,
 }
 
 impl Default for WindowConfig {
     fn default() -> Self {
         Self {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_hours(12),
+            scrape_interval: secs(30),
+            retention: hours(12),
         }
     }
 }
@@ -46,11 +49,11 @@ pub enum Window {
 }
 
 impl Window {
-    fn as_duration(self) -> Duration {
+    fn as_time(self) -> Time {
         match self {
-            Window::FiveMin => Duration::from_mins(5),
-            Window::OneHour => Duration::from_hours(1),
-            Window::TwelveHour => Duration::from_hours(12),
+            Window::FiveMin => minutes(5),
+            Window::OneHour => hours(1),
+            Window::TwelveHour => hours(12),
         }
     }
 }
@@ -79,8 +82,7 @@ fn series_key(broker_id: i32, topic: &str, partition: i32, metric: MetricKind) -
 }
 
 fn window_lower_bound(window: Window, now_ms: i64) -> i64 {
-    let window_ms = i64::try_from(window.as_duration().as_millis()).unwrap_or(i64::MAX);
-    now_ms - window_ms
+    now_ms - window.as_time().millis_i64()
 }
 
 fn sample_in_window(sample: &Sample, lower: i64, upper: i64) -> bool {
@@ -114,7 +116,7 @@ impl UsageStore {
     /// `at_ms` is the wall-clock millis at scrape time. Drops samples
     /// older than `config.retention`.
     pub fn insert(&self, broker_id: i32, samples: Vec<ParsedSample>, at_ms: i64) {
-        let cutoff = at_ms - i64::try_from(self.config.retention.as_millis()).unwrap_or(i64::MAX);
+        let cutoff = at_ms - self.config.retention.millis_i64();
         let mut map = self.inner.write();
         for s in samples {
             let key = SeriesKey {
@@ -134,12 +136,12 @@ impl UsageStore {
         }
     }
 
-    /// Rate of `BytesIn` (bytes/sec) within `window`, derived from the
-    /// earliest + latest samples in the window. Returns `None` if
-    /// there are fewer than 2 samples in the window, a counter reset
-    /// is detected (`latest.value < earliest.value`), or the latest
-    /// sample is older than `now_ms - window` (data is too stale to
-    /// represent the requested window).
+    /// Rate of `BytesIn` within `window`, derived from the earliest +
+    /// latest samples in the window. Returns `None` if there are fewer
+    /// than 2 samples in the window, a counter reset is detected
+    /// (`latest.value < earliest.value`), or the latest sample is older
+    /// than `now_ms - window` (data is too stale to represent the
+    /// requested window).
     #[must_use]
     pub fn bytes_in_rate(
         &self,
@@ -148,7 +150,7 @@ impl UsageStore {
         partition: i32,
         window: Window,
         now_ms: i64,
-    ) -> Option<f64> {
+    ) -> Option<ByteRate> {
         self.counter_rate(
             broker_id,
             topic,
@@ -157,6 +159,7 @@ impl UsageStore {
             window,
             now_ms,
         )
+        .map(ByteRate::from_bytes_per_sec_f64)
     }
 
     #[must_use]
@@ -167,7 +170,7 @@ impl UsageStore {
         partition: i32,
         window: Window,
         now_ms: i64,
-    ) -> Option<f64> {
+    ) -> Option<ByteRate> {
         self.counter_rate(
             broker_id,
             topic,
@@ -176,21 +179,22 @@ impl UsageStore {
             window,
             now_ms,
         )
+        .map(ByteRate::from_bytes_per_sec_f64)
     }
 
-    /// Rate of CPU usage in microseconds per second within `window`.
-    /// Divide by `1_000_000` to get the equivalent number of CPU cores in
-    /// use. Returns `None` on insufficient samples, counter reset, or
-    /// stale data (same guards as `bytes_in_rate`).
+    /// CPU seconds burned per wall-clock second within `window` — the
+    /// equivalent number of busy cores, as a dimensionless [`Ratio`].
+    /// Returns `None` on insufficient samples, counter reset, or stale
+    /// data (same guards as `bytes_in_rate`).
     #[must_use]
-    pub fn cpu_micros_rate(
+    pub fn cpu_cores_rate(
         &self,
         broker_id: i32,
         topic: &str,
         partition: i32,
         window: Window,
         now_ms: i64,
-    ) -> Option<f64> {
+    ) -> Option<Ratio> {
         self.counter_rate(
             broker_id,
             topic,
@@ -199,6 +203,7 @@ impl UsageStore {
             window,
             now_ms,
         )
+        .map(|micros_per_sec| fraction(micros_per_sec / MICROS_PER_CORE_SECOND))
     }
 
     /// Average disk-bytes gauge over the window `[now_ms - W, now_ms]`.
@@ -212,7 +217,7 @@ impl UsageStore {
         partition: i32,
         window: Window,
         now_ms: i64,
-    ) -> Option<f64> {
+    ) -> Option<ByteSize> {
         let key = series_key(broker_id, topic, partition, MetricKind::DiskBytes);
         let map = self.inner.read();
         let buf = map.get(&key)?;
@@ -228,7 +233,7 @@ impl UsageStore {
         if count == 0 {
             None
         } else {
-            Some(sum / count.to_f64()?)
+            Some(ByteSize::from_bytes_f64(sum / count.to_f64()?))
         }
     }
 
@@ -270,6 +275,8 @@ impl UsageStore {
 #[cfg(test)]
 mod tests {
 
+    use crabka_units::prelude::*;
+
     use super::*;
 
     fn sample(metric: MetricKind, topic: &str, partition: i32, value: f64) -> ParsedSample {
@@ -296,11 +303,11 @@ mod tests {
         // (3000 - 1000) / 1.0s = 2000 bytes/sec. Query at now_ms=1000 so
         // the latest sample is on the window's upper bound.
         let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1000).unwrap();
-        assert2::assert!((rate - 2000.0).abs() < 1e-6);
+        assert2::assert!(rate == bytes_per_sec(2000));
     }
 
     #[test]
-    fn two_cpu_micros_samples_yield_rate() {
+    fn two_cpu_samples_yield_core_rate() {
         let s = UsageStore::default();
         let now_ms = 1_000_000;
         s.insert(
@@ -313,11 +320,11 @@ mod tests {
             vec![sample(MetricKind::CpuMicros, "t", 0, 2_100_000.0)],
             now_ms,
         );
-        // (2_100_000 - 100_000) / 1.0s = 2_000_000 micros/sec.
+        // (2_100_000 - 100_000) / 1.0s = 2_000_000 micros/sec = 2 busy cores.
         let rate = s
-            .cpu_micros_rate(1, "t", 0, Window::FiveMin, now_ms)
+            .cpu_cores_rate(1, "t", 0, Window::FiveMin, now_ms)
             .unwrap();
-        assert2::assert!((rate - 2_000_000.0).abs() < 1e-3);
+        assert2::assert!(rate == fraction(2.0));
     }
 
     #[test]
@@ -336,14 +343,14 @@ mod tests {
         s.insert(1, vec![sample(MetricKind::DiskBytes, "t", 0, 300.0)], 2000);
         // Query at now_ms=2000 (latest sample). Average of [100, 200, 300] = 200.
         let avg = s.disk_bytes_avg(1, "t", 0, Window::FiveMin, 2000).unwrap();
-        assert2::assert!((avg - 200.0).abs() < 1e-6);
+        assert2::assert!(avg == bytes(200));
     }
 
     #[test]
     fn retention_drops_old_samples() {
         let s = UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_mins(1),
+            scrape_interval: secs(30),
+            retention: minutes(1),
         });
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 0);
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 200.0)], 30_000);
@@ -352,14 +359,14 @@ mod tests {
         // Only samples at 30_000 and 90_000 remain.
         // The 5-min window includes both. Rate = (300-200)/60s = ~1.67/sec.
         let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 90_000).unwrap();
-        assert2::assert!((rate - 100.0 / 60.0).abs() < 1e-3);
+        assert2::assert!((rate.bytes_per_sec_f64() - 100.0 / 60.0).abs() < 1e-3);
     }
 
     #[test]
     fn retention_cutoff_subtracts_retention_from_insert_time() {
         let s = UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_mins(1),
+            scrape_interval: secs(30),
+            retention: minutes(1),
         });
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 30_000);
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 200.0)], 100_000);
@@ -368,7 +375,7 @@ mod tests {
         let rate = s
             .bytes_in_rate(1, "t", 0, Window::FiveMin, 120_000)
             .unwrap();
-        assert2::assert!((rate - 5.0).abs() < 1e-6);
+        assert2::assert!(rate == bytes_per_sec(5));
     }
 
     #[test]
@@ -386,7 +393,7 @@ mod tests {
         let avg = s
             .disk_bytes_avg(1, "t", 0, Window::FiveMin, 300_000)
             .unwrap();
-        assert2::assert!((avg - 150.0).abs() < 1e-6);
+        assert2::assert!(avg == bytes(150));
     }
 
     #[test]
@@ -404,7 +411,7 @@ mod tests {
         let rate = s
             .bytes_in_rate(1, "t", 0, Window::FiveMin, 300_000)
             .unwrap();
-        assert2::assert!((rate - 200.0).abs() < 1e-6);
+        assert2::assert!(rate == bytes_per_sec(200));
     }
 
     #[test]
@@ -427,7 +434,7 @@ mod tests {
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 300.0)], 1_000);
 
         let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1_000).unwrap();
-        assert2::assert!((rate - 200.0).abs() < 1e-6);
+        assert2::assert!(rate == bytes_per_sec(200));
     }
 
     #[test]
@@ -437,7 +444,7 @@ mod tests {
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 1_000);
 
         let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1_000).unwrap();
-        assert2::assert!(rate.abs() < f64::EPSILON);
+        assert2::assert!(rate == bytes_per_sec(0));
     }
 
     /// Regression: a broker that stops emitting must not keep producing

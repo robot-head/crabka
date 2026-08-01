@@ -47,7 +47,7 @@ pub use functions::{
 pub use http_api::{PrometheusApiState, prometheus_router};
 pub use ids::{Offset, PartitionIndex};
 pub use in_memory::{
-    DEFAULT_RETENTION_MS, InMemoryMetricStore, PartitionWatermark, PruneStats, WalHead,
+    DEFAULT_RETENTION, InMemoryMetricStore, PartitionWatermark, PruneStats, WalHead,
 };
 pub use merged_store::MergedMetricStore;
 pub use planner::{DurationExprContext, parse_promql, parse_promql_with_duration_context};

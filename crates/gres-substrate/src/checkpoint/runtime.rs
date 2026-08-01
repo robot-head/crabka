@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 
 use crabka_client_admin::DeleteRecordsOp;
 use crabka_pgkv::{KvError, KvPair, KvSnapshot, RestoreKv, SnapshotKv};
+use crabka_units::ByteSize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::{
     CheckpointFilter, CheckpointPart, CheckpointStore, Manifest, ManifestValidation, PartEntry,
@@ -51,6 +54,107 @@ pub struct WalPrunePlan {
     pub delete_records: Vec<DeleteRecordsOp>,
     /// Checkpoint objects eligible for deletion.
     pub delete_object_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CheckpointPinRecord {
+    operation_id: String,
+    manifest_key: String,
+    wal_generation: u64,
+    covered_offset: i64,
+}
+
+fn checkpoint_pin_prefix(tenant: &str) -> String {
+    format!("gres/{tenant}/pins/")
+}
+
+fn checkpoint_pin_key(tenant: &str, operation_id: &str) -> String {
+    let digest = Sha256::digest(operation_id.as_bytes());
+    format!("{}{}", checkpoint_pin_prefix(tenant), hex::encode(digest))
+}
+
+pub(super) async fn pin_checkpoint(
+    store: &dyn CheckpointStore,
+    tenant: &str,
+    operation_id: &str,
+    manifest_key: &str,
+    wal_generation: u64,
+    covered_offset: i64,
+) -> Result<(), SubstrateError> {
+    if operation_id.is_empty() {
+        return Err(SubstrateError::Checkpoint(
+            "checkpoint pin operation id must not be empty".into(),
+        ));
+    }
+    let expected_prefix = ckpt_prefix(tenant);
+    if !manifest_key.starts_with(&expected_prefix) || !manifest_key.ends_with("/MANIFEST") {
+        return Err(SubstrateError::Checkpoint(
+            "checkpoint pin manifest key is outside its tenant namespace".into(),
+        ));
+    }
+    let record = CheckpointPinRecord {
+        operation_id: operation_id.to_owned(),
+        manifest_key: manifest_key.to_owned(),
+        wal_generation,
+        covered_offset,
+    };
+    let bytes = serde_json::to_vec(&record)
+        .map_err(|error| SubstrateError::Checkpoint(format!("checkpoint pin: {error}")))?;
+    store
+        .put(&checkpoint_pin_key(tenant, operation_id), bytes)
+        .await
+}
+
+pub(super) async fn unpin_checkpoint(
+    store: &dyn CheckpointStore,
+    tenant: &str,
+    operation_id: &str,
+) -> Result<(), SubstrateError> {
+    store
+        .delete(&checkpoint_pin_key(tenant, operation_id))
+        .await
+}
+
+async fn checkpoint_pins(
+    store: &dyn CheckpointStore,
+    tenant: &str,
+) -> Result<Vec<CheckpointPinRecord>, SubstrateError> {
+    let mut pins = Vec::new();
+    for object in store.list(&checkpoint_pin_prefix(tenant)).await? {
+        let bytes = store.get(&object.key).await?;
+        let pin = serde_json::from_slice::<CheckpointPinRecord>(&bytes)
+            .map_err(|error| SubstrateError::Checkpoint(format!("checkpoint pin: {error}")))?;
+        if object.key != checkpoint_pin_key(tenant, &pin.operation_id) {
+            return Err(SubstrateError::Checkpoint(
+                "checkpoint pin key does not match its operation id".into(),
+            ));
+        }
+        pins.push(pin);
+    }
+    Ok(pins)
+}
+
+/// Remove checkpoint pins that are not backed by the one durable active operation.
+///
+/// # Errors
+///
+/// Returns an error when pin markers cannot be read, validated, or deleted.
+pub async fn reconcile_checkpoint_pins(
+    store: &dyn CheckpointStore,
+    tenant: &str,
+    active: Option<(&str, &str, i64)>,
+) -> Result<(), SubstrateError> {
+    for pin in checkpoint_pins(store, tenant).await? {
+        let keep = active.is_some_and(|(operation_id, manifest_key, covered_offset)| {
+            pin.operation_id == operation_id
+                && pin.manifest_key == manifest_key
+                && pin.covered_offset == covered_offset
+        });
+        if !keep {
+            unpin_checkpoint(store, tenant, &pin.operation_id).await?;
+        }
+    }
+    Ok(())
 }
 
 /// Public checkpoint manifest metadata safe for operator/control-plane decisions.
@@ -136,17 +240,9 @@ pub async fn write_checkpoint(
     tenant: &str,
     kv: &dyn SnapshotKv,
     snapshot: CheckpointSnapshot,
-    part_max_bytes: usize,
+    part_max_size: ByteSize,
 ) -> Result<Manifest, SubstrateError> {
-    write_checkpoint_inner(
-        store,
-        tenant,
-        kv.snapshot()?,
-        snapshot,
-        part_max_bytes,
-        None,
-    )
-    .await
+    write_checkpoint_inner(store, tenant, kv.snapshot()?, snapshot, part_max_size, None).await
 }
 
 pub(crate) async fn write_captured_checkpoint(
@@ -154,9 +250,9 @@ pub(crate) async fn write_captured_checkpoint(
     tenant: &str,
     kv_snapshot: Box<dyn KvSnapshot>,
     snapshot: CheckpointSnapshot,
-    part_max_bytes: usize,
+    part_max_size: ByteSize,
 ) -> Result<Manifest, SubstrateError> {
-    write_checkpoint_inner(store, tenant, kv_snapshot, snapshot, part_max_bytes, None).await
+    write_checkpoint_inner(store, tenant, kv_snapshot, snapshot, part_max_size, None).await
 }
 
 #[cfg(feature = "checkpoint-test-hooks")]
@@ -165,7 +261,7 @@ pub(crate) async fn write_captured_checkpoint_with_failpoint(
     tenant: &str,
     kv_snapshot: Box<dyn KvSnapshot>,
     snapshot: CheckpointSnapshot,
-    part_max_bytes: usize,
+    part_max_size: ByteSize,
     failpoint: &super::CheckpointFailpoint,
 ) -> Result<Manifest, SubstrateError> {
     write_checkpoint_inner(
@@ -173,7 +269,7 @@ pub(crate) async fn write_captured_checkpoint_with_failpoint(
         tenant,
         kv_snapshot,
         snapshot,
-        part_max_bytes,
+        part_max_size,
         Some(failpoint),
     )
     .await
@@ -185,7 +281,7 @@ pub(crate) async fn write_checkpoint_with_failpoint(
     tenant: &str,
     kv: &dyn SnapshotKv,
     snapshot: CheckpointSnapshot,
-    part_max_bytes: usize,
+    part_max_size: ByteSize,
     failpoint: &super::CheckpointFailpoint,
 ) -> Result<Manifest, SubstrateError> {
     write_checkpoint_inner(
@@ -193,7 +289,7 @@ pub(crate) async fn write_checkpoint_with_failpoint(
         tenant,
         kv.snapshot()?,
         snapshot,
-        part_max_bytes,
+        part_max_size,
         Some(failpoint),
     )
     .await
@@ -204,7 +300,7 @@ async fn write_checkpoint_inner(
     tenant: &str,
     mut kv_snapshot: Box<dyn KvSnapshot>,
     snapshot: CheckpointSnapshot,
-    part_max_bytes: usize,
+    part_max_size: ByteSize,
     #[cfg_attr(not(feature = "checkpoint-test-hooks"), allow(unused_variables))] failpoint: Option<
         &CheckpointFailpoint,
     >,
@@ -220,7 +316,7 @@ async fn write_checkpoint_inner(
         snapshot.covered_offset,
         snapshot.producer_epoch,
     );
-    let parts = CheckpointPart::split_at_target_size(pairs, part_max_bytes)?;
+    let parts = CheckpointPart::split_at_target_size(pairs, part_max_size)?;
     let mut entries = Vec::with_capacity(parts.len());
 
     for (index, part) in parts.iter().enumerate() {
@@ -294,7 +390,36 @@ pub async fn restore_latest(
     current_generation: u64,
     log_start: Option<i64>,
 ) -> Result<Option<RestoredFrom>, SubstrateError> {
-    restore_latest_with_filter(objects, tenant, kv, current_generation, log_start, None).await
+    restore_latest_with_filter(
+        objects,
+        tenant,
+        kv,
+        current_generation,
+        log_start,
+        None,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn restore_latest_at_or_before(
+    objects: &dyn CheckpointStore,
+    tenant: &str,
+    kv: &dyn RestoreKv,
+    current_generation: u64,
+    log_start: Option<i64>,
+    maximum_covered_offset: i64,
+) -> Result<Option<RestoredFrom>, SubstrateError> {
+    restore_latest_with_filter(
+        objects,
+        tenant,
+        kv,
+        current_generation,
+        log_start,
+        None,
+        Some(maximum_covered_offset),
+    )
+    .await
 }
 
 /// Restore the newest valid checkpoint subset for `tenant`, skipping incomplete attempts.
@@ -316,6 +441,7 @@ pub async fn restore_latest_filtered(
         current_generation,
         log_start,
         Some(filter),
+        None,
     )
     .await
 }
@@ -396,6 +522,7 @@ async fn restore_latest_with_filter(
     current_generation: u64,
     log_start: Option<i64>,
     filter: Option<CheckpointFilter>,
+    maximum_covered_offset: Option<i64>,
 ) -> Result<Option<RestoredFrom>, SubstrateError> {
     let mut manifest_keys = objects
         .list(&ckpt_prefix(tenant))
@@ -440,6 +567,11 @@ async fn restore_latest_with_filter(
                 "checkpoint manifest {manifest_object} generation {} is newer than current generation {current_generation}",
                 manifest.wal_generation
             )));
+            continue;
+        }
+        if manifest.wal_generation == current_generation
+            && maximum_covered_offset.is_some_and(|maximum| manifest.covered_offset > maximum)
+        {
             continue;
         }
         match restore_manifest(
@@ -806,20 +938,49 @@ pub async fn plan_prune(
     manifest: &Manifest,
     keep_newest: usize,
 ) -> Result<WalPrunePlan, SubstrateError> {
-    let offset = manifest
-        .covered_offset
-        .checked_add(1)
-        .ok_or_else(|| SubstrateError::Checkpoint("checkpoint covered offset overflow".into()))?;
     let mut dirs = checkpoint_dirs(store, tenant).await?;
     dirs.sort();
     let keep_from = dirs.len().saturating_sub(keep_newest);
-    let delete_dirs = &dirs[..keep_from];
+    let retained_dirs = &dirs[keep_from..];
+    let pins = checkpoint_pins(store, tenant).await?;
+    let pinned_dirs = pins
+        .iter()
+        .map(|pin| {
+            pin.manifest_key
+                .strip_suffix("MANIFEST")
+                .ok_or_else(|| {
+                    SubstrateError::Checkpoint(
+                        "checkpoint pin manifest key has no MANIFEST suffix".into(),
+                    )
+                })
+                .map(str::to_owned)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let delete_dirs = dirs[..keep_from]
+        .iter()
+        .filter(|dir| !pinned_dirs.contains(dir))
+        .collect::<Vec<_>>();
+    let mut horizon = manifest.covered_offset;
+    for dir in retained_dirs {
+        let retained = Manifest::decode(&store.get(&manifest_key(dir)).await?)?;
+        if retained.wal_generation == manifest.wal_generation {
+            horizon = horizon.min(retained.covered_offset);
+        }
+    }
+    for pin in &pins {
+        if pin.wal_generation == manifest.wal_generation {
+            horizon = horizon.min(pin.covered_offset);
+        }
+    }
+    let offset = horizon
+        .checked_add(1)
+        .ok_or_else(|| SubstrateError::Checkpoint("checkpoint covered offset overflow".into()))?;
     let delete_object_keys = store
         .list(&ckpt_prefix(tenant))
         .await?
         .into_iter()
         .map(|object| object.key)
-        .filter(|key| delete_dirs.iter().any(|dir| key.starts_with(dir)))
+        .filter(|key| delete_dirs.iter().any(|dir| key.starts_with(*dir)))
         .collect();
 
     Ok(WalPrunePlan {
@@ -1012,7 +1173,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        checkpoint::{DEFAULT_PART_MAX_BYTES, InMemoryCheckpointStore},
+        checkpoint::{DEFAULT_PART_MAX_SIZE, InMemoryCheckpointStore},
         frame::{BARRIER_SEQ, WalFrame},
     };
 
@@ -1041,7 +1202,7 @@ mod tests {
             "t",
             &old,
             snapshot_at(5),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("old checkpoint");
@@ -1052,7 +1213,7 @@ mod tests {
             "t",
             &new,
             snapshot_at(9),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("new checkpoint");
@@ -1097,7 +1258,7 @@ mod tests {
             "t",
             &old,
             snapshot_at(1),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("old checkpoint");
@@ -1114,7 +1275,7 @@ mod tests {
             "t",
             &newest,
             snapshot_at(2),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("new checkpoint");
@@ -1179,7 +1340,7 @@ mod tests {
             "t",
             &base,
             snapshot_at(1),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -1228,7 +1389,7 @@ mod tests {
             "t",
             &base,
             snapshot_at(4),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -1282,7 +1443,7 @@ mod tests {
             "t",
             &base,
             snapshot_at(4),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -1401,7 +1562,7 @@ mod tests {
             "t",
             &base,
             snapshot_at(4),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -1426,7 +1587,7 @@ mod tests {
             "t",
             &base,
             snapshot_at(4),
-            DEFAULT_PART_MAX_BYTES,
+            DEFAULT_PART_MAX_SIZE,
         )
         .await
         .expect("checkpoint");
@@ -1456,7 +1617,7 @@ mod tests {
                 "t",
                 &kv,
                 snapshot_at(offset),
-                DEFAULT_PART_MAX_BYTES,
+                DEFAULT_PART_MAX_SIZE,
             )
             .await
             .expect("checkpoint");
@@ -1472,7 +1633,7 @@ mod tests {
                 == vec![DeleteRecordsOp {
                     topic: "__gres_wal.t".to_string(),
                     partition: 0,
-                    offset: 4,
+                    offset: 3,
                 }]
         );
         assert!(
@@ -1480,6 +1641,109 @@ mod tests {
                 .iter()
                 .all(|key| key.contains("00000000000000000001"))
         );
+    }
+
+    #[tokio::test]
+    async fn pinned_checkpoint_survives_retention_and_caps_wal_pruning_until_release() {
+        let objects = InMemoryCheckpointStore::shared();
+        for offset in [1, 2, 3] {
+            let kv = MemKv::default();
+            kv.put(vec![u8::try_from(offset).expect("offset")], b"v".to_vec())
+                .expect("put");
+            write_checkpoint(
+                objects.as_ref(),
+                "t",
+                &kv,
+                snapshot_at(offset),
+                DEFAULT_PART_MAX_SIZE,
+            )
+            .await
+            .expect("checkpoint");
+        }
+        let pinned = ckpt_dir("t", 0, 1, 1);
+        pin_checkpoint(
+            objects.as_ref(),
+            "t",
+            "split-a",
+            &manifest_key(&pinned),
+            0,
+            1,
+        )
+        .await
+        .expect("pin");
+        let latest = Manifest::new("t".to_string(), 3, 4, 1, 0, Vec::new());
+
+        let pinned_plan = plan_prune(objects.as_ref(), "t", "__gres_wal.t", &latest, 1)
+            .await
+            .expect("pinned plan");
+        assert!(pinned_plan.delete_records[0].offset == 2);
+        assert!(
+            pinned_plan
+                .delete_object_keys
+                .iter()
+                .all(|key| !key.starts_with(&pinned))
+        );
+
+        unpin_checkpoint(objects.as_ref(), "t", "split-a")
+            .await
+            .expect("unpin");
+        let released_plan = plan_prune(objects.as_ref(), "t", "__gres_wal.t", &latest, 1)
+            .await
+            .expect("released plan");
+        assert!(released_plan.delete_records[0].offset == 4);
+        assert!(
+            released_plan
+                .delete_object_keys
+                .iter()
+                .any(|key| key.starts_with(&pinned))
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_pin_reconciliation_keeps_only_the_exact_durable_operation() {
+        let objects = InMemoryCheckpointStore::shared();
+        let manifest = manifest_key(&ckpt_dir("t", 0, 7, 1));
+        pin_checkpoint(objects.as_ref(), "t", "active", &manifest, 0, 7)
+            .await
+            .expect("active pin");
+        pin_checkpoint(objects.as_ref(), "t", "orphan", &manifest, 0, 7)
+            .await
+            .expect("orphan pin");
+
+        reconcile_checkpoint_pins(
+            objects.as_ref(),
+            "t",
+            Some(("active", manifest.as_str(), 7)),
+        )
+        .await
+        .expect("reconcile active");
+        assert!(
+            objects
+                .get(&checkpoint_pin_key("t", "active"))
+                .await
+                .is_ok()
+        );
+        assert!(
+            objects
+                .get(&checkpoint_pin_key("t", "orphan"))
+                .await
+                .is_err()
+        );
+
+        reconcile_checkpoint_pins(objects.as_ref(), "t", None)
+            .await
+            .expect("reconcile terminal");
+        assert!(
+            objects
+                .get(&checkpoint_pin_key("t", "active"))
+                .await
+                .is_err()
+        );
+        let latest = Manifest::new("t".to_string(), 7, 8, 1, 0, Vec::new());
+        let released_plan = plan_prune(objects.as_ref(), "t", "__gres_wal.t", &latest, 0)
+            .await
+            .expect("terminal pin release advances prune horizon");
+        assert!(released_plan.delete_records[0].offset == 8);
     }
 
     #[tokio::test]

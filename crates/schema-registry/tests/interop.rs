@@ -30,6 +30,7 @@ use crabka_schema_registry::{
     kafkastore::KafkaStore,
     rest::{self, AppState},
 };
+use crabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
 
@@ -64,11 +65,11 @@ async fn start_host_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir)
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: Duration::from_secs(5),
-        controller_heartbeat_interval: Duration::from_millis(500),
+        heartbeat_interval: secs(3),
+        heartbeat_timeout: secs(9),
+        replica_lag_time_max: secs(30),
+        controller_election_timeout: secs(5),
+        controller_heartbeat_interval: millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };
@@ -260,6 +261,7 @@ async fn our_store_decodes_cp_schema_registry_records() {
         advertised_url: "http://127.0.0.1:0".into(),
         group_id: "schema-registry".into(),
         leader_eligibility: true,
+        runtime: crabka_schema_registry::config::RegistryRuntimeConfig::default(),
         security: SecurityConfig::default(),
     };
     let cancel = CancellationToken::new();

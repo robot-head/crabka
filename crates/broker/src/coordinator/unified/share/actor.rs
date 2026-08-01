@@ -164,7 +164,7 @@ impl ShareGroupActorHandle {
         offsets_log: Arc<dyn OffsetsLog>,
         coordinator: Arc<super::super::GroupCoordinator>,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(config.actor_mailbox_capacity);
         let task = tokio::spawn(actor_loop(
             group_id,
             config,

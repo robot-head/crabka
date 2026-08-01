@@ -1,5 +1,7 @@
 //! Tempo-shaped `TraceQL` result model.
 
+use crabka_units::{ByteSize, Time};
+
 /// A typed attribute value.
 #[derive(Clone, Debug, PartialEq)]
 pub enum AttrValue {
@@ -12,7 +14,8 @@ pub enum AttrValue {
 /// One span event attached to a returned span.
 #[derive(Clone, Debug, PartialEq)]
 pub struct EventRef {
-    pub time_since_start_nano: u64,
+    /// How long after the span started the event fired.
+    pub time_since_start: Time,
     pub name: String,
     pub attributes: Vec<(String, AttrValue)>,
 }
@@ -36,7 +39,8 @@ pub struct SpanRef {
     pub nested_set_right: i32,
     pub nested_set_parent: i32,
     pub start_time_unix_nano: u64,
-    pub duration_nanos: u64,
+    /// How long the span ran.
+    pub duration: Time,
     pub status_code: i32,
     pub status_message: String,
     pub instrumentation_name: String,
@@ -61,8 +65,10 @@ pub struct TraceResult {
     pub root_service_name: String,
     pub root_trace_name: String,
     pub start_time_unix_nano: u64,
-    pub duration_nanos: u64,
-    pub duration_ms: u64,
+    /// How long the trace ran, from the earliest span start to the latest span
+    /// end. The Tempo search JSON renders this twice, as `durationMs` and as
+    /// the span-set `durationNanos`; both come from this one magnitude.
+    pub duration: Time,
     pub span_sets: Vec<SpanSet>,
 }
 
@@ -71,10 +77,10 @@ pub struct TraceResult {
 pub struct SearchResponse {
     pub traces: Vec<TraceResult>,
     pub inspected_traces: usize,
-    /// Approximate bytes of span data the query inspected (the decoded size of
-    /// the scanned cold+live batches, before filtering). Surfaced as the Tempo
+    /// Approximate span data the query inspected (the decoded size of the
+    /// scanned cold+live batches, before filtering). Surfaced as the Tempo
     /// search `metrics.inspectedBytes`.
-    pub inspected_bytes: u64,
+    pub inspected: ByteSize,
 }
 
 /// Full span set for one trace.
@@ -137,6 +143,7 @@ pub struct TraceMetricsResponse {
 #[cfg(test)]
 mod tests {
     use assert2::assert;
+    use crabka_units::{bytes, millis, nanos};
 
     use super::*;
 
@@ -151,7 +158,7 @@ mod tests {
             nested_set_right: 0,
             nested_set_parent: 0,
             start_time_unix_nano: 1000,
-            duration_nanos: 42,
+            duration: nanos(42),
             status_code: 0,
             status_message: String::new(),
             instrumentation_name: String::new(),
@@ -176,20 +183,19 @@ mod tests {
                 root_service_name: "checkout".into(),
                 root_trace_name: "POST /pay".into(),
                 start_time_unix_nano: 5,
-                duration_nanos: 12_000_000,
-                duration_ms: 12,
+                duration: millis(12),
                 span_sets: vec![SpanSet {
                     spans: vec![],
                     matched: 3,
                 }],
             }],
             inspected_traces: 1,
-            inspected_bytes: 4096,
+            inspected: bytes(4096),
         };
         assert!(resp.traces[0].span_sets[0].matched == 3);
         assert!(resp.traces[0].trace_id == [0xAB; 16]);
         assert!(resp.inspected_traces == 1);
-        assert!(resp.inspected_bytes == 4096);
+        assert!(resp.inspected == bytes(4096));
     }
 
     #[test]

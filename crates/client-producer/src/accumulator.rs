@@ -2,11 +2,14 @@
 //! record + a oneshot tx; the sender drains in-flight batches and
 //! resolves the oneshots from the `ProduceResponse`.
 
-use std::{collections::VecDeque, sync::Arc, time::Instant};
+use std::{collections::VecDeque, sync::Arc};
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use tokio::sync::{Mutex, oneshot};
+use tokio::{
+    sync::{Mutex, oneshot},
+    time::Instant,
+};
 
 use crate::{
     error::ProducerError,
@@ -34,10 +37,7 @@ pub(crate) struct InProgressBatch {
     /// A batch is never allowed to cross a transaction recovery boundary.
     pub transaction_generation: Option<u64>,
     /// Wall-clock time when this batch's first record was appended.
-    /// Used by the sender to decide `linger.ms` expiry (the sender
-    /// currently relies on the linger ticker rather than reading this
-    /// field, but it's still useful for diagnostics).
-    #[allow(dead_code)]
+    /// Used by the sender to decide batch-relative `linger.ms` expiry.
     pub first_append_at: Instant,
     /// Approximate uncompressed body size.
     pub size_bytes: usize,
@@ -76,7 +76,13 @@ pub(crate) struct Accumulator {
 /// Result of [`Accumulator::try_append`].
 #[allow(dead_code)] // `BatchFull` is reserved for future backpressure paths.
 pub(crate) enum AppendResult {
-    Appended(oneshot::Receiver<Result<RecordMetadata, ProducerError>>),
+    Appended {
+        receiver: oneshot::Receiver<Result<RecordMetadata, ProducerError>>,
+        /// A new current batch (and therefore a new linger deadline) was
+        /// created. This is also true when the previous current batch rolled
+        /// into `ready`.
+        wakes_sender: bool,
+    },
     /// The accumulator's `batch.size` is full but a new batch could be
     /// started. The caller (sender wakeup) needs to seal and rotate.
     BatchFull,
@@ -142,7 +148,10 @@ impl Accumulator {
             ack: tx,
         });
         batch.size_bytes += record_size;
-        AppendResult::Appended(rx)
+        AppendResult::Appended {
+            receiver: rx,
+            wakes_sender: need_new_batch,
+        }
     }
 
     /// Move the current in-progress batch into `ready`. Called by the

@@ -32,6 +32,7 @@ use arrow::{
     record_batch::RecordBatch,
 };
 use crabka_blockstore::{Labels, SeriesFingerprint};
+use crabka_units::prelude::*;
 use datafusion::{
     catalog::MemTable,
     execution::FunctionRegistry,
@@ -104,11 +105,11 @@ pub struct OverTimeRangePlan {
 
 /// Build the leaf table and operator chain that evaluates
 /// `f_over_time(selector[range])` at a single eval instant `eval_time_ms` with
-/// range width `range_ms`. `phi` is the quantile literal for
+/// the given `range` width. `phi` is the quantile literal for
 /// [`OverTimeFamily::Quantile`] and ignored for every other family.
 ///
 /// `samples` are the float samples of the matched series over the exact range
-/// window `(eval_time_ms - range_ms, eval_time_ms]`. Stale-NaN markers must be
+/// window `(eval_time_ms - range, eval_time_ms]`. Stale-NaN markers must be
 /// filtered by the caller before the values reach the operator chain; genuine
 /// NaN values are carried through unchanged, as the interpreter does.
 ///
@@ -119,7 +120,7 @@ pub struct OverTimeRangePlan {
 pub async fn plan_over_time_range_selector(
     samples: Vec<LabeledSample>,
     eval_time_ms: i64,
-    range_ms: i64,
+    range: Time,
     family: OverTimeFamily,
     phi: f64,
 ) -> Result<OverTimeRangePlan> {
@@ -168,6 +169,7 @@ pub async fn plan_over_time_range_selector(
             input: divide,
         }),
     });
+    let range_ms = range.millis_i64();
     let range = RangeManipulate::new(
         eval_time_ms,
         eval_time_ms,
@@ -274,11 +276,11 @@ mod tests {
     async fn run(
         samples: Vec<LabeledSample>,
         eval_time_ms: i64,
-        range_ms: i64,
+        range: Time,
         family: OverTimeFamily,
         phi: f64,
     ) -> Vec<(String, f64)> {
-        let plan = plan_over_time_range_selector(samples, eval_time_ms, range_ms, family, phi)
+        let plan = plan_over_time_range_selector(samples, eval_time_ms, range, family, phi)
             .await
             .unwrap();
         let batches = plan
@@ -315,7 +317,7 @@ mod tests {
     #[tokio::test]
     async fn avg_over_time_plan_reduces_window() {
         let samples = vec![labeled("a", 60_000, 3.0), labeled("a", 120_000, 5.0)];
-        let got = run(samples, 120_000, 120_000, OverTimeFamily::Avg, 0.0).await;
+        let got = run(samples, 120_000, millis(120_000), OverTimeFamily::Avg, 0.0).await;
         check!(got.len() == 1);
         check!(got[0].0 == "a");
         check!(approx_eq(got[0].1, 4.0));
@@ -353,7 +355,14 @@ mod tests {
             .enumerate()
             .map(|(i, v)| labeled("a", (i64::try_from(i).unwrap() + 1) * 60_000, *v))
             .collect();
-        let got = run(samples, 480_000, 480_000, OverTimeFamily::Quantile, 0.5).await;
+        let got = run(
+            samples,
+            480_000,
+            millis(480_000),
+            OverTimeFamily::Quantile,
+            0.5,
+        )
+        .await;
         assert2::assert!(got.len() == 1);
         assert2::assert!(approx_eq(got[0].1, 4.5));
     }
@@ -362,7 +371,14 @@ mod tests {
     #[tokio::test]
     async fn present_over_time_plan_signals_presence() {
         let samples = vec![labeled("a", 60_000, 42.0)];
-        let got = run(samples, 120_000, 120_000, OverTimeFamily::Present, 0.0).await;
+        let got = run(
+            samples,
+            120_000,
+            millis(120_000),
+            OverTimeFamily::Present,
+            0.0,
+        )
+        .await;
         assert2::assert!(approx_eq(got[0].1, 1.0));
     }
 
@@ -375,10 +391,15 @@ mod tests {
         // A sample on the left edge (ts == range_start) is excluded by the
         // left-open window, leaving the window empty.
         let samples = vec![labeled("a", 0, 5.0)];
-        let plan =
-            plan_over_time_range_selector(samples, 120_000, 120_000, OverTimeFamily::Sum, 0.0)
-                .await
-                .unwrap();
+        let plan = plan_over_time_range_selector(
+            samples,
+            120_000,
+            millis(120_000),
+            OverTimeFamily::Sum,
+            0.0,
+        )
+        .await
+        .unwrap();
         let batches = plan
             .ctx
             .execute_logical_plan(plan.plan)

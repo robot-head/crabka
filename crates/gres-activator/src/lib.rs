@@ -1,31 +1,41 @@
 //! Wake activator foundation for suspended Gres tenants.
 
+pub mod config_value;
 pub mod hold;
 pub mod peek;
 pub mod pipe;
 
-use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
+use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::BytesMut;
+pub use config_value::{NonEmptyValue, PositiveMillis};
 use crabka_gres_control::{Registry, TenantName, TenantState};
 use crabka_pgwire::{error::PgError, messages::backend};
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
+    fmt::Human as _,
+};
 pub use hold::{BackendEndpoint, Readiness, WaitForReadyConfig, wait_for_ready};
 pub use peek::{Prelude, peek_prelude, peek_prelude_from};
 pub use pipe::pipe_startup_and_session;
 use tokio::{io::AsyncWriteExt, net::TcpStream, sync::Mutex};
 
 /// Activator runtime configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Not `Eq`: the poll interval and cold-start timeout are `f64`-backed
+/// quantities.
+#[derive(Debug, Clone, PartialEq)]
 pub struct ActivatorConfig {
     /// Address to accept frontend connections on.
     pub listen: SocketAddr,
     /// Kafka bootstrap address for the tenant registry.
     pub bootstrap: String,
     /// How often readiness waits poll the registry.
-    pub registry_poll: Duration,
+    pub registry_poll: Time,
     /// Maximum time to hold a cold-starting connection.
-    pub cold_start_timeout: Duration,
+    pub cold_start_timeout: Time,
     /// Backend endpoint template used until registry records grow an endpoint field.
     pub backend_endpoint_template: String,
 }
@@ -107,7 +117,7 @@ where
     ) -> Result<BackendEndpoint, ActivatorError> {
         let started = tokio::time::Instant::now();
         let Ok(request_result) =
-            tokio::time::timeout(wait.timeout, self.request_resume_once(request)).await
+            tokio::time::timeout(wait.timeout.to_std(), self.request_resume_once(request)).await
         else {
             self.forget_request(request.tenant()).await;
             return Err(ActivatorError::ReadyTimeout {
@@ -119,7 +129,9 @@ where
             self.forget_request(request.tenant()).await;
             return Err(error);
         }
-        let remaining = wait.timeout.saturating_sub(started.elapsed());
+        // An overrun leaves a negative extent, which `TimeExt::to_std` floors at
+        // zero when the wait converts it back for the timer.
+        let remaining = wait.timeout - started.elapsed().as_time();
         let result = wait_for_ready(
             &self.registry,
             request.tenant(),
@@ -224,7 +236,7 @@ impl WakeRegistry for ControlRegistryWakeRegistry {
                 TenantState::Parking => {}
             }
             drop(registry);
-            tokio::time::sleep(self.cfg.registry_poll).await;
+            tokio::time::sleep(self.cfg.registry_poll.to_std()).await;
         }
     }
 
@@ -260,12 +272,12 @@ pub enum ActivatorError {
     #[error("tenant {0} is missing from the registry")]
     TenantMissing(TenantName),
     /// Readiness wait exceeded the configured timeout.
-    #[error("tenant {tenant} did not become ready within {timeout:?}")]
+    #[error("tenant {tenant} did not become ready within {}", timeout.human())]
     ReadyTimeout {
         /// Tenant being awaited.
         tenant: TenantName,
         /// Timeout that elapsed.
-        timeout: Duration,
+        timeout: Time,
     },
     /// Current control record schema cannot represent `ResumeRequested` or endpoint.
     #[error("gres-control registry lacks ResumeRequested/endpoint lifecycle fields")]
@@ -350,6 +362,7 @@ mod tests {
     use assert2::assert;
     use bytes::{BufMut, BytesMut};
     use crabka_gres_control::TenantName;
+    use crabka_units::{millis, secs};
     use tokio::{io::AsyncWriteExt, join};
 
     use super::{test_doubles::FakeWakeRegistry, *};
@@ -415,8 +428,8 @@ mod tests {
             &registry,
             &tenant,
             WaitForReadyConfig {
-                timeout: Duration::from_millis(15),
-                poll_interval: Duration::from_millis(5),
+                timeout: millis(15),
+                poll_interval: millis(5),
             },
         )
         .await;
@@ -444,8 +457,8 @@ mod tests {
             &registry,
             &tenant,
             WaitForReadyConfig {
-                timeout: Duration::from_secs(1),
-                poll_interval: Duration::from_millis(5),
+                timeout: secs(1),
+                poll_interval: millis(5),
             },
         )
         .await
@@ -460,8 +473,8 @@ mod tests {
         let coordinator = Arc::new(WakeCoordinator::new(registry.clone()));
         let request = WakeRequest::for_database("tenant-a").unwrap();
         let wait = WaitForReadyConfig {
-            timeout: Duration::from_secs(1),
-            poll_interval: Duration::from_millis(5),
+            timeout: secs(1),
+            poll_interval: millis(5),
         };
         let first = Arc::clone(&coordinator);
         let first_request = request.clone();
@@ -503,8 +516,8 @@ mod tests {
             )
             .await;
         let wait = WaitForReadyConfig {
-            timeout: Duration::from_millis(50),
-            poll_interval: Duration::from_millis(5),
+            timeout: millis(50),
+            poll_interval: millis(5),
         };
 
         let first = coordinator.wake_and_wait(&request, wait).await.unwrap();

@@ -10,6 +10,7 @@ use std::{
 use bytes::{Bytes, BytesMut};
 use crabka_ids::{LeaderEpoch, Offset, ProducerId};
 use crabka_protocol::records::{HEADER_LEN, RecordBatch};
+use crabka_units::prelude::{ByteSize, ByteSizeExt, bytes};
 use tracing::instrument;
 
 use crate::{
@@ -22,6 +23,24 @@ use crate::{
     stamp_source::StampSource,
     txn_index::{AbortedTxn, TxnIndex},
 };
+
+/// A `usize` byte length as a quantity.
+///
+/// The read paths track their budget as a [`ByteSize`], but the lengths they
+/// subtract come from `Bytes::len` and `FileRegion::len`, which are `usize`.
+fn size_from_len(len: usize) -> ByteSize {
+    ByteSize::from_bytes(u64::try_from(len).unwrap_or(u64::MAX))
+}
+
+/// The fixed v2 record-batch header, as a quantity.
+///
+/// Every per-segment read is asked for at least this much, so the header walk
+/// that finds batch boundaries always has one to look at (Kafka's anti-stall
+/// rule). Derived from [`HEADER_LEN`] rather than restated, so the floor
+/// cannot drift from the protocol.
+fn batch_header() -> ByteSize {
+    size_from_len(HEADER_LEN)
+}
 
 /// A Kafka-format log: a sorted collection of [`Segment`]s plus a single
 /// active segment that accepts appends.
@@ -225,7 +244,9 @@ pub struct VerbatimBatch {
 /// offload (KIP-405). Carries the on-disk file paths plus the offset / timestamp /
 /// size metadata and the leader-epoch ranges a `RemoteLogManager` needs to
 /// build remote-segment metadata. Produced by [`Log::tierable_segments`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+// No `Eq`: `size` is a `ByteSize`, which stores `f64`. The derive was unused —
+// `SegmentExport` is never hashed nor used as a map key.
+#[derive(Debug, Clone, PartialEq)]
 pub struct SegmentExport {
     /// First absolute offset in the segment.
     pub base_offset: Offset,
@@ -234,8 +255,8 @@ pub struct SegmentExport {
     /// Highest record timestamp in the segment, or `-1` when unknown
     /// (a sealed segment loaded from disk without a tail scan).
     pub max_timestamp: i64,
-    /// `.log` file size in bytes.
-    pub size_bytes: u64,
+    /// `.log` file size.
+    pub size: ByteSize,
     /// Path to the `.log` data file.
     pub log_path: PathBuf,
     /// Path to the `.index` (offset index) file.
@@ -475,19 +496,17 @@ impl Log {
         Offset(0)
     }
 
-    /// Total `.log` byte size across sealed and active segments. Read from
+    /// Total `.log` size across sealed and active segments. Read from
     /// the segments' tracked logical size rather than a filesystem stat,
     /// so it reflects buffered appends immediately and consistently across
     /// platforms (a directory stat can lag an open, unflushed write handle
     /// on some OSes).
     #[must_use]
-    pub fn size_bytes(&self) -> u64 {
-        let sealed: u64 = self
-            .segments
+    pub fn size(&self) -> ByteSize {
+        let active = self.active.as_ref().map_or(ByteSize::ZERO, Segment::size);
+        self.segments
             .iter()
-            .map(super::segment::Segment::size_bytes)
-            .sum();
-        sealed + self.active.as_ref().map_or(0, Segment::size_bytes)
+            .fold(active, |total, seg| total + seg.size())
     }
 
     /// Last-Stable-Offset: the highest offset that consumers in
@@ -801,17 +820,13 @@ impl Log {
         batch: &VerbatimBatch,
         base_offset: Offset,
     ) -> Result<(), LogError> {
-        let (segment_bytes, index_interval_bytes, flush_on_append) = {
+        let (segment_size, index_interval, flush_on_append) = {
             let cfg = self.config.read().unwrap();
-            (
-                cfg.segment_bytes,
-                cfg.index_interval_bytes,
-                cfg.flush_on_append,
-            )
+            (cfg.segment_size, cfg.index_interval, cfg.flush_on_append)
         };
 
         let should_roll = match &self.active {
-            Some(seg) => seg.size_bytes() >= segment_bytes,
+            Some(seg) => seg.size() >= segment_size,
             None => false,
         };
         if should_roll {
@@ -828,7 +843,7 @@ impl Log {
             batch.last_offset_delta,
             batch.max_timestamp,
             batch.leader_epoch,
-            index_interval_bytes,
+            index_interval,
         )?;
 
         if flush_on_append {
@@ -929,17 +944,13 @@ impl Log {
     /// `batch.base_offset`. Callers are responsible for setting it first.
     /// Also updates LSO and the active `.txnindex` based on batch attributes.
     fn append_preserving_offset(&mut self, batch: &mut RecordBatch) -> Result<(), LogError> {
-        let (segment_bytes, index_interval_bytes, flush_on_append) = {
+        let (segment_size, index_interval, flush_on_append) = {
             let cfg = self.config.read().unwrap();
-            (
-                cfg.segment_bytes,
-                cfg.index_interval_bytes,
-                cfg.flush_on_append,
-            )
+            (cfg.segment_size, cfg.index_interval, cfg.flush_on_append)
         };
 
         let should_roll = match &self.active {
-            Some(seg) => seg.size_bytes() >= segment_bytes,
+            Some(seg) => seg.size() >= segment_size,
             None => false,
         };
         if should_roll {
@@ -950,7 +961,7 @@ impl Log {
             .active
             .as_mut()
             .expect("active segment must exist after Log::open");
-        active.append(batch, index_interval_bytes)?;
+        active.append(batch, index_interval)?;
 
         if flush_on_append {
             self.active_segment_flush()?;
@@ -1034,7 +1045,7 @@ impl Log {
     }
 
     /// Read batches starting at `offset`, returning up to roughly
-    /// `max_bytes` of `.log` data. Walks sealed segments first, then the
+    /// `max_size` of `.log` data. Walks sealed segments first, then the
     /// active segment, so reads can span segment boundaries.
     #[instrument(
         level = "debug",
@@ -1052,7 +1063,8 @@ impl Log {
     /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     /// # Panics
     /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
-    pub fn read(&self, offset: Offset, max_bytes: usize) -> Result<ReadOutput, LogError> {
+    pub fn read(&self, offset: Offset, max_size: ByteSize) -> Result<ReadOutput, LogError> {
+        let read_buffer_cap = self.config.read().unwrap().read_buffer_cap;
         let log_start = self.log_start_offset();
         let log_end = self.log_end_offset();
         if offset < log_start {
@@ -1070,30 +1082,34 @@ impl Log {
 
         let mut batches: Vec<RecordBatch> = Vec::new();
         let mut current_offset = offset;
-        let mut remaining = max_bytes;
+        let mut remaining = max_size;
 
         for seg in &self.segments {
             if seg.last_offset() < current_offset {
                 continue;
             }
-            let bs = seg.read(current_offset, remaining)?;
+            let bs = seg.read_with_buffer_cap(current_offset, remaining, read_buffer_cap)?;
             if !bs.is_empty() {
                 let consumed: usize = bs.iter().map(RecordBatch::encoded_len).sum();
-                remaining = remaining.saturating_sub(consumed);
+                remaining = (remaining - size_from_len(consumed)).max(ByteSize::ZERO);
                 let last = bs.last().expect("non-empty by branch");
                 current_offset = Offset(last.base_offset + i64::from(last.last_offset_delta) + 1);
                 batches.extend(bs);
-                if remaining == 0 {
+                if remaining == ByteSize::ZERO {
                     break;
                 }
             }
         }
 
-        if (remaining > 0 || batches.is_empty())
+        if (remaining > ByteSize::ZERO || batches.is_empty())
             && let Some(active) = &self.active
             && current_offset <= active.last_offset()
         {
-            let bs = active.read(current_offset, remaining.max(1))?;
+            let bs = active.read_with_buffer_cap(
+                current_offset,
+                remaining.max(bytes(1)),
+                read_buffer_cap,
+            )?;
             batches.extend(bs);
         }
 
@@ -1107,7 +1123,7 @@ impl Log {
 
     /// Like [`Log::read`] but returns verbatim wire bytes (no decode), walking
     /// sealed segments then the active segment. Includes only batches with
-    /// `base_offset < limit_offset`, up to roughly `max_bytes` (≥ one batch).
+    /// `base_offset < limit_offset`, up to roughly `max_size` (≥ one batch).
     #[instrument(
         level = "debug",
         skip(self),
@@ -1122,8 +1138,9 @@ impl Log {
         &self,
         fetch_offset: Offset,
         limit_offset: Offset,
-        max_bytes: usize,
+        max_size: ByteSize,
     ) -> Result<RawRead, LogError> {
+        let read_buffer_cap = self.config.read().unwrap().read_buffer_cap;
         let log_start = self.log_start_offset();
         if fetch_offset < log_start {
             return Err(LogError::OffsetTooLow {
@@ -1138,7 +1155,7 @@ impl Log {
         let mut chunks: Vec<Bytes> = Vec::new();
         let mut start_offset = fetch_offset;
         let mut current = fetch_offset;
-        let mut remaining = max_bytes;
+        let mut remaining = max_size;
         let mut got_first = false;
         let mut last_offset = None;
 
@@ -1146,29 +1163,38 @@ impl Log {
             if seg.last_offset() < current {
                 continue;
             }
-            let r: RawSegmentRead =
-                seg.read_raw(current, limit_offset, remaining.max(HEADER_LEN))?;
+            let r: RawSegmentRead = seg.read_raw_with_buffer_cap(
+                current,
+                limit_offset,
+                remaining.max(batch_header()),
+                read_buffer_cap,
+            )?;
             if !r.is_empty() {
                 if !got_first {
                     start_offset = r.start_offset;
                     got_first = true;
                 }
-                remaining = remaining.saturating_sub(r.bytes.len());
+                remaining = (remaining - size_from_len(r.bytes.len())).max(ByteSize::ZERO);
                 current = r.last_offset + 1;
                 last_offset = Some(r.last_offset);
                 chunks.push(r.bytes);
-                if remaining == 0 || current >= limit_offset {
+                if remaining == ByteSize::ZERO || current >= limit_offset {
                     break;
                 }
             }
         }
 
-        if (remaining > 0 || !got_first)
+        if (remaining > ByteSize::ZERO || !got_first)
             && current < limit_offset
             && let Some(active) = &self.active
             && current <= active.last_offset()
         {
-            let r = active.read_raw(current, limit_offset, remaining.max(HEADER_LEN))?;
+            let r = active.read_raw_with_buffer_cap(
+                current,
+                limit_offset,
+                remaining.max(batch_header()),
+                read_buffer_cap,
+            )?;
             if !r.is_empty() {
                 if !got_first {
                     start_offset = r.start_offset;
@@ -1209,7 +1235,7 @@ impl Log {
     /// separately, dropping the cross-segment copy.
     ///
     /// The selected byte ranges are byte-identical to what `read_raw` would
-    /// have returned for the same `(fetch_offset, limit_offset, max_bytes)`.
+    /// have returned for the same `(fetch_offset, limit_offset, max_size)`.
     #[instrument(
         level = "debug",
         skip(self),
@@ -1222,7 +1248,7 @@ impl Log {
         &self,
         fetch_offset: Offset,
         limit_offset: Offset,
-        max_bytes: usize,
+        max_size: ByteSize,
     ) -> Result<RawReadDesc, LogError> {
         let log_start = self.log_start_offset();
         if fetch_offset < log_start {
@@ -1238,36 +1264,36 @@ impl Log {
         let mut regions: Vec<crabka_protocol::records::FileRegion> = Vec::new();
         let mut start_offset = fetch_offset;
         let mut current = fetch_offset;
-        let mut remaining = max_bytes;
+        let mut remaining = max_size;
         let mut got_first = false;
 
         for seg in &self.segments {
             if seg.last_offset() < current {
                 continue;
             }
-            let r = seg.read_raw_desc(current, limit_offset, remaining.max(HEADER_LEN))?;
+            let r = seg.read_raw_desc(current, limit_offset, remaining.max(batch_header()))?;
             if !r.is_empty() {
                 if !got_first {
                     start_offset = r.start_offset;
                     got_first = true;
                 }
-                remaining = remaining.saturating_sub(r.len());
+                remaining = (remaining - size_from_len(r.len())).max(ByteSize::ZERO);
                 current = r.last_offset + 1;
                 if let Some(region) = r.region {
                     regions.push(region);
                 }
-                if remaining == 0 || current >= limit_offset {
+                if remaining == ByteSize::ZERO || current >= limit_offset {
                     break;
                 }
             }
         }
 
-        if (remaining > 0 || !got_first)
+        if (remaining > ByteSize::ZERO || !got_first)
             && current < limit_offset
             && let Some(active) = &self.active
             && current <= active.last_offset()
         {
-            let r = active.read_raw_desc(current, limit_offset, remaining.max(HEADER_LEN))?;
+            let r = active.read_raw_desc(current, limit_offset, remaining.max(batch_header()))?;
             if !r.is_empty() {
                 if !got_first {
                     start_offset = r.start_offset;
@@ -1473,7 +1499,7 @@ impl Log {
             return Ok(());
         }
         let sealed_refs: Vec<&Segment> = self.segments.iter().collect();
-        let active_size = self.active.as_ref().map_or(0, Segment::size_bytes);
+        let active_size = self.active.as_ref().map_or(ByteSize::ZERO, Segment::size);
 
         let cfg_guard = self.config.read().unwrap();
         let time_evict = retention::time_based_evict(&sealed_refs, &cfg_guard, now);
@@ -1519,11 +1545,16 @@ impl Log {
     /// `max_timestamp >= target_ts` holds the answer; the per-segment
     /// helper does the index lookup + forward scan. `None` when no
     /// local record qualifies (including an empty log).
+    ///
+    /// # Panics
+    ///
+    /// Panics when another thread poisoned the log configuration lock.
     #[must_use]
     pub fn offset_for_timestamp(&self, target_ts: i64) -> Option<(Offset, i64)> {
+        let scan_window = self.config.read().unwrap().timestamp_scan_window;
         for seg in &self.segments {
             if seg.max_timestamp() >= target_ts
-                && let Some(hit) = seg.offset_for_timestamp(target_ts)
+                && let Some(hit) = seg.offset_for_timestamp_with_window(target_ts, scan_window)
             {
                 return Some(hit);
             }
@@ -1531,7 +1562,7 @@ impl Log {
         if let Some(active) = &self.active
             && active.max_timestamp() >= target_ts
         {
-            return active.offset_for_timestamp(target_ts);
+            return active.offset_for_timestamp_with_window(target_ts, scan_window);
         }
         None
     }
@@ -1541,12 +1572,17 @@ impl Log {
     /// segment. Ties resolve to the earliest offset (the first segment,
     /// and the first record within it, wins). Returns `None` when the
     /// log holds no records.
+    ///
+    /// # Panics
+    ///
+    /// Panics when another thread poisoned the log configuration lock.
     #[must_use]
     pub fn max_timestamp_offset_and_ts(&self) -> Option<(Offset, i64)> {
+        let scan_window = self.config.read().unwrap().timestamp_scan_window;
         let mut best: Option<(i64, Offset)> = None; // (timestamp, offset)
         let candidates = self.segments.iter().chain(self.active.as_ref());
         for seg in candidates {
-            if let Some((offset, ts)) = seg.offset_of_max_timestamp()
+            if let Some((offset, ts)) = seg.offset_of_max_timestamp_with_window(scan_window)
                 && best.is_none_or(|(best_ts, _)| ts > best_ts)
             {
                 best = Some((ts, offset));
@@ -1674,7 +1710,7 @@ impl Log {
                     base_offset: base,
                     last_offset: last,
                     max_timestamp: if max_ts == i64::MIN { -1 } else { max_ts },
-                    size_bytes: seg.size_bytes(),
+                    size: seg.size(),
                     log_path: name::log_path(&self.dir, base.0),
                     offset_index_path: name::index_path(&self.dir, base.0),
                     time_index_path: name::timeindex_path(&self.dir, base.0),
@@ -1711,15 +1747,12 @@ impl Log {
             return Ok(());
         }
 
-        let (index_interval, delete_retention_ms) = {
+        let (index_interval, delete_retention) = {
             let cfg_guard = self.config.read().unwrap();
             if cfg_guard.cleanup_policy != crate::CleanupPolicy::Compact {
                 return Ok(());
             }
-            (
-                cfg_guard.index_interval_bytes,
-                i64::try_from(cfg_guard.delete_retention_ms.as_millis()).unwrap_or(i64::MAX),
-            )
+            (cfg_guard.index_interval, cfg_guard.delete_retention)
         };
 
         let now_ms = retention::now_ms(ctx.now);
@@ -1742,7 +1775,7 @@ impl Log {
                 &txn_meta,
                 crate::compact::RewriteRetention {
                     now_ms,
-                    delete_retention_ms,
+                    delete_retention,
                 },
                 &ctx.active_producers,
                 index_interval,
@@ -1821,10 +1854,22 @@ mod tests {
     use bytes::Bytes;
     use crabka_ids::Offset;
     use crabka_protocol::records::{Attributes, Record};
+    use crabka_units::prelude::{gibibytes, kibibytes, mebibytes, millis, minutes, secs};
     use tempfile::tempdir;
 
     use super::*;
     use crate::leader_epoch_checkpoint::EpochEntry;
+
+    /// A read budget larger than anything these tests write, so the byte
+    /// budget never clips the result.
+    const NO_LIMIT: ByteSize = gibibytes(4);
+
+    #[test]
+    fn batch_header_floor_is_the_protocol_header_length() {
+        // `read_raw`'s anti-stall floor: each segment must be asked for at
+        // least one whole v2 header, or the boundary walk has nothing to read.
+        assert2::assert!(batch_header().bytes_usize() == HEADER_LEN);
+    }
 
     fn sample_batch(n: i32) -> RecordBatch {
         let mut b = RecordBatch {
@@ -1878,7 +1923,7 @@ mod tests {
         }
         let wire = wire.freeze();
         let log_end = log.log_end_offset();
-        let r = log.read_raw(Offset(0), log_end, 10 * 1024 * 1024).unwrap();
+        let r = log.read_raw(Offset(0), log_end, mebibytes(10)).unwrap();
         assert2::assert!(r.start_offset == Offset(0));
         assert2::assert!(r.total == wire.len());
         assert2::assert!(&r.bytes[..] == &wire[..]);
@@ -1887,14 +1932,14 @@ mod tests {
 
     #[test]
     fn log_read_raw_spans_multiple_segments() {
-        // A tiny `segment_bytes` forces a roll partway through, so the
+        // A tiny `segment_size` forces a roll partway through, so the
         // read must walk at least one sealed segment AND the active
         // segment — exercising the multi-chunk `BytesMut` concat path
         // that `log_read_raw_spans_and_is_byte_exact` (default ~1 GiB
         // segments) never reaches.
         let dir = tempdir().unwrap();
         let config = LogConfig {
-            segment_bytes: 100, // tiny: roll after roughly each batch
+            segment_size: bytes(100), // tiny: roll after roughly each batch
             ..LogConfig::default()
         };
         let mut log = Log::open(dir.path(), config).unwrap();
@@ -1916,7 +1961,7 @@ mod tests {
         assert2::assert!(log.active.is_some());
 
         let log_end = log.log_end_offset();
-        let r = log.read_raw(Offset(0), log_end, 10 * 1024 * 1024).unwrap();
+        let r = log.read_raw(Offset(0), log_end, mebibytes(10)).unwrap();
         assert2::assert!(r.start_offset == Offset(0));
         assert2::assert!(r.total == wire.len());
         assert2::assert!(&r.bytes[..] == &wire[..]);
@@ -1942,7 +1987,7 @@ mod tests {
         use std::os::unix::fs::FileExt;
         let dir = tempdir().unwrap();
         let config = LogConfig {
-            segment_bytes: 100, // tiny: roll roughly each batch
+            segment_size: bytes(100), // tiny: roll roughly each batch
             ..LogConfig::default()
         };
         let mut log = Log::open(dir.path(), config).unwrap();
@@ -1955,8 +2000,8 @@ mod tests {
         assert2::assert!(!log.segments.is_empty());
 
         let log_end = log.log_end_offset();
-        let raw = log.read_raw(Offset(0), log_end, 10 * 1024 * 1024).unwrap();
-        let desc = log.read_raw_desc(Offset(0), log_end, 10 * 1024 * 1024).unwrap();
+        let raw = log.read_raw(Offset(0), log_end, mebibytes(10)).unwrap();
+        let desc = log.read_raw_desc(Offset(0), log_end, mebibytes(10)).unwrap();
 
         assert2::assert!(desc.start_offset == raw.start_offset);
         assert2::assert!(desc.total == raw.total);
@@ -2025,7 +2070,7 @@ mod tests {
         assert2::assert!(log.log_end_offset() == 3);
 
         let log_end = log.log_end_offset();
-        let r = log.read_raw(Offset(0), log_end, 10 * 1024 * 1024).unwrap();
+        let r = log.read_raw(Offset(0), log_end, mebibytes(10)).unwrap();
         assert2::assert!(&r.bytes[..] == &expected_wire[..]);
 
         // Decodes cleanly (CRC valid) with the assigned offsets.
@@ -2077,7 +2122,7 @@ mod tests {
         stamped.encode(&mut expected_wire).unwrap();
 
         let r = log
-            .read_raw(Offset(0), log.log_end_offset(), 10 * 1024 * 1024)
+            .read_raw(Offset(0), log.log_end_offset(), mebibytes(10))
             .unwrap();
         assert_eq!(
             r.bytes[..],
@@ -2108,7 +2153,7 @@ mod tests {
         );
         assert_eq!(log.log_end_offset(), Offset(0));
         assert!(
-            log.read_raw(Offset(0), Offset(0), 1024)
+            log.read_raw(Offset(0), Offset(0), kibibytes(1))
                 .unwrap()
                 .bytes
                 .is_empty()
@@ -2181,10 +2226,10 @@ mod tests {
         let end_verb = log_verb.log_end_offset();
         assert2::assert!(end_owned == end_verb);
         let r_owned = log_owned
-            .read_raw(Offset(0), end_owned, 10 * 1024 * 1024)
+            .read_raw(Offset(0), end_owned, mebibytes(10))
             .unwrap();
         let r_verb = log_verb
-            .read_raw(Offset(0), end_verb, 10 * 1024 * 1024)
+            .read_raw(Offset(0), end_verb, mebibytes(10))
             .unwrap();
         assert2::assert!(&r_owned.bytes[..] == &r_verb.bytes[..]);
         drop(dir_owned);
@@ -2275,7 +2320,7 @@ mod tests {
                     let mut log = Log::open(
                         dir.path(),
                         LogConfig {
-                            segment_bytes: 1,
+                            segment_size: bytes(1),
                             ..LogConfig::default()
                         },
                     )
@@ -2300,7 +2345,7 @@ mod tests {
         let mut log = Log::open(
             dir.path(),
             LogConfig {
-                segment_bytes: 1,
+                segment_size: bytes(1),
                 ..LogConfig::default()
             },
         )
@@ -2372,7 +2417,7 @@ mod tests {
             log.append(&mut b).unwrap();
             expected.push(b);
         }
-        let out = log.read(Offset(0), usize::MAX).unwrap();
+        let out = log.read(Offset(0), NO_LIMIT).unwrap();
         assert2::assert!(out.batches == expected);
         assert2::assert!(out.start_offset == Offset(0));
     }
@@ -2384,7 +2429,7 @@ mod tests {
         let mut b = sample_batch(2);
         log.append(&mut b).unwrap();
         assert2::assert!(matches!(
-            log.read(Offset(-1), 1024),
+            log.read(Offset(-1), kibibytes(1)),
             Err(LogError::OffsetTooLow { .. })
         ));
     }
@@ -2396,7 +2441,7 @@ mod tests {
         let mut b = sample_batch(2);
         log.append(&mut b).unwrap();
         let log_end = log.log_end_offset();
-        let out = log.read(log_end, 1024).unwrap();
+        let out = log.read(log_end, kibibytes(1)).unwrap();
         assert2::assert!(out.batches == Vec::new());
         assert2::assert!(out.start_offset == log_end);
     }
@@ -2438,11 +2483,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
         let big = LogConfig {
-            segment_bytes: 1 << 30,
+            segment_size: gibibytes(1),
             ..LogConfig::default()
         };
         let tiny = LogConfig {
-            segment_bytes: 1,
+            segment_size: bytes(1),
             ..LogConfig::default()
         };
         // Batch A → active base 0.
@@ -2476,11 +2521,11 @@ mod tests {
         let dir = tempdir().unwrap();
         let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
         let big = LogConfig {
-            segment_bytes: 1 << 30,
+            segment_size: gibibytes(1),
             ..LogConfig::default()
         };
         let tiny = LogConfig {
-            segment_bytes: 1,
+            segment_size: bytes(1),
             ..LogConfig::default()
         };
         // Batch A → active base 0.
@@ -2531,10 +2576,7 @@ mod tests {
             let mut log = Log::open(dir.path(), LogConfig::default()).unwrap();
             let mut first = sample_batch_with_epoch(1, 1);
             log.append(&mut first).unwrap();
-            let first_batch_len = log
-                .read_raw(Offset(0), Offset(1), usize::MAX)
-                .unwrap()
-                .total;
+            let first_batch_len = log.read_raw(Offset(0), Offset(1), NO_LIMIT).unwrap().total;
             let mut torn = sample_batch_with_epoch(1, 7);
             log.append(&mut torn).unwrap();
             assert_eq!(log.epoch_checkpoint().latest_epoch(), Some(LeaderEpoch(7)));
@@ -2586,8 +2628,8 @@ mod tests {
         use std::time::Duration;
         let dir = tempdir().unwrap();
         let config = LogConfig {
-            retention_ms: Some(Duration::from_secs(1)),
-            retention_bytes: Some(0),
+            retention: Some(secs(1)),
+            retention_size: Some(ByteSize::ZERO),
             ..LogConfig::default()
         };
         let mut log = Log::open(dir.path(), config).unwrap();
@@ -2603,7 +2645,7 @@ mod tests {
     fn segment_rolls_when_bytes_exceeded() {
         let dir = tempdir().unwrap();
         let config = LogConfig {
-            segment_bytes: 200, // tiny so we roll fast
+            segment_size: bytes(200), // tiny so we roll fast
             ..LogConfig::default()
         };
         let mut log = Log::open(dir.path(), config).unwrap();
@@ -2869,7 +2911,7 @@ mod tests {
         let mut log = Log::open(
             dir.path(),
             LogConfig {
-                segment_bytes: 1, // roll on every append after the first
+                segment_size: bytes(1), // roll on every append after the first
                 ..LogConfig::default()
             },
         )
@@ -2955,8 +2997,8 @@ mod tests {
 
         // Byte-for-byte identical client-facing `.log` output.
         let end = plain.log_end_offset();
-        let plain_raw = plain.read_raw(Offset(0), end, 10 * 1024 * 1024).unwrap();
-        let stamped_raw = stamped.read_raw(Offset(0), end, 10 * 1024 * 1024).unwrap();
+        let plain_raw = plain.read_raw(Offset(0), end, mebibytes(10)).unwrap();
+        let stamped_raw = stamped.read_raw(Offset(0), end, mebibytes(10)).unwrap();
         assert2::assert!(plain_raw.bytes == stamped_raw.bytes);
     }
 
@@ -3169,7 +3211,7 @@ mod tests {
         use tempfile::TempDir;
         let dir = TempDir::new().unwrap();
         let cfg = LogConfig {
-            segment_bytes: 1, // roll on every append → one segment per batch
+            segment_size: bytes(1), // roll on every append → one segment per batch
             ..LogConfig::default()
         };
         {
@@ -3188,7 +3230,7 @@ mod tests {
         // pinned the high-watermark and stalled acks=all.
         let reopened = Log::open(dir.path(), cfg).unwrap();
         let r = reopened
-            .read_raw(Offset(0), reopened.log_end_offset(), 1 << 20)
+            .read_raw(Offset(0), reopened.log_end_offset(), mebibytes(1))
             .unwrap();
         assert2::assert!(r.start_offset == 0);
     }
@@ -3205,7 +3247,7 @@ mod tests {
         use tempfile::TempDir;
         let dir = TempDir::new().unwrap();
         let cfg = LogConfig {
-            segment_bytes: 1, // roll on every append
+            segment_size: bytes(1), // roll on every append
             ..LogConfig::default()
         };
         {
@@ -3247,18 +3289,16 @@ mod tests {
         let log = Log::open(
             dir.path(),
             LogConfig {
-                retention_ms: Some(std::time::Duration::from_mins(1)),
+                retention: Some(minutes(1)),
                 ..LogConfig::default()
             },
         )
         .expect("open");
         log.set_config(LogConfig {
-            retention_ms: Some(std::time::Duration::from_mins(2)),
+            retention: Some(minutes(2)),
             ..LogConfig::default()
         });
-        assert2::assert!(
-            log.config_snapshot().retention_ms == Some(std::time::Duration::from_mins(2))
-        );
+        assert2::assert!(log.config_snapshot().retention == Some(minutes(2)));
     }
 
     #[test]
@@ -3267,7 +3307,7 @@ mod tests {
         let mut log = Log::open(
             dir.path(),
             LogConfig {
-                segment_bytes: 200, // small so we roll fast
+                segment_size: bytes(200), // small so we roll fast
                 ..LogConfig::default()
             },
         )
@@ -3373,7 +3413,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cfg = LogConfig {
             cleanup_policy: crate::CleanupPolicy::Compact,
-            segment_bytes: 256, // force rolls
+            segment_size: bytes(256), // force rolls
             ..Default::default()
         };
         let mut log = Log::open(dir.path(), cfg).unwrap();
@@ -3384,7 +3424,7 @@ mod tests {
             let mut b = keyed_batch(0, &[(0, b"k1", v.as_bytes())]);
             log.append(&mut b).unwrap();
             // Roll the active segment by forcing a tick or a large pad batch.
-            // Easiest: call set_segment_bytes or rely on the small segment_bytes.
+            // Easiest: call set_segment_size or rely on the small segment_size.
         }
         // Add one more append to ensure the last write is in a fresh active
         // segment (not part of what compaction touches).
@@ -3397,7 +3437,7 @@ mod tests {
 
         // After compaction: read everything, assert only the newest k1 plus
         // the active "active-key" survive.
-        let out = log.read(Offset(0), 1024 * 1024).unwrap();
+        let out = log.read(Offset(0), mebibytes(1)).unwrap();
         let all_records: Vec<_> = out.batches.iter().flat_map(|b| b.records.iter()).collect();
         let keys: Vec<&[u8]> = all_records
             .iter()
@@ -3418,7 +3458,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cfg = LogConfig {
             cleanup_policy: crate::CleanupPolicy::Compact,
-            segment_bytes: 1, // one batch per segment: every append exceeds this and rolls
+            segment_size: bytes(1), // one batch per segment: every append exceeds this and rolls
             ..Default::default()
         };
         let mut log = Log::open(dir.path(), cfg).unwrap();
@@ -3443,7 +3483,7 @@ mod tests {
         assert2::assert!(log.segments.len() == 1);
 
         // Exactly one surviving k1 record, and it is the newest value "v2".
-        let out = log.read(Offset(0), 1024 * 1024).unwrap();
+        let out = log.read(Offset(0), mebibytes(1)).unwrap();
         let k1_values: Vec<&[u8]> = out
             .batches
             .iter()
@@ -3458,7 +3498,7 @@ mod tests {
     fn tierable_segments_excludes_active_and_reports_paths() {
         let dir = tempdir().unwrap();
         let config = LogConfig {
-            segment_bytes: 200, // small so we roll fast
+            segment_size: bytes(200), // small so we roll fast
             ..LogConfig::default()
         };
         let mut log = Log::open(dir.path(), config).unwrap();
@@ -3503,7 +3543,7 @@ mod tests {
     fn tierable_segments_last_offset_matches_next_base() {
         let dir = tempdir().unwrap();
         let config = LogConfig {
-            segment_bytes: 200,
+            segment_size: bytes(200),
             ..LogConfig::default()
         };
         let mut log = Log::open(dir.path(), config).unwrap();
@@ -3523,7 +3563,7 @@ mod tests {
     fn tierable_segments_carry_leader_epochs() {
         let dir = tempdir().unwrap();
         let config = LogConfig {
-            segment_bytes: 200,
+            segment_size: bytes(200),
             ..LogConfig::default()
         };
         let mut log = Log::open(dir.path(), config).unwrap();
@@ -3609,7 +3649,7 @@ mod tests {
         let dir = tempdir().unwrap();
         let cfg = LogConfig {
             cleanup_policy: crate::CleanupPolicy::Compact,
-            segment_bytes: 256,
+            segment_size: bytes(256),
             ..Default::default()
         };
         let mut log = Log::open(dir.path(), cfg).unwrap();
@@ -3635,7 +3675,7 @@ mod tests {
         let mut log = Log::open(
             dir,
             LogConfig {
-                segment_bytes: 200,
+                segment_size: bytes(200),
                 ..extra.clone()
             },
         )
@@ -3772,7 +3812,7 @@ mod tests {
             dir_tiered.path(),
             &LogConfig {
                 remote_storage_enable: true,
-                retention_ms: Some(Duration::from_millis(1)),
+                retention: Some(millis(1)),
                 ..LogConfig::default()
             },
         );
@@ -3787,7 +3827,7 @@ mod tests {
             dir_plain.path(),
             &LogConfig {
                 remote_storage_enable: false,
-                retention_ms: Some(Duration::from_millis(1)),
+                retention: Some(millis(1)),
                 ..LogConfig::default()
             },
         );
@@ -3819,7 +3859,7 @@ mod tests {
     fn log_offset_for_timestamp_across_segments() {
         let dir = tempdir().unwrap();
         let config = LogConfig {
-            segment_bytes: 1, // roll after every batch → each record its own segment
+            segment_size: bytes(1), // roll after every batch → each record its own segment
             ..LogConfig::default()
         };
         let mut log = Log::open(dir.path(), config).unwrap();
@@ -3853,6 +3893,30 @@ mod tests {
     }
 
     #[test]
+    fn configured_io_policy_reaches_reads_and_timestamp_scans() {
+        let dir = tempdir().unwrap();
+        let mut log = Log::open(
+            dir.path(),
+            LogConfig {
+                read_buffer_cap: bytes(1),
+                timestamp_scan_window: bytes(1),
+                ..LogConfig::default()
+            },
+        )
+        .unwrap();
+        let mut batch = ts_batch(100);
+        log.append(&mut batch).unwrap();
+
+        assert2::assert!(
+            !log.read_raw(Offset(0), Offset(1), kibibytes(1))
+                .unwrap()
+                .bytes
+                .is_empty()
+        );
+        assert2::assert!(log.offset_for_timestamp(100) == Some((Offset(0), 100)));
+    }
+
+    #[test]
     fn log_offset_for_timestamp_empty_log_is_none() {
         let dir = tempdir().unwrap();
         let log = Log::open(dir.path(), LogConfig::default()).unwrap();
@@ -3865,7 +3929,7 @@ mod tests {
     fn log_offset_of_max_timestamp_in_active() {
         let dir = tempdir().unwrap();
         let config = LogConfig {
-            segment_bytes: 1, // each record its own segment
+            segment_size: bytes(1), // each record its own segment
             ..LogConfig::default()
         };
         let mut log = Log::open(dir.path(), config).unwrap();
@@ -3893,7 +3957,7 @@ mod tests {
     fn log_max_timestamp_offset_and_ts_returns_pair() {
         let dir = tempdir().unwrap();
         let config = LogConfig {
-            segment_bytes: 1,
+            segment_size: bytes(1),
             ..LogConfig::default()
         };
         let mut log = Log::open(dir.path(), config).unwrap();

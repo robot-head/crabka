@@ -16,8 +16,9 @@
 //! coordinates; `__transaction_state` persistence + the producer-epoch fence on
 //! completion make a duplicate/late sweep on a moved partition a safe no-op.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
+use crabka_units::{Time, convert::TimeExt as _};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
@@ -30,10 +31,10 @@ use crate::{metadata_source::MetadataSource, txn::coordinator::TxnCoordinator};
 pub(crate) async fn run(
     coord: Arc<TxnCoordinator>,
     controller: Arc<dyn MetadataSource>,
-    interval: Duration,
+    interval: Time,
     shutdown: CancellationToken,
 ) {
-    let mut tick = tokio::time::interval(interval);
+    let mut tick = tokio::time::interval(interval.to_std());
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tokio::select! {

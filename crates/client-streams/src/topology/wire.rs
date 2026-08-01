@@ -5,6 +5,7 @@ use crabka_protocol::owned::{
     common::streams_group_heartbeat_request::{key_value::KeyValue, topic_info::TopicInfo},
     streams_group_heartbeat_request::{CopartitionGroup, Subtopology, Topology},
 };
+use crabka_units::prelude::*;
 use serde::Serialize;
 
 use super::grouping::GroupTopics;
@@ -14,14 +15,28 @@ use super::grouping::GroupTopics;
 /// `StreamsGroupHeartbeat` `TopicInfo` convention).
 const INTERNAL_TOPIC_DEFAULT_RF: i16 = -1;
 
+/// `segment.bytes` the JVM 4.x client sets on a repartition topic (50 MiB), so
+/// consumed segments are deleted promptly.
+const REPARTITION_SEGMENT_SIZE: ByteSize = mebibytes(50);
+
 /// Topic configs the JVM 4.x client attaches to a **repartition** topic, sorted
 /// by key (the wire array order the fixture pins).
+///
+/// A repartition topic keeps records only until they are consumed, which the JVM
+/// expresses as `retention.ms=-1` — the absence of a retention bound, not an
+/// extent, so it renders through the `-1` wire sentinel.
 fn repartition_topic_configs() -> Vec<KeyValue> {
     topic_configs([
-        ("cleanup.policy", "delete"),
-        ("message.timestamp.type", "CreateTime"),
-        ("retention.ms", "-1"),
-        ("segment.bytes", "52428800"),
+        ("cleanup.policy", "delete".to_string()),
+        ("message.timestamp.type", "CreateTime".to_string()),
+        (
+            "retention.ms",
+            crabka_units::convert::wire::opt_time_to_millis_i64(None).to_string(),
+        ),
+        (
+            "segment.bytes",
+            REPARTITION_SEGMENT_SIZE.bytes_i64().to_string(),
+        ),
     ])
 }
 
@@ -29,15 +44,18 @@ fn repartition_topic_configs() -> Vec<KeyValue> {
 /// topic, sorted by key.
 fn changelog_topic_configs() -> Vec<KeyValue> {
     topic_configs([
-        ("cleanup.policy", "compact"),
-        ("message.timestamp.type", "CreateTime"),
+        ("cleanup.policy", "compact".to_string()),
+        ("message.timestamp.type", "CreateTime".to_string()),
     ])
 }
 
 /// Topic configs the JVM 4.x client attaches to a **windowed-store changelog**
 /// topic: `compact,delete` policy + `retention.ms` to ensure expired windows are
 /// actually purged. Keys are in sorted order (same rule as repartition configs).
-fn windowed_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
+///
+/// `retention` is rendered as the raw millisecond integer Kafka's `retention.ms`
+/// takes — the key name and the string value are wire contract.
+fn windowed_changelog_topic_configs(retention: Time) -> Vec<KeyValue> {
     vec![
         KeyValue {
             key: "cleanup.policy".into(),
@@ -51,7 +69,7 @@ fn windowed_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
         },
         KeyValue {
             key: "retention.ms".into(),
-            value: retention_ms.to_string(),
+            value: retention.millis_i64().to_string(),
             ..Default::default()
         },
     ]
@@ -61,7 +79,10 @@ fn windowed_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
 /// `message.timestamp.type=CreateTime` + `min.compaction.lag.ms` so recent
 /// versions survive (un-compacted) until restore reads them. Keys are in sorted
 /// order (same rule as the other changelog configs).
-fn versioned_changelog_topic_configs(min_compaction_lag_ms: i64) -> Vec<KeyValue> {
+///
+/// `min_compaction_lag` is rendered as the raw millisecond integer Kafka's
+/// `min.compaction.lag.ms` takes.
+fn versioned_changelog_topic_configs(min_compaction_lag: Time) -> Vec<KeyValue> {
     vec![
         KeyValue {
             key: "cleanup.policy".into(),
@@ -75,7 +96,7 @@ fn versioned_changelog_topic_configs(min_compaction_lag_ms: i64) -> Vec<KeyValue
         },
         KeyValue {
             key: "min.compaction.lag.ms".into(),
-            value: min_compaction_lag_ms.to_string(),
+            value: min_compaction_lag.millis_i64().to_string(),
             ..Default::default()
         },
     ]
@@ -84,7 +105,10 @@ fn versioned_changelog_topic_configs(min_compaction_lag_ms: i64) -> Vec<KeyValue
 /// Topic configs the JVM 4.x client attaches to a **join-window-store changelog**
 /// topic: `delete`-only policy + `retention.ms`. Join window stores use
 /// `retainDuplicates=true`, which prohibits compaction.
-fn join_window_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
+///
+/// `retention` is rendered as the raw millisecond integer Kafka's `retention.ms`
+/// takes.
+fn join_window_changelog_topic_configs(retention: Time) -> Vec<KeyValue> {
     vec![
         KeyValue {
             key: "cleanup.policy".into(),
@@ -98,7 +122,7 @@ fn join_window_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
         },
         KeyValue {
             key: "retention.ms".into(),
-            value: retention_ms.to_string(),
+            value: retention.millis_i64().to_string(),
             ..Default::default()
         },
     ]
@@ -106,12 +130,12 @@ fn join_window_changelog_topic_configs(retention_ms: i64) -> Vec<KeyValue> {
 
 /// Build the `KeyValue` config array from `(key, value)` pairs (already in
 /// sorted order at the call site).
-fn topic_configs<const N: usize>(pairs: [(&str, &str); N]) -> Vec<KeyValue> {
+fn topic_configs<const N: usize>(pairs: [(&str, String); N]) -> Vec<KeyValue> {
     pairs
         .into_iter()
         .map(|(key, value)| KeyValue {
             key: key.to_string(),
-            value: value.to_string(),
+            value,
             ..Default::default()
         })
         .collect()
@@ -176,15 +200,15 @@ fn subtopology(g: &GroupTopics, app: &str) -> Subtopology {
             replication_factor: INTERNAL_TOPIC_DEFAULT_RF,
             topic_configs: match changelog_kind {
                 crate::topology::node::ChangelogKind::Kv => changelog_topic_configs(),
-                crate::topology::node::ChangelogKind::AggWindow { retention_ms } => {
-                    windowed_changelog_topic_configs(*retention_ms)
+                crate::topology::node::ChangelogKind::AggWindow { retention } => {
+                    windowed_changelog_topic_configs(*retention)
                 }
-                crate::topology::node::ChangelogKind::JoinWindow { retention_ms } => {
-                    join_window_changelog_topic_configs(*retention_ms)
+                crate::topology::node::ChangelogKind::JoinWindow { retention } => {
+                    join_window_changelog_topic_configs(*retention)
                 }
-                crate::topology::node::ChangelogKind::Versioned {
-                    min_compaction_lag_ms,
-                } => versioned_changelog_topic_configs(*min_compaction_lag_ms),
+                crate::topology::node::ChangelogKind::Versioned { min_compaction_lag } => {
+                    versioned_changelog_topic_configs(*min_compaction_lag)
+                }
             },
             ..Default::default()
         })
@@ -572,7 +596,7 @@ mod tests {
 
     #[test]
     fn windowed_store_changelog_config_is_compact_delete_with_retention() {
-        // size=60_000ms, grace=0ms → retention = 60_000 + 0 + 86_400_000 = 86_460_000
+        // size=60s, grace=0 → retention = 60_000 + 0 + 86_400_000 = 86_460_000 ms
         let groups = vec![GroupTopics {
             id: "0".into(),
             source_topics: vec!["in".into()],
@@ -580,7 +604,7 @@ mod tests {
                 "w".into(),
                 None,
                 ChangelogKind::AggWindow {
-                    retention_ms: 86_460_000,
+                    retention: Time::from_millis(86_460_000),
                 },
             )],
             ..Default::default()
@@ -644,7 +668,8 @@ mod tests {
     #[test]
     fn join_window_changelog_is_delete_only_with_retention() {
         use crate::topology::node::ChangelogKind;
-        // before=60_000ms, after=60_000ms, grace=0ms → retention = 60_000 + 60_000 + 0 + 86_400_000 = 86_520_000
+        // before=60s, after=60s, grace=0 → retention = 60_000 + 60_000 + 0 +
+        // 86_400_000 = 86_520_000 ms
         let groups = vec![GroupTopics {
             id: "0".into(),
             source_topics: vec!["in".into()],
@@ -652,28 +677,112 @@ mod tests {
                 "j".into(),
                 None,
                 ChangelogKind::JoinWindow {
-                    retention_ms: 86_520_000,
+                    retention: Time::from_millis(86_520_000),
                 },
             )],
             ..Default::default()
         }];
         let topo = to_wire(&groups, "app");
         let cl = &topo.subtopologies[0].state_changelog_topics[0];
-        assert_eq!(cl.name, "app-j-changelog");
-        assert_eq!(cl.topic_configs[0].key, "cleanup.policy");
-        assert_eq!(cl.topic_configs[0].value, "delete"); // NOT compact,delete
-        assert_eq!(cl.topic_configs[1].key, "message.timestamp.type");
-        assert_eq!(cl.topic_configs[2].key, "retention.ms");
-        assert_eq!(cl.topic_configs[2].value, "86520000");
+        check!(cl.name == "app-j-changelog");
+        check!(cl.topic_configs[0].key == "cleanup.policy");
+        check!(cl.topic_configs[0].value == "delete"); // NOT compact,delete
+        check!(cl.topic_configs[1].key == "message.timestamp.type");
+        check!(cl.topic_configs[2].key == "retention.ms");
+        check!(cl.topic_configs[2].value == "86520000");
     }
 
     #[test]
     fn versioned_store_changelog_config_is_compact_with_min_compaction_lag() {
-        let cfgs = versioned_changelog_topic_configs(686_400_000);
+        let cfgs = versioned_changelog_topic_configs(Time::from_millis(686_400_000));
         let get = |k: &str| cfgs.iter().find(|c| c.key == k).map(|c| c.value.clone());
-        assert_eq!(get("cleanup.policy").as_deref(), Some("compact"));
-        assert_eq!(get("message.timestamp.type").as_deref(), Some("CreateTime"));
-        assert_eq!(get("min.compaction.lag.ms").as_deref(), Some("686400000"));
+        check!(get("cleanup.policy").as_deref() == Some("compact"));
+        check!(get("message.timestamp.type").as_deref() == Some("CreateTime"));
+        check!(get("min.compaction.lag.ms").as_deref() == Some("686400000"));
+    }
+
+    /// Every changelog flavour's rendered `(key, value)` config array, pinned
+    /// against the exact strings Kafka's topic configs take.
+    ///
+    /// The quantity lives in `ChangelogKind`; only this rendering step turns it
+    /// back into a millisecond integer, and a scale slip here would silently
+    /// change how long a changelog is retained.
+    #[test]
+    fn changelog_kinds_render_kafka_config_strings_verbatim() {
+        let cases = [
+            (
+                ChangelogKind::Kv,
+                vec![
+                    ("cleanup.policy", "compact"),
+                    ("message.timestamp.type", "CreateTime"),
+                ],
+            ),
+            (
+                ChangelogKind::AggWindow { retention: days(7) },
+                vec![
+                    ("cleanup.policy", "compact,delete"),
+                    ("message.timestamp.type", "CreateTime"),
+                    ("retention.ms", "604800000"),
+                ],
+            ),
+            (
+                ChangelogKind::JoinWindow {
+                    retention: minutes(90),
+                },
+                vec![
+                    ("cleanup.policy", "delete"),
+                    ("message.timestamp.type", "CreateTime"),
+                    ("retention.ms", "5400000"),
+                ],
+            ),
+            (
+                ChangelogKind::Versioned {
+                    min_compaction_lag: millis(1),
+                },
+                vec![
+                    ("cleanup.policy", "compact"),
+                    ("message.timestamp.type", "CreateTime"),
+                    ("min.compaction.lag.ms", "1"),
+                ],
+            ),
+        ];
+
+        for (kind, expected) in cases {
+            let groups = vec![GroupTopics {
+                id: "0".into(),
+                source_topics: vec!["in".into()],
+                changelog_stores: vec![("s".into(), None, kind)],
+                ..Default::default()
+            }];
+            let topo = to_wire(&groups, "app");
+            let rendered: Vec<(&str, &str)> = topo.subtopologies[0].state_changelog_topics[0]
+                .topic_configs
+                .iter()
+                .map(|kv| (kv.key.as_str(), kv.value.as_str()))
+                .collect();
+            check!(rendered == expected, "{kind:?}");
+        }
+    }
+
+    /// Repartition topics carry a fixed config array — including a `segment.bytes`
+    /// that must stay the byte count the JVM client sends, not a rounded or
+    /// rescaled one.
+    #[test]
+    fn repartition_topic_configs_render_verbatim() {
+        let configs = repartition_topic_configs();
+        let rendered: Vec<(&str, &str)> = configs
+            .iter()
+            .map(|kv| (kv.key.as_str(), kv.value.as_str()))
+            .collect();
+        check!(
+            rendered
+                == vec![
+                    ("cleanup.policy", "delete"),
+                    ("message.timestamp.type", "CreateTime"),
+                    ("retention.ms", "-1"),
+                    ("segment.bytes", "52428800"),
+                ]
+        );
     }
 
     #[test]

@@ -11,11 +11,11 @@ topology:
 workload:
   connections: 24
   rate: saturate
-  warmup_s: 10
-  duration_s: 60
+  warmup: 10s
+  duration: 60s
   mix:
     single_shard_insert: 70
     read_only: 30
 faults:
-  - at_s: 20
-    partition: { target: "range:0", duration_s: 15, style: blackhole }
+  - at: 20s
+    partition: { target: "range:0", duration: 15s, style: blackhole }

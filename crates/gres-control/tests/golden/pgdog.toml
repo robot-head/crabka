@@ -1,10 +1,10 @@
 [general]
 port = 6432
 min_pool_size = 0
-pooler_mode = "transaction"
+pooler_mode = "session"
 passthrough_auth = "enabled"
-connect_timeout = 10000
-connect_attempts = 3
+connect_timeout = 6000
+connect_attempts = 5
 checkout_timeout = 30000
 idle_timeout = 45000
 server_lifetime = 240000
@@ -24,4 +24,4 @@ pooler_mode = "transaction"
 name = "green"
 host = "green-0.gres.svc"
 port = 5432
-pooler_mode = "transaction"
+pooler_mode = "session"

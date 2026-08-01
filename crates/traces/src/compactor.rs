@@ -13,15 +13,19 @@ use arrow::{
     compute::concat_batches,
     record_batch::RecordBatch,
 };
+#[cfg(test)]
+use crabka_blockstore::read_block;
 use crabka_blockstore::{
-    BlockIndex, BlockMeta, BlockWriter, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_ATTR_VALUE_BOOL,
-    SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_CHILD_COUNT, SCOL_DURATION_NANOS,
-    SCOL_EVENTS, SCOL_INSTRUMENTATION_NAME, SCOL_INSTRUMENTATION_VERSION, SCOL_LINKS, SCOL_NAME,
-    SCOL_NESTED_SET_LEFT, SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID, SCOL_PARENT_SPAN_ID,
-    SCOL_ROOT_SERVICE_NAME, SCOL_ROOT_SPAN_NAME, SCOL_SPAN_ID, SCOL_START_NANO,
-    SCOL_TRACE_DURATION_NANOS, SCOL_TRACE_ID, SCOL_TRACE_START_NANO, ShardedTraceBloom,
-    SummaryColumns, TraceBlockStats, TraceIndex, read_block, span_block_decl, span_block_schema,
+    BlockIndex, BlockMeta, BlockWriter, DEFAULT_BLOCK_READ_MAX, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE,
+    SCOL_ATTR_VALUE_BOOL, SCOL_ATTR_VALUE_DOUBLE, SCOL_ATTR_VALUE_INT, SCOL_CHILD_COUNT,
+    SCOL_DURATION_NANOS, SCOL_EVENTS, SCOL_INSTRUMENTATION_NAME, SCOL_INSTRUMENTATION_VERSION,
+    SCOL_LINKS, SCOL_NAME, SCOL_NESTED_SET_LEFT, SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID,
+    SCOL_PARENT_SPAN_ID, SCOL_ROOT_SERVICE_NAME, SCOL_ROOT_SPAN_NAME, SCOL_SPAN_ID,
+    SCOL_START_NANO, SCOL_TRACE_DURATION_NANOS, SCOL_TRACE_ID, SCOL_TRACE_START_NANO,
+    ShardedTraceBloom, SummaryColumns, TraceBlockStats, TraceIndex, read_block_with_max_bytes,
+    span_block_decl, span_block_schema,
 };
+use crabka_units::ByteSize;
 use object_store::ObjectStore;
 
 use crate::{
@@ -60,10 +64,37 @@ pub async fn compact_block_keys(
     input_keys: &[String],
     output_key: &str,
 ) -> Result<BlockMeta, TracesError> {
+    compact_block_keys_with_max_bytes(
+        store,
+        writer,
+        index,
+        tenant,
+        input_keys,
+        output_key,
+        DEFAULT_BLOCK_READ_MAX,
+    )
+    .await
+}
+
+/// Merge existing span blocks with a caller-supplied on-disk read limit.
+///
+/// # Errors
+/// Returns an error when an input exceeds the configured cap, the query is
+/// malformed, an expression has incompatible operand types, or the backing
+/// span store fails.
+pub async fn compact_block_keys_with_max_bytes(
+    store: Arc<dyn ObjectStore>,
+    writer: &BlockWriter,
+    index: &mut TraceIndex,
+    tenant: &str,
+    input_keys: &[String],
+    output_key: &str,
+    block_read_max: ByteSize,
+) -> Result<BlockMeta, TracesError> {
     let mut batches = Vec::new();
     for key in input_keys {
         batches.extend(
-            read_block(store.clone(), key)
+            read_block_with_max_bytes(store.clone(), key, block_read_max)
                 .await
                 .map_err(|err| TracesError::Block(err.to_string()))?,
         );
@@ -120,6 +151,33 @@ pub async fn compact_index_window(
     start_ns: i64,
     end_ns: i64,
 ) -> Result<Vec<BlockMeta>, TracesError> {
+    compact_index_window_with_max_bytes(
+        store,
+        writer,
+        index,
+        object_key_prefix,
+        start_ns,
+        end_ns,
+        DEFAULT_BLOCK_READ_MAX,
+    )
+    .await
+}
+
+/// Compact every tenant using a caller-supplied on-disk block-read limit.
+///
+/// # Errors
+/// Returns an error when an input exceeds the configured cap, the query is
+/// malformed, an expression has incompatible operand types, or the backing
+/// span store fails.
+pub async fn compact_index_window_with_max_bytes(
+    store: Arc<dyn ObjectStore>,
+    writer: &BlockWriter,
+    index: &mut TraceIndex,
+    object_key_prefix: &str,
+    start_ns: i64,
+    end_ns: i64,
+    block_read_max: ByteSize,
+) -> Result<Vec<BlockMeta>, TracesError> {
     let mut metas = Vec::new();
     for tenant in index.tenants() {
         let candidate_keys = index.candidate_blocks(&tenant, start_ns, end_ns);
@@ -136,13 +194,14 @@ pub async fn compact_index_window(
                 WindowStartNs(start_ns),
             ),
         );
-        let meta = compact_block_keys(
+        let meta = compact_block_keys_with_max_bytes(
             store.clone(),
             writer,
             index,
             &tenant,
             &candidate_keys,
             &output_key,
+            block_read_max,
         )
         .await?;
         metas.push(meta);
@@ -941,6 +1000,18 @@ mod tests {
             .unwrap();
 
         let mut index = TraceIndex::new();
+        let rejected = compact_block_keys_with_max_bytes(
+            store.clone(),
+            &writer,
+            &mut index,
+            "tenant",
+            &["a.parquet".to_string(), "b.parquet".to_string()],
+            "rejected.parquet",
+            crabka_units::bytes(1),
+        )
+        .await;
+        assert2::assert!(rejected.is_err());
+
         compact_block_keys(
             store.clone(),
             &writer,

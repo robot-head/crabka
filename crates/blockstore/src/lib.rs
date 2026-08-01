@@ -35,7 +35,10 @@ pub use block_index::{BlockIndex, BlockSchema, RequiredColumn, series_block_sche
 pub use bloom::{ShardedTraceBloom, fnv1_32};
 pub use error::{BlockStoreError, Result};
 pub use index::{Index, MAX_INDEX_SNAPSHOT_BYTES};
-pub use index_snapshot::{DEFAULT_INDEX_SNAPSHOT_RETAIN, index_snapshot_prefix_for_key};
+pub use index_snapshot::{
+    DEFAULT_INDEX_SNAPSHOT_MAX, DEFAULT_INDEX_SNAPSHOT_RETAIN, IndexSnapshotRetain,
+    index_snapshot_prefix_for_key,
+};
 pub use labels::{Labels, SeriesFingerprint};
 // Logs-path block store. Types that share a name with the canonical
 // (traces/shared) abstractions above are re-exported under `Log*` names.
@@ -71,7 +74,9 @@ pub use profile_schema::{
     PCOL_TOTAL_VALUE, PCOL_TRACE_ID, PCOL_VALUE, profile_samples_decl, profile_samples_schema,
 };
 pub use reader::{
-    MAX_BLOCK_BYTES, RowGroupMeta, read_block, read_block_row_groups, read_row_group_metadata,
+    DEFAULT_BLOCK_READ_MAX, RowGroupMeta, read_block, read_block_row_groups,
+    read_block_row_groups_with_max_bytes, read_block_with_max_bytes, read_row_group_metadata,
+    read_row_group_metadata_with_max_bytes,
 };
 pub use span_block::{
     AttrValue, SpanAttr, SpanEvent, SpanLink, SpanRow, encode_span_rows,

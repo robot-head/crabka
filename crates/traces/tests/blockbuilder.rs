@@ -21,6 +21,7 @@ use crabka_traces::{
     ids::{MaxOffset, MinOffset, WindowStartNs},
     metrics::ServiceMetrics,
 };
+use crabka_units::{hours, millis, minutes};
 use futures::stream::BoxStream;
 use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
@@ -257,10 +258,12 @@ async fn replaying_saved_partition_window_after_restart_is_idempotent() {
     let config = crabka_traces::blockbuilder::BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS,
         flush_max_age: crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE,
+        index_snapshot_retain: crabka_blockstore::IndexSnapshotRetain::default(),
     };
     let records = [
         consumer_record(7, 10, &rec("tenant-a", [1; 16], 2, Some(1), 200)),
@@ -300,6 +303,36 @@ async fn replaying_saved_partition_window_after_restart_is_idempotent() {
 }
 
 #[tokio::test]
+async fn configured_index_snapshot_retention_is_applied() {
+    use std::collections::BTreeMap;
+
+    use futures::StreamExt as _;
+
+    let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+    let writer = BlockWriter::new(store.clone());
+    let mut index = TraceIndex::new();
+    let mut config = block_builder_config();
+    config.index_snapshot_retain = crabka_blockstore::IndexSnapshotRetain::new(2).unwrap();
+
+    for _ in 0..4 {
+        flush_partition_windows(&writer, &mut index, store.clone(), &config, BTreeMap::new())
+            .await
+            .unwrap();
+    }
+
+    let prefix = object_store::path::Path::from(crabka_blockstore::index_snapshot_prefix_for_key(
+        &config.index_key,
+    ));
+    let mut snapshots = store.list(Some(&prefix));
+    let mut count = 0;
+    while let Some(snapshot) = snapshots.next().await {
+        snapshot.unwrap();
+        count += 1;
+    }
+    assert_eq!(count, 2);
+}
+
+#[tokio::test]
 async fn multiple_polls_below_threshold_flush_one_block_per_partition() {
     use crabka_traces::blockbuilder::{BlockBuilderConfig, FlushAccumulator};
     use tokio::time::Instant;
@@ -309,10 +342,12 @@ async fn multiple_polls_below_threshold_flush_one_block_per_partition() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
+        index_snapshot_retain: crabka_blockstore::IndexSnapshotRetain::default(),
     };
 
     // Three polls, each well under the flush threshold, all for the same trace
@@ -380,10 +415,12 @@ async fn accumulator_flushes_on_record_count_threshold() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 2,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
+        index_snapshot_retain: crabka_blockstore::IndexSnapshotRetain::default(),
     };
 
     let mut accumulator = FlushAccumulator::new();
@@ -410,10 +447,12 @@ async fn accumulator_flushes_on_age_for_low_traffic_stream() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
+        index_snapshot_retain: crabka_blockstore::IndexSnapshotRetain::default(),
     };
 
     let mut accumulator = FlushAccumulator::new();
@@ -442,10 +481,12 @@ async fn shutdown_drain_flushes_remaining_buffer_without_losing_spans() {
     let config = BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_mins(1),
+        flush_max_age: minutes(1),
+        index_snapshot_retain: crabka_blockstore::IndexSnapshotRetain::default(),
     };
 
     // Two polls buffered, never reaching the flush threshold (mirrors a pending
@@ -727,7 +768,7 @@ impl ScriptedConsumer {
 impl WalConsumerPoll for ScriptedConsumer {
     async fn poll(
         &mut self,
-        _window: std::time::Duration,
+        _window: crabka_units::Time,
     ) -> Result<Vec<ConsumerRecord>, TracesError> {
         if let Some(batch) = self.batches.pop_front() {
             Ok(batch)
@@ -756,12 +797,14 @@ fn block_builder_config() -> BlockBuilderConfig {
     BlockBuilderConfig {
         object_key_prefix: String::new(),
         index_key: "index/traces.json".into(),
-        window: std::time::Duration::from_millis(1),
+        window: millis(1),
+        empty_poll_backoff: millis(1),
         promoted_attrs: Vec::new(),
         // Below-threshold counts never trip the count flush; the loop drains on
         // shutdown instead, exercising the drain path the tests target.
         flush_max_records: 50_000,
-        flush_max_age: std::time::Duration::from_hours(1),
+        flush_max_age: hours(1),
+        index_snapshot_retain: crabka_blockstore::IndexSnapshotRetain::default(),
     }
 }
 

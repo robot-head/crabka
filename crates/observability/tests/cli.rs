@@ -3,6 +3,7 @@ use clap::Parser;
 use crabka_observability::{
     QuerierIndexSource, Role, ServiceConfig, build_service_dependencies, run,
 };
+use crabka_units::{bytes, kibibytes, millis, nanos};
 
 #[test]
 fn parses_explicit_service_targets() {
@@ -16,6 +17,43 @@ fn parses_explicit_service_targets() {
 
         assert!(config.target == expected);
         assert!(run(config).unwrap().role == expected);
+    }
+}
+
+#[test]
+fn parses_unit_bearing_query_length() {
+    let config = ServiceConfig::try_parse_from([
+        "crabka-observability",
+        "--target",
+        "querier",
+        "--max-query-length",
+        "64B",
+    ])
+    .unwrap();
+
+    assert!(config.max_query_length.is_some());
+}
+
+#[test]
+fn rejects_negative_quantity_limits() {
+    for (flag, value) in [
+        ("--max-query-range", "-1ns"),
+        ("--max-query-read", "-1B"),
+        ("--max-query-length", "-1B"),
+        ("--max-ingest-body", "-1B"),
+        ("--wal-append-timeout", "-1ms"),
+    ] {
+        let argument = format!("{flag}={value}");
+        assert!(
+            ServiceConfig::try_parse_from([
+                "crabka-observability",
+                "--target",
+                "querier",
+                &argument,
+            ])
+            .is_err(),
+            "{flag} accepted {value}"
+        );
     }
 }
 
@@ -41,14 +79,14 @@ fn parses_querier_object_store_shard_catalog_config() {
         "10",
         "--query-end-ns",
         "30",
-        "--max-query-range-ns",
-        "20",
+        "--max-query-range",
+        "20ns",
         "--max-query-series",
         "10",
-        "--max-query-bytes",
-        "1024",
+        "--max-query-read",
+        "1KiB",
         "--max-query-length",
-        "64",
+        "64B",
     ])
     .unwrap();
 
@@ -67,12 +105,13 @@ fn parses_querier_object_store_shard_catalog_config() {
                 index_prefix: Some("observability/logs".to_string()),
                 query_start_ns: Some(10),
                 query_end_ns: Some(30),
-                max_query_range_ns: Some(20),
+                max_query_range: Some(nanos(20)),
                 max_query_series: Some(10),
-                max_query_bytes: Some(1024),
-                max_query_length: Some(64),
-                max_ingest_body_bytes: None,
-                wal_append_timeout_ms: None,
+                max_query_read: Some(kibibytes(1)),
+                max_query_length: Some(bytes(64)),
+                max_ingest_body: None,
+                wal_append_timeout: None,
+                ..ServiceConfig::default()
             }
     );
 }
@@ -87,10 +126,10 @@ fn parses_distributor_wal_config() {
         "127.0.0.1:9092",
         "--wal-topic",
         "__crabka_observability_logs_wal",
-        "--max-ingest-body-bytes",
-        "2048",
-        "--wal-append-timeout-ms",
-        "250",
+        "--max-ingest-body",
+        "2KiB",
+        "--wal-append-timeout",
+        "250ms",
     ])
     .unwrap();
 
@@ -109,12 +148,13 @@ fn parses_distributor_wal_config() {
                 index_prefix: None,
                 query_start_ns: None,
                 query_end_ns: None,
-                max_query_range_ns: None,
+                max_query_range: None,
                 max_query_series: None,
-                max_query_bytes: None,
+                max_query_read: None,
                 max_query_length: None,
-                max_ingest_body_bytes: Some(2048),
-                wal_append_timeout_ms: Some(250),
+                max_ingest_body: Some(kibibytes(2)),
+                wal_append_timeout: Some(millis(250)),
+                ..ServiceConfig::default()
             }
     );
 }
@@ -153,12 +193,13 @@ fn parses_compactor_wal_consumer_config() {
                 index_prefix: Some("observability/logs".to_string()),
                 query_start_ns: None,
                 query_end_ns: None,
-                max_query_range_ns: None,
+                max_query_range: None,
                 max_query_series: None,
-                max_query_bytes: None,
+                max_query_read: None,
                 max_query_length: None,
-                max_ingest_body_bytes: None,
-                wal_append_timeout_ms: None,
+                max_ingest_body: None,
+                wal_append_timeout: None,
+                ..ServiceConfig::default()
             }
     );
 }
@@ -193,12 +234,13 @@ fn parses_querier_wal_tail_config() {
                 index_prefix: None,
                 query_start_ns: None,
                 query_end_ns: None,
-                max_query_range_ns: None,
+                max_query_range: None,
                 max_query_series: None,
-                max_query_bytes: None,
+                max_query_read: None,
                 max_query_length: None,
-                max_ingest_body_bytes: None,
-                wal_append_timeout_ms: None,
+                max_ingest_body: None,
+                wal_append_timeout: None,
+                ..ServiceConfig::default()
             }
     );
 }
@@ -218,12 +260,13 @@ async fn querier_dependencies_require_wal_bootstrap_server() {
         index_prefix: None,
         query_start_ns: None,
         query_end_ns: None,
-        max_query_range_ns: None,
+        max_query_range: None,
         max_query_series: None,
-        max_query_bytes: None,
+        max_query_read: None,
         max_query_length: None,
-        max_ingest_body_bytes: None,
-        wal_append_timeout_ms: None,
+        max_ingest_body: None,
+        wal_append_timeout: None,
+        ..ServiceConfig::default()
     };
 
     match build_service_dependencies(&config).await {

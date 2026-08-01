@@ -16,6 +16,8 @@ pub mod spanmetrics;
 
 /// Single point of truth for types consumed from sibling traces/metrics slices.
 pub mod contract {
+    pub use crabka_units::ByteSize;
+
     pub use crate::{
         span::{SpanKind, StatusCode},
         wal::TRACES_WAL_TOPIC,
@@ -36,7 +38,8 @@ pub mod contract {
         pub status_message: String,
         pub service_name: String,
         pub attributes: Vec<(String, String)>,
-        pub size_bytes: u64,
+        /// The encoded size of the WAL record this span was projected from.
+        pub size: ByteSize,
     }
 
     /// A run of populated native histogram buckets.

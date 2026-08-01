@@ -149,7 +149,7 @@ async fn cooperative_transparent_to_poll() {
     tokio::time::timeout(Duration::from_secs(30), async {
         while values_seen.len() < 4 {
             let recs = m1
-                .poll(Duration::from_millis(200))
+                .poll(crabka_units::millis(200))
                 .await
                 .expect("poll first wave");
             for r in recs {
@@ -178,7 +178,7 @@ async fn cooperative_transparent_to_poll() {
     let mut m1_second_wave: HashSet<String> = HashSet::new();
     tokio::time::timeout(Duration::from_secs(30), async {
         while m1_second_wave.len() < 4 {
-            let recs = m1.poll(Duration::from_millis(200)).await.expect("m1 poll");
+            let recs = m1.poll(crabka_units::millis(200)).await.expect("m1 poll");
             for r in recs {
                 let v = value_string(r.value.as_ref());
                 if v.starts_with('b') {
@@ -214,7 +214,7 @@ async fn cooperative_transparent_to_poll() {
         loop {
             // Keep m1 polling during the wait; ignore transient errors but
             // still fail on rebalance-specific ones.
-            match m1.poll(Duration::from_millis(200)).await {
+            match m1.poll(crabka_units::millis(200)).await {
                 Ok(recs) => {
                     for r in recs {
                         received
@@ -247,7 +247,7 @@ async fn cooperative_transparent_to_poll() {
     let mut m2_second_wave: HashSet<String> = HashSet::new();
     tokio::time::timeout(Duration::from_secs(30), async {
         loop {
-            let recs = m2.poll(Duration::from_millis(200)).await.expect("m2 poll");
+            let recs = m2.poll(crabka_units::millis(200)).await.expect("m2 poll");
             if recs.is_empty() {
                 break;
             }
@@ -308,7 +308,7 @@ async fn cooperative_single_member_steady_state() {
     let mut seen: HashSet<String> = HashSet::new();
     tokio::time::timeout(Duration::from_secs(30), async {
         while seen.len() < 3 {
-            let recs = consumer.poll(Duration::from_millis(250)).await.unwrap();
+            let recs = consumer.poll(crabka_units::millis(250)).await.unwrap();
             for r in recs {
                 seen.insert(value_string(r.value.as_ref()));
             }
@@ -446,9 +446,9 @@ async fn build_cooperative_consumer(
         .client_id(client_id)
         .group_id(group_id)
         .assignor(Assignor::CooperativeSticky)
-        .session_timeout(Duration::from_secs(30))
-        .rebalance_timeout(Duration::from_secs(2))
-        .heartbeat_interval(Duration::from_millis(500))
+        .session_timeout(crabka_units::secs(30))
+        .rebalance_timeout(crabka_units::secs(2))
+        .heartbeat_interval(crabka_units::millis(500))
         .auto_offset_reset(AutoOffsetReset::Earliest)
         .subscribe([topic.to_string()])
         .build()

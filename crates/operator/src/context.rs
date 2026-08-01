@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
+    future::Future,
     sync::Arc,
 };
 
@@ -769,6 +770,13 @@ struct KafkaGresControl {
     checkpoint_manifest_verifier: CheckpointManifestVerifierHandle,
 }
 
+#[derive(Clone)]
+struct CachedGresControl {
+    bootstrap: String,
+    policy: crabka_gres_control::RegistryPolicy,
+    control: GresControlHandle,
+}
+
 #[async_trait::async_trait]
 impl GresControlLike for KafkaGresControl {
     async fn get_tenant(
@@ -784,7 +792,7 @@ impl GresControlLike for KafkaGresControl {
         expected_record_version: Option<u64>,
     ) -> Result<crabka_gres_control::TenantRecord, GresControlWriteError> {
         let mut registry = self.registry.lock().await;
-        registry.ensure_topic(record.wal_replication).await?;
+        registry.ensure_topic().await?;
         let stored_record = registry
             .replace_if_version(record, expected_record_version)
             .await?;
@@ -855,7 +863,7 @@ pub struct Context {
     /// resolved Connect base URL. Dropped + re-created lazily on
     /// transport failure.
     pub rebalancer_clients: Arc<Mutex<HashMap<String, RebalancerClientHandle>>>,
-    pub gres_controls: Arc<Mutex<HashMap<String, GresControlHandle>>>,
+    gres_controls: Arc<Mutex<HashMap<(String, String), CachedGresControl>>>,
     pub checkpoint_manifest_verifier: CheckpointManifestVerifierHandle,
     pub pgdog_admin: PgdogAdminHandle,
 }
@@ -912,7 +920,21 @@ impl Context {
         if let Some(client) = map.get(cluster) {
             return Ok(client.clone());
         }
-        let admin = AdminClient::connect(&[bootstrap.to_string()]).await?;
+        let admin = AdminClient::connect_with_options(
+            &[bootstrap.to_string()],
+            crabka_client_core::ConnectionOptions {
+                dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::new(
+                    self.config.client_dispatch_queue_capacity,
+                )
+                .map_err(crabka_client_admin::AdminError::Protocol)?,
+                frame_max: crabka_client_core::ClientFrameMax::try_from(
+                    self.config.client_frame_max,
+                )
+                .map_err(crabka_client_admin::AdminError::Protocol)?,
+                ..crabka_client_core::ConnectionOptions::default()
+            },
+        )
+        .await?;
         let entry: AdminClientHandle = Arc::new(Mutex::new(admin));
         map.insert(cluster.to_string(), entry.clone());
         Ok(entry)
@@ -949,7 +971,10 @@ impl Context {
         if let Some(client) = map.get(endpoint) {
             return client.clone();
         }
-        let client: RebalancerClientHandle = Arc::new(ConnectRebalancerClient::new(endpoint));
+        let client: RebalancerClientHandle = Arc::new(ConnectRebalancerClient::new(
+            endpoint,
+            self.config.rebalancer_request_timeout,
+        ));
         map.insert(endpoint.to_string(), client.clone());
         client
     }
@@ -978,28 +1003,97 @@ impl Context {
     /// Returns an error when the requested operation cannot be completed.
     pub async fn gres_control_for(
         &self,
-        cluster: &str,
+        namespace: &str,
+        kafka_name: &str,
         bootstrap: &str,
+        policy: &crabka_gres_control::RegistryPolicy,
     ) -> Result<GresControlHandle, GresControlWriteError> {
-        let mut map = self.gres_controls.lock().await;
-        if let Some(control) = map.get(cluster) {
-            return Ok(control.clone());
+        let bootstrap_owned = bootstrap.to_owned();
+        let policy_owned = policy.clone();
+        let checkpoint_manifest_verifier = Arc::clone(&self.checkpoint_manifest_verifier);
+        self.gres_control_for_with(namespace, kafka_name, bootstrap, policy, async move {
+            let mut registry =
+                crabka_gres_control::Registry::connect_with_policy(&bootstrap_owned, policy_owned)
+                    .await?;
+            registry.ensure_topic().await?;
+            Ok(Arc::new(KafkaGresControl {
+                registry: Mutex::new(registry),
+                checkpoint_manifest_verifier,
+            }) as GresControlHandle)
+        })
+        .await
+    }
+
+    async fn gres_control_for_with<F>(
+        &self,
+        namespace: &str,
+        kafka_name: &str,
+        bootstrap: &str,
+        policy: &crabka_gres_control::RegistryPolicy,
+        build: F,
+    ) -> Result<GresControlHandle, GresControlWriteError>
+    where
+        F: Future<Output = Result<GresControlHandle, GresControlWriteError>>,
+    {
+        let key = (namespace.to_owned(), kafka_name.to_owned());
+        if let Some(entry) = self.gres_controls.lock().await.get(&key)
+            && entry.bootstrap == bootstrap
+            && entry.policy == *policy
+        {
+            return Ok(Arc::clone(&entry.control));
         }
-        let mut registry = crabka_gres_control::Registry::connect(bootstrap).await?;
-        registry.ensure_topic(1).await?;
-        let control: GresControlHandle = Arc::new(KafkaGresControl {
-            registry: Mutex::new(registry),
-            checkpoint_manifest_verifier: Arc::clone(&self.checkpoint_manifest_verifier),
-        });
-        map.insert(cluster.to_string(), control.clone());
+
+        let control = build.await?;
+        let mut map = self.gres_controls.lock().await;
+        if let Some(entry) = map.get(&key)
+            && entry.bootstrap == bootstrap
+            && entry.policy == *policy
+        {
+            return Ok(Arc::clone(&entry.control));
+        }
+        map.insert(
+            key,
+            CachedGresControl {
+                bootstrap: bootstrap.to_owned(),
+                policy: policy.clone(),
+                control: Arc::clone(&control),
+            },
+        );
         Ok(control)
     }
 
-    pub async fn insert_gres_control_for_test(&self, cluster: &str, control: GresControlHandle) {
-        self.gres_controls
-            .lock()
-            .await
-            .insert(cluster.to_string(), control);
+    pub async fn insert_gres_control_for_test(
+        &self,
+        namespace: &str,
+        kafka_name: &str,
+        control: GresControlHandle,
+    ) {
+        self.insert_gres_control_for_test_with_policy(
+            namespace,
+            kafka_name,
+            &format!("{kafka_name}-broker-headless.{namespace}.svc.cluster.local:9092"),
+            crabka_gres_control::RegistryPolicy::default(),
+            control,
+        )
+        .await;
+    }
+
+    pub async fn insert_gres_control_for_test_with_policy(
+        &self,
+        namespace: &str,
+        kafka_name: &str,
+        bootstrap: &str,
+        policy: crabka_gres_control::RegistryPolicy,
+        control: GresControlHandle,
+    ) {
+        self.gres_controls.lock().await.insert(
+            (namespace.to_owned(), kafka_name.to_owned()),
+            CachedGresControl {
+                bootstrap: bootstrap.to_owned(),
+                policy,
+                control,
+            },
+        );
     }
 }
 
@@ -1020,6 +1114,7 @@ fn checkpoint_manifest_verifier(config: &OperatorConfig) -> CheckpointManifestVe
 mod tests {
     use assert2::assert;
     use clap::Parser;
+    use tower::service_fn;
 
     use super::*;
 
@@ -1031,6 +1126,146 @@ mod tests {
     struct ConfigArgs {
         #[command(flatten)]
         config: OperatorConfig,
+    }
+
+    struct TestGresControl;
+
+    #[async_trait::async_trait]
+    impl GresControlLike for TestGresControl {
+        async fn get_tenant(
+            &self,
+            _tenant: &crabka_gres_control::TenantName,
+        ) -> Result<Option<crabka_gres_control::TenantRecord>, GresControlWriteError> {
+            unreachable!("cache test does not read tenants")
+        }
+
+        async fn replace_tenant_if_version(
+            &self,
+            _record: &crabka_gres_control::TenantRecord,
+            _expected_record_version: Option<u64>,
+        ) -> Result<crabka_gres_control::TenantRecord, GresControlWriteError> {
+            unreachable!("cache test does not write tenants")
+        }
+
+        async fn delete_tenant(
+            &self,
+            _tenant: &crabka_gres_control::TenantName,
+        ) -> Result<(), GresControlWriteError> {
+            unreachable!("cache test does not delete tenants")
+        }
+
+        async fn validate_final_checkpoint_manifest(
+            &self,
+            _record: &crabka_gres_control::TenantRecord,
+        ) -> Result<(), GresControlWriteError> {
+            unreachable!("cache test does not verify checkpoints")
+        }
+    }
+
+    fn test_context() -> Context {
+        let client = Client::new(
+            service_fn(|_| async {
+                Ok::<_, std::convert::Infallible>(
+                    http::Response::builder()
+                        .status(500)
+                        .body(kube::client::Body::from(Vec::new()))
+                        .expect("response"),
+                )
+            }),
+            "default",
+        );
+        let (registry, metrics) = crate::telemetry::new_registry_with_metrics();
+        Context::new(
+            client,
+            ConfigArgs::parse_from(["operator"]).config,
+            Arc::new(Mutex::new(registry)),
+            metrics,
+        )
+    }
+
+    #[tokio::test]
+    async fn gres_control_cache_tracks_inputs_without_locking_during_build() {
+        let ctx = test_context();
+        let defaults = crabka_gres_control::RegistryPolicy::default();
+        let first: GresControlHandle = Arc::new(TestGresControl);
+        let observed = ctx
+            .gres_control_for_with("ns-a", "demo", "a:9092", &defaults, async {
+                assert!(ctx.gres_controls.try_lock().is_ok());
+                Ok(Arc::clone(&first))
+            })
+            .await
+            .expect("first control");
+        assert!(Arc::ptr_eq(&observed, &first));
+
+        let reused = ctx
+            .gres_control_for_with("ns-a", "demo", "a:9092", &defaults, async {
+                unreachable!("equal cache inputs must not rebuild")
+            })
+            .await
+            .expect("reused control");
+        assert!(Arc::ptr_eq(&reused, &first));
+
+        let changed_reader_admin_dns = defaults
+            .clone()
+            .with_reader_admin_dns_timeout(crabka_units::millis(37))
+            .expect("reader/admin DNS timeout");
+        let changed_reader_admin_dns_control: GresControlHandle = Arc::new(TestGresControl);
+        let replaced = ctx
+            .gres_control_for_with("ns-a", "demo", "a:9092", &changed_reader_admin_dns, async {
+                Ok(Arc::clone(&changed_reader_admin_dns_control))
+            })
+            .await
+            .expect("reader/admin DNS policy replacement");
+        assert!(Arc::ptr_eq(&replaced, &changed_reader_admin_dns_control));
+
+        let changed_dns = changed_reader_admin_dns
+            .clone()
+            .with_producer_dns_timeout(crabka_units::millis(37))
+            .expect("DNS timeout");
+        let changed_dns_control: GresControlHandle = Arc::new(TestGresControl);
+        let replaced = ctx
+            .gres_control_for_with("ns-a", "demo", "a:9092", &changed_dns, async {
+                Ok(Arc::clone(&changed_dns_control))
+            })
+            .await
+            .expect("DNS policy replacement");
+        assert!(Arc::ptr_eq(&replaced, &changed_dns_control));
+
+        let custom = crabka_gres_control::RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(501),
+            crabka_units::bytes(1_048_577),
+        )
+        .expect("policy");
+        let changed_policy: GresControlHandle = Arc::new(TestGresControl);
+        let replaced = ctx
+            .gres_control_for_with("ns-a", "demo", "a:9092", &custom, async {
+                Ok(Arc::clone(&changed_policy))
+            })
+            .await
+            .expect("policy replacement");
+        assert!(Arc::ptr_eq(&replaced, &changed_policy));
+
+        let changed_bootstrap: GresControlHandle = Arc::new(TestGresControl);
+        let replaced = ctx
+            .gres_control_for_with("ns-a", "demo", "b:9092", &custom, async {
+                Ok(Arc::clone(&changed_bootstrap))
+            })
+            .await
+            .expect("bootstrap replacement");
+        assert!(Arc::ptr_eq(&replaced, &changed_bootstrap));
+
+        let other_namespace: GresControlHandle = Arc::new(TestGresControl);
+        let isolated = ctx
+            .gres_control_for_with("ns-b", "demo", "b:9092", &custom, async {
+                Ok(Arc::clone(&other_namespace))
+            })
+            .await
+            .expect("namespace-isolated control");
+        assert!(Arc::ptr_eq(&isolated, &other_namespace));
+        assert!(ctx.gres_controls.lock().await.len() == 2);
     }
 
     fn checkpoint_config(kind: GresCheckpointStoreKind) -> OperatorConfig {

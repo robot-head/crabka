@@ -112,6 +112,8 @@ pub(crate) struct RealPeerSender {
     voters: VoterSet,
     client_id: String,
     dialer: Arc<dyn OutboundDialer>,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
 }
 
 impl RealPeerSender {
@@ -119,12 +121,16 @@ impl RealPeerSender {
         voters: VoterSet,
         client_id: String,
         dialer: Arc<dyn OutboundDialer>,
+        dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+        frame_max: crabka_client_core::ClientFrameMax,
     ) -> Self {
         Self {
             connections: DashMap::new(),
             voters,
             client_id,
             dialer,
+            dispatch_queue_capacity,
+            frame_max,
         }
     }
 
@@ -139,6 +145,8 @@ impl RealPeerSender {
         })?;
         let opts = ConnectionOptions {
             client_id: self.client_id.clone(),
+            dispatch_queue_capacity: self.dispatch_queue_capacity,
+            frame_max: self.frame_max,
             ..ConnectionOptions::default()
         };
         let conn = Arc::new(self.dialer.dial(peer, &addr, opts).await?);
@@ -356,7 +364,15 @@ mod tests {
         });
 
         let voters = voter_set_with_controller(NodeId(2), &addr.ip().to_string(), addr.port());
-        let sender = RealPeerSender::new(voters, "raft-client".into(), Arc::new(PlaintextDialer));
+        let sender = RealPeerSender::new(
+            voters,
+            "raft-client".into(),
+            Arc::new(PlaintextDialer),
+            crabka_client_core::ConnectionDispatchQueueCapacity::new(7).unwrap(),
+            crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32)).unwrap(),
+        );
+        assert2::assert!(sender.dispatch_queue_capacity.get() == 7);
+        assert2::assert!(sender.frame_max.size() == crabka_units::kibibytes(32));
         let response = sender
             .send(NodeId(2), api_key::VOTE, Bytes::from_static(b"vote-body"))
             .await

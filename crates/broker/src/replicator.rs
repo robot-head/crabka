@@ -5,7 +5,7 @@
 //! 0 and restarting; `NOT_LEADER_FOR_PARTITION` by returning so the
 //! supervisor's next reconcile re-evaluates.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{path::PathBuf, sync::Arc};
 
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
 use crabka_ids::PartitionIndex;
@@ -23,42 +23,29 @@ use crabka_protocol::{
 };
 use crabka_raft::NodeId;
 use crabka_security::ListenerProtocol;
+use crabka_units::{
+    ByteRate, ByteSize, Time,
+    convert::{ByteRateExt, ByteSizeExt, TimeExt},
+    fmt::Human as _,
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use crate::{
     broker::spawn_partition,
     codes,
+    config::ReplicationRuntimeConfig,
     partition_registry::PartitionRegistry,
     throttle::{ThrottleState, TopicThrottle},
 };
 
-const FETCH_MAX_BYTES: i32 = 1 << 20;
-const FETCH_MAX_WAIT_MS: i32 = 500;
-const FETCH_MIN_BYTES: i32 = 1;
-
-/// Sleep before re-checking the KIP-73 follower-in token bucket after it
-/// refused the fetch (bucket exhausted this round).
-const THROTTLE_EXHAUSTED_BACKOFF: Duration = Duration::from_millis(100);
-/// Backoff before reconnecting after an unexpected (non-transport)
-/// `client.send` error.
-const SEND_ERROR_BACKOFF: Duration = Duration::from_secs(1);
-/// Retry delay while the leader hasn't materialized its side of the
-/// partition yet (`CreateTopics`-vs-replicator race).
-const UNKNOWN_TOPIC_RETRY_DELAY: Duration = Duration::from_millis(100);
-/// Backoff between fetch rounds after a fenced/unknown leader epoch, so a
-/// persistent fence doesn't hot-spin fetch → `OffsetForLeaderEpoch`.
-const EPOCH_FENCE_BACKOFF: Duration = Duration::from_millis(200);
-/// Backoff after an unexpected fetch `error_code` before the next round.
-const UNEXPECTED_ERROR_BACKOFF: Duration = Duration::from_millis(500);
-/// First delay of the leader-connect exponential backoff.
-const RECONNECT_INITIAL_DELAY: Duration = Duration::from_millis(100);
-/// Ceiling for the leader-connect exponential backoff.
-const RECONNECT_DELAY_CAP: Duration = Duration::from_secs(5);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether this round may fetch, and with how large a per-partition budget.
+///
+/// Not `Eq`: the budget is a [`ByteSize`], whose `f64` storage is only
+/// `PartialEq`.
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum FetchThrottleDecision {
-    Fetch(i32),
+    Fetch(ByteSize),
     Sleep,
 }
 
@@ -89,6 +76,8 @@ pub(crate) struct Config {
     /// PLAINTEXT.
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     pub inter_broker_listener_protocol: ListenerProtocol,
+    pub inter_broker_server_name: String,
+    pub replication: ReplicationRuntimeConfig,
     /// KIP-73: broker-wide throttle state. The follower-in bucket gates
     /// outbound Fetch bytes when this partition is throttled.
     pub throttle_state: Arc<ThrottleState>,
@@ -190,7 +179,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
         // throttled-partition Fetch isolation is free — no need to split
         // requests here. We set `partition_max_bytes` on the single partition
         // in the request to the bucket-granted amount.
-        let partition_max_bytes_cap = match follower_partition_fetch_cap(cfg) {
+        let partition_max_cap = match follower_partition_fetch_cap(cfg) {
             FetchThrottleDecision::Fetch(cap) => cap,
             FetchThrottleDecision::Sleep => {
                 tracing::debug!(
@@ -201,13 +190,13 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
                 // Bucket exhausted — yield and retry next loop iteration.
                 tokio::select! {
                     () = cfg.shutdown.cancelled() => return Ok(()),
-                    () = tokio::time::sleep(THROTTLE_EXHAUSTED_BACKOFF) => {}
+                    () = tokio::time::sleep(cfg.replication.throttle_exhausted_backoff.to_std()) => {}
                 }
                 continue;
             }
         };
 
-        let req = build_fetch_request(cfg, fetch_offset, partition_max_bytes_cap);
+        let req = build_fetch_request(cfg, fetch_offset, partition_max_cap);
 
         let send = tokio::select! {
             () = cfg.shutdown.cancelled() => return Ok(()),
@@ -226,7 +215,7 @@ async fn run_inner(cfg: &Config) -> Result<(), String> {
                     "replicator: client.send unexpected error; retrying after backoff");
                 tokio::select! {
                     () = cfg.shutdown.cancelled() => return Ok(()),
-                    () = tokio::time::sleep(SEND_ERROR_BACKOFF) => {}
+                    () = tokio::time::sleep(cfg.replication.send_error_backoff.to_std()) => {}
                 }
                 client = connect_with_backoff(cfg).await?;
                 continue;
@@ -248,18 +237,21 @@ fn follower_partition_fetch_cap(cfg: &Config) -> FetchThrottleDecision {
     let image = cfg.controller.current_image();
     let throttle = TopicThrottle::for_topic(&image, &cfg.topic);
     let throttled = throttle.follower.contains(cfg.partition.get(), cfg.node_id);
-    if !throttled || cfg.throttle_state.follower_in.rate() == 0 {
-        return FetchThrottleDecision::Fetch(FETCH_MAX_BYTES);
+    if !throttled || cfg.throttle_state.follower_in.byte_rate() == <ByteRate as ByteRateExt>::ZERO {
+        return FetchThrottleDecision::Fetch(cfg.replication.fetch_max);
     }
 
+    // The bucket seam counts raw bytes, so the budget crosses into `u64` here
+    // and back on the granted amount. `try_consume` never grants more than it
+    // was asked for, so the result is bounded by the configured maximum.
     let granted = cfg
         .throttle_state
         .follower_in
-        .try_consume(u64::try_from(FETCH_MAX_BYTES).unwrap_or(0));
+        .try_consume(cfg.replication.fetch_max.bytes_u64());
     if granted == 0 {
         FetchThrottleDecision::Sleep
     } else {
-        FetchThrottleDecision::Fetch(i32::try_from(granted).unwrap_or(FETCH_MAX_BYTES))
+        FetchThrottleDecision::Fetch(ByteSize::from_bytes(granted))
     }
 }
 
@@ -272,12 +264,12 @@ fn follower_partition_fetch_cap(cfg: &Config) -> FetchThrottleDecision {
 /// stale or fenced replicas and return `FENCED_LEADER_EPOCH` or
 /// `UNKNOWN_LEADER_EPOCH` when appropriate.
 ///
-/// `partition_max_bytes_cap` is the KIP-73 follower-throttle cap for
-/// `partition_max_bytes`. Pass `FETCH_MAX_BYTES` when unthrottled.
+/// `partition_max_cap` is the KIP-73 follower-throttle cap for
+/// `partition_max_bytes`. Pass the configured fetch maximum when unthrottled.
 fn build_fetch_request(
     cfg: &Config,
     fetch_offset: Offset,
-    partition_max_bytes_cap: i32,
+    partition_max_cap: ByteSize,
 ) -> FetchRequest {
     let leader_epoch = cfg
         .partitions
@@ -303,15 +295,20 @@ fn build_fetch_request(
     // whichever the negotiated version requires. Populate BOTH so the request
     // is correct regardless of which version the leader negotiates.
     let rid = i32::try_from(cfg.node_id.0).unwrap_or(-1);
+    // Truncate rather than round: `max_wait_ms` is a wire field, and a
+    // fractional millisecond rounded up would ask the leader to hold the Fetch
+    // open past the configured budget. A negative budget means "do not wait".
+    let max_wait_ms =
+        i32::try_from(cfg.replication.fetch_max_wait.millis_i64_trunc().max(0)).unwrap_or(i32::MAX);
     FetchRequest {
         replica_id: rid,
         replica_state: ReplicaState {
             replica_id: rid,
             ..ReplicaState::default()
         },
-        max_wait_ms: FETCH_MAX_WAIT_MS,
-        min_bytes: FETCH_MIN_BYTES,
-        max_bytes: FETCH_MAX_BYTES,
+        max_wait_ms,
+        min_bytes: cfg.replication.fetch_min.bytes_i32(),
+        max_bytes: cfg.replication.fetch_max.bytes_i32(),
         topics: vec![FetchTopic {
             topic: cfg.topic.clone(),
             topic_id: cfg.topic_id,
@@ -321,7 +318,7 @@ fn build_fetch_request(
                 fetch_offset: fetch_offset.0,
                 current_leader_epoch: leader_epoch,
                 last_fetched_epoch,
-                partition_max_bytes: partition_max_bytes_cap,
+                partition_max_bytes: partition_max_cap.bytes_i32(),
                 ..FetchPartition::default()
             }],
             ..FetchTopic::default()
@@ -458,7 +455,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
         codes::UNKNOWN_TOPIC_OR_PARTITION => {
             // Leader hasn't materialized its side yet
             // (CreateTopics-vs-replicator race).
-            tokio::time::sleep(UNKNOWN_TOPIC_RETRY_DELAY).await;
+            tokio::time::sleep(cfg.replication.unknown_topic_retry_delay.to_std()).await;
             LoopAction::Continue
         }
         codes::NOT_LEADER_OR_FOLLOWER => LoopAction::StopNotLeader,
@@ -488,7 +485,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             // hot-spin the CPU between fetch and fence.
             tokio::select! {
                 () = cfg.shutdown.cancelled() => return LoopAction::StopNotLeader,
-                () = tokio::time::sleep(EPOCH_FENCE_BACKOFF) => {}
+                () = tokio::time::sleep(cfg.replication.epoch_fence_backoff.to_std()) => {}
             }
             LoopAction::Continue
         }
@@ -497,7 +494,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
                 error_code = other,
                 "replicator: unexpected fetch error_code"
             );
-            tokio::time::sleep(UNEXPECTED_ERROR_BACKOFF).await;
+            tokio::time::sleep(cfg.replication.unexpected_error_backoff.to_std()).await;
             LoopAction::Continue
         }
     }
@@ -586,7 +583,7 @@ async fn handle_epoch_fence(cfg: &Config) -> Result<(), String> {
             &cfg.leader_host,
             cfg.leader_port,
             cfg.inter_broker_listener_protocol,
-            "localhost",
+            &cfg.inter_broker_server_name,
             opts,
         )
         .await
@@ -697,22 +694,21 @@ fn build_offset_for_leader_epoch_request(
 }
 
 /// Open a [`Connection`] against the partition's leader, retrying with
-/// exponential backoff (capped at [`RECONNECT_DELAY_CAP`]). Returns `Err`
+/// exponential backoff capped by the configured reconnect policy. Returns `Err`
 /// only if shutdown is requested while we were waiting.
 ///
 /// Routes through the shared [`InterBrokerClient`] so TLS + SASL are run
 /// when the inter-broker listener demands them, and falls back to plain
 /// TCP for `ListenerProtocol::Plaintext`.
 async fn connect_with_backoff(cfg: &Config) -> Result<Connection, String> {
-    let mut delay = RECONNECT_INITIAL_DELAY;
-    let cap = RECONNECT_DELAY_CAP;
+    let mut delay = reconnect_delay(cfg, None);
     loop {
         let opts = connection_options(&cfg.client_id);
         let attempt = cfg.inter_broker_client.connect_as_connection(
             &cfg.leader_host,
             cfg.leader_port,
             cfg.inter_broker_listener_protocol,
-            "localhost",
+            &cfg.inter_broker_server_name,
             opts,
         );
         let result = tokio::select! {
@@ -724,20 +720,26 @@ async fn connect_with_backoff(cfg: &Config) -> Result<Connection, String> {
             Err(e) => {
                 warn!(
                     host = %cfg.leader_host, port = cfg.leader_port, error = %e,
-                    "replicator: connect failed; retrying after {:?}", delay
+                    "replicator: connect failed; retrying after {}", delay.human()
                 );
                 tokio::select! {
                     () = cfg.shutdown.cancelled() => return Err("cancelled".into()),
-                    () = tokio::time::sleep(delay) => {}
+                    () = tokio::time::sleep(delay.to_std()) => {}
                 }
-                delay = next_reconnect_delay(delay, cap);
+                delay = reconnect_delay(cfg, Some(delay));
             }
         }
     }
 }
 
-fn next_reconnect_delay(delay: Duration, cap: Duration) -> Duration {
-    (delay * 2).min(cap)
+fn reconnect_delay(cfg: &Config, previous: Option<Time>) -> Time {
+    previous.map_or(cfg.replication.reconnect_initial_delay, |delay| {
+        // `Time` has no `Ord` — its `f64` storage is only `PartialOrd` — so the
+        // cap is applied by comparison rather than `Ord::min`.
+        let doubled = delay * 2.0;
+        let cap = cfg.replication.reconnect_delay_cap;
+        if doubled > cap { cap } else { doubled }
+    })
 }
 
 #[cfg(test)]
@@ -745,6 +747,7 @@ mod tests {
     use std::{
         collections::{BTreeMap, BTreeSet},
         net::SocketAddr,
+        time::Duration,
     };
 
     use assert2::assert;
@@ -758,6 +761,7 @@ mod tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
+    use crabka_units::{bytes, bytes_per_sec, millis, secs};
     use tokio::sync::watch;
 
     use super::*;
@@ -910,6 +914,8 @@ mod tests {
                 None, None,
             )),
             inter_broker_listener_protocol: ListenerProtocol::Plaintext,
+            inter_broker_server_name: "localhost".into(),
+            replication: ReplicationRuntimeConfig::default(),
             throttle_state: Arc::new(ThrottleState::new()),
             controller: Arc::new(StaticMetadataSource::new(image)),
             log_dir_status: crate::log_dir_status::LogDirRegistry::default(),
@@ -940,22 +946,20 @@ mod tests {
     }
 
     #[test]
-    fn fetch_max_bytes_is_one_mebibyte() {
-        assert!(FETCH_MAX_BYTES == 1_048_576);
-    }
-
-    #[test]
     fn build_fetch_request_populates_replica_and_partition_fields() {
-        let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        cfg.replication.fetch_max = bytes(2_345_678);
+        cfg.replication.fetch_max_wait = millis(321);
+        cfg.replication.fetch_min = bytes(17);
 
-        let req = build_fetch_request(&cfg, Offset(123), 456);
+        let req = build_fetch_request(&cfg, Offset(123), bytes(456));
 
         let rid = i32::try_from(NODE_ID.0).unwrap();
         let expected = FetchRequest {
             replica_id: rid,
-            max_wait_ms: FETCH_MAX_WAIT_MS,
-            min_bytes: FETCH_MIN_BYTES,
-            max_bytes: FETCH_MAX_BYTES,
+            max_wait_ms: 321,
+            min_bytes: 17,
+            max_bytes: 2_345_678,
             isolation_level: 0,
             session_id: 0,
             session_epoch: -1,
@@ -993,7 +997,7 @@ mod tests {
         let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
         cfg.node_id = NodeId(i32::MAX as u64 + 1);
 
-        let req = build_fetch_request(&cfg, Offset(0), FETCH_MAX_BYTES);
+        let req = build_fetch_request(&cfg, Offset(0), cfg.replication.fetch_max);
 
         assert!(req.replica_id == -1);
         assert!(req.replica_state.replica_id == -1);
@@ -1034,27 +1038,38 @@ mod tests {
     }
 
     #[test]
-    fn next_reconnect_delay_doubles_until_cap() {
-        let cases = [
-            // Doubles below the cap.
-            (
-                Duration::from_millis(100),
-                Duration::from_secs(5),
-                Duration::from_millis(200),
-            ),
-            // Clamps at the cap.
-            (
-                Duration::from_secs(4),
-                Duration::from_secs(5),
-                Duration::from_secs(5),
-            ),
-        ];
-        for (current, cap, want) in cases {
-            assert!(
-                next_reconnect_delay(current, cap) == want,
-                "current {current:?} cap {cap:?}"
-            );
-        }
+    fn configured_reconnect_delay_doubles_until_cap() {
+        let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        cfg.replication.reconnect_initial_delay = millis(37);
+        cfg.replication.reconnect_delay_cap = millis(100);
+
+        let first = reconnect_delay(&cfg, None);
+        let second = reconnect_delay(&cfg, Some(first));
+        let capped = reconnect_delay(&cfg, Some(second));
+
+        assert!((first, second, capped) == (millis(37), millis(74), millis(100)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn unexpected_error_uses_configured_backoff() {
+        let (mut cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
+        cfg.replication.unexpected_error_backoff = secs(37);
+        let response = fetch_response(
+            TOPIC,
+            WIRE_TOPIC_ID,
+            partition_response(PARTITION, codes::INVALID_REQUEST),
+        );
+
+        let response_task = tokio::spawn(async move { handle_response(response, &cfg).await });
+        tokio::task::yield_now().await;
+        assert!(!response_task.is_finished());
+
+        tokio::time::advance(Duration::from_secs(36)).await;
+        tokio::task::yield_now().await;
+        assert!(!response_task.is_finished());
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        assert!(response_task.await.unwrap() == LoopAction::Continue);
     }
 
     #[test]
@@ -1072,10 +1087,13 @@ mod tests {
     #[test]
     fn follower_partition_fetch_cap_ignores_unthrottled_partitions() {
         let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
-        cfg.throttle_state.follower_in.set_rate_with_burst(1234, 0);
+        cfg.throttle_state
+            .follower_in
+            .set_byte_rate_with_burst(bytes_per_sec(1234), bytes(0));
 
         assert!(
-            follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(FETCH_MAX_BYTES)
+            follower_partition_fetch_cap(&cfg)
+                == FetchThrottleDecision::Fetch(cfg.replication.fetch_max)
         );
     }
 
@@ -1084,14 +1102,17 @@ mod tests {
         let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
 
         assert!(
-            follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(FETCH_MAX_BYTES)
+            follower_partition_fetch_cap(&cfg)
+                == FetchThrottleDecision::Fetch(cfg.replication.fetch_max)
         );
     }
 
     #[test]
     fn follower_partition_fetch_cap_sleeps_when_throttled_bucket_is_empty() {
         let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
-        cfg.throttle_state.follower_in.set_rate_with_burst(1024, 0);
+        cfg.throttle_state
+            .follower_in
+            .set_byte_rate_with_burst(bytes_per_sec(1024), bytes(0));
 
         assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Sleep);
     }
@@ -1101,9 +1122,9 @@ mod tests {
         let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
         cfg.throttle_state
             .follower_in
-            .set_rate_with_burst(1234, 1234);
+            .set_byte_rate_with_burst(bytes_per_sec(1234), bytes(1234));
 
-        assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(1234));
+        assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(bytes(1234)));
     }
 
     #[tokio::test]

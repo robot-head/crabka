@@ -3,8 +3,6 @@
 //! `ingest::admin_client` pattern; we don't pull in the high-level
 //! `crabka-client-producer` for a one-key-per-write workload.
 
-use std::time::Duration;
-
 use bytes::Bytes;
 use crabka_client_core::Client;
 use crabka_protocol::{
@@ -17,27 +15,28 @@ use crabka_protocol::{
     primitives::uuid::Uuid,
     records::{Record, RecordBatch},
 };
+use crabka_units::convert::TimeExt as _;
 use tracing::debug;
 
-use crate::state_topic::error::{StateTopicError, is_transient_topic_partition_code};
-
-const PRODUCE_RETRY_ATTEMPTS: usize = 50;
-const PRODUCE_RETRY_BACKOFF: Duration = Duration::from_millis(200);
+use crate::{
+    config::RebalancerRuntimePolicy,
+    state_topic::error::{StateTopicError, is_transient_topic_partition_code},
+};
 
 /// Produce a single record to `(topic, partition=0)`. `value=None` is
 /// a tombstone (null value), matching Kafka compaction semantics.
-/// `acks=all`, `timeout_ms=10_000`. Transient error codes (see
-/// [`is_transient_topic_partition_code`]) retry with a short backoff for up
-/// to `PRODUCE_RETRY_ATTEMPTS * PRODUCE_RETRY_BACKOFF` total wait.
+/// Uses `acks=all`; timeout and transient-error retry policy come from the
+/// validated runtime policy.
 pub(crate) async fn produce_state(
     client: &Client,
     topic: &str,
     key: &str,
     value: Option<Bytes>,
+    policy: &RebalancerRuntimePolicy,
 ) -> Result<(), StateTopicError> {
     let key_bytes = Bytes::copy_from_slice(key.as_bytes());
     let mut last_transient: Option<i16> = None;
-    for attempt in 0..PRODUCE_RETRY_ATTEMPTS {
+    for attempt in 0..policy.state_produce_retry_attempts.get() {
         // KIP-516: Produce v13+ keys partition routing by `topic_id`.
         // Resolve it via Metadata on each attempt — also nudges the
         // broker to load the topic into its data plane if it hasn't
@@ -50,13 +49,21 @@ pub(crate) async fn produce_state(
                     attempt,
                     topic, "metadata returned no topic_id; retrying after backoff"
                 );
-                tokio::time::sleep(PRODUCE_RETRY_BACKOFF).await;
+                tokio::time::sleep(policy.state_produce_retry_backoff.to_std()).await;
                 continue;
             }
             Err(e) => return Err(e),
         };
         match classify_send_result(
-            send_once(client, topic, topic_id, &key_bytes, value.clone()).await,
+            send_once(
+                client,
+                topic,
+                topic_id,
+                &key_bytes,
+                value.clone(),
+                policy.state_produce_timeout,
+            )
+            .await,
         ) {
             Ok(None) => return Ok(()),
             Ok(Some(code)) => {
@@ -65,7 +72,7 @@ pub(crate) async fn produce_state(
                     code,
                     attempt, "transient produce error; retrying after backoff"
                 );
-                tokio::time::sleep(PRODUCE_RETRY_BACKOFF).await;
+                tokio::time::sleep(policy.state_produce_retry_backoff.to_std()).await;
             }
             Err(e) => return Err(e),
         }
@@ -108,8 +115,9 @@ async fn send_once(
     topic_id: Uuid,
     key: &Bytes,
     value: Option<Bytes>,
+    produce_timeout: crabka_units::Time,
 ) -> Result<(), StateTopicError> {
-    let req = produce_request(topic, topic_id, key, value);
+    let req = produce_request(topic, topic_id, key, value, produce_timeout);
     let resp = client.send(req).await?;
     if let Some(code) = produce_response_error(&resp) {
         return Err(StateTopicError::ProduceErrorCode { code });
@@ -122,6 +130,7 @@ fn produce_request(
     topic_id: Uuid,
     key: &Bytes,
     value: Option<Bytes>,
+    produce_timeout: crabka_units::Time,
 ) -> ProduceRequest {
     let record = Record {
         key: Some(key.clone()),
@@ -134,7 +143,7 @@ fn produce_request(
     };
     ProduceRequest {
         acks: -1, // all
-        timeout_ms: 10_000,
+        timeout_ms: produce_timeout.millis_i32(),
         topic_data: vec![TopicProduceData {
             name: topic.into(),
             topic_id,
@@ -184,8 +193,12 @@ mod tests {
         },
         records::RecordsPayload,
     };
+    use crabka_units::{Time, millis, secs};
 
     use super::*;
+
+    /// Connect/request timeout for the deliberately-unreachable test client.
+    const CLIENT_TIMEOUT: Time = millis(50);
 
     fn response_with_error(code: i16) -> ProduceResponse {
         ProduceResponse {
@@ -208,8 +221,8 @@ mod tests {
         Client::builder()
             .bootstrap("127.0.0.1:1")
             .client_id(unreachable_client_id(suffix))
-            .connect_timeout(Duration::from_millis(50))
-            .request_timeout(Duration::from_millis(50))
+            .connect_timeout(CLIENT_TIMEOUT)
+            .request_timeout(CLIENT_TIMEOUT)
             .build()
             .await
             .expect("client build does not connect")
@@ -221,7 +234,7 @@ mod tests {
         let key = Bytes::from_static(b"in_flight");
         let value = Some(Bytes::from_static(b"{json}"));
 
-        let req = produce_request("state-topic", topic_id, &key, value.clone());
+        let req = produce_request("state-topic", topic_id, &key, value.clone(), secs(10));
 
         check!(
             (
@@ -347,7 +360,8 @@ mod tests {
                 &client,
                 "__crabka_state",
                 "in_flight",
-                Some(Bytes::from_static(b"{}"))
+                Some(Bytes::from_static(b"{}")),
+                &RebalancerRuntimePolicy::default(),
             )
             .await
             .is_err()
@@ -372,7 +386,8 @@ mod tests {
                 "__crabka_state",
                 Uuid([7; 16]),
                 &key,
-                Some(Bytes::from_static(b"{}"))
+                Some(Bytes::from_static(b"{}")),
+                secs(10),
             )
             .await
             .is_err()

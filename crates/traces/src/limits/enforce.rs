@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
+use crabka_units::{
+    Time,
+    convert::{ByteSizeExt as _, FrequencyExt as _, TimeExt as _},
+};
 use dashmap::DashMap;
+use num_traits::ToPrimitive as _;
 use rate_bucket::RateBucket;
 
 use super::{LimitError, Limits};
@@ -27,10 +32,10 @@ impl IngestEnforcer {
         tenant: &str,
         n_spans: u64,
     ) -> Result<(), LimitError> {
-        if limits.ingestion_rate_spans_per_sec == 0.0 || n_spans == 0 {
+        if limits.ingestion_rate.per_sec_f64() == 0.0 || n_spans == 0 {
             return Ok(());
         }
-        let rate = rounded_positive_rate(limits.ingestion_rate_spans_per_sec);
+        let rate = rounded_positive_rate(limits.ingestion_rate.per_sec_f64());
         if rate == 0 {
             return Ok(());
         }
@@ -58,7 +63,7 @@ impl IngestEnforcer {
             Ok(())
         } else {
             Err(LimitError::IngestionRateExceeded {
-                rate: limits.ingestion_rate_spans_per_sec,
+                rate: limits.ingestion_rate.per_sec_f64(),
                 observed: f64_from_u64(n_spans),
             })
         }
@@ -85,7 +90,7 @@ impl IngestEnforcer {
     /// # Errors
     /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn check_attributes(limits: &Limits, attrs: &[(String, u64)]) -> Result<(), LimitError> {
-        let limit = limits.max_attribute_bytes;
+        let limit = limits.max_attribute.bytes_u64();
         if limit == 0 {
             return Ok(());
         }
@@ -121,14 +126,12 @@ impl QueryEnforcer {
         start_ns: i64,
         end_ns: i64,
     ) -> Result<(), LimitError> {
-        let limit_secs = limits.max_search_duration_secs;
+        let limit_secs = u64::try_from(limits.max_search_duration.secs_i64()).unwrap_or(0);
         if limit_secs == 0 {
             return Ok(());
         }
-        let observed_ns = end_ns.saturating_sub(start_ns);
-        let observed_secs = u64::try_from(observed_ns)
-            .unwrap_or(0)
-            .div_ceil(1_000_000_000);
+        let observed = Time::from_nanos(end_ns.saturating_sub(start_ns));
+        let observed_secs = observed.secs_f64().ceil().to_u64().unwrap_or(0);
         if observed_secs > limit_secs {
             return Err(LimitError::SearchDurationExceeded {
                 limit_secs,
@@ -213,14 +216,15 @@ mod rate_bucket {
 
 #[cfg(test)]
 mod tests {
+    use crabka_units::{bytes, hours, per_sec};
 
     use super::*;
     use crate::limits::{LimitError, Limits};
 
-    fn limits_with(spans: u64, attr_bytes: u64) -> Limits {
+    fn limits_with(spans: u64, attr_bytes: u32) -> Limits {
         Limits {
             max_spans_per_trace: spans,
-            max_attribute_bytes: attr_bytes,
+            max_attribute: bytes(attr_bytes),
             ..Limits::default()
         }
     }
@@ -286,7 +290,7 @@ mod tests {
     fn ingest_rate_bucket_eventually_rejects() {
         let enforcer = IngestEnforcer::new();
         let limits = Limits {
-            ingestion_rate_spans_per_sec: 100.0,
+            ingestion_rate: per_sec(100),
             ingestion_burst_spans: 100,
             ..Limits::default()
         };
@@ -307,7 +311,7 @@ mod tests {
         // burst, sustaining 1000/sec indefinitely).
         let enforcer = IngestEnforcer::new();
         let limits = Limits {
-            ingestion_rate_spans_per_sec: 100.0,
+            ingestion_rate: per_sec(100),
             ingestion_burst_spans: 1000,
             ..Limits::default()
         };
@@ -330,7 +334,7 @@ mod tests {
         // subsequent within-limit request needs (all-or-nothing).
         let enforcer = IngestEnforcer::new();
         let limits = Limits {
-            ingestion_rate_spans_per_sec: 100.0,
+            ingestion_rate: per_sec(100),
             ingestion_burst_spans: 100,
             ..Limits::default()
         };
@@ -349,7 +353,7 @@ mod tests {
     fn search_limit_and_duration_caps() {
         let limits = Limits {
             max_traces_per_search: 1000,
-            max_search_duration_secs: 3600,
+            max_search_duration: hours(1),
             ..Limits::default()
         };
 

@@ -38,7 +38,7 @@ use crate::{PersistMode, error::ExecError};
 /// xids are visibility ordinals, not user-visible sequences, and a leaked xid
 /// is indistinguishable from any other crashed transaction — so this only
 /// trades fsync frequency against gap size. Matches `seq.rs`'s rowid block.
-const DURABLE_XID_BLOCK: u64 = 1024;
+pub(crate) const DURABLE_XID_BLOCK: u64 = 1024;
 
 /// Registry state: `next_xid` is the next xid to hand out; `durable_end` is
 /// the exclusive end of the durably persisted reservation (the on-disk
@@ -57,13 +57,23 @@ pub(crate) struct ProcArray {
     inner: Mutex<Inner>,
     kv: Arc<dyn Kv>,
     mode: PersistMode,
+    durable_block: u64,
 }
 
 impl ProcArray {
     /// Seed the next-xid counter from the durable key. Absent or stale reserved
     /// values are clamped to the first normal xid; reserved xids are MVCC
     /// sentinels and must never be assigned to a real transaction.
+    #[allow(dead_code)]
     pub fn open(kv: Arc<dyn Kv>, mode: PersistMode) -> Result<Self, ExecError> {
+        Self::open_with_block(kv, mode, DURABLE_XID_BLOCK)
+    }
+
+    pub fn open_with_block(
+        kv: Arc<dyn Kv>,
+        mode: PersistMode,
+        durable_block: u64,
+    ) -> Result<Self, ExecError> {
         let next_xid = match kv.get(&crabka_pgkv::key::next_xid_key())? {
             Some(b) => {
                 let (v, _) = U64::read_from_prefix(b.as_slice())
@@ -84,6 +94,7 @@ impl ProcArray {
             }),
             kv,
             mode,
+            durable_block,
         })
     }
 
@@ -114,7 +125,9 @@ impl ProcArray {
                     // allocations that fit the reservation never touch the
                     // store, so concurrent writers' commit batches can group-
                     // commit instead of serializing behind a per-xid fsync.
-                    let new_end = new_next + DURABLE_XID_BLOCK;
+                    let new_end = new_next.checked_add(self.durable_block).ok_or_else(|| {
+                        ExecError::Unsupported("durable XID reservation exhausted u64".into())
+                    })?;
                     self.kv.write_batch(&[crabka_pgkv::WriteOp::Put {
                         key: crabka_pgkv::key::next_xid_key(),
                         value: U64::new(new_end).as_bytes().to_vec(),

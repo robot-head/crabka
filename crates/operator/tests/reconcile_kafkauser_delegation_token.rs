@@ -164,8 +164,8 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
         USER,
         DelegationTokenAuth {
             renewers: vec!["User:bob".into()],
-            max_lifetime_ms: None,
-            renew_before_expiry_ms: None,
+            max_lifetime: None,
+            renew_before_expiry: None,
         },
     );
     reconcile(Arc::new(ku), ctx).await.unwrap();
@@ -185,18 +185,18 @@ async fn delegation_token_user_reconcile_creates_secret_and_status() {
         RecordedCall::CreateDelegationToken {
             owner_principal_name,
             renewers,
-            max_lifetime_ms,
+            max_lifetime,
         } => Some((
             owner_principal_name.clone(),
             renewers.clone(),
-            *max_lifetime_ms,
+            *max_lifetime,
         )),
         _ => None,
     });
     // Owner principal name carries no `User:` prefix; unset
-    // spec.max_lifetime_ms → -1 (broker default).
+    // spec.max_lifetime → `None` (broker default).
     assert!(
-        create_call == Some(("alice".to_string(), vec!["User:bob".to_string()], -1_i64,)),
+        create_call == Some(("alice".to_string(), vec!["User:bob".to_string()], None)),
         "CreateDelegationToken must have been issued with these exact args",
     );
 
@@ -285,8 +285,8 @@ async fn delegation_token_user_reconcile_renews_when_within_threshold() {
     // 7d renew_before with 7d default lifetime → renewal always fires.
     let auth = DelegationTokenAuth {
         renewers: vec![],
-        max_lifetime_ms: None,
-        renew_before_expiry_ms: Some(7 * 24 * 60 * 60 * 1_000),
+        max_lifetime: None,
+        renew_before_expiry: Some(crabka_units::days(7)),
     };
 
     // ── Pass 1: Create + status patch ──────────────────────────────

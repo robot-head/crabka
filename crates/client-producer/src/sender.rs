@@ -4,9 +4,10 @@
 //! The sender is `tokio::spawn`'d by the builder. It owns the `wake_rx`
 //! `Receiver` end of the wake channel (the `Producer` holds the
 //! `wake_tx` `Sender`), the `flush_notify`, the `accumulators` map, and
-//! the `next_seq` map. On every linger tick or wake signal it walks the
-//! accumulators, seals + drains batches, and builds a v2 `RecordBatch` per
-//! batch (allocating its `base_sequence`). Each batch becomes its own
+//! the `next_seq` map. Per-batch deadlines seal only expired current batches,
+//! ready wakes drain completed rollover batches, and forced wakes stay active
+//! until zero-linger, flush, or shutdown work settles. Drained batches become v2
+//! `RecordBatch`es (allocating their `base_sequence`). Each batch becomes its own
 //! single-partition `ProduceRequest`, sent via `Client::broker(id)` — falling
 //! back to the bootstrap `Client::send` when the leader is unknown — with all
 //! of a cycle's requests sent **concurrently** to keep every broker busy.
@@ -31,12 +32,11 @@
 //! the next cycle. The retry slots persist across cycles (owned by [`run`]).
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
-    time::{Duration, Instant},
 };
 
 use crabka_protocol::{
@@ -47,9 +47,16 @@ use crabka_protocol::{
     primitives::uuid::Uuid,
     records::{Attributes, Record, RecordBatch, RecordHeader},
 };
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
+};
 use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
-use tokio::sync::{Mutex, Notify};
+use tokio::{
+    sync::{Mutex, Notify},
+    time::Instant,
+};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -57,7 +64,7 @@ use crate::{
     compression::Compression,
     error::ProducerError,
     partitioner::UniformStickyPartitioner,
-    producer::{Acks, STATE_ACTIVE, STATE_FENCED, TopicMetadata},
+    producer::{Acks, STATE_ACTIVE, STATE_FENCED, TopicMetadata, UNRESOLVED_TOPIC_PARTITION_COUNT},
     record::RecordMetadata,
     transactional::TxnState,
     transport::ProduceTransport,
@@ -84,24 +91,6 @@ mod codes {
 /// `< 0` or whose advertised address the pool can't dial falls back to the
 /// bootstrap `Client::send` rather than `Client::broker(id)`.
 const BOOTSTRAP_LEADER: i32 = -1;
-
-/// Transport attempts to a specific leader before re-routing. `1` means: on the
-/// first failure, re-resolve immediately rather than burning more
-/// `request_timeout`s on a leader that has likely moved (failover). A transient
-/// blip (socket dropped, broker still alive) is handled just as cheaply — the
-/// re-route re-resolves to the same alive leader and reconnects — so paying
-/// multiple full request-timeouts here only slows failover recovery.
-const TRANSPORT_RETRIES: i32 = 1;
-
-/// Wall-clock budget for routing a batch to a reachable leader, measured from
-/// its first send and preserved across resends. Spans a typical failover leader
-/// re-election (the broker session timeout is single-digit seconds) with
-/// margin, then fails the still-unroutable batch so the caller's ack/`flush`
-/// resolves instead of hanging forever. Enforced per cycle in
-/// [`collect_retries`] as a resend batch is about to be re-sent, so a batch that
-/// keeps bouncing between leaders gives up by ~30s rather than resending
-/// indefinitely.
-const ROUTING_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Maximum Produce requests in flight **per partition** at once.
 ///
@@ -143,6 +132,17 @@ const MAX_IN_FLIGHT_PER_PARTITION: usize = 1;
 // time so the assumption can't silently drift.
 const _: [(); 1] = [(); MAX_IN_FLIGHT_PER_PARTITION];
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DrainIntent {
+    /// Send batches already completed by rollover without sealing young
+    /// in-progress batches.
+    Ready,
+    /// Seal only in-progress batches whose own linger deadline elapsed.
+    Expired,
+    /// Seal every in-progress batch for zero linger, explicit flush, or shutdown.
+    Force,
+}
+
 /// All the bits of state the sender task needs. The builder constructs
 /// one of these, hands it to [`run`], and drops it.
 // accumulators map mirrors the Producer field; alias deferred.
@@ -154,9 +154,11 @@ pub(crate) struct SenderConfig {
     pub producer_epoch: i16,
     pub acks: Acks,
     pub compression: Compression,
-    pub linger: Duration,
-    pub request_timeout: Duration,
-    pub retry_backoff: Duration,
+    pub linger: Time,
+    pub request_timeout_ms: i32,
+    pub retries: i32,
+    pub retry_backoff: Time,
+    pub routing_retry_budget: Time,
     /// Maximum number of Produce requests fired **concurrently per drain
     /// cycle**, across all partitions — the cross-partition / per-connection
     /// pipelining bound (Kafka's `max.in.flight.requests.per.connection`).
@@ -176,7 +178,7 @@ pub(crate) struct SenderConfig {
     pub accumulators: AccumulatorMap,
     pub next_seq: Arc<DashMap<(String, i32), i32>>,
     pub state: Arc<AtomicU8>,
-    pub wake_rx: tokio::sync::mpsc::Receiver<()>,
+    pub wake_rx: tokio::sync::mpsc::Receiver<DrainIntent>,
     pub flush_notify: Arc<Notify>,
     /// Shared with `Producer`; tracks batches popped from an accumulator that
     /// are still being sent so `flush` can wait for them. See the field doc on
@@ -214,64 +216,178 @@ struct PipelineState {
     retry: HashMap<(String, i32), PreparedBatch>,
 }
 
+#[derive(Debug)]
+struct Schedule {
+    immediate: bool,
+    deadline: Option<Instant>,
+    settled: bool,
+}
+
+fn include_deadline(schedule: &mut Schedule, deadline: Instant, now: Instant) {
+    if deadline <= now {
+        schedule.immediate = true;
+    } else if schedule.deadline.is_none_or(|current| deadline < current) {
+        schedule.deadline = Some(deadline);
+    }
+}
+
+async fn schedule(cfg: &SenderConfig, state: &PipelineState, force: bool) -> Schedule {
+    let now = Instant::now();
+    let mut schedule = Schedule {
+        immediate: false,
+        deadline: None,
+        settled: state.retry.is_empty() && cfg.in_flight.load(Ordering::Acquire) == 0,
+    };
+
+    for batch in state.retry.values() {
+        schedule.settled = false;
+        if batch_crosses_recovery_barrier(cfg, batch.transaction_generation) {
+            schedule.immediate = true;
+            continue;
+        }
+        let Some(first_sent) = batch.first_sent else {
+            if let Some(backoff_until) = batch.backoff_until {
+                include_deadline(&mut schedule, backoff_until, now);
+            } else {
+                schedule.immediate = true;
+            }
+            continue;
+        };
+        include_deadline(
+            &mut schedule,
+            first_sent
+                .checked_add(cfg.routing_retry_budget.to_std())
+                .unwrap_or(now),
+            now,
+        );
+        if let Some(backoff_until) = batch.backoff_until {
+            include_deadline(&mut schedule, backoff_until, now);
+        } else {
+            schedule.immediate = true;
+        }
+    }
+
+    let keys = cfg
+        .accumulators
+        .iter()
+        .map(|entry| entry.key().clone())
+        .collect::<Vec<_>>();
+    for key in keys {
+        let Some(accumulator) = cfg
+            .accumulators
+            .get(&key)
+            .map(|entry| Arc::clone(entry.value()))
+        else {
+            continue;
+        };
+        let accumulator = accumulator.lock().await;
+        let has_current = accumulator
+            .current
+            .as_ref()
+            .is_some_and(|batch| !batch.is_empty());
+        let has_ready = !accumulator.ready.is_empty();
+        if !has_current && !has_ready {
+            continue;
+        }
+        schedule.settled = false;
+        let has_recovery_invalid =
+            accumulator.current.as_ref().is_some_and(|batch| {
+                batch_crosses_recovery_barrier(cfg, batch.transaction_generation)
+            }) || accumulator
+                .ready
+                .iter()
+                .any(|batch| batch_crosses_recovery_barrier(cfg, batch.transaction_generation));
+        if has_recovery_invalid {
+            schedule.immediate = true;
+            continue;
+        }
+        if state.retry.contains_key(&key) {
+            continue;
+        }
+        if has_ready {
+            schedule.immediate = true;
+        }
+        if let Some(batch) = accumulator
+            .current
+            .as_ref()
+            .filter(|batch| !batch.is_empty())
+        {
+            if force || batch_crosses_recovery_barrier(cfg, batch.transaction_generation) {
+                schedule.immediate = true;
+            } else {
+                include_deadline(
+                    &mut schedule,
+                    batch
+                        .first_append_at
+                        .checked_add(cfg.linger.to_std())
+                        .unwrap_or(now),
+                    now,
+                );
+            }
+        }
+    }
+
+    schedule
+}
+
 #[tracing::instrument(
     level = "debug",
     skip_all,
     fields(producer_id = cfg.producer_id, max_in_flight = cfg.max_in_flight),
 )]
 pub(crate) async fn run(mut cfg: SenderConfig) {
-    let mut ticker = tokio::time::interval(cfg.linger.max(Duration::from_millis(1)));
-    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
     let mut state = PipelineState::default();
-
+    let mut force = false;
+    let mut stopping = false;
     loop {
-        tokio::select! {
-            () = cfg.shutdown.cancelled() => break,
-            _ = ticker.tick() => {
-                drain_once(&mut cfg, &mut state).await;
-            }
-            received = cfg.wake_rx.recv() => {
-                // A closed wake channel means every producer handle is gone,
-                // so no further record can ever arrive: fall through to the
-                // final drain instead of hot-looping on the closed receiver.
-                if received.is_none() {
-                    break;
-                }
-                drain_once(&mut cfg, &mut state).await;
+        let next = schedule(&cfg, &state, force).await;
+        if next.immediate {
+            let intent = if force {
+                DrainIntent::Force
+            } else {
+                DrainIntent::Expired
+            };
+            drain_once(&mut cfg, &mut state, intent).await;
+            continue;
+        }
+        if force && next.settled {
+            force = false;
+            if stopping {
+                break;
             }
         }
-    }
-
-    // Settle everything left when we shut down so neither `close()` nor a
-    // dropped-without-close producer strands records: one drain can cap out at
-    // `max_in_flight` or park a transiently failed batch in a retry slot, so
-    // keep draining on the linger cadence until the accumulators, retry slots,
-    // and in-flight count are all settled. Bounded by the same budget a
-    // failing batch is given before it is terminally failed, so a dead broker
-    // cannot pin the task forever; whatever remains past the budget resolves
-    // its acknowledgements through the drain's terminal-failure paths or drops
-    // as cancellation exactly as before.
-    let settle_deadline = Instant::now() + ROUTING_RETRY_BUDGET;
-    loop {
-        drain_once(&mut cfg, &mut state).await;
-        let mut settled =
-            state.retry.is_empty() && cfg.in_flight.load(std::sync::atomic::Ordering::Acquire) == 0;
-        if settled {
-            for entry in cfg.accumulators.iter() {
-                let accumulator = entry.value().lock().await;
-                if accumulator.current.as_ref().is_some_and(|b| !b.is_empty())
-                    || !accumulator.ready.is_empty()
-                {
-                    settled = false;
-                    break;
-                }
-            }
-        }
-        if settled || Instant::now() >= settle_deadline {
+        if stopping && next.settled {
             break;
         }
-        tokio::time::sleep(cfg.linger.max(Duration::from_millis(1))).await;
+        if stopping {
+            tokio::time::sleep_until(
+                next.deadline
+                    .expect("unsettled stopped sender has a retry deadline"),
+            )
+            .await;
+            continue;
+        }
+
+        let received = if let Some(deadline) = next.deadline {
+            tokio::select! {
+                () = cfg.shutdown.cancelled() => None,
+                received = cfg.wake_rx.recv() => received,
+                () = tokio::time::sleep_until(deadline) => continue,
+            }
+        } else {
+            tokio::select! {
+                () = cfg.shutdown.cancelled() => None,
+                received = cfg.wake_rx.recv() => received,
+            }
+        };
+        match received {
+            Some(DrainIntent::Force) => force = true,
+            Some(DrainIntent::Ready | DrainIntent::Expired) => {}
+            None => {
+                force = true;
+                stopping = true;
+            }
+        }
     }
 }
 
@@ -294,16 +410,17 @@ struct PreparedBatch {
     record_batch: RecordBatch,
     records: Vec<PendingRecord>,
     /// Wall-clock time the batch was first handed to the transport. Set on the
-    /// first send and preserved across resends so the routing-retry budget
-    /// (`ROUTING_RETRY_BUDGET`) is measured from the first attempt, not the
+    /// first send and preserved across resends so the routing retry budget is
+    /// measured from the first attempt, not the
     /// most recent — a batch that keeps failing to route gives up by ~30s.
     first_sent: Option<Instant>,
-    /// When `Some`, the batch is backing off after a **transport/connection**
-    /// failure and must not be resent until this instant. This keeps a leader
-    /// whose pod is down and refusing connections from hot-looping the drain
-    /// every linger tick. Routing redirects (`NOT_LEADER` / `UNKNOWN`) leave
-    /// this `None` so they resend immediately at the freshly-resolved leader.
+    /// When `Some`, the batch must not be resent until this instant after a
+    /// transport failure, missing response, or retriable/routing broker
+    /// response. This prevents failed sends from hot-looping the drain
+    /// scheduler.
     backoff_until: Option<Instant>,
+    /// Resends already admitted after the initial send.
+    retries_used: i32,
     transaction_generation: Option<u64>,
 }
 
@@ -332,22 +449,31 @@ struct PreparedBatch {
     skip_all,
     fields(batches = tracing::field::Empty),
 )]
-async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
+async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState, intent: DrainIntent) {
+    if cfg.state.load(Ordering::Acquire) != STATE_ACTIVE {
+        fence(cfg, state, Vec::new());
+        return;
+    }
     let now = Instant::now();
 
-    // 1. Resends first: each partition's single failed batch must precede any
-    //    new batch for that partition. `collect_retries` drains the retry slots
+    // 1. Fail undrained batches that crossed transaction recovery, then process
+    //    resends: each partition's single failed batch must precede any new
+    //    batch for that partition. `collect_retries` drains the retry slots
     //    and returns batches whose routing budget elapsed, which we fail here
     //    (their in-flight slot was counted at first drain, so `finish_in_flight`
     //    once).
+    fail_recovered_accumulator_batches(cfg).await;
     fail_recovered_retry_slots(cfg, &mut state.retry);
-    let (mut to_send, expired) = collect_retries(&mut state.retry, now);
-    for pb in expired {
-        fail_batch(
-            pb.records,
-            ProducerError::Server(codes::NOT_LEADER_OR_FOLLOWER),
-        );
-        finish_in_flight(cfg);
+    let (mut to_send, mut expired) = collect_retries(
+        &mut state.retry,
+        now,
+        cfg.routing_retry_budget,
+        cfg.max_in_flight,
+    );
+    if !expired.is_empty() {
+        expired.append(&mut to_send);
+        fence(cfg, state, expired);
+        return;
     }
     fail_recovered_batches(cfg, &mut to_send);
 
@@ -363,10 +489,10 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
         .chain(state.retry.keys().cloned())
         .collect();
 
-    // 2. One new batch per idle partition. Across partitions we fan out
+    // 2. One eligible new batch per idle partition. Across partitions we fan out
     //    concurrently, but bound the cycle's total fan-out to `max_in_flight`
     //    (the per-connection pipelining bound); partitions not reached this cycle
-    //    are picked up on the next linger tick (their retry slots carry forward,
+    //    are picked up on the next drain cycle (their retry slots carry forward,
     //    so none is starved). `in_flight` is incremented per new batch while the
     //    accumulator lock is held, so a concurrent `flush` never sees a batch
     //    that is neither in the accumulator nor counted in flight.
@@ -383,13 +509,23 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
             Some(a) => Arc::clone(a.value()),
             None => continue,
         };
-        // Seal the in-progress batch, then take a single ready batch.
+        // Seal only when this drain's cause permits it, then take a single
+        // ready batch. A rollover wake must not pull an unrelated young
+        // partition into the same send.
         {
             let mut a = acc.lock().await;
-            let had_current = a.current.as_ref().is_some_and(|b| !b.is_empty());
-            a.seal_current();
-            if had_current && let Some(num_partitions) = topic_partition_count(cfg, &key.0).await {
-                cfg.partitioner.rotate(&key.0, num_partitions);
+            let should_seal = a.current.as_ref().is_some_and(|batch| {
+                !batch.is_empty()
+                    && (matches!(intent, DrainIntent::Force)
+                        || batch_crosses_recovery_barrier(cfg, batch.transaction_generation)
+                        || (matches!(intent, DrainIntent::Expired)
+                            && now
+                                .saturating_duration_since(batch.first_append_at)
+                                .as_time()
+                                >= cfg.linger))
+            });
+            if should_seal {
+                a.seal_current();
             }
         }
         let batch = {
@@ -401,6 +537,9 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
             b
         };
         let Some(batch) = batch else { continue };
+        if let Some(num_partitions) = topic_partition_count(cfg, &key.0).await {
+            cfg.partitioner.rotate(&key.0, num_partitions);
+        }
         if batch_crosses_recovery_barrier(cfg, batch.transaction_generation) {
             fail_batch(batch.records, ProducerError::RecoveryRequired);
             finish_in_flight(cfg);
@@ -424,7 +563,7 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
 
 /// Drain the per-partition retry slots into an ordered send list (one-slot
 /// model). Each partition holds **at most one** failed batch awaiting a verbatim
-/// resend; a batch whose routing budget ([`ROUTING_RETRY_BUDGET`], measured from
+/// resend; a batch whose routing budget (measured from
 /// its first send) has elapsed is split off into `expired` for the caller to
 /// fail instead of resending. Every resent batch keeps its allocated
 /// `base_sequence` and bytes (the broker dedups a re-landed write via
@@ -435,17 +574,19 @@ async fn drain_once(cfg: &mut SenderConfig, state: &mut PipelineState) {
 fn collect_retries(
     retry: &mut HashMap<(String, i32), PreparedBatch>,
     now: Instant,
+    routing_retry_budget: Time,
+    max_to_send: usize,
 ) -> (Vec<PreparedBatch>, Vec<PreparedBatch>) {
     let mut to_send: Vec<PreparedBatch> = Vec::new();
     let mut expired: Vec<PreparedBatch> = Vec::new();
     // Batches still backing off after a transport failure are re-parked here so
-    // a down/refusing leader doesn't hot-loop the drain on every linger tick.
+    // a down/refusing leader doesn't hot-loop the drain scheduler.
     let mut parked: Vec<((String, i32), PreparedBatch)> = Vec::new();
 
     for (key, mut pb) in retry.drain() {
         if pb
             .first_sent
-            .is_some_and(|t| now.duration_since(t) >= ROUTING_RETRY_BUDGET)
+            .is_some_and(|t| now.duration_since(t).as_time() >= routing_retry_budget)
         {
             expired.push(pb);
             continue;
@@ -455,6 +596,10 @@ fn collect_retries(
         // routing rejection (NOT_LEADER / UNKNOWN_TOPIC) so a partition that is
         // still settling at cold boot isn't hammered in a tight resend loop.
         if pb.backoff_until.is_some_and(|t| now < t) {
+            parked.push((key, pb));
+            continue;
+        }
+        if to_send.len() >= max_to_send {
             parked.push((key, pb));
             continue;
         }
@@ -607,6 +752,7 @@ async fn prepare_batch(
         records: batch.records,
         first_sent: None,
         backoff_until: None,
+        retries_used: 0,
         transaction_generation: batch.transaction_generation,
     }
 }
@@ -646,14 +792,22 @@ async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Ve
     let mut fenced: Option<Vec<PreparedBatch>> = None;
     while let Some(res) = results.next().await {
         let BatchSendResult {
-            pb,
+            mut pb,
             verdict,
             refresh_needed,
         } = res;
         needs_refresh |= refresh_needed;
 
         if let Some(to_fail) = &mut fenced {
-            to_fail.push(pb);
+            match verdict {
+                BatchVerdict::Acked { base_offset } => ack_batch(cfg, pb, base_offset),
+                BatchVerdict::Terminal(code) => terminal_fail_batch(cfg, pb, code),
+                BatchVerdict::RecoveryRequired => {
+                    fail_batch(pb.records, ProducerError::RecoveryRequired);
+                    finish_in_flight(cfg);
+                }
+                BatchVerdict::Retry | BatchVerdict::Fence => to_fail.push(pb),
+            }
             continue;
         }
 
@@ -666,6 +820,9 @@ async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Ve
             // the partition's single retry slot, resent verbatim next cycle. The
             // batch is still outstanding, so its in-flight slot stays counted —
             // no `finish_in_flight` here.
+            BatchVerdict::Retry if take_retry(&mut pb, cfg.retries) => {
+                fenced = Some(vec![pb]);
+            }
             BatchVerdict::Retry => {
                 tracing::debug!(
                     topic = %pb.topic,
@@ -695,6 +852,15 @@ async fn send_batches(cfg: &SenderConfig, state: &mut PipelineState, to_send: Ve
 
     if needs_refresh {
         update_leaders_from_metadata(cfg).await;
+    }
+}
+
+fn take_retry(batch: &mut PreparedBatch, retries: i32) -> bool {
+    if batch.retries_used >= retries {
+        true
+    } else {
+        batch.retries_used += 1;
+        false
     }
 }
 
@@ -764,8 +930,8 @@ fn fence(cfg: &SenderConfig, state: &mut PipelineState, to_fail: Vec<PreparedBat
 /// The instant a transport-failed batch becomes eligible to resend: `now` plus
 /// the configured `retry_backoff`. Pulled out so the offset direction (the
 /// deadline must be in the *future*) is unit-testable.
-fn backoff_deadline(now: Instant, retry_backoff: Duration) -> Instant {
-    now + retry_backoff
+fn backoff_deadline(now: Instant, retry_backoff: Time) -> Instant {
+    now.checked_add(retry_backoff.to_std()).unwrap_or(now)
 }
 
 /// Send a single batch as its own single-partition `ProduceRequest`, resolving
@@ -819,42 +985,30 @@ async fn send_one_batch(cfg: &SenderConfig, mut pb: PreparedBatch) -> BatchSendR
         Some(leader)
     };
 
-    let mut attempts: i32 = 0;
-    let resp: ProduceResponse = loop {
-        attempts += 1;
-        let send = cfg.transport.send_produce(route, req.clone()).await;
-        match send {
-            Ok(r) => break r,
-            Err(e) => {
-                // The cached connection is likely dead (broker bounced / failed
-                // over). Evict it so a reconnect targets the broker's current
-                // address; never evict the shared bootstrap connection.
-                if leader != BOOTSTRAP_LEADER {
-                    cfg.transport.evict_broker(leader);
-                }
-                if attempts >= TRANSPORT_RETRIES {
-                    tracing::warn!(
-                        leader,
-                        partition = pb.partition,
-                        base_sequence = pb.base_sequence,
-                        error = %e,
-                        "produce to leader failed {attempts}×; will re-route",
-                    );
-                    // Transport failure → retry (park in the retry slot, resend
-                    // verbatim). Back off before the resend so a down/refusing
-                    // leader isn't hammered every linger tick, and force a
-                    // metadata refresh so the resend re-resolves to whatever
-                    // leader the cluster (re-)elected.
-                    pb.backoff_until = Some(backoff_deadline(Instant::now(), cfg.retry_backoff));
-                    return BatchSendResult {
-                        pb,
-                        verdict: BatchVerdict::Retry,
-                        refresh_needed: true,
-                    };
-                }
-                tracing::warn!(leader, error = %e, "produce attempt {attempts} failed; reconnecting");
-                tokio::time::sleep(cfg.retry_backoff).await;
+    let resp: ProduceResponse = match cfg.transport.send_produce(route, req).await {
+        Ok(response) => response,
+        Err(error) => {
+            // The cached connection is likely dead (broker bounced / failed
+            // over). Evict it so a reconnect targets the broker's current
+            // address; never evict the shared bootstrap connection.
+            if leader != BOOTSTRAP_LEADER {
+                cfg.transport.evict_broker(leader);
             }
+            tracing::warn!(
+                leader,
+                partition = pb.partition,
+                base_sequence = pb.base_sequence,
+                error = %error,
+                "produce to leader failed; will re-route",
+            );
+            // Park the batch for a verbatim resend after backoff, and refresh
+            // metadata so the resend targets the current leader.
+            pb.backoff_until = Some(backoff_deadline(Instant::now(), cfg.retry_backoff));
+            return BatchSendResult {
+                pb,
+                verdict: BatchVerdict::Retry,
+                refresh_needed: true,
+            };
         }
     };
 
@@ -970,7 +1124,7 @@ fn build_single_batch_request(cfg: &SenderConfig, pb: &PreparedBatch) -> Produce
     ProduceRequest {
         transactional_id: req_txn_id,
         acks: cfg.acks.wire(),
-        timeout_ms: i32::try_from(cfg.request_timeout.as_millis()).unwrap_or(i32::MAX),
+        timeout_ms: cfg.request_timeout_ms,
         topic_data: vec![TopicProduceData {
             name: pb.topic.clone(),
             topic_id: pb.topic_id,
@@ -1012,7 +1166,9 @@ async fn update_leaders_from_metadata(cfg: &SenderConfig) {
             // backfill it on resend (see `send_one_batch`). Only update topics we
             // already track, so a full-cluster refresh doesn't bloat the cache.
             if let Some(entry) = cache.get_mut(name) {
-                entry.num_partitions = i32::try_from(t.partitions.len()).unwrap_or(1).max(1);
+                entry.num_partitions = i32::try_from(t.partitions.len())
+                    .unwrap_or(UNRESOLVED_TOPIC_PARTITION_COUNT)
+                    .max(UNRESOLVED_TOPIC_PARTITION_COUNT);
                 entry.topic_id = t.topic_id;
             }
         }
@@ -1054,6 +1210,41 @@ fn fail_recovered_retry_slots(
             .expect("recovered retry key remains present");
         fail_batch(batch.records, ProducerError::RecoveryRequired);
         finish_in_flight(cfg);
+    }
+}
+
+async fn fail_recovered_accumulator_batches(cfg: &SenderConfig) {
+    let accumulators = cfg
+        .accumulators
+        .iter()
+        .map(|entry| Arc::clone(entry.value()))
+        .collect::<Vec<_>>();
+    let mut failed_any = false;
+    for accumulator in accumulators {
+        let mut accumulator = accumulator.lock().await;
+        if accumulator
+            .current
+            .as_ref()
+            .is_some_and(|batch| batch_crosses_recovery_barrier(cfg, batch.transaction_generation))
+            && let Some(batch) = accumulator.current.take()
+        {
+            fail_batch(batch.records, ProducerError::RecoveryRequired);
+            failed_any = true;
+        }
+
+        let mut retained = VecDeque::with_capacity(accumulator.ready.len());
+        while let Some(batch) = accumulator.ready.pop_front() {
+            if batch_crosses_recovery_barrier(cfg, batch.transaction_generation) {
+                fail_batch(batch.records, ProducerError::RecoveryRequired);
+                failed_any = true;
+            } else {
+                retained.push_back(batch);
+            }
+        }
+        accumulator.ready = retained;
+    }
+    if failed_any {
+        cfg.flush_notify.notify_waiters();
     }
 }
 
@@ -1169,7 +1360,7 @@ fn fail_batch(records: Vec<PendingRecord>, err: ProducerError) {
             ProducerError::RecordTooLarge { record_size } => Some(ProducerError::RecordTooLarge {
                 record_size: *record_size,
             }),
-            ProducerError::InvalidConfig(s) => Some(ProducerError::InvalidConfig(s)),
+            ProducerError::InvalidConfig(s) => Some(ProducerError::InvalidConfig(s.clone())),
             _ => None, // Client, Protocol, Compression — not Clone.
         }
     }
@@ -1190,7 +1381,10 @@ fn fail_batch(records: Vec<PendingRecord>, err: ProducerError) {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use assert2::check;
+    use crabka_units::{millis, secs};
     use tokio::sync::oneshot;
 
     use super::*;
@@ -1236,6 +1430,7 @@ mod tests {
             records: vec![record],
             first_sent,
             backoff_until: None,
+            retries_used: 0,
             transaction_generation: None,
         };
         (pb, rx)
@@ -1301,14 +1496,14 @@ mod tests {
         // one is returned to send. The map is fully drained either way.
         let mut retry: HashMap<(String, i32), PreparedBatch> = HashMap::new();
         let long_ago = Instant::now()
-            .checked_sub(ROUTING_RETRY_BUDGET + Duration::from_secs(1))
+            .checked_sub(Duration::from_secs(31))
             .expect("instant in range");
         let (old, _rx_old) = prepared("t", 0, 0, Some(long_ago));
         let (recent, _rx_recent) = prepared("t", 1, 16, Some(Instant::now()));
         retry.insert(("t".to_string(), 0), old);
         retry.insert(("t".to_string(), 1), recent);
 
-        let (to_send, expired) = collect_retries(&mut retry, Instant::now());
+        let (to_send, expired) = collect_retries(&mut retry, Instant::now(), secs(30), usize::MAX);
 
         check!(
             (
@@ -1322,13 +1517,56 @@ mod tests {
     }
 
     #[test]
+    fn collect_retries_caps_sends_but_still_extracts_every_expired_batch() {
+        let now = Instant::now();
+        let long_ago = now
+            .checked_sub(Duration::from_secs(31))
+            .expect("instant in range");
+        let mut retry = HashMap::new();
+        for partition in 0..5 {
+            let first_sent = Some(if partition == 4 { long_ago } else { now });
+            let (batch, _rx) = prepared("t", partition, partition * 16, first_sent);
+            retry.insert(("t".to_owned(), partition), batch);
+        }
+
+        let (to_send, expired) = collect_retries(&mut retry, now, secs(30), 2);
+
+        assert_eq!(to_send.len(), 2);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(retry.len(), 2);
+    }
+
+    #[test]
+    fn retry_count_exhausts_after_configured_resends() {
+        let (mut batch, _rx) = prepared("t", 0, 0, None);
+
+        assert2::assert!(!take_retry(&mut batch, 1));
+        assert2::assert!(take_retry(&mut batch, 1));
+    }
+
+    #[test]
+    fn routing_budget_uses_configured_duration() {
+        let mut retry = HashMap::new();
+        let now = Instant::now();
+        let first_sent = now
+            .checked_sub(Duration::from_millis(11))
+            .expect("instant in range");
+        let (old, _rx) = prepared("t", 0, 0, Some(first_sent));
+        retry.insert(("t".to_owned(), 0), old);
+
+        let (to_send, expired) = collect_retries(&mut retry, now, millis(10), usize::MAX);
+
+        assert2::assert!((to_send.len(), expired.len()) == (0, 1));
+    }
+
+    #[test]
     fn collect_retries_sets_first_sent_when_unset() {
         let mut retry: HashMap<(String, i32), PreparedBatch> = HashMap::new();
         let (pb, _rx) = prepared("t", 0, 0, None);
         retry.insert(("t".to_string(), 0), pb);
 
         let now = Instant::now();
-        let (to_send, expired) = collect_retries(&mut retry, now);
+        let (to_send, expired) = collect_retries(&mut retry, now, secs(30), usize::MAX);
 
         check!((expired.is_empty(), to_send.len(), to_send[0].first_sent) == (true, 1, Some(now)));
     }
@@ -1337,8 +1575,8 @@ mod tests {
     fn collect_retries_honours_connection_backoff_until() {
         // A batch parked with `backoff_until` set (after a transport failure)
         // must NOT be resent until that instant passes — otherwise a leader
-        // whose pod is down and refusing connections hot-loops the drain every
-        // linger tick. The three sample points (before / exactly at / after the
+        // whose pod is down and refusing connections hot-loops the drain
+        // scheduler. The three sample points (before / exactly at / after the
         // backoff instant) pin the `now < backoff_until` comparison so no
         // `<` → `<=`/`>`/`>=`/`==`/`!=` mutant survives.
         let backoff = Duration::from_millis(100);
@@ -1350,7 +1588,8 @@ mod tests {
             let (mut pb, _rx) = prepared("t", 0, 0, Some(now));
             pb.backoff_until = Some(now + backoff);
             retry.insert(("t".to_string(), 0), pb);
-            let (to_send, expired) = collect_retries(&mut retry, now + elapsed);
+            let (to_send, expired) =
+                collect_retries(&mut retry, now + elapsed, secs(30), usize::MAX);
             assert2::assert!(expired.is_empty());
             (to_send.len(), retry.len())
         };
@@ -1374,8 +1613,8 @@ mod tests {
         // `now`. A `+` -> `-` (deadline in the past) would disable the backoff
         // and re-admit the connection-refused hot loop.
         let now = Instant::now();
-        let d = Duration::from_millis(100);
-        assert2::assert!(backoff_deadline(now, d) == now + d);
+        let d = millis(100);
+        assert2::assert!(backoff_deadline(now, d) == now + d.to_std());
     }
 
     #[test]
@@ -1399,9 +1638,12 @@ mod tests {
 /// described in the module docs.
 #[cfg(test)]
 mod harness {
-    use std::sync::{
-        Mutex as StdMutex,
-        atomic::{AtomicBool, AtomicI64, AtomicU64},
+    use std::{
+        sync::{
+            Mutex as StdMutex,
+            atomic::{AtomicBool, AtomicI64, AtomicU64},
+        },
+        time::Duration,
     };
 
     use assert2::check;
@@ -1418,6 +1660,7 @@ mod harness {
         },
         records::{Attributes, Record, RecordBatch},
     };
+    use crabka_units::{millis, minutes, secs};
     use tokio::sync::oneshot;
 
     use super::*;
@@ -1514,6 +1757,9 @@ mod harness {
         /// Signals each entry into `send_produce`, including injected failures
         /// before the broker model applies a request.
         send_started: Notify,
+        active_sends: AtomicUsize,
+        peak_active_sends: AtomicUsize,
+        fail_next_sends: AtomicUsize,
         /// Count of `refresh_metadata` calls, so a test can assert the sender
         /// refreshed after a routing/transport failure.
         refreshes: AtomicUsize,
@@ -1556,6 +1802,9 @@ mod harness {
                 known_brokers: StdMutex::new(HashSet::new()),
                 sent_leaders: StdMutex::new(Vec::new()),
                 send_started: Notify::new(),
+                active_sends: AtomicUsize::new(0),
+                peak_active_sends: AtomicUsize::new(0),
+                fail_next_sends: AtomicUsize::new(0),
                 refreshes: AtomicUsize::new(0),
                 offsets_seen: AtomicI64::new(0),
             })
@@ -1563,6 +1812,14 @@ mod harness {
 
         fn fail_once_on(self: &Arc<Self>, seq: i32) {
             *self.fail_once_seq.lock().unwrap() = Some(seq);
+        }
+
+        fn fail_next(self: &Arc<Self>, count: usize) {
+            self.fail_next_sends.store(count, Ordering::Release);
+        }
+
+        fn peak_active_sends(self: &Arc<Self>) -> usize {
+            self.peak_active_sends.load(Ordering::Acquire)
         }
 
         fn fail_once_on_leader(self: &Arc<Self>, leader: i32) {
@@ -1696,10 +1953,30 @@ mod harness {
             leader: Option<i32>,
             req: ProduceRequest,
         ) -> Result<ProduceResponse, ClientError> {
+            struct ActiveSend<'a>(&'a AtomicUsize);
+            impl Drop for ActiveSend<'_> {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+
+            let active = self.active_sends.fetch_add(1, Ordering::AcqRel) + 1;
+            self.peak_active_sends.fetch_max(active, Ordering::AcqRel);
+            let _active_send = ActiveSend(&self.active_sends);
             self.sent_leaders.lock().unwrap().push(leader);
             self.send_started.notify_one();
             self.last_timeout_ms
                 .store(i64::from(req.timeout_ms), Ordering::Relaxed);
+
+            if self
+                .fail_next_sends
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err(ClientError::Disconnected);
+            }
 
             if let Some(delay) =
                 leader.and_then(|id| self.leader_delay.lock().unwrap().get(&id).copied())
@@ -1808,7 +2085,7 @@ mod harness {
         partition_leaders: Arc<DashMap<(String, i32), i32>>,
         metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>>,
         state: Arc<AtomicU8>,
-        wake_tx: tokio::sync::mpsc::Sender<()>,
+        wake_tx: tokio::sync::mpsc::Sender<DrainIntent>,
         flush_notify: Arc<Notify>,
         in_flight: Arc<AtomicUsize>,
         shutdown: CancellationToken,
@@ -1819,18 +2096,38 @@ mod harness {
         handle: tokio::task::JoinHandle<()>,
     }
 
-    /// Spawn a sender backed by `transport`, with `max_in_flight` and a fast
-    /// 1ms linger so the loop spins quickly.
+    /// Spawn a sender backed by `transport`, with `max_in_flight` and a 1ms
+    /// linger so batch deadlines expire quickly.
     fn spawn_sender(transport: Arc<MockTransport>, max_in_flight: usize) -> Harness {
-        spawn_sender_with(transport, max_in_flight, Duration::from_millis(1))
+        spawn_sender_with(transport, max_in_flight, millis(1))
     }
 
-    /// Spawn a sender with an explicit `linger`. A long linger lets a test
-    /// observe wake-triggered drains in isolation (no empty linger-tick drains).
+    /// Spawn a sender with an explicit `linger`. A long linger keeps the batch
+    /// deadline in the future so a test can observe wake-triggered drains in
+    /// isolation.
     fn spawn_sender_with(
         transport: Arc<MockTransport>,
         max_in_flight: usize,
-        linger: Duration,
+        linger: Time,
+    ) -> Harness {
+        spawn_sender_with_retries(transport, max_in_flight, linger, i32::MAX)
+    }
+
+    fn spawn_sender_with_retries(
+        transport: Arc<MockTransport>,
+        max_in_flight: usize,
+        linger: Time,
+        retries: i32,
+    ) -> Harness {
+        spawn_sender_with_policy(transport, max_in_flight, linger, retries, secs(30))
+    }
+
+    fn spawn_sender_with_policy(
+        transport: Arc<MockTransport>,
+        max_in_flight: usize,
+        linger: Time,
+        retries: i32,
+        routing_retry_budget: Time,
     ) -> Harness {
         let accumulators: AccumulatorMap = Arc::new(DashMap::new());
         let next_seq: Arc<DashMap<(String, i32), i32>> = Arc::new(DashMap::new());
@@ -1855,8 +2152,10 @@ mod harness {
             acks: Acks::All,
             compression: Compression::None,
             linger,
-            request_timeout: Duration::from_secs(5),
-            retry_backoff: Duration::from_millis(1),
+            request_timeout_ms: 5_000,
+            retries,
+            retry_backoff: millis(1),
+            routing_retry_budget,
             max_in_flight,
             metadata_cache: Arc::clone(&metadata_cache),
             partition_leaders: Arc::clone(&partition_leaders),
@@ -1917,7 +2216,7 @@ mod harness {
             let mut a = acc.lock().await;
             let rx =
                 match a.try_append(None, Some(bytes::Bytes::from_static(b"x")), vec![], 0, None) {
-                    crate::accumulator::AppendResult::Appended(rx) => rx,
+                    crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
                     crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
                 };
             // Seal so each record becomes its own ready batch with a distinct
@@ -1925,7 +2224,7 @@ mod harness {
             a.seal_current();
             rxs.push(rx);
         }
-        let _ = h.wake_tx.try_send(());
+        let _ = h.wake_tx.try_send(DrainIntent::Ready);
         rxs
     }
 
@@ -1941,7 +2240,7 @@ mod harness {
         n: usize,
     ) -> Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>> {
         let rxs = produce_single_batch_without_wake(h, topic, partition, n).await;
-        let _ = h.wake_tx.try_send(());
+        let _ = h.wake_tx.try_send(DrainIntent::Force);
         rxs
     }
 
@@ -1970,7 +2269,7 @@ mod harness {
                     0,
                     None,
                 ) {
-                    crate::accumulator::AppendResult::Appended(rx) => rx,
+                    crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
                     crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
                 };
                 rxs.push(rx);
@@ -1979,9 +2278,390 @@ mod harness {
         rxs
     }
 
+    async fn produce_ready_batches_without_wake(
+        h: &Harness,
+        topic: &str,
+        partition: i32,
+        n: usize,
+    ) -> Vec<oneshot::Receiver<Result<RecordMetadata, ProducerError>>> {
+        let key = (topic.to_owned(), partition);
+        let accumulator = h
+            .accumulators
+            .entry(key)
+            .or_insert_with(|| Arc::new(Mutex::new(Accumulator::new(16 * 1024))))
+            .value()
+            .clone();
+        let mut receivers = Vec::with_capacity(n);
+        let mut accumulator = accumulator.lock().await;
+        for _ in 0..n {
+            let receiver = match accumulator.try_append(
+                None,
+                Some(bytes::Bytes::from_static(b"x")),
+                vec![],
+                0,
+                None,
+            ) {
+                crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
+                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+            };
+            accumulator.seal_current();
+            receivers.push(receiver);
+        }
+        receivers
+    }
+
     async fn shutdown(h: Harness) {
         h.shutdown.cancel();
         let _ = h.handle.await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nonzero_linger_coalesces_until_the_batch_expires() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, millis(100));
+        let rxs = produce_single_batch_without_wake(&h, "t", 0, 2).await;
+
+        tokio::task::yield_now().await;
+        assert_eq!(transport.send_count(), 0, "young batch sent before linger");
+
+        tokio::time::advance(Duration::from_millis(99)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(transport.send_count(), 0, "young batch sent before linger");
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        let mut offsets = Vec::new();
+        for rx in rxs {
+            offsets.push(
+                rx.await
+                    .expect("ack channel remains connected")
+                    .expect("coalesced batch is acknowledged")
+                    .offset,
+            );
+        }
+        assert_eq!(offsets, vec![0, 1]);
+        assert_eq!(transport.send_count(), 1);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn rollover_wake_sends_ready_only_and_leaves_young_currents_open() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, millis(100));
+        tokio::task::yield_now().await;
+
+        let rollover = Arc::new(Mutex::new(Accumulator::new(20)));
+        h.accumulators
+            .insert(("t".to_owned(), 0), Arc::clone(&rollover));
+        let (ready_rx, current_rx) = {
+            let mut accumulator = rollover.lock().await;
+            let ready = match accumulator.try_append(
+                None,
+                Some(bytes::Bytes::from_static(b"a")),
+                vec![],
+                0,
+                None,
+            ) {
+                crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
+                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+            };
+            let current = match accumulator.try_append(
+                None,
+                Some(bytes::Bytes::from_static(b"b")),
+                vec![],
+                0,
+                None,
+            ) {
+                crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
+                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+            };
+            (ready, current)
+        };
+
+        let unrelated = Arc::new(Mutex::new(Accumulator::new(1024)));
+        h.accumulators
+            .insert(("t".to_owned(), 1), Arc::clone(&unrelated));
+        let unrelated_rx = match unrelated.lock().await.try_append(
+            None,
+            Some(bytes::Bytes::from_static(b"young")),
+            vec![],
+            0,
+            None,
+        ) {
+            crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
+            crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+        };
+
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+        ready_rx
+            .await
+            .expect("ready ack channel remains connected")
+            .expect("ready rollover batch is acknowledged");
+
+        assert_eq!(transport.send_count(), 1);
+        assert!(rollover.lock().await.current.is_some());
+        assert!(unrelated.lock().await.current.is_some());
+
+        drop((current_rx, unrelated_rx));
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn zero_linger_force_wake_sends_without_advancing_time() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, secs(0));
+        tokio::task::yield_now().await;
+        let mut rxs = produce_single_batch_without_wake(&h, "t", 0, 1).await;
+
+        h.wake_tx
+            .send(DrainIntent::Force)
+            .await
+            .expect("sender is running");
+        rxs.remove(0)
+            .await
+            .expect("ack channel remains connected")
+            .expect("zero-linger batch is acknowledged");
+        assert_eq!(transport.send_count(), 1);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn explicit_flush_intent_bypasses_nonzero_linger() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, minutes(1));
+        tokio::task::yield_now().await;
+        let mut rxs = produce_single_batch_without_wake(&h, "t", 0, 1).await;
+
+        h.wake_tx
+            .send(DrainIntent::Force)
+            .await
+            .expect("sender is running");
+        rxs.remove(0)
+            .await
+            .expect("ack channel remains connected")
+            .expect("explicitly flushed batch is acknowledged");
+        assert_eq!(transport.send_count(), 1);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn off_phase_append_sends_at_its_own_linger_deadline() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, millis(100));
+        tokio::task::yield_now().await;
+        tokio::time::advance(Duration::from_millis(50)).await;
+        let mut receivers = produce_single_batch_without_wake(&h, "t", 0, 1).await;
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+
+        tokio::time::advance(Duration::from_millis(99)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(transport.send_count(), 0);
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert_eq!(transport.send_count(), 1);
+        receivers
+            .remove(0)
+            .await
+            .expect("ack channel remains connected")
+            .expect("batch is acknowledged at its own deadline");
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn force_drains_more_partitions_than_max_in_flight_without_linger_wait() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 2, minutes(1));
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        let mut receivers = Vec::new();
+        for partition in 0..6 {
+            receivers.extend(produce_single_batch_without_wake(&h, "t", partition, 1).await);
+        }
+
+        h.wake_tx
+            .send(DrainIntent::Force)
+            .await
+            .expect("sender is running");
+        for receiver in receivers {
+            receiver
+                .await
+                .expect("ack channel remains connected")
+                .expect("forced batch is acknowledged");
+        }
+        assert_eq!(Instant::now(), start);
+        assert_eq!(transport.send_count(), 6);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn eligible_retries_never_exceed_max_in_flight() {
+        let transport = MockTransport::new(Duration::from_millis(1));
+        transport.fail_next(6);
+        let h = spawn_sender_with(transport.clone(), 2, minutes(1));
+        let mut receivers = Vec::new();
+        for partition in 0..6 {
+            receivers.extend(produce_ready_batches_without_wake(&h, "t", partition, 1).await);
+        }
+
+        h.wake_tx
+            .send(DrainIntent::Force)
+            .await
+            .expect("sender is running");
+        while transport.send_count() < 6 {
+            tokio::task::yield_now().await;
+        }
+        tokio::time::advance(Duration::from_millis(1)).await;
+
+        for receiver in receivers {
+            receiver
+                .await
+                .expect("ack channel remains connected")
+                .expect("retry is acknowledged");
+        }
+        assert_eq!(transport.send_count(), 12);
+        assert_eq!(transport.peak_active_sends(), 2);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn force_drains_multiple_ready_batches_from_one_partition_without_linger_wait() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, minutes(1));
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        let receivers = produce_ready_batches_without_wake(&h, "t", 0, 3).await;
+
+        h.wake_tx
+            .send(DrainIntent::Force)
+            .await
+            .expect("sender is running");
+        for receiver in receivers {
+            receiver
+                .await
+                .expect("ack channel remains connected")
+                .expect("forced batch is acknowledged");
+        }
+        assert_eq!(Instant::now(), start);
+        assert_eq!(transport.send_count(), 3);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn one_ready_wake_drains_coalesced_backlog_past_the_cycle_cap() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 2, minutes(1));
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        let mut receivers = Vec::new();
+        for partition in 0..6 {
+            receivers.extend(produce_ready_batches_without_wake(&h, "t", partition, 1).await);
+        }
+
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+        for receiver in receivers {
+            receiver
+                .await
+                .expect("ack channel remains connected")
+                .expect("ready batch is acknowledged");
+        }
+        assert_eq!(Instant::now(), start);
+        assert_eq!(transport.send_count(), 6);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_release_resumes_same_partition_ready_backlog() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.fail_once_on(0);
+        let h = spawn_sender_with(transport.clone(), 5, minutes(1));
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        let receivers = produce_ready_batches_without_wake(&h, "t", 0, 2).await;
+        let first_send = transport.send_started.notified();
+        tokio::pin!(first_send);
+        first_send.as_mut().enable();
+
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+        first_send.await;
+        for receiver in receivers {
+            receiver
+                .await
+                .expect("ack channel remains connected")
+                .expect("retry and queued batch are acknowledged");
+        }
+        assert_eq!(
+            Instant::now().duration_since(start),
+            Duration::from_millis(1)
+        );
+        assert_eq!(transport.send_count(), 3);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn shutdown_drains_multiple_batches_without_waiting_for_linger() {
+        let transport = MockTransport::new(Duration::ZERO);
+        let h = spawn_sender_with(transport.clone(), 5, minutes(1));
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        let receivers = produce_ready_batches_without_wake(&h, "t", 0, 3).await;
+
+        h.shutdown.cancel();
+        h.handle.await.expect("sender shuts down cleanly");
+        assert_eq!(Instant::now(), start);
+        assert_eq!(transport.send_count(), 3);
+        drop(receivers);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn channel_close_waits_for_retry_deadline_not_linger() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.fail_once_on(0);
+        let h = spawn_sender_with(transport.clone(), 5, minutes(1));
+        tokio::task::yield_now().await;
+        let mut receivers = produce_ready_batches_without_wake(&h, "t", 0, 1).await;
+        let first_send = transport.send_started.notified();
+        tokio::pin!(first_send);
+        first_send.as_mut().enable();
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+        first_send.await;
+        let start = Instant::now();
+
+        drop(h.wake_tx);
+        h.handle.await.expect("closed sender drains cleanly");
+        assert_eq!(
+            Instant::now().duration_since(start),
+            Duration::from_millis(1)
+        );
+        assert_eq!(transport.send_count(), 2);
+        receivers
+            .remove(0)
+            .await
+            .expect("ack channel remains connected")
+            .expect("retry is acknowledged before close");
     }
 
     /// THE REGRESSION TEST for the same-partition pipelining hang.
@@ -2204,7 +2884,7 @@ mod harness {
 
         let mut dead_rx = produce_single_batch_without_wake(&h, "t", 0, 1).await;
         let mut live_rx = produce_single_batch_without_wake(&h, "t", 1, 1).await;
-        let _ = h.wake_tx.try_send(());
+        let _ = h.wake_tx.try_send(DrainIntent::Force);
 
         let live_md = tokio::time::timeout(Duration::from_millis(100), live_rx.remove(0))
             .await
@@ -2432,6 +3112,87 @@ mod harness {
         .await;
         assert2::assert!(drained.is_ok());
 
+        shutdown(h).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exhausted_retry_fences_before_a_sequence_gap_can_be_sent() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.inject_code_once(0, codes::NOT_LEADER_OR_FOLLOWER);
+        let h = spawn_sender_with_retries(transport.clone(), 1, millis(1), 0);
+
+        let first = produce_burst(&h, "t", 0, 1).await.pop().expect("first ack");
+        let first_error = tokio::time::timeout(Duration::from_secs(1), first)
+            .await
+            .expect("first ack resolves")
+            .expect("first sender remains")
+            .expect_err("exhausted batch must fail");
+        assert2::assert!(matches!(first_error, ProducerError::FencedProducer));
+        assert2::assert!(h.state.load(Ordering::Acquire) == STATE_FENCED);
+
+        let second = produce_burst(&h, "t", 0, 1)
+            .await
+            .pop()
+            .expect("second ack");
+        let second_error = tokio::time::timeout(Duration::from_secs(1), second)
+            .await
+            .expect("second ack resolves")
+            .expect("second sender remains")
+            .expect_err("fenced producer rejects later records");
+        assert2::assert!(matches!(second_error, ProducerError::FencedProducer));
+        assert2::assert!(transport.send_count() == 1);
+
+        shutdown(h).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_exhaustion_preserves_concurrent_successful_ack() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.add_known_broker(0);
+        transport.add_known_broker(1);
+        transport.fail_once_on_leader(0);
+        transport.delay_leader(1, Duration::from_millis(20));
+        let h = spawn_sender_with_retries(transport.clone(), 2, secs(1), 0);
+        h.partition_leaders.insert(("t".to_owned(), 0), 0);
+        h.partition_leaders.insert(("t".to_owned(), 1), 1);
+
+        let mut failed = produce_single_batch_without_wake(&h, "t", 0, 1).await;
+        let mut accepted = produce_single_batch_without_wake(&h, "t", 1, 1).await;
+        let _ = h.wake_tx.try_send(DrainIntent::Force);
+
+        let failed_error = tokio::time::timeout(Duration::from_secs(1), failed.remove(0))
+            .await
+            .expect("failed ack resolves")
+            .expect("failed sender remains")
+            .expect_err("exhausted partition must fence");
+        let accepted_metadata = tokio::time::timeout(Duration::from_secs(1), accepted.remove(0))
+            .await
+            .expect("accepted ack resolves")
+            .expect("accepted sender remains")
+            .expect("broker-accepted partition must remain acknowledged");
+
+        assert2::assert!(matches!(failed_error, ProducerError::FencedProducer));
+        assert2::assert!((accepted_metadata.partition, accepted_metadata.offset) == (1, 0));
+        assert2::assert!(h.state.load(Ordering::Acquire) == STATE_FENCED);
+        assert2::assert!(transport.send_count() == 2);
+        shutdown(h).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn exhausted_routing_budget_fences_the_producer() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.inject_code_once(0, codes::NOT_LEADER_OR_FOLLOWER);
+        let h = spawn_sender_with_policy(transport, 1, millis(1), i32::MAX, millis(1));
+
+        let ack = produce_burst(&h, "t", 0, 1).await.pop().expect("ack");
+        let error = tokio::time::timeout(Duration::from_secs(1), ack)
+            .await
+            .expect("ack resolves")
+            .expect("sender remains")
+            .expect_err("expired batch must fail");
+
+        assert2::assert!(matches!(error, ProducerError::FencedProducer));
+        assert2::assert!(h.state.load(Ordering::Acquire) == STATE_FENCED);
         shutdown(h).await;
     }
 
@@ -2679,10 +3440,88 @@ mod harness {
         shutdown(h).await;
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn recovery_fails_accumulator_batches_even_behind_same_partition_retry() {
+        let transport = MockTransport::new(Duration::ZERO);
+        transport.fail_next(1);
+        let h = spawn_sender_with(transport.clone(), 1, minutes(1));
+        let retry_receiver = produce_ready_batches_without_wake(&h, "t", 0, 1)
+            .await
+            .remove(0);
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+        while transport.send_count() < 1 {
+            tokio::task::yield_now().await;
+        }
+
+        let accumulator = h
+            .accumulators
+            .get(&("t".to_owned(), 0))
+            .expect("accumulator exists")
+            .value()
+            .clone();
+        let (ready_receiver, current_receiver) = {
+            let mut accumulator = accumulator.lock().await;
+            let ready_receiver = match accumulator.try_append(
+                None,
+                Some(bytes::Bytes::from_static(b"old-ready")),
+                vec![],
+                0,
+                Some(0),
+            ) {
+                crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
+                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+            };
+            accumulator.seal_current();
+            let current_receiver = match accumulator.try_append(
+                None,
+                Some(bytes::Bytes::from_static(b"old-current")),
+                vec![],
+                0,
+                Some(0),
+            ) {
+                crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
+                crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
+            };
+            (ready_receiver, current_receiver)
+        };
+
+        h.recovery_generation.store(1, Ordering::Release);
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
+        for receiver in [ready_receiver, current_receiver] {
+            let result = receiver
+                .await
+                .expect("recovery acknowledgement channel remains connected");
+            assert!(matches!(result, Err(ProducerError::RecoveryRequired)));
+        }
+        assert_eq!(
+            transport.send_count(),
+            1,
+            "old transactional accumulator batches must fail before retry release"
+        );
+        assert_eq!(
+            h.in_flight.load(Ordering::Acquire),
+            1,
+            "undrained batches must not decrement the retry's in-flight slot"
+        );
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        retry_receiver
+            .await
+            .expect("retry acknowledgement channel remains connected")
+            .expect("nontransactional retry is acknowledged");
+        shutdown(h).await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn queued_transactional_batch_is_failed_after_recovery_before_reinitialization() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 1, Duration::from_secs(30));
+        let h = spawn_sender_with(transport.clone(), 1, secs(30));
         let accumulator = Arc::new(Mutex::new(Accumulator::new(1024)));
         h.accumulators
             .insert(("t".to_string(), 0), Arc::clone(&accumulator));
@@ -2693,7 +3532,7 @@ mod harness {
             0,
             Some(0),
         ) {
-            crate::accumulator::AppendResult::Appended(rx) => rx,
+            crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
             crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
         };
 
@@ -2702,7 +3541,10 @@ mod harness {
         // Simulate a completed InitProducerId before the sender gets to drain:
         // the old generation must still be rejected under the new epoch.
         h.recovery_required.store(false, Ordering::Release);
-        h.wake_tx.send(()).await.expect("sender is running");
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
 
         let acknowledgement = tokio::time::timeout(Duration::from_secs(3), rx)
             .await
@@ -2724,7 +3566,7 @@ mod harness {
     async fn retry_slot_transactional_batch_is_failed_after_recovery_without_resend() {
         let transport = MockTransport::new(Duration::ZERO);
         transport.fail_once_on(0);
-        let h = spawn_sender_with(transport.clone(), 1, Duration::from_secs(30));
+        let h = spawn_sender_with(transport.clone(), 1, secs(30));
         let accumulator = Arc::new(Mutex::new(Accumulator::new(1024)));
         h.accumulators
             .insert(("t".to_string(), 0), Arc::clone(&accumulator));
@@ -2735,12 +3577,15 @@ mod harness {
             0,
             Some(0),
         ) {
-            crate::accumulator::AppendResult::Appended(rx) => rx,
+            crate::accumulator::AppendResult::Appended { receiver, .. } => receiver,
             crate::accumulator::AppendResult::BatchFull => panic!("unexpected BatchFull"),
         };
 
         let initial_send = transport.send_started.notified();
-        h.wake_tx.send(()).await.expect("sender is running");
+        h.wake_tx
+            .send(DrainIntent::Force)
+            .await
+            .expect("sender is running");
         tokio::time::timeout(Duration::from_secs(3), initial_send)
             .await
             .expect("transactional batch should reach the controlled transport failure");
@@ -2755,7 +3600,10 @@ mod harness {
         h.recovery_required.store(true, Ordering::Release);
         h.recovery_generation.store(1, Ordering::Release);
         h.recovery_required.store(false, Ordering::Release);
-        h.wake_tx.send(()).await.expect("sender is running");
+        h.wake_tx
+            .send(DrainIntent::Ready)
+            .await
+            .expect("sender is running");
 
         let acknowledgement = tokio::time::timeout(Duration::from_secs(3), rx)
             .await
@@ -2775,20 +3623,13 @@ mod harness {
     }
 
     /// `finish_in_flight` notifies flush waiters exactly when `in_flight` reaches
-    /// zero. With a long linger the only drains are wake-triggered, so this
+    /// zero. With a long linger the only early drains are wake-triggered, so this
     /// notify is the only one a registered waiter can receive.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn finish_in_flight_notifies_when_drained() {
         let transport = MockTransport::new(Duration::ZERO);
-        let h = spawn_sender_with(transport.clone(), 5, Duration::from_secs(30));
+        let h = spawn_sender_with(transport.clone(), 5, secs(30));
 
-        // Let the immediate first (empty) linger-tick drain pass before
-        // registering the waiter. That tick's `notify_waiters` leaves no
-        // trace (it wakes only already-registered waiters and this drain
-        // mutates no observable state), so there is no positive condition to
-        // poll — this is a deliberate ordering delay that keeps the first
-        // empty tick from waking the waiter for the wrong reason.
-        tokio::time::sleep(Duration::from_millis(50)).await;
         let flush = Arc::clone(&h.flush_notify);
         // Register the flush waiter synchronously: a `Notified` future only
         // registers once enabled/polled, and `notify_waiters` wakes only

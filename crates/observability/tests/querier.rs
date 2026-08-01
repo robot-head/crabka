@@ -1,7 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::Arc,
-    time::Duration,
 };
 
 use assert2::assert;
@@ -21,6 +20,7 @@ use crabka_observability::{
     execute_tail_query_with_frontier, metric_plan_scan_sql, poll_log_hot_tail_once,
     stream_plan_scan_sql,
 };
+use crabka_units::{Time, millis};
 use object_store::{ObjectStore, local::LocalFileSystem, path::Path as ObjectPath};
 use serde_json::json;
 
@@ -438,7 +438,7 @@ async fn hot_tail_buffer_polls_and_decodes_kafka_wal_records() {
     ]]);
     let hot_tail = BufferedLogHotTail::default();
 
-    let decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, Duration::from_millis(1))
+    let decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, millis(1))
         .await
         .unwrap();
 
@@ -4640,7 +4640,7 @@ impl RecordingWalConsumer {
 
 #[async_trait]
 impl LogWalConsumer for RecordingWalConsumer {
-    async fn poll(&mut self, _timeout: Duration) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
+    async fn poll(&mut self, _timeout: Time) -> Result<Vec<KafkaWalRecord>, WalConsumerError> {
         if self.batches.is_empty() {
             Ok(Vec::new())
         } else {

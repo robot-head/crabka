@@ -19,7 +19,12 @@ use crabka_pprof::{
     COL_FINGERPRINT, COL_TIMESTAMP, EngineOpts, FlameEngine, FlameGraph, InMemoryProfileStore,
     LabeledHeatmap, PCOL_SPAN_ID, PCOL_STACKTRACE_ID, PCOL_STACKTRACE_PARTITION, PCOL_TOTAL_VALUE,
     PCOL_VALUE, ProfileError, ProfileStats, ProfileStore, ProfileType, Series, SeriesAgg,
-    bin_heatmap, parse_label_selector, step_bucket_ms, step_ms_from_secs,
+    bin_heatmap, parse_label_selector, step_bucket_ms, step_from_secs,
+};
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt},
+    days, hours, millis, minutes, secs,
 };
 use num_traits::ToPrimitive as _;
 use prost::Message;
@@ -39,7 +44,7 @@ type QueryTarget<'a> = (&'a str, &'a str, &'a str);
 type QueryRange = (i64, i64);
 
 const DEFAULT_HEATMAP_VALUE_BUCKETS: usize = 32;
-const MAX_HEATMAP_TIME_BUCKETS: usize = 4096;
+const DEFAULT_HEATMAP_TIME_BUCKETS_MAX: usize = 4096;
 const PROFILE_ID_LABEL: &str = "__profile_id__";
 
 /// Labels stored internally for span/exemplar lookups that Pyroscope does not
@@ -99,9 +104,13 @@ pub struct QuerierState<S: ProfileStore = DefaultStore> {
     execution: QueryExecution,
     overrides: OverridesProvider,
     metrics: ServiceMetrics,
+    heatmap_value_buckets: usize,
+    heatmap_time_buckets_max: usize,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Not `Eq`: the sharded variant carries a [`FrontendConfig`], whose shard width
+/// is a `f64`-backed quantity.
+#[derive(Clone, Debug, PartialEq)]
 enum QueryExecution {
     Direct,
     Sharded(FrontendConfig),
@@ -160,7 +169,16 @@ impl<S: ProfileStore> QuerierState<S> {
             // process-shared bundle (the one wired to `/metrics`) via
             // [`Self::with_metrics`] so query handlers feed the exported series.
             metrics: ServiceMetrics::new(),
+            heatmap_value_buckets: DEFAULT_HEATMAP_VALUE_BUCKETS,
+            heatmap_time_buckets_max: DEFAULT_HEATMAP_TIME_BUCKETS_MAX,
         }
+    }
+
+    #[must_use]
+    pub fn with_heatmap_policy(mut self, value_buckets: usize, time_buckets_max: usize) -> Self {
+        self.heatmap_value_buckets = value_buckets;
+        self.heatmap_time_buckets_max = time_buckets_max;
+        self
     }
 
     /// Attach the process-shared metrics bundle (the one whose registry backs
@@ -277,7 +295,7 @@ impl<S: ProfileStore> QuerierState<S> {
                     .await
             }
             QueryExecution::Sharded(config) => {
-                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
+                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width)?;
                 self.engine
                     .select_merge_stacktraces_with_stack_trace_selector_sharded(
                         tenant,
@@ -317,7 +335,7 @@ impl<S: ProfileStore> QuerierState<S> {
                     .await
             }
             QueryExecution::Sharded(config) => {
-                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
+                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width)?;
                 self.engine
                     .select_merge_stacktraces_tree_with_stack_trace_selector_sharded(
                         tenant,
@@ -336,7 +354,7 @@ impl<S: ProfileStore> QuerierState<S> {
         &self,
         target: QueryTarget<'_>,
         group_by: &[String],
-        step_secs: f64,
+        step: Time,
         agg: SeriesAgg,
         range: QueryRange,
         stack_trace_call_sites: &[String],
@@ -350,7 +368,7 @@ impl<S: ProfileStore> QuerierState<S> {
                     .select_series_with_stack_trace_selector(
                         (tenant, profile_type, label_selector),
                         group_by,
-                        step_secs,
+                        step,
                         agg,
                         (start_ms, end_ms),
                         stack_trace_call_sites,
@@ -358,12 +376,12 @@ impl<S: ProfileStore> QuerierState<S> {
                     .await
             }
             QueryExecution::Sharded(config) => {
-                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
+                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width)?;
                 self.engine
                     .select_series_with_stack_trace_selector_sharded(
                         (tenant, profile_type, label_selector),
                         group_by,
-                        step_secs,
+                        step,
                         agg,
                         &shards,
                         stack_trace_call_sites,
@@ -377,14 +395,13 @@ impl<S: ProfileStore> QuerierState<S> {
         &self,
         target: QueryTarget<'_>,
         group_by: &[String],
-        step_secs: f64,
+        step: Time,
         range: QueryRange,
         call_sites: &[String],
     ) -> Result<SpanExemplarsBySeries, ProfileError> {
         let (tenant, profile_type, label_selector) = target;
         let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
-        let step_ms = step_ms_from_secs(step_secs)?;
         let base_matchers = parse_label_selector(label_selector)?;
         let groups = if group_by.is_empty() {
             vec![Vec::new()]
@@ -405,7 +422,7 @@ impl<S: ProfileStore> QuerierState<S> {
                 .store
                 .select(tenant, profile_type, &matchers, start_ms, end_ms)
                 .await?;
-            let exemplars = span_exemplars_from_scan(&scan, step_ms, &labels, call_sites).await?;
+            let exemplars = span_exemplars_from_scan(&scan, step, &labels, call_sites).await?;
             if !exemplars.is_empty() {
                 out.insert(labels, exemplars);
             }
@@ -417,14 +434,13 @@ impl<S: ProfileStore> QuerierState<S> {
         &self,
         target: QueryTarget<'_>,
         group_by: &[String],
-        step_secs: f64,
+        step: Time,
         range: QueryRange,
         call_sites: &[String],
     ) -> Result<SpanExemplarsBySeries, ProfileError> {
         let (tenant, profile_type, label_selector) = target;
         let (start_ms, end_ms) = range;
         self.validate_query_range(tenant, start_ms, end_ms)?;
-        let step_ms = step_ms_from_secs(step_secs)?;
         let base_matchers = parse_label_selector(label_selector)?;
         let mut profile_group_by = group_by.to_vec();
         if !profile_group_by.iter().any(|name| name == PROFILE_ID_LABEL) {
@@ -460,7 +476,7 @@ impl<S: ProfileStore> QuerierState<S> {
                 .await?;
             let exemplars = individual_exemplars_from_scan(
                 &scan,
-                step_ms,
+                step,
                 &series_labels,
                 &profile_id,
                 call_sites,
@@ -640,7 +656,7 @@ impl<S: ProfileStore> QuerierState<S> {
                     .await
             }
             QueryExecution::Sharded(config) => {
-                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
+                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width)?;
                 self.engine
                     .select_merge_span_profile_sharded(
                         tenant,
@@ -678,7 +694,7 @@ impl<S: ProfileStore> QuerierState<S> {
                     .await
             }
             QueryExecution::Sharded(config) => {
-                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width_ms)?;
+                let shards = split_inclusive_range(start_ms, end_ms, config.shard_width)?;
                 self.engine
                     .select_merge_span_profile_tree_sharded(
                         tenant,
@@ -696,12 +712,12 @@ impl<S: ProfileStore> QuerierState<S> {
 
 async fn span_exemplars_from_scan(
     scan: &crabka_pprof::ProfileScan,
-    step_ms: i64,
+    step: Time,
     labels: &[(String, String)],
     call_sites: &[String],
 ) -> Result<BTreeMap<i64, Vec<pb::types::v1::Exemplar>>, ProfileError> {
     if call_sites.is_empty() {
-        return span_exemplars_from_totals(scan, step_ms, labels).await;
+        return span_exemplars_from_totals(scan, step, labels).await;
     }
     let sql = format!(
         "SELECT {timestamp}, {fingerprint}, {span}, {partition}, {stacktrace}, SUM({value}) AS v \
@@ -755,7 +771,7 @@ async fn span_exemplars_from_scan(
     let label_pairs = types_label_pairs(labels.to_vec());
     let mut out: BTreeMap<i64, Vec<pb::types::v1::Exemplar>> = BTreeMap::new();
     for ((timestamp, _fingerprint, span_id), value) in per_span {
-        out.entry(step_bucket_ms(timestamp, step_ms))
+        out.entry(step_bucket_ms(timestamp, step))
             .or_default()
             .push(pb::types::v1::Exemplar {
                 timestamp,
@@ -770,7 +786,7 @@ async fn span_exemplars_from_scan(
 
 async fn span_exemplars_from_totals(
     scan: &crabka_pprof::ProfileScan,
-    step_ms: i64,
+    step: Time,
     labels: &[(String, String)],
 ) -> Result<BTreeMap<i64, Vec<pb::types::v1::Exemplar>>, ProfileError> {
     let sql = format!(
@@ -803,7 +819,7 @@ async fn span_exemplars_from_totals(
                 continue;
             }
             let timestamp = timestamps.value(row);
-            out.entry(step_bucket_ms(timestamp, step_ms))
+            out.entry(step_bucket_ms(timestamp, step))
                 .or_default()
                 .push(pb::types::v1::Exemplar {
                     timestamp,
@@ -819,13 +835,13 @@ async fn span_exemplars_from_totals(
 
 async fn individual_exemplars_from_scan(
     scan: &crabka_pprof::ProfileScan,
-    step_ms: i64,
+    step: Time,
     labels: &[(String, String)],
     profile_id: &str,
     call_sites: &[String],
 ) -> Result<BTreeMap<i64, Vec<pb::types::v1::Exemplar>>, ProfileError> {
     if call_sites.is_empty() {
-        return individual_exemplars_from_totals(scan, step_ms, labels, profile_id).await;
+        return individual_exemplars_from_totals(scan, step, labels, profile_id).await;
     }
     let sql = format!(
         "SELECT {timestamp}, {fingerprint}, {partition}, {stacktrace}, SUM({value}) AS v \
@@ -869,7 +885,7 @@ async fn individual_exemplars_from_scan(
     let label_pairs = types_label_pairs(labels.to_vec());
     let mut out: BTreeMap<i64, Vec<pb::types::v1::Exemplar>> = BTreeMap::new();
     for ((timestamp, _fingerprint), value) in per_profile {
-        out.entry(step_bucket_ms(timestamp, step_ms))
+        out.entry(step_bucket_ms(timestamp, step))
             .or_default()
             .push(pb::types::v1::Exemplar {
                 timestamp,
@@ -884,7 +900,7 @@ async fn individual_exemplars_from_scan(
 
 async fn individual_exemplars_from_totals(
     scan: &crabka_pprof::ProfileScan,
-    step_ms: i64,
+    step: Time,
     labels: &[(String, String)],
     profile_id: &str,
 ) -> Result<BTreeMap<i64, Vec<pb::types::v1::Exemplar>>, ProfileError> {
@@ -912,7 +928,7 @@ async fn individual_exemplars_from_totals(
         let totals = batch.column(1).as_primitive::<Int64Type>();
         for row in 0..batch.num_rows() {
             let timestamp = timestamps.value(row);
-            out.entry(step_bucket_ms(timestamp, step_ms))
+            out.entry(step_bucket_ms(timestamp, step))
                 .or_default()
                 .push(pb::types::v1::Exemplar {
                     timestamp,
@@ -1100,7 +1116,7 @@ async fn timed_query<T>(
 ) -> Result<T, ConnectError> {
     let start = std::time::Instant::now();
     let result = fut.await;
-    metrics.record_query(route, result.is_ok(), start.elapsed().as_secs_f64());
+    metrics.record_query(route, result.is_ok(), start.elapsed().as_time());
     result
 }
 
@@ -1115,7 +1131,7 @@ async fn timed_query_response(
     let start = std::time::Instant::now();
     let response = fut.await;
     let ok = response.status().is_success() || response.status().is_redirection();
-    metrics.record_query(route, ok, start.elapsed().as_secs_f64());
+    metrics.record_query(route, ok, start.elapsed().as_time());
     response
 }
 
@@ -1527,12 +1543,16 @@ where
         SeriesAgg::Sum
     };
     let stack_trace_call_sites = stack_trace_call_sites(req.stack_trace_selector.as_ref());
+    // Pyroscope carries `step` as a float number of seconds on the request; it
+    // becomes a `Time` here, at the Connect boundary, so nothing downstream has
+    // to remember the unit.
+    let step = step_from_secs(req.step).map_err(connect_error)?;
     let span_exemplars = match req.exemplar_type {
         exemplar_type if exemplar_type == pb::querier::v1::ExemplarType::Span as i32 => state
             .select_series_span_exemplars(
                 (&tenant, &req.profile_type_id, &req.label_selector),
                 &req.group_by,
-                req.step,
+                step,
                 (req.start, req.end),
                 &stack_trace_call_sites,
             )
@@ -1542,7 +1562,7 @@ where
             .select_series_individual_exemplars(
                 (&tenant, &req.profile_type_id, &req.label_selector),
                 &req.group_by,
-                req.step,
+                step,
                 (req.start, req.end),
                 &stack_trace_call_sites,
             )
@@ -1554,7 +1574,7 @@ where
         .select_series(
             (&tenant, &req.profile_type_id, &req.label_selector),
             &req.group_by,
-            req.step,
+            step,
             agg,
             (req.start, req.end),
             &stack_trace_call_sites,
@@ -1728,8 +1748,14 @@ where
     state
         .validate_query_range(&tenant, req.start, req.end)
         .map_err(connect_error)?;
-    let time_buckets = heatmap_time_buckets(StartMs(req.start), EndMs(req.end), req.step)
-        .map_err(connect_error)?;
+    let step = step_from_secs(req.step).map_err(connect_error)?;
+    let time_buckets = heatmap_time_buckets(
+        StartMs(req.start),
+        EndMs(req.end),
+        step,
+        state.heatmap_time_buckets_max,
+    )
+    .map_err(connect_error)?;
     let span_exemplars = match req.exemplar_type {
         exemplar_type if exemplar_type == pb::querier::v1::ExemplarType::Span as i32 => state
             .select_heatmap_span_exemplars(
@@ -1758,7 +1784,7 @@ where
                 &req.group_by,
                 (req.start, req.end),
                 time_buckets,
-                DEFAULT_HEATMAP_VALUE_BUCKETS,
+                state.heatmap_value_buckets,
             )
             .await
     } else {
@@ -1769,7 +1795,7 @@ where
                 &req.group_by,
                 (req.start, req.end),
                 time_buckets,
-                DEFAULT_HEATMAP_VALUE_BUCKETS,
+                state.heatmap_value_buckets,
             )
             .await
     }
@@ -2285,22 +2311,30 @@ fn stack_trace_call_sites_from_json(selector: &str) -> Result<Vec<String>, Profi
 fn heatmap_time_buckets(
     start_ms: StartMs,
     end_ms: EndMs,
-    step_secs: f64,
+    step: Time,
+    max_buckets: usize,
 ) -> Result<usize, ProfileError> {
     if start_ms.0 >= end_ms.0 {
         return Err(ProfileError::Plan(
             "heatmap start must be before end".to_string(),
         ));
     }
-    let step_ms = step_ms_from_secs(step_secs)?;
+    // The bounds are instants and the step is an extent: only the step converts,
+    // and the bucket walk stays exact integer arithmetic. `step_from_secs` has
+    // already rejected a sub-millisecond step at the Connect boundary; this
+    // guard keeps the division below safe for any other caller.
+    if step < millis(1) {
+        return Err(ProfileError::Plan("step must be >= 1ms".to_string()));
+    }
+    let step_ms = step.millis_i64();
     let span_ms = end_ms
         .0
         .checked_sub(start_ms.0)
         .ok_or_else(|| ProfileError::Plan("heatmap time range is too large".to_string()))?;
     let buckets = (span_ms / step_ms + i64::from(span_ms % step_ms != 0)).max(1);
     Ok(usize::try_from(buckets)
-        .unwrap_or(MAX_HEATMAP_TIME_BUCKETS)
-        .min(MAX_HEATMAP_TIME_BUCKETS))
+        .unwrap_or(max_buckets)
+        .min(max_buckets))
 }
 
 fn query_param_i64(params: &[(String, String)], name: &str) -> Option<i64> {
@@ -2335,7 +2369,9 @@ fn parse_render_time_param(
         return Ok(now_ms.0);
     }
     if let Some(offset) = value.strip_prefix("now-") {
-        let resolved = now_ms.0 - parse_render_duration_ms(offset)?;
+        // The offset is an extent; `now` and the resolved bound are instants, so
+        // the subtraction happens in epoch milliseconds.
+        let resolved = now_ms.0 - parse_render_offset(offset)?.millis_i64();
         return reject_negative_render_time(resolved, value);
     }
     let numeric = value
@@ -2366,24 +2402,33 @@ fn normalize_render_unix_time(value: i64) -> i64 {
     }
 }
 
-fn parse_render_duration_ms(value: &str) -> Result<i64, ProfileError> {
+/// The `now-<offset>` lookback of Pyroscope's `/render` `from`/`until` params.
+///
+/// The grammar is Pyroscope's, not `crabka-units`': a bare integer followed by
+/// exactly one of `s`/`m`/`h`/`d`. The result is an extent, so it is a [`Time`];
+/// the instant it resolves against stays epoch milliseconds at the call site.
+fn parse_render_offset(value: &str) -> Result<Time, ProfileError> {
     let (number, unit) = value.split_at(value.len().saturating_sub(1));
     let amount = number.parse::<i64>().map_err(|err| {
         ProfileError::Plan(format!("invalid render relative duration {value:?}: {err}"))
     })?;
-    let multiplier = match unit {
-        "s" => 1_000,
-        "m" => 60_000,
-        "h" => 3_600_000,
-        "d" => 86_400_000,
+    let unit = match unit {
+        "s" => secs(1),
+        "m" => minutes(1),
+        "h" => hours(1),
+        "d" => days(1),
         _ => {
             return Err(ProfileError::Plan(format!(
                 "invalid render relative duration unit {unit:?}"
             )));
         }
     };
+    // The offset resolves against an epoch-millisecond instant, so it is scaled
+    // in whole milliseconds and an offset too large to express there stays an
+    // error rather than saturating into a silently different lookback.
     amount
-        .checked_mul(multiplier)
+        .checked_mul(unit.millis_i64())
+        .map(Time::from_millis)
         .ok_or_else(|| ProfileError::Plan(format!("render relative duration overflows: {value}")))
 }
 
@@ -2777,6 +2822,7 @@ mod tests {
     use assert2::{assert, check};
     use base64::Engine;
     use crabka_pprof::{FunctionRec, LineRec, LocationRec};
+    use crabka_units::secs;
 
     use super::*;
     use crate::{Limits, OverridesProvider};
@@ -2788,7 +2834,7 @@ mod tests {
         let state = QuerierState::new_with_limits(
             Arc::new(InMemoryProfileStore::new()),
             Limits {
-                max_query_length_secs: 1,
+                max_query_length: secs(1),
                 ..Limits::default()
             },
         );
@@ -2807,7 +2853,7 @@ mod tests {
         let state = QuerierState::new_with_limits(
             Arc::new(InMemoryProfileStore::new()),
             Limits {
-                max_query_length_secs: 1,
+                max_query_length: secs(1),
                 ..Limits::default()
             },
         );
@@ -3203,7 +3249,7 @@ mod tests {
         let state = QuerierState::new_with_limits(
             Arc::new(store_with_frame("main.work")),
             Limits {
-                max_query_length_secs: 1,
+                max_query_length: secs(1),
                 ..Limits::default()
             },
         );
@@ -3212,7 +3258,7 @@ mod tests {
             .select_series(
                 ("tenant-a", PT, r#"{service_name="api"}"#),
                 &[],
-                1.0,
+                secs(1),
                 SeriesAgg::Sum,
                 (0, 2_000),
                 &[],
@@ -3241,7 +3287,7 @@ overrides:
             .select_series(
                 ("tenant-a", PT, r#"{service_name="api"}"#),
                 &[],
-                1.0,
+                secs(1),
                 SeriesAgg::Sum,
                 (0, 2_000),
                 &[],
@@ -3252,7 +3298,7 @@ overrides:
             .select_series(
                 ("tenant-b", PT, r#"{service_name="api"}"#),
                 &[],
-                1.0,
+                secs(1),
                 SeriesAgg::Sum,
                 (0, 2_000),
                 &[],
@@ -4008,7 +4054,7 @@ overrides:
         let state = Arc::new(QuerierState::new_with_limits(
             Arc::new(store_with_frame("main.work")),
             Limits {
-                max_query_length_secs: 1,
+                max_query_length: secs(1),
                 ..Limits::default()
             },
         ));
@@ -4856,7 +4902,7 @@ overrides:
         let state = QuerierState::new(Arc::new(InMemoryProfileStore::new()));
 
         // An explicit `start=0, end=i64::MAX` range (NOT the range-omitted health
-        // probe) now exceeds the default `max_query_length_secs` cap.
+        // probe) now exceeds the default `max_query_length` cap.
         let err = state
             .validate_query_range("anonymous", 0, i64::MAX)
             .unwrap_err();
@@ -4946,9 +4992,9 @@ overrides:
 
     #[test]
     fn heatmap_time_buckets_ceil_from_step_seconds() {
-        check!(heatmap_time_buckets(StartMs(0), EndMs(21_000), 10.0).unwrap() == 3);
-        check!(heatmap_time_buckets(StartMs(0), EndMs(1), 0.0).is_err());
-        check!(heatmap_time_buckets(StartMs(1), EndMs(1), 1.0).is_err());
+        check!(heatmap_time_buckets(StartMs(0), EndMs(21_000), secs(10), 4096).unwrap() == 3);
+        check!(heatmap_time_buckets(StartMs(0), EndMs(1), <Time as TimeExt>::ZERO, 4096).is_err());
+        check!(heatmap_time_buckets(StartMs(1), EndMs(1), secs(1), 4096).is_err());
     }
 
     #[test]
@@ -4956,23 +5002,24 @@ overrides:
         // With a non-zero start, the bucket count depends on `end - start`, not
         // `end + start`. Here span = 20_000ms / 10_000ms/step = 2 buckets.
         // A `+` in the span computation would see 80_000ms → 8 buckets.
-        check!(heatmap_time_buckets(StartMs(30_000), EndMs(50_000), 10.0).unwrap() == 2);
+        check!(heatmap_time_buckets(StartMs(30_000), EndMs(50_000), secs(10), 4096).unwrap() == 2);
     }
 
     #[test]
     fn heatmap_time_buckets_rejects_sub_millisecond_steps() {
-        for step in [0.0001, 0.0005, 0.000_999_9] {
-            check!(heatmap_time_buckets(StartMs(0), EndMs(1), step).is_err());
+        for step_secs in [0.0001, 0.0005, 0.000_999_9] {
+            let step = Time::from_secs_f64(step_secs);
+            check!(
+                heatmap_time_buckets(StartMs(0), EndMs(1), step, 4096).is_err(),
+                "{step_secs}"
+            );
         }
-        check!(heatmap_time_buckets(StartMs(0), EndMs(1), 0.001).unwrap() == 1);
+        check!(heatmap_time_buckets(StartMs(0), EndMs(1), millis(1), 4096).unwrap() == 1);
     }
 
     #[test]
     fn heatmap_time_buckets_caps_large_ranges() {
-        assert!(
-            heatmap_time_buckets(StartMs(0), EndMs(i64::MAX), 10.0).unwrap()
-                == MAX_HEATMAP_TIME_BUCKETS
-        );
+        assert!(heatmap_time_buckets(StartMs(0), EndMs(i64::MAX), secs(10), 7).unwrap() == 7);
     }
 
     #[test]

@@ -25,6 +25,7 @@ use crabka_metrics::{
     run_compactor_consumer_loop,
     wire::pb,
 };
+use crabka_units::prelude::*;
 use object_store::{ObjectStore, memory::InMemory};
 use prost::Message;
 use tower::ServiceExt as _;
@@ -84,7 +85,7 @@ async fn remote_write_v1_lands_as_block() {
     let mut config = MetricsCompactorConfig::new(bootstrap);
     config.group_id = "metrics-roundtrip-compactor".into();
     config.client_id = "metrics-roundtrip-compactor".into();
-    config.poll_timeout = Duration::from_millis(100);
+    config.poll_timeout = millis(100);
     let runtime = config
         .build_runtime(object_store.clone())
         .expect("compactor runtime");
@@ -149,7 +150,7 @@ async fn create_metrics_wal_topic(bootstrap: &str) {
                 replicas: 1,
                 configs: BTreeMap::default(),
             }],
-            5_000,
+            crabka_units::secs(5),
         )
         .await
         .expect("create metrics wal topic");
@@ -168,7 +169,7 @@ async fn inspect_wal_record(bootstrap: &str) -> WalRecord {
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
         let records = consumer
-            .poll(Duration::from_millis(250))
+            .poll(crabka_units::millis(250))
             .await
             .expect("poll inspect consumer");
         if let Some(record) = records.into_iter().find(|record| record.topic == WAL_TOPIC) {

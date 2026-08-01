@@ -22,6 +22,12 @@ use connectrpc_axum::{
 use crabka_broker::throttle::TokenBucket;
 use crabka_client_producer::{Header, Producer, ProducerRecord};
 use crabka_pprof::PprofProfile;
+#[cfg(test)]
+use crabka_units::mebibytes;
+use crabka_units::{
+    ByteSize, Frequency,
+    convert::{ByteSizeExt, FrequencyExt as _, StdDurationExt as _},
+};
 use num_traits::ToPrimitive as _;
 use prost::Message;
 use tokio::net::TcpListener;
@@ -31,9 +37,9 @@ use crate::{
     error::ProfilesError,
     ids::{IngestBytes, IngestItems},
     ingest::{
-        RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id, decode_ingest_body,
-        decode_otlp, decode_push, enforce_limits, parse_ingest_query, require_service_name,
-        split_sample_types,
+        LegacyDecodeLimits, RelabelConfig, TenantLimitConfig, apply_relabel, cap_session_id,
+        decode_ingest_body_with_limits, decode_otlp, decode_push, enforce_limits,
+        parse_ingest_query, require_service_name, split_sample_types,
     },
     limits::{Limits, OverridesProvider},
     metrics::ServiceMetrics,
@@ -44,25 +50,6 @@ use crate::{
     wire::pb,
 };
 
-/// Maximum decompressed/decoded request body the distributor will accept, in
-/// bytes (16 MiB). This is wired into both the axum `DefaultBodyLimit` for the
-/// raw `/ingest` + OTLP-HTTP doors and the Connect receive limit, and is kept
-/// in lockstep with the per-request `max_decompressed` gunzip cap so a single
-/// request can never balloon past this bound at any stage.
-const MAX_REQUEST_BODY_BYTES: usize = 16 * 1024 * 1024;
-
-/// Hard cap on the number of distinct tenants tracked in the per-tenant
-/// `active_series` and `ingestion_buckets` maps. These maps are otherwise
-/// unbounded: a caller minting fresh tenant ids on every request could grow
-/// them without limit (a memory `DoS`). Once the cap is reached we evict an
-/// arbitrary existing tenant before inserting a new one, so total memory stays
-/// bounded. Combined with `X-Scope-OrgID` validation (which rejects malformed
-/// ids) this closes the "mint unlimited tenants" vector. The cap is generous
-/// (a few thousand) so legitimate multi-tenant deployments are unaffected;
-/// evicting a real tenant merely resets its cardinality/rate accounting, which
-/// is self-healing on the next request.
-const MAX_TENANTS: usize = 4096;
-
 #[async_trait::async_trait]
 pub trait WalSink: Send + Sync {
     async fn append(&self, rec: ProfileRecord) -> Result<(), ProfilesError>;
@@ -70,12 +57,18 @@ pub trait WalSink: Send + Sync {
 
 pub struct KafkaSink {
     producer: Arc<Producer>,
+    topic: String,
 }
 
 impl KafkaSink {
     #[must_use]
     pub fn new(producer: Arc<Producer>) -> Self {
-        Self { producer }
+        Self::with_topic(producer, PROFILES_WAL_TOPIC.to_owned())
+    }
+
+    #[must_use]
+    pub fn with_topic(producer: Arc<Producer>, topic: String) -> Self {
+        Self { producer, topic }
     }
 }
 
@@ -98,7 +91,7 @@ impl WalSink for KafkaSink {
         let ack = self
             .producer
             .send(ProducerRecord {
-                topic: PROFILES_WAL_TOPIC.to_string(),
+                topic: self.topic.clone(),
                 partition: None,
                 key: Some(key),
                 value: Some(Bytes::from(value)),
@@ -120,7 +113,11 @@ pub struct DistributorState {
     pub active_series: Mutex<HashMap<String, BTreeSet<u64>>>,
     pub ingestion_buckets: Mutex<HashMap<String, Arc<TokenBucket>>>,
     pub relabel: Vec<RelabelConfig>,
-    pub max_decompressed: usize,
+    /// Shared raw, Connect, and decompressed request-body limit.
+    pub max_decompressed: ByteSize,
+    /// Maximum tenants retained in distributor accounting maps.
+    pub max_tracked_tenants: usize,
+    pub legacy_decode_limits: LegacyDecodeLimits,
     /// Prometheus metrics bundle. `record_ingest` is called at each ingest
     /// handler boundary; `record_wal_append_failure` fires at the WAL-append
     /// error site inside [`process_raw`].
@@ -207,24 +204,25 @@ fn enforce_ingestion_rate(
         return Ok(());
     }
     let limits = state.profile_overrides.for_tenant(tenant);
-    if limits.ingestion_rate_profiles_per_sec <= 0.0 {
+    if limits.ingestion_rate.per_sec_f64() <= 0.0 {
         return Ok(());
     }
     let requested = u64::try_from(profile_count).unwrap_or(u64::MAX);
     if limits.ingestion_burst_profiles > 0 && requested > limits.ingestion_burst_profiles {
         return Err(crate::limits::LimitError::IngestionRateExceeded {
-            rate: limits.ingestion_rate_profiles_per_sec,
+            rate: limits.ingestion_rate.per_sec_f64(),
             observed: requested.to_f64().unwrap_or(f64::MAX),
         }
         .into());
     }
 
     let configured_rate = rate_tokens_per_sec(limits);
-    let bucket = ingestion_bucket_for_tenant(state, tenant, configured_rate)?;
+    let bucket =
+        ingestion_bucket_for_tenant(state, tenant, Frequency::from_per_sec_u64(configured_rate))?;
     let granted = bucket.try_consume(requested);
     if granted < requested {
         return Err(crate::limits::LimitError::IngestionRateExceeded {
-            rate: limits.ingestion_rate_profiles_per_sec,
+            rate: limits.ingestion_rate.per_sec_f64(),
             observed: requested.to_f64().unwrap_or(f64::MAX),
         }
         .into());
@@ -232,9 +230,13 @@ fn enforce_ingestion_rate(
     Ok(())
 }
 
+/// The `TokenBucket` kernel in `crabka-broker` is Creusot-verified over
+/// integers, so the configured `Frequency` is extracted to whole tokens per
+/// second right at that seam.
 fn rate_tokens_per_sec(limits: &Limits) -> u64 {
     let rate = limits
-        .ingestion_rate_profiles_per_sec
+        .ingestion_rate
+        .per_sec_f64()
         .ceil()
         .max(1.0)
         .to_u64()
@@ -249,23 +251,24 @@ fn rate_tokens_per_sec(limits: &Limits) -> u64 {
 fn ingestion_bucket_for_tenant(
     state: &DistributorState,
     tenant: &str,
-    rate: u64,
+    rate: Frequency,
 ) -> Result<Arc<TokenBucket>, ProfilesError> {
     let mut buckets = state
         .ingestion_buckets
         .lock()
         .map_err(|_| ProfilesError::Internal("ingestion bucket lock poisoned".to_string()))?;
-    // Bound per-tenant map growth (see `MAX_TENANTS`): evict an arbitrary
+    // Bound per-tenant map growth: evict an arbitrary
     // existing tenant before admitting a brand-new one once the cap is hit.
-    if !buckets.contains_key(tenant) && buckets.len() >= MAX_TENANTS {
+    if !buckets.contains_key(tenant) && buckets.len() >= state.max_tracked_tenants {
         evict_one_tenant(&mut buckets);
     }
     let bucket = buckets
         .entry(tenant.to_string())
         .or_insert_with(|| Arc::new(TokenBucket::new()))
         .clone();
-    if bucket.rate() != rate {
-        bucket.set_rate(rate);
+    // One token is one profile sample, not one byte.
+    if bucket.event_rate() != rate {
+        bucket.set_event_rate(rate);
     }
     Ok(bucket)
 }
@@ -284,23 +287,27 @@ fn merge_ingest_limits(
     overrides: &Limits,
 ) -> crate::ingest::TenantLimits {
     crate::ingest::TenantLimits {
-        max_label_name_len: usize::try_from(overrides.max_label_name_length)
-            .ok()
-            .filter(|limit| *limit > 0)
-            .unwrap_or(base.max_label_name_len),
+        max_label_name: positive_or(overrides.max_label_name, base.max_label_name),
         max_label_names_per_series: usize::try_from(overrides.max_label_names_per_series)
             .ok()
             .filter(|limit| *limit > 0)
             .unwrap_or(base.max_label_names_per_series),
-        max_label_value_len: usize::try_from(overrides.max_label_value_length)
-            .ok()
-            .filter(|limit| *limit > 0)
-            .unwrap_or(base.max_label_value_len),
+        max_label_value: positive_or(overrides.max_label_value, base.max_label_value),
         session_id_buckets: if overrides.max_session_id_cardinality > 0 {
             overrides.max_session_id_cardinality
         } else {
             base.session_id_buckets
         },
+    }
+}
+
+/// A Pyroscope label cap of zero means "unlimited", which here means "leave the
+/// base tenant limit alone".
+fn positive_or(override_size: ByteSize, base: ByteSize) -> ByteSize {
+    if override_size > <ByteSize as ByteSizeExt>::ZERO {
+        override_size
+    } else {
+        base
     }
 }
 
@@ -335,8 +342,8 @@ fn enforce_and_reserve_max_series(
         .map_err(|_| ProfilesError::Internal("active series lock poisoned".to_string()))?;
 
     // Bound per-tenant map growth: evict an arbitrary existing tenant before
-    // admitting a brand-new one once the cap is hit (see `MAX_TENANTS`).
-    if !active.contains_key(tenant) && active.len() >= MAX_TENANTS {
+    // admitting a brand-new one once the cap is hit.
+    if !active.contains_key(tenant) && active.len() >= state.max_tracked_tenants {
         evict_one_tenant(&mut active);
     }
     let entry = active.entry(tenant.to_string()).or_default();
@@ -410,7 +417,8 @@ pub fn router(state: Arc<DistributorState>) -> Router {
     // decompression. The `receive_max_bytes` cap rejects oversized Connect
     // bodies (via `Content-Length`) before decompression, mirroring the raw
     // doors' body limit. See the matching fix in the querier router.
-    let connect_limits = MessageLimits::new().receive_max_bytes(MAX_REQUEST_BODY_BYTES);
+    let connect_limits =
+        MessageLimits::new().receive_max_bytes(state.max_decompressed.bytes_usize());
     let push_router = pb::push::v1::pusher_service_connect::PusherServiceBuilder::<()>::new()
         .push(push_handler)
         .build();
@@ -430,10 +438,10 @@ pub fn router(state: Arc<DistributorState>) -> Router {
     Router::new()
         .route("/ingest", post(ingest_handler))
         .route("/v1development/profiles", post(otlp_http_handler))
-        // Cap the raw `/ingest` + OTLP-HTTP request bodies at `MAX_REQUEST_BODY_BYTES`
-        // (16 MiB). This bounds memory before the body is buffered and is kept
-        // consistent with the per-request gunzip cap (`max_decompressed`).
-        .layer(DefaultBodyLimit::max(MAX_REQUEST_BODY_BYTES))
+        // Cap raw request bodies at the same limit as Connect and decompression.
+        // This bounds memory before the body is buffered and is kept consistent
+        // with the per-request gunzip cap (`max_decompressed`).
+        .layer(DefaultBodyLimit::max(state.max_decompressed.bytes_usize()))
         .merge(push)
         .merge(otlp)
         .layer(Extension(state))
@@ -498,7 +506,7 @@ async fn push_handler(
         result.is_ok(),
         IngestBytes(bytes),
         IngestItems(items),
-        start.elapsed().as_secs_f64(),
+        start.elapsed().as_time(),
     );
     result.map_err(connect_error)?;
     Ok(ConnectResponse::new(pb::push::v1::PushResponse {}))
@@ -542,7 +550,7 @@ async fn export_handler(
         result.is_ok(),
         IngestBytes(bytes),
         IngestItems(items),
-        start.elapsed().as_secs_f64(),
+        start.elapsed().as_time(),
     );
     result.map_err(connect_error)?;
     Ok(ConnectResponse::new(
@@ -596,7 +604,7 @@ async fn otlp_http_handler(
         result.is_ok(),
         IngestBytes(bytes),
         IngestItems(items),
-        start.elapsed().as_secs_f64(),
+        start.elapsed().as_time(),
     );
     match result {
         Ok(body) => (
@@ -634,7 +642,14 @@ async fn ingest_handler(
         let content_type = headers
             .get(axum::http::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok());
-        let raw = decode_ingest_body(&query, content_type, body, state.max_decompressed).await?;
+        let raw = decode_ingest_body_with_limits(
+            &query,
+            content_type,
+            body,
+            state.max_decompressed,
+            state.legacy_decode_limits,
+        )
+        .await?;
         process_raw(&state, &tenant, vec![raw]).await
     }
     .instrument(ingest_span)
@@ -648,7 +663,7 @@ async fn ingest_handler(
         result.is_ok(),
         IngestBytes(bytes),
         IngestItems(1),
-        start.elapsed().as_secs_f64(),
+        start.elapsed().as_time(),
     );
     match result {
         Ok(()) => StatusCode::OK.into_response(),
@@ -867,6 +882,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use assert2::{assert, check};
+    use crabka_units::{bytes, per_sec};
     use prost::Message;
 
     use super::*;
@@ -927,7 +943,9 @@ mod tests {
             active_series: Mutex::default(),
             ingestion_buckets: Mutex::default(),
             relabel: vec![],
-            max_decompressed: 1 << 24,
+            max_decompressed: mebibytes(16),
+            max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         })
     }
@@ -1124,7 +1142,9 @@ mod tests {
                 replacement: String::new(),
                 action: RelabelAction::Drop,
             }],
-            max_decompressed: 1 << 24,
+            max_decompressed: mebibytes(16),
+            max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
         let raws = vec![crate::wire::test_fixtures::raw_profile_cpu()];
@@ -1142,7 +1162,7 @@ mod tests {
             limits: TenantLimitConfig::default().with_tenant_limits(
                 "tenant-a",
                 TenantLimits {
-                    max_label_value_len: 3,
+                    max_label_value: bytes(3),
                     ..Default::default()
                 },
             ),
@@ -1150,7 +1170,9 @@ mod tests {
             active_series: Mutex::default(),
             ingestion_buckets: Mutex::default(),
             relabel: vec![],
-            max_decompressed: 1 << 24,
+            max_decompressed: mebibytes(16),
+            max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1188,7 +1210,9 @@ mod tests {
             active_series: Mutex::default(),
             ingestion_buckets: Mutex::default(),
             relabel: vec![],
-            max_decompressed: 1 << 24,
+            max_decompressed: mebibytes(16),
+            max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1221,7 +1245,9 @@ overrides:
             active_series: Mutex::default(),
             ingestion_buckets: Mutex::default(),
             relabel: vec![],
-            max_decompressed: 1 << 24,
+            max_decompressed: mebibytes(16),
+            max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1260,7 +1286,9 @@ overrides:
             active_series: Mutex::default(),
             ingestion_buckets: Mutex::default(),
             relabel: vec![],
-            max_decompressed: 1 << 24,
+            max_decompressed: mebibytes(16),
+            max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1294,7 +1322,9 @@ overrides:
             active_series: Mutex::default(),
             ingestion_buckets: Mutex::default(),
             relabel: vec![],
-            max_decompressed: 1 << 24,
+            max_decompressed: mebibytes(16),
+            max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1328,7 +1358,9 @@ overrides:
             active_series: Mutex::default(),
             ingestion_buckets: Mutex::default(),
             relabel: vec![],
-            max_decompressed: 1 << 24,
+            max_decompressed: mebibytes(16),
+            max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1655,7 +1687,9 @@ overrides:
             active_series: Mutex::default(),
             ingestion_buckets: Mutex::default(),
             relabel: vec![],
-            max_decompressed: 1 << 24,
+            max_decompressed: mebibytes(16),
+            max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1697,7 +1731,9 @@ overrides:
             active_series: Mutex::default(),
             ingestion_buckets: Mutex::default(),
             relabel: vec![],
-            max_decompressed: 1 << 24,
+            max_decompressed: mebibytes(16),
+            max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
@@ -1727,18 +1763,18 @@ overrides:
     #[test]
     fn evict_one_tenant_bounds_map_growth() {
         let mut map: HashMap<String, usize> = HashMap::new();
-        for idx in 0..MAX_TENANTS {
+        for idx in 0..4096 {
             map.insert(format!("tenant-{idx}"), idx);
         }
-        assert!(map.len() == MAX_TENANTS);
+        assert!(map.len() == 4096);
 
         // Simulate the admission guard: evict before inserting a new tenant.
-        if !map.contains_key("tenant-new") && map.len() >= MAX_TENANTS {
+        if !map.contains_key("tenant-new") && map.len() >= 4096 {
             evict_one_tenant(&mut map);
         }
         map.insert("tenant-new".to_string(), 0);
 
-        assert!(map.len() == MAX_TENANTS);
+        assert!(map.len() == 4096);
         assert!(map.contains_key("tenant-new"));
     }
 
@@ -1752,25 +1788,31 @@ overrides:
             sink,
             limits: TenantLimitConfig::default(),
             profile_overrides: OverridesProvider::new(crate::limits::Limits {
-                ingestion_rate_profiles_per_sec: 1000.0,
+                ingestion_rate: per_sec(1000),
                 ingestion_burst_profiles: 1000,
                 ..Default::default()
             }),
             active_series: Mutex::default(),
             ingestion_buckets: Mutex::default(),
             relabel: vec![],
-            max_decompressed: 1 << 24,
+            max_decompressed: mebibytes(16),
+            max_tracked_tenants: 4096,
+            legacy_decode_limits: LegacyDecodeLimits::default(),
             metrics: ServiceMetrics::new(),
         });
 
-        for idx in 0..(MAX_TENANTS + 50) {
+        for idx in 0..(4096 + 50) {
             // `has_tenant_override` is false for the default provider, so the
             // rate path is skipped; allocate buckets directly to exercise the cap.
-            let _ = ingestion_bucket_for_tenant(&state, &format!("tenant-{idx}"), 10);
+            let _ = ingestion_bucket_for_tenant(&state, &format!("tenant-{idx}"), per_sec(10));
         }
 
         let buckets = state.ingestion_buckets.lock().unwrap();
-        assert!(buckets.len() <= MAX_TENANTS, "{}", buckets.len());
+        assert!(
+            buckets.len() <= state.max_tracked_tenants,
+            "{}",
+            buckets.len()
+        );
     }
 
     // #7: a 5xx/internal error returns a GENERIC body, not the detailed text.

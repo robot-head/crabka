@@ -3,6 +3,7 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
+use crabka_units::Time;
 
 use crate::result::{AttrValue, EventRef, LinkRef};
 
@@ -41,7 +42,8 @@ pub struct InputSpan {
     pub name: String,
     pub kind: i32,
     pub start_unix_nano: i64,
-    pub duration_nanos: i64,
+    /// How long the span ran.
+    pub duration: Time,
     pub status_code: i32,
     pub status_message: String,
     pub instrumentation_name: String,
@@ -207,6 +209,7 @@ pub fn assign_nested_set(spans: &[InputSpan]) -> Vec<NestedSet> {
 mod tests {
     use arrow::datatypes::DataType;
     use assert2::{assert, check};
+    use crabka_units::nanos;
 
     use super::*;
 
@@ -222,7 +225,7 @@ mod tests {
             name: format!("span-{id}"),
             kind: 0,
             start_unix_nano: i64::from(id) * 100,
-            duration_nanos: 10,
+            duration: nanos(10),
             status_code: 0,
             status_message: String::new(),
             instrumentation_name: String::new(),

@@ -2,8 +2,6 @@
 //! so every topic deletion is recorded in the metadata quorum before the
 //! partition dirs and in-memory state are torn down.
 
-use std::time::Duration;
-
 use bytes::Bytes;
 use crabka_metadata::{AclOperation, DeleteTopicRecord, MetadataRecord};
 use crabka_protocol::{
@@ -15,6 +13,7 @@ use crabka_protocol::{
     primitives::uuid::Uuid as WireUuid,
 };
 use crabka_raft::RaftError;
+use crabka_units::{Time, convert::TimeExt};
 
 use crate::{
     authorizer::{AuthorizationResult, authorize_topics},
@@ -81,8 +80,8 @@ fn audit_deleted_topics(
     }
 }
 
-fn should_wait_for_quota_delay(delay: Duration) -> bool {
-    delay > Duration::ZERO
+fn should_wait_for_quota_delay(delay: Time) -> bool {
+    delay > <Time as TimeExt>::ZERO
 }
 
 #[tracing::instrument(
@@ -242,10 +241,11 @@ pub(crate) async fn handle(
         ctx.principal.name.as_str(),
         ctx.client_id,
         mutation_count,
+        broker.config.quota_throttle_max,
     );
-    let throttle_time_ms = i32::try_from(delay.as_millis()).unwrap_or(i32::MAX);
+    let throttle_time_ms = crate::quota::throttle_time_ms(delay);
     if should_wait_for_quota_delay(delay) {
-        tokio::time::sleep(delay).await;
+        tokio::time::sleep(delay.to_std()).await;
     }
 
     let resp = delete_topics_response(results, throttle_time_ms);
@@ -345,6 +345,7 @@ mod tests {
     use assert2::{assert, check};
     use crabka_protocol::owned::delete_topics_request::{DeleteTopicState, DeleteTopicsRequest};
     use crabka_security::Principal;
+    use crabka_units::millis;
 
     use super::*;
     use crate::test_support::{DenyAll, peer, principal};
@@ -511,8 +512,8 @@ mod tests {
 
     #[test]
     fn should_wait_for_quota_delay_only_waits_for_positive_delay() {
-        assert!(!should_wait_for_quota_delay(Duration::ZERO));
-        assert!(should_wait_for_quota_delay(Duration::from_millis(1)));
+        assert!(!should_wait_for_quota_delay(<Time as TimeExt>::ZERO));
+        assert!(should_wait_for_quota_delay(millis(1)));
     }
 
     #[tokio::test]

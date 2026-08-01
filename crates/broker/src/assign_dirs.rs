@@ -92,10 +92,28 @@ pub(crate) fn build_request(
 /// - connection failure
 /// - send/receive failure
 /// - non-zero `error_code` in the response
+#[cfg(test)]
 pub(crate) async fn send_assignments(
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     client_id: &str,
     req: AssignReplicasToDirsRequest,
+) -> Result<(), String> {
+    send_assignments_with_policy(
+        controller,
+        client_id,
+        req,
+        crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+        crabka_client_core::ClientFrameMax::default(),
+    )
+    .await
+}
+
+pub(crate) async fn send_assignments_with_policy(
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    client_id: &str,
+    req: AssignReplicasToDirsRequest,
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
 ) -> Result<(), String> {
     // Resolve the controller leader address — same pattern as
     // `isr_maintenance::send_alter_partition`.
@@ -112,6 +130,8 @@ pub(crate) async fn send_assignments(
     let client = crabka_client_core::Client::builder()
         .bootstrap(addr)
         .client_id(client_id.to_owned())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await
         .map_err(|e| format!("connect: {e}"))?;

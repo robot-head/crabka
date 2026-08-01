@@ -55,11 +55,13 @@ fn list_reassignments_request() -> ListPartitionReassignmentsRequest {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use assert2::check;
+    use crabka_units::{Time, millis};
 
     use super::*;
+
+    /// Connect/request timeout for the deliberately-unreachable test client.
+    const CLIENT_TIMEOUT: Time = millis(50);
 
     #[test]
     fn metadata_request_fetches_all_topics_without_auto_creation() {
@@ -81,8 +83,8 @@ mod tests {
         let client = Client::builder()
             .bootstrap("127.0.0.1:1")
             .client_id("rebalancer-admin-client-test")
-            .connect_timeout(Duration::from_millis(50))
-            .request_timeout(Duration::from_millis(50))
+            .connect_timeout(CLIENT_TIMEOUT)
+            .request_timeout(CLIENT_TIMEOUT)
             .build()
             .await
             .expect("client build does not connect");

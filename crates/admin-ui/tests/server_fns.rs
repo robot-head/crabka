@@ -25,6 +25,7 @@ use crabka_admin_ui::{
     },
     session::{SessionCredentials, SessionRecord, SessionStore, SessionUser},
 };
+use crabka_units::secs;
 
 const LOGIN_PASSWORD_SENTINEL: &str = "server-fn-password-sentinel";
 const SESSION_SENTINEL: &str = "server-fn-session-sentinel";
@@ -53,7 +54,7 @@ fn app_state_carries_config_and_sessions() {
         cluster_name: "task-six-cluster".to_string(),
         bootstrap_addrs: vec!["127.0.0.1:9092".to_string()],
         security: BrokerSecurityConfig::SaslPlaintext,
-        session_ttl_seconds: 37,
+        session_ttl: secs(37),
         ..AdminUiConfig::default()
     };
 

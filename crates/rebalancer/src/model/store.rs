@@ -165,6 +165,8 @@ fn write_atomic(path: &Path, on_disk: &OnDisk) -> Result<(), StoreError> {
 #[cfg(test)]
 mod tests {
 
+    use crabka_units::{ByteRate, convert::ByteRateExt as _};
+
     use super::*;
     use crate::model::proposal::{Proposal, ProposalStatus, ProposalSummary};
 
@@ -179,7 +181,7 @@ mod tests {
             started_at_ms: 0,
             terminated_at_ms: 0,
             failure_reason: None,
-            throttle_bytes_per_sec: 0,
+            throttle: ByteRate::ZERO,
         }
     }
 
@@ -249,7 +251,7 @@ mod tests {
             started_at_ms: 42,
             terminated_at_ms: 0,
             failure_reason: None,
-            throttle_bytes_per_sec: 0,
+            throttle: ByteRate::ZERO,
         };
         assert2::assert!(updated == want);
         assert2::assert!(s.get("a") == Some(want));

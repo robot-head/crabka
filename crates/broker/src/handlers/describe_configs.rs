@@ -23,6 +23,7 @@ use crabka_protocol::{
         },
     },
 };
+use crabka_units::convert::TimeExt as _;
 
 use crate::{
     authorizer::{AuthorizationRequest, AuthorizationResult},
@@ -72,6 +73,7 @@ fn make_entry(key: &str, value: &str, config_source: i8) -> DescribeConfigsResou
 fn describe_one(
     image: &crabka_metadata::MetadataImage,
     r: crabka_protocol::owned::describe_configs_request::DescribeConfigsResource,
+    client_metrics_default_interval_ms: i32,
 ) -> DescribeConfigsResult {
     let ok = |configs| DescribeConfigsResult {
         error_code: codes::NONE,
@@ -124,9 +126,7 @@ fn describe_one(
     }
 
     if r.resource_type == RESOURCE_TYPE_CLIENT_METRICS {
-        use crate::client_metrics::config::{
-            DEFAULT_INTERVAL_MS, KEY_INTERVAL_MS, KEY_MATCH, KEY_METRICS,
-        };
+        use crate::client_metrics::config::{KEY_INTERVAL_MS, KEY_MATCH, KEY_METRICS};
         let overrides = image
             .client_metrics_config(&r.resource_name)
             .cloned()
@@ -136,7 +136,7 @@ fn describe_one(
         // Emit all three keys: set values use CLIENT_METRICS_CONFIG source;
         // unset keys report their default value/source (KAFKA-17516 — tooling
         // needs effective values, not blanks).
-        let default_interval = DEFAULT_INTERVAL_MS.to_string();
+        let default_interval = client_metrics_default_interval_ms.to_string();
         let mut emit = |key: &str, default: &str| {
             if key_filter.is_some_and(|ks| !ks.iter().any(|f| f == key)) {
                 return;
@@ -253,7 +253,11 @@ pub(crate) fn handle(
                 ) {
                     denied_result(r.resource_type, r.resource_name, code)
                 } else {
-                    describe_one(&image, r)
+                    describe_one(
+                        &image,
+                        r,
+                        broker.config.client_metrics_default_interval.millis_i32(),
+                    )
                 }
             })
             .collect();
@@ -354,6 +358,7 @@ mod tests {
                 configuration_keys: Some(vec!["cleanup.policy".into()]),
                 ..Default::default()
             },
+            300_000,
         );
 
         let expected = DescribeConfigsResult {
@@ -388,6 +393,7 @@ mod tests {
                 configuration_keys: None,
                 ..Default::default()
             },
+            300_000,
         );
 
         let expected = DescribeConfigsResult {
@@ -470,13 +476,13 @@ mod tests {
             configuration_keys: None,
             ..Default::default()
         };
-        let res = super::describe_one(&img, r);
+        let res = super::describe_one(&img, r, 12_345);
         assert_eq!(res.error_code, crate::codes::NONE);
         let by_name: std::collections::HashMap<_, _> =
             res.configs.iter().map(|c| (c.name.as_str(), c)).collect();
         let cases = [
             ("metrics", Some("a."), super::CONFIG_SOURCE_CLIENT_METRICS),
-            ("interval.ms", Some("300000"), super::CONFIG_SOURCE_DEFAULT),
+            ("interval.ms", Some("12345"), super::CONFIG_SOURCE_DEFAULT),
         ];
         for (key, want_value, want_source) in cases {
             assert!(

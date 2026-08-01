@@ -23,34 +23,44 @@ spec:
               gres:
                 description: Name of the `Gres` fleet this tenant belongs to.
                 type: string
+              image:
+                description: |-
+                  Compute container image override. When absent the operator uses its
+                  global Gres image override or compiled default.
+                minLength: 1
+                nullable: true
+                type: string
               overrides:
                 description: Tenant-specific overrides for fleet defaults.
                 nullable: true
                 properties:
-                  checkpointBytes:
-                    description: Checkpoint after this many bytes when set.
-                    format: uint64
-                    minimum: 0.0
-                    nullable: true
-                    type: integer
                   checkpointFrames:
                     description: Checkpoint after this many frames when set.
                     format: uint64
                     minimum: 0.0
                     nullable: true
                     type: integer
+                  checkpointSize:
+                    description: Checkpoint after this much WAL when set.
+                    nullable: true
+                    type: string
                   idleSeconds:
                     description: Idle timeout in seconds; unset means never suspend by idleness.
                     format: uint64
                     minimum: 0.0
                     nullable: true
                     type: integer
-                  suspendMaxCheckpointBytes:
-                    description: Keep the tenant warm when its latest checkpoint exceeds this size.
-                    format: uint64
-                    minimum: 0.0
+                  scramIterations:
+                    description: PBKDF2 iteration count for tenant Kafka and `PostgreSQL` SCRAM credentials.
+                    format: int32
+                    maximum: 16384.0
+                    minimum: 4096.0
                     nullable: true
                     type: integer
+                  suspendMaxCheckpointSize:
+                    description: Keep the tenant warm when its latest checkpoint exceeds this size.
+                    nullable: true
+                    type: string
                   walReplication:
                     description: Replication factor for tenant WAL topics.
                     format: int32

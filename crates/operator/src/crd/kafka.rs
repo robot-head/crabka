@@ -1,3 +1,8 @@
+use crabka_units::{
+    ByteSize, Ratio, Time,
+    convert::{ByteSizeExt as _, RatioExt as _, TimeExt as _},
+    fmt::Human as _,
+};
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -126,6 +131,757 @@ pub struct KafkaSpec {
     /// default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tracing: Option<Tracing>,
+    /// Validated broker operational policy rendered into `[runtime]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broker_tuning: Option<BrokerTuning>,
+    /// Shared creation and reader policy for the Gres tenant registry topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gres_registry: Option<GresRegistrySpec>,
+}
+
+/// Kafka-owned Gres tenant registry policy.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct GresRegistrySpec {
+    /// Registry topic replication factor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1, max = 32_767))]
+    pub replication_factor: Option<i32>,
+    /// Kafka topic creation timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub topic_create_timeout: Option<Time>,
+    /// Registry reader retry delay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub reader_retry_backoff: Option<Time>,
+    /// Maximum time a registry fetch waits for data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_max_wait: Option<Time>,
+    /// Maximum bytes fetched from the registry partition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_partition_max: Option<ByteSize>,
+    /// DNS lookup deadline for the registry producer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub producer_dns_timeout: Option<Time>,
+    /// DNS lookup deadline for registry reader and admin paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub reader_admin_dns_timeout: Option<Time>,
+    /// Minimum response size for registry reader fetches.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub reader_fetch_min: Option<ByteSize>,
+}
+
+impl GresRegistrySpec {
+    pub(crate) fn configured_reader_fetch_min(
+        &self,
+    ) -> Result<Option<crabka_client_core::FetchMinBytes>, String> {
+        self.reader_fetch_min
+            .map(crabka_client_core::FetchMinBytes::try_from)
+            .transpose()
+            .map_err(|error| format!("spec.gresRegistry.readerFetchMin: {error}"))
+    }
+
+    /// Convert the CRD values to the validated runtime policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any configured value is outside its supported range.
+    pub fn policy(&self) -> Result<crabka_gres_control::RegistryPolicy, String> {
+        let defaults = crabka_gres_control::RegistryPolicy::default();
+        let policy = crabka_gres_control::RegistryPolicy::new(
+            self.replication_factor.unwrap_or(1),
+            self.topic_create_timeout.unwrap_or(crabka_units::secs(15)),
+            self.reader_retry_backoff
+                .unwrap_or(crabka_units::millis(250)),
+            self.fetch_max_wait.unwrap_or(crabka_units::millis(500)),
+            self.fetch_partition_max
+                .unwrap_or(crabka_units::mebibytes(1)),
+        )
+        .map_err(|error| format!("spec.gresRegistry: {error}"))?;
+        let policy = policy
+            .with_producer_dns_timeout(
+                self.producer_dns_timeout
+                    .unwrap_or_else(|| defaults.producer_dns_timeout().time()),
+            )
+            .map_err(|error| format!("spec.gresRegistry.producerDnsTimeout: {error}"))?;
+        let policy = policy
+            .with_reader_admin_dns_timeout(
+                self.reader_admin_dns_timeout
+                    .unwrap_or_else(|| defaults.reader_admin_dns_timeout().time()),
+            )
+            .map_err(|error| format!("spec.gresRegistry.readerAdminDnsTimeout: {error}"))?;
+        let reader_fetch_min = self
+            .configured_reader_fetch_min()?
+            .unwrap_or_else(|| defaults.reader_fetch_min());
+        Ok(policy.with_client_resource_policy(
+            defaults.dispatch_queue_capacity(),
+            defaults.frame_max(),
+            reader_fetch_min,
+        ))
+    }
+}
+
+fn validate_nonnegative_tuning_time(field: &str, value: Time) -> Result<(), String> {
+    if value.secs_f64().is_finite() && value >= Time::from_secs(0) {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(
+            field,
+            "must be finite and nonnegative",
+        ))
+    }
+}
+
+fn validate_positive_tuning_time(field: &str, value: Time) -> Result<(), String> {
+    validate_nonnegative_tuning_time(field, value)?;
+    if value > Time::from_secs(0) {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(field, "must be positive"))
+    }
+}
+
+fn validate_bounded_tuning_time(field: &str, value: Time, max_ms: i32) -> Result<(), String> {
+    validate_whole_millis_tuning_time(field, value)?;
+    let millis = value.millis_i64();
+    if millis <= i64::from(max_ms) {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(
+            field,
+            format!("must be at most {max_ms}ms"),
+        ))
+    }
+}
+
+fn validate_whole_millis_tuning_time(field: &str, value: Time) -> Result<(), String> {
+    validate_positive_tuning_time(field, value)?;
+    if Time::from_millis(value.millis_i64()) == value {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(
+            field,
+            "must be a whole number of milliseconds",
+        ))
+    }
+}
+
+fn validate_tuning_size(field: &str, value: ByteSize, max: u64) -> Result<(), String> {
+    let bytes = value.bytes_u64();
+    if !value.bytes_f64().is_finite()
+        || value <= ByteSize::from_bytes(0)
+        || ByteSize::from_bytes(bytes) != value
+    {
+        return Err(BrokerTuning::invalid(
+            field,
+            "must be a positive whole number of bytes",
+        ));
+    }
+    if bytes <= max {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(
+            field,
+            format!("must be at most {max} bytes"),
+        ))
+    }
+}
+
+fn validate_positive_tuning_ratio(field: &str, value: Ratio) -> Result<(), String> {
+    if value.as_f64().is_finite() && value > crabka_units::fraction(0.0) {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(field, "must be finite and positive"))
+    }
+}
+
+fn validate_unit_interval_tuning_ratio(field: &str, value: Ratio) -> Result<(), String> {
+    if value.as_f64().is_finite()
+        && value >= crabka_units::fraction(0.0)
+        && value <= crabka_units::fraction(1.0)
+    {
+        Ok(())
+    } else {
+        Err(BrokerTuning::invalid(field, "must be between 0% and 100%"))
+    }
+}
+
+macro_rules! validate_tuning_field {
+    (refined, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            <$rule>::new(value)
+                .map_err(|error| BrokerTuning::invalid(stringify!($field), error))?;
+        }
+    };
+    (plain, $owner:ident, $field:ident, $rule:ty) => {};
+    (string, $owner:ident, $field:ident, $rule:ty) => {};
+    (time, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_positive_tuning_time(stringify!($field), value)?;
+        }
+    };
+    (time_nonnegative, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_nonnegative_tuning_time(stringify!($field), value)?;
+        }
+    };
+    (time_voter, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_bounded_tuning_time(stringify!($field), value, i32::MAX)?;
+        }
+    };
+    (time_transaction_max, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_bounded_tuning_time(stringify!($field), value, i32::MAX - 1)?;
+        }
+    };
+    (time_i32, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_bounded_tuning_time(stringify!($field), value, i32::MAX)?;
+        }
+    };
+    (time_i64, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_whole_millis_tuning_time(stringify!($field), value)?;
+        }
+    };
+    (size_i32, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_tuning_size(
+                stringify!($field),
+                value,
+                u64::try_from(i32::MAX).expect("i32::MAX fits u64"),
+            )?;
+        }
+    };
+    (size_u32, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_tuning_size(stringify!($field), value, u64::from(u32::MAX))?;
+        }
+    };
+    (size_usize, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_tuning_size(
+                stringify!($field),
+                value,
+                u64::try_from(usize::MAX).unwrap_or(u64::MAX),
+            )?;
+        }
+    };
+    (size_u64, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_tuning_size(stringify!($field), value, u64::MAX)?;
+        }
+    };
+    (size_snapshot_fetch, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            crabka_kraft_core::snapshot_fetch::MetadataSnapshotFetchMax::new(value)
+                .map_err(|error| BrokerTuning::invalid(stringify!($field), error))?;
+        }
+    };
+    (ratio_positive, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_positive_tuning_ratio(stringify!($field), value)?;
+        }
+    };
+    (ratio_unit, $owner:ident, $field:ident, $rule:ty) => {
+        if let Some(value) = $owner.$field {
+            validate_unit_interval_tuning_ratio(stringify!($field), value)?;
+        }
+    };
+}
+
+macro_rules! render_tuning_field {
+    (refined, $owner:ident, $out:ident, $field:ident) => {
+        if let Some(value) = $owner.$field {
+            use std::fmt::Write as _;
+            let _ = writeln!($out, "{} = {value}", stringify!($field));
+        }
+    };
+    (plain, $owner:ident, $out:ident, $field:ident) => {
+        if let Some(value) = $owner.$field {
+            use std::fmt::Write as _;
+            let _ = writeln!($out, "{} = {value}", stringify!($field));
+        }
+    };
+    (string, $owner:ident, $out:ident, $field:ident) => {
+        if let Some(value) = &$owner.$field {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                $out,
+                "{} = {}",
+                stringify!($field),
+                toml::Value::String(value.clone())
+            );
+        }
+    };
+    ($kind:ident, $owner:ident, $out:ident, $field:ident) => {
+        if let Some(value) = $owner.$field {
+            use std::fmt::Write as _;
+            let _ = writeln!(
+                $out,
+                "{} = {}",
+                stringify!($field),
+                toml::Value::String(value.human().to_string())
+            );
+        }
+    };
+}
+
+macro_rules! define_broker_tuning {
+    ($(
+        $kind:ident
+        $(#[$meta:meta])*
+        $field:ident: $ty:ty => $rule:ty;
+    )*) => {
+        /// Typed Kafka CRD surface for broker `[runtime]` policy.
+        #[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        pub struct BrokerTuning {
+            $(
+                $(#[$meta])*
+                #[serde(default, skip_serializing_if = "Option::is_none")]
+                pub $field: Option<$ty>,
+            )*
+        }
+
+        impl BrokerTuning {
+            /// Validate scalar and relational runtime constraints.
+            ///
+            /// # Errors
+            ///
+            /// Returns the invalid camel-case CRD path.
+            pub fn validate(&self) -> Result<(), String> {
+                $(validate_tuning_field!($kind, self, $field, $rule);)*
+                self.validate_strings()?;
+                self.validate_relations()
+            }
+
+            pub(crate) fn render_runtime_toml(&self) -> String {
+                let mut values = String::new();
+                $(render_tuning_field!($kind, self, values, $field);)*
+                if values.is_empty() {
+                    String::new()
+                } else {
+                    format!("[runtime]\n{values}\n")
+                }
+            }
+        }
+    };
+}
+
+define_broker_tuning! {
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] startup_leader_wait_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] self_registration_backoff_min: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] self_registration_backoff_max: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] observer_poll_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] audit_spool_replay_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] audit_stats_poll_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] audit_partition_wait_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] liveness_tick_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] gauge_poll_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] cleaner_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] isr_scan_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] future_log_move_retry_backoff: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_eviction_tick: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_stale_floor: Time => ();
+    time_i32 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_default_interval: Time => ();
+    size_i32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] client_metrics_telemetry_max: ByteSize => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] client_metrics_prom_snapshot_ttl: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] rlmm_reconcile_tick: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] rlmm_bootstrap_backoff_initial: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] rlmm_bootstrap_backoff_max: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] connection_creation_throttle_max: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] opa_http_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] oauth_jwks_http_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] auto_join_retry_backoff: Time => ();
+    time_voter #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] auto_join_voter_request_timeout: Time => ();
+    size_i32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] replication_fetch_max: ByteSize => ();
+    time_i32 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_fetch_max_wait: Time => ();
+    size_i32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] replication_fetch_min: ByteSize => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_throttle_exhausted_backoff: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_send_error_backoff: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_unknown_topic_retry_delay: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_epoch_fence_backoff: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_unexpected_error_backoff: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_reconnect_initial_delay: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replication_reconnect_delay_cap: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] coordinator_session_expiry_tick: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] coordinator_shutdown_ack_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_session_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_heartbeat_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_min_session_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_max_session_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_min_heartbeat_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] consumer_group_max_heartbeat_interval: Time => ();
+    refined #[schemars(range(min = 1))] consumer_group_max_size: usize => refined_type::rule::GreaterUsize<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] classic_group_initial_rebalance_delay: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] sync_group_follower_wait: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] unclean_recovery_aggressive_deadline: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] unclean_recovery_balanced_deadline: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] operator_recovery_deadline: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] quota_throttle_max: Time => ();
+    refined #[schemars(range(min = 1))] self_registration_max_attempts: u32 => refined_type::rule::GreaterU32<0>;
+    size_u32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] observer_fetch_max: ByteSize => ();
+    refined #[schemars(range(min = 1))] audit_event_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] audit_tail_window_offsets: i64 => refined_type::rule::GreaterI64<0>;
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] audit_tail_read_max: ByteSize => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] offsets_topic_metadata_wait_timeout: Time => ();
+    refined #[schemars(range(min = 1))] client_metrics_stale_push_intervals: u32 => refined_type::rule::GreaterU32<0>;
+    refined #[schemars(range(min = 1))] client_metrics_otlp_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] coordinator_actor_mailbox_capacity: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] diskless_wal_local_replica_count: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] unclean_recovery_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] share_recovery_read_max: ByteSize => ();
+    refined #[schemars(range(min = 1))] share_session_cache_max_when_unlimited: usize => refined_type::rule::GreaterUsize<0>;
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] log_read_buffer_cap: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] log_timestamp_scan_window: ByteSize => ();
+    size_u32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] socket_request_max: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] sendfile_min: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] socket_send_buffer: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] socket_receive_buffer: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] acl_max_principal: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] acl_max_resource_name: ByteSize => ();
+    ratio_positive #[serde(with = "crabka_units::serde_units::human::option_ratio")] #[schemars(with = "Option<String>")] telemetry_max_decompression_ratio: Ratio => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] telemetry_decompressed_output_floor: ByteSize => ();
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] telemetry_decompressed_output_ceiling: ByteSize => ();
+    ratio_positive #[serde(with = "crabka_units::serde_units::human::option_ratio")] #[schemars(with = "Option<String>")] record_decompression_max_ratio: Ratio => ();
+    size_u64 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] record_decompression_output_floor: ByteSize => ();
+    size_u64 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] record_decompression_output_ceiling: ByteSize => ();
+    string #[schemars(length(min = 1))] inter_broker_server_name: String => ();
+    time_i64 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] producer_id_expiration: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] producer_id_expiration_scan_interval: Time => ();
+    refined #[schemars(range(min = 1))] max_produce_group: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] partition_writer_queue_depth: usize => refined_type::rule::GreaterUsize<0>;
+    refined #[schemars(range(min = 1))] default_min_insync_replicas: i32 => refined_type::rule::GreaterI32<0>;
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] future_log_move_read_chunk: ByteSize => ();
+    refined #[schemars(range(min = 1))] share_state_num_partitions: i32 => refined_type::rule::GreaterI32<0>;
+    refined #[schemars(range(min = 1))] share_state_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
+    refined #[schemars(range(min = 1))] transaction_state_num_partitions: i32 => refined_type::rule::GreaterI32<0>;
+    size_usize #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] transaction_recovery_read_max: ByteSize => ();
+    refined #[schemars(range(min = 1))] transaction_state_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
+    time_i32 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] transaction_min_timeout: Time => ();
+    time_transaction_max #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] transaction_max_timeout: Time => ();
+    time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] partition_disk_scan_interval: Time => ();
+    plain observer_lag_bound: u64 => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] heartbeat_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] heartbeat_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] replica_lag_time_max: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controller_election_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controller_heartbeat_interval: Time => ();
+    refined #[schemars(range(min = 1))] controller_fetch_miss_limit: u32 => refined_type::rule::GreaterU32<0>;
+    refined #[schemars(range(min = 1))] metadata_raft_command_queue_capacity: usize => refined_type::rule::GreaterUsize<0>;
+    size_i32 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] metadata_raft_fetch_max: ByteSize => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] controlled_shutdown_drain_timeout: Time => ();
+    size_u64 #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] metadata_max_between_snapshots: ByteSize => ();
+    time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] metadata_max_snapshot_interval: Time => ();
+    refined #[schemars(range(min = 1))] metadata_snapshot_interval_records: u64 => refined_type::rule::GreaterU64<0>;
+    size_snapshot_fetch #[serde(with = "crabka_units::serde_units::human::option_byte_size")] #[schemars(with = "Option<String>")] metadata_snapshot_fetch_max: ByteSize => ();
+    time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] txn_abort_cleanup_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] leader_imbalance_check_interval: Time => ();
+    ratio_unit #[serde(with = "crabka_units::serde_units::human::option_ratio")] #[schemars(with = "Option<String>")] leader_imbalance_per_broker: Ratio => ();
+    time_nonnegative #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] tls_reload_interval: Time => ();
+    plain max_incremental_fetch_session_cache_slots: usize => ();
+    plain max_connections: usize => ();
+    plain max_connections_per_ip: usize => ();
+    time_i64 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] delegation_token_max_lifetime: Time => ();
+    time_i64 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] delegation_token_expiry_check_interval: Time => ();
+    time_i64 #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] delegation_token_default_renew_period: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] remote_log_manager_interval: Time => ();
+    plain share_group_enable: bool => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_session_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_heartbeat_interval: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] share_group_record_lock_duration: Time => ();
+    refined #[schemars(range(min = 1))] share_group_max_delivery_attempts: i16 => refined_type::rule::GreaterI16<0>;
+    refined #[schemars(range(min = 1))] share_group_max_inflight_records: i32 => refined_type::rule::GreaterI32<0>;
+    string share_group_isolation_level: String => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] streams_group_session_timeout: Time => ();
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] streams_group_heartbeat_interval: Time => ();
+    refined #[schemars(range(min = 1))] streams_internal_topic_replication_factor: i16 => refined_type::rule::GreaterI16<0>;
+    refined #[schemars(range(min = 0))] streams_group_num_standby_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
+    refined #[schemars(range(min = 0))] streams_group_num_warmup_replicas: i32 => refined_type::rule::GreaterEqualI32<0>;
+    refined #[schemars(range(min = 0))] streams_group_acceptable_recovery_lag: i64 => refined_type::rule::GreaterEqualI64<0>;
+    time #[serde(with = "crabka_units::serde_units::human::option_time")] #[schemars(with = "Option<String>")] streams_group_task_offset_interval: Time => ();
+    string streams_group_assignor: String => ();
+}
+
+impl BrokerTuning {
+    fn camel_case(field: &str) -> String {
+        let mut parts = field.split('_');
+        let mut result = parts.next().unwrap_or_default().to_owned();
+        for part in parts {
+            let mut chars = part.chars();
+            if let Some(first) = chars.next() {
+                result.push(first.to_ascii_uppercase());
+                result.extend(chars);
+            }
+        }
+        result
+    }
+
+    fn path(field: &str) -> String {
+        format!("spec.brokerTuning.{}", Self::camel_case(field))
+    }
+
+    fn invalid(field: &str, error: impl std::fmt::Display) -> String {
+        format!("{}: {error}", Self::path(field))
+    }
+
+    fn invalid_relation(left: &str, right: &str, message: &str) -> String {
+        format!("{} and {}: {message}", Self::path(left), Self::path(right))
+    }
+
+    fn validate_strings(&self) -> Result<(), String> {
+        if let Some(value) = &self.inter_broker_server_name {
+            refined_type::rule::NonEmptyString::new(value.clone())
+                .map_err(|error| Self::invalid("inter_broker_server_name", error))?;
+        }
+        if let Some(value) = &self.share_group_isolation_level
+            && !matches!(value.as_str(), "read-uncommitted" | "read-committed")
+        {
+            return Err(Self::invalid(
+                "share_group_isolation_level",
+                "expected `read-uncommitted` or `read-committed`",
+            ));
+        }
+        if let Some(value) = &self.streams_group_assignor
+            && !matches!(value.as_str(), "auto" | "sticky" | "highly-available")
+        {
+            return Err(Self::invalid(
+                "streams_group_assignor",
+                "expected `auto`, `sticky`, or `highly-available`",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_relations(&self) -> Result<(), String> {
+        macro_rules! ordered {
+            ($left:ident, $left_default:expr, <=, $right:ident, $right_default:expr) => {
+                if self.$left.unwrap_or($left_default) > self.$right.unwrap_or($right_default) {
+                    return Err(Self::invalid_relation(
+                        stringify!($left),
+                        stringify!($right),
+                        "minimum or initial value exceeds maximum",
+                    ));
+                }
+            };
+            ($left:ident, $left_default:expr, <, $right:ident, $right_default:expr) => {
+                if self.$left.unwrap_or($left_default) >= self.$right.unwrap_or($right_default) {
+                    return Err(Self::invalid_relation(
+                        stringify!($left),
+                        stringify!($right),
+                        "left value must be below right value",
+                    ));
+                }
+            };
+        }
+        macro_rules! bounded {
+            (
+                $value:ident, $value_default:expr,
+                $min:ident, $min_default:expr,
+                $max:ident, $max_default:expr
+            ) => {{
+                let value = self.$value.unwrap_or($value_default);
+                let min = self.$min.unwrap_or($min_default);
+                let max = self.$max.unwrap_or($max_default);
+                if !(min..=max).contains(&value) {
+                    return Err(format!(
+                        "{} must be within {} and {}",
+                        Self::path(stringify!($value)),
+                        Self::path(stringify!($min)),
+                        Self::path(stringify!($max))
+                    ));
+                }
+            }};
+        }
+
+        ordered!(
+            self_registration_backoff_min,
+            Time::from_millis(100),
+            <=,
+            self_registration_backoff_max,
+            Time::from_millis(5_000)
+        );
+        ordered!(
+            rlmm_bootstrap_backoff_initial,
+            Time::from_millis(250),
+            <=,
+            rlmm_bootstrap_backoff_max,
+            Time::from_millis(10_000)
+        );
+        ordered!(
+            replication_fetch_min,
+            ByteSize::from_bytes(1),
+            <=,
+            replication_fetch_max,
+            ByteSize::from_bytes(1_048_576)
+        );
+        ordered!(
+            replication_reconnect_initial_delay,
+            Time::from_millis(100),
+            <=,
+            replication_reconnect_delay_cap,
+            Time::from_millis(5_000)
+        );
+        ordered!(
+            heartbeat_interval,
+            Time::from_millis(3_000),
+            <,
+            heartbeat_timeout,
+            Time::from_millis(9_000)
+        );
+        ordered!(
+            controller_heartbeat_interval,
+            Time::from_millis(500),
+            <,
+            controller_election_timeout,
+            Time::from_millis(5_000)
+        );
+        ordered!(
+            delegation_token_default_renew_period,
+            Time::from_millis(86_400_000),
+            <=,
+            delegation_token_max_lifetime,
+            Time::from_millis(604_800_000)
+        );
+        ordered!(
+            client_metrics_eviction_tick,
+            Time::from_millis(60_000),
+            <=,
+            client_metrics_stale_floor,
+            Time::from_millis(600_000)
+        );
+        ordered!(
+            unclean_recovery_aggressive_deadline,
+            Time::from_millis(2_000),
+            <=,
+            unclean_recovery_balanced_deadline,
+            Time::from_millis(30_000)
+        );
+        ordered!(
+            telemetry_decompressed_output_floor,
+            ByteSize::from_bytes(16_777_216),
+            <=,
+            telemetry_decompressed_output_ceiling,
+            ByteSize::from_bytes(1_073_741_824)
+        );
+        self.validate_record_decompression()?;
+        ordered!(
+            transaction_min_timeout,
+            Time::from_millis(1_000),
+            <,
+            transaction_max_timeout,
+            Time::from_millis(900_000)
+        );
+
+        ordered!(
+            consumer_group_min_session_timeout,
+            Time::from_millis(45_000),
+            <=,
+            consumer_group_max_session_timeout,
+            Time::from_millis(60_000)
+        );
+        bounded!(
+            consumer_group_session_timeout,
+            Time::from_millis(45_000),
+            consumer_group_min_session_timeout,
+            Time::from_millis(45_000),
+            consumer_group_max_session_timeout,
+            Time::from_millis(60_000)
+        );
+        ordered!(
+            consumer_group_min_heartbeat_interval,
+            Time::from_millis(5_000),
+            <=,
+            consumer_group_max_heartbeat_interval,
+            Time::from_millis(15_000)
+        );
+        bounded!(
+            consumer_group_heartbeat_interval,
+            Time::from_millis(5_000),
+            consumer_group_min_heartbeat_interval,
+            Time::from_millis(5_000),
+            consumer_group_max_heartbeat_interval,
+            Time::from_millis(15_000)
+        );
+
+        if !(Time::from_millis(45_000)..=Time::from_millis(60_000)).contains(
+            &self
+                .share_group_session_timeout
+                .unwrap_or_else(|| Time::from_millis(45_000)),
+        ) {
+            return Err(Self::invalid(
+                "share_group_session_timeout",
+                "must be within 45000..=60000",
+            ));
+        }
+        if !(Time::from_millis(5_000)..=Time::from_millis(15_000)).contains(
+            &self
+                .share_group_heartbeat_interval
+                .unwrap_or_else(|| Time::from_millis(5_000)),
+        ) {
+            return Err(Self::invalid(
+                "share_group_heartbeat_interval",
+                "must be within 5000..=15000",
+            ));
+        }
+        if !(Time::from_millis(45_000)..=Time::from_millis(60_000)).contains(
+            &self
+                .streams_group_session_timeout
+                .unwrap_or_else(|| Time::from_millis(45_000)),
+        ) {
+            return Err(Self::invalid(
+                "streams_group_session_timeout",
+                "must be within 45000..=60000",
+            ));
+        }
+        if !(Time::from_millis(5_000)..=Time::from_millis(15_000)).contains(
+            &self
+                .streams_group_heartbeat_interval
+                .unwrap_or_else(|| Time::from_millis(5_000)),
+        ) {
+            return Err(Self::invalid(
+                "streams_group_heartbeat_interval",
+                "must be within 5000..=15000",
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_record_decompression(&self) -> Result<(), String> {
+        let defaults = crabka_compression::RecordDecompressionPolicy::default();
+        crabka_compression::RecordDecompressionPolicy::new(
+            self.record_decompression_max_ratio
+                .unwrap_or(defaults.max_ratio()),
+            self.record_decompression_output_floor
+                .unwrap_or(defaults.output_floor()),
+            self.record_decompression_output_ceiling
+                .unwrap_or(defaults.output_ceiling()),
+        )
+        .map(|_| ())
+        .map_err(|error| {
+            format!(
+                "{}, {}, and {}: {error}",
+                Self::path("record_decompression_max_ratio"),
+                Self::path("record_decompression_output_floor"),
+                Self::path("record_decompression_output_ceiling"),
+            )
+        })
+    }
 }
 
 /// Inter-broker GSSAPI initiate config. Single shared client principal
@@ -161,7 +917,7 @@ pub struct Krb5ConfSecretRef {
 /// without `spec.s3`, `type = "Gcs"` without `spec.gcs`, or
 /// `type = "Local"` with `spec.s3` / `spec.gcs` set — are rejected by the
 /// operator reconciler with a `TieredStorageInvalid` status condition.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TieredStorage {
     /// Backend kind selector.
@@ -439,7 +1195,7 @@ impl TieredStorage {
 /// `RemoteLogMetadataManager` the broker pods use. Defaults to topic-backed
 /// (`type: Topic`)
 /// when this field is omitted.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MetadataManagerSpec {
     /// Implementation selector.
@@ -492,7 +1248,7 @@ pub enum MetadataManagerType {
 
 /// KIP-405: topic-backed RLMM tuning. Renders into the
 /// broker TOML's `[remote_storage.kafka_metadata]` block.
-#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize, JsonSchema, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct TopicMetadataManagerSpec {
     /// `host:port` the broker pod dials to reach its own listener for
@@ -509,6 +1265,35 @@ pub struct TopicMetadataManagerSpec {
     /// `remote.log.metadata.topic.replication.factor`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replication: Option<i32>,
+    /// Timeout for provisioning each internal metadata topic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub topic_create_timeout: Option<Time>,
+    /// Maximum wait for each per-partition metadata fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_max_wait: Option<Time>,
+    /// Maximum bytes returned by each per-partition metadata fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_max_bytes: Option<ByteSize>,
+    /// Backoff after a failed metadata fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fetch_retry_backoff: Option<Time>,
+    /// Capacity of the shared metadata-event delivery queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub event_queue_capacity: Option<usize>,
+    /// RLMM cache snapshot cadence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub snapshot_interval: Option<Time>,
 }
 
 impl TopicMetadataManagerSpec {
@@ -536,7 +1321,29 @@ impl TopicMetadataManagerSpec {
                 "metadataManager.topic.replication must be > 0 (got {r})"
             ));
         }
-        Ok(())
+        let defaults = crabka_broker::KafkaRlmmConfig::default();
+        let mut policy = crabka_broker::KafkaRlmmConfig {
+            bootstrap: self.bootstrap.clone(),
+            num_partitions: self.num_partitions.unwrap_or(defaults.num_partitions),
+            replication: self.replication.unwrap_or(defaults.replication),
+            ..defaults
+        };
+        policy.topic_create_timeout = self
+            .topic_create_timeout
+            .unwrap_or(policy.topic_create_timeout);
+        policy.fetch_max_wait = self.fetch_max_wait.unwrap_or(policy.fetch_max_wait);
+        policy.fetch_max_bytes = self.fetch_max_bytes.unwrap_or(policy.fetch_max_bytes);
+        policy.fetch_retry_backoff = self
+            .fetch_retry_backoff
+            .unwrap_or(policy.fetch_retry_backoff);
+        if let Some(capacity) = self.event_queue_capacity {
+            refined_type::rule::GreaterUsize::<0>::new(capacity)
+                .map_err(|error| format!("metadataManager.topic.event_queue_capacity: {error}"))?;
+        }
+        policy.snapshot_interval = self.snapshot_interval.unwrap_or(policy.snapshot_interval);
+        policy
+            .validate()
+            .map_err(|error| format!("metadataManager.topic: {error}"))
     }
 }
 
@@ -592,10 +1399,15 @@ pub struct OtlpTracing {
     /// `"crabka-broker"`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub service_name: Option<String>,
-    /// Optional export timeout in seconds. Rendered as
-    /// `CRABKA_OTLP_TIMEOUT_SECS`. Defaults to the broker's `10`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub timeout_secs: Option<u64>,
+    /// Optional export timeout. Rendered as `CRABKA_OTLP_TIMEOUT`.
+    /// Defaults to the broker's `10s`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "crabka_units::serde_units::human::option_time"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub timeout: Option<Time>,
 }
 
 /// OTLP wire protocol selector. Mirrors the broker's
@@ -629,7 +1441,7 @@ impl Tracing {
     ///
     /// Fails when `type=Otlp` is missing the `otlp` block, when
     /// `otlp.endpoint` is empty, when `sampleRatio` is outside
-    /// `[0.0, 1.0]`, or when `timeoutSecs == 0`.
+    /// `[0.0, 1.0]`, or when `timeout` is not positive.
     pub fn validate(&self) -> Result<(), String> {
         match (self.kind, &self.otlp) {
             (TracingType::Otlp, None) => {
@@ -649,8 +1461,11 @@ impl Tracing {
                 {
                     return Err("otlp.serviceName, when set, must be non-empty".into());
                 }
-                if otlp.timeout_secs == Some(0) {
-                    return Err("otlp.timeoutSecs, when set, must be > 0".into());
+                if let Some(timeout) = otlp.timeout
+                    && (timeout.secs_f64() <= 0.0
+                        || std::time::Duration::try_from_secs_f64(timeout.secs_f64()).is_err())
+                {
+                    return Err("otlp.timeout, when set, must be positive and representable".into());
                 }
                 Ok(())
             }
@@ -864,6 +1679,353 @@ mod tests {
     }
 
     #[test]
+    fn broker_tuning_rejects_invalid_dimensioned_sizes_and_ratios() {
+        for field in [
+            "clientMetricsTelemetryMax",
+            "replicationFetchMax",
+            "replicationFetchMin",
+            "observerFetchMax",
+            "auditTailReadMax",
+            "shareRecoveryReadMax",
+            "logReadBufferCap",
+            "logTimestampScanWindow",
+            "transactionRecoveryReadMax",
+            "socketRequestMax",
+            "sendfileMin",
+            "socketSendBuffer",
+            "socketReceiveBuffer",
+            "aclMaxPrincipal",
+            "aclMaxResourceName",
+            "telemetryDecompressedOutputFloor",
+            "telemetryDecompressedOutputCeiling",
+            "recordDecompressionOutputFloor",
+            "recordDecompressionOutputCeiling",
+            "futureLogMoveReadChunk",
+            "metadataMaxBetweenSnapshots",
+            "metadataSnapshotFetchMax",
+            "metadataRaftFetchMax",
+        ] {
+            let tuning: BrokerTuning =
+                serde_json::from_value(serde_json::json!({field: "0B"})).expect("deserialize size");
+            let error = tuning.validate().expect_err("zero byte size must fail");
+            assert!(error.contains(field), "{error}");
+        }
+
+        for (field, value) in [
+            ("telemetryMaxDecompressionRatio", "0"),
+            ("recordDecompressionMaxRatio", "0"),
+            ("leaderImbalancePerBroker", "101%"),
+        ] {
+            let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({field: value}))
+                .expect("deserialize ratio");
+            let error = tuning.validate().expect_err("invalid ratio must fail");
+            assert!(error.contains(field), "{error}");
+        }
+    }
+
+    #[test]
+    fn broker_tuning_log_io_policy_reaches_broker_config() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "logReadBufferCap": "2MiB",
+            "logTimestampScanWindow": "32KiB"
+        }))
+        .expect("deserialize log I/O policy");
+        tuning.validate().expect("validate log I/O policy");
+        let rendered = tuning.render_runtime_toml();
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&rendered).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        assert!(broker.log_config.read_buffer_cap == crabka_units::mebibytes(2));
+        assert!(broker.log_config.timestamp_scan_window == crabka_units::kibibytes(32));
+    }
+
+    #[test]
+    fn broker_tuning_diskless_wal_replica_count_reaches_broker_config() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "disklessWalLocalReplicaCount": 5
+        }))
+        .expect("deserialize diskless WAL policy");
+        tuning.validate().expect("validate diskless WAL policy");
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&tuning.render_runtime_toml()).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        assert!(broker.diskless_wal_local_replica_count == 5);
+
+        let invalid: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "disklessWalLocalReplicaCount": 0
+        }))
+        .expect("deserialize invalid diskless WAL policy");
+        assert!(invalid.validate().is_err());
+    }
+
+    #[test]
+    fn broker_tuning_transaction_recovery_policy_reaches_broker_config() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "transactionRecoveryReadMax": "3MiB"
+        }))
+        .expect("deserialize transaction recovery policy");
+        tuning
+            .validate()
+            .expect("validate transaction recovery policy");
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&tuning.render_runtime_toml()).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        assert!(broker.transaction_recovery_read_max == crabka_units::mebibytes(3));
+    }
+
+    #[test]
+    fn broker_tuning_renders_bounded_metadata_snapshot_fetch_max() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "metadataSnapshotFetchMax": "512MiB"
+        }))
+        .expect("deserialize snapshot fetch maximum");
+        tuning.validate().expect("lower limit is valid");
+        let rendered = tuning.render_runtime_toml();
+        assert!(rendered.contains("metadata_snapshot_fetch_max = \"512MiB\""));
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&rendered).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        assert!(broker.metadata_snapshot_fetch_max == crabka_units::mebibytes(512));
+
+        let over_ceiling: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "metadataSnapshotFetchMax": "1073741825B"
+        }))
+        .expect("deserialize over-ceiling maximum");
+        let error = over_ceiling
+            .validate()
+            .expect_err("operator must reject values above the core ceiling");
+        assert!(error.contains("metadataSnapshotFetchMax"), "{error}");
+    }
+
+    #[test]
+    fn broker_tuning_renders_raft_runtime_policy() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "controllerFetchMissLimit": 7,
+            "metadataRaftCommandQueueCapacity": 512,
+            "metadataRaftFetchMax": "4MiB"
+        }))
+        .expect("deserialize Raft runtime policy");
+        tuning.validate().expect("Raft runtime policy is valid");
+
+        let rendered = tuning.render_runtime_toml();
+        assert!(rendered.contains("controller_fetch_miss_limit = 7"));
+        assert!(rendered.contains("metadata_raft_command_queue_capacity = 512"));
+        assert!(rendered.contains("metadata_raft_fetch_max = \"4MiB\""));
+
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&rendered).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        assert!(broker.controller_fetch_miss_limit.get() == 7);
+        assert!(broker.metadata_raft_command_queue_capacity.get() == 512);
+        assert!(broker.metadata_raft_fetch_max.bytes() == 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn broker_tuning_record_decompression_round_trips_and_validates() {
+        let tuning: BrokerTuning = serde_json::from_value(serde_json::json!({
+            "recordDecompressionMaxRatio": "50",
+            "recordDecompressionOutputFloor": "8MiB",
+            "recordDecompressionOutputCeiling": "512MiB"
+        }))
+        .expect("deserialize record decompression policy");
+        tuning
+            .validate()
+            .expect("valid record decompression policy");
+        let rendered = tuning.render_runtime_toml();
+        let file: crabka_broker::file_config::FileConfig =
+            toml::from_str(&rendered).expect("broker accepts operator TOML");
+        let mut broker = crabka_broker::BrokerConfig::default();
+        file.apply_to(&mut broker)
+            .expect("apply operator TOML to broker");
+        let policy = broker.record_decompression_policy().unwrap();
+        assert!(policy.max_ratio() == crabka_units::fraction(50.0));
+        assert!(policy.output_floor() == crabka_units::mebibytes(8));
+        assert!(policy.output_ceiling() == crabka_units::mebibytes(512));
+
+        for value in [
+            serde_json::json!({"recordDecompressionMaxRatio": "101"}),
+            serde_json::json!({
+                "recordDecompressionOutputFloor": "1GiB",
+                "recordDecompressionOutputCeiling": "16MiB"
+            }),
+            serde_json::json!({"recordDecompressionOutputCeiling": "2GiB"}),
+        ] {
+            let tuning: BrokerTuning =
+                serde_json::from_value(value).expect("deserialize invalid policy");
+            let error = tuning.validate().expect_err("invalid policy must fail");
+            assert!(error.contains("recordDecompression"), "{error}");
+        }
+    }
+
+    #[test]
+    fn gres_registry_round_trips_and_defaults() {
+        let custom: KafkaSpec = serde_json::from_str(
+            r#"{
+                "kafkaVersion":"0.1.1",
+                "gresRegistry":{
+                    "replicationFactor":2,
+                    "topicCreateTimeout":"15001ms",
+                    "readerRetryBackoff":"251ms",
+                    "fetchMaxWait":"501ms",
+                    "fetchPartitionMax":"1048577B",
+                    "producerDnsTimeout":"37ms",
+                    "readerAdminDnsTimeout":"37ms",
+                    "readerFetchMin":"3B"
+                }
+            }"#,
+        )
+        .expect("custom registry policy");
+        let expected = crabka_gres_control::RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(501),
+            crabka_units::bytes(1_048_577),
+        )
+        .expect("expected policy")
+        .with_producer_dns_timeout(crabka_units::millis(37))
+        .expect("DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(37))
+        .expect("reader/admin DNS timeout")
+        .with_client_resource_policy(
+            crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            crabka_client_core::ClientFrameMax::default(),
+            crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(3))
+                .expect("fetch minimum"),
+        );
+        assert!(
+            custom
+                .gres_registry
+                .as_ref()
+                .expect("gresRegistry")
+                .policy()
+                .expect("valid policy")
+                == expected
+        );
+        let json = serde_json::to_string(&custom).expect("serialize Kafka spec");
+        let round_trip: KafkaSpec = serde_json::from_str(&json).expect("round trip");
+        assert!(round_trip == custom);
+
+        let defaults: KafkaSpec =
+            serde_json::from_str(r#"{"kafkaVersion":"0.1.1"}"#).expect("default policy");
+        assert!(
+            defaults
+                .gres_registry
+                .as_ref()
+                .map_or_else(
+                    || Ok(crabka_gres_control::RegistryPolicy::default()),
+                    GresRegistrySpec::policy,
+                )
+                .expect("valid defaults")
+                == crabka_gres_control::RegistryPolicy::default()
+        );
+    }
+
+    #[test]
+    fn gres_registry_schema_has_runtime_bounds() {
+        let crd = serde_json::to_value(Kafka::crd()).expect("serialize Kafka CRD");
+        let registry = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["gresRegistry"];
+        assert!(registry["properties"]["replicationFactor"]["minimum"].as_f64() == Some(1.0));
+        assert!(registry["properties"]["fetchPartitionMax"]["type"] == "string");
+        assert!(registry["properties"]["readerFetchMin"]["type"] == "string");
+        for field in [
+            "topicCreateTimeout",
+            "readerRetryBackoff",
+            "fetchMaxWait",
+            "producerDnsTimeout",
+            "readerAdminDnsTimeout",
+        ] {
+            assert!(registry["properties"][field]["type"] == "string");
+        }
+        assert!(registry["properties"]["replicationFactor"]["maximum"].as_f64() == Some(32_767.0));
+    }
+
+    #[test]
+    fn gres_registry_rejects_zero_and_replication_overflow() {
+        let cases = [
+            GresRegistrySpec {
+                replication_factor: Some(0),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                replication_factor: Some(32_768),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                topic_create_timeout: Some(Time::ZERO),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                reader_retry_backoff: Some(Time::ZERO),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                fetch_max_wait: Some(Time::ZERO),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                fetch_partition_max: Some(ByteSize::ZERO),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                producer_dns_timeout: Some(Time::ZERO),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                reader_admin_dns_timeout: Some(Time::ZERO),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                reader_fetch_min: Some(ByteSize::ZERO),
+                ..Default::default()
+            },
+            GresRegistrySpec {
+                reader_fetch_min: Some(ByteSize::from_bytes_f64(1.5)),
+                ..Default::default()
+            },
+        ];
+
+        for spec in cases {
+            assert!(spec.policy().is_err(), "accepted invalid policy: {spec:?}");
+        }
+
+        let error = GresRegistrySpec {
+            producer_dns_timeout: Some(Time::ZERO),
+            ..Default::default()
+        }
+        .policy()
+        .expect_err("zero DNS timeout");
+        assert!(error.starts_with("spec.gresRegistry.producerDnsTimeout:"));
+
+        let error = GresRegistrySpec {
+            reader_admin_dns_timeout: Some(Time::ZERO),
+            ..Default::default()
+        }
+        .policy()
+        .expect_err("zero reader/admin DNS timeout");
+        assert!(error.starts_with("spec.gresRegistry.readerAdminDnsTimeout:"));
+
+        let error = GresRegistrySpec {
+            reader_fetch_min: Some(ByteSize::ZERO),
+            ..Default::default()
+        }
+        .policy()
+        .expect_err("zero reader fetch minimum");
+        assert!(error.starts_with("spec.gresRegistry.readerFetchMin:"));
+    }
+
+    #[test]
     fn round_trips_through_json() {
         let k = Kafka::new(
             "demo",
@@ -884,6 +2046,8 @@ mod tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
+                gres_registry: None,
             },
         );
         let json = serde_json::to_string(&k).unwrap();
@@ -916,6 +2080,8 @@ mod tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
+                gres_registry: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -1037,6 +2203,8 @@ mod tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
+                gres_registry: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -1077,6 +2245,8 @@ mod tests {
                 inter_broker_kerberos: None,
                 krb5_conf_secret_ref: None,
                 tracing: None,
+                broker_tuning: None,
+                gres_registry: None,
             },
         );
         let j = serde_json::to_string(&k.spec).unwrap();
@@ -1592,6 +2762,7 @@ authorization:
                     bootstrap: "127.0.0.1:9092".into(),
                     num_partitions: None,
                     replication: None,
+                    ..Default::default()
                 }),
             }),
             persistence: None,
@@ -1629,6 +2800,7 @@ authorization:
                     bootstrap: "  ".into(),
                     num_partitions: None,
                     replication: None,
+                    ..Default::default()
                 }),
             }),
             persistence: None,
@@ -1649,6 +2821,7 @@ authorization:
                     bootstrap: "127.0.0.1:9094".into(),
                     num_partitions: Some(0),
                     replication: None,
+                    ..Default::default()
                 }),
             }),
             persistence: None,
@@ -1669,11 +2842,112 @@ authorization:
                     bootstrap: "127.0.0.1:9094".into(),
                     num_partitions: None,
                     replication: None,
+                    ..Default::default()
                 }),
             }),
             persistence: None,
         };
         assert!(ts.validate().is_ok());
+    }
+
+    #[test]
+    fn topic_metadata_policy_round_trips_with_human_units() {
+        let value = serde_json::json!({
+            "bootstrap": "127.0.0.1:9094",
+            "numPartitions": 8,
+            "replication": 1,
+            "topicCreateTimeout": "45s",
+            "fetchMaxWait": "750ms",
+            "fetchMaxBytes": "2MiB",
+            "fetchRetryBackoff": "300ms",
+            "eventQueueCapacity": 2048,
+            "snapshotInterval": "1.5m"
+        });
+        let policy: TopicMetadataManagerSpec =
+            serde_json::from_value(value.clone()).expect("deserialize metadata policy");
+
+        check!(policy.topic_create_timeout == Some(crabka_units::secs(45)));
+        check!(policy.fetch_max_wait == Some(crabka_units::millis(750)));
+        check!(policy.fetch_max_bytes == Some(crabka_units::mebibytes(2)));
+        check!(policy.fetch_retry_backoff == Some(crabka_units::millis(300)));
+        check!(policy.event_queue_capacity == Some(2048));
+        check!(policy.snapshot_interval == Some(crabka_units::secs(90)));
+        policy.validate().unwrap();
+        assert!(serde_json::to_value(policy).unwrap() == value);
+    }
+
+    #[test]
+    fn topic_metadata_policy_rejects_invalid_runtime_values() {
+        for (field, policy) in [
+            (
+                "topic_create_timeout",
+                TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9094".into(),
+                    topic_create_timeout: Some(Time::ZERO),
+                    ..Default::default()
+                },
+            ),
+            (
+                "fetch_max_bytes",
+                TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9094".into(),
+                    fetch_max_bytes: Some(ByteSize::ZERO),
+                    ..Default::default()
+                },
+            ),
+            (
+                "event_queue_capacity",
+                TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9094".into(),
+                    event_queue_capacity: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "snapshot_interval",
+                TopicMetadataManagerSpec {
+                    bootstrap: "127.0.0.1:9094".into(),
+                    snapshot_interval: Some(Time::ZERO),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            let error = policy.validate().expect_err("invalid policy must fail");
+            assert!(error.contains(field), "{field}: {error}");
+        }
+    }
+
+    #[test]
+    fn topic_metadata_policy_schema_has_units_and_capacity_bound() {
+        let crd = serde_json::to_value(Kafka::crd()).expect("serialize Kafka CRD");
+        let topic = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["tieredStorage"]["properties"]["metadataManager"]["properties"]["topic"];
+
+        for field in [
+            "topicCreateTimeout",
+            "fetchMaxWait",
+            "fetchMaxBytes",
+            "fetchRetryBackoff",
+            "snapshotInterval",
+        ] {
+            assert!(topic["properties"][field]["type"] == "string", "{field}");
+        }
+        assert!(topic["properties"]["eventQueueCapacity"]["type"] == "integer");
+        assert!(topic["properties"]["eventQueueCapacity"]["minimum"].as_f64() == Some(1.0));
+        let required = topic["required"].as_array().expect("topic required fields");
+        for optional in [
+            "topicCreateTimeout",
+            "fetchMaxWait",
+            "fetchMaxBytes",
+            "fetchRetryBackoff",
+            "eventQueueCapacity",
+            "snapshotInterval",
+        ] {
+            assert!(
+                !required.iter().any(|field| field == optional),
+                "{optional} must remain optional"
+            );
+        }
     }
 
     #[test]
@@ -1771,7 +3045,7 @@ authorization:
                 protocol: None,
                 sample_ratio: None,
                 service_name: None,
-                timeout_secs: None,
+                timeout: None,
             }),
         };
         let err = t.validate().unwrap_err();
@@ -1787,7 +3061,7 @@ authorization:
                 protocol: None,
                 sample_ratio: Some(1.5),
                 service_name: None,
-                timeout_secs: None,
+                timeout: None,
             }),
         };
         let err = t.validate().unwrap_err();
@@ -1803,11 +3077,44 @@ authorization:
                 protocol: None,
                 sample_ratio: None,
                 service_name: None,
-                timeout_secs: Some(0),
+                timeout: Some(Time::ZERO),
             }),
         };
         let err = t.validate().unwrap_err();
-        assert!(err.contains("otlp.timeoutSecs"), "got: {err}");
+        assert!(err.contains("otlp.timeout"), "got: {err}");
+    }
+
+    #[test]
+    fn tracing_otlp_timeout_rejects_invalid_dimensioned_values() {
+        for value in ["5", "1MiB", "NaNs"] {
+            let json = serde_json::json!({
+                "endpoint": "http://otel:4317",
+                "timeout": value,
+            });
+            assert!(
+                serde_json::from_value::<OtlpTracing>(json).is_err(),
+                "accepted timeout {value}"
+            );
+        }
+
+        for value in [
+            "-1s",
+            "999999999999999999999999999999999999999999999999999999999999s",
+        ] {
+            let otlp: OtlpTracing = serde_json::from_value(serde_json::json!({
+                "endpoint": "http://otel:4317",
+                "timeout": value,
+            }))
+            .expect("dimensioned timeout deserializes before semantic validation");
+            let tracing = Tracing {
+                kind: TracingType::Otlp,
+                otlp: Some(otlp),
+            };
+            assert!(
+                tracing.validate().is_err(),
+                "accepted invalid timeout {value}"
+            );
+        }
     }
 
     #[test]
@@ -1819,7 +3126,7 @@ authorization:
                 protocol: Some(OtlpProtocol::Grpc),
                 sample_ratio: Some(0.1),
                 service_name: Some("prod-cluster".into()),
-                timeout_secs: Some(5),
+                timeout: Some(Time::from_secs(5)),
             }),
         };
         assert!(t.validate().is_ok());

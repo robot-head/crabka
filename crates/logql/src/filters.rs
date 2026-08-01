@@ -1,5 +1,6 @@
 use std::{cmp::Ordering, net::IpAddr};
 
+use crabka_units::ByteSize;
 use regex::Regex;
 
 use crate::{
@@ -201,7 +202,7 @@ impl FieldFilter {
                         })
                 }),
             FieldValue::Bytes(expected) => parse_bytes_literal(&candidate)
-                .is_some_and(|candidate| self.op.compare_numbers(candidate, *expected)),
+                .is_some_and(|candidate| self.op.compare_sizes(candidate, *expected)),
             FieldValue::String(expected) => self.op.compare_strings(&candidate, expected),
             FieldValue::Ip(expected) => match self.op {
                 ComparisonOp::Equal => expected.matches_ip_text(&candidate),
@@ -253,17 +254,23 @@ pub enum ComparisonOp {
 
 impl ComparisonOp {
     fn compare_numbers(self, candidate: f64, expected: f64) -> bool {
-        candidate
-            .partial_cmp(&expected)
-            .is_some_and(|ordering| match self {
-                Self::Equal => ordering == Ordering::Equal,
-                Self::NotEqual => ordering != Ordering::Equal,
-                Self::RegexEqual | Self::RegexNotEqual => false,
-                Self::Greater => ordering == Ordering::Greater,
-                Self::GreaterEqual => matches!(ordering, Ordering::Greater | Ordering::Equal),
-                Self::Less => ordering == Ordering::Less,
-                Self::LessEqual => matches!(ordering, Ordering::Less | Ordering::Equal),
-            })
+        self.matches_ordering(candidate.partial_cmp(&expected))
+    }
+
+    fn compare_sizes(self, candidate: ByteSize, expected: ByteSize) -> bool {
+        self.matches_ordering(candidate.partial_cmp(&expected))
+    }
+
+    fn matches_ordering(self, ordering: Option<Ordering>) -> bool {
+        ordering.is_some_and(|ordering| match self {
+            Self::Equal => ordering == Ordering::Equal,
+            Self::NotEqual => ordering != Ordering::Equal,
+            Self::RegexEqual | Self::RegexNotEqual => false,
+            Self::Greater => ordering == Ordering::Greater,
+            Self::GreaterEqual => matches!(ordering, Ordering::Greater | Ordering::Equal),
+            Self::Less => ordering == Ordering::Less,
+            Self::LessEqual => matches!(ordering, Ordering::Less | Ordering::Equal),
+        })
     }
 
     fn compare_strings(self, candidate: &str, expected: &str) -> bool {
@@ -286,7 +293,7 @@ impl ComparisonOp {
 pub enum FieldValue {
     Number(f64),
     Duration(i64),
-    Bytes(f64),
+    Bytes(ByteSize),
     String(String),
     Ip(IpMatcher),
 }

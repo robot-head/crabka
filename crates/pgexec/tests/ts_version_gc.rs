@@ -2,13 +2,14 @@
 //! sharded-table version chains, reclaim-floor admission, and pinned-read
 //! protection (see `crabka_pgexec::ts_gc`).
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use assert2::assert;
 use crabka_pgcatalog::RelationName;
 use crabka_pgexec::{ExecError, RowInterval, SqlEngine, TimestampWrite, timestamp_txn};
 use crabka_pgkv::{Kv, MemKv};
 use crabka_pgwire::engine::{Cell, Engine, QueryResult, Session};
+use crabka_units::{Time, convert::TimeExt as _, days};
 
 async fn exec(session: &mut crabka_pgexec::SqlSession, sql: &str) {
     session.simple_query(sql).await.expect("statement");
@@ -42,7 +43,7 @@ fn ts_version_count(kv: &dyn Kv, table_name: &str) -> usize {
 async fn engine_with_hot_row() -> (Arc<MemKv>, SqlEngine, crabka_pgexec::SqlSession) {
     let kv = Arc::new(MemKv::new());
     let engine = SqlEngine::with_kv(Arc::clone(&kv) as Arc<dyn Kv>).expect("engine");
-    engine.ts_version_gc().set_floor_lag(Duration::ZERO);
+    engine.ts_version_gc().set_floor_lag(Time::ZERO);
     let mut session = engine.connect();
     exec(&mut session, "CREATE TABLE hot (id int4, v int4) SHARDED").await;
     exec(&mut session, "INSERT INTO hot VALUES (1, 0)").await;
@@ -113,9 +114,7 @@ async fn pinned_repeatable_read_holds_reclamation_until_release() {
 async fn per_statement_reclamation_work_is_capped_and_amortizes() {
     let (kv, engine, mut session) = engine_with_hot_row().await;
     // An effectively infinite lag disables reclamation while the backlog builds.
-    engine
-        .ts_version_gc()
-        .set_floor_lag(Duration::from_secs(u64::MAX / 1_000));
+    engine.ts_version_gc().set_floor_lag(days(365 * 1_000));
 
     for i in 1..=80 {
         exec(
@@ -126,7 +125,7 @@ async fn per_statement_reclamation_work_is_capped_and_amortizes() {
     }
     assert!(ts_version_count(kv.as_ref(), "hot") == 81);
 
-    engine.ts_version_gc().set_floor_lag(Duration::ZERO);
+    engine.ts_version_gc().set_floor_lag(Time::ZERO);
     // One statement reclaims at most the per-row cap (64), oldest first...
     exec(&mut session, "UPDATE hot SET v = 81 WHERE id = 1").await;
     assert!(ts_version_count(kv.as_ref(), "hot") == 81 + 1 - 64);
@@ -234,7 +233,7 @@ async fn participant_commit_resolves_publish_closure_and_reclaim() {
     // closed: without it the reclaim floor sits at zero forever and every
     // superseded version survives (the load-test regression).
     let engine = SqlEngine::new();
-    engine.ts_version_gc().set_floor_lag(Duration::ZERO);
+    engine.ts_version_gc().set_floor_lag(Time::ZERO);
     let participant = engine.timestamp_txn_participant(3);
     let write = TimestampWrite {
         table_id: 42,

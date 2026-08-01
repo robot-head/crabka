@@ -21,8 +21,14 @@ use crabka_security::{
     ClientAuthMode, Jwks, JwksHandle, ListenerProtocol, OAuthBearerValidator, SaslMechanism,
     SignedJwsValidator, TlsConfig,
 };
+use crabka_units::prelude::*;
 
-use crate::config::{AuthzConfig, BasicAuthConfig, BearerAuthConfig, SecurityConfig};
+use crate::config::{
+    AuthzConfig, BasicAuthConfig, BearerAuthConfig, DEFAULT_ACL_REFRESH, SecurityConfig,
+};
+
+/// Default JWKS refresh interval.
+pub const DEFAULT_JWKS_REFRESH: Time = minutes(1);
 
 /// Plain (clap-free) inputs for assembling [`SecurityConfig`]. The binary maps
 /// its clap `Args` into this; the lib does the validation/assembly so it is
@@ -49,7 +55,8 @@ pub struct SecurityCliInput {
     pub jwks_expected_audience: Option<String>,
     pub jwks_ca: Option<std::path::PathBuf>,
     pub jwks_principal_claim: Option<String>,
-    pub jwks_refresh_ms: Option<u64>,
+    /// JWKS refresh interval. `None` uses [`DEFAULT_JWKS_REFRESH`].
+    pub jwks_refresh: Option<Time>,
     /// Server cert chain (PEM); enables HTTPS with `tls_key`.
     pub tls_cert: Option<PathBuf>,
     /// Server private key (PEM).
@@ -62,8 +69,9 @@ pub struct SecurityCliInput {
     pub authz: bool,
     /// Super-user principal names that bypass ACL checks.
     pub super_users: Vec<String>,
-    /// ACL-cache refresh interval (seconds).
-    pub acl_refresh_secs: u64,
+    /// ACL-cache refresh interval. `None` uses
+    /// [`DEFAULT_ACL_REFRESH`](crate::config::DEFAULT_ACL_REFRESH).
+    pub acl_refresh: Option<Time>,
     /// Kafka client protocol: `PLAINTEXT` | `SSL` | `SASL_PLAINTEXT` | `SASL_SSL`.
     pub kafka_security_protocol: String,
     /// SASL mechanism: `PLAIN` | `SCRAM-SHA-256` | `SCRAM-SHA-512`.
@@ -89,8 +97,8 @@ pub struct JwksHandleForRefresh {
     pub endpoint_uri: String,
     /// Optional CA bundle trusted for the JWKS HTTPS connection.
     pub ca_path: Option<std::path::PathBuf>,
-    /// Refresh interval in milliseconds. Default 60 000.
-    pub refresh_ms: u64,
+    /// How often the key set is re-fetched.
+    pub refresh: Time,
 }
 
 /// Return value of [`build_security`]: the assembled [`SecurityConfig`] plus,
@@ -214,7 +222,7 @@ fn build_bearer_jwks(
         handle,
         endpoint_uri,
         ca_path: input.jwks_ca.clone(),
-        refresh_ms: input.jwks_refresh_ms.unwrap_or(60_000),
+        refresh: input.jwks_refresh.unwrap_or(DEFAULT_JWKS_REFRESH),
     };
     Ok((cfg, refresh))
 }
@@ -252,7 +260,7 @@ fn build_authz(input: &SecurityCliInput) -> Option<AuthzConfig> {
     Some(AuthzConfig {
         enabled: true,
         super_users,
-        acl_refresh: std::time::Duration::from_secs(input.acl_refresh_secs),
+        acl_refresh: input.acl_refresh.unwrap_or(DEFAULT_ACL_REFRESH),
     })
 }
 
@@ -337,13 +345,13 @@ mod tests {
     /// Convenience: the binary's clap defaults for the string-typed knobs, so a
     /// test sets only the fields it exercises. Mirrors the `Args` `default_value`
     /// attributes (bearer `off`, client-auth `disabled`, broker protocol
-    /// `PLAINTEXT`, SASL mechanism `PLAIN`, ACL refresh `30`).
+    /// `PLAINTEXT`, SASL mechanism `PLAIN`, ACL refresh `30s`).
     fn input() -> SecurityCliInput {
         SecurityCliInput {
             bearer: "off".to_string(),
             bearer_principal_claim: "sub".to_string(),
             tls_client_auth: "disabled".to_string(),
-            acl_refresh_secs: 30,
+            acl_refresh: Some(secs(30)),
             kafka_security_protocol: "PLAINTEXT".to_string(),
             kafka_sasl_mechanism: "PLAIN".to_string(),
             ..Default::default()
@@ -554,7 +562,7 @@ mod tests {
         let s = sec(&SecurityCliInput {
             authz: true,
             super_users: vec!["admin".to_string(), "root".to_string()],
-            acl_refresh_secs: 45,
+            acl_refresh: Some(secs(45)),
             ..input()
         });
         let a = s.authz.expect("authz enabled");
@@ -564,13 +572,13 @@ mod tests {
                 super_users: ["admin".to_string(), "root".to_string()]
                     .into_iter()
                     .collect(),
-                acl_refresh: std::time::Duration::from_secs(45),
+                acl_refresh: secs(45),
             }
         );
     }
 
     #[test]
-    fn authz_default_refresh_secs() {
+    fn authz_default_refresh() {
         let s = sec(&SecurityCliInput {
             authz: true,
             ..input()
@@ -580,7 +588,7 @@ mod tests {
             a == crate::config::AuthzConfig {
                 enabled: true,
                 super_users: std::collections::HashSet::new(),
-                acl_refresh: std::time::Duration::from_secs(30),
+                acl_refresh: secs(30),
             }
         );
     }
@@ -747,7 +755,7 @@ mod tests {
             h.endpoint_uri.as_str() == "https://idp.example.com/.well-known/jwks.json"
         );
         assert2::assert!(h.ca_path == None);
-        assert2::assert!(h.refresh_ms == 60_000);
+        assert2::check!(h.refresh == minutes(1));
     }
 
     #[test]
@@ -784,14 +792,14 @@ mod tests {
     }
 
     #[test]
-    fn bearer_jwks_custom_refresh_ms() {
+    fn bearer_jwks_custom_refresh() {
         let i = SecurityCliInput {
             bearer: "jwks".into(),
             jwks_endpoint_uri: Some("https://idp/jwks".into()),
-            jwks_refresh_ms: Some(120_000),
+            jwks_refresh: Some(minutes(2)),
             ..input()
         };
         let out = build_security(&i).unwrap();
-        assert2::assert!(out.jwks_handle.unwrap().refresh_ms == 120_000);
+        assert2::check!(out.jwks_handle.unwrap().refresh == minutes(2));
     }
 }

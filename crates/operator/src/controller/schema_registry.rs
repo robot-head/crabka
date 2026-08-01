@@ -2,8 +2,14 @@
 //! Service + `ClusterIP` Service for the `crabka-schema-registry` binary,
 //! associated with a managed `Kafka` via the `crabka.io/cluster` label.
 
-use std::{collections::BTreeMap, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, sync::Arc};
 
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    fmt::Human as _,
+    secs,
+};
 use futures::StreamExt as _;
 use k8s_openapi::api::{
     apps::v1::Deployment,
@@ -30,13 +36,16 @@ use crate::{
         topic::internal_listener_bootstrap,
     },
     crd::{
-        BearerMode, CertManagerIssuerRef, Kafka, SchemaRegistry, SchemaRegistryStatus,
-        TlsClientAuth,
+        BearerMode, CertManagerIssuerRef, Kafka, SchemaRegistry, SchemaRegistrySpec,
+        SchemaRegistryStatus, TlsClientAuth,
     },
 };
 
 const APP_NAME: &str = "crabka-schema-registry";
 const SR_PORT: i32 = 8081;
+const DEFAULT_ELECTION_SESSION_TIMEOUT: Time = secs(10);
+const DEFAULT_ELECTION_REBALANCE_TIMEOUT: Time = secs(30);
+const DEFAULT_ELECTION_HEARTBEAT_INTERVAL: Time = secs(3);
 const DEFAULT_IMAGE: &str = concat!(
     "ghcr.io/robot-head/crabka-schema-registry:",
     env!("CARGO_PKG_VERSION")
@@ -62,9 +71,9 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn error_policy(_obj: Arc<SchemaRegistry>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
+pub fn error_policy(_obj: Arc<SchemaRegistry>, err: &ReconcileError, ctx: Arc<Context>) -> Action {
     tracing::warn!(error = %err, "schemaregistry reconcile error, requeueing");
-    Action::requeue(Duration::from_secs(15))
+    common::error_requeue(ctx)
 }
 
 /// Reconcile entry point. Times the pass and records the reconcile
@@ -101,6 +110,20 @@ async fn reconcile_inner(
     let name = obj.name_any();
     let sr_api: Api<SchemaRegistry> = Api::namespaced(ctx.client.clone(), &ns);
 
+    if let Err(why) = validate_config(&obj.spec) {
+        set_status(
+            &sr_api,
+            &name,
+            &obj,
+            "SchemaRegistryConfigInvalid",
+            &why,
+            None,
+            None,
+        )
+        .await?;
+        return Err(ReconcileError::SchemaRegistryConfigInvalid(why));
+    }
+
     // 1. Cluster label (unless an explicit bootstrap override is set)
     let cluster = obj
         .meta()
@@ -123,7 +146,7 @@ async fn reconcile_inner(
                 None,
             )
             .await?;
-            return Ok(Action::requeue(Duration::from_mins(1)));
+            return Ok(common::requeue(ctx.config.controller_drift_requeue));
         };
         let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
         let kafka = kafka_api.get_opt(&cluster).await?;
@@ -140,7 +163,7 @@ async fn reconcile_inner(
             None,
         )
         .await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
+        return Ok(common::requeue(ctx.config.controller_dependency_requeue));
     };
 
     // 3. Resolve TLS secret name (handles issuerRef path + mutual-exclusion).
@@ -157,7 +180,7 @@ async fn reconcile_inner(
                     None,
                 )
                 .await?;
-                return Ok(Action::requeue(Duration::from_secs(30)));
+                return Ok(common::requeue(ctx.config.controller_dependency_requeue));
             }
             (None, None) => {
                 set_status(
@@ -170,7 +193,7 @@ async fn reconcile_inner(
                     None,
                 )
                 .await?;
-                return Ok(Action::requeue(Duration::from_secs(30)));
+                return Ok(common::requeue(ctx.config.controller_dependency_requeue));
             }
             (Some(sn), None) => Some(sn.clone()),
             (None, Some(issuer)) => {
@@ -189,7 +212,7 @@ async fn reconcile_inner(
                         None,
                     )
                     .await?;
-                    return Ok(Action::requeue(Duration::from_secs(10)));
+                    return Ok(common::requeue(ctx.config.controller_certificate_requeue));
                 }
                 Some(cert_secret)
             }
@@ -256,7 +279,7 @@ async fn reconcile_inner(
         )
         .await?;
     }
-    Ok(Action::requeue(Duration::from_mins(1)))
+    Ok(common::requeue(ctx.config.controller_drift_requeue))
 }
 
 fn deployment_name(n: &str) -> String {
@@ -267,6 +290,208 @@ fn service_name(n: &str) -> String {
 }
 fn headless_name(n: &str) -> String {
     format!("{n}-sr-headless")
+}
+
+fn validate_protocol_millis_i32(value: Option<Time>, path: &str) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let millis = value.millis_i64();
+    if !value.secs_f64().is_finite() || Time::from_millis(millis) != value {
+        return Err(format!(
+            "{path}: must be a positive whole number of milliseconds within 1..=i32::MAX"
+        ));
+    }
+    let millis = i32::try_from(millis).map_err(|_| {
+        format!("{path}: must be a positive whole number of milliseconds within 1..=i32::MAX")
+    })?;
+    refined_type::rule::GreaterI32::<0>::new(millis)
+        .map(|_| ())
+        .map_err(|_| {
+            format!("{path}: must be a positive whole number of milliseconds within 1..=i32::MAX")
+        })
+}
+
+fn validate_protocol_bytes_i32(value: Option<ByteSize>, path: &str) -> Result<(), String> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let bytes = value.bytes_u64();
+    if !value.bytes_f64().is_finite() || ByteSize::from_bytes(bytes) != value {
+        return Err(format!(
+            "{path}: must be a positive whole number of bytes within 1..=i32::MAX"
+        ));
+    }
+    let bytes = i32::try_from(bytes).map_err(|_| {
+        format!("{path}: must be a positive whole number of bytes within 1..=i32::MAX")
+    })?;
+    refined_type::rule::GreaterI32::<0>::new(bytes)
+        .map(|_| ())
+        .map_err(|_| {
+            format!("{path}: must be a positive whole number of bytes within 1..=i32::MAX")
+        })
+}
+
+fn validate_config(spec: &SchemaRegistrySpec) -> Result<(), String> {
+    macro_rules! validate {
+        ($value:expr, $rule:ty, $path:literal) => {
+            if let Some(value) = $value {
+                <$rule>::new(value).map_err(|error| format!("{}: {error}", $path))?;
+            }
+        };
+    }
+
+    validate!(
+        spec.schemas_topic_replication_factor,
+        refined_type::rule::GreaterI32<0>,
+        "spec.schemasTopicReplicationFactor"
+    );
+    if let Some(client_id) = &spec.client_id {
+        refined_type::rule::NonEmptyString::new(client_id.clone())
+            .map_err(|error| format!("spec.clientId: {error}"))?;
+    }
+    if let Some(runtime) = &spec.runtime {
+        runtime
+            .client_dispatch_queue_capacity
+            .map(crabka_client_core::ConnectionDispatchQueueCapacity::new)
+            .transpose()
+            .map_err(|error| format!("spec.runtime.clientDispatchQueueCapacity: {error}"))?;
+        runtime
+            .client_frame_max
+            .map(crabka_client_core::ClientFrameMax::try_from)
+            .transpose()
+            .map_err(|error| format!("spec.runtime.clientFrameMax: {error}"))?;
+        validate_protocol_millis_i32(
+            runtime.store_reader_fetch_max_wait,
+            "spec.runtime.storeReaderFetchMaxWait",
+        )?;
+        validate_protocol_bytes_i32(
+            runtime.store_reader_fetch_max,
+            "spec.runtime.storeReaderFetchMax",
+        )?;
+        validate_protocol_millis_i32(
+            runtime.schemas_topic_create_timeout,
+            "spec.runtime.schemasTopicCreateTimeout",
+        )?;
+        for (value, path) in [
+            (
+                runtime.election_session_timeout,
+                "spec.runtime.electionSessionTimeout",
+            ),
+            (
+                runtime.election_rebalance_timeout,
+                "spec.runtime.electionRebalanceTimeout",
+            ),
+            (
+                runtime.election_heartbeat_interval,
+                "spec.runtime.electionHeartbeatInterval",
+            ),
+            (
+                runtime.election_reconnect_backoff,
+                "spec.runtime.electionReconnectBackoff",
+            ),
+            (
+                runtime.store_reader_retry_backoff,
+                "spec.runtime.storeReaderRetryBackoff",
+            ),
+        ] {
+            if value.is_some_and(|value| {
+                !value.secs_f64().is_finite()
+                    || value <= <Time as crabka_units::convert::TimeExt>::ZERO
+            }) {
+                return Err(format!("{path}: must be positive"));
+            }
+        }
+        if runtime.forward_max_body.is_some_and(|value| {
+            !value.bytes_f64().is_finite()
+                || value <= <ByteSize as crabka_units::convert::ByteSizeExt>::ZERO
+        }) {
+            return Err("spec.runtime.forwardMaxBody: must be positive".into());
+        }
+
+        let session = runtime
+            .election_session_timeout
+            .unwrap_or(DEFAULT_ELECTION_SESSION_TIMEOUT);
+        let rebalance = runtime
+            .election_rebalance_timeout
+            .unwrap_or(DEFAULT_ELECTION_REBALANCE_TIMEOUT);
+        let heartbeat = runtime
+            .election_heartbeat_interval
+            .unwrap_or(DEFAULT_ELECTION_HEARTBEAT_INTERVAL);
+        if heartbeat >= session {
+            return Err(
+                "spec.runtime.electionHeartbeatInterval must be below electionSessionTimeout"
+                    .into(),
+            );
+        }
+        if session > rebalance {
+            return Err(
+                "spec.runtime.electionSessionTimeout must not exceed electionRebalanceTimeout"
+                    .into(),
+            );
+        }
+        if let Some(level) = &runtime.default_compatibility_level
+            && !matches!(
+                level.as_str(),
+                "NONE"
+                    | "BACKWARD"
+                    | "BACKWARD_TRANSITIVE"
+                    | "FORWARD"
+                    | "FORWARD_TRANSITIVE"
+                    | "FULL"
+                    | "FULL_TRANSITIVE"
+            )
+        {
+            return Err("spec.runtime.defaultCompatibilityLevel is invalid".into());
+        }
+        if let Some(mode) = &runtime.default_mode
+            && !matches!(mode.as_str(), "READWRITE" | "READONLY" | "IMPORT")
+        {
+            return Err("spec.runtime.defaultMode is invalid".into());
+        }
+    }
+    if let Some(health) = &spec.health_checks {
+        validate!(
+            health.readiness_initial_delay_seconds,
+            refined_type::rule::GreaterEqualI32<0>,
+            "spec.healthChecks.readinessInitialDelaySeconds"
+        );
+        validate!(
+            health.readiness_period_seconds,
+            refined_type::rule::GreaterI32<0>,
+            "spec.healthChecks.readinessPeriodSeconds"
+        );
+        validate!(
+            health.liveness_initial_delay_seconds,
+            refined_type::rule::GreaterEqualI32<0>,
+            "spec.healthChecks.livenessInitialDelaySeconds"
+        );
+        validate!(
+            health.liveness_period_seconds,
+            refined_type::rule::GreaterI32<0>,
+            "spec.healthChecks.livenessPeriodSeconds"
+        );
+    }
+    if let Some(refresh) = spec
+        .authentication
+        .as_ref()
+        .and_then(|authn| authn.bearer.as_ref())
+        .and_then(|bearer| bearer.jwks_refresh)
+        && (!refresh.secs_f64().is_finite()
+            || refresh <= <Time as crabka_units::convert::TimeExt>::ZERO)
+    {
+        return Err("spec.authentication.bearer.jwksRefresh: must be positive".into());
+    }
+    if let Some(refresh) = spec
+        .authorization
+        .as_ref()
+        .and_then(|authz| authz.acl_refresh)
+        && (!refresh.secs_f64().is_finite()
+            || refresh <= <Time as crabka_units::convert::TimeExt>::ZERO)
+    {
+        return Err("spec.authorization.aclRefresh: must be positive".into());
+    }
+    Ok(())
 }
 
 /// Stable label set used for Deployment `selector.matchLabels`, the pod
@@ -360,6 +585,19 @@ fn render_deployment(
         headless_name(&name),
         ns
     );
+    let health = obj.spec.health_checks.as_ref();
+    let readiness_initial_delay_seconds = health
+        .and_then(|checks| checks.readiness_initial_delay_seconds)
+        .unwrap_or(2);
+    let readiness_period_seconds = health
+        .and_then(|checks| checks.readiness_period_seconds)
+        .unwrap_or(5);
+    let liveness_initial_delay_seconds = health
+        .and_then(|checks| checks.liveness_initial_delay_seconds)
+        .unwrap_or(5);
+    let liveness_period_seconds = health
+        .and_then(|checks| checks.liveness_period_seconds)
+        .unwrap_or(10);
     let mut env = vec![
         json!({ "name": "POD_NAME", "valueFrom": { "fieldRef": { "fieldPath": "metadata.name" } } }),
         json!({ "name": "SCHEMA_REGISTRY_ADVERTISED_URL", "value": advertised }),
@@ -387,8 +625,16 @@ fn render_deployment(
                         "env": env,
                         "ports": [{ "name": "rest", "containerPort": SR_PORT, "protocol": "TCP" }],
                         "volumeMounts": mounts,
-                        "readinessProbe": { "tcpSocket": { "port": SR_PORT }, "initialDelaySeconds": 2, "periodSeconds": 5 },
-                        "livenessProbe": { "tcpSocket": { "port": SR_PORT }, "initialDelaySeconds": 5, "periodSeconds": 10 },
+                        "readinessProbe": {
+                            "tcpSocket": { "port": SR_PORT },
+                            "initialDelaySeconds": readiness_initial_delay_seconds,
+                            "periodSeconds": readiness_period_seconds,
+                        },
+                        "livenessProbe": {
+                            "tcpSocket": { "port": SR_PORT },
+                            "initialDelaySeconds": liveness_initial_delay_seconds,
+                            "periodSeconds": liveness_period_seconds,
+                        },
                         "resources": obj.spec.resources.clone().unwrap_or_default(),
                     }],
                 }
@@ -425,6 +671,47 @@ fn build_args_and_mounts(
     }
     if let Some(g) = &s.group_id {
         a.push(format!("--group-id={g}"));
+    }
+    if let Some(runtime) = &s.runtime {
+        macro_rules! push_runtime {
+            ($field:ident) => {
+                if let Some(value) = &runtime.$field {
+                    a.push(format!(
+                        "--{}={value}",
+                        stringify!($field).replace('_', "-")
+                    ));
+                }
+            };
+            (quantity $field:ident) => {
+                if let Some(value) = runtime.$field {
+                    a.push(format!(
+                        "--{}={}",
+                        stringify!($field).replace('_', "-"),
+                        value.human()
+                    ));
+                }
+            };
+        }
+        push_runtime!(quantity election_session_timeout);
+        push_runtime!(quantity election_rebalance_timeout);
+        push_runtime!(quantity election_heartbeat_interval);
+        push_runtime!(quantity election_reconnect_backoff);
+        push_runtime!(quantity store_reader_retry_backoff);
+        push_runtime!(quantity store_reader_fetch_max_wait);
+        push_runtime!(quantity store_reader_fetch_max);
+        push_runtime!(quantity schemas_topic_create_timeout);
+        push_runtime!(quantity forward_max_body);
+        push_runtime!(default_compatibility_level);
+        push_runtime!(default_mode);
+        if let Some(value) = runtime.client_dispatch_queue_capacity {
+            a.push(format!("--client-dispatch-queue-capacity={value}"));
+        }
+        if let Some(value) = runtime.client_frame_max {
+            a.push(format!("--client-frame-max={}B", value.bytes_u64()));
+        }
+    }
+    if let Some(client_id) = &s.client_id {
+        a.push(format!("--client-id={client_id}"));
     }
 
     let mut volumes = Vec::new();
@@ -498,8 +785,8 @@ fn build_args_and_mounts(
                     {
                         a.push(format!("--bearer-jwks-principal-claim={pc}"));
                     }
-                    if let Some(ms) = bearer.jwks_refresh_ms {
-                        a.push(format!("--bearer-jwks-refresh-ms={ms}"));
+                    if let Some(refresh) = bearer.jwks_refresh {
+                        a.push(format!("--bearer-jwks-refresh={}", refresh.human()));
                     }
                     if let Some(ca_sn) = &bearer.jwks_tls_secret_name {
                         a.push("--bearer-jwks-ca=/etc/sr/jwks-ca/ca.crt".into());
@@ -522,8 +809,8 @@ fn build_args_and_mounts(
         for u in &az.super_users {
             a.push(format!("--super-user={u}"));
         }
-        if let Some(r) = az.acl_refresh_seconds {
-            a.push(format!("--acl-refresh-secs={r}"));
+        if let Some(refresh) = az.acl_refresh {
+            a.push(format!("--acl-refresh={}", refresh.human()));
         }
     }
 
@@ -658,4 +945,139 @@ async fn set_status(
     };
     patch_status(api, name, status).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configured_client_policy_renders_once() {
+        let mut registry = SchemaRegistry::new(
+            "registry",
+            SchemaRegistrySpec {
+                replicas: 1,
+                image: None,
+                bootstrap_servers: None,
+                schemas_topic: None,
+                schemas_topic_replication_factor: None,
+                group_id: None,
+                runtime: None,
+                client_id: None,
+                health_checks: None,
+                kafka_client: None,
+                tls: None,
+                authentication: None,
+                authorization: None,
+                resources: None,
+            },
+        );
+        registry.spec.runtime = Some(crate::crd::SchemaRegistryRuntime {
+            client_dispatch_queue_capacity: Some(7),
+            client_frame_max: Some(crabka_units::kibibytes(32)),
+            ..crate::crd::SchemaRegistryRuntime::default()
+        });
+
+        let (args, _, _, _) = build_args_and_mounts(&registry, "boot:9092", None);
+        assert_eq!(
+            args.iter()
+                .filter(|arg| *arg == "--client-dispatch-queue-capacity=7")
+                .count(),
+            1
+        );
+        assert_eq!(
+            args.iter()
+                .filter(|arg| *arg == "--client-frame-max=32768B")
+                .count(),
+            1
+        );
+
+        registry.spec.runtime = None;
+        let (omitted, _, _, _) = build_args_and_mounts(&registry, "boot:9092", None);
+        assert!(
+            omitted.iter().all(|arg| {
+                !arg.starts_with("--client-dispatch-queue-capacity=")
+                    && !arg.starts_with("--client-frame-max=")
+            }),
+            "got: {omitted:?}"
+        );
+    }
+
+    #[test]
+    fn client_policy_validation_rejects_invalid_boundaries() {
+        for (runtime, path) in [
+            (
+                serde_json::json!({"clientDispatchQueueCapacity": 0}),
+                "spec.runtime.clientDispatchQueueCapacity",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "0B"}),
+                "spec.runtime.clientFrameMax",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "1.5B"}),
+                "spec.runtime.clientFrameMax",
+            ),
+            (
+                serde_json::json!({"clientFrameMax": "101MiB"}),
+                "spec.runtime.clientFrameMax",
+            ),
+        ] {
+            let spec: SchemaRegistrySpec = serde_json::from_value(serde_json::json!({
+                "replicas": 1,
+                "runtime": runtime,
+            }))
+            .unwrap();
+            let error = validate_config(&spec).expect_err("reject invalid policy");
+            assert!(error.contains(path), "got: {error}");
+        }
+    }
+
+    #[test]
+    fn protocol_runtime_validation_rejects_lossy_lowering() {
+        for value in [
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"storeReaderFetchMaxWait": "0.5ms"}
+            }),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"storeReaderFetchMax": "0.5B"}
+            }),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"schemasTopicCreateTimeout": "0.5ms"}
+            }),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"storeReaderFetchMaxWait": "2147483648ms"}
+            }),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"storeReaderFetchMax": "2147483648B"}
+            }),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {"schemasTopicCreateTimeout": "2147483648ms"}
+            }),
+        ] {
+            let spec: SchemaRegistrySpec = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate_config(&spec).is_err(), "accepted invalid {value}");
+        }
+
+        for value in [
+            serde_json::json!({"replicas": 1}),
+            serde_json::json!({
+                "replicas": 1,
+                "runtime": {
+                    "storeReaderFetchMaxWait": "2147483647ms",
+                    "storeReaderFetchMax": "2147483647B",
+                    "schemasTopicCreateTimeout": "2147483647ms"
+                }
+            }),
+        ] {
+            let spec: SchemaRegistrySpec = serde_json::from_value(value.clone()).unwrap();
+            assert!(validate_config(&spec).is_ok(), "rejected valid {value}");
+        }
+    }
 }

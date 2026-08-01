@@ -7,11 +7,12 @@ use std::{
         Arc,
         atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
     },
-    time::Duration,
 };
 
 use crabka_client_consumer::ConsumerGroupMetadata;
-use crabka_client_core::{Client, security::ClientSecurity};
+use crabka_client_core::{
+    Client, ClientFrameMax, ConnectionDispatchQueueCapacity, security::ClientSecurity,
+};
 use crabka_protocol::owned::{
     add_offsets_to_txn_request::AddOffsetsToTxnRequest,
     add_partitions_to_txn_request::{AddPartitionsToTxnRequest, AddPartitionsToTxnTransaction},
@@ -23,6 +24,7 @@ use crabka_protocol::owned::{
         TxnOffsetCommitRequest, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
     },
 };
+use crabka_units::{Time, convert::TimeExt};
 use dashmap::DashMap;
 use tokio::{
     sync::{Mutex, Notify, oneshot},
@@ -33,10 +35,12 @@ use tracing::Instrument as _;
 
 use crate::{
     accumulator::{Accumulator, AccumulatorMap, AppendResult},
+    builder::{ProducerFlushTimeout, init_producer_id_with_retry},
     compression::Compression,
     error::ProducerError,
     partitioner::UniformStickyPartitioner,
     record::{ProducerRecord, RecordMetadata},
+    sender::DrainIntent,
     transactional::{OwnedTransaction, Transaction, TxnState},
 };
 
@@ -62,6 +66,7 @@ impl Acks {
 pub(crate) const STATE_ACTIVE: u8 = 0;
 pub(crate) const STATE_FENCED: u8 = 1;
 pub(crate) const STATE_CLOSED: u8 = 2;
+pub(crate) const UNRESOLVED_TOPIC_PARTITION_COUNT: i32 = 1;
 
 #[derive(Debug, Clone)]
 pub(crate) struct TopicMetadata {
@@ -79,6 +84,18 @@ pub(crate) struct ProducerIdentity {
     pub epoch: i16,
 }
 
+fn wake_sender_after_append(
+    wake_tx: &tokio::sync::mpsc::Sender<DrainIntent>,
+    linger: Time,
+    wakes_sender: bool,
+) {
+    if linger == <Time as TimeExt>::ZERO {
+        let _ = wake_tx.try_send(DrainIntent::Force);
+    } else if wakes_sender {
+        let _ = wake_tx.try_send(DrainIntent::Ready);
+    }
+}
+
 // accumulators map is inherently complex
 pub struct Producer {
     pub(crate) client: Client,
@@ -90,6 +107,8 @@ pub struct Producer {
     /// connections would be plaintext/unauthenticated and a secured listener
     /// drops them, failing the transactional flow with `Client(Disconnected)`.
     pub(crate) security: Option<ClientSecurity>,
+    pub(crate) dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    pub(crate) frame_max: ClientFrameMax,
     pub(crate) identity: ProducerIdentity,
     // The following config knobs are also copied into `SenderConfig` at
     // construction time. They live on `Producer` for diagnostic
@@ -101,13 +120,10 @@ pub struct Producer {
     pub(crate) compression: Compression,
     pub(crate) batch_size: usize,
     #[allow(dead_code)]
-    pub(crate) linger: Duration,
+    pub(crate) linger: Time,
     #[allow(dead_code)]
-    pub(crate) request_timeout: Duration,
-    #[allow(dead_code)]
-    pub(crate) retries: i32,
-    #[allow(dead_code)]
-    pub(crate) retry_backoff: Duration,
+    pub(crate) request_timeout: Time,
+    pub(crate) flush_timeout: ProducerFlushTimeout,
     #[allow(dead_code)]
     pub(crate) max_in_flight: usize,
     pub(crate) metadata_cache: Arc<Mutex<HashMap<String, TopicMetadata>>>,
@@ -123,7 +139,7 @@ pub struct Producer {
     pub(crate) next_seq: Arc<DashMap<(String, i32), i32>>,
     pub(crate) partitioner: Arc<UniformStickyPartitioner>,
     pub(crate) state: Arc<AtomicU8>,
-    pub(crate) wake_tx: tokio::sync::mpsc::Sender<()>,
+    pub(crate) wake_tx: tokio::sync::mpsc::Sender<DrainIntent>,
     pub(crate) flush_notify: Arc<Notify>,
     /// Count of batches the sender has popped from an accumulator but not yet
     /// finished sending (Produce in-flight, awaiting the broker ack). A batch
@@ -135,7 +151,10 @@ pub struct Producer {
     pub(crate) sender_shutdown: CancellationToken,
     pub(crate) sender_handle: Option<JoinHandle<()>>,
     pub(crate) transactional_id: Option<String>,
-    pub(crate) transaction_timeout: Duration,
+    pub(crate) transaction_timeout_ms: i32,
+    pub(crate) init_retry_timeout: Time,
+    pub(crate) init_retry_backoff: Time,
+    pub(crate) init_max_backoff: Time,
     /// Arc-wrapped so the sender task can share the same state without
     /// additional synchronization structures.
     pub(crate) txn_state: Arc<Mutex<TxnState>>,
@@ -453,19 +472,24 @@ impl Producer {
             .bootstrap(coord_addr)
             .client_id(self.client_id.clone())
             .maybe_security(self.security.clone())
+            .dispatch_queue_capacity(self.dispatch_queue_capacity.get())
+            .frame_max(self.frame_max.size())
             .request_timeout(self.request_timeout)
             .build()
             .await?;
 
-        let timeout_ms = i32::try_from(self.transaction_timeout.as_millis()).unwrap_or(60_000);
-
-        let resp = coord
-            .send(InitProducerIdRequest {
+        let resp = init_producer_id_with_retry(
+            &coord,
+            InitProducerIdRequest {
                 transactional_id: Some(tid.to_owned()),
-                transaction_timeout_ms: timeout_ms,
+                transaction_timeout_ms: self.transaction_timeout_ms,
                 ..Default::default()
-            })
-            .await?;
+            },
+            self.init_retry_timeout,
+            self.init_retry_backoff,
+            self.init_max_backoff,
+        )
+        .await?;
 
         tracing::Span::current().record("error_code", resp.error_code);
         match resp.error_code {
@@ -599,6 +623,8 @@ impl Producer {
             .bootstrap(group_addr)
             .client_id(self.client_id.clone())
             .maybe_security(self.security.clone())
+            .dispatch_queue_capacity(self.dispatch_queue_capacity.get())
+            .frame_max(self.frame_max.size())
             .build()
             .await?;
 
@@ -657,7 +683,7 @@ impl Producer {
         if !self.txn_recovery_required.swap(true, Ordering::AcqRel) {
             self.txn_recovery_generation.fetch_add(1, Ordering::AcqRel);
         }
-        let _ = self.wake_tx.try_send(());
+        let _ = self.wake_tx.try_send(DrainIntent::Ready);
     }
 
     fn transaction_recovery_required(&self) -> bool {
@@ -753,26 +779,34 @@ impl Producer {
             return rx;
         }
         let mut a = acc.lock().await;
+        if let Err(error) = self.is_active() {
+            let (tx, rx) = oneshot::channel();
+            let _ = tx.send(Err(error));
+            return rx;
+        }
         // try_append currently only ever returns `Appended`; if a future
         // change adds `BatchFull` we want a compile error, so match
         // exhaustively rather than `let ... else`.
-        let rx = match a.try_append(
+        let (rx, wakes_sender) = match a.try_append(
             record.key,
             record.value,
             record.headers,
             timestamp,
             transaction_generation,
         ) {
-            AppendResult::Appended(rx) => rx,
+            AppendResult::Appended {
+                receiver,
+                wakes_sender,
+            } => (receiver, wakes_sender),
             AppendResult::BatchFull => {
                 // Should not happen with the current implementation; treat
                 // as transient and fail the caller rather than panic.
                 let (tx, rx) = oneshot::channel();
                 let _ = tx.send(Err(ProducerError::BufferFull));
-                rx
+                (rx, false)
             }
         };
-        let _ = self.wake_tx.try_send(());
+        wake_sender_after_append(&self.wake_tx, self.linger, wakes_sender);
         rx
     }
 
@@ -841,7 +875,9 @@ impl Producer {
                 // to a default of 1 so the caller can still attempt the send.
                 let (count, topic_id) = match topic_meta {
                     Some(t) if t.error_code == 0 => {
-                        let count = i32::try_from(t.partitions.len()).unwrap_or(1).max(1);
+                        let count = i32::try_from(t.partitions.len())
+                            .unwrap_or(UNRESOLVED_TOPIC_PARTITION_COUNT)
+                            .max(UNRESOLVED_TOPIC_PARTITION_COUNT);
                         // Cache the per-partition leader id so the sender can
                         // route each Produce to the partition leader.
                         for part in &t.partitions {
@@ -850,7 +886,10 @@ impl Producer {
                         }
                         (count, t.topic_id)
                     }
-                    _ => (1, crabka_protocol::primitives::uuid::Uuid::ZERO),
+                    _ => (
+                        UNRESOLVED_TOPIC_PARTITION_COUNT,
+                        crabka_protocol::primitives::uuid::Uuid::ZERO,
+                    ),
                 };
                 // NOTE: an unresolved lookup is cached as `{count: 1, topic_id:
                 // ZERO}` to avoid a metadata-refresh storm (this runs per record
@@ -870,7 +909,7 @@ impl Producer {
                 tracing::Span::current().record("num_partitions", count);
                 count
             }
-            Err(_) => 1,
+            Err(_) => UNRESOLVED_TOPIC_PARTITION_COUNT,
         }
     }
 
@@ -897,15 +936,24 @@ impl Producer {
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn flush(&self) -> Result<(), ProducerError> {
         self.is_active()?;
-        let _ = self.wake_tx.send(()).await;
-        for _ in 0..1000 {
-            if self.all_empty().await && self.in_flight.load(Ordering::Acquire) == 0 {
-                return Ok(());
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.flush_timeout.duration())
+            .ok_or(ProducerError::FlushTimeout)?;
+
+        tokio::time::timeout_at(deadline, async {
+            let _ = self.wake_tx.send(DrainIntent::Force).await;
+            loop {
+                let notified = self.flush_notify.notified();
+                tokio::pin!(notified);
+                notified.as_mut().enable();
+                if self.all_empty().await && self.in_flight.load(Ordering::Acquire) == 0 {
+                    return;
+                }
+                notified.await;
             }
-            let _ =
-                tokio::time::timeout(Duration::from_millis(50), self.flush_notify.notified()).await;
-        }
-        Err(ProducerError::FlushTimeout)
+        })
+        .await
+        .map_err(|_| ProducerError::FlushTimeout)
     }
 
     async fn all_empty(&self) -> bool {
@@ -969,9 +1017,12 @@ fn build_topics_payload(offsets: &[((String, i32), i64)]) -> Vec<TxnOffsetCommit
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Mutex, atomic::Ordering},
+        time::Duration,
+    };
 
-    use bytes::BytesMut;
+    use bytes::{Bytes, BytesMut};
     use crabka_client_core::MockBroker;
     use crabka_protocol::{
         Decode, Encode,
@@ -983,9 +1034,52 @@ mod tests {
         },
     };
 
-    use super::Producer;
+    use super::{DrainIntent, Producer, wake_sender_after_append};
+    use crate::{
+        accumulator::{Accumulator, AppendResult},
+        error::ProducerError,
+    };
 
     const CLIENT_ID: &str = "producer-test";
+
+    #[test]
+    fn only_new_deadlines_and_rollovers_wake_nonzero_linger() {
+        let (wake_tx, mut wake_rx) = tokio::sync::mpsc::channel(4);
+
+        let mut coalesced = Accumulator::new(1024);
+        let AppendResult::Appended { wakes_sender, .. } =
+            coalesced.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None)
+        else {
+            panic!("unexpected BatchFull");
+        };
+        wake_sender_after_append(&wake_tx, crabka_units::millis(10), wakes_sender);
+        assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Ready));
+        let AppendResult::Appended { wakes_sender, .. } =
+            coalesced.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None)
+        else {
+            panic!("unexpected BatchFull");
+        };
+        wake_sender_after_append(&wake_tx, crabka_units::millis(10), wakes_sender);
+        assert_eq!(
+            wake_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        );
+
+        let mut rollover = Accumulator::new(20);
+        let _ = rollover.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
+        let AppendResult::Appended { wakes_sender, .. } =
+            rollover.try_append(None, Some(Bytes::from_static(b"b")), vec![], 0, None)
+        else {
+            panic!("unexpected BatchFull");
+        };
+        wake_sender_after_append(&wake_tx, crabka_units::millis(10), wakes_sender);
+        assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Ready));
+
+        let mut immediate = Accumulator::new(1024);
+        let _ = immediate.try_append(None, Some(Bytes::from_static(b"a")), vec![], 0, None);
+        wake_sender_after_append(&wake_tx, crabka_units::secs(0), false);
+        assert_eq!(wake_rx.try_recv(), Ok(DrainIntent::Force));
+    }
 
     fn encode_v0(resp: &impl Encode) -> Vec<u8> {
         let mut buf = BytesMut::new();
@@ -1077,6 +1171,22 @@ mod tests {
         (mock, producer)
     }
 
+    async fn producer_with_flush_timeout(flush_timeout: Duration) -> (MockBroker, Producer) {
+        let mock = MockBroker::start(|api_key, _version, _corr_id, _body| {
+            (api_key == api_versions_request::API_KEY).then(|| api_versions_response(4))
+        })
+        .await;
+        let producer = Producer::builder()
+            .bootstrap(mock.addr.to_string())
+            .client_id(CLIENT_ID)
+            .enable_idempotence(false)
+            .flush_timeout(flush_timeout)
+            .build()
+            .await
+            .expect("producer connects to mock broker");
+        (mock, producer)
+    }
+
     #[derive(Clone, Copy)]
     enum LookupKind {
         Group,
@@ -1147,5 +1257,77 @@ mod tests {
             assert2::assert!(*requests == vec![expected_request]);
             mock.stop();
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_times_out_at_the_configured_deadline() {
+        let (mock, producer) = producer_with_flush_timeout(Duration::from_millis(7)).await;
+        producer.in_flight.store(1, Ordering::Release);
+
+        let flush = producer.flush();
+        tokio::pin!(flush);
+        assert!(futures::poll!(flush.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(6)).await;
+        assert!(futures::poll!(flush.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            futures::poll!(flush.as_mut()),
+            std::task::Poll::Ready(Err(ProducerError::FlushTimeout))
+        ));
+        mock.stop();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn flush_timeout_bounds_a_blocked_force_wake() {
+        let (mock, mut producer) = producer_with_flush_timeout(Duration::from_millis(7)).await;
+        let (wake_tx, _wake_rx) = tokio::sync::mpsc::channel(16);
+        producer.wake_tx = wake_tx;
+        for _ in 0..16 {
+            producer
+                .wake_tx
+                .try_send(DrainIntent::Force)
+                .expect("wake channel has capacity");
+        }
+
+        let flush = producer.flush();
+        tokio::pin!(flush);
+        assert!(futures::poll!(flush.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(6)).await;
+        assert!(futures::poll!(flush.as_mut()).is_pending());
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert!(matches!(
+            futures::poll!(flush.as_mut()),
+            std::task::Poll::Ready(Err(ProducerError::FlushTimeout))
+        ));
+        mock.stop();
+    }
+
+    #[tokio::test]
+    async fn flush_does_not_miss_notification_during_state_check() {
+        let (mock, producer) = producer_with_flush_timeout(Duration::from_millis(20)).await;
+        let accumulator = Arc::new(tokio::sync::Mutex::new(Accumulator::new(1024)));
+        producer
+            .accumulators
+            .insert(("held".to_owned(), 0), Arc::clone(&accumulator));
+        let mut guard = accumulator.lock().await;
+
+        let flush = producer.flush();
+        tokio::pin!(flush);
+        assert!(futures::poll!(flush.as_mut()).is_pending());
+
+        guard.current = None;
+        guard.ready.clear();
+        producer.flush_notify.notify_waiters();
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_millis(20), flush)
+            .await
+            .expect("flush must not wait for another notification")
+            .expect("empty producer flushes");
+        mock.stop();
     }
 }

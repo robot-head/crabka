@@ -1,6 +1,7 @@
 //! Typed range-map and routing primitives for Chapter Gres multi-range tenants.
 
 pub mod barrier;
+mod config;
 pub mod control;
 pub mod coordinator;
 pub mod forward;
@@ -25,6 +26,7 @@ pub use transport::{serve_tcp, spawn_loopback};
 
 pub use self::{
     barrier::{BarrierError, Range0Barrier, Range0EndSampler},
+    config::{PositiveU32, PositiveU64, PositiveUsize, RangeRuntimePolicy},
     control::AuthorizedSplitIntent,
     coordinator::{
         LocalCoordinator, LocalCoordinatorError, LocalTransactionRecord, NetCoordinator,
@@ -66,8 +68,9 @@ pub use self::{
     tenant::{
         GatewayCommitFault, LocalSqlSplitError, MultiRangeTenant, MultiRangeTenantConfig,
         MultiRangeTenantHandles, ReadOnlyRange0Replica, RouteRecord, StatementKind, TenantError,
-        TimestampSourceMode, hlc_tso_rpc_from_horizon, hlc_wall_clock,
-        pgexec_timestamp_oracle_from_rpc, tso_rpc_from_horizon,
+        TimestampSourceMode, hlc_tso_rpc_from_horizon, hlc_tso_rpc_from_horizon_with_policy,
+        hlc_wall_clock, pgexec_timestamp_oracle_from_horizon_with_policy,
+        pgexec_timestamp_oracle_from_rpc, tso_rpc_from_horizon, tso_rpc_from_horizon_with_policy,
     },
     transfer::{
         ClaimedStagedSuccessor, ClaimedStagedSuccessors, CommittedTailRecord, RangeTransferBarrier,
@@ -77,11 +80,11 @@ pub use self::{
     transport::{
         DurableInspectProvenance, DurableRecord, FramedTcpClient, InspectDurableRecordsReq,
         InspectDurableRecordsResp, JoinRangeReq, JoinRangeResp, JoinRangeRow,
-        MAX_DURABLE_INSPECT_BYTES, MAX_DURABLE_INSPECT_RECORDS, RangeControlOperation,
-        RangeControlReq, RangeControlResp, RangeRequest, RangeResponse, RangeService,
-        RangeTlsClientConfig, RangeTlsServerConfig, ScanCursorReq, ScanCursorResp, TransportError,
-        TsoReq, TsoResp, TxnReq, TxnResp, WireErrorKind, WireInDoubtMarker, WireJoinKind,
-        WireJoinStrategy, WireJoinTableInterval, WireRangeKey, serve_tls,
+        RangeControlOperation, RangeControlReq, RangeControlResp, RangeRequest, RangeResponse,
+        RangeService, RangeTlsClientConfig, RangeTlsServerConfig, ScanCursorReq, ScanCursorResp,
+        TransportError, TsoReq, TsoResp, TxnReq, TxnResp, WireErrorKind, WireInDoubtMarker,
+        WireJoinKind, WireJoinStrategy, WireJoinTableInterval, WireRangeKey, serve_tls,
+        serve_tls_with_policy,
     },
     tso::{
         BatchedTsoClient, EpochHeartbeat, GrantLease, HeartbeatVerdict, MemoryTsoHorizon,

@@ -5,19 +5,110 @@ use std::{
     io::Read,
     path::PathBuf,
     sync::{Arc, Mutex, MutexGuard},
-    time::Duration,
 };
 
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes, secs,
+};
 use object::{Object, ObjectSymbol};
+use refined_type::{Refined, rule::GreaterU64};
 
 use crate::{Frame, RawLocation, SymbolDb, SymbolSource};
 
-/// Hard cap on debuginfo artifacts downloaded from a (potentially untrusted)
-/// debuginfod server. `build_id` is attacker-controlled, so a malicious or
-/// compromised server could otherwise stream an unbounded body and exhaust
-/// memory. 512 MiB comfortably covers real debug objects while bounding the
-/// blast radius.
-const MAX_DEBUGINFO_BYTES: u64 = 512 * 1024 * 1024;
+/// Default hard cap on a debuginfo artifact downloaded from a debuginfod server.
+pub const DEFAULT_DEBUGINFOD_MAX_ARTIFACT_SIZE: ByteSize = mebibytes(512);
+
+/// Default time allowed to establish a debuginfod connection.
+pub const DEFAULT_DEBUGINFOD_CONNECT_TIMEOUT: Time = secs(5);
+
+/// Default time allowed for a whole debuginfod request, connection included.
+pub const DEFAULT_DEBUGINFOD_REQUEST_TIMEOUT: Time = secs(10);
+
+/// Validated resource policy for debuginfod requests.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DebuginfodConfig {
+    max_artifact_size: ByteSize,
+    connect_timeout: Time,
+    request_timeout: Time,
+}
+
+impl DebuginfodConfig {
+    /// Validate a debuginfod resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless the artifact cap is a positive whole-byte value,
+    /// both timeouts are positive and finite, and the connect timeout does not
+    /// exceed the whole-request timeout.
+    pub fn new(
+        max_artifact_size: ByteSize,
+        connect_timeout: Time,
+        request_timeout: Time,
+    ) -> Result<Self, String> {
+        let bytes = max_artifact_size.bytes_f64();
+        if !bytes.is_finite() || bytes.fract() != 0.0 || bytes > 9_007_199_254_740_992.0 {
+            return Err(
+                "debuginfod maximum artifact size must be a positive whole-byte value exactly representable by UOM"
+                    .to_string(),
+            );
+        }
+        GreaterU64::<0>::new(max_artifact_size.bytes_u64())
+            .map(Refined::into_value)
+            .map_err(|error| format!("debuginfod maximum artifact size: {error}"))?;
+
+        validate_positive_timeout("connect", connect_timeout)?;
+        validate_positive_timeout("request", request_timeout)?;
+        if connect_timeout > request_timeout {
+            return Err("debuginfod connect timeout must not exceed request timeout".to_string());
+        }
+
+        Ok(Self {
+            max_artifact_size,
+            connect_timeout,
+            request_timeout,
+        })
+    }
+
+    /// Return the maximum downloaded artifact size.
+    #[must_use]
+    pub const fn max_artifact_size(self) -> ByteSize {
+        self.max_artifact_size
+    }
+
+    /// Return the connection timeout.
+    #[must_use]
+    pub const fn connect_timeout(self) -> Time {
+        self.connect_timeout
+    }
+
+    /// Return the whole-request timeout.
+    #[must_use]
+    pub const fn request_timeout(self) -> Time {
+        self.request_timeout
+    }
+}
+
+impl Default for DebuginfodConfig {
+    fn default() -> Self {
+        Self::new(
+            DEFAULT_DEBUGINFOD_MAX_ARTIFACT_SIZE,
+            DEFAULT_DEBUGINFOD_CONNECT_TIMEOUT,
+            DEFAULT_DEBUGINFOD_REQUEST_TIMEOUT,
+        )
+        .expect("default debuginfod configuration is valid")
+    }
+}
+
+fn validate_positive_timeout(name: &str, timeout: Time) -> Result<(), String> {
+    let duration = std::time::Duration::try_from_secs_f64(timeout.secs_f64())
+        .map_err(|error| format!("debuginfod {name} timeout: {error}"))?;
+    if duration.is_zero() {
+        return Err(format!("debuginfod {name} timeout must be positive"));
+    }
+    Ok(())
+}
 
 /// Returns `true` iff `build_id` is a valid debuginfod build-id: a non-empty
 /// lowercase hex string. debuginfod build-ids are hex digests, so anything
@@ -140,20 +231,23 @@ pub struct DebuginfodResolver {
     base_urls: Vec<reqwest::Url>,
     client: reqwest::blocking::Client,
     cache: Mutex<HashMap<String, Option<ObjectSymbolResolver>>>,
-    max_debuginfo_bytes: u64,
+    max_debuginfo: ByteSize,
 }
 
 impl DebuginfodResolver {
     /// # Errors
     /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn new(base_urls: Vec<String>) -> Result<Self, String> {
-        Self::with_max_debuginfo_bytes(base_urls, MAX_DEBUGINFO_BYTES)
+        Self::with_config(base_urls, DebuginfodConfig::default())
     }
 
-    fn with_max_debuginfo_bytes(
-        base_urls: Vec<String>,
-        max_debuginfo_bytes: u64,
-    ) -> Result<Self, String> {
+    /// Create a resolver with explicit debuginfod resource policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when no base URL is supplied, a URL is invalid, or the
+    /// HTTP client cannot be built.
+    pub fn with_config(base_urls: Vec<String>, config: DebuginfodConfig) -> Result<Self, String> {
         let base_urls = base_urls
             .into_iter()
             .filter(|url| !url.trim().is_empty())
@@ -164,19 +258,17 @@ impl DebuginfodResolver {
         }
         // Do not follow redirects: a redirect from a debuginfod server is a
         // vector for SSRF pivots (e.g. to internal hosts or 169.254.169.254).
-        // A connect timeout bounds slow-connect DoS in addition to the total
-        // request timeout.
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
-            .connect_timeout(Duration::from_secs(5))
-            .timeout(Duration::from_secs(10))
+            .connect_timeout(config.connect_timeout().to_std())
+            .timeout(config.request_timeout().to_std())
             .build()
             .map_err(|err| err.to_string())?;
         Ok(Self {
             base_urls,
             client,
             cache: Mutex::new(HashMap::new()),
-            max_debuginfo_bytes,
+            max_debuginfo: config.max_artifact_size(),
         })
     }
 
@@ -225,10 +317,11 @@ impl DebuginfodResolver {
             // Reject artifacts whose advertised length already exceeds the cap,
             // then read the body with a hard byte ceiling so a server that
             // lies about (or omits) Content-Length still cannot exhaust memory.
-            if !content_length_within_cap(response.content_length(), self.max_debuginfo_bytes) {
+            let cap = self.max_debuginfo.bytes_u64();
+            if !content_length_within_cap(response.content_length(), cap) {
                 continue;
             }
-            let Some(bytes) = read_capped(response, self.max_debuginfo_bytes) else {
+            let Some(bytes) = read_capped(response, cap) else {
                 continue;
             };
             if let Ok(resolver) = ObjectSymbolResolver::from_bytes(bytes) {
@@ -430,12 +523,39 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use assert2::{assert, check};
+    use crabka_units::millis;
     // Only used by the ELF/DWARF self-symbolization tests below, which run on Linux.
     #[cfg(target_os = "linux")]
     use object::{Object, ObjectSymbol};
 
     use super::*;
     use crate::{LocationRec, MappingRec, MappingSymbolization};
+
+    #[test]
+    fn debuginfod_config_preserves_defaults_and_custom_values() {
+        let defaults = DebuginfodConfig::default();
+        assert!(defaults.max_artifact_size() == mebibytes(512));
+        assert!(defaults.connect_timeout() == secs(5));
+        assert!(defaults.request_timeout() == secs(10));
+
+        let custom = DebuginfodConfig::new(mebibytes(64), millis(250), secs(3)).unwrap();
+        assert!(custom.max_artifact_size() == mebibytes(64));
+        assert!(custom.connect_timeout() == millis(250));
+        assert!(custom.request_timeout() == secs(3));
+    }
+
+    #[test]
+    fn debuginfod_config_rejects_invalid_values() {
+        for result in [
+            DebuginfodConfig::new(ByteSize::ZERO, secs(1), secs(2)),
+            DebuginfodConfig::new(ByteSize::from_bytes_f64(0.5), secs(1), secs(2)),
+            DebuginfodConfig::new(mebibytes(1), Time::ZERO, secs(2)),
+            DebuginfodConfig::new(mebibytes(1), Time::from_secs_f64(f64::INFINITY), secs(2)),
+            DebuginfodConfig::new(mebibytes(1), secs(3), secs(2)),
+        ] {
+            assert!(result.is_err());
+        }
+    }
 
     struct FixedResolver {
         calls: AtomicUsize,
@@ -654,7 +774,7 @@ mod tests {
         };
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let max_debuginfo_bytes = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        let max_debuginfo = ByteSize::from_bytes(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
         let served = Arc::new(AtomicUsize::new(0));
         let served_clone = Arc::clone(&served);
         let server_thread = std::thread::spawn(move || {
@@ -672,9 +792,8 @@ mod tests {
             std::io::Write::write_all(&mut stream, header.as_bytes()).unwrap();
             std::io::Write::write_all(&mut stream, &bytes).unwrap();
         });
-        let resolver =
-            DebuginfodResolver::with_max_debuginfo_bytes(vec![base_url], max_debuginfo_bytes)
-                .unwrap();
+        let config = DebuginfodConfig::new(max_debuginfo, millis(250), secs(3)).unwrap();
+        let resolver = DebuginfodResolver::with_config(vec![base_url], config).unwrap();
 
         let first = resolver
             .symbolize(&SymbolizeRequest {

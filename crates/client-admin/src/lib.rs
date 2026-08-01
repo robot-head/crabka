@@ -11,9 +11,8 @@
 //! modules cover topic CRUD, partition expansion, config changes, SCRAM user
 //! credentials, ACLs, quotas, delegation tokens, and log-dir inspection.
 
-use std::time::Duration;
-
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
+use crabka_units::{Time, convert::TimeExt as _, secs};
 use thiserror::Error;
 
 pub mod configs;
@@ -33,8 +32,9 @@ pub use topics::{
 };
 pub use users::{
     AclEntry, AclEntryFilter, AclOperation, CreateAclOutcome, DEFAULT_SCRAM_ITERATIONS,
-    DeleteAclFilterOutcome, PatternType, PermissionType, ResourceType, ScramDeletion,
-    ScramUpsertion, ScramUserOutcome, UserScramCredential, UserScramCredentials,
+    DeleteAclFilterOutcome, MAX_SCRAM_ITERATIONS, MIN_SCRAM_ITERATIONS, PatternType,
+    PermissionType, ResourceType, ScramDeletion, ScramIterations, ScramUpsertion, ScramUserOutcome,
+    UserScramCredential, UserScramCredentials,
 };
 
 /// Test seam for `AdminClient`. The operator's reconcile only needs
@@ -50,22 +50,22 @@ pub trait AdminClientLike: Send {
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError>;
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteTopicOutcome>, AdminError>;
     async fn create_partitions(
         &mut self,
         ops: &[CreatePartitionsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreatePartitionsOutcome>, AdminError>;
     async fn delete_records(
         &mut self,
         ops: &[DeleteRecordsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteRecordsOutcome>, AdminError>;
     async fn describe_configs(
         &mut self,
@@ -120,7 +120,7 @@ pub trait AdminClientLike: Send {
         &mut self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<crabka_metadata::DelegationToken, AdminError>;
     async fn renew_delegation_token(
         &mut self,
@@ -141,30 +141,30 @@ impl AdminClientLike for AdminClient {
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError> {
-        AdminClient::create_topics(self, specs, timeout_ms).await
+        AdminClient::create_topics(self, specs, timeout).await
     }
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteTopicOutcome>, AdminError> {
-        AdminClient::delete_topics(self, names, timeout_ms).await
+        AdminClient::delete_topics(self, names, timeout).await
     }
     async fn create_partitions(
         &mut self,
         ops: &[CreatePartitionsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreatePartitionsOutcome>, AdminError> {
-        AdminClient::create_partitions(self, ops, timeout_ms).await
+        AdminClient::create_partitions(self, ops, timeout).await
     }
     async fn delete_records(
         &mut self,
         ops: &[DeleteRecordsOp],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<DeleteRecordsOutcome>, AdminError> {
-        AdminClient::delete_records(self, ops, timeout_ms).await
+        AdminClient::delete_records(self, ops, timeout).await
     }
     async fn describe_configs(
         &mut self,
@@ -237,7 +237,7 @@ impl AdminClientLike for AdminClient {
         &mut self,
         owner_principal_name: &str,
         renewers: &[String],
-        max_lifetime_ms: i64,
+        max_lifetime: Option<Time>,
     ) -> Result<crabka_metadata::DelegationToken, AdminError> {
         // The create-response carries every field the image type needs
         // *except* the renewer list (the broker does not echo it back),
@@ -248,7 +248,7 @@ impl AdminClientLike for AdminClient {
             self,
             owner_principal_name,
             renewers,
-            max_lifetime_ms,
+            max_lifetime,
         )
         .await?;
         let renewers_image = renewers
@@ -390,14 +390,37 @@ pub(crate) fn kafka_error_if(code: i16, message: Option<String>) -> Option<Kafka
     }
 }
 
+async fn lookup_first<F, I>(
+    host_port: &str,
+    dns_timeout: crabka_client_core::ClientDnsTimeout,
+    lookup: F,
+) -> Result<std::net::SocketAddr, AdminError>
+where
+    F: std::future::Future<Output = std::io::Result<I>>,
+    I: Iterator<Item = std::net::SocketAddr>,
+{
+    let mut addrs = tokio::time::timeout(dns_timeout.time().to_std(), lookup)
+        .await
+        .map_err(|_| {
+            AdminError::Protocol(format!(
+                "DNS lookup {host_port} timed out after {} ms",
+                dns_timeout.milliseconds(),
+            ))
+        })?
+        .map_err(|error| AdminError::Protocol(format!("DNS lookup {host_port}: {error}")))?;
+    addrs
+        .next()
+        .ok_or_else(|| AdminError::Protocol(format!("no addresses for {host_port}")))
+}
+
 /// Short-lived admin client targeting one cluster's controller.
 /// Optionally negotiates TLS/SASL via [`AdminClient::connect_secured`].
 pub struct AdminClient {
     pub(crate) conn: Connection,
     bootstrap_addrs: Vec<String>,
-    /// Client security carried forward to `reconnect` so a
-    /// `NOT_CONTROLLER` retry re-dials the new controller the same way.
-    security: Option<crabka_client_core::security::ClientSecurity>,
+    /// Full connection template carried forward so reconnects preserve
+    /// caller-supplied identity, security, and timeouts.
+    options: ConnectionOptions,
 }
 
 impl AdminClient {
@@ -405,9 +428,12 @@ impl AdminClient {
     /// carrying the supplied security policy.
     fn opts(security: Option<crabka_client_core::security::ClientSecurity>) -> ConnectionOptions {
         ConnectionOptions {
-            connect_timeout: Duration::from_secs(5),
-            request_timeout: Duration::from_secs(30),
+            dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+            connect_timeout: secs(5),
+            request_timeout: secs(30),
             client_id: "crabka-operator".to_string(),
+            dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            frame_max: crabka_client_core::ClientFrameMax::default(),
             security: security.map(Box::new),
         }
     }
@@ -422,14 +448,51 @@ impl AdminClient {
         bootstrap_addrs: &[String],
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, AdminError> {
-        let opts = Self::opts(security.clone());
+        Self::connect_with_options(bootstrap_addrs, Self::opts(security)).await
+    }
+
+    /// Connect with supplied security and DNS deadline while preserving the
+    /// standard admin identity, TCP-connect timeout, and request timeout.
+    ///
+    /// # Errors
+    /// Returns `AdminError::Connect { tried }` if no bootstrap address connects.
+    pub async fn connect_secured_with_dns_timeout(
+        bootstrap_addrs: &[String],
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        dns_timeout: crabka_client_core::ClientDnsTimeout,
+    ) -> Result<Self, AdminError> {
+        let mut options = Self::opts(security);
+        options.dns_timeout = dns_timeout;
+        Self::connect_with_options(bootstrap_addrs, options).await
+    }
+
+    /// Connect with the standard plaintext admin policy and a custom DNS deadline.
+    ///
+    /// # Errors
+    /// Returns `AdminError::Connect { tried }` if no bootstrap address connects.
+    pub async fn connect_with_dns_timeout(
+        bootstrap_addrs: &[String],
+        dns_timeout: crabka_client_core::ClientDnsTimeout,
+    ) -> Result<Self, AdminError> {
+        Self::connect_secured_with_dns_timeout(bootstrap_addrs, None, dns_timeout).await
+    }
+
+    /// Connect using a complete connection-options template.
+    ///
+    /// # Errors
+    /// Returns `AdminError::Connect { tried }` if no bootstrap address
+    /// accepted the connection.
+    pub async fn connect_with_options(
+        bootstrap_addrs: &[String],
+        options: ConnectionOptions,
+    ) -> Result<Self, AdminError> {
         for host_port in bootstrap_addrs {
-            match Self::connect_one(host_port, opts.clone()).await {
+            match Self::connect_one(host_port, options.clone()).await {
                 Ok(conn) => {
                     return Ok(Self {
                         conn,
                         bootstrap_addrs: bootstrap_addrs.to_vec(),
-                        security,
+                        options,
                     });
                 }
                 Err(e) => {
@@ -461,12 +524,12 @@ impl AdminClient {
         host_port: &str,
         opts: ConnectionOptions,
     ) -> Result<Connection, AdminError> {
-        let mut addrs = tokio::net::lookup_host(host_port)
-            .await
-            .map_err(|e| AdminError::Protocol(format!("DNS lookup {host_port}: {e}")))?;
-        let addr = addrs
-            .next()
-            .ok_or_else(|| AdminError::Protocol(format!("no addresses for {host_port}")))?;
+        let addr = lookup_first(
+            host_port,
+            opts.dns_timeout,
+            tokio::net::lookup_host(host_port),
+        )
+        .await?;
         Connection::connect_with_options(addr, opts)
             .await
             .map_err(AdminError::from)
@@ -475,13 +538,13 @@ impl AdminClient {
     /// Replace the underlying connection. Used internally by the
     /// `NOT_CONTROLLER` retry path to reconnect to the current controller.
     pub(crate) async fn reconnect(&mut self, host_port: &str) -> Result<(), AdminError> {
-        let opts = Self::opts(self.security.clone());
+        let opts = self.options.clone();
         self.conn = Self::connect_one(host_port, opts).await?;
         Ok(())
     }
 
     pub(crate) async fn reconnect_bootstrap(&mut self) -> Result<(), AdminError> {
-        let opts = Self::opts(self.security.clone());
+        let opts = self.options.clone();
         for host_port in &self.bootstrap_addrs {
             match Self::connect_one(host_port, opts.clone()).await {
                 Ok(conn) => {
@@ -548,8 +611,213 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::{
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
+
+    use bytes::{BufMut, BytesMut};
+    use crabka_client_core::security::{ClientSecurity, SaslCredentials};
+    use crabka_protocol::{
+        Encode,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            metadata_request, sasl_authenticate_request,
+            sasl_authenticate_response::SaslAuthenticateResponse,
+            sasl_handshake_request,
+            sasl_handshake_response::SaslHandshakeResponse,
+        },
+    };
+    use crabka_security::ListenerProtocol;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    use tokio_util::sync::CancellationToken;
 
     use super::*;
+
+    struct ObservedAdminBroker {
+        addr: std::net::SocketAddr,
+        shutdown: CancellationToken,
+        connections: Arc<AtomicUsize>,
+        sasl_handshakes: Arc<AtomicUsize>,
+        client_ids: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl ObservedAdminBroker {
+        async fn start(api_versions_delay: Duration) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let shutdown = CancellationToken::new();
+            let connections = Arc::new(AtomicUsize::new(0));
+            let sasl_handshakes = Arc::new(AtomicUsize::new(0));
+            let client_ids = Arc::new(Mutex::new(Vec::new()));
+            let task_shutdown = shutdown.clone();
+            let task_connections = Arc::clone(&connections);
+            let task_sasl_handshakes = Arc::clone(&sasl_handshakes);
+            let task_client_ids = Arc::clone(&client_ids);
+
+            tokio::spawn(async move {
+                loop {
+                    let Ok((mut stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    if task_shutdown.is_cancelled() {
+                        break;
+                    }
+                    task_connections.fetch_add(1, Ordering::SeqCst);
+                    let conn_sasl_handshakes = Arc::clone(&task_sasl_handshakes);
+                    let conn_client_ids = Arc::clone(&task_client_ids);
+                    tokio::spawn(async move {
+                        while let Ok(frame_len) = stream.read_u32().await {
+                            let mut request = vec![0_u8; frame_len as usize];
+                            if stream.read_exact(&mut request).await.is_err() || request.len() < 10
+                            {
+                                break;
+                            }
+                            let api_key = i16::from_be_bytes([request[0], request[1]]);
+                            let correlation_id =
+                                i32::from_be_bytes(request[4..8].try_into().unwrap());
+                            let client_id_len =
+                                usize::from(u16::from_be_bytes([request[8], request[9]]));
+                            if request.len() < 10 + client_id_len {
+                                break;
+                            }
+                            conn_client_ids.lock().unwrap().push(
+                                String::from_utf8_lossy(&request[10..10 + client_id_len]).into(),
+                            );
+
+                            let (body, flexible_header) = match api_key {
+                                sasl_handshake_request::API_KEY => {
+                                    conn_sasl_handshakes.fetch_add(1, Ordering::SeqCst);
+                                    let mut body = BytesMut::new();
+                                    SaslHandshakeResponse {
+                                        error_code: 0,
+                                        ..Default::default()
+                                    }
+                                    .encode(&mut body, 1)
+                                    .unwrap();
+                                    (body, false)
+                                }
+                                sasl_authenticate_request::API_KEY => {
+                                    let mut body = BytesMut::new();
+                                    SaslAuthenticateResponse {
+                                        error_code: 0,
+                                        ..Default::default()
+                                    }
+                                    .encode(&mut body, 2)
+                                    .unwrap();
+                                    (body, true)
+                                }
+                                api_versions_request::API_KEY => {
+                                    tokio::time::sleep(api_versions_delay).await;
+                                    let mut body = BytesMut::new();
+                                    ApiVersionsResponse {
+                                        error_code: 0,
+                                        api_keys: vec![
+                                            ApiVersion {
+                                                api_key: api_versions_request::API_KEY,
+                                                min_version: 0,
+                                                max_version: 3,
+                                                ..Default::default()
+                                            },
+                                            ApiVersion {
+                                                api_key: metadata_request::API_KEY,
+                                                min_version: 0,
+                                                max_version: 12,
+                                                ..Default::default()
+                                            },
+                                        ],
+                                        ..Default::default()
+                                    }
+                                    .encode(&mut body, 0)
+                                    .unwrap();
+                                    (body, false)
+                                }
+                                _ => continue,
+                            };
+                            let mut response = BytesMut::new();
+                            response.put_i32(correlation_id);
+                            if flexible_header {
+                                response.put_u8(0);
+                            }
+                            response.extend_from_slice(&body);
+                            if stream
+                                .write_u32(u32::try_from(response.len()).unwrap())
+                                .await
+                                .is_err()
+                                || stream.write_all(&response).await.is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                }
+            });
+
+            Self {
+                addr,
+                shutdown,
+                connections,
+                sasl_handshakes,
+                client_ids,
+            }
+        }
+
+        fn observed_custom_security_and_id(&self) -> bool {
+            self.sasl_handshakes.load(Ordering::SeqCst) > 0
+                && self
+                    .client_ids
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|client_id| client_id == "custom-admin")
+        }
+
+        fn stop(self) {
+            self.shutdown.cancel();
+        }
+    }
+
+    fn custom_admin_options() -> ConnectionOptions {
+        ConnectionOptions {
+            dns_timeout: crabka_client_core::ClientDnsTimeout::default(),
+            client_id: "custom-admin".into(),
+            connect_timeout: crabka_units::millis(100),
+            request_timeout: crabka_units::millis(25),
+            dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::new(7)
+                .unwrap(),
+            frame_max: crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32))
+                .unwrap(),
+            security: Some(Box::new(ClientSecurity {
+                protocol: ListenerProtocol::SaslPlaintext,
+                tls: None,
+                sasl: Some(SaslCredentials::Plain {
+                    username: "u".into(),
+                    password: "p".into(),
+                }),
+                sasl_host: Some("broker.example".into()),
+            })),
+        }
+    }
+
+    async fn metadata_times_out_with_custom_request_timeout(admin: &mut AdminClient) {
+        let result = tokio::time::timeout(Duration::from_millis(500), admin.metadata(&[]))
+            .await
+            .expect("custom request timeout fires");
+        assert2::assert!(result.is_err());
+    }
+
+    fn assert_custom_connect_timeout_is_stored(admin: &AdminClient) {
+        assert2::assert!(admin.options.connect_timeout == crabka_units::millis(100));
+        assert2::assert!(admin.options.dispatch_queue_capacity.get() == 7);
+        assert2::assert!(admin.options.frame_max.size() == crabka_units::kibibytes(32));
+    }
 
     #[test]
     fn kafka_error_name_known_codes() {
@@ -628,5 +896,155 @@ mod tests {
         // proving the security arg is threaded (not a type error).
         let res = AdminClient::connect_secured(&["127.0.0.1:1".to_string()], Some(security)).await;
         assert2::assert!(res.is_err());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dns_lookup_stops_at_connection_option_deadline() {
+        let timeout = crabka_client_core::ClientDnsTimeout::new(Time::from_millis(37))
+            .expect("positive timeout");
+        let started = tokio::time::Instant::now();
+        let pending =
+            std::future::pending::<std::io::Result<std::vec::IntoIter<std::net::SocketAddr>>>();
+
+        let result = lookup_first("broker.invalid:9092", timeout, pending).await;
+
+        assert2::assert!(result.is_err());
+        assert2::assert!(started.elapsed() == Duration::from_millis(37));
+    }
+
+    #[tokio::test]
+    async fn custom_options_are_observable_on_initial_dial() {
+        let live = ObservedAdminBroker::start(Duration::ZERO).await;
+        let mut admin =
+            AdminClient::connect_with_options(&[live.addr.to_string()], custom_admin_options())
+                .await
+                .unwrap();
+
+        assert2::assert!(live.observed_custom_security_and_id());
+        assert_custom_connect_timeout_is_stored(&admin);
+        metadata_times_out_with_custom_request_timeout(&mut admin).await;
+
+        let slow = ObservedAdminBroker::start(Duration::from_millis(300)).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            AdminClient::connect_with_options(&[slow.addr.to_string()], custom_admin_options()),
+        )
+        .await
+        .expect("ApiVersions obeys the stored connect timeout");
+        assert2::assert!(result.is_err());
+
+        live.stop();
+        slow.stop();
+    }
+
+    #[tokio::test]
+    async fn connect_with_dns_timeout_preserves_admin_defaults() {
+        let live = ObservedAdminBroker::start(Duration::ZERO).await;
+        let timeout = crabka_client_core::ClientDnsTimeout::new(Time::from_millis(37))
+            .expect("positive timeout");
+        let admin = AdminClient::connect_with_dns_timeout(&[live.addr.to_string()], timeout)
+            .await
+            .expect("admin connects");
+
+        assert2::assert!(admin.options.dns_timeout == timeout);
+        assert2::assert!(admin.options.client_id == "crabka-operator");
+        assert2::assert!(admin.options.connect_timeout == secs(5));
+        assert2::assert!(admin.options.request_timeout == secs(30));
+        live.stop();
+    }
+
+    #[tokio::test]
+    async fn secured_dns_timeout_preserves_security_and_admin_defaults() {
+        let live = ObservedAdminBroker::start(Duration::ZERO).await;
+        let timeout = crabka_client_core::ClientDnsTimeout::new(Time::from_millis(37))
+            .expect("positive timeout");
+        let security = ClientSecurity {
+            protocol: ListenerProtocol::SaslPlaintext,
+            tls: None,
+            sasl: Some(SaslCredentials::Plain {
+                username: "u".into(),
+                password: "p".into(),
+            }),
+            sasl_host: Some("broker.example".into()),
+        };
+        let admin = AdminClient::connect_secured_with_dns_timeout(
+            &[live.addr.to_string()],
+            Some(security),
+            timeout,
+        )
+        .await
+        .expect("secured admin connects");
+
+        assert2::assert!(admin.options.dns_timeout == timeout);
+        assert2::assert!(admin.options.security.is_some());
+        assert2::assert!(admin.options.client_id == "crabka-operator");
+        assert2::assert!(admin.options.connect_timeout == secs(5));
+        assert2::assert!(admin.options.request_timeout == secs(30));
+        live.stop();
+    }
+
+    #[tokio::test]
+    async fn custom_options_are_observable_on_controller_reconnect() {
+        let bootstrap = ObservedAdminBroker::start(Duration::ZERO).await;
+        let controller = ObservedAdminBroker::start(Duration::ZERO).await;
+        let slow = ObservedAdminBroker::start(Duration::from_millis(300)).await;
+        let mut admin = AdminClient::connect_with_options(
+            &[bootstrap.addr.to_string()],
+            custom_admin_options(),
+        )
+        .await
+        .unwrap();
+
+        admin.reconnect(&controller.addr.to_string()).await.unwrap();
+        assert2::assert!(controller.observed_custom_security_and_id());
+        assert_custom_connect_timeout_is_stored(&admin);
+        metadata_times_out_with_custom_request_timeout(&mut admin).await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(1),
+            admin.reconnect(&slow.addr.to_string()),
+        )
+        .await
+        .expect("reconnected ApiVersions obeys the stored connect timeout");
+        assert2::assert!(result.is_err());
+
+        bootstrap.stop();
+        controller.stop();
+        slow.stop();
+    }
+
+    #[tokio::test]
+    async fn custom_options_are_observable_on_bootstrap_reconnect() {
+        let slow = ObservedAdminBroker::start(Duration::from_millis(300)).await;
+        let live = ObservedAdminBroker::start(Duration::ZERO).await;
+        let bootstrap = [slow.addr.to_string(), live.addr.to_string()];
+        let mut admin = tokio::time::timeout(
+            Duration::from_secs(1),
+            AdminClient::connect_with_options(&bootstrap, custom_admin_options()),
+        )
+        .await
+        .expect("custom initial timeout advances to next bootstrap")
+        .unwrap();
+
+        tokio::time::timeout(Duration::from_secs(1), admin.reconnect_bootstrap())
+            .await
+            .expect("custom reconnect timeout advances to next bootstrap")
+            .unwrap();
+        assert2::assert!(live.connections.load(Ordering::SeqCst) == 2);
+        assert2::assert!(live.observed_custom_security_and_id());
+        assert_custom_connect_timeout_is_stored(&admin);
+        metadata_times_out_with_custom_request_timeout(&mut admin).await;
+
+        slow.stop();
+        live.stop();
+    }
+
+    #[test]
+    fn existing_connectors_keep_admin_defaults() {
+        let options = AdminClient::opts(None);
+
+        assert2::assert!(options.client_id == "crabka-operator");
+        assert2::assert!(options.connect_timeout == secs(5));
+        assert2::assert!(options.request_timeout == secs(30));
+        assert2::assert!(options.security.is_none());
     }
 }

@@ -1,31 +1,24 @@
 //! `SyncGroup` (`api_key=14`). Routes into the group's unified actor as a
 //! `ClassicSync` message. The leader's call installs assignments and the actor
 //! drains the parked followers; a follower with no assignment yet is parked
-//! until then (capped here by `FOLLOWER_WAIT`).
+//! until then (capped by the broker's configured follower wait).
 //!
 //! KIP-559 (v5+): the response carries `protocol_type` + `protocol_name`
 //! so an L7 proxy can route the call without remembering the prior
 //! `JoinGroup` exchange.
-
-use std::time::Duration;
 
 use bytes::Bytes;
 use crabka_protocol::{
     Decode,
     owned::{sync_group_request::SyncGroupRequest, sync_group_response::SyncGroupResponse},
 };
+use crabka_units::convert::TimeExt as _;
 use tokio::sync::oneshot;
 
 use crate::{
     broker::Broker, codes, coordinator::unified::actor::GroupActorMessage, error::BrokerError,
     handlers::group_read_denied,
 };
-
-/// Upper bound on how long a follower's `SyncGroup` is parked waiting for the
-/// leader's call to install assignments before giving up with
-/// `REBALANCE_IN_PROGRESS`. Matches Kafka's default group rebalance timeout
-/// order of magnitude so a healthy leader always beats the deadline.
-const FOLLOWER_WAIT: Duration = Duration::from_secs(30);
 
 #[tracing::instrument(
     name = "handle_sync_group",
@@ -76,8 +69,10 @@ pub(crate) async fn handle(
         }
         // The leader and the already-Stable follower reply immediately; a
         // not-yet-synced follower is parked and resolved when the leader's
-        // SyncGroup installs assignments, bounded by FOLLOWER_WAIT.
-        let Ok(Ok(result)) = tokio::time::timeout(FOLLOWER_WAIT, rx).await else {
+        // SyncGroup installs assignments, bounded by the configured follower wait.
+        let Ok(Ok(result)) =
+            tokio::time::timeout(broker.config.sync_group_follower_wait.to_std(), rx).await
+        else {
             return encode_err(version, codes::REBALANCE_IN_PROGRESS, None, None);
         };
 

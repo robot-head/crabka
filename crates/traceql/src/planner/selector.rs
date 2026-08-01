@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use arrow::record_batch::RecordBatch;
+use crabka_units::{ByteSize, convert::ByteSizeExt};
 use datafusion::{catalog::MemTable, prelude::SessionContext};
 
 use crate::{
@@ -39,7 +40,7 @@ pub(crate) async fn plan_selector<S: SpanStore>(
             &ctx.scan_options,
         )
         .await?;
-    let inspected_bytes = scan.inspected_bytes;
+    let inspected = scan.inspected;
     let parent_table = if needs_unfiltered_parent_table(fe) {
         register_unfiltered_parent_table(store, ctx, &scan.ctx).await?
     } else {
@@ -57,7 +58,7 @@ pub(crate) async fn plan_selector<S: SpanStore>(
         return Ok(PlannedSpanset {
             ctx: scan.ctx,
             plan,
-            inspected_bytes,
+            inspected,
         });
     }
     let table = ident(&scan.span_table);
@@ -67,7 +68,7 @@ pub(crate) async fn plan_selector<S: SpanStore>(
     Ok(PlannedSpanset {
         ctx: scan.ctx,
         plan,
-        inspected_bytes,
+        inspected,
     })
 }
 
@@ -78,7 +79,7 @@ async fn plan_selector_disjuncts<S: SpanStore>(
 ) -> Result<PlannedSpanset> {
     let mut batches = Vec::new();
     let mut schema = None;
-    let mut inspected_bytes = 0_u64;
+    let mut inspected = <ByteSize as ByteSizeExt>::ZERO;
     for matchers in disjuncts {
         let scan = store
             .scan_with_options(
@@ -89,7 +90,7 @@ async fn plan_selector_disjuncts<S: SpanStore>(
                 &ctx.scan_options,
             )
             .await?;
-        inspected_bytes = inspected_bytes.saturating_add(scan.inspected_bytes);
+        inspected += scan.inspected;
         let mut scan_batches = collect_table(&scan.ctx, &scan.span_table).await?;
         if schema.is_none() {
             schema = scan_batches.first().map(RecordBatch::schema);
@@ -106,7 +107,7 @@ async fn plan_selector_disjuncts<S: SpanStore>(
     Ok(PlannedSpanset {
         ctx,
         plan,
-        inspected_bytes,
+        inspected,
     })
 }
 

@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use num_traits::ToPrimitive;
+use crabka_units::convert::ByteRateExt;
 
 use crate::{
     goals::{Goal, GoalContext, GoalPriority, OriginalReplicaState},
@@ -26,6 +26,7 @@ impl NetworkInCapacity {
         crate::goals::replica_totals(partitions, broker_ids, |broker, topic, partition| {
             ctx.broker_usages
                 .bytes_in_rate(broker, topic, partition, Window::FiveMin, now_ms)
+                .map(ByteRateExt::bytes_per_sec_f64)
         })
     }
 }
@@ -54,7 +55,7 @@ impl Goal for NetworkInCapacity {
                 let Some(limit) = cap.network_in_bytes_per_sec else {
                     continue;
                 };
-                let limit_f = limit.to_f64().expect("u64 capacity must convert to f64");
+                let limit_f = limit.bytes_per_sec_f64();
                 if *current > limit_f {
                     let excess = current - limit_f;
                     let prior = over.map_or(0.0, |(_, c, l)| c - l);
@@ -116,7 +117,7 @@ impl Goal for NetworkInCapacity {
             let Some(limit) = cap.network_in_bytes_per_sec else {
                 continue;
             };
-            if *current > limit.to_f64().expect("u64 capacity must convert to f64") {
+            if *current > limit.bytes_per_sec_f64() {
                 return false;
             }
         }
@@ -126,7 +127,9 @@ impl Goal for NetworkInCapacity {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
+
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -137,7 +140,7 @@ mod tests {
 
     fn ctx_with(caps: BrokerCapacities, store: Arc<UsageStore>) -> GoalContext {
         GoalContext {
-            imbalance_threshold_pct: 10,
+            imbalance_threshold: percent(10),
             max_movements_per_proposal: 256,
             min_topic_leaders_per_broker: 0,
             broker_capacities: Arc::new(caps),
@@ -176,8 +179,8 @@ mod tests {
 
     fn store_with_counter_pair(samples: Vec<(i32, &str, i32, f64, f64)>) -> Arc<UsageStore> {
         let store = UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_hours(1),
+            scrape_interval: secs(30),
+            retention: hours(1),
         });
         // Insert at "now-1000" and "now" so the 1-second delta still
         // yields the same rate and both samples are inside the 5-min
@@ -211,7 +214,7 @@ mod tests {
         Arc::new(store)
     }
 
-    fn caps(broker: i32, bps: u64) -> BrokerCapacities {
+    fn caps(broker: i32, bps: ByteRate) -> BrokerCapacities {
         let mut b = std::collections::HashMap::new();
         b.insert(
             broker,
@@ -223,7 +226,7 @@ mod tests {
         BrokerCapacities { by_broker: b }
     }
 
-    fn caps_many(entries: &[(i32, u64)]) -> BrokerCapacities {
+    fn caps_many(entries: &[(i32, ByteRate)]) -> BrokerCapacities {
         let mut b = std::collections::HashMap::new();
         for (broker, bps) in entries {
             b.insert(
@@ -241,7 +244,10 @@ mod tests {
     fn empty_usage_no_op() {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2]);
-        let ctx = ctx_with(caps(1, 1_000_000), Arc::new(UsageStore::default()));
+        let ctx = ctx_with(
+            caps(1, bytes_per_sec(1_000_000)),
+            Arc::new(UsageStore::default()),
+        );
         assert2::assert!(
             (
                 NetworkInCapacity.propose(&s, &ctx).is_empty(),
@@ -257,7 +263,7 @@ mod tests {
         // 3 partitions × 200kB/s rate = 600kB/s on broker 1; limit 500kB/s.
         let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 200_000.0)).collect();
         let store = store_with_counter_pair(samples);
-        let ctx = ctx_with(caps(1, 500_000), store);
+        let ctx = ctx_with(caps(1, bytes_per_sec(500_000)), store);
         let mvs = NetworkInCapacity.propose(&s, &ctx);
         assert2::assert!(!mvs.is_empty());
     }
@@ -268,7 +274,7 @@ mod tests {
         let s = state_with(parts, vec![1, 2]);
         let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 200_000.0)).collect();
         let store = store_with_counter_pair(samples);
-        let ctx = ctx_with(caps(1, 500_000), store);
+        let ctx = ctx_with(caps(1, bytes_per_sec(500_000)), store);
         assert2::assert!(!NetworkInCapacity.is_satisfied_with_ctx(&s, &ctx));
     }
 
@@ -278,7 +284,7 @@ mod tests {
         let s = state_with(parts, vec![1, 2]);
         let samples: Vec<_> = (0..2).map(|i| (1, "t", i, 0.0, 250_000.0)).collect();
         let store = store_with_counter_pair(samples);
-        let ctx = ctx_with(caps(1, 500_000), store);
+        let ctx = ctx_with(caps(1, bytes_per_sec(500_000)), store);
 
         assert2::assert!(
             (
@@ -299,7 +305,10 @@ mod tests {
             (1, "small_limit", 0, 0.0, 1_000.0),
             (2, "large_limit", 0, 0.0, 2_000.0),
         ]);
-        let mut ctx = ctx_with(caps_many(&[(1, 100), (2, 1_000)]), store);
+        let mut ctx = ctx_with(
+            caps_many(&[(1, bytes_per_sec(100)), (2, bytes_per_sec(1_000))]),
+            store,
+        );
         ctx.max_movements_per_proposal = 1;
 
         let mvs = NetworkInCapacity.propose(&s, &ctx);
@@ -327,7 +336,10 @@ mod tests {
             (1, "high_sum", 0, 0.0, 1_000.0),
             (2, "high_excess", 0, 0.0, 600.0),
         ]);
-        let mut ctx = ctx_with(caps_many(&[(1, 900), (2, 100)]), store);
+        let mut ctx = ctx_with(
+            caps_many(&[(1, bytes_per_sec(900)), (2, bytes_per_sec(100))]),
+            store,
+        );
         ctx.max_movements_per_proposal = 1;
 
         let mvs = NetworkInCapacity.propose(&s, &ctx);
@@ -349,7 +361,7 @@ mod tests {
         let parts = vec![part("hot", 0, vec![1, 2], 1)];
         let s = state_with(parts, vec![1, 2, 3]);
         let store = store_with_counter_pair(vec![(1, "hot", 0, 0.0, 1_000.0)]);
-        let ctx = ctx_with(caps(1, 500), store);
+        let ctx = ctx_with(caps(1, bytes_per_sec(500)), store);
 
         let mvs = NetworkInCapacity.propose(&s, &ctx);
 
@@ -363,7 +375,7 @@ mod tests {
         let parts = vec![part("hot", 0, vec![1, 2], 1)];
         let s = state_with(parts, vec![1, 2]);
         let store = store_with_counter_pair(vec![(1, "hot", 0, 0.0, 1_000.0)]);
-        let ctx = ctx_with(caps(1, 500), store);
+        let ctx = ctx_with(caps(1, bytes_per_sec(500)), store);
 
         assert2::assert!(NetworkInCapacity.propose(&s, &ctx).is_empty());
     }
@@ -373,7 +385,7 @@ mod tests {
         let parts = vec![part("hot", 0, vec![1], 1)];
         let s = state_with(parts, vec![1, 2]);
         let store = store_with_counter_pair(vec![(1, "hot", 0, 0.0, 1_000.0)]);
-        let ctx = ctx_with(caps(1, 500), store);
+        let ctx = ctx_with(caps(1, bytes_per_sec(500)), store);
 
         let mvs = NetworkInCapacity.propose(&s, &ctx);
 
@@ -395,7 +407,7 @@ mod tests {
         let s = state_with(parts, vec![1, 2, 3]);
         let samples: Vec<_> = (0..5).map(|i| (1, "hot", i, 0.0, 200_000.0)).collect();
         let store = store_with_counter_pair(samples);
-        let mut ctx = ctx_with(caps(1, 500_000), store);
+        let mut ctx = ctx_with(caps(1, bytes_per_sec(500_000)), store);
         ctx.max_movements_per_proposal = 1;
 
         let mvs = NetworkInCapacity.propose(&s, &ctx);

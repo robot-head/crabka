@@ -7,6 +7,7 @@ use crabka_grpc_gateway::{
     health::{self, Readiness},
     serve,
 };
+use crabka_units::prelude::*;
 use tokio_util::sync::CancellationToken;
 
 fn install_provider() {
@@ -70,12 +71,13 @@ async fn tls_listener_rejects_plaintext_connection() {
         trust_roots_path: None,
         client_ca_path: None,
         client_auth: ClientAuthMode::Disabled,
-        reload_interval_secs: 3600,
+        reload_interval: hours(1),
     };
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();
     let token = CancellationToken::new();
-    let dynamic = serve::build_and_watch_tls(settings.to_security(), 3600, token.clone()).unwrap();
+    let dynamic =
+        serve::build_and_watch_tls(settings.to_security(), hours(1), token.clone()).unwrap();
     let app = health::router(Readiness::new());
     let t = token.clone();
     let h = tokio::spawn(async move {

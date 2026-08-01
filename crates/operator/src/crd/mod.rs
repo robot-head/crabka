@@ -19,17 +19,18 @@ pub mod user;
 
 pub use ca::{CertificateAuthority, CertificateAuthorityStatus};
 pub use gres::{
-    Gres, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind, GresBalancerPlanSnapshot,
-    GresBalancerRegistryLayout, GresBalancerSpec, GresBalancerStatus, GresBalancerThresholds,
-    GresSpec, GresStatus, PgdogSpec, SecretKeyRef, SecretRef, TenantDefaults,
+    Gres, GresActivatorSpec, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
+    GresBalancerPlanSnapshot, GresBalancerRegistryLayout, GresBalancerSpec, GresBalancerStatus,
+    GresBalancerThresholds, GresSpec, GresStatus, PgdogPoolerModeSpec, PgdogSpec, SecretKeyRef,
+    SecretRef, TenantDefaults,
 };
 pub use gres_tenant::{
     GresTenant, GresTenantRangeKey, GresTenantRangeSpec, GresTenantSpec, GresTenantStatus,
 };
 pub use grpc_gateway::{KafkaGrpcGateway, KafkaGrpcGatewaySpec, KafkaGrpcGatewayStatus};
 pub use kafka::{
-    Authorization, InterBrokerKerberos, Kafka, KafkaCondition, KafkaSpec, KafkaStatus,
-    Krb5ConfSecretRef, OpaAuthorization, SimpleAuthorization,
+    Authorization, BrokerTuning, GresRegistrySpec, InterBrokerKerberos, Kafka, KafkaCondition,
+    KafkaSpec, KafkaStatus, Krb5ConfSecretRef, OpaAuthorization, SimpleAuthorization,
 };
 pub use kafka_node_pool::{
     JbodSpec, JbodVolume, KafkaNodePool, KafkaNodePoolSpec, KafkaNodePoolStatus, MetadataTemplate,
@@ -42,8 +43,9 @@ pub use network_policy::{NetworkPolicyPeer, NetworkPolicySpec};
 pub use rebalance::{KafkaRebalance, KafkaRebalanceSpec, KafkaRebalanceStatus, OptimizationResult};
 pub use schema_registry::{
     BasicAuthn, BearerAuthn, BearerMode, CertManagerIssuerRef, KafkaClientSasl, KafkaClientTls,
-    SchemaRegistry, SchemaRegistryAuthn, SchemaRegistryAuthz, SchemaRegistryKafkaClient,
-    SchemaRegistrySpec, SchemaRegistryStatus, SchemaRegistryTls, TlsClientAuth,
+    SchemaRegistry, SchemaRegistryAuthn, SchemaRegistryAuthz, SchemaRegistryHealthChecks,
+    SchemaRegistryKafkaClient, SchemaRegistryRuntime, SchemaRegistrySpec, SchemaRegistryStatus,
+    SchemaRegistryTls, TlsClientAuth,
 };
 pub use topic::{KafkaTopic, KafkaTopicSpec, KafkaTopicStatus};
 // The cluster-level `Authorization` / `SimpleAuthorization` on

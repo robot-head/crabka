@@ -1326,7 +1326,7 @@ impl MemoryBudget {
         self.bytes = self
             .bytes
             .saturating_add(crate::scanner::datum_row_bytes(row));
-        if self.bytes > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+        if crate::scanner::exceeds_query_memory(self.bytes, crate::scanner::BLOCKING_QUERY_MEMORY) {
             return Err(crate::scanner::memory_budget_exceeded());
         }
         Ok(())

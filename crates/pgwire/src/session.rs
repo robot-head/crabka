@@ -33,12 +33,14 @@ pub enum AuthMode {
     ScramSha256 {
         verifiers: std::collections::HashMap<String, crate::scram::ScramVerifier>,
         mock_secret: [u8; 32],
+        mock_iterations: u32,
     },
 }
 
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
     pub auth: AuthMode,
+    pub max_message_len: usize,
     /// `ParameterStatus` values announced at session start. Clients parse
     /// `server_version` and rely on `client_encoding=UTF8`.
     pub server_params: Vec<(String, String)>,
@@ -49,6 +51,7 @@ impl SessionConfig {
     pub fn trust() -> Self {
         Self {
             auth: AuthMode::Trust,
+            max_message_len: crate::messages::frontend::MAX_MESSAGE_LEN,
             server_params: default_server_params(),
         }
     }
@@ -395,6 +398,7 @@ where
         AuthMode::ScramSha256 {
             verifiers,
             mock_secret,
+            mock_iterations,
         } => {
             let user = startup_params
                 .iter()
@@ -403,14 +407,18 @@ where
                 .unwrap_or_default();
             let verifier = match verifiers.get(user) {
                 Some(v) => v.clone(),
-                None => crate::scram::ScramVerifier::mock(mock_secret, user),
+                None => crate::scram::ScramVerifier::mock_with_iterations(
+                    mock_secret,
+                    user,
+                    *mock_iterations,
+                ),
             };
 
             backend::authentication_sasl(out, &["SCRAM-SHA-256"]);
             stream.write_all(out).await?;
             out.clear();
 
-            let Some(mut body) = read_password(stream, inbuf).await? else {
+            let Some(mut body) = read_password(stream, inbuf, config.max_message_len).await? else {
                 return Ok(false);
             };
             let mechanism = frontend::get_cstr(&mut body).map_err(|_| bad_proto())?;
@@ -431,7 +439,8 @@ where
             stream.write_all(out).await?;
             out.clear();
 
-            let Some(client_final) = read_password(stream, inbuf).await? else {
+            let Some(client_final) = read_password(stream, inbuf, config.max_message_len).await?
+            else {
                 return Ok(false);
             };
             match scram.handle_client_final(&client_final) {
@@ -474,12 +483,16 @@ fn server_nonce() -> String {
 }
 
 /// Reads the next frontend message, expecting Password ('p'); returns its body.
-async fn read_password<S>(stream: &mut S, inbuf: &mut BytesMut) -> std::io::Result<Option<Bytes>>
+async fn read_password<S>(
+    stream: &mut S,
+    inbuf: &mut BytesMut,
+    max_message_len: usize,
+) -> std::io::Result<Option<Bytes>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     loop {
-        match frontend::decode_message(inbuf) {
+        match frontend::decode_message_with_max_len(inbuf, max_message_len) {
             Ok(Some(FrontendMessage::Password(body))) => return Ok(Some(body)),
             // Anything else mid-auth: give up.
             Ok(Some(_)) | Err(_) => return Ok(None),
@@ -641,28 +654,29 @@ where
         let mut copy_in: Option<CopyInState> = None;
 
         loop {
-            let msg = match frontend::decode_message(&mut inbuf) {
-                Ok(Some(msg)) => msg,
-                Ok(None) => {
-                    if !read_or_notify(
-                        &mut stream,
-                        &mut inbuf,
-                        &mut out,
-                        session.tx_status(),
-                        notifications.as_mut(),
-                    )
-                    .await?
-                    {
-                        return Ok(()); // client went away
+            let msg =
+                match frontend::decode_message_with_max_len(&mut inbuf, config.max_message_len) {
+                    Ok(Some(msg)) => msg,
+                    Ok(None) => {
+                        if !read_or_notify(
+                            &mut stream,
+                            &mut inbuf,
+                            &mut out,
+                            session.tx_status(),
+                            notifications.as_mut(),
+                        )
+                        .await?
+                        {
+                            return Ok(()); // client went away
+                        }
+                        continue;
                     }
-                    continue;
-                }
-                Err(e) => {
-                    backend::error_response(&mut out, &e);
-                    stream.write_all(&out).await?;
-                    return Ok(()); // protocol errors are fatal
-                }
-            };
+                    Err(e) => {
+                        backend::error_response(&mut out, &e);
+                        stream.write_all(&out).await?;
+                        return Ok(()); // protocol errors are fatal
+                    }
+                };
 
             if let Some(state) = &mut copy_in {
                 match msg {

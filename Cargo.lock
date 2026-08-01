@@ -77,9 +77,9 @@ dependencies = [
 
 [[package]]
 name = "aes"
-version = "0.9.1"
+version = "0.9.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f1fc76eaeac4c9164506c466d4ffdd8ec9d0c5bf57ee97177c4d8eceb3a0e138"
+checksum = "f8eb277bec05f56a0e0591f155a484cbd0f4f07ff2905051a48c72f004f7ed58"
 dependencies = [
  "cipher 0.5.2",
  "cpubits",
@@ -1188,7 +1188,7 @@ dependencies = [
  "bitflags 2.13.1",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "lazy_static",
  "lazycell",
  "log",
@@ -1435,9 +1435,9 @@ checksum = "36f64beae40a84da1b4b26ff2761a5b895c12adc41dc25aaee1c4f2bbfe97a6e"
 
 [[package]]
 name = "branches"
-version = "0.4.4"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e426eb5cc1900033930ec955317b302e68f19f326cc7bb0c8a86865a826cdf0c"
+checksum = "b8fba76cd916045514e3064707df9ed5282b94419444c2753a6c62ecaf458e56"
 dependencies = [
  "rustc_version",
 ]
@@ -1548,9 +1548,9 @@ checksum = "acbc26382d871df4b7442e3df10a9402bf3cf5e55cbd66f12be38861425f0564"
 
 [[package]]
 name = "camino"
-version = "1.2.4"
+version = "1.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f2d30e4173c4026932d51d31d6b0613b1fd3014bf3f9f8943d4ba139c437ba0"
+checksum = "bb1307f12aa967b5a58416e87b3653360e0fd614a016b6e970db08fecbb1b80d"
 
 [[package]]
 name = "cast"
@@ -1578,9 +1578,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.3.0"
+version = "1.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c89588d05638b5b4594a3348a2d6c20277e43a7f5c5202b05cc56888475a47b8"
+checksum = "5add81bb678e6cb321aff7fa0dc7689ad82b112dbc032cea19f91d6b8e3582b9"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -2241,11 +2241,13 @@ dependencies = [
  "crabka-client-admin",
  "crabka-client-core",
  "crabka-security",
+ "crabka-units",
  "dioxus",
  "dioxus-ssr",
  "mutants",
  "parking_lot",
  "playwright-rs",
+ "refined_type",
  "serde",
  "serde_json",
  "tempfile",
@@ -2268,6 +2270,7 @@ dependencies = [
  "crabka-ids",
  "crabka-log",
  "crabka-protocol",
+ "crabka-units",
  "derive_more",
  "mutants",
  "qubit-clock",
@@ -2308,6 +2311,8 @@ dependencies = [
  "crabka-client-producer",
  "crabka-protocol",
  "crabka-security",
+ "crabka-units",
+ "datatest-stable",
  "derive_more",
  "exponential-backoff",
  "futures",
@@ -2316,6 +2321,7 @@ dependencies = [
  "kube",
  "num-traits",
  "plotly",
+ "refined_type",
  "reqwest 0.13.4",
  "rustls",
  "serde",
@@ -2336,12 +2342,14 @@ dependencies = [
  "assert2",
  "async-trait",
  "crabka-object-store",
+ "crabka-units",
  "datafusion",
  "futures",
  "num-traits",
  "object_store",
  "parquet",
  "proptest",
+ "refined_type",
  "regex",
  "serde",
  "serde_json",
@@ -2384,6 +2392,7 @@ dependencies = [
  "crabka-security",
  "crabka-telemetry",
  "crabka-throttle",
+ "crabka-units",
  "crabka-verified",
  "crabka-voters",
  "crc32c",
@@ -2405,6 +2414,7 @@ dependencies = [
  "prost 0.14.4",
  "qubit-clock",
  "rcgen",
+ "refined_type",
  "regex",
  "reqwest 0.13.4",
  "ring",
@@ -2456,6 +2466,7 @@ dependencies = [
  "crabka-gres-control",
  "crabka-metadata",
  "crabka-security",
+ "crabka-units",
  "derive_more",
  "ring",
  "serde",
@@ -2485,6 +2496,7 @@ dependencies = [
  "crabka-metadata",
  "crabka-protocol",
  "crabka-security",
+ "crabka-units",
  "futures-util",
  "ring",
  "tempfile",
@@ -2509,9 +2521,11 @@ dependencies = [
  "crabka-ids",
  "crabka-protocol",
  "crabka-security",
+ "crabka-units",
  "futures-util",
  "mutants",
  "proptest",
+ "refined_type",
  "stateright",
  "tempfile",
  "thiserror 2.0.19",
@@ -2532,6 +2546,7 @@ dependencies = [
  "crabka-ids",
  "crabka-protocol",
  "crabka-security",
+ "crabka-units",
  "crc32c",
  "dashmap",
  "futures-util",
@@ -2539,6 +2554,7 @@ dependencies = [
  "mockall",
  "mutants",
  "proptest",
+ "refined_type",
  "rustls",
  "rustls-pki-types",
  "serde",
@@ -2566,9 +2582,11 @@ dependencies = [
  "crabka-compression",
  "crabka-protocol",
  "crabka-security",
+ "crabka-units",
  "dashmap",
  "futures",
  "mutants",
+ "refined_type",
  "stateright",
  "tempfile",
  "thiserror 2.0.19",
@@ -2596,6 +2614,7 @@ dependencies = [
  "crabka-protocol",
  "crabka-schema-registry",
  "crabka-schema-serde",
+ "crabka-units",
  "hex",
  "mutants",
  "polars",
@@ -2604,6 +2623,7 @@ dependencies = [
  "proptest",
  "prost 0.14.4",
  "prost-reflect",
+ "refined_type",
  "schemars 1.2.2",
  "serde",
  "serde_json",
@@ -2623,11 +2643,13 @@ dependencies = [
  "assert2",
  "bytes",
  "codspeed-criterion-compat",
+ "crabka-units",
  "flate2",
  "hex",
  "lz4_flex 0.14.0",
  "once_cell",
  "proptest",
+ "refined_type",
  "serde",
  "serde_json",
  "snap",
@@ -2734,8 +2756,10 @@ dependencies = [
  "crabka-pgwire",
  "crabka-protocol",
  "crabka-security",
+ "crabka-units",
  "futures-util",
  "rand 0.10.2",
+ "refined_type",
  "rustls",
  "rustls-pki-types",
  "serde",
@@ -2758,12 +2782,16 @@ dependencies = [
  "async-trait",
  "bytes",
  "clap",
+ "crabka-client-core",
  "crabka-gres",
  "crabka-gres-control",
  "crabka-gres-substrate",
  "crabka-pgkv",
  "crabka-pgwire",
+ "crabka-units",
  "futures-util",
+ "refined_type",
+ "temp-env",
  "thiserror 2.0.19",
  "tokio",
  "tracing",
@@ -2777,7 +2805,9 @@ dependencies = [
  "assert2",
  "crabka-gres-control",
  "crabka-gres-substrate",
+ "crabka-units",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2792,6 +2822,7 @@ dependencies = [
  "crabka-pgparser",
  "crabka-pgtypes",
  "crabka-pgwire",
+ "crabka-units",
  "futures-util",
  "native-tls",
  "postgres-native-tls",
@@ -2815,7 +2846,9 @@ dependencies = [
  "crabka-client-core",
  "crabka-client-producer",
  "crabka-protocol",
+ "crabka-units",
  "proptest",
+ "refined_type",
  "serde",
  "serde_json",
  "static_assertions",
@@ -2832,6 +2865,7 @@ name = "crabka-gres-fdw"
 version = "0.3.9"
 dependencies = [
  "apache-avro",
+ "assert2",
  "bigdecimal",
  "bytes",
  "crabka-broker",
@@ -2847,6 +2881,7 @@ dependencies = [
  "crabka-schema-registry",
  "crabka-schema-serde",
  "crabka-security",
+ "crabka-units",
  "jiff",
  "num-bigint 0.5.1",
  "prost-reflect",
@@ -2868,11 +2903,14 @@ dependencies = [
  "assert2",
  "clap",
  "crabka-client-admin",
+ "crabka-client-core",
  "crabka-gres-control",
  "crabka-security",
+ "crabka-units",
  "futures",
  "hdrhistogram",
  "rand 0.10.2",
+ "refined_type",
  "rustix 1.1.4",
  "serde",
  "serde_json",
@@ -2903,8 +2941,10 @@ dependencies = [
  "crabka-pgtypes",
  "crabka-pgwire",
  "crabka-security",
+ "crabka-units",
  "derive_more",
  "proptest",
+ "refined_type",
  "rustls",
  "serde",
  "serde_json",
@@ -2939,9 +2979,11 @@ dependencies = [
  "crabka-protocol",
  "crabka-raft",
  "crabka-security",
+ "crabka-units",
  "hex",
  "object_store",
  "proptest",
+ "refined_type",
  "rustix 1.1.4",
  "serde",
  "serde_json",
@@ -2982,6 +3024,7 @@ dependencies = [
  "crabka-protocol",
  "crabka-security",
  "crabka-telemetry",
+ "crabka-units",
  "dashmap",
  "derive_more",
  "futures-util",
@@ -2997,12 +3040,14 @@ dependencies = [
  "prost-reflect",
  "protoc-bin-vendored",
  "protox-parse",
+ "refined_type",
  "reqwest 0.13.4",
  "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "subtle",
+ "temp-env",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -3046,6 +3091,7 @@ dependencies = [
  "crabka-protocol",
  "crabka-raft",
  "crabka-security",
+ "crabka-units",
  "flate2",
  "futures-util",
  "proptest",
@@ -3078,8 +3124,10 @@ version = "0.3.9"
 dependencies = [
  "assert2",
  "bytes",
+ "crabka-units",
  "crabka-verified",
  "crabka-voters",
+ "refined_type",
  "serde",
  "tracing",
  "uuid",
@@ -3095,6 +3143,7 @@ dependencies = [
  "crabka-compression",
  "crabka-ids",
  "crabka-protocol",
+ "crabka-units",
  "crabka-verified",
  "hex",
  "mutants",
@@ -3118,6 +3167,7 @@ dependencies = [
  "codspeed-criterion-compat",
  "crabka-log",
  "crabka-protocol",
+ "crabka-units",
  "memmap2",
  "tempfile",
 ]
@@ -3141,6 +3191,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "crabka-blockstore",
+ "crabka-units",
  "derive_more",
  "num-traits",
  "regex",
@@ -3160,6 +3211,7 @@ dependencies = [
  "crabka-ids",
  "crabka-protocol",
  "crabka-security",
+ "crabka-units",
  "crabka-voters",
  "mutants",
  "proptest",
@@ -3185,10 +3237,12 @@ dependencies = [
  "crabka-broker",
  "crabka-client-admin",
  "crabka-client-consumer",
+ "crabka-client-core",
  "crabka-client-producer",
  "crabka-ids",
  "crabka-telemetry",
  "crabka-throttle",
+ "crabka-units",
  "dashmap",
  "futures",
  "mutants",
@@ -3200,12 +3254,14 @@ dependencies = [
  "prost 0.14.4",
  "prost-build 0.14.4",
  "protoc-bin-vendored",
+ "refined_type",
  "reqwest 0.13.4",
  "serde",
  "serde-wincode",
  "serde_json",
  "serde_yaml",
  "snap",
+ "temp-env",
  "tempfile",
  "thiserror 2.0.19",
  "tikv-jemallocator",
@@ -3229,18 +3285,22 @@ dependencies = [
  "clap",
  "crabka-blockstore",
  "crabka-client-consumer",
+ "crabka-client-core",
  "crabka-client-producer",
  "crabka-ids",
  "crabka-metrics",
  "crabka-promql",
  "crabka-telemetry",
+ "crabka-units",
  "futures",
  "object_store",
  "prost 0.14.4",
+ "refined_type",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
  "snap",
+ "temp-env",
  "testcontainers",
  "thiserror 2.0.19",
  "tikv-jemallocator",
@@ -3279,10 +3339,12 @@ dependencies = [
  "crabka-blockstore",
  "crabka-client-admin",
  "crabka-client-consumer",
+ "crabka-client-core",
  "crabka-client-producer",
  "crabka-ids",
  "crabka-logql",
  "crabka-telemetry",
+ "crabka-units",
  "datafusion",
  "flate2",
  "futures-util",
@@ -3298,6 +3360,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "snap",
+ "temp-env",
  "tempfile",
  "thiserror 2.0.19",
  "tikv-jemallocator",
@@ -3327,20 +3390,27 @@ dependencies = [
  "crabka-client-admin",
  "crabka-client-core",
  "crabka-client-producer",
+ "crabka-compression",
  "crabka-gres-control",
  "crabka-gres-ranges",
  "crabka-gres-substrate",
+ "crabka-kraft-core",
  "crabka-logfmt",
  "crabka-metadata",
  "crabka-object-store",
+ "crabka-pgexec",
+ "crabka-pgkv",
  "crabka-rebalancer",
+ "crabka-schema-serde",
  "crabka-security",
+ "crabka-units",
  "derive_more",
  "futures",
  "hex",
  "http",
  "http-body-util",
  "hyper",
+ "jsonpath-rust",
  "k8s-openapi",
  "kube",
  "mutants",
@@ -3348,6 +3418,7 @@ dependencies = [
  "object_store",
  "postgres-native-tls",
  "prometheus-client",
+ "refined_type",
  "reqwest 0.13.4",
  "ring",
  "rustls",
@@ -3399,6 +3470,7 @@ dependencies = [
  "crabka-pgparser",
  "crabka-pgtypes",
  "crabka-pgwire",
+ "crabka-units",
  "hex",
  "jiff",
  "md-5 0.11.0",
@@ -3420,9 +3492,11 @@ version = "0.3.9"
 dependencies = [
  "assert2",
  "crabka-pgtypes",
+ "crabka-units",
  "fjall",
  "jiff",
  "proptest",
+ "refined_type",
  "serde",
  "tempfile",
  "thiserror 2.0.19",
@@ -3510,6 +3584,7 @@ dependencies = [
  "assert2",
  "async-trait",
  "crabka-blockstore",
+ "crabka-units",
  "datafusion",
  "mutants",
  "object 0.40.0",
@@ -3517,6 +3592,7 @@ dependencies = [
  "prost 0.14.4",
  "prost-build 0.14.4",
  "protox",
+ "refined_type",
  "regex",
  "reqwest 0.13.4",
  "serde",
@@ -3548,6 +3624,7 @@ dependencies = [
  "crabka-client-producer",
  "crabka-pprof",
  "crabka-telemetry",
+ "crabka-units",
  "datafusion",
  "derive_more",
  "flate2",
@@ -3562,12 +3639,14 @@ dependencies = [
  "proptest",
  "prost 0.14.4",
  "protoc-bin-vendored",
+ "refined_type",
  "regex",
  "reqwest 0.13.4",
  "serde",
  "serde-wincode",
  "serde_json",
  "serde_yaml",
+ "temp-env",
  "tempfile",
  "testcontainers",
  "thiserror 2.0.19",
@@ -3591,6 +3670,7 @@ dependencies = [
  "crabka-blockstore",
  "crabka-ids",
  "crabka-metrics",
+ "crabka-units",
  "datafusion",
  "datatest-stable",
  "futures",
@@ -3624,6 +3704,7 @@ dependencies = [
  "codspeed-criterion-compat",
  "crabka-compression",
  "crabka-kafka-tap",
+ "crabka-units",
  "crc32c",
  "datatest-stable",
  "hex",
@@ -3664,11 +3745,13 @@ dependencies = [
  "crabka-log",
  "crabka-metadata",
  "crabka-protocol",
+ "crabka-units",
  "crabka-verified",
  "dashmap",
  "futures-util",
  "mockall",
  "mutants",
+ "refined_type",
  "serde",
  "serde-wincode",
  "stateright",
@@ -3699,6 +3782,7 @@ dependencies = [
  "crabka-client-core",
  "crabka-metadata",
  "crabka-protocol",
+ "crabka-units",
  "mutants",
  "num-traits",
  "parking_lot",
@@ -3706,11 +3790,13 @@ dependencies = [
  "prometheus-client",
  "prost 0.14.4",
  "protoc-bin-vendored",
+ "refined_type",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
  "serde_yaml",
  "strum 0.28.0",
+ "temp-env",
  "tempfile",
  "thiserror 2.0.19",
  "tokio",
@@ -3730,6 +3816,7 @@ dependencies = [
  "crabka-compression",
  "crabka-ids",
  "crabka-protocol",
+ "crabka-units",
  "crc32fast",
  "hex",
  "proptest",
@@ -3744,6 +3831,7 @@ dependencies = [
  "bytes",
  "crabka-ids",
  "crabka-object-store",
+ "crabka-units",
  "object_store",
  "tempfile",
  "thiserror 2.0.19",
@@ -3766,8 +3854,10 @@ dependencies = [
  "crabka-protocol",
  "crabka-remote-storage",
  "crabka-security",
+ "crabka-units",
  "futures-util",
  "mutants",
+ "refined_type",
  "serde_json",
  "thiserror 2.0.19",
  "tokio",
@@ -3794,9 +3884,11 @@ dependencies = [
  "crabka-ids",
  "crabka-logfmt",
  "crabka-security",
+ "crabka-units",
  "derive_more",
  "mutants",
  "qubit-clock",
+ "refined_type",
  "regex",
  "rustls",
  "serde",
@@ -3833,6 +3925,7 @@ dependencies = [
  "crabka-protocol",
  "crabka-security",
  "crabka-telemetry",
+ "crabka-units",
  "datatest-stable",
  "derive_more",
  "hex",
@@ -3842,11 +3935,13 @@ dependencies = [
  "percent-encoding",
  "prost-reflect",
  "protox-parse",
+ "refined_type",
  "reqwest 0.13.4",
  "ring",
  "rustls",
  "serde",
  "serde_json",
+ "temp-env",
  "tempfile",
  "testcontainers",
  "testcontainers-modules",
@@ -3868,6 +3963,7 @@ dependencies = [
  "apache-avro",
  "assert2",
  "bytes",
+ "crabka-units",
  "hex",
  "jsonschema",
  "prost 0.14.4",
@@ -3891,12 +3987,14 @@ dependencies = [
  "base64 0.23.0",
  "bytes",
  "codspeed-criterion-compat",
+ "crabka-units",
  "hex",
  "hmac",
  "jsonpath-rust",
  "mutants",
  "pbkdf2",
  "rcgen",
+ "refined_type",
  "regex",
  "ring",
  "rustls",
@@ -3922,7 +4020,9 @@ version = "0.3.9"
 dependencies = [
  "assert2",
  "axum",
+ "clap",
  "crabka-logfmt",
+ "crabka-units",
  "flate2",
  "jemalloc_pprof",
  "mutants",
@@ -3931,6 +4031,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "pprof",
+ "refined_type",
  "serde",
  "thiserror 2.0.19",
  "tokio",
@@ -3945,6 +4046,7 @@ name = "crabka-throttle"
 version = "0.3.9"
 dependencies = [
  "assert2",
+ "crabka-units",
  "creusot-std",
  "derive_more",
  "proptest",
@@ -3960,6 +4062,7 @@ dependencies = [
  "assert2",
  "async-trait",
  "crabka-blockstore",
+ "crabka-units",
  "datafusion",
  "datatest-stable",
  "derive_more",
@@ -3992,6 +4095,7 @@ dependencies = [
  "crabka-protocol",
  "crabka-telemetry",
  "crabka-traceql",
+ "crabka-units",
  "dashmap",
  "datafusion",
  "datatest-stable",
@@ -4010,6 +4114,7 @@ dependencies = [
  "prost 0.14.4",
  "prost-types 0.14.4",
  "protox",
+ "refined_type",
  "regex",
  "reqwest 0.13.4",
  "serde",
@@ -4032,6 +4137,19 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "wincode",
+]
+
+[[package]]
+name = "crabka-units"
+version = "0.3.9"
+dependencies = [
+ "assert2",
+ "num-traits",
+ "proptest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.19",
+ "uom",
 ]
 
 [[package]]
@@ -5844,13 +5962,13 @@ dependencies = [
 
 [[package]]
 name = "displaydoc"
-version = "0.2.6"
+version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ac70aa55017e108007fbaf5aa0f54b021c98f92ff8af59d42eda9da96e3dd4f"
+checksum = "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -5961,9 +6079,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.16.0"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
+checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 dependencies = [
  "serde",
 ]
@@ -6171,11 +6289,10 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
  "parking",
  "pin-project-lite",
 ]
@@ -7462,6 +7579,15 @@ name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
+dependencies = [
+ "either",
+]
+
+[[package]]
+name = "itertools"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ba291022dbbd398a455acf126c1e341954079855bc60dfdda641363bd6922569"
 dependencies = [
  "either",
 ]
@@ -8810,6 +8936,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73f88a1307638156682bada9d7604135552957b7818057dcef22705b4d509495"
 dependencies = [
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -8872,6 +8999,7 @@ dependencies = [
  "num-bigint 0.4.8",
  "num-integer",
  "num-traits",
+ "serde",
 ]
 
 [[package]]
@@ -9021,15 +9149,18 @@ dependencies = [
  "bytes",
  "clap",
  "crabka-client-consumer",
+ "crabka-client-core",
  "crabka-client-producer",
  "crabka-client-streams",
  "crabka-schema-serde",
  "crabka-telemetry",
+ "crabka-units",
  "prometheus-client",
  "prost 0.14.4",
  "prost-build 0.14.4",
  "prost-reflect",
  "protox",
+ "refined_type",
  "tokio",
  "tracing",
 ]
@@ -9510,9 +9641,9 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pest"
-version = "2.8.7"
+version = "2.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47627dd7305c6a2d6c8c6bcd24c5a4c17dbbf425f4f9c5313e724b38fc9782e9"
+checksum = "7df728be843c7070fab6ab7c328c4e9e9d78e23bf749c0669c86ee7ebfa050a2"
 dependencies = [
  "memchr",
  "ucd-trie",
@@ -9520,9 +9651,9 @@ dependencies = [
 
 [[package]]
 name = "pest_derive"
-version = "2.8.7"
+version = "2.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b4254325ecad416ab689e27ba51da03ba01a9632bc6e108f5fe7c3c4ad29d58"
+checksum = "9e2dd6fc3b26b3462ee188aac870f5a41d398f1cd5e2408d16531bd71c9591fd"
 dependencies = [
  "pest",
  "pest_generator",
@@ -9530,9 +9661,9 @@ dependencies = [
 
 [[package]]
 name = "pest_generator"
-version = "2.8.7"
+version = "2.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c4c0e91ead7a8f7acecbca6f003fc2e8282b1dbe2dd9c9d2f16aba42995e0a7"
+checksum = "6a7a9205cfb6f596a9e8b689c0a15f9ceb7a1aafae7aaf788150ac65b29975b6"
 dependencies = [
  "pest",
  "pest_meta",
@@ -9543,9 +9674,9 @@ dependencies = [
 
 [[package]]
 name = "pest_meta"
-version = "2.8.7"
+version = "2.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f9744bc48116fee06334924bb5f2bad41eed5e89bd26e29b0b799f9a3f82c210"
+checksum = "85abd351c0de1e8384fc791a0737111a350394937e92b956b743dac12429f57c"
 dependencies = [
  "pest",
 ]
@@ -9722,7 +9853,7 @@ version = "0.12.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2d188f3192356068dbdba54bddbca6fd0f7a09565d3861eeb8efe1ab77ae8e97"
 dependencies = [
- "aes 0.9.1",
+ "aes 0.9.2",
  "block-padding",
  "byteorder",
  "cbc",
@@ -10920,7 +11051,7 @@ checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
  "heck",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "log",
  "multimap",
  "once_cell",
@@ -10981,7 +11112,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81bddcdb20abf9501610992b6759a4c888aef7d1a7247ef75e2404275ac24af1"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -11578,6 +11709,17 @@ dependencies = [
  "parking_lot",
  "percent-encoding",
  "serde_json",
+]
+
+[[package]]
+name = "refined_type"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "55fd965c177adfc691bf4d2f3d5e67b2bf91cf35643f6b2ea48a6f98006bcc01"
+dependencies = [
+ "paste",
+ "regex",
+ "serde",
 ]
 
 [[package]]
@@ -14634,6 +14776,20 @@ name = "unty"
 version = "0.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6d49784317cd0d1ee7ec5c716dd598ec5b4483ea832a2dced265471cc0f690ae"
+
+[[package]]
+name = "uom"
+version = "0.38.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a739f83872836c82a4f2527d4e54b37007b3de68cafe7edde95fd695968bf4b9"
+dependencies = [
+ "num-bigint 0.4.8",
+ "num-complex",
+ "num-rational",
+ "num-traits",
+ "serde_core",
+ "typenum",
+]
 
 [[package]]
 name = "ureq"

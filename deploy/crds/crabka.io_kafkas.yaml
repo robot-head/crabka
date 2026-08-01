@@ -60,6 +60,472 @@ spec:
                 required:
                 - type
                 type: object
+              brokerTuning:
+                description: Validated broker operational policy rendered into `[runtime]`.
+                nullable: true
+                properties:
+                  aclMaxPrincipal:
+                    nullable: true
+                    type: string
+                  aclMaxResourceName:
+                    nullable: true
+                    type: string
+                  auditEventQueueCapacity:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  auditPartitionWaitTimeout:
+                    nullable: true
+                    type: string
+                  auditSpoolReplayInterval:
+                    nullable: true
+                    type: string
+                  auditStatsPollInterval:
+                    nullable: true
+                    type: string
+                  auditTailReadMax:
+                    nullable: true
+                    type: string
+                  auditTailWindowOffsets:
+                    format: int64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  autoJoinRetryBackoff:
+                    nullable: true
+                    type: string
+                  autoJoinVoterRequestTimeout:
+                    nullable: true
+                    type: string
+                  classicGroupInitialRebalanceDelay:
+                    nullable: true
+                    type: string
+                  cleanerInterval:
+                    nullable: true
+                    type: string
+                  clientMetricsDefaultInterval:
+                    nullable: true
+                    type: string
+                  clientMetricsEvictionTick:
+                    nullable: true
+                    type: string
+                  clientMetricsOtlpQueueCapacity:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientMetricsPromSnapshotTtl:
+                    nullable: true
+                    type: string
+                  clientMetricsStaleFloor:
+                    nullable: true
+                    type: string
+                  clientMetricsStalePushIntervals:
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  clientMetricsTelemetryMax:
+                    nullable: true
+                    type: string
+                  connectionCreationThrottleMax:
+                    nullable: true
+                    type: string
+                  consumerGroupHeartbeatInterval:
+                    nullable: true
+                    type: string
+                  consumerGroupMaxHeartbeatInterval:
+                    nullable: true
+                    type: string
+                  consumerGroupMaxSessionTimeout:
+                    nullable: true
+                    type: string
+                  consumerGroupMaxSize:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  consumerGroupMinHeartbeatInterval:
+                    nullable: true
+                    type: string
+                  consumerGroupMinSessionTimeout:
+                    nullable: true
+                    type: string
+                  consumerGroupSessionTimeout:
+                    nullable: true
+                    type: string
+                  controlledShutdownDrainTimeout:
+                    nullable: true
+                    type: string
+                  controllerElectionTimeout:
+                    nullable: true
+                    type: string
+                  controllerFetchMissLimit:
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  controllerHeartbeatInterval:
+                    nullable: true
+                    type: string
+                  coordinatorActorMailboxCapacity:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  coordinatorSessionExpiryTick:
+                    nullable: true
+                    type: string
+                  coordinatorShutdownAckTimeout:
+                    nullable: true
+                    type: string
+                  defaultMinInsyncReplicas:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  delegationTokenDefaultRenewPeriod:
+                    nullable: true
+                    type: string
+                  delegationTokenExpiryCheckInterval:
+                    nullable: true
+                    type: string
+                  delegationTokenMaxLifetime:
+                    nullable: true
+                    type: string
+                  disklessWalLocalReplicaCount:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  futureLogMoveReadChunk:
+                    nullable: true
+                    type: string
+                  futureLogMoveRetryBackoff:
+                    nullable: true
+                    type: string
+                  gaugePollInterval:
+                    nullable: true
+                    type: string
+                  heartbeatInterval:
+                    nullable: true
+                    type: string
+                  heartbeatTimeout:
+                    nullable: true
+                    type: string
+                  interBrokerServerName:
+                    minLength: 1
+                    nullable: true
+                    type: string
+                  isrScanInterval:
+                    nullable: true
+                    type: string
+                  leaderImbalanceCheckInterval:
+                    nullable: true
+                    type: string
+                  leaderImbalancePerBroker:
+                    nullable: true
+                    type: string
+                  livenessTickInterval:
+                    nullable: true
+                    type: string
+                  logReadBufferCap:
+                    nullable: true
+                    type: string
+                  logTimestampScanWindow:
+                    nullable: true
+                    type: string
+                  maxConnections:
+                    format: uint
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  maxConnectionsPerIp:
+                    format: uint
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  maxIncrementalFetchSessionCacheSlots:
+                    format: uint
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  maxProduceGroup:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  metadataMaxBetweenSnapshots:
+                    nullable: true
+                    type: string
+                  metadataMaxSnapshotInterval:
+                    nullable: true
+                    type: string
+                  metadataRaftCommandQueueCapacity:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  metadataRaftFetchMax:
+                    nullable: true
+                    type: string
+                  metadataSnapshotFetchMax:
+                    nullable: true
+                    type: string
+                  metadataSnapshotIntervalRecords:
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  oauthJwksHttpTimeout:
+                    nullable: true
+                    type: string
+                  observerFetchMax:
+                    nullable: true
+                    type: string
+                  observerLagBound:
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  observerPollInterval:
+                    nullable: true
+                    type: string
+                  offsetsTopicMetadataWaitTimeout:
+                    nullable: true
+                    type: string
+                  opaHttpTimeout:
+                    nullable: true
+                    type: string
+                  operatorRecoveryDeadline:
+                    nullable: true
+                    type: string
+                  partitionDiskScanInterval:
+                    nullable: true
+                    type: string
+                  partitionWriterQueueDepth:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  producerIdExpiration:
+                    nullable: true
+                    type: string
+                  producerIdExpirationScanInterval:
+                    nullable: true
+                    type: string
+                  quotaThrottleMax:
+                    nullable: true
+                    type: string
+                  recordDecompressionMaxRatio:
+                    nullable: true
+                    type: string
+                  recordDecompressionOutputCeiling:
+                    nullable: true
+                    type: string
+                  recordDecompressionOutputFloor:
+                    nullable: true
+                    type: string
+                  remoteLogManagerInterval:
+                    nullable: true
+                    type: string
+                  replicaLagTimeMax:
+                    nullable: true
+                    type: string
+                  replicationEpochFenceBackoff:
+                    nullable: true
+                    type: string
+                  replicationFetchMax:
+                    nullable: true
+                    type: string
+                  replicationFetchMaxWait:
+                    nullable: true
+                    type: string
+                  replicationFetchMin:
+                    nullable: true
+                    type: string
+                  replicationReconnectDelayCap:
+                    nullable: true
+                    type: string
+                  replicationReconnectInitialDelay:
+                    nullable: true
+                    type: string
+                  replicationSendErrorBackoff:
+                    nullable: true
+                    type: string
+                  replicationThrottleExhaustedBackoff:
+                    nullable: true
+                    type: string
+                  replicationUnexpectedErrorBackoff:
+                    nullable: true
+                    type: string
+                  replicationUnknownTopicRetryDelay:
+                    nullable: true
+                    type: string
+                  rlmmBootstrapBackoffInitial:
+                    nullable: true
+                    type: string
+                  rlmmBootstrapBackoffMax:
+                    nullable: true
+                    type: string
+                  rlmmReconcileTick:
+                    nullable: true
+                    type: string
+                  selfRegistrationBackoffMax:
+                    nullable: true
+                    type: string
+                  selfRegistrationBackoffMin:
+                    nullable: true
+                    type: string
+                  selfRegistrationMaxAttempts:
+                    format: uint32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  sendfileMin:
+                    nullable: true
+                    type: string
+                  shareGroupEnable:
+                    nullable: true
+                    type: boolean
+                  shareGroupHeartbeatInterval:
+                    nullable: true
+                    type: string
+                  shareGroupIsolationLevel:
+                    nullable: true
+                    type: string
+                  shareGroupMaxDeliveryAttempts:
+                    format: int16
+                    maximum: 32767.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareGroupMaxInflightRecords:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareGroupRecordLockDuration:
+                    nullable: true
+                    type: string
+                  shareGroupSessionTimeout:
+                    nullable: true
+                    type: string
+                  shareRecoveryReadMax:
+                    nullable: true
+                    type: string
+                  shareSessionCacheMaxWhenUnlimited:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareStateNumPartitions:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  shareStateReplicationFactor:
+                    format: int16
+                    maximum: 32767.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  socketReceiveBuffer:
+                    nullable: true
+                    type: string
+                  socketRequestMax:
+                    nullable: true
+                    type: string
+                  socketSendBuffer:
+                    nullable: true
+                    type: string
+                  startupLeaderWaitTimeout:
+                    nullable: true
+                    type: string
+                  streamsGroupAcceptableRecoveryLag:
+                    format: int64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  streamsGroupAssignor:
+                    nullable: true
+                    type: string
+                  streamsGroupHeartbeatInterval:
+                    nullable: true
+                    type: string
+                  streamsGroupNumStandbyReplicas:
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  streamsGroupNumWarmupReplicas:
+                    format: int32
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
+                  streamsGroupSessionTimeout:
+                    nullable: true
+                    type: string
+                  streamsGroupTaskOffsetInterval:
+                    nullable: true
+                    type: string
+                  streamsInternalTopicReplicationFactor:
+                    format: int16
+                    maximum: 32767.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  syncGroupFollowerWait:
+                    nullable: true
+                    type: string
+                  telemetryDecompressedOutputCeiling:
+                    nullable: true
+                    type: string
+                  telemetryDecompressedOutputFloor:
+                    nullable: true
+                    type: string
+                  telemetryMaxDecompressionRatio:
+                    nullable: true
+                    type: string
+                  tlsReloadInterval:
+                    nullable: true
+                    type: string
+                  transactionMaxTimeout:
+                    nullable: true
+                    type: string
+                  transactionMinTimeout:
+                    nullable: true
+                    type: string
+                  transactionRecoveryReadMax:
+                    nullable: true
+                    type: string
+                  transactionStateNumPartitions:
+                    format: int32
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  transactionStateReplicationFactor:
+                    format: int16
+                    maximum: 32767.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  txnAbortCleanupInterval:
+                    nullable: true
+                    type: string
+                  uncleanRecoveryAggressiveDeadline:
+                    nullable: true
+                    type: string
+                  uncleanRecoveryBalancedDeadline:
+                    nullable: true
+                    type: string
+                  uncleanRecoveryQueueCapacity:
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                type: object
               clientsCa:
                 description: |-
                   Per-cluster CA used to sign `KafkaUser` TLS certs.
@@ -161,6 +627,46 @@ spec:
                     type: object
                 required:
                 - secretKeyRef
+                type: object
+              gresRegistry:
+                description: Shared creation and reader policy for the Gres tenant registry topic.
+                nullable: true
+                properties:
+                  fetchMaxWait:
+                    description: Maximum time a registry fetch waits for data.
+                    nullable: true
+                    type: string
+                  fetchPartitionMax:
+                    description: Maximum bytes fetched from the registry partition.
+                    nullable: true
+                    type: string
+                  producerDnsTimeout:
+                    description: DNS lookup deadline for the registry producer.
+                    nullable: true
+                    type: string
+                  readerAdminDnsTimeout:
+                    description: DNS lookup deadline for registry reader and admin paths.
+                    nullable: true
+                    type: string
+                  readerFetchMin:
+                    description: Minimum response size for registry reader fetches.
+                    nullable: true
+                    type: string
+                  readerRetryBackoff:
+                    description: Registry reader retry delay.
+                    nullable: true
+                    type: string
+                  replicationFactor:
+                    description: Registry topic replication factor.
+                    format: int32
+                    maximum: 32767.0
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  topicCreateTimeout:
+                    description: Kafka topic creation timeout.
+                    nullable: true
+                    type: string
                 type: object
               interBrokerKerberos:
                 description: |-
@@ -305,6 +811,9 @@ spec:
                           format: int32
                           minimum: 1.0
                           type: integer
+                        maxTimeSkew:
+                          minLength: 1
+                          type: string
                         principalToLocalRules:
                           items:
                             minLength: 1
@@ -768,6 +1277,24 @@ spec:
                               publishing / consuming `__remote_log_metadata`. Typically the
                               pod's loopback inter-broker listener (e.g. `127.0.0.1:9094`).
                             type: string
+                          eventQueueCapacity:
+                            description: Capacity of the shared metadata-event delivery queue.
+                            format: uint
+                            minimum: 1.0
+                            nullable: true
+                            type: integer
+                          fetchMaxBytes:
+                            description: Maximum bytes returned by each per-partition metadata fetch.
+                            nullable: true
+                            type: string
+                          fetchMaxWait:
+                            description: Maximum wait for each per-partition metadata fetch.
+                            nullable: true
+                            type: string
+                          fetchRetryBackoff:
+                            description: Backoff after a failed metadata fetch.
+                            nullable: true
+                            type: string
                           numPartitions:
                             description: |-
                               Partition count for `__remote_log_metadata` on first creation.
@@ -784,6 +1311,14 @@ spec:
                             format: int32
                             nullable: true
                             type: integer
+                          snapshotInterval:
+                            description: RLMM cache snapshot cadence.
+                            nullable: true
+                            type: string
+                          topicCreateTimeout:
+                            description: Timeout for provisioning each internal metadata topic.
+                            nullable: true
+                            type: string
                         required:
                         - bootstrap
                         type: object
@@ -983,14 +1518,12 @@ spec:
                           `"crabka-broker"`.
                         nullable: true
                         type: string
-                      timeoutSecs:
+                      timeout:
                         description: |-
-                          Optional export timeout in seconds. Rendered as
-                          `CRABKA_OTLP_TIMEOUT_SECS`. Defaults to the broker's `10`.
-                        format: uint64
-                        minimum: 0.0
+                          Optional export timeout. Rendered as `CRABKA_OTLP_TIMEOUT`.
+                          Defaults to the broker's `10s`.
                         nullable: true
-                        type: integer
+                        type: string
                     required:
                     - endpoint
                     type: object

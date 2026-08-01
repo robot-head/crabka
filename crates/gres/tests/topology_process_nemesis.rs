@@ -201,14 +201,14 @@ impl RangeRetirementAdmin for CountingRetirementAdmin {
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: crabka_units::Time,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
         self.ledger
             .lock()
             .expect("retirement delete ledger")
             .record_delete_request(&self.expected_topic, names)
             .map_err(crabka_client_admin::AdminError::Protocol)?;
-        let outcomes = self.inner.delete_topics(names, timeout_ms).await?;
+        let outcomes = self.inner.delete_topics(names, timeout).await?;
         if self.error_after_delete && outcomes.iter().all(|outcome| outcome.error.is_none()) {
             self.error_after_delete = false;
             self.ledger
@@ -1165,7 +1165,7 @@ async fn prepare_split_foundation() -> SplitFoundationSetup {
                 replicas: 1,
                 configs: BTreeMap::default(),
             }],
-            30_000,
+            crabka_units::secs(30),
         )
         .await
         .expect("create split sentinel");
@@ -1243,12 +1243,9 @@ async fn direct_successor_rows(
     start: Option<u64>,
     end: Option<u64>,
 ) -> Vec<SplitLedgerRow> {
-    let table_id = system
-        .catalog_table_id(&format!("live_ledger{routing_table_id}"))
-        .await;
     let scan = crabka_gres_ranges::transport::ScanRangeReq {
         range_id: crabka_gres_ranges::RangeId::new(range_id),
-        table_id,
+        table_name: format!("live_ledger{routing_table_id}"),
         interval: crabka_gres_ranges::transport::WireRowInterval { start, end },
         local_snapshot: crabka_gres_ranges::transport::WireSnapshot {
             xmin: 1,
@@ -1365,10 +1362,7 @@ async fn restart_operation_source(input: OperationRestartInput<'_>) -> KillObser
     let mut fresh_registry = Registry::connect(input.system.bootstrap())
         .await
         .expect("fresh post-kill registry");
-    fresh_registry
-        .ensure_topic(1)
-        .await
-        .expect("registry topic");
+    fresh_registry.ensure_topic().await.expect("registry topic");
     *input.control = Arc::new(BrokerControl {
         registry: Mutex::new(fresh_registry),
     });
@@ -1570,6 +1564,7 @@ async fn reconcile_non_special_phase(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn drive_operation(
     system: &mut ProcessHarness,
     operation_id: &str,
@@ -1580,7 +1575,7 @@ async fn drive_operation(
     let mut registry = Registry::connect(system.bootstrap())
         .await
         .expect("registry");
-    registry.ensure_topic(1).await.expect("registry topic");
+    registry.ensure_topic().await.expect("registry topic");
     let mut control: GresControlHandle = Arc::new(BrokerControl {
         registry: Mutex::new(registry),
     });
@@ -1727,17 +1722,26 @@ async fn drive_operation(
                         && restarted_pids.is_none()
                 }) {
                     retirement_admin.arm_error_after_delete();
-                    let error =
-                        reconcile_one_retiring_range_wal(&control, &mut retirement_admin, &tenant)
-                            .await
-                            .expect_err("AfterDelete must stop before sidecar CAS");
+                    let error = reconcile_one_retiring_range_wal(
+                        &control,
+                        &mut retirement_admin,
+                        &tenant,
+                        crabka_units::secs(30),
+                    )
+                    .await
+                    .expect_err("AfterDelete must stop before sidecar CAS");
                     assert!(error.to_string().contains("injected ambiguity"));
                     continue;
                 }
                 assert!(
-                    reconcile_one_retiring_range_wal(&control, &mut retirement_admin, &tenant)
-                        .await
-                        .expect("WAL retirement")
+                    reconcile_one_retiring_range_wal(
+                        &control,
+                        &mut retirement_admin,
+                        &tenant,
+                        crabka_units::secs(30),
+                    )
+                    .await
+                    .expect("WAL retirement")
                 );
                 if kill_injection.as_ref().is_some_and(|injection| {
                     injection.point == SourceKillPoint::RetiringParked && restarted_pids.is_none()
@@ -2216,7 +2220,7 @@ async fn prepare_move_nemesis(kill_point: SourceKillPoint) -> PreparedMoveNemesi
                 replicas: 1,
                 configs: BTreeMap::default(),
             }],
-            30_000,
+            crabka_units::secs(30),
         )
         .await
         .expect("create sentinel topic");

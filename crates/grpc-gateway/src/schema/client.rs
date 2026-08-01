@@ -7,16 +7,17 @@
 //! - `by_subject_latest` — schema-id of the latest version per subject, with
 //!   a TTL so topology changes are picked up within a bounded window.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
+use crabka_units::prelude::*;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use url::Url;
 
-use crate::codec::{CodecError, SchemaFormat};
-
-/// TTL for `by_subject_latest` cache entries.
-const LATEST_TTL: Duration = Duration::from_secs(5);
+use crate::{
+    codec::{CodecError, SchemaFormat},
+    config::GatewayRuntimeConfig,
+};
 
 /// A caching HTTP client for a Confluent-compatible Schema Registry.
 #[derive(Debug)]
@@ -29,6 +30,7 @@ pub struct SchemaRegistryClient {
     pub by_id: DashMap<i32, (String, SchemaFormat)>,
     /// Cache: subject → (latest schema-id, fetched-at timestamp for TTL).
     pub by_subject_latest: DashMap<String, (i32, Instant)>,
+    latest_cache_ttl: Time,
 }
 
 // ── Confluent wire shapes ────────────────────────────────────────────────────
@@ -101,6 +103,17 @@ impl SchemaRegistryClient {
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn new(base_url: &str) -> Result<Self, CodecError> {
+        Self::new_with_policy(
+            base_url,
+            GatewayRuntimeConfig::default().schema_registry_latest_cache_ttl,
+        )
+    }
+
+    /// Construct a client with a configured latest-subject cache TTL.
+    ///
+    /// # Errors
+    /// Returns an error when `base_url` is invalid.
+    pub fn new_with_policy(base_url: &str, latest_cache_ttl: Time) -> Result<Self, CodecError> {
         let base = Url::parse(base_url)
             .map_err(|e| CodecError::Registry(format!("invalid schema registry URL: {e}")))?;
         let http = reqwest::Client::new();
@@ -109,6 +122,7 @@ impl SchemaRegistryClient {
             base,
             by_id: DashMap::new(),
             by_subject_latest: DashMap::new(),
+            latest_cache_ttl,
         })
     }
 
@@ -224,7 +238,7 @@ impl SchemaRegistryClient {
         // Check cache: if the subject entry is fresh AND by_id has the schema, return it.
         if let Some(entry) = self.by_subject_latest.get(subject) {
             let (cached_id, fetched_at) = *entry;
-            if fetched_at.elapsed() < LATEST_TTL
+            if fetched_at.elapsed().as_time() < self.latest_cache_ttl
                 && let Some(schema_entry) = self.by_id.get(&cached_id)
             {
                 let (schema, fmt) = schema_entry.clone();
@@ -472,6 +486,58 @@ mod tests {
             assert2::assert!(fmt == SchemaFormat::Json);
             assert2::assert!(client.by_id.contains_key(&2));
             assert2::assert!(client.by_subject_latest.contains_key("my-subject-value"));
+        });
+    }
+
+    #[test]
+    fn schema_registry_cache_uses_configured_latest_ttl() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+
+        use axum::{Json, Router, routing::get};
+        use serde_json::json;
+
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let handler_requests = requests.clone();
+        let app = Router::new().route(
+            "/subjects/{subject}/versions/latest",
+            get(move || {
+                let handler_requests = handler_requests.clone();
+                async move {
+                    handler_requests.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({
+                        "id": 2,
+                        "schema": "{\"type\":\"record\"}",
+                        "schemaType": "JSON"
+                    }))
+                }
+            }),
+        );
+        let listener = rt
+            .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+            .unwrap();
+        let base_url = format!("http://{}/", listener.local_addr().unwrap());
+        rt.spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        rt.block_on(async {
+            let short = SchemaRegistryClient::new_with_policy(&base_url, millis(1)).unwrap();
+            short.latest("short-value").await.unwrap();
+            tokio::time::sleep(millis(5).to_std()).await;
+            short.latest("short-value").await.unwrap();
+            assert2::check!(requests.load(Ordering::SeqCst) == 2);
+
+            let long = SchemaRegistryClient::new_with_policy(&base_url, days(365)).unwrap();
+            long.latest("long-value").await.unwrap();
+            long.latest("long-value").await.unwrap();
+            assert2::check!(requests.load(Ordering::SeqCst) == 3);
         });
     }
 }

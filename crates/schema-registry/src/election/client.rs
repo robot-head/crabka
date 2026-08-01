@@ -3,8 +3,6 @@
 //! on shutdown. Generic over `protocol_type` + opaque JSON metadata/assignment;
 //! models `client-consumer`'s coordinator loop without consumer semantics.
 
-use std::time::Duration;
-
 use bytes::Bytes;
 use crabka_client_core::{Client, ClientSecurity};
 use crabka_protocol::owned::{
@@ -14,6 +12,7 @@ use crabka_protocol::owned::{
     leave_group_request::{LeaveGroupRequest, MemberIdentity},
     sync_group_request::{SyncGroupRequest, SyncGroupRequestAssignment},
 };
+use crabka_units::prelude::*;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
@@ -24,6 +23,7 @@ use super::{
         SchemaRegistryIdentity, select_master,
     },
 };
+use crate::config::RegistryRuntimeConfig;
 
 // Kafka group error codes (defined locally to avoid a crabka-broker dependency).
 const NONE: i16 = 0;
@@ -35,9 +35,23 @@ const UNKNOWN_MEMBER_ID: i16 = 25;
 const REBALANCE_IN_PROGRESS: i16 = 27;
 const MEMBER_ID_REQUIRED: i16 = 79;
 
-const SESSION_TIMEOUT_MS: i32 = 10_000;
-const REBALANCE_TIMEOUT_MS: i32 = 30_000;
-const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(3);
+/// `PartialEq` but not `Eq`: [`Time`] stores `f64`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ElectionPolicy {
+    session_timeout: Time,
+    rebalance_timeout: Time,
+    heartbeat_interval: Time,
+    reconnect_backoff: Time,
+}
+
+fn election_policy(runtime: &RegistryRuntimeConfig) -> ElectionPolicy {
+    ElectionPolicy {
+        session_timeout: runtime.election_session_timeout,
+        rebalance_timeout: runtime.election_rebalance_timeout,
+        heartbeat_interval: runtime.election_heartbeat_interval,
+        reconnect_backoff: runtime.election_reconnect_backoff,
+    }
+}
 
 pub(super) struct ElectionClient {
     pub bootstrap: String,
@@ -48,6 +62,7 @@ pub(super) struct ElectionClient {
     /// SR-to-broker Kafka-client security for the coordinator connections.
     /// `None` = plaintext (the pre-security default).
     pub security: Option<ClientSecurity>,
+    pub runtime: RegistryRuntimeConfig,
 }
 
 impl ElectionClient {
@@ -67,7 +82,9 @@ impl ElectionClient {
                     member_id.clear();
                     let _ = self.tx.send(PrimaryState::default());
                     if cancel
-                        .run_until_cancelled(tokio::time::sleep(Duration::from_millis(500)))
+                        .run_until_cancelled(tokio::time::sleep(
+                            election_policy(&self.runtime).reconnect_backoff.to_std(),
+                        ))
                         .await
                         .is_none()
                     {
@@ -110,7 +127,7 @@ impl ElectionClient {
                         }).await;
                         return Ok(());
                     }
-                    () = tokio::time::sleep(HEARTBEAT_INTERVAL) => {
+                    () = tokio::time::sleep(election_policy(&self.runtime).heartbeat_interval.to_std()) => {
                         let hb = coord.send(HeartbeatRequest {
                             group_id: self.group_id.clone(),
                             generation_id: generation,
@@ -137,6 +154,8 @@ impl ElectionClient {
         let boot = Client::builder()
             .bootstrap(self.bootstrap.clone())
             .client_id(self.client_id.clone())
+            .dispatch_queue_capacity(self.runtime.client_dispatch_queue_capacity.get())
+            .frame_max(self.runtime.client_frame_max.size())
             .maybe_security(self.security.clone())
             .build()
             .await?;
@@ -160,6 +179,8 @@ impl ElectionClient {
         Ok(Client::builder()
             .bootstrap(format!("{host}:{port}"))
             .client_id(self.client_id.clone())
+            .dispatch_queue_capacity(self.runtime.client_dispatch_queue_capacity.get())
+            .frame_max(self.runtime.client_frame_max.size())
             .maybe_security(self.security.clone())
             .build()
             .await?)
@@ -174,10 +195,13 @@ impl ElectionClient {
         member_id: &mut String,
     ) -> anyhow::Result<(i32, Bytes)> {
         let metadata = Bytes::from(serde_json::to_vec(&self.identity)?);
+        let policy = election_policy(&self.runtime);
         let mk_join = |mid: String| JoinGroupRequest {
             group_id: self.group_id.clone(),
-            session_timeout_ms: SESSION_TIMEOUT_MS,
-            rebalance_timeout_ms: REBALANCE_TIMEOUT_MS,
+            // `JoinGroup` is a generated wire request: the extents render back
+            // to raw `int32` milliseconds here.
+            session_timeout_ms: policy.session_timeout.millis_i32(),
+            rebalance_timeout_ms: policy.rebalance_timeout.millis_i32(),
             member_id: mid,
             protocol_type: SR_PROTOCOL_TYPE.to_string(),
             protocols: vec![JoinGroupRequestProtocol {
@@ -262,5 +286,32 @@ impl ElectionClient {
             is_primary,
             primary_url,
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RegistryRuntimeConfig;
+
+    #[test]
+    fn election_policy_uses_configured_runtime() {
+        let runtime = RegistryRuntimeConfig {
+            election_session_timeout: secs(12),
+            election_rebalance_timeout: secs(40),
+            election_heartbeat_interval: secs(2),
+            election_reconnect_backoff: millis(750),
+            ..RegistryRuntimeConfig::default()
+        };
+
+        assert2::check!(
+            election_policy(&runtime)
+                == ElectionPolicy {
+                    session_timeout: secs(12),
+                    rebalance_timeout: secs(40),
+                    heartbeat_interval: secs(2),
+                    reconnect_backoff: millis(750),
+                }
+        );
     }
 }

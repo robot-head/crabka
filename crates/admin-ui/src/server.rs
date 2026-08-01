@@ -1,6 +1,6 @@
 //! HTTP server helpers for the admin UI.
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use axum::{
     Form, Router,
@@ -10,6 +10,7 @@ use axum::{
     response::{Html, IntoResponse},
     routing::{get, post},
 };
+use crabka_units::prelude::*;
 use serde::de::DeserializeOwned;
 
 use crate::{
@@ -23,7 +24,6 @@ use crate::{
 };
 
 pub const SESSION_COOKIE_NAME: &str = "crabka_admin_session";
-const MUTATION_JSON_BODY_LIMIT_BYTES: usize = 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -41,7 +41,7 @@ pub struct AdminRouterState<F, B = AdminClientLoginBroker> {
 impl AppState {
     #[must_use]
     pub fn new(cfg: AdminUiConfig) -> Self {
-        let session_ttl = Duration::from_secs(cfg.session_ttl_seconds);
+        let session_ttl = cfg.session_ttl.to_std();
 
         Self {
             cfg: Arc::new(cfg),
@@ -503,11 +503,14 @@ where
         ));
     };
 
-    let body = to_bytes(request.into_body(), MUTATION_JSON_BODY_LIMIT_BYTES)
-        .await
-        .map_err(|_| {
-            mutation_error_response(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
-        })?;
+    let body = to_bytes(
+        request.into_body(),
+        state.app.cfg.mutation_json_body_limit.bytes_usize(),
+    )
+    .await
+    .map_err(|_| {
+        mutation_error_response(StatusCode::PAYLOAD_TOO_LARGE, "request body too large")
+    })?;
     let request = parse_json_request(&body)
         .map_err(|_| mutation_error_response(StatusCode::BAD_REQUEST, "invalid JSON request"))?;
 

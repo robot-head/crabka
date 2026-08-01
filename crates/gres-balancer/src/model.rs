@@ -2,6 +2,7 @@
 
 use crabka_gres_control::RangeBoundary;
 use crabka_gres_substrate::RangeStatsSnapshot;
+use crabka_units::{ByteSize, Frequency};
 use serde::{Deserialize, Serialize};
 
 /// One compute endpoint capable of hosting Chapter Gres ranges.
@@ -12,19 +13,23 @@ pub struct ComputeNode {
 }
 
 /// Table-level policy visible to the balancer.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `PartialEq` but not `Eq`, and no `Hash`: the dimensioned thresholds are
+/// `f64`-backed quantities, so equality is not reflexive across the whole
+/// domain and no consistent hash exists.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TablePolicy {
     pub table_id: u64,
     pub table_name: String,
     pub is_sharded: bool,
     pub auto_shard_disabled: bool,
-    pub convert_store_bytes_threshold: u64,
-    pub convert_commit_rate_threshold: u64,
-    /// Bucket count of the table's registry hash placement, `Some` exactly for a
-    /// hash-sharded table. A hash-sharded table's range boundaries may only fall
-    /// on a bucket start, so the planner needs the count to bound the buckets it
-    /// may propose.
+    /// Convert an unsharded table once its ranges together store this much.
+    #[serde(with = "crabka_units::serde_units::human::byte_size")]
+    pub convert_store_threshold: ByteSize,
+    #[serde(with = "crabka_units::serde_units::human::frequency")]
+    pub convert_commit_rate_threshold: Frequency,
+    /// Bucket count for hash placement, present exactly for hash-sharded tables.
     pub hash_bucket_count: Option<u32>,
 }
 
@@ -36,8 +41,7 @@ pub struct RangeMetrics {
     pub table_id: u64,
     /// Inclusive lower bound of the keys this range owns.
     pub start_key: RangeBoundary,
-    /// Exclusive upper bound of the keys this range owns. `None` for the final,
-    /// open-ended range.
+    /// Exclusive upper bound, or open-ended for the final range.
     pub end_key: Option<RangeBoundary>,
     pub compute_id: String,
     /// Authoritative stored bytes. `None` means unknown, never zero.
@@ -68,7 +72,9 @@ impl RangeMetrics {
 }
 
 /// Metrics and policies for one tenant registry record.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// `PartialEq` but not `Eq`, and no `Hash`, following [`TablePolicy`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TenantMetrics {
     pub tenant_name: String,
@@ -129,9 +135,6 @@ pub enum BalanceOperation {
     Split {
         tenant_name: String,
         source_range_id: u32,
-        /// Exclusive boundary the source range is cut at, naming the table it
-        /// belongs to. On a hash-sharded table this is always a bucket start, so
-        /// no bucket is left owned by two ranges.
         split_at: RangeBoundary,
     },
     Move {

@@ -15,15 +15,15 @@ use std::{
         Arc, RwLock,
         atomic::{AtomicU64, Ordering},
     },
-    time::Duration,
 };
 
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_units::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::error::GatewayError;
+use crate::{config::GatewayRuntimeConfig, error::GatewayError};
 
 /// One replica's published membership (value; key = `node_id`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -43,14 +43,21 @@ struct NodeEntry {
 pub struct MembershipStore {
     nodes: RwLock<HashMap<String, NodeEntry>>,
     routing: RwLock<HashMap<u32, String>>,
+    poll_timeout: Time,
 }
 
 impl MembershipStore {
     #[must_use]
     pub fn new() -> Self {
+        Self::new_with_policy(&GatewayRuntimeConfig::default())
+    }
+
+    #[must_use]
+    pub fn new_with_policy(runtime: &GatewayRuntimeConfig) -> Self {
         Self {
             nodes: RwLock::new(HashMap::new()),
             routing: RwLock::new(HashMap::new()),
+            poll_timeout: runtime.consumer_poll_timeout,
         }
     }
 
@@ -109,9 +116,38 @@ impl MembershipStore {
         shutdown: tokio_util::sync::CancellationToken,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<(), GatewayError> {
+        self.run_membership_with_policy(
+            bootstrap,
+            client_id,
+            membership_topic,
+            group,
+            shutdown,
+            (security, crate::config::GatewayRuntimeConfig::default()),
+        )
+        .await
+    }
+
+    /// Tail membership with the deployment's client resource policy.
+    /// # Errors
+    /// Returns an error when consuming fails.
+    pub async fn run_membership_with_policy(
+        self: Arc<Self>,
+        bootstrap: String,
+        client_id: String,
+        membership_topic: String,
+        group: String,
+        shutdown: tokio_util::sync::CancellationToken,
+        client_policy: (
+            Option<crabka_client_core::security::ClientSecurity>,
+            crate::config::GatewayRuntimeConfig,
+        ),
+    ) -> Result<(), GatewayError> {
+        let (security, policy) = client_policy;
         let mut consumer = Consumer::builder()
             .bootstrap(bootstrap)
             .client_id(client_id)
+            .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+            .frame_max(policy.client_frame_max.size())
             .group_id(group)
             .subscribe(vec![membership_topic])
             .isolation_level(IsolationLevel::ReadCommitted)
@@ -125,7 +161,7 @@ impl MembershipStore {
         loop {
             let batch = tokio::select! {
                 () = shutdown.cancelled() => break,
-                b = consumer.poll(Duration::from_millis(500)) => match b {
+                b = consumer.poll(self.poll_timeout) => match b {
                     Ok(batch) => batch,
                     Err(e) => { poll_err = Some(e.into()); break; }
                 },
@@ -180,9 +216,35 @@ impl MembershipPublisher {
         membership_topic: String,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<Self, GatewayError> {
+        Self::new_with_policy(
+            bootstrap,
+            client_id,
+            node_id,
+            advertised_addr,
+            membership_topic,
+            security,
+            &crate::config::GatewayRuntimeConfig::default(),
+        )
+        .await
+    }
+
+    /// Build the publisher with the deployment's client resource policy.
+    /// # Errors
+    /// Returns an error when client construction fails.
+    pub async fn new_with_policy(
+        bootstrap: &str,
+        client_id: &str,
+        node_id: String,
+        advertised_addr: String,
+        membership_topic: String,
+        security: Option<crabka_client_core::security::ClientSecurity>,
+        policy: &crate::config::GatewayRuntimeConfig,
+    ) -> Result<Self, GatewayError> {
         let producer = Producer::builder()
             .bootstrap(bootstrap.to_string())
             .client_id(client_id.to_string())
+            .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+            .frame_max(policy.client_frame_max.size())
             .enable_idempotence(true)
             .acks(Acks::All)
             .maybe_security(security)

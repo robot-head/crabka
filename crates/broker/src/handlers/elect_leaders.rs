@@ -19,6 +19,7 @@ use crabka_protocol::{
         elect_leaders_response::{ElectLeadersResponse, PartitionResult, ReplicaElectionResult},
     },
 };
+use crabka_units::convert::TimeExt as _;
 use tokio::sync::oneshot;
 
 use crate::{
@@ -32,13 +33,6 @@ use crate::{
 
 const WIRE_ELECTION_PREFERRED: i8 = 0;
 const WIRE_ELECTION_UNCLEAN: i8 = 1;
-
-/// Operator-triggered offset-aware recovery is bounded so the admin RPC
-/// can't hang on a stalled replica. Slightly above the URM's Balanced
-/// deadline (30s) would let the manager finish; we use 25s to fail the
-/// client request before the inter-broker poll's own cap and surface a
-/// retriable error.
-const OPERATOR_RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
 
 #[tracing::instrument(
     name = "handle_elect_leaders",
@@ -223,7 +217,7 @@ async fn run_offset_aware_recovery(
         })
         .await;
     let (error_code, error_message) =
-        match tokio::time::timeout(OPERATOR_RECOVERY_DEADLINE, rx).await {
+        match tokio::time::timeout(broker.config.operator_recovery_deadline.to_std(), rx).await {
             Ok(Ok(RecoveryOutcome::Elected(_))) => (codes::NONE, None),
             Ok(Ok(RecoveryOutcome::NoEligibleReplica)) => (
                 codes::ELIGIBLE_LEADERS_NOT_AVAILABLE,

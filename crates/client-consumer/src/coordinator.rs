@@ -42,6 +42,10 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
+};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
@@ -51,7 +55,7 @@ use crate::{
         AutoOffsetReset, decode_assignment, decode_subscription, encode_assignment,
         encode_subscription,
     },
-    consumer::{reset_starting_offset, starting_offset},
+    consumer::{ConsumerRetryPolicy, reset_starting_offset, starting_offset},
     error::ConsumerError,
     offset_wire::{build_commit_topics, build_offset_fetch, id_to_name, parse_offset_fetch},
 };
@@ -63,10 +67,24 @@ pub(crate) const COORDINATOR_LOAD_IN_PROGRESS: i16 = 14;
 pub(crate) const COORDINATOR_NOT_AVAILABLE: i16 = 15;
 pub(crate) const NOT_COORDINATOR: i16 = 16;
 
-/// How long `with_coordinator_retry` keeps retrying a cold coordinator before
-/// surfacing the last error. Matches a typical client `request.timeout.ms`.
-pub(crate) const COORDINATOR_RETRY_TIMEOUT: Duration = Duration::from_secs(30);
 const UNKNOWN_EPOCH: i32 = -1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct CoordinatorRetryPolicy {
+    pub timeout: Duration,
+    pub initial_backoff: Duration,
+    pub max_backoff: Duration,
+}
+
+impl From<ConsumerRetryPolicy> for CoordinatorRetryPolicy {
+    fn from(value: ConsumerRetryPolicy) -> Self {
+        Self {
+            timeout: value.coordinator_retry_timeout().to_std(),
+            initial_backoff: value.coordinator_initial_backoff().to_std(),
+            max_backoff: value.coordinator_max_backoff().to_std(),
+        }
+    }
+}
 
 pub(crate) fn is_retriable_coordinator_code(code: i16) -> bool {
     matches!(
@@ -125,8 +143,9 @@ fn coordinator_node_id(r: &FindCoordinatorResponse) -> i32 {
 pub(crate) async fn find_coordinator(
     client: &Client,
     group_id: &str,
+    retry: CoordinatorRetryPolicy,
 ) -> Result<i32, ConsumerError> {
-    let resp = with_coordinator_retry(COORDINATOR_RETRY_TIMEOUT, coordinator_error_code, || {
+    let resp = with_coordinator_retry(retry, coordinator_error_code, || {
         let group_id = group_id.to_string();
         async move {
             match client.send(build_find_coordinator_request(group_id)).await {
@@ -227,7 +246,7 @@ pub(crate) async fn with_coordinator_refind<R, F, Fut>(
     client: &Client,
     group_id: &str,
     coordinator_id: &AtomicI32,
-    timeout: Duration,
+    retry: CoordinatorRetryPolicy,
     code: impl Fn(&R) -> i16,
     make: F,
 ) -> Result<R, ConsumerError>
@@ -235,21 +254,20 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<R, ConsumerError>>,
 {
-    const MAX_BACKOFF: Duration = Duration::from_secs(1);
     let start = tokio::time::Instant::now();
-    let mut backoff = Duration::from_millis(100);
+    let mut backoff = retry.initial_backoff;
     loop {
         let needs_refind = match make().await {
             Ok(r) if !is_retriable_coordinator_code(code(&r)) => return Ok(r),
             Ok(r) => {
-                if retry_deadline_elapsed(start, timeout) {
+                if retry_deadline_elapsed(start, retry.timeout) {
                     return Ok(r);
                 }
                 // Retriable broker code: the coordinator likely moved.
                 true
             }
             Err(ConsumerError::Client(e)) if is_retriable_transport_error(&e) => {
-                if retry_deadline_elapsed(start, timeout) {
+                if retry_deadline_elapsed(start, retry.timeout) {
                     return Err(ConsumerError::CoordinatorUnavailable);
                 }
                 // The socket to the coordinator is gone (bounced / failed
@@ -264,7 +282,7 @@ where
             // Best-effort re-discovery. A transient failure here just means the
             // next attempt reuses the last-known id; the outer deadline (and
             // find_coordinator's own retry) still bound us.
-            match find_coordinator(client, group_id).await {
+            match find_coordinator(client, group_id, retry).await {
                 Ok(id) => coordinator_id.store(id, Ordering::Relaxed),
                 Err(e) => {
                     tracing::warn!(
@@ -275,7 +293,7 @@ where
             }
         }
         tokio::time::sleep(backoff).await;
-        backoff = next_backoff(backoff, MAX_BACKOFF);
+        backoff = next_backoff(backoff, retry.max_backoff);
     }
 }
 
@@ -287,7 +305,7 @@ where
 /// `error_code` handling runs) or `CoordinatorUnavailable` if the last attempt
 /// was a transport failure.
 pub(crate) async fn with_coordinator_retry<R, F, Fut>(
-    timeout: Duration,
+    retry: CoordinatorRetryPolicy,
     code: impl Fn(&R) -> i16,
     make: F,
 ) -> Result<R, ConsumerError>
@@ -295,26 +313,25 @@ where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<R, ConsumerError>>,
 {
-    const MAX_BACKOFF: Duration = Duration::from_secs(1);
     let start = tokio::time::Instant::now();
-    let mut backoff = Duration::from_millis(100);
+    let mut backoff = retry.initial_backoff;
     loop {
         match make().await {
             Ok(r) if !is_retriable_coordinator_code(code(&r)) => return Ok(r),
             Ok(r) => {
-                if retry_deadline_elapsed(start, timeout) {
+                if retry_deadline_elapsed(start, retry.timeout) {
                     return Ok(r);
                 }
             }
             Err(ConsumerError::Client(e)) if is_retriable_transport_error(&e) => {
-                if retry_deadline_elapsed(start, timeout) {
+                if retry_deadline_elapsed(start, retry.timeout) {
                     return Err(ConsumerError::CoordinatorUnavailable);
                 }
             }
             Err(e) => return Err(e),
         }
         tokio::time::sleep(backoff).await;
-        backoff = next_backoff(backoff, MAX_BACKOFF);
+        backoff = next_backoff(backoff, retry.max_backoff);
     }
 }
 
@@ -353,9 +370,11 @@ pub(crate) struct CoordinatorState {
     pub next_offsets: Arc<Mutex<HashMap<(String, i32), i64>>>,
     pub positions: Arc<Mutex<HashMap<(String, i32), crate::position::PartitionPosition>>>,
     pub topic_ids: Arc<Mutex<HashMap<String, WireUuid>>>,
-    pub session_timeout: Duration,
-    pub rebalance_timeout: Duration,
-    pub heartbeat_interval: Duration,
+    pub session_timeout: Time,
+    pub rebalance_timeout: Time,
+    pub heartbeat_interval: Time,
+    pub subscription_metadata_refresh_interval: Time,
+    pub leave_group_timeout: Time,
     pub auto_offset_reset: AutoOffsetReset,
     pub client_rack: Option<String>,
     /// Subscribed-topic partition counts the INITIAL assignment was computed
@@ -366,6 +385,7 @@ pub(crate) struct CoordinatorState {
     /// starting, comparing equal to the baseline forever and stranding the
     /// empty cold-start assignment permanently.
     pub initial_subscribed_counts: HashMap<String, i32>,
+    pub retry_policy: CoordinatorRetryPolicy,
 }
 
 /// Set the coordinator's working generation AND publish it to the shared atomic
@@ -414,11 +434,9 @@ fn heartbeat_outcome(error_code: i16) -> HeartbeatOutcome {
 /// as soon as the broker signals a rebalance; the next tick performs
 /// the rejoin in place of heartbeating.
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: long-running I/O event loop, exercised by integration tests
-/// How often the coordinator re-checks broker metadata for subscribed-topic
-/// partition changes (a topic being created, or gaining partitions) so it can
-/// rejoin to (re)distribute them. Short enough that a consumer which joined at
-/// cold-start before its WAL topic existed recovers within seconds.
-const SUBSCRIPTION_METADATA_REFRESH: Duration = Duration::from_secs(5);
+fn subscription_metadata_refresh_due(last_check: tokio::time::Instant, interval: Time) -> bool {
+    last_check.elapsed().as_time() >= interval
+}
 
 /// Current partition count of each subscribed topic that exists in broker
 /// metadata. A subscribed topic not yet created is simply absent from the map
@@ -486,7 +504,7 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
         tracing::warn!(error = %e, "coordinator client metadata refresh failed at startup");
     }
 
-    let mut ticker = tokio::time::interval(state.heartbeat_interval);
+    let mut ticker = tokio::time::interval(state.heartbeat_interval.to_std());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut needs_rejoin = false;
     // Subscribed-topic partition counts the current assignment was computed
@@ -513,7 +531,12 @@ pub(crate) async fn run(mut state: CoordinatorState, shutdown: CancellationToken
         // joined (the cold-start race that otherwise strands an empty
         // assignment) and rejoin to distribute it. Throttled, and only when not
         // already rejoining. Best-effort: a failed metadata RPC just retries.
-        if !needs_rejoin && last_meta_check.elapsed() >= SUBSCRIPTION_METADATA_REFRESH {
+        if !needs_rejoin
+            && subscription_metadata_refresh_due(
+                last_meta_check,
+                state.subscription_metadata_refresh_interval,
+            )
+        {
             last_meta_check = tokio::time::Instant::now();
             if let Ok(current) = subscribed_partition_counts(&state).await
                 && subscribed_topics_grew(&known_counts, &current)
@@ -617,7 +640,7 @@ async fn leave_group(state: &CoordinatorState) {
         state.member_id.clone(),
         state.group_instance_id.clone(),
     ));
-    let _ = tokio::time::timeout(Duration::from_secs(5), send).await;
+    let _ = tokio::time::timeout(state.leave_group_timeout.to_std(), send).await;
 }
 
 /// Send one `Heartbeat` to the coordinator broker and translate the response
@@ -683,7 +706,7 @@ async fn heartbeat_once(state: &CoordinatorState) -> HeartbeatOutcome {
 /// failure (the next tick retries).
 #[cfg_attr(test, mutants::skip)] // cargo-mutants: best-effort discovery I/O, exercised by integration tests
 async fn refind_after(state: &CoordinatorState, ctx: &str) {
-    match find_coordinator(&state.client, &state.group_id).await {
+    match find_coordinator(&state.client, &state.group_id, state.retry_policy).await {
         Ok(id) => state.coordinator_id.store(id, Ordering::Relaxed),
         Err(e) => {
             tracing::warn!(error = %e, context = ctx, "coordinator re-discovery failed");
@@ -993,9 +1016,11 @@ async fn perform_join(
     state: &mut CoordinatorState,
     owned: &[(String, i32)],
 ) -> Result<JoinGroupResponse, ConsumerError> {
-    let session_timeout_ms = i32::try_from(state.session_timeout.as_millis()).unwrap_or(i32::MAX);
-    let rebalance_timeout_ms =
-        i32::try_from(state.rebalance_timeout.as_millis()).unwrap_or(i32::MAX);
+    // Truncating, not rounding: these are `JoinGroupRequest` `int32`
+    // milliseconds the coordinator range-checks, and `Duration::as_millis`
+    // truncated here before the conversion.
+    let session_timeout_ms = crate::consumer::protocol_millis_i32(state.session_timeout);
+    let rebalance_timeout_ms = crate::consumer::protocol_millis_i32(state.rebalance_timeout);
 
     let subscription_bytes = encode_subscription(
         &state.subscribed_topics,
@@ -1025,7 +1050,7 @@ async fn perform_join(
         &client,
         &group_id,
         &coordinator_id,
-        COORDINATOR_RETRY_TIMEOUT,
+        state.retry_policy,
         |r: &JoinGroupResponse| r.error_code,
         || {
             let group_id = group_id.clone();
@@ -1067,7 +1092,7 @@ async fn perform_join(
             &client,
             &group_id,
             &coordinator_id,
-            COORDINATOR_RETRY_TIMEOUT,
+            state.retry_policy,
             |r: &JoinGroupResponse| r.error_code,
             || {
                 let group_id = group_id.clone();
@@ -1250,7 +1275,7 @@ async fn sync_assignment(
         &state.client,
         &state.group_id,
         &state.coordinator_id,
-        COORDINATOR_RETRY_TIMEOUT,
+        state.retry_policy,
         |response: &SyncGroupResponse| response.error_code,
         || {
             let request = build_sync_group_request(
@@ -1349,9 +1374,26 @@ mod retry_tests {
         sync::atomic::{AtomicUsize, Ordering},
     };
 
-    use crabka_protocol::UnknownTaggedFields;
+    use crabka_client_core::MockBroker;
+    use crabka_protocol::{
+        Encode, UnknownTaggedFields,
+        owned::{
+            api_versions_request,
+            api_versions_response::{ApiVersion, ApiVersionsResponse},
+            leave_group_request,
+        },
+    };
+    use crabka_units::{millis, minutes, secs};
 
     use super::*;
+
+    fn retry(timeout: Duration) -> CoordinatorRetryPolicy {
+        CoordinatorRetryPolicy {
+            timeout,
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(1),
+        }
+    }
 
     struct Resp {
         error_code: i16,
@@ -1362,6 +1404,97 @@ mod retry_tests {
             addr: SocketAddr::from(([127, 0, 0, 1], 9092)),
             source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
         })
+    }
+
+    fn api_versions_for_leave_group() -> Vec<u8> {
+        let response = ApiVersionsResponse {
+            error_code: 0,
+            api_keys: vec![
+                ApiVersion {
+                    api_key: api_versions_request::API_KEY,
+                    min_version: 0,
+                    max_version: 3,
+                    ..Default::default()
+                },
+                ApiVersion {
+                    api_key: leave_group_request::API_KEY,
+                    min_version: 0,
+                    max_version: leave_group_request::MAX_VERSION,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut buffer = bytes::BytesMut::new();
+        response
+            .encode(&mut buffer, 0)
+            .expect("encode API versions");
+        buffer.to_vec()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn subscription_metadata_refresh_due_uses_configured_inclusive_boundary() {
+        let last_check = tokio::time::Instant::now();
+        let interval = millis(37);
+
+        tokio::time::advance(Duration::from_millis(36)).await;
+        assert2::assert!(!subscription_metadata_refresh_due(last_check, interval));
+
+        tokio::time::advance(Duration::from_millis(1)).await;
+        assert2::assert!(subscription_metadata_refresh_due(last_check, interval));
+    }
+
+    #[tokio::test]
+    async fn coordinator_leave_group_uses_configured_timeout() {
+        let saw_leave = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_leave_in_mock = Arc::clone(&saw_leave);
+        let mock = MockBroker::start(move |api_key, _version, _corr_id, _body| {
+            if api_key == api_versions_request::API_KEY {
+                Some(api_versions_for_leave_group())
+            } else if api_key == leave_group_request::API_KEY {
+                saw_leave_in_mock.store(true, Ordering::SeqCst);
+                None
+            } else {
+                None
+            }
+        })
+        .await;
+        let client = Client::builder()
+            .bootstrap(mock.addr.to_string())
+            .request_timeout(crabka_units::secs(5))
+            .build()
+            .await
+            .expect("client");
+        let state = CoordinatorState {
+            client,
+            group_id: "group-a".into(),
+            coordinator_id: Arc::new(AtomicI32::new(0)),
+            member_id: "member-a".into(),
+            group_instance_id: None,
+            generation_id: 1,
+            current_generation: Arc::new(AtomicI32::new(1)),
+            assignor: Assignor::Range,
+            subscribed_topics: vec!["topic".into()],
+            assigned: Arc::new(Mutex::new(Vec::new())),
+            next_offsets: Arc::new(Mutex::new(HashMap::new())),
+            positions: Arc::new(Mutex::new(HashMap::new())),
+            topic_ids: Arc::new(Mutex::new(HashMap::new())),
+            session_timeout: secs(45),
+            rebalance_timeout: minutes(1),
+            heartbeat_interval: secs(3),
+            subscription_metadata_refresh_interval: millis(37),
+            leave_group_timeout: millis(37),
+            auto_offset_reset: AutoOffsetReset::Latest,
+            client_rack: None,
+            initial_subscribed_counts: HashMap::new(),
+            retry_policy: retry(Duration::from_secs(30)),
+        };
+
+        tokio::time::timeout(Duration::from_secs(1), leave_group(&state))
+            .await
+            .expect("configured leave deadline bounds coordinator shutdown");
+        mock.stop();
+        assert2::assert!(saw_leave.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -1668,7 +1801,7 @@ mod retry_tests {
     async fn retries_until_coordinator_finishes_loading() {
         let calls = AtomicUsize::new(0);
         let r = with_coordinator_retry(
-            Duration::from_secs(30),
+            retry(Duration::from_secs(30)),
             |r: &Resp| r.error_code,
             || {
                 let n = calls.fetch_add(1, Ordering::SeqCst);
@@ -1687,9 +1820,31 @@ mod retry_tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn configured_coordinator_retry_policy_controls_backoff_and_timeout() {
+        let calls = AtomicUsize::new(0);
+        let retry = CoordinatorRetryPolicy {
+            timeout: Duration::from_millis(35),
+            initial_backoff: Duration::from_millis(5),
+            max_backoff: Duration::from_millis(10),
+        };
+        let r = with_coordinator_retry(
+            retry,
+            |r: &Resp| r.error_code,
+            || {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<_, ConsumerError>(Resp { error_code: 15 }) }
+            },
+        )
+        .await
+        .unwrap();
+        assert2::assert!(r.error_code == 15);
+        assert2::assert!(calls.load(Ordering::SeqCst) == 5);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn surfaces_last_response_after_deadline() {
         let r = with_coordinator_retry(
-            Duration::from_secs(1),
+            retry(Duration::from_secs(1)),
             |r: &Resp| r.error_code,
             || async { Ok::<_, ConsumerError>(Resp { error_code: 15 }) },
         )
@@ -1704,7 +1859,7 @@ mod retry_tests {
     async fn non_retriable_code_returns_immediately() {
         let calls = AtomicUsize::new(0);
         let r = with_coordinator_retry(
-            Duration::from_secs(30),
+            retry(Duration::from_secs(30)),
             |r: &Resp| r.error_code,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -1720,7 +1875,7 @@ mod retry_tests {
     #[tokio::test(start_paused = true)]
     async fn disconnect_past_deadline_surfaces_coordinator_unavailable() {
         let r = with_coordinator_retry(
-            Duration::from_secs(1),
+            retry(Duration::from_secs(1)),
             |r: &Resp| r.error_code,
             || async {
                 Err::<Resp, _>(ConsumerError::Client(
@@ -1736,7 +1891,7 @@ mod retry_tests {
     async fn connect_past_deadline_surfaces_coordinator_unavailable() {
         let calls = AtomicUsize::new(0);
         let r = with_coordinator_retry(
-            Duration::from_millis(1),
+            retry(Duration::from_millis(1)),
             |r: &Resp| r.error_code,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -1823,6 +1978,14 @@ mod refind_tests {
 
     use super::*;
 
+    fn retry(timeout: Duration) -> CoordinatorRetryPolicy {
+        CoordinatorRetryPolicy {
+            timeout,
+            initial_backoff: Duration::from_millis(100),
+            max_backoff: Duration::from_secs(1),
+        }
+    }
+
     struct Resp {
         error_code: i16,
     }
@@ -1847,7 +2010,7 @@ mod refind_tests {
             &client,
             "g",
             &coord,
-            Duration::from_secs(30),
+            retry(Duration::from_secs(30)),
             |r: &Resp| r.error_code,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -1877,7 +2040,7 @@ mod refind_tests {
             &client,
             "g",
             &coord,
-            Duration::from_secs(30),
+            retry(Duration::from_secs(30)),
             |r: &Resp| r.error_code,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);
@@ -1895,8 +2058,8 @@ mod refind_tests {
     async fn connect_error_refinds_until_deadline() {
         let client = Client::builder()
             .bootstrap("127.0.0.1:1")
-            .connect_timeout(Duration::from_millis(10))
-            .request_timeout(Duration::from_millis(10))
+            .connect_timeout(crabka_units::millis(10))
+            .request_timeout(crabka_units::millis(10))
             .build()
             .await
             .unwrap();
@@ -1906,7 +2069,7 @@ mod refind_tests {
             &client,
             "g",
             &coord,
-            Duration::from_millis(1),
+            retry(Duration::from_millis(1)),
             |r: &Resp| r.error_code,
             || {
                 calls.fetch_add(1, Ordering::SeqCst);

@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use crabka_units::prelude::*;
 use prometheus_client::{
     encoding::EncodeLabelSet,
     metrics::{counter::Counter, family::Family, histogram::Histogram},
@@ -152,16 +153,20 @@ impl ServiceMetrics {
     /// Record one ingest request outcome. `wal_append_failures` is NOT touched
     /// here — increment it separately at the actual WAL/produce error site so a
     /// 4xx client/validation error does not inflate the WAL-failure counter.
-    pub fn record_ingest(&self, ok: bool, bytes: u64, items: u64, secs: f64) {
+    ///
+    /// `body` is the request-body size and `elapsed` the handler latency; both
+    /// are converted to the raw units the Prometheus instruments hold here, so
+    /// callers never spell out `_bytes`/`_secs` themselves.
+    pub fn record_ingest(&self, ok: bool, body: ByteSize, items: u64, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.ingest_requests
             .get_or_create(&StatusLabel {
                 status: status.into(),
             })
             .inc();
-        self.ingest_bytes.inc_by(bytes);
+        self.ingest_bytes.inc_by(body.bytes_u64());
         self.ingest_items.inc_by(items);
-        self.ingest_duration.observe(secs);
+        self.ingest_duration.observe(elapsed.secs_f64());
     }
 
     /// Record `series` accepted series for `tenant` on the ingest path. Called
@@ -186,7 +191,7 @@ impl ServiceMetrics {
     }
 
     /// Record one query request outcome on `route` with its latency.
-    pub fn record_query(&self, route: &str, ok: bool, secs: f64) {
+    pub fn record_query(&self, route: &str, ok: bool, elapsed: Time) {
         let status = if ok { "ok" } else { "error" };
         self.query_requests
             .get_or_create(&RouteStatusLabel {
@@ -198,7 +203,7 @@ impl ServiceMetrics {
             .get_or_create(&RouteLabel {
                 route: route.into(),
             })
-            .observe(secs);
+            .observe(elapsed.secs_f64());
     }
 }
 
@@ -256,13 +261,13 @@ mod tests {
     #[tokio::test]
     async fn registry_has_metrics_prefix_and_all_metrics() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, 1024, 5, 0.012);
-        m.record_ingest(false, 0, 0, 0.001);
+        m.record_ingest(true, kibibytes(1), 5, millis(12));
+        m.record_ingest(false, ByteSize::ZERO, 0, millis(1));
         m.wal_append_failures.inc();
         m.record_ingest_series("tenant-a", 5);
         m.record_blocks_compacted(3);
-        m.record_query("query", true, 0.05);
-        m.record_query("query_range", false, 1.5);
+        m.record_query("query", true, millis(50));
+        m.record_query("query_range", false, millis(1500));
 
         let mut buf = String::new();
         let r = m.registry.lock().await;
@@ -291,14 +296,35 @@ mod tests {
         let m = ServiceMetrics::new();
         // An error outcome must NOT bump wal_append_failures — that is reserved
         // for actual WAL/produce errors, incremented at the append site.
-        m.record_ingest(false, 0, 0, 0.0);
+        m.record_ingest(false, ByteSize::ZERO, 0, Time::ZERO);
         assert!(m.wal_append_failures.get() == 0);
+    }
+
+    #[tokio::test]
+    async fn dimensioned_arguments_export_in_prometheus_base_units() {
+        // The instruments hold raw bytes and raw seconds; the quantity seam must
+        // scale a `ByteSize`/`Time` into exactly those units, not pass the
+        // caller's magnitude through unscaled.
+        let m = ServiceMetrics::new();
+        m.record_ingest(true, mebibytes(2), 1, millis(250));
+        m.record_query("query", true, secs(2));
+
+        let mut buf = String::new();
+        let r = m.registry.lock().await;
+        prometheus_client::encoding::text::encode(&mut buf, &r).unwrap();
+        for needle in [
+            "crabka_metrics_ingest_bytes_total 2097152",
+            "crabka_metrics_ingest_duration_seconds_sum 0.25",
+            "crabka_metrics_query_duration_seconds_sum{route=\"query\"} 2.0",
+        ] {
+            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
+        }
     }
 
     #[tokio::test]
     async fn metrics_route_returns_openmetrics() {
         let m = ServiceMetrics::new();
-        m.record_ingest(true, 42, 1, 0.01);
+        m.record_ingest(true, bytes(42), 1, millis(10));
         let app = metrics_router(m.registry);
         let resp = app
             .oneshot(

@@ -30,8 +30,17 @@ use crabka_operator::{
         gres_tenant::{RangeRetirementAdmin, reconcile_one_retiring_range_wal},
     },
 };
+use crabka_units::convert::ByteSizeExt as _;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+
+fn durable_inspect_limits() -> (u32, u32) {
+    let policy = crabka_gres_ranges::RangeRuntimePolicy::default();
+    (
+        policy.durable_inspect_max_records.get(),
+        u32::try_from(policy.durable_inspect_max_size.bytes_u64()).unwrap(),
+    )
+}
 
 #[path = "../../gres-ranges/tests/harness/process.rs"]
 mod process;
@@ -645,7 +654,7 @@ impl RangeRetirementAdmin for CountingRetirementAdmin {
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: crabka_units::Time,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
         if names != [self.expected_topic.as_str()] {
             let mut ledger = self.ledger.lock().expect("delete ledger");
@@ -659,7 +668,7 @@ impl RangeRetirementAdmin for CountingRetirementAdmin {
             ));
         }
         self.ledger.lock().expect("delete ledger").exact_calls += 1;
-        let result = self.inner.delete_topics(names, timeout_ms).await?;
+        let result = self.inner.delete_topics(names, timeout).await?;
         if self.fail_after_delete && result.iter().all(|outcome| outcome.error.is_none()) {
             self.fail_after_delete = false;
             let mut ledger = self.ledger.lock().expect("delete ledger");
@@ -1911,8 +1920,8 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
                 table_id: 50,
                 start_key: start_key.clone(),
                 end_key: end_key.clone(),
-                max_records: crabka_gres_ranges::MAX_DURABLE_INSPECT_RECORDS,
-                max_bytes: crabka_gres_ranges::MAX_DURABLE_INSPECT_BYTES,
+                max_records: durable_inspect_limits().0,
+                max_bytes: durable_inspect_limits().1,
                 snapshot_offset: None,
                 cursor: None,
             })
@@ -2101,7 +2110,7 @@ async fn register_hash_split_layout(system: &ProcessHarness) {
     let mut registry = Registry::connect(system.bootstrap())
         .await
         .expect("hash layout registry");
-    registry.ensure_topic(1).await.expect("registry topic");
+    registry.ensure_topic().await.expect("registry topic");
     let mut tenant = registry
         .get(system.tenant())
         .await
@@ -2525,8 +2534,8 @@ async fn collect_hash_snapshots(
                     table_id,
                     start_key,
                     end_key,
-                    max_records: crabka_gres_ranges::MAX_DURABLE_INSPECT_RECORDS,
-                    max_bytes: crabka_gres_ranges::MAX_DURABLE_INSPECT_BYTES,
+                    max_records: durable_inspect_limits().0,
+                    max_bytes: durable_inspect_limits().1,
                     snapshot_offset: None,
                     cursor: None,
                 })
@@ -2765,12 +2774,9 @@ async fn direct_ordinary_physical_rows(
     range_id: u32,
     routing_table_id: u64,
 ) -> Vec<OrdinaryPhysicalRow> {
-    let table_id = system
-        .catalog_table_id(&format!("live_ledger{routing_table_id}"))
-        .await;
     let scan = crabka_gres_ranges::transport::ScanRangeReq {
         range_id: RangeId::new(range_id),
-        table_id,
+        table_name: format!("live_ledger{routing_table_id}"),
         interval: crabka_gres_ranges::transport::WireRowInterval {
             start: None,
             end: None,
@@ -2873,12 +2879,9 @@ async fn direct_hash_payload_rows(
     range_id: u32,
     routing_table_id: u64,
 ) -> Vec<PhysicalPayloadRow> {
-    let table_id = system
-        .catalog_table_id(&format!("live_ledger{routing_table_id}"))
-        .await;
     let scan = crabka_gres_ranges::transport::ScanRangeReq {
         range_id: RangeId::new(range_id),
-        table_id,
+        table_name: format!("live_ledger{routing_table_id}"),
         interval: crabka_gres_ranges::transport::WireRowInterval {
             start: None,
             end: None,
@@ -4219,8 +4222,8 @@ async fn authorize_hash_response_recovery(
                     table_id: 50,
                     start_key: start_key.clone(),
                     end_key: end_key.clone(),
-                    max_records: crabka_gres_ranges::MAX_DURABLE_INSPECT_RECORDS,
-                    max_bytes: crabka_gres_ranges::MAX_DURABLE_INSPECT_BYTES,
+                    max_records: durable_inspect_limits().0,
+                    max_bytes: durable_inspect_limits().1,
                     snapshot_offset: None,
                     cursor: None,
                 })
@@ -4446,7 +4449,7 @@ async fn prepare_split_system(
                 replicas: 1,
                 configs: BTreeMap::new(),
             }],
-            30_000,
+            crabka_units::secs(30),
         )
         .await
         .expect("create sentinel topic");
@@ -4825,7 +4828,7 @@ async fn restart_split_source(input: RestartSplitSource<'_>) -> RestartSplitOutc
     let mut fresh = Registry::connect(input.system.bootstrap())
         .await
         .expect("registry restart");
-    fresh.ensure_topic(1).await.expect("registry topic restart");
+    fresh.ensure_topic().await.expect("registry topic restart");
     *input.control = Arc::new(BrokerControl {
         registry: Mutex::new(fresh),
         faults: Arc::clone(input.faults),
@@ -4870,7 +4873,7 @@ async fn prepare_split_control(
     let mut registry = Registry::connect(system.bootstrap())
         .await
         .expect("registry");
-    registry.ensure_topic(1).await.expect("registry topic");
+    registry.ensure_topic().await.expect("registry topic");
     let faults = Arc::new(OneShotControlFaults::default());
     let control: GresControlHandle = Arc::new(BrokerControl {
         registry: Mutex::new(registry),
@@ -5061,8 +5064,13 @@ async fn drive_split_operation(mut input: SplitDriveInput<'_>) -> SplitDriveOutc
                 if !killed && input.point == SplitKillPoint::DeleteSuccessBeforeSidecarCas {
                     retirement.fail_after_delete = true;
                 }
-                let _ =
-                    reconcile_one_retiring_range_wal(&control, &mut retirement, &tenant_name).await;
+                let _ = reconcile_one_retiring_range_wal(
+                    &control,
+                    &mut retirement,
+                    &tenant_name,
+                    crabka_units::secs(30),
+                )
+                .await;
                 let current = load_operation(input.system, input.operation_id).await;
                 let current_tenant = load_tenant(input.system).await;
                 let sidecar_parked = current_tenant.range_retirements.iter().any(|retirement| {

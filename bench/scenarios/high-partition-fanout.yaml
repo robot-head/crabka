@@ -4,7 +4,7 @@
 # consumer rebalance has bugs they tend to surface here as stalled msgs/s.
 name: high-partition-fanout
 mode_tag: cluster
-msg_size_bytes: 1024
+msg_size: 1KiB
 partitions: 100
 replication_factor: 3
 producers: 4
@@ -13,7 +13,7 @@ mode:
   kind: saturate
 acks: leader
 compression: none
-linger_ms: 5
-batch_size: 16384
-warmup_s: 15
-duration_s: 120
+linger: 5ms
+batch_size: 16KiB
+warmup: 15s
+duration: 120s

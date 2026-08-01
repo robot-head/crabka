@@ -1,10 +1,14 @@
 //! `DiskPressure` rule — fires when a broker's summed `disk_bytes_avg`
-//! exceeds `disk_pressure_pct` of its configured `disk_bytes` capacity.
-//! Skips brokers with no capacity info.
+//! exceeds `disk_pressure_threshold` of its configured `disk_bytes`
+//! capacity. Skips brokers with no capacity info.
 
 use std::collections::HashMap;
 
-use num_traits::ToPrimitive;
+use crabka_units::{
+    ByteSize, Ratio,
+    fmt::Human as _,
+    prelude::{ByteSizeExt as _, RatioExt as _},
+};
 
 use super::{Rule, RuleCtx, RuleHit};
 use crate::{
@@ -21,7 +25,7 @@ impl Rule for DiskPressure {
 
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<RuleHit> {
         // Sum disk_bytes_avg per broker across all hosted replicas.
-        let mut per_broker: HashMap<i32, f64> = HashMap::new();
+        let mut per_broker: HashMap<i32, ByteSize> = HashMap::new();
         for p in &ctx.snapshot.partitions {
             for replica in &p.replicas {
                 if let Some(bytes) = ctx.usages.disk_bytes_avg(
@@ -31,13 +35,13 @@ impl Rule for DiskPressure {
                     Window::FiveMin,
                     ctx.now_ms,
                 ) {
-                    *per_broker.entry(*replica).or_insert(0.0) += bytes;
+                    *per_broker.entry(*replica).or_insert(ByteSize::ZERO) += bytes;
                 }
             }
         }
 
         let mut hits: Vec<RuleHit> = Vec::new();
-        let mut sorted: Vec<(i32, f64)> = per_broker.into_iter().collect();
+        let mut sorted: Vec<(i32, ByteSize)> = per_broker.into_iter().collect();
         sorted.sort_by_key(|(id, _)| *id);
         for (id, total) in sorted {
             let Some(cap) = ctx.capacities.for_broker(id) else {
@@ -46,17 +50,15 @@ impl Rule for DiskPressure {
             let Some(cap_bytes) = cap.disk_bytes else {
                 continue;
             };
-            if cap_bytes == 0 {
+            if cap_bytes == ByteSize::ZERO {
                 continue;
             }
-            let ratio = total
-                / cap_bytes
-                    .to_f64()
-                    .expect("u64 capacity must convert to f64");
-            if ratio <= ctx.cfg.disk_pressure_pct {
+            // Two byte counts divide to a dimensionless fill factor.
+            let fill: Ratio = total / cap_bytes;
+            if fill <= ctx.cfg.disk_pressure_threshold {
                 continue;
             }
-            let severity = if ratio > ctx.cfg.disk_critical_pct {
+            let severity = if fill > ctx.cfg.disk_critical_threshold {
                 AnomalySeverity::Critical
             } else {
                 AnomalySeverity::Warning
@@ -65,8 +67,9 @@ impl Rule for DiskPressure {
                 key: AnomalyKey::Broker(id),
                 severity,
                 details: format!(
-                    "broker {id} disk usage {pct:.1}% (cap {cap_bytes} bytes)",
-                    pct = ratio * 100.0,
+                    "broker {id} disk usage {pct:.1}% (cap {cap})",
+                    pct = fill.percent_f64(),
+                    cap = cap_bytes.human(),
                 ),
             });
         }
@@ -76,7 +79,9 @@ impl Rule for DiskPressure {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
+
+    use crabka_units::prelude::*;
 
     use super::*;
     use crate::{
@@ -116,8 +121,8 @@ mod tests {
 
     fn store_with_disk(samples: Vec<(i32, &str, i32, f64)>) -> Arc<UsageStore> {
         let store = UsageStore::new(WindowConfig {
-            scrape_interval: Duration::from_secs(30),
-            retention: Duration::from_hours(1),
+            scrape_interval: secs(30),
+            retention: hours(1),
         });
         for (broker, topic, partition, value) in samples {
             store.insert(
@@ -134,7 +139,7 @@ mod tests {
         Arc::new(store)
     }
 
-    fn caps_with(broker: i32, disk_bytes: u64) -> BrokerCapacities {
+    fn caps_with(broker: i32, disk_bytes: ByteSize) -> BrokerCapacities {
         let mut by = std::collections::HashMap::new();
         by.insert(
             broker,
@@ -146,10 +151,10 @@ mod tests {
         BrokerCapacities { by_broker: by }
     }
 
-    fn cfg(pressure: f64, critical: f64) -> DetectorConfig {
+    fn cfg(pressure: Ratio, critical: Ratio) -> DetectorConfig {
         DetectorConfig {
-            disk_pressure_pct: pressure,
-            disk_critical_pct: critical,
+            disk_pressure_threshold: pressure,
+            disk_critical_threshold: critical,
             ..DetectorConfig::default()
         }
     }
@@ -160,8 +165,8 @@ mod tests {
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2])).collect();
         let s = state(parts);
         let usages = store_with_disk((0..5).map(|i| (1, "t", i, 100.0)).collect());
-        let capacities = caps_with(1, 10_000);
-        let cfg = cfg(0.85, 0.95);
+        let capacities = caps_with(1, bytes(10_000));
+        let cfg = cfg(percent(85), percent(95));
         let hist = SnapshotHistory::new(10);
         let ctx = RuleCtx {
             snapshot: &s,
@@ -180,8 +185,8 @@ mod tests {
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2])).collect();
         let s = state(parts);
         let usages = store_with_disk((0..5).map(|i| (1, "t", i, 180.0)).collect());
-        let capacities = caps_with(1, 1_000);
-        let cfg = cfg(0.85, 0.95);
+        let capacities = caps_with(1, bytes(1_000));
+        let cfg = cfg(percent(85), percent(95));
         let hist = SnapshotHistory::new(10);
         let ctx = RuleCtx {
             snapshot: &s,
@@ -206,8 +211,8 @@ mod tests {
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2])).collect();
         let s = state(parts);
         let usages = store_with_disk((0..5).map(|i| (1, "t", i, 200.0)).collect());
-        let capacities = caps_with(1, 1_000);
-        let cfg = cfg(0.85, 0.95);
+        let capacities = caps_with(1, bytes(1_000));
+        let cfg = cfg(percent(85), percent(95));
         let hist = SnapshotHistory::new(10);
         let ctx = RuleCtx {
             snapshot: &s,
@@ -229,8 +234,8 @@ mod tests {
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2])).collect();
         let s = state(parts);
         let usages = store_with_disk((0..5).map(|i| (1, "t", i, 190.0)).collect());
-        let capacities = caps_with(1, 1_000);
-        let cfg = cfg(0.85, 0.95);
+        let capacities = caps_with(1, bytes(1_000));
+        let cfg = cfg(percent(85), percent(95));
         let hist = SnapshotHistory::new(10);
         let ctx = RuleCtx {
             snapshot: &s,
@@ -256,7 +261,7 @@ mod tests {
         let s = state(parts);
         let usages = store_with_disk((0..5).map(|i| (1, "t", i, 10_000_000.0)).collect());
         let capacities = BrokerCapacities::default(); // empty
-        let cfg = cfg(0.85, 0.95);
+        let cfg = cfg(percent(85), percent(95));
         let hist = SnapshotHistory::new(10);
         let ctx = RuleCtx {
             snapshot: &s,

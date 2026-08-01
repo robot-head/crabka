@@ -50,11 +50,11 @@ async fn start_host_broker() -> (BrokerHandle, tempfile::TempDir) {
         node_id: crabka_broker::NodeId(1),
         controller_listen_addr: controller_addr,
         controller_quorum_voters: vec![(crabka_broker::NodeId(1), controller_addr.to_string())],
-        heartbeat_interval_ms: 3_000,
-        heartbeat_timeout_ms: 9_000,
-        replica_lag_time_max_ms: 30_000,
-        controller_election_timeout: std::time::Duration::from_secs(5),
-        controller_heartbeat_interval: std::time::Duration::from_millis(500),
+        heartbeat_interval: crabka_units::millis(3_000),
+        heartbeat_timeout: crabka_units::millis(9_000),
+        replica_lag_time_max: crabka_units::millis(30_000),
+        controller_election_timeout: crabka_units::secs(5),
+        controller_heartbeat_interval: crabka_units::millis(500),
         bootstrap_mode: crabka_broker::BootstrapMode::Bootstrap,
         ..BrokerConfig::default()
     };

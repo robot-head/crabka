@@ -3,16 +3,21 @@
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
 use crabka_client_admin::{
-    AclEntry, AclEntryFilter, AclOperation, CreateTopicSpec, DEFAULT_SCRAM_ITERATIONS, PatternType,
-    PermissionType, ResourceType, ScramDeletion, ScramUpsertion,
+    AclEntry, AclEntryFilter, AclOperation, CreateTopicSpec, PatternType, PermissionType,
+    ResourceType, ScramDeletion, ScramIterations, ScramUpsertion,
 };
 use crabka_gres_control::{
-    RangeBoundary, RangeLayoutEntry, SqlUser, TENANT_REGISTRY_TOPIC, TenantId, TenantName,
-    TenantRecord, TenantState, tenant_config_topic,
+    DEFAULT_CHECKPOINT_BYTES, DEFAULT_CHECKPOINT_FRAMES, RangeBoundary, RangeLayoutEntry, SqlUser,
+    TenantId, TenantName, TenantRecord, TenantState, tenant_config_topic,
 };
 use crabka_security::{
     ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert},
     scram::PgScramVerifier,
+};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    fmt::Human as _,
 };
 use futures::StreamExt as _;
 use k8s_openapi::{
@@ -42,7 +47,10 @@ use sha2::{Digest as _, Sha256};
 use crate::{
     context::Context,
     controller::{
-        common::{self, FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref},
+        common::{
+            self, FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref,
+            time_from_millis_u64,
+        },
         gres_split_operation::{
             MtlsRangeMutationClient, active_operations, reconcile_activated_cutover,
             reconcile_one_rpc_phase, successors_may_be_deployed, verify_target_topology_ready,
@@ -52,11 +60,12 @@ use crate::{
     },
     crd::{
         Gres, GresTenant, GresTenantRangeKey, GresTenantRangeSpec, Kafka, SecretKeyRef,
-        TenantDefaults,
+        TenantDefaults, gres::EffectiveGresComputePolicy,
     },
 };
 
 const FINALIZER: &str = "crabka.io/gres-tenant-finalizer";
+
 const APP_NAME: &str = "crabka-gres";
 const DEFAULT_IMAGE: &str = concat!("ghcr.io/robot-head/crabka-gres:", env!("CARGO_PKG_VERSION"));
 pub(super) const COMPUTE_PORT: i32 = 5432;
@@ -64,7 +73,6 @@ const RANGE_PORT: i32 = 7432;
 const RANGE_TLS_DIR: &str = "/etc/crabka/range-tls";
 const RANGE_TLS_IDENTITY_ANNOTATION: &str = "crabka.io/range-tls-identity";
 const RANGE_TLS_HASH_ANNOTATION: &str = "crabka.io/range-tls-hash";
-const LIFECYCLE_REQUEUE: Duration = Duration::from_secs(5);
 
 /// Run the controller forever.
 /// # Errors
@@ -92,9 +100,9 @@ pub async fn run(ctx: Context) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn error_policy(_obj: Arc<GresTenant>, err: &ReconcileError, _ctx: Arc<Context>) -> Action {
+pub fn error_policy(_obj: Arc<GresTenant>, err: &ReconcileError, ctx: Arc<Context>) -> Action {
     tracing::warn!(error = %err, "gres tenant reconcile error, requeueing");
-    Action::requeue(Duration::from_secs(15))
+    common::error_requeue(ctx)
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(kind = "GresTenant", name = %obj.name_any()))]
@@ -117,13 +125,33 @@ struct ReadyTenant {
     tenant_name: TenantName,
     cluster: String,
     bootstrap: String,
+    policy: crabka_gres_control::RegistryPolicy,
     defaults: EffectiveDefaults,
+    compute_image: String,
+    compute_policy: EffectiveGresComputePolicy,
+    direct_bootstrap_grace: Time,
     kafka_sasl: bool,
 }
 
 enum TenantPreparation {
     Ready(Box<ReadyTenant>),
     Requeue(Action),
+}
+
+fn effective_compute_image(
+    obj: &GresTenant,
+    config: &crate::config::OperatorConfig,
+) -> Result<String, ReconcileError> {
+    let (image, path) = if let Some(image) = &obj.spec.image {
+        (image.clone(), "spec.image")
+    } else if let Some(image) = &config.default_gres_image {
+        (image.clone(), "DEFAULT_GRES_IMAGE")
+    } else {
+        (DEFAULT_IMAGE.to_owned(), "compiled default Gres image")
+    };
+    refined_type::rule::NonEmptyString::new(image)
+        .map(refined_type::Refined::into_value)
+        .map_err(|error| ReconcileError::Malformed(format!("{path}: {error}")))
 }
 
 async fn prepare_tenant(
@@ -147,11 +175,12 @@ async fn prepare_tenant(
                     registry_version: None,
                     lifecycle_phase: preserved_lifecycle_state(obj),
                     advance_generation: false,
+                    direct_bootstrap_grace: None,
                 },
             )
             .await?;
-            return Ok(TenantPreparation::Requeue(Action::requeue(
-                Duration::from_mins(5),
+            return Ok(TenantPreparation::Requeue(common::requeue(
+                ctx.config.controller_invalid_requeue,
             )));
         }
     };
@@ -168,29 +197,71 @@ async fn prepare_tenant(
                 registry_version: None,
                 lifecycle_phase: preserved_lifecycle_state(obj),
                 advance_generation: false,
+                direct_bootstrap_grace: None,
             },
         )
         .await?;
-        return Ok(TenantPreparation::Requeue(Action::requeue(
-            Duration::from_secs(30),
+        return Ok(TenantPreparation::Requeue(common::requeue(
+            ctx.config.controller_dependency_requeue,
         )));
     };
+    let pgdog_policy = gres
+        .spec
+        .pgdog
+        .effective_policy()
+        .map_err(ReconcileError::Malformed)?;
+    let mut compute_policy = gres
+        .spec
+        .compute
+        .as_ref()
+        .map_or_else(
+            || crate::crd::gres::GresComputeSpec::default().effective_policy(),
+            crate::crd::gres::GresComputeSpec::effective_policy,
+        )
+        .map_err(ReconcileError::Malformed)?;
+    let compute_image = effective_compute_image(obj, &ctx.config)?;
     let cluster = gres.spec.kafka_cluster.clone();
     let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &namespace);
     let Some(kafka) = kafka_api.get_opt(&cluster).await? else {
         patch_cluster_not_ready(&tenant_api, &name, obj).await?;
-        return Ok(TenantPreparation::Requeue(Action::requeue(
-            Duration::from_secs(30),
+        return Ok(TenantPreparation::Requeue(common::requeue(
+            ctx.config.controller_dependency_requeue,
         )));
     };
     let Some(bootstrap) = internal_listener_bootstrap(&kafka) else {
         patch_cluster_not_ready(&tenant_api, &name, obj).await?;
-        return Ok(TenantPreparation::Requeue(Action::requeue(
-            Duration::from_secs(30),
+        return Ok(TenantPreparation::Requeue(common::requeue(
+            ctx.config.controller_dependency_requeue,
         )));
     };
+    let policy = kafka
+        .spec
+        .gres_registry
+        .as_ref()
+        .map_or_else(
+            || Ok(crabka_gres_control::RegistryPolicy::default()),
+            crate::crd::GresRegistrySpec::policy,
+        )
+        .map_err(ReconcileError::Malformed)?;
+    compute_policy.registry_reader_fetch_min = kafka
+        .spec
+        .gres_registry
+        .as_ref()
+        .map(crate::crd::GresRegistrySpec::configured_reader_fetch_min)
+        .transpose()
+        .map_err(ReconcileError::Malformed)?
+        .flatten();
     if obj.meta().deletion_timestamp.is_some() {
-        cleanup_tenant(ctx, &cluster, &bootstrap, &tenant_name, &name).await;
+        cleanup_tenant(
+            ctx,
+            &namespace,
+            &cluster,
+            &bootstrap,
+            &policy,
+            &tenant_name,
+            &name,
+        )
+        .await;
         remove_finalizer(&tenant_api, &name).await?;
         return Ok(TenantPreparation::Requeue(Action::await_change()));
     }
@@ -205,7 +276,13 @@ async fn prepare_tenant(
         tenant_name,
         cluster,
         bootstrap,
-        defaults: effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref()),
+        policy,
+        defaults: effective_defaults(gres.spec.defaults.as_ref(), obj.spec.overrides.as_ref())?,
+        compute_image,
+        compute_policy,
+        direct_bootstrap_grace: Time::from_millis(
+            i64::try_from(pgdog_policy.direct_bootstrap_grace.into_value()).unwrap_or(i64::MAX),
+        ),
         kafka_sasl: kafka_internal_listener_requires_sasl(&kafka),
     })))
 }
@@ -226,6 +303,7 @@ async fn patch_cluster_not_ready(
             registry_version: None,
             lifecycle_phase: preserved_lifecycle_state(obj),
             advance_generation: false,
+            direct_bootstrap_grace: None,
         },
     )
     .await
@@ -235,7 +313,7 @@ async fn reconcile_inner(
     obj: Arc<GresTenant>,
     ctx: Arc<Context>,
 ) -> Result<Action, ReconcileError> {
-    let ready = match prepare_tenant(&obj, &ctx).await? {
+    let ready = match Box::pin(prepare_tenant(&obj, &ctx)).await? {
         TenantPreparation::Ready(ready) => ready,
         TenantPreparation::Requeue(action) => return Ok(action),
     };
@@ -246,32 +324,21 @@ async fn reconcile_inner(
         tenant_name,
         cluster,
         bootstrap,
+        policy,
         defaults,
+        compute_image,
+        compute_policy,
+        direct_bootstrap_grace,
         kafka_sasl,
     } = *ready;
-    let wal_topic = wal_topic(&tenant_name);
+    let (wal_topic, cfg_topic) = (wal_topic(&tenant_name), tenant_config_topic(&tenant_name));
     let spec_ranges = effective_ranges(&obj.spec.ranges)?;
-    let cfg_topic = tenant_config_topic(&tenant_name);
-    let control = ctx.gres_control_for(&cluster, &bootstrap).await?;
+    let control = Context::gres_control_for(&ctx, &ns, &cluster, &bootstrap, &policy).await?;
     let current_record = control.get_tenant(&tenant_name).await?;
     let split_operations = active_operations(control.list_split_operations(&tenant_name).await?);
     let active_split = split_operations.first().cloned();
-    let tenant_ranges = active_split
-        .as_ref()
-        .filter(|operation| successors_may_be_deployed(operation))
-        .and_then(|operation| operation.plan.as_ref())
-        .map_or_else(
-            || reconcile_ranges(current_record.as_ref(), &spec_ranges),
-            |plan| {
-                plan.target_layout
-                    .iter()
-                    .map(|range| GresTenantRangeSpec {
-                        range_id: range.range_id,
-                        end_key: range.end_key.map(range_key_from_boundary),
-                    })
-                    .collect()
-            },
-        );
+    let tenant_ranges =
+        reconcile_tenant_ranges(current_record.as_ref(), &spec_ranges, active_split.as_ref());
     let lifecycle_state = current_record
         .as_ref()
         .map_or_else(|| requested_state(&obj), |record| record.state);
@@ -316,16 +383,15 @@ async fn reconcile_inner(
             current_record.as_ref(),
             &tenant_ranges,
         )?;
-
         let range_parking_progress = park_retiring_ranges(
             &control,
             &mut admin,
             &tenant_name,
             &mut record,
             current_record.as_ref(),
+            ctx.config.topic_mutation_timeout,
         )
         .await?;
-
         let parking_progress = if matches!(
             lifecycle_state,
             TenantState::Parking | TenantState::Suspended
@@ -339,6 +405,7 @@ async fn reconcile_inner(
                 current_record
                     .as_ref()
                     .map(|current| current.record_version),
+                ctx.config.topic_mutation_timeout,
             )
             .await?
         } else {
@@ -357,6 +424,9 @@ async fn reconcile_inner(
                     bootstrap: &bootstrap,
                     wal_topic: &wal_topic,
                     config_topic: &cfg_topic,
+                    policy: &policy,
+                    image: &compute_image,
+                    compute_policy,
                     lifecycle_state: record.state,
                     kafka_sasl,
                     range_control_enabled,
@@ -364,7 +434,7 @@ async fn reconcile_inner(
                 },
             )
             .await?;
-            return Ok(Action::requeue(LIFECYCLE_REQUEUE));
+            return Ok(lifecycle_requeue(&compute_policy));
         }
         if matches!(
             lifecycle_state,
@@ -374,7 +444,6 @@ async fn reconcile_inner(
             record.ensure_valid()?;
         }
         drop(admin);
-
         if parking_progress == ParkingProgress::Complete
             || range_parking_progress == ParkingProgress::Complete
         {
@@ -396,7 +465,6 @@ async fn reconcile_inner(
         } else if let Some(current) = current_record.as_ref() {
             record = current.clone();
         }
-
         reconcile_compute_and_status(&ComputeStatusConfig {
             ctx: &ctx,
             namespace: &ns,
@@ -409,7 +477,11 @@ async fn reconcile_inner(
             bootstrap: &bootstrap,
             wal_topic: &wal_topic,
             config_topic: &cfg_topic,
+            policy: &policy,
+            image: &compute_image,
+            compute_policy,
             record: &record,
+            direct_bootstrap_grace,
             kafka_sasl,
             range_control_enabled,
             range_tls_hash: range_tls_hash.as_deref(),
@@ -417,27 +489,70 @@ async fn reconcile_inner(
         .await
     }
     .await;
-
     match reconcile_result {
         Ok(action) => Ok(action),
         Err(error) => {
-            patch_status(
+            patch_reconcile_failed(
                 &tenant_api,
                 &name,
                 &obj,
-                &TenantStatusUpdate {
-                    status: "False",
-                    reason: "ReconcileFailed",
-                    message: &error.to_string(),
-                    registry_version,
-                    lifecycle_phase: lifecycle_state,
-                    advance_generation: false,
-                },
+                &error,
+                registry_version,
+                lifecycle_state,
+                direct_bootstrap_grace,
             )
             .await?;
             Err(error)
         }
     }
+}
+
+fn reconcile_tenant_ranges(
+    current_record: Option<&TenantRecord>,
+    spec_ranges: &[GresTenantRangeSpec],
+    active_split: Option<&crabka_gres_control::SplitOperationRecord>,
+) -> Vec<GresTenantRangeSpec> {
+    active_split
+        .filter(|operation| successors_may_be_deployed(operation))
+        .and_then(|operation| operation.plan.as_ref())
+        .map_or_else(
+            || reconcile_ranges(current_record, spec_ranges),
+            |plan| {
+                plan.target_layout
+                    .iter()
+                    .map(|range| GresTenantRangeSpec {
+                        range_id: range.range_id,
+                        end_key: range.end_key.map(range_key_from_boundary),
+                    })
+                    .collect()
+            },
+        )
+}
+
+async fn patch_reconcile_failed(
+    tenant_api: &Api<GresTenant>,
+    name: &str,
+    obj: &GresTenant,
+    error: &ReconcileError,
+    registry_version: Option<u64>,
+    lifecycle_phase: TenantState,
+    direct_bootstrap_grace: Time,
+) -> Result<(), ReconcileError> {
+    patch_status(
+        tenant_api,
+        name,
+        obj,
+        &TenantStatusUpdate {
+            status: "False",
+            reason: "ReconcileFailed",
+            message: &error.to_string(),
+            registry_version,
+            lifecycle_phase,
+            advance_generation: false,
+            direct_bootstrap_grace: Some(direct_bootstrap_grace),
+        },
+    )
+    .await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -464,21 +579,12 @@ async fn provision_tenant_resources(
     admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
     config: &TenantResourceConfig<'_>,
 ) -> Result<String, ReconcileError> {
-    let compact = BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]);
-    let mut topic_specs = vec![
-        CreateTopicSpec {
-            name: config.config_topic.to_owned(),
-            partitions: 1,
-            replicas: config.defaults.wal_replication,
-            configs: compact.clone(),
-        },
-        CreateTopicSpec {
-            name: TENANT_REGISTRY_TOPIC.to_string(),
-            partitions: 1,
-            replicas: config.defaults.wal_replication,
-            configs: compact,
-        },
-    ];
+    let mut topic_specs = vec![CreateTopicSpec {
+        name: config.config_topic.to_owned(),
+        partitions: 1,
+        replicas: config.defaults.wal_replication,
+        configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
+    }];
     if matches!(
         config.lifecycle_state,
         TenantState::Active | TenantState::ResumeRequested
@@ -495,7 +601,9 @@ async fn provision_tenant_resources(
     }
     let missing = missing_topics(admin, &topic_specs).await?;
     if !missing.is_empty() {
-        admin.create_topics(&missing, 30_000).await?;
+        admin
+            .create_topics(&missing, config.ctx.config.topic_mutation_timeout)
+            .await?;
     }
 
     let password = read_password_secret(
@@ -510,7 +618,7 @@ async fn provision_tenant_resources(
             &[ScramUpsertion {
                 username: kafka_username.clone(),
                 password: password.clone(),
-                iterations: DEFAULT_SCRAM_ITERATIONS,
+                iterations: config.defaults.scram_iterations.into_value(),
             }],
             &[],
         )
@@ -578,7 +686,11 @@ struct ComputeStatusConfig<'a> {
     bootstrap: &'a str,
     wal_topic: &'a str,
     config_topic: &'a str,
+    policy: &'a crabka_gres_control::RegistryPolicy,
+    image: &'a str,
+    compute_policy: EffectiveGresComputePolicy,
     record: &'a TenantRecord,
+    direct_bootstrap_grace: Time,
     kafka_sasl: bool,
     range_control_enabled: bool,
     range_tls_hash: Option<&'a str>,
@@ -596,6 +708,9 @@ async fn reconcile_compute_and_status(
             bootstrap: config.bootstrap,
             wal_topic: config.wal_topic,
             config_topic: config.config_topic,
+            policy: config.policy,
+            image: config.image,
+            compute_policy: config.compute_policy,
             lifecycle_state: config.record.state,
             kafka_sasl: config.kafka_sasl,
             range_control_enabled: config.range_control_enabled,
@@ -618,7 +733,7 @@ async fn reconcile_compute_and_status(
                 .await
                 .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
         }
-        return Ok(Action::requeue(LIFECYCLE_REQUEUE));
+        return Ok(lifecycle_requeue(&config.compute_policy));
     }
 
     let policy_api: Api<NetworkPolicy> =
@@ -650,10 +765,15 @@ async fn reconcile_compute_and_status(
             registry_version: Some(config.record.record_version),
             lifecycle_phase: config.record.state,
             advance_generation: endpoint_ready,
+            direct_bootstrap_grace: Some(config.direct_bootstrap_grace),
         },
     )
     .await?;
-    Ok(Action::requeue(LIFECYCLE_REQUEUE))
+    Ok(lifecycle_requeue(&config.compute_policy))
+}
+
+fn lifecycle_requeue(policy: &EffectiveGresComputePolicy) -> Action {
+    Action::requeue(time_from_millis_u64(policy.lifecycle_requeue_ms.into_value()).to_std())
 }
 
 async fn reconcile_range_tls_secret(
@@ -705,6 +825,9 @@ struct ComputeDeploymentConfig<'a> {
     bootstrap: &'a str,
     wal_topic: &'a str,
     config_topic: &'a str,
+    policy: &'a crabka_gres_control::RegistryPolicy,
+    image: &'a str,
+    compute_policy: EffectiveGresComputePolicy,
     lifecycle_state: TenantState,
     kafka_sasl: bool,
     range_control_enabled: bool,
@@ -718,11 +841,6 @@ async fn reconcile_compute_deployments(
     config: &ComputeDeploymentConfig<'_>,
 ) -> Result<bool, ReconcileError> {
     let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
-    let image = ctx
-        .config
-        .default_gres_image
-        .clone()
-        .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
     let tenant_name = obj.name_any();
     let mut all_ready = true;
     for range in config.ranges {
@@ -731,10 +849,15 @@ async fn reconcile_compute_deployments(
             range,
             &DeploymentRenderConfig {
                 all_ranges: config.ranges,
-                image: &image,
+                image: config.image,
+                readiness_probe_period_seconds: config
+                    .compute_policy
+                    .readiness_probe_period_seconds,
                 bootstrap: config.bootstrap,
                 wal_topic: config.wal_topic,
                 config_topic: config.config_topic,
+                policy: config.policy,
+                compute_policy: config.compute_policy,
                 replicas: compute_replicas(config.lifecycle_state),
                 operator_config: &ctx.config,
                 kafka_sasl: config.kafka_sasl,
@@ -776,6 +899,7 @@ async fn park_suspended_tenant_wal(
     tenant: &TenantName,
     record: &mut TenantRecord,
     expected_record_version: Option<u64>,
+    topic_mutation_timeout: Time,
 ) -> Result<ParkingProgress, ReconcileError> {
     let generation_to_park = if record.state == TenantState::Parking {
         record.wal_generation.saturating_sub(1)
@@ -831,7 +955,14 @@ async fn park_suspended_tenant_wal(
     *record = latest;
 
     if !ranges_to_park.is_empty() {
-        delete_wal_topics(&mut **admin, tenant, &ranges_to_park, generation_to_park).await?;
+        delete_wal_topics(
+            &mut **admin,
+            tenant,
+            &ranges_to_park,
+            generation_to_park,
+            topic_mutation_timeout,
+        )
+        .await?;
     }
     if wal_topics_remain(admin, tenant, ranges, generation_to_park).await? {
         return Ok(ParkingProgress::DeletionPending);
@@ -855,6 +986,7 @@ async fn park_retiring_ranges(
     tenant: &TenantName,
     record: &mut TenantRecord,
     current: Option<&TenantRecord>,
+    topic_mutation_timeout: Time,
 ) -> Result<ParkingProgress, ReconcileError> {
     if let Some(current) = current.filter(|current| {
         current.range_retirements.iter().any(|retirement| {
@@ -883,7 +1015,14 @@ async fn park_retiring_ranges(
         }
         let topic = wal_topic_for_generation(tenant, range_id, generation);
         if topic_exists(&mut **admin, &topic).await? {
-            delete_wal_topics(&mut **admin, tenant, &[range_id], generation).await?;
+            delete_wal_topics(
+                &mut **admin,
+                tenant,
+                &[range_id],
+                generation,
+                topic_mutation_timeout,
+            )
+            .await?;
         }
         if topic_exists(&mut **admin, &topic).await? {
             return Ok(ParkingProgress::DeletionPending);
@@ -932,7 +1071,14 @@ async fn park_retiring_ranges(
     for (range_id, operation_id, generation) in retiring {
         let topic = wal_topic_for_generation(tenant, range_id, generation);
         if topic_exists(&mut **admin, &topic).await? {
-            delete_wal_topics(&mut **admin, tenant, &[range_id], generation).await?;
+            delete_wal_topics(
+                &mut **admin,
+                tenant,
+                &[range_id],
+                generation,
+                topic_mutation_timeout,
+            )
+            .await?;
         }
         if topic_exists(&mut **admin, &topic).await? {
             return Ok(ParkingProgress::DeletionPending);
@@ -962,7 +1108,7 @@ pub trait RangeRetirementAdmin: Send {
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError>;
 }
 
@@ -981,9 +1127,9 @@ where
     async fn delete_topics(
         &mut self,
         names: &[&str],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
-        crabka_client_admin::AdminClientLike::delete_topics(self, names, timeout_ms).await
+        crabka_client_admin::AdminClientLike::delete_topics(self, names, timeout).await
     }
 }
 
@@ -994,6 +1140,7 @@ pub async fn reconcile_one_retiring_range_wal(
     control: &crate::context::GresControlHandle,
     admin: &mut (dyn RangeRetirementAdmin + Send),
     tenant: &TenantName,
+    topic_mutation_timeout: Time,
 ) -> Result<bool, ReconcileError> {
     let Some(record) = control.get_tenant(tenant).await? else {
         return Err(ReconcileError::Malformed(format!(
@@ -1012,7 +1159,14 @@ pub async fn reconcile_one_retiring_range_wal(
     let generation = retirement.source_generation;
     let topic = wal_topic_for_generation(tenant, range_id, generation);
     if topic_exists(admin, &topic).await? {
-        delete_wal_topics(admin, tenant, &[range_id], generation).await?;
+        delete_wal_topics(
+            admin,
+            tenant,
+            &[range_id],
+            generation,
+            topic_mutation_timeout,
+        )
+        .await?;
     }
     if topic_exists(admin, &topic).await? {
         return Ok(false);
@@ -1049,13 +1203,16 @@ async fn delete_wal_topics<A>(
     tenant: &TenantName,
     ranges: &[u32],
     generation: u64,
+    topic_mutation_timeout: Time,
 ) -> Result<(), ReconcileError>
 where
     A: RangeRetirementAdmin + Send + ?Sized,
 {
     for range_id in ranges {
         let topic = wal_topic_for_generation(tenant, *range_id, generation);
-        let outcomes = admin.delete_topics(&[topic.as_str()], 30_000).await?;
+        let outcomes = admin
+            .delete_topics(&[topic.as_str()], topic_mutation_timeout)
+            .await?;
         for outcome in outcomes {
             if let Some(error) = outcome.error {
                 return Err(ReconcileError::Malformed(format!(
@@ -1082,17 +1239,21 @@ where
 
 async fn cleanup_tenant(
     ctx: &Context,
-    cluster: &str,
+    namespace: &str,
+    kafka_name: &str,
     bootstrap: &str,
+    policy: &crabka_gres_control::RegistryPolicy,
     tenant: &TenantName,
     _tenant_name: &str,
 ) {
-    if let Ok(control) = ctx.gres_control_for(cluster, bootstrap).await
+    if let Ok(control) = ctx
+        .gres_control_for(namespace, kafka_name, bootstrap, policy)
+        .await
         && let Err(err) = control.delete_tenant(tenant).await
     {
         tracing::warn!(error = %err, tenant = %tenant, "gres tenant tombstone write failed");
     }
-    let Ok(admin_handle) = ctx.admin_client_for(cluster, bootstrap).await else {
+    let Ok(admin_handle) = ctx.admin_client_for(kafka_name, bootstrap).await else {
         return;
     };
     let mut admin = admin_handle.lock().await;
@@ -1121,34 +1282,43 @@ async fn cleanup_tenant(
 #[derive(Debug, Clone, Copy)]
 struct EffectiveDefaults {
     wal_replication: i32,
+    scram_iterations: ScramIterations,
     checkpoint_frames: Option<u64>,
-    checkpoint_bytes: Option<u64>,
-    suspend_max_checkpoint_bytes: Option<u64>,
+    checkpoint_size: Option<ByteSize>,
+    suspend_max_checkpoint_size: Option<ByteSize>,
     idle_seconds: Option<u64>,
 }
 
 fn effective_defaults(
     base: Option<&TenantDefaults>,
     override_: Option<&TenantDefaults>,
-) -> EffectiveDefaults {
-    EffectiveDefaults {
+) -> Result<EffectiveDefaults, ReconcileError> {
+    let scram_iterations = override_
+        .and_then(|defaults| defaults.scram_iterations)
+        .or_else(|| base.and_then(|defaults| defaults.scram_iterations))
+        .map_or_else(|| Ok(ScramIterations::default()), ScramIterations::new)
+        .map_err(|error| ReconcileError::Malformed(format!("defaults.scramIterations: {error}")))?;
+    Ok(EffectiveDefaults {
         wal_replication: override_
             .and_then(|d| d.wal_replication)
             .or_else(|| base.and_then(|d| d.wal_replication))
             .unwrap_or(1),
+        scram_iterations,
         checkpoint_frames: override_
             .and_then(|d| d.checkpoint_frames)
-            .or_else(|| base.and_then(|d| d.checkpoint_frames)),
-        checkpoint_bytes: override_
-            .and_then(|d| d.checkpoint_bytes)
-            .or_else(|| base.and_then(|d| d.checkpoint_bytes)),
-        suspend_max_checkpoint_bytes: override_
-            .and_then(|d| d.suspend_max_checkpoint_bytes)
-            .or_else(|| base.and_then(|d| d.suspend_max_checkpoint_bytes)),
+            .or_else(|| base.and_then(|d| d.checkpoint_frames))
+            .or(Some(DEFAULT_CHECKPOINT_FRAMES)),
+        checkpoint_size: override_
+            .and_then(|d| d.checkpoint_size)
+            .or_else(|| base.and_then(|d| d.checkpoint_size))
+            .or(Some(DEFAULT_CHECKPOINT_BYTES)),
+        suspend_max_checkpoint_size: override_
+            .and_then(|d| d.suspend_max_checkpoint_size)
+            .or_else(|| base.and_then(|d| d.suspend_max_checkpoint_size)),
         idle_seconds: override_
             .and_then(|d| d.idle_seconds)
             .or_else(|| base.and_then(|d| d.idle_seconds)),
-    }
+    })
 }
 
 async fn missing_topics(
@@ -1214,12 +1384,18 @@ fn build_tenant_record(
     desired_ranges: &[GresTenantRangeSpec],
 ) -> Result<TenantRecord, ReconcileError> {
     let verifier = current
-        .filter(|record| verifier_matches_password(&record.scram_verifier, password))
+        .filter(|record| {
+            verifier_matches_password(&record.scram_verifier, password, defaults.scram_iterations)
+        })
         .map(|record| record.scram_verifier.clone())
         .unwrap_or(
-            PgScramVerifier::generate(password, DEFAULT_SCRAM_ITERATIONS as u32)
-                .map_err(|err| ReconcileError::Malformed(err.to_string()))?
-                .to_string(),
+            PgScramVerifier::generate(
+                password,
+                u32::try_from(defaults.scram_iterations.into_value())
+                    .expect("validated SCRAM iterations are positive"),
+            )
+            .map_err(|err| ReconcileError::Malformed(err.to_string()))?
+            .to_string(),
         );
     let state = current.map_or_else(|| requested_state(obj), |record| record.state);
     let mut record = TenantRecord::new(
@@ -1232,8 +1408,8 @@ fn build_tenant_record(
         defaults.wal_replication,
     )?;
     record.checkpoint_frames = defaults.checkpoint_frames;
-    record.checkpoint_bytes = defaults.checkpoint_bytes;
-    record.suspend_max_checkpoint_bytes = defaults.suspend_max_checkpoint_bytes;
+    record.checkpoint_size = defaults.checkpoint_size;
+    record.suspend_max_checkpoint_size = defaults.suspend_max_checkpoint_size;
     record.idle_seconds = defaults.idle_seconds;
     if let Some(current) = current {
         record.wal_generation = current.wal_generation;
@@ -1310,10 +1486,20 @@ fn requested_state(obj: &GresTenant) -> TenantState {
     TenantState::Active
 }
 
-fn verifier_matches_password(verifier: &str, password: &str) -> bool {
+fn verifier_matches_password(
+    verifier: &str,
+    password: &str,
+    scram_iterations: ScramIterations,
+) -> bool {
     let Ok(parsed) = PgScramVerifier::parse(verifier) else {
         return false;
     };
+    if parsed.iterations
+        != u32::try_from(scram_iterations.into_value())
+            .expect("validated SCRAM iterations are positive")
+    {
+        return false;
+    }
     let Ok(candidate) =
         PgScramVerifier::generate_with_salt(password, parsed.iterations, parsed.salt)
     else {
@@ -1856,9 +2042,12 @@ fn render_range_service(obj: &GresTenant, range_id: u32) -> Result<Service, Reco
 struct DeploymentRenderConfig<'a> {
     all_ranges: &'a [GresTenantRangeSpec],
     image: &'a str,
+    readiness_probe_period_seconds: i32,
     bootstrap: &'a str,
     wal_topic: &'a str,
     config_topic: &'a str,
+    policy: &'a crabka_gres_control::RegistryPolicy,
+    compute_policy: EffectiveGresComputePolicy,
     replicas: i32,
     operator_config: &'a crate::config::OperatorConfig,
     kafka_sasl: bool,
@@ -1866,6 +2055,166 @@ struct DeploymentRenderConfig<'a> {
     range_tls_hash: Option<&'a str>,
 }
 
+/// The `--registry-*` flags a compute pod inherits from the shared policy.
+///
+/// The policy holds quantities and the compute binary accepts human-readable
+/// quantities, so no unit information is discarded at this boundary.
+fn registry_policy_args(policy: &crabka_gres_control::RegistryPolicy) -> [String; 14] {
+    [
+        "--registry-replication-factor".to_owned(),
+        policy.replication_factor().to_string(),
+        "--registry-topic-create-timeout".to_owned(),
+        policy.topic_create_timeout().human().to_string(),
+        "--registry-reader-retry-backoff".to_owned(),
+        policy.reader_retry_backoff().human().to_string(),
+        "--registry-fetch-max-wait".to_owned(),
+        policy.fetch_max_wait().human().to_string(),
+        "--registry-fetch-partition-max".to_owned(),
+        policy.fetch_partition_max().human().to_string(),
+        "--registry-producer-dns-timeout".to_owned(),
+        policy.producer_dns_timeout().time().human().to_string(),
+        "--registry-reader-admin-dns-timeout".to_owned(),
+        policy.reader_admin_dns_timeout().time().human().to_string(),
+    ]
+}
+
+fn human_millis(value: i64) -> String {
+    Time::from_millis(value).human().to_string()
+}
+
+fn wal_consumer_admin_args(policy: &EffectiveGresComputePolicy) -> [String; 28] {
+    [
+        "--fdw-broker-dns-timeout".to_owned(),
+        policy.fdw_broker_dns_timeout.time().human().to_string(),
+        "--schema-fetch-retry-initial-backoff".to_owned(),
+        policy
+            .schema_fetch_retry_policy
+            .initial_backoff()
+            .human()
+            .to_string(),
+        "--schema-fetch-retry-max-backoff".to_owned(),
+        policy
+            .schema_fetch_retry_policy
+            .max_backoff()
+            .human()
+            .to_string(),
+        "--wal-recovery-fetch-max-wait".to_owned(),
+        human_millis(i64::from(
+            policy.wal_recovery_fetch_max_wait_ms.into_value(),
+        )),
+        "--wal-recovery-fetch-partition-max".to_owned(),
+        ByteSize::from_bytes(
+            u64::try_from(policy.wal_recovery_fetch_partition_max.into_value())
+                .expect("validated positive i32"),
+        )
+        .human()
+        .to_string(),
+        "--wal-recovery-fetch-response-max".to_owned(),
+        ByteSize::from_bytes(
+            u64::try_from(policy.wal_recovery_fetch_response_max.into_value())
+                .expect("validated positive i32"),
+        )
+        .human()
+        .to_string(),
+        "--wal-recovery-empty-fetch-retries".to_owned(),
+        policy
+            .wal_recovery_empty_fetch_retries
+            .into_value()
+            .to_string(),
+        "--wal-recovery-dns-timeout".to_owned(),
+        human_millis(
+            i64::try_from(policy.wal_recovery_dns_timeout_ms.into_value())
+                .expect("validated timeout fits i64"),
+        ),
+        "--wal-recovery-connect-timeout".to_owned(),
+        human_millis(
+            i64::try_from(policy.wal_recovery_connect_timeout_ms.into_value())
+                .expect("validated timeout fits i64"),
+        ),
+        "--wal-recovery-request-timeout".to_owned(),
+        human_millis(
+            i64::try_from(policy.wal_recovery_request_timeout_ms.into_value())
+                .expect("validated timeout fits i64"),
+        ),
+        "--wal-topic-replication-factor".to_owned(),
+        policy.wal_topic_replication_factor.into_value().to_string(),
+        "--wal-topic-ensure-timeout".to_owned(),
+        human_millis(i64::from(policy.wal_topic_ensure_timeout_ms.into_value())),
+        "--wal-admin-connect-timeout".to_owned(),
+        human_millis(
+            i64::try_from(policy.wal_admin_connect_timeout_ms.into_value())
+                .expect("validated timeout fits i64"),
+        ),
+        "--wal-admin-request-timeout".to_owned(),
+        human_millis(
+            i64::try_from(policy.wal_admin_request_timeout_ms.into_value())
+                .expect("validated timeout fits i64"),
+        ),
+    ]
+}
+
+fn range_runtime_args(policy: crabka_gres_ranges::RangeRuntimePolicy) -> Vec<String> {
+    vec![
+        "--range-join-key-columns".to_owned(),
+        policy.join.key_columns.to_string(),
+        "--range-join-projection-columns".to_owned(),
+        policy.join.projection_columns.to_string(),
+        "--range-join-predicates".to_owned(),
+        policy.join.predicates.to_string(),
+        "--range-join-snapshot-xids".to_owned(),
+        policy.join.snapshot_xids.to_string(),
+        "--range-join-broadcast-rows".to_owned(),
+        policy.join.broadcast_rows.to_string(),
+        "--range-join-row-max".to_owned(),
+        crabka_units::ByteSize::from_bytes(
+            u64::try_from(policy.join.row_bytes).expect("validated row limit fits u64"),
+        )
+        .human()
+        .to_string(),
+        "--range-join-result-rows".to_owned(),
+        policy.join.result_rows.to_string(),
+        "--range-rpc-frame-max".to_owned(),
+        policy.rpc_frame_max.human().to_string(),
+        "--range-rpc-request-timeout".to_owned(),
+        policy.rpc_request_timeout.human().to_string(),
+        "--range-rpc-server-idle-timeout".to_owned(),
+        policy.rpc_server_idle_timeout.human().to_string(),
+        "--range-rpc-pool-idle-ttl".to_owned(),
+        policy.rpc_pool_idle_ttl.human().to_string(),
+        "--range-rpc-pool-max-idle-per-endpoint".to_owned(),
+        policy.rpc_pool_max_idle_per_endpoint.get().to_string(),
+        "--range-remote-session-idle".to_owned(),
+        policy.remote_session_idle.human().to_string(),
+        "--range-remote-session-max".to_owned(),
+        policy.remote_session_max.get().to_string(),
+        "--range0-wait-timeout".to_owned(),
+        policy.range0_wait_timeout.human().to_string(),
+        "--range0-barrier-reply-budget".to_owned(),
+        policy.range0_barrier_reply_budget.human().to_string(),
+        "--range-cross-range-lock-wait-cap".to_owned(),
+        policy.cross_range_lock_wait_cap.human().to_string(),
+        "--range-durable-inspect-max-records".to_owned(),
+        policy.durable_inspect_max_records.get().to_string(),
+        "--range-durable-inspect-max-size".to_owned(),
+        policy.durable_inspect_max_size.human().to_string(),
+        "--range-decision-release-lag-retries".to_owned(),
+        policy.decision_release_lag_retries.get().to_string(),
+        "--range-decision-release-retry-backoff".to_owned(),
+        policy.decision_release_retry_backoff.human().to_string(),
+        "--range-tso-heartbeat-interval".to_owned(),
+        policy.tso_heartbeat_interval.human().to_string(),
+        "--range-logical-min-persist-interval".to_owned(),
+        policy.logical_min_persist_interval.human().to_string(),
+        "--range-logical-base-persist-stride".to_owned(),
+        policy.logical_base_persist_stride.get().to_string(),
+        "--range-logical-max-persist-stride".to_owned(),
+        policy.logical_max_persist_stride.get().to_string(),
+        "--range-hlc-horizon-headroom".to_owned(),
+        policy.hlc_horizon_headroom.human().to_string(),
+    ]
+}
+
+#[allow(clippy::too_many_lines)]
 fn render_deployment(
     obj: &GresTenant,
     range: &GresTenantRangeSpec,
@@ -1875,6 +2224,7 @@ fn render_deployment(
     let selector = range_labels(obj, range.range_id);
     let host_ranges = host_ranges_arg(range.range_id);
     let ranges = ranges_arg(config.all_ranges);
+    let compute_policy = config.compute_policy;
     let mut args = vec![
         "--listen".to_owned(),
         format!("0.0.0.0:{COMPUTE_PORT}"),
@@ -1883,7 +2233,100 @@ fn render_deployment(
         "--tenant".to_owned(),
         name.clone(),
     ];
+    args.extend(registry_policy_args(config.policy));
+    if let Some(value) = compute_policy.client_dispatch_queue_capacity {
+        args.extend([
+            "--client-dispatch-queue-capacity".to_owned(),
+            value.get().to_string(),
+        ]);
+    }
+    if let Some(value) = compute_policy.client_frame_max {
+        args.extend([
+            "--client-frame-max".to_owned(),
+            format!("{}B", value.bytes()),
+        ]);
+    }
+    args.extend([
+        "--pgwire-max-message-size".to_owned(),
+        compute_policy.pgwire_max_message_size.human().to_string(),
+        "--pgexec-notify-queue-capacity".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .notify_queue_capacity
+            .to_string(),
+        "--pgexec-blocking-query-memory".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .blocking_query_memory
+            .human()
+            .to_string(),
+        "--pgexec-result-page-max".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .result_page_max
+            .human()
+            .to_string(),
+        "--pgexec-join-broadcast-threshold".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .join_broadcast_threshold
+            .human()
+            .to_string(),
+        "--pgexec-xid-reservation".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .xid_reservation
+            .to_string(),
+        "--pgexec-rowid-reservation".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .rowid_reservation
+            .to_string(),
+        "--pgexec-ts-prune-versions-per-row".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .ts_prune_versions_per_row
+            .to_string(),
+        "--pgexec-ts-gc-floor-lag".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .ts_gc_floor_lag
+            .human()
+            .to_string(),
+    ]);
+    if let Some(value) = compute_policy.registry_reader_fetch_min {
+        args.extend([
+            "--registry-reader-fetch-min".to_owned(),
+            format!("{}B", value.bytes()),
+        ]);
+    }
+    if let Some(value) = compute_policy.fdw_fetch_min {
+        args.extend(["--fdw-fetch-min".to_owned(), format!("{}B", value.bytes())]);
+    }
+    args.extend([
+        "--fdw-fetch-max-wait".to_owned(),
+        compute_policy.fdw_fetch_max_wait.human().to_string(),
+        "--fdw-fetch-partition-max".to_owned(),
+        compute_policy.fdw_fetch_partition_max.human().to_string(),
+        "--fdw-connect-timeout".to_owned(),
+        compute_policy.fdw_connect_timeout.human().to_string(),
+        "--fdw-request-timeout".to_owned(),
+        compute_policy.fdw_request_timeout.human().to_string(),
+        "--fdw-schema-fetch-timeout".to_owned(),
+        compute_policy.fdw_schema_fetch_timeout.human().to_string(),
+        "--fdw-schema-fetch-poll".to_owned(),
+        compute_policy.fdw_schema_fetch_poll.human().to_string(),
+    ]);
+    if let Some(value) = compute_policy.wal_recovery_fetch_min {
+        args.extend([
+            "--wal-recovery-fetch-min".to_owned(),
+            format!("{}B", value.bytes()),
+        ]);
+    }
+    args.extend(wal_consumer_admin_args(&compute_policy));
+    args.extend(wal_producer_args(&compute_policy));
     if config.range_control_enabled {
+        args.extend(range_runtime_args(compute_policy.range_runtime_policy));
         args.extend([
             "--ranges".to_owned(),
             ranges.clone(),
@@ -1903,9 +2346,84 @@ fn render_deployment(
             format!("CN={name}-range"),
             "--operator-control-principal".to_owned(),
             format!("CN={name}-operator"),
+            "--range0-follower-poll-interval".to_owned(),
+            Time::from_millis(
+                i64::try_from(compute_policy.range0_follower_poll_interval_ms.into_value())
+                    .expect("validated interval fits i64"),
+            )
+            .human()
+            .to_string(),
+            "--range0-follower-rebuild-backoff-floor".to_owned(),
+            human_millis(
+                i64::try_from(
+                    compute_policy
+                        .range0_follower_rebuild_backoff_floor_ms
+                        .into_value(),
+                )
+                .expect("validated interval fits i64"),
+            ),
+            "--range0-follower-rebuild-backoff-ceiling".to_owned(),
+            human_millis(
+                i64::try_from(
+                    compute_policy
+                        .range0_follower_rebuild_backoff_ceiling_ms
+                        .into_value(),
+                )
+                .expect("validated interval fits i64"),
+            ),
+            "--durable-inspection-timeout".to_owned(),
+            human_millis(
+                i64::try_from(compute_policy.durable_inspection_timeout_ms.into_value())
+                    .expect("validated timeout fits i64"),
+            ),
+            "--durable-inspection-fold-max-records".to_owned(),
+            compute_policy
+                .durable_inspection_fold_max_records
+                .into_value()
+                .to_string(),
+            "--durable-inspection-fold-max-size".to_owned(),
+            compute_policy
+                .durable_inspection_fold_max_size
+                .human()
+                .to_string(),
         ]);
     }
-    args.extend(checkpoint_runtime_args(config.operator_config)?);
+    let checkpoint_runtime_args = checkpoint_runtime_args(config.operator_config)?;
+    if !checkpoint_runtime_args.is_empty() {
+        args.extend([
+            "--checkpoint-part-size".to_owned(),
+            compute_policy
+                .checkpoint_part_size
+                .into_value()
+                .human()
+                .to_string(),
+            "--checkpoint-retain".to_owned(),
+            compute_policy.checkpoint_retain.into_value().to_string(),
+            "--checkpoint-delete-records-timeout".to_owned(),
+            Time::from_millis(i64::from(
+                compute_policy
+                    .checkpoint_delete_records_timeout_ms
+                    .into_value(),
+            ))
+            .human()
+            .to_string(),
+            "--checkpoint-poll-interval".to_owned(),
+            Time::from_millis(
+                i64::try_from(compute_policy.checkpoint_poll_interval_ms.into_value())
+                    .expect("validated interval fits i64"),
+            )
+            .human()
+            .to_string(),
+            "--idle-suspend-poll-interval".to_owned(),
+            Time::from_millis(
+                i64::try_from(compute_policy.idle_suspend_poll_interval_ms.into_value())
+                    .expect("validated interval fits i64"),
+            )
+            .human()
+            .to_string(),
+        ]);
+        args.extend(checkpoint_runtime_args);
+    }
     let mut env = vec![
         json!({ "name": "KAFKA_BOOTSTRAP_SERVERS", "value": config.bootstrap }),
         json!({ "name": "GRES_TENANT", "value": name }),
@@ -1961,7 +2479,7 @@ fn render_deployment(
                         "env": env,
                         "ports": ports,
                         "volumeMounts": range_tls_mounts,
-                        "readinessProbe": { "tcpSocket": { "port": COMPUTE_PORT }, "periodSeconds": 5 },
+                        "readinessProbe": { "tcpSocket": { "port": COMPUTE_PORT }, "periodSeconds": config.readiness_probe_period_seconds },
                         "resources": obj.spec.resources.clone().unwrap_or_default()
                     }],
                     "volumes": range_tls_volumes
@@ -1969,6 +2487,76 @@ fn render_deployment(
             }
         }
     }))?)
+}
+
+fn wal_producer_flush_args(policy: crabka_client_producer::ProducerFlushTimeout) -> [String; 2] {
+    [
+        "--wal-producer-flush-timeout".to_owned(),
+        Time::from_std(policy.duration()).human().to_string(),
+    ]
+}
+
+fn wal_producer_dns_args(timeout: crabka_client_core::ClientDnsTimeout) -> [String; 2] {
+    [
+        "--wal-producer-dns-timeout".to_owned(),
+        timeout.time().human().to_string(),
+    ]
+}
+
+fn wal_producer_args(policy: &EffectiveGresComputePolicy) -> Vec<String> {
+    let mut args = Vec::with_capacity(26);
+    args.extend(wal_producer_flush_args(policy.wal_producer_flush_timeout));
+    args.extend(wal_producer_dns_args(policy.wal_producer_dns_timeout));
+    let retry = policy.wal_producer_retry_policy;
+    args.extend([
+        "--wal-producer-request-timeout".to_owned(),
+        Time::from_std(retry.request_timeout()).human().to_string(),
+        "--wal-producer-retries".to_owned(),
+        retry.retries().to_string(),
+        "--wal-producer-retry-backoff".to_owned(),
+        Time::from_std(retry.retry_backoff()).human().to_string(),
+        "--wal-producer-routing-retry-budget".to_owned(),
+        Time::from_std(retry.routing_retry_budget())
+            .human()
+            .to_string(),
+        "--wal-producer-init-retry-timeout".to_owned(),
+        Time::from_std(retry.init_retry_timeout())
+            .human()
+            .to_string(),
+        "--wal-producer-init-max-backoff".to_owned(),
+        Time::from_std(retry.init_max_backoff()).human().to_string(),
+        "--wal-producer-transaction-timeout".to_owned(),
+        Time::from_std(retry.transaction_timeout())
+            .human()
+            .to_string(),
+    ]);
+    args.extend(wal_producer_throughput_args(
+        policy.wal_producer_throughput_policy,
+    ));
+    args.extend([
+        "--wal-frame-max-size".to_owned(),
+        policy.wal_frame_max_size.human().to_string(),
+        "--pgkv-max-memtable-size".to_owned(),
+        policy.pgkv_options.max_memtable_size().human().to_string(),
+        "--pgkv-rotate-after-ops".to_owned(),
+        policy.pgkv_options.rotate_after_ops().get().to_string(),
+    ]);
+    args
+}
+
+fn wal_producer_throughput_args(
+    policy: crabka_client_producer::ProducerThroughputPolicy,
+) -> [String; 6] {
+    [
+        "--wal-producer-compression".to_owned(),
+        policy.compression().to_string(),
+        "--wal-producer-linger".to_owned(),
+        Time::from_std(policy.linger()).human().to_string(),
+        "--wal-producer-batch".to_owned(),
+        ByteSize::from_bytes(u64::try_from(policy.batch_bytes()).expect("producer batch fits u64"))
+            .human()
+            .to_string(),
+    ]
 }
 
 fn kafka_internal_listener_requires_sasl(kafka: &Kafka) -> bool {
@@ -2131,6 +2719,7 @@ struct TenantStatusUpdate<'a> {
     registry_version: Option<u64>,
     lifecycle_phase: TenantState,
     advance_generation: bool,
+    direct_bootstrap_grace: Option<Time>,
 }
 
 async fn patch_status(
@@ -2139,7 +2728,6 @@ async fn patch_status(
     obj: &GresTenant,
     update: &TenantStatusUpdate<'_>,
 ) -> Result<(), ReconcileError> {
-    const PGDOG_ACTIVE_GRACE_MS: u64 = 4_000;
     let observed_generation = if update.advance_generation {
         obj.meta().generation
     } else {
@@ -2154,23 +2742,17 @@ async fn patch_status(
         .status
         .as_ref()
         .and_then(|status| status.pgdog_credential_grace_until_unix_ms);
-    let pgdog_grace = if update.lifecycle_phase == TenantState::Active {
-        if previous_phase == Some("active") {
-            existing_grace
-        } else {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|error| ReconcileError::Malformed(format!("system clock: {error}")))?
-                .as_millis();
-            Some(
-                u64::try_from(now)
-                    .unwrap_or(u64::MAX)
-                    .saturating_add(PGDOG_ACTIVE_GRACE_MS),
-            )
-        }
-    } else {
-        None
-    };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|error| ReconcileError::Malformed(format!("system clock: {error}")))?
+        .as_millis();
+    let pgdog_grace = pgdog_grace_deadline(
+        previous_phase,
+        existing_grace,
+        update.lifecycle_phase,
+        u64::try_from(now).unwrap_or(u64::MAX),
+        update.direct_bootstrap_grace,
+    );
     let body = json!({
         "status": {
             "conditions": [condition("Ready", update.status, update.reason, update.message)],
@@ -2194,6 +2776,25 @@ async fn patch_status(
     Ok(())
 }
 
+fn pgdog_grace_deadline(
+    previous_phase: Option<&str>,
+    existing_grace: Option<u64>,
+    lifecycle_phase: TenantState,
+    now: u64,
+    direct_bootstrap_grace: Option<Time>,
+) -> Option<u64> {
+    if lifecycle_phase != TenantState::Active {
+        return None;
+    }
+    if previous_phase == Some("active") && existing_grace.is_some() {
+        return existing_grace;
+    }
+    // `now` is a unix-millisecond instant, so the grace extent crosses into
+    // millisecond form here to produce the deadline the CRD status carries.
+    direct_bootstrap_grace
+        .map(|grace| now.saturating_add(grace.millis_i64().try_into().unwrap_or(u64::MAX)))
+}
+
 fn preserved_lifecycle_state(obj: &GresTenant) -> TenantState {
     match obj
         .status
@@ -2214,6 +2815,58 @@ mod tests {
     use clap::Parser as _;
 
     use super::*;
+
+    #[test]
+    fn configured_pgdog_grace_drives_active_transition_deadline() {
+        assert!(
+            pgdog_grace_deadline(
+                Some("suspended"),
+                None,
+                TenantState::Active,
+                10_000,
+                Some(crabka_units::secs(7))
+            ) == Some(17_000)
+        );
+        assert!(
+            pgdog_grace_deadline(
+                Some("suspended"),
+                None,
+                TenantState::Active,
+                u64::MAX - 1,
+                Some(crabka_units::secs(7))
+            ) == Some(u64::MAX)
+        );
+        assert!(
+            pgdog_grace_deadline(
+                Some("active"),
+                Some(12_000),
+                TenantState::Active,
+                20_000,
+                Some(crabka_units::secs(7))
+            ) == Some(12_000)
+        );
+        assert!(
+            pgdog_grace_deadline(
+                Some("active"),
+                None,
+                TenantState::Active,
+                20_000,
+                Some(crabka_units::secs(7))
+            ) == Some(27_000)
+        );
+        assert!(
+            pgdog_grace_deadline(
+                Some("active"),
+                None,
+                TenantState::Active,
+                u64::MAX - 1,
+                Some(crabka_units::secs(7))
+            ) == Some(u64::MAX)
+        );
+        assert!(
+            pgdog_grace_deadline(Some("active"), None, TenantState::Active, 20_000, None).is_none()
+        );
+    }
     use crate::crd::{GresTenantSpec, SecretKeyRef};
 
     fn fixture_password() -> String {
@@ -2231,6 +2884,7 @@ mod tests {
             "tenant-a",
             GresTenantSpec {
                 gres: "fleet".into(),
+                image: None,
                 user: "alice".into(),
                 password_secret_ref: SecretKeyRef {
                     name: "pw".into(),
@@ -2253,6 +2907,9 @@ mod tests {
         range_tls_hash: Option<&str>,
     ) -> Deployment {
         let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let compute_policy = crate::crd::gres::GresComputeSpec::default()
+            .effective_policy()
+            .expect("compute policy");
         let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
         render_deployment(
             obj,
@@ -2260,9 +2917,12 @@ mod tests {
             &DeploymentRenderConfig {
                 all_ranges,
                 image: "image",
+                readiness_probe_period_seconds: 5,
                 bootstrap: "k:9092",
                 wal_topic: &wal_topic,
                 config_topic: "__gres_cfg.tenant-a",
+                policy: &crabka_gres_control::RegistryPolicy::default(),
+                compute_policy,
                 replicas: 1,
                 operator_config: &operator_config,
                 kafka_sasl,
@@ -2271,6 +2931,89 @@ mod tests {
             },
         )
         .expect("render deployment")
+    }
+
+    #[test]
+    fn checkpoint_thresholds_use_override_then_fleet_then_compiled_fallback() {
+        let defaults = |frames, bytes| TenantDefaults {
+            wal_replication: None,
+            scram_iterations: None,
+            checkpoint_frames: frames,
+            checkpoint_size: bytes,
+            suspend_max_checkpoint_size: None,
+            idle_seconds: None,
+        };
+        for (base, override_, expected_frames, expected_bytes) in [
+            (
+                None,
+                None,
+                DEFAULT_CHECKPOINT_FRAMES,
+                DEFAULT_CHECKPOINT_BYTES,
+            ),
+            (
+                Some(defaults(Some(11), None)),
+                None,
+                11,
+                DEFAULT_CHECKPOINT_BYTES,
+            ),
+            (
+                Some(defaults(None, Some(crabka_units::bytes(12)))),
+                None,
+                DEFAULT_CHECKPOINT_FRAMES,
+                crabka_units::bytes(12),
+            ),
+            (
+                Some(defaults(Some(11), Some(crabka_units::bytes(12)))),
+                Some(defaults(Some(21), None)),
+                21,
+                crabka_units::bytes(12),
+            ),
+            (
+                Some(defaults(Some(11), Some(crabka_units::bytes(12)))),
+                Some(defaults(None, Some(crabka_units::bytes(22)))),
+                11,
+                crabka_units::bytes(22),
+            ),
+        ] {
+            let effective = effective_defaults(base.as_ref(), override_.as_ref()).unwrap();
+            assert!(effective.checkpoint_frames == Some(expected_frames));
+            assert!(effective.checkpoint_size == Some(expected_bytes));
+        }
+    }
+
+    #[test]
+    fn scram_iterations_use_override_then_fleet_then_default_and_validate() {
+        let defaults = |scram_iterations| TenantDefaults {
+            wal_replication: None,
+            scram_iterations,
+            checkpoint_frames: None,
+            checkpoint_size: None,
+            suspend_max_checkpoint_size: None,
+            idle_seconds: None,
+        };
+        let fallback = effective_defaults(None, None).unwrap();
+        assert!(
+            fallback.scram_iterations.into_value() == crabka_client_admin::DEFAULT_SCRAM_ITERATIONS
+        );
+        let fleet = defaults(Some(8_192));
+        assert!(
+            effective_defaults(Some(&fleet), None)
+                .unwrap()
+                .scram_iterations
+                .into_value()
+                == 8_192
+        );
+        let override_ = defaults(Some(12_288));
+        assert!(
+            effective_defaults(Some(&fleet), Some(&override_))
+                .unwrap()
+                .scram_iterations
+                .into_value()
+                == 12_288
+        );
+        for invalid in [4_095, 16_385] {
+            assert!(effective_defaults(Some(&defaults(Some(invalid))), None).is_err());
+        }
     }
 
     #[test]
@@ -2286,12 +3029,9 @@ mod tests {
             acls.iter()
                 .any(|acl| acl.resource_name == "__gres_cfg.tenant-a")
         );
-        assert!(
-            !acls
-                .iter()
-                .any(|acl| acl.resource_name == TENANT_REGISTRY_TOPIC
-                    && acl.operation == AclOperation::Read)
-        );
+        assert!(!acls.iter().any(|acl| acl.resource_name
+            == crabka_gres_control::TENANT_REGISTRY_TOPIC
+            && acl.operation == AclOperation::Read));
         assert!(
             acls.iter()
                 .any(|acl| acl.resource_type == ResourceType::TransactionalId
@@ -2326,9 +3066,10 @@ mod tests {
         let password = fixture_password();
         let defaults = EffectiveDefaults {
             wal_replication: 1,
-            checkpoint_frames: None,
-            checkpoint_bytes: None,
-            suspend_max_checkpoint_bytes: None,
+            scram_iterations: crabka_client_admin::ScramIterations::new(12_288).unwrap(),
+            checkpoint_frames: Some(37),
+            checkpoint_size: None,
+            suspend_max_checkpoint_size: None,
             idle_seconds: None,
         };
         let record = build_tenant_record(
@@ -2345,7 +3086,34 @@ mod tests {
         )
         .unwrap();
         assert!(record.scram_verifier.starts_with("SCRAM-SHA-256$"));
+        assert!(
+            PgScramVerifier::parse(&record.scram_verifier)
+                .is_ok_and(|verifier| verifier.iterations == 12_288)
+        );
         assert!(!record.scram_verifier.contains(&password));
+        assert!(record.checkpoint_frames == Some(37));
+
+        let mut changed_defaults = defaults;
+        changed_defaults.scram_iterations =
+            crabka_client_admin::ScramIterations::new(8_192).unwrap();
+        let changed = build_tenant_record(
+            &obj,
+            &TenantName::try_from("tenant-a").unwrap(),
+            &password,
+            2,
+            &changed_defaults,
+            Some(&record),
+            &[GresTenantRangeSpec {
+                range_id: 0,
+                end_key: None,
+            }],
+        )
+        .unwrap();
+        assert!(
+            PgScramVerifier::parse(&changed.scram_verifier)
+                .is_ok_and(|verifier| verifier.iterations == 8_192)
+        );
+        assert!(changed.scram_verifier != record.scram_verifier);
     }
 
     #[test]
@@ -2371,6 +3139,1085 @@ mod tests {
                 .unwrap();
             assert!(!args.iter().any(|arg| arg == "--ranges"));
         }
+    }
+
+    #[test]
+    fn compute_workload_without_checkpoint_store_omits_checkpoint_policy() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let deployment = render_test_deployment(&obj, &ranges[0], &ranges, false, false, None);
+        let args = deployment
+            .spec
+            .unwrap()
+            .template
+            .spec
+            .unwrap()
+            .containers
+            .into_iter()
+            .next()
+            .expect("container")
+            .args
+            .expect("args");
+
+        for absent in [
+            "--checkpoint-part-size",
+            "--checkpoint-retain",
+            "--checkpoint-delete-records-timeout",
+            "--checkpoint-poll-interval",
+            "--idle-suspend-poll-interval",
+        ] {
+            assert!(!args.iter().any(|arg| arg == absent), "got: {args:?}");
+        }
+        assert!(
+            !args
+                .iter()
+                .any(|arg| arg == "--range0-follower-poll-interval")
+        );
+        assert!(
+            args.windows(14).any(|window| {
+                window
+                    == [
+                        "--wal-recovery-fetch-max-wait",
+                        "100ms",
+                        "--wal-recovery-fetch-partition-max",
+                        "1MiB",
+                        "--wal-recovery-fetch-response-max",
+                        "50MiB",
+                        "--wal-recovery-empty-fetch-retries",
+                        "100",
+                        "--wal-recovery-dns-timeout",
+                        "10s",
+                        "--wal-recovery-connect-timeout",
+                        "10s",
+                        "--wal-recovery-request-timeout",
+                        "30s",
+                    ]
+            }),
+            "got: {args:?}"
+        );
+    }
+
+    #[test]
+    fn compute_wal_recovery_args_are_exact_in_single_and_multi_range_modes() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        for (spec, expected) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                ["100ms", "1MiB", "50MiB", "100", "10s", "10s", "30s"],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    wal_recovery_fetch_max_wait: Some(crabka_units::millis(11)),
+                    wal_recovery_fetch_partition_max: Some(crabka_units::bytes(22)),
+                    wal_recovery_fetch_response_max: Some(crabka_units::bytes(33)),
+                    wal_recovery_empty_fetch_retries: Some(44),
+                    wal_recovery_dns_timeout: Some(crabka_units::millis(77)),
+                    wal_recovery_connect_timeout: Some(crabka_units::millis(55)),
+                    wal_recovery_request_timeout: Some(crabka_units::millis(66)),
+                    ..crate::crd::gres::GresComputeSpec::default()
+                },
+                ["11ms", "22B", "33B", "44", "77ms", "55ms", "66ms"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for range_control_enabled in [false, true] {
+                let deployment = render_deployment(
+                    &obj,
+                    &ranges[0],
+                    &DeploymentRenderConfig {
+                        all_ranges: &ranges,
+                        image: "image",
+                        readiness_probe_period_seconds: 5,
+                        bootstrap: "k:9092",
+                        wal_topic: "__gres_wal.tenant-a.r0",
+                        config_topic: "__gres_cfg.tenant-a",
+                        policy: &crabka_gres_control::RegistryPolicy::default(),
+                        compute_policy,
+                        replicas: 1,
+                        operator_config: &operator_config,
+                        kafka_sasl: false,
+                        range_control_enabled,
+                        range_tls_hash: None,
+                    },
+                )
+                .expect("render deployment");
+                let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                    .args
+                    .clone()
+                    .unwrap();
+                let expected = [
+                    "--wal-recovery-fetch-max-wait",
+                    expected[0],
+                    "--wal-recovery-fetch-partition-max",
+                    expected[1],
+                    "--wal-recovery-fetch-response-max",
+                    expected[2],
+                    "--wal-recovery-empty-fetch-retries",
+                    expected[3],
+                    "--wal-recovery-dns-timeout",
+                    expected[4],
+                    "--wal-recovery-connect-timeout",
+                    expected[5],
+                    "--wal-recovery-request-timeout",
+                    expected[6],
+                ];
+                assert!(
+                    args.windows(expected.len())
+                        .any(|window| window == expected),
+                    "got: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compute_client_policy_args_are_exact_in_single_and_multi_range_modes() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let registry_policy = crabka_gres_control::RegistryPolicy::default()
+            .with_client_resource_policy(
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+                crabka_client_core::ClientFrameMax::default(),
+                crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(4))
+                    .expect("registry fetch minimum"),
+            );
+        let mut configured = crate::crd::gres::GresComputeSpec {
+            client_dispatch_queue_capacity: Some(7),
+            client_frame_max: Some(crabka_units::kibibytes(32)),
+            pgwire_max_message_size: Some(crabka_units::bytes(37)),
+            pgexec_notify_queue_capacity: Some(38),
+            pgexec_blocking_query_memory: Some(crabka_units::bytes(35)),
+            pgexec_result_page_max: Some(crabka_units::bytes(36)),
+            pgexec_join_broadcast_threshold: Some(crabka_units::bytes(37)),
+            pgexec_xid_reservation: Some(39),
+            pgexec_rowid_reservation: Some(40),
+            pgexec_ts_prune_versions_per_row: Some(41),
+            pgexec_ts_gc_floor_lag: Some(crabka_units::millis(42)),
+            fdw_fetch_min: Some(crabka_units::bytes(2)),
+            fdw_fetch_max_wait: Some(crabka_units::millis(41)),
+            fdw_fetch_partition_max: Some(crabka_units::bytes(43)),
+            fdw_connect_timeout: Some(crabka_units::millis(47)),
+            fdw_request_timeout: Some(crabka_units::millis(53)),
+            fdw_schema_fetch_timeout: Some(crabka_units::millis(59)),
+            fdw_schema_fetch_poll: Some(crabka_units::millis(17)),
+            wal_recovery_fetch_min: Some(crabka_units::bytes(3)),
+            ..crate::crd::gres::GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("compute policy");
+        configured.registry_reader_fetch_min = Some(
+            crabka_client_core::FetchMinBytes::try_from(crabka_units::bytes(4))
+                .expect("registry fetch minimum"),
+        );
+
+        for range_control_enabled in [false, true] {
+            let deployment = render_deployment(
+                &obj,
+                &ranges[0],
+                &DeploymentRenderConfig {
+                    all_ranges: &ranges,
+                    image: "image",
+                    readiness_probe_period_seconds: 5,
+                    bootstrap: "k:9092",
+                    wal_topic: "__gres_wal.tenant-a.r0",
+                    config_topic: "__gres_cfg.tenant-a",
+                    policy: &registry_policy,
+                    compute_policy: configured,
+                    replicas: 1,
+                    operator_config: &operator_config,
+                    kafka_sasl: false,
+                    range_control_enabled,
+                    range_tls_hash: None,
+                },
+            )
+            .expect("render deployment");
+            let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                .args
+                .clone()
+                .unwrap();
+            for pair in [
+                ["--client-dispatch-queue-capacity", "7"],
+                ["--client-frame-max", "32768B"],
+                ["--pgwire-max-message-size", "37B"],
+                ["--pgexec-notify-queue-capacity", "38"],
+                ["--pgexec-blocking-query-memory", "35B"],
+                ["--pgexec-result-page-max", "36B"],
+                ["--pgexec-join-broadcast-threshold", "37B"],
+                ["--pgexec-xid-reservation", "39"],
+                ["--pgexec-rowid-reservation", "40"],
+                ["--pgexec-ts-prune-versions-per-row", "41"],
+                ["--pgexec-ts-gc-floor-lag", "42ms"],
+                ["--registry-reader-fetch-min", "4B"],
+                ["--fdw-fetch-min", "2B"],
+                ["--fdw-fetch-max-wait", "41ms"],
+                ["--fdw-fetch-partition-max", "43B"],
+                ["--fdw-connect-timeout", "47ms"],
+                ["--fdw-request-timeout", "53ms"],
+                ["--fdw-schema-fetch-timeout", "59ms"],
+                ["--fdw-schema-fetch-poll", "17ms"],
+                ["--wal-recovery-fetch-min", "3B"],
+            ] {
+                assert!(
+                    args.windows(2).filter(|window| *window == pair).count() == 1,
+                    "expected {pair:?} exactly once, got: {args:?}"
+                );
+            }
+        }
+
+        let defaults = crate::crd::gres::GresComputeSpec::default()
+            .effective_policy()
+            .expect("default compute policy");
+        let deployment = render_deployment(
+            &obj,
+            &ranges[0],
+            &DeploymentRenderConfig {
+                all_ranges: &ranges,
+                image: "image",
+                readiness_probe_period_seconds: 5,
+                bootstrap: "k:9092",
+                wal_topic: "__gres_wal.tenant-a.r0",
+                config_topic: "__gres_cfg.tenant-a",
+                policy: &crabka_gres_control::RegistryPolicy::default(),
+                compute_policy: defaults,
+                replicas: 1,
+                operator_config: &operator_config,
+                kafka_sasl: false,
+                range_control_enabled: false,
+                range_tls_hash: None,
+            },
+        )
+        .expect("render defaults");
+        let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+            .args
+            .clone()
+            .unwrap();
+        assert!(
+            args.windows(2)
+                .any(|window| window == ["--pgwire-max-message-size", "64MiB"]),
+            "got: {args:?}"
+        );
+        for absent in [
+            "--client-dispatch-queue-capacity",
+            "--client-frame-max",
+            "--registry-reader-fetch-min",
+            "--fdw-fetch-min",
+            "--wal-recovery-fetch-min",
+        ] {
+            assert!(!args.iter().any(|arg| arg == absent), "got: {args:?}");
+        }
+    }
+
+    #[test]
+    fn compute_wal_producer_args_are_exact_in_single_and_multi_range_modes() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        for (spec, expected) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                ["30s", "2147483647", "100ms", "30s", "30s", "1s", "1m"],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    wal_producer_request_timeout: Some(crabka_units::millis(11)),
+                    wal_producer_retries: Some(12),
+                    wal_producer_retry_backoff: Some(crabka_units::millis(13)),
+                    wal_producer_routing_retry_budget: Some(crabka_units::millis(14)),
+                    wal_producer_init_retry_timeout: Some(crabka_units::millis(15)),
+                    wal_producer_init_max_backoff: Some(crabka_units::millis(16)),
+                    wal_producer_transaction_timeout: Some(crabka_units::millis(17)),
+                    ..crate::crd::gres::GresComputeSpec::default()
+                },
+                ["11ms", "12", "13ms", "14ms", "15ms", "16ms", "17ms"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for range_control_enabled in [false, true] {
+                let deployment = render_deployment(
+                    &obj,
+                    &ranges[0],
+                    &DeploymentRenderConfig {
+                        all_ranges: &ranges,
+                        image: "image",
+                        readiness_probe_period_seconds: 5,
+                        bootstrap: "k:9092",
+                        wal_topic: "__gres_wal.tenant-a.r0",
+                        config_topic: "__gres_cfg.tenant-a",
+                        policy: &crabka_gres_control::RegistryPolicy::default(),
+                        compute_policy,
+                        replicas: 1,
+                        operator_config: &operator_config,
+                        kafka_sasl: false,
+                        range_control_enabled,
+                        range_tls_hash: None,
+                    },
+                )
+                .expect("render deployment");
+                let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                    .args
+                    .clone()
+                    .unwrap();
+                let expected = [
+                    "--wal-producer-request-timeout",
+                    expected[0],
+                    "--wal-producer-retries",
+                    expected[1],
+                    "--wal-producer-retry-backoff",
+                    expected[2],
+                    "--wal-producer-routing-retry-budget",
+                    expected[3],
+                    "--wal-producer-init-retry-timeout",
+                    expected[4],
+                    "--wal-producer-init-max-backoff",
+                    expected[5],
+                    "--wal-producer-transaction-timeout",
+                    expected[6],
+                ];
+                assert!(
+                    args.windows(expected.len())
+                        .any(|window| window == expected),
+                    "got: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wal_producer_flush_timeout_is_exact_once_in_single_and_two_range_deployments() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    bucket: None,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let compute_policy = crate::crd::gres::GresComputeSpec {
+            wal_producer_flush_timeout: Some(crabka_units::millis(12_345)),
+            ..crate::crd::gres::GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("compute policy");
+
+        for (range_control_enabled, active_ranges) in [(false, &ranges[..1]), (true, &ranges[..])] {
+            for range in active_ranges {
+                let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
+                let deployment = render_deployment(
+                    &obj,
+                    range,
+                    &DeploymentRenderConfig {
+                        all_ranges: active_ranges,
+                        image: "image",
+                        readiness_probe_period_seconds: 5,
+                        bootstrap: "k:9092",
+                        wal_topic: &wal_topic,
+                        config_topic: "__gres_cfg.tenant-a",
+                        policy: &crabka_gres_control::RegistryPolicy::default(),
+                        compute_policy,
+                        replicas: 1,
+                        operator_config: &operator_config,
+                        kafka_sasl: false,
+                        range_control_enabled,
+                        range_tls_hash: None,
+                    },
+                )
+                .expect("render deployment");
+                let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                    .args
+                    .clone()
+                    .unwrap();
+                let pair = ["--wal-producer-flush-timeout", "12.345s"];
+                assert!(
+                    args.windows(2).filter(|window| *window == pair).count() == 1,
+                    "expected {pair:?} exactly once, got: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wal_producer_dns_timeout_is_exact_once_in_single_and_two_range_deployments() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    bucket: None,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+
+        for (spec, pair) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                ["--wal-producer-dns-timeout", "10s"],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    wal_producer_dns_timeout: Some(crabka_units::millis(37)),
+                    ..crate::crd::gres::GresComputeSpec::default()
+                },
+                ["--wal-producer-dns-timeout", "37ms"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for (range_control_enabled, active_ranges) in
+                [(false, &ranges[..1]), (true, &ranges[..])]
+            {
+                for range in active_ranges {
+                    let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
+                    let deployment = render_deployment(
+                        &obj,
+                        range,
+                        &DeploymentRenderConfig {
+                            all_ranges: active_ranges,
+                            image: "image",
+                            readiness_probe_period_seconds: 5,
+                            bootstrap: "k:9092",
+                            wal_topic: &wal_topic,
+                            config_topic: "__gres_cfg.tenant-a",
+                            policy: &crabka_gres_control::RegistryPolicy::default(),
+                            compute_policy,
+                            replicas: 1,
+                            operator_config: &operator_config,
+                            kafka_sasl: false,
+                            range_control_enabled,
+                            range_tls_hash: None,
+                        },
+                    )
+                    .expect("render deployment");
+                    let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                        .args
+                        .clone()
+                        .unwrap();
+                    assert!(
+                        args.windows(2).filter(|window| *window == pair).count() == 1,
+                        "got: {args:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn fdw_broker_dns_timeout_is_exact_once_in_single_and_two_range_deployments() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    bucket: None,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+
+        for (spec, pair) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                ["--fdw-broker-dns-timeout", "10s"],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    fdw_broker_dns_timeout: Some(crabka_units::millis(37)),
+                    ..crate::crd::gres::GresComputeSpec::default()
+                },
+                ["--fdw-broker-dns-timeout", "37ms"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for (range_control_enabled, active_ranges) in
+                [(false, &ranges[..1]), (true, &ranges[..])]
+            {
+                for range in active_ranges {
+                    let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
+                    let deployment = render_deployment(
+                        &obj,
+                        range,
+                        &DeploymentRenderConfig {
+                            all_ranges: active_ranges,
+                            image: "image",
+                            readiness_probe_period_seconds: 5,
+                            bootstrap: "k:9092",
+                            wal_topic: &wal_topic,
+                            config_topic: "__gres_cfg.tenant-a",
+                            policy: &crabka_gres_control::RegistryPolicy::default(),
+                            compute_policy,
+                            replicas: 1,
+                            operator_config: &operator_config,
+                            kafka_sasl: false,
+                            range_control_enabled,
+                            range_tls_hash: None,
+                        },
+                    )
+                    .expect("render deployment");
+                    let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                        .args
+                        .clone()
+                        .expect("compute args");
+                    assert!(
+                        args.windows(2).filter(|window| *window == pair).count() == 1,
+                        "expected {pair:?} exactly once, got: {args:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn schema_fetch_retry_is_exact_once_in_single_and_two_range_deployments() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    bucket: None,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        let compute_policy = crate::crd::gres::GresComputeSpec {
+            schema_fetch_retry_initial_backoff: Some(crabka_units::millis(37)),
+            schema_fetch_retry_max_backoff: Some(crabka_units::millis(91)),
+            ..crate::crd::gres::GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("compute policy");
+
+        for (range_control_enabled, active_ranges) in [(false, &ranges[..1]), (true, &ranges[..])] {
+            for range in active_ranges {
+                let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
+                let deployment = render_deployment(
+                    &obj,
+                    range,
+                    &DeploymentRenderConfig {
+                        all_ranges: active_ranges,
+                        image: "image",
+                        readiness_probe_period_seconds: 5,
+                        bootstrap: "k:9092",
+                        wal_topic: &wal_topic,
+                        config_topic: "__gres_cfg.tenant-a",
+                        policy: &crabka_gres_control::RegistryPolicy::default(),
+                        compute_policy,
+                        replicas: 1,
+                        operator_config: &operator_config,
+                        kafka_sasl: false,
+                        range_control_enabled,
+                        range_tls_hash: None,
+                    },
+                )
+                .expect("render deployment");
+                let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                    .args
+                    .clone()
+                    .expect("compute args");
+                for pair in [
+                    ["--schema-fetch-retry-initial-backoff", "37ms"],
+                    ["--schema-fetch-retry-max-backoff", "91ms"],
+                ] {
+                    assert_eq!(
+                        args.windows(2).filter(|window| *window == pair).count(),
+                        1,
+                        "expected {pair:?} exactly once, got: {args:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compute_wal_producer_throughput_args_are_exact_once_in_single_and_multi_range_modes() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    bucket: None,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        for (spec, expected) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                ["none", "0s", "16KiB", "1MiB", "8MiB", "262144"],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    wal_producer_compression: Some(crate::crd::gres::WalProducerCompression::Zstd),
+                    wal_producer_linger: Some(crabka_units::millis(18)),
+                    wal_producer_batch: Some(crabka_units::bytes(19)),
+                    wal_frame_max_size: Some(crabka_units::bytes(20)),
+                    pgkv_max_memtable_size: Some(crabka_units::bytes(21)),
+                    pgkv_rotate_after_ops: Some(22),
+                    ..crate::crd::gres::GresComputeSpec::default()
+                },
+                ["zstd", "18ms", "19B", "20B", "21B", "22"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for (range_control_enabled, active_ranges) in
+                [(false, &ranges[..1]), (true, &ranges[..])]
+            {
+                for range in active_ranges {
+                    let wal_topic = format!("__gres_wal.tenant-a.r{}", range.range_id);
+                    let deployment = render_deployment(
+                        &obj,
+                        range,
+                        &DeploymentRenderConfig {
+                            all_ranges: active_ranges,
+                            image: "image",
+                            readiness_probe_period_seconds: 5,
+                            bootstrap: "k:9092",
+                            wal_topic: &wal_topic,
+                            config_topic: "__gres_cfg.tenant-a",
+                            policy: &crabka_gres_control::RegistryPolicy::default(),
+                            compute_policy,
+                            replicas: 1,
+                            operator_config: &operator_config,
+                            kafka_sasl: false,
+                            range_control_enabled,
+                            range_tls_hash: None,
+                        },
+                    )
+                    .expect("render deployment");
+                    let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                        .args
+                        .clone()
+                        .unwrap();
+                    for pair in [
+                        ["--wal-producer-compression", expected[0]],
+                        ["--wal-producer-linger", expected[1]],
+                        ["--wal-producer-batch", expected[2]],
+                        ["--wal-frame-max-size", expected[3]],
+                        ["--pgkv-max-memtable-size", expected[4]],
+                        ["--pgkv-rotate-after-ops", expected[5]],
+                    ] {
+                        assert!(
+                            args.windows(2).filter(|window| *window == pair).count() == 1,
+                            "expected {pair:?} exactly once, got: {args:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compute_wal_admin_args_are_exact_in_single_and_multi_range_modes() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        for (spec, expected) in [
+            (
+                crate::crd::gres::GresComputeSpec::default(),
+                ["1", "30s", "5s", "30s"],
+            ),
+            (
+                crate::crd::gres::GresComputeSpec {
+                    wal_topic_replication_factor: Some(11),
+                    wal_topic_ensure_timeout: Some(crabka_units::millis(22)),
+                    wal_admin_connect_timeout: Some(crabka_units::millis(33)),
+                    wal_admin_request_timeout: Some(crabka_units::millis(44)),
+                    ..crate::crd::gres::GresComputeSpec::default()
+                },
+                ["11", "22ms", "33ms", "44ms"],
+            ),
+        ] {
+            let compute_policy = spec.effective_policy().expect("compute policy");
+            for range_control_enabled in [false, true] {
+                let deployment = render_deployment(
+                    &obj,
+                    &ranges[0],
+                    &DeploymentRenderConfig {
+                        all_ranges: &ranges,
+                        image: "image",
+                        readiness_probe_period_seconds: 5,
+                        bootstrap: "k:9092",
+                        wal_topic: "__gres_wal.tenant-a.r0",
+                        config_topic: "__gres_cfg.tenant-a",
+                        policy: &crabka_gres_control::RegistryPolicy::default(),
+                        compute_policy,
+                        replicas: 1,
+                        operator_config: &operator_config,
+                        kafka_sasl: false,
+                        range_control_enabled,
+                        range_tls_hash: None,
+                    },
+                )
+                .expect("render deployment");
+                let args = deployment.spec.unwrap().template.spec.unwrap().containers[0]
+                    .args
+                    .clone()
+                    .unwrap();
+                let expected = [
+                    "--wal-topic-replication-factor",
+                    expected[0],
+                    "--wal-topic-ensure-timeout",
+                    expected[1],
+                    "--wal-admin-connect-timeout",
+                    expected[2],
+                    "--wal-admin-request-timeout",
+                    expected[3],
+                ];
+                assert!(
+                    args.windows(expected.len())
+                        .any(|window| window == expected),
+                    "got: {args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compute_workload_renders_custom_policy() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [
+            GresTenantRangeSpec {
+                range_id: 0,
+                end_key: Some(GresTenantRangeKey {
+                    table_id: 10,
+                    bucket: None,
+                    rowid: 0,
+                }),
+            },
+            GresTenantRangeSpec {
+                range_id: 1,
+                end_key: None,
+            },
+        ];
+        let mut operator_config = ConfigArgs::parse_from(["operator"]).config;
+        operator_config.gres_checkpoint_store = Some(crate::config::GresCheckpointStoreKind::S3);
+        operator_config.gres_checkpoint_bucket = Some("checkpoints".to_owned());
+        let compute_policy = crate::crd::gres::GresComputeSpec {
+            checkpoint_part_size: Some(crabka_units::bytes(8_388_608)),
+            checkpoint_retain: Some(4),
+            checkpoint_delete_records_timeout: Some(crabka_units::millis(12_345)),
+            checkpoint_poll_interval: Some(crabka_units::millis(2_345)),
+            idle_suspend_poll_interval: Some(crabka_units::millis(3_456)),
+            range0_follower_poll_interval: Some(crabka_units::millis(5_678)),
+            range0_follower_rebuild_backoff_floor: Some(crabka_units::millis(6_789)),
+            range0_follower_rebuild_backoff_ceiling: Some(crabka_units::millis(7_890)),
+            durable_inspection_timeout: Some(crabka_units::millis(8_901)),
+            durable_inspection_fold_max_records: Some(9_012),
+            durable_inspection_fold_max_size: Some(crabka_units::bytes(10_123)),
+            lifecycle_requeue: Some(crabka_units::millis(4_567)),
+            ..crate::crd::gres::GresComputeSpec::default()
+        }
+        .effective_policy()
+        .expect("compute policy");
+        let policy = crabka_gres_control::RegistryPolicy::new(
+            2,
+            crabka_units::millis(15_001),
+            crabka_units::millis(251),
+            crabka_units::millis(501),
+            crabka_units::bytes(1_048_577),
+        )
+        .expect("policy")
+        .with_producer_dns_timeout(crabka_units::millis(37))
+        .expect("DNS timeout")
+        .with_reader_admin_dns_timeout(crabka_units::millis(37))
+        .expect("reader/admin DNS timeout");
+        let deployment = render_deployment(
+            &obj,
+            &ranges[0],
+            &DeploymentRenderConfig {
+                all_ranges: &ranges,
+                image: "tenant-image",
+                readiness_probe_period_seconds: 7,
+                bootstrap: "k:9092",
+                wal_topic: "__gres_wal.tenant-a.r0",
+                config_topic: "__gres_cfg.tenant-a",
+                policy: &policy,
+                compute_policy,
+                replicas: 1,
+                operator_config: &operator_config,
+                kafka_sasl: false,
+                range_control_enabled: true,
+                range_tls_hash: None,
+            },
+        )
+        .expect("render deployment");
+        let args = deployment
+            .spec
+            .as_ref()
+            .expect("spec")
+            .template
+            .spec
+            .as_ref()
+            .expect("pod spec")
+            .containers[0]
+            .args
+            .as_ref()
+            .expect("args");
+
+        for pair in [
+            ["--registry-replication-factor", "2"],
+            ["--registry-topic-create-timeout", "15.001s"],
+            ["--registry-reader-retry-backoff", "251ms"],
+            ["--registry-fetch-max-wait", "501ms"],
+            ["--registry-fetch-partition-max", "1048577B"],
+            ["--registry-producer-dns-timeout", "37ms"],
+            ["--registry-reader-admin-dns-timeout", "37ms"],
+            ["--checkpoint-part-size", "8MiB"],
+            ["--checkpoint-retain", "4"],
+            ["--checkpoint-delete-records-timeout", "12.345s"],
+            ["--checkpoint-poll-interval", "2.345s"],
+            ["--idle-suspend-poll-interval", "3.456s"],
+            ["--range0-follower-poll-interval", "5.678s"],
+            ["--range0-follower-rebuild-backoff-floor", "6.789s"],
+            ["--range0-follower-rebuild-backoff-ceiling", "7.89s"],
+            ["--durable-inspection-timeout", "8.901s"],
+            ["--durable-inspection-fold-max-records", "9012"],
+            ["--durable-inspection-fold-max-size", "10123B"],
+        ] {
+            assert!(
+                args.windows(2).any(|window| window == pair),
+                "missing {pair:?}: {args:?}"
+            );
+        }
+        for absent in [
+            "--checkpoint-frames",
+            "--checkpoint-size",
+            "--lifecycle-requeue",
+        ] {
+            assert!(!args.iter().any(|arg| arg == absent), "got: {args:?}");
+        }
+        assert!(
+            args.iter()
+                .filter(|arg| {
+                    [
+                        "--checkpoint-part-size",
+                        "--checkpoint-retain",
+                        "--checkpoint-delete-records-timeout",
+                        "--checkpoint-poll-interval",
+                        "--idle-suspend-poll-interval",
+                    ]
+                    .contains(&arg.as_str())
+                })
+                .count()
+                == 5
+        );
+        assert!(
+            args.iter()
+                .filter(|arg| arg.as_str() == "--registry-producer-dns-timeout")
+                .count()
+                == 1
+        );
+        assert!(
+            args.iter()
+                .filter(|arg| { arg.as_str() == "--registry-reader-admin-dns-timeout" })
+                .count()
+                == 1
+        );
+        assert!(
+            lifecycle_requeue(&compute_policy)
+                == Action::requeue(crabka_units::millis(4_567).to_std())
+        );
+        let readiness = deployment
+            .spec
+            .as_ref()
+            .expect("deployment spec")
+            .template
+            .spec
+            .as_ref()
+            .expect("pod spec")
+            .containers[0]
+            .readiness_probe
+            .as_ref()
+            .expect("readiness probe");
+        assert!(readiness.period_seconds == Some(7));
+        assert!(
+            deployment
+                .spec
+                .as_ref()
+                .expect("deployment spec")
+                .template
+                .spec
+                .as_ref()
+                .expect("pod spec")
+                .containers[0]
+                .image
+                .as_deref()
+                == Some("tenant-image")
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_compute_policy_is_rejected_before_kafka_or_resource_io() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        use tower::service_fn;
+
+        for (compute, expected_path) in [
+            (
+                json!({"checkpointPartSize": "7B"}),
+                "spec.compute.checkpointPartSize",
+            ),
+            (
+                json!({"fdwBrokerDnsTimeout": "0ms"}),
+                "spec.compute.fdwBrokerDnsTimeout",
+            ),
+        ] {
+            let requests = Arc::new(AtomicUsize::new(0));
+            let observed = Arc::clone(&requests);
+            let client = kube::Client::new(
+                service_fn(move |_request| {
+                    let observed = Arc::clone(&observed);
+                    let compute = compute.clone();
+                    async move {
+                        observed.fetch_add(1, Ordering::SeqCst);
+                        let body = serde_json::to_vec(&json!({
+                            "apiVersion": "crabka.io/v1alpha1",
+                            "kind": "Gres",
+                            "metadata": {"name": "fleet", "namespace": "default"},
+                            "spec": {
+                                "kafkaCluster": "demo",
+                                "pgdog": {
+                                    "replicas": 1,
+                                    "listenPort": 6432,
+                                    "adminSecretRef": {"name": "admin", "key": "password"}
+                                },
+                                "compute": compute
+                            }
+                        }))
+                        .expect("serialize Gres");
+                        Ok::<_, std::convert::Infallible>(
+                            http::Response::builder()
+                                .status(200)
+                                .header(http::header::CONTENT_TYPE, "application/json")
+                                .body(kube::client::Body::from(body))
+                                .expect("response"),
+                        )
+                    }
+                }),
+                "default",
+            );
+            let (registry, metrics) = crate::telemetry::new_registry_with_metrics();
+            let ctx = Context::new(
+                client,
+                ConfigArgs::parse_from(["operator"]).config,
+                Arc::new(tokio::sync::Mutex::new(registry)),
+                metrics,
+            );
+
+            let Err(error) = Box::pin(prepare_tenant(&tenant(), &ctx)).await else {
+                panic!("invalid compute policy must fail");
+            };
+
+            assert!(error.to_string().contains(expected_path), "got: {error}");
+            assert!(
+                requests.load(Ordering::SeqCst) == 1,
+                "validation for {expected_path} performed downstream I/O"
+            );
+        }
+    }
+
+    #[test]
+    fn compute_image_precedence_is_tenant_then_operator_then_compiled_default() {
+        let mut obj = tenant();
+        let mut operator_config = ConfigArgs::parse_from(["operator"]).config;
+        operator_config.default_gres_image = Some("operator-image".into());
+
+        obj.spec.image = Some("tenant-image".into());
+        assert!(
+            effective_compute_image(&obj, &operator_config).expect("tenant image")
+                == "tenant-image"
+        );
+        obj.spec.image = None;
+        assert!(
+            effective_compute_image(&obj, &operator_config).expect("operator image")
+                == "operator-image"
+        );
+        operator_config.default_gres_image = None;
+        assert!(
+            effective_compute_image(&obj, &operator_config).expect("compiled image")
+                == DEFAULT_IMAGE
+        );
+    }
+
+    #[test]
+    fn empty_effective_compute_image_is_rejected_without_fallback() {
+        let mut obj = tenant();
+        let operator_config = ConfigArgs::parse_from(["operator"]).config;
+        obj.spec.image = Some(String::new());
+
+        let error =
+            effective_compute_image(&obj, &operator_config).expect_err("empty image must fail");
+        assert!(error.to_string().contains("spec.image"), "got: {error}");
     }
 
     #[test]
@@ -2686,10 +4533,48 @@ mod tests {
                 .any(|pair| pair == ["--checkpoint-bucket", "gres-checkpoints"])
         );
         assert!(args.contains(&"--checkpoint-allow-http".to_string()));
+        assert!(!args.iter().any(|arg| arg == "--checkpoint-frames"));
         assert!(!args.iter().any(|arg| arg == "secret"));
         // Checkpointing is enabled by `--checkpoint-store`; the periodic
         // thresholds stay at the runtime defaults.
         assert!(!args.iter().any(|arg| arg == "--checkpoint-frames"));
         assert!(!args.iter().any(|arg| arg == "--checkpoint-bytes"));
+    }
+
+    #[test]
+    fn range_runtime_policy_renders_every_gres_flag() {
+        let policy = crabka_gres_ranges::RangeRuntimePolicy {
+            join: crabka_pgexec::scanner::JoinPolicy {
+                key_columns: 3,
+                row_bytes: 8192,
+                ..Default::default()
+            },
+            rpc_frame_max: crabka_units::mebibytes(2),
+            remote_session_max: crabka_gres_ranges::PositiveUsize::new(17).unwrap(),
+            ..Default::default()
+        };
+        let args = range_runtime_args(policy);
+
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--range-rpc-frame-max", "2MiB"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--range-remote-session-max", "17"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--range-join-key-columns", "3"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--range-join-row-max", "8KiB"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--range-hlc-horizon-headroom", "128ms"])
+        );
+        assert!(args.len() == 52);
     }
 }

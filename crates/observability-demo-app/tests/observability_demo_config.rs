@@ -164,6 +164,20 @@ fn docker_log_tailing_is_scoped_to_the_demo_compose_project() {
 }
 
 #[test]
+fn demo_roles_expose_schema_fetch_retry_defaults() {
+    let compose = docker_compose();
+    for service in ["demo-produce", "demo-stream", "demo-consume"] {
+        let block = compose_service_block(&compose, service);
+        for setting in [
+            "CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF: \"${CRABKA_DEMO_SCHEMA_FETCH_RETRY_INITIAL_BACKOFF:-10ms}\"",
+            "CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF: \"${CRABKA_DEMO_SCHEMA_FETCH_RETRY_MAX_BACKOFF:-1s}\"",
+        ] {
+            assert_eq!(block.matches(setting).count(), 1, "{service}: {setting}");
+        }
+    }
+}
+
+#[test]
 fn crabka_worker_targets_also_collect_memory_profiles() {
     let config = alloy_config();
     let scrape = scrape_block(&config, "crabka_workers");
@@ -199,18 +213,99 @@ fn metrics_compactor_bounds_cold_block_retention_for_demo() {
     let compose = docker_compose();
     let block = compose_service_block(&compose, "metrics-compactor");
     assert2::assert!(
-        block
-            .contains("--compactor-retention-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_MS:-3600000}")
+        block.contains("--compactor-retention=${CRABKA_METRICS_COMPACTOR_RETENTION:-1h}")
     );
     assert2::assert!(block.contains(
-        "--compactor-retention-sweep-ms=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_MS:-30000}"
+        "--compactor-retention-sweep-interval=${CRABKA_METRICS_COMPACTOR_RETENTION_SWEEP_INTERVAL:-30s}"
     ));
+}
+
+#[test]
+fn trace_and_profile_snapshot_policy_is_overrideable_per_signal() {
+    let compose = docker_compose();
+    for (service, signal) in [
+        ("traces-block-builder", "TRACES"),
+        ("profiles-block-builder", "PROFILES"),
+    ] {
+        let block = compose_service_block(&compose, service);
+        assert2::assert!(block.contains(&format!(
+            "CRABKA_{signal}_INDEX_SNAPSHOT_MAX: \"${{CRABKA_{signal}_INDEX_SNAPSHOT_MAX:-256MiB}}\""
+        )));
+        assert2::assert!(block.contains(&format!(
+            "CRABKA_{signal}_INDEX_SNAPSHOT_RETAIN: \"${{CRABKA_{signal}_INDEX_SNAPSHOT_RETAIN:-8}}\""
+        )));
+    }
+
+    for (service, signal) in [
+        ("traces-querier", "TRACES"),
+        ("profiles-querier", "PROFILES"),
+    ] {
+        let block = compose_service_block(&compose, service);
+        assert2::assert!(block.contains(&format!(
+            "CRABKA_{signal}_INDEX_SNAPSHOT_MAX: \"${{CRABKA_{signal}_INDEX_SNAPSHOT_MAX:-256MiB}}\""
+        )));
+        assert2::assert!(!block.contains(&format!("CRABKA_{signal}_INDEX_SNAPSHOT_RETAIN:")));
+    }
+}
+
+#[test]
+fn trace_and_profile_wal_fetch_limits_are_overrideable_per_signal() {
+    let compose = docker_compose();
+    for (service, signal) in [
+        ("traces-block-builder", "TRACES"),
+        ("profiles-block-builder", "PROFILES"),
+    ] {
+        let block = compose_service_block(&compose, service);
+        assert2::assert!(block.contains(&format!(
+            "CRABKA_{signal}_WAL_FETCH_MAX: \"${{CRABKA_{signal}_WAL_FETCH_MAX:-2MiB}}\""
+        )));
+        assert2::assert!(block.contains(&format!(
+            "CRABKA_{signal}_WAL_FETCH_PARTITION_MAX: \"${{CRABKA_{signal}_WAL_FETCH_PARTITION_MAX:-256KiB}}\""
+        )));
+    }
+}
+
+#[test]
+fn traces_querier_parquet_read_cap_is_overrideable() {
+    let compose = docker_compose();
+    let block = compose_service_block(&compose, "traces-querier");
+    assert2::assert!(
+        block.contains("CRABKA_TRACES_BLOCK_READ_MAX: \"${CRABKA_TRACES_BLOCK_READ_MAX:-1GiB}\"")
+    );
+}
+
+#[test]
+fn traces_querier_scan_concat_cap_is_overrideable() {
+    let compose = docker_compose();
+    let block = compose_service_block(&compose, "traces-querier");
+    assert2::assert!(
+        block
+            .contains("CRABKA_TRACES_SCAN_CONCAT_MAX: \"${CRABKA_TRACES_SCAN_CONCAT_MAX:-1.5GB}\"")
+    );
+}
+
+#[test]
+fn profiles_wal_poll_timeout_is_owned_by_wal_consumers() {
+    let compose = docker_compose();
+    for service in ["profiles-block-builder", "profiles-querier"] {
+        let block = compose_service_block(&compose, service);
+        assert2::assert!(block.contains(
+            "CRABKA_PROFILES_WAL_POLL_TIMEOUT: \"${CRABKA_PROFILES_WAL_POLL_TIMEOUT:-500ms}\""
+        ));
+    }
+    assert2::assert!(
+        !compose_service_block(&compose, "profiles-distributor")
+            .contains("CRABKA_PROFILES_WAL_POLL_TIMEOUT")
+    );
 }
 
 #[test]
 fn otlp_heartbeat_traces_use_per_component_service_names() {
     let compose = docker_compose();
-    assert2::assert!(compose.contains("CRABKA_OTLP_HEARTBEAT_INTERVAL_SECS: \"15\""));
+    assert2::assert!(
+        compose
+            .contains("CRABKA_OTLP_HEARTBEAT_INTERVAL: \"${CRABKA_OTLP_HEARTBEAT_INTERVAL:-15s}\"")
+    );
     for service in [
         "broker",
         "schema-registry",
@@ -713,5 +808,167 @@ fn alerts_surface_recent_observability_container_restarts() {
         "profiles-querier",
     ] {
         assert2::assert!(alerts.contains(service));
+    }
+}
+
+#[test]
+fn streams_dns_timeout_is_configurable_only_on_the_stream_role() {
+    let compose = docker_compose();
+    let stream = compose_service_block(&compose, "demo-stream");
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT: \"${CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT:-10s}\""
+    ));
+    for service in ["demo-produce", "demo-consume"] {
+        assert2::assert!(
+            !compose_service_block(&compose, service)
+                .contains("CRABKA_DEMO_STREAMS_BROKER_DNS_TIMEOUT")
+        );
+    }
+}
+
+#[test]
+fn streams_runtime_policy_is_configurable_only_on_the_stream_role() {
+    let compose = docker_compose();
+    let stream = compose_service_block(&compose, "demo-stream");
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_POLL_INTERVAL: \"${CRABKA_DEMO_STREAMS_POLL_INTERVAL:-200ms}\""
+    ));
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_COMMIT_INTERVAL: \"${CRABKA_DEMO_STREAMS_COMMIT_INTERVAL:-5s}\""
+    ));
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT: \"${CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT:-30s}\""
+    ));
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT: \"${CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT:-5s}\""
+    ));
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF: \"${CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF:-200ms}\""
+    ));
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY: \"${CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY:-64}\""
+    ));
+    assert2::assert!(stream.contains(
+        "CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX: \"${CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX:-10MiB}\""
+    ));
+    for service in ["demo-produce", "demo-consume"] {
+        let service = compose_service_block(&compose, service);
+        assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_POLL_INTERVAL"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_COMMIT_INTERVAL"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_REBALANCE_TIMEOUT"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_LEAVE_HEARTBEAT_TIMEOUT"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_JOIN_RETRY_BACKOFF"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_INTERACTIVE_QUERY_QUEUE_CAPACITY"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_STREAMS_STATE_STORE_CACHE_MAX"));
+    }
+}
+
+#[test]
+fn consumer_leave_timeout_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    assert2::assert!(consume.contains(
+        "CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT: \"${CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT:-5s}\""
+    ));
+    for service in ["demo-produce", "demo-stream"] {
+        assert2::assert!(
+            !compose_service_block(&compose, service)
+                .contains("CRABKA_DEMO_CONSUMER_LEAVE_GROUP_TIMEOUT")
+        );
+    }
+}
+
+#[test]
+fn consumer_metadata_refresh_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    assert2::assert!(consume.contains(
+        "CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL: \"${CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL:-5s}\""
+    ));
+    for service in ["demo-produce", "demo-stream"] {
+        assert2::assert!(
+            !compose_service_block(&compose, service)
+                .contains("CRABKA_DEMO_CONSUMER_SUBSCRIPTION_METADATA_REFRESH_INTERVAL")
+        );
+    }
+}
+
+#[test]
+fn consumer_retry_policy_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    for setting in [
+        "CRABKA_DEMO_CONSUMER_STARTUP_ATTEMPT_TIMEOUT: \"${CRABKA_DEMO_CONSUMER_STARTUP_ATTEMPT_TIMEOUT:-90s}\"",
+        "CRABKA_DEMO_CONSUMER_STARTUP_DEADLINE: \"${CRABKA_DEMO_CONSUMER_STARTUP_DEADLINE:-5m}\"",
+        "CRABKA_DEMO_CONSUMER_STARTUP_INITIAL_BACKOFF: \"${CRABKA_DEMO_CONSUMER_STARTUP_INITIAL_BACKOFF:-500ms}\"",
+        "CRABKA_DEMO_CONSUMER_STARTUP_MAX_BACKOFF: \"${CRABKA_DEMO_CONSUMER_STARTUP_MAX_BACKOFF:-5s}\"",
+        "CRABKA_DEMO_CONSUMER_COORDINATOR_RETRY_TIMEOUT: \"${CRABKA_DEMO_CONSUMER_COORDINATOR_RETRY_TIMEOUT:-30s}\"",
+        "CRABKA_DEMO_CONSUMER_COORDINATOR_INITIAL_BACKOFF: \"${CRABKA_DEMO_CONSUMER_COORDINATOR_INITIAL_BACKOFF:-100ms}\"",
+        "CRABKA_DEMO_CONSUMER_COORDINATOR_MAX_BACKOFF: \"${CRABKA_DEMO_CONSUMER_COORDINATOR_MAX_BACKOFF:-1s}\"",
+    ] {
+        assert2::assert!(consume.contains(setting));
+    }
+    for service in ["demo-produce", "demo-stream"] {
+        let service = compose_service_block(&compose, service);
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_STARTUP_"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_COORDINATOR_"));
+    }
+}
+
+#[test]
+fn consumer_fetch_policy_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    for setting in [
+        "CRABKA_DEMO_CONSUMER_FETCH_MIN: \"${CRABKA_DEMO_CONSUMER_FETCH_MIN:-1B}\"",
+        "CRABKA_DEMO_CONSUMER_FETCH_MAX: \"${CRABKA_DEMO_CONSUMER_FETCH_MAX:-50MiB}\"",
+        "CRABKA_DEMO_CONSUMER_FETCH_PARTITION_MAX: \"${CRABKA_DEMO_CONSUMER_FETCH_PARTITION_MAX:-1MiB}\"",
+    ] {
+        assert2::assert!(consume.contains(setting));
+    }
+    for service in ["demo-produce", "demo-stream"] {
+        assert2::assert!(
+            !compose_service_block(&compose, service).contains("CRABKA_DEMO_CONSUMER_FETCH_")
+        );
+    }
+}
+
+#[test]
+fn consumer_timing_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    for setting in [
+        "CRABKA_DEMO_CONSUMER_SESSION_TIMEOUT: \"${CRABKA_DEMO_CONSUMER_SESSION_TIMEOUT:-45s}\"",
+        "CRABKA_DEMO_CONSUMER_REBALANCE_TIMEOUT: \"${CRABKA_DEMO_CONSUMER_REBALANCE_TIMEOUT:-1m}\"",
+        "CRABKA_DEMO_CONSUMER_HEARTBEAT_INTERVAL: \"${CRABKA_DEMO_CONSUMER_HEARTBEAT_INTERVAL:-3s}\"",
+        "CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT: \"${CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT:-30s}\"",
+    ] {
+        assert2::assert!(consume.contains(setting));
+    }
+    for service in ["demo-produce", "demo-stream"] {
+        let service = compose_service_block(&compose, service);
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_SESSION_TIMEOUT"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_REBALANCE_TIMEOUT"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_HEARTBEAT_INTERVAL"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_REQUEST_TIMEOUT"));
+    }
+}
+
+#[test]
+fn consumer_behavior_is_configurable_only_on_the_consume_role() {
+    let compose = docker_compose();
+    let consume = compose_service_block(&compose, "demo-consume");
+    for setting in [
+        "CRABKA_DEMO_CONSUMER_AUTO_OFFSET_RESET: \"${CRABKA_DEMO_CONSUMER_AUTO_OFFSET_RESET:-latest}\"",
+        "CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL: \"${CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL:-read-uncommitted}\"",
+        "CRABKA_DEMO_CONSUMER_ASSIGNOR: \"${CRABKA_DEMO_CONSUMER_ASSIGNOR:-range}\"",
+    ] {
+        assert2::assert!(consume.contains(setting));
+    }
+    for service in ["demo-produce", "demo-stream"] {
+        let service = compose_service_block(&compose, service);
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_AUTO_OFFSET_RESET"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_ISOLATION_LEVEL"));
+        assert2::assert!(!service.contains("CRABKA_DEMO_CONSUMER_ASSIGNOR"));
     }
 }

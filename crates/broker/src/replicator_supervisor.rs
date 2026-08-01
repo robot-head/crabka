@@ -23,14 +23,15 @@ use crabka_ids::PartitionIndex;
 use crabka_log::{Log, LogConfig};
 use crabka_metadata::MetadataImage;
 use crabka_raft::NodeId;
+use crabka_units::Time;
 use dashmap::DashMap;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
 use crate::{
-    partition_registry::PartitionRegistry, replicator, throttle::ThrottleState,
-    txn::coordinator::TxnCoordinator,
+    config::ReplicationRuntimeConfig, partition_registry::PartitionRegistry, replicator,
+    throttle::ThrottleState, txn::coordinator::TxnCoordinator,
 };
 
 /// A `(topic, partition)` pair — the key the supervisor tracks follower
@@ -85,6 +86,10 @@ pub(crate) struct MaterializePartitionConfig<'a> {
     pub log_config: &'a LogConfig,
     pub log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
     pub producer_state: &'a Arc<crate::producer_state::ProducerState>,
+    pub producer_id_expiration: Time,
+    pub max_produce_group: usize,
+    pub partition_writer_queue_depth: usize,
+    pub diskless_wal_local_replica_count: usize,
     pub diskless: bool,
     pub hot_tail: Option<Arc<crate::diskless::hot_tail::HotTailCache>>,
     pub wal_shards: Option<Arc<crate::wal::quorum::registry::WalShardRegistry>>,
@@ -101,6 +106,10 @@ pub(crate) fn materialize_partition(config: MaterializePartitionConfig<'_>) -> R
         log_config,
         log_dir_status,
         producer_state,
+        producer_id_expiration,
+        max_produce_group,
+        partition_writer_queue_depth,
+        diskless_wal_local_replica_count,
         diskless,
         hot_tail,
         wal_shards,
@@ -129,6 +138,10 @@ pub(crate) fn materialize_partition(config: MaterializePartitionConfig<'_>) -> R
             log,
             log_dir_status: log_dir_status.clone(),
             producer_state: producer_state.clone(),
+            producer_id_expiration,
+            max_produce_group,
+            partition_writer_queue_depth,
+            diskless_wal_local_replica_count,
             diskless,
             hot_tail,
             wal_shards,
@@ -230,7 +243,11 @@ trait AssignDirsReporter: Send + Sync {
     ) -> Result<(), String>;
 }
 
-struct NetworkAssignDirsReporter;
+#[derive(Default)]
+struct NetworkAssignDirsReporter {
+    dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    frame_max: crabka_client_core::ClientFrameMax,
+}
 
 #[async_trait::async_trait]
 impl AssignDirsReporter for NetworkAssignDirsReporter {
@@ -240,7 +257,14 @@ impl AssignDirsReporter for NetworkAssignDirsReporter {
         client_id: &str,
         req: crabka_protocol::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest,
     ) -> Result<(), String> {
-        crate::assign_dirs::send_assignments(controller, client_id, req).await
+        crate::assign_dirs::send_assignments_with_policy(
+            controller,
+            client_id,
+            req,
+            self.dispatch_queue_capacity,
+            self.frame_max,
+        )
+        .await
     }
 }
 
@@ -269,6 +293,8 @@ pub(crate) struct ReplicatorSupervisor {
     /// Listener protocol used for inter-broker dials. Drives whether
     /// the dialer runs TLS / SASL.
     inter_broker_listener_protocol: crabka_security::ListenerProtocol,
+    inter_broker_server_name: String,
+    replication: ReplicationRuntimeConfig,
     /// Name of the listener whose endpoint we resolve from the
     /// metadata image when dialing peers.
     inter_broker_listener_name: String,
@@ -285,6 +311,10 @@ pub(crate) struct ReplicatorSupervisor {
     /// writer's `Compact` handler can snapshot active producers for
     /// KIP-534 `RETAIN_EMPTY`.
     producer_state: Arc<crate::producer_state::ProducerState>,
+    producer_id_expiration: Time,
+    max_produce_group: usize,
+    partition_writer_queue_depth: usize,
+    diskless_wal_local_replica_count: usize,
     /// Broker-wide metrics handle. Each spawned replicator
     /// clones this so it can increment `replication_bytes_in` after a
     /// successful follower-side append.
@@ -309,6 +339,8 @@ pub(crate) struct ReplicatorSupervisor {
 }
 
 pub(crate) struct ReplicatorSupervisorConfig {
+    pub client_dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
+    pub client_frame_max: crabka_client_core::ClientFrameMax,
     pub node_id: NodeId,
     pub broker_id: i32,
     pub controller: Arc<dyn crate::metadata_source::MetadataSource>,
@@ -321,10 +353,16 @@ pub(crate) struct ReplicatorSupervisorConfig {
     pub share_coordinator: Option<Arc<crate::share_coordinator::coordinator::ShareCoordinator>>,
     pub inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
     pub inter_broker_listener_protocol: crabka_security::ListenerProtocol,
+    pub inter_broker_server_name: String,
     pub inter_broker_listener_name: String,
+    pub replication: ReplicationRuntimeConfig,
     pub throttle_state: Arc<ThrottleState>,
     pub log_dir_status: crate::log_dir_status::LogDirRegistry,
     pub producer_state: Arc<crate::producer_state::ProducerState>,
+    pub producer_id_expiration: Time,
+    pub max_produce_group: usize,
+    pub partition_writer_queue_depth: usize,
+    pub diskless_wal_local_replica_count: usize,
     pub metrics: crate::metrics::BrokerMetrics,
     pub log_dir_ids: crate::log_dir_id::LogDirIds,
     pub hot_tail: Arc<crate::diskless::hot_tail::HotTailCache>,
@@ -334,6 +372,8 @@ pub(crate) struct ReplicatorSupervisorConfig {
 impl ReplicatorSupervisor {
     pub(crate) fn new(config: ReplicatorSupervisorConfig) -> Self {
         let ReplicatorSupervisorConfig {
+            client_dispatch_queue_capacity,
+            client_frame_max,
             node_id,
             broker_id,
             controller,
@@ -346,10 +386,16 @@ impl ReplicatorSupervisor {
             share_coordinator,
             inter_broker_client,
             inter_broker_listener_protocol,
+            inter_broker_server_name,
             inter_broker_listener_name,
+            replication,
             throttle_state,
             log_dir_status,
             producer_state,
+            producer_id_expiration,
+            max_produce_group,
+            partition_writer_queue_depth,
+            diskless_wal_local_replica_count,
             metrics,
             log_dir_ids,
             hot_tail,
@@ -375,17 +421,61 @@ impl ReplicatorSupervisor {
             share_coordinator,
             inter_broker_client,
             inter_broker_listener_protocol,
+            inter_broker_server_name,
             inter_broker_listener_name,
+            replication,
             throttle_state,
             log_dir_status,
             producer_state,
+            producer_id_expiration,
+            max_produce_group,
+            partition_writer_queue_depth,
+            diskless_wal_local_replica_count,
             metrics,
             log_dir_ids,
             hot_tail,
             wal_shards,
             reported_dirs: dashmap::DashMap::new(),
             known_topic_ids: Mutex::new(known_topic_ids),
-            assign_dirs_reporter: Arc::new(NetworkAssignDirsReporter),
+            assign_dirs_reporter: Arc::new(NetworkAssignDirsReporter {
+                dispatch_queue_capacity: client_dispatch_queue_capacity,
+                frame_max: client_frame_max,
+            }),
+        }
+    }
+
+    fn replicator_config(
+        &self,
+        key: TopicPartition,
+        topic: &crabka_metadata::TopicRecord,
+        partition: &crabka_metadata::PartitionRecord,
+        broker: &crabka_metadata::BrokerRegistrationRecord,
+        shutdown: CancellationToken,
+    ) -> replicator::Config {
+        let (leader_host, leader_port) =
+            resolve_leader_endpoint(broker, &self.inter_broker_listener_name);
+        replicator::Config {
+            node_id: self.node_id,
+            topic: key.0,
+            topic_id: crabka_protocol::primitives::uuid::Uuid(topic.topic_id.into_bytes()),
+            partition: crabka_ids::PartitionIndex(key.1),
+            leader_node_id: partition.leader,
+            leader_host,
+            leader_port,
+            partitions: self.partitions.clone(),
+            log_dirs: self.log_dirs.clone(),
+            log_settings: self.log_config.clone(),
+            client_id: self.client_id.clone(),
+            shutdown,
+            inter_broker_client: self.inter_broker_client.clone(),
+            inter_broker_listener_protocol: self.inter_broker_listener_protocol,
+            inter_broker_server_name: self.inter_broker_server_name.clone(),
+            replication: self.replication.clone(),
+            throttle_state: self.throttle_state.clone(),
+            controller: self.controller.clone(),
+            log_dir_status: self.log_dir_status.clone(),
+            producer_state: self.producer_state.clone(),
+            metrics: self.metrics.clone(),
         }
     }
 
@@ -473,34 +563,9 @@ impl ReplicatorSupervisor {
             self.tasks.insert(k.clone(), token.clone());
             self.task_targets
                 .insert(k.clone(), (leader, part.leader_epoch));
-            // Prefer the inter-broker listener's endpoint when the leader
-            // has projected it onto its registration record. Fall back to
-            // the legacy top-level host/port for brokers that haven't
-            // projected a per-listener endpoint yet (or PLAINTEXT-only
-            // deployments where the synthesized endpoint matches anyway).
-            let (leader_host, leader_port) =
-                resolve_leader_endpoint(&broker, &self.inter_broker_listener_name);
-            tokio::spawn(replicator::run(replicator::Config {
-                node_id: self.node_id,
-                topic: k.0,
-                topic_id: crabka_protocol::primitives::uuid::Uuid(topic_rec.topic_id.into_bytes()),
-                partition: crabka_ids::PartitionIndex(k.1),
-                leader_node_id: leader,
-                leader_host,
-                leader_port,
-                partitions: self.partitions.clone(),
-                log_dirs: self.log_dirs.clone(),
-                log_settings: self.log_config.clone(),
-                client_id: self.client_id.clone(),
-                shutdown: token,
-                inter_broker_client: self.inter_broker_client.clone(),
-                inter_broker_listener_protocol: self.inter_broker_listener_protocol,
-                throttle_state: self.throttle_state.clone(),
-                controller: self.controller.clone(),
-                log_dir_status: self.log_dir_status.clone(),
-                producer_state: self.producer_state.clone(),
-                metrics: self.metrics.clone(),
-            }));
+            tokio::spawn(replicator::run(
+                self.replicator_config(k, &topic_rec, &part, &broker, token),
+            ));
         }
 
         // 3. Refresh the txn coordinator's view of locally-led
@@ -671,6 +736,10 @@ impl ReplicatorSupervisor {
             log_config: &self.log_config,
             log_dir_status: &self.log_dir_status,
             producer_state: &self.producer_state,
+            producer_id_expiration: self.producer_id_expiration,
+            max_produce_group: self.max_produce_group,
+            partition_writer_queue_depth: self.partition_writer_queue_depth,
+            diskless_wal_local_replica_count: self.diskless_wal_local_replica_count,
             diskless,
             hot_tail: Some(self.hot_tail.clone()),
             wal_shards: Some(self.wal_shards.clone()),
@@ -723,6 +792,7 @@ mod tests {
         AddVoter, Node, QuorumState, RaftError, ReconfigOutcome, RemoveVoter, SnapshotRange,
         UpdateVoter,
     };
+    use crabka_units::{bytes, hours, millis};
     use tokio::sync::watch;
     use uuid::Uuid;
 
@@ -912,6 +982,9 @@ mod tests {
         let partitions = Arc::new(PartitionRegistry::new());
         let reporter = Arc::new(CountingAssignDirsReporter::default());
         let mut supervisor = ReplicatorSupervisor::new(ReplicatorSupervisorConfig {
+            client_dispatch_queue_capacity:
+                crabka_client_core::ConnectionDispatchQueueCapacity::default(),
+            client_frame_max: crabka_client_core::ClientFrameMax::default(),
             node_id: NodeId(2),
             broker_id: 2,
             controller: Arc::new(StaticMetadataSource::new(image)),
@@ -926,10 +999,16 @@ mod tests {
                 None, None,
             )),
             inter_broker_listener_protocol: crabka_security::ListenerProtocol::Plaintext,
+            inter_broker_server_name: "localhost".into(),
             inter_broker_listener_name: "INTERNAL".into(),
+            replication: ReplicationRuntimeConfig::default(),
             throttle_state: Arc::new(ThrottleState::new()),
             log_dir_status: crate::log_dir_status::LogDirRegistry::default(),
             producer_state: Arc::new(crate::producer_state::ProducerState::new()),
+            producer_id_expiration: hours(24),
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            diskless_wal_local_replica_count: 3,
             metrics: crate::metrics::BrokerMetrics::default(),
             log_dir_ids: crate::log_dir_id::LogDirIds::resolve(&[dir.path().to_path_buf()]),
             hot_tail: Arc::new(crate::diskless::hot_tail::HotTailCache::default()),
@@ -945,7 +1024,7 @@ mod tests {
         // (here: no controller leader elected), not swallow it into Ok(()).
         let source: Arc<dyn crate::metadata_source::MetadataSource> =
             Arc::new(StaticMetadataSource::new(MetadataImage::new(Uuid::nil())));
-        let err = NetworkAssignDirsReporter
+        let err = NetworkAssignDirsReporter::default()
             .send(
                 &source,
                 "test",
@@ -1054,6 +1133,10 @@ mod tests {
             log_config: &LogConfig::default(),
             log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
             producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
+            producer_id_expiration: hours(24),
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            diskless_wal_local_replica_count: 3,
             diskless: false,
             hot_tail: None,
             wal_shards: None,
@@ -1100,6 +1183,10 @@ mod tests {
             log_config: &LogConfig::default(),
             log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
             producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
+            producer_id_expiration: hours(24),
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            diskless_wal_local_replica_count: 3,
             diskless: true,
             hot_tail: Some(hot_tail),
             wal_shards: Some(wal_shards.clone()),
@@ -1207,6 +1294,33 @@ mod tests {
         let broker = broker_record(NodeId(1));
         assert!(resolve_leader_endpoint(&broker, "INTERNAL") == ("internal-host".into(), 19092));
         assert!(resolve_leader_endpoint(&broker, "EXTERNAL") == ("legacy-host".into(), 9092));
+    }
+
+    #[test]
+    fn replicator_task_config_receives_runtime_policy_and_tls_server_name() {
+        let image = image_with(&[
+            topic_record("t", 1),
+            partition_record("t", 0, NodeId(1), vec![NodeId(1), NodeId(2)], 7),
+            MetadataRecord::V1BrokerRegistration(broker_record(NodeId(1))),
+        ]);
+        let (mut supervisor, _partitions, _reporter, _dir) = supervisor_fixture(image.clone());
+        supervisor.replication.fetch_max = bytes(2_345_678);
+        supervisor.replication.send_error_backoff = millis(37);
+        supervisor.inter_broker_server_name = "broker.internal".into();
+        let broker = image.broker(NodeId(1)).expect("leader broker");
+        let topic = image.topic("t").expect("topic");
+
+        let config = supervisor.replicator_config(
+            ("t".into(), 0),
+            topic,
+            image.partition("t", 0).expect("partition"),
+            broker,
+            CancellationToken::new(),
+        );
+
+        assert!(config.replication.fetch_max == bytes(2_345_678));
+        assert!(config.replication.send_error_backoff == millis(37));
+        assert!(config.inter_broker_server_name == "broker.internal");
     }
 
     #[tokio::test]
@@ -1493,6 +1607,10 @@ mod tests {
             log_config: &LogConfig::default(),
             log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
             producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
+            producer_id_expiration: hours(24),
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            diskless_wal_local_replica_count: 3,
             diskless: false,
             hot_tail: None,
             wal_shards: None,
@@ -1515,12 +1633,12 @@ mod tests {
                 .lock()
                 .expect("log lock")
                 .config_snapshot()
-                .retention_ms
-                == Some(std::time::Duration::from_mins(1))
+                .retention
+                == Some(crabka_units::minutes(1))
         })
         .await;
         let snap = part.log.lock().expect("log lock").config_snapshot();
-        assert!(snap.retention_ms == Some(std::time::Duration::from_mins(1)));
+        assert!(snap.retention == Some(crabka_units::minutes(1)));
     }
 
     #[tokio::test]
@@ -1561,6 +1679,10 @@ mod tests {
             log_config: &LogConfig::default(),
             log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
             producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
+            producer_id_expiration: hours(24),
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            diskless_wal_local_replica_count: 3,
             diskless: false,
             hot_tail: None,
             wal_shards: None,
@@ -1581,12 +1703,12 @@ mod tests {
                 .lock()
                 .expect("log lock")
                 .config_snapshot()
-                .retention_ms
-                == LogConfig::default().retention_ms
+                .retention
+                == LogConfig::default().retention
         })
         .await;
         let snap = part.log.lock().expect("log lock").config_snapshot();
-        assert!(snap.retention_ms == LogConfig::default().retention_ms);
+        assert!(snap.retention == LogConfig::default().retention);
     }
 
     #[tokio::test]
@@ -1630,6 +1752,10 @@ mod tests {
             log_config: &LogConfig::default(),
             log_dir_status: &crate::log_dir_status::LogDirRegistry::default(),
             producer_state: &Arc::new(crate::producer_state::ProducerState::new()),
+            producer_id_expiration: hours(24),
+            max_produce_group: 1_024,
+            partition_writer_queue_depth: 64,
+            diskless_wal_local_replica_count: 3,
             diskless: false,
             hot_tail: None,
             wal_shards: None,

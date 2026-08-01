@@ -18,7 +18,9 @@ use std::{collections::HashMap, sync::Arc};
 
 use bytes::Bytes;
 use crabka_client_core::{
-    Client, Connection, ConnectionOptions, IsolatedFetch, fetch_partition_with_isolation,
+    Client, ClientDnsTimeout, ClientFrameMax, Connection, ConnectionDispatchQueueCapacity,
+    ConnectionOptions, DEFAULT_FETCH_RESPONSE_MAX, FetchMinBytes, IsolatedFetch,
+    fetch_partition_with_isolation,
 };
 use crabka_client_producer::{Acks, Producer, ProducerError, ProducerRecord, RecordMetadata};
 use crabka_protocol::{
@@ -35,6 +37,7 @@ use crabka_protocol::{
     },
     primitives::uuid::Uuid as WireUuid,
 };
+use crabka_units::prelude::*;
 use tokio::sync::{Mutex, oneshot};
 
 use crate::{
@@ -58,10 +61,18 @@ pub(crate) struct BrokerFetcher {
     client: Client,
     /// Cache of topic name → `topic_id` (populated lazily via metadata refresh).
     topic_ids: Mutex<HashMap<String, WireUuid>>,
-    /// Maximum time the broker waits before returning an empty fetch (ms).
-    max_wait_ms: i32,
-    /// Maximum bytes the broker returns per partition per fetch.
-    partition_max_bytes: i32,
+    /// Maximum time the broker waits before returning an empty fetch.
+    max_wait: Time,
+    /// Maximum the broker returns per partition per fetch.
+    partition_max: ByteSize,
+    fetch_min: FetchMinBytes,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct ClientResourcePolicy {
+    pub(crate) dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    pub(crate) frame_max: ClientFrameMax,
+    pub(crate) fetch_min: FetchMinBytes,
 }
 
 #[async_trait::async_trait]
@@ -89,8 +100,12 @@ impl RecordFetcher for BrokerFetcher {
                 topic_id,
                 partition,
                 fetch_offset: offset,
-                max_wait_ms: self.max_wait_ms,
-                partition_max_bytes: self.partition_max_bytes,
+                // `IsolatedFetch` mirrors the Kafka `Fetch` wire fields, so the
+                // quantities render back to raw integers here.
+                max_wait: self.max_wait,
+                max: DEFAULT_FETCH_RESPONSE_MAX,
+                partition_max: self.partition_max,
+                fetch_min: self.fetch_min,
                 isolation_level,
             },
         )
@@ -701,6 +716,46 @@ impl OffsetStore for BrokerOffsetStore {
 
 // ─── build ────────────────────────────────────────────────────────────────────
 
+async fn lookup_first<F, I>(
+    bootstrap: &str,
+    dns_timeout: ClientDnsTimeout,
+    lookup: F,
+) -> Result<std::net::SocketAddr, StreamsClientError>
+where
+    F: std::future::Future<Output = std::io::Result<I>>,
+    I: Iterator<Item = std::net::SocketAddr>,
+{
+    let mut addrs = tokio::time::timeout(dns_timeout.time().to_std(), lookup)
+        .await
+        .map_err(|_| {
+            StreamsClientError::Runtime(format!(
+                "DNS lookup {bootstrap} timed out after {} ms",
+                dns_timeout.milliseconds(),
+            ))
+        })?
+        .map_err(|error| {
+            StreamsClientError::Runtime(format!("failed to resolve bootstrap {bootstrap}: {error}"))
+        })?;
+    addrs.next().ok_or_else(|| {
+        StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
+    })
+}
+
+fn fetch_connection_options(
+    client_id: &str,
+    broker_dns_timeout: ClientDnsTimeout,
+    dispatch_queue_capacity: ConnectionDispatchQueueCapacity,
+    frame_max: ClientFrameMax,
+) -> ConnectionOptions {
+    ConnectionOptions {
+        client_id: client_id.to_owned(),
+        dns_timeout: broker_dns_timeout,
+        dispatch_queue_capacity,
+        frame_max,
+        ..ConnectionOptions::default()
+    }
+}
+
 /// Construct the three broker-backed I/O trait objects from a single bootstrap
 /// address.
 ///
@@ -711,31 +766,40 @@ pub(crate) async fn build(
     bootstrap: &str,
     group_id: &str,
     client_id: &str,
+    broker_dns_timeout: ClientDnsTimeout,
+    policy: ClientResourcePolicy,
 ) -> Result<(BrokerFetcher, Arc<BrokerProducer>, Arc<BrokerOffsetStore>), StreamsClientError> {
+    let ClientResourcePolicy {
+        dispatch_queue_capacity,
+        frame_max,
+        fetch_min,
+    } = policy;
     // 1. Client for metadata + offset RPCs.
     let metadata_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
+        .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await?;
 
     // 2. Dedicated fetch connection (single bootstrap broker).
     // Resolve the bootstrap address (e.g. "localhost:9092") to a SocketAddr.
-    let addr = tokio::net::lookup_host(bootstrap)
-        .await
-        .map_err(|e| {
-            StreamsClientError::Runtime(format!("failed to resolve bootstrap address: {e}"))
-        })?
-        .next()
-        .ok_or_else(|| {
-            StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
-        })?;
+    let addr = lookup_first(
+        bootstrap,
+        broker_dns_timeout,
+        tokio::net::lookup_host(bootstrap),
+    )
+    .await?;
     let fetch_conn = Connection::connect_with_options(
         addr,
-        ConnectionOptions {
-            client_id: client_id.to_string(),
-            ..Default::default()
-        },
+        fetch_connection_options(
+            client_id,
+            broker_dns_timeout,
+            dispatch_queue_capacity,
+            frame_max,
+        ),
     )
     .await?;
 
@@ -745,6 +809,9 @@ pub(crate) async fn build(
         .client_id(format!("{client_id}-producer"))
         .enable_idempotence(true)
         .acks(Acks::All)
+        .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
@@ -755,6 +822,9 @@ pub(crate) async fn build(
     let offset_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-offsets"))
+        .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await?;
 
@@ -762,8 +832,9 @@ pub(crate) async fn build(
         conn: fetch_conn,
         client: metadata_client,
         topic_ids: Mutex::new(HashMap::new()),
-        max_wait_ms: 500,
-        partition_max_bytes: 1 << 20,
+        max_wait: millis(500),
+        partition_max: mebibytes(1),
+        fetch_min,
     };
     let broker_producer = Arc::new(BrokerProducer {
         inner: producer,
@@ -787,6 +858,8 @@ pub(crate) async fn build_eos(
     group_id: &str,
     client_id: &str,
     transactional_id: &str,
+    broker_dns_timeout: ClientDnsTimeout,
+    policy: ClientResourcePolicy,
 ) -> Result<
     (
         BrokerFetcher,
@@ -795,30 +868,37 @@ pub(crate) async fn build_eos(
     ),
     StreamsClientError,
 > {
+    let ClientResourcePolicy {
+        dispatch_queue_capacity,
+        frame_max,
+        fetch_min,
+    } = policy;
     // 1. Client for metadata + offset RPCs.
     let metadata_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(client_id)
+        .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await?;
 
     // 2. Dedicated fetch connection (single bootstrap broker).
     // Resolve the bootstrap address (e.g. "localhost:9092") to a SocketAddr.
-    let addr = tokio::net::lookup_host(bootstrap)
-        .await
-        .map_err(|e| {
-            StreamsClientError::Runtime(format!("failed to resolve bootstrap address: {e}"))
-        })?
-        .next()
-        .ok_or_else(|| {
-            StreamsClientError::Runtime(format!("no addresses resolved for bootstrap: {bootstrap}"))
-        })?;
+    let addr = lookup_first(
+        bootstrap,
+        broker_dns_timeout,
+        tokio::net::lookup_host(bootstrap),
+    )
+    .await?;
     let fetch_conn = Connection::connect_with_options(
         addr,
-        ConnectionOptions {
-            client_id: client_id.to_string(),
-            ..Default::default()
-        },
+        fetch_connection_options(
+            client_id,
+            broker_dns_timeout,
+            dispatch_queue_capacity,
+            frame_max,
+        ),
     )
     .await?;
 
@@ -829,6 +909,9 @@ pub(crate) async fn build_eos(
         .enable_idempotence(true)
         .acks(Acks::All)
         .transactional_id(transactional_id.to_string())
+        .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await
         .map_err(|e| StreamsClientError::Runtime(e.to_string()))?;
@@ -839,6 +922,9 @@ pub(crate) async fn build_eos(
     let offset_client = Client::builder()
         .bootstrap(bootstrap)
         .client_id(format!("{client_id}-offsets"))
+        .dns_timeout(broker_dns_timeout.time())
+        .dispatch_queue_capacity(dispatch_queue_capacity.get())
+        .frame_max(frame_max.size())
         .build()
         .await?;
 
@@ -846,8 +932,9 @@ pub(crate) async fn build_eos(
         conn: fetch_conn,
         client: metadata_client,
         topic_ids: Mutex::new(HashMap::new()),
-        max_wait_ms: 500,
-        partition_max_bytes: 1 << 20,
+        max_wait: millis(500),
+        partition_max: mebibytes(1),
+        fetch_min,
     };
     let txn_producer = Arc::new(BrokerTransactionalProducer {
         inner: Arc::new(producer),
@@ -863,16 +950,21 @@ pub(crate) async fn build_eos(
 #[cfg(test)]
 mod tests {
 
-    use std::sync::Arc;
+    use std::{net::SocketAddr, sync::Arc, time::Duration};
 
     use bytes::Bytes;
     use crabka_broker::{Broker, BrokerConfig};
-    use crabka_client_core::Client;
+    use crabka_client_core::{
+        Client, ClientDnsTimeout, ClientFrameMax, ConnectionDispatchQueueCapacity,
+    };
     use crabka_client_producer::Producer;
     use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
+    use crabka_units::{kibibytes, millis};
     use tokio::sync::Mutex;
 
-    use super::{BrokerOffsetStore, BrokerTransactionalProducer};
+    use super::{
+        BrokerOffsetStore, BrokerTransactionalProducer, fetch_connection_options, lookup_first,
+    };
     use crate::{
         error::StreamsClientError,
         runtime::{
@@ -907,6 +999,74 @@ mod tests {
         assert_eq!(
             resp.topics[0].error_code, 0,
             "topic create failed: {resp:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn raw_lookup_stops_at_the_configured_deadline() {
+        let timeout = ClientDnsTimeout::new(millis(37)).expect("positive timeout");
+        let started = tokio::time::Instant::now();
+        let error = lookup_first(
+            "broker.example:9092",
+            timeout,
+            std::future::pending::<std::io::Result<std::vec::IntoIter<SocketAddr>>>(),
+        )
+        .await
+        .expect_err("pending resolver must time out");
+
+        assert2::assert!(started.elapsed() == Duration::from_millis(37));
+        assert2::assert!(
+            error.to_string()
+                == "runtime error: DNS lookup broker.example:9092 timed out after 37 ms"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_lookup_preserves_resolver_and_empty_result_context() {
+        let timeout = ClientDnsTimeout::default();
+        let resolver_error = lookup_first(
+            "bad.example:9092",
+            timeout,
+            std::future::ready(Err::<std::vec::IntoIter<SocketAddr>, _>(
+                std::io::Error::other("resolver failed"),
+            )),
+        )
+        .await
+        .expect_err("resolver error");
+        assert2::assert!(
+            resolver_error.to_string()
+                == "runtime error: failed to resolve bootstrap bad.example:9092: resolver failed"
+        );
+
+        let empty = lookup_first(
+            "empty.example:9092",
+            timeout,
+            std::future::ready(Ok(Vec::<SocketAddr>::new().into_iter())),
+        )
+        .await
+        .expect_err("empty result");
+        assert2::assert!(
+            empty.to_string()
+                == "runtime error: no addresses resolved for bootstrap: empty.example:9092"
+        );
+    }
+
+    #[test]
+    fn fetch_connection_options_carry_client_policy() {
+        let timeout = ClientDnsTimeout::new(millis(41)).expect("positive timeout");
+        let dispatch = ConnectionDispatchQueueCapacity::new(7).unwrap();
+        let frame_max = ClientFrameMax::try_from(kibibytes(32)).unwrap();
+        let options = fetch_connection_options("streams-fetch", timeout, dispatch, frame_max);
+
+        assert2::assert!(options.client_id == "streams-fetch");
+        assert2::assert!(options.dns_timeout == timeout);
+        assert2::assert!(options.dispatch_queue_capacity == dispatch);
+        assert2::assert!(options.frame_max == frame_max);
+        assert2::assert!(
+            options.connect_timeout == crabka_client_core::DEFAULT_CLIENT_CONNECT_TIMEOUT
+        );
+        assert2::assert!(
+            options.request_timeout == crabka_client_core::DEFAULT_CLIENT_REQUEST_TIMEOUT
         );
     }
 

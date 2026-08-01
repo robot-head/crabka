@@ -30,13 +30,15 @@ crabka-broker = { path = "../broker", version = "0.3.8" }
 crabka-telemetry = { path = "../telemetry", version = "0.3.8" }
 crabka-client-consumer = { path = "../client-consumer", version = "0.3.9" }
 crabka-client-producer = { path = "../client-producer", version = "0.3.9" }
+crabka-client-core = { path = "../client-core", version = "0.3.9" }
 crabka-traceql = { path = "../traceql", version = "0.3.7" }
+crabka-units = { workspace = true }
 arrow = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true, features = ["json"] }
 base64 = { workspace = true }
 bytes = { workspace = true }
-clap = { workspace = true }
+clap = { workspace = true, features = ["env"] }
 datafusion = { workspace = true }
 dashmap = { workspace = true }
 derive_more = { workspace = true }
@@ -51,6 +53,7 @@ prost = { workspace = true }
 prost-types = { workspace = true }
 reqwest = { workspace = true }
 regex = { workspace = true }
+refined_type = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
@@ -69,7 +72,6 @@ wincode = { workspace = true }
 tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
-crabka-client-core = { path = "../client-core", version = "0.3.9" }
 crabka-protocol = { path = "../protocol", version = "0.3.9" }
 datatest-stable = { workspace = true }
 http-body-util = "0.1"

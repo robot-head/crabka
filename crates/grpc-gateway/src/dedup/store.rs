@@ -3,21 +3,20 @@
 //! assigned dedup partitions, and keeps the claim map warm. P3 gates every
 //! produce on ownership + warmth so only the owning replica may write.
 
-use std::{
-    sync::{
-        Arc, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
-    time::Duration,
+use std::sync::{
+    Arc, OnceLock,
+    atomic::{AtomicBool, Ordering},
 };
 
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
+use crabka_units::prelude::*;
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    config::GatewayRuntimeConfig,
     error::GatewayError,
     ids::{Offset, PartitionIndex},
 };
@@ -42,11 +41,20 @@ pub struct DedupStore {
     /// Optional membership publisher; set by the binary before `run_ownership`
     /// starts. `None` in single-owner/unit contexts means no publishing.
     membership: OnceLock<Arc<crate::dedup::membership::MembershipPublisher>>,
+    poll_timeout: Time,
+    warmup_empty_polls: u32,
 }
 
 impl DedupStore {
     #[must_use]
     pub fn new(partitions: u32) -> Self {
+        Self::new_with_policy(partitions, &GatewayRuntimeConfig::default())
+    }
+
+    #[must_use]
+    pub fn new_with_policy(partitions: u32, runtime: &GatewayRuntimeConfig) -> Self {
+        assert2::assert!(partitions > 0);
+        assert2::assert!(i32::try_from(partitions).is_ok());
         Self {
             map: DashMap::new(),
             partitions,
@@ -54,6 +62,8 @@ impl DedupStore {
             warm: AtomicBool::new(false),
             warmed_once: AtomicBool::new(false),
             membership: OnceLock::new(),
+            poll_timeout: runtime.consumer_poll_timeout,
+            warmup_empty_polls: runtime.ownership_warmup_empty_polls,
         }
     }
 
@@ -111,9 +121,40 @@ impl DedupStore {
         shutdown: tokio_util::sync::CancellationToken,
         security: Option<crabka_client_core::security::ClientSecurity>,
     ) -> Result<(), GatewayError> {
+        self.run_ownership_with_policy(
+            bootstrap,
+            client_id,
+            dedup_topic,
+            group,
+            shutdown,
+            (security, crate::config::GatewayRuntimeConfig::default()),
+        )
+        .await
+    }
+
+    /// Run ownership with the deployment's client resource policy.
+    /// # Errors
+    /// Returns an error when consuming fails.
+    /// # Panics
+    /// Panics if synchronized ownership state is poisoned.
+    pub async fn run_ownership_with_policy(
+        self: Arc<Self>,
+        bootstrap: String,
+        client_id: String,
+        dedup_topic: String,
+        group: String,
+        shutdown: tokio_util::sync::CancellationToken,
+        client_policy: (
+            Option<crabka_client_core::security::ClientSecurity>,
+            crate::config::GatewayRuntimeConfig,
+        ),
+    ) -> Result<(), GatewayError> {
+        let (security, policy) = client_policy;
         let mut consumer = Consumer::builder()
             .bootstrap(bootstrap)
             .client_id(client_id)
+            .dispatch_queue_capacity(policy.client_dispatch_queue_capacity.get())
+            .frame_max(policy.client_frame_max.size())
             .group_id(group)
             .subscribe(vec![dedup_topic.clone()])
             .isolation_level(IsolationLevel::ReadCommitted)
@@ -130,7 +171,7 @@ impl DedupStore {
         loop {
             let batch = tokio::select! {
                 () = shutdown.cancelled() => break,
-                b = consumer.poll(Duration::from_millis(500)) => match b {
+                b = consumer.poll(self.poll_timeout) => match b {
                     Ok(batch) => batch,
                     Err(e) => { poll_err = Some(e.into()); break; }
                 },
@@ -156,7 +197,7 @@ impl DedupStore {
                 self.warm.store(false, Ordering::SeqCst);
                 empty_polls = 0;
                 crate::metrics::metrics()
-                    .set_owned_partitions(i64::try_from(current.len()).unwrap_or(0));
+                    .set_owned_partitions(i64::try_from(current.len()).expect("count fits i64"));
                 if let Some(publisher) = self.membership.get()
                     && let Err(e) = publisher.publish(&current).await
                 {
@@ -164,15 +205,15 @@ impl DedupStore {
                 }
             }
 
-            // Warm heuristic: two consecutive empty polls since the last
+            // Warm heuristic: the configured empty-poll count since the last
             // assignment change ⇒ owned partitions drained to the tail, safe to
             // serve. Assumes a low-traffic, bursty claim topic (it is: tiny
             // compacted claims that replay then idle); a continuously-saturated
             // owned partition would defer warmth until it next idles. A future
             // HWM-precise gate (spec §2) removes that theoretical caveat.
             if batch.is_empty() {
-                empty_polls += 1;
-                if empty_polls >= 2 {
+                empty_polls = empty_polls.saturating_add(1);
+                if ownership_is_warm(empty_polls, self.warmup_empty_polls) {
                     self.warm.store(true, Ordering::SeqCst);
                     self.warmed_once.store(true, Ordering::SeqCst);
                 }
@@ -205,6 +246,8 @@ impl DedupStore {
 
     /// Test/helper writer: produce a single claim record (compacted topic key
     /// = idempotency key, value = JSON `ClaimValue`) to its hashed partition.
+    /// # Panics
+    /// Panics if the validated partition count cannot be represented by Kafka.
     /// # Errors
     /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn write_claim(
@@ -224,8 +267,8 @@ impl DedupStore {
             .maybe_security(security)
             .build()
             .await?;
-        let partition =
-            i32::try_from(crate::dedup::partition_for(key, self.partitions)).unwrap_or(0);
+        let partition = i32::try_from(crate::dedup::partition_for(key, self.partitions))
+            .expect("validated partition fits i32");
         let prec = ProducerRecord {
             topic: dedup_topic.to_string(),
             partition: Some(partition),
@@ -242,5 +285,23 @@ impl DedupStore {
         meta.map_err(GatewayError::Producer)?;
         self.apply(key.to_string(), value.clone());
         Ok(())
+    }
+}
+
+#[must_use]
+fn ownership_is_warm(empty_polls: u32, warmup_empty_polls: u32) -> bool {
+    empty_polls >= warmup_empty_polls
+}
+
+#[cfg(test)]
+mod tests {
+    use assert2::assert;
+
+    use super::ownership_is_warm;
+
+    #[test]
+    fn ownership_warmup_uses_configured_empty_poll_threshold() {
+        assert!(!ownership_is_warm(2, 3));
+        assert!(ownership_is_warm(3, 3));
     }
 }

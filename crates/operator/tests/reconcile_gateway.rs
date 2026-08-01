@@ -29,10 +29,10 @@ use http::{Method, Response};
 mod shared;
 
 use shared::{
-    MockRule, build_ctx, fake_broker_user_secret, fake_cluster_ca_cert_secret,
-    fake_cluster_ca_key_secret, fake_config_secret, fake_deployment_body, fake_gateway_body,
-    fake_kafkauser_body, fake_parent_kafka_body, fake_service_body, fake_serving_secret,
-    json_response, not_found_body,
+    MockRule, build_ctx, build_ctx_with_config, fake_broker_user_secret,
+    fake_cluster_ca_cert_secret, fake_cluster_ca_key_secret, fake_config_secret,
+    fake_deployment_body, fake_gateway_body, fake_kafkauser_body, fake_parent_kafka_body,
+    fake_service_body, fake_serving_secret, json_response, not_found_body,
 };
 
 const NS: &str = "default";
@@ -49,6 +49,10 @@ fn gw_cr(name: &str) -> KafkaGrpcGateway {
             image: None,
             resources: None,
             dedup: None,
+            membership_topic: None,
+            tuning: None,
+            schema_registry: None,
+            health_checks: None,
             tls: None,
             authz: None,
             webhooks: vec![],
@@ -64,6 +68,177 @@ fn gw_cr(name: &str) -> KafkaGrpcGateway {
     labels.insert("crabka.io/cluster".into(), KAFKA.into());
     gw.metadata.labels = Some(labels);
     gw
+}
+
+#[test]
+fn runtime_crd_surface_round_trips() {
+    let gw: KafkaGrpcGateway = serde_json::from_value(serde_json::json!({
+        "apiVersion": "crabka.io/v1alpha1",
+        "kind": "KafkaGrpcGateway",
+        "metadata": { "name": GW, "namespace": NS },
+        "spec": {
+            "membershipTopic": "members-custom",
+            "tuning": {
+                "internalTopicReplicationFactor": 2,
+                "internalTopicAllowReplicationFallback": false,
+                "internalTopicCreateTimeout": "7.001s",
+                "internalTopicSegment": "22.001s",
+                "internalTopicMinCleanableDirtyRatio": "2.5%",
+                "consumerPollTimeout": "501ms",
+                "ownershipWarmupEmptyPolls": 3,
+                "readinessPollInterval": "251ms",
+                "produceMaxBody": "3MiB",
+                "forwardMaxBody": "3145727B"
+            },
+            "schemaRegistry": {
+                "url": "http://registry:8081",
+                "latestCacheTtl": "5.001s",
+                "frameRaw": true
+            },
+            "healthChecks": {
+                "readinessInitialDelaySeconds": 3,
+                "readinessPeriodSeconds": 6,
+                "livenessInitialDelaySeconds": 11,
+                "livenessPeriodSeconds": 12
+            },
+            "dedup": { "ownershipGroup": "owners-custom" },
+            "tls": { "reloadInterval": "31s" },
+            "authz": {
+                "bearer": { "allowableClockSkew": "31.001s" }
+            },
+            "webhooks": [{
+                "name": "orders",
+                "targetTopic": "orders",
+                "schemaSubject": "orders-value",
+                "schemaFormat": "avro"
+            }],
+            "outboundSubscriptions": [{
+                "name": "deliver",
+                "sourceTopics": ["orders"],
+                "targetUrl": "https://example.com/hook",
+                "groupId": "deliver-custom",
+                "decodeToJson": true
+            }]
+        }
+    }))
+    .expect("gateway CRD shape");
+
+    let spec = serde_json::to_value(&gw.spec).expect("serialize spec");
+    for pointer in [
+        "/membershipTopic",
+        "/tuning/internalTopicReplicationFactor",
+        "/tuning/internalTopicMinCleanableDirtyRatio",
+        "/tuning/produceMaxBody",
+        "/tuning/forwardMaxBody",
+        "/schemaRegistry/latestCacheTtl",
+        "/healthChecks/readinessPeriodSeconds",
+        "/dedup/ownershipGroup",
+        "/tls/reloadInterval",
+        "/authz/bearer/allowableClockSkew",
+        "/webhooks/0/schemaSubject",
+        "/outboundSubscriptions/0/groupId",
+        "/outboundSubscriptions/0/decodeToJson",
+    ] {
+        assert!(
+            spec.pointer(pointer).is_some(),
+            "missing {pointer} from {spec}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn runtime_invalid_values_stop_before_child_rendering() {
+    for invalid in [
+        serde_json::json!({"tuning": {"consumerPollTimeout": "0s"}}),
+        serde_json::json!({"tuning": {"produceMaxBody": "0B"}}),
+        serde_json::json!({"tuning": {"forwardMaxBody": "0B"}}),
+        serde_json::json!({
+            "tuning": {"internalTopicMinCleanableDirtyRatio": "100.01%"}
+        }),
+        serde_json::json!({"outboundSubscriptions": [{
+            "name": "s",
+            "sourceTopics": ["t"],
+            "targetUrl": "https://example.com",
+            "baseBackoff": "2ms",
+            "maxBackoff": "1ms"
+        }]}),
+        serde_json::json!({"schemaRegistry": {"url": "not a URL"}}),
+        serde_json::json!({"healthChecks": {"readinessInitialDelaySeconds": -1}}),
+        serde_json::json!({"healthChecks": {"livenessPeriodSeconds": 0}}),
+        serde_json::json!({"webhooks": [{
+            "name": "w",
+            "targetTopic": "t",
+            "secretRef": {"name": "secret", "key": "hmac"}
+        }]}),
+        serde_json::json!({"webhooks": [{
+            "name": "w",
+            "targetTopic": "t",
+            "signatureHeader": "X-Signature"
+        }]}),
+        serde_json::json!({"webhooks": [{
+            "name": "w",
+            "targetTopic": "t",
+            "idempotencySource": "cookie:id",
+        }]}),
+        serde_json::json!({"webhooks": [{
+            "name": "w",
+            "targetTopic": "t",
+            "keySource": "json:$[",
+        }]}),
+        serde_json::json!({"outboundSubscriptions": [{
+            "name": "s",
+            "sourceTopics": ["t"],
+            "targetUrl": "not a URL"
+        }]}),
+        serde_json::json!({"outboundSubscriptions": [{
+            "name": "s",
+            "sourceTopics": ["t"],
+            "targetUrl": "mailto:user@example.com"
+        }]}),
+        serde_json::json!({"outboundSubscriptions": [{
+            "name": "s",
+            "sourceTopics": ["t"],
+            "targetUrl": "https://example.com",
+            "filter": "header:X-Tenant"
+        }]}),
+        serde_json::json!({"outboundSubscriptions": [{
+            "name": "s",
+            "sourceTopics": ["t"],
+            "targetUrl": "https://example.com",
+            "filter": "json:$["
+        }]}),
+    ] {
+        let mut gw = gw_cr(GW);
+        gw.spec = serde_json::from_value(invalid.clone()).expect("gateway spec");
+        let rules = vec![MockRule {
+            method: Method::PATCH,
+            path_substr: format!("/kafkagrpcgateways/{GW}/status"),
+            response: json_response(200, &fake_gateway_body(GW, NS, KAFKA)),
+        }];
+        let (ctx, state) = build_ctx(NS, rules);
+
+        let result = reconcile(Arc::new(gw), ctx).await;
+        assert!(result.is_err(), "accepted invalid {invalid}");
+
+        let observed = state.take_observed();
+        assert!(
+            observed.len() == 1,
+            "validation must happen before child reads/renders for {invalid}: {observed:?}"
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(observed[0].body()).expect("status patch body");
+        let ready = body["status"]["conditions"]
+            .as_array()
+            .and_then(|conditions| {
+                conditions
+                    .iter()
+                    .find(|condition| condition["type"] == "Ready")
+            })
+            .expect("Ready condition");
+        assert!(ready["status"] == "False", "body: {body}");
+        assert!(ready["reason"] == "GatewayConfigInvalid", "body: {body}");
+        assert!(state.remaining_rules() == 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -209,14 +384,16 @@ async fn happy_path_all_objects_created_ready() {
         },
     ];
 
-    let (ctx, state) = build_ctx(NS, rules);
+    let mut config = shared::op_config(NS);
+    config.controller_dependency_requeue = crabka_units::millis(1_234);
+    let (ctx, state) = build_ctx_with_config(NS, rules, config);
     let gw = gw_cr(GW);
     let action = reconcile(Arc::new(gw), ctx).await.expect("reconcile ok");
 
-    // Action must be a 30-second requeue.
     assert!(
-        action == kube::runtime::controller::Action::requeue(std::time::Duration::from_secs(30)),
-        "expected requeue(30s), got {action:?}"
+        action
+            == kube::runtime::controller::Action::requeue(std::time::Duration::from_millis(1_234)),
+        "expected configured dependency requeue, got {action:?}"
     );
 
     let observed = state.take_observed();

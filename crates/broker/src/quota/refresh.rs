@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use crabka_metadata::{EntityKey, MetadataImage};
+use crabka_units::convert::ByteRateExt as _;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
@@ -53,14 +54,15 @@ fn refresh_buckets(image: &MetadataImage, buckets: &QuotaBuckets) {
             .and_then(|m| m.get(&quota_key))
             .copied()
             .map_or(0, positive_f64_to_u64);
-        if bucket.rate() != new_rate {
+        let new_rate = super::bucket_rate(new_rate);
+        if bucket.byte_rate() != new_rate {
             debug!(
                 quota_key,
                 ?entity_key,
-                new_rate,
+                new_rate = new_rate.bytes_per_sec_i64(),
                 "quota refresh: rate update"
             );
-            bucket.set_rate(new_rate);
+            bucket.set_byte_rate(new_rate);
         }
     }
 }
@@ -78,7 +80,7 @@ mod tests {
     use assert2::assert;
     use crabka_metadata::EntityKey;
 
-    use super::*;
+    use super::{super::bucket_rate, *};
     use crate::quota::test_support::image_with_quota as quota_image;
 
     fn img_with_quota(
@@ -94,11 +96,11 @@ mod tests {
         let buckets = Arc::new(QuotaBuckets::new());
         let key: EntityKey = vec![("user".into(), Some("alice".into()))];
         let b = buckets.get_or_create("producer_byte_rate", &key, 0);
-        assert!(b.rate() == 0);
+        assert!(b.byte_rate() == bucket_rate(0));
 
         let img = img_with_quota(vec![("user", Some("alice"))], "producer_byte_rate", 2048.0);
         refresh_buckets(&img, &buckets);
-        assert!(b.rate() == 2048);
+        assert!(b.byte_rate() == bucket_rate(2048));
     }
 
     #[test]
@@ -106,11 +108,11 @@ mod tests {
         let buckets = Arc::new(QuotaBuckets::new());
         let key: EntityKey = vec![("user".into(), Some("alice".into()))];
         let b = buckets.get_or_create("producer_byte_rate", &key, 1024);
-        assert!(b.rate() == 1024);
+        assert!(b.byte_rate() == bucket_rate(1024));
 
         let empty = Arc::new(MetadataImage::new(uuid::Uuid::nil()));
         refresh_buckets(&empty, &buckets);
-        assert!(b.rate() == 0);
+        assert!(b.byte_rate() == bucket_rate(0));
     }
 
     #[test]
@@ -122,7 +124,7 @@ mod tests {
             ("qos-tier".into(), Some("gold".into())),
         ];
         let b = buckets.get_or_create("producer_byte_rate", &tiered_key, 128);
-        assert!(b.rate() == 128);
+        assert!(b.byte_rate() == bucket_rate(128));
 
         let img = img_with_quota(
             vec![("user", Some("alice")), ("client-id", Some("app"))],
@@ -130,6 +132,6 @@ mod tests {
             2048.0,
         );
         refresh_buckets(&img, &buckets);
-        assert!(b.rate() == 2048);
+        assert!(b.byte_rate() == bucket_rate(2048));
     }
 }
