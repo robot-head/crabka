@@ -140,7 +140,7 @@ async fn execute_probe(command: &str, sql: &str) {
 #[tokio::test]
 async fn every_resolved_behavior_probe_reaches_the_session_contract() {
     let report = parser_command_report().expect("behavior manifest parses");
-    assert!(report.probes.len() == 143);
+    assert!(report.probes.len() == 149);
     let mut executed = 0;
     let mut refused = 0;
     for probe in report.probes {
@@ -176,7 +176,7 @@ async fn every_resolved_behavior_probe_reaches_the_session_contract() {
         );
         refused += 1;
     }
-    assert!(executed == 88);
+    assert!(executed == 94);
     assert!(refused == 55);
 }
 

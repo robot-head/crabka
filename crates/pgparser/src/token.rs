@@ -49,6 +49,10 @@ pub enum Token {
     KeyExistsAll,
     /// The array `&&` overlap operator.
     Overlaps,
+    /// `<->` — adjacent-lexeme phrase query composition.
+    Phrase,
+    /// `!!` — prefix tsquery negation.
+    TsNot,
     /// `~` — POSIX regex match when infix, bitwise NOT when prefix. One token for
     /// both: `PostgreSQL` spells them identically and only position tells them
     /// apart, so the parser (not the lexer) picks the reading.

@@ -1012,6 +1012,12 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
     guc("client_encoding", "string", "UTF8", parse_client_encoding),
     guc("datestyle", "string", "ISO, MDY", parse_date_style).aliases(&["DateStyle"]),
     guc(
+        "default_text_search_config",
+        "string",
+        "pg_catalog.english",
+        |value, _| Ok(GucValue::Text(value.to_string())),
+    ),
+    guc(
         "extra_float_digits",
         "integer",
         "1",
@@ -2018,6 +2024,7 @@ fn read_only_command_tag(stmt: &Statement) -> &'static str {
 /// undo.
 fn statement_has_effects(stmt: &Statement) -> bool {
     match stmt {
+        Statement::Utility(UtilityStatement::TextSearch(_)) => true,
         Statement::Query(_)
         | Statement::Begin { .. }
         | Statement::Commit { .. }
@@ -2054,6 +2061,7 @@ fn statement_has_effects(stmt: &Statement) -> bool {
 /// bypass the transaction-activity rule.
 fn establishes_transaction_activity(stmt: &Statement) -> bool {
     match stmt {
+        Statement::Utility(UtilityStatement::TextSearch(_)) => true,
         Statement::Query(_)
         | Statement::Insert { .. }
         | Statement::Update { .. }
@@ -4163,6 +4171,7 @@ impl SqlSession {
                     tag: reset_or_set_tag(*reset),
                 })
             }
+            UtilityStatement::TextSearch(_) => unreachable!("text-search DDL uses run_ddl"),
         }
     }
 
@@ -4487,7 +4496,8 @@ impl SqlSession {
         | Statement::DropType { .. }
         | Statement::CreateDomain { .. }
         | Statement::AlterDomain { .. }
-        | Statement::DropDomain { .. } => self.run_ddl(stmt).await,
+        | Statement::DropDomain { .. }
+        | Statement::Utility(UtilityStatement::TextSearch(_)) => self.run_ddl(stmt).await,
         Statement::Call { name, args } => self.run_call(name, args).await,
         Statement::DoBlock { language, .. } => Err(crate::routine::do_block(language)),
             Statement::Insert { .. }
@@ -7531,6 +7541,7 @@ impl ParamBinder<'_> {
                     | UnaryOp::IsNotUnknown => Some(ColumnType::Bool),
                     UnaryOp::Plus | UnaryOp::Neg | UnaryOp::BitNot | UnaryOp::Abs => expected,
                     UnaryOp::Sqrt | UnaryOp::Cbrt => Some(ColumnType::Float8),
+                    UnaryOp::TsNot => Some(ColumnType::TsQuery),
                 };
                 self.bind_expr_with_scope_and_ctes(expr, child_expected, scope, ctes)?;
             }
@@ -7723,7 +7734,7 @@ fn binary_param_type(
         },
         // Containment and overlap are same-type operators (jsonb @> jsonb,
         // int[] && int[]), so a parameter adopts its sibling's type.
-        BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps => {
+        BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps | BinaryOp::Phrase => {
             infer_param_context_type(other, scope)
         }
         // `?` tests one key; `?|`/`?&` and the `#>`/`#>>` path operators take a
@@ -7738,8 +7749,14 @@ fn binary_param_type(
         // `->`/`->>` take either a text key or an integer index; the operand
         // alone cannot say which, so leave the parameter at its default.
         BinaryOp::JsonGet | BinaryOp::JsonGetText => None,
-        // `@?`/`@@` take a jsonpath on the right, which crabka spells `text`.
-        BinaryOp::JsonPathExists | BinaryOp::JsonPathMatch => Some(ColumnType::Text),
+        // `@@` also serves full-text search; a vector sibling resolves the
+        // parameter as the query operand instead of jsonpath text.
+        BinaryOp::JsonPathMatch => match infer_param_context_type(other, scope) {
+            Some(ColumnType::TsVector) => Some(ColumnType::TsQuery),
+            Some(ColumnType::TsQuery) => Some(ColumnType::TsVector),
+            _ => Some(ColumnType::Text),
+        },
+        BinaryOp::JsonPathExists => Some(ColumnType::Text),
         // The regex-match, bitwise, exponent and modulo operators and the
         // boolean connectives resolve a parameter from nothing but its own
         // default.
@@ -7791,7 +7808,7 @@ fn infer_param_context_type(expr: &Expr, scope: &crate::scope::Scope) -> Option<
             op: UnaryOp::Neg,
             expr,
         } => infer_param_context_type(expr, scope),
-        _ => None,
+        _ => crate::eval::infer_type(expr, scope).ok(),
     }
 }
 
@@ -8187,6 +8204,8 @@ fn param_column_type(param: &BoundParam) -> Result<Option<ColumnType>, PgError> 
         Some(crabka_pgtypes::oids::JSON | crabka_pgtypes::oids::JSONB) => {
             Ok(Some(ColumnType::Jsonb))
         }
+        Some(crabka_pgtypes::oids::TSVECTOR) => Ok(Some(ColumnType::TsVector)),
+        Some(crabka_pgtypes::oids::TSQUERY) => Ok(Some(ColumnType::TsQuery)),
         Some(0) | None => Ok(None),
         // Every array OID crabka has an element type for (`_int4`, `_text`, …);
         // `_json` folds onto `jsonb[]` the same way `json` folds onto `jsonb`.
@@ -8302,6 +8321,12 @@ fn decode_binary_value(
                 .map_err(ExecError::into_pg)
         }
         ColumnType::Jsonb => decode_jsonb_binary(value),
+        ColumnType::TsVector | ColumnType::TsQuery => {
+            let text = std::str::from_utf8(value).map_err(invalid_parameter_encoding)?;
+            decode_text_bound_param(text, ty, time_zone)
+                .map_err(ExecError::from)
+                .map_err(ExecError::into_pg)
+        }
         ColumnType::Array(elem) => decode_array_binary(value, elem, time_zone),
         // A domain's binary representation is its base type's, so it decodes as
         // the base and picks up its constraints on assignment.
@@ -8714,6 +8739,12 @@ impl SqlSession {
             Ok(_) => return None,
             Err(error) => return Some(Err(error.into())),
         };
+        if crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection)
+            .text_search
+            .is_some()
+        {
+            return None;
+        }
 
         Some(
             async {
@@ -12921,6 +12952,26 @@ mod listen_notify_session_tests {
             panic!("expected one row set from {sql}");
         };
         rows.len()
+    }
+
+    #[tokio::test]
+    async fn text_search_ddl_uses_the_catalog_committer() {
+        let (engine, committer) = recording_engine();
+        let mut session = session(&engine, 22);
+
+        tag(
+            &mut session,
+            "CREATE TEXT SEARCH CONFIGURATION replicated_cfg (COPY = simple)",
+        )
+        .await;
+
+        let batches = committer.batches();
+        assert!(batches.len() == 1);
+        assert!(batches[0].iter().any(|op| matches!(
+            op,
+            WriteOp::Put { key, .. }
+                if key.ends_with(b"catalog/text-search/c/replicated_cfg")
+        )));
     }
 
     fn notification(process_id: i32, channel: &str, payload: &str) -> Notification {

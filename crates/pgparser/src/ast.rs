@@ -694,6 +694,37 @@ pub enum UtilityStatement {
         /// `SET`.
         reset: bool,
     },
+    /// SQL-managed text-search configurations and dictionaries. Parser and
+    /// template objects remain explicit C-bound non-goals.
+    TextSearch(TextSearchDdl),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextSearchObjectKind {
+    Configuration,
+    Dictionary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TextSearchDdl {
+    Create {
+        kind: TextSearchObjectKind,
+        name: String,
+        /// `COPY` for a configuration or `TEMPLATE` for a dictionary.
+        base: String,
+    },
+    Alter {
+        kind: TextSearchObjectKind,
+        name: String,
+        /// Present for `RENAME TO`; other `PostgreSQL` mapping/option alterations
+        /// update the existing object in place.
+        rename_to: Option<String>,
+    },
+    Drop {
+        kind: TextSearchObjectKind,
+        name: String,
+        if_exists: bool,
+    },
 }
 
 /// `DISCARD` targets.
@@ -2853,6 +2884,8 @@ pub enum UnaryOp {
     Sqrt,
     /// Prefix `||/` — cube root (`float8`).
     Cbrt,
+    /// Prefix `!!` — tsquery boolean negation.
+    TsNot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2889,6 +2922,8 @@ pub enum BinaryOp {
     JsonPathMatch,
     /// array `&&` — the two arrays have at least one element in common.
     Overlaps,
+    /// `tsquery <-> tsquery` — adjacent phrase composition.
+    Phrase,
     /// `~` — the left string matches the POSIX regular expression on the right.
     Match,
     /// `~*` — [`BinaryOp::Match`], case-insensitively.

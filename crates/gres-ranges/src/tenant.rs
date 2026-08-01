@@ -6730,6 +6730,8 @@ fn datum_hash_bytes(value: &Datum) -> Option<Vec<u8>> {
         | Datum::Timestamptz(_)
         | Datum::Interval(_)
         | Datum::Jsonb(_)
+        | Datum::TsVector(_)
+        | Datum::TsQuery(_)
         // A composite or enum shard key would need its type's identity in the
         // hash as well as the value, so both are excluded like the floats.
         | Datum::Record(_)

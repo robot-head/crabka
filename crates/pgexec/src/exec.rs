@@ -10,7 +10,7 @@ use bytes::Bytes;
 use crabka_pgcatalog::{Column, ColumnDefault, Sequence, Table, TableId};
 use crabka_pgkv::Kv;
 use crabka_pgparser::ast::{
-    ArraySubscript, Expr, FuncArgs, OrderItem, SelectItem, SelectStmt, Statement,
+    ArraySubscript, Expr, FuncArgs, OrderItem, SelectItem, SelectStmt, Statement, UtilityStatement,
 };
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::{Cell, FieldDescription, QueryResult};
@@ -265,6 +265,10 @@ pub(crate) fn execute_ddl(
 ) -> Result<(QueryResult, Vec<crabka_pgkv::WriteOp>), ExecError> {
     let resolution = fctx.resolution;
     match stmt {
+        Statement::Utility(UtilityStatement::TextSearch(ddl)) => {
+            let (tag, ops) = crate::text_search_catalog::execute(kv, ddl)?;
+            Ok((command(tag), ops))
+        }
         // P2: SQL routines. Definition, lifecycle and catalog storage live in
         // `routine`; only the DDL routing is here.
         Statement::CreateRoutine(routine) => crate::routine::create(kv, routine, fctx.current_user),
@@ -809,7 +813,16 @@ pub(crate) fn execute_ddl(
                 table,
                 keys,
             ));
-            let columns = index_key_columns(keys, predicate.as_deref(), method.as_deref())?;
+            let index_method = match method.as_deref() {
+                None | Some("btree") => crabka_pgcatalog::IndexMethod::Btree,
+                Some("gin") => crabka_pgcatalog::IndexMethod::Gin,
+                Some(method) => {
+                    return Err(ExecError::Unsupported(format!(
+                        "index access method \"{method}\" is not supported"
+                    )));
+                }
+            };
+            let columns = index_key_columns(keys, predicate.as_deref())?;
             if !include.is_empty() {
                 return Err(ExecError::Unsupported(
                     "CREATE INDEX … INCLUDE is not supported: index entries carry only key \
@@ -836,16 +849,18 @@ pub(crate) fn execute_ddl(
                         .into(),
                 ));
             }
-            let (id, mut ops) = crabka_pgcatalog::create_index_ops(
+            let table_meta = crabka_pgcatalog::get_table(kv, table)?;
+            validate_index_method(&table_meta, columns, *unique, placement, index_method)?;
+            let (id, mut ops) = crabka_pgcatalog::create_index_with_method_ops(
                 kv,
                 &name.name,
                 table,
                 columns.clone(),
                 *unique,
                 placement,
+                index_method,
             )?;
             if placement == crabka_pgcatalog::IndexPlacement::Local {
-                let table_meta = crabka_pgcatalog::get_table(kv, table)?;
                 reject_unwritable_local_index(&table_meta)?;
                 let index = crabka_pgcatalog::Index {
                     id,
@@ -855,6 +870,7 @@ pub(crate) fn execute_ddl(
                     columns: columns.clone(),
                     unique: *unique,
                     placement,
+                    method: index_method,
                     constraint: None,
                 };
                 ops.extend(local_index_backfill_ops(
@@ -1375,6 +1391,7 @@ fn create_table_constraint_index(
         columns: columns.to_vec(),
         unique: true,
         placement: crabka_pgcatalog::IndexPlacement::Local,
+        method: crabka_pgcatalog::IndexMethod::Btree,
         constraint: Some(if primary_key {
             crabka_pgcatalog::IndexConstraint::PrimaryKey
         } else {
@@ -1511,15 +1528,7 @@ fn index_name_or_default(
 fn index_key_columns(
     keys: &[crabka_pgparser::ast::IndexKey],
     predicate: Option<&str>,
-    method: Option<&str>,
 ) -> Result<Vec<String>, ExecError> {
-    if let Some(method) = method
-        && method != "btree"
-    {
-        return Err(ExecError::Unsupported(format!(
-            "index access method \"{method}\" is not supported; only btree exists"
-        )));
-    }
     if predicate.is_some() {
         return Err(ExecError::Unsupported(
             "partial indexes (CREATE INDEX … WHERE) are not supported: the scanner would treat \
@@ -1548,6 +1557,44 @@ fn index_key_columns(
         .collect()
 }
 
+fn validate_index_method(
+    table: &Table,
+    columns: &[String],
+    unique: bool,
+    placement: crabka_pgcatalog::IndexPlacement,
+    method: crabka_pgcatalog::IndexMethod,
+) -> Result<(), ExecError> {
+    if method == crabka_pgcatalog::IndexMethod::Btree {
+        return Ok(());
+    }
+    // ponytail: one stored tsvector column keeps maintenance on the existing
+    // row path; add expression/multicolumn GIN only when queries require it.
+    if unique {
+        return Err(ExecError::Unsupported(
+            "access method gin does not support unique indexes".into(),
+        ));
+    }
+    if placement != crabka_pgcatalog::IndexPlacement::Local {
+        return Err(ExecError::Unsupported(
+            "global GIN indexes are not supported".into(),
+        ));
+    }
+    let [column] = columns else {
+        return Err(ExecError::Unsupported(
+            "GIN indexes currently require exactly one tsvector column".into(),
+        ));
+    };
+    let column = table
+        .column_index(column)
+        .ok_or_else(|| ExecError::UndefinedColumn(column.clone()))?;
+    if table.columns[column].ty != ColumnType::TsVector {
+        return Err(ExecError::Unsupported(
+            "GIN indexes currently support only tsvector columns".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
     if matches!(
         value,
@@ -1559,6 +1606,8 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
             | Datum::Float8(_)
             | Datum::Numeric(_)
             | Datum::Jsonb(_)
+            | Datum::TsVector(_)
+            | Datum::TsQuery(_)
             // Stored as its bare oid, with the relation name re-derived on read.
             | Datum::Regclass(_)
             // An array carries its elements in the row encoding, so an element
@@ -1572,9 +1621,8 @@ fn ensure_default_can_be_persisted(value: &Datum) -> Result<(), ExecError> {
     // (`crabka_pgcatalog::serde::write_default`), so they are refused at DDL
     // time rather than written and lost.
     Err(ExecError::Unsupported(
-        "defaults for date/time, interval, bytea, composite and enum columns are not persisted \
-         yet"
-        .into(),
+        "defaults for date/time, interval, bytea, composite and enum columns are not persisted yet"
+            .into(),
     ))
 }
 
@@ -4891,17 +4939,20 @@ fn local_index_backfill_ops_for_rows(
     let mut seen = HashSet::new();
     let mut ops = Vec::with_capacity(rows.len());
     for (rowid, _xmin, row) in rows {
-        let values = indexed_values(table, index, row)?;
-        if values.iter().any(Datum::is_null) {
-            continue;
+        for values in index_entries(table, index, row)? {
+            if values.iter().any(Datum::is_null) {
+                continue;
+            }
+            if index.unique && !seen.insert(values.clone()) {
+                return Err(ExecError::UniqueIndexBuildViolation(index.name.clone()));
+            }
+            ops.push(crabka_pgkv::WriteOp::Put {
+                key: crabka_pgkv::key::secondary_index_entry_key(
+                    table.id, index.id, &values, *rowid,
+                ),
+                value: Vec::new(),
+            });
         }
-        if index.unique && !seen.insert(values.clone()) {
-            return Err(ExecError::UniqueIndexBuildViolation(index.name.clone()));
-        }
-        ops.push(crabka_pgkv::WriteOp::Put {
-            key: crabka_pgkv::key::secondary_index_entry_key(table.id, index.id, &values, *rowid),
-            value: Vec::new(),
-        });
     }
     Ok(ops)
 }
@@ -5518,20 +5569,40 @@ fn local_index_entry_ops(
     rowid: u64,
     row: &[Datum],
 ) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
-    indexes
-        .iter()
-        .map(|index| {
-            Ok(crabka_pgkv::WriteOp::Put {
+    let mut ops = Vec::new();
+    for index in indexes {
+        for values in index_entries(table, index, row)? {
+            ops.push(crabka_pgkv::WriteOp::Put {
                 key: crabka_pgkv::key::secondary_index_entry_key(
-                    table.id,
-                    index.id,
-                    &indexed_values(table, index, row)?,
-                    rowid,
+                    table.id, index.id, &values, rowid,
                 ),
                 value: Vec::new(),
-            })
-        })
-        .collect()
+            });
+        }
+    }
+    Ok(ops)
+}
+
+fn index_entries(
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    row: &[Datum],
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    if index.method == crabka_pgcatalog::IndexMethod::Btree {
+        return indexed_values(table, index, row).map(|values| vec![values]);
+    }
+    let column = table
+        .column_index(&index.columns[0])
+        .ok_or_else(|| ExecError::UndefinedColumn(index.columns[0].clone()))?;
+    match &row[column] {
+        Datum::Null => Ok(Vec::new()),
+        Datum::TsVector(vector) => Ok(vector
+            .0
+            .iter()
+            .map(|lexeme| vec![Datum::Text(lexeme.text.clone())])
+            .collect()),
+        got => Err(crate::func::type_error("tsvector", got)),
+    }
 }
 
 fn indexed_values(
@@ -5722,36 +5793,37 @@ pub(crate) fn prune_rowid_chain_ops(
             value: crabka_pgmvcc::version::freeze_tuple_xmin(&value)?,
         });
     }
-    let mut index_entries: u64 = 0;
+    let mut index_entries_pruned: u64 = 0;
     // An index entry key `(values, rowid)` is SHARED by every version of this
     // row carrying `values`: delete it only when no surviving version — nor
     // the row this batch is writing — still carries those values. Chains are
     // short (pruning keeps them O(1)), so linear survivor probes suffice.
     let mut removed: Vec<(crabka_pgcatalog::IndexId, Vec<Datum>)> = Vec::new();
     for index in local_indexes {
-        let mut survivors: Vec<Vec<Datum>> = Vec::with_capacity(surviving.len() + 1);
+        let mut survivor_entries = Vec::new();
         for row in &surviving {
-            survivors.push(indexed_values(table, index, row)?);
+            survivor_entries.extend(index_entries(table, index, row)?);
         }
         if let Some(row) = new_row {
-            survivors.push(indexed_values(table, index, row)?);
+            survivor_entries.extend(index_entries(table, index, row)?);
         }
         for (_, row) in &dead {
-            let values = indexed_values(table, index, row)?;
-            if survivors.contains(&values)
-                || removed
-                    .iter()
-                    .any(|(id, prior)| *id == index.id && *prior == values)
-            {
-                continue;
+            for values in index_entries(table, index, row)? {
+                if survivor_entries.contains(&values)
+                    || removed
+                        .iter()
+                        .any(|(id, prior)| *id == index.id && *prior == values)
+                {
+                    continue;
+                }
+                ops.push(crabka_pgkv::WriteOp::Delete {
+                    key: crabka_pgkv::key::secondary_index_entry_key(
+                        table.id, index.id, &values, rowid,
+                    ),
+                });
+                removed.push((index.id, values));
+                index_entries_pruned += 1;
             }
-            ops.push(crabka_pgkv::WriteOp::Delete {
-                key: crabka_pgkv::key::secondary_index_entry_key(
-                    table.id, index.id, &values, rowid,
-                ),
-            });
-            removed.push((index.id, values));
-            index_entries += 1;
         }
     }
     let versions = dead.len() as u64;
@@ -5762,7 +5834,7 @@ pub(crate) fn prune_rowid_chain_ops(
     Ok(ChainPrune {
         ops,
         versions,
-        index_entries,
+        index_entries: index_entries_pruned,
         frozen,
     })
 }
@@ -5782,6 +5854,88 @@ fn lookup_local_index_equal(
         )?);
     }
 
+    let mut exact = Vec::new();
+    for candidate in visible_rows_for_rowids(mvcc, table, rowids)? {
+        if indexed_values(table, index, &candidate.row)? == values {
+            exact.push(candidate);
+        }
+    }
+    Ok(exact)
+}
+
+fn lookup_local_gin(
+    mvcc: &MvccReadContext<'_>,
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    query: &crabka_pgtypes::TsQuery,
+) -> Result<Option<Vec<ScannedRow>>, ExecError> {
+    let Some(rowids) = gin_candidate_rowids(mvcc.kv, table, index, query)? else {
+        return Ok(None);
+    };
+    let column = table
+        .column_index(&index.columns[0])
+        .ok_or_else(|| ExecError::UndefinedColumn(index.columns[0].clone()))?;
+    Ok(Some(
+        visible_rows_for_rowids(mvcc, table, rowids)?
+            .into_iter()
+            .filter(|candidate| {
+                matches!(&candidate.row[column], Datum::TsVector(vector) if vector.matches(query))
+            })
+            .collect(),
+    ))
+}
+
+fn gin_candidate_rowids(
+    kv: &dyn Kv,
+    table: &Table,
+    index: &crabka_pgcatalog::Index,
+    query: &crabka_pgtypes::TsQuery,
+) -> Result<Option<BTreeSet<u64>>, ExecError> {
+    use crabka_pgtypes::TsQuery;
+
+    match query {
+        TsQuery::Empty => Ok(Some(BTreeSet::new())),
+        TsQuery::Term(term) if term.prefix => Ok(None),
+        TsQuery::Term(term) => {
+            let prefix = crabka_pgkv::key::secondary_index_entry_prefix(
+                table.id,
+                index.id,
+                &[Datum::Text(term.text.clone())],
+            );
+            let mut rowids = BTreeSet::new();
+            for (key, _) in kv.scan_prefix(&prefix)? {
+                rowids.insert(crabka_pgkv::key::secondary_index_rowid_of(
+                    table.id, index.id, &key,
+                )?);
+            }
+            Ok(Some(rowids))
+        }
+        TsQuery::Not(_) => Ok(None),
+        TsQuery::And(left, right) | TsQuery::Phrase(left, right, _) => {
+            let left = gin_candidate_rowids(kv, table, index, left)?;
+            let right = gin_candidate_rowids(kv, table, index, right)?;
+            Ok(match (left, right) {
+                (Some(left), Some(right)) => Some(&left & &right),
+                (Some(candidates), None) | (None, Some(candidates)) => Some(candidates),
+                (None, None) => None,
+            })
+        }
+        TsQuery::Or(left, right) => {
+            let left = gin_candidate_rowids(kv, table, index, left)?;
+            let right = gin_candidate_rowids(kv, table, index, right)?;
+            Ok(match (left, right) {
+                (Some(left), Some(right)) => Some(&left | &right),
+                _ => None,
+            })
+        }
+    }
+}
+
+fn visible_rows_for_rowids(
+    mvcc: &MvccReadContext<'_>,
+    table: &Table,
+    rowids: BTreeSet<u64>,
+) -> Result<Vec<ScannedRow>, ExecError> {
     let mut rows = Vec::new();
     for rowid in rowids {
         let row_prefix = crabka_pgkv::key::row_key(table.id, rowid);
@@ -5805,9 +5959,7 @@ fn lookup_local_index_equal(
         else {
             continue;
         };
-        if indexed_values(table, index, &row)? == values {
-            rows.push(ScannedRow { rowid, xmin, row });
-        }
+        rows.push(ScannedRow { rowid, xmin, row });
     }
     Ok(rows)
 }
@@ -8375,6 +8527,23 @@ fn try_scan_with_local_index(
     if table.sharded || plan.partial_aggregate.is_some() {
         return Ok(None);
     }
+    if let Some(predicate) = &plan.text_search
+        && let Some(index) = choose_local_gin_index(read_ctx.catalog_kv, table, predicate.column)?
+        && let Some(rows) = lookup_local_gin(
+            &MvccReadContext {
+                kv: read_ctx.kv,
+                global: read_ctx.global,
+                global_snapshot: read_ctx.gsnap,
+                snapshot: read_ctx.snapshot,
+                own: read_ctx.own,
+            },
+            table,
+            &index,
+            &predicate.query,
+        )?
+    {
+        return Ok(Some(rows));
+    }
     let Some((index, value)) =
         choose_local_index_equality(read_ctx.catalog_kv, table, &plan.predicate)?
     else {
@@ -8402,6 +8571,23 @@ fn try_scan_with_local_index(
     .map(Some)
 }
 
+fn choose_local_gin_index(
+    catalog_kv: &dyn Kv,
+    table: &Table,
+    column: usize,
+) -> Result<Option<crabka_pgcatalog::Index>, ExecError> {
+    Ok(
+        crabka_pgcatalog::list_table_indexes(catalog_kv, &table.name)?
+            .into_iter()
+            .find(|index| {
+                index.placement == crabka_pgcatalog::IndexPlacement::Local
+                    && index.method == crabka_pgcatalog::IndexMethod::Gin
+                    && index.columns.len() == 1
+                    && table.column_index(&index.columns[0]) == Some(column)
+            }),
+    )
+}
+
 fn choose_local_index_equality(
     catalog_kv: &dyn Kv,
     table: &Table,
@@ -8417,6 +8603,7 @@ fn choose_local_index_equality(
     {
         let Some(index) = indexes.iter().find(|index| {
             index.placement == crabka_pgcatalog::IndexPlacement::Local
+                && index.method == crabka_pgcatalog::IndexMethod::Btree
                 && index.columns.len() == 1
                 && table.column_index(&index.columns[0]) == Some(predicate.column)
         }) else {
@@ -9402,6 +9589,8 @@ fn virtual_table(name: &str) -> Option<&'static str> {
         "pg_class" => Some("pg_class"),
         "pg_attribute" => Some("pg_attribute"),
         "pg_type" => Some("pg_type"),
+        "pg_ts_config" => Some("pg_ts_config"),
+        "pg_ts_dict" => Some("pg_ts_dict"),
         "pg_range" => Some("pg_range"),
         "pg_index" => Some("pg_index"),
         "pg_settings" => Some("pg_settings"),
@@ -9471,6 +9660,21 @@ fn virtual_catalog_columns(name: &str) -> Vec<Column> {
             ("typelem", Int4),
             ("typarray", Int4),
             ("typbasetype", Int4),
+        ]),
+        "pg_ts_config" => cols(&[
+            ("oid", Int4),
+            ("cfgname", Text),
+            ("cfgnamespace", Int4),
+            ("cfgowner", Int4),
+            ("cfgparser", Int4),
+        ]),
+        "pg_ts_dict" => cols(&[
+            ("oid", Int4),
+            ("dictname", Text),
+            ("dictnamespace", Int4),
+            ("dictowner", Int4),
+            ("dicttemplate", Int4),
+            ("dictinitoption", Text),
         ]),
         // PostgreSQL 18 column set, in catalog order. The oid-valued columns
         // use Int4 like every other synthesized catalog oid; the two regproc
@@ -9675,6 +9879,14 @@ fn virtual_catalog_rows(
         "pg_class" => pg_class_rows(catalog_kv),
         "pg_attribute" => pg_attribute_rows(catalog_kv),
         "pg_type" => Ok(pg_type_rows()),
+        "pg_ts_config" => text_search_catalog_rows(
+            catalog_kv,
+            crabka_pgparser::ast::TextSearchObjectKind::Configuration,
+        ),
+        "pg_ts_dict" => text_search_catalog_rows(
+            catalog_kv,
+            crabka_pgparser::ast::TextSearchObjectKind::Dictionary,
+        ),
         // Zero rows: no built-in type in the exposed scalar slice is a range
         // type. Drivers still LEFT JOIN it in their typeinfo queries.
         "pg_range" => Ok(Vec::new()),
@@ -9858,7 +10070,10 @@ fn pg_class_rows(catalog_kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
             crate::catalog_rel::namespace_oid(&index.table.schema),
         );
         row.relnatts = index.columns.len();
-        row.relam = crate::catalog_rel::BTREE_AM_OID;
+        row.relam = match index.method {
+            crabka_pgcatalog::IndexMethod::Btree => crate::catalog_rel::BTREE_AM_OID,
+            crabka_pgcatalog::IndexMethod::Gin => crate::catalog_rel::GIN_AM_OID,
+        };
         row.relpersistence = crabka_pgcatalog::relpersistence_of(&index.table.schema);
         rows.push(row.build()?);
     }
@@ -10149,14 +10364,16 @@ fn format_default_value(value: &Datum, ty: ColumnType) -> String {
         }
         // A jsonb/array default renders like PostgreSQL's `pg_get_expr` output:
         // the value's own text, quoted and cast to the column type.
-        Datum::Jsonb(_) | Datum::Array(_) => match zone_independent_text(value) {
-            Some(literal) => {
-                let mut out = String::new();
-                let _ = write!(out, "'{}'::{}", escape_sql_string(&literal), ty.name());
-                out
+        Datum::Jsonb(_) | Datum::Array(_) | Datum::TsVector(_) | Datum::TsQuery(_) => {
+            match zone_independent_text(value) {
+                Some(literal) => {
+                    let mut out = String::new();
+                    let _ = write!(out, "'{}'::{}", escape_sql_string(&literal), ty.name());
+                    out
+                }
+                None => "<unsupported>".to_string(),
             }
-            None => "<unsupported>".to_string(),
-        },
+        }
         Datum::Date(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
@@ -10296,6 +10513,43 @@ fn pg_type_rows() -> Vec<Vec<Datum>> {
         .collect();
     rows.extend(user_type_rows());
     rows
+}
+
+fn text_search_catalog_rows(
+    kv: &dyn Kv,
+    kind: crabka_pgparser::ast::TextSearchObjectKind,
+) -> Result<Vec<Vec<Datum>>, ExecError> {
+    Ok(crate::text_search_catalog::catalog_rows(kv, kind)?
+        .into_iter()
+        .map(|(name, base)| {
+            let mut hash = 2_166_136_261u32;
+            for byte in name.bytes() {
+                hash = (hash ^ u32::from(byte)).wrapping_mul(16_777_619);
+            }
+            let oid = i32::try_from(60_000 + hash % 1_000_000).expect("bounded oid");
+            match kind {
+                crabka_pgparser::ast::TextSearchObjectKind::Configuration => vec![
+                    Datum::Int4(oid),
+                    Datum::Text(name),
+                    Datum::Int4(PG_CATALOG_NAMESPACE_OID),
+                    Datum::Int4(10),
+                    Datum::Int4(3722),
+                ],
+                crabka_pgparser::ast::TextSearchObjectKind::Dictionary => vec![
+                    Datum::Int4(oid),
+                    Datum::Text(name),
+                    Datum::Int4(PG_CATALOG_NAMESPACE_OID),
+                    Datum::Int4(10),
+                    Datum::Int4(3727),
+                    if base.is_empty() {
+                        Datum::Null
+                    } else {
+                        Datum::Text(base)
+                    },
+                ],
+            }
+        })
+        .collect())
 }
 
 /// The `pg_type` rows of the `CREATE TYPE`/`CREATE DOMAIN` types.
@@ -10491,6 +10745,8 @@ pub(crate) fn virtual_table_names() -> &'static [&'static str] {
             "pg_class",
             "pg_attribute",
             "pg_type",
+            "pg_ts_config",
+            "pg_ts_dict",
             "pg_range",
             "pg_index",
             "pg_settings",
@@ -10709,6 +10965,8 @@ pub(crate) fn virtual_relation_oid(name: &str) -> i32 {
         "pg_class" => 1259,
         "pg_attribute" => 1249,
         "pg_type" => 1247,
+        "pg_ts_config" => 3602,
+        "pg_ts_dict" => 3600,
         "pg_range" => 3541,
         "pg_index" => 2610,
         "pg_settings" => 100_001,
@@ -10890,6 +11148,22 @@ fn scalar_type_rows() -> &'static [BuiltinTypeRow] {
             elem: 0,
             array: crabka_pgtypes::oids::JSONBARRAY as i32,
         },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::TSVECTOR as i32,
+            name: "tsvector",
+            len: -1,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::TSVECTORARRAY as i32,
+        },
+        BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::TSQUERY as i32,
+            name: "tsquery",
+            len: -1,
+            category: "U",
+            elem: 0,
+            array: crabka_pgtypes::oids::TSQUERYARRAY as i32,
+        },
     ]
 }
 
@@ -10932,6 +11206,22 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
             len: -1,
             category: "A",
             elem: crabka_pgtypes::oids::JSON as i32,
+            array: 0,
+        });
+        rows.push(BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::TSVECTORARRAY as i32,
+            name: "_tsvector",
+            len: -1,
+            category: "A",
+            elem: crabka_pgtypes::oids::TSVECTOR as i32,
+            array: 0,
+        });
+        rows.push(BuiltinTypeRow {
+            oid: crabka_pgtypes::oids::TSQUERYARRAY as i32,
+            name: "_tsquery",
+            len: -1,
+            category: "A",
+            elem: crabka_pgtypes::oids::TSQUERY as i32,
             array: 0,
         });
         rows.extend(crabka_pgtypes::ElemType::ALL.map(|elem| BuiltinTypeRow {
@@ -12484,6 +12774,7 @@ fn create_table_definition(
                     columns: index.columns.clone(),
                     unique: true,
                     placement: crabka_pgcatalog::IndexPlacement::Local,
+                    method: crabka_pgcatalog::IndexMethod::Btree,
                     constraint: Some(constraint),
                 });
             }
@@ -14483,6 +14774,7 @@ fn add_constraint_index(
         columns: columns.to_vec(),
         unique: true,
         placement: crabka_pgcatalog::IndexPlacement::Local,
+        method: crabka_pgcatalog::IndexMethod::Btree,
         constraint: Some(if primary_key {
             crabka_pgcatalog::IndexConstraint::PrimaryKey
         } else {
@@ -15463,6 +15755,7 @@ mod tests {
                 projection: ProjectionPushdown::All,
                 partial_aggregate: None,
                 top_k: None,
+                text_search: None,
             },
         ));
 
@@ -15477,6 +15770,7 @@ mod tests {
                     group_by: Vec::new(),
                 }),
                 top_k: None,
+                text_search: None,
             },
         ));
 
@@ -15493,6 +15787,7 @@ mod tests {
                     }],
                     limit: 1,
                 }),
+                text_search: None,
             },
         ));
     }
@@ -19521,6 +19816,7 @@ mod tests {
                     columns: cols.iter().map(|c| (*c).to_string()).collect(),
                     unique: *unique,
                     placement: crabka_pgcatalog::IndexPlacement::Local,
+                    method: crabka_pgcatalog::IndexMethod::Btree,
                     constraint: constraint.then_some(crabka_pgcatalog::IndexConstraint::Unique),
                 },
             )

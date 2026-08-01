@@ -2100,7 +2100,7 @@ pub fn dependents_blocking_index_drop(
 #[cfg(test)]
 mod tests {
     use assert2::assert;
-    use crabka_pgcatalog::{IndexPlacement, NewIndex};
+    use crabka_pgcatalog::{IndexMethod, IndexPlacement, NewIndex};
     use crabka_pgkv::MemKv;
     use crabka_pgparser::ast::{MatchType as AstMatchType, ReferentialAction as AstAction};
     use crabka_pgwire::error::PgError;
@@ -2119,6 +2119,7 @@ mod tests {
             name: name.to_string(),
             columns: cols.iter().map(|c| (*c).to_string()).collect(),
             unique: true,
+            method: IndexMethod::Btree,
             placement: IndexPlacement::Local,
             constraint,
         }
@@ -2405,6 +2406,7 @@ mod tests {
             table_id: 9,
             columns: names(&["id"]),
             unique: true,
+            method: IndexMethod::Btree,
             placement: IndexPlacement::Local,
             constraint: Some(IndexConstraint::PrimaryKey),
         }];

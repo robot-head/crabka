@@ -523,6 +523,7 @@ fn resolve_relation_oid(
 ) -> Result<i32, ExecError> {
     match object {
         Datum::Text(name) => resolve_relation_in_scope(kv, scope, name),
+        Datum::Regclass(value) => Ok(value.oid),
         other => i32::try_from(int_arg(other)?)
             .map_err(|_| ExecError::Unsupported("oid exceeds int4 range".into())),
     }
@@ -944,11 +945,15 @@ fn index_def(kv: &dyn Kv, scope: &ResolutionScope, object: &Datum) -> Result<Dat
 /// it is visible — read the note there before making the two agree.
 pub(crate) fn index_definition(index: &Index, table: &Table) -> String {
     format!(
-        "CREATE {}INDEX {} ON {}.{} USING btree ({})",
+        "CREATE {}INDEX {} ON {}.{} USING {} ({})",
         if index.unique { "UNIQUE " } else { "" },
         quote_identifier(&index.name),
         quote_identifier(&table.name.schema),
         quote_identifier(&table.name.name),
+        match index.method {
+            crabka_pgcatalog::IndexMethod::Btree => "btree",
+            crabka_pgcatalog::IndexMethod::Gin => "gin",
+        },
         quoted_column_list(&index.columns),
     )
 }

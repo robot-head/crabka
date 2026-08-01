@@ -87,6 +87,8 @@ mod sql92;
 mod srf;
 mod string_fn;
 mod subquery;
+mod text_search_catalog;
+mod text_search_fn;
 pub mod timestamp_txn;
 pub mod ts_gc;
 mod usertype;

@@ -18,8 +18,9 @@ use crabka_pgtypes::{
 
 use crate::{
     CheckConstraint, Column, ColumnDefault, ForeignDataWrapper, ForeignKey, ForeignServer,
-    ForeignTableMeta, HashSharding, IdentityKind, Index, IndexConstraint, IndexPlacement,
-    MatchType, ReferentialAction, Sequence, ShardingStrategy, TableOptions, UserMapping, View,
+    ForeignTableMeta, HashSharding, IdentityKind, Index, IndexConstraint, IndexMethod,
+    IndexPlacement, MatchType, ReferentialAction, Sequence, ShardingStrategy, TableOptions,
+    UserMapping, View,
 };
 
 /// Everything [`deserialize_schema`] recovers from a stored table schema.
@@ -41,10 +42,12 @@ const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
 const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
-const INDEX_VERSION: u8 = 2;
+const INDEX_VERSION: u8 = 3;
 const SEQUENCE_VERSION: u8 = 1;
 const INDEX_PLACEMENT_LOCAL: u8 = 0;
 const INDEX_PLACEMENT_GLOBAL: u8 = 1;
+const INDEX_METHOD_BTREE: u8 = 0;
+const INDEX_METHOD_GIN: u8 = 1;
 const INDEX_CONSTRAINT_NONE: u8 = 0;
 const INDEX_CONSTRAINT_PRIMARY_KEY: u8 = 1;
 const INDEX_CONSTRAINT_UNIQUE: u8 = 2;
@@ -90,6 +93,8 @@ mod datum_tag {
     /// dropped — what `PostgreSQL` does with the oid its folded `Const` holds.
     /// Append-only — no version bump.
     pub const REGCLASS: u8 = 11;
+    pub const TSVECTOR: u8 = 12;
+    pub const TSQUERY: u8 = 13;
 }
 
 mod type_tag {
@@ -139,6 +144,8 @@ mod type_tag {
     /// `pg_type.oid` as a big-endian `u32`. The definition lives in the type
     /// catalog, so the column stores only the identity. Append-only.
     pub const USER: u8 = 21;
+    pub const TSVECTOR: u8 = 22;
+    pub const TSQUERY: u8 = 23;
 }
 
 /// Append a column's type (tag byte, plus the numeric typmod payload).
@@ -188,6 +195,8 @@ pub(crate) fn write_type(out: &mut Vec<u8>, ty: ColumnType) {
         ColumnType::Bytea => out.push(type_tag::BYTEA),
         ColumnType::Uuid => out.push(type_tag::UUID),
         ColumnType::Regclass => out.push(type_tag::REGCLASS),
+        ColumnType::TsVector => out.push(type_tag::TSVECTOR),
+        ColumnType::TsQuery => out.push(type_tag::TSQUERY),
         ColumnType::Jsonb => out.push(type_tag::JSONB),
         ColumnType::Array(elem) => {
             out.push(type_tag::ARRAY);
@@ -279,6 +288,8 @@ pub(crate) fn read_type(cur: &mut &[u8]) -> Result<ColumnType, KvError> {
         type_tag::BYTEA => ColumnType::Bytea,
         type_tag::UUID => ColumnType::Uuid,
         type_tag::REGCLASS => ColumnType::Regclass,
+        type_tag::TSVECTOR => ColumnType::TsVector,
+        type_tag::TSQUERY => ColumnType::TsQuery,
         type_tag::JSONB => ColumnType::Jsonb,
         type_tag::ARRAY => {
             let elem = crabka_pgtypes::ElemType::read_code(cur)
@@ -391,6 +402,14 @@ fn write_default_value(out: &mut Vec<u8>, default: &Datum) {
             out.push(datum_tag::REGCLASS);
             out.extend_from_slice(&value.oid.to_be_bytes());
         }
+        Datum::TsVector(value) => {
+            out.push(datum_tag::TSVECTOR);
+            write_str(out, &value.to_string());
+        }
+        Datum::TsQuery(value) => {
+            out.push(datum_tag::TSQUERY);
+            write_str(out, &value.to_string());
+        }
         Datum::Date(_)
         | Datum::Time(_)
         | Datum::Timetz(_)
@@ -470,6 +489,16 @@ fn read_default_value(cur: &mut &[u8]) -> Result<Datum, KvError> {
         datum_tag::REGCLASS => Datum::Regclass(crabka_pgtypes::RegclassValue::unresolved(
             i32::from_be_bytes(take_n(cur, 4)?.try_into().expect("4")),
         )),
+        datum_tag::TSVECTOR => {
+            Datum::TsVector(read_string(cur)?.parse().map_err(|error| {
+                KvError::CorruptRow(format!("invalid tsvector default: {error}"))
+            })?)
+        }
+        datum_tag::TSQUERY => {
+            Datum::TsQuery(read_string(cur)?.parse().map_err(|error| {
+                KvError::CorruptRow(format!("invalid tsquery default: {error}"))
+            })?)
+        }
         tag => {
             return Err(KvError::CorruptRow(format!(
                 "unknown default datum tag {tag}"
@@ -830,6 +859,10 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
         IndexPlacement::Local => INDEX_PLACEMENT_LOCAL,
         IndexPlacement::Global => INDEX_PLACEMENT_GLOBAL,
     });
+    out.push(match index.method {
+        IndexMethod::Btree => INDEX_METHOD_BTREE,
+        IndexMethod::Gin => INDEX_METHOD_GIN,
+    });
     out.push(match index.constraint {
         None => INDEX_CONSTRAINT_NONE,
         Some(IndexConstraint::PrimaryKey) => INDEX_CONSTRAINT_PRIMARY_KEY,
@@ -859,7 +892,7 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
 pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
-    if version != INDEX_VERSION {
+    if !matches!(version, 2 | INDEX_VERSION) {
         return Err(KvError::CorruptRow(format!(
             "unknown index version {version}"
         )));
@@ -885,6 +918,19 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
                 "unknown index placement flag {flag}"
             )));
         }
+    };
+    let method = if version >= 3 {
+        match take_u8(&mut cur)? {
+            INDEX_METHOD_BTREE => IndexMethod::Btree,
+            INDEX_METHOD_GIN => IndexMethod::Gin,
+            tag => {
+                return Err(KvError::CorruptRow(format!(
+                    "unknown index method tag {tag}"
+                )));
+            }
+        }
+    } else {
+        IndexMethod::Btree
     };
     let constraint = match take_u8(&mut cur)? {
         INDEX_CONSTRAINT_NONE => None,
@@ -917,6 +963,7 @@ pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
         columns,
         unique,
         placement,
+        method,
         constraint,
     })
 }
@@ -2000,6 +2047,7 @@ mod tests {
             columns: vec!["email".into()],
             unique: true,
             placement: IndexPlacement::Global,
+            method: IndexMethod::Gin,
             constraint: None,
         };
 

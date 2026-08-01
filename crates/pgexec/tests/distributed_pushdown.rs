@@ -1866,6 +1866,21 @@ async fn unsupported_top_k_shapes_fall_back_to_safe_full_scan() {
 }
 
 #[tokio::test]
+async fn text_search_on_sharded_rows_uses_safe_sequential_scan() {
+    let engine = SqlEngine::new();
+    seed_sharded_items(&engine).await;
+
+    let rows = query_cells(
+        engine,
+        "SELECT id FROM items \
+         WHERE to_tsvector('english', name) @@ plainto_tsquery('english', 'three')",
+    )
+    .await;
+
+    assert_eq!(rows, vec![vec![Some("3".into())]]);
+}
+
+#[tokio::test]
 async fn unsharded_select_does_not_request_executable_pushdown() {
     let scanner = Arc::new(RecordingScanner::default());
     let mut engine = SqlEngine::new();

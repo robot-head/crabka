@@ -1643,6 +1643,8 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
         | Datum::Interval(_)
         | Datum::Enum(_)
         | Datum::Regclass(_)
+        | Datum::TsVector(_)
+        | Datum::TsQuery(_)
         | Datum::Bytea(_) => JsonbValue::String(datum_text(d, ctx)),
     })
 }

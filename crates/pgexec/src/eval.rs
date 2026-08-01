@@ -545,6 +545,13 @@ pub(crate) fn eval_case(
 pub(crate) fn apply_unary(op: UnaryOp, v: &Datum, _ctx: &EvalCtx) -> Result<Datum, ExecError> {
     match op {
         UnaryOp::Not => Ok(ops::not(v)?),
+        UnaryOp::TsNot => match v {
+            Datum::Null => Ok(Datum::Null),
+            Datum::TsQuery(query) => Ok(Datum::TsQuery(crabka_pgtypes::TsQuery::Not(Box::new(
+                query.clone(),
+            )))),
+            other => Err(undefined_prefix_operator(op, other)),
+        },
         // SP37: unary minus on an interval negates each field (`0 - interval` has no
         // defined operator). Everything else is `0 - v` (int/numeric/float negation).
         UnaryOp::Neg => match v {
@@ -697,7 +704,8 @@ fn apply_prefix_op(op: UnaryOp, v: &Datum) -> Result<Datum, ExecError> {
         | UnaryOp::IsFalse
         | UnaryOp::IsNotFalse
         | UnaryOp::IsUnknown
-        | UnaryOp::IsNotUnknown => Err(undefined_prefix_operator(op, v)),
+        | UnaryOp::IsNotUnknown
+        | UnaryOp::TsNot => Err(undefined_prefix_operator(op, v)),
     }
 }
 
@@ -731,6 +739,7 @@ fn prefix_spelling(op: UnaryOp) -> &'static str {
         UnaryOp::Cbrt => "||/",
         UnaryOp::Neg => "-",
         UnaryOp::Plus => "+",
+        UnaryOp::TsNot => "!!",
         _ => "NOT",
     }
 }
@@ -983,7 +992,16 @@ fn coerce_untyped_literal_operands(
             };
         }
         if !matches!(other, Datum::Jsonb(_)) {
-            return None;
+            return match (op, other) {
+                (BinaryOp::JsonPathMatch, Datum::TsVector(_)) => Some(ColumnType::TsQuery),
+                (BinaryOp::Concat, Datum::TsVector(_)) => Some(ColumnType::TsVector),
+                (BinaryOp::Concat, Datum::TsQuery(_)) => Some(ColumnType::TsQuery),
+                (
+                    BinaryOp::Contains | BinaryOp::ContainedBy | BinaryOp::Overlaps,
+                    Datum::TsQuery(_),
+                ) => Some(ColumnType::TsQuery),
+                _ => None,
+            };
         }
         match op {
             BinaryOp::JsonGetPath
@@ -1066,11 +1084,33 @@ pub(crate) fn apply_binary(
         BinaryOp::KeyExistsAny => json_fn::eval_json_operator(JsonOp::KeyExistsAny, l, r),
         BinaryOp::KeyExistsAll => json_fn::eval_json_operator(JsonOp::KeyExistsAll, l, r),
         BinaryOp::JsonPathExists => json_fn::eval_json_operator(JsonOp::PathExists, l, r),
+        BinaryOp::JsonPathMatch
+            if matches!(l, Datum::TsVector(_) | Datum::TsQuery(_) | Datum::Text(_))
+                || matches!(r, Datum::TsVector(_) | Datum::TsQuery(_)) =>
+        {
+            apply_text_search_match(l, r, ctx)
+        }
         BinaryOp::JsonPathMatch => json_fn::eval_json_operator(JsonOp::PathMatch, l, r),
         // `@>` / `<@` are defined for BOTH jsonb and arrays.
         BinaryOp::Contains | BinaryOp::ContainedBy => apply_containment(op, l, r),
         // `&&` is array-only; `array_overlap` already yields NULL for a NULL side.
+        BinaryOp::Overlaps if matches!((l, r), (Datum::TsQuery(_), Datum::TsQuery(_))) => {
+            let (Datum::TsQuery(left), Datum::TsQuery(right)) = (l, r) else {
+                unreachable!()
+            };
+            Ok(Datum::TsQuery(crabka_pgtypes::TsQuery::And(
+                Box::new(left.clone()),
+                Box::new(right.clone()),
+            )))
+        }
         BinaryOp::Overlaps => array_fn::array_overlap(l, r),
+        BinaryOp::Phrase => match (l, r) {
+            (Datum::TsQuery(left), Datum::TsQuery(right)) => Ok(Datum::TsQuery(
+                crabka_pgtypes::TsQuery::Phrase(Box::new(left.clone()), Box::new(right.clone()), 1),
+            )),
+            (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
+            _ => Err(undefined_operator_for(op, l, r)),
+        },
         BinaryOp::Match | BinaryOp::MatchCi | BinaryOp::NotMatch | BinaryOp::NotMatchCi => {
             apply_regex_match(op, l, r)
         }
@@ -1112,6 +1152,13 @@ fn apply_containment(op: BinaryOp, l: &Datum, r: &Datum) -> Result<Datum, ExecEr
             array_fn::array_contained_by(l, r)
         };
     }
+    if let (Datum::TsQuery(left), Datum::TsQuery(right)) = (l, r) {
+        return Ok(Datum::Bool(if contains {
+            left.contains(right)
+        } else {
+            right.contains(left)
+        }));
+    }
     if l.is_null() && r.is_null() {
         return Ok(Datum::Null);
     }
@@ -1128,6 +1175,10 @@ enum ConcatKind {
     /// One of the three array forms (`anyarray || anyarray`, `anyarray ||
     /// anyelement`, `anyelement || anyarray`).
     Array(ConcatForm),
+    /// `tsvector || tsvector`.
+    TsVector,
+    /// `tsquery || tsquery` (boolean OR).
+    TsQuery,
 }
 
 /// Resolve `left || right` from the operands' STATIC types: the operator that
@@ -1153,7 +1204,12 @@ fn adopt_null_literal_type(
     lt: ColumnType,
     rt: ColumnType,
 ) -> (ColumnType, ColumnType) {
-    let adopts = |t: ColumnType| t == ColumnType::Jsonb || t.array_element().is_some();
+    let adopts = |t: ColumnType| {
+        matches!(
+            t,
+            ColumnType::Jsonb | ColumnType::TsVector | ColumnType::TsQuery
+        ) || t.array_element().is_some()
+    };
     if matches!(left, Expr::NullLiteral) && adopts(rt) {
         (rt, rt)
     } else if matches!(right, Expr::NullLiteral) && adopts(lt) {
@@ -1180,10 +1236,16 @@ fn adopt_string_literal_type(
     rt: ColumnType,
 ) -> (ColumnType, ColumnType) {
     let untyped = |e: &Expr| matches!(e, Expr::StringLiteral(_));
-    if untyped(left) && rt == ColumnType::Jsonb {
-        (ColumnType::Jsonb, rt)
-    } else if untyped(right) && lt == ColumnType::Jsonb {
-        (lt, ColumnType::Jsonb)
+    let adopts = |t: ColumnType| {
+        matches!(
+            t,
+            ColumnType::Jsonb | ColumnType::TsVector | ColumnType::TsQuery
+        )
+    };
+    if untyped(left) && adopts(rt) {
+        (rt, rt)
+    } else if untyped(right) && adopts(lt) {
+        (lt, lt)
     } else {
         (lt, rt)
     }
@@ -1448,6 +1510,12 @@ pub(crate) fn undetermined_polymorphic_type() -> ExecError {
 /// before the text fallback so `text[] || text` appends rather than stringifies —
 /// PostgreSQL's `anyarray || anyelement` outranks `anynonarray || text` there.
 fn concat_kind(lt: ColumnType, rt: ColumnType) -> Option<(ConcatKind, ColumnType)> {
+    if lt == ColumnType::TsVector && rt == ColumnType::TsVector {
+        return Some((ConcatKind::TsVector, ColumnType::TsVector));
+    }
+    if lt == ColumnType::TsQuery && rt == ColumnType::TsQuery {
+        return Some((ConcatKind::TsQuery, ColumnType::TsQuery));
+    }
     if lt == ColumnType::Jsonb && rt == ColumnType::Jsonb {
         return Some((ConcatKind::Jsonb, ColumnType::Jsonb));
     }
@@ -1469,7 +1537,39 @@ fn apply_concat(kind: ConcatKind, l: &Datum, r: &Datum, ctx: &EvalCtx) -> Result
         ConcatKind::Text => Ok(ops::concat(l, r, ctx.output_style())?),
         ConcatKind::Jsonb => json_fn::eval_json_operator(JsonOp::Concat, l, r),
         ConcatKind::Array(form) => array_fn::array_concat(form, l, r, ctx),
+        ConcatKind::TsVector => match (l, r) {
+            (Datum::TsVector(left), Datum::TsVector(right)) => {
+                Ok(Datum::TsVector(left.concat(right)))
+            }
+            (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
+            _ => Err(undefined_operator_for(BinaryOp::Concat, l, r)),
+        },
+        ConcatKind::TsQuery => match (l, r) {
+            (Datum::TsQuery(left), Datum::TsQuery(right)) => Ok(Datum::TsQuery(
+                crabka_pgtypes::TsQuery::Or(Box::new(left.clone()), Box::new(right.clone())),
+            )),
+            (Datum::Null, _) | (_, Datum::Null) => Ok(Datum::Null),
+            _ => Err(undefined_operator_for(BinaryOp::Concat, l, r)),
+        },
     }
+}
+
+fn apply_text_search_match(l: &Datum, r: &Datum, ctx: &EvalCtx) -> Result<Datum, ExecError> {
+    if l.is_null() || r.is_null() {
+        return Ok(Datum::Null);
+    }
+    let matches = match (l, r) {
+        (Datum::TsVector(vector), Datum::TsQuery(query))
+        | (Datum::TsQuery(query), Datum::TsVector(vector)) => vector.matches(query),
+        (Datum::Text(text), Datum::TsQuery(query)) | (Datum::TsQuery(query), Datum::Text(text)) => {
+            let config =
+                crate::session::current_setting_runtime("default_text_search_config", false)?
+                    .expect("registered GUC has a value");
+            crate::text_search_fn::to_tsvector(&config, text, ctx.catalog())?.matches(query)
+        }
+        _ => return Err(undefined_operator_for(BinaryOp::JsonPathMatch, l, r)),
+    };
+    Ok(Datum::Bool(matches))
 }
 
 /// The `JsonOp` a `BinaryOp` spells, for the operators jsonb defines.
@@ -1510,6 +1610,7 @@ fn op_spelling(op: BinaryOp) -> &'static str {
         BinaryOp::JsonPathExists => "@?",
         BinaryOp::JsonPathMatch => "@@",
         BinaryOp::Overlaps => "&&",
+        BinaryOp::Phrase => "<->",
         BinaryOp::Match => "~",
         BinaryOp::MatchCi => "~*",
         BinaryOp::NotMatch => "!~",
@@ -1734,6 +1835,14 @@ pub(crate) fn infer_type(expr: &Expr, scope: &Scope) -> Result<ColumnType, ExecE
         }
         Expr::Unary { op, expr } => match op {
             UnaryOp::Not => Ok(ColumnType::Bool),
+            UnaryOp::TsNot => {
+                let operand = infer_type(expr, scope)?;
+                if operand == ColumnType::TsQuery || is_unknown_literal(expr) {
+                    Ok(ColumnType::TsQuery)
+                } else {
+                    Err(undefined_operator("!!", operand, operand))
+                }
+            }
             // `~` and `@` keep the operand's type; `|/` and `||/` are the
             // `float8`-only `dsqrt`/`dcbrt`, so they report `float8` whatever
             // the operand is.
@@ -1961,6 +2070,43 @@ fn infer_binary_type(
         // `||` is text, jsonb, or one of the three array concatenations, resolved
         // from the operand types (42883 when no `||` applies).
         BinaryOp::Concat => Ok(resolve_concat(left, right, scope)?.1),
+        BinaryOp::Phrase => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            if lt == ColumnType::TsQuery && rt == ColumnType::TsQuery {
+                Ok(ColumnType::TsQuery)
+            } else {
+                Err(undefined_operator("<->", lt, rt))
+            }
+        }
+        // `@@` is shared by jsonpath and full-text search. A text-search
+        // operand selects the latter overload; a bare query literal adopts
+        // `tsquery` when paired with a vector.
+        BinaryOp::JsonPathMatch => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            let (lt, rt) = if lt == ColumnType::TsVector && is_unknown_literal(right) {
+                (lt, ColumnType::TsQuery)
+            } else {
+                (lt, rt)
+            };
+            if matches!(
+                (lt, rt),
+                (ColumnType::TsVector | ColumnType::Text, ColumnType::TsQuery)
+                    | (ColumnType::TsQuery, ColumnType::TsVector | ColumnType::Text)
+            ) {
+                return Ok(ColumnType::Bool);
+            }
+            json_fn::json_operator_result_type(JsonOp::PathMatch, lt, rt)
+                .ok_or_else(|| undefined_operator("@@", lt, rt))
+        }
+        BinaryOp::Overlaps => {
+            let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
+            let (alt, art) = adopt_json_operand_types(op, left, right, lt, rt);
+            if alt == ColumnType::TsQuery && art == ColumnType::TsQuery {
+                return Ok(ColumnType::TsQuery);
+            }
+            json_or_array_operator_result_type(op, alt, art)
+                .ok_or_else(|| undefined_operator("&&", lt, rt))
+        }
         // The jsonb/array operators: `->` and `#>` yield jsonb, `->>` and `#>>`
         // yield text, and the containment/existence/overlap tests yield boolean.
         BinaryOp::JsonGet
@@ -1972,11 +2118,15 @@ fn infer_binary_type(
         | BinaryOp::KeyExists
         | BinaryOp::KeyExistsAny
         | BinaryOp::KeyExistsAll
-        | BinaryOp::JsonPathExists
-        | BinaryOp::JsonPathMatch
-        | BinaryOp::Overlaps => {
+        | BinaryOp::JsonPathExists => {
             let (lt, rt) = (infer_type(left, scope)?, infer_type(right, scope)?);
             let (alt, art) = adopt_json_operand_types(op, left, right, lt, rt);
+            if matches!(op, BinaryOp::Contains | BinaryOp::ContainedBy)
+                && alt == ColumnType::TsQuery
+                && art == ColumnType::TsQuery
+            {
+                return Ok(ColumnType::Bool);
+            }
             json_or_array_operator_result_type(op, alt, art)
                 .ok_or_else(|| undefined_operator(op_spelling(op), lt, rt))
         }

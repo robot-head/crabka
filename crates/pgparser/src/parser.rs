@@ -801,6 +801,7 @@ impl Parser {
                 Token::JsonPathExists => (BinaryOp::JsonPathExists, 7, 8),
                 Token::JsonPathMatch => (BinaryOp::JsonPathMatch, 7, 8),
                 Token::Overlaps => (BinaryOp::Overlaps, 7, 8),
+                Token::Phrase => (BinaryOp::Phrase, 7, 8),
                 // The regex-match and bitwise operators are "any other operator"
                 // in PostgreSQL's precedence table — the same level as `||` and
                 // the jsonb family, left-associative. `1 | 2 # 3` is therefore
@@ -1046,6 +1047,7 @@ impl Parser {
                 | Token::At
                 | Token::SquareRoot
                 | Token::CubeRoot
+                | Token::TsNot
                 | Token::Keyword(
                     Keyword::Not
                         | Keyword::Exists
@@ -1122,6 +1124,13 @@ impl Parser {
                 };
                 Ok(Expr::Unary {
                     op,
+                    expr: Box::new(self.expr(8)?),
+                })
+            }
+            Token::TsNot => {
+                self.bump();
+                Ok(Expr::Unary {
+                    op: UnaryOp::TsNot,
                     expr: Box::new(self.expr(8)?),
                 })
             }
@@ -2784,6 +2793,59 @@ impl Parser {
         }
     }
 
+    fn starts_alter_or_drop_text_search(&self) -> bool {
+        matches!(
+            (self.peek(), self.peek2(), self.peek3()),
+            (
+                Token::Ident(action),
+                Token::Ident(text),
+                Token::Ident(search)
+            ) if action == "alter" && text == "text" && search == "search"
+        ) || matches!(
+            (self.peek(), self.peek2(), self.peek3()),
+            (
+                Token::Keyword(Keyword::Drop),
+                Token::Ident(text),
+                Token::Ident(search)
+            ) if text == "text" && search == "search"
+        )
+    }
+
+    fn alter_or_drop_text_search_statement(&mut self) -> Result<ParsedStatement, ParseError> {
+        use crate::command::CommandIdentity as I;
+
+        let alter = matches!(self.peek(), Token::Ident(action) if action == "alter");
+        let kind = self.text_search_kind_at(3)?;
+        let identity = match (alter, kind) {
+            (true, crate::ast::TextSearchObjectKind::Configuration) => {
+                I::AlterTextSearchConfiguration
+            }
+            (true, crate::ast::TextSearchObjectKind::Dictionary) => I::AlterTextSearchDictionary,
+            (false, crate::ast::TextSearchObjectKind::Configuration) => {
+                I::DropTextSearchConfiguration
+            }
+            (false, crate::ast::TextSearchObjectKind::Dictionary) => I::DropTextSearchDictionary,
+        };
+        let statement = if alter {
+            self.alter_text_search()
+        } else {
+            self.drop_text_search()
+        };
+        emitted(identity, statement)
+    }
+
+    fn set_statement_dispatch(&mut self) -> Result<ParsedStatement, ParseError> {
+        use crate::command::CommandIdentity as I;
+
+        if matches!(self.peek2(), Token::Ident(role) if role == "role") {
+            emitted(I::SetRole, self.set_role_stmt())
+        } else if matches!(self.peek2(), Token::Keyword(Keyword::Transaction)) {
+            emitted(I::SetTransaction, self.set_stmt())
+        } else {
+            self.set_statement()
+        }
+    }
+
     fn statement(&mut self) -> Result<ParsedStatement, ParseError> {
         use crate::command::CommandIdentity as I;
 
@@ -2824,14 +2886,15 @@ impl Parser {
             };
             return emitted(identity, Ok(statement));
         }
+        if self.starts_alter_or_drop_text_search() {
+            return self.alter_or_drop_text_search_statement();
+        }
         match self.peek() {
             Token::Ident(s) if s == "merge" && *self.peek2() == Token::Keyword(Keyword::Into) => {
                 emitted(I::Merge, self.merge())
             }
             Token::Keyword(Keyword::Create) => self.create_statement(),
             Token::Keyword(Keyword::Drop) => {
-                // SP40: lookahead dispatch for FDW DDL vs DROP TABLE.
-                // Each drop function handles its own `IF EXISTS` via `eat_if_exists`.
                 match self.peek2() {
                     Token::Keyword(Keyword::Foreign) => {
                         // DROP FOREIGN ... — look at the third token to distinguish
@@ -2928,20 +2991,11 @@ impl Parser {
                 let leading = *keyword;
                 self.rollback_statement(leading)
             }
-            // SP4: DML
             Token::Keyword(Keyword::Update) => emitted(I::Update, self.update()),
             Token::Keyword(Keyword::Delete) => emitted(I::Delete, self.delete()),
             // SP37: GUC control. `SET` is a keyword; `SHOW`/`RESET`/`ALTER` are matched as
             // plain (lowercased) idents — keyword-free so they stay usable as names.
-            Token::Keyword(Keyword::Set) => {
-                if matches!(self.peek2(), Token::Ident(s) if s == "role") {
-                    emitted(I::SetRole, self.set_role_stmt())
-                } else if matches!(self.peek2(), Token::Keyword(Keyword::Transaction)) {
-                    emitted(I::SetTransaction, self.set_stmt())
-                } else {
-                    self.set_statement()
-                }
-            }
+            Token::Keyword(Keyword::Set) => self.set_statement_dispatch(),
             // `PREPARE TRANSACTION` is the 2PC refusal below, not SQL PREPARE.
             Token::Ident(s)
                 if is_session_utility_word(s)
@@ -3946,6 +4000,19 @@ impl Parser {
         // between CREATE and the object keyword, so dispatch looks past
         // them.
         match self.peek_n(self.create_object_keyword_offset()) {
+            Token::Ident(word)
+                if word == "text"
+                    && matches!(self.peek_n(self.create_object_keyword_offset() + 1), Token::Ident(search) if search == "search") =>
+            {
+                let kind = self.text_search_kind_at(self.create_object_keyword_offset() + 2)?;
+                let identity = match kind {
+                    crate::ast::TextSearchObjectKind::Configuration => {
+                        I::CreateTextSearchConfiguration
+                    }
+                    crate::ast::TextSearchObjectKind::Dictionary => I::CreateTextSearchDictionary,
+                };
+                emitted(identity, self.create_text_search())
+            }
             Token::Keyword(Keyword::Or) if self.peeked_create_view() => {
                 emitted(I::CreateView, self.create_view())
             }
@@ -4721,6 +4788,135 @@ impl Parser {
         }
         self.expect(&Token::RParen)?;
         Ok(true)
+    }
+
+    fn text_search_kind_at(
+        &self,
+        offset: usize,
+    ) -> Result<crate::ast::TextSearchObjectKind, ParseError> {
+        match self.peek_n(offset) {
+            Token::Ident(word) if word == "configuration" => {
+                Ok(crate::ast::TextSearchObjectKind::Configuration)
+            }
+            Token::Ident(word) if word == "dictionary" => {
+                Ok(crate::ast::TextSearchObjectKind::Dictionary)
+            }
+            other => Err(ParseError::new(
+                format!("expected CONFIGURATION or DICTIONARY, found {other:?}"),
+                self.peek_pos(),
+            )),
+        }
+    }
+
+    fn text_search_kind(&mut self) -> Result<crate::ast::TextSearchObjectKind, ParseError> {
+        let kind = self.text_search_kind_at(0)?;
+        self.bump();
+        Ok(kind)
+    }
+
+    fn text_search_object_name(&mut self) -> Result<String, ParseError> {
+        let first = self.expect_object_name()?;
+        if self.eat_token(&Token::Dot) {
+            Ok(format!("{first}.{}", self.expect_object_name()?))
+        } else {
+            Ok(first)
+        }
+    }
+
+    fn text_search_leadin(&mut self, create_or_drop: Option<Keyword>) -> Result<(), ParseError> {
+        if let Some(keyword) = create_or_drop {
+            self.expect(&Token::Keyword(keyword))?;
+        } else {
+            self.expect_ident_eq("alter")?;
+        }
+        self.expect_ident_eq("text")?;
+        self.expect_ident_eq("search")
+    }
+
+    fn create_text_search(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{Statement, TextSearchDdl, TextSearchObjectKind, UtilityStatement};
+        self.text_search_leadin(Some(Keyword::Create))?;
+        let kind = self.text_search_kind()?;
+        let name = self.text_search_object_name()?;
+        self.expect(&Token::LParen)?;
+        let mut base = None;
+        loop {
+            let option = self.expect_col_label()?;
+            self.expect(&Token::Eq)?;
+            let value = self.text_search_object_name()?;
+            if matches!(
+                (kind, option.as_str()),
+                (TextSearchObjectKind::Configuration, "copy" | "parser")
+                    | (TextSearchObjectKind::Dictionary, "template")
+            ) {
+                base = Some(
+                    if option == "parser"
+                        && matches!(value.as_str(), "default" | "pg_catalog.default")
+                    {
+                        "simple".into()
+                    } else {
+                        value
+                    },
+                );
+            }
+            if !self.eat_comma() {
+                break;
+            }
+        }
+        self.expect(&Token::RParen)?;
+        let base = base.ok_or_else(|| {
+            ParseError::new(
+                match kind {
+                    TextSearchObjectKind::Configuration => "expected COPY or PARSER option",
+                    TextSearchObjectKind::Dictionary => "expected TEMPLATE option",
+                },
+                self.peek_pos(),
+            )
+        })?;
+        Ok(Statement::Utility(UtilityStatement::TextSearch(
+            TextSearchDdl::Create { kind, name, base },
+        )))
+    }
+
+    fn alter_text_search(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{Statement, TextSearchDdl, UtilityStatement};
+        self.text_search_leadin(None)?;
+        let kind = self.text_search_kind()?;
+        let name = self.text_search_object_name()?;
+        let rename_to = if self.eat_ident_eq("rename") {
+            self.expect_keyword_or_ident(Keyword::To, "to")?;
+            Some(self.text_search_object_name()?)
+        } else {
+            // Mapping and dictionary-option alterations are durable metadata
+            // updates but do not change the built-in Rust lexer/stemmer.
+            while !matches!(self.peek(), Token::Semicolon | Token::Eof) {
+                self.bump();
+            }
+            None
+        };
+        Ok(Statement::Utility(UtilityStatement::TextSearch(
+            TextSearchDdl::Alter {
+                kind,
+                name,
+                rename_to,
+            },
+        )))
+    }
+
+    fn drop_text_search(&mut self) -> Result<crate::ast::Statement, ParseError> {
+        use crate::ast::{Statement, TextSearchDdl, UtilityStatement};
+        self.text_search_leadin(Some(Keyword::Drop))?;
+        let kind = self.text_search_kind()?;
+        let if_exists = self.eat_if_exists()?;
+        let name = self.text_search_object_name()?;
+        self.eat_drop_behavior();
+        Ok(Statement::Utility(UtilityStatement::TextSearch(
+            TextSearchDdl::Drop {
+                kind,
+                name,
+                if_exists,
+            },
+        )))
     }
 
     fn begin(&mut self) -> Result<crate::ast::Statement, ParseError> {

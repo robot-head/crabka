@@ -295,6 +295,8 @@ pub fn cast_in(
         // `cast_allowed` says yes for `T → T` and for anything ↔ the string
         // family, so without them a runtime cast would wrongly report 42846.
         (Datum::Jsonb(j), ColumnType::Jsonb) => Ok(Datum::Jsonb(j.clone())),
+        (Datum::TsVector(vector), ColumnType::TsVector) => Ok(Datum::TsVector(vector.clone())),
+        (Datum::TsQuery(query), ColumnType::TsQuery) => Ok(Datum::TsQuery(query.clone())),
         // text → jsonb is `jsonb_in` (22P02 on bad JSON).
         (Datum::Text(s), ColumnType::Jsonb) => crate::jsonb::parse(s).map(Datum::Jsonb),
         // text → array is `array_in`: split the literal, then run the element
@@ -415,6 +417,8 @@ pub fn cast_in(
                 type_name: "regclass",
                 value: s.clone(),
             }),
+        (Datum::Text(s), ColumnType::TsVector) => s.parse().map(Datum::TsVector),
+        (Datum::Text(s), ColumnType::TsQuery) => s.parse().map(Datum::TsQuery),
         (Datum::Text(s), Numeric(tm)) => {
             let d = crate::numeric::parse(s).ok_or_else(|| TypeError::InvalidText {
                 type_name: "numeric",
