@@ -312,6 +312,30 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub fdw_fetch_min: Option<ByteSize>,
 
+    /// Maximum time a broker may hold one FDW fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fdw_fetch_max_wait: Option<Time>,
+
+    /// Maximum bytes returned for one FDW partition fetch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_byte_size")]
+    #[schemars(with = "Option<String>")]
+    pub fdw_fetch_partition_max: Option<ByteSize>,
+
+    /// FDW broker TCP connection timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fdw_connect_timeout: Option<Time>,
+
+    /// FDW broker request timeout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fdw_request_timeout: Option<Time>,
+
     /// Minimum response size for committed-WAL recovery fetches.
     #[serde(
         default,
@@ -753,6 +777,10 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) pgexec_runtime_policy: crabka_pgexec::RuntimePolicy,
     pub(crate) registry_reader_fetch_min: Option<crabka_client_core::FetchMinBytes>,
     pub(crate) fdw_fetch_min: Option<crabka_client_core::FetchMinBytes>,
+    pub(crate) fdw_fetch_max_wait: Time,
+    pub(crate) fdw_fetch_partition_max: ByteSize,
+    pub(crate) fdw_connect_timeout: Time,
+    pub(crate) fdw_request_timeout: Time,
     pub(crate) wal_recovery_fetch_min: Option<crabka_client_core::FetchMinBytes>,
     pub(crate) checkpoint_part_size: CheckpointPartBytes,
     pub(crate) checkpoint_retain: PositiveUsize,
@@ -1032,6 +1060,16 @@ impl GresComputeSpec {
             };
             format!("spec.compute.{field}: {error}")
         })?;
+        let fdw_fetch_max_wait = self.fdw_fetch_max_wait.unwrap_or(crabka_units::secs(5));
+        whole_millis_i32("spec.compute.fdwFetchMaxWait", fdw_fetch_max_wait)?;
+        let fdw_fetch_partition_max = self
+            .fdw_fetch_partition_max
+            .unwrap_or_else(|| crabka_units::mebibytes(10));
+        whole_bytes_i32("spec.compute.fdwFetchPartitionMax", fdw_fetch_partition_max)?;
+        let fdw_connect_timeout = self.fdw_connect_timeout.unwrap_or(crabka_units::secs(10));
+        whole_millis_i32("spec.compute.fdwConnectTimeout", fdw_connect_timeout)?;
+        let fdw_request_timeout = self.fdw_request_timeout.unwrap_or(crabka_units::secs(30));
+        whole_millis_i32("spec.compute.fdwRequestTimeout", fdw_request_timeout)?;
 
         Ok(EffectiveGresComputePolicy {
             readiness_probe_period_seconds: self.effective_readiness_probe_period_seconds()?,
@@ -1053,6 +1091,10 @@ impl GresComputeSpec {
                 .map(crabka_client_core::FetchMinBytes::try_from)
                 .transpose()
                 .map_err(|error| format!("spec.compute.fdwFetchMin: {error}"))?,
+            fdw_fetch_max_wait,
+            fdw_fetch_partition_max,
+            fdw_connect_timeout,
+            fdw_request_timeout,
             wal_recovery_fetch_min: self
                 .wal_recovery_fetch_min
                 .map(crabka_client_core::FetchMinBytes::try_from)
@@ -1913,6 +1955,10 @@ mod tests {
             client_dispatch_queue_capacity: Some(7),
             client_frame_max: Some(crabka_units::kibibytes(32)),
             fdw_fetch_min: Some(crabka_units::bytes(2)),
+            fdw_fetch_max_wait: Some(crabka_units::millis(41)),
+            fdw_fetch_partition_max: Some(crabka_units::bytes(43)),
+            fdw_connect_timeout: Some(crabka_units::millis(47)),
+            fdw_request_timeout: Some(crabka_units::millis(53)),
             wal_recovery_fetch_min: Some(crabka_units::bytes(3)),
             ..GresComputeSpec::default()
         };
@@ -1928,6 +1974,10 @@ mod tests {
         );
         assert!(effective.client_frame_max.expect("frame").size() == crabka_units::kibibytes(32));
         assert!(effective.fdw_fetch_min.expect("FDW fetch").size() == crabka_units::bytes(2));
+        assert!(effective.fdw_fetch_max_wait == crabka_units::millis(41));
+        assert!(effective.fdw_fetch_partition_max == crabka_units::bytes(43));
+        assert!(effective.fdw_connect_timeout == crabka_units::millis(47));
+        assert!(effective.fdw_request_timeout == crabka_units::millis(53));
         assert!(
             effective
                 .wal_recovery_fetch_min
@@ -1940,7 +1990,15 @@ mod tests {
         let compute = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
             ["properties"]["compute"]["properties"];
         assert!(compute["clientDispatchQueueCapacity"]["minimum"].as_f64() == Some(1.0));
-        for field in ["clientFrameMax", "fdwFetchMin", "walRecoveryFetchMin"] {
+        for field in [
+            "clientFrameMax",
+            "fdwFetchMin",
+            "fdwFetchMaxWait",
+            "fdwFetchPartitionMax",
+            "fdwConnectTimeout",
+            "fdwRequestTimeout",
+            "walRecoveryFetchMin",
+        ] {
             assert!(
                 compute[field]["type"] == "string",
                 "wrong schema for {field}"
@@ -1968,6 +2026,13 @@ mod tests {
                     ..GresComputeSpec::default()
                 },
                 "spec.compute.fdwFetchMin",
+            ),
+            (
+                GresComputeSpec {
+                    fdw_fetch_max_wait: Some(Time::ZERO),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.fdwFetchMaxWait",
             ),
             (
                 GresComputeSpec {

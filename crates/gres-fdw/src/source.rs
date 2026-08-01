@@ -17,7 +17,11 @@ use crabka_protocol::{
     owned::list_offsets_request::{ListOffsetsPartition, ListOffsetsRequest, ListOffsetsTopic},
     primitives::uuid::Uuid as WireUuid,
 };
-use crabka_units::{ByteSize, Time, convert::TimeExt as _, mebibytes, secs};
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    mebibytes, secs,
+};
 
 use crate::{config::ConnProfile, error::KafkaFdwError};
 
@@ -129,19 +133,61 @@ const LATEST: i64 = -1;
 const CONSUMER_REPLICA_ID: i32 = -1;
 /// `READ_COMMITTED` isolation level for the Fetch API.
 const READ_COMMITTED: i8 = 1;
-/// Maximum wait time per Fetch RPC.
-const MAX_WAIT: Time = secs(5);
-/// Maximum bytes per partition per Fetch RPC.
-const PARTITION_MAX: ByteSize = mebibytes(10);
-/// Deadline for one TCP connection attempt to a bootstrap broker.
-const CONNECT_TIMEOUT: Time = secs(10);
-/// Deadline for one request issued over the scan's connection.
-const REQUEST_TIMEOUT: Time = secs(30);
+/// Per-scan broker fetch and connection policy.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FdwScanPolicy {
+    pub fetch_max_wait: Time,
+    pub fetch_partition_max: ByteSize,
+    pub connect_timeout: Time,
+    pub request_timeout: Time,
+}
 
-/// The Fetch RPC's per-call budgets: how long the broker may hold the request
-/// open, and how much of one partition it may return.
-fn fetch_budgets() -> (Time, ByteSize) {
-    (MAX_WAIT, PARTITION_MAX)
+impl Default for FdwScanPolicy {
+    fn default() -> Self {
+        Self {
+            fetch_max_wait: secs(5),
+            fetch_partition_max: mebibytes(10),
+            connect_timeout: secs(10),
+            request_timeout: secs(30),
+        }
+    }
+}
+
+impl FdwScanPolicy {
+    /// Validate protocol-representable positive values.
+    ///
+    /// # Errors
+    /// Returns an error for non-positive, non-finite or unrepresentable values.
+    pub fn validate(self) -> Result<Self, String> {
+        let millis = |name: &str, value: Time| {
+            if !value.secs_f64().is_finite()
+                || value <= Time::ZERO
+                || value.millis_i32() <= 0
+                || Time::from_millis(i64::from(value.millis_i32())) != value
+            {
+                Err(format!(
+                    "{name} must be positive whole milliseconds representable as i32"
+                ))
+            } else {
+                Ok(())
+            }
+        };
+        millis("fetch maximum wait", self.fetch_max_wait)?;
+        millis("connect timeout", self.connect_timeout)?;
+        millis("request timeout", self.request_timeout)?;
+        if !self.fetch_partition_max.bytes_f64().is_finite()
+            || self.fetch_partition_max <= ByteSize::ZERO
+            || self.fetch_partition_max.bytes_i32() <= 0
+            || !u64::try_from(self.fetch_partition_max.bytes_i32())
+                .is_ok_and(|bytes| ByteSize::from_bytes(bytes) == self.fetch_partition_max)
+        {
+            return Err(
+                "fetch partition maximum must be positive whole bytes representable as i32"
+                    .to_owned(),
+            );
+        }
+        Ok(self)
+    }
 }
 
 /// Materialise a bounded snapshot of `topic` into a flat `Vec<RawRecord>`.
@@ -198,10 +244,12 @@ pub async fn scan_topic_with_dns_timeout(
         crabka_client_core::ConnectionDispatchQueueCapacity::default(),
         crabka_client_core::ClientFrameMax::default(),
         crabka_client_core::FetchMinBytes::default(),
+        FdwScanPolicy::default(),
     )
     .await
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(crate) async fn scan_topic_with_policy(
     profile: &ConnProfile,
     topic: &str,
@@ -210,7 +258,9 @@ pub(crate) async fn scan_topic_with_policy(
     dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     frame_max: crabka_client_core::ClientFrameMax,
     fetch_min: crabka_client_core::FetchMinBytes,
+    policy: FdwScanPolicy,
 ) -> Result<Vec<RawRecord>, KafkaFdwError> {
+    let policy = policy.validate().map_err(KafkaFdwError::Config)?;
     // Step 1: ensure the rustcrypto TLS provider is installed.
     crate::provider::install_default_provider();
 
@@ -220,10 +270,11 @@ pub(crate) async fn scan_topic_with_policy(
         crabka_client_core::ConnectionOptions {
             client_id: "crabka-fdw".into(),
             dns_timeout,
+            connect_timeout: policy.connect_timeout,
+            request_timeout: policy.request_timeout,
             dispatch_queue_capacity,
             frame_max,
             security: profile.security.clone().map(Box::new),
-            ..crabka_client_core::ConnectionOptions::default()
         },
     )
     .await
@@ -282,7 +333,14 @@ pub(crate) async fn scan_topic_with_policy(
     }
 
     // Step 3: open ONE connection and reuse it for ListOffsets + Fetch.
-    let conn = open_connection(profile, dns_timeout, dispatch_queue_capacity, frame_max).await?;
+    let conn = open_connection(
+        profile,
+        dns_timeout,
+        dispatch_queue_capacity,
+        frame_max,
+        policy,
+    )
+    .await?;
 
     // Step 4: ListOffsets — batch earliest + HWM for all partitions in one RPC.
     let list_offsets_req_earliest = ListOffsetsRequest {
@@ -389,7 +447,6 @@ pub(crate) async fn scan_topic_with_policy(
                 break;
             }
 
-            let (max_wait, partition_max) = fetch_budgets();
             let fetched = fetch_partition_with_isolation(
                 &conn,
                 IsolatedFetch {
@@ -397,9 +454,9 @@ pub(crate) async fn scan_topic_with_policy(
                     topic_id: topic_uuid,
                     partition,
                     fetch_offset: next_offset,
-                    max_wait,
+                    max_wait: policy.fetch_max_wait,
                     max: DEFAULT_FETCH_RESPONSE_MAX,
-                    partition_max,
+                    partition_max: policy.fetch_partition_max,
                     fetch_min,
                     isolation_level: READ_COMMITTED,
                 },
@@ -412,7 +469,7 @@ pub(crate) async fn scan_topic_with_policy(
             })?;
 
             if fetched.is_empty() {
-                // No records at or after `next_offset` within `MAX_WAIT`.
+                // No records at or after `next_offset` within the configured wait.
                 break;
             }
 
@@ -489,6 +546,7 @@ async fn open_connection(
     dns_timeout: crabka_client_core::ClientDnsTimeout,
     dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     frame_max: crabka_client_core::ClientFrameMax,
+    policy: FdwScanPolicy,
 ) -> Result<Connection, KafkaFdwError> {
     let host_port = profile.bootstrap.first().ok_or_else(|| {
         KafkaFdwError::Config("no bootstrap address in connection profile".to_string())
@@ -498,7 +556,7 @@ async fn open_connection(
 
     crabka_client_core::Connection::connect_with_options(
         addr,
-        connection_options(profile, dispatch_queue_capacity, frame_max),
+        connection_options(profile, dispatch_queue_capacity, frame_max, policy),
     )
     .await
     .map_err(|e| KafkaFdwError::Other(format!("connect to {host_port}: {e}")))
@@ -509,11 +567,12 @@ fn connection_options(
     profile: &ConnProfile,
     dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     frame_max: crabka_client_core::ClientFrameMax,
+    policy: FdwScanPolicy,
 ) -> crabka_client_core::ConnectionOptions {
     crabka_client_core::ConnectionOptions {
         client_id: "crabka-fdw".to_string(),
-        connect_timeout: CONNECT_TIMEOUT,
-        request_timeout: REQUEST_TIMEOUT,
+        connect_timeout: policy.connect_timeout,
+        request_timeout: policy.request_timeout,
         dispatch_queue_capacity,
         frame_max,
         security: profile.security.clone().map(Box::new),
@@ -528,6 +587,7 @@ mod tests {
     use std::time::Duration;
 
     use assert2::assert;
+    use crabka_units::millis;
 
     use super::*;
 
@@ -641,11 +701,21 @@ mod tests {
         );
     }
 
-    /// The Fetch budgets carry the magnitudes the constants name: 5 s and
-    /// 10 MiB.
+    /// Defaults preserve the prior fetch and connection policy.
     #[test]
-    fn fetch_budgets_carry_the_configured_magnitudes() {
-        assert!(fetch_budgets() == (secs(5), mebibytes(10)));
+    fn scan_policy_defaults_and_validation() {
+        let policy = FdwScanPolicy::default();
+        assert!(policy.fetch_max_wait == secs(5));
+        assert!(policy.fetch_partition_max == mebibytes(10));
+        assert!((policy.connect_timeout, policy.request_timeout) == (secs(10), secs(30)));
+        assert!(
+            (FdwScanPolicy {
+                fetch_max_wait: Time::ZERO,
+                ..policy
+            })
+            .validate()
+            .is_err()
+        );
     }
 
     /// The connection deadlines reach `crabka-client-core` as the durations the
@@ -665,9 +735,14 @@ mod tests {
             crabka_client_core::ConnectionDispatchQueueCapacity::new(7).expect("positive");
         let frame_max = crabka_client_core::ClientFrameMax::try_from(crabka_units::kibibytes(32))
             .expect("valid frame max");
-        let options = connection_options(&profile, dispatch, frame_max);
+        let policy = FdwScanPolicy {
+            connect_timeout: millis(37),
+            request_timeout: millis(41),
+            ..Default::default()
+        };
+        let options = connection_options(&profile, dispatch, frame_max, policy);
 
-        assert!((options.connect_timeout, options.request_timeout) == (secs(10), secs(30)));
+        assert!((options.connect_timeout, options.request_timeout) == (millis(37), millis(41)));
         assert!(options.dispatch_queue_capacity == dispatch);
         assert!(options.frame_max == frame_max);
     }

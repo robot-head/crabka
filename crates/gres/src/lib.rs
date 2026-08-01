@@ -1365,6 +1365,38 @@ pub struct RegistryOptions {
     )]
     fdw_fetch_min: Option<ByteSize>,
     #[arg(
+        long = "fdw-fetch-max-wait",
+        env = "CRABKA_GRES_FDW_FETCH_MAX_WAIT",
+        default_value = "5s",
+        value_parser = parse_fdw_fetch_max_wait,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_fetch_max_wait: Time,
+    #[arg(
+        long = "fdw-fetch-partition-max",
+        env = "CRABKA_GRES_FDW_FETCH_PARTITION_MAX",
+        default_value = "10MiB",
+        value_parser = parse_fdw_fetch_partition_max,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_fetch_partition_max: ByteSize,
+    #[arg(
+        long = "fdw-connect-timeout",
+        env = "CRABKA_GRES_FDW_CONNECT_TIMEOUT",
+        default_value = "10s",
+        value_parser = parse_fdw_connect_timeout,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_connect_timeout: Time,
+    #[arg(
+        long = "fdw-request-timeout",
+        env = "CRABKA_GRES_FDW_REQUEST_TIMEOUT",
+        default_value = "30s",
+        value_parser = parse_fdw_request_timeout,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_request_timeout: Time,
+    #[arg(
         long = "wal-recovery-fetch-min",
         env = "CRABKA_GRES_WAL_RECOVERY_FETCH_MIN",
         value_parser = parse_fetch_min,
@@ -1446,6 +1478,15 @@ impl RegistryOptions {
         .expect("validated Gres FDW fetch minimum")
     }
 
+    fn fdw_scan_policy(&self) -> crabka_gres_fdw::FdwScanPolicy {
+        crabka_gres_fdw::FdwScanPolicy {
+            fetch_max_wait: self.fdw_fetch_max_wait,
+            fetch_partition_max: self.fdw_fetch_partition_max,
+            connect_timeout: self.fdw_connect_timeout,
+            request_timeout: self.fdw_request_timeout,
+        }
+    }
+
     fn wal_recovery_fetch_min(&self) -> crabka_client_core::FetchMinBytes {
         crabka_client_core::FetchMinBytes::try_from(
             self.wal_recovery_fetch_min
@@ -1492,6 +1533,47 @@ fn parse_client_dispatch_queue_capacity(value: &str) -> Result<usize, String> {
     let value = value.parse::<usize>().map_err(|error| error.to_string())?;
     crabka_client_core::ConnectionDispatchQueueCapacity::new(value)
         .map(crabka_client_core::ConnectionDispatchQueueCapacity::get)
+}
+
+fn parse_fdw_fetch_max_wait(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::positive_time(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwScanPolicy {
+        fetch_max_wait: value,
+        ..Default::default()
+    }
+    .validate()
+    .map(|policy| policy.fetch_max_wait)
+}
+
+fn parse_fdw_fetch_partition_max(value: &str) -> Result<ByteSize, String> {
+    let value =
+        crabka_units::parse::positive_byte_size(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwScanPolicy {
+        fetch_partition_max: value,
+        ..Default::default()
+    }
+    .validate()
+    .map(|policy| policy.fetch_partition_max)
+}
+
+fn parse_fdw_connect_timeout(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::positive_time(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwScanPolicy {
+        connect_timeout: value,
+        ..Default::default()
+    }
+    .validate()
+    .map(|policy| policy.connect_timeout)
+}
+
+fn parse_fdw_request_timeout(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::positive_time(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwScanPolicy {
+        request_timeout: value,
+        ..Default::default()
+    }
+    .validate()
+    .map(|policy| policy.request_timeout)
 }
 
 fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
@@ -3200,6 +3282,7 @@ pub fn serve_listener_with_tenant_config_loader(
             effective_args.registry.dispatch_queue_capacity(),
             effective_args.registry.frame_max(),
             effective_args.registry.fdw_fetch_min(),
+            effective_args.registry.fdw_scan_policy(),
         );
         let session_config =
             build_session_config_from_tenant(&effective_args, tenant_record.as_ref())?;
@@ -8301,6 +8384,7 @@ pub fn register_kafka_scanner(engine: &mut SqlEngine) {
         crabka_client_core::ConnectionDispatchQueueCapacity::default(),
         crabka_client_core::ClientFrameMax::default(),
         crabka_client_core::FetchMinBytes::default(),
+        crabka_gres_fdw::FdwScanPolicy::default(),
     )));
 }
 
@@ -8311,11 +8395,13 @@ fn kafka_scanner(
     dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     frame_max: crabka_client_core::ClientFrameMax,
     fetch_min: crabka_client_core::FetchMinBytes,
+    scan_policy: crabka_gres_fdw::FdwScanPolicy,
 ) -> crabka_gres_fdw::KafkaFdw {
     crabka_gres_fdw::KafkaFdw::with_defaults(default_bootstrap)
         .with_broker_dns_timeout(broker_dns_timeout)
         .with_schema_fetch_retry_policy(schema_fetch_retry_policy)
         .with_client_resource_policy(dispatch_queue_capacity, frame_max, fetch_min)
+        .with_scan_policy(scan_policy)
 }
 
 /// Register Crabka's Kafka foreign-data scanner with an optional default bootstrap.
@@ -8333,9 +8419,11 @@ pub fn register_kafka_scanner_with_default_bootstrap(
         crabka_client_core::ConnectionDispatchQueueCapacity::default(),
         crabka_client_core::ClientFrameMax::default(),
         crabka_client_core::FetchMinBytes::default(),
+        crabka_gres_fdw::FdwScanPolicy::default(),
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_kafka_scanner_with_default_bootstrap_and_policy(
     engine: &mut RuntimeEngine,
     default_bootstrap: Option<String>,
@@ -8344,6 +8432,7 @@ fn register_kafka_scanner_with_default_bootstrap_and_policy(
     dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     frame_max: crabka_client_core::ClientFrameMax,
     fetch_min: crabka_client_core::FetchMinBytes,
+    scan_policy: crabka_gres_fdw::FdwScanPolicy,
 ) {
     let scanner: Arc<dyn crabka_pgexec::foreign::ForeignScanner> = Arc::new(kafka_scanner(
         default_bootstrap,
@@ -8352,6 +8441,7 @@ fn register_kafka_scanner_with_default_bootstrap_and_policy(
         dispatch_queue_capacity,
         frame_max,
         fetch_min,
+        scan_policy,
     ));
     match engine {
         RuntimeEngine::Single(engine) => engine.set_foreign_scanner(scanner),
@@ -9544,6 +9634,10 @@ mod tests {
                     crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
                 client_frame_max: crabka_units::mebibytes(100),
                 fdw_fetch_min: None,
+                fdw_fetch_max_wait: crabka_units::secs(5),
+                fdw_fetch_partition_max: crabka_units::mebibytes(10),
+                fdw_connect_timeout: crabka_units::secs(10),
+                fdw_request_timeout: crabka_units::secs(30),
                 wal_recovery_fetch_min: None,
                 registry_reader_fetch_min: crabka_units::bytes(1),
                 replication_factor: RegistryReplicationFactor::new(1).expect("default"),
@@ -9997,6 +10091,10 @@ mod tests {
                 crabka_client_core::DEFAULT_CONNECTION_DISPATCH_QUEUE_CAPACITY,
             client_frame_max: crabka_units::mebibytes(100),
             fdw_fetch_min: None,
+            fdw_fetch_max_wait: crabka_units::secs(5),
+            fdw_fetch_partition_max: crabka_units::mebibytes(10),
+            fdw_connect_timeout: crabka_units::secs(10),
+            fdw_request_timeout: crabka_units::secs(30),
             wal_recovery_fetch_min: None,
             registry_reader_fetch_min: crabka_units::bytes(1),
             replication_factor: RegistryReplicationFactor::new(2).expect("replication factor"),
@@ -11431,6 +11529,7 @@ mod tests {
             crabka_client_core::ConnectionDispatchQueueCapacity::default(),
             crabka_client_core::ClientFrameMax::default(),
             crabka_client_core::FetchMinBytes::default(),
+            args.registry.fdw_scan_policy(),
         );
 
         assert_eq!(scanner.schema_fetch_retry_policy(), policy);
@@ -11443,6 +11542,10 @@ mod tests {
             "--substrate-bootstrap=memory://",
             "--tenant=tenant-a",
             "--fdw-broker-dns-timeout=37ms",
+            "--fdw-fetch-max-wait=41ms",
+            "--fdw-fetch-partition-max=43B",
+            "--fdw-connect-timeout=47ms",
+            "--fdw-request-timeout=53ms",
         ])
         .expect("substrate FDW DNS timeout")
         .serve;
@@ -11454,10 +11557,30 @@ mod tests {
             crabka_client_core::ConnectionDispatchQueueCapacity::default(),
             crabka_client_core::ClientFrameMax::default(),
             crabka_client_core::FetchMinBytes::default(),
+            args.registry.fdw_scan_policy(),
         );
 
         assert_eq!(scanner.default_bootstrap(), Some("memory://"));
         assert_eq!(scanner.broker_dns_timeout().milliseconds(), 37);
+        assert_eq!(
+            scanner.scan_policy(),
+            crabka_gres_fdw::FdwScanPolicy {
+                fetch_max_wait: crabka_units::millis(41),
+                fetch_partition_max: crabka_units::bytes(43),
+                connect_timeout: crabka_units::millis(47),
+                request_timeout: crabka_units::millis(53),
+            }
+        );
+
+        assert!(
+            <Cli as clap::Parser>::try_parse_from([
+                "crabka-gres",
+                "--substrate-bootstrap=memory://",
+                "--tenant=tenant-a",
+                "--fdw-fetch-max-wait=0ms",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

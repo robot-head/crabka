@@ -23,7 +23,9 @@ pub use config::{ConnProfile, ServerProfile, resolve, resolve_server};
 pub use crabka_schema_serde::SchemaFetchRetryPolicy;
 pub use decode::{DecodedValue, Wire, decode_value};
 pub use error::KafkaFdwError;
-pub use source::{FetchPlan, RawRecord, plan_fetch, scan_topic, scan_topic_with_dns_timeout};
+pub use source::{
+    FdwScanPolicy, FetchPlan, RawRecord, plan_fetch, scan_topic, scan_topic_with_dns_timeout,
+};
 pub use types::{
     avro_schema_to_columns, json_schema_to_columns, project, protobuf_message_to_columns,
 };
@@ -44,6 +46,7 @@ pub struct KafkaFdw {
     dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity,
     frame_max: crabka_client_core::ClientFrameMax,
     fetch_min: crabka_client_core::FetchMinBytes,
+    scan_policy: FdwScanPolicy,
     schema_fetch_retry_policy: SchemaFetchRetryPolicy,
 }
 
@@ -57,6 +60,7 @@ impl KafkaFdw {
             dispatch_queue_capacity: crabka_client_core::ConnectionDispatchQueueCapacity::default(),
             frame_max: crabka_client_core::ClientFrameMax::default(),
             fetch_min: crabka_client_core::FetchMinBytes::default(),
+            scan_policy: FdwScanPolicy::default(),
             schema_fetch_retry_policy: SchemaFetchRetryPolicy::default(),
         }
     }
@@ -89,6 +93,19 @@ impl KafkaFdw {
         self.frame_max = frame_max;
         self.fetch_min = fetch_min;
         self
+    }
+
+    /// Override per-scan broker fetch and connection policy.
+    #[must_use]
+    pub fn with_scan_policy(mut self, policy: FdwScanPolicy) -> Self {
+        self.scan_policy = policy;
+        self
+    }
+
+    /// Return per-scan broker fetch and connection policy.
+    #[must_use]
+    pub fn scan_policy(&self) -> FdwScanPolicy {
+        self.scan_policy
     }
 
     /// Override the retry range for transient schema fetch failures.
@@ -166,6 +183,7 @@ impl ForeignScanner for KafkaFdw {
                     self.dispatch_queue_capacity,
                     self.frame_max,
                     self.fetch_min,
+                    self.scan_policy,
                 )
                 .await
                 .map_err(|err| to_exec_err(&err))?;

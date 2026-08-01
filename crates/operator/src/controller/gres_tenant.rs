@@ -2303,6 +2303,16 @@ fn render_deployment(
     if let Some(value) = compute_policy.fdw_fetch_min {
         args.extend(["--fdw-fetch-min".to_owned(), format!("{}B", value.bytes())]);
     }
+    args.extend([
+        "--fdw-fetch-max-wait".to_owned(),
+        compute_policy.fdw_fetch_max_wait.human().to_string(),
+        "--fdw-fetch-partition-max".to_owned(),
+        compute_policy.fdw_fetch_partition_max.human().to_string(),
+        "--fdw-connect-timeout".to_owned(),
+        compute_policy.fdw_connect_timeout.human().to_string(),
+        "--fdw-request-timeout".to_owned(),
+        compute_policy.fdw_request_timeout.human().to_string(),
+    ]);
     if let Some(value) = compute_policy.wal_recovery_fetch_min {
         args.extend([
             "--wal-recovery-fetch-min".to_owned(),
@@ -3298,6 +3308,10 @@ mod tests {
             pgexec_ts_prune_versions_per_row: Some(41),
             pgexec_ts_gc_floor_lag: Some(crabka_units::millis(42)),
             fdw_fetch_min: Some(crabka_units::bytes(2)),
+            fdw_fetch_max_wait: Some(crabka_units::millis(41)),
+            fdw_fetch_partition_max: Some(crabka_units::bytes(43)),
+            fdw_connect_timeout: Some(crabka_units::millis(47)),
+            fdw_request_timeout: Some(crabka_units::millis(53)),
             wal_recovery_fetch_min: Some(crabka_units::bytes(3)),
             ..crate::crd::gres::GresComputeSpec::default()
         }
@@ -3347,6 +3361,10 @@ mod tests {
                 ["--pgexec-ts-gc-floor-lag", "42ms"],
                 ["--registry-reader-fetch-min", "4B"],
                 ["--fdw-fetch-min", "2B"],
+                ["--fdw-fetch-max-wait", "41ms"],
+                ["--fdw-fetch-partition-max", "43B"],
+                ["--fdw-connect-timeout", "47ms"],
+                ["--fdw-request-timeout", "53ms"],
                 ["--wal-recovery-fetch-min", "3B"],
             ] {
                 assert!(

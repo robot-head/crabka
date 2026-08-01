@@ -225,8 +225,24 @@ spec:
                     description: Timeout for resolving Kafka broker hostnames used by the FDW.
                     nullable: true
                     type: string
+                  fdwConnectTimeout:
+                    description: FDW broker TCP connection timeout.
+                    nullable: true
+                    type: string
+                  fdwFetchMaxWait:
+                    description: Maximum time a broker may hold one FDW fetch.
+                    nullable: true
+                    type: string
                   fdwFetchMin:
                     description: Minimum response size for FDW Kafka fetches.
+                    nullable: true
+                    type: string
+                  fdwFetchPartitionMax:
+                    description: Maximum bytes returned for one FDW partition fetch.
+                    nullable: true
+                    type: string
+                  fdwRequestTimeout:
+                    description: FDW broker request timeout.
                     nullable: true
                     type: string
                   idleSuspendPollInterval:
