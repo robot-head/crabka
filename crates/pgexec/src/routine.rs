@@ -545,8 +545,17 @@ pub(crate) fn create(
     // with the default `check_function_bodies`.
     if routine.language == "sql" {
         parse_body(&routine)?;
-    } else if routine.language == "plpgsql" {
-        parse_plpgsql_body(&routine)?;
+    } else if routine.language == "plpgsql"
+        && let Err(error) = parse_plpgsql_body(&routine)
+        && !matches!(
+            &error,
+            ExecError::FunctionError {
+                sqlstate: "0A000",
+                ..
+            }
+        )
+    {
+        return Err(error);
     }
     let ops = put_routine_ops(kv, &routine)?;
     Ok((
@@ -3293,6 +3302,12 @@ mod tests {
         .expect_err("invalid body is rejected");
         assert!(sqlstate(&error) == "42601");
         assert!(routines_named(&kv, "broken").expect("catalog").is_empty());
+
+        defined(
+            &kv,
+            "CREATE FUNCTION deferred_sql() RETURNS trigger LANGUAGE plpgsql AS $$ \
+             BEGIN PERFORM string_agg(v, ',' ORDER BY v) FROM t; RETURN NULL; END $$",
+        );
     }
 
     #[test]

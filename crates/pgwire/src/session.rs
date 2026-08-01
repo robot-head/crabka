@@ -674,7 +674,7 @@ where
                         let CopyInState { target, chunks } =
                             copy_in.take().expect("copy state present");
                         let extended = matches!(target, CopyInTarget::Portal { .. });
-                        activity.touch();
+                        let _statement_activity = activity.begin_statement().await;
                         let token = cancel.begin_query();
                         let outcome = tokio::select! {
                             biased;
@@ -775,7 +775,7 @@ where
             match msg {
                 FrontendMessage::Terminate => return Ok(()),
                 FrontendMessage::Query { sql } => {
-                    activity.touch();
+                    let _statement_activity = activity.begin_statement().await;
                     let token = cancel.begin_query();
                     let copy_start = tokio::select! {
                         biased;
@@ -916,7 +916,7 @@ where
                     if ext.failed {
                         continue;
                     }
-                    activity.touch();
+                    let _statement_activity = activity.begin_statement().await;
                     // Cancel window: between extended messages no engine future runs; the pending flag in CancelRegistry makes a cancel received there fire on the next engine call.
                     let token = cancel.begin_query();
                     match handle_execute(
