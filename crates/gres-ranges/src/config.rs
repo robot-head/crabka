@@ -111,6 +111,7 @@ impl RangeRuntimePolicy {
         }
         if !self.durable_inspect_max_size.bytes_f64().is_finite()
             || self.durable_inspect_max_size <= ByteSize::ZERO
+            || self.durable_inspect_max_size.bytes_u64() > u64::from(u32::MAX)
         {
             return Err("durable inspection maximum size must be positive and finite".to_owned());
         }

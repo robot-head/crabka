@@ -68,8 +68,9 @@ pub use self::{
     tenant::{
         GatewayCommitFault, LocalSqlSplitError, MultiRangeTenant, MultiRangeTenantConfig,
         MultiRangeTenantHandles, ReadOnlyRange0Replica, RouteRecord, StatementKind, TenantError,
-        TimestampSourceMode, hlc_tso_rpc_from_horizon, hlc_wall_clock,
-        pgexec_timestamp_oracle_from_rpc, tso_rpc_from_horizon,
+        TimestampSourceMode, hlc_tso_rpc_from_horizon, hlc_tso_rpc_from_horizon_with_policy,
+        hlc_wall_clock, pgexec_timestamp_oracle_from_horizon_with_policy,
+        pgexec_timestamp_oracle_from_rpc, tso_rpc_from_horizon, tso_rpc_from_horizon_with_policy,
     },
     transfer::{
         ClaimedStagedSuccessor, ClaimedStagedSuccessors, CommittedTailRecord, RangeTransferBarrier,
@@ -83,7 +84,7 @@ pub use self::{
         RangeControlReq, RangeControlResp, RangeRequest, RangeResponse, RangeService,
         RangeTlsClientConfig, RangeTlsServerConfig, ScanCursorReq, ScanCursorResp, TransportError,
         TsoReq, TsoResp, TxnReq, TxnResp, WireErrorKind, WireInDoubtMarker, WireJoinKind,
-        WireJoinStrategy, WireJoinTableInterval, WireRangeKey, serve_tls,
+        WireJoinStrategy, WireJoinTableInterval, WireRangeKey, serve_tls, serve_tls_with_policy,
     },
     tso::{
         BatchedTsoClient, EpochHeartbeat, GrantLease, HeartbeatVerdict, MemoryTsoHorizon,

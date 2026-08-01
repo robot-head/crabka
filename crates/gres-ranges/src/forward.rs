@@ -7,7 +7,7 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use async_trait::async_trait;
@@ -17,6 +17,11 @@ use crabka_pgwire::{
         ResultPage, ResultSink, Session as _, TxStatus,
     },
     error::PgError,
+};
+use crabka_units::{
+    Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+    fmt::Human as _,
 };
 
 use crate::{
@@ -33,7 +38,7 @@ use crate::{
         WireJoinTableInterval, WirePartialAggregateFunction, WirePartialAggregateSpec,
         WirePredicateOp, WirePredicatePushdown, WireProjectionPushdown, WireQueryResult,
         WireRowInterval, WireSessionOperation, WireSessionResult, WireSnapshot, WireSqlResultChunk,
-        WireTopKColumn, WireTopKSpec, write_frame,
+        WireTopKColumn, WireTopKSpec, write_frame_with_limit,
     },
     tso::{GrantLease, TsoError, TsoRpc},
 };
@@ -75,6 +80,7 @@ pub struct HostedRangeService {
     durable_inspector: Option<Arc<dyn DurableRecordInspector>>,
     ddl_gate: Arc<tokio::sync::Mutex<()>>,
     catalog_follower: Option<Arc<Range0Barrier>>,
+    runtime_policy: crate::RangeRuntimePolicy,
 }
 
 #[async_trait]
@@ -91,36 +97,34 @@ struct HostedSession {
     last_used: Instant,
 }
 
-const REMOTE_SESSION_IDLE: Duration = Duration::from_mins(1);
-const MAX_REMOTE_SESSIONS: usize = 1024;
-// Reply budget for a follower catalog barrier, kept below the client's 5 s
-// wire-silence timeout so a slow catch-up surfaces as a typed error frame
-// instead of an ambiguous transport timeout. The gateway's local replica
-// barrier shares it so a stalled broker end sample cannot block DDL forever.
-pub(crate) const RANGE0_BARRIER_REPLY_BUDGET: Duration = Duration::from_secs(4);
-
-/// Cap on lock waits by sessions enlisted in a cross-range transaction (a
-/// gateway-local session once its transaction escalates past one range, or a
-/// hosted remote-participant session for the statements such a transaction
-/// sends it, carried per statement on the wire). A deadlock cycle
-/// spanning engines never appears in any single engine's wait-for graph, so
-/// the expired cap — surfaced as a retryable 40P01 — is the only detector such
-/// a cycle has. Purely local transactions keep unbounded waits under the
-/// exact engine-local cycle check. Must stay comfortably below the range
-/// transport's 5 s RPC timeout so the participant reports the abort instead of
-/// the gateway timing the RPC out first.
-pub(crate) const CROSS_RANGE_LOCK_WAIT_CAP: Duration = Duration::from_secs(2);
-
 /// Encode a lock-wait cap for the session wire, saturating instead of failing
-/// on a pathological over-large duration.
-fn cap_to_millis(cap: Duration) -> u64 {
-    u64::try_from(cap.as_millis()).unwrap_or(u64::MAX)
+/// on a pathological over-large extent.
+///
+/// Truncating, not rounding: the participant reconstructs the cap from this
+/// integer, and a cap rounded up past the range transport's RPC timeout would
+/// let the gateway time the call out before the participant reports its abort.
+fn cap_to_millis(cap: Time) -> u64 {
+    u64::try_from(cap.millis_i64_trunc()).unwrap_or(u64::MAX)
+}
+
+/// Decode a lock-wait cap arriving from the session wire.
+fn cap_from_millis(millis: u64) -> Time {
+    Time::from_millis(i64::try_from(millis).unwrap_or(i64::MAX))
 }
 
 impl HostedRangeService {
     /// Build a hosted range service. Only range 0 may be given a TSO RPC.
     #[must_use]
     pub fn new(engines: BTreeMap<RangeId, crabka_pgexec::SqlEngine>) -> Self {
+        Self::new_with_policy(engines, crate::RangeRuntimePolicy::default())
+    }
+
+    /// Build a hosted range service with explicit runtime policy.
+    #[must_use]
+    pub fn new_with_policy(
+        engines: BTreeMap<RangeId, crabka_pgexec::SqlEngine>,
+        runtime_policy: crate::RangeRuntimePolicy,
+    ) -> Self {
         Self {
             engines,
             tso: None,
@@ -132,6 +136,7 @@ impl HostedRangeService {
             durable_inspector: None,
             ddl_gate: Arc::new(tokio::sync::Mutex::new(())),
             catalog_follower: None,
+            runtime_policy,
         }
     }
 
@@ -329,9 +334,11 @@ impl HostedRangeService {
         match request {
             RangeRequest::InspectDurableRecords(request) => {
                 if request.max_records == 0
-                    || request.max_records > crate::transport::MAX_DURABLE_INSPECT_RECORDS
+                    || request.max_records > self.runtime_policy.durable_inspect_max_records.get()
                     || request.max_bytes == 0
-                    || request.max_bytes > crate::transport::MAX_DURABLE_INSPECT_BYTES
+                    || request.max_bytes
+                        > u32::try_from(self.runtime_policy.durable_inspect_max_size.bytes_u64())
+                            .unwrap_or(u32::MAX)
                 {
                     return RangeResponse::Error {
                         error: WireErrorKind::Failed,
@@ -377,9 +384,11 @@ impl HostedRangeService {
                 };
                 let mut sessions = self.sessions.lock().await;
                 let now = Instant::now();
-                sessions
-                    .retain(|_, lease| now.duration_since(lease.last_used) < REMOTE_SESSION_IDLE);
-                if sessions.len() >= MAX_REMOTE_SESSIONS {
+                sessions.retain(|_, lease| {
+                    now.duration_since(lease.last_used)
+                        < self.runtime_policy.remote_session_idle.to_std()
+                });
+                if sessions.len() >= self.runtime_policy.remote_session_max.get() {
                     return RangeResponse::SqlError {
                         code: "53300".into(),
                         message: "too many remote range sessions".into(),
@@ -1108,7 +1117,11 @@ impl HostedRangeService {
         // The barrier's own timeout only bounds tail catch-up, not the broker
         // end sample, so this outer timeout is the one mechanism that bounds
         // the whole reply below the client's 5 s wire-silence deadline.
-        match tokio::time::timeout(RANGE0_BARRIER_REPLY_BUDGET, follower.wait_for_fresh_end()).await
+        match tokio::time::timeout(
+            self.runtime_policy.range0_barrier_reply_budget.to_std(),
+            follower.wait_for_fresh_end(),
+        )
+        .await
         {
             Ok(Ok(())) => RangeResponse::Range0Barriered,
             Ok(Err(error)) => RangeResponse::Error {
@@ -1118,8 +1131,8 @@ impl HostedRangeService {
             Err(_elapsed) => RangeResponse::Error {
                 error: WireErrorKind::Failed,
                 message: format!(
-                    "range-0 follower did not cover the catalog barrier within \
-                     {RANGE0_BARRIER_REPLY_BUDGET:?}"
+                    "range-0 follower did not cover the catalog barrier within {}",
+                    self.runtime_policy.range0_barrier_reply_budget.human()
                 ),
             },
         }
@@ -1195,6 +1208,7 @@ impl RangeService for HostedRangeService {
         };
         let mut sink = RangeFrameSink {
             writer,
+            max_frame: self.runtime_policy.rpc_frame_max,
             transport_error: None,
             terminal_error_sent: false,
         };
@@ -1212,18 +1226,19 @@ impl RangeService for HostedRangeService {
                 } else {
                     error.message
                 };
-                write_frame(
+                write_frame_with_limit(
                     sink.writer,
                     &RangeResponse::SqlError {
                         code: error.code,
                         message,
                     },
+                    sink.max_frame,
                 )
                 .await?;
             }
             return Ok(None);
         }
-        write_frame(sink.writer, &RangeResponse::SqlResultsDone).await?;
+        write_frame_with_limit(sink.writer, &RangeResponse::SqlResultsDone, sink.max_frame).await?;
         Ok(None)
     }
 }
@@ -1252,6 +1267,7 @@ fn decode_global_status(status: WireGlobalStatus) -> crabka_pgmvcc::clog::XidSta
 
 struct RangeFrameSink<'a> {
     writer: &'a mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    max_frame: crabka_units::ByteSize,
     transport_error: Option<TransportError>,
     terminal_error_sent: bool,
 }
@@ -1265,7 +1281,7 @@ async fn handle_session_operation(
             sql,
             lock_wait_cap_ms,
         } => {
-            session.set_lock_wait_cap(lock_wait_cap_ms.map(Duration::from_millis));
+            session.set_lock_wait_cap(lock_wait_cap_ms.map(cap_from_millis));
             session
                 .simple_query(&sql)
                 .await
@@ -1325,7 +1341,7 @@ async fn handle_session_operation(
             max_rows,
             lock_wait_cap_ms,
         } => {
-            session.set_lock_wait_cap(lock_wait_cap_ms.map(Duration::from_millis));
+            session.set_lock_wait_cap(lock_wait_cap_ms.map(cap_from_millis));
             let outcome = session.execute(&portal, max_rows).await;
             outcome.and_then(|outcome| match outcome {
                 ExecuteOutcome::Rows { rows, completion } => {
@@ -1435,15 +1451,16 @@ impl ResultSink for RangeFrameSink<'_> {
                 },
             },
         };
-        match write_frame(self.writer, &response).await {
+        match write_frame_with_limit(self.writer, &response, self.max_frame).await {
             Ok(()) => Ok(()),
             Err(TransportError::FrameTooLarge { .. }) => {
-                write_frame(
+                write_frame_with_limit(
                     self.writer,
                     &RangeResponse::SqlError {
                         code: "54000".into(),
                         message: "one remote SQL row exceeds the transport frame limit".into(),
                     },
+                    self.max_frame,
                 )
                 .await
                 .map_err(|error| {
@@ -2290,7 +2307,7 @@ impl RemoteRangeSession {
     pub async fn simple_query(
         &mut self,
         sql: String,
-        lock_wait_cap: Option<Duration>,
+        lock_wait_cap: Option<Time>,
     ) -> Result<Vec<QueryResult>, PgError> {
         match self
             .call(WireSessionOperation::SimpleQuery {
@@ -2415,7 +2432,7 @@ impl RemoteRangeSession {
         &mut self,
         portal: String,
         max_rows: u32,
-        lock_wait_cap: Option<Duration>,
+        lock_wait_cap: Option<Time>,
     ) -> Result<ExecuteOutcome, PgError> {
         match self
             .call(WireSessionOperation::Execute {
@@ -2712,7 +2729,7 @@ impl RegistryRangeScanner {
     ) -> Result<Vec<crabka_pgexec::ScannedRow>, crabka_pgexec::ExecError> {
         let req = ScanRangeReq {
             range_id,
-            table_id: u64::from(request.table.id),
+            table_name: request.table.name.clone(),
             interval: WireRowInterval {
                 start: request.interval.start,
                 end: request.interval.end,
@@ -2860,8 +2877,10 @@ impl RegistryRangeScanner {
                 "distributed join requires a local catalog engine".into(),
             )
         })?;
-        let left_table = table_by_id(catalog, request.left.table_id)?;
-        let right_table = table_by_id(catalog, request.right.table_id)?;
+        let left_table =
+            crabka_pgcatalog::get_table(catalog.catalog_kv(), &request.left.table_name)?;
+        let right_table =
+            crabka_pgcatalog::get_table(catalog.catalog_kv(), &request.right.table_name)?;
         if request.strategy == crabka_pgexec::JoinExecutionStrategy::CoPartitioned
             && !crabka_pgexec::plan_dist::co_partitioned_join_keys_match(
                 &left_table,
@@ -2998,7 +3017,7 @@ impl RegistryRangeScanner {
                     .map_err(|error| scanner_error(error.into()))?;
                 let rpc = ScanRangeReq {
                     range_id,
-                    table_id: u64::from(table.id),
+                    table_name: table.name.clone(),
                     interval: WireRowInterval {
                         start: side.interval.start,
                         end: side.interval.end,
@@ -3208,7 +3227,7 @@ impl crabka_pgexec::RangeCursor for RegistryRangeCursor<'_> {
                 for range_id in active {
                     let scan = ScanRangeReq {
                         range_id,
-                        table_id: u64::from(self.request.table.id),
+                        table_name: self.request.table.name.clone(),
                         interval: WireRowInterval {
                             start: self.request.interval.start,
                             end: self.request.interval.end,
@@ -3381,37 +3400,23 @@ impl RangeService for RangeScanService {
     }
 }
 
-/// Resolve the relation a range RPC addresses by its catalog id.
-///
-/// Range RPCs carry a `table_id`, never a name: a name is session-dependent
-/// once `search_path` and `pg_temp` exist, and this node has no notion of the
-/// originating session, so resolving one here would read the wrong relation or
-/// none at all. Resolving by id also pins the column layout against a rename
-/// between planning and scanning, because the id survives a rename and the name
-/// does not.
-///
-/// The lookup is a `get` against the catalog's id-keyed index, not a scan of
-/// every table it holds.
-fn table_by_id(
-    engine: &crabka_pgexec::SqlEngine,
-    table_id: u64,
-) -> Result<crabka_pgcatalog::Table, crabka_pgexec::ExecError> {
-    let id = crabka_pgcatalog::TableId::try_from(table_id).map_err(|_| {
-        crabka_pgcatalog::CatalogError::UndefinedTable(format!("table id {table_id}"))
-    })?;
-    Ok(crabka_pgcatalog::table_by_id(engine.catalog_kv(), id)?)
-}
-
 fn handle_join_range(
     engine: &crabka_pgexec::SqlEngine,
     request: &JoinRangeReq,
 ) -> Result<JoinRangeResp, crabka_pgexec::ExecError> {
-    let left_table = table_by_id(engine, request.left.table_id)?;
-    let right_table = table_by_id(engine, request.right.table_id)?;
-    let pg_request = request.to_pgexec();
-    pg_request
+    request
         .validate()
         .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?;
+    let pg_request = request.to_pgexec();
+    let left_table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.left.table_name)?;
+    let right_table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.right.table_name)?;
+    if u64::from(left_table.id) != request.left.table_id
+        || u64::from(right_table.id) != request.right.table_id
+    {
+        return Err(crabka_pgexec::ExecError::Unsupported(
+            "join table id does not match catalog identity".into(),
+        ));
+    }
     if matches!(request.strategy, WireJoinStrategy::CoPartitioned)
         && !crabka_pgexec::plan_dist::co_partitioned_join_keys_match(
             &left_table,
@@ -3481,7 +3486,7 @@ fn handle_scan_range(
     engine: &crabka_pgexec::SqlEngine,
     request: ScanRangeReq,
 ) -> Result<ScanRangeResp, crabka_pgexec::ExecError> {
-    let table = table_by_id(engine, request.table_id)?;
+    let table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.table_name)?;
     let rows = engine.scan_local_visible_with_timestamp_owner(
         &table,
         &request.global_snapshot.into(),
@@ -3544,7 +3549,7 @@ fn handle_scan_cursor(
             "blocking scan pushdowns cannot use the row cursor protocol".into(),
         ));
     }
-    let table = table_by_id(engine, request.scan.table_id)?;
+    let table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.scan.table_name)?;
     let (next, terminal) = if let Some(token) = request.token.as_deref() {
         decode_owner_cursor_token(token)?
     } else {
@@ -3868,6 +3873,7 @@ fn encode_join_request(
     };
     let table = |value: &crabka_pgexec::JoinTableInterval| WireJoinTableInterval {
         table_id: value.table_id,
+        table_name: value.table_name.clone(),
         interval: WireRowInterval {
             start: value.interval.start,
             end: value.interval.end,
@@ -4190,12 +4196,16 @@ mod tests {
     fn sharded_table() -> Table {
         Table {
             id: 11,
-            name: crabka_pgcatalog::RelationName::public("t11"),
-            columns: vec![Column::new("id", ColumnType::Int4)],
+            name: "t11".to_string(),
+            columns: vec![Column {
+                name: "id".to_string(),
+                ty: ColumnType::Int4,
+                not_null: false,
+                default: None,
+            }],
             sharded: true,
             sharding: None,
             foreign: None,
-            checks: Vec::new(),
         }
     }
 
@@ -4552,7 +4562,7 @@ mod tests {
         let error = session
             .simple_query(
                 "UPDATE t SET v = 2 WHERE id = 1".into(),
-                Some(Duration::from_millis(100)),
+                Some(crabka_units::millis(100)),
             )
             .await
             .expect_err("capped wait expires");
@@ -4918,7 +4928,7 @@ mod tests {
         );
         assert_eq!(rows[0].row, vec![Datum::Int4(10)]);
         let left_requests = left.requests.lock().expect("left requests");
-        assert2::assert!(left_requests[0].table_id == 11);
+        assert_eq!(left_requests[0].table_name, "t11");
         assert_eq!(left_requests[0].interval.start, Some(1));
         assert_eq!(left_requests[0].local_snapshot.xip, vec![5]);
         assert_eq!(left_requests[0].own_xid, Some(8));
@@ -5217,11 +5227,6 @@ mod tests {
             .simple_query("INSERT INTO t11 VALUES (1, 'drop'), (2, 'keep')")
             .await
             .expect("insert owner rows");
-        let table = crabka_pgcatalog::get_table(
-            owner.catalog_kv(),
-            &crabka_pgcatalog::RelationName::public("t11"),
-        )
-        .expect("owner catalog row");
         let service = RangeScanService::new(std::collections::BTreeMap::from([(
             RangeId::new(1),
             owner.clone_handle(),
@@ -5230,7 +5235,7 @@ mod tests {
         let response = service
             .handle(RangeRequest::ScanRange(ScanRangeReq {
                 range_id: RangeId::new(1),
-                table_id: table.id.into(),
+                table_name: "t11".to_string(),
                 interval: WireRowInterval {
                     start: None,
                     end: None,
@@ -5286,16 +5291,8 @@ mod tests {
             .simple_query("INSERT INTO jl VALUES (1, 'a'), (2, 'b')")
             .await
             .unwrap();
-        let left = crabka_pgcatalog::get_table(
-            owner.catalog_kv(),
-            &crabka_pgcatalog::RelationName::public("jl"),
-        )
-        .unwrap();
-        let right = crabka_pgcatalog::get_table(
-            owner.catalog_kv(),
-            &crabka_pgcatalog::RelationName::public("jr"),
-        )
-        .unwrap();
+        let left = crabka_pgcatalog::get_table(owner.catalog_kv(), "jl").unwrap();
+        let right = crabka_pgcatalog::get_table(owner.catalog_kv(), "jr").unwrap();
         let service =
             RangeScanService::new(BTreeMap::from([(RangeId::new(1), owner.clone_handle())]));
         let snapshot = WireSnapshot {
@@ -5317,6 +5314,7 @@ mod tests {
                 strategy: WireJoinStrategy::BroadcastRight,
                 left: WireJoinTableInterval {
                     table_id: u64::from(left.id),
+                    table_name: left.name,
                     interval: WireRowInterval {
                         start: None,
                         end: None,
@@ -5324,6 +5322,7 @@ mod tests {
                 },
                 right: WireJoinTableInterval {
                     table_id: u64::from(right.id),
+                    table_name: right.name,
                     interval: WireRowInterval {
                         start: None,
                         end: None,
@@ -5361,16 +5360,8 @@ mod tests {
             "CREATE TABLE cpl (id int4, v text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair; \
              CREATE TABLE cpr (id int4, v text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair",
         ).await.unwrap();
-        let left = crabka_pgcatalog::get_table(
-            owner.catalog_kv(),
-            &crabka_pgcatalog::RelationName::public("cpl"),
-        )
-        .unwrap();
-        let right = crabka_pgcatalog::get_table(
-            owner.catalog_kv(),
-            &crabka_pgcatalog::RelationName::public("cpr"),
-        )
-        .unwrap();
+        let left = crabka_pgcatalog::get_table(owner.catalog_kv(), "cpl").unwrap();
+        let right = crabka_pgcatalog::get_table(owner.catalog_kv(), "cpr").unwrap();
         let service =
             RangeScanService::new(BTreeMap::from([(RangeId::new(1), owner.clone_handle())]));
         let snapshot = WireSnapshot {
@@ -5392,6 +5383,7 @@ mod tests {
                 strategy: WireJoinStrategy::CoPartitioned,
                 left: WireJoinTableInterval {
                     table_id: u64::from(left.id),
+                    table_name: left.name,
                     interval: WireRowInterval {
                         start: None,
                         end: None,
@@ -5399,6 +5391,7 @@ mod tests {
                 },
                 right: WireJoinTableInterval {
                     table_id: u64::from(right.id),
+                    table_name: right.name,
                     interval: WireRowInterval {
                         start: None,
                         end: None,
@@ -5436,16 +5429,8 @@ mod tests {
             .simple_query("INSERT INTO jr VALUES (2, 'z'), (3, 'q')")
             .await
             .expect("insert right");
-        let left = crabka_pgcatalog::get_table(
-            gateway.catalog_kv(),
-            &crabka_pgcatalog::RelationName::public("jl"),
-        )
-        .expect("left table");
-        let right = crabka_pgcatalog::get_table(
-            gateway.catalog_kv(),
-            &crabka_pgcatalog::RelationName::public("jr"),
-        )
-        .expect("right table");
+        let left = crabka_pgcatalog::get_table(gateway.catalog_kv(), "jl").expect("left table");
+        let right = crabka_pgcatalog::get_table(gateway.catalog_kv(), "jr").expect("right table");
         let registry =
             RangeRegistry::from_tenant_record(&record("127.0.0.1:1".into())).expect("registry");
         let scanner = RegistryRangeScanner::new(
@@ -5459,7 +5444,7 @@ mod tests {
             (u64::from(right.id), 100),
         ])));
         gateway.set_join_strategy_config(crabka_pgexec::plan_dist::PlannerConfig {
-            broadcast_threshold_bytes: 16,
+            broadcast_threshold: crabka_units::bytes(16),
         });
 
         let result = gateway
@@ -5490,11 +5475,8 @@ mod tests {
             .simple_query("INSERT INTO cursor_items VALUES (10), (20)")
             .await
             .expect("insert owner rows");
-        let table = crabka_pgcatalog::get_table(
-            owner.catalog_kv(),
-            &crabka_pgcatalog::RelationName::public("cursor_items"),
-        )
-        .expect("cursor table");
+        let table =
+            crabka_pgcatalog::get_table(owner.catalog_kv(), "cursor_items").expect("cursor table");
         owner
             .kv_handle()
             .write_batch(&[crabka_pgkv::WriteOp::Delete {
@@ -5507,7 +5489,7 @@ mod tests {
         )]));
         let scan = ScanRangeReq {
             range_id: RangeId::new(1),
-            table_id: table.id.into(),
+            table_name: "cursor_items".to_string(),
             interval: WireRowInterval {
                 start: None,
                 end: None,
@@ -5567,11 +5549,6 @@ mod tests {
             .simple_query("INSERT INTO t11 VALUES (1, 'drop'), (2, 'keep'), (3, 'keep')")
             .await
             .expect("insert owner rows");
-        let table = crabka_pgcatalog::get_table(
-            owner.catalog_kv(),
-            &crabka_pgcatalog::RelationName::public("t11"),
-        )
-        .expect("owner catalog row");
         let service = RangeScanService::new(std::collections::BTreeMap::from([(
             RangeId::new(1),
             owner.clone_handle(),
@@ -5580,7 +5557,7 @@ mod tests {
         let response = service
             .handle(RangeRequest::ScanRange(ScanRangeReq {
                 range_id: RangeId::new(1),
-                table_id: table.id.into(),
+                table_name: "t11".to_string(),
                 interval: WireRowInterval {
                     start: None,
                     end: None,
@@ -5636,11 +5613,6 @@ mod tests {
             .simple_query("INSERT INTO t11 VALUES (10, 'd'), (30, 'z'), (30, 'a'), (20, 'b')")
             .await
             .expect("insert owner rows");
-        let table = crabka_pgcatalog::get_table(
-            owner.catalog_kv(),
-            &crabka_pgcatalog::RelationName::public("t11"),
-        )
-        .expect("owner catalog row");
         let service = RangeScanService::new(std::collections::BTreeMap::from([(
             RangeId::new(1),
             owner.clone_handle(),
@@ -5649,7 +5621,7 @@ mod tests {
         let response = service
             .handle(RangeRequest::ScanRange(ScanRangeReq {
                 range_id: RangeId::new(1),
-                table_id: table.id.into(),
+                table_name: "t11".to_string(),
                 interval: WireRowInterval {
                     start: None,
                     end: None,
@@ -5718,7 +5690,7 @@ mod tests {
         let registry = RangeRegistry::from_tenant_record(&record(addr.to_string())).unwrap();
         let scanner = RegistryRangeScanner::new(
             registry,
-            FramedTcpClient::with_timeout(Duration::from_millis(20)),
+            FramedTcpClient::with_timeout(crabka_units::millis(20)),
             std::collections::BTreeMap::new(),
         );
         let local = MemKv::new();
@@ -6299,11 +6271,7 @@ mod tests {
             .simple_query("INSERT INTO t11 VALUES (42)")
             .await
             .expect("insert owner row");
-        let owner_table = crabka_pgcatalog::get_table(
-            owner.catalog_kv(),
-            &crabka_pgcatalog::RelationName::public("t11"),
-        )
-        .expect("t11");
+        let owner_table = crabka_pgcatalog::get_table(owner.catalog_kv(), "t11").expect("t11");
         let service = RangeScanService::new(std::collections::BTreeMap::from([(
             RangeId::new(1),
             owner.clone_handle(),

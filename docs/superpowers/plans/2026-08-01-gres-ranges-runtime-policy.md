@@ -17,11 +17,11 @@ through existing runtime owners; render identical values from
 
 ### Task 2: Gres CLI and runtime ownership
 
-- [ ] Add optional `CRABKA_GRES_RANGE_*`-backed `ServeArgs` fields.
-- [ ] Resolve one policy in `SubstrateRuntimeConfig` and reject invalid combinations.
-- [ ] Thread the policy through transport, forwarding, barrier, inspection, release, and timestamp owners.
-- [ ] Preserve default public constructors.
-- [ ] Run Gres and ranges tests plus strict Clippy; commit.
+- [x] Add optional `CRABKA_GRES_RANGE_*`-backed `ServeArgs` fields.
+- [x] Resolve one policy in `SubstrateRuntimeConfig` and reject invalid combinations.
+- [x] Thread the policy through transport, forwarding, barrier, inspection, release, and timestamp owners.
+- [x] Preserve default public constructors.
+- [x] Run Gres and ranges tests plus strict Clippy; commit.
 
 ### Task 3: Compute CRD
 

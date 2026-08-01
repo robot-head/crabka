@@ -27,6 +27,7 @@ use std::{
 
 use crabka_pgexec::{HybridLogicalClock, WallClock};
 use crabka_pgkv::{Kv, WriteOp};
+use crabka_units::{Time, convert::TimeExt as _, millis};
 use tokio::{sync::Mutex, time::Instant};
 
 use crate::tso::stats::TsoOracleStats;
@@ -219,8 +220,6 @@ impl TsoClock for SystemTsoClock {
     }
 }
 
-const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
-
 /// Target minimum wall interval between logical-mode horizon persists.
 ///
 /// The dense logical counter advances with grant volume, so a fixed-count
@@ -231,7 +230,7 @@ const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
 /// logical oracle persists a handful of times per second regardless of grant
 /// volume — the same wall-time bound the wall-anchored arm gets from its packed
 /// stride, and comparable to that arm's own cadence.
-const LOGICAL_MIN_PERSIST_INTERVAL_MS: u64 = 100;
+const LOGICAL_MIN_PERSIST_INTERVAL: Time = millis(100);
 
 /// Ceiling on the widened logical stride. Caps how far ahead the durable
 /// horizon runs, and therefore how many otherwise-unused timestamps a crash
@@ -245,7 +244,9 @@ struct RecoverySettings {
     epoch: i16,
     stride: NonZeroU64,
     persisted_max_ts: u64,
-    heartbeat_interval: Duration,
+    heartbeat_interval: Time,
+    logical_min_persist_interval: Time,
+    logical_max_persist_stride: u64,
 }
 
 /// Range-0 timestamp oracle.
@@ -271,7 +272,9 @@ pub struct TsoOracle<C, H> {
     heartbeat: H,
     epoch: i16,
     stride: NonZeroU64,
-    heartbeat_interval: Duration,
+    heartbeat_interval: Time,
+    logical_min_persist_interval: Time,
+    logical_max_persist_stride: u64,
     clock: Arc<dyn TsoClock>,
     ready: AtomicBool,
     ready_at_ms: u64,
@@ -298,13 +301,38 @@ where
         stride: NonZeroU64,
         persisted_max_ts: u64,
     ) -> Result<Self, TsoError> {
-        Self::recover_with_clock(
+        Self::recover_with_policy(
             committer,
             heartbeat,
             epoch,
             stride,
             persisted_max_ts,
-            DEFAULT_HEARTBEAT_INTERVAL,
+            &crate::RangeRuntimePolicy::default(),
+        )
+    }
+
+    /// Recover a logical oracle using explicit runtime policy.
+    /// # Errors
+    /// Returns an error when the durable horizon is invalid.
+    pub fn recover_with_policy(
+        committer: C,
+        heartbeat: H,
+        epoch: i16,
+        stride: NonZeroU64,
+        persisted_max_ts: u64,
+        policy: &crate::RangeRuntimePolicy,
+    ) -> Result<Self, TsoError> {
+        Self::recover_with_clock_and_policy(
+            committer,
+            heartbeat,
+            RecoverySettings {
+                epoch,
+                stride,
+                persisted_max_ts,
+                heartbeat_interval: policy.tso_heartbeat_interval,
+                logical_min_persist_interval: policy.logical_min_persist_interval,
+                logical_max_persist_stride: policy.logical_max_persist_stride.get(),
+            },
             Arc::new(SystemTsoClock(Instant::now())),
         )
     }
@@ -317,7 +345,7 @@ where
         epoch: i16,
         stride: NonZeroU64,
         persisted_max_ts: u64,
-        heartbeat_interval: Duration,
+        heartbeat_interval: Time,
     ) -> Result<Self, TsoError> {
         Self::recover_with_clock(
             committer,
@@ -336,18 +364,34 @@ where
         epoch: i16,
         stride: NonZeroU64,
         persisted_max_ts: u64,
-        heartbeat_interval: Duration,
+        heartbeat_interval: Time,
         clock: Arc<dyn TsoClock>,
     ) -> Result<Self, TsoError> {
+        Self::recover_with_clock_and_policy(
+            committer,
+            heartbeat,
+            RecoverySettings {
+                epoch,
+                stride,
+                persisted_max_ts,
+                heartbeat_interval,
+                logical_min_persist_interval: LOGICAL_MIN_PERSIST_INTERVAL,
+                logical_max_persist_stride: LOGICAL_MAX_PERSIST_STRIDE,
+            },
+            clock,
+        )
+    }
+
+    fn recover_with_clock_and_policy(
+        committer: C,
+        heartbeat: H,
+        settings: RecoverySettings,
+        clock: Arc<dyn TsoClock>,
+    ) -> Result<Self, TsoError> {
+        let persisted_max_ts = settings.persisted_max_ts;
         let reservation = GrantReservation::Logical(AtomicU64::new(
             TsoTimestamp::from_persisted_next(persisted_max_ts)?.get(),
         ));
-        let settings = RecoverySettings {
-            epoch,
-            stride,
-            persisted_max_ts,
-            heartbeat_interval,
-        };
         Ok(Self::assemble(
             committer,
             heartbeat,
@@ -376,11 +420,36 @@ where
         persisted_max_ts: u64,
         wall: Arc<dyn WallClock>,
     ) -> Result<Self, TsoError> {
+        Self::recover_hlc_with_policy(
+            committer,
+            heartbeat,
+            epoch,
+            stride,
+            persisted_max_ts,
+            wall,
+            &crate::RangeRuntimePolicy::default(),
+        )
+    }
+
+    /// Recover an HLC oracle using explicit runtime policy.
+    /// # Errors
+    /// Returns an error when the durable horizon is invalid.
+    pub fn recover_hlc_with_policy(
+        committer: C,
+        heartbeat: H,
+        epoch: i16,
+        stride: NonZeroU64,
+        persisted_max_ts: u64,
+        wall: Arc<dyn WallClock>,
+        policy: &crate::RangeRuntimePolicy,
+    ) -> Result<Self, TsoError> {
         let settings = RecoverySettings {
             epoch,
             stride,
             persisted_max_ts,
-            heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
+            heartbeat_interval: policy.tso_heartbeat_interval,
+            logical_min_persist_interval: policy.logical_min_persist_interval,
+            logical_max_persist_stride: policy.logical_max_persist_stride.get(),
         };
         Ok(Self::recover_hlc_with_clock(
             committer,
@@ -417,6 +486,8 @@ where
             stride,
             persisted_max_ts,
             heartbeat_interval,
+            logical_min_persist_interval,
+            logical_max_persist_stride,
         } = settings;
         // A zero horizon proves no predecessor ever granted (every grant
         // persists a stride first), so no successor grace period is needed.
@@ -425,7 +496,7 @@ where
         } else {
             clock
                 .now_ms()
-                .saturating_add(duration_ms(heartbeat_interval))
+                .saturating_add(interval_ms(heartbeat_interval))
         };
         Self {
             committer,
@@ -433,6 +504,8 @@ where
             epoch,
             stride,
             heartbeat_interval,
+            logical_min_persist_interval,
+            logical_max_persist_stride,
             clock,
             ready: AtomicBool::new(ready_at_ms == 0),
             ready_at_ms,
@@ -529,7 +602,7 @@ where
         let now_ms = self.clock.now_ms();
         self.ensure_epoch_live().await?;
         self.certified_until_ms.store(
-            now_ms.saturating_add(duration_ms(self.heartbeat_interval)),
+            now_ms.saturating_add(interval_ms(self.heartbeat_interval)),
             Ordering::Release,
         );
         Ok(())
@@ -567,7 +640,7 @@ where
         }
         self.durable_max_ts.store(new_horizon, Ordering::Release);
         self.certified_until_ms.store(
-            now_ms.saturating_add(duration_ms(self.heartbeat_interval)),
+            now_ms.saturating_add(interval_ms(self.heartbeat_interval)),
             Ordering::Release,
         );
         Ok(())
@@ -582,7 +655,7 @@ where
     /// stride would persist more often as load rises, flooding the serialized
     /// grant path with synchronous durable writes. Pace it against wall time
     /// instead: widen the stride (halving the persist rate) whenever persists
-    /// arrive closer together than [`LOGICAL_MIN_PERSIST_INTERVAL_MS`], and
+    /// arrive closer together than [`LOGICAL_MIN_PERSIST_INTERVAL`], and
     /// narrow it back toward the base once they space out, so the persist rate
     /// settles at a handful per second under any grant volume while a light or
     /// idle oracle keeps a tight horizon. Called under the slow-path mutex.
@@ -590,13 +663,14 @@ where
         match &self.reservation {
             GrantReservation::WallAnchored { .. } => self.stride.get(),
             GrantReservation::Logical(_) => {
+                let target_ms = interval_ms(self.logical_min_persist_interval);
                 let elapsed = now_ms.saturating_sub(slow.last_persist_ms);
-                if slow.last_persist_ms != u64::MAX && elapsed < LOGICAL_MIN_PERSIST_INTERVAL_MS {
+                if slow.last_persist_ms != u64::MAX && elapsed < target_ms {
                     slow.persist_stride = slow
                         .persist_stride
                         .saturating_mul(2)
-                        .min(LOGICAL_MAX_PERSIST_STRIDE);
-                } else if elapsed > LOGICAL_MIN_PERSIST_INTERVAL_MS.saturating_mul(4) {
+                        .min(self.logical_max_persist_stride);
+                } else if elapsed > target_ms.saturating_mul(4) {
                     slow.persist_stride = (slow.persist_stride / 2).max(self.stride.get());
                 }
                 slow.last_persist_ms = now_ms;
@@ -705,8 +779,14 @@ pub(crate) fn parse_count(count: u64) -> Result<NonZeroU64, TsoError> {
     NonZeroU64::new(count).ok_or(TsoError::EmptyGrant)
 }
 
-fn duration_ms(duration: Duration) -> u64 {
-    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+/// An interval in whole milliseconds, for comparison against the oracle's own
+/// monotone millisecond clock.
+///
+/// Rounds to nearest: the result is internal only — it never reaches a wire
+/// field, durable record, or any external system — so nearest is the honest
+/// reading of the configured extent.
+fn interval_ms(interval: Time) -> u64 {
+    u64::try_from(interval.millis_i64()).unwrap_or(u64::MAX)
 }
 
 fn decode_u64(bytes: &[u8]) -> Result<u64, TsoError> {
@@ -726,6 +806,7 @@ mod tests {
 
     use assert2::assert;
     use crabka_pgkv::MemKv;
+    use crabka_units::secs;
 
     use super::*;
 
@@ -785,7 +866,7 @@ mod tests {
             3,
             nonzero(100),
             100,
-            Duration::from_millis(10),
+            millis(10),
             clock.clone(),
         )
         .expect("recover");
@@ -818,7 +899,7 @@ mod tests {
             3,
             nonzero(10),
             0,
-            Duration::from_millis(10),
+            millis(10),
             clock.clone(),
         )
         .expect("recover")
@@ -894,7 +975,7 @@ mod tests {
             2,
             nonzero(8),
             4,
-            Duration::from_millis(400),
+            millis(400),
         )
         .expect("recover successor");
 
@@ -920,7 +1001,7 @@ mod tests {
             3,
             nonzero(100),
             0,
-            Duration::from_millis(10),
+            millis(10),
             clock.clone(),
         )
         .expect("recover");
@@ -1087,7 +1168,7 @@ mod tests {
             3,
             nonzero(STRIDE),
             0,
-            Duration::from_millis(10),
+            millis(10),
             clock,
         )
         .expect("recover");
@@ -1119,7 +1200,7 @@ mod tests {
             1,
             nonzero(1024),
             0,
-            Duration::from_millis(10),
+            millis(10),
             clock,
         )
         .expect("recover");
@@ -1132,11 +1213,12 @@ mod tests {
         // stride, halving the persist rate each time.
         assert!(oracle.persist_stride(&mut slow, 1_000) == 2_048);
         assert!(oracle.persist_stride(&mut slow, 1_000) == 4_096);
-        let last_persist = 1_000 + LOGICAL_MIN_PERSIST_INTERVAL_MS - 1;
+        let target_ms = interval_ms(LOGICAL_MIN_PERSIST_INTERVAL);
+        let last_persist = 1_000 + target_ms - 1;
         assert!(oracle.persist_stride(&mut slow, last_persist) == 8_192);
         // A gap well past the target interval narrows the stride back toward
         // the base, so an idle oracle keeps a tight horizon.
-        let idle_at = last_persist + LOGICAL_MIN_PERSIST_INTERVAL_MS * 4 + 1;
+        let idle_at = last_persist + target_ms * 4 + 1;
         assert!(oracle.persist_stride(&mut slow, idle_at) == 4_096);
     }
 
@@ -1176,7 +1258,7 @@ mod tests {
             2,
             nonzero(8),
             40,
-            Duration::from_millis(50),
+            millis(50),
         )
         .expect("recover successor");
 
@@ -1206,7 +1288,7 @@ mod tests {
             2,
             nonzero(8),
             0,
-            Duration::from_secs(1),
+            secs(1),
         )
         .expect("recover fresh");
 
@@ -1231,7 +1313,7 @@ mod tests {
             6,
             nonzero(8),
             16,
-            Duration::from_secs(1),
+            secs(1),
             clock.clone(),
         )
         .expect("recover successor");
@@ -1254,7 +1336,9 @@ mod tests {
             epoch,
             stride: nonzero(crabka_pgexec::hlc::pack(stride_ms, 0)),
             persisted_max_ts,
-            heartbeat_interval: Duration::from_millis(10),
+            heartbeat_interval: millis(10),
+            logical_min_persist_interval: LOGICAL_MIN_PERSIST_INTERVAL,
+            logical_max_persist_stride: LOGICAL_MAX_PERSIST_STRIDE,
         }
     }
 

@@ -339,6 +339,7 @@ impl LiveMultiRangeTransfer {
                     persisted_max_ts,
                     self.config.timestamp_source_mode,
                     self.config.hlc_wall_offset_ms,
+                    &self.config.range_runtime_policy,
                 )
                 .map_err(|error| {
                     crabka_gres_ranges::RangeTransferError::Runtime {

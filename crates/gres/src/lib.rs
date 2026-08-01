@@ -1713,11 +1713,17 @@ impl RangeRpcRuntimeConfig {
         }))
     }
 
-    fn client(&self) -> std::io::Result<crabka_gres_ranges::FramedTcpClient> {
-        crabka_gres_ranges::FramedTcpClient::with_tls(crabka_gres_ranges::RangeTlsClientConfig {
-            tls: self.tls.clone(),
-            server_name: self.server_name.clone(),
-        })
+    fn client(
+        &self,
+        policy: &crabka_gres_ranges::RangeRuntimePolicy,
+    ) -> std::io::Result<crabka_gres_ranges::FramedTcpClient> {
+        crabka_gres_ranges::FramedTcpClient::with_tls_and_policy(
+            crabka_gres_ranges::RangeTlsClientConfig {
+                tls: self.tls.clone(),
+                server_name: self.server_name.clone(),
+            },
+            policy,
+        )
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
     }
 
@@ -1992,9 +1998,11 @@ impl GresRuntime {
     }
 
     fn multi(engine: crabka_gres_ranges::MultiRangeTenant) -> Self {
-        let mut range_service =
-            crabka_gres_ranges::HostedRangeService::new(engine.hosted_range_engines())
-                .with_ddl_gate(engine.schema_gate());
+        let mut range_service = crabka_gres_ranges::HostedRangeService::new_with_policy(
+            engine.hosted_range_engines(),
+            engine.runtime_policy(),
+        )
+        .with_ddl_gate(engine.schema_gate());
         if let Some((registry, client)) = engine.timestamp_primary_remote() {
             range_service = range_service.with_timestamp_primary_remote(registry, client);
         }
@@ -3717,7 +3725,10 @@ async fn bind_early_range_transport(
         return Ok(None);
     }
     let dynamic = Arc::new(DynamicLiveRangeService::new(
-        crabka_gres_ranges::HostedRangeService::new(BTreeMap::new()),
+        crabka_gres_ranges::HostedRangeService::new_with_policy(
+            BTreeMap::new(),
+            config.range_runtime_policy,
+        ),
     ));
     let server = start_range_service(
         args,
@@ -3746,9 +3757,9 @@ async fn start_range_service(
             "--range-listen requires a multi-range runtime",
         )
     })?;
-    let config = SubstrateRuntimeConfig::from_args(args)?
-        .and_then(|config| config.range_rpc)
+    let runtime = SubstrateRuntimeConfig::from_args(args)?
         .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "--range-listen requires --range-tls-cert, --range-tls-key, --range-tls-ca, --range-tls-server-name, and --range-allowed-principal"))?;
+    let config = runtime.range_rpc.ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "--range-listen requires --range-tls-cert, --range-tls-key, --range-tls-ca, --range-tls-server-name, and --range-allowed-principal"))?;
     let tenant = args.tenant.clone().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -3763,7 +3774,14 @@ async fn start_range_service(
     tracing::info!(range_listen = %address, "crabka-gres range compute listening");
     Ok(Some((
         tokio::spawn(async move {
-            if let Err(error) = crabka_gres_ranges::serve_tls(listener, service, tls).await {
+            if let Err(error) = crabka_gres_ranges::serve_tls_with_policy(
+                listener,
+                service,
+                tls,
+                runtime.range_runtime_policy,
+            )
+            .await
+            {
                 tracing::warn!(%error, "range compute server stopped");
             }
         }),
@@ -4644,7 +4662,8 @@ fn multirange_tenant_config(
         crabka_gres_ranges::MultiRangeTenantConfig::from_boundaries(tenant, boundaries)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?
             .with_timestamp_source_mode(config.timestamp_source_mode)
-            .with_hlc_wall_offset_ms(config.hlc_wall_offset_ms);
+            .with_hlc_wall_offset_ms(config.hlc_wall_offset_ms)
+            .with_runtime_policy(config.range_runtime_policy);
     if let Some(record) = tenant_record {
         tenant_config.range_map = range_map_from_tenant_layout(
             tenant_config.tenant.clone(),
@@ -4683,7 +4702,7 @@ fn multirange_tenant_config(
         }
         if let Some(range_rpc) = &config.range_rpc {
             tenant_config = tenant_config
-                .with_range_client(range_rpc.client()?)
+                .with_range_client(range_rpc.client(&config.range_runtime_policy)?)
                 .with_range_registry(registry);
         } else if remote_ranges_are_configured(config, record) {
             return invalid_input(
@@ -4731,8 +4750,12 @@ async fn attach_range0_read_barrier(
     ));
     let catalog_refresh_poke = Arc::new(tokio::sync::Notify::new());
     let tenant_config = tenant_config.with_read_only_range0_replica(
-        crabka_gres_ranges::ReadOnlyRange0Replica::new(tail, sampler)
-            .with_catalog_refresh_poke(Arc::clone(&catalog_refresh_poke)),
+        crabka_gres_ranges::ReadOnlyRange0Replica::new_with_policy(
+            tail,
+            sampler,
+            &config.range_runtime_policy,
+        )
+        .with_catalog_refresh_poke(Arc::clone(&catalog_refresh_poke)),
     );
     tokio::spawn(
         range0_follower::Range0FollowerTail::new(
@@ -5099,10 +5122,14 @@ async fn recover_live_multirange_engines(
                     horizon,
                     tenant_config.timestamp_source_mode,
                     tenant_config.hlc_wall_offset_ms,
+                    &tenant_config.runtime_policy,
                 )?;
                 early.replace(
-                    crabka_gres_ranges::HostedRangeService::new(BTreeMap::new())
-                        .with_tso(Arc::clone(&tso_rpc)),
+                    crabka_gres_ranges::HostedRangeService::new_with_policy(
+                        BTreeMap::new(),
+                        tenant_config.runtime_policy,
+                    )
+                    .with_tso(Arc::clone(&tso_rpc)),
                 );
                 tracing::info!("range-0 timestamp oracle serving before full multirange recovery");
                 range0_tso = Some(tso_rpc);
@@ -5123,12 +5150,19 @@ fn build_range0_tso_rpc(
     tso_horizon: &crabka_gres_substrate::SubstrateTsoHorizon,
     mode: crabka_gres_ranges::TimestampSourceMode,
     hlc_wall_offset_ms: i64,
+    policy: &crabka_gres_ranges::RangeRuntimePolicy,
 ) -> std::io::Result<Arc<dyn crabka_gres_ranges::TsoRpc>> {
     let persisted_max_ts = tso_horizon
         .load_max_ts()
         .map_err(|error| std::io::Error::other(format!("range-0 TSO horizon: {error}")))?;
-    mode_tso_rpc_from_horizon(tso_horizon, persisted_max_ts, mode, hlc_wall_offset_ms)
-        .map_err(|error| std::io::Error::other(format!("range-0 TSO oracle: {error}")))
+    mode_tso_rpc_from_horizon(
+        tso_horizon,
+        persisted_max_ts,
+        mode,
+        hlc_wall_offset_ms,
+        policy,
+    )
+    .map_err(|error| std::io::Error::other(format!("range-0 TSO oracle: {error}")))
 }
 
 /// Build the mode-appropriate range-0 grant oracle from an already-loaded
@@ -5149,23 +5183,26 @@ fn mode_tso_rpc_from_horizon(
     persisted_max_ts: u64,
     mode: crabka_gres_ranges::TimestampSourceMode,
     hlc_wall_offset_ms: i64,
+    policy: &crabka_gres_ranges::RangeRuntimePolicy,
 ) -> Result<Arc<dyn crabka_gres_ranges::TsoRpc>, crabka_gres_ranges::TsoError> {
     match mode {
         crabka_gres_ranges::TimestampSourceMode::LogicalTso => {
-            crabka_gres_ranges::tso_rpc_from_horizon(
+            crabka_gres_ranges::tso_rpc_from_horizon_with_policy(
                 tso_horizon.clone(),
                 tso_horizon.clone(),
                 tso_horizon.epoch(),
                 persisted_max_ts,
+                policy,
             )
         }
         crabka_gres_ranges::TimestampSourceMode::Hlc { .. } => {
-            crabka_gres_ranges::hlc_tso_rpc_from_horizon(
+            crabka_gres_ranges::hlc_tso_rpc_from_horizon_with_policy(
                 tso_horizon.clone(),
                 tso_horizon.clone(),
                 tso_horizon.epoch(),
                 persisted_max_ts,
                 crabka_gres_ranges::hlc_wall_clock(hlc_wall_offset_ms),
+                policy,
             )
         }
     }
@@ -5568,6 +5605,7 @@ async fn start_live_multirange_tenant(
             &tso_horizon,
             tenant_config.timestamp_source_mode,
             tenant_config.hlc_wall_offset_ms,
+            &tenant_config.runtime_policy,
         )?),
         (None, None) => None,
     };
@@ -5649,9 +5687,12 @@ fn assembled_hosted_service(
     gateway: &crabka_gres_ranges::MultiRangeTenant,
     timestamp_primary_aliases: &BTreeMap<crabka_gres_ranges::RangeId, crabka_gres_ranges::RangeId>,
 ) -> crabka_gres_ranges::HostedRangeService {
-    let mut service = crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
-        .with_timestamp_primary_aliases(timestamp_primary_aliases.clone())
-        .with_ddl_gate(gateway.schema_gate());
+    let mut service = crabka_gres_ranges::HostedRangeService::new_with_policy(
+        gateway.hosted_range_engines(),
+        gateway.runtime_policy(),
+    )
+    .with_timestamp_primary_aliases(timestamp_primary_aliases.clone())
+    .with_ddl_gate(gateway.schema_gate());
     if let Some(replica) = gateway.range0_replica() {
         service = service.with_catalog_follower(replica.barrier());
     }
@@ -7297,6 +7338,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                         persisted_max_ts,
                         self.config.timestamp_source_mode,
                         self.config.hlc_wall_offset_ms,
+                        &self.config.range_runtime_policy,
                     )
                     .map_err(|error| {
                         crabka_gres_ranges::RangeTransferError::Runtime {
