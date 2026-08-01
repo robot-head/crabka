@@ -96,25 +96,53 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
 struct Cli {
     #[command(flatten)]
     profiling: crabka_telemetry::profiling::ProfilingConfig,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_TRACES_TARGET")]
     target: Target,
-    #[arg(long, default_value = "127.0.0.1:3200")]
+    #[arg(long, env = "CRABKA_TRACES_LISTEN", default_value = "127.0.0.1:3200")]
     listen: String,
     #[arg(long, env = "CRABKA_ADMIN_LISTEN_ADDR", default_value = "0.0.0.0:9404")]
     admin_listen_addr: SocketAddr,
-    #[arg(long, default_value = "127.0.0.1:4317")]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_GRPC_LISTEN",
+        default_value = "127.0.0.1:4317"
+    )]
     grpc_listen: String,
-    #[arg(long, default_value = "127.0.0.1:4318")]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_OTLP_HTTP_LISTEN",
+        default_value = "127.0.0.1:4318"
+    )]
     otlp_http_listen: String,
-    #[arg(long, default_value = "127.0.0.1:14250")]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_JAEGER_GRPC_LISTEN",
+        default_value = "127.0.0.1:14250"
+    )]
     jaeger_grpc_listen: String,
-    #[arg(long, default_value = "127.0.0.1:6831")]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_JAEGER_COMPACT_LISTEN",
+        default_value = "127.0.0.1:6831"
+    )]
     jaeger_compact_listen: String,
-    #[arg(long, default_value = "127.0.0.1:14268")]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_JAEGER_HTTP_LISTEN",
+        default_value = "127.0.0.1:14268"
+    )]
     jaeger_http_listen: String,
-    #[arg(long, default_value = "127.0.0.1:9411")]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_ZIPKIN_LISTEN",
+        default_value = "127.0.0.1:9411"
+    )]
     zipkin_listen: String,
-    #[arg(long, default_value = "127.0.0.1:9092")]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_BOOTSTRAP",
+        default_value = "127.0.0.1:9092"
+    )]
     bootstrap: String,
     #[arg(
         long,
@@ -159,11 +187,15 @@ struct Cli {
     block_builder_flush_max_records: usize,
     #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64())]
     block_builder_flush_max_age_ms: i64,
-    #[arg(long, action = ArgAction::SetTrue)]
+    #[arg(long, env = "CRABKA_TRACES_QUERIER_LIVE_STORE", action = ArgAction::SetTrue)]
     querier_live_store: bool,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_TRACES_QUERIER_LIVE_STORE_URL")]
     querier_live_store_url: Option<String>,
-    #[arg(long, default_value = "index/traces.json")]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_TRACE_INDEX_KEY",
+        default_value = "index/traces.json"
+    )]
     trace_index_key: String,
     #[arg(
         long,
@@ -192,17 +224,21 @@ struct Cli {
         value_parser = parse_scan_concat_max
     )]
     scan_concat_max: ByteSize,
-    #[arg(long, default_value = "memory:///")]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_OBJECT_STORE_URL",
+        default_value = "memory:///"
+    )]
     object_store_url: String,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_TRACES_REMOTE_WRITE_URL")]
     remote_write_url: Option<String>,
     #[arg(long)]
     collection_interval_secs: Option<u64>,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_TRACES_MAX_EXEMPLARS_PER_SERIES")]
     max_exemplars_per_series: Option<usize>,
     #[arg(long)]
     edge_ttl_secs: Option<u64>,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_TRACES_EDGE_STORE_MAX_ITEMS")]
     edge_store_max_items: Option<usize>,
     #[arg(long)]
     #[arg(value_delimiter = ',')]
@@ -213,15 +249,19 @@ struct Cli {
     compaction_start_ns: i64,
     #[arg(long, default_value_t = i64::MAX)]
     compaction_end_ns: i64,
-    #[arg(long, default_value = "http://127.0.0.1:3200")]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_QUERIER_URL",
+        default_value = "http://127.0.0.1:3200"
+    )]
     querier_url: String,
     #[arg(long)]
     live_frontier_ns: Option<i64>,
-    #[arg(long, default_value_t = 128)]
+    #[arg(long, env = "CRABKA_TRACES_QUERY_QUEUE_DEPTH", default_value_t = 128)]
     query_queue_depth: usize,
     #[arg(long, default_value_t = 0)]
     target_bytes_per_job: u64,
-    #[arg(long, default_value_t = usize::MAX)]
+    #[arg(long, env = "CRABKA_TRACES_MAX_TRACE_SPANS", default_value_t = usize::MAX)]
     max_trace_spans: usize,
     #[arg(
         long,
@@ -268,17 +308,29 @@ struct Cli {
         value_parser = parse::positive_time
     )]
     traceql_histogram_buckets: Vec<Time>,
-    #[arg(long, default_value_t = 10_000)]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_MAX_SPANS_PER_REQUEST",
+        default_value_t = 10_000
+    )]
     max_spans_per_request: usize,
-    #[arg(long, default_value_t = usize::MAX)]
+    #[arg(long, env = "CRABKA_TRACES_MAX_SPANS_PER_TRACE", default_value_t = usize::MAX)]
     max_spans_per_trace: usize,
-    #[arg(long, default_value_t = usize::MAX)]
+    #[arg(long, env = "CRABKA_TRACES_MAX_INGEST_SPANS_PER_SECOND", default_value_t = usize::MAX)]
     max_ingest_spans_per_second: usize,
-    #[arg(long, default_value_t = usize::MAX)]
+    #[arg(long, env = "CRABKA_TRACES_INGEST_RATE_BURST", default_value_t = usize::MAX)]
     ingest_rate_burst: usize,
-    #[arg(long = "promote-span-attr")]
+    #[arg(
+        long = "promote-span-attr",
+        env = "CRABKA_TRACES_PROMOTE_SPAN_ATTR",
+        value_delimiter = ','
+    )]
     promote_span_attrs: Vec<String>,
-    #[arg(long = "promote-resource-attr")]
+    #[arg(
+        long = "promote-resource-attr",
+        env = "CRABKA_TRACES_PROMOTE_RESOURCE_ATTR",
+        value_delimiter = ','
+    )]
     promote_resource_attrs: Vec<String>,
     #[arg(long, default_value_t = 64 * 1024)]
     max_attr_value_len: usize,
@@ -298,17 +350,17 @@ struct Cli {
         value_parser = parse::positive_time
     )]
     metrics_generator_poll_error_backoff: Time,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_TRACES_CONFIG")]
     config: Option<String>,
 }
 
 #[derive(Debug, Args)]
 struct MetricsFlags {
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_TRACES_ENABLE_TARGET_INFO")]
     enable_target_info: bool,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_TRACES_ENABLE_STATUS_MESSAGE")]
     enable_status_message: bool,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_TRACES_ENABLE_MESSAGING_SYSTEM_LATENCY")]
     enable_messaging_system_latency: bool,
 }
 
@@ -1158,12 +1210,140 @@ mod tests {
         body::Body,
         http::{Request, StatusCode as HttpStatusCode},
     };
-    use clap::Parser;
+    use clap::{CommandFactory as _, Parser};
     use crabka_units::minutes;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
     use super::*;
+
+    #[test]
+    fn non_dimensioned_cli_arguments_have_environment_backing() {
+        let command = Cli::command();
+        for (id, env) in [
+            ("target", "CRABKA_TRACES_TARGET"),
+            ("listen", "CRABKA_TRACES_LISTEN"),
+            ("grpc_listen", "CRABKA_TRACES_GRPC_LISTEN"),
+            ("otlp_http_listen", "CRABKA_TRACES_OTLP_HTTP_LISTEN"),
+            ("jaeger_grpc_listen", "CRABKA_TRACES_JAEGER_GRPC_LISTEN"),
+            (
+                "jaeger_compact_listen",
+                "CRABKA_TRACES_JAEGER_COMPACT_LISTEN",
+            ),
+            ("jaeger_http_listen", "CRABKA_TRACES_JAEGER_HTTP_LISTEN"),
+            ("zipkin_listen", "CRABKA_TRACES_ZIPKIN_LISTEN"),
+            ("bootstrap", "CRABKA_TRACES_BOOTSTRAP"),
+            ("querier_live_store", "CRABKA_TRACES_QUERIER_LIVE_STORE"),
+            (
+                "querier_live_store_url",
+                "CRABKA_TRACES_QUERIER_LIVE_STORE_URL",
+            ),
+            ("trace_index_key", "CRABKA_TRACES_TRACE_INDEX_KEY"),
+            ("object_store_url", "CRABKA_TRACES_OBJECT_STORE_URL"),
+            ("remote_write_url", "CRABKA_TRACES_REMOTE_WRITE_URL"),
+            (
+                "max_exemplars_per_series",
+                "CRABKA_TRACES_MAX_EXEMPLARS_PER_SERIES",
+            ),
+            ("edge_store_max_items", "CRABKA_TRACES_EDGE_STORE_MAX_ITEMS"),
+            ("querier_url", "CRABKA_TRACES_QUERIER_URL"),
+            ("query_queue_depth", "CRABKA_TRACES_QUERY_QUEUE_DEPTH"),
+            ("max_trace_spans", "CRABKA_TRACES_MAX_TRACE_SPANS"),
+            (
+                "max_spans_per_request",
+                "CRABKA_TRACES_MAX_SPANS_PER_REQUEST",
+            ),
+            ("max_spans_per_trace", "CRABKA_TRACES_MAX_SPANS_PER_TRACE"),
+            (
+                "max_ingest_spans_per_second",
+                "CRABKA_TRACES_MAX_INGEST_SPANS_PER_SECOND",
+            ),
+            ("ingest_rate_burst", "CRABKA_TRACES_INGEST_RATE_BURST"),
+            ("promote_span_attrs", "CRABKA_TRACES_PROMOTE_SPAN_ATTR"),
+            (
+                "promote_resource_attrs",
+                "CRABKA_TRACES_PROMOTE_RESOURCE_ATTR",
+            ),
+            ("config", "CRABKA_TRACES_CONFIG"),
+            ("enable_target_info", "CRABKA_TRACES_ENABLE_TARGET_INFO"),
+            (
+                "enable_status_message",
+                "CRABKA_TRACES_ENABLE_STATUS_MESSAGE",
+            ),
+            (
+                "enable_messaging_system_latency",
+                "CRABKA_TRACES_ENABLE_MESSAGING_SYSTEM_LATENCY",
+            ),
+        ] {
+            let configured = command
+                .get_arguments()
+                .find(|arg| arg.get_id() == id)
+                .and_then(|arg| arg.get_env())
+                .and_then(|value| value.to_str());
+            check!(configured == Some(env), "missing {env} on {id}");
+        }
+    }
+
+    #[test]
+    fn process_environment_supplies_cli_and_explicit_flags_win() {
+        const CHILD: &str = "CRABKA_TRACES_PROCESS_ENVIRONMENT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::process_environment_supplies_cli_and_explicit_flags_win",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_TRACES_TARGET", "querier")
+                    .env("CRABKA_TRACES_LISTEN", "127.0.0.1:3210")
+                    .env("CRABKA_TRACES_ENABLE_TARGET_INFO", "true")
+                    .env(
+                        "CRABKA_TRACES_PROMOTE_SPAN_ATTR",
+                        "http.method:string,http.status:int",
+                    )
+                    .env("CRABKA_TRACES_QUERY_QUEUE_DEPTH", "7")
+                    .status()
+                    .expect("child test");
+            check!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-traces"]).unwrap();
+        check!(
+            (
+                from_env.target,
+                from_env.listen.as_str(),
+                from_env.metrics.enable_target_info,
+                from_env.promote_span_attrs.as_slice(),
+                from_env.query_queue_depth,
+            ) == (
+                Target::Querier,
+                "127.0.0.1:3210",
+                true,
+                &[
+                    "http.method:string".to_string(),
+                    "http.status:int".to_string()
+                ][..],
+                7,
+            )
+        );
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target=query-frontend",
+            "--listen=127.0.0.1:3220",
+            "--query-queue-depth=11",
+        ])
+        .unwrap();
+        check!(
+            (
+                from_cli.target,
+                from_cli.listen.as_str(),
+                from_cli.query_queue_depth
+            ) == (Target::QueryFrontend, "127.0.0.1:3220", 11)
+        );
+    }
 
     #[test]
     fn client_resource_policy_parses_defaults_and_overrides() {

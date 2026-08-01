@@ -6343,3 +6343,20 @@ explicit overrides through `with_poll_policy`. CLI defaults, overrides,
 environment precedence, zero rejection, and block-builder loop tests pass.
 This closes only the traces poll-retry slice; the repository-wide hardcoded
 operational-value audit remains active.
+
+## Traces Process Environment Closure
+
+All remaining non-dimensional traces process arguments now have direct
+environment backing. The new `CRABKA_TRACES_*` mappings cover target role,
+listeners, Kafka bootstrap, live-store selection and URL, object/index store
+locations, metrics-generator endpoint and feature switches, query and ingest
+limits, promoted attributes, and the optional config path. Existing flags,
+defaults, and explicit-CLI precedence are unchanged.
+
+A command-metadata test exhaustively checks the 29 mappings, and a child
+process proves environment parsing for enum, address, boolean, list, and count
+values plus CLI precedence. No CRD owns the standalone traces process. Raw
+unit-suffixed legacy arguments remain a separate dimensioned/UOM closure so
+new environment names do not encode untyped numeric values. This closes only
+the non-dimensional process-environment slice; the repository-wide hardcoded
+operational-value audit remains active.
