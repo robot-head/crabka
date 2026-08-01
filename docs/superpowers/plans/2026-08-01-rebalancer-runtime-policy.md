@@ -23,8 +23,8 @@ render the same environment variables from the Helm chart.
 
 ### Task 3: Helm deployment surface
 
-- [ ] Add unit-bearing chart values and matching environment variables.
-- [ ] Extend chart rendering tests.
+- [x] Add unit-bearing chart values and matching environment variables.
+- [x] Extend chart rendering tests.
 - [ ] Run chart tests and diff hygiene; commit.
 
 ### Task 4: Closure

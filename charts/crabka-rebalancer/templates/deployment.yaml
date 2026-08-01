@@ -48,6 +48,38 @@ spec:
               value: {{ .Values.reassignmentBatchSize | quote }}
             - name: CRABKA_REBALANCER_REASSIGNMENT_REQUEST_TIMEOUT
               value: {{ .Values.reassignmentRequestTimeout | quote }}
+            - name: CRABKA_REBALANCER_RECOVERY_LOAD_POLL_INTERVAL
+              value: {{ .Values.runtime.recoveryLoadPollInterval | quote }}
+            - name: CRABKA_REBALANCER_EXECUTOR_DRAIN_TIMEOUT
+              value: {{ .Values.runtime.executorDrainTimeout | quote }}
+            - name: CRABKA_REBALANCER_INGESTER_JOIN_TIMEOUT
+              value: {{ .Values.runtime.ingesterJoinTimeout | quote }}
+            - name: CRABKA_REBALANCER_SCRAPER_HTTP_TIMEOUT
+              value: {{ .Values.runtime.scraperHttpTimeout | quote }}
+            - name: CRABKA_REBALANCER_CANCEL_DRAIN_TIMEOUT
+              value: {{ .Values.runtime.cancelDrainTimeout | quote }}
+            - name: CRABKA_REBALANCER_CANCEL_DRAIN_POLL_INTERVAL
+              value: {{ .Values.runtime.cancelDrainPollInterval | quote }}
+            - name: CRABKA_REBALANCER_DETECTOR_HISTORY_CAPACITY
+              value: {{ .Values.runtime.detectorHistoryCapacity | quote }}
+            - name: CRABKA_REBALANCER_STATE_TOPIC_CREATE_TIMEOUT
+              value: {{ .Values.runtime.stateTopicCreateTimeout | quote }}
+            - name: CRABKA_REBALANCER_STATE_LOADER_POLL_INTERVAL
+              value: {{ .Values.runtime.stateLoaderPollInterval | quote }}
+            - name: CRABKA_REBALANCER_STATE_LOADER_QUIET_POLLS
+              value: {{ .Values.runtime.stateLoaderQuietPolls | quote }}
+            - name: CRABKA_REBALANCER_STATE_FETCH_MAX
+              value: {{ .Values.runtime.stateFetchMax | quote }}
+            - name: CRABKA_REBALANCER_STATE_PRODUCE_RETRY_ATTEMPTS
+              value: {{ .Values.runtime.stateProduceRetryAttempts | quote }}
+            - name: CRABKA_REBALANCER_STATE_PRODUCE_RETRY_BACKOFF
+              value: {{ .Values.runtime.stateProduceRetryBackoff | quote }}
+            - name: CRABKA_REBALANCER_STATE_PRODUCE_TIMEOUT
+              value: {{ .Values.runtime.stateProduceTimeout | quote }}
+            - name: CRABKA_REBALANCER_STATE_TOPIC_MIN_CLEANABLE_DIRTY_RATIO
+              value: {{ .Values.runtime.stateTopicMinCleanableDirtyRatio | quote }}
+            - name: CRABKA_REBALANCER_STATE_TOPIC_SEGMENT_INTERVAL
+              value: {{ .Values.runtime.stateTopicSegmentInterval | quote }}
             - name: CRABKA_MIN_TOPIC_LEADERS_PER_BROKER
               value: {{ .Values.minTopicLeadersPerBroker | quote }}
             {{- if .Values.brokerCapacityFile }}

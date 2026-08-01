@@ -69,6 +69,24 @@ reassignmentPollIntervalSecs: 5
 reassignmentBatchSize: 200
 reassignmentRequestTimeout: 60s
 
+runtime:
+  recoveryLoadPollInterval: 100ms
+  executorDrainTimeout: 10s
+  ingesterJoinTimeout: 5s
+  scraperHttpTimeout: 5s
+  cancelDrainTimeout: 5s
+  cancelDrainPollInterval: 25ms
+  detectorHistoryCapacity: 10
+  stateTopicCreateTimeout: 10s
+  stateLoaderPollInterval: 100ms
+  stateLoaderQuietPolls: 5
+  stateFetchMax: 1MiB
+  stateProduceRetryAttempts: 50
+  stateProduceRetryBackoff: 200ms
+  stateProduceTimeout: 10s
+  stateTopicMinCleanableDirtyRatio: "1%"
+  stateTopicSegmentInterval: 1m
+
 persistence:
   size: 1Gi
   storageClass: ""  # uses default storage class when empty

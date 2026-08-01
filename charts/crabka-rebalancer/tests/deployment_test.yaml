@@ -68,6 +68,34 @@ tests:
             name: CRABKA_REBALANCER_REASSIGNMENT_REQUEST_TIMEOUT
             value: 37ms
 
+  - it: passes dimensioned runtime policy overrides
+    set:
+      runtime.executorDrainTimeout: 37ms
+      runtime.detectorHistoryCapacity: 7
+      runtime.stateFetchMax: 32KiB
+      runtime.stateTopicMinCleanableDirtyRatio: 2%
+    asserts:
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_REBALANCER_EXECUTOR_DRAIN_TIMEOUT
+            value: 37ms
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_REBALANCER_DETECTOR_HISTORY_CAPACITY
+            value: "7"
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_REBALANCER_STATE_FETCH_MAX
+            value: 32KiB
+      - contains:
+          path: spec.template.spec.containers[0].env
+          content:
+            name: CRABKA_REBALANCER_STATE_TOPIC_MIN_CLEANABLE_DIRTY_RATIO
+            value: 2%
+
   - it: passes brokerCapacityFile env when brokerCapacities is set
     set:
       brokerCapacities:
