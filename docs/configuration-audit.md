@@ -6160,3 +6160,26 @@ The Gres ranges, Gres, and operator all-target suites pass. Workspace
 all-target check and strict Clippy, nightly formatting, generated-CRD sync, and
 diff hygiene pass. This closes only the Gres range runtime-policy slice; the
 repository-wide hardcoded operational-value audit remains active.
+
+## Rebalancer Runtime Policy
+
+The standalone rebalancer now resolves one validated policy for its remaining
+recovery, shutdown, metrics-scrape, cancellation, detector-history, and
+state-topic operational values. All 16 settings retain their previous defaults
+and are exposed as unit-bearing `--...` options backed by
+`CRABKA_REBALANCER_*` environment variables. Positive counts use a
+`refined_type`-validated newtype; times, byte limits, and the cleanable-dirty
+ratio use UOM values with Kafka wire-bound validation.
+
+The policy reaches recovery and shutdown loops, the scraper HTTP client,
+Connect cancellation polling, detector snapshot history, state-topic creation,
+loading, fetching, and producing. The standalone Helm chart exposes matching
+values and environment variables. Compaction, the single state-topic
+partition, its fixed key, Kafka error codes, and `acks=all` remain protocol
+semantics rather than tunable settings.
+
+All 357 rebalancer library tests, 16 binary tests, Connect and end-to-end
+targets, strict Clippy, workspace all-target check and strict Clippy, nightly
+formatting, and diff hygiene pass. Helm 4 lint/template and all 21 chart tests
+pass in an ephemeral container. This closes only the rebalancer runtime-policy
+slice; the repository-wide hardcoded operational-value audit remains active.

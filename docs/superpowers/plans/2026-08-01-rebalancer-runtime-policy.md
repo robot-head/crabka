@@ -25,12 +25,12 @@ render the same environment variables from the Helm chart.
 
 - [x] Add unit-bearing chart values and matching environment variables.
 - [x] Extend chart rendering tests.
-- [ ] Run chart tests and diff hygiene; commit.
+- [x] Run chart tests and diff hygiene; commit.
 
 ### Task 4: Closure
 
-- [ ] Run rebalancer all-target tests.
-- [ ] Run workspace all-target check and strict Clippy.
-- [ ] Run nightly formatting and diff hygiene.
-- [ ] Update `docs/configuration-audit.md` and commit closure docs.
-- [ ] Leave the repository-wide goal active.
+- [x] Run rebalancer all-target tests.
+- [x] Run workspace all-target check and strict Clippy.
+- [x] Run nightly formatting and diff hygiene.
+- [x] Update `docs/configuration-audit.md` and commit closure docs.
+- [x] Leave the repository-wide goal active.
