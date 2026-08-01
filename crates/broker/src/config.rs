@@ -602,6 +602,9 @@ pub struct BrokerConfig {
     /// `for_tests` so unit tests don't fight over port allocation.
     pub metrics_listen_addr: Option<SocketAddr>,
 
+    /// CPU and heap profiling endpoint policy.
+    pub profiling: crabka_telemetry::profiling::ProfilingConfig,
+
     /// Optional OTLP endpoint for KIP-714 client metrics forwarding.
     /// Populated by binaries from their parsed runtime configuration rather
     /// than read from the environment while the broker starts.
@@ -1142,6 +1145,7 @@ impl BrokerConfig {
             // setting this to `Some(127.0.0.1:0)`; sharing a default
             // port would race in parallel test runs.
             metrics_listen_addr: None,
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             client_metrics_otlp_endpoint: None,
             // Disable the disk scanner by default in tests so the
             // background task doesn't tick during short-lived fixtures.
@@ -2020,6 +2024,7 @@ impl Default for BrokerConfig {
             // sets that via env, so production deployments still get
             // metrics by default.
             metrics_listen_addr: None,
+            profiling: crabka_telemetry::profiling::ProfilingConfig::default(),
             client_metrics_otlp_endpoint: None,
             partition_disk_scan_interval: secs(60),
             max_incremental_fetch_session_cache_slots:

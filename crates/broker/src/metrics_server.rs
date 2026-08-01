@@ -15,11 +15,16 @@ use crate::metrics::SharedRegistry;
 
 /// Build the router: `/metrics` (Prometheus) plus `/debug/pprof/{profile,heap}`
 /// (CPU always on Unix; heap when built with `--features heap-profiling`).
-pub fn router(registry: SharedRegistry) -> Router {
-    Router::new()
+pub fn router(
+    registry: SharedRegistry,
+    profiling: crabka_telemetry::profiling::ProfilingConfig,
+) -> Result<Router, crabka_telemetry::profiling::ProfilingError> {
+    Ok(Router::new()
         .route("/metrics", get(metrics))
         .with_state(registry)
-        .merge(crabka_telemetry::profiling::pprof_router())
+        .merge(crabka_telemetry::profiling::pprof_router_with_config(
+            profiling,
+        )?))
 }
 
 /// Bind and serve until `shutdown` fires. Returns the bound address so
@@ -29,12 +34,13 @@ pub fn router(registry: SharedRegistry) -> Router {
 pub(crate) async fn run(
     addr: SocketAddr,
     registry: SharedRegistry,
+    profiling: crabka_telemetry::profiling::ProfilingConfig,
     shutdown: CancellationToken,
-) -> std::io::Result<SocketAddr> {
+) -> Result<SocketAddr, crabka_telemetry::profiling::ProfilingError> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
     tracing::info!(%bound, "metrics server listening");
-    let app = router(registry);
+    let app = router(registry, profiling)?;
     tokio::spawn(async move {
         let server = axum::serve(listener, app).with_graceful_shutdown(async move {
             shutdown.cancelled().await;
@@ -76,7 +82,11 @@ mod tests {
     async fn metrics_route_returns_openmetrics() {
         let m = BrokerMetrics::new();
         m.record_produce("t", 42);
-        let app = router(m.registry);
+        let app = router(
+            m.registry,
+            crabka_telemetry::profiling::ProfilingConfig::default(),
+        )
+        .unwrap();
         let resp = app
             .oneshot(
                 Request::builder()
@@ -101,5 +111,15 @@ mod tests {
         for needle in ["crabka_broker_topic_bytes_in_total", "42", "# EOF"] {
             assert!(s.contains(needle), "missing {needle:?} in {s}");
         }
+    }
+
+    #[test]
+    fn router_rejects_invalid_profiling_policy() {
+        let m = BrokerMetrics::new();
+        let profiling = crabka_telemetry::profiling::ProfilingConfig {
+            profiling_cpu_default_duration: crabka_units::secs(61),
+            ..crabka_telemetry::profiling::ProfilingConfig::default()
+        };
+        assert!(router(m.registry, profiling).is_err());
     }
 }

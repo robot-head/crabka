@@ -1081,10 +1081,16 @@ async fn start_observability(
             crate::metrics_server::run(
                 address,
                 Arc::clone(&metrics.registry),
+                config.profiling.clone(),
                 shutdown.child_token(),
             )
             .await
-            .map_err(BrokerError::Io)?,
+            .map_err(|error| match error {
+                crabka_telemetry::profiling::ProfilingError::Io(error) => BrokerError::Io(error),
+                crabka_telemetry::profiling::ProfilingError::Config(error) => {
+                    BrokerError::InvalidRuntimeConfig(error)
+                }
+            })?,
         )
     } else {
         None

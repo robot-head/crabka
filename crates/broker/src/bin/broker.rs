@@ -515,6 +515,9 @@ struct Args {
     #[command(flatten)]
     runtime: RuntimeArgs,
 
+    #[command(flatten)]
+    profiling: crabka_telemetry::profiling::ProfilingConfig,
+
     /// TCP address to listen on. Mutually exclusive with `--config-file`.
     #[arg(long, default_value = "127.0.0.1:9092", conflicts_with = "config_file")]
     listen_addr: SocketAddr,
@@ -923,6 +926,7 @@ impl Args {
             bootstrap_mode: BootstrapMode::Bootstrap,
             cluster_id: self.cluster_id.take(),
             metrics_listen_addr,
+            profiling: self.profiling.clone(),
             client_metrics_otlp_endpoint,
             delegation_token_secret_key: self
                 .delegation_token_secret_key
@@ -1192,6 +1196,35 @@ mod tests {
     use super::*;
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[test]
+    fn profiling_policy_reads_environment_and_cli_wins() {
+        let lock = ENV_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().expect("environment lock");
+
+        let defaults = Args::try_parse_from(["crabka-broker"]).expect("parse defaults");
+        assert!(defaults.profiling == crabka_telemetry::profiling::ProfilingConfig::default());
+
+        temp_env::with_vars(
+            [
+                ("CRABKA_PROFILING_CPU_DEFAULT_DURATION", Some("2s")),
+                ("CRABKA_PROFILING_CPU_SAMPLE_FREQUENCY", Some("101Hz")),
+            ],
+            || {
+                let args = Args::try_parse_from([
+                    "crabka-broker",
+                    "--profiling-cpu-default-duration=3s",
+                    "--profiling-cpu-sample-frequency=103Hz",
+                ])
+                .expect("parse profiling overrides");
+                assert!(args.profiling.profiling_cpu_default_duration == secs(3));
+                assert!(
+                    args.profiling.profiling_cpu_sample_frequency.frequency()
+                        == crabka_units::per_sec(103)
+                );
+            },
+        );
+    }
 
     #[test]
     fn detect_bootstrap_when_log_dir_is_empty() {

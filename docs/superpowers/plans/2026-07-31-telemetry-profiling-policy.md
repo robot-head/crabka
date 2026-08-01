@@ -28,10 +28,10 @@ binaries flatten and pass the shared config.
 
 ### Task 3: Broker owner
 
-- [ ] Flatten `ProfilingConfig` into the broker CLI/config boundary.
-- [ ] Pass policy through the metrics-server router construction.
-- [ ] Add focused broker CLI/environment and router tests.
-- [ ] Run broker tests and strict Clippy; commit broker wiring.
+- [x] Flatten `ProfilingConfig` into the broker CLI/config boundary.
+- [x] Pass policy through the metrics-server router construction.
+- [x] Add focused broker CLI/environment and router tests.
+- [x] Run broker tests and strict Clippy; commit broker wiring.
 
 ### Task 4: Closure
 
