@@ -57,8 +57,6 @@ const INTRINSIC_TAGS: &[&str] = &[
 const EVENT_TAGS: &[&str] = &["event:name", "event:timeSinceStart"];
 const LINK_TAGS: &[&str] = &["link:spanID", "link:traceID"];
 const INSTRUMENTATION_TAGS: &[&str] = &["instrumentation:name", "instrumentation:version"];
-const TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT: usize = 25;
-
 struct AppState<S: SpanStore> {
     engine: Arc<TraceqlEngine<S>>,
     cfg: HttpConfig,
@@ -88,6 +86,7 @@ impl<S: SpanStore> AppState<S> {
 #[derive(Clone, Debug)]
 pub struct HttpConfig {
     pub max_trace_spans: usize,
+    pub tag_query_filter_autocomplete_limit: usize,
     pub limits: Limits,
     pub overrides: Option<OverridesProvider>,
 }
@@ -96,6 +95,7 @@ impl Default for HttpConfig {
     fn default() -> Self {
         Self {
             max_trace_spans: usize::MAX,
+            tag_query_filter_autocomplete_limit: 25,
             limits: Limits::default(),
             overrides: None,
         }
@@ -341,7 +341,11 @@ where
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
-        let limit = match q_filter_limit(&uri, state.engine.max_traces()) {
+        let limit = match q_filter_limit(
+            &uri,
+            state.engine.max_traces(),
+            state.cfg.tag_query_filter_autocomplete_limit,
+        ) {
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
@@ -417,7 +421,11 @@ where
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
-        let limit = match q_filter_limit(&uri, state.engine.max_traces()) {
+        let limit = match q_filter_limit(
+            &uri,
+            state.engine.max_traces(),
+            state.cfg.tag_query_filter_autocomplete_limit,
+        ) {
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
@@ -515,7 +523,11 @@ where
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
-        let limit = match q_filter_limit(&uri, state.engine.max_traces()) {
+        let limit = match q_filter_limit(
+            &uri,
+            state.engine.max_traces(),
+            state.cfg.tag_query_filter_autocomplete_limit,
+        ) {
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
@@ -612,7 +624,11 @@ where
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
-        let limit = match q_filter_limit(&uri, state.engine.max_traces()) {
+        let limit = match q_filter_limit(
+            &uri,
+            state.engine.max_traces(),
+            state.cfg.tag_query_filter_autocomplete_limit,
+        ) {
             Ok(value) => value,
             Err(err) => return (StatusCode::BAD_REQUEST, err).into_response(),
         };
@@ -1027,15 +1043,17 @@ fn is_match_all_query(query: &str) -> bool {
         .eq("{}".chars())
 }
 
-fn q_filter_limit(uri: &Uri, max_traces: usize) -> Result<usize, String> {
+fn q_filter_limit(
+    uri: &Uri,
+    max_traces: usize,
+    autocomplete_limit: usize,
+) -> Result<usize, String> {
     Ok(
         optional_usize_param(uri, "limit")?.map_or(usize::MAX, |limit| {
             if limit == 0 {
-                max_traces.min(TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT)
+                max_traces.min(autocomplete_limit)
             } else {
-                limit
-                    .min(max_traces)
-                    .min(TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT)
+                limit.min(max_traces).min(autocomplete_limit)
             }
         }),
     )
@@ -3197,6 +3215,7 @@ mod tests {
     async fn search_rejects_limit_above_http_limits() {
         let app = app_with_http_config(HttpConfig {
             max_trace_spans: usize::MAX,
+            tag_query_filter_autocomplete_limit: 25,
             limits: crate::limits::Limits {
                 max_traces_per_search: 1,
                 ..crate::limits::Limits::default()
@@ -3222,6 +3241,7 @@ mod tests {
     async fn search_applies_tenant_limit_overrides() {
         let app = app_with_http_config(HttpConfig {
             max_trace_spans: usize::MAX,
+            tag_query_filter_autocomplete_limit: 25,
             limits: crate::limits::Limits::default(),
             overrides: Some(
                 crate::limits::OverridesProvider::from_yaml(
@@ -3271,6 +3291,7 @@ overrides:
     async fn metrics_query_range_rejects_duration_above_http_limits() {
         let app = app_with_http_config(HttpConfig {
             max_trace_spans: usize::MAX,
+            tag_query_filter_autocomplete_limit: 25,
             limits: crate::limits::Limits {
                 max_search_duration_secs: 1,
                 ..crate::limits::Limits::default()
@@ -5914,7 +5935,13 @@ overrides:
             );
         }
         let engine = Arc::new(TraceqlEngine::new(Arc::new(store), EngineOpts::default()));
-        let app = router(engine);
+        let app = router_with_config(
+            engine,
+            HttpConfig {
+                tag_query_filter_autocomplete_limit: 7,
+                ..HttpConfig::default()
+            },
+        );
         let resp = app
             .oneshot(
                 Request::builder()
@@ -5931,6 +5958,6 @@ overrides:
 
         assert2::assert!(status == StatusCode::OK);
         let values = body["tagValues"].as_array().unwrap();
-        assert2::assert!(values.len() == 25);
+        assert2::assert!(values.len() == 7);
     }
 }

@@ -6311,3 +6311,17 @@ CLI default, override, invalid-input, environment-precedence, histogram, and
 compare-cardinality tests pass. This closes only the TraceQL engine
 runtime-policy slice; the repository-wide hardcoded operational-value audit
 remains active.
+
+## Traces Tag Autocomplete Policy
+
+The traces querier now exposes its filtered tag-autocomplete scan cap through
+`--tag-query-filter-autocomplete-limit`, backed by
+`CRABKA_TRACES_TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT`. The positive
+`refined_type`-validated value defaults to the existing 25 and reaches both
+the cold querier and live-store HTTP routers through `HttpConfig`.
+
+The configured cap still composes with the request limit and TraceQL's search
+trace ceiling. Unfiltered indexed tag lookup remains uncapped because it does
+not scan matching traces. CLI, environment precedence, zero rejection, and
+configured HTTP behavior tests pass. This closes only the traces autocomplete
+slice; the repository-wide hardcoded operational-value audit remains active.

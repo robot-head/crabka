@@ -217,6 +217,13 @@ struct Cli {
     #[arg(long, default_value_t = usize::MAX)]
     max_trace_spans: usize,
     #[arg(
+        long,
+        env = "CRABKA_TRACES_TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT",
+        default_value_t = 25,
+        value_parser = parse_positive_usize
+    )]
+    tag_query_filter_autocomplete_limit: usize,
+    #[arg(
         long = "traceql-default-limit",
         env = "CRABKA_TRACES_TRACEQL_DEFAULT_LIMIT",
         default_value_t = 20,
@@ -640,6 +647,7 @@ async fn build_querier_router_with_live(
         engine,
         HttpConfig {
             max_trace_spans: cli.max_trace_spans,
+            tag_query_filter_autocomplete_limit: cli.tag_query_filter_autocomplete_limit,
             ..HttpConfig::default()
         },
         metrics,
@@ -671,6 +679,7 @@ fn build_live_store_router(
         engine,
         HttpConfig {
             max_trace_spans: cli.max_trace_spans,
+            tag_query_filter_autocomplete_limit: cli.tag_query_filter_autocomplete_limit,
             ..HttpConfig::default()
         },
     );
@@ -2119,6 +2128,44 @@ mod tests {
         assert2::assert!(matches!(cli.target, Target::Querier));
         assert2::assert!(cli.max_trace_spans == 100);
         check!(build_querier_router(&cli).await.is_ok());
+    }
+
+    #[test]
+    fn tag_query_filter_autocomplete_limit_reads_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("test executable"),
+            )
+            .args([
+                "--exact",
+                "tests::tag_query_filter_autocomplete_limit_reads_environment_and_prefers_cli",
+            ])
+            .env(CHILD, "1")
+            .env("CRABKA_TRACES_TAG_QUERY_FILTER_AUTOCOMPLETE_LIMIT", "7")
+            .status()
+            .expect("child test");
+            check!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-traces", "--target=querier"]).unwrap();
+        check!(from_env.tag_query_filter_autocomplete_limit == 7);
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target=querier",
+            "--tag-query-filter-autocomplete-limit=11",
+        ])
+        .unwrap();
+        check!(from_cli.tag_query_filter_autocomplete_limit == 11);
+        check!(
+            Cli::try_parse_from([
+                "crabka-traces",
+                "--target=querier",
+                "--tag-query-filter-autocomplete-limit=0",
+            ])
+            .is_err()
+        );
     }
 
     #[tokio::test]
