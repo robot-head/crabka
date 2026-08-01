@@ -35,8 +35,8 @@ binaries flatten and pass the shared config.
 
 ### Task 4: Closure
 
-- [ ] Run `cargo test -p crabka-telemetry --all-targets --locked` and affected owner tests.
-- [ ] Run workspace all-target check and strict warnings-as-errors Clippy.
-- [ ] Run nightly formatting and `git diff --check`.
-- [ ] Update `docs/configuration-audit.md` with the implemented surface and evidence.
-- [ ] Commit closure documents; leave the broader repository goal active.
+- [x] Run `cargo test -p crabka-telemetry --all-targets --locked` and affected owner tests.
+- [x] Run workspace all-target check and strict warnings-as-errors Clippy.
+- [x] Run nightly formatting and `git diff --check`.
+- [x] Update `docs/configuration-audit.md` with the implemented surface and evidence.
+- [x] Commit closure documents; leave the broader repository goal active.

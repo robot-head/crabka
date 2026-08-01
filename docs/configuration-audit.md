@@ -6092,3 +6092,37 @@ final formatting. Workspace all-target check and strict Clippy, nightly
 formatting, and diff hygiene pass. This closes only the observability demo
 Consumer behavior slice; the repository-wide hardcoded operational-value
 audit remains active.
+
+## Telemetry Profiling Policy
+
+The shared telemetry profiling routes now use one validated process-local
+policy while preserving their previous defaults:
+
+| Setting | Default | CLI | Environment |
+|---|---:|---|---|
+| CPU duration | `30s` | `--profiling-cpu-default-duration` | `CRABKA_PROFILING_CPU_DEFAULT_DURATION` |
+| CPU duration cap | `60s` | `--profiling-cpu-max-duration` | `CRABKA_PROFILING_CPU_MAX_DURATION` |
+| CPU sample frequency | `99Hz` | `--profiling-cpu-sample-frequency` | `CRABKA_PROFILING_CPU_SAMPLE_FREQUENCY` |
+| heap duration | `5s` | `--profiling-heap-default-duration` | `CRABKA_PROFILING_HEAP_DEFAULT_DURATION` |
+| heap duration cap | `30s` | `--profiling-heap-max-duration` | `CRABKA_PROFILING_HEAP_MAX_DURATION` |
+| native-frame blocklist | `libc,libgcc,pthread,vdso` | `--profiling-native-frame-blocklist` | `CRABKA_PROFILING_NATIVE_FRAME_BLOCKLIST` |
+
+Durations and frequency are dimensioned UOM values. CPU sampling accepts only
+positive, finite, whole-Hz values representable by `pprof`, with its positive
+integer boundary validated by `refined_type`. Default durations cannot exceed
+their maxima, and request-provided seconds retain their compatible one-second
+floor while being capped by policy.
+
+The policy is flattened into metrics, traces, profiles, schema-registry,
+metrics-service, observability, observability-demo-app, and broker CLI
+surfaces. Each owner passes the parsed value to the shared policy-aware admin
+router; existing library entry points remain as default-preserving wrappers.
+The broker carries the same policy through `BrokerConfig` to its combined
+metrics and profiling server. No CRD is added because these are process-local
+debug endpoint controls rather than workload or cluster semantics.
+
+All 33 telemetry tests, the affected owner binary tests, and focused broker
+router tests pass. Workspace all-target check and strict Clippy, nightly
+formatting, and diff hygiene pass. This closes only the telemetry profiling
+policy slice; the repository-wide hardcoded operational-value audit remains
+active.
