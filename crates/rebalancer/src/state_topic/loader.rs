@@ -3,7 +3,7 @@
 //! the consumer has seen no new records for 5 consecutive 100ms polls
 //! (the "quiet period" end-of-log heuristic).
 
-use std::{sync::Arc, time::Duration};
+use std::sync::Arc;
 
 use crabka_client_core::Client;
 use crabka_protocol::{
@@ -13,18 +13,25 @@ use crabka_protocol::{
     },
     records::RecordsPayload,
 };
+use crabka_units::{
+    ByteSize, Time,
+    convert::{ByteSizeExt as _, TimeExt as _},
+};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
-use crate::state_topic::{
-    LoadedState, STATE_KEY,
-    error::{StateTopicError, is_transient_topic_partition_code},
-    serde_format,
+use crate::{
+    config::RebalancerRuntimePolicy,
+    state_topic::{
+        LoadedState, STATE_KEY,
+        error::{StateTopicError, is_transient_topic_partition_code},
+        serde_format,
+    },
 };
-
-const POLL_INTERVAL: Duration = Duration::from_millis(100);
-const QUIET_POLLS_TO_DECLARE_LOADED: u32 = 5;
-const MAX_BYTES_PER_FETCH: i32 = 1 << 20; // 1 MiB
+/// The loader drains the log as fast as the broker will answer, so it asks for
+/// whatever is already there rather than parking on the broker's fetch queue.
+const NO_FETCH_WAIT: Time = Time::ZERO;
+const NO_MIN_BYTES: ByteSize = ByteSize::ZERO;
 
 /// `(absolute_offset, key_bytes, value_bytes)` — value is `None` for tombstones.
 type FetchedRecord = (i64, Option<Vec<u8>>, Option<Vec<u8>>);
@@ -34,16 +41,17 @@ pub struct StateTopicLoader {
     pub topic: String,
     pub state: Arc<LoadedState>,
     pub shutdown: CancellationToken,
+    pub runtime_policy: RebalancerRuntimePolicy,
 }
 
 impl StateTopicLoader {
     pub async fn run(self) {
         info!(topic = %self.topic, "state-topic loader started");
         let mut next_offset: i64 = 0;
-        let mut quiet_polls: u32 = 0;
+        let mut quiet_polls: usize = 0;
         loop {
             tokio::select! {
-                () = tokio::time::sleep(POLL_INTERVAL) => {}
+                () = tokio::time::sleep(self.runtime_policy.state_loader_poll_interval.to_std()) => {}
                 () = self.shutdown.cancelled() => {
                     info!("state-topic loader shutting down");
                     return;
@@ -56,7 +64,11 @@ impl StateTopicLoader {
                         quiet_polls = 0;
                     } else {
                         quiet_polls += 1;
-                        if should_mark_loaded(quiet_polls, self.state.is_loaded()) {
+                        if should_mark_loaded(
+                            quiet_polls,
+                            self.runtime_policy.state_loader_quiet_polls.get(),
+                            self.state.is_loaded(),
+                        ) {
                             info!("state-topic load reached steady state; marking loaded");
                             self.state.mark_loaded();
                         }
@@ -71,21 +83,36 @@ impl StateTopicLoader {
     }
 
     async fn poll_once(&self, fetch_offset: i64) -> Result<Vec<FetchedRecord>, StateTopicError> {
-        let req = fetch_request(&self.topic, fetch_offset);
+        let req = fetch_request_with_max(
+            &self.topic,
+            fetch_offset,
+            self.runtime_policy.state_fetch_max,
+        );
         let resp = self.client.send(req).await?;
         fetched_records_from_response(&resp)
     }
 }
 
+#[cfg(test)]
 fn fetch_request(topic: &str, fetch_offset: i64) -> FetchRequest {
+    fetch_request_with_max(
+        topic,
+        fetch_offset,
+        RebalancerRuntimePolicy::default().state_fetch_max,
+    )
+}
+
+fn fetch_request_with_max(topic: &str, fetch_offset: i64, fetch_max: ByteSize) -> FetchRequest {
     FetchRequest {
-        max_bytes: MAX_BYTES_PER_FETCH,
+        max_wait_ms: NO_FETCH_WAIT.millis_i32(),
+        min_bytes: NO_MIN_BYTES.bytes_i32(),
+        max_bytes: fetch_max.bytes_i32(),
         topics: vec![FetchTopic {
             topic: topic.to_string(),
             partitions: vec![FetchPartition {
                 partition: 0,
                 fetch_offset,
-                partition_max_bytes: MAX_BYTES_PER_FETCH,
+                partition_max_bytes: fetch_max.bytes_i32(),
                 ..Default::default()
             }],
             ..Default::default()
@@ -94,8 +121,8 @@ fn fetch_request(topic: &str, fetch_offset: i64) -> FetchRequest {
     }
 }
 
-fn should_mark_loaded(quiet_polls: u32, is_loaded: bool) -> bool {
-    quiet_polls >= QUIET_POLLS_TO_DECLARE_LOADED && !is_loaded
+fn should_mark_loaded(quiet_polls: usize, required_quiet_polls: usize, is_loaded: bool) -> bool {
+    quiet_polls >= required_quiet_polls && !is_loaded
 }
 
 fn apply_fetched_records(
@@ -166,8 +193,6 @@ fn fetched_records_from_response(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use bytes::Bytes;
     use crabka_protocol::{
         UnknownTaggedFields,
@@ -178,12 +203,21 @@ mod tests {
         primitives::uuid::Uuid,
         records::{Record, RecordBatch, RecordsPayload},
     };
+    use crabka_units::millis;
 
     use super::*;
     use crate::executor::state::{InFlightFile, Phase};
 
+    /// Connect/request timeout for the deliberately-unreachable test client.
+    const CLIENT_TIMEOUT: Time = millis(50);
+
     fn in_flight(id: &str) -> InFlightFile {
-        InFlightFile::new(id.to_string(), Phase::Wait, 42, 50_000_000)
+        InFlightFile::new(
+            id.to_string(),
+            Phase::Wait,
+            42,
+            crabka_units::bytes_per_sec(50_000_000),
+        )
     }
 
     fn fetched(offset: i64, key: Option<&str>, value: Option<Vec<u8>>) -> FetchedRecord {
@@ -246,11 +280,18 @@ mod tests {
     }
 
     #[test]
+    fn fetch_request_uses_custom_maximum() {
+        let request = fetch_request_with_max("__crabka_state", 0, crabka_units::kibibytes(32));
+        assert2::assert!(request.max_bytes == 32 * 1024);
+        assert2::assert!(request.topics[0].partitions[0].partition_max_bytes == 32 * 1024);
+    }
+
+    #[test]
     fn should_mark_loaded_only_at_quiet_threshold_before_loaded() {
         for (quiet_polls, is_loaded, want) in
             [(4, false, false), (5, false, true), (5, true, false)]
         {
-            assert2::assert!(should_mark_loaded(quiet_polls, is_loaded) == want);
+            assert2::assert!(should_mark_loaded(quiet_polls, 5, is_loaded) == want);
         }
     }
 
@@ -355,8 +396,8 @@ mod tests {
             Client::builder()
                 .bootstrap("127.0.0.1:1")
                 .client_id("state-topic-loader-test")
-                .connect_timeout(Duration::from_millis(50))
-                .request_timeout(Duration::from_millis(50))
+                .connect_timeout(CLIENT_TIMEOUT)
+                .request_timeout(CLIENT_TIMEOUT)
                 .build()
                 .await
                 .expect("client build does not connect"),
@@ -366,6 +407,7 @@ mod tests {
             topic: "__crabka_state".into(),
             state: LoadedState::new(),
             shutdown: CancellationToken::new(),
+            runtime_policy: RebalancerRuntimePolicy::default(),
         };
 
         assert2::assert!(loader.poll_once(0).await.is_err());

@@ -22,6 +22,7 @@ use crabka_rebalancer::{
         handlers::{self, AppState},
     },
     capacity::BrokerCapacities,
+    config::RebalancerRuntimePolicy,
     executor::{
         ExecutorConfig, ExecutorState,
         phases::{ClientFacade, ConfigOp, PhaseError},
@@ -151,6 +152,8 @@ fn build_state(snapshot: SharedSnapshot) -> (Arc<AppState>, Registry) {
         client_facade,
         anomaly_store: Arc::new(crabka_rebalancer::detector::AnomalyStore::new(200)),
         state_topic: Arc::new(crabka_rebalancer::state_topic::fake::InMemoryBackend::new_loaded()),
+        cancel_drain_timeout: RebalancerRuntimePolicy::default().cancel_drain_timeout,
+        cancel_drain_poll_interval: RebalancerRuntimePolicy::default().cancel_drain_poll_interval,
     });
     (state, registry)
 }

@@ -4,9 +4,13 @@
 use std::collections::BTreeMap;
 
 use crabka_client_admin::{AdminClient, AdminError, CreateTopicOutcome, CreateTopicSpec};
+use crabka_units::{
+    Time,
+    convert::{RatioExt as _, TimeExt as _},
+};
 use tracing::warn;
 
-use crate::state_topic::error::StateTopicError;
+use crate::{config::RebalancerRuntimePolicy, state_topic::error::StateTopicError};
 
 /// Kafka error code for "replication factor exceeds available brokers".
 const INVALID_REPLICATION_FACTOR: i16 = 38;
@@ -16,7 +20,7 @@ pub trait TopicAdminClient: Send {
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError>;
 }
 
@@ -27,9 +31,9 @@ impl TopicAdminClient for AdminClient {
     async fn create_topics(
         &mut self,
         specs: &[CreateTopicSpec],
-        timeout_ms: i32,
+        timeout: Time,
     ) -> Result<Vec<CreateTopicOutcome>, AdminError> {
-        AdminClient::create_topics(self, specs, timeout_ms).await
+        AdminClient::create_topics(self, specs, timeout).await
     }
 }
 
@@ -52,12 +56,47 @@ pub async fn ensure_topic<A: TopicAdminClient + ?Sized>(
     name: &str,
     replication_factor: i16,
 ) -> Result<(), StateTopicError> {
+    ensure_topic_with_policy(
+        admin,
+        name,
+        replication_factor,
+        &RebalancerRuntimePolicy::default(),
+    )
+    .await
+}
+
+/// Create the state topic using explicit runtime policy.
+///
+/// # Errors
+/// Returns an error when topic creation fails.
+pub async fn ensure_topic_with_policy<A: TopicAdminClient + ?Sized>(
+    admin: &mut A,
+    name: &str,
+    replication_factor: i16,
+    policy: &RebalancerRuntimePolicy,
+) -> Result<(), StateTopicError> {
     let mut configs = BTreeMap::new();
     configs.insert("cleanup.policy".to_string(), "compact".to_string());
-    configs.insert("min.cleanable.dirty.ratio".to_string(), "0.01".to_string());
-    configs.insert("segment.ms".to_string(), "60000".to_string());
+    configs.insert(
+        "min.cleanable.dirty.ratio".to_string(),
+        policy
+            .state_topic_min_cleanable_dirty_ratio
+            .as_f64()
+            .to_string(),
+    );
+    configs.insert(
+        "segment.ms".to_string(),
+        policy.state_topic_segment_interval.millis_i64().to_string(),
+    );
 
-    let effective_rf = try_create_topic(admin, name, replication_factor, &configs).await?;
+    let effective_rf = try_create_topic(
+        admin,
+        name,
+        replication_factor,
+        &configs,
+        policy.state_topic_create_timeout,
+    )
+    .await?;
     if effective_rf != replication_factor {
         warn!(
             topic = %name,
@@ -77,6 +116,7 @@ async fn try_create_topic<A: TopicAdminClient + ?Sized>(
     name: &str,
     rf: i16,
     configs: &BTreeMap<String, String>,
+    timeout: Time,
 ) -> Result<i16, StateTopicError> {
     let spec = CreateTopicSpec {
         name: name.to_string(),
@@ -84,9 +124,7 @@ async fn try_create_topic<A: TopicAdminClient + ?Sized>(
         replicas: i32::from(rf),
         configs: configs.clone(),
     };
-    let outcomes = admin
-        .create_topics(&[spec], /* timeout_ms */ 10_000)
-        .await?;
+    let outcomes = admin.create_topics(&[spec], timeout).await?;
     for o in outcomes {
         // 36 = TOPIC_ALREADY_EXISTS  → idempotent, treat as success.
         // 38 = INVALID_REPLICATION_FACTOR → retry with rf=1 if rf > 1.
@@ -94,7 +132,7 @@ async fn try_create_topic<A: TopicAdminClient + ?Sized>(
         match o.error.as_ref().map(|e| e.code) {
             None | Some(0 | 36) => {}
             Some(INVALID_REPLICATION_FACTOR) if rf > 1 => {
-                return Box::pin(try_create_topic(admin, name, 1, configs)).await;
+                return Box::pin(try_create_topic(admin, name, 1, configs, timeout)).await;
             }
             Some(code) => return Err(StateTopicError::ProduceErrorCode { code }),
         }
@@ -108,13 +146,14 @@ mod tests {
 
     use assert2::check;
     use crabka_client_admin::{AdminError, CreateTopicOutcome, KafkaError};
+    use crabka_units::secs;
 
     use super::*;
 
     #[derive(Default)]
     struct FakeAdmin {
         outcomes: VecDeque<Result<Vec<CreateTopicOutcome>, AdminError>>,
-        calls: Vec<(Vec<CreateTopicSpec>, i32)>,
+        calls: Vec<(Vec<CreateTopicSpec>, Time)>,
     }
 
     #[async_trait::async_trait]
@@ -122,9 +161,9 @@ mod tests {
         async fn create_topics(
             &mut self,
             specs: &[CreateTopicSpec],
-            timeout_ms: i32,
+            timeout: Time,
         ) -> Result<Vec<CreateTopicOutcome>, AdminError> {
-            self.calls.push((specs.to_vec(), timeout_ms));
+            self.calls.push((specs.to_vec(), timeout));
             self.outcomes.pop_front().expect("fake outcome")
         }
     }
@@ -164,9 +203,9 @@ mod tests {
             ("segment.ms".to_string(), "60000".to_string()),
         ]);
         assert2::assert!(
-            admin.calls.first().map(|(specs, timeout_ms)| {
+            admin.calls.first().map(|(specs, timeout)| {
                 (
-                    *timeout_ms,
+                    *timeout,
                     specs.first().map(|spec| {
                         (
                             spec.name.as_str(),
@@ -176,8 +215,31 @@ mod tests {
                         )
                     }),
                 )
-            }) == Some((10_000, Some(("__crabka_state", 1, 3, &expected_configs))))
+            }) == Some((secs(10), Some(("__crabka_state", 1, 3, &expected_configs))))
         );
+    }
+
+    #[tokio::test]
+    async fn ensure_topic_applies_custom_runtime_policy() {
+        let mut admin = FakeAdmin {
+            outcomes: VecDeque::from([Ok(vec![ok("__crabka_state")])]),
+            ..Default::default()
+        };
+        let policy = RebalancerRuntimePolicy {
+            state_topic_create_timeout: crabka_units::millis(37),
+            state_topic_min_cleanable_dirty_ratio: crabka_units::percent(2),
+            state_topic_segment_interval: crabka_units::secs(90),
+            ..Default::default()
+        };
+
+        ensure_topic_with_policy(&mut admin, "__crabka_state", 3, &policy)
+            .await
+            .unwrap();
+
+        let (specs, timeout) = &admin.calls[0];
+        assert2::assert!(*timeout == crabka_units::millis(37));
+        assert2::assert!(specs[0].configs["min.cleanable.dirty.ratio"] == "0.02");
+        assert2::assert!(specs[0].configs["segment.ms"] == "90000");
     }
 
     #[tokio::test]
@@ -205,7 +267,7 @@ mod tests {
         };
         let configs = BTreeMap::new();
 
-        let effective = try_create_topic(&mut admin, "__crabka_state", 3, &configs)
+        let effective = try_create_topic(&mut admin, "__crabka_state", 3, &configs, secs(10))
             .await
             .unwrap();
 
@@ -223,7 +285,7 @@ mod tests {
         };
         let configs = BTreeMap::new();
 
-        let effective = try_create_topic(&mut admin, "__crabka_state", 3, &configs)
+        let effective = try_create_topic(&mut admin, "__crabka_state", 3, &configs, secs(10))
             .await
             .unwrap();
 
@@ -250,7 +312,7 @@ mod tests {
         };
         let configs = BTreeMap::new();
 
-        let err = try_create_topic(&mut admin, "__crabka_state", 1, &configs)
+        let err = try_create_topic(&mut admin, "__crabka_state", 1, &configs, secs(10))
             .await
             .unwrap_err();
 

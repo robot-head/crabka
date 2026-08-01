@@ -9,17 +9,17 @@ render the same environment variables from the Helm chart.
 
 ### Task 1: Shared policy and boundary
 
-- [ ] Add default and invariant tests.
-- [ ] Add UOM fields and a `refined_type`-validated positive count newtype.
-- [ ] Add optional CLI/environment overrides and resolve one policy before I/O.
-- [ ] Run focused tests and strict Clippy; commit.
+- [x] Add default and invariant tests.
+- [x] Add UOM fields and a `refined_type`-validated positive count newtype.
+- [x] Add optional CLI/environment overrides and resolve one policy before I/O.
+- [x] Run focused tests and strict Clippy; commit.
 
 ### Task 2: Runtime owners
 
-- [ ] Thread policy through recovery, shutdown, scraper, cancellation, detector, and state-topic owners.
-- [ ] Preserve default public constructors.
-- [ ] Remove superseded production literals.
-- [ ] Run rebalancer tests and strict Clippy; commit.
+- [x] Thread policy through recovery, shutdown, scraper, cancellation, detector, and state-topic owners.
+- [x] Preserve default public constructors.
+- [x] Remove superseded production literals.
+- [x] Run rebalancer tests and strict Clippy; commit.
 
 ### Task 3: Helm deployment surface
 

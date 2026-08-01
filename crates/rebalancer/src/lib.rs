@@ -72,6 +72,7 @@ pub mod pb {
 
 pub mod api;
 pub mod capacity;
+pub mod config;
 pub mod detector;
 pub mod executor;
 pub mod goals;

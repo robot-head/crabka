@@ -102,6 +102,10 @@ fn build_state(snapshot: SharedSnapshot) -> Arc<AppState> {
         client_facade,
         anomaly_store: Arc::new(crabka_rebalancer::detector::AnomalyStore::new(200)),
         state_topic,
+        cancel_drain_timeout: crabka_rebalancer::config::RebalancerRuntimePolicy::default()
+            .cancel_drain_timeout,
+        cancel_drain_poll_interval: crabka_rebalancer::config::RebalancerRuntimePolicy::default()
+            .cancel_drain_poll_interval,
     })
 }
 

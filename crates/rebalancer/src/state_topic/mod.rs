@@ -20,7 +20,7 @@ use crabka_client_core::Client;
 pub use error::StateTopicError;
 pub use loader::StateTopicLoader;
 
-use crate::executor::state::InFlightFile;
+use crate::{config::RebalancerRuntimePolicy, executor::state::InFlightFile};
 
 /// In-memory mirror of the latest record under the `STATE_KEY` on the
 /// state topic. Populated by `StateTopicLoader` at startup and by
@@ -94,15 +94,27 @@ pub struct StateTopic {
     client: Arc<Client>,
     topic: String,
     state: Arc<LoadedState>,
+    runtime_policy: RebalancerRuntimePolicy,
 }
 
 impl StateTopic {
     #[must_use]
     pub fn new(client: Arc<Client>, topic: String, state: Arc<LoadedState>) -> Self {
+        Self::new_with_policy(client, topic, state, RebalancerRuntimePolicy::default())
+    }
+
+    #[must_use]
+    pub fn new_with_policy(
+        client: Arc<Client>,
+        topic: String,
+        state: Arc<LoadedState>,
+        runtime_policy: RebalancerRuntimePolicy,
+    ) -> Self {
         Self {
             client,
             topic,
             state,
+            runtime_policy,
         }
     }
 }
@@ -119,13 +131,27 @@ impl StateBackend for StateTopic {
 
     async fn write(&self, f: &InFlightFile) -> Result<(), StateTopicError> {
         let value: Bytes = serde_format::encode(f)?;
-        producer::produce_state(&self.client, &self.topic, STATE_KEY, Some(value)).await?;
+        producer::produce_state(
+            &self.client,
+            &self.topic,
+            STATE_KEY,
+            Some(value),
+            &self.runtime_policy,
+        )
+        .await?;
         self.state.store(Some(f.clone()));
         Ok(())
     }
 
     async fn delete(&self) -> Result<(), StateTopicError> {
-        producer::produce_state(&self.client, &self.topic, STATE_KEY, None).await?;
+        producer::produce_state(
+            &self.client,
+            &self.topic,
+            STATE_KEY,
+            None,
+            &self.runtime_policy,
+        )
+        .await?;
         self.state.store(None);
         Ok(())
     }

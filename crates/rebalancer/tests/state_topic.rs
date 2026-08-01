@@ -8,6 +8,7 @@ use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::AdminClient;
 use crabka_client_core::Client;
 use crabka_rebalancer::{
+    config::RebalancerRuntimePolicy,
     executor::state::{InFlightFile, Phase},
     state_topic::{LoadedState, StateBackend, StateTopic, StateTopicLoader, topic_admin},
 };
@@ -74,6 +75,7 @@ async fn write_load_round_trip_via_real_broker() {
         topic: topic.clone(),
         state: warmup_state.clone(),
         shutdown: warmup_shutdown.clone(),
+        runtime_policy: RebalancerRuntimePolicy::default(),
     };
     let warmup_handle = tokio::spawn(warmup_loader.run());
     drive_loader_until_loaded(warmup_state.clone(), Duration::from_secs(10)).await;
@@ -91,6 +93,7 @@ async fn write_load_round_trip_via_real_broker() {
         topic: topic.clone(),
         state: state.clone(),
         shutdown: shutdown.clone(),
+        runtime_policy: RebalancerRuntimePolicy::default(),
     };
     let handle = tokio::spawn(loader_task.run());
 
@@ -111,6 +114,7 @@ async fn write_load_round_trip_via_real_broker() {
         topic: topic.clone(),
         state: state2.clone(),
         shutdown: shutdown2.clone(),
+        runtime_policy: RebalancerRuntimePolicy::default(),
     };
     let handle2 = tokio::spawn(loader2.run());
 

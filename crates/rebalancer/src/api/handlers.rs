@@ -14,6 +14,12 @@ use std::sync::Arc;
 
 use axum::Extension;
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse, error::Code};
+use crabka_units::{
+    ByteRate, Time,
+    convert::{ByteRateExt as _, StdDurationExt as _, TimeExt as _},
+};
+#[cfg(test)]
+use crabka_units::{millis, secs};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -43,6 +49,8 @@ pub struct AppState {
     pub anomaly_store: Arc<crate::detector::AnomalyStore>,
     // Gates /readyz and execute_proposal.
     pub state_topic: Arc<dyn crate::state_topic::StateBackend>,
+    pub cancel_drain_timeout: Time,
+    pub cancel_drain_poll_interval: Time,
 }
 
 /// Convert a `ClusterState` into the proto `GetStateResponse`.
@@ -131,7 +139,7 @@ pub fn proposal_to_proto(p: &crate::model::Proposal) -> pb::Proposal {
         started_at_ms: p.started_at_ms,
         terminated_at_ms: p.terminated_at_ms,
         failure_reason: p.failure_reason.clone(),
-        throttle_bytes_per_sec: p.throttle_bytes_per_sec,
+        throttle_bytes_per_sec: p.throttle.bytes_per_sec_i64(),
     }
 }
 
@@ -243,7 +251,7 @@ pub async fn create_proposal(
     })?;
     state
         .metrics
-        .observe_rebalance_duration(started.elapsed().as_secs_f64());
+        .observe_rebalance_duration(started.elapsed().as_time());
     state
         .metrics
         .record_rebalance(if out.proposal.movements.is_empty() {
@@ -329,9 +337,10 @@ pub async fn execute_proposal(
     }
     let inner = req.0;
     let id = inner.id;
-    let throttle_bytes_per_sec = inner
-        .throttle_bytes_per_sec
-        .unwrap_or(state.executor.config.default_throttle_bytes_per_sec);
+    let throttle = inner.throttle_bytes_per_sec.map_or(
+        state.executor.config.default_throttle,
+        ByteRate::from_bytes_per_sec,
+    );
 
     let proposal = state
         .store
@@ -367,12 +376,7 @@ pub async fn execute_proposal(
     // proposals.json. Recovery keys off the topic record; writing proposals.json
     // first opens a crash window where the proposal is `Executing` but no
     // recovery marker exists, leaving the proposal orphaned.
-    let in_flight_file = InFlightFile::new(
-        id.clone(),
-        Phase::ApplyThrottle,
-        now,
-        throttle_bytes_per_sec,
-    );
+    let in_flight_file = InFlightFile::new(id.clone(), Phase::ApplyThrottle, now, throttle);
     if let Err(e) = state.state_topic.write(&in_flight_file).await {
         return Err(ConnectError::new(
             Code::Internal,
@@ -383,7 +387,7 @@ pub async fn execute_proposal(
     let Some(updated) = state.store.mutate(&id, |p| {
         p.status = ProposalStatus::Executing;
         p.started_at_ms = now;
-        p.throttle_bytes_per_sec = throttle_bytes_per_sec;
+        p.throttle = throttle;
     }) else {
         // Best-effort cleanup: tombstone the state topic record we just wrote.
         let topic = state.state_topic.clone();
@@ -404,7 +408,7 @@ pub async fn execute_proposal(
             client,
             executor_state,
             prop_for_task,
-            throttle_bytes_per_sec,
+            throttle,
             cancel_for_task,
         )
         .run()
@@ -465,8 +469,7 @@ pub async fn cancel_execution(
     // and update the store. Bound to 5s; if the executor doesn't drain
     // in that time, return the current (Executing) proposal — the
     // operator can re-poll.
-    let deadline =
-        cancel_poll_deadline(std::time::Instant::now(), std::time::Duration::from_secs(5));
+    let deadline = cancel_poll_deadline(std::time::Instant::now(), state.cancel_drain_timeout);
     loop {
         let proposal = state.store.get(&id).ok_or_else(|| {
             ConnectError::new(Code::NotFound, format!("proposal `{id}` vanished"))
@@ -484,12 +487,12 @@ pub async fn cancel_execution(
                 proposal: Some(proposal_to_proto(&proposal)),
             }));
         }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        tokio::time::sleep(state.cancel_drain_poll_interval.to_std()).await;
     }
 }
 
-fn cancel_poll_deadline(now: std::time::Instant, wait: std::time::Duration) -> std::time::Instant {
-    now + wait
+fn cancel_poll_deadline(now: std::time::Instant, wait: Time) -> std::time::Instant {
+    now + wait.to_std()
 }
 
 fn cancel_poll_expired(now: std::time::Instant, deadline: std::time::Instant) -> bool {
@@ -519,10 +522,11 @@ pub async fn get_anomalies(
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::sync::Arc;
 
     use assert2::check;
     use async_trait::async_trait;
+    use crabka_units::{bytes_per_sec, percent};
 
     use super::*;
     use crate::{
@@ -550,7 +554,7 @@ mod tests {
             &self,
             _op: ConfigOp,
             _targets: &ThrottleTargets,
-            _throttle_bytes_per_sec: i64,
+            _throttle: ByteRate,
         ) -> Result<(), PhaseError> {
             Ok(())
         }
@@ -581,9 +585,9 @@ mod tests {
             store: store.clone(),
             config: ExecutorConfig {
                 data_dir: dir.to_path_buf(),
-                default_throttle_bytes_per_sec: 50_000_000,
-                poll_interval: Duration::from_millis(50),
-                execute_deadline: Duration::from_secs(30),
+                default_throttle: bytes_per_sec(50_000_000),
+                poll_interval: millis(50),
+                execute_deadline: secs(30),
                 batch_size: 200,
             },
             metrics: metrics.clone(),
@@ -598,7 +602,7 @@ mod tests {
             store,
             goal_registry: Arc::new(crate::api::GoalRegistry::default_registry()),
             goal_ctx: GoalContext {
-                imbalance_threshold_pct: 10,
+                imbalance_threshold: percent(10),
                 max_movements_per_proposal: 256,
                 min_topic_leaders_per_broker: 0,
                 broker_capacities: Arc::new(BrokerCapacities::default()),
@@ -609,6 +613,8 @@ mod tests {
             client_facade,
             anomaly_store: Arc::new(crate::detector::AnomalyStore::new(20)),
             state_topic: Arc::new(crate::state_topic::fake::InMemoryBackend::new_loaded()),
+            cancel_drain_timeout: secs(5),
+            cancel_drain_poll_interval: millis(25),
         })
     }
 
@@ -623,7 +629,7 @@ mod tests {
             started_at_ms: 0,
             terminated_at_ms: 0,
             failure_reason: None,
-            throttle_bytes_per_sec: 0,
+            throttle: ByteRate::ZERO,
         });
     }
 
@@ -691,7 +697,7 @@ mod tests {
             started_at_ms: 1,
             terminated_at_ms: 2,
             failure_reason: None,
-            throttle_bytes_per_sec: 0,
+            throttle: ByteRate::ZERO,
         });
 
         let err = execute_proposal(
@@ -734,7 +740,7 @@ mod tests {
 
         if let Some(handle) = state.executor.in_flight.lock().await.take() {
             handle.cancel.cancel();
-            let _ = tokio::time::timeout(Duration::from_secs(1), handle.task).await;
+            let _ = tokio::time::timeout(secs(1).to_std(), handle.task).await;
         }
     }
 
@@ -757,9 +763,9 @@ mod tests {
     #[test]
     fn cancel_poll_deadline_and_expiry_are_strict_until_deadline() {
         let now = std::time::Instant::now();
-        let deadline = cancel_poll_deadline(now, Duration::from_secs(5));
-        assert2::assert!(!cancel_poll_expired(now + Duration::from_secs(4), deadline));
-        assert2::assert!(cancel_poll_expired(now + Duration::from_secs(5), deadline));
+        let deadline = cancel_poll_deadline(now, secs(5));
+        assert2::assert!(!cancel_poll_expired(now + secs(4).to_std(), deadline));
+        assert2::assert!(cancel_poll_expired(now + secs(5).to_std(), deadline));
     }
 
     #[test]
