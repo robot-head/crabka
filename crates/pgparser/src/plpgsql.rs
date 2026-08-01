@@ -1154,8 +1154,21 @@ impl PlParser<'_> {
         let end = self.find_token(start, &Token::Semicolon)?;
         let mut into = None;
         let mut sql = self.slice_tokens(start, end).trim().to_string();
-        let select = self.word_at(start).is_some_and(|word| word == "select");
-        let returning = (!select)
+        let select = if self.word_at(start).is_some_and(|word| word == "select") {
+            Some(start)
+        } else if self.word_at(start).is_some_and(|word| word == "with") {
+            (start + 1..end)
+                .find(|pos| {
+                    self.word_at(*pos).is_some_and(|word| {
+                        ["select", "insert", "update", "delete", "merge"].contains(&word.as_str())
+                    }) && self.is_top_level_between(start, *pos)
+                })
+                .filter(|pos| self.word_at(*pos).is_some_and(|word| word == "select"))
+        } else {
+            None
+        };
+        let returning = select
+            .is_none()
             .then(|| {
                 (start..end).find(|pos| {
                     self.word_at(*pos).is_some_and(|word| word == "returning")
@@ -1163,7 +1176,7 @@ impl PlParser<'_> {
                 })
             })
             .flatten();
-        let into_at = (if select { Some(start) } else { returning }).and_then(|after| {
+        let into_at = select.or(returning).and_then(|after| {
             (after + 1..end).find(|pos| {
                 self.word_at(*pos).is_some_and(|word| word == "into")
                     && self.is_top_level_between(start, *pos)

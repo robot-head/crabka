@@ -382,6 +382,31 @@ fn parses_static_dml_returning_into_without_confusing_sql_into() {
 }
 
 #[test]
+fn parses_select_into_after_cte() {
+    let block = parse_plpgsql(
+        r"begin
+          with progress_data as (
+            select pid, relid, command, type, bytes_processed, bytes_total,
+                   tuples_processed, tuples_excluded
+            from pg_stat_progress_copy where pid = pg_backend_pid()
+          )
+          select into report (to_jsonb(r)) as value from progress_data r;
+        end",
+    )
+    .expect("CTE SELECT INTO");
+    let PlPgSqlStatement::Sql {
+        statement,
+        into: Some(into),
+        ..
+    } = &block.statements[0]
+    else {
+        panic!("expected CTE SELECT INTO");
+    };
+    assert!(matches!(statement.as_ref(), Statement::Query(_)));
+    assert!(into.targets[0].path == ["report"]);
+}
+
+#[test]
 fn ignores_nested_dml_returning_when_extracting_static_into() {
     let block = parse_plpgsql(
         "begin with moved as (delete from things returning id) insert into archive select id from moved; end",
