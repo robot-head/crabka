@@ -33,70 +33,43 @@
 //! xid/clog/snapshot model with uncommitted versions on disk. SP6 removes the
 //! global writer lock: writers run concurrently, serialized only at the row
 //! level via the `RowLockManager`, with rowid allocation via the
-//! `SequenceManager` and DDL serialized behind a small catalog lock — with the
-//! table-id counter split out from under it, into a lock of its own that a
-//! session takes once per block of ids rather than once per `CREATE TABLE`.
+//! `SequenceManager` and DDL serialized behind a small catalog lock.
 
 #![doc(html_root_url = "https://docs.rs/crabka-pgexec/0.3.9")]
 
 mod agg;
 mod array_fn;
-mod catalog_fn;
-mod catalog_rel;
 pub mod clock;
 mod commit;
 mod cte;
-mod cursor;
 mod datetime_fn;
 mod error;
 mod eval;
 mod exec;
-mod explain;
-pub mod fk;
 pub mod foreign;
 mod format_fn;
 mod func;
-mod grouping;
 mod gtm;
 pub mod hlc;
 pub mod hlc_source;
 mod join;
 mod json_fn;
-mod jsonpath;
 mod local_sequence;
 mod lockmgr;
-mod math_fn;
 pub mod notify;
-mod partition;
-mod pattern;
 pub mod plan_dist;
-mod plpgsql;
-mod plpgsql_sqlstate;
 mod procarray;
 mod query;
 mod read_gate;
-mod regexp_fn;
-mod relname;
-mod routine;
-mod rowexpr;
 pub mod scanner;
 mod scope;
-mod search_path;
 mod seq;
 mod session;
 mod setops;
-mod sql92;
-mod srf;
-mod string_fn;
 mod subquery;
-mod text_search_catalog;
-mod text_search_fn;
 pub mod timestamp_txn;
 pub mod ts_gc;
-mod usertype;
 mod values;
-mod viewdef;
-mod window;
 
 use std::{
     collections::HashMap,
@@ -107,10 +80,8 @@ use std::{
 pub use commit::{Committer, LocalCommitter};
 use crabka_pgkv::{FjallKv, Kv, MemKv};
 use crabka_pgwire::engine::Engine;
-pub use error::{
-    DependentForeignKey, DroppedObject, ExecError, ForeignKeyDependents, ForeignKeyTypeMismatch,
-    ForeignKeyViolation, ForeignKeyViolationSide, GucRangeViolation,
-};
+use crabka_units::convert::TimeExt as _;
+pub use error::ExecError;
 pub use gtm::GlobalXidLease;
 pub use hlc::{Hlc, HybridLogicalClock};
 pub use hlc_source::{
@@ -139,7 +110,6 @@ use crate::{lockmgr::RowLockManager, procarray::ProcArray, seq::SequenceManager}
 /// handle.
 struct EngineCoordination {
     catalog_lock: Arc<tokio::sync::Mutex<()>>,
-    table_id_lock: Arc<tokio::sync::Mutex<()>>,
     table_write_gate: Arc<tokio::sync::RwLock<()>>,
     writer_fence: Arc<WriterFence>,
 }
@@ -148,7 +118,6 @@ impl EngineCoordination {
     fn new() -> Self {
         Self {
             catalog_lock: Arc::new(tokio::sync::Mutex::new(())),
-            table_id_lock: Arc::new(tokio::sync::Mutex::new(())),
             table_write_gate: Arc::new(tokio::sync::RwLock::new(())),
             writer_fence: Arc::new(WriterFence::new()),
         }
@@ -324,6 +293,54 @@ pub(crate) enum PersistMode {
     Replicated,
 }
 
+/// Runtime policy for engine-local queues, durable counter reservations, and
+/// timestamp-version reclamation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RuntimePolicy {
+    pub notify_queue_capacity: usize,
+    pub xid_reservation: u64,
+    pub rowid_reservation: u64,
+    pub ts_prune_versions_per_row: usize,
+    pub ts_gc_floor_lag: crabka_units::Time,
+}
+
+impl Default for RuntimePolicy {
+    fn default() -> Self {
+        Self {
+            notify_queue_capacity: notify::NOTIFY_QUEUE_CAPACITY,
+            xid_reservation: procarray::DURABLE_XID_BLOCK,
+            rowid_reservation: seq::DURABLE_BLOCK,
+            ts_prune_versions_per_row: ts_gc::TS_PRUNE_ROW_VERSION_CAP,
+            ts_gc_floor_lag: ts_gc::TS_PRUNE_FLOOR_LAG,
+        }
+    }
+}
+
+impl RuntimePolicy {
+    /// Validate the policy before constructing an engine.
+    /// # Errors
+    ///
+    /// Returns an error for zero counts or a GC lag that cannot be represented
+    /// by the engine's whole-millisecond clock.
+    pub fn validate(self) -> Result<Self, ExecError> {
+        let floor_lag_millis = self.ts_gc_floor_lag.millis_i64();
+        if self.notify_queue_capacity == 0
+            || self.xid_reservation == 0
+            || self.rowid_reservation == 0
+            || self.ts_prune_versions_per_row == 0
+            || !self.ts_gc_floor_lag.secs_f64().is_finite()
+            || floor_lag_millis < 0
+            || crabka_units::Time::from_millis(floor_lag_millis) != self.ts_gc_floor_lag
+        {
+            return Err(ExecError::Unsupported(
+                "PgExec runtime counts must be positive and GC lag must be finite, nonnegative, and whole milliseconds"
+                    .into(),
+            ));
+        }
+        Ok(self)
+    }
+}
+
 /// The SQL engine over a durable (or in-memory) KV store. Catalog, sequences,
 /// the xid counter, and the clog live in the KV store. Writers run concurrently
 /// (SP6): row-level conflicts serialize through the `RowLockManager`, rowid
@@ -342,8 +359,6 @@ pub struct SqlEngine {
     pub(crate) procarray: Arc<ProcArray>,
     pub(crate) seq: Arc<SequenceManager>,
     pub(crate) lockmgr: Arc<RowLockManager>,
-    /// S3: engine-wide relation and advisory lock state, shared by every session.
-    pub(crate) session_locks: Arc<crate::lockmgr::SessionLocks>,
     /// The engine-wide `LISTEN`/`NOTIFY` bus. Every session registers on it and
     /// receives its own bounded notification queue; every `clone_handle` shares
     /// the same bus, so all of a node's connections publish into one place.
@@ -353,19 +368,6 @@ pub struct SqlEngine {
     /// [`SqlEngine::set_notify_origin`] is called.
     pub(crate) notify_replication: Arc<NotifyReplication>,
     pub(crate) catalog_lock: Arc<tokio::sync::Mutex<()>>,
-    /// Covers the shared next-table-id counter's read-bump-commit, and nothing
-    /// else.
-    ///
-    /// `catalog_lock` used to cover both the catalog keyspace and this counter,
-    /// which made every `CREATE TABLE` — including a temporary one, whose
-    /// namespace no other session can even name — wait out a cluster-wide
-    /// critical section that spans a Raft round-trip. Split out, a session
-    /// claims a block of ids here and hands them out locally, so the common
-    /// `CREATE TEMP TABLE` coordinates with nobody.
-    ///
-    /// Lock order where a statement wants both: `table_id_lock` first, then
-    /// `catalog_lock`.
-    pub(crate) table_id_lock: Arc<tokio::sync::Mutex<()>>,
     /// Serializes physical rewrites with ordinary writes. Explicit xid writers
     /// additionally retain `writer_fence` through their terminal outcome.
     pub(crate) table_write_gate: Arc<tokio::sync::RwLock<()>>,
@@ -714,6 +716,14 @@ impl SqlEngine {
         Self::with_kv(Arc::new(MemKv::new())).expect("in-memory engine never fails to open")
     }
 
+    /// Ephemeral in-memory engine with explicit runtime policy.
+    /// # Errors
+    ///
+    /// Returns an error when the runtime policy is invalid.
+    pub fn new_with_policy(policy: RuntimePolicy) -> Result<Self, ExecError> {
+        Self::with_kv_and_policy(Arc::new(MemKv::new()), policy)
+    }
+
     /// Durable engine backed by a fjall store at `path`.
     /// # Errors
     ///
@@ -722,12 +732,36 @@ impl SqlEngine {
         Self::with_kv(Arc::new(FjallKv::open(path)?))
     }
 
+    /// Durable engine with explicit runtime policy.
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot be opened or the policy is invalid.
+    pub fn open_with_policy(
+        path: impl AsRef<Path>,
+        policy: RuntimePolicy,
+    ) -> Result<Self, ExecError> {
+        Self::with_kv_and_policy(Arc::new(FjallKv::open(path)?), policy)
+    }
+
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
     pub fn with_kv(kv: Arc<dyn Kv>) -> Result<Self, ExecError> {
+        Self::with_kv_and_policy(kv, RuntimePolicy::default())
+    }
+
+    /// Open an engine with explicit runtime policy.
+    /// # Errors
+    ///
+    /// Returns an error when the store cannot be read or the policy is invalid.
+    pub fn with_kv_and_policy(kv: Arc<dyn Kv>, policy: RuntimePolicy) -> Result<Self, ExecError> {
+        let policy = policy.validate()?;
         let coordination = coordination_for(&kv);
-        let procarray = Arc::new(ProcArray::open(Arc::clone(&kv), PersistMode::Durable)?);
+        let procarray = Arc::new(ProcArray::open_with_block(
+            Arc::clone(&kv),
+            PersistMode::Durable,
+            policy.xid_reservation,
+        )?);
         let sweep_committer = timestamp_txn::HorizonObservingCommitter::wrap(
             Arc::new(crate::commit::LocalCommitter {
                 kv: Arc::clone(&kv),
@@ -743,19 +777,26 @@ impl SqlEngine {
         let timestamp_horizon =
             timestamp_txn::TimestampHorizonSource::new(Arc::clone(&kv), Arc::clone(&kv), false);
         let local_sequence = new_local_sequence();
-        let ts_gc = Arc::new(ts_gc::TsVersionGc::new(Arc::clone(&local_sequence)));
+        let ts_gc = Arc::new(ts_gc::TsVersionGc::with_policy(
+            Arc::clone(&local_sequence),
+            policy.ts_prune_versions_per_row,
+            policy.ts_gc_floor_lag,
+        ));
         Ok(Self {
             coordination: Arc::clone(&coordination),
             catalog_kv: Arc::clone(&kv),
             kv: Arc::clone(&kv),
             procarray,
-            seq: Arc::new(SequenceManager::new(PersistMode::Durable)),
+            seq: Arc::new(SequenceManager::with_durable_block(
+                PersistMode::Durable,
+                policy.rowid_reservation,
+            )),
             lockmgr: Arc::new(RowLockManager::new()),
-            session_locks: Arc::new(crate::lockmgr::SessionLocks::new()),
-            notify: Arc::new(notify::NotifyBus::new()),
+            notify: Arc::new(notify::NotifyBus::with_capacity(
+                policy.notify_queue_capacity,
+            )),
             notify_replication: Arc::new(NotifyReplication::default()),
             catalog_lock: Arc::clone(&coordination.catalog_lock),
-            table_id_lock: Arc::clone(&coordination.table_id_lock),
             table_write_gate: Arc::clone(&coordination.table_write_gate),
             writer_fence: Arc::clone(&coordination.writer_fence),
             unique_index_lock: Arc::new(tokio::sync::RwLock::new(())),
@@ -1317,10 +1358,32 @@ impl SqlEngine {
         committer: Arc<dyn crate::commit::Committer>,
         linearizer: Arc<dyn crate::read_gate::Linearizer>,
     ) -> Result<Self, ExecError> {
+        Self::replicated_with_policy(
+            catalog_kv,
+            sm_kv,
+            committer,
+            linearizer,
+            RuntimePolicy::default(),
+        )
+    }
+
+    /// Build a replicated engine with explicit runtime policy.
+    /// # Errors
+    ///
+    /// Returns an error when the applied store cannot be read or the policy is invalid.
+    pub fn replicated_with_policy(
+        catalog_kv: Arc<dyn Kv>,
+        sm_kv: Arc<dyn Kv>,
+        committer: Arc<dyn crate::commit::Committer>,
+        linearizer: Arc<dyn crate::read_gate::Linearizer>,
+        policy: RuntimePolicy,
+    ) -> Result<Self, ExecError> {
+        let policy = policy.validate()?;
         let coordination = coordination_for(&sm_kv);
-        let procarray = Arc::new(ProcArray::open(
+        let procarray = Arc::new(ProcArray::open_with_block(
             Arc::clone(&sm_kv),
             PersistMode::Replicated,
+            policy.xid_reservation,
         )?);
         let committer = timestamp_txn::HorizonObservingCommitter::wrap(committer, &sm_kv);
         let timestamp_horizon = timestamp_txn::TimestampHorizonSource::new(
@@ -1329,19 +1392,26 @@ impl SqlEngine {
             false,
         );
         let local_sequence = new_local_sequence();
-        let ts_gc = Arc::new(ts_gc::TsVersionGc::new(Arc::clone(&local_sequence)));
+        let ts_gc = Arc::new(ts_gc::TsVersionGc::with_policy(
+            Arc::clone(&local_sequence),
+            policy.ts_prune_versions_per_row,
+            policy.ts_gc_floor_lag,
+        ));
         Ok(Self {
             coordination: Arc::clone(&coordination),
             catalog_kv,
             kv: Arc::clone(&sm_kv),
             procarray,
-            seq: Arc::new(SequenceManager::new(PersistMode::Replicated)),
+            seq: Arc::new(SequenceManager::with_durable_block(
+                PersistMode::Replicated,
+                policy.rowid_reservation,
+            )),
             lockmgr: Arc::new(RowLockManager::new()),
-            session_locks: Arc::new(crate::lockmgr::SessionLocks::new()),
-            notify: Arc::new(notify::NotifyBus::new()),
+            notify: Arc::new(notify::NotifyBus::with_capacity(
+                policy.notify_queue_capacity,
+            )),
             notify_replication: Arc::new(NotifyReplication::default()),
             catalog_lock: Arc::clone(&coordination.catalog_lock),
-            table_id_lock: Arc::clone(&coordination.table_id_lock),
             table_write_gate: Arc::clone(&coordination.table_write_gate),
             writer_fence: Arc::clone(&coordination.writer_fence),
             unique_index_lock: Arc::new(tokio::sync::RwLock::new(())),
@@ -1379,10 +1449,6 @@ impl SqlEngine {
     pub fn reseed_counters(&self) -> Result<(), ExecError> {
         self.procarray.reseed_from_applied()?;
         self.seq.reseed_from_applied();
-        // Becoming the writer is the one moment the SQL sequence cache may be
-        // dropped: every value the previous writer handed to a client is
-        // durable, so re-seeding from the applied store can only move forward.
-        self.seq.reseed_sql_sequences();
         self.timestamp_horizon.invalidate();
         Ok(())
     }
@@ -1408,11 +1474,9 @@ impl SqlEngine {
             procarray: Arc::clone(&self.procarray),
             seq: Arc::clone(&self.seq),
             lockmgr: Arc::clone(&self.lockmgr),
-            session_locks: Arc::clone(&self.session_locks),
             notify: Arc::clone(&self.notify),
             notify_replication: Arc::clone(&self.notify_replication),
             catalog_lock: Arc::clone(&self.catalog_lock),
-            table_id_lock: Arc::clone(&self.table_id_lock),
             table_write_gate: Arc::clone(&self.table_write_gate),
             writer_fence: Arc::clone(&self.writer_fence),
             unique_index_lock: Arc::clone(&self.unique_index_lock),
@@ -1653,10 +1717,7 @@ impl SqlEngine {
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
-    pub fn table_uses_global_visibility(
-        &self,
-        name: &crabka_pgcatalog::RelationName,
-    ) -> Result<bool, ExecError> {
+    pub fn table_uses_global_visibility(&self, name: &str) -> Result<bool, ExecError> {
         let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name)?;
         Ok(crate::exec::table_uses_global_visibility(&table))
     }
@@ -1667,7 +1728,7 @@ impl SqlEngine {
     /// Returns an error when the requested operation cannot be completed.
     pub fn table_sharding(
         &self,
-        name: &crabka_pgcatalog::RelationName,
+        name: &str,
     ) -> Result<Option<crabka_pgcatalog::ShardingStrategy>, ExecError> {
         let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name)?;
         Ok(table.sharding)
@@ -1679,7 +1740,7 @@ impl SqlEngine {
     /// Returns an error when the requested operation cannot be completed.
     pub async fn convert_table_to_sharded_metadata(
         &self,
-        name: &crabka_pgcatalog::RelationName,
+        name: &str,
         sharding: Option<&crabka_pgcatalog::ShardingStrategy>,
     ) -> Result<(), ExecError> {
         let _xid_writer_fence = self.writer_fence.conversion().await;
@@ -1701,10 +1762,7 @@ impl SqlEngine {
     /// # Errors
     ///
     /// Returns an error when the requested operation cannot be completed.
-    pub fn catalog_table(
-        &self,
-        name: &crabka_pgcatalog::RelationName,
-    ) -> Result<crabka_pgcatalog::Table, ExecError> {
+    pub fn catalog_table(&self, name: &str) -> Result<crabka_pgcatalog::Table, ExecError> {
         crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name).map_err(Into::into)
     }
 
@@ -1769,32 +1827,6 @@ impl SqlEngine {
         &self,
         sql: &str,
     ) -> Result<crate::exec::TimestampWritePlan, ExecError> {
-        let (mut plan, sequence_ops) = self.plan_timestamp_write_parts(sql)?;
-        plan.commit_ops.extend(sequence_ops);
-        Ok(plan)
-    }
-
-    /// The plan and its SQL sequence advances kept apart, because the two have
-    /// different lifetimes: a caller that supplies its own hidden rowids drops
-    /// the plan's rowid op, but a `nextval` the statement evaluated still has to
-    /// reach the store or the next writer will hand the same value out again.
-    fn plan_timestamp_write_parts(
-        &self,
-        sql: &str,
-    ) -> Result<(crate::exec::TimestampWritePlan, Vec<crabka_pgkv::WriteOp>), ExecError> {
-        let pending = Arc::new(std::sync::Mutex::new(
-            crate::seq::PendingSequences::default(),
-        ));
-        let plan = self.plan_timestamp_write_with_pending(sql, &pending)?;
-        let sequence_ops = pending.lock().expect("pending sequences").take_ops();
-        Ok((plan, sequence_ops))
-    }
-
-    fn plan_timestamp_write_with_pending(
-        &self,
-        sql: &str,
-        pending: &Arc<std::sync::Mutex<crate::seq::PendingSequences>>,
-    ) -> Result<crate::exec::TimestampWritePlan, ExecError> {
         let statements = crabka_pgparser::parse(sql)?;
         let [statement] = statements.as_slice() else {
             return Err(ExecError::Unsupported(
@@ -1806,28 +1838,14 @@ impl SqlEngine {
             now,
             stmt_now: now,
             time_zone: jiff::tz::TimeZone::UTC,
-            date_order: crabka_pgtypes::datetime::DateOrder::default(),
-            date_style: crabka_pgtypes::datetime::DateStyle::default(),
-            interval_style: crabka_pgtypes::datetime::IntervalStyle::default(),
             current_user: "public".into(),
             session_user: "public".into(),
-            // No connection was ever opened for this write, so there is no
-            // backend id to report.
-            backend_pid: 0,
             clock: Arc::clone(&self.clock),
             sequence: Some(Arc::new(crate::clock::SequenceRuntime {
                 kv: Arc::clone(&self.catalog_kv),
                 manager: Arc::clone(&self.seq),
                 currvals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
-                pending: Arc::clone(pending),
             })),
-            // The catalog is reachable through `sequence`, which holds the same
-            // handle.
-            catalog: None,
-            // Nor is there a session `search_path` to resolve against, so an
-            // unqualified name in a scattered write takes PostgreSQL's default
-            // path — the same one a fresh session starts with.
-            resolution: None,
             // Planning a sharded write has no session behind it, so `pg_notify`
             // in one reports "requires a SQL session" rather than silently
             // dropping the notification.
@@ -1851,7 +1869,7 @@ impl SqlEngine {
         sql: &str,
         hidden_rowids: &[u64],
     ) -> Result<crate::exec::TimestampWritePlan, ExecError> {
-        let (mut plan, sequence_ops) = self.plan_timestamp_write_parts(sql)?;
+        let mut plan = self.plan_timestamp_write_sql(sql)?;
         if plan.writes.len() != hidden_rowids.len() {
             return Err(ExecError::Unsupported(
                 "hidden row-id lease does not match timestamp write count".into(),
@@ -1860,11 +1878,7 @@ impl SqlEngine {
         for (write, rowid) in plan.writes.iter_mut().zip(hidden_rowids) {
             write.rowid = *rowid;
         }
-        // The rowid counter op goes: these rowids came from the lease, so the
-        // counter was never advanced. A SQL sequence advance is not the same
-        // thing — the statement really did consume those values.
         plan.commit_ops.clear();
-        plan.commit_ops.extend(sequence_ops);
         Ok(plan)
     }
 
@@ -2932,7 +2946,6 @@ fn exclusive_cursor_terminal(sequence: u64, physical_max: Option<u64>) -> Result
 
 #[cfg(test)]
 mod cursor_terminal_tests {
-    use crabka_pgcatalog::RelationName;
     use crabka_pgkv::WriteOp;
     use crabka_pgwire::engine::{Engine, Session};
 
@@ -2956,9 +2969,7 @@ mod cursor_terminal_tests {
             .simple_query("CREATE TABLE h (id int4) SHARDED BY HASH (id) BUCKETS 16")
             .await
             .expect("create hash table");
-        let table = engine
-            .catalog_table(&RelationName::public("h"))
-            .expect("hash table");
+        let table = engine.catalog_table("h").expect("hash table");
         engine
             .kv_handle()
             .write_batch(&[WriteOp::Put {
@@ -3100,23 +3111,14 @@ pub fn describe_fields(
     catalog_kv: &dyn Kv,
     sql: &str,
 ) -> Result<Vec<crabka_pgwire::engine::FieldDescription>, ExecError> {
-    crate::exec::describe(
-        catalog_kv,
-        catalog_kv,
-        crate::relname::ResolutionScope::default_scope(),
-        sql,
-    )
+    crate::exec::describe(catalog_kv, catalog_kv, sql)
 }
 
 impl Engine for SqlEngine {
     type Session = SqlSession;
 
-    /// A session with no client behind it — an embedded caller, or a range
-    /// engine the gateway drives. It still draws a backend id, from the same
-    /// process-wide counter the wire layer announces from, so `pg_backend_pid()`
-    /// identifies it as distinctly as a connected session's does.
     fn connect(&self) -> SqlSession {
-        self.connect_with_pid(crabka_pgwire::server::next_backend_pid())
+        self.connect_with_pid(0)
     }
 
     fn connect_with_pid(&self, pid: i32) -> SqlSession {
@@ -3126,9 +3128,7 @@ impl Engine for SqlEngine {
             procarray: Arc::clone(&self.procarray),
             seq: Arc::clone(&self.seq),
             lockmgr: Arc::clone(&self.lockmgr),
-            session_locks: Arc::clone(&self.session_locks),
             catalog_lock: Arc::clone(&self.catalog_lock),
-            table_id_lock: Arc::clone(&self.table_id_lock),
             table_write_gate: Arc::clone(&self.table_write_gate),
             writer_fence: Arc::clone(&self.writer_fence),
             coordination: Arc::clone(&self.coordination),
@@ -3149,7 +3149,6 @@ impl Engine for SqlEngine {
             gc_horizon: Arc::clone(&self.gc_horizon),
             ts_gc: Arc::clone(&self.ts_gc),
             notify_replication: Arc::clone(&self.notify_replication),
-            backend_pid: pid,
         });
         session.register_notify(&self.notify, pid);
         session
@@ -3158,11 +3157,52 @@ impl Engine for SqlEngine {
 
 #[cfg(test)]
 mod tests {
-    use crabka_pgcatalog::RelationName;
     use crabka_pgwire::engine::Session;
+    use crabka_units::convert::TimeExt as _;
     use tokio::sync::{Barrier, Notify};
 
     use super::*;
+
+    #[test]
+    fn runtime_policy_rejects_zero_counts_and_negative_gc_lag() {
+        let defaults = RuntimePolicy::default();
+        for policy in [
+            RuntimePolicy {
+                notify_queue_capacity: 0,
+                ..defaults
+            },
+            RuntimePolicy {
+                xid_reservation: 0,
+                ..defaults
+            },
+            RuntimePolicy {
+                rowid_reservation: 0,
+                ..defaults
+            },
+            RuntimePolicy {
+                ts_prune_versions_per_row: 0,
+                ..defaults
+            },
+            RuntimePolicy {
+                ts_gc_floor_lag: crabka_units::Time::from_millis(-1),
+                ..defaults
+            },
+            RuntimePolicy {
+                ts_gc_floor_lag: crabka_units::Time::from_micros(500),
+                ..defaults
+            },
+        ] {
+            assert!(policy.validate().is_err());
+        }
+        assert!(
+            RuntimePolicy {
+                ts_gc_floor_lag: crabka_units::secs(0),
+                ..defaults
+            }
+            .validate()
+            .is_ok()
+        );
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn in_doubt_globals_lists_undecided_prepared_markers() {
@@ -3208,10 +3248,10 @@ mod tests {
             .await
             .expect("create local table");
 
-        let sharded = crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("sharded_t"))
+        let sharded = crabka_pgcatalog::get_table(kv.as_ref(), "sharded_t")
             .expect("sharded table catalog row");
-        let local = crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("local_t"))
-            .expect("local table catalog row");
+        let local =
+            crabka_pgcatalog::get_table(kv.as_ref(), "local_t").expect("local table catalog row");
 
         assert!(sharded.sharded);
         assert!(!local.sharded);
@@ -3230,8 +3270,7 @@ mod tests {
             .await
             .expect("create hash sharded table");
 
-        let table = crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("hash_t"))
-            .expect("table");
+        let table = crabka_pgcatalog::get_table(kv.as_ref(), "hash_t").expect("table");
         assert!(table.sharded);
         assert_eq!(
             table.sharding,
@@ -3256,12 +3295,8 @@ mod tests {
             )
             .await
             .expect("create tables");
-        let hash = engine
-            .catalog_table(&RelationName::public("h"))
-            .expect("hash table");
-        let ordinary = engine
-            .catalog_table(&RelationName::public("s"))
-            .expect("ordinary table");
+        let hash = engine.catalog_table("h").expect("hash table");
+        let ordinary = engine.catalog_table("s").expect("ordinary table");
 
         assert!(engine.validate_timestamp_bucket(hash.id, Some(0)).is_ok());
         assert!(engine.validate_timestamp_bucket(hash.id, Some(15)).is_ok());
@@ -3314,12 +3349,11 @@ mod tests {
         });
 
         engine
-            .convert_table_to_sharded_metadata(&RelationName::public("convert_t"), Some(&sharding))
+            .convert_table_to_sharded_metadata("convert_t", Some(&sharding))
             .await
             .expect("convert metadata");
 
-        let table = crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("convert_t"))
-            .expect("table");
+        let table = crabka_pgcatalog::get_table(kv.as_ref(), "convert_t").expect("table");
         assert!(table.sharded);
         assert_eq!(table.sharding, Some(sharding));
     }
@@ -3343,7 +3377,7 @@ mod tests {
             .expect("read before");
 
         engine
-            .convert_table_to_sharded_metadata(&RelationName::public("convert_visible"), None)
+            .convert_table_to_sharded_metadata("convert_visible", None)
             .await
             .expect("metadata conversion");
         let after = session
@@ -3379,10 +3413,7 @@ mod tests {
                 conversion_started.notify_one();
                 release_conversion.notified().await;
                 converting_engine
-                    .convert_table_to_sharded_metadata(
-                        &RelationName::public("conversion_fence"),
-                        None,
-                    )
+                    .convert_table_to_sharded_metadata("conversion_fence", None)
                     .await
             }
         });
@@ -3403,9 +3434,7 @@ mod tests {
             .expect("conversion task")
             .expect("convert table");
 
-        let table =
-            crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("conversion_fence"))
-                .expect("table");
+        let table = crabka_pgcatalog::get_table(kv.as_ref(), "conversion_fence").expect("table");
         for (_, value) in kv
             .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
             .expect("scan converted tuples")
@@ -3454,10 +3483,7 @@ mod tests {
                 conversion_barrier.wait().await;
                 conversion_started.notify_one();
                 converting_engine
-                    .convert_table_to_sharded_metadata(
-                        &RelationName::public("shared_conversion_fence"),
-                        None,
-                    )
+                    .convert_table_to_sharded_metadata("shared_conversion_fence", None)
                     .await
             }
         });
@@ -3478,11 +3504,8 @@ mod tests {
             .expect("conversion task")
             .expect("convert table");
 
-        let table = crabka_pgcatalog::get_table(
-            kv.as_ref(),
-            &RelationName::public("shared_conversion_fence"),
-        )
-        .expect("table");
+        let table =
+            crabka_pgcatalog::get_table(kv.as_ref(), "shared_conversion_fence").expect("table");
         assert!(table.sharded);
         for (_, value) in kv
             .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
@@ -3521,10 +3544,7 @@ mod tests {
         conversion_waiter.as_mut().enable();
         let conversion = tokio::spawn(async move {
             reopened
-                .convert_table_to_sharded_metadata(
-                    &RelationName::public("retained_conversion_fence"),
-                    None,
-                )
+                .convert_table_to_sharded_metadata("retained_conversion_fence", None)
                 .await
         });
         conversion_waiter.await;
@@ -3565,10 +3585,7 @@ mod tests {
                 conversion_barrier.wait().await;
                 conversion_started.notify_one();
                 converting_engine
-                    .convert_table_to_sharded_metadata(
-                        &RelationName::public("conversion_upgrade"),
-                        None,
-                    )
+                    .convert_table_to_sharded_metadata("conversion_upgrade", None)
                     .await
             }
         });
@@ -3616,9 +3633,7 @@ mod tests {
             .await
             .expect("insert 2");
 
-        let table =
-            crabka_pgcatalog::get_table(engine.catalog_kv(), &RelationName::public("local_t"))
-                .expect("table");
+        let table = crabka_pgcatalog::get_table(engine.catalog_kv(), "local_t").expect("table");
         let snapshot = engine.procarray.snapshot();
         let direct_rows = engine
             .scan_local_visible(
@@ -3797,9 +3812,7 @@ mod tests {
         };
         // The dropped session freed li's lock (presumed-abort), so the inherited in-doubt
         // row now has NO live lock holder — exactly the wiped-lock-table condition.
-        let table = crabka_pgcatalog::get_table(kv.as_ref(), &RelationName::public("t"))
-            .expect("t")
-            .id;
+        let table = crabka_pgcatalog::get_table(kv.as_ref(), "t").expect("t").id;
         // g is still in-doubt (no global decision written): recovery re-acquires li's lock.
         let pairs = engine.reacquire_in_doubt_locks().await.expect("reacquire");
         assert_eq!(

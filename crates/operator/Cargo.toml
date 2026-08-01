@@ -43,6 +43,7 @@ crabka-schema-serde = { version = "0.3.9", path = "../schema-serde" }
 crabka-security = { workspace = true }
 crabka-units = { workspace = true }
 crabka-pgkv = { version = "0.3.9", path = "../pgkv" }
+crabka-pgexec = { version = "0.3.9", path = "../pgexec" }
 base64 = { workspace = true }
 bytes = { workspace = true }
 derive_more = { workspace = true }

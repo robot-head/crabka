@@ -113,6 +113,10 @@ pub struct ServeArgs {
     #[command(flatten)]
     pub range_runtime: Box<RangeRuntimeOptions>,
 
+    /// SQL executor runtime limits and persistence pacing.
+    #[command(flatten)]
+    pub pgexec_runtime: Box<PgExecRuntimeOptions>,
+
     /// Address to listen on.
     #[arg(long, default_value = "127.0.0.1:5433")]
     pub listen: String,
@@ -705,6 +709,73 @@ pub struct RangeRuntimeOptions {
     /// Wall-clock headroom persisted by the HLC oracle.
     #[arg(long = "range-hlc-horizon-headroom", env = "CRABKA_GRES_RANGE_HLC_HORIZON_HEADROOM", value_parser = crabka_units::parse::positive_time)]
     pub hlc_horizon_headroom: Option<Time>,
+}
+
+/// Optional CLI overrides for SQL executor runtime policy.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct PgExecRuntimeOptions {
+    /// Per-session LISTEN/NOTIFY queue capacity.
+    #[arg(
+        long = "pgexec-notify-queue-capacity",
+        env = "CRABKA_GRES_PGEXEC_NOTIFY_QUEUE_CAPACITY"
+    )]
+    pub notify_queue_capacity: Option<PositiveUsize>,
+    /// Durable XID reservation size.
+    #[arg(
+        long = "pgexec-xid-reservation",
+        env = "CRABKA_GRES_PGEXEC_XID_RESERVATION"
+    )]
+    pub xid_reservation: Option<crabka_gres_ranges::PositiveU64>,
+    /// Durable internal row-ID reservation size.
+    #[arg(
+        long = "pgexec-rowid-reservation",
+        env = "CRABKA_GRES_PGEXEC_ROWID_RESERVATION"
+    )]
+    pub rowid_reservation: Option<crabka_gres_ranges::PositiveU64>,
+    /// Maximum timestamp versions pruned per written row.
+    #[arg(
+        long = "pgexec-ts-prune-versions-per-row",
+        env = "CRABKA_GRES_PGEXEC_TS_PRUNE_VERSIONS_PER_ROW"
+    )]
+    pub ts_prune_versions_per_row: Option<PositiveUsize>,
+    /// Lag retained behind the timestamp GC floor.
+    #[arg(long = "pgexec-ts-gc-floor-lag", env = "CRABKA_GRES_PGEXEC_TS_GC_FLOOR_LAG", value_parser = parse_pgexec_gc_floor_lag)]
+    pub ts_gc_floor_lag: Option<Time>,
+}
+
+fn parse_pgexec_gc_floor_lag(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::non_negative_time(value).map_err(|error| error.to_string())?;
+    crabka_pgexec::RuntimePolicy {
+        ts_gc_floor_lag: value,
+        ..Default::default()
+    }
+    .validate()
+    .map(|policy| policy.ts_gc_floor_lag)
+    .map_err(|error| format!("{error:?}"))
+}
+
+impl PgExecRuntimeOptions {
+    fn effective_policy(&self) -> crabka_pgexec::RuntimePolicy {
+        let defaults = crabka_pgexec::RuntimePolicy::default();
+        crabka_pgexec::RuntimePolicy {
+            notify_queue_capacity: self
+                .notify_queue_capacity
+                .map_or(defaults.notify_queue_capacity, PositiveUsize::into_value),
+            xid_reservation: self.xid_reservation.map_or(
+                defaults.xid_reservation,
+                crabka_gres_ranges::PositiveU64::get,
+            ),
+            rowid_reservation: self.rowid_reservation.map_or(
+                defaults.rowid_reservation,
+                crabka_gres_ranges::PositiveU64::get,
+            ),
+            ts_prune_versions_per_row: self.ts_prune_versions_per_row.map_or(
+                defaults.ts_prune_versions_per_row,
+                PositiveUsize::into_value,
+            ),
+            ts_gc_floor_lag: self.ts_gc_floor_lag.unwrap_or(defaults.ts_gc_floor_lag),
+        }
+    }
 }
 
 impl RangeRuntimeOptions {
@@ -1470,6 +1541,8 @@ pub struct SubstrateRuntimeConfig {
     pub registry_policy: RegistryPolicy,
     /// Distributed range execution limits and pacing.
     pub range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy,
+    /// SQL executor runtime limits and persistence pacing.
+    pub pgexec_runtime_policy: crabka_pgexec::RuntimePolicy,
 }
 
 /// Validated TLS-only range RPC configuration.
@@ -1688,6 +1761,7 @@ impl SubstrateRuntimeConfig {
             hlc_wall_offset_ms: whole_millis_i64("HLC wall offset", args.hlc_wall_offset)?,
             registry_policy: args.registry.policy(),
             range_runtime_policy: args.range_runtime.effective_policy()?,
+            pgexec_runtime_policy: args.pgexec_runtime.effective_policy(),
         }))
     }
 
@@ -4567,13 +4641,15 @@ async fn open_runtime_with_tenant_record(
         .await;
     }
 
+    let policy = args.pgexec_runtime.effective_policy();
     let engine = match args.data_dir.as_deref() {
         Some(dir) => {
             std::fs::create_dir_all(dir)?;
-            SqlEngine::open(dir)
+            SqlEngine::open_with_policy(dir, policy)
                 .map_err(|err| std::io::Error::other(format!("opening data dir: {err:?}")))
         }
-        None => Ok(SqlEngine::new()),
+        None => SqlEngine::new_with_policy(policy)
+            .map_err(|err| std::io::Error::other(format!("opening in-memory engine: {err:?}"))),
     }?;
     Ok(GresRuntime::new(engine))
 }
@@ -4661,6 +4737,7 @@ async fn open_substrate_runtime_with_tenant_record(
         checkpoint.as_ref().map(|checkpoint| {
             Arc::clone(&checkpoint.planner_stats) as Arc<dyn crabka_pgexec::plan_dist::Stats>
         }),
+        config.pgexec_runtime_policy,
     )?;
     Ok(match checkpoint {
         Some(checkpoint) => GresRuntime::with_checkpoint_runtime(engine, checkpoint),
@@ -5425,6 +5502,7 @@ async fn open_live_range_substrate_engine(
         checkpoint.as_ref().map(|runtime| {
             Arc::clone(&runtime.planner_stats) as Arc<dyn crabka_pgexec::plan_dist::Stats>
         }),
+        config.pgexec_runtime_policy,
     )?;
     let tso_horizon = if range_id == crabka_gres_ranges::RangeId::COORDINATOR {
         let tso_store: Arc<dyn Kv> = store.clone();
@@ -7395,6 +7473,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     Some(Arc::clone(&checkpoint.stats)),
                     Some(Arc::clone(&checkpoint.planner_stats)
                         as Arc<dyn crabka_pgexec::plan_dist::Stats>),
+                    self.config.pgexec_runtime_policy,
                 )
                 .map_err(|error| {
                     crabka_gres_ranges::RangeTransferError::Runtime {
@@ -7914,6 +7993,7 @@ async fn open_live_substrate_runtime(
         checkpoint.as_ref().map(|checkpoint| {
             Arc::clone(&checkpoint.planner_stats) as Arc<dyn crabka_pgexec::plan_dist::Stats>
         }),
+        config.pgexec_runtime_policy,
     )?;
     Ok(match checkpoint {
         Some(checkpoint) => GresRuntime::with_checkpoint_runtime(engine, checkpoint),
@@ -7941,6 +8021,7 @@ fn build_replicated_substrate_engine<W>(
     snapshot_source: &Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint_stats: Option<Arc<crabka_gres_substrate::CheckpointStats>>,
     checkpoint_planner_stats: Option<Arc<dyn crabka_pgexec::plan_dist::Stats>>,
+    pgexec_runtime_policy: crabka_pgexec::RuntimePolicy,
 ) -> std::io::Result<SqlEngine>
 where
     W: crabka_gres_substrate::TransactionalWalWriter + crabka_gres_substrate::FenceLease + 'static,
@@ -7954,6 +8035,7 @@ where
         snapshot_source,
         checkpoint_stats,
         checkpoint_planner_stats,
+        pgexec_runtime_policy,
     )
     .map(|(engine, _committer)| engine)
 }
@@ -7968,6 +8050,7 @@ fn build_replicated_substrate_engine_with_committer<W>(
     snapshot_source: &Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint_stats: Option<Arc<crabka_gres_substrate::CheckpointStats>>,
     checkpoint_planner_stats: Option<Arc<dyn crabka_pgexec::plan_dist::Stats>>,
+    pgexec_runtime_policy: crabka_pgexec::RuntimePolicy,
 ) -> std::io::Result<(SqlEngine, Arc<crabka_gres_substrate::SubstrateCommitter<W>>)>
 where
     W: crabka_gres_substrate::TransactionalWalWriter + crabka_gres_substrate::FenceLease + 'static,
@@ -7994,11 +8077,12 @@ where
     };
     let committer = Arc::new(committer);
     let linearizer = crabka_gres_substrate::SubstrateLinearizer::new(writer, generation);
-    let mut engine = SqlEngine::replicated(
+    let mut engine = SqlEngine::replicated_with_policy(
         engine_read_store,
         engine_write_store,
         committer.clone(),
         Arc::new(linearizer),
+        pgexec_runtime_policy,
     )
     .map_err(|error| std::io::Error::other(format!("engine: {error:?}")))?;
     if let Some(checkpoint_stats) = checkpoint_planner_stats {
@@ -9387,6 +9471,7 @@ mod tests {
             },
             local_vacuum: LocalVacuumOptions::default(),
             range_runtime: Box::default(),
+            pgexec_runtime: Box::default(),
             listen: "127.0.0.1:0".to_string(),
             tls_cert: None,
             tls_key: None,
@@ -11367,6 +11452,38 @@ mod tests {
     }
 
     #[test]
+    fn pgexec_runtime_policy_parses_and_reaches_substrate_config() {
+        let cli = Cli::try_parse_from([
+            "crabka-gres",
+            "--substrate-bootstrap=memory://",
+            "--tenant=tenant-a",
+            "--pgexec-notify-queue-capacity=37",
+            "--pgexec-xid-reservation=38",
+            "--pgexec-rowid-reservation=39",
+            "--pgexec-ts-prune-versions-per-row=40",
+            "--pgexec-ts-gc-floor-lag=41ms",
+        ])
+        .expect("PgExec runtime policy");
+        let config = SubstrateRuntimeConfig::from_args(&cli.serve)
+            .expect("valid config")
+            .expect("substrate config");
+
+        assert!(
+            config.pgexec_runtime_policy
+                == crabka_pgexec::RuntimePolicy {
+                    notify_queue_capacity: 37,
+                    xid_reservation: 38,
+                    rowid_reservation: 39,
+                    ts_prune_versions_per_row: 40,
+                    ts_gc_floor_lag: crabka_units::millis(41),
+                }
+        );
+        assert!(Cli::try_parse_from(["crabka-gres", "--pgexec-notify-queue-capacity=0"]).is_err());
+        assert!(Cli::try_parse_from(["crabka-gres", "--pgexec-ts-gc-floor-lag=-1ms"]).is_err());
+        assert!(Cli::try_parse_from(["crabka-gres", "--pgexec-ts-gc-floor-lag=0.5ms"]).is_err());
+    }
+
+    #[test]
     fn wal_producer_throughput_policy_uses_defaults_environment_and_cli_precedence() {
         const CHILD: &str = "CRABKA_TEST_GRES_WAL_PRODUCER_THROUGHPUT_POLICY_CHILD";
         const VARS: [&str; 26] = [
@@ -11955,6 +12072,7 @@ mod tests {
             hlc_wall_offset_ms: 0,
             registry_policy: RegistryPolicy::default(),
             range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+            pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
         };
 
         let Err(error) = open_substrate_runtime(&config).await else {
@@ -12050,6 +12168,7 @@ mod tests {
             hlc_wall_offset_ms: 0,
             registry_policy: RegistryPolicy::default(),
             range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+            pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
         };
         let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
         let kv = Arc::new(MemKv::default());
@@ -12126,6 +12245,7 @@ mod tests {
             &source,
             None,
             None,
+            crabka_pgexec::RuntimePolicy::default(),
         )
         .expect("substrate engine");
 
@@ -12427,6 +12547,7 @@ mod tests {
             hlc_wall_offset_ms: 0,
             registry_policy: RegistryPolicy::default(),
             range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+            pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
         };
 
         let wal_selection = single_range_live_wal_selection(&config, None).expect("wal selection");
@@ -12531,6 +12652,7 @@ mod tests {
             hlc_wall_offset_ms: 0,
             registry_policy: RegistryPolicy::default(),
             range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+            pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
         };
 
         let Err(error) = open_substrate_engine(&config).await else {

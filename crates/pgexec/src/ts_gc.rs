@@ -34,10 +34,15 @@
 use std::{
     collections::VecDeque,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use crabka_pgkv::{Kv, WriteOp};
+use crabka_units::{
+    Time,
+    convert::{StdDurationExt as _, TimeExt as _},
+    secs,
+};
 
 use crate::{error::ExecError, local_sequence::LocalSequence, timestamp_txn::TimestampWrite};
 
@@ -59,11 +64,18 @@ pub(crate) const TS_PRUNE_ROW_VERSION_CAP: usize = 64;
 /// The trade-off is bounded retained garbage: at most `lag x update rate`
 /// dead versions per hot row, instead of the unbounded chains of no
 /// reclamation at all.
-const TS_PRUNE_FLOOR_LAG: Duration = Duration::from_secs(5);
+pub(crate) const TS_PRUNE_FLOOR_LAG: Time = secs(5);
 
 /// Minimum interval between reclamation-telemetry log lines
 /// ([`TsVersionGc::log_engagement`]).
-const TS_GC_LOG_EVERY: Duration = Duration::from_secs(1);
+const TS_GC_LOG_EVERY: Time = secs(1);
+
+/// `lag` in whole milliseconds, the representation `floor_lag_millis` stores.
+/// A negative lag is meaningless and clamps to zero; one beyond `i64::MAX`
+/// milliseconds saturates there, which is already longer than any run.
+fn floor_lag_millis(lag: Time) -> u64 {
+    u64::try_from(lag.millis_i64()).unwrap_or(0)
+}
 
 /// Reclamation telemetry accumulated between rate-limited log emissions.
 #[derive(Default)]
@@ -89,10 +101,12 @@ pub struct TsVersionGc {
     /// Closed-timestamp samples `(taken, closed_ts)` backing the lagged floor
     /// candidate ([`TS_PRUNE_FLOOR_LAG`]), newest at the back.
     closed_samples: Mutex<VecDeque<(Instant, u64)>>,
-    /// The active floor lag in milliseconds (defaults to
-    /// [`TS_PRUNE_FLOOR_LAG`]); tests shrink it to observe reclamation
-    /// without waiting out the production lag.
+    /// The active floor lag (defaults to [`TS_PRUNE_FLOOR_LAG`]); tests shrink
+    /// it to observe reclamation without waiting out the production lag. Held
+    /// as raw milliseconds because an atomic cannot carry a quantity; the
+    /// dimension is restored in `floor_lag`.
     floor_lag_millis: std::sync::atomic::AtomicU64,
+    prune_row_version_cap: usize,
     /// Rate-limited reclamation telemetry (see [`Self::log_engagement`]).
     engagement: Mutex<EngagementLog>,
 }
@@ -102,24 +116,39 @@ impl TsVersionGc {
     /// durable floor is folded in on every admission check.
     #[must_use]
     pub fn new(local_sequence: Arc<LocalSequence>) -> Self {
+        Self::with_policy(local_sequence, TS_PRUNE_ROW_VERSION_CAP, TS_PRUNE_FLOOR_LAG)
+    }
+
+    #[must_use]
+    pub fn with_policy(
+        local_sequence: Arc<LocalSequence>,
+        prune_row_version_cap: usize,
+        floor_lag: Time,
+    ) -> Self {
         Self {
             floor: Arc::new(crabka_pgmvcc::gc::GcHorizon::new()),
             local_sequence,
             closed_samples: Mutex::new(VecDeque::new()),
-            floor_lag_millis: std::sync::atomic::AtomicU64::new(
-                u64::try_from(TS_PRUNE_FLOOR_LAG.as_millis()).unwrap_or(u64::MAX),
-            ),
+            floor_lag_millis: std::sync::atomic::AtomicU64::new(floor_lag_millis(floor_lag)),
+            prune_row_version_cap,
             engagement: Mutex::new(EngagementLog::default()),
         }
     }
 
     /// Override the reclaim-floor lag. A testing seam: shrinking the lag lets
     /// tests observe reclamation without waiting out the production window.
-    pub fn set_floor_lag(&self, lag: Duration) {
-        self.floor_lag_millis.store(
-            u64::try_from(lag.as_millis()).unwrap_or(u64::MAX),
-            std::sync::atomic::Ordering::SeqCst,
-        );
+    pub fn set_floor_lag(&self, lag: Time) {
+        self.floor_lag_millis
+            .store(floor_lag_millis(lag), std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The active reclaim-floor lag, re-dimensioned from the atomic's raw
+    /// milliseconds.
+    fn floor_lag(&self) -> Time {
+        let millis = self
+            .floor_lag_millis
+            .load(std::sync::atomic::Ordering::SeqCst);
+        Time::from_millis(i64::try_from(millis).unwrap_or(i64::MAX))
     }
 
     /// Record a locally allocated commit timestamp as closed, on engines
@@ -143,20 +172,17 @@ impl TsVersionGc {
     /// are taken on each call, so the candidate trails the closed timestamp
     /// by the lag under steady write load.
     fn lagged_closed_timestamp(&self) -> u64 {
-        let lag = Duration::from_millis(
-            self.floor_lag_millis
-                .load(std::sync::atomic::Ordering::SeqCst),
-        );
+        let lag = self.floor_lag();
         let now = Instant::now();
         let mut samples = self.closed_samples.lock().expect("closed samples");
         samples.push_back((now, self.local_sequence.closed_timestamp()));
         // Keep exactly one sample older than the lag window: the newest such
         // sample is the candidate, and anything older is superseded by it.
-        while samples.len() >= 2 && now.duration_since(samples[1].0) >= lag {
+        while samples.len() >= 2 && now.duration_since(samples[1].0).as_time() >= lag {
             samples.pop_front();
         }
         let (taken, closed) = samples[0];
-        if now.duration_since(taken) >= lag {
+        if now.duration_since(taken).as_time() >= lag {
             closed
         } else {
             0
@@ -236,9 +262,11 @@ impl TsVersionGc {
                     states.push(version.state);
                 }
             }
-            for index in
-                crabka_pgmvcc::gc::ts_dead_version_indices(&states, floor, TS_PRUNE_ROW_VERSION_CAP)
-            {
+            for index in crabka_pgmvcc::gc::ts_dead_version_indices(
+                &states,
+                floor,
+                self.prune_row_version_cap,
+            ) {
                 ops.push(WriteOp::Delete {
                     key: keys[index].clone(),
                 });
@@ -270,7 +298,7 @@ impl TsVersionGc {
         let now = Instant::now();
         let due = log
             .last_emitted
-            .is_none_or(|last| now.duration_since(last) >= TS_GC_LOG_EVERY);
+            .is_none_or(|last| now.duration_since(last).as_time() >= TS_GC_LOG_EVERY);
         if !due {
             return;
         }

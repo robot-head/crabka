@@ -2231,6 +2231,32 @@ fn render_deployment(
     args.extend([
         "--pgwire-max-message-size".to_owned(),
         compute_policy.pgwire_max_message_size.human().to_string(),
+        "--pgexec-notify-queue-capacity".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .notify_queue_capacity
+            .to_string(),
+        "--pgexec-xid-reservation".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .xid_reservation
+            .to_string(),
+        "--pgexec-rowid-reservation".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .rowid_reservation
+            .to_string(),
+        "--pgexec-ts-prune-versions-per-row".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .ts_prune_versions_per_row
+            .to_string(),
+        "--pgexec-ts-gc-floor-lag".to_owned(),
+        compute_policy
+            .pgexec_runtime_policy
+            .ts_gc_floor_lag
+            .human()
+            .to_string(),
     ]);
     if let Some(value) = compute_policy.registry_reader_fetch_min {
         args.extend([
@@ -3227,6 +3253,11 @@ mod tests {
             client_dispatch_queue_capacity: Some(7),
             client_frame_max: Some(crabka_units::kibibytes(32)),
             pgwire_max_message_size: Some(crabka_units::bytes(37)),
+            pgexec_notify_queue_capacity: Some(38),
+            pgexec_xid_reservation: Some(39),
+            pgexec_rowid_reservation: Some(40),
+            pgexec_ts_prune_versions_per_row: Some(41),
+            pgexec_ts_gc_floor_lag: Some(crabka_units::millis(42)),
             fdw_fetch_min: Some(crabka_units::bytes(2)),
             wal_recovery_fetch_min: Some(crabka_units::bytes(3)),
             ..crate::crd::gres::GresComputeSpec::default()
@@ -3267,6 +3298,11 @@ mod tests {
                 ["--client-dispatch-queue-capacity", "7"],
                 ["--client-frame-max", "32768B"],
                 ["--pgwire-max-message-size", "37B"],
+                ["--pgexec-notify-queue-capacity", "38"],
+                ["--pgexec-xid-reservation", "39"],
+                ["--pgexec-rowid-reservation", "40"],
+                ["--pgexec-ts-prune-versions-per-row", "41"],
+                ["--pgexec-ts-gc-floor-lag", "42ms"],
                 ["--registry-reader-fetch-min", "4B"],
                 ["--fdw-fetch-min", "2B"],
                 ["--wal-recovery-fetch-min", "3B"],

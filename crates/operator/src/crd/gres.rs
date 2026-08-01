@@ -28,7 +28,7 @@ use crabka_units::{
     gibibytes, mebibytes, percent,
 };
 use kube::CustomResource;
-use refined_type::rule::GreaterI32;
+use refined_type::rule::{GreaterI32, GreaterU64, GreaterUsize};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -258,6 +258,32 @@ pub struct GresComputeSpec {
     )]
     #[schemars(with = "Option<String>")]
     pub pgwire_max_message_size: Option<ByteSize>,
+
+    /// Per-session LISTEN/NOTIFY queue capacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub pgexec_notify_queue_capacity: Option<usize>,
+
+    /// Durable XID reservation size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub pgexec_xid_reservation: Option<u64>,
+
+    /// Durable internal row-ID reservation size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub pgexec_rowid_reservation: Option<u64>,
+
+    /// Maximum timestamp versions pruned per written row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 1))]
+    pub pgexec_ts_prune_versions_per_row: Option<usize>,
+
+    /// Lag retained behind the timestamp GC floor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub pgexec_ts_gc_floor_lag: Option<Time>,
 
     /// Minimum response size for FDW Kafka fetches.
     #[serde(
@@ -670,6 +696,7 @@ pub(crate) struct EffectiveGresComputePolicy {
         Option<crabka_client_core::ConnectionDispatchQueueCapacity>,
     pub(crate) client_frame_max: Option<crabka_client_core::ClientFrameMax>,
     pub(crate) pgwire_max_message_size: ByteSize,
+    pub(crate) pgexec_runtime_policy: crabka_pgexec::RuntimePolicy,
     pub(crate) registry_reader_fetch_min: Option<crabka_client_core::FetchMinBytes>,
     pub(crate) fdw_fetch_min: Option<crabka_client_core::FetchMinBytes>,
     pub(crate) wal_recovery_fetch_min: Option<crabka_client_core::FetchMinBytes>,
@@ -747,6 +774,49 @@ impl GresComputeSpec {
             .pgwire_max_message_size
             .unwrap_or_else(|| mebibytes(64));
         whole_bytes_usize("spec.compute.pgwireMaxMessageSize", pgwire_max_message_size)?;
+        let pgexec_defaults = crabka_pgexec::RuntimePolicy::default();
+        let positive_usize = |field: &str, value: usize| {
+            GreaterUsize::<0>::new(value)
+                .map(refined_type::Refined::into_value)
+                .map_err(|error| format!("spec.compute.{field}: {error}"))
+        };
+        let positive_u64 = |field: &str, value: u64| {
+            GreaterU64::<0>::new(value)
+                .map(refined_type::Refined::into_value)
+                .map_err(|error| format!("spec.compute.{field}: {error}"))
+        };
+        let pgexec_ts_gc_floor_lag = self
+            .pgexec_ts_gc_floor_lag
+            .unwrap_or(pgexec_defaults.ts_gc_floor_lag);
+        let pgexec_notify_queue_capacity = positive_usize(
+            "pgexecNotifyQueueCapacity",
+            self.pgexec_notify_queue_capacity
+                .unwrap_or(pgexec_defaults.notify_queue_capacity),
+        )?;
+        let pgexec_xid_reservation = positive_u64(
+            "pgexecXidReservation",
+            self.pgexec_xid_reservation
+                .unwrap_or(pgexec_defaults.xid_reservation),
+        )?;
+        let pgexec_rowid_reservation = positive_u64(
+            "pgexecRowidReservation",
+            self.pgexec_rowid_reservation
+                .unwrap_or(pgexec_defaults.rowid_reservation),
+        )?;
+        let pgexec_ts_prune_versions_per_row = positive_usize(
+            "pgexecTsPruneVersionsPerRow",
+            self.pgexec_ts_prune_versions_per_row
+                .unwrap_or(pgexec_defaults.ts_prune_versions_per_row),
+        )?;
+        let pgexec_runtime_policy = crabka_pgexec::RuntimePolicy {
+            notify_queue_capacity: pgexec_notify_queue_capacity,
+            xid_reservation: pgexec_xid_reservation,
+            rowid_reservation: pgexec_rowid_reservation,
+            ts_prune_versions_per_row: pgexec_ts_prune_versions_per_row,
+            ts_gc_floor_lag: pgexec_ts_gc_floor_lag,
+        }
+        .validate()
+        .map_err(|error| format!("spec.compute.pgexecTsGcFloorLag: {error:?}"))?;
         let wal_frame_max_size = self.wal_frame_max_size.unwrap_or(DEFAULT_MAX_FRAME_SIZE);
         whole_bytes_usize("spec.compute.walFrameMaxSize", wal_frame_max_size)?;
         let pgkv_defaults = crabka_pgkv::FjallOptions::default();
@@ -861,6 +931,7 @@ impl GresComputeSpec {
                 .transpose()
                 .map_err(|error| format!("spec.compute.clientFrameMax: {error}"))?,
             pgwire_max_message_size,
+            pgexec_runtime_policy,
             registry_reader_fetch_min: None,
             fdw_fetch_min: self
                 .fdw_fetch_min
@@ -2257,6 +2328,53 @@ mod tests {
         .effective_policy()
         .expect_err("zero");
         assert!(error.contains("spec.compute.pgwireMaxMessageSize"));
+    }
+
+    #[test]
+    fn pgexec_runtime_policy_has_overrides_schema_and_validation() {
+        let spec = GresComputeSpec {
+            pgexec_notify_queue_capacity: Some(37),
+            pgexec_xid_reservation: Some(38),
+            pgexec_rowid_reservation: Some(39),
+            pgexec_ts_prune_versions_per_row: Some(40),
+            pgexec_ts_gc_floor_lag: Some(crabka_units::millis(41)),
+            ..Default::default()
+        };
+        let policy = spec.effective_policy().expect("overrides");
+        assert_eq!(policy.pgexec_runtime_policy.notify_queue_capacity, 37);
+        assert_eq!(policy.pgexec_runtime_policy.xid_reservation, 38);
+        assert_eq!(policy.pgexec_runtime_policy.rowid_reservation, 39);
+        assert_eq!(policy.pgexec_runtime_policy.ts_prune_versions_per_row, 40);
+        assert!(policy.pgexec_runtime_policy.ts_gc_floor_lag == crabka_units::millis(41));
+
+        let crd = serde_json::to_value(Gres::crd()).expect("CRD");
+        let fields = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"]["compute"]["properties"];
+        for field in [
+            "pgexecNotifyQueueCapacity",
+            "pgexecXidReservation",
+            "pgexecRowidReservation",
+            "pgexecTsPruneVersionsPerRow",
+        ] {
+            assert!(fields[field]["minimum"].as_f64() == Some(1.0));
+        }
+        assert!(fields["pgexecTsGcFloorLag"]["type"] == "string");
+
+        let error = GresComputeSpec {
+            pgexec_xid_reservation: Some(0),
+            ..Default::default()
+        }
+        .effective_policy()
+        .expect_err("zero");
+        assert!(error.contains("spec.compute.pgexecXidReservation"));
+
+        let error = GresComputeSpec {
+            pgexec_ts_gc_floor_lag: Some(Time::from_micros(500)),
+            ..Default::default()
+        }
+        .effective_policy()
+        .expect_err("fractional millisecond");
+        assert!(error.contains("spec.compute.pgexecTsGcFloorLag"));
     }
 
     #[test]

@@ -237,6 +237,34 @@ spec:
                     description: Tenant lifecycle reconciliation interval.
                     nullable: true
                     type: string
+                  pgexecNotifyQueueCapacity:
+                    description: Per-session LISTEN/NOTIFY queue capacity.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  pgexecRowidReservation:
+                    description: Durable internal row-ID reservation size.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  pgexecTsGcFloorLag:
+                    description: Lag retained behind the timestamp GC floor.
+                    nullable: true
+                    type: string
+                  pgexecTsPruneVersionsPerRow:
+                    description: Maximum timestamp versions pruned per written row.
+                    format: uint
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
+                  pgexecXidReservation:
+                    description: Durable XID reservation size.
+                    format: uint64
+                    minimum: 1.0
+                    nullable: true
+                    type: integer
                   pgkvMaxMemtableSize:
                     description: Maximum active memtable size for each on-disk substrate cache.
                     nullable: true

@@ -6544,3 +6544,24 @@ messages through one `SessionConfig` field. All 107 pgwire tests, 229 Gres
 all-target tests, the complete operator all-target suite, generated-CRD parity,
 workspace all-target Clippy, nightly formatting and diff hygiene pass. The
 repository-wide hardcoded operational-value audit remains active.
+
+## PgExec Persistence and Reclamation Policy
+
+PgExec now owns one runtime policy for its per-session notification queue,
+durable XID and internal row-ID reservation blocks, opportunistic timestamp
+version pruning, and timestamp-GC floor lag. Existing defaults remain 16,384
+notifications, 1,024 XIDs, 1,024 row IDs, 64 versions per written row, and a
+five-second UOM-backed lag.
+
+Gres exposes these as `--pgexec-*` arguments backed by
+`CRABKA_GRES_PGEXEC_*` environment variables. `Gres.spec.compute` exposes the
+same five values and the operator renders them into every compute pod. Count
+inputs are positive validated newtypes backed by `refined_type`; the GC lag is
+a dimensioned UOM value and rejects negative input while intentionally allowing
+zero.
+
+The policy is applied when constructing standalone, durable, WAL-backed,
+recovered multi-range, and split-successor engines. PgExec's 547 library tests,
+focused Gres parsing and operator CRD/rendering tests, generated-CRD parity,
+workspace all-target Clippy, nightly formatting and diff hygiene pass. The
+repository-wide hardcoded operational-value audit remains active.

@@ -21,7 +21,7 @@ use crate::{PersistMode, error::ExecError};
 /// leaked rowid gap after a crash or restart. Gaps are harmless — scans are
 /// keyspace range scans, not per-rowid probes — so this only trades fsync
 /// frequency against gap size.
-const DURABLE_BLOCK: u64 = 1024;
+pub(crate) const DURABLE_BLOCK: u64 = 1024;
 
 /// Per-table allocator state: `next` is the next rowid to hand out;
 /// `durable_end` is the exclusive end of the durably persisted reservation
@@ -89,14 +89,21 @@ pub(crate) struct SequenceManager {
     /// what enforces it.
     sql: Mutex<HashMap<crabka_pgcatalog::RelationName, crabka_pgcatalog::Sequence>>,
     mode: PersistMode,
+    durable_block: u64,
 }
 
 impl SequenceManager {
+    #[allow(dead_code)]
     pub fn new(mode: PersistMode) -> Self {
+        Self::with_durable_block(mode, DURABLE_BLOCK)
+    }
+
+    pub fn with_durable_block(mode: PersistMode, durable_block: u64) -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
             sql: Mutex::new(HashMap::new()),
             mode,
+            durable_block,
         }
     }
 
@@ -142,7 +149,9 @@ impl SequenceManager {
                     // under the mutex but happens once per ~DURABLE_BLOCK rows,
                     // not per statement; allocations that fit the reservation
                     // never touch the store.
-                    let new_end = new_next + DURABLE_BLOCK;
+                    let new_end = new_next.checked_add(self.durable_block).ok_or_else(|| {
+                        ExecError::Unsupported("durable row-ID reservation exhausted u64".into())
+                    })?;
                     kv.write_batch(&[crabka_pgkv::WriteOp::Put {
                         key: crabka_pgkv::key::seq_key(table),
                         value: U64::new(new_end).as_bytes().to_vec(),

@@ -230,6 +230,7 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         registry,
         local_vacuum: crabka_gres::LocalVacuumOptions::default(),
         range_runtime: Box::default(),
+        pgexec_runtime: Box::default(),
         listen,
         tls_cert: None,
         tls_key: None,
@@ -460,6 +461,7 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
         hlc_wall_offset_ms: 0,
         registry_policy: crabka_gres_control::RegistryPolicy::default(),
         range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+        pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
     })
     .await
     .expect("open live multi-range substrate runtime");
@@ -545,6 +547,7 @@ async fn live_multirange_substrate_hlc_mode_commits_and_mints_wall_anchored_stam
         hlc_wall_offset_ms: 0,
         registry_policy: crabka_gres_control::RegistryPolicy::default(),
         range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+        pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
     })
     .await
     .expect("open live multi-range substrate runtime in HLC mode");
@@ -726,6 +729,7 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         hlc_wall_offset_ms: 0,
         registry_policy: crabka_gres_control::RegistryPolicy::default(),
         range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+        pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
     })
     .await
     .expect("open live multi-range runtime");
@@ -1109,6 +1113,7 @@ fn activation_crash_config(
         hlc_wall_offset_ms: 0,
         registry_policy: crabka_gres_control::RegistryPolicy::default(),
         range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+        pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
     }
 }
 
@@ -2673,6 +2678,7 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         hlc_wall_offset_ms: 0,
         registry_policy: crabka_gres_control::RegistryPolicy::default(),
         range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+        pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
     })
     .await
     .expect("open live multi-range runtime");
@@ -2861,6 +2867,7 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
         hlc_wall_offset_ms: 0,
         registry_policy: crabka_gres_control::RegistryPolicy::default(),
         range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+        pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
     })
     .await
     .expect("open live multi-range runtime");
@@ -2948,6 +2955,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
         hlc_wall_offset_ms: 0,
         registry_policy: crabka_gres_control::RegistryPolicy::default(),
         range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+        pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
     })
     .await
     .expect("open in-memory single-range runtime");
@@ -2989,6 +2997,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
             hlc_wall_offset_ms: 0,
             registry_policy: crabka_gres_control::RegistryPolicy::default(),
             range_runtime_policy: crabka_gres_ranges::RangeRuntimePolicy::default(),
+            pgexec_runtime_policy: crabka_pgexec::RuntimePolicy::default(),
         }
     })
     .await

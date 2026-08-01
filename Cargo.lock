@@ -3364,6 +3364,7 @@ dependencies = [
  "crabka-logfmt",
  "crabka-metadata",
  "crabka-object-store",
+ "crabka-pgexec",
  "crabka-pgkv",
  "crabka-rebalancer",
  "crabka-schema-serde",
