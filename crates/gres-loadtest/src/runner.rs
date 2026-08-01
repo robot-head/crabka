@@ -183,6 +183,7 @@ fn cluster_options_for_run(
         work_dir,
         binaries: config.binaries.clone(),
         registry_policy: config.registry_policy.clone(),
+        runtime_policy: config.runtime_policy,
     }
 }
 
@@ -601,6 +602,7 @@ mod tests {
             PathBuf::from("/work"),
         );
         assert!(options.registry_policy == policy);
+        assert!(options.runtime_policy == config.runtime_policy);
     }
 
     #[test]

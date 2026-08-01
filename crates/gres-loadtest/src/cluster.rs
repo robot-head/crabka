@@ -53,6 +53,7 @@ use tokio::{
 };
 
 use crate::{
+    config::LoadtestRuntimePolicy,
     proxy::ChaosProxy,
     scenario::{ModeSpec, TopologySpec},
 };
@@ -81,19 +82,6 @@ const BROKER_CLUSTER_ID: &str = "00000000-0000-0000-0000-000000000001";
 const TLS_SERVER_NAME: &str = "crabka-dev";
 /// Subject DN authorized for range and operator-control RPCs.
 const TLS_PRINCIPAL: &str = "CN=loadtest-range";
-/// Overall bound for a child process to report ready (debug builds replaying
-/// WAL are slow).
-const LAUNCH_TIMEOUT: Time = minutes(2);
-/// Bound for a `SIGKILL`ed child to be reaped.
-const KILL_TIMEOUT: Time = secs(10);
-/// Bound for a killed child's log-pump task to drain.
-const LOG_DRAIN_TIMEOUT: Time = secs(5);
-/// Poll interval while waiting for the broker's Kafka listener.
-const BROKER_POLL_INTERVAL: Time = millis(100);
-/// Timeout handed to the admin client when creating the tenant's WAL topics.
-const TOPIC_CREATE_TIMEOUT: Time = secs(30);
-/// Lines of a child's log included in launch/teardown error messages.
-const LOG_TAIL_LINES: usize = 40;
 
 /// Paths to the binaries the cluster launches.
 #[derive(Debug, Clone)]
@@ -146,6 +134,8 @@ pub struct ClusterOptions {
     pub binaries: Binaries,
     /// Shared registry policy used by provisioning and spawned computes.
     pub registry_policy: RegistryPolicy,
+    /// Harness-owned process and proxy policy.
+    pub runtime_policy: LoadtestRuntimePolicy,
 }
 
 /// Connection parameters for a node's SQL front door (via its chaos proxy).
@@ -211,6 +201,7 @@ pub struct Cluster {
     nodes: Vec<NodeSlot>,
     roster: ProcessRoster,
     sql_password: String,
+    runtime_policy: LoadtestRuntimePolicy,
 }
 
 impl Cluster {
@@ -227,6 +218,7 @@ impl Cluster {
             work_dir,
             binaries,
             registry_policy,
+            runtime_policy,
         } = options;
         ensure!(topology.nodes >= 1, "topology needs at least one node");
         ensure!(topology.ranges >= 1, "topology needs at least one range");
@@ -268,15 +260,18 @@ impl Cluster {
             &log_dir,
             broker_port,
             allocation.as_ref().map(|cpus| cpus.broker.as_str()),
+            &runtime_policy,
         )
         .await?;
         let kafka_bootstrap = format!("127.0.0.1:{broker_port}");
         tracing::info!(bootstrap = %kafka_bootstrap, "broker ready");
 
-        let range_proxies = spawn_proxies(topology.ranges)
+        let range_proxies = spawn_proxies(topology.ranges, runtime_policy)
             .await
             .context("range proxies")?;
-        let sql_proxies = spawn_proxies(topology.nodes).await.context("sql proxies")?;
+        let sql_proxies = spawn_proxies(topology.nodes, runtime_policy)
+            .await
+            .context("sql proxies")?;
         let tls = write_tls_fixture(&work_dir)?;
         let range_endpoints: Vec<SocketAddr> = range_proxies.iter().map(ChaosProxy::addr).collect();
         let sql_password = generate_sql_password();
@@ -286,6 +281,7 @@ impl Cluster {
             &range_endpoints,
             &sql_password,
             &registry_policy,
+            &runtime_policy,
         )
         .await?;
         tracing::info!(
@@ -337,9 +333,10 @@ impl Cluster {
             nodes,
             roster,
             sql_password,
+            runtime_policy,
         };
         for index in 0..cluster.nodes.len() {
-            wait_node_ready(&mut cluster.nodes[index]).await?;
+            wait_node_ready(&mut cluster.nodes[index], &cluster.runtime_policy).await?;
         }
         for node in 0..cluster.topology.nodes {
             cluster.point_proxies_at(node);
@@ -435,8 +432,18 @@ impl Cluster {
             bail!("node {node} is already down");
         };
         let label = self.nodes[index].spec.label.clone();
-        kill_child(&label, &mut process.child, process.pid).await?;
-        let _ = tokio::time::timeout(LOG_DRAIN_TIMEOUT.to_std(), &mut process.log_task).await;
+        kill_child(
+            &label,
+            &mut process.child,
+            process.pid,
+            &self.runtime_policy,
+        )
+        .await?;
+        let _ = tokio::time::timeout(
+            self.runtime_policy.log_drain_timeout.to_std(),
+            &mut process.log_task,
+        )
+        .await;
         tracing::info!(node, "node killed");
         Ok(())
     }
@@ -468,7 +475,7 @@ impl Cluster {
             label: incarnation_label(&self.nodes[index].spec.label, self.nodes[index].incarnation),
             pid,
         });
-        wait_node_ready(&mut self.nodes[index]).await?;
+        wait_node_ready(&mut self.nodes[index], &self.runtime_policy).await?;
         self.point_proxies_at(node);
         tracing::info!(node, "node restarted");
         Ok(())
@@ -487,12 +494,30 @@ impl Cluster {
                 continue;
             };
             let label = self.nodes[index].spec.label.clone();
-            if let Err(error) = kill_child(&label, &mut process.child, process.pid).await {
+            if let Err(error) = kill_child(
+                &label,
+                &mut process.child,
+                process.pid,
+                &self.runtime_policy,
+            )
+            .await
+            {
                 failures.push(format!("{error:#}"));
             }
-            let _ = tokio::time::timeout(LOG_DRAIN_TIMEOUT.to_std(), &mut process.log_task).await;
+            let _ = tokio::time::timeout(
+                self.runtime_policy.log_drain_timeout.to_std(),
+                &mut process.log_task,
+            )
+            .await;
         }
-        if let Err(error) = kill_child("broker", &mut self.broker.child, self.broker.pid).await {
+        if let Err(error) = kill_child(
+            "broker",
+            &mut self.broker.child,
+            self.broker.pid,
+            &self.runtime_policy,
+        )
+        .await
+        {
             failures.push(format!("{error:#}"));
         }
         if failures.is_empty() {
@@ -926,7 +951,10 @@ fn spawn_node(gres_binary: &Path, spec: &NodeSpec) -> anyhow::Result<NodeProcess
 
 /// Waits for a spawned node to print `CRABKA_GRES_READY` and records its
 /// OS-assigned SQL and range addresses on the slot.
-async fn wait_node_ready(slot: &mut NodeSlot) -> anyhow::Result<()> {
+async fn wait_node_ready(
+    slot: &mut NodeSlot,
+    policy: &LoadtestRuntimePolicy,
+) -> anyhow::Result<()> {
     let label = slot.spec.label.clone();
     let log_path = slot.spec.log_path.clone();
     let receiver = slot
@@ -936,25 +964,25 @@ async fn wait_node_ready(slot: &mut NodeSlot) -> anyhow::Result<()> {
         .ready
         .take()
         .with_context(|| format!("{label} readiness already consumed"))?;
-    let ready = tokio::time::timeout(LAUNCH_TIMEOUT.to_std(), receiver)
+    let ready = tokio::time::timeout(policy.launch_timeout.to_std(), receiver)
         .await
         .map_err(|_| {
             anyhow!(
                 "{label} did not report CRABKA_GRES_READY within {}; log tail:\n{}",
-                LAUNCH_TIMEOUT.human(),
-                log_tail(&log_path)
+                policy.launch_timeout.human(),
+                log_tail(&log_path, policy.log_tail_lines.get())
             )
         })?
         .map_err(|_| {
             anyhow!(
                 "{label} exited before reporting ready; log tail:\n{}",
-                log_tail(&log_path)
+                log_tail(&log_path, policy.log_tail_lines.get())
             )
         })?;
     let range_addr = ready.range.ok_or_else(|| {
         anyhow!(
             "{label} reported no range listener; log tail:\n{}",
-            log_tail(&log_path)
+            log_tail(&log_path, policy.log_tail_lines.get())
         )
     })?;
     let process = slot
@@ -1007,11 +1035,14 @@ fn parse_ready_line(payload: &str) -> Option<NodeReady> {
 
 /// Spawns `count` chaos proxies pointing at a refusing placeholder backend;
 /// they are repointed once nodes report ready.
-async fn spawn_proxies(count: u16) -> anyhow::Result<Vec<ChaosProxy>> {
+async fn spawn_proxies(
+    count: u16,
+    policy: LoadtestRuntimePolicy,
+) -> anyhow::Result<Vec<ChaosProxy>> {
     let mut proxies = Vec::with_capacity(usize::from(count));
     for _ in 0..count {
         proxies.push(
-            ChaosProxy::spawn(placeholder_addr())
+            ChaosProxy::spawn_with_policy(placeholder_addr(), policy)
                 .await
                 .context("spawn chaos proxy")?,
         );
@@ -1070,6 +1101,7 @@ async fn start_broker(
     log_dir: &Path,
     broker_port: u16,
     cpuset: Option<&str>,
+    policy: &LoadtestRuntimePolicy,
 ) -> anyhow::Result<BrokerProcess> {
     let broker_data = work_dir.join("broker-data");
     let config_path = work_dir.join("broker.toml");
@@ -1117,7 +1149,7 @@ super_users = ["ANONYMOUS"]
         .with_context(|| format!("spawn {}", broker_binary.display()))?;
     let pid = child.id().context("broker pid")?;
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, broker_port));
-    wait_for_broker(addr, &log_path, &mut child).await?;
+    wait_for_broker(addr, &log_path, &mut child, policy).await?;
     Ok(BrokerProcess { child, pid })
 }
 
@@ -1126,8 +1158,9 @@ async fn wait_for_broker(
     addr: SocketAddr,
     log_path: &Path,
     child: &mut Child,
+    policy: &LoadtestRuntimePolicy,
 ) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + LAUNCH_TIMEOUT.to_std();
+    let deadline = tokio::time::Instant::now() + policy.launch_timeout.to_std();
     loop {
         if TcpStream::connect(addr).await.is_ok() {
             return Ok(());
@@ -1135,17 +1168,17 @@ async fn wait_for_broker(
         if let Some(status) = child.try_wait().context("poll broker status")? {
             bail!(
                 "crabka-broker exited with {status} before listening on {addr}; log tail:\n{}",
-                log_tail(log_path)
+                log_tail(log_path, policy.log_tail_lines.get())
             );
         }
         if tokio::time::Instant::now() >= deadline {
             bail!(
                 "crabka-broker did not listen on {addr} within {}; log tail:\n{}",
-                LAUNCH_TIMEOUT.human(),
-                log_tail(log_path)
+                policy.launch_timeout.human(),
+                log_tail(log_path, policy.log_tail_lines.get())
             );
         }
-        tokio::time::sleep(BROKER_POLL_INTERVAL.to_std()).await;
+        tokio::time::sleep(policy.broker_poll_interval.to_std()).await;
     }
 }
 
@@ -1157,6 +1190,7 @@ async fn provision_tenant(
     range_endpoints: &[SocketAddr],
     sql_password: &str,
     registry_policy: &RegistryPolicy,
+    runtime_policy: &LoadtestRuntimePolicy,
 ) -> anyhow::Result<()> {
     let mut admin = AdminClient::connect_with_options(
         &[bootstrap.to_owned()],
@@ -1177,7 +1211,7 @@ async fn provision_tenant(
         })
         .collect::<Vec<_>>();
     let outcomes = admin
-        .create_topics(&topics, TOPIC_CREATE_TIMEOUT)
+        .create_topics(&topics, runtime_policy.topic_create_timeout)
         .await
         .context("create WAL topics")?;
     ensure!(
@@ -1274,7 +1308,12 @@ async fn pick_free_ports() -> anyhow::Result<(u16, u16)> {
 
 /// SIGKILLs `child` (whole process group on Unix) and waits for it to be
 /// reaped. Succeeds if the child already exited on its own.
-async fn kill_child(label: &str, child: &mut Child, pid: u32) -> anyhow::Result<()> {
+async fn kill_child(
+    label: &str,
+    child: &mut Child,
+    pid: u32,
+    policy: &LoadtestRuntimePolicy,
+) -> anyhow::Result<()> {
     if child
         .try_wait()
         .with_context(|| format!("poll {label} status"))?
@@ -1283,12 +1322,12 @@ async fn kill_child(label: &str, child: &mut Child, pid: u32) -> anyhow::Result<
         kill_process_group(pid);
         let _ = child.start_kill();
     }
-    tokio::time::timeout(KILL_TIMEOUT.to_std(), child.wait())
+    tokio::time::timeout(policy.kill_timeout.to_std(), child.wait())
         .await
         .map_err(|_| {
             anyhow!(
                 "{label} did not exit within {} of SIGKILL",
-                KILL_TIMEOUT.human()
+                policy.kill_timeout.human()
             )
         })?
         .with_context(|| format!("wait for {label} to exit"))?;
@@ -1309,12 +1348,12 @@ fn kill_process_group(process_group: u32) {
 #[cfg(not(unix))]
 fn kill_process_group(_process_group: u32) {}
 
-/// The last [`LOG_TAIL_LINES`] lines of a child's log, for error messages.
-fn log_tail(path: &Path) -> String {
+/// The last `line_cap` lines of a child's log, for error messages.
+fn log_tail(path: &Path, line_cap: usize) -> String {
     match std::fs::read_to_string(path) {
         Ok(contents) => {
             let lines: Vec<&str> = contents.lines().collect();
-            let start = lines.len().saturating_sub(LOG_TAIL_LINES);
+            let start = lines.len().saturating_sub(line_cap);
             lines[start..].join("\n")
         }
         Err(error) => format!("<read {} failed: {error}>", path.display()),
@@ -1802,6 +1841,7 @@ mod tests {
         let binaries = Binaries::resolve().expect("resolve binaries");
         let work_dir = tempfile::tempdir().expect("work dir");
         let options = ClusterOptions {
+            runtime_policy: LoadtestRuntimePolicy::default(),
             topology: TopologySpec {
                 nodes: 2,
                 ranges: 2,

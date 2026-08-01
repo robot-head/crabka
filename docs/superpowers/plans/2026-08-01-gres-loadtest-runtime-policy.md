@@ -18,11 +18,11 @@ dimensioned value and `refined_type`-validated newtypes for positive counts.
 
 ### Task 2: Cluster and chaos runtime
 
-- [ ] Thread policy through process launch/kill/log drain and broker polling.
-- [ ] Thread policy through WAL-topic creation and diagnostic log-tail limits.
-- [ ] Thread policy through chaos-proxy burst and delay-queue behavior.
-- [ ] Preserve default public constructors for existing callers and tests.
-- [ ] Run focused cluster/proxy tests and strict Clippy; commit.
+- [x] Thread policy through process launch/kill/log drain and broker polling.
+- [x] Thread policy through WAL-topic creation and diagnostic log-tail limits.
+- [x] Thread policy through chaos-proxy burst and delay-queue behavior.
+- [x] Preserve default public constructors for existing callers and tests.
+- [x] Run focused cluster/proxy tests and strict Clippy; commit.
 
 ### Task 3: Workload and fault runtime
 
