@@ -164,7 +164,7 @@ wincode = "=0.6"
 serde-wincode = "=0.1.2"
 async-trait = "0.1"
 addr2line = "0.27"
-object = { version = "0.39", default-features = false, features = ["read_core", "elf", "macho", "pe", "std"] }
+object = { version = "0.40", default-features = false, features = ["read_core", "elf", "macho", "pe", "std"] }
 rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
 # rustls-pemfile retired upstream (RUSTSEC-2025-0134, archived 2025-08).
 # Use the PEM parsers in `rustls-pki-types` (same code; pull explicitly).
