@@ -985,7 +985,7 @@ mod tests {
 
         assert!(report.format_version == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(
-            report.commands.len() == 143,
+            report.commands.len() == 149,
             "all resolved command rows need probes"
         );
         assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
@@ -1023,7 +1023,7 @@ mod tests {
 
         assert!(json["format_version"] == PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert!(json["commands"][0] == "ABORT");
-        assert!(json["probes"].as_array().map(Vec::len) == Some(143));
+        assert!(json["probes"].as_array().map(Vec::len) == Some(149));
         let refusal = json["probes"]
             .as_array()
             .expect("probe array")
