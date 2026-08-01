@@ -63,6 +63,20 @@ fn parse_positive_whole_byte_size(value: &str) -> Result<ByteSize, String> {
     Ok(size)
 }
 
+fn parse_non_negative_whole_byte_size_or_bytes(value: &str) -> Result<ByteSize, String> {
+    let size = value.parse::<u64>().map_or_else(
+        |_| parse::non_negative_byte_size(value).map_err(|error| error.to_string()),
+        |bytes| Ok(ByteSize::from_bytes(bytes)),
+    )?;
+    let bytes = size.bytes_f64();
+    if bytes.fract() != 0.0 || bytes > 9_007_199_254_740_992.0 {
+        return Err(
+            "size must be a non-negative whole-byte value exactly representable by UOM".to_owned(),
+        );
+    }
+    Ok(size)
+}
+
 fn parse_scan_concat_max(value: &str) -> Result<ByteSize, String> {
     let size = parse_positive_whole_byte_size(value)?;
     if size > DEFAULT_SCAN_CONCAT_MAX {
@@ -340,8 +354,13 @@ struct Cli {
     live_frontier_ns: Option<i64>,
     #[arg(long, env = "CRABKA_TRACES_QUERY_QUEUE_DEPTH", default_value_t = 128)]
     query_queue_depth: usize,
-    #[arg(long, default_value_t = 0)]
-    target_bytes_per_job: u64,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_TARGET_BYTES_PER_JOB",
+        default_value = "0B",
+        value_parser = parse_non_negative_whole_byte_size_or_bytes
+    )]
+    target_bytes_per_job: ByteSize,
     #[arg(long, env = "CRABKA_TRACES_MAX_TRACE_SPANS", default_value_t = usize::MAX)]
     max_trace_spans: usize,
     #[arg(
@@ -413,10 +432,20 @@ struct Cli {
         value_delimiter = ','
     )]
     promote_resource_attrs: Vec<String>,
-    #[arg(long, default_value_t = 64 * 1024)]
-    max_attr_value_len: usize,
-    #[arg(long, default_value_t = 10 * 1024 * 1024)]
-    max_decompressed_bytes: usize,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_MAX_ATTR_VALUE_LEN",
+        default_value = "64KiB",
+        value_parser = parse_non_negative_whole_byte_size_or_bytes
+    )]
+    max_attr_value_len: ByteSize,
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_MAX_DECOMPRESSED_BYTES",
+        default_value = "10MiB",
+        value_parser = parse_non_negative_whole_byte_size_or_bytes
+    )]
+    max_decompressed_bytes: ByteSize,
     #[arg(
         long,
         env = "CRABKA_TRACES_METRICS_GENERATOR_POLL_BATCH_SIZE",
@@ -544,9 +573,9 @@ async fn run_distributor(
     state.limits.max_spans_per_trace = cli.max_spans_per_trace;
     state.limits.max_ingest_rate = ingest_rate_from_cli(cli.max_ingest_spans_per_second);
     state.limits.ingest_rate_burst = cli.ingest_rate_burst;
-    state.limits.max_attr_value = size_from_usize(cli.max_attr_value_len);
+    state.limits.max_attr_value = cli.max_attr_value_len;
     state.shared_limits = state.limits.to_shared_limits();
-    state.max_decompressed = size_from_usize(cli.max_decompressed_bytes);
+    state.max_decompressed = cli.max_decompressed_bytes;
     let state = Arc::new(state);
     let addr: SocketAddr = cli.listen.parse()?;
     let grpc_addr: SocketAddr = cli.grpc_listen.parse()?;
@@ -1021,7 +1050,7 @@ fn frontend_config_from_cli(
     let querier_addrs = parse_querier_addrs(&cli.querier_url)?;
     Ok(FrontendConfig {
         querier_addrs,
-        target_per_job: ByteSize::from_bytes(cli.target_bytes_per_job),
+        target_per_job: cli.target_bytes_per_job,
         max_concurrency: cli.query_queue_depth.max(1),
         hot_frontier_ns: cli.live_frontier_ns.unwrap_or(0),
         max_trace: max_trace_size(cli.max_trace_spans),
@@ -1036,7 +1065,7 @@ fn frontend_config_from_cli(
 async fn build_trace_index_catalog(
     cli: &Cli,
 ) -> Result<TraceIndexCatalog, Box<dyn std::error::Error + Send + Sync>> {
-    if cli.target_bytes_per_job == 0 {
+    if cli.target_bytes_per_job == ByteSize::from_bytes(0) {
         return Ok(TraceIndexCatalog::new(std::collections::BTreeMap::new()));
     }
     let configured = build_object_store(cli)?;
@@ -1215,10 +1244,6 @@ fn ingest_rate_from_cli(spans_per_sec: usize) -> Frequency {
     } else {
         Frequency::from_per_sec(f64_from_usize(spans_per_sec))
     }
-}
-
-fn size_from_usize(value: usize) -> ByteSize {
-    ByteSize::from_bytes(u64::try_from(value).unwrap_or(u64::MAX))
 }
 
 fn f64_from_usize(value: usize) -> f64 {
@@ -1583,8 +1608,8 @@ mod tests {
         .unwrap();
 
         assert2::assert!(cli.max_spans_per_request == 123);
-        assert2::assert!(cli.max_attr_value_len == 456);
-        assert2::assert!(cli.max_decompressed_bytes == 789);
+        assert2::assert!(cli.max_attr_value_len == ByteSize::from_bytes(456));
+        assert2::assert!(cli.max_decompressed_bytes == ByteSize::from_bytes(789));
     }
 
     #[test]
@@ -2418,6 +2443,51 @@ mod tests {
     }
 
     #[test]
+    fn byte_policy_reads_uom_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_BYTE_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::byte_policy_reads_uom_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_TRACES_TARGET_BYTES_PER_JOB", "1KiB")
+                    .env("CRABKA_TRACES_MAX_ATTR_VALUE_LEN", "2KiB")
+                    .env("CRABKA_TRACES_MAX_DECOMPRESSED_BYTES", "3KiB")
+                    .status()
+                    .expect("child test");
+            check!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-traces", "--target=query-frontend"]).unwrap();
+        check!(
+            (
+                from_env.target_bytes_per_job,
+                from_env.max_attr_value_len,
+                from_env.max_decompressed_bytes,
+            ) == (kibibytes(1), kibibytes(2), kibibytes(3))
+        );
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target=query-frontend",
+            "--target-bytes-per-job=4KiB",
+            "--max-attr-value-len=5KiB",
+            "--max-decompressed-bytes=6KiB",
+        ])
+        .unwrap();
+        check!(
+            (
+                from_cli.target_bytes_per_job,
+                from_cli.max_attr_value_len,
+                from_cli.max_decompressed_bytes,
+            ) == (kibibytes(4), kibibytes(5), kibibytes(6))
+        );
+    }
+
+    #[test]
     fn parses_metrics_generator_optional_spanmetrics_switches() {
         let cli = Cli::try_parse_from([
             "crabka-traces",
@@ -2847,7 +2917,7 @@ mod tests {
         );
         assert2::assert!(cli.live_frontier_ns == Some(60_000_000_000));
         assert2::assert!(cli.query_queue_depth == 4);
-        assert2::assert!(cli.target_bytes_per_job == 4096);
+        assert2::assert!(cli.target_bytes_per_job == ByteSize::from_bytes(4096));
         check!(build_query_frontend_router(&cli).await.is_ok());
     }
 }

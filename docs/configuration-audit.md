@@ -6382,3 +6382,19 @@ tests pass. No CRD owns the standalone traces process. This closes only the
 duration environment slice; byte sizes and absolute nanosecond timestamps
 remain the next dimensioned closure, and the repository-wide audit remains
 active.
+
+## Traces Byte Environment Closure
+
+The query-frontend target-per-job budget and distributor attribute-value and
+decompression ceilings now use UOM `ByteSize` values. Their existing flags are
+backed by `CRABKA_TRACES_TARGET_BYTES_PER_JOB`,
+`CRABKA_TRACES_MAX_ATTR_VALUE_LEN`, and
+`CRABKA_TRACES_MAX_DECOMPRESSED_BYTES`. Defaults remain 0B, 64KiB, and 10MiB.
+
+Environment and primary CLI values accept dimensioned sizes. Existing bare
+CLI values remain byte-compatible. All values must be non-negative whole-byte
+quantities exactly representable by the UOM storage type; zero retains its
+existing disable-or-reject-all semantics. CLI, environment precedence,
+legacy-byte, and runtime-wiring tests pass. This closes only the traces byte
+environment slice; absolute timestamps remain pending and the repository-wide
+audit remains active.
