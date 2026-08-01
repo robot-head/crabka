@@ -6414,3 +6414,17 @@ exact nanoseconds. The compaction defaults remain epoch start through
 Legacy-alias, UOM CLI, environment-precedence, and runtime-wiring tests pass.
 This closes the remaining dimensioned traces process arguments; the
 repository-wide hardcoded operational-value audit remains active.
+
+## Traces Process Boundary Completion
+
+`--block-builder-flush-max-records` now has
+`CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_RECORDS` backing and rejects zero with
+the shared `refined_type` positive-count parser. A command-metadata test proves
+that every one of the 61 traces process arguments, including flattened
+profiling arguments, has an environment mapping.
+
+The unused metrics-generator `latency_native_schema` field and its hardcoded
+default were removed rather than exposed: no runtime code read the setting, so
+changing it could never affect behavior. Historical design documents remain
+unchanged. This completes the traces process CLI/environment boundary; the
+repository-wide hardcoded operational-value audit remains active.

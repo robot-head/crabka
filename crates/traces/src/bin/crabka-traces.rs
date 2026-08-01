@@ -270,7 +270,12 @@ struct Cli {
         value_parser = parse::positive_time
     )]
     block_builder_empty_poll_backoff: Time,
-    #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS)]
+    #[arg(
+        long,
+        env = "CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_RECORDS",
+        default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS,
+        value_parser = parse_positive_usize
+    )]
     block_builder_flush_max_records: usize,
     #[arg(
         long = "block-builder-flush-max-age",
@@ -1425,6 +1430,20 @@ mod tests {
     }
 
     #[test]
+    fn every_process_argument_has_environment_backing() {
+        let command = Cli::command();
+        let missing = command
+            .get_arguments()
+            .filter(|arg| arg.get_env().is_none())
+            .map(|arg| arg.get_id().to_string())
+            .collect::<Vec<_>>();
+        check!(
+            missing.is_empty(),
+            "arguments without environment backing: {missing:?}"
+        );
+    }
+
+    #[test]
     fn process_environment_supplies_cli_and_explicit_flags_win() {
         const CHILD: &str = "CRABKA_TRACES_PROCESS_ENVIRONMENT_CHILD";
         if std::env::var_os(CHILD).is_none() {
@@ -1690,6 +1709,7 @@ mod tests {
                     ])
                     .env(CHILD, "1")
                     .env("CRABKA_TRACES_BLOCK_BUILDER_EMPTY_POLL_BACKOFF", "7ms")
+                    .env("CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_RECORDS", "17")
                     .status()
                     .expect("child test");
             check!(status.success());
@@ -1697,19 +1717,38 @@ mod tests {
         }
 
         let from_env = Cli::try_parse_from(["crabka-traces", "--target=block-builder"]).unwrap();
-        check!(from_env.block_builder_empty_poll_backoff == crabka_units::millis(7));
+        check!(
+            (
+                from_env.block_builder_empty_poll_backoff,
+                from_env.block_builder_flush_max_records,
+            ) == (crabka_units::millis(7), 17)
+        );
         let from_cli = Cli::try_parse_from([
             "crabka-traces",
             "--target=block-builder",
             "--block-builder-empty-poll-backoff=11ms",
+            "--block-builder-flush-max-records=19",
         ])
         .unwrap();
-        check!(from_cli.block_builder_empty_poll_backoff == crabka_units::millis(11));
+        check!(
+            (
+                from_cli.block_builder_empty_poll_backoff,
+                from_cli.block_builder_flush_max_records,
+            ) == (crabka_units::millis(11), 19)
+        );
         check!(
             Cli::try_parse_from([
                 "crabka-traces",
                 "--target=block-builder",
                 "--block-builder-empty-poll-backoff=0ms",
+            ])
+            .is_err()
+        );
+        check!(
+            Cli::try_parse_from([
+                "crabka-traces",
+                "--target=block-builder",
+                "--block-builder-flush-max-records=0",
             ])
             .is_err()
         );

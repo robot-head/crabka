@@ -29,7 +29,6 @@ pub struct MetricsGenConfig {
     #[serde(rename = "collection_interval_secs", with = "secs")]
     pub collection_interval: Duration,
     pub histogram_buckets_ns: Vec<f64>,
-    pub latency_native_schema: i8,
     pub max_exemplars_per_series: usize,
     #[serde(rename = "edge_ttl_secs", with = "secs")]
     pub edge_ttl: Duration,
@@ -45,7 +44,6 @@ impl Default for MetricsGenConfig {
         Self {
             collection_interval: Duration::from_secs(15),
             histogram_buckets_ns: DEFAULT_LATENCY_BUCKETS_NS.to_vec(),
-            latency_native_schema: 8,
             max_exemplars_per_series: 0,
             edge_ttl: Duration::from_secs(10),
             edge_store_max_items: 10_000,
@@ -91,7 +89,6 @@ mod tests {
             c == MetricsGenConfig {
                 collection_interval: Duration::from_secs(15),
                 histogram_buckets_ns: DEFAULT_LATENCY_BUCKETS_NS.to_vec(),
-                latency_native_schema: 8,
                 max_exemplars_per_series: 0,
                 edge_ttl: Duration::from_secs(10),
                 edge_store_max_items: 10_000,
@@ -112,7 +109,6 @@ mod tests {
             c == MetricsGenConfig {
                 collection_interval: Duration::from_secs(30),
                 histogram_buckets_ns: DEFAULT_LATENCY_BUCKETS_NS.to_vec(),
-                latency_native_schema: 8,
                 max_exemplars_per_series: 5,
                 edge_ttl: Duration::from_secs(10),
                 edge_store_max_items: 10_000,
