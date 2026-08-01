@@ -3625,6 +3625,7 @@ async fn run_local_vacuum_loop(
             () = shutdown.cancelled() => return,
             () = tokio::time::sleep(pace.interval.to_std()) => {}
         }
+        let _maintenance = activity.begin_maintenance().await;
         let step_started = std::time::Instant::now();
         match engine.vacuum_step_budgeted(pace.key_budget).await {
             Ok(step) => {

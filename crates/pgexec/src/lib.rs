@@ -58,6 +58,8 @@ mod local_sequence;
 mod lockmgr;
 pub mod notify;
 pub mod plan_dist;
+mod plpgsql;
+mod plpgsql_sqlstate;
 mod procarray;
 mod query;
 mod read_gate;

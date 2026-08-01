@@ -285,55 +285,6 @@ pub const MAX_JOIN_BROADCAST_ROWS: usize = 8_192;
 pub const MAX_JOIN_ROW_BYTES: usize = 256 * 1024;
 pub const MAX_JOIN_RESULT_ROWS: usize = 65_536;
 
-/// Owner-enforced structural limits for distributed join requests and results.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct JoinPolicy {
-    pub key_columns: usize,
-    pub projection_columns: usize,
-    pub predicates: usize,
-    pub snapshot_xids: usize,
-    pub broadcast_rows: usize,
-    pub row_bytes: usize,
-    pub result_rows: usize,
-}
-
-impl Default for JoinPolicy {
-    fn default() -> Self {
-        Self {
-            key_columns: MAX_JOIN_KEY_COLUMNS,
-            projection_columns: MAX_JOIN_PROJECTION_COLUMNS,
-            predicates: MAX_JOIN_PREDICATES,
-            snapshot_xids: MAX_JOIN_SNAPSHOT_XIDS,
-            broadcast_rows: MAX_JOIN_BROADCAST_ROWS,
-            row_bytes: MAX_JOIN_ROW_BYTES,
-            result_rows: MAX_JOIN_RESULT_ROWS,
-        }
-    }
-}
-
-impl JoinPolicy {
-    /// Reject zero limits.
-    ///
-    /// # Errors
-    /// Returns an error when any limit is zero.
-    pub fn validate(self) -> Result<Self, JoinValidationError> {
-        if [
-            self.key_columns,
-            self.projection_columns,
-            self.predicates,
-            self.snapshot_xids,
-            self.broadcast_rows,
-            self.row_bytes,
-            self.result_rows,
-        ]
-        .contains(&0)
-        {
-            return Err(JoinValidationError::InvalidPolicy);
-        }
-        Ok(self)
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinKind {
     Inner,
@@ -360,7 +311,6 @@ pub struct JoinSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JoinTableInterval {
     pub table_id: u64,
-    pub table_name: String,
     pub interval: RowInterval,
 }
 
@@ -396,8 +346,6 @@ pub struct JoinRangeResult {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum JoinValidationError {
-    #[error("distributed join limits must be positive")]
-    InvalidPolicy,
     #[error("join read timestamp must be nonzero")]
     MissingReadTimestamp,
     #[error("join key lists must be nonempty and have equal length")]
@@ -429,33 +377,28 @@ impl JoinRangeRequest {
     ///
     /// Returns an error when the requested operation cannot be completed.
     pub fn validate(&self) -> Result<(), JoinValidationError> {
-        self.validate_with_policy(JoinPolicy::default())
-    }
-
-    /// Validate against limits owned by the receiving process.
-    ///
-    /// # Errors
-    /// Returns an error when the request exceeds or violates the policy.
-    pub fn validate_with_policy(&self, policy: JoinPolicy) -> Result<(), JoinValidationError> {
-        let policy = policy.validate()?;
         if self.read_ts == 0 {
             return Err(JoinValidationError::MissingReadTimestamp);
         }
         if self.left_keys.is_empty() || self.left_keys.len() != self.right_keys.len() {
             return Err(JoinValidationError::InvalidJoinKeys);
         }
-        bound(self.left_keys.len(), policy.key_columns, |actual, limit| {
-            JoinValidationError::TooManyJoinKeys { actual, limit }
-        })?;
+        bound(
+            self.left_keys.len(),
+            MAX_JOIN_KEY_COLUMNS,
+            |actual, limit| JoinValidationError::TooManyJoinKeys { actual, limit },
+        )?;
         bound(
             self.projection.len(),
-            policy.projection_columns,
+            MAX_JOIN_PROJECTION_COLUMNS,
             |actual, limit| JoinValidationError::TooManyProjectionColumns { actual, limit },
         )?;
         for snapshot in [&self.local_snapshot, &self.global_snapshot] {
-            bound(snapshot.xip.len(), policy.snapshot_xids, |actual, limit| {
-                JoinValidationError::TooManySnapshotXids { actual, limit }
-            })?;
+            bound(
+                snapshot.xip.len(),
+                MAX_JOIN_SNAPSHOT_XIDS,
+                |actual, limit| JoinValidationError::TooManySnapshotXids { actual, limit },
+            )?;
             if snapshot.xmin > snapshot.xmax
                 || !snapshot.xip.windows(2).all(|pair| pair[0] < pair[1])
             {
@@ -467,12 +410,12 @@ impl JoinRangeRequest {
                 PredicatePushdown::FullScan => 0,
                 PredicatePushdown::Conjunctive(items) => items.len(),
             };
-            bound(count, policy.predicates, |actual, limit| {
+            bound(count, MAX_JOIN_PREDICATES, |actual, limit| {
                 JoinValidationError::TooManyPredicates { actual, limit }
             })?;
         }
         for table in [&self.left, &self.right] {
-            if table.table_id == 0 || table.table_name.is_empty() {
+            if table.table_id == 0 {
                 return Err(JoinValidationError::InvalidTableIdentity);
             }
             if matches!((table.interval.start, table.interval.end), (Some(start), Some(end)) if start >= end)
@@ -488,10 +431,10 @@ impl JoinRangeRequest {
             return Err(JoinValidationError::InvalidBroadcastRows);
         }
         if let Some(rows) = &self.broadcast_rows {
-            bound(rows.len(), policy.broadcast_rows, |actual, limit| {
+            bound(rows.len(), MAX_JOIN_BROADCAST_ROWS, |actual, limit| {
                 JoinValidationError::TooManyBroadcastRows { actual, limit }
             })?;
-            validate_join_rows(rows, policy.row_bytes)?;
+            validate_join_rows(rows)?;
         }
         Ok(())
     }
@@ -515,12 +458,10 @@ impl JoinRangeRequest {
             strategy: JoinExecutionStrategy::BroadcastRight,
             left: JoinTableInterval {
                 table_id: 1,
-                table_name: "left".into(),
                 interval: RowInterval::ALL,
             },
             right: JoinTableInterval {
                 table_id: 2,
-                table_name: "right".into(),
                 interval: RowInterval::ALL,
             },
             broadcast_rows: Some(vec![]),
@@ -536,19 +477,10 @@ impl JoinRangeResult {
     ///
     /// Returns an error when the requested operation cannot be completed.
     pub fn validate(&self) -> Result<(), JoinValidationError> {
-        self.validate_with_policy(JoinPolicy::default())
-    }
-
-    /// Validate against limits owned by the receiving process.
-    ///
-    /// # Errors
-    /// Returns an error when result rows exceed or violate the policy.
-    pub fn validate_with_policy(&self, policy: JoinPolicy) -> Result<(), JoinValidationError> {
-        let policy = policy.validate()?;
-        bound(self.rows.len(), policy.result_rows, |actual, limit| {
+        bound(self.rows.len(), MAX_JOIN_RESULT_ROWS, |actual, limit| {
             JoinValidationError::TooManyResultRows { actual, limit }
         })?;
-        validate_join_rows(&self.rows, policy.row_bytes)
+        validate_join_rows(&self.rows)
     }
 }
 
@@ -565,24 +497,8 @@ pub fn execute_materialized_join(
     left: &[JoinRow],
     right: &[JoinRow],
 ) -> Result<JoinRangeResult, ExecError> {
-    execute_materialized_join_with_policy(request, left, right, JoinPolicy::default())
-}
-
-/// Execute a materialized join under limits owned by the receiving process.
-///
-/// # Errors
-/// Returns an error when validation or join execution fails.
-pub fn execute_materialized_join_with_policy(
-    request: &JoinRangeRequest,
-    left: &[JoinRow],
-    right: &[JoinRow],
-    policy: JoinPolicy,
-) -> Result<JoinRangeResult, ExecError> {
-    let policy = policy
-        .validate()
-        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
     request
-        .validate_with_policy(policy)
+        .validate()
         .map_err(|error| ExecError::Unsupported(error.to_string()))?;
     if request.kind != JoinKind::Inner {
         return Err(ExecError::Unsupported(
@@ -597,11 +513,11 @@ pub fn execute_materialized_join_with_policy(
             if !join_keys_equal(left_row, right_row, &request.left_keys, &request.right_keys)? {
                 continue;
             }
-            if rows.len() == policy.result_rows {
+            if rows.len() == MAX_JOIN_RESULT_ROWS {
                 return Err(ExecError::Unsupported(
                     JoinValidationError::TooManyResultRows {
-                        actual: policy.result_rows.saturating_add(1),
-                        limit: policy.result_rows,
+                        actual: MAX_JOIN_RESULT_ROWS + 1,
+                        limit: MAX_JOIN_RESULT_ROWS,
                     }
                     .to_string(),
                 ));
@@ -634,7 +550,7 @@ pub fn execute_materialized_join_with_policy(
     rows.sort_by(|left, right| left.tuple.cmp(&right.tuple));
     let result = JoinRangeResult { rows };
     result
-        .validate_with_policy(policy)
+        .validate()
         .map_err(|error| ExecError::Unsupported(error.to_string()))?;
     Ok(result)
 }
@@ -676,9 +592,9 @@ fn join_keys_equal(
     Ok(true)
 }
 
-fn validate_join_rows(rows: &[JoinRow], row_bytes: usize) -> Result<(), JoinValidationError> {
+fn validate_join_rows(rows: &[JoinRow]) -> Result<(), JoinValidationError> {
     for row in rows {
-        bound(row.tuple.len(), row_bytes, |actual, limit| {
+        bound(row.tuple.len(), MAX_JOIN_ROW_BYTES, |actual, limit| {
             JoinValidationError::JoinRowTooLarge { actual, limit }
         })?;
     }
@@ -816,23 +732,6 @@ mod join_protocol_tests {
     }
 
     #[test]
-    fn materialized_join_uses_owner_policy() {
-        let mut request = JoinRangeRequest::test_fixture();
-        request.strategy = JoinExecutionStrategy::Gather;
-        request.broadcast_rows = None;
-        let input = vec![encoded(&[crabka_pgtypes::Datum::Int4(1)]); 2];
-        let policy = JoinPolicy {
-            result_rows: 3,
-            ..Default::default()
-        };
-
-        let error = execute_materialized_join_with_policy(&request, &input, &input, policy)
-            .expect_err("owner result limit");
-
-        assert!(matches!(error, ExecError::Unsupported(message) if message.contains("limit 3")));
-    }
-
-    #[test]
     fn randomized_materialized_strategies_equal_gathered_reference() {
         use crabka_pgtypes::Datum::{Int4, Null};
         let mut state = 0x9e37_79b9_u64;
@@ -933,7 +832,7 @@ mod join_protocol_tests {
 }
 
 /// Default cap for rows retained by a blocking executor fallback.
-pub const BLOCKING_QUERY_MEMORY: crabka_units::ByteSize = crabka_units::mebibytes(16);
+pub const BLOCKING_QUERY_MEMORY_BYTES: usize = 16 * 1024 * 1024;
 
 /// Collect a cursor for a blocking operator while charging one central byte budget.
 /// # Errors
@@ -942,34 +841,36 @@ pub const BLOCKING_QUERY_MEMORY: crabka_units::ByteSize = crabka_units::mebibyte
 pub fn collect_cursor_bounded(
     scanner: &dyn RangeScanner,
     request: ScanRequest<'_>,
-    budget: crabka_units::ByteSize,
+    max_bytes: usize,
 ) -> Result<Vec<ScannedRow>, ExecError> {
-    let max_bytes = crabka_units::convert::ByteSizeExt::bytes_usize(budget);
+    let cancel = crate::session::query_cancel_runtime();
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
-                let mut cursor = scanner.scan_cursor(request)?;
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| ExecError::Unsupported(error.to_string()))?;
-                runtime.block_on(async move {
-                    let mut rows = Vec::new();
-                    let mut used = 0usize;
-                    loop {
-                        let page = cursor.next_page(1024).await?;
-                        for row in page.rows {
-                            let bytes = scanned_row_bytes(&row);
-                            if used.saturating_add(bytes) > max_bytes {
-                                return Err(memory_budget_exceeded());
+                crate::session::with_query_cancel_runtime(cancel, || {
+                    let mut cursor = scanner.scan_cursor(request)?;
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+                    runtime.block_on(async move {
+                        let mut rows = Vec::new();
+                        let mut used = 0usize;
+                        loop {
+                            let page = cursor.next_page(1024).await?;
+                            for row in page.rows {
+                                let bytes = scanned_row_bytes(&row);
+                                if used.saturating_add(bytes) > max_bytes {
+                                    return Err(memory_budget_exceeded());
+                                }
+                                used += bytes;
+                                rows.push(row);
                             }
-                            used += bytes;
-                            rows.push(row);
+                            if page.is_last {
+                                return Ok(rows);
+                            }
                         }
-                        if page.is_last {
-                            return Ok(rows);
-                        }
-                    }
+                    })
                 })
             })
             .join()
@@ -996,9 +897,8 @@ pub(crate) fn collect_partial_aggregates_bounded(
     scanner: &dyn RangeScanner,
     request: ScanRequest<'_>,
     specs: &[PartialAggregateSpec],
-    budget: crabka_units::ByteSize,
+    max_bytes: usize,
 ) -> Result<Vec<Vec<ScannedRow>>, ExecError> {
-    let max_bytes = crabka_units::convert::ByteSizeExt::bytes_usize(budget);
     if specs.is_empty() {
         return Err(ExecError::Unsupported(
             "partial aggregate streaming requires at least one aggregate".into(),
@@ -1012,31 +912,34 @@ pub(crate) fn collect_partial_aggregates_bounded(
             "partial aggregate streaming owns the scan pushdown contract".into(),
         ));
     }
+    let cancel = crate::session::query_cancel_runtime();
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
-                let mut cursor = scanner.scan_cursor(request)?;
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| ExecError::Unsupported(error.to_string()))?;
-                runtime.block_on(async move {
-                    let mut states = vec![Vec::new(); specs.len()];
-                    loop {
-                        let page = cursor.next_page(1024).await?;
-                        let is_last = page.is_last;
-                        let rows = page.rows.into_vec();
-                        if scanned_rows_bytes(rows.iter()) > max_bytes {
-                            return Err(memory_budget_exceeded());
+                crate::session::with_query_cancel_runtime(cancel, || {
+                    let mut cursor = scanner.scan_cursor(request)?;
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+                    runtime.block_on(async move {
+                        let mut states = vec![Vec::new(); specs.len()];
+                        loop {
+                            let page = cursor.next_page(1024).await?;
+                            let is_last = page.is_last;
+                            let rows = page.rows.into_vec();
+                            if scanned_rows_bytes(rows.iter()) > max_bytes {
+                                return Err(memory_budget_exceeded());
+                            }
+                            fold_page_into_states(rows, specs, &mut states)?;
+                            if scanned_rows_bytes(states.iter().flatten()) > max_bytes {
+                                return Err(memory_budget_exceeded());
+                            }
+                            if is_last {
+                                return Ok(states);
+                            }
                         }
-                        fold_page_into_states(rows, specs, &mut states)?;
-                        if scanned_rows_bytes(states.iter().flatten()) > max_bytes {
-                            return Err(memory_budget_exceeded());
-                        }
-                        if is_last {
-                            return Ok(states);
-                        }
-                    }
+                    })
                 })
             })
             .join()
@@ -1095,14 +998,6 @@ pub(crate) fn datum_row_bytes(row: &[crabka_pgtypes::Datum]) -> usize {
 
 fn scanned_row_bytes(row: &ScannedRow) -> usize {
     std::mem::size_of::<ScannedRow>().saturating_add(datum_row_bytes(&row.row))
-}
-
-/// Whether a running byte total has passed the central blocking-query memory
-/// budget ([`BLOCKING_QUERY_MEMORY`]). The operators accumulate raw `usize`
-/// totals so they can saturate rather than overflow, so the budget converts
-/// here rather than the totals.
-pub(crate) fn exceeds_query_memory(used: usize, budget: crabka_units::ByteSize) -> bool {
-    used > crabka_units::convert::ByteSizeExt::bytes_usize(budget)
 }
 
 pub(crate) fn memory_budget_exceeded() -> ExecError {
@@ -1749,14 +1644,14 @@ fn finalize_avg_parts(parts: &[crabka_pgtypes::Datum]) -> Result<crabka_pgtypes:
 }
 
 fn avg_numeric_value(value: &crabka_pgtypes::Datum) -> Result<crabka_pgtypes::Datum, ExecError> {
-    use bigdecimal::BigDecimal;
+    use crabka_pgtypes::numeric::NumericValue;
 
     match value {
         crabka_pgtypes::Datum::Int4(value) => {
-            Ok(crabka_pgtypes::Datum::Numeric(BigDecimal::from(*value)))
+            Ok(crabka_pgtypes::Datum::Numeric(NumericValue::from(*value)))
         }
         crabka_pgtypes::Datum::Int8(value) => {
-            Ok(crabka_pgtypes::Datum::Numeric(BigDecimal::from(*value)))
+            Ok(crabka_pgtypes::Datum::Numeric(NumericValue::from(*value)))
         }
         crabka_pgtypes::Datum::Numeric(value) => Ok(crabka_pgtypes::Datum::Numeric(value.clone())),
         _ => Err(ExecError::Unsupported(
@@ -1886,24 +1781,35 @@ fn compute_partial_min_max(
 enum PartialSum {
     Int(i64),
     Float(f64),
+    Float4(f32),
     Numeric(crabka_pgtypes::Datum),
 }
 
 impl PartialSum {
     fn try_from_first(value: &crabka_pgtypes::Datum) -> Result<Self, ExecError> {
         match value {
+            crabka_pgtypes::Datum::Int2(value) => Ok(Self::Int(i64::from(*value))),
             crabka_pgtypes::Datum::Int4(value) => Ok(Self::Int(i64::from(*value))),
             crabka_pgtypes::Datum::Int8(value) => Ok(Self::Int(*value)),
+            // `sum(real)` is `real`, so its partials must stay single-precision
+            // all the way to the coordinator rather than widening to float8.
+            crabka_pgtypes::Datum::Float4(value) => Ok(Self::Float4(*value)),
             crabka_pgtypes::Datum::Float8(value) => Ok(Self::Float(*value)),
             crabka_pgtypes::Datum::Numeric(_) => Ok(Self::Numeric(value.clone())),
             _ => Err(ExecError::Unsupported(
-                "partial SUM pushdown supports only int4/int8/float8/numeric inputs".into(),
+                "partial SUM pushdown supports only int2/int4/int8/float4/float8/numeric inputs"
+                    .into(),
             )),
         }
     }
 
     fn add(&mut self, value: &crabka_pgtypes::Datum) -> Result<(), ExecError> {
         match (self, value) {
+            (Self::Int(acc), crabka_pgtypes::Datum::Int2(value)) => {
+                *acc = acc
+                    .checked_add(i64::from(*value))
+                    .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow))?;
+            }
             (Self::Int(acc), crabka_pgtypes::Datum::Int4(value)) => {
                 *acc = acc
                     .checked_add(i64::from(*value))
@@ -1915,6 +1821,7 @@ impl PartialSum {
                     .ok_or(ExecError::Type(crabka_pgtypes::TypeError::Overflow))?;
             }
             (Self::Float(acc), crabka_pgtypes::Datum::Float8(value)) => *acc += *value,
+            (Self::Float4(acc), crabka_pgtypes::Datum::Float4(value)) => *acc += *value,
             (Self::Numeric(acc), crabka_pgtypes::Datum::Numeric(_)) => {
                 *acc = crabka_pgtypes::ops::add(acc, value)?;
             }
@@ -1931,6 +1838,7 @@ impl PartialSum {
         match self {
             Self::Int(value) => crabka_pgtypes::Datum::Int8(value),
             Self::Float(value) => crabka_pgtypes::Datum::Float8(value),
+            Self::Float4(value) => crabka_pgtypes::Datum::Float4(value),
             Self::Numeric(value) => value,
         }
     }
@@ -1941,8 +1849,10 @@ fn ensure_partial_min_max_value_is_supported(
 ) -> Result<(), ExecError> {
     if matches!(
         value,
-        crabka_pgtypes::Datum::Int4(_)
+        crabka_pgtypes::Datum::Int2(_)
+            | crabka_pgtypes::Datum::Int4(_)
             | crabka_pgtypes::Datum::Int8(_)
+            | crabka_pgtypes::Datum::Float4(_)
             | crabka_pgtypes::Datum::Float8(_)
             | crabka_pgtypes::Datum::Numeric(_)
             | crabka_pgtypes::Datum::Text(_)
@@ -2159,11 +2069,10 @@ mod cursor_contract_tests {
         atomic::{AtomicUsize, Ordering},
     };
 
-    use crabka_pgcatalog::{Column, Table};
+    use crabka_pgcatalog::{Column, RelationName, Table};
     use crabka_pgkv::MemKv;
     use crabka_pgmvcc::Snapshot;
     use crabka_pgtypes::{ColumnType, Datum};
-    use crabka_units::bytes;
 
     use super::{
         MaterializedRangeCursor, PredicatePushdown, ProjectionPushdown, RangeCursor, RangeScanner,
@@ -2240,11 +2149,12 @@ mod cursor_contract_tests {
         };
         let table = Table {
             id: 42,
-            name: "items".into(),
+            name: RelationName::public("items"),
             columns: vec![Column::new("id", ColumnType::Int8)],
             sharded: true,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         };
 
         let mut cursor = scanner
@@ -2282,11 +2192,12 @@ mod cursor_contract_tests {
         };
         let table = Table {
             id: 42,
-            name: "items".into(),
+            name: RelationName::public("items"),
             columns: vec![Column::new("id", ColumnType::Int8)],
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         };
         let error = super::collect_cursor_bounded(
             &MaterializedOnlyScanner(vec![super::ScannedRow {
@@ -2309,7 +2220,7 @@ mod cursor_contract_tests {
                 partial_aggregate: None,
                 top_k: None,
             },
-            bytes(64),
+            64,
         )
         .expect_err("row must be rejected before exceeding budget");
 
@@ -2332,21 +2243,15 @@ mod cursor_contract_tests {
 #[cfg(test)]
 mod streaming_aggregate_tests {
     use assert2::assert;
-    use crabka_pgcatalog::{Column, Table};
+    use crabka_pgcatalog::{Column, RelationName, Table};
     use crabka_pgkv::MemKv;
     use crabka_pgmvcc::Snapshot;
     use crabka_pgtypes::{ColumnType, Datum};
-    use crabka_units::{ByteSize, bytes, convert::ByteSizeExt as _};
 
     use super::{
         PartialAggregateSpec, PredicatePushdown, ProjectionPushdown, RangeScanner, RowInterval,
         ScanRequest, ScannedRow,
     };
-
-    /// A byte total measured off the fixture rows, as a budget quantity.
-    fn budget_of(total: usize) -> ByteSize {
-        ByteSize::from_bytes(u64::try_from(total).expect("budget fits u64"))
-    }
 
     struct FixedRowsScanner(Vec<ScannedRow>);
 
@@ -2359,11 +2264,12 @@ mod streaming_aggregate_tests {
     fn table() -> Table {
         Table {
             id: 42,
-            name: "items".into(),
+            name: RelationName::public("items"),
             columns: vec![Column::new("v", ColumnType::Int8)],
             sharded: false,
             sharding: None,
             foreign: None,
+            checks: Vec::new(),
         }
     }
 
@@ -2409,7 +2315,6 @@ mod streaming_aggregate_tests {
 
     #[test]
     fn streaming_fold_computes_every_aggregate_under_a_per_page_budget() {
-        use std::str::FromStr;
         let rows = int_rows(2500);
         let whole_table_bytes = rows
             .iter()
@@ -2417,7 +2322,7 @@ mod streaming_aggregate_tests {
             .sum::<usize>();
         // A budget the whole table exceeds but a single 1024-row page does not:
         // the streaming fold must succeed exactly where whole-table collection fails.
-        let budget = budget_of(whole_table_bytes - 1);
+        let budget = whole_table_bytes - 1;
         let scanner = FixedRowsScanner(rows);
         let (local, snapshot, table) = (MemKv::new(), snapshot(), table());
         let specs = vec![
@@ -2467,9 +2372,7 @@ mod streaming_aggregate_tests {
                     Datum::Int8(3_126_250),
                     Datum::Int8(1),
                     Datum::Int8(2500),
-                    Datum::Numeric(
-                        bigdecimal::BigDecimal::from_str("1250.5").expect("test literal")
-                    ),
+                    Datum::Numeric(crabka_pgtypes::numeric::parse("1250.5").expect("test literal")),
                 ]
         );
     }
@@ -2488,7 +2391,7 @@ mod streaming_aggregate_tests {
             &scanner,
             request(&local, &snapshot, &table),
             &specs,
-            bytes(64),
+            64,
         )
         .expect_err("one oversized page must fail closed");
 
@@ -2524,7 +2427,7 @@ mod streaming_aggregate_tests {
             request(&local, &snapshot, &table),
             &specs,
             // Above one page (and its per-page state), below two pages of groups.
-            budget_of(page_bytes + page_bytes / 2),
+            page_bytes + page_bytes / 2,
         )
         .expect_err("unbounded distinct group keys must fail closed");
 
