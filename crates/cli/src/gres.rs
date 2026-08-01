@@ -1757,13 +1757,14 @@ mod tests {
                 "isSharded": true,
                 "autoShardDisabled": false,
                 "convertStoreThreshold": "10000B",
-                "convertCommitRateThreshold": "10000/s"
+                "convertCommitRateThreshold": "10000/s",
+                "hashBucketCount": null
             }],
             "ranges": [{
                 "rangeId": 1,
                 "tableId": 10,
-                "startRowid": 0,
-                "endRowid": 1000,
+                "startKey": { "table_id": 10, "rowid": 0 },
+                "endKey": { "table_id": 10, "rowid": 1000 },
                 "computeId": "c1",
                 "storeBytes": 2500,
                 "checkpointBytes": 0,
@@ -1801,13 +1802,14 @@ mod tests {
                 "isSharded": true,
                 "autoShardDisabled": false,
                 "convertStoreThreshold": "10000B",
-                "convertCommitRateThreshold": "10000/s"
+                "convertCommitRateThreshold": "10000/s",
+                "hashBucketCount": null
             }],
             "ranges": [{
                 "rangeId": 1,
                 "tableId": 10,
-                "startRowid": 0,
-                "endRowid": 1000,
+                "startKey": { "table_id": 10, "rowid": 0 },
+                "endKey": { "table_id": 10, "rowid": 1000 },
                 "computeId": "c1",
                 "storeBytes": 2500,
                 "checkpointBytes": 0,
