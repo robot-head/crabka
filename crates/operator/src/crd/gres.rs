@@ -336,6 +336,18 @@ pub struct GresComputeSpec {
     #[schemars(with = "Option<String>")]
     pub fdw_request_timeout: Option<Time>,
 
+    /// Total deadline for resolving a cold FDW writer schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fdw_schema_fetch_timeout: Option<Time>,
+
+    /// Poll cadence while awaiting a cold FDW writer schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(with = "crabka_units::serde_units::human::option_time")]
+    #[schemars(with = "Option<String>")]
+    pub fdw_schema_fetch_poll: Option<Time>,
+
     /// Minimum response size for committed-WAL recovery fetches.
     #[serde(
         default,
@@ -781,6 +793,8 @@ pub(crate) struct EffectiveGresComputePolicy {
     pub(crate) fdw_fetch_partition_max: ByteSize,
     pub(crate) fdw_connect_timeout: Time,
     pub(crate) fdw_request_timeout: Time,
+    pub(crate) fdw_schema_fetch_timeout: Time,
+    pub(crate) fdw_schema_fetch_poll: Time,
     pub(crate) wal_recovery_fetch_min: Option<crabka_client_core::FetchMinBytes>,
     pub(crate) checkpoint_part_size: CheckpointPartBytes,
     pub(crate) checkpoint_retain: PositiveUsize,
@@ -1070,6 +1084,22 @@ impl GresComputeSpec {
         whole_millis_i32("spec.compute.fdwConnectTimeout", fdw_connect_timeout)?;
         let fdw_request_timeout = self.fdw_request_timeout.unwrap_or(crabka_units::secs(30));
         whole_millis_i32("spec.compute.fdwRequestTimeout", fdw_request_timeout)?;
+        let fdw_schema_fetch_timeout = self
+            .fdw_schema_fetch_timeout
+            .unwrap_or_else(|| crabka_units::secs(10));
+        whole_millis(
+            "spec.compute.fdwSchemaFetchTimeout",
+            fdw_schema_fetch_timeout,
+        )?;
+        let fdw_schema_fetch_poll = self
+            .fdw_schema_fetch_poll
+            .unwrap_or_else(|| crabka_units::millis(20));
+        whole_millis("spec.compute.fdwSchemaFetchPoll", fdw_schema_fetch_poll)?;
+        if fdw_schema_fetch_poll > fdw_schema_fetch_timeout {
+            return Err(
+                "spec.compute.fdwSchemaFetchPoll must not exceed fdwSchemaFetchTimeout".to_owned(),
+            );
+        }
 
         Ok(EffectiveGresComputePolicy {
             readiness_probe_period_seconds: self.effective_readiness_probe_period_seconds()?,
@@ -1095,6 +1125,8 @@ impl GresComputeSpec {
             fdw_fetch_partition_max,
             fdw_connect_timeout,
             fdw_request_timeout,
+            fdw_schema_fetch_timeout,
+            fdw_schema_fetch_poll,
             wal_recovery_fetch_min: self
                 .wal_recovery_fetch_min
                 .map(crabka_client_core::FetchMinBytes::try_from)
@@ -1959,6 +1991,8 @@ mod tests {
             fdw_fetch_partition_max: Some(crabka_units::bytes(43)),
             fdw_connect_timeout: Some(crabka_units::millis(47)),
             fdw_request_timeout: Some(crabka_units::millis(53)),
+            fdw_schema_fetch_timeout: Some(crabka_units::millis(59)),
+            fdw_schema_fetch_poll: Some(crabka_units::millis(17)),
             wal_recovery_fetch_min: Some(crabka_units::bytes(3)),
             ..GresComputeSpec::default()
         };
@@ -1978,6 +2012,8 @@ mod tests {
         assert!(effective.fdw_fetch_partition_max == crabka_units::bytes(43));
         assert!(effective.fdw_connect_timeout == crabka_units::millis(47));
         assert!(effective.fdw_request_timeout == crabka_units::millis(53));
+        assert!(effective.fdw_schema_fetch_timeout == crabka_units::millis(59));
+        assert!(effective.fdw_schema_fetch_poll == crabka_units::millis(17));
         assert!(
             effective
                 .wal_recovery_fetch_min
@@ -1997,6 +2033,8 @@ mod tests {
             "fdwFetchPartitionMax",
             "fdwConnectTimeout",
             "fdwRequestTimeout",
+            "fdwSchemaFetchTimeout",
+            "fdwSchemaFetchPoll",
             "walRecoveryFetchMin",
         ] {
             assert!(
@@ -2033,6 +2071,14 @@ mod tests {
                     ..GresComputeSpec::default()
                 },
                 "spec.compute.fdwFetchMaxWait",
+            ),
+            (
+                GresComputeSpec {
+                    fdw_schema_fetch_timeout: Some(crabka_units::millis(10)),
+                    fdw_schema_fetch_poll: Some(crabka_units::millis(11)),
+                    ..GresComputeSpec::default()
+                },
+                "spec.compute.fdwSchemaFetchPoll",
             ),
             (
                 GresComputeSpec {

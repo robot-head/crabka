@@ -245,6 +245,14 @@ spec:
                     description: FDW broker request timeout.
                     nullable: true
                     type: string
+                  fdwSchemaFetchPoll:
+                    description: Poll cadence while awaiting a cold FDW writer schema.
+                    nullable: true
+                    type: string
+                  fdwSchemaFetchTimeout:
+                    description: Total deadline for resolving a cold FDW writer schema.
+                    nullable: true
+                    type: string
                   idleSuspendPollInterval:
                     description: Idle-suspend polling interval.
                     nullable: true

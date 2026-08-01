@@ -2312,6 +2312,10 @@ fn render_deployment(
         compute_policy.fdw_connect_timeout.human().to_string(),
         "--fdw-request-timeout".to_owned(),
         compute_policy.fdw_request_timeout.human().to_string(),
+        "--fdw-schema-fetch-timeout".to_owned(),
+        compute_policy.fdw_schema_fetch_timeout.human().to_string(),
+        "--fdw-schema-fetch-poll".to_owned(),
+        compute_policy.fdw_schema_fetch_poll.human().to_string(),
     ]);
     if let Some(value) = compute_policy.wal_recovery_fetch_min {
         args.extend([
@@ -3312,6 +3316,8 @@ mod tests {
             fdw_fetch_partition_max: Some(crabka_units::bytes(43)),
             fdw_connect_timeout: Some(crabka_units::millis(47)),
             fdw_request_timeout: Some(crabka_units::millis(53)),
+            fdw_schema_fetch_timeout: Some(crabka_units::millis(59)),
+            fdw_schema_fetch_poll: Some(crabka_units::millis(17)),
             wal_recovery_fetch_min: Some(crabka_units::bytes(3)),
             ..crate::crd::gres::GresComputeSpec::default()
         }
@@ -3365,6 +3371,8 @@ mod tests {
                 ["--fdw-fetch-partition-max", "43B"],
                 ["--fdw-connect-timeout", "47ms"],
                 ["--fdw-request-timeout", "53ms"],
+                ["--fdw-schema-fetch-timeout", "59ms"],
+                ["--fdw-schema-fetch-poll", "17ms"],
                 ["--wal-recovery-fetch-min", "3B"],
             ] {
                 assert!(

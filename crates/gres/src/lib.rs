@@ -1124,6 +1124,10 @@ fn validate_wal_recovery_read_policy(args: &ServeArgs) -> std::io::Result<()> {
     effective_wal_producer_dns_timeout(args)?;
     effective_fdw_broker_dns_timeout(args)?;
     effective_schema_fetch_retry_policy(args)?;
+    args.registry
+        .fdw_decode_policy()
+        .validate()
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     effective_wal_producer_retry_policy(args)?;
     effective_wal_producer_throughput_policy(args)?;
     Ok(())
@@ -1397,6 +1401,22 @@ pub struct RegistryOptions {
     )]
     fdw_request_timeout: Time,
     #[arg(
+        long = "fdw-schema-fetch-timeout",
+        env = "CRABKA_GRES_FDW_SCHEMA_FETCH_TIMEOUT",
+        default_value = "10s",
+        value_parser = parse_fdw_schema_fetch_timeout,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_schema_fetch_timeout: Time,
+    #[arg(
+        long = "fdw-schema-fetch-poll",
+        env = "CRABKA_GRES_FDW_SCHEMA_FETCH_POLL",
+        default_value = "20ms",
+        value_parser = parse_fdw_schema_fetch_poll,
+        requires = "substrate_bootstrap"
+    )]
+    fdw_schema_fetch_poll: Time,
+    #[arg(
         long = "wal-recovery-fetch-min",
         env = "CRABKA_GRES_WAL_RECOVERY_FETCH_MIN",
         value_parser = parse_fetch_min,
@@ -1487,6 +1507,13 @@ impl RegistryOptions {
         }
     }
 
+    fn fdw_decode_policy(&self) -> crabka_gres_fdw::FdwDecodePolicy {
+        crabka_gres_fdw::FdwDecodePolicy {
+            schema_fetch_timeout: self.fdw_schema_fetch_timeout,
+            schema_fetch_poll: self.fdw_schema_fetch_poll,
+        }
+    }
+
     fn wal_recovery_fetch_min(&self) -> crabka_client_core::FetchMinBytes {
         crabka_client_core::FetchMinBytes::try_from(
             self.wal_recovery_fetch_min
@@ -1574,6 +1601,26 @@ fn parse_fdw_request_timeout(value: &str) -> Result<Time, String> {
     }
     .validate()
     .map(|policy| policy.request_timeout)
+}
+
+fn parse_fdw_schema_fetch_timeout(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::positive_time(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwDecodePolicy {
+        schema_fetch_timeout: value,
+        schema_fetch_poll: value,
+    }
+    .validate()
+    .map(|policy| policy.schema_fetch_timeout)
+}
+
+fn parse_fdw_schema_fetch_poll(value: &str) -> Result<Time, String> {
+    let value = crabka_units::parse::positive_time(value).map_err(|error| error.to_string())?;
+    crabka_gres_fdw::FdwDecodePolicy {
+        schema_fetch_timeout: value,
+        schema_fetch_poll: value,
+    }
+    .validate()
+    .map(|policy| policy.schema_fetch_poll)
 }
 
 fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
@@ -3283,6 +3330,7 @@ pub fn serve_listener_with_tenant_config_loader(
             effective_args.registry.frame_max(),
             effective_args.registry.fdw_fetch_min(),
             effective_args.registry.fdw_scan_policy(),
+            effective_args.registry.fdw_decode_policy(),
         );
         let session_config =
             build_session_config_from_tenant(&effective_args, tenant_record.as_ref())?;
@@ -8385,9 +8433,11 @@ pub fn register_kafka_scanner(engine: &mut SqlEngine) {
         crabka_client_core::ClientFrameMax::default(),
         crabka_client_core::FetchMinBytes::default(),
         crabka_gres_fdw::FdwScanPolicy::default(),
+        crabka_gres_fdw::FdwDecodePolicy::default(),
     )));
 }
 
+#[allow(clippy::too_many_arguments)]
 fn kafka_scanner(
     default_bootstrap: Option<String>,
     broker_dns_timeout: crabka_client_core::ClientDnsTimeout,
@@ -8396,12 +8446,14 @@ fn kafka_scanner(
     frame_max: crabka_client_core::ClientFrameMax,
     fetch_min: crabka_client_core::FetchMinBytes,
     scan_policy: crabka_gres_fdw::FdwScanPolicy,
+    decode_policy: crabka_gres_fdw::FdwDecodePolicy,
 ) -> crabka_gres_fdw::KafkaFdw {
     crabka_gres_fdw::KafkaFdw::with_defaults(default_bootstrap)
         .with_broker_dns_timeout(broker_dns_timeout)
         .with_schema_fetch_retry_policy(schema_fetch_retry_policy)
         .with_client_resource_policy(dispatch_queue_capacity, frame_max, fetch_min)
         .with_scan_policy(scan_policy)
+        .with_decode_policy(decode_policy)
 }
 
 /// Register Crabka's Kafka foreign-data scanner with an optional default bootstrap.
@@ -8420,6 +8472,7 @@ pub fn register_kafka_scanner_with_default_bootstrap(
         crabka_client_core::ClientFrameMax::default(),
         crabka_client_core::FetchMinBytes::default(),
         crabka_gres_fdw::FdwScanPolicy::default(),
+        crabka_gres_fdw::FdwDecodePolicy::default(),
     );
 }
 
@@ -8433,6 +8486,7 @@ fn register_kafka_scanner_with_default_bootstrap_and_policy(
     frame_max: crabka_client_core::ClientFrameMax,
     fetch_min: crabka_client_core::FetchMinBytes,
     scan_policy: crabka_gres_fdw::FdwScanPolicy,
+    decode_policy: crabka_gres_fdw::FdwDecodePolicy,
 ) {
     let scanner: Arc<dyn crabka_pgexec::foreign::ForeignScanner> = Arc::new(kafka_scanner(
         default_bootstrap,
@@ -8442,6 +8496,7 @@ fn register_kafka_scanner_with_default_bootstrap_and_policy(
         frame_max,
         fetch_min,
         scan_policy,
+        decode_policy,
     ));
     match engine {
         RuntimeEngine::Single(engine) => engine.set_foreign_scanner(scanner),
@@ -9638,6 +9693,8 @@ mod tests {
                 fdw_fetch_partition_max: crabka_units::mebibytes(10),
                 fdw_connect_timeout: crabka_units::secs(10),
                 fdw_request_timeout: crabka_units::secs(30),
+                fdw_schema_fetch_timeout: crabka_units::secs(10),
+                fdw_schema_fetch_poll: crabka_units::millis(20),
                 wal_recovery_fetch_min: None,
                 registry_reader_fetch_min: crabka_units::bytes(1),
                 replication_factor: RegistryReplicationFactor::new(1).expect("default"),
@@ -10095,6 +10152,8 @@ mod tests {
             fdw_fetch_partition_max: crabka_units::mebibytes(10),
             fdw_connect_timeout: crabka_units::secs(10),
             fdw_request_timeout: crabka_units::secs(30),
+            fdw_schema_fetch_timeout: crabka_units::secs(10),
+            fdw_schema_fetch_poll: crabka_units::millis(20),
             wal_recovery_fetch_min: None,
             registry_reader_fetch_min: crabka_units::bytes(1),
             replication_factor: RegistryReplicationFactor::new(2).expect("replication factor"),
@@ -11530,6 +11589,7 @@ mod tests {
             crabka_client_core::ClientFrameMax::default(),
             crabka_client_core::FetchMinBytes::default(),
             args.registry.fdw_scan_policy(),
+            args.registry.fdw_decode_policy(),
         );
 
         assert_eq!(scanner.schema_fetch_retry_policy(), policy);
@@ -11546,6 +11606,8 @@ mod tests {
             "--fdw-fetch-partition-max=43B",
             "--fdw-connect-timeout=47ms",
             "--fdw-request-timeout=53ms",
+            "--fdw-schema-fetch-timeout=59ms",
+            "--fdw-schema-fetch-poll=17ms",
         ])
         .expect("substrate FDW DNS timeout")
         .serve;
@@ -11558,6 +11620,7 @@ mod tests {
             crabka_client_core::ClientFrameMax::default(),
             crabka_client_core::FetchMinBytes::default(),
             args.registry.fdw_scan_policy(),
+            args.registry.fdw_decode_policy(),
         );
 
         assert_eq!(scanner.default_bootstrap(), Some("memory://"));
@@ -11569,6 +11632,13 @@ mod tests {
                 fetch_partition_max: crabka_units::bytes(43),
                 connect_timeout: crabka_units::millis(47),
                 request_timeout: crabka_units::millis(53),
+            }
+        );
+        assert_eq!(
+            scanner.decode_policy(),
+            crabka_gres_fdw::FdwDecodePolicy {
+                schema_fetch_timeout: crabka_units::millis(59),
+                schema_fetch_poll: crabka_units::millis(17),
             }
         );
 

@@ -6608,18 +6608,20 @@ value audit remains active.
 
 ## Gres FDW Fetch and Connection Policy
 
-The Kafka FDW now owns one validated scan policy for broker fetch wait,
-per-partition response bytes, TCP connection timeout and request timeout.
-Existing defaults remain 5 seconds, 10 MiB, 10 seconds and 30 seconds. All are
-dimensioned UOM values and reject zero, fractional protocol units and values
-outside the Kafka wire representation.
+The Kafka FDW now owns validated scan and decode policies for broker fetch
+wait, per-partition response bytes, TCP connection timeout, request timeout,
+schema fetch timeout and schema fetch polling. Existing defaults remain 5
+seconds, 10 MiB, 10 seconds, 30 seconds, 10 seconds and 20 milliseconds. All
+are dimensioned UOM values and reject zero, fractional protocol units and
+values outside their receiving representations; schema polling also cannot
+exceed its timeout.
 
-Gres exposes the four values through `--fdw-*` arguments backed by matching
+Gres exposes the six values through `--fdw-*` arguments backed by matching
 `CRABKA_GRES_FDW_*` environment variables. `Gres.spec.compute` exposes the same
 values, and the operator renders them into every compute pod. The policy
 reaches metadata/admin connections, the reused scan connection and every
-partition Fetch request.
+partition Fetch request, as well as the cold-schema registry wait loop.
 
-All 59 Gres FDW, 154 Gres and 772 operator library tests, generated-CRD parity,
+All 60 Gres FDW, 154 Gres and 772 operator library tests, generated-CRD parity,
 workspace all-target Clippy, nightly formatting and diff hygiene pass. The
 repository-wide hardcoded operational-value audit remains active.

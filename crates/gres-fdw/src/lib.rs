@@ -21,7 +21,7 @@ pub mod types;
 
 pub use config::{ConnProfile, ServerProfile, resolve, resolve_server};
 pub use crabka_schema_serde::SchemaFetchRetryPolicy;
-pub use decode::{DecodedValue, Wire, decode_value};
+pub use decode::{DecodedValue, FdwDecodePolicy, Wire, decode_value, decode_value_with_policy};
 pub use error::KafkaFdwError;
 pub use source::{
     FdwScanPolicy, FetchPlan, RawRecord, plan_fetch, scan_topic, scan_topic_with_dns_timeout,
@@ -47,6 +47,7 @@ pub struct KafkaFdw {
     frame_max: crabka_client_core::ClientFrameMax,
     fetch_min: crabka_client_core::FetchMinBytes,
     scan_policy: FdwScanPolicy,
+    decode_policy: FdwDecodePolicy,
     schema_fetch_retry_policy: SchemaFetchRetryPolicy,
 }
 
@@ -61,6 +62,7 @@ impl KafkaFdw {
             frame_max: crabka_client_core::ClientFrameMax::default(),
             fetch_min: crabka_client_core::FetchMinBytes::default(),
             scan_policy: FdwScanPolicy::default(),
+            decode_policy: FdwDecodePolicy::default(),
             schema_fetch_retry_policy: SchemaFetchRetryPolicy::default(),
         }
     }
@@ -106,6 +108,19 @@ impl KafkaFdw {
     #[must_use]
     pub fn scan_policy(&self) -> FdwScanPolicy {
         self.scan_policy
+    }
+
+    /// Override cold-cache schema resolution policy.
+    #[must_use]
+    pub fn with_decode_policy(mut self, policy: FdwDecodePolicy) -> Self {
+        self.decode_policy = policy;
+        self
+    }
+
+    /// Return cold-cache schema resolution policy.
+    #[must_use]
+    pub fn decode_policy(&self) -> FdwDecodePolicy {
+        self.decode_policy
     }
 
     /// Override the retry range for transient schema fetch failures.
@@ -187,7 +202,7 @@ impl ForeignScanner for KafkaFdw {
                 )
                 .await
                 .map_err(|err| to_exec_err(&err))?;
-                scan::assemble_rows(table, &raws, &profile, &cache)
+                scan::assemble_rows_with_policy(table, &raws, &profile, &cache, self.decode_policy)
                     .await
                     .map_err(|err| to_exec_err(&err))
             })

@@ -11,7 +11,10 @@ use crabka_pgtypes::Datum;
 use crabka_schema_serde::SchemaCache;
 
 use crate::{
-    config::ConnProfile, decode::decode_value, error::KafkaFdwError, source::RawRecord,
+    config::ConnProfile,
+    decode::{FdwDecodePolicy, decode_value_with_policy},
+    error::KafkaFdwError,
+    source::RawRecord,
     types::project,
 };
 
@@ -27,19 +30,42 @@ const ENVELOPE_COLS: usize = 5;
 /// 3. `_timestamp` → [`Datum::Timestamptz`] (from `timestamp_ms`)
 /// 4. `_key`       → [`Datum::Bytea`] or [`Datum::Null`]
 /// 5. `_headers`   → [`Datum::Text`] holding the headers as a JSON string
-/// 6. the value columns, decoded via [`decode_value`] and projected via
+/// 6. the value columns, decoded via [`decode_value_with_policy`] and projected via
 ///    [`project`] onto `table.columns[5..]`. A `None`/empty value yields all
 ///    value columns as [`Datum::Null`].
 ///
 /// # Errors
 /// Propagates [`KafkaFdwError`] from value decoding (wire-format, schema
 /// registry, or Avro/JSON parse failures).
+#[cfg(test)]
 pub async fn assemble_rows(
     table: &Table,
     raw_records: &[RawRecord],
     profile: &ConnProfile,
     cache: &Arc<SchemaCache>,
 ) -> Result<Vec<Vec<Datum>>, KafkaFdwError> {
+    assemble_rows_with_policy(
+        table,
+        raw_records,
+        profile,
+        cache,
+        FdwDecodePolicy::default(),
+    )
+    .await
+}
+
+/// Assemble rows under explicit cold-cache schema resolution policy.
+///
+/// # Errors
+/// Propagates value decoding and schema resolution failures.
+pub async fn assemble_rows_with_policy(
+    table: &Table,
+    raw_records: &[RawRecord],
+    profile: &ConnProfile,
+    cache: &Arc<SchemaCache>,
+    policy: FdwDecodePolicy,
+) -> Result<Vec<Vec<Datum>>, KafkaFdwError> {
+    let policy = policy.validate().map_err(KafkaFdwError::Config)?;
     let value_columns = &table.columns[ENVELOPE_COLS.min(table.columns.len())..];
 
     let mut rows = Vec::with_capacity(raw_records.len());
@@ -62,8 +88,14 @@ pub async fn assemble_rows(
         // ── value columns ─────────────────────────────────────────────────
         match raw.value.as_deref() {
             Some(bytes) if !bytes.is_empty() => {
-                let (decoded, avro_schema) =
-                    decode_value(cache, profile.value_format, &profile.topic, bytes).await?;
+                let (decoded, avro_schema) = decode_value_with_policy(
+                    cache,
+                    profile.value_format,
+                    &profile.topic,
+                    bytes,
+                    policy,
+                )
+                .await?;
                 row.extend(project(&decoded, value_columns, avro_schema.as_ref()));
             }
             // Null / empty value (a tombstone, or no payload) → all value
