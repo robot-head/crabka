@@ -5095,24 +5095,30 @@ The equal 500-ms defaults serve different source-poll, drain-poll, and commit
 semantics and therefore remain separate settings. Defaults preserve all
 current timing/count values and single-replica behavior.
 
-The proposed minimal design threads one `ReplicatorRuntimePolicy` through the
-existing supervisor/worker/task constructors. Times remain positive UOM
+One `ReplicatorRuntimePolicy` now flows through the existing
+supervisor/worker/task constructors. Times remain positive UOM
 `Time`; positive counts and batch sizes use `NonZeroUsize`; replication
-factors use the repository's existing validated positive Kafka replication
-type. The standalone binary exposes direct flags backed by
+factors use a `refined_type`-validated positive Kafka newtype. The standalone
+binary exposes direct flags backed by
 `CRABKA_REPLICATOR_*` environment variables rather than adding another YAML
 subtree solely for Kubernetes overrides.
 
-The hardcoded one-partition shape for replicated data topics should not become
-a knob. The supervisor already reads source metadata, so it should retain each
-source topic's partition count, create the target with that count, and preserve
-the source partition on each produced record. Replicator internal topics remain
-single-partition for ordering/compatibility, while their replication factor is
-configurable.
+The same policy owns the admin/client DNS, connect, and request timeouts.
+Existing public entry points remain default-preserving wrappers. Data and
+internal replication factors reach their distinct topic owners, and internal
+topic drain behavior uses the configured poll duration and empty-poll count.
 
-This design is pending explicit approval and has not been implemented. All 42
-all-target tests, including recovery and two-cluster behavior, pass. Strict
-all-target Clippy passes.
+The hardcoded one-partition shape for replicated data topics did not become a
+knob. The supervisor retains each selected source topic's discovered partition
+count, the sink creates the target with that count, and each record keeps its
+source partition. Replicator internal topics remain single-partition for
+ordering/compatibility, while their replication factor is configurable.
+
+All 46 replicator all-target tests pass, including recovery, two-cluster
+behavior, configured policy parsing, and three-partition topology preservation.
+Workspace all-target check and strict Clippy, nightly formatting, and diff
+hygiene pass. This closes only the replicator runtime/topic slice; the
+repository-wide hardcoded operational-value audit remains active.
 
 ## Gres Conformance Harness
 
