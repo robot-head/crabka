@@ -428,7 +428,7 @@ pub(super) fn handle_leave(
                     .values()
                     .map(|m| m.rebalance_timeout)
                     .max()
-                    .unwrap_or(Duration::from_mins(1)),
+                    .expect("nonempty group has a rebalance timeout"),
         );
     }
     member_responses
