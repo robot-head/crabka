@@ -6360,3 +6360,25 @@ unit-suffixed legacy arguments remain a separate dimensioned/UOM closure so
 new environment names do not encode untyped numeric values. This closes only
 the non-dimensional process-environment slice; the repository-wide hardcoded
 operational-value audit remains active.
+
+## Traces Duration Environment Closure
+
+Traces duration policy now uses UOM `Time` values for retention, block-builder
+poll and flush windows, metrics-generator collection interval and edge TTL,
+and metrics histogram buckets. The primary flags are `--retention`,
+`--block-builder-window`, `--block-builder-flush-max-age`,
+`--collection-interval`, `--edge-ttl`, and `--histogram-buckets`, backed by
+matching unitless `CRABKA_TRACES_*` environment names.
+
+The former `-ns`, `-ms`, and `-secs` flags remain visible aliases. Bare values
+passed through those aliases retain their former units, while both aliases and
+primary flags also accept UOM strings. Defaults remain 30m, 5s, 10s, absent
+file overrides, and the configured histogram list. Positive deployment
+durations reject zero; collection interval and edge TTL retain their supported
+zero values.
+
+Legacy-alias, UOM CLI, environment-precedence, default, and runtime wiring
+tests pass. No CRD owns the standalone traces process. This closes only the
+duration environment slice; byte sizes and absolute nanosecond timestamps
+remain the next dimensioned closure, and the repository-wide audit remains
+active.

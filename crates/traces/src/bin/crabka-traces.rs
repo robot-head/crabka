@@ -90,6 +90,54 @@ fn parse_positive_usize(value: &str) -> Result<usize, String> {
         .map_err(|error| error.to_string())
 }
 
+fn parse_time_or_legacy_i64(
+    value: &str,
+    legacy_unit: fn(i64) -> Time,
+    positive: bool,
+) -> Result<Time, String> {
+    if let Ok(value) = value.parse::<i64>() {
+        if value < 0 || (positive && value == 0) {
+            return Err("time must be positive".to_owned());
+        }
+        return Ok(legacy_unit(value));
+    }
+    if positive {
+        parse::positive_time(value)
+    } else {
+        parse::non_negative_time(value)
+    }
+    .map_err(|error| error.to_string())
+}
+
+fn parse_positive_time_or_nanos(value: &str) -> Result<Time, String> {
+    parse_time_or_legacy_i64(value, Time::from_nanos, true)
+}
+
+fn parse_positive_time_or_millis(value: &str) -> Result<Time, String> {
+    parse_time_or_legacy_i64(value, Time::from_millis, true)
+}
+
+fn parse_positive_time_or_secs(value: &str) -> Result<Time, String> {
+    parse_time_or_legacy_i64(value, Time::from_secs, true)
+}
+
+fn parse_non_negative_time_or_secs(value: &str) -> Result<Time, String> {
+    parse_time_or_legacy_i64(value, Time::from_secs, false)
+}
+
+fn parse_positive_time_or_nanos_f64(value: &str) -> Result<Time, String> {
+    value.parse::<f64>().map_or_else(
+        |_| parse::positive_time(value).map_err(|error| error.to_string()),
+        |value| {
+            if value.is_finite() && value > 0.0 {
+                Ok(Time::from_secs_f64(value / 1_000_000_000.0))
+            } else {
+                Err("time must be finite and positive".to_owned())
+            }
+        },
+    )
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "crabka-traces")]
 #[command(about = "Tempo-compatible traces service for Crabka")]
@@ -172,10 +220,22 @@ struct Cli {
         value_parser = parse_consumer_fetch_size
     )]
     wal_fetch_partition_max: ByteSize,
-    #[arg(long, default_value_t = 30 * 60 * 1_000_000_000_i64)]
-    retention_ns: i64,
-    #[arg(long, default_value_t = 5)]
-    block_builder_window_secs: i64,
+    #[arg(
+        long = "retention",
+        visible_alias = "retention-ns",
+        env = "CRABKA_TRACES_RETENTION",
+        default_value = "30m",
+        value_parser = parse_positive_time_or_nanos
+    )]
+    retention: Time,
+    #[arg(
+        long = "block-builder-window",
+        visible_alias = "block-builder-window-secs",
+        env = "CRABKA_TRACES_BLOCK_BUILDER_WINDOW",
+        default_value = "5s",
+        value_parser = parse_positive_time_or_secs
+    )]
+    block_builder_window: Time,
     #[arg(
         long,
         env = "CRABKA_TRACES_BLOCK_BUILDER_EMPTY_POLL_BACKOFF",
@@ -185,8 +245,14 @@ struct Cli {
     block_builder_empty_poll_backoff: Time,
     #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS)]
     block_builder_flush_max_records: usize,
-    #[arg(long, default_value_t = crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64())]
-    block_builder_flush_max_age_ms: i64,
+    #[arg(
+        long = "block-builder-flush-max-age",
+        visible_alias = "block-builder-flush-max-age-ms",
+        env = "CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_AGE",
+        default_value = "10s",
+        value_parser = parse_positive_time_or_millis
+    )]
+    block_builder_flush_max_age: Time,
     #[arg(long, env = "CRABKA_TRACES_QUERIER_LIVE_STORE", action = ArgAction::SetTrue)]
     querier_live_store: bool,
     #[arg(long, env = "CRABKA_TRACES_QUERIER_LIVE_STORE_URL")]
@@ -232,17 +298,32 @@ struct Cli {
     object_store_url: String,
     #[arg(long, env = "CRABKA_TRACES_REMOTE_WRITE_URL")]
     remote_write_url: Option<String>,
-    #[arg(long)]
-    collection_interval_secs: Option<u64>,
+    #[arg(
+        long = "collection-interval",
+        visible_alias = "collection-interval-secs",
+        env = "CRABKA_TRACES_COLLECTION_INTERVAL",
+        value_parser = parse_non_negative_time_or_secs
+    )]
+    collection_interval: Option<Time>,
     #[arg(long, env = "CRABKA_TRACES_MAX_EXEMPLARS_PER_SERIES")]
     max_exemplars_per_series: Option<usize>,
-    #[arg(long)]
-    edge_ttl_secs: Option<u64>,
+    #[arg(
+        long = "edge-ttl",
+        visible_alias = "edge-ttl-secs",
+        env = "CRABKA_TRACES_EDGE_TTL",
+        value_parser = parse_non_negative_time_or_secs
+    )]
+    edge_ttl: Option<Time>,
     #[arg(long, env = "CRABKA_TRACES_EDGE_STORE_MAX_ITEMS")]
     edge_store_max_items: Option<usize>,
-    #[arg(long)]
-    #[arg(value_delimiter = ',')]
-    histogram_buckets_ns: Option<Vec<f64>>,
+    #[arg(
+        long = "histogram-buckets",
+        visible_alias = "histogram-buckets-ns",
+        env = "CRABKA_TRACES_HISTOGRAM_BUCKETS",
+        value_delimiter = ',',
+        value_parser = parse_positive_time_or_nanos_f64
+    )]
+    histogram_buckets: Option<Vec<Time>>,
     #[command(flatten)]
     metrics: MetricsFlags,
     #[arg(long, default_value_t = 0)]
@@ -552,11 +633,11 @@ async fn run_block_builder(
         blockbuilder::BlockBuilderConfig {
             object_key_prefix,
             index_key: trace_index_key,
-            window: Time::from_secs(cli.block_builder_window_secs),
+            window: cli.block_builder_window,
             empty_poll_backoff: cli.block_builder_empty_poll_backoff,
             promoted_attrs,
             flush_max_records: cli.block_builder_flush_max_records,
-            flush_max_age: Time::from_millis(cli.block_builder_flush_max_age_ms),
+            flush_max_age: cli.block_builder_flush_max_age,
             index_snapshot_retain: cli.index_snapshot_retain,
         },
         metrics,
@@ -581,7 +662,7 @@ async fn run_live_store(
         cli.client_frame_max,
     )
     .await?;
-    let store = Arc::new(RwLock::new(LiveStore::new(cli.retention_ns)));
+    let store = Arc::new(RwLock::new(LiveStore::new(cli.retention.nanos_i64())));
     let router = build_live_store_router(&cli, Arc::clone(&store))?;
     let live_shutdown = shutdown.clone();
     tokio::spawn(async move {
@@ -609,7 +690,7 @@ async fn run_querier(
     let addr: SocketAddr = cli.listen.parse()?;
     let live_store = cli
         .querier_live_store
-        .then(|| Arc::new(RwLock::new(LiveStore::new(cli.retention_ns))));
+        .then(|| Arc::new(RwLock::new(LiveStore::new(cli.retention.nanos_i64()))));
     let (router, store, trace_index_key, trace_index) =
         build_querier_router_with_live(&cli, metrics, live_store.clone()).await?;
     if let Some(live_store) = live_store {
@@ -635,7 +716,7 @@ async fn run_querier(
     let refresh_shutdown = shutdown.clone();
     let refresh_store = Arc::clone(&store);
     let refresh_index = Arc::clone(&trace_index);
-    let refresh_interval = Time::from_secs(cli.block_builder_window_secs).max(secs(1));
+    let refresh_interval = cli.block_builder_window.max(secs(1));
     let index_snapshot_max = cli.index_snapshot_max;
     tokio::spawn(async move {
         let mut tick = tokio::time::interval(refresh_interval.to_std());
@@ -1150,8 +1231,8 @@ fn max_trace_size(spans: usize) -> ByteSize {
 }
 
 fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) {
-    if let Some(secs) = cli.collection_interval_secs {
-        cfg.collection_interval = Time::from_secs(i64::try_from(secs).unwrap_or(i64::MAX));
+    if let Some(interval) = cli.collection_interval {
+        cfg.collection_interval = interval;
     }
     if let Some(url) = &cli.remote_write_url {
         cfg.remote_write_url.clone_from(url);
@@ -1159,14 +1240,17 @@ fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) 
     if let Some(max) = cli.max_exemplars_per_series {
         cfg.max_exemplars_per_series = max;
     }
-    if let Some(secs) = cli.edge_ttl_secs {
-        cfg.edge_ttl = Time::from_secs(i64::try_from(secs).unwrap_or(i64::MAX));
+    if let Some(ttl) = cli.edge_ttl {
+        cfg.edge_ttl = ttl;
     }
     if let Some(max) = cli.edge_store_max_items {
         cfg.edge_store_max_items = max;
     }
-    if let Some(buckets) = &cli.histogram_buckets_ns {
-        cfg.histogram_buckets_ns.clone_from(buckets);
+    if let Some(buckets) = &cli.histogram_buckets {
+        cfg.histogram_buckets_ns = buckets
+            .iter()
+            .map(|bucket| bucket.secs_f64() * 1_000_000_000.0)
+            .collect();
     }
     cfg.enable_target_info |= cli.metrics.enable_target_info;
     cfg.enable_status_message |= cli.metrics.enable_status_message;
@@ -1521,7 +1605,7 @@ mod tests {
         .unwrap();
 
         assert2::assert!(matches!(cli.target, Target::BlockBuilder));
-        assert2::assert!(cli.block_builder_window_secs == 30);
+        assert2::assert!(cli.block_builder_window == secs(30));
     }
 
     #[test]
@@ -1534,8 +1618,7 @@ mod tests {
                 == crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_RECORDS
         );
         assert2::assert!(
-            cli.block_builder_flush_max_age_ms
-                == crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64()
+            cli.block_builder_flush_max_age == crabka_traces::blockbuilder::DEFAULT_FLUSH_MAX_AGE
         );
     }
 
@@ -1863,8 +1946,8 @@ mod tests {
             (
                 cli.target,
                 cli.block_builder_flush_max_records,
-                cli.block_builder_flush_max_age_ms,
-            ) == (Target::BlockBuilder, 1000, 30_000)
+                cli.block_builder_flush_max_age,
+            ) == (Target::BlockBuilder, 1000, secs(30))
         );
     }
 
@@ -1924,7 +2007,7 @@ mod tests {
         ])
         .unwrap();
         assert2::assert!(matches!(cli.target, Target::LiveStore));
-        assert2::assert!(cli.retention_ns == 42);
+        assert2::assert!(cli.retention == Time::from_nanos(42));
     }
 
     #[test]
@@ -1941,7 +2024,7 @@ mod tests {
 
         assert2::assert!(matches!(cli.target, Target::Querier));
         assert2::assert!(cli.querier_live_store);
-        assert2::assert!(cli.retention_ns == 42);
+        assert2::assert!(cli.retention == Time::from_nanos(42));
     }
 
     #[test]
@@ -2238,21 +2321,98 @@ mod tests {
             (
                 cli.target,
                 cli.remote_write_url.as_deref(),
-                cli.collection_interval_secs,
+                cli.collection_interval,
                 cli.max_exemplars_per_series,
-                cli.edge_ttl_secs,
+                cli.edge_ttl,
                 cli.edge_store_max_items,
-                cli.histogram_buckets_ns,
+                cli.histogram_buckets,
                 cli.config.as_deref(),
             ) == (
                 Target::MetricsGenerator,
                 Some("http://mimir.example/api/v1/push"),
-                Some(30),
+                Some(secs(30)),
                 Some(3),
-                Some(20),
+                Some(secs(20)),
                 Some(1234),
-                Some(vec![1000.0, 2000.0, 5000.0]),
+                Some(vec![
+                    Time::from_nanos(1000),
+                    Time::from_nanos(2000),
+                    Time::from_nanos(5000)
+                ]),
                 Some("metricsgen.yaml"),
+            )
+        );
+    }
+
+    #[test]
+    fn duration_policy_reads_uom_environment_and_prefers_cli() {
+        const CHILD: &str = "CRABKA_TRACES_DURATION_POLICY_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::duration_policy_reads_uom_environment_and_prefers_cli",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_TRACES_RETENTION", "42s")
+                    .env("CRABKA_TRACES_BLOCK_BUILDER_WINDOW", "7s")
+                    .env("CRABKA_TRACES_BLOCK_BUILDER_FLUSH_MAX_AGE", "8s")
+                    .env("CRABKA_TRACES_COLLECTION_INTERVAL", "9s")
+                    .env("CRABKA_TRACES_EDGE_TTL", "10s")
+                    .env("CRABKA_TRACES_HISTOGRAM_BUCKETS", "1ms,2ms")
+                    .status()
+                    .expect("child test");
+            check!(status.success());
+            return;
+        }
+
+        let from_env =
+            Cli::try_parse_from(["crabka-traces", "--target=metrics-generator"]).unwrap();
+        check!(
+            (
+                from_env.retention,
+                from_env.block_builder_window,
+                from_env.block_builder_flush_max_age,
+                from_env.collection_interval,
+                from_env.edge_ttl,
+                from_env.histogram_buckets,
+            ) == (
+                secs(42),
+                secs(7),
+                secs(8),
+                Some(secs(9)),
+                Some(secs(10)),
+                Some(vec![crabka_units::millis(1), crabka_units::millis(2)]),
+            )
+        );
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-traces",
+            "--target=metrics-generator",
+            "--retention=11s",
+            "--block-builder-window=12s",
+            "--block-builder-flush-max-age=13s",
+            "--collection-interval=14s",
+            "--edge-ttl=15s",
+            "--histogram-buckets=3ms,4ms",
+        ])
+        .unwrap();
+        check!(
+            (
+                from_cli.retention,
+                from_cli.block_builder_window,
+                from_cli.block_builder_flush_max_age,
+                from_cli.collection_interval,
+                from_cli.edge_ttl,
+                from_cli.histogram_buckets,
+            ) == (
+                secs(11),
+                secs(12),
+                secs(13),
+                Some(secs(14)),
+                Some(secs(15)),
+                Some(vec![crabka_units::millis(3), crabka_units::millis(4)]),
             )
         );
     }
