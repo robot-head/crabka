@@ -6183,3 +6183,34 @@ targets, strict Clippy, workspace all-target check and strict Clippy, nightly
 formatting, and diff hygiene pass. Helm 4 lint/template and all 21 chart tests
 pass in an ephemeral container. This closes only the rebalancer runtime-policy
 slice; the repository-wide hardcoded operational-value audit remains active.
+
+## Gres Load-test Runtime Policy
+
+The standalone Gres load-test harness now resolves one validated runtime
+policy for its remaining process orchestration, workload driver, chaos proxy,
+fault scheduling, resource sampling, and report-selection values. All 28
+settings retain their previous defaults and are exposed on both `run` and
+`compare` as unit-bearing CLI arguments backed by
+`CRABKA_GRES_LOADTEST_*` environment variables. The compare HLC offset now
+uses the same environment-backed boundary.
+
+Times, byte limits, and the report deviation threshold use UOM values.
+Positive and non-negative counts use `refined_type`-validated newtypes, with
+checked conversions at runtime-library boundaries. Cross-field validation
+orders reconnect and histogram bounds, keeps startup retry delay within its
+deadline, and constrains report thresholds.
+
+The policy reaches child readiness and teardown, log draining and tails,
+broker polling and WAL-topic creation, proxy burst and queue behavior, schema
+connection and seeding, workload retries and pacing, fault flapping, sampling,
+and Markdown timeline selection. Existing public workload, proxy, fault, and
+report entry points remain default-preserving wrappers. Tenant/TLS identities,
+broker cluster ID, range/table and worker-ID layout, socket chunk size, and the
+one-byte throttle arithmetic floor remain fixed compatibility or implementation
+invariants. Broker CPU allocation was already scenario-configurable.
+
+All 106 runnable Gres load-test tests pass; the binary-dependent live-cluster
+test remains intentionally ignored. Gres load-test and workspace all-target
+check and strict Clippy, nightly formatting, and diff hygiene pass. This closes
+only the Gres load-test runtime-policy slice; the repository-wide hardcoded
+operational-value audit remains active.

@@ -41,11 +41,11 @@ dimensioned value and `refined_type`-validated newtypes for positive counts.
 
 ### Task 5: Closure
 
-- [ ] Run Gres load-test all-target tests and strict Clippy.
-- [ ] Run workspace all-target check and strict Clippy.
-- [ ] Run nightly formatting and diff hygiene.
-- [ ] Update `docs/configuration-audit.md` and commit closure docs.
-- [ ] Leave the repository-wide goal active.
+- [x] Run Gres load-test all-target tests and strict Clippy.
+- [x] Run workspace all-target check and strict Clippy.
+- [x] Run nightly formatting and diff hygiene.
+- [x] Update `docs/configuration-audit.md` and commit closure docs.
+- [x] Leave the repository-wide goal active.
 
 Fixed values remain fixed where configurability has no useful meaning: tenant
 and TLS identities, broker cluster ID, range/table and worker-ID layout,

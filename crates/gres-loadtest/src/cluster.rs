@@ -1647,7 +1647,7 @@ mod tests {
         assert!(arg_value(&spawned_args, "--registry-producer-dns-timeout") == Some("37ms"));
         assert!(arg_value(&spawned_args, "--registry-reader-admin-dns-timeout",) == Some("37ms"));
         assert!(arg_value(&spawned_args, "--client-dispatch-queue-capacity") == Some("7"));
-        assert!(arg_value(&spawned_args, "--client-frame-max") == Some("32768B"));
+        assert!(arg_value(&spawned_args, "--client-frame-max") == Some("32KiB"));
         assert!(arg_value(&spawned_args, "--registry-reader-fetch-min") == Some("3B"));
     }
 
