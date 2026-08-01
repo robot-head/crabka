@@ -3600,6 +3600,7 @@ dependencies = [
  "proptest",
  "prost 0.14.4",
  "protoc-bin-vendored",
+ "refined_type",
  "regex",
  "reqwest 0.13.4",
  "serde",

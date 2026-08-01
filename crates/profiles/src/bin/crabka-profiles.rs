@@ -21,7 +21,7 @@ use crabka_profiles::{
     cold_store::ColdProfileStore,
     compactor::{DownsamplePolicy, compact_once_with_policy},
     distributor::{DistributorState, KafkaSink, serve},
-    hot_store::{WalTailProfileStore, run_wal_tail},
+    hot_store::{RetentionConfig, WalTailProfileStore, run_wal_tail},
     ingest::{RelabelConfig, TenantLimitConfig},
     limits::{Limits, OverridesProvider},
     metrics::ServiceMetrics,
@@ -32,21 +32,32 @@ use crabka_telemetry::OtlpConfig;
 use crabka_units::{
     ByteSize, Time,
     convert::{ByteSizeExt as _, TimeExt as _},
-    mebibytes, parse, secs,
+    fmt::Human as _,
+    parse,
 };
+#[cfg(test)]
+use crabka_units::{mebibytes, secs};
 use object_store::{ObjectStore, path::Path as ObjectPath};
 
 #[derive(Debug, Parser)]
 struct Cli {
     #[command(flatten)]
     profiling: crabka_telemetry::profiling::ProfilingConfig,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_PROFILES_TARGET")]
     target: Target,
-    #[arg(long, default_value = "127.0.0.1:4040")]
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_LISTEN_ADDR",
+        default_value = "127.0.0.1:4040"
+    )]
     listen: SocketAddr,
     #[arg(long, env = "CRABKA_ADMIN_LISTEN_ADDR", default_value = "0.0.0.0:9404")]
     admin_listen_addr: SocketAddr,
-    #[arg(long, default_value = "127.0.0.1:9092")]
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_BOOTSTRAP",
+        default_value = "127.0.0.1:9092"
+    )]
     bootstrap: String,
     #[arg(
         long,
@@ -64,6 +75,20 @@ struct Cli {
     client_frame_max: ByteSize,
     #[arg(
         long,
+        env = "CRABKA_PROFILES_DISTRIBUTOR_REQUEST_MAX",
+        default_value = "16MiB",
+        value_parser = parse_positive_whole_byte_size
+    )]
+    distributor_request_max: ByteSize,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_DISTRIBUTOR_MAX_TRACKED_TENANTS",
+        default_value_t = 4096,
+        value_parser = parse_positive_usize
+    )]
+    distributor_max_tracked_tenants: usize,
+    #[arg(
+        long,
         env = "CRABKA_PROFILES_WAL_FETCH_MAX",
         default_value = "2MiB",
         value_parser = parse_consumer_fetch_size
@@ -76,7 +101,11 @@ struct Cli {
         value_parser = parse_consumer_fetch_size
     )]
     wal_fetch_partition_max: ByteSize,
-    #[arg(long, default_value = "file://./.crabka-profiles-blocks")]
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_OBJECT_STORE_URL",
+        default_value = "file://./.crabka-profiles-blocks"
+    )]
     object_store_url: String,
     #[arg(
         long,
@@ -93,33 +122,69 @@ struct Cli {
     index_snapshot_retain: IndexSnapshotRetain,
     #[arg(
         long,
+        env = "CRABKA_PROFILES_INDEX_REFRESH_INTERVAL",
+        default_value = "15s",
+        value_parser = parse::positive_time
+    )]
+    index_refresh_interval: Time,
+    #[arg(
+        long,
         env = "CRABKA_PROFILES_WAL_POLL_TIMEOUT",
         default_value = "500ms",
         value_parser = parse::positive_time
     )]
     wal_poll_timeout: Time,
-    // Same deployment contract as the flush-max-age flag: the name and the
-    // millisecond integer stay, and the value is lifted into a `Time` where it
-    // enters the frontend config.
-    #[arg(long, default_value_t = FrontendConfig::default().shard_width.millis_i64())]
-    query_frontend_shard_ms: i64,
-    #[arg(long)]
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_HOT_STORE_MAX_AGE",
+        default_value = "6h",
+        value_parser = parse::positive_time
+    )]
+    hot_store_max_age: Time,
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_HOT_STORE_MAX_RECORDS",
+        default_value_t = 1_000_000,
+        value_parser = parse_positive_usize
+    )]
+    hot_store_max_records: usize,
+    #[arg(
+        long = "query-frontend-shard-width",
+        visible_alias = "query-frontend-shard-ms",
+        env = "CRABKA_PROFILES_QUERY_FRONTEND_SHARD_WIDTH",
+        default_value = "15m",
+        value_parser = parse_positive_time_or_legacy_millis
+    )]
+    query_frontend_shard_width: Time,
+    #[arg(long, env = "CRABKA_PROFILES_TENANT_LIMITS_CONFIG")]
     tenant_limits_config: Option<std::path::PathBuf>,
-    #[arg(long)]
+    #[arg(long, env = "CRABKA_PROFILES_LIMITS_OVERRIDES_CONFIG")]
     profiles_limits_overrides_config: Option<std::path::PathBuf>,
-    #[arg(long, default_value = "crabka-profiles-query-wal-tail")]
+    #[arg(
+        long,
+        env = "CRABKA_PROFILES_QUERY_WAL_TAIL_GROUP_ID",
+        default_value = "crabka-profiles-query-wal-tail"
+    )]
     query_wal_tail_group_id: String,
-    #[arg(long, default_value_t = 8)]
+    #[arg(long, env = "CRABKA_PROFILES_COMPACTOR_MAX_BLOCKS_PER_JOB", default_value_t = 8, value_parser = parse_min_two_usize)]
     compactor_max_blocks_per_job: usize,
-    #[arg(long)]
-    compactor_downsample_resolution_ns: Option<i64>,
-    #[arg(long, default_value_t = crabka_profiles::blockbuilder::DEFAULT_FLUSH_RECORDS)]
+    #[arg(
+        long = "compactor-downsample-resolution",
+        visible_alias = "compactor-downsample-resolution-ns",
+        env = "CRABKA_PROFILES_COMPACTOR_DOWNSAMPLE_RESOLUTION",
+        value_parser = parse_positive_time_or_legacy_nanos
+    )]
+    compactor_downsample_resolution: Option<Time>,
+    #[arg(long, env = "CRABKA_PROFILES_BLOCK_BUILDER_FLUSH_RECORDS", default_value_t = crabka_profiles::blockbuilder::DEFAULT_FLUSH_RECORDS, value_parser = parse_positive_usize)]
     block_builder_flush_records: usize,
-    // The flag name and its millisecond integer encoding are the deployment
-    // contract (`demo/observability/docker-compose.yml` passes it), so the raw
-    // value is held here and lifted into a `Time` where it enters the config.
-    #[arg(long, default_value_t = crabka_profiles::blockbuilder::DEFAULT_FLUSH_MAX_AGE.millis_i64())]
-    block_builder_flush_max_age_ms: i64,
+    #[arg(
+        long = "block-builder-flush-max-age",
+        visible_alias = "block-builder-flush-max-age-ms",
+        env = "CRABKA_PROFILES_BLOCK_BUILDER_FLUSH_MAX_AGE",
+        default_value = "10s",
+        value_parser = parse_positive_time_or_legacy_millis
+    )]
+    block_builder_flush_max_age: Time,
     /// debuginfod base URLs (comma-separated) to fetch DWARF for unsymbolized
     /// native frames. Empty by default: the symbolizer makes NO outbound
     /// requests unless an operator explicitly opts in by supplying URLs.
@@ -192,6 +257,40 @@ fn parse_client_frame_max(value: &str) -> Result<ByteSize, String> {
     ClientFrameMax::try_from(value).map(ClientFrameMax::size)
 }
 
+fn parse_positive_usize(value: &str) -> Result<usize, String> {
+    use refined_type::rule::GreaterUsize;
+
+    GreaterUsize::<0>::new(value.parse::<usize>().map_err(|error| error.to_string())?)
+        .map(refined_type::Refined::into_value)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_min_two_usize(value: &str) -> Result<usize, String> {
+    use refined_type::rule::GreaterUsize;
+
+    GreaterUsize::<1>::new(value.parse::<usize>().map_err(|error| error.to_string())?)
+        .map(refined_type::Refined::into_value)
+        .map_err(|error| error.to_string())
+}
+
+fn parse_positive_time_or_legacy(value: &str, legacy: fn(i64) -> Time) -> Result<Time, String> {
+    if let Ok(raw) = value.parse::<i64>() {
+        if raw <= 0 {
+            return Err("time must be positive".to_owned());
+        }
+        return Ok(legacy(raw));
+    }
+    parse::positive_time(value).map_err(|error| error.to_string())
+}
+
+fn parse_positive_time_or_legacy_millis(value: &str) -> Result<Time, String> {
+    parse_positive_time_or_legacy(value, Time::from_millis)
+}
+
+fn parse_positive_time_or_legacy_nanos(value: &str) -> Result<Time, String> {
+    parse_positive_time_or_legacy(value, Time::from_nanos)
+}
+
 fn client_resource_policy(
     cli: &Cli,
 ) -> (
@@ -243,9 +342,6 @@ fn build_object_store(
     })
 }
 
-/// How often the querier reloads the profile block index from object storage.
-const INDEX_REFRESH_INTERVAL: Time = secs(15);
-
 /// How long each hot WAL-tail poll waits for records.
 /// Periodically reload the profile block index from object storage and swap it
 /// into the cold store. The block-builder writes new blocks continuously; without
@@ -258,9 +354,10 @@ fn spawn_profile_index_refresh(
     store: Arc<dyn ObjectStore>,
     index_key: String,
     max_bytes: ByteSize,
+    interval: Time,
 ) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(INDEX_REFRESH_INTERVAL.to_std());
+        let mut tick = tokio::time::interval(interval.to_std());
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tick.tick().await;
@@ -318,7 +415,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 active_series: Mutex::default(),
                 ingestion_buckets: Mutex::default(),
                 relabel: Vec::<RelabelConfig>::new(),
-                max_decompressed: mebibytes(16),
+                max_decompressed: cli.distributor_request_max,
+                max_tracked_tenants: cli.distributor_max_tracked_tenants,
                 metrics: metrics.clone(),
             });
             let shutdown = async {
@@ -338,7 +436,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.wal_fetch_max = cli.wal_fetch_max;
             config.wal_fetch_partition_max = cli.wal_fetch_partition_max;
             config.flush_records = cli.block_builder_flush_records;
-            config.flush_max_age = Time::from_millis(cli.block_builder_flush_max_age_ms);
+            config.flush_max_age = cli.block_builder_flush_max_age;
             config.poll_timeout = cli.wal_poll_timeout;
             config.index_snapshot_max = cli.index_snapshot_max;
             config.index_snapshot_retain = cli.index_snapshot_retain;
@@ -370,8 +468,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 refresh_store,
                 index_key.clone(),
                 cli.index_snapshot_max,
+                cli.index_refresh_interval,
             );
-            let hot = WalTailProfileStore::new();
+            let hot = WalTailProfileStore::with_retention(RetentionConfig {
+                max_age: cli.hot_store_max_age,
+                max_records: cli.hot_store_max_records,
+            });
             spawn_wal_tail(
                 &cli,
                 hot.clone(),
@@ -415,8 +517,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 refresh_store,
                 index_key.clone(),
                 cli.index_snapshot_max,
+                cli.index_refresh_interval,
             );
-            let hot = WalTailProfileStore::new();
+            let hot = WalTailProfileStore::with_retention(RetentionConfig {
+                max_age: cli.hot_store_max_age,
+                max_records: cli.hot_store_max_records,
+            });
             spawn_wal_tail(
                 &cli,
                 hot.clone(),
@@ -428,7 +534,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 QuerierState::new_frontend_with_overrides(
                     union,
                     FrontendConfig {
-                        shard_width: Time::from_millis(cli.query_frontend_shard_ms),
+                        shard_width: cli.query_frontend_shard_width,
                     },
                     overrides,
                 )
@@ -440,7 +546,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let bound = serve_querier(cli.listen, state, shutdown).await?;
             tracing::info!(
                 %bound,
-                shard_width_ms = cli.query_frontend_shard_ms,
+                shard_width = %cli.query_frontend_shard_width.human(),
                 "profiles query-frontend listening"
             );
             let _ = tokio::signal::ctrl_c().await;
@@ -460,9 +566,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
             .await
             .unwrap_or_else(|_| ProfileIndex::new());
-            let downsample = cli
-                .compactor_downsample_resolution_ns
-                .map(|resolution_ns| DownsamplePolicy { resolution_ns });
+            let downsample =
+                cli.compactor_downsample_resolution
+                    .map(|resolution| DownsamplePolicy {
+                        resolution_ns: resolution.nanos_i64(),
+                    });
             let metas = compact_once_with_policy(
                 &configured.store,
                 &mut index,
@@ -479,7 +587,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .await?;
             tracing::info!(
                 compacted_blocks = metas.len(),
-                downsample_resolution_ns = ?cli.compactor_downsample_resolution_ns,
+                downsample_resolution = ?cli.compactor_downsample_resolution,
                 "profiles compactor finished one pass"
             );
         }
@@ -538,7 +646,7 @@ mod tests {
     use std::sync::{Mutex as StdMutex, OnceLock};
 
     use assert2::{assert, check};
-    use clap::Parser;
+    use clap::{CommandFactory, Parser};
     use crabka_units::{bytes, per_sec};
 
     use super::*;
@@ -718,6 +826,129 @@ mod tests {
     }
 
     #[test]
+    fn runtime_policy_preserves_defaults_and_accepts_units() {
+        let defaults = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
+        assert!(defaults.distributor_request_max == mebibytes(16));
+        assert!(defaults.distributor_max_tracked_tenants == 4096);
+        assert!(defaults.index_refresh_interval == secs(15));
+        assert!(defaults.hot_store_max_age == crabka_units::hours(6));
+        assert!(defaults.hot_store_max_records == 1_000_000);
+        assert!(defaults.query_frontend_shard_width == crabka_units::minutes(15));
+
+        let custom = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "querier",
+            "--distributor-request-max",
+            "2MiB",
+            "--distributor-max-tracked-tenants",
+            "32",
+            "--index-refresh-interval",
+            "2s",
+            "--hot-store-max-age",
+            "30m",
+            "--hot-store-max-records",
+            "500",
+            "--query-frontend-shard-width",
+            "1m",
+            "--block-builder-flush-max-age",
+            "3s",
+            "--compactor-downsample-resolution",
+            "5m",
+        ])
+        .unwrap();
+        assert!(custom.distributor_request_max == mebibytes(2));
+        assert!(custom.distributor_max_tracked_tenants == 32);
+        assert!(custom.index_refresh_interval == secs(2));
+        assert!(custom.hot_store_max_age == crabka_units::minutes(30));
+        assert!(custom.hot_store_max_records == 500);
+        assert!(custom.query_frontend_shard_width == crabka_units::minutes(1));
+        assert!(custom.block_builder_flush_max_age == secs(3));
+        assert!(custom.compactor_downsample_resolution == Some(crabka_units::minutes(5)));
+    }
+
+    #[test]
+    fn runtime_policy_rejects_zero_and_invalid_counts() {
+        for (flag, invalid) in [
+            ("--distributor-request-max", "0B"),
+            ("--distributor-max-tracked-tenants", "0"),
+            ("--index-refresh-interval", "0s"),
+            ("--hot-store-max-age", "0s"),
+            ("--hot-store-max-records", "0"),
+            ("--query-frontend-shard-width", "0"),
+            ("--block-builder-flush-records", "0"),
+            ("--block-builder-flush-max-age", "0"),
+            ("--compactor-max-blocks-per-job", "1"),
+            ("--compactor-downsample-resolution", "0"),
+        ] {
+            assert!(
+                Cli::try_parse_from(["crabka-profiles", "--target", "querier", flag, invalid])
+                    .is_err(),
+                "{flag} should reject {invalid:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn runtime_policy_reads_environment_and_cli_wins() {
+        const CHILD: &str = "CRABKA_PROFILES_RUNTIME_POLICY_CHILD";
+
+        if std::env::var_os(CHILD).is_none() {
+            let status =
+                std::process::Command::new(std::env::current_exe().expect("test executable"))
+                    .args([
+                        "--exact",
+                        "tests::runtime_policy_reads_environment_and_cli_wins",
+                    ])
+                    .env(CHILD, "1")
+                    .env("CRABKA_PROFILES_DISTRIBUTOR_REQUEST_MAX", "2MiB")
+                    .env("CRABKA_PROFILES_DISTRIBUTOR_MAX_TRACKED_TENANTS", "32")
+                    .env("CRABKA_PROFILES_INDEX_REFRESH_INTERVAL", "2s")
+                    .env("CRABKA_PROFILES_HOT_STORE_MAX_AGE", "30m")
+                    .env("CRABKA_PROFILES_HOT_STORE_MAX_RECORDS", "500")
+                    .status()
+                    .expect("child test");
+            assert!(status.success());
+            return;
+        }
+
+        let from_env = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
+        assert!(from_env.distributor_request_max == mebibytes(2));
+        assert!(from_env.distributor_max_tracked_tenants == 32);
+        assert!(from_env.index_refresh_interval == secs(2));
+        assert!(from_env.hot_store_max_age == crabka_units::minutes(30));
+        assert!(from_env.hot_store_max_records == 500);
+
+        let from_cli = Cli::try_parse_from([
+            "crabka-profiles",
+            "--target",
+            "querier",
+            "--distributor-request-max",
+            "3MiB",
+            "--distributor-max-tracked-tenants",
+            "64",
+        ])
+        .unwrap();
+        assert!(from_cli.distributor_request_max == mebibytes(3));
+        assert!(from_cli.distributor_max_tracked_tenants == 64);
+    }
+
+    #[test]
+    fn every_process_argument_has_an_environment_binding() {
+        let command = Cli::command();
+        let missing = command
+            .get_arguments()
+            .filter(|argument| argument.get_long().is_some() && argument.get_env().is_none())
+            .filter_map(|argument| argument.get_long().map(str::to_owned))
+            .collect::<Vec<_>>();
+
+        assert!(
+            missing.is_empty(),
+            "arguments without env bindings: {missing:?}"
+        );
+    }
+
+    #[test]
     fn parses_block_builder_target() {
         let cli = Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
 
@@ -738,7 +969,7 @@ mod tests {
         .unwrap();
 
         assert!(cli.block_builder_flush_records == 4096);
-        assert!(cli.block_builder_flush_max_age_ms == 60_000);
+        assert!(cli.block_builder_flush_max_age == crabka_units::minutes(1));
     }
 
     #[test]
@@ -975,7 +1206,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.target, Target::QueryFrontend));
-        assert!(cli.query_frontend_shard_ms == 30_000);
+        assert!(cli.query_frontend_shard_width == crabka_units::secs(30));
     }
 
     #[test]
@@ -1050,7 +1281,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert!(cli.compactor_downsample_resolution_ns == Some(60_000_000_000));
+        assert!(cli.compactor_downsample_resolution == Some(crabka_units::minutes(1)));
     }
 
     #[test]
