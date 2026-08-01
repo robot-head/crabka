@@ -4,7 +4,12 @@
 //! SQL remains ordinary parsed SQL and therefore keeps the session's MVCC,
 //! locking, constraint, savepoint, and command-tag behaviour.
 
-use std::{collections::HashMap, future::Future, pin::Pin, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    future::Future,
+    pin::Pin,
+    sync::Arc,
+};
 
 use crabka_pgcatalog::routine::{Routine, RoutineKind};
 use crabka_pgparser::ast::{
@@ -28,6 +33,7 @@ type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 struct Slot {
     value: Datum,
     ty: ColumnType,
+    record_types: Option<Arc<[ColumnType]>>,
     constant: bool,
     not_null: bool,
 }
@@ -37,6 +43,18 @@ struct Frame {
     label: Option<String>,
     slots: HashMap<String, Slot>,
     aliases: HashMap<String, String>,
+}
+
+fn inferred_record_types(value: &Datum) -> Option<Arc<[ColumnType]>> {
+    let Datum::Record(record) = value else {
+        return None;
+    };
+    record
+        .values
+        .iter()
+        .map(Datum::column_type)
+        .collect::<Option<Vec<_>>>()
+        .map(Arc::from)
 }
 
 enum Flow {
@@ -350,122 +368,207 @@ pub(crate) fn eval_scalar_function(
 
 /// Whether a scalar body needs the owning SQL session rather than the pure
 /// expression/control interpreter.
-pub(crate) fn scalar_function_requires_session(routine: &Routine) -> Result<bool, ExecError> {
-    fn expression_needs_session(expr: &Expr) -> bool {
-        let mut needs_session = false;
-        crate::grouping::visit_expr(expr, &mut |node| {
-            needs_session |= matches!(
-                node,
-                Expr::ScalarSubquery(_)
-                    | Expr::Exists(_)
-                    | Expr::InSubquery { .. }
-                    | Expr::Quantified { .. }
-            );
-        });
-        needs_session
+pub(crate) fn scalar_function_requires_session(
+    catalog: &dyn crabka_pgkv::Kv,
+    routine: &Routine,
+) -> Result<bool, ExecError> {
+    struct Scanner<'a> {
+        catalog: &'a dyn crabka_pgkv::Kv,
+        visiting: HashSet<String>,
     }
 
-    fn target_needs_session(target: &PlPgSqlTarget) -> bool {
-        target.subscripts.iter().any(expression_needs_session)
-    }
+    impl Scanner<'_> {
+        fn routine(&mut self, routine: &Routine) -> Result<bool, ExecError> {
+            let identity = routine.identity();
+            if !self.visiting.insert(identity.clone()) {
+                return Ok(false);
+            }
+            let result = self.block(&crate::routine::parse_plpgsql_body(routine)?);
+            self.visiting.remove(&identity);
+            result
+        }
 
-    fn block_needs_session(block: &PlPgSqlBlock) -> bool {
-        block
-            .declarations
-            .iter()
-            .any(|declaration| match declaration {
-                PlPgSqlDeclaration::Variable { default, .. } => {
-                    default.as_ref().is_some_and(expression_needs_session)
+        fn expressions<'a>(
+            &mut self,
+            expressions: impl IntoIterator<Item = &'a Expr>,
+        ) -> Result<bool, ExecError> {
+            for expression in expressions {
+                if self.expression(expression)? {
+                    return Ok(true);
                 }
-                PlPgSqlDeclaration::Alias { .. } => false,
-                PlPgSqlDeclaration::Cursor { .. } => true,
-            })
-            || block.statements.iter().any(statement_needs_session)
-            || block
-                .exceptions
-                .iter()
-                .any(|handler| handler.statements.iter().any(statement_needs_session))
-    }
+            }
+            Ok(false)
+        }
 
-    fn statement_needs_session(statement: &PlPgSqlStatement) -> bool {
-        match statement {
-            PlPgSqlStatement::Block(block) => block_needs_session(block),
-            PlPgSqlStatement::If {
-                branches,
-                else_body,
-            } => {
-                branches.iter().any(|(condition, body)| {
-                    expression_needs_session(condition) || body.iter().any(statement_needs_session)
-                }) || else_body.iter().any(statement_needs_session)
+        fn statements<'a>(
+            &mut self,
+            statements: impl IntoIterator<Item = &'a PlPgSqlStatement>,
+        ) -> Result<bool, ExecError> {
+            for statement in statements {
+                if self.statement(statement)? {
+                    return Ok(true);
+                }
             }
-            PlPgSqlStatement::Case {
-                operand,
-                arms,
-                else_body,
-            } => {
-                operand.as_ref().is_some_and(expression_needs_session)
-                    || arms.iter().any(|(conditions, body)| {
-                        conditions.iter().any(expression_needs_session)
-                            || body.iter().any(statement_needs_session)
-                    })
-                    || else_body
-                        .as_ref()
-                        .is_some_and(|body| body.iter().any(statement_needs_session))
+            Ok(false)
+        }
+
+        fn expression(&mut self, expression: &Expr) -> Result<bool, ExecError> {
+            let mut direct = false;
+            let mut calls = Vec::new();
+            crate::grouping::visit_expr(expression, &mut |node| match node {
+                Expr::ScalarSubquery(_)
+                | Expr::Exists(_)
+                | Expr::InSubquery { .. }
+                | Expr::Quantified { .. } => direct = true,
+                Expr::Func(call) => calls.push(call.clone()),
+                _ => {}
+            });
+            if direct {
+                return Ok(true);
             }
-            PlPgSqlStatement::Loop { kind, body, .. } => {
-                let source_needs_session = match kind.as_ref() {
-                    PlPgSqlLoop::Unconditional => false,
-                    PlPgSqlLoop::While(condition) => expression_needs_session(condition),
-                    PlPgSqlLoop::Integer {
-                        lower, upper, step, ..
-                    } => {
-                        expression_needs_session(lower)
-                            || expression_needs_session(upper)
-                            || step.as_ref().is_some_and(expression_needs_session)
-                    }
-                    PlPgSqlLoop::Query { .. }
-                    | PlPgSqlLoop::Dynamic { .. }
-                    | PlPgSqlLoop::Foreach { .. } => true,
+            for call in calls {
+                let FuncArgs::Exprs(args) = &call.args else {
+                    continue;
                 };
-                source_needs_session || body.iter().any(statement_needs_session)
+                if !crate::routine::is_user_routine(self.catalog, &call.name) {
+                    continue;
+                }
+                let given = crate::eval::static_arg_types(args, &crate::scope::Scope::empty())
+                    .unwrap_or_else(|_| vec![crate::eval::ArgType::Opaque; args.len()]);
+                match crate::routine::resolve_call(self.catalog, &call.name, &given) {
+                    Ok(Some(callee)) if callee.language == "plpgsql" => {
+                        if self.routine(&callee)? {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(Some(_)) | Err(_) => return Ok(true),
+                    Ok(None) => {}
+                }
             }
-            PlPgSqlStatement::Raise(raise) => {
-                raise.level != PlPgSqlRaiseLevel::Exception
-                    || raise.parameters.iter().any(expression_needs_session)
-                    || raise
-                        .options
-                        .iter()
-                        .any(|(_, value)| expression_needs_session(value))
+            Ok(false)
+        }
+
+        fn block(&mut self, block: &PlPgSqlBlock) -> Result<bool, ExecError> {
+            for declaration in &block.declarations {
+                match declaration {
+                    PlPgSqlDeclaration::Variable {
+                        default: Some(default),
+                        ..
+                    } if self.expression(default)? => return Ok(true),
+                    PlPgSqlDeclaration::Cursor { .. } => return Ok(true),
+                    PlPgSqlDeclaration::Variable { .. } | PlPgSqlDeclaration::Alias { .. } => {}
+                }
             }
-            PlPgSqlStatement::Sql { .. }
-            | PlPgSqlStatement::Perform { .. }
-            | PlPgSqlStatement::Execute { .. }
-            | PlPgSqlStatement::Open { .. }
-            | PlPgSqlStatement::Fetch { .. }
-            | PlPgSqlStatement::Close(_)
-            | PlPgSqlStatement::GetDiagnostics { .. }
-            | PlPgSqlStatement::Transaction { .. }
-            | PlPgSqlStatement::ReturnNext(_)
-            | PlPgSqlStatement::ReturnQuery(_)
-            | PlPgSqlStatement::ReturnQueryExecute { .. } => true,
-            PlPgSqlStatement::Assign { target, value } => {
-                target_needs_session(target) || expression_needs_session(value)
+            if self.statements(&block.statements)? {
+                return Ok(true);
             }
-            PlPgSqlStatement::Exit { when, .. } => {
-                when.as_ref().is_some_and(expression_needs_session)
+            for handler in &block.exceptions {
+                if self.statements(&handler.statements)? {
+                    return Ok(true);
+                }
             }
-            PlPgSqlStatement::Return(value) => value.as_ref().is_some_and(expression_needs_session),
-            PlPgSqlStatement::Assert { condition, message } => {
-                expression_needs_session(condition)
-                    || message.as_ref().is_some_and(expression_needs_session)
+            Ok(false)
+        }
+
+        fn statement(&mut self, statement: &PlPgSqlStatement) -> Result<bool, ExecError> {
+            match statement {
+                PlPgSqlStatement::Block(block) => self.block(block),
+                PlPgSqlStatement::If {
+                    branches,
+                    else_body,
+                } => {
+                    for (condition, body) in branches {
+                        if self.expression(condition)? || self.statements(body)? {
+                            return Ok(true);
+                        }
+                    }
+                    self.statements(else_body)
+                }
+                PlPgSqlStatement::Case {
+                    operand,
+                    arms,
+                    else_body,
+                } => {
+                    if let Some(operand) = operand
+                        && self.expression(operand)?
+                    {
+                        return Ok(true);
+                    }
+                    for (conditions, body) in arms {
+                        if self.expressions(conditions)? || self.statements(body)? {
+                            return Ok(true);
+                        }
+                    }
+                    match else_body {
+                        Some(body) => self.statements(body),
+                        None => Ok(false),
+                    }
+                }
+                PlPgSqlStatement::Loop { kind, body, .. } => {
+                    let source = match kind.as_ref() {
+                        PlPgSqlLoop::Unconditional => false,
+                        PlPgSqlLoop::While(condition) => self.expression(condition)?,
+                        PlPgSqlLoop::Integer {
+                            lower, upper, step, ..
+                        } => {
+                            self.expression(lower)?
+                                || self.expression(upper)?
+                                || match step {
+                                    Some(step) => self.expression(step)?,
+                                    None => false,
+                                }
+                        }
+                        PlPgSqlLoop::Query { .. }
+                        | PlPgSqlLoop::Dynamic { .. }
+                        | PlPgSqlLoop::Foreach { .. } => true,
+                    };
+                    if source {
+                        Ok(true)
+                    } else {
+                        self.statements(body)
+                    }
+                }
+                PlPgSqlStatement::Raise(raise) => Ok(raise.level != PlPgSqlRaiseLevel::Exception
+                    || self.expressions(&raise.parameters)?
+                    || self.expressions(raise.options.iter().map(|(_, value)| value))?),
+                PlPgSqlStatement::Sql { .. }
+                | PlPgSqlStatement::Perform { .. }
+                | PlPgSqlStatement::Execute { .. }
+                | PlPgSqlStatement::Open { .. }
+                | PlPgSqlStatement::Fetch { .. }
+                | PlPgSqlStatement::Close(_)
+                | PlPgSqlStatement::GetDiagnostics { .. }
+                | PlPgSqlStatement::Transaction { .. }
+                | PlPgSqlStatement::ReturnNext(_)
+                | PlPgSqlStatement::ReturnQuery(_)
+                | PlPgSqlStatement::ReturnQueryExecute { .. } => Ok(true),
+                PlPgSqlStatement::Assign { target, value } => {
+                    Ok(self.expressions(&target.subscripts)? || self.expression(value)?)
+                }
+                PlPgSqlStatement::Exit { when, .. } => match when {
+                    Some(when) => self.expression(when),
+                    None => Ok(false),
+                },
+                PlPgSqlStatement::Return(value) => match value {
+                    Some(value) => self.expression(value),
+                    None => Ok(false),
+                },
+                PlPgSqlStatement::Assert { condition, message } => Ok(self
+                    .expression(condition)?
+                    || match message {
+                        Some(message) => self.expression(message)?,
+                        None => false,
+                    }),
+                PlPgSqlStatement::Null => Ok(false),
             }
-            PlPgSqlStatement::Null => false,
         }
     }
 
-    Ok(block_needs_session(&crate::routine::parse_plpgsql_body(
-        routine,
-    )?))
+    Scanner {
+        catalog,
+        visiting: HashSet::new(),
+    }
+    .routine(routine)
 }
 
 fn bind_scalar_parameters(
@@ -493,6 +596,7 @@ fn bind_scalar_parameters(
             Slot {
                 value,
                 ty,
+                record_types: None,
                 constant: false,
                 not_null: false,
             },
@@ -515,6 +619,7 @@ fn bind_scalar_parameters(
             Slot {
                 value: Datum::Null,
                 ty: param.ty.column.unwrap_or(ColumnType::Text),
+                record_types: None,
                 constant: false,
                 not_null: false,
             },
@@ -528,6 +633,7 @@ fn bind_scalar_parameters(
                 Slot {
                     value: Datum::Null,
                     ty,
+                    record_types: None,
                     constant: false,
                     not_null: false,
                 },
@@ -563,6 +669,7 @@ async fn bind_parameters(
         let slot = Slot {
             value,
             ty,
+            record_types: None,
             constant: false,
             not_null: false,
         };
@@ -588,6 +695,7 @@ fn add_special_slots(frame: &mut Frame) {
         Slot {
             value: Datum::Bool(false),
             ty: ColumnType::Bool,
+            record_types: None,
             constant: false,
             not_null: true,
         },
@@ -597,6 +705,7 @@ fn add_special_slots(frame: &mut Frame) {
         Slot {
             value: Datum::Text("00000".into()),
             ty: ColumnType::Text,
+            record_types: None,
             constant: false,
             not_null: true,
         },
@@ -606,6 +715,7 @@ fn add_special_slots(frame: &mut Frame) {
         Slot {
             value: Datum::Text(String::new()),
             ty: ColumnType::Text,
+            record_types: None,
             constant: false,
             not_null: true,
         },
@@ -931,8 +1041,9 @@ impl ScalarInterpreter<'_> {
                 self.frames.last_mut().expect("loop frame").slots.insert(
                     variable.clone(),
                     Slot {
-                        value: Datum::Int8(lower),
-                        ty: ColumnType::Int8,
+                        value: Datum::Int4(lower),
+                        ty: ColumnType::Int4,
+                        record_types: None,
                         constant: false,
                         not_null: true,
                     },
@@ -943,7 +1054,7 @@ impl ScalarInterpreter<'_> {
                 } else {
                     current <= upper
                 } {
-                    self.assign_name(variable, Datum::Int8(current))?;
+                    self.assign_name(variable, Datum::Int4(current))?;
                     if let Some(flow) = self.loop_iteration(label, body)? {
                         self.frames.pop();
                         return Ok(flow);
@@ -1027,6 +1138,7 @@ impl ScalarInterpreter<'_> {
                     Slot {
                         value,
                         ty,
+                        record_types: None,
                         constant: *constant,
                         not_null: *not_null,
                     },
@@ -1091,15 +1203,14 @@ impl ScalarInterpreter<'_> {
         }
     }
 
-    fn integer(&self, expr: &Expr) -> Result<i64, ExecError> {
-        match self.eval(expr)? {
-            Datum::Int2(value) => Ok(i64::from(value)),
-            Datum::Int4(value) => Ok(i64::from(value)),
-            Datum::Int8(value) => Ok(value),
-            _ => Err(ExecError::TypeMismatch(
-                "FOR loop bounds must be integers".into(),
-            )),
-        }
+    fn integer(&self, expr: &Expr) -> Result<i32, ExecError> {
+        let value = self.eval(expr)?;
+        let Datum::Int4(value) =
+            crabka_pgtypes::cast::cast(&value, ColumnType::Int4, &self.ctx.time_zone)?
+        else {
+            unreachable!("int4 cast returned another datum type");
+        };
+        Ok(value)
     }
 
     fn lookup_slot(&self, name: &str) -> Option<&Slot> {
@@ -1162,10 +1273,25 @@ impl ScalarInterpreter<'_> {
                 else {
                     return Err(ExecError::UndefinedColumn(target.path[1].clone()));
                 };
+                let field_type = slot
+                    .record_types
+                    .as_deref()
+                    .and_then(|types| types.get(index))
+                    .copied()
+                    .or_else(|| record.values[index].column_type());
                 record.values[index] = if subscripts.is_empty() {
-                    value
+                    match field_type {
+                        Some(ty) => crabka_pgtypes::cast::cast(&value, ty, &self.ctx.time_zone)?,
+                        None => value,
+                    }
                 } else {
-                    assign_subscripted(&record.values[index], None, &subscripts, &value, self.ctx)?
+                    assign_subscripted(
+                        &record.values[index],
+                        field_type,
+                        &subscripts,
+                        &value,
+                        self.ctx,
+                    )?
                 };
                 return Ok(());
             }
@@ -1194,6 +1320,7 @@ impl ScalarInterpreter<'_> {
                         ),
                     });
                 }
+                slot.record_types = inferred_record_types(&value);
                 slot.value = value;
                 return Ok(());
             }
@@ -1635,6 +1762,7 @@ impl Interpreter<'_> {
                                 Slot {
                                     value,
                                     ty,
+                                    record_types: None,
                                     constant: true,
                                     not_null: false,
                                 },
@@ -1795,8 +1923,9 @@ impl Interpreter<'_> {
                     self.frames.last_mut().unwrap().slots.insert(
                         variable.clone(),
                         Slot {
-                            value: Datum::Int8(lower),
-                            ty: ColumnType::Int8,
+                            value: Datum::Int4(lower),
+                            ty: ColumnType::Int4,
+                            record_types: None,
                             constant: false,
                             not_null: true,
                         },
@@ -1810,7 +1939,7 @@ impl Interpreter<'_> {
                         current <= end
                     } {
                         found = true;
-                        self.assign_name(variable, Datum::Int8(current))?;
+                        self.assign_name(variable, Datum::Int4(current))?;
                         if let Some(flow) = self.loop_iteration(label, body).await? {
                             self.frames.pop();
                             self.set_found(found);
@@ -1993,6 +2122,7 @@ impl Interpreter<'_> {
                     Slot {
                         value,
                         ty,
+                        record_types: None,
                         constant: *constant,
                         not_null: *not_null,
                     },
@@ -2031,6 +2161,7 @@ impl Interpreter<'_> {
                     Slot {
                         value: Datum::Text(name.clone()),
                         ty: ColumnType::Text,
+                        record_types: None,
                         constant: false,
                         not_null: true,
                     },
@@ -2081,15 +2212,14 @@ impl Interpreter<'_> {
         }
     }
 
-    async fn integer_async(&mut self, expr: &Expr) -> Result<i64, ExecError> {
-        match self.eval_async(expr).await?.0 {
-            Datum::Int2(value) => Ok(i64::from(value)),
-            Datum::Int4(value) => Ok(i64::from(value)),
-            Datum::Int8(value) => Ok(value),
-            _ => Err(ExecError::TypeMismatch(
-                "FOR loop bounds must be integers".into(),
-            )),
-        }
+    async fn integer_async(&mut self, expr: &Expr) -> Result<i32, ExecError> {
+        let value = self.eval_async(expr).await?.0;
+        let time_zone = self.session.plpgsql_eval_context().time_zone;
+        let Datum::Int4(value) = crabka_pgtypes::cast::cast(&value, ColumnType::Int4, &time_zone)?
+        else {
+            unreachable!("int4 cast returned another datum type");
+        };
+        Ok(value)
     }
 
     fn lookup_slot(&self, name: &str) -> Option<&Slot> {
@@ -2157,10 +2287,25 @@ impl Interpreter<'_> {
                 else {
                     return Err(ExecError::UndefinedColumn(target.path[1].clone()));
                 };
+                let field_type = slot
+                    .record_types
+                    .as_deref()
+                    .and_then(|types| types.get(index))
+                    .copied()
+                    .or_else(|| record.values[index].column_type());
                 record.values[index] = if subscripts.is_empty() {
-                    value
+                    match field_type {
+                        Some(ty) => crabka_pgtypes::cast::cast(&value, ty, &ctx.time_zone)?,
+                        None => value,
+                    }
                 } else {
-                    assign_subscripted(&record.values[index], None, &subscripts, &value, &ctx)?
+                    assign_subscripted(
+                        &record.values[index],
+                        field_type,
+                        &subscripts,
+                        &value,
+                        &ctx,
+                    )?
                 };
                 return Ok(());
             }
@@ -2190,7 +2335,25 @@ impl Interpreter<'_> {
                         ),
                     });
                 }
+                slot.record_types = inferred_record_types(&value);
                 slot.value = value;
+                return Ok(());
+            }
+        }
+        Err(ExecError::Syntax(format!(
+            "\"{name}\" is not a known variable"
+        )))
+    }
+
+    fn set_record_types(
+        &mut self,
+        name: &str,
+        record_types: Arc<[ColumnType]>,
+    ) -> Result<(), ExecError> {
+        let name = self.resolve_alias(name);
+        for frame in self.frames.iter_mut().rev() {
+            if let Some(slot) = frame.slots.get_mut(&name) {
+                slot.record_types = Some(record_types);
                 return Ok(());
             }
         }
@@ -2359,12 +2522,17 @@ impl Interpreter<'_> {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             let names: Vec<String> = fields.iter().map(|field| field.name.clone()).collect();
-            return self
-                .assign_target(
-                    target,
-                    Datum::Record(RecordValue::named(None, Arc::from(names), values)),
-                )
-                .await;
+            let record_types = fields
+                .iter()
+                .map(|field| crate::exec::column_type_from_oid(field.type_oid))
+                .collect::<Result<Vec<_>, _>>()?;
+            self.assign_target(
+                target,
+                Datum::Record(RecordValue::named(None, Arc::from(names), values)),
+            )
+            .await?;
+            self.set_record_types(&target.path[0], Arc::from(record_types))?;
+            return Ok(());
         }
         if targets.len() != row.map_or(targets.len(), Vec::len) {
             return Err(ExecError::Syntax(
@@ -2466,6 +2634,7 @@ impl Interpreter<'_> {
             }
             call_args.push(arg.clone());
         }
+        let _guard = self.session.plpgsql_enter_call()?;
         let output = execute_call_with_output(
             self.session,
             name,
@@ -4079,5 +4248,91 @@ mod tests {
             .await
             .expect("rolled back side effect");
         assert!(first_text(&count) == "1");
+    }
+
+    #[tokio::test]
+    async fn integer_for_variables_are_int4_and_bounds_are_range_checked() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let rows = session
+            .simple_query(
+                "CREATE FUNCTION loop_pick(x int4) RETURNS text LANGUAGE plpgsql AS $$ \
+                 BEGIN RETURN 'int4'; END $$; \
+                 CREATE FUNCTION loop_pick(x int8) RETURNS text LANGUAGE plpgsql AS $$ \
+                 BEGIN RETURN 'int8'; END $$; \
+                 CREATE FUNCTION loop_type() RETURNS text LANGUAGE plpgsql AS $$ \
+                 BEGIN FOR i IN 1..1 LOOP RETURN loop_pick(i); END LOOP; END $$; \
+                 SELECT loop_type()",
+            )
+            .await
+            .expect("integer loop overload");
+        assert!(first_text(&rows[3..]) == "int4");
+
+        let error = session
+            .simple_query(
+                "DO $$ BEGIN FOR i IN 2147483648::int8..2147483648::int8 LOOP NULL; END LOOP; END $$",
+            )
+            .await
+            .expect_err("int4 loop bound overflow");
+        assert!(error.code == "22003");
+    }
+
+    #[tokio::test]
+    async fn nested_procedure_recursion_is_bounded() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE PROCEDURE recursive_call() LANGUAGE plpgsql AS $$ \
+                 BEGIN CALL recursive_call(); END $$",
+            )
+            .await
+            .expect("procedure");
+        let error = session
+            .simple_query("CALL recursive_call()")
+            .await
+            .expect_err("bounded recursion");
+        assert!(error.code == "54001");
+    }
+
+    #[tokio::test]
+    async fn nested_sql_bearing_function_uses_session_exception_rollback() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE nested_sql_guard (id int4 PRIMARY KEY); \
+                 INSERT INTO nested_sql_guard VALUES (1); \
+                 CREATE FUNCTION nested_sql_inner() RETURNS int4 LANGUAGE plpgsql AS $$ \
+                 BEGIN INSERT INTO nested_sql_guard VALUES (1); RETURN 0; END $$; \
+                 CREATE FUNCTION nested_sql_outer() RETURNS int4 LANGUAGE plpgsql AS $$ \
+                 BEGIN \
+                   BEGIN RETURN nested_sql_inner(); \
+                   EXCEPTION WHEN unique_violation THEN RETURN 7; END; \
+                 END $$",
+            )
+            .await
+            .expect("setup");
+        let rows = session
+            .simple_query("BEGIN; SELECT nested_sql_outer(); SELECT 1; ROLLBACK")
+            .await
+            .expect("caught inner error keeps transaction usable");
+        assert!(first_text(&rows[1..]) == "7");
+        assert!(first_text(&rows[2..]) == "1");
+    }
+
+    #[tokio::test]
+    async fn record_field_assignment_coerces_to_the_selected_column_type() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        for select in ["1::int4", "NULL::int4"] {
+            let error = session
+                .simple_query(&format!(
+                    "DO $$ DECLARE r record; BEGIN SELECT {select} AS x INTO r; r.x := 'oops'; END $$"
+                ))
+                .await
+                .expect_err("record field cast");
+            assert!(error.code == "22P02", "{select}: {error:?}");
+        }
     }
 }

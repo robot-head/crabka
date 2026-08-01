@@ -43,6 +43,7 @@ pub(crate) fn eval(
     values: &[Datum],
     ctx: &EvalCtx,
 ) -> Result<Datum, ExecError> {
+    crate::session::check_query_canceled()?;
     eval_depth(expr, scope, values, ctx, 0)
 }
 

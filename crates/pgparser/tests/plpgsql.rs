@@ -79,6 +79,28 @@ fn parses_declarations_assignments_sql_and_exceptions() {
 }
 
 #[test]
+fn rejects_duplicate_names_in_one_declaration_scope() {
+    for declarations in [
+        "item int; item text;",
+        "item alias for $1; item alias for $2;",
+        "item cursor for select 1; item cursor for select 2;",
+        "item int; item alias for $1;",
+        "item alias for $1; item cursor for select 1;",
+        "item cursor for select 1; item int;",
+    ] {
+        let error = parse_plpgsql(&format!("declare {declarations} begin null; end"))
+            .expect_err("duplicate declaration");
+        assert!(error.message.contains("duplicate declaration \"item\""));
+    }
+}
+
+#[test]
+fn nested_blocks_may_reuse_declaration_names() {
+    parse_plpgsql("declare item int; begin declare item text; begin null; end; end")
+        .expect("nested declaration scope");
+}
+
+#[test]
 fn parses_if_case_and_all_loop_sources() {
     let block = parse_plpgsql(
         r"

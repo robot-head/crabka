@@ -5,6 +5,8 @@
 //! PL grammar expects them. Embedded expressions and SQL statements are handed
 //! back to the ordinary SQL parser.
 
+use std::collections::HashSet;
+
 use crate::{
     ast::{
         Expr, PlPgSqlBlock, PlPgSqlDeclaration, PlPgSqlExceptionHandler, PlPgSqlInto, PlPgSqlLoop,
@@ -266,11 +268,15 @@ impl PlParser<'_> {
 
     fn parse_declarations(&mut self) -> Result<Vec<PlPgSqlDeclaration>, ParseError> {
         let mut declarations = Vec::new();
+        let mut names = HashSet::new();
         while !self.at_word("begin") {
             if self.at_eof() {
                 return Err(self.error("unterminated DECLARE section"));
             }
             let name = self.expect_name()?;
+            if !names.insert(name.clone()) {
+                return Err(self.error(format!("duplicate declaration \"{name}\"")));
+            }
             if self.eat_word("alias") {
                 self.expect_word("for")?;
                 let target = match self.bump() {

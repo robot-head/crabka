@@ -13,7 +13,7 @@ use std::{
     collections::{BTreeMap, HashMap, HashSet, hash_map::Entry},
     sync::{
         Arc, LazyLock, Mutex,
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
 };
 
@@ -31,7 +31,7 @@ use crabka_pgwire::{
         BoundParam, Cell, CloseTarget, CopyInResponse, ExecuteOutcome, FieldDescription,
         Notification, PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
     },
-    error::{PgError, sqlstate},
+    error::{PgError, Severity, sqlstate},
 };
 use tokio::sync::{OwnedRwLockReadGuard, mpsc, watch};
 
@@ -1636,6 +1636,17 @@ fn normalize_guc_name(name: &str) -> String {
     )
 }
 
+fn client_accepts_message(client_min: &str, severity: Severity) -> bool {
+    match severity {
+        Severity::Debug => client_min.starts_with("debug"),
+        Severity::Log => client_min.starts_with("debug") || client_min == "log",
+        // PostgreSQL always sends INFO to the client, regardless of this GUC.
+        Severity::Info | Severity::Error | Severity::Fatal => true,
+        Severity::Notice => !matches!(client_min, "warning" | "error"),
+        Severity::Warning => client_min != "error",
+    }
+}
+
 /// Gres implements `READ COMMITTED` and `REPEATABLE READ`. `READ UNCOMMITTED`
 /// runs as `READ COMMITTED` exactly as it does in `PostgreSQL`, but
 /// `SERIALIZABLE`'s anomaly detection has no implementation here, so asking for
@@ -1830,6 +1841,39 @@ thread_local! {
     /// S3: the advisory-lock state the `pg_advisory_*` function family reaches
     /// while a statement of this session evaluates.
     static SESSION_LOCK_RUNTIME: RefCell<Option<SessionLockRuntime>> = const { RefCell::new(None) };
+    static QUERY_CANCEL_RUNTIME: RefCell<Option<Arc<AtomicBool>>> = const { RefCell::new(None) };
+}
+
+pub(crate) fn query_cancel_runtime() -> Option<Arc<AtomicBool>> {
+    QUERY_CANCEL_RUNTIME.with(|cell| cell.borrow().clone())
+}
+
+pub(crate) fn with_query_cancel_runtime<T>(
+    cancel: Option<Arc<AtomicBool>>,
+    f: impl FnOnce() -> T,
+) -> T {
+    QUERY_CANCEL_RUNTIME.with(|cell| {
+        let previous = cell.replace(cancel);
+        let result = f();
+        cell.replace(previous);
+        result
+    })
+}
+
+pub(crate) fn check_query_canceled() -> Result<(), ExecError> {
+    let canceled = QUERY_CANCEL_RUNTIME.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|cancel| cancel.load(Ordering::Acquire))
+    });
+    if canceled {
+        Err(ExecError::Remote(PgError::error(
+            sqlstate::QUERY_CANCELED,
+            "canceling statement due to user request",
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 /// The S3 lock context one statement evaluates against.
@@ -2745,7 +2789,13 @@ struct LockingActorContext {
 struct ActiveWorker {
     id: usize,
     cancel: watch::Sender<bool>,
+    canceled: Arc<AtomicBool>,
     finished: watch::Receiver<bool>,
+}
+
+struct WorkerCancel {
+    signal: watch::Receiver<bool>,
+    canceled: Arc<AtomicBool>,
 }
 
 struct WorkerFinished(watch::Sender<bool>);
@@ -2756,13 +2806,15 @@ impl Drop for WorkerFinished {
     }
 }
 
-struct PlPgSqlCallDepthGuard(Arc<AtomicUsize>);
+pub(crate) struct PlPgSqlCallDepthGuard(Arc<AtomicUsize>);
+
+const MAX_NESTED_PLPGSQL_CALLS: usize = 4;
 
 impl PlPgSqlCallDepthGuard {
     fn enter(depth: Arc<AtomicUsize>) -> Result<Self, ExecError> {
         depth
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                (current < 64).then_some(current + 1)
+                (current < MAX_NESTED_PLPGSQL_CALLS).then_some(current + 1)
             })
             .map_err(|_| ExecError::StackDepthExceeded)?;
         Ok(Self(depth))
@@ -2900,17 +2952,26 @@ impl SqlSession {
         }
     }
 
-    fn register_worker(&mut self) -> (usize, watch::Receiver<bool>, WorkerFinished) {
+    fn register_worker(&mut self) -> (usize, WorkerCancel, WorkerFinished) {
         let id = self.next_worker_id;
         self.next_worker_id = self.next_worker_id.wrapping_add(1);
         let (cancel, cancel_rx) = watch::channel(false);
+        let canceled = Arc::new(AtomicBool::new(false));
         let (finished_tx, finished) = watch::channel(false);
         self.active_workers.push(ActiveWorker {
             id,
             cancel,
+            canceled: Arc::clone(&canceled),
             finished,
         });
-        (id, cancel_rx, WorkerFinished(finished_tx))
+        (
+            id,
+            WorkerCancel {
+                signal: cancel_rx,
+                canceled,
+            },
+            WorkerFinished(finished_tx),
+        )
     }
 
     fn worker_finished(&mut self, id: usize) {
@@ -2920,6 +2981,7 @@ impl SqlSession {
     async fn cancel_active_workers(&mut self) {
         let workers = std::mem::take(&mut self.active_workers);
         for worker in &workers {
+            worker.canceled.store(true, Ordering::Release);
             let _ = worker.cancel.send(true);
         }
         for mut worker in workers {
@@ -3158,6 +3220,10 @@ impl SqlSession {
         matches!(self.state, TxnState::Idle)
     }
 
+    pub(crate) fn plpgsql_enter_call(&self) -> Result<PlPgSqlCallDepthGuard, ExecError> {
+        PlPgSqlCallDepthGuard::enter(Arc::clone(&self.plpgsql_call_depth))
+    }
+
     pub(crate) fn plpgsql_eval(&self, expr: &Expr) -> Result<(Datum, ColumnType), ExecError> {
         let scope = crate::scope::Scope::empty();
         let ctx = self.eval_ctx();
@@ -3255,6 +3321,10 @@ impl SqlSession {
     }
 
     pub(crate) fn plpgsql_notice(&self, notice: PgError) -> Result<(), ExecError> {
+        let client_min_messages = self.guc.effective("client_min_messages")?;
+        if !client_accepts_message(&client_min_messages, notice.severity) {
+            return Ok(());
+        }
         // The wire loop drains only between query results, so awaiting a bounded
         // channel here could deadlock a notice-heavy block. Enqueue without
         // waiting and report a deterministic resource error if the generous
@@ -3959,6 +4029,13 @@ impl SqlSession {
                     .or_insert_with(|| value.clone());
             }
         }
+        let user_type_prefix = crabka_pgkv::key::user_type_prefix();
+        let restored_user_types = catalog_undo
+            .keys()
+            .filter_map(|key| key.strip_prefix(user_type_prefix.as_slice()))
+            .filter_map(|name| std::str::from_utf8(name).ok())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
         let catalog_undo_ops = catalog_undo
             .into_iter()
             .map(|(key, value)| match value {
@@ -3971,6 +4048,12 @@ impl SqlSession {
                 self.committer.commit(catalog_undo_ops).await?;
             } else {
                 self.catalog_kv.write_batch(&catalog_undo_ops)?;
+            }
+        }
+        for name in restored_user_types {
+            match crabka_pgcatalog::get_user_type(self.catalog_kv.as_ref(), &name)? {
+                Some(ty) => crabka_pgtypes::usertype::replace(&ty),
+                None => crabka_pgtypes::usertype::unregister(&name),
             }
         }
 
@@ -5681,7 +5764,7 @@ impl SqlSession {
         let prepared = self.prepared_statement_rows();
         let stmt = stmt.clone();
         let (requests, request_rx) = mpsc::channel(1);
-        let (worker_id, _cancel, finished) = self.register_worker();
+        let (worker_id, cancel, finished) = self.register_worker();
         let worker = tokio::task::spawn_blocking(move || {
             let _finished = finished;
             let statement_scanner = if let Some(own_start_ts) = own_start_ts {
@@ -5715,11 +5798,18 @@ impl SqlSession {
                 fctx,
                 range_scanner: &statement_scanner,
             };
-            with_guc_runtime(guc_values, guc_settings, prepared, || {
-                with_session_lock_runtime(&session_locks, session_lock_id, in_transaction, || {
-                    crate::routine::with_scalar_runtime(&catalog_kv, Some(requests), || {
-                        crate::exec::execute_read(&read_ctx, &stmt)
-                    })
+            with_query_cancel_runtime(Some(cancel.canceled), || {
+                with_guc_runtime(guc_values, guc_settings, prepared, || {
+                    with_session_lock_runtime(
+                        &session_locks,
+                        session_lock_id,
+                        in_transaction,
+                        || {
+                            crate::routine::with_scalar_runtime(&catalog_kv, Some(requests), || {
+                                crate::exec::execute_read(&read_ctx, &stmt)
+                            })
+                        },
+                    )
                 })
             })
         });
@@ -6585,7 +6675,7 @@ impl SqlSession {
                 runtime.block_on(async {
                     tokio::select! {
                         biased;
-                        _ = cancel.changed() => Err(ExecError::Remote(PgError::error(
+                        _ = cancel.signal.changed() => Err(ExecError::Remote(PgError::error(
                             sqlstate::QUERY_CANCELED,
                             "canceling statement due to user request",
                         ))),
@@ -6659,7 +6749,7 @@ impl SqlSession {
                 runtime.block_on(async {
                     tokio::select! {
                         biased;
-                        _ = cancel.changed() => Err(ExecError::Remote(PgError::error(
+                        _ = cancel.signal.changed() => Err(ExecError::Remote(PgError::error(
                             sqlstate::QUERY_CANCELED,
                             "canceling statement due to user request",
                         ))),
@@ -9415,6 +9505,7 @@ impl SqlSession {
         let table = match crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), &name) {
             Ok(table) if table.foreign.is_none() => table,
             Ok(_) => return None,
+            Err(crabka_pgcatalog::CatalogError::UndefinedTable(_)) => return None,
             Err(error) => return Some(Err(error.into())),
         };
         if crate::plan_dist::plan_scan(&table, select.filter.as_ref(), &select.projection)
@@ -10694,6 +10785,78 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rollback_to_savepoint_resyncs_user_types_with_the_catalog() {
+        use assert2::assert;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TYPE sp_altered_e AS ENUM ('old'); \
+                 CREATE TYPE sp_dropped_e AS ENUM ('kept')",
+            )
+            .await
+            .expect("seed types");
+        for sql in [
+            "BEGIN",
+            "SAVEPOINT type_boundary",
+            "CREATE TYPE sp_created_e AS ENUM ('stale')",
+            "ALTER TYPE sp_altered_e ADD VALUE 'new'",
+            "DROP TYPE sp_dropped_e",
+            "ROLLBACK TO type_boundary",
+            "COMMIT",
+        ] {
+            session.simple_query(sql).await.expect(sql);
+        }
+
+        assert!(sqlstate(&mut session, "SELECT 'stale'::sp_created_e").await == "42704");
+        assert!(sqlstate(&mut session, "SELECT 'new'::sp_altered_e").await == "22P02");
+        assert!(
+            rows_or_sqlstate(&mut session, "SELECT 'kept'::sp_dropped_e::text").await
+                == Ok(vec![vec!["kept".to_string()]])
+        );
+        session
+            .simple_query("DROP TYPE sp_altered_e, sp_dropped_e")
+            .await
+            .expect("clean up types");
+    }
+
+    #[tokio::test]
+    async fn client_min_messages_filters_plpgsql_raise_output() {
+        use assert2::assert;
+        use crabka_pgwire::error::Severity;
+        use tokio::sync::mpsc::error::TryRecvError;
+
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut notices = session.take_notices().expect("notice receiver");
+
+        session
+            .simple_query(
+                "DO $$ BEGIN \
+                   RAISE DEBUG 'debug'; RAISE LOG 'log'; RAISE INFO 'info'; \
+                   RAISE NOTICE 'notice'; RAISE WARNING 'warning'; \
+                 END $$",
+            )
+            .await
+            .expect("default threshold");
+        assert!(notices.try_recv().expect("info").severity == Severity::Info);
+        assert!(notices.try_recv().expect("notice").severity == Severity::Notice);
+        assert!(notices.try_recv().expect("warning").severity == Severity::Warning);
+        assert!(notices.try_recv() == Err(TryRecvError::Empty));
+
+        session
+            .simple_query(
+                "SET client_min_messages = error; \
+                 DO $$ BEGIN RAISE INFO 'always'; RAISE NOTICE 'hidden'; END $$",
+            )
+            .await
+            .expect("error threshold");
+        assert!(notices.try_recv().expect("info").severity == Severity::Info);
+        assert!(notices.try_recv() == Err(TryRecvError::Empty));
+    }
+
+    #[tokio::test]
     async fn rollback_to_savepoint_releases_locks_acquired_inside_it() {
         use assert2::assert;
         let engine = SqlEngine::new();
@@ -11178,6 +11341,23 @@ mod tests {
             .expect("install cancellation fixture");
     }
 
+    struct CancelPollingScanner {
+        entered: Arc<AtomicBool>,
+    }
+
+    impl crate::scanner::RangeScanner for CancelPollingScanner {
+        fn scan(
+            &self,
+            _request: crate::scanner::ScanRequest<'_>,
+        ) -> Result<Vec<crate::scanner::ScannedRow>, ExecError> {
+            self.entered.store(true, Ordering::Release);
+            loop {
+                super::check_query_canceled()?;
+                std::thread::yield_now();
+            }
+        }
+    }
+
     async fn wait_until_blocked(
         query: &mut (impl std::future::Future<Output = Result<Vec<QueryResult>, PgError>> + Unpin),
         lockmgr: &RowLockManager,
@@ -11229,6 +11409,39 @@ mod tests {
 
         blocker.simple_query("ROLLBACK").await.expect("unlock row");
         assert!(lockmgr.held_entry_count() == 0);
+    }
+
+    #[tokio::test]
+    async fn canceling_an_ordinary_read_stops_its_worker() {
+        let mut engine = SqlEngine::new();
+        let mut setup = engine.connect();
+        setup
+            .simple_query("CREATE TABLE cancel_read (id int4)")
+            .await
+            .expect("create table");
+        let entered = Arc::new(AtomicBool::new(false));
+        engine.set_range_scanner(Arc::new(CancelPollingScanner {
+            entered: Arc::clone(&entered),
+        }));
+
+        let mut target = engine.connect();
+        let mut query = Box::pin(target.simple_query("SELECT * FROM cancel_read"));
+        while !entered.load(Ordering::Acquire) {
+            tokio::select! {
+                result = &mut query => panic!("read completed before cancellation: {result:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+        }
+        drop(query);
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            target.cancel_current_query(),
+        )
+        .await
+        .expect("cancellation must join the read worker");
+        assert!(target.active_workers.is_empty());
+        assert!(target.tx_status() == TxStatus::Idle);
     }
 
     #[tokio::test]

@@ -6793,6 +6793,7 @@ pub(crate) fn scan_live_interval(
     let mut out: Vec<ScannedRow> = Vec::new();
     let mut i = 0;
     while i < scanned.len() {
+        crate::session::check_query_canceled()?;
         let prefix = crabka_pgmvcc::version::row_prefix_of(&scanned[i].0)?.to_vec();
         let rowid = physical_rowid(table, &prefix)?;
         if !interval.contains(rowid) {
@@ -6850,6 +6851,7 @@ pub(crate) fn scan_ts_live_interval(
     let mut out = Vec::new();
     let mut i = 0;
     while i < scanned.len() {
+        crate::session::check_query_canceled()?;
         let prefix = crabka_pgmvcc::version::row_prefix_of(&scanned[i].0)?.to_vec();
         let rowid = physical_rowid(table, &prefix)?;
         let bucket = physical_bucket(table, &prefix)?;
@@ -11356,10 +11358,12 @@ pub(crate) fn execute_read(
     read_ctx: &crate::subquery::SubCtx<'_>,
     stmt: &Statement,
 ) -> Result<QueryResult, ExecError> {
+    crate::session::check_query_canceled()?;
     let Statement::Query(q) = stmt else {
         return Err(ExecError::Unsupported("not a query statement".into()));
     };
     let rel = crate::query::query_to_relation(read_ctx, q)?;
+    crate::session::check_query_canceled()?;
     Ok(crate::query::relation_to_rows_result(
         rel,
         read_ctx.eval_ctx,

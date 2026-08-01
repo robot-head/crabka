@@ -843,31 +843,34 @@ pub fn collect_cursor_bounded(
     request: ScanRequest<'_>,
     max_bytes: usize,
 ) -> Result<Vec<ScannedRow>, ExecError> {
+    let cancel = crate::session::query_cancel_runtime();
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
-                let mut cursor = scanner.scan_cursor(request)?;
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| ExecError::Unsupported(error.to_string()))?;
-                runtime.block_on(async move {
-                    let mut rows = Vec::new();
-                    let mut used = 0usize;
-                    loop {
-                        let page = cursor.next_page(1024).await?;
-                        for row in page.rows {
-                            let bytes = scanned_row_bytes(&row);
-                            if used.saturating_add(bytes) > max_bytes {
-                                return Err(memory_budget_exceeded());
+                crate::session::with_query_cancel_runtime(cancel, || {
+                    let mut cursor = scanner.scan_cursor(request)?;
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+                    runtime.block_on(async move {
+                        let mut rows = Vec::new();
+                        let mut used = 0usize;
+                        loop {
+                            let page = cursor.next_page(1024).await?;
+                            for row in page.rows {
+                                let bytes = scanned_row_bytes(&row);
+                                if used.saturating_add(bytes) > max_bytes {
+                                    return Err(memory_budget_exceeded());
+                                }
+                                used += bytes;
+                                rows.push(row);
                             }
-                            used += bytes;
-                            rows.push(row);
+                            if page.is_last {
+                                return Ok(rows);
+                            }
                         }
-                        if page.is_last {
-                            return Ok(rows);
-                        }
-                    }
+                    })
                 })
             })
             .join()
@@ -909,31 +912,34 @@ pub(crate) fn collect_partial_aggregates_bounded(
             "partial aggregate streaming owns the scan pushdown contract".into(),
         ));
     }
+    let cancel = crate::session::query_cancel_runtime();
     std::thread::scope(|scope| {
         scope
             .spawn(move || {
-                let mut cursor = scanner.scan_cursor(request)?;
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .map_err(|error| ExecError::Unsupported(error.to_string()))?;
-                runtime.block_on(async move {
-                    let mut states = vec![Vec::new(); specs.len()];
-                    loop {
-                        let page = cursor.next_page(1024).await?;
-                        let is_last = page.is_last;
-                        let rows = page.rows.into_vec();
-                        if scanned_rows_bytes(rows.iter()) > max_bytes {
-                            return Err(memory_budget_exceeded());
+                crate::session::with_query_cancel_runtime(cancel, || {
+                    let mut cursor = scanner.scan_cursor(request)?;
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+                    runtime.block_on(async move {
+                        let mut states = vec![Vec::new(); specs.len()];
+                        loop {
+                            let page = cursor.next_page(1024).await?;
+                            let is_last = page.is_last;
+                            let rows = page.rows.into_vec();
+                            if scanned_rows_bytes(rows.iter()) > max_bytes {
+                                return Err(memory_budget_exceeded());
+                            }
+                            fold_page_into_states(rows, specs, &mut states)?;
+                            if scanned_rows_bytes(states.iter().flatten()) > max_bytes {
+                                return Err(memory_budget_exceeded());
+                            }
+                            if is_last {
+                                return Ok(states);
+                            }
                         }
-                        fold_page_into_states(rows, specs, &mut states)?;
-                        if scanned_rows_bytes(states.iter().flatten()) > max_bytes {
-                            return Err(memory_budget_exceeded());
-                        }
-                        if is_last {
-                            return Ok(states);
-                        }
-                    }
+                    })
                 })
             })
             .join()

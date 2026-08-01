@@ -24,9 +24,10 @@ use crabka_pgcatalog::routine::{
 };
 use crabka_pgkv::{Kv, WriteOp};
 use crabka_pgparser::ast::{
-    AlterRoutineAction, CreateRoutineStmt, Expr, FuncArgs, FuncCall, PlPgSqlBlock, QueryExpr,
-    RoutineArg, RoutineArgMode, RoutineBody, RoutineObject, RoutineOption, RoutineParallel,
-    RoutineReturn, RoutineSignature, RoutineVolatility, SelectItem, SelectStmt, Statement,
+    AlterRoutineAction, CreateRoutineStmt, Expr, FuncArgs, FuncCall, PlPgSqlBlock,
+    PlPgSqlStatement, QueryExpr, RoutineArg, RoutineArgMode, RoutineBody, RoutineObject,
+    RoutineOption, RoutineParallel, RoutineReturn, RoutineSignature, RoutineVolatility, SelectItem,
+    SelectStmt, Statement,
 };
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::engine::QueryResult;
@@ -1157,6 +1158,13 @@ pub(crate) fn inline_scalar(kv: &dyn Kv, call: &FuncCall) -> Result<Option<Expr>
     // the call node intact is what lets its arguments vary with each input row.
     match resolve_call(kv, &call.name, &given) {
         Ok(Some(routine)) if routine.language == "plpgsql" => return Ok(None),
+        Err(_)
+            if routines_named(kv, &call.name)?
+                .iter()
+                .all(|routine| routine.language == "plpgsql") =>
+        {
+            return Ok(None);
+        }
         Err(_) if known_builtin(&call.name) => return Ok(None),
         Ok(_) => {}
         Err(error) => return Err(error),
@@ -1238,7 +1246,7 @@ pub(crate) fn plpgsql_scalar_result_type(
     })
 }
 
-pub(crate) fn is_plpgsql_scalar_runtime(call: &FuncCall) -> bool {
+pub(crate) fn is_plpgsql_scalar_runtime(call: &FuncCall, scope: &crate::scope::Scope) -> bool {
     let FuncArgs::Exprs(args) = &call.args else {
         return false;
     };
@@ -1247,7 +1255,9 @@ pub(crate) fn is_plpgsql_scalar_runtime(call: &FuncCall) -> bool {
         let Some(runtime) = runtime.as_ref() else {
             return false;
         };
-        let given = best_effort_arg_types(args);
+        let Ok(given) = crate::eval::static_arg_types(args, scope) else {
+            return false;
+        };
         resolve_call(runtime.catalog.as_ref(), &call.name, &given)
             .is_ok_and(|routine| routine.is_some_and(|routine| routine.language == "plpgsql"))
     })
@@ -1321,7 +1331,10 @@ pub(crate) fn eval_plpgsql_scalar_with(
                 return Ok(Datum::Null);
             }
             let _guard = enter_plpgsql_call()?;
-            let value = if crate::plpgsql::scalar_function_requires_session(&routine)? {
+            let value = if crate::plpgsql::scalar_function_requires_session(
+                runtime.catalog.as_ref(),
+                &routine,
+            )? {
                 let requests = runtime.requests.ok_or_else(|| {
                     ExecError::Unsupported(
                         "SQL-bearing PL/pgSQL function requires a session executor".into(),
@@ -1405,10 +1418,55 @@ pub(crate) fn parse_plpgsql_body(routine: &Routine) -> Result<PlPgSqlBlock, Exec
             "PL/pgSQL function body must be a string literal",
         ));
     }
-    crabka_pgparser::parse_plpgsql(&routine.body).map_err(|error| ExecError::FunctionError {
-        sqlstate: error.sqlstate(),
-        message: error.message,
-    })
+    let block = crabka_pgparser::parse_plpgsql(&routine.body).map_err(|error| {
+        ExecError::FunctionError {
+            sqlstate: error.sqlstate(),
+            message: error.message,
+        }
+    })?;
+    if routine.kind == RoutineKind::Procedure && plpgsql_has_return_value(&block) {
+        return Err(ExecError::FunctionError {
+            sqlstate: "42804",
+            message: "RETURN cannot have a parameter in a procedure\nHINT:  Use RETURN without a parameter in a procedure."
+                .into(),
+        });
+    }
+    Ok(block)
+}
+
+fn plpgsql_has_return_value(block: &PlPgSqlBlock) -> bool {
+    fn statements_have_return_value(statements: &[PlPgSqlStatement]) -> bool {
+        statements.iter().any(|statement| match statement {
+            PlPgSqlStatement::Return(Some(_)) => true,
+            PlPgSqlStatement::Block(block) => plpgsql_has_return_value(block),
+            PlPgSqlStatement::If {
+                branches,
+                else_body,
+            } => {
+                branches
+                    .iter()
+                    .any(|(_, body)| statements_have_return_value(body))
+                    || statements_have_return_value(else_body)
+            }
+            PlPgSqlStatement::Case {
+                arms, else_body, ..
+            } => {
+                arms.iter()
+                    .any(|(_, body)| statements_have_return_value(body))
+                    || else_body
+                        .as_deref()
+                        .is_some_and(statements_have_return_value)
+            }
+            PlPgSqlStatement::Loop { body, .. } => statements_have_return_value(body),
+            _ => false,
+        })
+    }
+
+    statements_have_return_value(&block.statements)
+        || block
+            .exceptions
+            .iter()
+            .any(|handler| statements_have_return_value(&handler.statements))
 }
 
 /// A `LANGUAGE sql` routine's final query — the one whose result is the
@@ -2056,6 +2114,10 @@ pub(crate) fn table_function_columns(routine: &Routine) -> Option<Vec<String>> {
     }
 }
 
+fn is_record_type(ty: &RoutineType) -> bool {
+    ty.is_record() || matches!(ty.column, Some(ColumnType::Record(_)))
+}
+
 pub(crate) fn plpgsql_table_function_schema(
     kv: &dyn Kv,
     call: &crabka_pgparser::ast::TableFuncCall,
@@ -2111,7 +2173,7 @@ pub(crate) fn plpgsql_table_function_schema(
                     })
             })
             .collect::<Result<Vec<_>, _>>()?,
-        RoutineResult::Type { ty, .. } if ty.is_record() => call
+        RoutineResult::Type { ty, .. } if is_record_type(ty) => call
             .column_defs
             .as_ref()
             .ok_or_else(|| {
@@ -3234,6 +3296,35 @@ mod tests {
     }
 
     #[test]
+    fn plpgsql_procedure_rejects_return_values_when_defined() {
+        let kv = MemKv::default();
+        let error = define(
+            &kv,
+            "CREATE PROCEDURE bad_return() LANGUAGE plpgsql AS \
+             $$ BEGIN IF true THEN RETURN 1; END IF; END $$",
+        )
+        .expect_err("procedure RETURN value is rejected");
+        assert!(sqlstate(&error) == "42804");
+        assert!(
+            error
+                .into_pg()
+                .message
+                .contains("RETURN cannot have a parameter in a procedure")
+        );
+        assert!(
+            routines_named(&kv, "bad_return")
+                .expect("catalog")
+                .is_empty()
+        );
+
+        define(
+            &kv,
+            "CREATE PROCEDURE plain_return() LANGUAGE plpgsql AS $$ BEGIN RETURN; END $$",
+        )
+        .expect("a valueless RETURN is valid");
+    }
+
+    #[test]
     fn plpgsql_requires_a_source_string_body() {
         let kv = MemKv::default();
         let error = define(
@@ -3280,6 +3371,14 @@ mod tests {
         );
         assert!(declared_output_parameter_count(&outputs) == 2);
         assert!(declared_scalar_result_type(&outputs).is_none());
+    }
+
+    #[test]
+    fn record_return_recognition_covers_named_and_resolved_forms() {
+        assert!(is_record_type(&RoutineType::named("record".into())));
+        assert!(is_record_type(&RoutineType::builtin(ColumnType::Record(
+            None
+        ))));
     }
 
     #[test]

@@ -674,7 +674,7 @@ fn collect_specs(e: &Expr, scope: &Scope, specs: &mut Vec<AggSpec>) -> Result<()
         // `to_char(max(ts), 'YYYY')`).
         Expr::Func(fc)
             if is_wrapping_scalar_func(&fc.name)
-                || crate::routine::is_plpgsql_scalar_runtime(fc) =>
+                || crate::routine::is_plpgsql_scalar_runtime(fc, scope) =>
         {
             if let FuncArgs::Exprs(args) = &fc.args {
                 for a in args {
@@ -887,7 +887,7 @@ pub(crate) fn eval_over_aggregate_values(
 /// Both `e` and `group_by` have had their column references canonicalized
 /// against the input scope by [`aggregate_rows`], so the structural comparison
 /// below matches `t.a` against a bare `a` naming the same column.
-fn validate_grouped(e: &Expr, group_by: &[Expr]) -> Result<(), ExecError> {
+fn validate_grouped(e: &Expr, group_by: &[Expr], scope: &Scope) -> Result<(), ExecError> {
     if let Expr::Func(fc) = e
         && aggregate_func(&fc.name).is_some()
     {
@@ -898,45 +898,45 @@ fn validate_grouped(e: &Expr, group_by: &[Expr]) -> Result<(), ExecError> {
     }
     match e {
         Expr::Column { table, name } => Err(ungrouped_column(table.as_deref(), name)),
-        Expr::Unary { expr, .. } => validate_grouped(expr, group_by),
+        Expr::Unary { expr, .. } => validate_grouped(expr, group_by, scope),
         Expr::Binary { left, right, .. } => {
-            validate_grouped(left, group_by)?;
-            validate_grouped(right, group_by)
+            validate_grouped(left, group_by, scope)?;
+            validate_grouped(right, group_by, scope)
         }
         // SP29/SP37/SP38: every argument of a scalar, date/time, formatting, jsonb,
         // or array function must itself be grouped-valid (the call as a whole, if it
         // matches a GROUP BY key, was already accepted above).
         Expr::Func(fc)
             if is_wrapping_scalar_func(&fc.name)
-                || crate::routine::is_plpgsql_scalar_runtime(fc) =>
+                || crate::routine::is_plpgsql_scalar_runtime(fc, scope) =>
         {
             if let FuncArgs::Exprs(args) = &fc.args {
                 for a in args {
-                    validate_grouped(a, group_by)?;
+                    validate_grouped(a, group_by, scope)?;
                 }
             }
             Ok(())
         }
         Expr::Func(fc) => Err(undefined_function(&fc.name)),
         // SP28: every child of a predicate / CASE must itself be grouped-valid.
-        Expr::IsNull { expr, .. } => validate_grouped(expr, group_by),
+        Expr::IsNull { expr, .. } => validate_grouped(expr, group_by, scope),
         Expr::InList { expr, list, .. } => {
-            validate_grouped(expr, group_by)?;
+            validate_grouped(expr, group_by, scope)?;
             for e in list {
-                validate_grouped(e, group_by)?;
+                validate_grouped(e, group_by, scope)?;
             }
             Ok(())
         }
         Expr::Between {
             expr, low, high, ..
         } => {
-            validate_grouped(expr, group_by)?;
-            validate_grouped(low, group_by)?;
-            validate_grouped(high, group_by)
+            validate_grouped(expr, group_by, scope)?;
+            validate_grouped(low, group_by, scope)?;
+            validate_grouped(high, group_by, scope)
         }
         Expr::Like { expr, pattern, .. } => {
-            validate_grouped(expr, group_by)?;
-            validate_grouped(pattern, group_by)
+            validate_grouped(expr, group_by, scope)?;
+            validate_grouped(pattern, group_by, scope)
         }
         Expr::Case {
             operand,
@@ -944,34 +944,34 @@ fn validate_grouped(e: &Expr, group_by: &[Expr]) -> Result<(), ExecError> {
             else_result,
         } => {
             if let Some(o) = operand {
-                validate_grouped(o, group_by)?;
+                validate_grouped(o, group_by, scope)?;
             }
             for (c, r) in whens {
-                validate_grouped(c, group_by)?;
-                validate_grouped(r, group_by)?;
+                validate_grouped(c, group_by, scope)?;
+                validate_grouped(r, group_by, scope)?;
             }
             if let Some(e) = else_result {
-                validate_grouped(e, group_by)?;
+                validate_grouped(e, group_by, scope)?;
             }
             Ok(())
         }
         // SP31: a cast is grouped-valid iff its operand is (and an entire cast
         // expression matching a GROUP BY key was already accepted above).
-        Expr::Cast { expr, .. } => validate_grouped(expr, group_by),
+        Expr::Cast { expr, .. } => validate_grouped(expr, group_by, scope),
         // The array expression forms are grouped-valid iff every child is.
         Expr::ArrayLiteral(items) | Expr::Row(items) => {
             for item in items {
-                validate_grouped(item, group_by)?;
+                validate_grouped(item, group_by, scope)?;
             }
             Ok(())
         }
         Expr::Subscript { base, index } => {
-            validate_grouped(base, group_by)?;
-            validate_grouped(index, group_by)
+            validate_grouped(base, group_by, scope)?;
+            validate_grouped(index, group_by, scope)
         }
         Expr::QuantifiedArray { expr, array, .. } => {
-            validate_grouped(expr, group_by)?;
-            validate_grouped(array, group_by)
+            validate_grouped(expr, group_by, scope)?;
+            validate_grouped(array, group_by, scope)
         }
         _ => Ok(()), // literals / params are constants
     }
@@ -2214,7 +2214,7 @@ pub(crate) fn aggregate_rows(
         .chain(source_order_exprs)
     {
         collect_specs(e, scope, &mut specs)?;
-        validate_grouped(e, &group_by)?;
+        validate_grouped(e, &group_by, scope)?;
     }
 
     // Fold rows into groups, preserving first-appearance order.
