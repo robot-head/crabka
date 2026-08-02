@@ -7965,7 +7965,7 @@ impl Parser {
     }
 
     fn copy_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
-        use crate::ast::{CopyFormat, CopyStmt, Statement};
+        use crate::ast::{CopyFormat, CopySource, CopyStmt, Statement};
 
         self.expect(&Token::Keyword(Keyword::Copy))?;
         let table = self.relation_ref()?;
@@ -7983,13 +7983,16 @@ impl Parser {
             ));
         }
         self.expect(&Token::Keyword(Keyword::From))?;
-        if !self.eat_ident_eq("stdin") {
-            return Err(ParseError::new_sqlstate(
-                "0A000",
-                "only COPY FROM STDIN is supported",
+        let source = if self.eat_ident_eq("stdin") {
+            CopySource::Stdin
+        } else if let Token::StringLit(path) = self.bump() {
+            CopySource::File(path)
+        } else {
+            return Err(ParseError::new(
+                "expected STDIN or a file name after COPY FROM",
                 self.peek_pos(),
             ));
-        }
+        };
 
         let mut format = CopyFormat::Text;
         if self.eat_keyword(Keyword::With) {
@@ -8072,6 +8075,7 @@ impl Parser {
             value: crate::ast::SetValue::Value(vec![Self::encode_copy_stmt(&CopyStmt {
                 table,
                 columns,
+                source,
                 format,
             })]),
         })
@@ -8118,11 +8122,17 @@ impl Parser {
             .as_deref()
             .map(Self::encode_copy_part)
             .unwrap_or_default();
+        let (source, path) = match &copy.source {
+            crate::ast::CopySource::Stdin => ("stdin", String::new()),
+            crate::ast::CopySource::File(path) => ("file", Self::encode_copy_part(path)),
+        };
         [
             format,
             &Self::encode_copy_part(&copy.table.name),
             &columns,
             &schema,
+            source,
+            &path,
         ]
         .join("\t")
     }
@@ -15649,11 +15659,15 @@ mod tests {
         for (sql, encoded) in [
             (
                 "COPY accounts (id, name) FROM STDIN WITH (FORMAT text)",
-                "text\taccounts\tid,name\t",
+                "text\taccounts\tid,name\t\tstdin\t",
             ),
             (
                 "COPY s1.accounts (id, name) FROM STDIN WITH (FORMAT text)",
-                "text\taccounts\tid,name\ts1",
+                "text\taccounts\tid,name\ts1\tstdin\t",
+            ),
+            (
+                "COPY accounts FROM '/tmp/accounts.tsv'",
+                "text\taccounts\t\t\tfile\t/tmp/accounts.tsv",
             ),
         ] {
             let stmts = crate::parse(sql).expect("COPY FROM STDIN parses");
@@ -15672,7 +15686,6 @@ mod tests {
     fn copy_unsupported_paths_are_feature_not_supported() {
         for sql in [
             "COPY accounts TO STDOUT",
-            "COPY accounts FROM '/tmp/accounts.tsv'",
             "COPY accounts FROM STDIN WITH (FORMAT binary)",
             "COPY accounts FROM STDIN WITH (DELIMITER ',')",
         ] {

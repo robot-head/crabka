@@ -1690,10 +1690,17 @@ pub struct IndexKey {
 pub struct CopyStmt {
     pub table: RelationRef,
     pub columns: Option<Vec<String>>,
+    pub source: CopySource,
     pub format: CopyFormat,
 }
 
 pub const COPY_FROM_STDIN_SENTINEL: &str = "__copy_from_stdin";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CopySource {
+    Stdin,
+    File(String),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyFormat {
