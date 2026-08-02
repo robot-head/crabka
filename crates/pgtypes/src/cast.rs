@@ -1491,6 +1491,40 @@ mod tests {
     }
 
     #[test]
+    fn multirange_array_casts_use_the_multirange_element_input_function() {
+        let tz = utc();
+        let multirange = match ColumnType::builtin_multirange(crate::oids::NUMMULTIRANGE)
+            .expect("nummultirange")
+        {
+            ColumnType::Multirange(multirange) => multirange,
+            _ => unreachable!(),
+        };
+        let elem = crate::ElemType::Multirange(multirange);
+        let value = cast(
+            &Datum::Text(r#"{"{[1.1,1.2)}","{[12.3,155.5)}"}"#.into()),
+            ColumnType::Array(elem),
+            &tz,
+        )
+        .expect("nummultirange[] input");
+        assert_eq!(
+            crate::encoding::encode_text(&value, &tz),
+            br#"{"{[1.1,1.2)}","{[12.3,155.5)}"}"#
+        );
+        assert_eq!(elem.array_oid(), crate::oids::NUMMULTIRANGEARRAY);
+        assert_eq!(
+            crate::ElemType::from_array_oid(crate::oids::NUMMULTIRANGEARRAY),
+            Some(elem)
+        );
+
+        let mut encoded = Vec::new();
+        elem.write_code(&mut encoded);
+        assert_eq!(
+            crate::ElemType::read_code(&mut encoded.as_slice()),
+            Some(elem)
+        );
+    }
+
+    #[test]
     fn jsonb_and_array_cast_matrix_allows_only_string_conversions() {
         use assert2::assert;
 

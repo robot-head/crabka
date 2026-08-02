@@ -82,6 +82,12 @@ pub mod oids {
     pub const TSTZMULTIRANGE: u32 = 4534;
     pub const DATEMULTIRANGE: u32 = 4535;
     pub const INT8MULTIRANGE: u32 = 4536;
+    pub const INT4MULTIRANGEARRAY: u32 = 6150;
+    pub const NUMMULTIRANGEARRAY: u32 = 6151;
+    pub const TSMULTIRANGEARRAY: u32 = 6152;
+    pub const TSTZMULTIRANGEARRAY: u32 = 6153;
+    pub const DATEMULTIRANGEARRAY: u32 = 6155;
+    pub const INT8MULTIRANGEARRAY: u32 = 6157;
     /// `json[]`.
     pub const JSONARRAY: u32 = 199;
     /// `jsonb[]`.
@@ -160,6 +166,7 @@ pub enum ElemType {
     /// `character(n)[]`: each element is blank-padded to `n` on assignment.
     Char(Option<u16>),
     Range(RangeRef),
+    Multirange(MultirangeRef),
 }
 
 impl ElemType {
@@ -211,6 +218,7 @@ impl ElemType {
             ElemType::Varchar(n) => ColumnType::Varchar(n),
             ElemType::Char(n) => ColumnType::Char(n),
             ElemType::Range(range) => ColumnType::Range(range),
+            ElemType::Multirange(multirange) => ColumnType::Multirange(multirange),
         }
     }
 
@@ -251,7 +259,6 @@ impl ElemType {
             | ColumnType::Array(_)
             | ColumnType::Record(_)
             | ColumnType::Enum(_)
-            | ColumnType::Multirange(_)
             | ColumnType::Domain(_) => return None,
             ColumnType::Range(range) => {
                 let elem = ElemType::Range(range);
@@ -260,6 +267,7 @@ impl ElemType {
                 }
                 elem
             }
+            ColumnType::Multirange(multirange) => ElemType::Multirange(multirange),
         })
     }
 
@@ -297,6 +305,15 @@ impl ElemType {
                 oids::DATERANGE => oids::DATERANGEARRAY,
                 oids::INT8RANGE => oids::INT8RANGEARRAY,
                 _ => 0,
+            },
+            ElemType::Multirange(multirange) => match multirange.oid {
+                oids::INT4MULTIRANGE => oids::INT4MULTIRANGEARRAY,
+                oids::NUMMULTIRANGE => oids::NUMMULTIRANGEARRAY,
+                oids::TSMULTIRANGE => oids::TSMULTIRANGEARRAY,
+                oids::TSTZMULTIRANGE => oids::TSTZMULTIRANGEARRAY,
+                oids::DATEMULTIRANGE => oids::DATEMULTIRANGEARRAY,
+                oids::INT8MULTIRANGE => oids::INT8MULTIRANGEARRAY,
+                oid => crate::usertype::user_multirange_array_oid(oid),
             },
         }
     }
@@ -336,6 +353,15 @@ impl ElemType {
                 oids::INT8RANGE => "int8range[]",
                 _ => "range[]",
             },
+            ElemType::Multirange(multirange) => match multirange.oid {
+                oids::INT4MULTIRANGE => "int4multirange[]",
+                oids::NUMMULTIRANGE => "nummultirange[]",
+                oids::TSMULTIRANGE => "tsmultirange[]",
+                oids::TSTZMULTIRANGE => "tstzmultirange[]",
+                oids::DATEMULTIRANGE => "datemultirange[]",
+                oids::INT8MULTIRANGE => "int8multirange[]",
+                _ => "multirange[]",
+            },
         }
     }
 
@@ -373,6 +399,7 @@ impl ElemType {
             ElemType::Varchar(_) => 16,
             ElemType::Char(_) => 17,
             ElemType::Range(_) => 18,
+            ElemType::Multirange(_) => 19,
         }
     }
 
@@ -388,6 +415,8 @@ impl ElemType {
         out.push(self.code());
         if let ElemType::Range(range) = self {
             out.extend_from_slice(&range.oid.to_be_bytes());
+        } else if let ElemType::Multirange(multirange) = self {
+            out.extend_from_slice(&multirange.oid.to_be_bytes());
         } else if matches!(self, ElemType::Varchar(_) | ElemType::Char(_)) {
             match self.typmod() {
                 None => out.push(0),
@@ -412,6 +441,17 @@ impl ElemType {
                 .or_else(|| crate::usertype::lookup_oid(oid).map(|ty| ty.column_type()))?
             {
                 ColumnType::Range(range) => Some(ElemType::Range(range)),
+                _ => None,
+            };
+        }
+        if *code == 19 {
+            let (bytes, rest) = cursor.split_at_checked(4)?;
+            *cursor = rest;
+            let oid = u32::from_be_bytes(bytes.try_into().ok()?);
+            return match ColumnType::builtin_multirange(oid)
+                .or_else(|| crate::usertype::column_type_for_oid(oid))?
+            {
+                ColumnType::Multirange(multirange) => Some(ElemType::Multirange(multirange)),
                 _ => None,
             };
         }
@@ -458,6 +498,31 @@ impl ElemType {
             if elem.array_oid() == oid {
                 return Some(elem);
             }
+        }
+        for multirange_oid in [
+            oids::INT4MULTIRANGE,
+            oids::NUMMULTIRANGE,
+            oids::TSMULTIRANGE,
+            oids::TSTZMULTIRANGE,
+            oids::DATEMULTIRANGE,
+            oids::INT8MULTIRANGE,
+        ] {
+            let multirange = match ColumnType::builtin_multirange(multirange_oid)? {
+                ColumnType::Multirange(multirange) => multirange,
+                _ => unreachable!(),
+            };
+            let elem = ElemType::Multirange(multirange);
+            if elem.array_oid() == oid {
+                return Some(elem);
+            }
+        }
+        if let Some(multirange) = crate::usertype::all().into_iter().find_map(|ty| {
+            let ColumnType::Multirange(multirange) = ty.multirange_type()? else {
+                return None;
+            };
+            (ElemType::Multirange(multirange).array_oid() == oid).then_some(multirange)
+        }) {
+            return Some(ElemType::Multirange(multirange));
         }
         ElemType::ALL.into_iter().find(|e| e.array_oid() == oid)
     }
