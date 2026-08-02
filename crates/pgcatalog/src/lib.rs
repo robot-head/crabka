@@ -612,6 +612,26 @@ pub struct Tablespace {
     pub options: Vec<(String, String)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorFamily {
+    pub oid: u32,
+    pub name: RelationName,
+    pub method: String,
+    pub owner: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperatorClass {
+    pub oid: u32,
+    pub name: RelationName,
+    pub method: String,
+    pub owner: String,
+    pub family_oid: u32,
+    pub input_type_oid: u32,
+    pub default: bool,
+    pub key_type_oid: u32,
+}
+
 /// The bootstrap superuser every object is owned by.
 const BOOTSTRAP_ROLE: &str = "postgres";
 
@@ -707,6 +727,10 @@ const TABLESPACE_PREFIX: &[u8] = b"\0\0\0\0catalog_tablespace/by-name/";
 const RELATION_TABLESPACE_PREFIX: &[u8] = b"\0\0\0\0catalog_tablespace/by-relation/";
 const NEXT_TABLESPACE_OID_KEY: &[u8] = b"\0\0\0\0meta/next_tablespace_oid";
 const FIRST_USER_TABLESPACE_OID: u32 = 300_000;
+const OPERATOR_FAMILY_PREFIX: &[u8] = b"\0\0\0\0catalog_operator_family/";
+const OPERATOR_CLASS_PREFIX: &[u8] = b"\0\0\0\0catalog_operator_class/";
+const NEXT_OPERATOR_OBJECT_OID_KEY: &[u8] = b"\0\0\0\0meta/next_operator_object_oid";
+const FIRST_USER_OPERATOR_OBJECT_OID: u32 = 310_000;
 
 fn tablespace_key(name: &str) -> Vec<u8> {
     let mut key = TABLESPACE_PREFIX.to_vec();
@@ -722,6 +746,10 @@ fn relation_tablespace_key(relation: &RelationName) -> Vec<u8> {
 }
 
 /// Resolve a bootstrap or user-created tablespace name to its catalog oid.
+///
+/// # Errors
+///
+/// Returns undefined-object or catalog storage errors.
 pub fn tablespace_oid(kv: &dyn Kv, name: &str) -> Result<u32, CatalogError> {
     match name {
         "pg_default" => Ok(0),
@@ -746,6 +774,10 @@ pub fn set_relation_tablespace_op(relation: &RelationName, oid: u32) -> WriteOp 
 }
 
 /// Read a relation's placement; zero means the database default tablespace.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
 pub fn relation_tablespace_oid(kv: &dyn Kv, relation: &RelationName) -> Result<u32, CatalogError> {
     kv.get(&relation_tablespace_key(relation))?
         .map_or(Ok(0), |bytes| {
@@ -761,6 +793,204 @@ fn drop_relation_tablespace_op(relation: &RelationName) -> WriteOp {
     WriteOp::Delete {
         key: relation_tablespace_key(relation),
     }
+}
+
+fn operator_object_key(prefix: &[u8], method: &str, name: &RelationName) -> Vec<u8> {
+    let mut out = prefix.to_vec();
+    key::push_key_part(&mut out, method);
+    key::push_key_part(&mut out, &name.schema);
+    key::push_key_part(&mut out, &name.name);
+    out
+}
+
+fn operator_object_bytes(oid: u32, owner: &str, fields: &[u32]) -> Vec<u8> {
+    let mut out = U32::new(oid).as_bytes().to_vec();
+    out.extend_from_slice(owner.as_bytes());
+    out.push(0);
+    for field in fields {
+        out.extend_from_slice(U32::new(*field).as_bytes());
+    }
+    out
+}
+
+fn read_operator_object(bytes: &[u8]) -> Result<(u32, String, &[u8]), CatalogError> {
+    let (oid, rest) = U32::read_from_prefix(bytes)
+        .map_err(|_| KvError::CorruptRow("operator object oid is not u32".into()))?;
+    let split = rest
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| KvError::CorruptRow("operator object owner is missing".into()))?;
+    let owner = String::from_utf8(rest[..split].to_vec())
+        .map_err(|_| KvError::CorruptRow("operator object owner is not UTF-8".into()))?;
+    Ok((oid.get(), owner, &rest[split + 1..]))
+}
+
+fn operator_object_oid(kv: &dyn Kv) -> Result<u32, CatalogError> {
+    kv.get(NEXT_OPERATOR_OBJECT_OID_KEY)?.map_or(
+        Ok(FIRST_USER_OPERATOR_OBJECT_OID),
+        |bytes| {
+            U32::read_from_prefix(&bytes)
+                .map(|(oid, _)| oid.get())
+                .map_err(|_| KvError::CorruptRow("next operator object oid is not u32".into()).into())
+        },
+    )
+}
+
+/// Create an operator family and advance the shared operator-object oid cursor.
+///
+/// # Errors
+///
+/// Returns duplicate-object, catalog storage, or corruption errors.
+pub fn create_operator_family_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+    method: &str,
+    owner: &str,
+) -> Result<(OperatorFamily, Vec<WriteOp>), CatalogError> {
+    let key = operator_object_key(OPERATOR_FAMILY_PREFIX, method, name);
+    if kv.get(&key)?.is_some() {
+        return Err(CatalogError::DuplicateObject(name.name.clone()));
+    }
+    let oid = operator_object_oid(kv)?;
+    let family = OperatorFamily {
+        oid,
+        name: name.clone(),
+        method: method.to_string(),
+        owner: owner.to_string(),
+    };
+    Ok((
+        family,
+        vec![
+            WriteOp::Put {
+                key,
+                value: operator_object_bytes(oid, owner, &[]),
+            },
+            WriteOp::Put {
+                key: NEXT_OPERATOR_OBJECT_OID_KEY.to_vec(),
+                value: U32::new(oid + 1).as_bytes().to_vec(),
+            },
+        ],
+    ))
+}
+
+/// Create an operator class and its same-named implicit family when needed.
+///
+/// # Errors
+///
+/// Returns duplicate/undefined-object, catalog storage, or corruption errors.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the PostgreSQL operator-class catalog tuple is the creation contract"
+)]
+pub fn create_operator_class_ops(
+    kv: &dyn Kv,
+    name: &RelationName,
+    method: &str,
+    owner: &str,
+    family: Option<&RelationName>,
+    input_type_oid: u32,
+    default: bool,
+    key_type_oid: u32,
+) -> Result<(OperatorClass, Vec<WriteOp>), CatalogError> {
+    let key = operator_object_key(OPERATOR_CLASS_PREFIX, method, name);
+    if kv.get(&key)?.is_some() {
+        return Err(CatalogError::DuplicateObject(name.name.clone()));
+    }
+    let family_name = family.unwrap_or(name);
+    let family_key = operator_object_key(OPERATOR_FAMILY_PREFIX, method, family_name);
+    let (family_oid, mut ops, oid) = if let Some(bytes) = kv.get(&family_key)? {
+        (read_operator_object(&bytes)?.0, Vec::new(), operator_object_oid(kv)?)
+    } else if family.is_some() {
+        return Err(CatalogError::UndefinedObject(family_name.name.clone()));
+    } else {
+        let family_oid = operator_object_oid(kv)?;
+        (
+            family_oid,
+            vec![WriteOp::Put {
+                key: family_key,
+                value: operator_object_bytes(family_oid, owner, &[]),
+            }],
+            family_oid + 1,
+        )
+    };
+    let class = OperatorClass {
+        oid,
+        name: name.clone(),
+        method: method.to_string(),
+        owner: owner.to_string(),
+        family_oid,
+        input_type_oid,
+        default,
+        key_type_oid,
+    };
+    ops.push(WriteOp::Put {
+        key,
+        value: operator_object_bytes(
+            oid,
+            owner,
+            &[family_oid, input_type_oid, u32::from(default), key_type_oid],
+        ),
+    });
+    ops.push(WriteOp::Put {
+        key: NEXT_OPERATOR_OBJECT_OID_KEY.to_vec(),
+        value: U32::new(oid + 1).as_bytes().to_vec(),
+    });
+    Ok((class, ops))
+}
+
+/// List user-defined operator families.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn list_operator_families(kv: &dyn Kv) -> Result<Vec<OperatorFamily>, CatalogError> {
+    let mut out = Vec::new();
+    for (key, bytes) in kv.scan_prefix(OPERATOR_FAMILY_PREFIX)? {
+        let parts = key::key_parts(&key[OPERATOR_FAMILY_PREFIX.len()..], 3)
+            .ok_or_else(|| KvError::CorruptRow("operator family key is incomplete".into()))?;
+        let (oid, owner, _) = read_operator_object(&bytes)?;
+        out.push(OperatorFamily {
+            oid,
+            method: parts[0].to_string(),
+            name: RelationName::new(parts[1], parts[2]),
+            owner,
+        });
+    }
+    out.sort_by_key(|family| family.oid);
+    Ok(out)
+}
+
+/// List user-defined operator classes.
+///
+/// # Errors
+///
+/// Returns catalog storage or corruption errors.
+pub fn list_operator_classes(kv: &dyn Kv) -> Result<Vec<OperatorClass>, CatalogError> {
+    let mut out = Vec::new();
+    for (key, bytes) in kv.scan_prefix(OPERATOR_CLASS_PREFIX)? {
+        let parts = key::key_parts(&key[OPERATOR_CLASS_PREFIX.len()..], 3)
+            .ok_or_else(|| KvError::CorruptRow("operator class key is incomplete".into()))?;
+        let (oid, owner, fields) = read_operator_object(&bytes)?;
+        let mut fields = fields;
+        let mut next = || {
+            let (value, rest) = U32::read_from_prefix(fields)
+                .map_err(|_| KvError::CorruptRow("operator class fields are incomplete".into()))?;
+            fields = rest;
+            Ok::<_, KvError>(value.get())
+        };
+        out.push(OperatorClass {
+            oid,
+            method: parts[0].to_string(),
+            name: RelationName::new(parts[1], parts[2]),
+            owner,
+            family_oid: next()?,
+            input_type_oid: next()?,
+            default: next()? != 0,
+            key_type_oid: next()?,
+        });
+    }
+    out.sort_by_key(|class| class.oid);
+    Ok(out)
 }
 
 fn serialize_tablespace(tablespace: &Tablespace) -> Vec<u8> {

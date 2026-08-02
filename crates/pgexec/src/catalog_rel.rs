@@ -62,6 +62,20 @@ pub(crate) const HASH_AM_OID: i32 = 405;
 pub(crate) const GIST_AM_OID: i32 = 783;
 pub(crate) const GIN_AM_OID: i32 = 2742;
 pub(crate) const SPGIST_AM_OID: i32 = 4000;
+
+/// PostgreSQL's oid for a built-in index access method.
+pub(crate) fn access_method_oid(name: &str) -> Option<i32> {
+    Some(match name {
+        "btree" => BTREE_AM_OID,
+        "hash" => HASH_AM_OID,
+        "gist" => GIST_AM_OID,
+        "gin" => GIN_AM_OID,
+        "spgist" => SPGIST_AM_OID,
+        "brin" => 3580,
+        _ => return None,
+    })
+}
+
 /// Oid of the `default` collation, as in PostgreSQL.
 pub(crate) const DEFAULT_COLLATION_OID: i32 = 100;
 
@@ -104,6 +118,8 @@ const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_locks",
     "pg_partitioned_table",
     "pg_policy",
+    "pg_opclass",
+    "pg_opfamily",
     "pg_proc",
     "pg_publication",
     "pg_publication_namespace",
@@ -153,6 +169,8 @@ static RELATION_NAMES: &[&str] = &[
     "pg_locks",
     "pg_partitioned_table",
     "pg_policy",
+    "pg_opclass",
+    "pg_opfamily",
     "pg_proc",
     "pg_publication",
     "pg_publication_namespace",
@@ -203,6 +221,8 @@ pub(crate) fn relation_oid(name: &str) -> i32 {
         "pg_language" => 2612,
         "pg_partitioned_table" => 3350,
         "pg_policy" => 3256,
+        "pg_opclass" => 2616,
+        "pg_opfamily" => 2753,
         "pg_proc" => 1255,
         "pg_publication" => 6104,
         "pg_publication_namespace" => 6237,
@@ -546,6 +566,8 @@ pub(crate) fn rows(
         "pg_collation" => Ok(pg_collation_rows()),
         "pg_constraint" => pg_constraint_rows(kv),
         "pg_database" => Ok(pg_database_rows()),
+        "pg_opclass" => pg_opclass_rows(kv),
+        "pg_opfamily" => pg_opfamily_rows(kv),
         "pg_depend" => pg_depend_rows(kv),
         "pg_description" => pg_description_rows(kv),
         "pg_event_trigger" => pg_event_trigger_rows(kv),
@@ -805,6 +827,24 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
             ("partexprs", Text),
         ]),
         "pg_proc" => pg_proc_columns(),
+        "pg_opclass" => cols(&[
+            ("oid", Int4),
+            ("opcmethod", Int4),
+            ("opcname", Text),
+            ("opcnamespace", Int4),
+            ("opcowner", Int4),
+            ("opcfamily", Int4),
+            ("opcintype", Int4),
+            ("opcdefault", Bool),
+            ("opckeytype", Int4),
+        ]),
+        "pg_opfamily" => cols(&[
+            ("oid", Int4),
+            ("opfmethod", Int4),
+            ("opfname", Text),
+            ("opfnamespace", Int4),
+            ("opfowner", Int4),
+        ]),
         "pg_rewrite" => cols(&[
             ("oid", Int4),
             ("rulename", Text),
@@ -1319,11 +1359,51 @@ fn pg_tablespace_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     Ok(rows)
 }
 
-/// The current backend, as `pg_stat_activity` describes it.
-///
-/// Crabka has no cross-session backend registry, so it reports exactly one row.
-/// That row is the backend that runs the query, which is what a health check or
-/// a "who am I" probe reads.
+fn pg_opfamily_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let owners = role_oids(kv)?;
+    crabka_pgcatalog::list_operator_families(kv)?
+        .into_iter()
+        .map(|family| {
+            Ok(vec![
+                int(i32::try_from(family.oid).map_err(|_| {
+                    ExecError::Unsupported("operator family oid exceeds int4".into())
+                })?),
+                int(access_method_oid(&family.method).unwrap_or_default()),
+                text(&family.name.name),
+                int(namespace_oid(&family.name.schema)),
+                int(owners.get(&family.owner).copied().unwrap_or_default()),
+            ])
+        })
+        .collect()
+}
+
+fn pg_opclass_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
+    let owners = role_oids(kv)?;
+    crabka_pgcatalog::list_operator_classes(kv)?
+        .into_iter()
+        .map(|class| {
+            let oid = |oid: u32| {
+                i32::try_from(oid)
+                    .map_err(|_| ExecError::Unsupported("operator class oid exceeds int4".into()))
+            };
+            Ok(vec![
+                int(oid(class.oid)?),
+                int(access_method_oid(&class.method).unwrap_or_default()),
+                text(&class.name.name),
+                int(namespace_oid(&class.name.schema)),
+                int(owners.get(&class.owner).copied().unwrap_or_default()),
+                int(oid(class.family_oid)?),
+                int(oid(class.input_type_oid)?),
+                Datum::Bool(class.default),
+                int(oid(class.key_type_oid)?),
+            ])
+        })
+        .collect()
+}
+
+/// The current backend, as `pg_stat_activity` describes it. crabka has no
+/// cross-session backend registry, so exactly one row is reported: the backend
+/// running the query, which is what a health check or a "who am I" probe reads.
 ///
 /// The `pid` is the querying session's backend id, so
 /// `WHERE pid = pg_backend_pid()` selects the row. Every "am I still connected"

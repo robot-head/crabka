@@ -4890,9 +4890,79 @@ impl SqlSession {
                     tag: "ALTER TABLESPACE".into(),
                 })
             }
-            UtilityStatement::CreateOperatorClass => Ok(QueryResult::Command {
-                tag: "CREATE OPERATOR CLASS".into(),
-            }),
+            UtilityStatement::CreateOperatorFamily { name, method } => {
+                let method = method.to_ascii_lowercase();
+                if crate::catalog_rel::access_method_oid(&method).is_none() {
+                    return Err(ExecError::UndefinedObject(format!(
+                        "access method \"{method}\""
+                    )));
+                }
+                let name = crate::relname::resolve_relation(
+                    self.catalog_kv.as_ref(),
+                    &self.resolution_scope(),
+                    name,
+                    crate::relname::SchemaDisposition::Creation,
+                )?;
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let (_, ops) = crabka_pgcatalog::create_operator_family_ops(
+                    self.catalog_kv.as_ref(),
+                    &name,
+                    &method,
+                    &self.current_role,
+                )?;
+                self.commit_catalog(ops).await?;
+                Ok(QueryResult::Command {
+                    tag: "CREATE OPERATOR FAMILY".into(),
+                })
+            }
+            UtilityStatement::CreateOperatorClass {
+                name,
+                default,
+                input_type,
+                method,
+                family,
+                key_type,
+            } => {
+                let method = method.to_ascii_lowercase();
+                if crate::catalog_rel::access_method_oid(&method).is_none() {
+                    return Err(ExecError::UndefinedObject(format!(
+                        "access method \"{method}\""
+                    )));
+                }
+                let scope = self.resolution_scope();
+                let name = crate::relname::resolve_relation(
+                    self.catalog_kv.as_ref(),
+                    &scope,
+                    name,
+                    crate::relname::SchemaDisposition::Creation,
+                )?;
+                let family = family
+                    .as_ref()
+                    .map(|family| {
+                        crate::relname::resolve_relation(
+                            self.catalog_kv.as_ref(),
+                            &scope,
+                            family,
+                            crate::relname::SchemaDisposition::Creation,
+                        )
+                    })
+                    .transpose()?;
+                let _catalog_guard = Arc::clone(&self.catalog_lock).lock_owned().await;
+                let (_, ops) = crabka_pgcatalog::create_operator_class_ops(
+                    self.catalog_kv.as_ref(),
+                    &name,
+                    &method,
+                    &self.current_role,
+                    family.as_ref(),
+                    input_type.oid(),
+                    *default,
+                    key_type.map_or(0, crabka_pgtypes::ColumnType::oid),
+                )?;
+                self.commit_catalog(ops).await?;
+                Ok(QueryResult::Command {
+                    tag: "CREATE OPERATOR CLASS".into(),
+                })
+            }
             UtilityStatement::AlterSystem { name } => {
                 // `ALTER SYSTEM` never changes the running session in PostgreSQL
                 // either, but it does validate the parameter name.
@@ -16908,6 +16978,57 @@ mod session_conformance_tests {
             .simple_query("DROP TABLESPACE placed")
             .await
             .expect("drop empty tablespace");
+    }
+
+    #[tokio::test]
+    async fn operator_classes_and_families_are_catalog_visible() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE OPERATOR FAMILY explicit_family USING hash")
+            .await
+            .expect("create family");
+        session
+            .simple_query(
+                "CREATE OPERATOR CLASS explicit_class FOR TYPE uuid USING hash \
+                 FAMILY explicit_family AS STORAGE uuid",
+            )
+            .await
+            .expect("create class");
+        session
+            .simple_query(
+                "CREATE OPERATOR CLASS implicit_class FOR TYPE int4 USING btree AS STORAGE int4",
+            )
+            .await
+            .expect("create class with implicit family");
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opfamily \
+                 WHERE opfname IN ('explicit_family', 'implicit_class')",
+            )
+            .await
+                == "2"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opclass \
+                 WHERE opcname IN ('explicit_class', 'implicit_class')",
+            )
+            .await
+                == "2"
+        );
+        assert!(
+            scalar(
+                &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opclass c, pg_catalog.pg_opfamily f \
+                 WHERE c.opcfamily = f.oid AND c.opcname = 'explicit_class' \
+                   AND f.opfname = 'explicit_family'",
+            )
+            .await
+                == "1"
+        );
     }
 
     #[test]
