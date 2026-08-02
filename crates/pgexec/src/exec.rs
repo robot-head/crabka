@@ -11987,7 +11987,13 @@ fn pg_type_rows() -> Vec<Vec<Datum>> {
                 // ('b') with no domain base type, matching PostgreSQL 18's
                 // pg_type for these OIDs. Only `box` uses a typdelim other
                 // than ',', and crabka has no geometric types.
-                text(if ty.category == "R" { "r" } else { "b" }),
+                text(if ty.name.ends_with("multirange") {
+                    "m"
+                } else if ty.category == "R" {
+                    "r"
+                } else {
+                    "b"
+                }),
                 text(","),
                 int(ty.elem),
                 int(ty.array),
@@ -12752,6 +12758,15 @@ fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
             crabka_pgtypes::oids::INT8RANGE => "_int8range",
             _ => "_range",
         },
+        ElemType::Multirange(multirange) => match multirange.oid {
+            crabka_pgtypes::oids::INT4MULTIRANGE => "_int4multirange",
+            crabka_pgtypes::oids::NUMMULTIRANGE => "_nummultirange",
+            crabka_pgtypes::oids::TSMULTIRANGE => "_tsmultirange",
+            crabka_pgtypes::oids::TSTZMULTIRANGE => "_tstzmultirange",
+            crabka_pgtypes::oids::DATEMULTIRANGE => "_datemultirange",
+            crabka_pgtypes::oids::INT8MULTIRANGE => "_int8multirange",
+            _ => "_multirange",
+        },
     }
 }
 
@@ -12762,6 +12777,47 @@ fn array_typname(elem: crabka_pgtypes::ElemType) -> &'static str {
 fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
     static ROWS: std::sync::LazyLock<Vec<BuiltinTypeRow>> = std::sync::LazyLock::new(|| {
         let mut rows = scalar_type_rows().to_vec();
+        for (oid, name, array) in [
+            (
+                crabka_pgtypes::oids::INT4MULTIRANGE,
+                "int4multirange",
+                crabka_pgtypes::oids::INT4MULTIRANGEARRAY,
+            ),
+            (
+                crabka_pgtypes::oids::NUMMULTIRANGE,
+                "nummultirange",
+                crabka_pgtypes::oids::NUMMULTIRANGEARRAY,
+            ),
+            (
+                crabka_pgtypes::oids::TSMULTIRANGE,
+                "tsmultirange",
+                crabka_pgtypes::oids::TSMULTIRANGEARRAY,
+            ),
+            (
+                crabka_pgtypes::oids::TSTZMULTIRANGE,
+                "tstzmultirange",
+                crabka_pgtypes::oids::TSTZMULTIRANGEARRAY,
+            ),
+            (
+                crabka_pgtypes::oids::DATEMULTIRANGE,
+                "datemultirange",
+                crabka_pgtypes::oids::DATEMULTIRANGEARRAY,
+            ),
+            (
+                crabka_pgtypes::oids::INT8MULTIRANGE,
+                "int8multirange",
+                crabka_pgtypes::oids::INT8MULTIRANGEARRAY,
+            ),
+        ] {
+            rows.push(BuiltinTypeRow {
+                oid: oid as i32,
+                name,
+                len: -1,
+                category: "R",
+                elem: 0,
+                array: array as i32,
+            });
+        }
         rows.push(BuiltinTypeRow {
             oid: crabka_pgtypes::oids::JSONARRAY as i32,
             name: "_json",
@@ -12816,6 +12872,47 @@ fn builtin_type_rows() -> &'static [BuiltinTypeRow] {
                 crabka_pgtypes::oids::INT8RANGEARRAY,
                 "_int8range",
                 crabka_pgtypes::oids::INT8RANGE,
+            ),
+        ] {
+            rows.push(BuiltinTypeRow {
+                oid: oid as i32,
+                name,
+                len: -1,
+                category: "A",
+                elem: elem as i32,
+                array: 0,
+            });
+        }
+        for (oid, name, elem) in [
+            (
+                crabka_pgtypes::oids::INT4MULTIRANGEARRAY,
+                "_int4multirange",
+                crabka_pgtypes::oids::INT4MULTIRANGE,
+            ),
+            (
+                crabka_pgtypes::oids::NUMMULTIRANGEARRAY,
+                "_nummultirange",
+                crabka_pgtypes::oids::NUMMULTIRANGE,
+            ),
+            (
+                crabka_pgtypes::oids::TSMULTIRANGEARRAY,
+                "_tsmultirange",
+                crabka_pgtypes::oids::TSMULTIRANGE,
+            ),
+            (
+                crabka_pgtypes::oids::TSTZMULTIRANGEARRAY,
+                "_tstzmultirange",
+                crabka_pgtypes::oids::TSTZMULTIRANGE,
+            ),
+            (
+                crabka_pgtypes::oids::DATEMULTIRANGEARRAY,
+                "_datemultirange",
+                crabka_pgtypes::oids::DATEMULTIRANGE,
+            ),
+            (
+                crabka_pgtypes::oids::INT8MULTIRANGEARRAY,
+                "_int8multirange",
+                crabka_pgtypes::oids::INT8MULTIRANGE,
             ),
         ] {
             rows.push(BuiltinTypeRow {

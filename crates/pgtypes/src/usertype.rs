@@ -553,6 +553,13 @@ pub fn user_array_oid(type_oid: u32) -> u32 {
     type_oid + 2
 }
 
+/// The array oid of a user-defined range's multirange companion. Range types
+/// do not have a composite relation, so their reserved `+1` oid is available.
+#[must_use]
+pub fn user_multirange_array_oid(multirange_oid: u32) -> u32 {
+    multirange_oid - 2
+}
+
 #[cfg(test)]
 mod tests {
 
