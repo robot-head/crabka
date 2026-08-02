@@ -48,7 +48,9 @@ enum JsonFunc {
     Set,
     /// `to_jsonb(anyelement)`.
     ToJsonb,
-    /// `jsonb_strip_nulls(jsonb)`: drop every object field whose value is the
+    /// `row_to_json(record [, pretty])`.
+    RowToJson,
+    /// `jsonb_strip_nulls(jsonb)` — drop every object field whose value is the
     /// JSON `null` literal, recursively. Array nulls are kept.
     StripNulls,
     /// `jsonb_pretty(jsonb)`: the indented rendering, as `text`.
@@ -96,6 +98,7 @@ fn json_func(name: &str) -> Option<JsonFunc> {
         "jsonb_set" => JsonFunc::Set,
         "jsonb_set_lax" => JsonFunc::SetLax,
         "to_jsonb" | "to_json" => JsonFunc::ToJsonb,
+        "row_to_json" => JsonFunc::RowToJson,
         "jsonb_strip_nulls" | "json_strip_nulls" => JsonFunc::StripNulls,
         "jsonb_pretty" => JsonFunc::Pretty,
         "jsonb_insert" => JsonFunc::Insert,
@@ -194,6 +197,7 @@ fn param_types(f: JsonFunc, given: &[ArgType]) -> Result<Vec<Option<ColumnType>>
             }
             vec![None; n]
         }
+        JsonFunc::RowToJson => vec![None, Some(ColumnType::Bool)],
     })
 }
 
@@ -214,6 +218,15 @@ pub(crate) fn json_func_result_type(fc: &FuncCall, scope: &Scope) -> Result<Colu
             ColumnType::Jsonb
         }
         JsonFunc::BuildArray => ColumnType::Jsonb,
+        JsonFunc::RowToJson => {
+            require_arity(fc, n == 1 || n == 2)?;
+            if !matches!(types[0], ColumnType::Record(_))
+                || types.get(1).is_some_and(|ty| *ty != ColumnType::Bool)
+            {
+                return Err(undefined_function(&fc.name));
+            }
+            ColumnType::Text
+        }
         JsonFunc::ArrayLength => {
             require_arity(fc, n == 1)?;
             require_jsonb_arg(fc, types[0])?;
@@ -407,6 +420,22 @@ pub(crate) fn eval_json(
                 return Ok(Datum::Null);
             }
             Ok(Datum::Jsonb(to_jsonb(&vals[0], ctx)?))
+        }
+        JsonFunc::RowToJson => {
+            require_arity(fc, n == 1 || n == 2)?;
+            if vals[0].is_null() {
+                return Ok(Datum::Null);
+            }
+            if !matches!(vals[0], Datum::Record(_)) {
+                return Err(undefined_function(&fc.name));
+            }
+            let value = to_jsonb(&vals[0], ctx)?;
+            match vals.get(1) {
+                None | Some(Datum::Bool(false)) => Ok(Datum::Text(compact_json(&value))),
+                Some(Datum::Bool(true)) => Ok(Datum::Text(pretty(&value, 0))),
+                Some(Datum::Null) => Ok(Datum::Null),
+                Some(other) => Err(type_error(&fc.name, other)),
+            }
         }
         JsonFunc::StripNulls => {
             require_arity(fc, n == 1 || n == 2)?;
@@ -1659,6 +1688,31 @@ fn to_jsonb(d: &Datum, ctx: &EvalCtx) -> Result<JsonbValue, ExecError> {
         | Datum::Multirange(_)
         | Datum::Bytea(_) => JsonbValue::String(datum_text(d, ctx)),
     })
+}
+
+fn compact_json(value: &JsonbValue) -> String {
+    let text = value.to_text();
+    let mut quoted = false;
+    let mut escaped = false;
+    text.chars()
+        .filter(|ch| {
+            if quoted {
+                if escaped {
+                    escaped = false;
+                } else if *ch == '\\' {
+                    escaped = true;
+                } else if *ch == '"' {
+                    quoted = false;
+                }
+                true
+            } else if *ch == '"' {
+                quoted = true;
+                true
+            } else {
+                *ch != ' '
+            }
+        })
+        .collect()
 }
 
 /// A composite's fields as JSON object pairs, in declaration order.
