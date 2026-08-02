@@ -41,6 +41,61 @@ pub(crate) fn join_relations(
     ctx: &crate::clock::EvalCtx,
     blocking_query_memory: crabka_units::ByteSize,
 ) -> Result<Relation, ExecError> {
+    join_relations_impl(
+        left,
+        &right,
+        kind,
+        constraint,
+        ctx,
+        blocking_query_memory,
+        None,
+    )
+}
+
+pub(crate) struct PreparedJoinIndex {
+    index: Option<EquiIndex>,
+}
+
+pub(crate) fn prepare_join_index(
+    left: &Relation,
+    right: &Relation,
+    constraint: &JoinConstraint,
+) -> Result<PreparedJoinIndex, ExecError> {
+    let keys = equi_keys_for(left, right, constraint)?;
+    Ok(PreparedJoinIndex {
+        index: EquiIndex::build(left, right, &keys),
+    })
+}
+
+pub(crate) fn join_relations_prepared(
+    left: Relation,
+    right: &Relation,
+    kind: JoinKind,
+    constraint: &JoinConstraint,
+    ctx: &crate::clock::EvalCtx,
+    blocking_query_memory: crabka_units::ByteSize,
+    prepared: &PreparedJoinIndex,
+) -> Result<Relation, ExecError> {
+    join_relations_impl(
+        left,
+        right,
+        kind,
+        constraint,
+        ctx,
+        blocking_query_memory,
+        Some(prepared),
+    )
+}
+
+fn join_relations_impl(
+    left: Relation,
+    right: &Relation,
+    kind: JoinKind,
+    constraint: &JoinConstraint,
+    ctx: &crate::clock::EvalCtx,
+    blocking_query_memory: crabka_units::ByteSize,
+    prepared: Option<&PreparedJoinIndex>,
+) -> Result<Relation, ExecError> {
     use std::cmp::Ordering;
 
     // Self-join / duplicate alias: a qualifier may not appear on both sides.
@@ -114,7 +169,11 @@ pub(crate) fn join_relations(
     } else {
         pairs.clone()
     };
-    let index = EquiIndex::build(&left, &right, &equi_keys);
+    let built_index = prepared
+        .is_none()
+        .then(|| EquiIndex::build(&left, right, &equi_keys))
+        .flatten();
+    let index = prepared.map_or(built_index.as_ref(), |prepared| prepared.index.as_ref());
     // Every right row, for the rows the index cannot narrow.
     let all_right: Vec<usize> = if index.is_some() {
         Vec::new()
@@ -128,7 +187,7 @@ pub(crate) fn join_relations(
     match kind {
         JoinKind::Inner | JoinKind::Cross => {
             for l in &left.rows {
-                for &ri in candidate_rows(index.as_ref(), &all_right, l, &mut key_buf) {
+                for &ri in candidate_rows(index, &all_right, l, &mut key_buf) {
                     let r = &right.rows[ri];
                     if matches(l, r)? {
                         let mut row = l.clone();
@@ -150,7 +209,7 @@ pub(crate) fn join_relations(
             let mut right_matched = vec![false; right.rows.len()];
             for l in &left.rows {
                 let mut any = false;
-                for &ri in candidate_rows(index.as_ref(), &all_right, l, &mut key_buf) {
+                for &ri in candidate_rows(index, &all_right, l, &mut key_buf) {
                     let r = &right.rows[ri];
                     if matches(l, r)? {
                         any = true;
@@ -222,6 +281,39 @@ fn candidate_rows<'a>(
     match index {
         Some(index) => index.candidates(lrow, key_buf),
         None => all_right,
+    }
+}
+
+fn equi_keys_for(
+    left: &Relation,
+    right: &Relation,
+    constraint: &JoinConstraint,
+) -> Result<Vec<(usize, usize)>, ExecError> {
+    let mut combined = left.scope.clone();
+    combined.columns.extend(right.scope.columns.iter().cloned());
+    match constraint {
+        JoinConstraint::Using(columns) => columns
+            .iter()
+            .map(|column| {
+                Ok((
+                    left.scope.resolve(None, column)?,
+                    right.scope.resolve(None, column)?,
+                ))
+            })
+            .collect(),
+        JoinConstraint::Natural => natural_common_columns(&left.scope, &right.scope)
+            .iter()
+            .map(|column| {
+                Ok((
+                    left.scope.resolve(None, column)?,
+                    right.scope.resolve(None, column)?,
+                ))
+            })
+            .collect(),
+        JoinConstraint::On(predicate) => {
+            Ok(equi_key_columns(predicate, &combined, left.scope.width()))
+        }
+        JoinConstraint::None => Ok(Vec::new()),
     }
 }
 

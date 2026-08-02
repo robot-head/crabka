@@ -27,7 +27,7 @@ crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
 crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
 bytes = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "fs"] }
 async-trait = { workspace = true }
 zerocopy = { workspace = true }
 bigdecimal = { workspace = true }
