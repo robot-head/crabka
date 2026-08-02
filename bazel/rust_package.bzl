@@ -118,6 +118,7 @@ def rust_package(
         test_compile_data = [],
         test_features = {},
         test_tags = {},
+        test_binaries = {},
         harnessless = [],
         features = [],
         extra_deps = [],
@@ -219,12 +220,13 @@ def rust_package(
                 srcs = srcs,
                 testonly = True,
             )
-        binary_data = [":" + binary + "__bin" for binary in metadata["binaries"]]
+        binary_data = [":" + binary + "__bin" for binary in metadata["binaries"]] + test_binaries.values()
         test_rustc_env = dict(rustc_env)
         # Tests run from the workspace's runfiles root. Keep this relative so
         # it does not capture a compilation sandbox that disappears at runtime.
         test_rustc_env["CARGO_MANIFEST_DIR"] = native.package_name()
         test_rustc_env.update({"CARGO_BIN_EXE_" + binary: "$(rootpath :" + binary + "__bin)" for binary in metadata["binaries"]})
+        test_rustc_env.update({"CARGO_BIN_EXE_" + binary: "$(rootpath " + target + ")" for binary, target in test_binaries.items()})
         rust_test(
             name = test_name,
             aliases = _aliases("deps", "dev_deps"),

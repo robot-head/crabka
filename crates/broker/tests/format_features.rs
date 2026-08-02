@@ -16,24 +16,14 @@ use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
 
 mod support;
 
-/// Run `crabka format --standalone … --feature …` as a subprocess. Shelled
-/// out via `env!("CARGO")` (the `crabka-cli` `CARGO_BIN_EXE_*` isn't exported
-/// to this crate); the `crabka-cli` dev-dep keeps it a cache hit.
+/// Run `crabka format --standalone … --feature …` as a subprocess.
 fn run_crabka_format_with_features(
     log_dir: &std::path::Path,
     node_id: u64,
     controller_listener: &str,
     features: &[&str],
 ) {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
     let mut args: Vec<String> = [
-        "run",
-        "--quiet",
-        "-p",
-        "crabka-cli",
-        "--bin",
-        "crabka",
-        "--",
         "format",
         "--log-dir",
         log_dir.to_str().unwrap(),
@@ -50,7 +40,7 @@ fn run_crabka_format_with_features(
         args.push("--feature".to_string());
         args.push((*f).to_string());
     }
-    let out = Command::new(cargo)
+    let out = Command::new(env!("CARGO_BIN_EXE_crabka"))
         .args(&args)
         .output()
         .expect("spawn crabka format");

@@ -82,6 +82,18 @@ crate.annotation(
     crate = "sqlx-postgres",
     crate_features = ["offline"],
 )
+crate.annotation(
+    crate = "aws-lc-sys",
+    gen_build_script = "on",
+)
+crate.annotation(
+    crate = "tikv-jemalloc-sys",
+    gen_build_script = "on",
+)
+crate.annotation(
+    crate = "zstd-sys",
+    gen_build_script = "on",
+)
 crate.from_cargo(
     name = "crates",
     cargo_lock = "//:Cargo.lock",

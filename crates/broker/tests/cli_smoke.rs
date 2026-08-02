@@ -3,9 +3,7 @@ use std::process::Command;
 use assert2::assert;
 
 fn broker_bin() -> std::path::PathBuf {
-    let exe = std::env::var_os("CARGO_BIN_EXE_crabka-broker")
-        .expect("cargo provides CARGO_BIN_EXE_<bin> in test env");
-    std::path::PathBuf::from(exe)
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_crabka-broker"))
 }
 
 /// Format a fresh standalone log directory via `crabka format`. KIP-853
@@ -13,21 +11,9 @@ fn broker_bin() -> std::path::PathBuf {
 /// singleton `VotersRecord`) before `crabka-broker` will boot; an unformatted
 /// dir is treated as operator error and aborts startup.
 ///
-/// `crabka` lives in the `crabka-cli` package, so its `CARGO_BIN_EXE_*` isn't
-/// exported to this crate's test env — shell out via `env!("CARGO")` like
-/// `bootstrap_consumption.rs` does. The `crabka-cli` dev-dep keeps it in the
-/// compile graph so this is a cache hit, not a rebuild.
 fn run_crabka_format(log_dir: &std::path::Path, node_id: u32, controller_listener: &str) {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let out = Command::new(cargo)
+    let out = Command::new(env!("CARGO_BIN_EXE_crabka"))
         .args([
-            "run",
-            "--quiet",
-            "-p",
-            "crabka-cli",
-            "--bin",
-            "crabka",
-            "--",
             "format",
             "--log-dir",
             log_dir.to_str().unwrap(),

@@ -49,6 +49,7 @@ pub fn emit(
     });
     let tokens = quote! {
         #![doc = #doc]
+        #![allow(unused_imports, unused_mut, unused_variables)]
         #(#mods)*
     };
 
@@ -117,5 +118,11 @@ mod tests {
         // Output now uses `#![doc = "..."]` form instead of `//! ...` comment,
         // so we check for the doc text itself rather than the `//!` prefix.
         assert!(out.contains("Borrowed-flavor generated message types."));
+    }
+
+    #[test]
+    fn allows_version_dependent_generated_code() {
+        let out = emit(&[], Flavor::Owned, "test-sha", false);
+        assert!(out.contains("allow (unused_imports , unused_mut , unused_variables)"));
     }
 }

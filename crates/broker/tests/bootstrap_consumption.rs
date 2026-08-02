@@ -44,23 +44,9 @@ use tokio::{
 
 /// Run the `crabka format` binary as a subprocess.
 ///
-/// `CARGO_BIN_EXE_<name>` is only populated for integration tests inside
-/// the package that declares the binary, so we shell out via the parent
-/// `cargo` invocation (`env!("CARGO")`) and let cargo locate / rebuild
-/// the `crabka-cli` binary. The `crabka-cli` dev-dep in this crate's
-/// `Cargo.toml` ensures the binary is part of this test's compile-graph
-/// so the inner `cargo run` is a cache hit, not a fresh build.
 fn run_crabka_format(log_dir: &std::path::Path, add_scram: &str) {
-    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
-    let out = Command::new(cargo)
+    let out = Command::new(env!("CARGO_BIN_EXE_crabka"))
         .args([
-            "run",
-            "--quiet",
-            "-p",
-            "crabka-cli",
-            "--bin",
-            "crabka",
-            "--",
             "format",
             "--log-dir",
             log_dir.to_str().unwrap(),

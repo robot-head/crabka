@@ -10,6 +10,7 @@ rust_package(
     name = "broker",
     cargo_name = "crabka-broker",
     crate_name = "crabka_broker",
+    test_binaries = {"crabka": "//crates/cli:crabka__bin"},
     test_compile_data = ["//crates/security:test_fixtures"],
 )
 
