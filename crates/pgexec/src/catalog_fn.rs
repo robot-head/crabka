@@ -1100,7 +1100,7 @@ pub(crate) fn index_definition(index: &Index, table: &Table) -> String {
             crabka_pgcatalog::IndexMethod::Gin => "gin",
             crabka_pgcatalog::IndexMethod::Spgist => "spgist",
         },
-        quoted_column_list(&index.columns),
+        index_key_list(&index.columns),
     )
 }
 
@@ -1219,6 +1219,18 @@ fn quoted_column_list(columns: &[String]) -> String {
     columns
         .iter()
         .map(|column| quote_identifier(column))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn index_key_list(keys: &[String]) -> String {
+    keys.iter()
+        .map(|key| {
+            crabka_pgcatalog::index_key_expression(key).map_or_else(
+                || quote_identifier(key),
+                |expression| format!("({expression})"),
+            )
+        })
         .collect::<Vec<_>>()
         .join(", ")
 }

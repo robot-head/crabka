@@ -263,6 +263,21 @@ pub struct NewIndex {
     pub constraint: Option<IndexConstraint>,
 }
 
+const INDEX_EXPRESSION_PREFIX: &str = "\0expr:";
+
+/// Encode an expression key in the existing ordered key list. PostgreSQL
+/// columns cannot contain NUL, so this cannot collide with a real column name.
+#[must_use]
+pub fn expression_index_key(source: &str) -> String {
+    format!("{INDEX_EXPRESSION_PREFIX}{source}")
+}
+
+/// Return the stored source for an expression key, or `None` for a column key.
+#[must_use]
+pub fn index_key_expression(key: &str) -> Option<&str> {
+    key.strip_prefix(INDEX_EXPRESSION_PREFIX)
+}
+
 /// What a foreign key does to the referencing rows when the referenced row is
 /// deleted (`ON DELETE`) or its key columns are updated (`ON UPDATE`) —
 /// `pg_constraint.confdeltype` / `confupdtype`.
@@ -2574,6 +2589,9 @@ fn validate_index_columns(table: &Table, columns: &[String]) -> Result<(), Catal
         return Err(CatalogError::UndefinedColumn(String::new()));
     }
     for column in columns {
+        if index_key_expression(column).is_some_and(|source| !source.is_empty()) {
+            continue;
+        }
         if table.column_index(column).is_none() {
             return Err(CatalogError::UndefinedColumn(column.clone()));
         }
