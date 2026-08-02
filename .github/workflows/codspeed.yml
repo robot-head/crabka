@@ -40,25 +40,30 @@ jobs:
     name: Run benchmarks
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      matrix:
-        target:
-          - //crates/protocol:bench_codec
-          - //crates/protocol:bench_records
-          - //crates/log:bench_log
-          - //crates/compression:bench_codec
-          - //crates/security:bench_scram
-          - //crates/metadata:bench_image
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-bazel
         with:
           aspect-api-token: ${{ secrets.ASPECT_API_TOKEN }}
-          # Leave memory for CodSpeed's simulation tooling.
-          bazelrc: startup --host_jvm_args=-Xmx1024m
+      - name: Build benchmarks
+        run: >-
+          aspect build
+          //crates/protocol:bench_codec
+          //crates/protocol:bench_records
+          //crates/log:bench_log
+          //crates/compression:bench_codec
+          //crates/security:bench_scram
+          //crates/metadata:bench_image
+          --config=ci
+          --config=codspeed
       - name: Run the benchmarks
         uses: CodSpeedHQ/action@v5
         with:
           mode: simulation
-          run: aspect run '${{ matrix.target }}' --bazel-flag=--config=ci --bazel-flag=--config=codspeed
+          run: |
+            bazel-bin/crates/protocol/bench_codec
+            bazel-bin/crates/protocol/bench_records
+            bazel-bin/crates/log/bench_log
+            bazel-bin/crates/compression/bench_codec
+            bazel-bin/crates/security/bench_scram
+            bazel-bin/crates/metadata/bench_image
