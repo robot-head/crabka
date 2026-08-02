@@ -369,6 +369,7 @@ jobs:
       contents: read
       id-token: write
       attestations: write
+      pages: write
     uses: ./.github/workflows/docs.yml
     secrets: inherit
 
