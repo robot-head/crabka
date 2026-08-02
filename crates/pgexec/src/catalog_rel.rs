@@ -74,6 +74,15 @@ pub(crate) fn access_method_oid(name: &str) -> Option<i32> {
     })
 }
 
+pub(crate) fn builtin_operator_family_oid(method: &str, name: &str) -> Option<i32> {
+    crate::builtin_opfamilies::BUILTIN_OPERATOR_FAMILIES
+        .iter()
+        .find(|(_, candidate_method, candidate_name)| {
+            *candidate_method == method && *candidate_name == name
+        })
+        .map(|(oid, _, _)| *oid)
+}
+
 /// Oid of the `default` collation, as in PostgreSQL.
 pub(crate) const DEFAULT_COLLATION_OID: i32 = 100;
 
@@ -98,6 +107,8 @@ pub(crate) fn relation_names() -> &'static [&'static str] {
 
 const PG_CATALOG_RELATIONS: &[&str] = &[
     "pg_am",
+    "pg_amop",
+    "pg_amproc",
     "pg_attrdef",
     "pg_authid",
     "pg_collation",
@@ -149,6 +160,8 @@ const INFORMATION_SCHEMA_RELATIONS: &[&str] = &[
 
 static RELATION_NAMES: &[&str] = &[
     "pg_am",
+    "pg_amop",
+    "pg_amproc",
     "pg_attrdef",
     "pg_authid",
     "pg_collation",
@@ -201,6 +214,8 @@ static RELATION_NAMES: &[&str] = &[
 pub(crate) fn relation_oid(name: &str) -> i32 {
     match name {
         "pg_am" => 2601,
+        "pg_amop" => 2602,
+        "pg_amproc" => 2603,
         "pg_attrdef" => 2604,
         "pg_authid" => 1260,
         "pg_collation" => 3456,
@@ -541,6 +556,7 @@ pub(crate) fn rows(
 ) -> Result<Vec<Vec<Datum>>, ExecError> {
     match name {
         "pg_am" => Ok(pg_am_rows()),
+        "pg_amop" | "pg_amproc" => Ok(Vec::new()),
         "pg_language" => Ok(pg_language_rows()),
         "pg_proc" => crate::routine::pg_proc_rows(kv),
         "pg_attrdef" => pg_attrdef_rows(kv),
@@ -809,6 +825,25 @@ fn pg_catalog_columns(name: &str) -> Vec<Column> {
             ("partexprs", Text),
         ]),
         "pg_proc" => pg_proc_columns(),
+        "pg_amop" => cols(&[
+            ("oid", Int4),
+            ("amopfamily", Int4),
+            ("amoplefttype", Int4),
+            ("amoprighttype", Int4),
+            ("amopstrategy", Int2),
+            ("amoppurpose", Text),
+            ("amopopr", Int4),
+            ("amopmethod", Int4),
+            ("amopsortfamily", Int4),
+        ]),
+        "pg_amproc" => cols(&[
+            ("oid", Int4),
+            ("amprocfamily", Int4),
+            ("amproclefttype", Int4),
+            ("amprocrighttype", Int4),
+            ("amprocnum", Int2),
+            ("amproc", Int4),
+        ]),
         "pg_opclass" => cols(&[
             ("oid", Int4),
             ("opcmethod", Int4),
@@ -1335,7 +1370,19 @@ fn pg_tablespace_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
 
 fn pg_opfamily_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
     let owners = role_oids(kv)?;
-    crabka_pgcatalog::list_operator_families(kv)?
+    let mut rows = crate::builtin_opfamilies::BUILTIN_OPERATOR_FAMILIES
+        .iter()
+        .map(|(oid, method, name)| {
+            vec![
+                int(*oid),
+                int(access_method_oid(method).unwrap_or_default()),
+                text(name),
+                int(crate::exec::PG_CATALOG_NAMESPACE_OID),
+                int(crate::catalog_fn::BOOTSTRAP_ROLE_OID),
+            ]
+        })
+        .collect::<Vec<_>>();
+    rows.extend(crabka_pgcatalog::list_operator_families(kv)?
         .into_iter()
         .map(|family| {
             Ok(vec![
@@ -1348,7 +1395,8 @@ fn pg_opfamily_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {
                 int(owners.get(&family.owner).copied().unwrap_or_default()),
             ])
         })
-        .collect()
+        .collect::<Result<Vec<_>, ExecError>>()?);
+    Ok(rows)
 }
 
 fn pg_opclass_rows(kv: &dyn Kv) -> Result<Vec<Vec<Datum>>, ExecError> {

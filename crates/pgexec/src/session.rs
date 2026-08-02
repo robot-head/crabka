@@ -5038,9 +5038,14 @@ impl SqlSession {
                                     operator: operator.clone(),
                                     left_type_oid: left_type.oid(),
                                     right_type_oid: right_type.oid(),
-                                    // Built-in ordering families are synthesized catalog rows;
-                                    // zero is their existing unresolved oid sentinel.
-                                    order_family_oid: 0,
+                                    order_family_oid: match order_family {
+                                        Some(order_family) => resolve_ordering_family_oid(
+                                            &*self.catalog_kv,
+                                            &self.resolution_scope(),
+                                            order_family,
+                                        )?,
+                                        None => 0,
+                                    },
                                 }
                             }
                             crabka_pgparser::ast::OperatorFamilyMember::Function {
@@ -11183,6 +11188,36 @@ fn resolve_operator_object_name(
     Ok(crabka_pgcatalog::RelationName::public(
         reference.name.clone(),
     ))
+}
+
+fn resolve_ordering_family_oid(
+    kv: &dyn crabka_pgkv::Kv,
+    scope: &crate::relname::ResolutionScope,
+    reference: &crabka_pgparser::ast::RelationRef,
+) -> Result<u32, ExecError> {
+    if reference.schema.as_deref().is_none_or(|schema| schema == "pg_catalog") {
+        if let Some(oid) = crate::catalog_rel::builtin_operator_family_oid("btree", &reference.name)
+        {
+            return u32::try_from(oid)
+                .map_err(|_| ExecError::Unsupported("operator family oid is negative".into()));
+        }
+    }
+    let name = resolve_operator_object_name(
+        kv,
+        scope,
+        reference,
+        "btree",
+        crabka_pgparser::ast::OperatorObjectKind::Family,
+    )?;
+    crabka_pgcatalog::get_operator_family(kv, &name, "btree")
+        .map(|family| family.oid)
+        .map_err(|_| {
+            operator_object_missing(
+                crabka_pgparser::ast::OperatorObjectKind::Family,
+                &reference.name,
+                "btree",
+            )
+        })
 }
 
 fn attach_known_runtime_position(sql: &str, error: PgError) -> PgError {
@@ -17467,6 +17502,17 @@ mod session_conformance_tests {
         assert!(
             scalar(
                 &mut session,
+                "SELECT count(*) FROM pg_catalog.pg_opfamily \
+                 WHERE opfname = 'float_ops' AND opfmethod = 403",
+            )
+            .await
+                == "1"
+        );
+        assert!(scalar(&mut session, "SELECT count(*) FROM pg_catalog.pg_amop").await == "0");
+        assert!(scalar(&mut session, "SELECT count(*) FROM pg_catalog.pg_amproc").await == "0");
+        assert!(
+            scalar(
+                &mut session,
                 "SELECT count(*) FROM pg_catalog.pg_opclass \
                  WHERE opcname IN ('explicit_class', 'implicit_class')",
             )
@@ -17525,6 +17571,15 @@ mod session_conformance_tests {
             .simple_query("CREATE OPERATOR FAMILY member_family USING btree")
             .await
             .expect("create member family");
+        session
+            .simple_query(
+                "CREATE OPERATOR FAMILY ordering_family USING gist; \
+                 ALTER OPERATOR FAMILY ordering_family USING gist ADD \
+                 OPERATOR 1 < (int4, int4) FOR ORDER BY float_ops; \
+                 DROP OPERATOR FAMILY ordering_family USING gist",
+            )
+            .await
+            .expect("resolve built-in ordering family");
         let repeated = session
             .simple_query(
                 "ALTER OPERATOR FAMILY member_family USING btree ADD \

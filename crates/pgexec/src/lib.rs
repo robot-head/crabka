@@ -41,6 +41,7 @@
 
 mod agg;
 mod array_fn;
+mod builtin_opfamilies;
 mod catalog_fn;
 mod catalog_rel;
 pub mod clock;
