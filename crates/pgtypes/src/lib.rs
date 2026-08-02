@@ -14,6 +14,7 @@ pub mod geometry;
 pub mod jsonb;
 pub mod numeric;
 pub mod ops;
+pub mod range;
 pub mod string;
 pub mod text_search;
 pub mod usertype;

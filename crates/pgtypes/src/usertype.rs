@@ -217,6 +217,14 @@ impl UserType {
             _ => None,
         }
     }
+
+    #[must_use]
+    pub fn range(&self) -> Option<&RangeBody> {
+        match &self.body {
+            UserTypeBody::Range(range) => Some(range),
+            _ => None,
+        }
+    }
 }
 
 /// The first oid handed out to a user-defined type.
