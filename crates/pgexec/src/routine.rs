@@ -495,6 +495,7 @@ fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<R
                 .collect::<Result<Vec<_>, ExecError>>()?,
         ),
     };
+    validate_polymorphic_range_result(&params, &result)?;
     if kind == RoutineKind::Procedure && !matches!(result, RoutineResult::Unspecified) {
         return Err(invalid_definition("procedures cannot have a return value"));
     }
@@ -525,6 +526,46 @@ fn build_routine(kv: &dyn Kv, stmt: &CreateRoutineStmt, owner: &str) -> Result<R
         config: options.config,
         owner: owner.to_string(),
     })
+}
+
+fn validate_polymorphic_range_result(
+    params: &[RoutineParam],
+    result: &RoutineResult,
+) -> Result<(), ExecError> {
+    let mut outputs = params
+        .iter()
+        .filter(|param| param.mode.is_output())
+        .map(|param| &param.ty)
+        .collect::<Vec<_>>();
+    match result {
+        RoutineResult::Type { ty, .. } => outputs.push(ty),
+        RoutineResult::Table(columns) => outputs.extend(columns.iter().map(|(_, ty)| ty)),
+        RoutineResult::Unspecified => {}
+    }
+    for (result_name, input_names, detail) in [
+        (
+            "anyrange",
+            ["anyrange", "anymultirange"],
+            "A result of type anyrange requires at least one input of type anyrange or anymultirange.",
+        ),
+        (
+            "anycompatiblerange",
+            ["anycompatiblerange", "anycompatiblemultirange"],
+            "A result of type anycompatiblerange requires at least one input of type anycompatiblerange or anycompatiblemultirange.",
+        ),
+    ] {
+        if outputs.iter().any(|ty| ty.name == result_name)
+            && !params
+                .iter()
+                .any(|param| param.mode.is_input() && input_names.contains(&param.ty.name.as_str()))
+        {
+            return Err(ExecError::Remote(
+                crabka_pgwire::error::PgError::error("42P13", "cannot determine result data type")
+                    .with_detail(detail),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parsed_returns_set(returns: &RoutineReturn) -> bool {
@@ -843,9 +884,14 @@ pub(crate) fn resolve_call(
         let mut is_coercible = true;
         for (arg, param) in given.iter().zip(params.iter()) {
             let Some(target) = param.ty.column else {
-                // A type Gres does not model can only match an untyped literal.
-                is_exact = false;
-                is_coercible = matches!(arg, ArgType::Unknown | ArgType::Opaque);
+                if is_polymorphic_type(&param.ty.name) {
+                    is_exact &= !matches!(arg, ArgType::Unknown | ArgType::Opaque);
+                    is_coercible &= polymorphic_argument_matches(&param.ty.name, *arg);
+                } else {
+                    // A type Gres does not model can only match an untyped literal.
+                    is_exact = false;
+                    is_coercible = matches!(arg, ArgType::Unknown | ArgType::Opaque);
+                }
                 continue;
             };
             match arg {
@@ -859,6 +905,8 @@ pub(crate) fn resolve_call(
                 ArgType::Unknown | ArgType::Opaque => is_exact = false,
             }
         }
+        is_coercible &= polymorphic_arguments_are_consistent(&params, given);
+        is_exact &= polymorphic_arguments_are_exact(&params, given);
         if is_exact {
             exact.push(routine.clone());
         } else if is_coercible {
@@ -911,8 +959,116 @@ pub(crate) fn resolve_call(
     )))
 }
 
-/// A resolved routine plus the call arguments, after unknown-literal coercion
-/// and trailing parameter defaults are applied.
+fn is_polymorphic_type(name: &str) -> bool {
+    matches!(
+        name,
+        "anyarray"
+            | "anyelement"
+            | "anynonarray"
+            | "anyrange"
+            | "anycompatible"
+            | "anycompatiblearray"
+            | "anycompatiblenonarray"
+            | "anycompatiblerange"
+    )
+}
+
+fn polymorphic_argument_matches(name: &str, arg: ArgType) -> bool {
+    match arg {
+        ArgType::Unknown | ArgType::Opaque => true,
+        ArgType::Known(ty) => match name {
+            "anyarray" | "anycompatiblearray" => matches!(ty, ColumnType::Array(_)),
+            "anyrange" | "anycompatiblerange" => matches!(ty, ColumnType::Range(_)),
+            "anynonarray" | "anycompatiblenonarray" => !matches!(ty, ColumnType::Array(_)),
+            "anyelement" | "anycompatible" => true,
+            _ => false,
+        },
+    }
+}
+
+fn polymorphic_base_type(name: &str, arg: ArgType) -> Option<ColumnType> {
+    let ArgType::Known(ty) = arg else {
+        return None;
+    };
+    match name {
+        "anyarray" | "anycompatiblearray" => match ty {
+            ColumnType::Array(elem) => Some(elem.column_type()),
+            _ => None,
+        },
+        "anyrange" | "anycompatiblerange" => match ty {
+            ColumnType::Range(range) => Some(*range.subtype),
+            _ => None,
+        },
+        "anyelement" | "anynonarray" | "anycompatible" | "anycompatiblenonarray" => Some(ty),
+        _ => None,
+    }
+}
+
+fn polymorphic_arguments_are_consistent(params: &[&RoutineParam], given: &[ArgType]) -> bool {
+    let mut exact = None;
+    let mut compatible = None;
+    let mut compatible_range = None;
+    let mut compatible_inputs = Vec::new();
+    for (param, arg) in params.iter().zip(given) {
+        let Some(base) = polymorphic_base_type(&param.ty.name, *arg) else {
+            continue;
+        };
+        if param.ty.name.starts_with("anycompatible") {
+            compatible_inputs.push(base);
+            if param.ty.name == "anycompatiblerange" {
+                match compatible_range {
+                    None => compatible_range = Some(base),
+                    Some(current) if current == base => {}
+                    Some(_) => return false,
+                }
+            }
+            compatible = match compatible {
+                None => Some(base),
+                Some(current) if implicitly_coercible(base, current) => Some(current),
+                Some(current) if implicitly_coercible(current, base) => Some(base),
+                Some(_) => return false,
+            };
+        } else if param.ty.name.starts_with("any") {
+            match exact {
+                None => exact = Some(base),
+                Some(current) if current == base => {}
+                Some(_) => return false,
+            }
+        }
+    }
+    match compatible_range {
+        None => true,
+        Some(target) => compatible_inputs
+            .into_iter()
+            .all(|source| implicitly_coercible(source, target)),
+    }
+}
+
+fn polymorphic_arguments_are_exact(params: &[&RoutineParam], given: &[ArgType]) -> bool {
+    let mut traditional = None;
+    let mut compatible = None;
+    for (param, arg) in params.iter().zip(given) {
+        let Some(base) = polymorphic_base_type(&param.ty.name, *arg) else {
+            continue;
+        };
+        let slot = if param.ty.name.starts_with("anycompatible") {
+            &mut compatible
+        } else if param.ty.name.starts_with("any") {
+            &mut traditional
+        } else {
+            continue;
+        };
+        match slot {
+            None => *slot = Some(base),
+            Some(current) if *current == base => {}
+            Some(_) => return false,
+        }
+    }
+    true
+}
+
+/// A resolved routine plus the call arguments after unknown-literal coercion
+/// and trailing parameter defaults have been applied.
 #[derive(Debug, Clone)]
 pub(crate) struct BoundRoutineCall {
     pub routine: Routine,
@@ -1567,6 +1723,17 @@ fn unsafe_to_duplicate(arg: &Expr) -> bool {
         | Expr::Column { .. } => false,
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => unsafe_to_duplicate(expr),
         Expr::Binary { left, right, .. } => unsafe_to_duplicate(left) || unsafe_to_duplicate(right),
+        Expr::Func(call)
+            if matches!(
+                call.name.to_ascii_lowercase().as_str(),
+                "int4range" | "numrange" | "tsrange" | "tstzrange" | "daterange" | "int8range"
+            ) =>
+        {
+            match &call.args {
+                FuncArgs::Exprs(args) => args.iter().any(unsafe_to_duplicate),
+                FuncArgs::Star => true,
+            }
+        }
         // Everything else can reach a function call, so treat it as volatile.
         _ => true,
     }
@@ -3098,6 +3265,64 @@ mod tests {
             resolve_call(&kv, "amb", &[ArgType::Unknown, ArgType::Unknown]).expect_err("ambiguous");
         assert!(sqlstate(&error) == "42725");
         assert!(error.into_pg().message == "function amb(unknown, unknown) is not unique");
+    }
+
+    #[test]
+    fn polymorphic_range_signatures_link_arrays_to_range_subtypes() {
+        let kv = MemKv::default();
+        define(
+            &kv,
+            "CREATE FUNCTION exact_poly(a anyarray, r anyrange) RETURNS anyelement AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("traditional polymorphic function");
+        define(
+            &kv,
+            "CREATE FUNCTION compatible_poly(a anycompatiblearray, r anycompatiblerange) RETURNS anycompatible AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect("compatible polymorphic function");
+        let int4range =
+            ColumnType::builtin_range(crabka_pgtypes::oids::INT4RANGE).expect("int4range");
+        let numrange = ColumnType::builtin_range(crabka_pgtypes::oids::NUMRANGE).expect("numrange");
+        let ints = ArgType::Known(ColumnType::Array(crabka_pgtypes::ElemType::Int4));
+
+        assert!(
+            resolve_call(&kv, "exact_poly", &[ints, ArgType::Known(int4range)])
+                .expect("matching subtype")
+                .is_some()
+        );
+        assert!(resolve_call(&kv, "exact_poly", &[ints, ArgType::Known(numrange)]).is_err());
+        assert!(
+            resolve_call(&kv, "compatible_poly", &[ints, ArgType::Known(numrange)])
+                .expect("integer promotes to numeric")
+                .is_some()
+        );
+        let numerics = ArgType::Known(ColumnType::Array(crabka_pgtypes::ElemType::Numeric));
+        assert!(
+            resolve_call(
+                &kv,
+                "compatible_poly",
+                &[numerics, ArgType::Known(int4range)]
+            )
+            .is_err()
+        );
+
+        let error = define(
+            &kv,
+            "CREATE FUNCTION invalid_poly(a anyelement) RETURNS anyrange AS 'SELECT 1' LANGUAGE sql",
+        )
+        .expect_err("range result lacks range input");
+        let rendered = error.into_pg();
+        assert!(rendered.code == "42P13");
+        assert!(rendered.message == "cannot determine result data type");
+        assert!(
+            rendered
+                .diagnostics
+                .as_deref()
+                .and_then(|fields| fields.detail.as_deref())
+                == Some(
+                    "A result of type anyrange requires at least one input of type anyrange or anymultirange."
+                )
+        );
     }
 
     #[test]
