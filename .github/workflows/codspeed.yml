@@ -40,6 +40,9 @@ jobs:
     name: Run benchmarks
     runs-on: ubuntu-latest
     timeout-minutes: 45
+    env:
+      # Leave memory for CodSpeed's simulation tooling on GitHub-hosted runners.
+      JAVA_TOOL_OPTIONS: -Xmx1024m
     strategy:
       fail-fast: false
       matrix:

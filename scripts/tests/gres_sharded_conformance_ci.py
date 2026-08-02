@@ -22,7 +22,7 @@ def validate(
         "postgres:",
         "postgres:18",
         "CRABKA_GRES_SHARDED_CONFORMANCE_MODE: live",
-        "./scripts/gres-sharded-conformance.sh",
+        "aspect gres --task:name=gres-sharded-conformance --suite sharded-conformance",
         "if: ${{ !cancelled() }}",
         "target/gres-sharded-conformance-artifacts",
     ]
@@ -77,7 +77,9 @@ mutations = [
         "live invocation",
         {
             "workflow_text": workflow.replace(
-                "./scripts/gres-sharded-conformance.sh", "./scripts/not-live.sh", 1
+                "aspect gres --task:name=gres-sharded-conformance --suite sharded-conformance",
+                "aspect gres --task:name=gres-sharded-conformance --suite not-live",
+                1,
             )
         },
     ),
